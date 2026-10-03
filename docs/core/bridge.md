@@ -258,8 +258,8 @@ journal's `call.hook` records work exactly as a slot hook's do -- a site record'
 registers, in the same declaration order the object exposes them. There is no in-browser oracle
 for a site hook: the "compare at the next crossing" trick a slot hook's kernel may attempt (see
 above) has no analogue here, because there is no return value and no single write target to
-compare -- a site kernel is checked offline instead, against the real function in the real
-emulator, before it is ever bound in `replace` mode.
+compare -- a site kernel is checked offline instead, against the real function run in the
+guest, before it is ever bound in `replace` mode.
 
 ### Dispatch (`internal/dispatch.js`)
 
@@ -407,7 +407,7 @@ left that would read them.
 ### Callbacks into guest code (`internal/callback.js`)
 
 A handler that takes a function pointer — a comparator, a window procedure, an enumeration
-callback — cannot call it directly: the handler runs inside the emulator's own loop, which
+callback — cannot call it directly: the handler runs inside the engine's slice, which
 cannot be re-entered. So `callGuest` builds a frame below where the calling thread's stack
 comes to rest (`restingStack`: inside the innermost callback frame if there is one, otherwise
 where the suspended host call left it, or `freeStackFor(thread)` while the call still holds the

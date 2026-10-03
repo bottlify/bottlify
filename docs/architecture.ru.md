@@ -196,7 +196,6 @@ sequenceDiagram
   participant A as AudioWorklet
   Note over S,P: лаунчер, ui/src/engine/session.js
   P->>S: /engine/core.js, /bundles/id/entry, wasm видеодекодера
-  P->>P: системный том DirectX из Cache Storage
   P->>P: AudioContext, addModule(worklet.js)
   Note over P,E: createApp, core/src/host/
   P->>E: new Worker(engine.worker.js)
@@ -479,9 +478,9 @@ flowchart TD
 - **Настоящую DLL** загрузчик разбирает и перемещает, сначала грузит её зависимости, привязывает
   импорты (в том числе отложенные), а `DllMain` вызывает через мост как код игры. TLS поддерживается
   у главного образа и у библиотек, загруженных статически.
-- **Системный том** — это DirectX runtime (`d3dx9_*` и другие распространяемые библиотеки
-  Microsoft). Лаунчер монтирует его только для чтения в `C:\WINDOWS\system32\`. Если тома нет, на
-  `d3dx9_*` отвечает таблица движка.
+- **Распространяемые библиотеки DirectX** (`d3dx9_*` и другие) в движок не входят: их приносит
+  сама игра — через DirectX setup своего установщика, который кладёт их в `C:\WINDOWS\system32\`,
+  или как DLL рядом со своим `.exe`. Если их нет, на `d3dx9_*` отвечает таблица движка.
 
 Где смотреть в коде: `core/src/layers/loader/internal/synth.js` (образ),
 `core/src/layers/cpu/internal/thunks.js` (заглушки), `core/src/layers/bridge/` (мост), таблицы —
@@ -685,7 +684,6 @@ OPFS — файловая система браузера, и у каждого 
 | Кэш блоков | OPFS: `<id>.blocks`, `<id>.present`, `<id>.order` | блоки бандла, уже скачанные с сервера | Блок N лежит со смещения N × размер блока (размер берётся из заголовка бандла, по умолчанию 256 КиБ). `.present` — битовая карта скачанных блоков, `.order` — порядок, в котором к ним обращались впервые (до 4096). Доступ через синхронные дескрипторы: их открыто не больше 16, и первым закрывается тот, что дольше всех не нужен |
 | Переводы cork | OPFS: `cork/<id>.v3/` | переведённые регионы | В `records` записи лежат подряд, `index` — журнал того, где какая. Индекс читается один раз, промах не трогает диск, попадание — одно чтение по смещению. Новое дописывается пачками; файл уплотняется, предел — 1 ГиБ |
 | Сессия | OPFS: `<id>.session` | файлы, которые записала игра, и её реестр | Всё одним потоком deflate-raw. Накладывается до первой инструкции, сохраняется через 250 мс после того, как игра перестала писать. Сам бандл не меняется никогда |
-| Системный том | Cache Storage: `bottlify-system-volume` | DirectX runtime: `d3dx9_*` и другие распространяемые библиотеки | Страница скачивает его один раз и монтирует только для чтения в `C:\WINDOWS\system32\` |
 | Настройки | localStorage | настройки лаунчера, время до первого кадра | — |
 
 Как игра читает файл:
@@ -714,5 +712,4 @@ flowchart TD
 
 Где смотреть в коде: `core/src/layers/filesystem/internal/bundle/cache.js` (блоки),
 `core/src/layers/filesystem/internal/opfs-store.js` (дескрипторы),
-`core/src/layers/cpu/internal/translation-store.js` (переводы), `core/src/storage.js` (сессии),
-`ui/src/engine/session.js` (системный том).
+`core/src/layers/cpu/internal/translation-store.js` (переводы), `core/src/storage.js` (сессии).

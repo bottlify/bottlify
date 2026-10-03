@@ -6,12 +6,12 @@ lands; `roadmap/` holds the plans, this holds the contract.
 
 ## What the package is
 
-`@bottlify/core` runs an original Win32 x86 program in a browser tab. It is an x86 machine — a
-fork of v86, compiled to WebAssembly and vendored inside the package — with a Win32 and DirectX
-layer written from scratch on top of it. There is no Windows underneath: a 64 KiB ROM of the
-package's own takes the CPU straight into 32-bit protected mode, the loader maps the program's PE
-image and synthesises a real in-guest module for every system library, and the emulated CPU
-executes the program's own code. A call that leaves the program for `kernel32`, `user32`, `gdi32`,
+`@bottlify/core` runs an original Win32 x86 program in a browser tab. It is an x86 machine — the
+program's own code translated to WebAssembly by cork (`@bottlify/cork`, in `modules/cork`), which
+the package carries — with a Win32 and DirectX layer written from scratch on top of it. There is
+no Windows underneath: the loader maps the program's PE image and synthesises a real in-guest
+module for every system library, and the translated code runs the program's own instructions in
+32-bit protected mode. A call that leaves the program for `kernel32`, `user32`, `gdi32`,
 `ddraw`, `d3d8`, `dsound` or any other system library traps into the host and is answered by one of
 the layers below. Rendering goes out through WebGPU, sound through WebAudio, the program's files
 come from a bundle read by byte range and its writes persist in OPFS. A bundle may carry
@@ -21,7 +21,7 @@ the bridge's slot-hook mechanism ([`bridge.md`](./bridge.md), [`loader.md`](./lo
 naming a title anywhere in this package.
 
 The engine runs in a Web Worker. The page keeps the canvas, the keyboard and mouse, and the audio
-context; everything else — emulator, HLE, GPU device, mixer — is on a thread of its own.
+context; everything else — translator, HLE, GPU device, mixer — is on a thread of its own.
 
 ## Using it
 
@@ -30,7 +30,6 @@ import { createApp } from '@bottlify/core';
 
 const app = await createApp({
     executable,                                    // Uint8Array: the program
-    v86: { moduleUrl, wasmBytes },                 // the emulator, shipped in the package
     canvas,                                        // or `container`, or neither
     bundle: { url, id, store: 'local' },           // a .btl, by URL, read a range at a time
     storage: 'opfs',                               // where the session goes
@@ -46,10 +45,12 @@ const code = await app.run();
 
 Every option, the message protocol between page and worker, the controller's members, what is
 asynchronous and why, `host: 'thread'` for tests, and the current limitations of the host are in
-[`host.md`](./host.md). The emulator and decoder binaries are subpath exports of the package
-(`@bottlify/core/libv86.mjs`, `@bottlify/core/v86.wasm`, `@bottlify/core/video-decoder.wasm`,
-`@bottlify/core/worklet.js`, `@bottlify/core/engine.worker.js`); a bundler resolves them like the
-entry point. The `.btl` bundle format is published too: `@bottlify/core/bundle` carries what a
+[`host.md`](./host.md). The video decoder, the worklet and the worker are subpath exports of the
+package (`@bottlify/core/video-decoder.wasm`, `@bottlify/core/worklet.js`,
+`@bottlify/core/engine.worker.js`); a bundler resolves them like the entry point. The v86 emulator
+is not part of the package: `engine: 'emulator'` runs only a build the caller hands in as
+`v86: { moduleUrl, wasmBytes }`, and `createApp` refuses that engine without one
+([`cpu.md`](./cpu.md), "Engines"). The `.btl` bundle format is published too: `@bottlify/core/bundle` carries what a
 writer and the engine's reader agree on (the header constants, the codecs, `crc32`) and runs in a
 browser, and `@bottlify/core/bundle/node` reads and writes bundle files on a host (`openBundle`,
 `writeBundle`, `verifyBundle`) -- the reader and writer the bundle tools in `tools/` use.
@@ -64,7 +65,7 @@ system described in [`system.md`](./system.md). Each has a document of its own:
 
 | layer | one line | document |
 |---|---|---|
-| `cpu` | The vendored emulator behind an interface: boot from the package's own ROM, run for a quantum of instructions, registers, physical memory, the FPU, the I/O-port trap channel. The only layer that may import `vendor/`. Defines the executor contract a translator package (`@bottlify/cork`, in `modules/cork`) implements and is loaded through by URL, never imported. | [`cpu.md`](./cpu.md) |
+| `cpu` | The execution engine behind an interface: run for a quantum of instructions, registers, physical memory, the FPU, the I/O-port trap channel. Defines the executor contract the translator package (`@bottlify/cork`, in `modules/cork`) implements and is loaded through by URL, never imported; keeps an adapter and a boot ROM for a v86 emulator a caller brings, loaded by URL too. | [`cpu.md`](./cpu.md) |
 | `memory` | The guest address space as regions with permissions, and typed accessors every host read and write goes through. | [`memory.md`](./memory.md) |
 | `kernel` | Threads, a round-robin scheduler whose quantum is retired guest instructions, context switch, synchronisation objects with timed waits, the handle table, a virtual clock. | [`kernel.md`](./kernel.md) |
 | `bridge` | The trap channel's host half: calls marshalled by convention (`stdcall`, `cdecl`, `thiscall`), a caller parked when the answer is not ready, calls back into guest code, COM interfaces published into guest memory, recorded sessions replayed in tests. | [`bridge.md`](./bridge.md) |
@@ -99,21 +100,21 @@ From the repository root (`package.json` is an npm workspace over `modules/*`):
 | `npm ci` | Installs the dev toolchain. The package has no runtime dependencies. |
 | `npm run typecheck` | `tsc --checkJs --noEmit` over the source; types are JSDoc. |
 | `npm run lint` | ESLint flat config, zero warnings tolerated. |
-| `npm test` | Node's `node:test` over every `*.test.js` colocated with its code, across the workspaces. `scripts/tree.test.js` refuses a committed symbolic link: a worktree links its ignored artifact directories to the main checkout's, and a link committed from one checks out in the main checkout as a link to itself, dropping the fetched emulator or corpus the suites need. |
-| `npm run test:integration` | `*.itest.js`: whole programs from `test/fixtures/` run through the engine, needing the prebuilt emulator; then the translator package's differential suites against the hardware corpus and the emulator (`npm run fetch:corpus` first). Without their data those suites skip, except where `CI` is set: there they run and fail on the missing file (`testing/fetched.js`), so CI cannot go green without judging the corpus -- it had never run them. |
+| `npm test` | Node's `node:test` over every `*.test.js` colocated with its code, across the workspaces. `scripts/tree.test.js` refuses a committed symbolic link: a worktree links its ignored artifact directories to the main checkout's, and a link committed from one checks out in the main checkout as a link to itself, dropping the fetched corpus or decoders the suites need. |
+| `npm run test:integration` | `*.itest.js`: whole programs, from `test/fixtures/` or built in the test, run through the engine under cork; then the translator package's suites: the hardware corpus (`npm run fetch:corpus` first), and the sequence corpus, which judges translated code against cork's own instruction model bit for bit. Without the corpus its suites skip, except where `CI` is set: there they run and fail on the missing file (`testing/fetched.js`), so CI cannot go green without judging the corpus. No suite needs an emulator. |
 | `node scripts/build-fixtures.mjs` (in `modules/core`) | Rebuilds the compiled fixtures (`seh.exe`, `cxxeh.exe`, `unhandled.exe`, `apc.exe`, `processor.exe`, `crtdata.exe`, `virtual.exe`, `spawn.exe`, `spawn_child.exe`) from `test/fixtures/src/` with clang, lld-link and llvm-dlltool against the MSVC ABI -- no Microsoft toolchain. Only after changing a source; the executables are committed, and the build is byte-reproducible. |
 | `npm run check:boundaries` | The layer graph and the acyclic import check. |
-| `npm run fetch:v86`, `npm run fetch:video-decoder` | Pull the pinned emulator and decoder binaries into `vendor/prebuilt/`, verified against their lock files. |
-| `npm run fetch:corpus` | Pull the nasm instruction corpus (every case as an image with the state real hardware recorded) into `modules/cork/vendor/`, for the translator package's differential tests; pinned by `modules/cork/corpus-lock.json`. |
-| `npm run fetch:winetest`, `npm run wine-tests -- <dll>[:<test>] ...` | Wine's conformance tests run as guest programs (`tools/wine-tests.mjs`, node only). `fetch:winetest` downloads the i386 `winetest.exe` of Wine's daily CI build into `to_install/wine-tests/` (ignored: the binaries are LGPL and never go into the repository, a bundle or dist); `wine-tests` lifts each `<dll>_test.exe` out of it and runs its tests, each in a child process with a timeout, and writes `report.json` and `report.md` -- every failed check as `file.c:line`, grouped. `--preset games` is the libraries games lean on, `--baseline <report.json>` compares with an earlier run, and `--reference emulator` sets apart what fails only under the translator. The artifact is a daily build: a report names its build, and two reports compare only on the same one. |
-| `npm run build` | esbuild → `dist/core.js`, `dist/engine.worker.js`, `dist/worklet.js`, `dist/vendor/*`, `dist/checksums.json` -- after compiling the C runtime's `@guestCode` functions to x86 again (`npm run build:guest-code` alone; see [`win32.md`](./win32.md), "Runtime functions that run in the guest"). |
-| `npm run build:v86 -- --docker` and `npm run verify:reproducibility` | Rebuild the emulator from the submodule in a container and diff its hashes against the manifest. Not needed day to day. The submodule pins the commit the locked prebuilt release (`vendor-lock.json`'s `build-<commit>` tag) was built from, and `scripts/vendor-lock.test.js` fails when the two drift apart -- the pin had stayed 33 commits behind the build every test ran on, without the handoff exports cork's hybrid mode uses. |
+| `npm run fetch:video-decoder`, `npm run fetch:zstd` | Pull the pinned decoder binaries (FFmpeg's, and the bundle decoder's wasm build) into `vendor/prebuilt/`, verified against their lock files. Both are optional. |
+| `npm run fetch:corpus` | Pull the nasm instruction corpus (every case as an image with the state real hardware recorded) into `modules/cork/vendor/`, for the translator package's corpus tests; pinned by `modules/cork/corpus-lock.json`. |
+| `npm run fetch:winetest`, `npm run wine-tests -- <dll>[:<test>] ...` | Wine's conformance tests run as guest programs (`tools/wine-tests.mjs`, node only). `fetch:winetest` downloads the i386 `winetest.exe` of Wine's daily CI build into `to_install/wine-tests/` (ignored: the binaries are LGPL and never go into the repository, a bundle or dist); `wine-tests` lifts each `<dll>_test.exe` out of it and runs its tests, each in a child process with a timeout, and writes `report.json` and `report.md` -- every failed check as `file.c:line`, grouped. `--preset games` is the libraries games lean on, and `--baseline <report.json>` compares with an earlier run. The artifact is a daily build: a report names its build, and two reports compare only on the same one. |
+| `npm run build` | esbuild → `dist/core.js`, `dist/engine.worker.js`, `dist/worklet.js`, `dist/cork/*` (the translator), `dist/vendor/*`, `dist/checksums.json` -- after compiling the C runtime's `@guestCode` functions to x86 again (`npm run build:guest-code` alone; see [`win32.md`](./win32.md), "Runtime functions that run in the guest"). |
+| `npm run build:vendor` | Rebuild the two decoders from source in their pinned containers (needs Docker). Not needed day to day. |
 | `npm run cdp:probe` | Launches a headless Chromium, boots the core in a worker, checks it answers a ping. |
 | `npm run cdp:game`, `npm run cdp:frames` | Drive a program bundle in a real browser on a real GPU; report what a run cost, and where a frame's time goes once the program has settled. Development tooling in `tools/cdp_test/`, not tests. |
 
 CI runs `core` (typecheck, lint, tests, boundaries, integration tests, build) and `probe` on every
-push; `vendor` (the containerised v86 build and reproducibility check) runs when its own inputs
-change and on a schedule.
+push; `vendor` (the containerised builds of the two decoders) runs when its own inputs change, on a
+schedule and on demand.
 
 ## Current limitations
 
@@ -129,9 +130,9 @@ change and on a schedule.
   exposed through the controller. See [`host.md`](./host.md) §9.
 - **The mixer's pump runs on the engine's thread.** Output is on the audio thread; the rest of the
   audio layer waits for a measurement that says it should move (`host.md` §9).
-- **The preemption point is one compiled block wide.** A slice is bounded by retired instructions,
-  but the emulator compiles per page and a hot loop inside one block runs to that block's end
-  regardless of the quantum.
+- **The preemption point is one region wide.** A slice is bounded by retired instructions, but
+  translated code looks at its budget only at a jump back, a turn of a `rep` and a transfer to
+  another region, so a slice can run past its bound by up to one region's instructions.
 - **No stray pointer faults.** Without paging every address in RAM is readable and writable,
   the null page included, so a program counting on an access violation from a bad pointer
   carries on instead. Every other processor exception reaches the program's handlers
@@ -154,10 +155,6 @@ Generic enough to bite other npm-workspaces + `tsc --checkJs` projects:
   (`eslint` → `ajv` → `uri-js` → `punycode`), TypeScript resolves the real, untyped file and, with
   `checkJs`, type-checks it. Fixed with a `compilerOptions.paths` remap (`jsconfig.json` →
   `types/punycode.d.ts`). `skipLibCheck` does not help: the offending file is `.js`.
-- **A pinned build image needs the target's full toolchain.** The vendored v86's `Makefile` needs,
-  beyond `rustc`: Node (the `gen/` scripts run before `cargo`), a JRE and `wget` (Closure Compiler),
-  `clang` targeting `wasm32`, `python3`, and the `wasm32-unknown-unknown` Rust target.
-  `scripts/Dockerfile.v86` carries all of them.
 - **ESLint's `no-undef` is off deliberately.** Source runs in three global environments (Node
   scripts, a worker, a page) and `tsc --checkJs` already derives the right global set per file;
   everything else in `eslint:recommended` stays on.

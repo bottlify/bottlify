@@ -30,8 +30,7 @@ only where the assembler hands it in. It requires `log`.
 
 | option          | type                                                        | default                      | meaning |
 |-----------------|-------------------------------------------------------------|------------------------------|---------|
-| `drives`        | `{ [letter]: { source?: SourceStore \| null, system?: SourceStore \| null, writable?: WritableStore } }` | `{}` → `C:` on an in-memory writable store | Volumes to mount. A missing `writable` is an in-memory store; a missing `source` is a drive with no bundle; a missing `system` is a drive with no engine volume. |
-| `system`        | `SourceStore \| null`                                       | `null`                       | The engine's own read-only layer, mounted beneath every bundle. `source` wins where both name a path, and a write to a file only `system` holds is `ACCESS_DENIED`. Per-mount `system` overrides it. |
+| `drives`        | `{ [letter]: { source?: SourceStore \| null, writable?: WritableStore } }` | `{}` → `C:` on an in-memory writable store | Volumes to mount. A missing `writable` is an in-memory store; a missing `source` is a drive with no bundle. |
 | `openFileLimit` | `number`                                                    | `4096`                       | Most files open at once. |
 | `onChanged`     | `(changes: { path, kind }[]) => void`                       | none                         | Told, once per file and after the writes settle, that the writable layer changed. |
 
@@ -45,7 +44,7 @@ store folds no case and invents no directories — every Windows rule lives one 
 | method | one line |
 |--------|----------|
 | `ErrorCode`, `Disposition`, `SeekFrom` | The vocabularies (below). |
-| `mount(letter, { source?, system?, writable?, readOnly?, volume? })` | Mount or replace a drive. `letter` must be a single letter. `readOnly: true` is read-only media, a disc: every write, create and delete on the drive is `WRITE_PROTECTED`, and its writable layer is an empty one of its own. `volume` is what the drive says of itself -- for a disc `{ kind: 'cdrom', label, serial, size, unicode }` -- kept as given for `volume()`. |
+| `mount(letter, { source?, writable?, readOnly?, volume? })` | Mount or replace a drive. `letter` must be a single letter. `readOnly: true` is read-only media, a disc: every write, create and delete on the drive is `WRITE_PROTECTED`, and its writable layer is an empty one of its own. `volume` is what the drive says of itself -- for a disc `{ kind: 'cdrom', label, serial, size, unicode }` -- kept as given for `volume()`. |
 | `drives() → string[]` | Mounted letters, in mount order. |
 | `volume(letter)` | `{ readOnly, ...volume }` as the drive was mounted, or `null` for a letter nothing is mounted under. |
 | `resolve(path)` | `{ drive, components, device, wildcard, path }` without touching the volume — how a caller learns a path names a device before opening it. |
@@ -123,16 +122,12 @@ Every failure is an `Error` with a `code` from this set. `Disposition` is `CREAT
 
 ### The overlay (`src/layers/filesystem/internal/tree.js`)
 
-Two read-only layers, a bundle `source` and the engine's `system` volume, and one writable layer
-are indexed into a single tree of nodes at mount (`SourceStore.list()` is called once and never
-again — a source that changes behind the overlay's back is out of contract). Three rules do the
-work: a lookup finds the writable layer first, then the bundle, then the system volume; the first
-write to a bundle-only file copies it up (`copyUp`), so the bundle is never modified; deleting
-something that came from the bundle leaves a **tombstone**, because the bundle would otherwise hand
-it back on the next enumeration. The system volume is genuinely read-only: a write, truncate,
-create or delete aimed at a file only it holds is `ACCESS_DENIED`, the way a system directory is
-refused to a program that is not an administrator, and nothing is copied up on the way. A file in
-both the bundle and the system volume is the bundle's, by bytes and by spelling. Creating a
+A read-only layer, the bundle `source`, and one writable layer are indexed into a single tree of
+nodes at mount (`SourceStore.list()` is called once and never again — a source that changes
+behind the overlay's back is out of contract). Three rules do the work: a lookup finds the
+writable layer first, then the bundle; the first write to a bundle-only file copies it up
+(`copyUp`), so the bundle is never modified; deleting something that came from the bundle leaves a
+**tombstone**, because the bundle would otherwise hand it back on the next enumeration. Creating a
 directory over a read-only directory joins it rather than hiding what it put there; a directory is
 refused for removal while anything — including source-only content — is still in it. A node is the
 single answer to "does this exist, in which layer, under what spelling".
@@ -186,17 +181,24 @@ engine; `src/bundle.js` (`@bottlify/core/bundle`) publishes the constants and ch
   `C:\App\…` rather than at the root, where "where do I live" would happen to work whether the
   program answered it right or not. A bottle an installation made is mounted where the installation
   put it: its manifest's `root`, which `@bottlify/installer`'s `placementOf` turns into `prefix`
-  and the image path.
+  and the image path. Its `relocate` option maps a directory of the bundle somewhere other than
+  under `prefix` (`{ [path in the bundle]: path on the volume }`, case folded), its parents listed
+  as directories of the source.
 - **The bottle's registry**: a bundle that carries `.bottlify\registry.json` (`BOTTLE_REGISTRY_PATH`,
   the hive's `toJSON` as the installer saved it) has it read at mount, before the program's first
   instruction, and merged into the machine's registry with `fillFromJSON`: every key and value the
   session's saved registry lacks is added, and what the session holds is kept. A process started
   by another is given that one's registry instead and skips it.
+- **The bottle's system32**: what an installation added to `C:\WINDOWS\system32` travels in the
+  bottle under `.bottlify\system32\` (`BOTTLE_SYSTEM_PATH`), beside the registry, and
+  `mountBundle` relocates it to `WINDOWS\system32` (`relocate`), so it appears at
+  `C:\WINDOWS\system32\` and nowhere else. Its files are the bundle's like any other: read a
+  block at a time, and copied up on the first write.
 - **Block cache** (`cache.js`): where fetched blocks live between the network and a read. With a
   synchronous store (`resolveBlockStore('local')` → OPFS through `createOpfsStore`, worker-only) a
   block occupies the fixed slot `index * blockSize` in `/<name>.blocks`, and a presence bitmap
   `/<name>.present` makes a second session cheap; a bitmap of the wrong size belongs to another
-  bundle and is discarded. A zstd block is stored packed (the emulator's zstd decoder answers
+  bundle and is discarded. A zstd block is stored packed (the engine's zstd decoder answers
   synchronously); a deflate block is stored inflated at fetch time, because no synchronous inflate
   exists in a browser. Without a store the fallback is a bounded heap LRU (at least 64 MiB or 32
   blocks) that pins the blocks of the read being served, so a single large read cannot evict its
@@ -247,17 +249,6 @@ nothing of the disc ever lands in the writable layer, so nothing has to be told 
   the same way; an open asking for write access is refused the same way in the handle table. An
   open to read an existing file succeeds whatever its disposition; one that would create or empty
   a file is refused.
-
-### The system volume
-
-A second read-only layer can sit under the bundle: the engine's own volume, mounted at
-`C:\WINDOWS\system32\`, holding whatever files the host hands `createApp` as `system.files` (bare
-names, which the layer prefixes with the system directory) as though the machine had always had
-them. The engine carries none of its own, and the build packages none: the DirectX End-User
-Runtime's side-by-side DLLs (`d3dx9_*`, `d3dcompiler_*` and the rest) are put in `system32` by the
-setup a title's installer runs, as on a machine that never had them, and land in the writable
-layer like any other file an installer writes. A title's own file of the same name, in the bundle,
-still wins over this layer. The layer is refused for writing as a volume, not merely as a source.
 
 ### The session (what the program wrote)
 
@@ -312,11 +303,11 @@ engine journals what its callers decide to say.
 | file | covers |
 |------|--------|
 | `src/layers/filesystem/internal/paths.test.js` | Drive parsing, separators, trailing dots/spaces, `.`/`..`, devices everywhere, refused namespaces, wildcard rules, per-drive current directory. |
-| `src/layers/filesystem/internal/tree.test.js` | Both layers as one volume, case-preserving enumeration, copy-up on write, tombstones, merge with source directories, distinct failures, diagnostics, and the system volume: a file only it holds is read from it, a bundle file of the same name wins, and every mutation is `ACCESS_DENIED`. |
+| `src/layers/filesystem/internal/tree.test.js` | Both layers as one volume, case-preserving enumeration, copy-up on write, tombstones, merge with source directories, distinct failures, diagnostics. |
 | `src/layers/filesystem/internal/handles.test.js` | Positions, reads past the end, zero-filled extension, dispositions, sharing in both directions, `SetEndOfFile`, closed handles, the per-path report. |
 | `src/layers/filesystem/internal/memory-store.test.js` | The seeded store. |
 | `src/layers/filesystem/internal/opfs-store.test.js` | Over a fake OPFS: mount walk, synchronous read/write, zero-fill, nested directories, the handle pool, the exclusive lock, main-thread refusal. |
-| `src/layers/filesystem/internal/bundle/bundle.test.js` | Byte-exact round trip through all three codecs, ranges across blocks, reads past the end, case folding, empty directories, `BLOCK_MISS` naming every absent block, LRU eviction, header checks. |
+| `src/layers/filesystem/internal/bundle/bundle.test.js` | Byte-exact round trip through all three codecs, ranges across blocks, reads past the end, case folding, empty directories, `BLOCK_MISS` naming every absent block, LRU eviction, header checks, a relocated directory found where it is mapped and not where it lay. |
 | `src/layers/filesystem/internal/bundle/cache.test.js` | Slot arithmetic, the presence bitmap across sessions, a foreign bitmap discarded, the heap fallback and its pinning. |
 | `src/layers/filesystem/internal/bundle/crc32.test.js` | The checksum. |
 | `src/layers/filesystem/internal/iso/iso9660.test.js` | Over images written by `iso.fixture.js` (both descriptors, both trees, path tables): the Joliet tree preferred and its names kept, the primary tree's names cleaned, byte-exact reads whole and in pieces from a synchronous and an asynchronous reader, opening that reads no file, multi-extent and interleaved files, the hidden bit and the recording time in UTC, the serial number, refusal of what is not an image and of a directory that contains itself, the source store and the chunked reader. |
@@ -325,6 +316,9 @@ engine journals what its callers decide to say.
 
 Integration tests that drive a bundle and a session through the whole engine live beside the
 application entry point (`src/bundle.itest.js`, `src/session.itest.js`; `npm run test:integration`).
+`src/bundle.itest.js` also mounts a bottle that carries a library under `.bottlify\system32\`:
+it reads at `C:\WINDOWS\system32\`, not where the bottle carried it, and a program that imports
+it by bare name binds to it and calls it.
 `src/disc.itest.js` runs a program started from a disc image: the drive is a CD-ROM labelled as
 the disc is, on CDFS, the current directory is the disc's root, a file on it reads, a create there
 fails with `ERROR_WRITE_PROTECT`, and a copy to C: lands whole; and the image crosses the port

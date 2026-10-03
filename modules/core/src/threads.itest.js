@@ -111,7 +111,7 @@ test('the threads really did run, and really did take turns', { timeout: 15000 }
 test('the answer is the same every time', { timeout: 90000 }, async()=>{
     // Determinism is the actual acceptance criterion: a scheduler that is right
     // only sometimes is not right. Ten runs rather than a hundred keeps the test
-    // honest about cost -- each one boots a fresh emulator.
+    // honest about cost -- each one boots a fresh machine.
     const totals = [];
     for (let run = 0; run < 10; run++)
     {

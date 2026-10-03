@@ -10,7 +10,7 @@ Module machinery is described in [`README.md`](./README.md) and [`system.md`](./
 an image loads at the base its headers demand, a stack is placed by the kernel, the heap by the
 process assembler — and this layer records the decision, refuses layouts that overlap, and
 answers whether a given access is legal. Every typed read and write is checked against that map
-before it reaches the emulator, so an unmapped or wrongly-permitted access is an error with an
+before it reaches the engine, so an unmapped or wrongly-permitted access is an error with an
 address in it rather than a silent write into whatever happened to be there.
 
 It does not allocate, does not own the layout (the assembler in `src/app.js` does; see
@@ -58,7 +58,7 @@ Accessors (all validated through `assert`):
 | member | signature | meaning |
 |--------|-----------|---------|
 | `readBytes` | `(address, length) => Uint8Array` | A **copy** of guest bytes. |
-| `window` | `(address, length) => Uint8Array` | The emulator's own bytes, valid only until control returns to the guest. For a measured hot path. |
+| `window` | `(address, length) => Uint8Array` | The engine's own bytes, valid only until control returns to the guest. For a measured hot path. |
 | `writeBytes` | `(address, bytes) => void` | Writes; routes to `cpu.writeData` when the target region is not executable, `cpu.writePhysical` otherwise. |
 | `readU8` / `readU16` / `readU32` | `(address) => number` | Little-endian unsigned integers. `readU32` reads through the reader (below): in place out of the RAM the cpu lends, or through `cpu.readU32`, with nothing allocated. |
 | `readU32sInto` | `(address, count, into, at = 0) => void` | `count` signed dwords, written into `into` starting at `at`: one span check for the whole run, then the span read through the reader -- out of the RAM the cpu lends, or in one call to `cpu.readU32sInto` (per word through `cpu.readU32` where the cpu has no such path) -- nothing allocated. A span a region boundary refuses falls back inside this call to a per-word read, so a caller never sees the boundary case. |
@@ -135,7 +135,7 @@ pick between the two write paths the cpu layer offers.
 `writeData`). Three
 decisions shape it:
 
-- **Reads copy.** The emulator hands back a subarray of its own memory, and a caller holding two
+- **Reads copy.** The engine hands back a subarray of its own memory, and a caller holding two
   such windows and writing through one finds the other silently moved. `readBytes` slices;
   `window` is the explicit opt-out.
 - **Dword reads are cached by region.** A host call reads several dwords — arguments on the
@@ -155,7 +155,7 @@ decisions shape it:
   the reader when given one, and the module gives it one whenever the cpu reads dwords at all.
 - **Writes that cannot be code skip the compiler.** `writeBytes` calls `cpu.writeData` unless
   the region is executable, in which case it calls `cpu.writePhysical`, which tells the
-  emulator to discard compiled code on those pages. The cpu layer explains why the ordinary
+  engine to discard compiled or translated code on those pages. The cpu layer explains why the ordinary
   path is expensive; this is where the choice is made.
 
 A string scan may read up to `limit` bytes but is clamped to the region, so a string at the end
@@ -201,7 +201,7 @@ layers that own each piece register it. What a booted process looks like:
 | region | placed by | kind / access | where |
 |--------|-----------|---------------|-------|
 | `entry-vector` | assembler | `THUNK_DATA` rw | 4 bytes at `cpu.layout.entryVector` (`0x7000`) |
-| `boot-rom` | assembler | `LOW_MEM` rx | `0xF0000`, 64 KiB — registered so a fault report can name the engine's own stub |
+| `boot-rom` | assembler | `LOW_MEM` rx | `0xF0000`, 64 KiB — registered so a fault report can name the engine's own stub; under `emulator` only, cork having no ROM |
 | `thunks` | assembler | `THUNK_CODE`, rwx while written then `protect`ed to rx | `cpu.layout.thunkBase` (`0x100000`), `thunkCapacity` bytes |
 | `stack` | assembler | `STACK` rw | Below `cpu.layout.initialStack` (`0x300000`), sized from the image's `SizeOfStackReserve` (floored at 64 KiB, clamped to the room above the thunks) |
 | the program image | [`loader`](./loader.md) | `IMAGE` rwx | Its own `ImageBase` |
@@ -278,11 +278,11 @@ from `modules/core/`):
 `internal/reader.test.js` holds `DwordReader` to reading out of the RAM the machine lends, signed
 into an array or unsigned alone and nothing else asked of the machine; to the region map's refusals;
 to validating a call's stack, TEB and data once each until the map changes, and refusing a region
-at once when its access moves; to asking again for RAM that moved (an emulator growing its memory)
+at once when its access moves; to asking again for RAM that moved (the emulator growing its memory)
 and reading it where it is now; and to reading through the machine's own calls, checked the same,
 where it lends no RAM. `internal/writers.test.js` holds the slot to what `charging` swaps, and
 `module.test.js` the reader and the slot to the open instance.
 
-The tests drive the accessors against an in-memory `RawMemory` and need no emulator. The
+The tests drive the accessors against an in-memory `RawMemory` and need no running machine. The
 layer's behaviour under a running guest is exercised indirectly by every integration test
 (`src/*.itest.js`) and by the kernel and bridge module tests, which use a real region map.

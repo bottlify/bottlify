@@ -65,7 +65,7 @@ the layer still runs, but every timestamp reads as zero and `diagnostics().issue
 | `templates()` | Every distinct message template seen, with its category, level and count, most frequent first. |
 | `begin(name, kind = 'host')` | Open a phase. An unrecognised kind is `host`. |
 | `end(name?, { instructions?, weight? }?) → ms` | Close the innermost phase; returns what the clock measured. A name that does not match is counted as an imbalance, never thrown. `weight` lets one timed phase stand for several in the sums, never in a single-occurrence figure. |
-| `compiled(count = 1)` | Modules the emulator compiled during the open frame. |
+| `compiled(count = 1)` | Modules the engine compiled during the open frame. |
 | `note(name, amount)` | Any number the frame's owner counts into it, summed by name. |
 | `beginFrame()` / `endFrame()` | Bracket one frame; `endFrame` returns a copy of the `FrameRecord`. |
 | `frames(count = 240)` | The most recent completed frames, oldest first, as copies. |
@@ -252,7 +252,7 @@ Frames are a ring of `FrameRecord`s (`index, startedAt, ms, byKind, sampled, hos
 longestGuest, waits, compiles, idleMs, notes`), 240 deep by default; the frame still being measured
 is never reported. `idleMs` is how much of the frame the machine had nothing of the program's to run
 and was parked on us (any `idle-*` phase), which is what separates a frame we made long from a frame
-the program or the emulator made long. `snapshot(worst)` sorts every phase row (`name, kind, count, totalMs, selfMs, worstMs`)
+the program or the engine made long. `snapshot(worst)` sorts every phase row (`name, kind, count, totalMs, selfMs, worstMs`)
 by self time, names the `worst` slowest frames, and takes `hostShare` over the whole history rather
 than the last frame, because the threshold it serves is about sustained cost.
 

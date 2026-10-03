@@ -33,7 +33,7 @@ time,handles,processes,stacks}.js`.
 
 | option | type | default | meaning |
 |--------|------|---------|---------|
-| `quantum` | number | `100_000` | Retired guest instructions per scheduler turn. Below a page the emulator cannot honour a smaller one. |
+| `quantum` | number | `100_000` | Retired guest instructions per scheduler turn. A slice can run past it by what the engine runs between two looks at its budget (a region under cork, a block on the emulator). |
 | `preemption` | boolean | `false` | End a slice between 10 000-instruction chunks of translated code once a thread of higher priority comes due (a timed wait expired, or the running thread set what it waited on), as Windows preempts. Off: on the Warcraft III demo it ended thousands of slices early for a TIME_CRITICAL sound mixer and changed nothing heard in a browser, and its cost in speed is unmeasured. |
 | `stacks.base` | number | `0x00300000` | Where the first pool stack is placed (`0x00400000 - 0x00100000`). |
 | `stacks.size` | number | `0x10000` | The default reserve: the stack a thread whose creator asks for no size gets. |
@@ -150,7 +150,7 @@ sub-record each for handles, sync objects, processes and time:
 |--------|---------|---------------|
 | `quantum` | As configured. | Never. |
 | `turns` | Turns taken. | Each `runOnce` that ran a thread. |
-| `overruns`, `worstSlice`, `worstSliceAt`, `worstSliceFrom`, `worstSliceOn` | Slices the emulator ran past the quantum; the worst, where it began and ended, and on which thread. | When a slice retires more than `quantum`. |
+| `overruns`, `worstSlice`, `worstSliceAt`, `worstSliceFrom`, `worstSliceOn` | Slices the engine ran past the quantum; the worst, where it began and ended, and on which thread. | When a slice retires more than `quantum`. |
 | `worstSliceMs`, `slowSlices` | The eight slices that held the machine longest by the host clock (40 ms and up), as `ms instructions thread 0xfrom->0xat`. A production bundle reads no clock for them and reports none. | When a slice takes 40 ms or more. |
 | `expiries` | Timed waits that ran out. | Each expiry. |
 | `stackEscapes`, `stackEscaped` | Threads whose ESP has been seen outside their stack, and where. | Checked once a turn, before the slice. |
@@ -241,7 +241,7 @@ loop and hands the original back to the caller, which decides where the thread g
 (`scheduleResume`). `parkThread()` does the same but keeps the address on the thread, so the
 next turn resumes exactly where the call was made with `waitResult` in EAX. Both work because a
 stub is about to `ret`: the park loop is `hlt; jmp`, a parking slot rather than code to run.
-Whether that `ret` has run by the time the thread is switched away is the emulator's business
+Whether that `ret` has run by the time the thread is switched away is the engine's business
 — a slice can end on the instruction after the trap — so a parked thread's ESP is set from the
 `restingStack` its caller passed rather than trusted from the saved context; without it the
 resume pops the park address the kernel wrote over the return address and returns through
@@ -331,7 +331,7 @@ Invalid handles, type mismatches and double closes all throw with the handle in 
 
 ### Child processes (`internal/processes.js`)
 
-There is one address space and one emulator, so a child is not started beside its parent. A
+There is one address space and one machine, so a child is not started beside its parent. A
 record holds the image path, command line, `suspended` flag, a queue of `patches` (writes the
 parent made into the child before its image existed — process hollowing as a queue) and an
 `exitCode` that is always `STILL_ACTIVE` (259). `pending()` names the first non-suspended child;

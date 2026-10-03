@@ -14,7 +14,6 @@ import { createApp } from '@bottlify/core';
 
 const app = await createApp({
     executable,                                   // Uint8Array
-    v86: { moduleUrl, wasmBytes },                // the emulator, shipped in the package
     canvas,                                       // or container, or neither
     bundle: { url, id },                          // the program's files, read by byte range
     storage: 'opfs',                              // where the session goes
@@ -45,7 +44,7 @@ plus everything in `StartOptions` (`src/host/messages.js`), which is posted to t
 | `host` | `'worker' \| 'thread'` | Where the engine runs. Default: `'worker'` wherever `Worker` is a function, otherwise `'thread'`. See section 3. |
 | `canvas` | `HTMLCanvasElement` | Adopted as the viewport. Its control is transferred to the engine; nothing on the page may draw to it afterwards. |
 | `container` | `Element` | A canvas is created and appended to it, then treated as `canvas`. |
-| `transfer` | `ArrayBuffer[]` | Buffers among the options to hand over rather than copy — the image, the emulator's binary, the decoder's. |
+| `transfer` | `ArrayBuffer[]` | Buffers among the options to hand over rather than copy — the image, the decoder's binary, an emulator's. |
 | `workerUrl` | `string \| URL` | Where to load the engine worker from, for a bundler that moves files. Default: `./engine.worker.js` beside the entry module. |
 
 Neither `canvas` nor `container` means a run without a display: no GPU device is opened, and a
@@ -60,11 +59,10 @@ replaced by what it is built from. The worker rebuilds the object it needs.
 | option | type | meaning |
 |---|---|---|
 | `executable` | `Uint8Array` | The PE32 image to run. Required. |
-| `v86` | `{ moduleUrl: string, wasmBytes: ArrayBuffer }` | The emulator module and binary. Both are subpath exports of the package (`@bottlify/core/libv86.mjs`, `@bottlify/core/v86.wasm`). |
+| `v86` | `{ moduleUrl: string, wasmBytes: ArrayBuffer }` | The emulator module and binary, for `engine: 'emulator'` alone. The package carries none: a caller that selects the emulator brings both halves, and without them `createApp` rejects with ``cpu: the emulator is not installed -- engine "emulator" needs the caller's v86, as `v86: { moduleUrl, wasmBytes }` ``. Ignored under `cork`. |
 | `zstd` | `{ wasmUrl?: string, wasmBytes?: ArrayBuffer }` | The bundle decoder's wasm build (`vendor/zstd.wasm` beside the module by default). Optional: absent, the JavaScript decoder decodes, or the emulator's while it is loaded (`docs/core/cpu.md`, "zstd"). |
 | `media` | `{ wasmBytes?: ArrayBuffer }` | The video decoder (`@bottlify/core/video-decoder.wasm`). Absent, the media layer comes up and reports that nothing can be played. |
-| `system` | `{ files: { path: string, bytes: Uint8Array }[] }` | The engine's own read-only volume, mounted under `C:\WINDOWS\system32\`. Each `path` is a bare file name and each `bytes` its contents, present as though the machine had always had them. The engine carries none of its own. Absent (or empty), the volume has no system layer. |
-| `bundle` | `{ url, store?, id?, prefix?, prefetch?, indexSha256?, retry? }` | A `.btl` mounted as the volume's read-only source, fetched by HTTP byte range from `url` (a `206` is the only accepted answer). `store: 'local'` (default) caches blocks in OPFS; `null` keeps nothing. `id` names the cache. `prefix` is where the bundle appears in the volume (`App` by default; a bottle is placed where its installation put it, `placementOf` in `@bottlify/installer`), and a `.bottlify\registry.json` it carries is merged into the registry at mount (`filesystem.md`). `prefetch` (default on) fills the cache when idle. `indexSha256` is checked against the bundle's index. `retry: { attempts, baseDelayMs, maxDelayMs }` defaults to 6 / 250 / 10000. A zstd-compressed block is decoded synchronously by the engine's decoder: the emulator's wasm one under `emulator`/`hybrid` (it is loaded and several times faster), this project's own (`src/zstd.js`) under `cork`, which has no emulator. |
+| `bundle` | `{ url, store?, id?, prefix?, prefetch?, indexSha256?, retry? }` | A `.btl` mounted as the volume's read-only source, fetched by HTTP byte range from `url` (a `206` is the only accepted answer). `store: 'local'` (default) caches blocks in OPFS; `null` keeps nothing. `id` names the cache. `prefix` is where the bundle appears in the volume (`App` by default; a bottle is placed where its installation put it, `placementOf` in `@bottlify/installer`), and a `.bottlify\registry.json` it carries is merged into the registry at mount (`filesystem.md`). What a bottle carries under `.bottlify\system32\` -- what its installation added to `C:\WINDOWS\system32` -- is mounted at `C:\WINDOWS\system32\`, read a block at a time and copied up on a write like any file of the bundle. `prefetch` (default on) fills the cache when idle. `indexSha256` is checked against the bundle's index. `retry: { attempts, baseDelayMs, maxDelayMs }` defaults to 6 / 250 / 10000. A zstd-compressed block is decoded synchronously: by the wasm build of this project's decoder when the package carries it (`zstd`), otherwise by `src/zstd.js` under `cork` and by the emulator's own decoder under `emulator`. |
 | `discs` | `{ image: Blob \| Uint8Array, letter?: string }[]` | Disc images, each mounted as a CD-ROM drive of its own: `letter`, or D: and the first free letter after it when absent (a letter asked for that is taken rejects `createApp`). The image is an ISO 9660 image, with Joliet names where it has them ([`filesystem.md`](./filesystem.md), "Disc images"). A `Blob` -- the file the person chose -- crosses to the worker by reference, not by copy, and the worker reads it a range at a time with `FileReaderSync`; on a thread without `FileReaderSync` (`host: 'thread'`, a test runner) it is read into memory once, when it is mounted. Bytes are used as they are. A caller holding the engine itself (`src/app.js`) may also pass `{ size, read(offset, length) }`, a synchronous reader of its own. The drive is read-only, answers `GetDriveType` with `DRIVE_CDROM` and `GetVolumeInformation` with the disc's label and serial number ([`win32.md`](./win32.md), "Drives and discs"), and carries across a process replacement and a child run beside its parent as every other option does. Nothing of it is in `session.export()`. The event `disc` says what was mounted: `{ letter, label, files, bytes, joliet, whole }`, `whole` true when the image had to be read into memory. |
 | `storage` | `'opfs' \| 'local' \| { files: { path, bytes }[] } \| null` | Where the session — files the program wrote plus the registry — is loaded from and saved to. `'opfs'` persists in the origin's private file system. `'local'` means `localStorage`, which a worker does not have (see section 9). An object seeds the volume and saves nothing. |
 | `id` | `string` | Names the session and the bundle cache when neither option does. |
@@ -91,7 +89,7 @@ replaced by what it is built from. The worker rebuilds the object it needs.
 | `memorySize`, `heapSize`, `stackSize` | `number` | Guest RAM (a power of two), the heap's ceiling, the main thread's stack. |
 | `quantum` | `number` | Guest instructions per scheduler turn. |
 | `jit` | `Record<string, number>` | The emulator's compiler budgets, for measurement. The `jit.*` counters report `-1` under `cork`, which has no emulator compiler. |
-| `engine` | `'emulator' \| 'cork'` | Which execution engine runs the program (`docs/core/cpu.md`'s "Engines"). Default `cork`, which loads nothing of the emulator. Chosen per launch: the launcher passes the person's choice for the bundle, or the manifest's suggestion. The emulator is an optional layer since 5.5: a build without its artifacts still runs under `cork`, and a launch that selects `emulator` without them is refused with `cpu: the emulator is not available in this build (engine "…" needs it)`. |
+| `engine` | `'emulator' \| 'cork'` | Which execution engine runs the program (`docs/core/cpu.md`'s "Engines"). Default `cork`, the engine the package carries, which loads nothing of the emulator. `emulator` needs the caller's `v86`, and is refused without it before anything is built. |
 | `sampling` | `boolean` | The `cpu` layer's always-on guest sampler (`docs/core/cpu.md`'s "Sampling"). `false` turns it off, for a caller measuring the emulator's own compiler rather than the guest's code. Always on otherwise. |
 | `record` | `number` | How many bridge events to keep for a replayable session; `0` keeps none. |
 | `traceStrings`, `profileCalls` | `boolean` | Keep the text an argument pointed at; time every host call as a phase. Both cost, both off by default. |
@@ -108,7 +106,7 @@ the engine directly (`createApp` from `src/app.js`, not exported by the package)
 |---|---|
 | **The page** (`src/host/create.js`, `src/host/remote.js`) | Creates the worker, transfers the canvas as an `OffscreenCanvas`, captures keyboard and mouse on the canvas and posts them, posts `document.hidden` on every change, relays the log between the caller and the keeper, hands the sound ring's shared memory to the audio worklet the page creates. The page does nothing per frame. |
 | **The log keeper** (`src/host/log.worker.js` → `src/host/keeper.js`) | Owns the log. Handed the journal's block, it polls it before the ring laps, keeps the history, works out the frames, the profile and the module attribution, and answers the page's reads. A `recent` or `drain` read polls the block first, so a tail right after an exit is not a tick stale; a `recent` longer than the keeper's own history (4 096 records) is read off the shared block itself, whose ring the engine sized (`log.capacity`/`log.bytes`), so a capture of a few frames of a call area is the ring's, not the mirror's. A process replacement hands it the next block rather than restarting it. The page's thread never keeps the log. |
-| **The engine** (`src/host/engine.worker.js` → `src/host/serve.js` → `src/app.js`) | Everything else: the emulator, the Win32 layer, the mixer's pump, the GPU device — opened here because a `GPUDevice` is neither transferable nor cloneable — and the copy of every frame into the transferred canvas, one `copyTextureToTexture` per frame. |
+| **The engine** (`src/host/engine.worker.js` → `src/host/serve.js` → `src/app.js`) | Everything else: the execution engine, the Win32 layer, the mixer's pump, the GPU device — opened here because a `GPUDevice` is neither transferable nor cloneable — and the copy of every frame into the transferred canvas, one `copyTextureToTexture` per frame. |
 | **The audio thread** (`dist/worklet.js`, from `src/layers/audio/output/worklet.js`) | With shared memory, the `bottlify-output` `AudioWorkletProcessor` resamples, scales and sums every open track's own PCM out of a shared track table -- converting and mixing both happen here now, not on the engine thread; its own count of what it consumed and produced is what a program's play cursor is built on when `audio.drained` is true. Without shared memory there is no worklet to read anything: the engine mixes into its own ring on its own thread instead, and only that thread can read it (`docs/core/audio.md`'s Mixer section). |
 
 The device is requested with `texture-compression-bc` when the adapter offers it. An uncaptured
@@ -220,7 +218,8 @@ settings panel prints it.
 | `input.detach()`, `input.send(event)`, `input.poll()` | synchronous | |
 | `session.export()` | `SessionFile[]` | Synchronous, once `run()` has resolved; throws `the program has not exited yet` before. Empty unless `collectOnExit`. |
 | `registry()` | `{ toJSON() }` | The registry as of exit; same rule. |
-| `files.list(path)` | `Promise<{ name, path, directory, size, modified }[]>` | A directory of the volume as the program sees it, while it runs: the bundle, the system volume and what the program wrote, a file a previous run saved among it -- which `session.export()` does not hold. |
+| `systemLibraries()` | `string[]` | The libraries the engine synthesises as Windows' own, by file name, as of exit; same rule, and empty unless `collectOnExit`. What `@bottlify/installer` sorts an installation's `system32` against. |
+| `files.list(path)` | `Promise<{ name, path, directory, size, modified }[]>` | A directory of the volume as the program sees it, while it runs: the bundle and what the program wrote, a file a previous run saved among it -- which `session.export()` does not hold. |
 | `files.read(path)` | `Promise<Uint8Array>` | A file of that volume, whole. Opened sharing read and write, so a file the program holds open reads as it stands. |
 | `canvas`, `host` | | The viewport adopted, or `null`; `'worker'` or `'thread'`. |
 
@@ -294,20 +293,13 @@ elsewhere, never a zero timeout, which a browser clamps to 4 ms. The split is ab
 timers and I/O, which the yield exists to let through. Node delivers a port's messages at least a
 thousand at a time in one pass of its event loop, running the microtasks after each, so a loop
 yielding through a port stays inside the pass for a thousand turns: no timer fires, no file read or
-fetch answers, no worker's message arrives and the emulator's compiled code is not installed until
+fetch answers, and no worker's message -- the translator's answers among them -- arrives until
 the pass ends. An immediate set from inside an immediate runs on the next pass, and every pass runs
-the due timers and polls for I/O. Measured under Node with a program that only counts, a port
-before and an immediate after: a 5 ms timer set again each time it fired fired once in a 2 s run,
-when the run ended, under each of the four engines, against 217-337 times and at most 19-47 ms
-late; the emulator retired 102-107 M instructions in 2 s against 1.35-1.38 G, having run no
-compiled code at all before; and on Doom 3 over 60 s under cork with its translation worker,
-72.6-73.3 % of instructions ran translated against 96.5-97.2 %, and the program presented 100-107
-frames against 152-170. In Chromium a channel message is a task scheduled beside the timers rather
-than ahead of them: on a page and in a worker, running the same program under cork and under the
-emulator, a 5 ms timer came 3.2 ms late at the median and 5-30 ms at worst, alike before and
-after, since no browser has `setImmediate`. `src/host-timers.itest.js` holds Node to it under cork and under the emulator:
-over a second and a half of a program that only counts, a 5 ms timer fires again and again and
-never 250 ms late, file reads answer, and the emulator runs compiled code.
+the due timers and polls for I/O. In Chromium a channel message is a task scheduled beside the
+timers rather than ahead of them, which is all a browser offers, since none has `setImmediate`.
+`src/host-timers.itest.js` holds Node to it: over a second and a half of a program that only
+counts, a 5 ms timer fires again and again and never 250 ms late, file reads answer, and the
+translator's regions arrive from its worker and run.
 
 The yield is by need and by time, never by turn (`pacedYield`). The loop leaves the microtask
 queue at once when the host may have something to deliver — a host call is suspended, a range is
@@ -350,17 +342,17 @@ translator (`@bottlify/cork`), which the cpu layer loads by URL too. The outputs
 | `dist/log.worker.js` | `src/host/log.worker.js` | loaded by URL from `createApp` |
 | `dist/worklet.js` | copied from `src/layers/audio/output/worklet.js` | `@bottlify/core/worklet.js` |
 | `dist/cork/index.js`, `dist/cork/translator.worker.js` | `modules/cork/src/index.js` and its translation worker | loaded by URL for `engine: 'cork'` |
-| `dist/vendor/libv86.mjs`, `v86.wasm` | copied from `vendor/prebuilt/` | `@bottlify/core/libv86.mjs`, `@bottlify/core/v86.wasm` |
-| `dist/vendor/video-decoder.wasm` | copied from `vendor/prebuilt/` | `@bottlify/core/video-decoder.wasm` |
+| `dist/vendor/video-decoder.wasm` | copied from `vendor/prebuilt/` when there | `@bottlify/core/video-decoder.wasm` |
+| `dist/vendor/zstd.wasm` | copied from `vendor/prebuilt/` when there | loaded by URL from beside the module |
 | `dist/vendor/manifest.json` | written | checksums and source release of each vendor artifact |
 | `dist/checksums.json` | written | SHA-256 of every file under `dist/` |
 
-The build is minified, without source maps, targets `es2022`, and stops if a vendor artifact is
-missing from `vendor/prebuilt/` (`npm run fetch:v86`, `npm run fetch:video-decoder` put them
-there, verified against `vendor-lock.json` and `video-decoder-lock.json`).
-`import.meta.env.BOTTLIFY_VENDOR` is defined as `./vendor/` and
-`import.meta.env.BOTTLIFY_CORK` as `./cork/index.js`, so the built module finds its emulator and its
-translator beside itself.
+The build is minified, without source maps, and targets `es2022`. Both binaries are optional: it
+copies each that `vendor/prebuilt/` holds (`npm run fetch:video-decoder` and `npm run fetch:zstd`
+put them there, verified against `video-decoder-lock.json` and `zstd-lock.json`) and names each
+absent one in its log. `import.meta.env.BOTTLIFY_VENDOR` is defined as `./vendor/` and
+`import.meta.env.BOTTLIFY_CORK` as `./cork/index.js`, so the built module finds its binaries and
+its translator beside itself.
 
 The build is a production bundle: it defines `import.meta.BOTTLIFY_DIAGNOSTICS` as `false`, and
 every diagnostic instrument -- each guarded by `import.meta.BOTTLIFY_DIAGNOSTICS !== false` -- folds

@@ -52,8 +52,8 @@ modules/core/src/
 └── layers/
     ├── index.js           # defaultModules(), in dependency order
     ├── log/internal/      # journal.js profiler.js ring.js
-    ├── cpu/internal/      # boot-rom.js context.js faults.js fpu.js thunks.js v86-host.js
-    │                      #   (the only layer that may import vendor/v86)
+    ├── cpu/internal/      # cork-host.js translation-store.js thunks.js context.js faults.js
+    │                      #   ports.js samples.js; v86-host.js boot-rom.js fpu.js for a caller's v86
     ├── memory/internal/   # regions.js accessors.js
     ├── kernel/internal/   # threads.js switch.js sync.js handles.js time.js processes.js stacks.js
     ├── bridge/            # replay.js — recorded sessions replayed through the real bridge

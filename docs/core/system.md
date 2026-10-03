@@ -61,7 +61,7 @@ already answers (`system/stub.js`'s `NOT_IMPLEMENTED`) for a layer like `graphic
 returns whole object graphs with no harmless scalar to stand in for them. `cpu` is the one further
 step: a disposed instance answers exactly as one that has never booted, because from a caller's
 side those are the same state, and `boot()`'s "already booted" refusal reads only its own
-instance's state — never a different instance's emulator — so a fresh instance boots cleanly
+instance's state — never a different instance's machine — so a fresh instance boots cleanly
 while the one it is replacing is still running or already disposed.
 
 ## 2. Configuration (`src/system/config.js`)
@@ -159,7 +159,7 @@ product API is `createApp` ([`host.md`](./host.md)), whose engine (`src/app.js`)
 `assembleModules` with one configuration object per layer and then wires the cross-cutting step the
 graph deliberately does not express — binding a program's imports to the layers' exports.
 
-Building the graph starts nothing: the `cpu` module's `create` does not boot the emulator, and
+Building the graph starts nothing: the `cpu` module's `create` does not load or boot an engine, and
 anything that needs a running guest throws `boot() must be called` until it is.
 
 ## 7. The layer dependency graph
@@ -169,8 +169,8 @@ This is what every `module.js` declares today, read from `src/layers/<name>/modu
 | layer | version | `requires` |
 |---|---|---|
 | `log` | 0.1.0 | — |
-| `cpu` | 0.1.0 | — |
-| `memory` | 0.1.0 | `cpu` |
+| `cpu` | 0.1.0 | `log` |
+| `memory` | 0.1.0 | `cpu`, `log` |
 | `kernel` | 0.1.0 | `cpu`, `memory`, `log` |
 | `bridge` | 0.1.0 | `cpu`, `kernel`, `memory`, `log` |
 | `loader` | 0.1.0 | `cpu`, `memory`, `log` |
@@ -203,12 +203,12 @@ that builds a tree for each form. Any of the following fails the build:
 
 | rule | message |
 |---|---|
-| An import that resolves under `vendor/` from any file outside `src/layers/cpu/` | `vendor is reachable only from layers/cpu` |
+| An import that resolves under `vendor/`, from any file | `vendor holds binaries the root of src reaches by URL, and nothing imports it` |
 | An import that resolves outside `src/` (other than the vendor case) | `imports outside src` |
-| A `new URL(..., import.meta.url)` reaching outside `src/`, from anything but a root file or the cpu layer reaching `vendor/` | `reaches outside src by URL` |
+| A `new URL(..., import.meta.url)` reaching outside `src/`, from anything but a root file | `reaches outside src by URL` |
 | An `import()` of a computed argument from anything but the cpu layer or a root file -- the one form nothing here can check | `imports a module by a computed argument` |
 | A package name other than the platform's `node:` modules | `the core has no dependencies` |
-| An engine package (`@bottlify/cork`), which the cpu layer loads by URL when a launch selects it and the core must run without | `core must not depend on an engine package` |
+| An engine package (`@bottlify/cork`), which the cpu layer loads by URL when a launch selects it | `core must not depend on an engine package` |
 | A `src/system/` file importing a layer or `src/layers/index.js` | `system must not know layers` |
 | A layer file importing `src/layers/index.js` | `import the layer module directly` |
 | A layer file importing another layer that is not in its own `requires` | `not declared in requires` |

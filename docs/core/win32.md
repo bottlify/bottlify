@@ -393,8 +393,8 @@ finite ones, and `EDOM` for a NaN given to `atan`, `tanh` or `exp`, which answer
 -- and so does an argument past `fsin`'s reduction (2^63), a NaN or an infinity where
 the function checks for one, and a result past a double's range.
 `tools/math-bench.mjs` times each of these calls in a loop, d3dx9's arithmetic beside them and
-the x87's instructions inline, under both precisions, and sets cork's answers beside the
-emulator's.
+the x87's instructions inline, under both precisions, and writes out each row's answers so two
+runs can be set against each other.
 
 The rest of the runtime's floating point is in the guest as well (`msvcrt/inguest-float.js`).
 `_control87` and `_controlfp` read the thread's x87 control word, translate it into `float.h`'s
@@ -424,8 +424,8 @@ infinity or a zero out of digits that were not all zeros.
 the remainder in EDX, where a compiler takes an eight-byte structure, from one `idiv`, which
 faults as msvcrt's own does for a zero divisor or INT_MIN over -1. `msvcrt/inguest-float.test.js`
 holds each to its JavaScript on cork's test machine -- the control word it leaves and the flags it
-clears among what is compared -- and `src/crt-float.itest.js` calls them through the import on
-cork and on the emulator, the program's own 1 / 3 rounding to the precision `_controlfp` set.
+clears among what is compared -- and `src/crt-float.itest.js` calls them through the import
+under cork, the program's own 1 / 3 rounding to the precision `_controlfp` set.
 
 kernel32's `MulDiv` and ntdll's 64-bit helpers are code in the guest too, assembled by hand, since
 the compiler's subset has neither a 64-bit product nor `div`. `MulDiv` (`MULDIV_CODE`,
@@ -444,7 +444,7 @@ handler being passed no registers. The `dvrm` forms and the shifts are new, wher
 stopped the program. `ntdll/integer.test.js` and `kernel32/system.test.js`
 hold the code to BigInt arithmetic on cork's test machine -- edges and random operands, the
 registers a callee keeps and the bytes it pops -- and `src/integer-helpers.itest.js` calls them
-through the import on cork and on the emulator, none crossing into the host.
+through the import under cork, none crossing into the host.
 
 ### d3dx9's mathematics
 
@@ -502,8 +502,8 @@ rounded once, a few units from the library's floats.
 each function's x86 to its JavaScript on cork's test machine under three control words and to the
 x87's model under single precision -- random floats of every size, angles past 2^63, NULL for
 every pointer that may be one, zero vectors, singular products, strides, outputs over inputs --
-and `src/d3dx9-math.itest.js` calls a selection through the import on cork and on the emulator,
-both of which answer the model's floats to the bit, and none of which crosses into the host.
+and `src/d3dx9-math.itest.js` calls a selection through the import under cork, which answers the
+model's floats to the bit, none of the calls crossing into the host.
 
 ### The process model
 
@@ -1069,7 +1069,8 @@ nothing implements).
   GenuineIntel, family 6 model 7 stepping 3, its EDX and ECX feature bits -- and everything a
   program can ask derives from it: `GetSystemInfo`'s level and revision, `IsProcessorFeaturePresent`
   (SSE3 and RDRAND included, execute-disable and PAE answered no since nothing enforces or pages),
-  the registry's `CentralProcessor\0` identifier and speed, the process block's processor count
+  the registry's `CentralProcessor\0` identifier and speed (`~MHz`: the rate the engine's rdtsc
+  runs at, 3000 under cork, `CORK_TSC_MHZ`, and 1000 under the emulator), the process block's processor count
   and `NtQuerySystemInformation`'s. `src/processor.itest.js` runs CPUID in a program and holds the
   record to the answer.
 - **`SendInput`** inserts mouse events into the same stream a real device feeds: each one goes to
@@ -1198,14 +1199,12 @@ Stated as the code states them.
   `_hypot` are written here, not after the runtime's code. errno is set as msvcrt sets it for
   a domain or a range error; a NaN argument sets none. `ldexp` of a count past a double's range
   scales in two steps and answers the double the result is (`ldexp(1e300, -1100)` is 7.4e-32),
-  where the handler multiplied by `Math.pow(2, n)`, zero or an infinity by then. The emulator's
-  `f2xm1` is 2^x less one in doubles and its `fldlg2` and `fldl2t` a unit off the doubles cork
-  loads: of the calls `crt-math.itest.js` makes, `exp(1)` and `log(10)` come a unit from cork's
-  under it and `sinh(0.1)` five, and `log10` takes the double nearest log10(2) rather than
-  `fldlg2`, which made `log10(1000)` 2.999999999999999 there. The emulator's `fprem` is not the
-  exact remainder either: of `math-bench.mjs`'s 256 pairs, `fmod` under it missed cork's answer
-  -- JavaScript's `%`, the x87's exact remainder -- in 91, by up to 3.8 million units in the last
-  place of a remainder that cancelled.
+  where the handler multiplied by `Math.pow(2, n)`, zero or an infinity by then. `log10` takes
+  the double nearest log10(2) rather than `fldlg2`. Under `emulator` the x87 instructions are the
+  emulator's, whose `f2xm1` is 2^x less one in doubles, whose `fldlg2` and `fldl2t` are a unit off
+  the doubles cork loads and whose `fprem` is not the exact remainder, so `exp`, `log`, `sinh` and
+  `fmod` there may answer a few units in the last place from cork's, and `fmod` of a remainder
+  that cancels further.
 - **The floating-point environment is the x87's alone.** `_control87` and `_controlfp` load the
   x87 control word and answer it; msvcrt.dll on a processor with SSE2 sets MXCSR's masks, rounding
   and denormal control alongside and folds its bits into the answer (`_EM_AMBIGUOUS` where the
@@ -1382,10 +1381,10 @@ Unit tests are colocated with each file, `node:test`, over `fakeMemory`
 | the rest | `advapi32/{crypto,functions,registry,services,tokens}`, `advpack/functions`, `cabinet/{cabinet,inflate,lzx}`, `crypto/{der,digest,pkcs7,pki,rc4,rsa,signature,x509}` (`pki.test.js` builds the keys, certificates and signed messages the others read), `comctl32/{functions,imagelist,progress,propsheet,tab,treeview}`, `comdlg32/functions`, `d3dx9/{functions,inguest}` (`inguest.test.js` holds the arithmetic's x86 to its JavaScript as msvcrt's does), `imm32/functions`, `lz32/{expand,functions}`, `mpr/functions`, `msacm32/functions`, `ntdll/{functions,integer,query,status,strings}`, `ole32/{cfb,functions,guid,objects,propvariant,storage,wbem}`, `oleaut32/{errorinfo,functions,invoke,objects,typelib}`, `quartz/graph`, `rpcrt4/functions`, `setupapi/{functions,inf}`, `sfc/functions`, `shell32/{fileop,functions,namespace,shelllink}`, `shlwapi/functions`, `version/functions`, `wininet/functions`, `winmm/{functions,mmio,thread,timers,wave}`, `winspool/functions`, `wintrust/{authenticode,fixtures,functions,roots}` (`fixtures.test.js` signs cabinets and images with a chain of its own), `wsock32/{functions,sockaddr,sockets,transport}` `.test.js` |
 | module | `module.test.js` — a configured screen reaches user32 and gdi32; a DC through user32 is GDI's; both fall back to 640×480 together; the C runtime family is cdecl and every other library stdcall; the runtime's `_sleep` is kernel32's `Sleep`; the KnownDLLs; shfolder's forwarding; comctl32's `_TrackMouseEvent` is user32's. `wiring.test.js` builds the module and asks through it what each library's capabilities were handed: SHLWAPI's wide strings, ADVPACK's `IsNTAdmin` from the account's token, SETUPAPI's INF found on the volume by bare name and its OS components in the hive advapi32 reads, WINTRUST's file read from the volume and judged against the configured roots, VERSION's system libraries, mmio's buffer from the program's heap, mmio reading a file by the program's own kernel32 handle and calling its own I/O procedure through the bridge on the caller's thread, a drop target as its window's property through user32, a PROPVARIANT's BSTR and SAFEARRAY copied by oleaut32's own calls, the synchronisation calls' and the profile structures' last errors and guest memory, `LoadLibraryEx`'s flags reaching the assembler, `ExitProcess` and the runtime's `exit` telling the attached libraries last first (and ending at once with none), `MWMO_INPUTAVAILABLE`. |
 
-`kernel32/critical.itest.js` runs the hand-assembled critical-section fast paths on the real
-emulator (`npm run test:integration`), pinning that the bytes the unit test checks are x86 that
-does the job. `src/kernel32-inguest.itest.js` calls the guest-code exports through the import, on
-cork and on the emulator: each interlocked call's answer, the dword it leaves, the stack it pops
+`kernel32/critical.itest.js` runs the hand-assembled critical-section fast paths on the cork
+host (`npm run test:integration`), pinning that the bytes the unit test checks are x86 that
+does the job. `src/kernel32-inguest.itest.js` calls the guest-code exports through the import, under
+cork: each interlocked call's answer, the dword it leaves, the stack it pops
 and the registers it keeps, and three preempted threads counting through two of them; a TLS value
 set in the guest read back by the API, by the compiler's `FS:[0x2c]` sequence and not by another
 thread, the last error each call leaves, a slot past the array through the host, an index past
@@ -1399,7 +1398,7 @@ sleeping while they hold it, the count exact, every entry through the fast path 
 handed the section; and a thread that finds a section held refused by `TryEnterCriticalSection`,
 then waiting in the host, with the lock count showing it queued, while the owner's own try is a
 recursion, until the owner's last leave hands it over. `src/heap-inguest.itest.js` calls the
-heap through the import on cork and on the emulator: a block sized, validated by the host, grown in
+heap through the import under cork: a block sized, validated by the host, grown in
 place and moved past its cell, freed and no longer valid; `HEAP_ZERO_MEMORY` over a recycled cell;
 a heap of the program's own added up by `HeapSummary`, walked by `HeapWalk` (which ends at once,
 over its blocks as over the host's) and taken whole by `HeapDestroy`; the
@@ -1407,22 +1406,22 @@ runtime's family; another heap's block refused; and ten thousand pairs with next
 crossing -- and three threads preempted every 97 instructions allocating, filling, checking and
 freeing eight blocks a turn from the process heap and from `malloc`. `src/winmm-inguest.itest.js` calls
 `timeGetTime` and `GetTickCount` one after the other through the import, twice with a `Sleep`
-between, on cork and on the emulator: each pair in order on one clock, the sleep seen, the stack
+between, under cork: each pair in order on one clock, the sleep seen, the stack
 and the kept registers as they were, `timeBeginPeriod` granted, `GetProcAddress` handing out the
 address the import took, and neither clock crossing into the host. `src/crt-inguest.itest.js`
-calls the runtime's in-guest functions through the import of a small program, under cork and
-under the emulator: `_ftol`'s two halves, `qsort` and `bsearch` through the program's comparator, and the
+calls the runtime's in-guest functions through the import of a small program, under cork:
+`_ftol`'s two halves, `qsort` and `bsearch` through the program's comparator, and the
 rest against the handlers' answers -- each copy, fill or move read back by a comparison -- with
 the program's ESI and EDI kept across each call, and where msvcrt.dll answers otherwise than the
 handlers did, against its answers: 0x80 below 0xa0 in each comparison, `atoi("4294967296")` 0,
-WEOF back from `towupper` and `towlower`, and the Latin-1 classes; and under cork a program that
+WEOF back from `towupper` and `towlower`, and the Latin-1 classes; and a program that
 calls `floor` while the host writes stdout's record in `_iob` at every turn has every instruction
 translated.
 `src/exceptions.itest.js` runs three compiled fixtures -- `seh.exe`, `cxxeh.exe`,
 `unhandled.exe`, built from `test/fixtures/src/` by `scripts/build-fixtures.mjs` with clang and
 lld against the MSVC ABI -- through every path above, processor faults and two threads throwing
-at once included; beside them a program built in the test takes an invalid opcode with DF set, on
-cork and on the emulator, and its handler runs with DF clear -- a `rep stosb` in it fills upwards
+at once included; beside them a program built in the test takes an invalid opcode with DF set,
+and its handler runs with DF clear -- a `rep stosb` in it fills upwards
 -- while the context has DF, and the block the handler continues at gets DF back.
 `src/apc.itest.js` runs `apc.exe`, built the same way: APCs to itself and to another thread's
 alertable sleep, one refused by a wait that is not alertable, a routine queued
@@ -1437,6 +1436,6 @@ the program imports be attached and then detached by `ExitProcess`; `src/arena.i
 library that ends just short of the stack pool and starts a thread; `src/system-modules.itest.js`
 holds the system modules to their own images' room in the module window, each where the one before
 it ends, and has a program import `d3dx9_30`, `d3dx9_43` and `msvcrt`, load and free `d3dx9_36`,
-and find each version's handle, exports and file name its own, on cork and on the emulator.
+and find each version's handle, exports and file name its own.
 End-to-end tests that drive a program through the whole surface live beside the application entry
 point (`src/*.itest.js`) and in `tools/cdp_test/` (a real browser and GPU).

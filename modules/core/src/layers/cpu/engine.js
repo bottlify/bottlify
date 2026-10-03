@@ -112,8 +112,8 @@
  * @property {number} [maxRegionBytes]   Default 8192.
  * @property {boolean} [precise]         Nothing relaxed for speed: the x87 exception flags,
  *     signalling NaNs, underflow and C1 kept as the processor keeps them, and the flags an
- *     instruction leaves undefined left as the emulator leaves them rather than as the cheapest
- *     code does (`docs/core/cpu.md` lists every relaxation). Default false, as games run; the
+ *     instruction leaves undefined left as the instruction model leaves them rather than as the
+ *     cheapest code does (`docs/core/cpu.md` lists every relaxation). Default false, as games run; the
  *     corpora run with it.
  * @property {boolean} [blockProfile]    A diagnostic: every block counts its executions.
  * @property {number} [blockProfileFrom]  With `blockProfile`: seconds after start at which the

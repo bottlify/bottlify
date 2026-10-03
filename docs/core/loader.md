@@ -10,7 +10,7 @@ modules a program links against as real in-guest PE images with real export dire
 
 The loader commits images to guest memory and records the region each occupies. Parsing and
 layout are pure functions over host buffers (`internal/pe.js`, `internal/image.js`), so an
-image can be built and inspected without an emulator; the module is what writes the result
+image can be built and inspected without a running machine; the module is what writes the result
 through the memory layer and registers it.
 
 It deliberately does not decide what an import binds to. Resolution is a parameter
@@ -184,7 +184,12 @@ search order is `libraryCandidates` in `src/app.js`: the program's own directory
 `C:\WINDOWS\system32\` and `C:\WINDOWS\`, which is where a title's DirectX setup puts the runtime —
 so a title that imported `d3dx9_26.dll` without shipping one, once its installer has run, is bound
 to the real redistributable in `system32`, not to the engine's `d3dx9_*` table. The run-time
-`LoadLibrary` path makes the same choice. Then the assembler places a `process-startup` arena where a library would fit.
+`LoadLibrary` path makes the same choice. A bottle carries what its installation added to
+`system32` under `.bottlify\system32\`, which the bundle mount puts back at
+`C:\WINDOWS\system32\` ([`filesystem.md`](./filesystem.md)), so this search finds those
+libraries there when the bottle runs; the installer leaves out of it any file named like a
+library the engine synthesises as Windows' own (`systemLibraries()`), the D3DX helpers excepted
+(`win32.redistributables()`). Then the assembler places a `process-startup` arena where a library would fit.
 The name/base module table (`byName`, `byBase`, `addressOf`, `addressOfOrdinal`, `attached`,
 `loaded`, `references`) lives in `src/app.js`, not in this layer; `list()` here is the flat record
 of what was placed. Whether a library is loaded, which `GetModuleHandle` and `PEB->Ldr` answer
@@ -267,8 +272,8 @@ wires to `bridge.siteHook`. The site itself is then patched: a near jump to the 
 `register` answered, padded with `nop` out to `displacedLength`, written through
 `memory.protect`/`memory.writeBytes`/`memory.protect` -- the same discipline a diagnostic watch's
 code patch uses, even though the program image is already `rwx` today and the protect toggle is a
-no-op. Since the image is executable, the write routes through the emulator's own physical-memory
-path and invalidates whatever was compiled from the bytes underneath; binding happens once, before
+no-op. Since the image is executable, the write routes through the engine's physical-memory
+path (`cpu.writePhysical`) and invalidates whatever was compiled from the bytes underneath; binding happens once, before
 the program's first instruction runs, so nothing is compiled yet to discard. `allocate` may be
 omitted by a caller whose spec holds only `slot` entries; a `site` entry bound with no `allocate`
 is refused by name rather than throwing.
@@ -353,7 +358,7 @@ whichever sorts first. `FindResource`, `LoadString`, dialogs and menus all look 
   the guest's *at the next crossing it sees* (unsound for some write targets; see
   [`bridge.md`](./bridge.md) "Slot hooks"); a site hook has no return value and no single write
   target to compare that way. A site kernel is checked offline instead, against the real function
-  in the real emulator, before it is ever bound in `replace` mode.
+  run in the guest, before it is ever bound in `replace` mode.
 - **A `site` patch and a `debug.hook` watch must not overlap.** `debug.hook` relocates a routine's
   opening bytes off a disassembly supplied when it is called, and a site's patch changes what is
   actually there; a watch whose displaced span ends inside a site's eight patched bytes would
@@ -364,7 +369,7 @@ whichever sorts first. `FindResource`, `LoadString`, dialogs and menus all look 
 
 Unit tests (`npm test`; filter with `node --test src/layers/loader/internal/<file>` from
 `modules/core/`). `pe.test.js` and `delayload.test.js` read real fixtures under
-`modules/core/test/fixtures/`; the rest build images in memory. None needs an emulator.
+`modules/core/test/fixtures/`; the rest build images in memory. None needs a running machine.
 
 | file | kind | covers |
 |------|------|--------|

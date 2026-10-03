@@ -276,7 +276,7 @@ succeed; `FindDevice` and `GetDeviceStatus` for an unknown GUID answer `DIERR_DE
 ### XInput
 
 `src/layers/input/xinput.js` answers the two XInput libraries that are part of Windows rather
-than of the DirectX redistributable, so no program brings a copy and the system volume holds none.
+than of the DirectX redistributable, so neither a program nor its DirectX setup brings a copy.
 Each exports what its Wine `.spec` lists, and `xinput1_4` at the numbers that `.spec` gives: a
 program takes `XInputGetStateEx` (100) and `XInputGetCapabilitiesEx` (108) with `GetProcAddress` on
 the ordinal. Every call checks its arguments first -- a user index past three (`XUSER_INDEX_ANY`
@@ -325,7 +325,7 @@ All under `npm test` from `modules/core` (`node --test "src/**/*.test.js"`); 177
 | `src/layers/input/dinput/devices.test.js` | Contract | Delta consumption, a buffer of N holding N - 1, ring overflow reporting, the buffer kept across `Unacquire`, unacquired refusal, key state layout. |
 | `src/layers/input/dinput/seam.test.js` | Contract, over a flat guest memory | Every slot's argument count for all eight interface generations, each device generation found by its IID and `CreateDevice` answering the one its root is declared with, `SetDataFormat` by size, `GetDeviceState` size checks, `GetDeviceData` in both structure sizes and unbuffered, properties and what an acquired device refuses, `DI_NOEFFECT` from `Acquire`, `Unacquire` and `Poll`, `SetCooperativeLevel`'s checks and exclusive holding, `GetCapabilities`' types and counts, `GetDeviceInfo`, `EnumObjects` and `GetObjectInfo`, creation and refusals, a device's last `Release` ending every generation a program asked it for, the DirectInput object counting its references across its interfaces and a device answering after that object's last `Release`; `EnumDevices` describing both devices to a recorded guest callback, in both widths and both device-type generations. |
 | `src/layers/input/xinput.test.js` | Contract | Each library exports what its `.spec` does and nothing else, `xinput1_4` at its `.spec`'s ordinals, every slot answers that no pad is connected, arguments are checked before the slot is, `XInputEnable` is remembered. |
-| `src/xinput.itest.js` | Integration, a built program on the emulator | `GetProcAddress` on `xinput1_4.dll` by ordinal 100 and 108 answers the address the names do, and 100 answers as `XInputGetStateEx` does with no pad. |
+| `src/xinput.itest.js` | Integration, a built program run through `createApp` | `GetProcAddress` on `xinput1_4.dll` by ordinal 100 and 108 answers the address the names do, and 100 answers as `XInputGetStateEx` does with no pad. |
 
 What a real browser does with a `KeyboardEvent` or a `PointerEvent` is not covered by the unit
 suite; the `dom.js` tests settle only what the adapter decides for itself. No tracked CDP scenario
