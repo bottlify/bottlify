@@ -1009,10 +1009,13 @@ export function createDirect3D9Seam(
                     stageStates: record.stageStates.keys(),
                     samplerStates: record.samplerStates.keys(),
                     material: record.material !== undefined,
-                    bindings: record.streams.size > 0 || record.indices !== undefined
-                        || record.vertexShader !== undefined
-                        || record.pixelShader !== undefined
-                        || record.vertexDeclaration !== undefined,
+                    bindings: {
+                        streams: record.streams.keys(),
+                        indices: record.indices !== undefined,
+                        declaration: record.vertexDeclaration !== undefined,
+                        shaders: record.vertexShader !== undefined
+                            || record.pixelShader !== undefined,
+                    },
                 });
                 return hr;
             },

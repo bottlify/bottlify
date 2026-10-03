@@ -2162,10 +2162,13 @@ export function createShadow(deps){
          * each Apply hundreds of calls into the device.
          *
          * @param {{ renderStates?: Iterable<number>, transforms?: Iterable<number>,
-         *     bindings?: boolean, textures?: boolean,
+         *     bindings?: boolean | { streams?: Iterable<number>, indices?: boolean,
+         *         declaration?: boolean, shaders?: boolean },
+         *     textures?: boolean,
          *     stageStates?: true | Iterable<number>, samplerStates?: Iterable<number>,
          *     material?: boolean }} [touched]  stage and sampler states by
-         *     (stage << 8) | type, or every stage state (true)
+         *     (stage << 8) | type, or every stage state (true); Direct3D 9's
+         *     bindings by stream and kind, or all of them (true)
          */
         remirror(touched){
             if (address === 0)
@@ -2190,7 +2193,30 @@ export function createShadow(deps){
             {
                 refreshTransform(type);
             }
-            if (touched.bindings)
+            const bindings = touched.bindings;
+            if (typeof bindings === 'object' && nine)
+            {
+                for (const index of bindings.streams ?? [])
+                {
+                    if (index >= 0 && index < SHADOW.STREAM_COUNT)
+                    {
+                        mirrorStream9(index);
+                    }
+                }
+                if (bindings.declaration)
+                {
+                    mirrorDeclaration();
+                }
+                if (bindings.indices)
+                {
+                    mirrorIndices9();
+                }
+                if (bindings.shaders)
+                {
+                    mirrorShaders9();
+                }
+            }
+            else if (bindings)
             {
                 mirrorBindings();
             }
