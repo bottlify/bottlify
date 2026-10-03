@@ -1965,6 +1965,36 @@ test('a value the host set through the trap is one the guest\'s next write is se
     assert.deepEqual(h.divergences, []);
 });
 
+test('a state block applied brings the states it holds into the guest\'s block, and reads no'
+    + ' other', ()=>{
+    const h = seamed({ shadow: true });
+    const device = h.createDevice(h.create());
+    const shadow = h.box.memory.readU32(device + 4);
+    assert.notEqual(shadow, 0);
+    // D3DRS_CULLMODE is 22 and D3DRS_SHADEMODE is 9.
+    const cull = 22;
+    const shade = 9;
+    const out = 0x9000;
+    assert.equal(h.device(device, 'BeginStateBlock'), D3D_OK);
+    assert.equal(h.device(device, 'SetRenderState', [cull, 1]), D3D_OK);
+    assert.equal(h.device(device, 'SetTextureStageState', [0, D3DTSS.COLORARG1, 3]), D3D_OK);
+    assert.equal(h.device(device, 'EndStateBlock', [out]), D3D_OK);
+    const block = h.box.memory.readU32(out);
+    /** @param {number} stage @param {number} type */
+    const stageWord = (stage, type)=>shadow + SHADOW.STAGE_STATES
+        + (stage * SHADOW.STAGE_STATE_STRIDE + type) * 4;
+    // Words of states the block does not hold, left as nothing on the device
+    // would leave them: an apply that read the device back whole overwrites them.
+    h.box.memory.writeU32(shadow + SHADOW.RENDER_STATES + shade * 4, 0xabcd);
+    h.box.memory.writeU32(stageWord(1, D3DTSS.COLORARG1), 0xabcd);
+    assert.equal(h.device(device, 'ApplyStateBlock', [block]), D3D_OK);
+    assert.equal(h.box.memory.readU32(shadow + SHADOW.RENDER_STATES + cull * 4), 1);
+    assert.equal(h.box.memory.readU32(stageWord(0, D3DTSS.COLORARG1)), 3);
+    assert.equal(h.box.memory.readU32(shadow + SHADOW.RENDER_STATES + shade * 4), 0xabcd);
+    assert.equal(h.box.memory.readU32(stageWord(1, D3DTSS.COLORARG1)), 0xabcd);
+    assert.deepEqual(h.divergences, []);
+});
+
 test('a device is handed out with its block already in place, and reads what the guest wrote', ()=>{
     // The guest methods find the block one word past the interface pointer,
     // and that word is written when the interface is published. A device
