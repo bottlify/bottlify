@@ -398,7 +398,7 @@ const MAX_CONCURRENT_REQUESTS = 6;
 const IDLE_CHECK_MS = 50;
 
 /** How many of the hottest sampled addresses a report carries the code around. */
-const HOT_CODE_SAMPLES = 24;
+const HOT_CODE_SAMPLES = 64;
 
 /**
  * Turns blocks into range requests.
