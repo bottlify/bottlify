@@ -261,6 +261,9 @@ function visit(value, bind){
  *     the device's root (`IDirect3D9`), made with no renderer behind it
  * @param {(address: number, length: number) => Uint8Array} options.readMemory
  *     the guest memory the locked bytes are read from
+ * @param {(address: number, length: number) => Uint8Array} [options.windowMemory]
+ *     the same bytes in place, for those copied into the batch before anything
+ *     can write them
  * @param {Transport} options.transport
  * @param {(target: any, name: string, args: any[]) => boolean} [options.answered]
  *     whether a call's answer is the other side's: what only its renderer
@@ -283,6 +286,7 @@ function visit(value, bind){
  */
 export function createRecording(options){
     const { root, readMemory, transport, answered = ()=>false, answers = new Set() } = options;
+    const windowMemory = options.windowMemory ?? readMemory;
     const { writer } = transport;
     /** @type {WeakMap<object, number>} */
     const numbers = new WeakMap([[root, 0]]);
@@ -424,13 +428,22 @@ export function createRecording(options){
             : held === null || length === null ? null : Math.max(held, length));
     };
 
-    /** The pending bytes, read now; none are pending after. */
-    const takePending = ()=>{
+    /**
+     * The pending bytes, as a record of their own ahead of the call that
+     * needs them: copied into the batch now, out of the guest's memory in
+     * place, before the call can write over them. None are pending after.
+     */
+    const shipPending = ()=>{
         const taken = [...pending.addresses].flatMap(([address, length])=>
-            rangeFrom({ address, length }));
+            rangeFrom({ address, length }, windowMemory));
         pending.addresses.clear();
         pending.objects.clear();
-        return taken;
+        if (taken.length > 0)
+        {
+            writer.u8(OP.WROTE);
+            writeMemory(taken);
+            transport.recorded();
+        }
     };
 
     /**
@@ -463,9 +476,10 @@ export function createRecording(options){
      * address to the end of the allocation it lies in, and never past that.
      *
      * @param {Locked} locked
+     * @param {(address: number, length: number) => Uint8Array} [read]
      * @returns {{ address: number, bytes: Uint8Array }[]}
      */
-    const rangeFrom = ({ address, length })=>{
+    const rangeFrom = ({ address, length }, read = readMemory)=>{
         const found = blockAt(address);
         if (found < 0)
         {
@@ -473,7 +487,7 @@ export function createRecording(options){
         }
         const rest = blocks.ends[found] - address;
         return [{ address,
-            bytes: readMemory(address, length === null ? rest : Math.min(length, rest)) }];
+            bytes: read(address, length === null ? rest : Math.min(length, rest)) }];
     };
 
     /**
@@ -639,6 +653,11 @@ export function createRecording(options){
                 }
                 return method.apply(target, applied);
             }
+            if (pending.addresses.size > 0
+                && (!quiet || (!unlocking && pending.objects.has(target))))
+            {
+                shipPending();
+            }
             /** @type {any[] | null} */
             let replies = null;
             number ??= /** @type {number} */ (numbers.get(target));
@@ -667,11 +686,6 @@ export function createRecording(options){
             }
             /** @type {{ address: number, bytes: Uint8Array }[] | null} */
             let shipped = null;
-            if (pending.addresses.size > 0
-                && (!quiet || (!unlocking && pending.objects.has(target))))
-            {
-                shipped = takePending();
-            }
             if (unlocking)
             {
                 const ranges = lockedRanges(target, name === 'ReleaseDC' ? '' : partOf(args));
@@ -682,7 +696,7 @@ export function createRecording(options){
                 }
                 else
                 {
-                    shipped = [...shipped ?? [], ...ranges.flatMap(rangeFrom)];
+                    shipped = [...shipped ?? [], ...ranges.flatMap(range=>rangeFrom(range))];
                 }
             }
             allocs = null;
