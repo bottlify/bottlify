@@ -108,6 +108,58 @@ test('a pixel outside the clip is refused, not silently dropped', ()=>{
     assert.equal(drawing.setPixel(HDC, 4, 4, RED_COLOR), RED_COLOR);
 });
 
+test('a clip with a hole draws round the hole, every other pixel once', ()=>{
+    const { objects, drawing, surface } = fixture();
+    // A frame round 4..8 x 4..8, as ExcludeClipRect leaves it.
+    drawing.setClipRegion(HDC, [
+        { left: 0, top: 0, right: 16, bottom: 4 },
+        { left: 0, top: 4, right: 4, bottom: 8 },
+        { left: 8, top: 4, right: 16, bottom: 8 },
+        { left: 0, top: 8, right: 16, bottom: 16 },
+    ]);
+    const red = objects.create('brush', { style: BS_SOLID, color: RED_COLOR, hatch: 0 });
+    assert.equal(drawing.fillRect(HDC, { left: 0, top: 0, right: 16, bottom: 16 }, red), true);
+    assert.equal(surface.read(5, 5), BACKGROUND, 'the hole is left as it was');
+    assert.equal(surface.read(3, 5), RED_PIXEL);
+    assert.equal(surface.read(8, 7), RED_PIXEL);
+    assert.equal(surface.read(10, 12), RED_PIXEL);
+    assert.equal(drawing.setPixel(HDC, 6, 6, RED_COLOR), CLR_INVALID, 'a pixel in the hole');
+    assert.equal(drawing.setPixel(HDC, 9, 6, BLUE_COLOR), BLUE_COLOR);
+
+    // An inversion twice over the same pixel would undo itself.
+    drawing.invertRect(HDC, { left: 0, top: 0, right: 16, bottom: 16 });
+    assert.equal(surface.read(3, 5), (RED_PIXEL ^ 0xffffffff) >>> 0, 'inverted once');
+    assert.equal(surface.read(5, 5), BACKGROUND);
+
+    drawing.setClipRect(HDC, { left: 0, top: 0, right: 16, bottom: 16 });
+    drawing.fillRect(HDC, { left: 0, top: 0, right: 16, bottom: 16 }, red);
+    assert.equal(surface.read(5, 5), RED_PIXEL, 'a rectangle clip has no hole');
+});
+
+test('a blit inside one surface under a region reads its source before writing over it', ()=>{
+    const { drawing, surface } = fixture();
+    for (let y = 0; y < 16; y++)
+    {
+        for (let x = 0; x < 16; x++)
+        {
+            surface.write(x, y, y);
+        }
+    }
+    drawing.bind(SOURCE_HDC, surface);
+    drawing.setClipRegion(HDC, [
+        { left: 0, top: 0, right: 16, bottom: 6 },
+        { left: 0, top: 6, right: 4, bottom: 8 },
+        { left: 8, top: 6, right: 16, bottom: 8 },
+        { left: 0, top: 8, right: 16, bottom: 16 },
+    ]);
+    // Everything moved down four rows: each row takes the one four above it.
+    drawing.bitBlt(HDC, 0, 4, 16, 12, SOURCE_HDC, 0, 0, SRCCOPY);
+    assert.equal(surface.read(0, 15), 11);
+    assert.equal(surface.read(0, 9), 5);
+    assert.equal(surface.read(0, 4), 0);
+    assert.equal(surface.read(5, 7), 7, 'the hole kept its row');
+});
+
 test('the selected pen and brush come from the shared object table', ()=>{
     const { objects, drawing, surface, context } = fixture();
     context.state.pen = objects.create('pen', { style: PS_SOLID, width: 1, color: RED_COLOR });

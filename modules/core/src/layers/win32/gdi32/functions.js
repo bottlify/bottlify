@@ -753,6 +753,9 @@ export function createGdiFunctions(host){
         viewportExt: { ...dc.viewportExt },
         windowExt: { ...dc.windowExt },
         position: { ...dc.position },
+        clip: dc.clip ? { ...dc.clip } : null,
+        clipRects: dc.clipRects ?? null,
+        clipSelected: dc.clipSelected,
     });
 
     /**
@@ -820,6 +823,9 @@ export function createGdiFunctions(host){
         dc.viewportExt = state.viewportExt;
         dc.windowExt = state.windowExt;
         dc.position = state.position;
+        dc.clip = state.clip;
+        dc.clipRects = state.clipRects;
+        dc.clipSelected = state.clipSelected;
     };
 
     /**
@@ -2049,6 +2055,7 @@ export function createGdiFunctions(host){
                     forEachSelection(discarded, object=>objects.release(object));
                 }
                 applyState(dc, dc.saved.pop());
+                drawing.restoreClip(handle);
                 return 1;
             },
         },
@@ -4087,6 +4094,7 @@ export function createGdiFunctions(host){
                     return false;
                 }
                 dc.clip = { ...rect };
+                dc.clipRects = null;
                 return drawing.bound(hdc)?.setClipRect(hdc >>> 0, rect) === true;
             },
 

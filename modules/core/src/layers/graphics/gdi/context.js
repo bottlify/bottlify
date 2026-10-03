@@ -16,8 +16,12 @@
  * routed to only one of them.
  *
  * What this half adds is the part the other one has no place for: the pixels,
- * the clip rectangle, the stretch mode, the text alignment and the brush
- * origin. None of those mean anything until something draws.
+ * the clip, the stretch mode, the text alignment and the brush origin. None of
+ * those mean anything until something draws.
+ *
+ * The clip is a rectangle, or a list of rectangles that never overlap when a
+ * program has cut a hole in it: a draw is then made once inside each of them,
+ * which touches every pixel of the region once and nothing outside it.
  *
  * A DirectDraw surface's `GetDC` is the same mechanism with a different owner:
  * DirectDraw mints the handle and this layer gives it the surface's own bytes.
@@ -106,6 +110,51 @@ export function createGdiDrawing(options = {}){
     /** @param {any} context @returns {import("./shapes.js").Painter} */
     const painterOf = context=>createPainter(context.surface, context.clip, context.state.rop2);
 
+    /**
+     * Makes a draw under a context's clip: once, or once inside each piece of
+     * a clip that is a region, `context.clip` that piece meanwhile. The answer
+     * is the largest any piece gave -- a draw that landed in one piece landed.
+     * A blit from the same pixels it writes reads its source before any
+     * piece's write could have reached it when the pieces are taken in the
+     * direction the picture moves, a scroll down from the bottom piece up.
+     *
+     * @template T
+     * @param {any} context
+     * @param {() => T} draw
+     * @param {{ x: number, y: number }} [moving]  How far a blit moves its source.
+     * @returns {T}
+     */
+    const clipped = (context, draw, moving)=>{
+        const pieces = context.clipRects;
+        if (pieces === null)
+        {
+            return draw();
+        }
+        const ordered = moving && (moving.x > 0 || moving.y > 0)
+            ? [...pieces].sort((a, b)=>(moving.y > 0 ? b.top - a.top : a.top - b.top)
+                || (moving.x > 0 ? b.left - a.left : a.left - b.left))
+            : pieces;
+        const whole = context.clip;
+        /** @type {any} */
+        let answer;
+        try
+        {
+            ordered.forEach((/** @type {any} */ piece, /** @type {number} */ index)=>{
+                context.clip = piece;
+                const result = draw();
+                if (index === 0 || result > answer)
+                {
+                    answer = result;
+                }
+            });
+        }
+        finally
+        {
+            context.clip = whole;
+        }
+        return answer;
+    };
+
     /** @param {any} context @returns {import("./shapes.js").Pen} */
     const penOf = context=>{
         const record = objects.get(context.state.pen);
@@ -176,6 +225,8 @@ export function createGdiDrawing(options = {}){
                 surface,
                 state: state ?? defaultState(),
                 clip: surfaceBounds(surface),
+                /** The pieces of a clip that is not one rectangle; null when it is. */
+                clipRects: null,
                 stretchMode: BLACKONWHITE,
                 brushOrigin: { x: 0, y: 0 },
             };
@@ -199,8 +250,8 @@ export function createGdiDrawing(options = {}){
         count: ()=>contexts.size,
 
         /**
-         * Clipping is one rectangle: enough for a DirectDraw clipper and for
-         * the client area of a window, and short of a region.
+         * Clips to one rectangle: a DirectDraw clipper, the client area of a
+         * window, the part of it a paint is limited to.
          *
          * @param {number} hdc
          * @param {import("./contract.js").Rect} rect
@@ -213,6 +264,38 @@ export function createGdiDrawing(options = {}){
                 return false;
             }
             context.clip = intersectRect(rect, surfaceBounds(context.surface));
+            context.clipRects = null;
+            return true;
+        },
+
+        /**
+         * Clips to a region, given as rectangles that do not overlap: what is
+         * left of a clip a program cut a hole in with ExcludeClipRect.
+         *
+         * @param {number} hdc
+         * @param {import("./contract.js").Rect[]} rects
+         * @returns {boolean}
+         */
+        setClipRegion(hdc, rects){
+            const context = contextOf(hdc);
+            if (!context)
+            {
+                return false;
+            }
+            const bounds = surfaceBounds(context.surface);
+            const pieces = rects.map(rect=>intersectRect(rect, bounds))
+                .filter(rect=>!isEmptyRect(rect));
+            if (pieces.length <= 1)
+            {
+                return this.setClipRect(hdc, pieces[0] ?? { left: 0, top: 0, right: 0, bottom: 0 });
+            }
+            context.clip = pieces.reduce((box, piece)=>({
+                left: Math.min(box.left, piece.left),
+                top: Math.min(box.top, piece.top),
+                right: Math.max(box.right, piece.right),
+                bottom: Math.max(box.bottom, piece.bottom),
+            }));
+            context.clipRects = pieces;
             return true;
         },
 
@@ -275,8 +358,9 @@ export function createGdiDrawing(options = {}){
          */
         setPixel(hdc, x, y, color){
             const context = contextOf(hdc);
-            if (!context || isEmptyRect(intersectRect(context.clip,
-                { left: x | 0, top: y | 0, right: (x | 0) + 1, bottom: (y | 0) + 1 })))
+            const point = { left: x | 0, top: y | 0, right: (x | 0) + 1, bottom: (y | 0) + 1 };
+            if (!context || (context.clipRects ?? [context.clip])
+                .every((/** @type {any} */ piece)=>isEmptyRect(intersectRect(piece, point))))
             {
                 return CLR_INVALID;
             }
@@ -339,7 +423,7 @@ export function createGdiDrawing(options = {}){
                 return false;
             }
             const from = contextOf(source);
-            return bitBlt({
+            return clipped(context, ()=>bitBlt({
                 dest: context.surface,
                 clip: context.clip,
                 x, y, width, height,
@@ -348,7 +432,7 @@ export function createGdiDrawing(options = {}){
                 rop,
                 pattern: patternOf(context),
                 convert: from ? conversionOf(context, from) : null,
-            });
+            }), { x: x - srcX, y: y - srcY });
         },
 
         /**
@@ -374,7 +458,7 @@ export function createGdiDrawing(options = {}){
             {
                 return false;
             }
-            return stretchBlt({
+            return clipped(context, ()=>stretchBlt({
                 dest: context.surface,
                 clip: context.clip,
                 x, y, width, height,
@@ -384,7 +468,7 @@ export function createGdiDrawing(options = {}){
                 mode: context.stretchMode,
                 pattern: patternOf(context),
                 convert: conversionOf(context, from),
-            });
+            }), { x: x - srcX, y: y - srcY });
         },
 
         /**
@@ -404,13 +488,13 @@ export function createGdiDrawing(options = {}){
             {
                 return false;
             }
-            return patBlt({
+            return clipped(context, ()=>patBlt({
                 dest: context.surface,
                 clip: context.clip,
                 x, y, width, height,
                 rop,
                 pattern: patternOf(context),
-            });
+            }));
         },
 
         /**
@@ -429,7 +513,8 @@ export function createGdiDrawing(options = {}){
             {
                 return false;
             }
-            fillRect(painterOf(context), rect, patternOf(context, brush));
+            const pattern = patternOf(context, brush);
+            clipped(context, ()=>fillRect(painterOf(context), rect, pattern));
             return true;
         },
 
@@ -447,7 +532,8 @@ export function createGdiDrawing(options = {}){
             {
                 return false;
             }
-            frameRect(painterOf(context), rect, patternOf(context, brush));
+            const pattern = patternOf(context, brush);
+            clipped(context, ()=>frameRect(painterOf(context), rect, pattern));
             return true;
         },
 
@@ -466,7 +552,7 @@ export function createGdiDrawing(options = {}){
             {
                 return false;
             }
-            return patBlt({
+            return clipped(context, ()=>patBlt({
                 dest: context.surface,
                 clip: context.clip,
                 x: rect.left,
@@ -474,7 +560,7 @@ export function createGdiDrawing(options = {}){
                 width: rect.right - rect.left,
                 height: rect.bottom - rect.top,
                 rop: DSTINVERT,
-            });
+            }));
         },
 
         /**
@@ -493,8 +579,10 @@ export function createGdiDrawing(options = {}){
             {
                 return false;
             }
-            rectangle(painterOf(context), { left, top, right, bottom },
-                penOf(context), patternOf(context));
+            const pen = penOf(context);
+            const pattern = patternOf(context);
+            clipped(context, ()=>rectangle(painterOf(context), { left, top, right, bottom },
+                pen, pattern));
             return true;
         },
 
@@ -514,8 +602,10 @@ export function createGdiDrawing(options = {}){
             {
                 return false;
             }
-            ellipse(painterOf(context), { left, top, right, bottom },
-                penOf(context), patternOf(context));
+            const pen = penOf(context);
+            const pattern = patternOf(context);
+            clipped(context, ()=>ellipse(painterOf(context), { left, top, right, bottom },
+                pen, pattern));
             return true;
         },
 
@@ -533,7 +623,9 @@ export function createGdiDrawing(options = {}){
             {
                 return false;
             }
-            polygon(painterOf(context), points, penOf(context), patternOf(context), fillMode);
+            const pen = penOf(context);
+            const pattern = patternOf(context);
+            clipped(context, ()=>polygon(painterOf(context), points, pen, pattern, fillMode));
             return true;
         },
 
@@ -574,7 +666,8 @@ export function createGdiDrawing(options = {}){
                 return false;
             }
             const from = context.state.position;
-            line(painterOf(context), from.x, from.y, x | 0, y | 0, penOf(context));
+            const pen = penOf(context);
+            clipped(context, ()=>line(painterOf(context), from.x, from.y, x | 0, y | 0, pen));
             context.state.position = { x: x | 0, y: y | 0 };
             return true;
         },
@@ -615,18 +708,25 @@ export function createGdiDrawing(options = {}){
             // the flag.
             const updating = (context.state.textAlign & 1) !== 0;
             const origin = updating ? context.state.position : { x: x | 0, y: y | 0 };
-            const result = extTextOut(painterOf(context), {
-                x: origin.x,
-                y: origin.y,
-                text,
-                metrics: metricsOf(context),
-                textColor: context.state.textColor,
-                bkColor: context.state.bkColor,
-                bkMode: context.state.bkMode,
-                align: context.state.textAlign,
-                flags,
-                rect: rect ?? undefined,
-                dx,
+            const metrics = metricsOf(context);
+            const result = { ok: false, width: 0 };
+            clipped(context, ()=>{
+                const drawn = extTextOut(painterOf(context), {
+                    x: origin.x,
+                    y: origin.y,
+                    text,
+                    metrics,
+                    textColor: context.state.textColor,
+                    bkColor: context.state.bkColor,
+                    bkMode: context.state.bkMode,
+                    align: context.state.textAlign,
+                    flags,
+                    rect: rect ?? undefined,
+                    dx,
+                });
+                result.ok ||= drawn.ok;
+                result.width = drawn.width;
+                return 0;
             });
             if (updating)
             {
@@ -666,11 +766,11 @@ export function createGdiDrawing(options = {}){
             {
                 return 0;
             }
-            return setDIBitsToDevice({
+            return clipped(context, ()=>setDIBitsToDevice({
                 ...request,
                 dest: context.surface,
                 clip: context.clip,
-            });
+            }));
         },
 
         /**
@@ -686,13 +786,14 @@ export function createGdiDrawing(options = {}){
             {
                 return 0;
             }
-            return stretchDIBits({
+            const pattern = patternOf(context);
+            return clipped(context, ()=>stretchDIBits({
                 mode: context.stretchMode,
-                pattern: patternOf(context),
+                pattern,
                 ...request,
                 dest: context.surface,
                 clip: context.clip,
-            });
+            }));
         },
 
         /**
@@ -726,7 +827,7 @@ export function createGdiDrawing(options = {}){
             {
                 return false;
             }
-            return patBlt({
+            return clipped(context, ()=>patBlt({
                 dest: context.surface,
                 clip: context.clip,
                 x: 0,
@@ -735,7 +836,7 @@ export function createGdiDrawing(options = {}){
                 height: context.surface.height,
                 rop: PATCOPY,
                 pattern: solidPattern(color),
-            });
+            }));
         },
     };
 }
