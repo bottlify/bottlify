@@ -1724,6 +1724,8 @@ export function createWin32Module(){
                     readCString,
                     readWideString,
                     setLastError: setError,
+                    setLastErrorFor: setErrorOn,
+                    currentThread: ()=>kernel.currentThread(),
                     /** @param {string} path */
                     versionInfo: path=>modules.versionInfo?.(path) ?? null,
                     // The libraries the engine answers for with no file behind

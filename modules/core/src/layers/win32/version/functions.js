@@ -83,11 +83,16 @@ const FIXED_FILE_VERSION_LS = 12;
  * @property {(address: number, maxLength: number) => string} [readWideString]
  *           For the W spellings; without it they read an empty path.
  * @property {(code: number) => void} setLastError
- * @property {(path: string) => Uint8Array | null} [versionInfo]
+ * @property {(thread: unknown, code: number) => void} [setLastErrorFor]
+ *           The last error of a named thread: what a call answered after a
+ *           wait sets, the thread on the processor then being somebody else.
+ * @property {() => unknown} [currentThread]
+ * @property {(path: string) => Uint8Array | null | Promise<Uint8Array | null>} [versionInfo]
  *           The raw version resource of the named file, or null when there is
- *           none. Absent in a build with no loader behind it, which then
- *           answers as a file that carries no version information -- a size of
- *           zero, which is exactly what a caller checks.
+ *           none; a promise while the file's bytes are still coming. Absent in
+ *           a build with no loader behind it, which then answers as a file
+ *           that carries no version information -- a size of zero, which is
+ *           exactly what a caller checks.
  * @property {import('../kernel32/files.js').FileSystem} [files]
  *           The volume VerInstallFile reads its source from and writes its
  *           destination to. Absent, VerInstallFile reports it cannot create
@@ -340,6 +345,32 @@ export function fileVersionOf(block){
  */
 export function createVersionFunctions(host){
     /**
+     * Continues with an answer that may still be on its way, as a file's
+     * version is while its bytes are.
+     *
+     * @template T
+     * @param {T | Promise<T>} value @param {(answer: T) => any} next
+     * @returns {any}
+     */
+    const after = (value, next)=>(typeof (/** @type {any} */ (value))?.then === 'function'
+        ? /** @type {Promise<T>} */ (value).then(next)
+        : next(/** @type {T} */ (value)));
+
+    /**
+     * The last-error setter of the call being answered, named before anything
+     * is awaited: once a file's bytes have come, the thread that asked is no
+     * longer the one on the processor.
+     *
+     * @returns {(code: number) => void}
+     */
+    const errorSetter = ()=>{
+        const owner = host.currentThread?.() ?? null;
+        return code=>(host.setLastErrorFor
+            ? host.setLastErrorFor(owner, code)
+            : host.setLastError(code));
+    };
+
+    /**
      * The file name of a library the engine answers for, when the path would
      * find it there -- a bare name, or one in the system directory -- or
      * null. A name with no extension is a DLL, as LoadLibrary takes it.
@@ -364,10 +395,11 @@ export function createVersionFunctions(host){
      * when the file exists but carries no VS_VERSION_INFO resource. Without a
      * filesystem behind this build there is no way to tell the two apart, so a
      * missing resource reads as an ordinary file with no version information.
-     * @param {string} path
+     *
+     * @param {string} path @param {(code: number) => void} fail
+     * @returns {Uint8Array | null | Promise<Uint8Array | null>}
      */
-    const resourceFor = path=>{
-        const resource = host.versionInfo?.(path) ?? null;
+    const resourceFor = (path, fail)=>after(host.versionInfo?.(path) ?? null, resource=>{
         if (resource)
         {
             return resource;
@@ -378,9 +410,9 @@ export function createVersionFunctions(host){
         {
             return systemVersionResource(library, host.windows, host.directx);
         }
-        host.setLastError(exists ? ERROR_RESOURCE_DATA_NOT_FOUND : ERROR_FILE_NOT_FOUND);
+        fail(exists ? ERROR_RESOURCE_DATA_NOT_FOUND : ERROR_FILE_NOT_FOUND);
         return null;
-    };
+    });
 
     /** @param {number} address */
     const narrow = address=>host.readCString(address >>> 0, MAX_PATH);
@@ -401,8 +433,8 @@ export function createVersionFunctions(host){
             // the caller's stack happened to hold.
             host.writeMemory(handle >>> 0, dword(0));
         }
-        const resource = resourceFor(path);
-        return resource ? resource.length + scratchFor(resource.length) : 0;
+        return after(resourceFor(path, errorSetter()), resource=>
+            (resource ? resource.length + scratchFor(resource.length) : 0));
     };
 
     /**
@@ -414,22 +446,24 @@ export function createVersionFunctions(host){
      * @param {boolean} ansi
      */
     const copyInto = (path, length, data, ansi)=>{
-        const resource = resourceFor(path);
-        if (!resource)
-        {
-            return 0;
-        }
-        if ((length >>> 0) < resource.length)
-        {
-            host.setLastError(ERROR_RESOURCE_TYPE_NOT_FOUND);
-            return 0;
-        }
-        host.writeMemory(data >>> 0, resource);
-        if (ansi && (length >>> 0) >= resource.length + scratchFor(resource.length))
-        {
-            host.writeMemory((data >>> 0) + resource.length, ROOM_MARK);
-        }
-        return 1;
+        const fail = errorSetter();
+        return after(resourceFor(path, fail), resource=>{
+            if (!resource)
+            {
+                return 0;
+            }
+            if ((length >>> 0) < resource.length)
+            {
+                fail(ERROR_RESOURCE_TYPE_NOT_FOUND);
+                return 0;
+            }
+            host.writeMemory(data >>> 0, resource);
+            if (ansi && (length >>> 0) >= resource.length + scratchFor(resource.length))
+            {
+                host.writeMemory((data >>> 0) + resource.length, ROOM_MARK);
+            }
+            return 1;
+        });
     };
 
     /**
@@ -672,54 +706,60 @@ export function createVersionFunctions(host){
                 {
                     return VIF_CANNOTREADSRC;
                 }
-                if (host.files.stat(destination)?.exists
-                    && ((flags >>> 0) & VIFF_FORCEINSTALL) === 0)
-                {
-                    const theirs = fileVersionOf(host.versionInfo?.(destination) ?? null);
-                    const ours = fileVersionOf(host.versionInfo?.(source) ?? null);
-                    if (theirs !== null && ours !== null && theirs > ours)
+                const files = host.files;
+                const install = ()=>{
+                    const input = files.open(source, { read: true });
+                    if (!input)
                     {
-                        return VIF_SRCOLD;
+                        return VIF_CANNOTREADSRC;
                     }
-                }
-                const input = host.files.open(source, { read: true });
-                if (!input)
-                {
-                    return VIF_CANNOTREADSRC;
-                }
-                const raw = host.files.read(input, 0, stat.size);
-                host.files.close(input);
-                // A temp file the installer copied in is always resident, so a
-                // promise here would be a source on a bundle -- which
-                // VerInstallFile is never asked to expand. Refuse rather than
-                // guess at a partial read.
-                if (typeof (/** @type {any} */ (raw))?.then === 'function')
-                {
-                    return VIF_CANNOTREADSRC;
-                }
-                const expanded = expand(/** @type {Uint8Array} */ (raw));
+                    const raw = files.read(input, 0, stat.size);
+                    files.close(input);
+                    // A temp file the installer copied in is always resident, so
+                    // a promise here would be a source on a bundle -- which
+                    // VerInstallFile is never asked to expand. Refuse rather than
+                    // guess at a partial read.
+                    if (typeof (/** @type {any} */ (raw))?.then === 'function')
+                    {
+                        return VIF_CANNOTREADSRC;
+                    }
+                    const expanded = expand(/** @type {Uint8Array} */ (raw));
 
-                const output = host.files.open(destination,
-                    { write: true, create: true, truncate: true });
-                if (!output)
-                {
-                    return VIF_CANNOTCREATE;
-                }
-                host.files.write(output, 0, expanded);
-                host.files.close(output);
+                    const output = files.open(destination,
+                        { write: true, create: true, truncate: true });
+                    if (!output)
+                    {
+                        return VIF_CANNOTCREATE;
+                    }
+                    files.write(output, 0, expanded);
+                    files.close(output);
 
-                // The temp-file out-parameters name no temp file, because none
-                // was left: an empty string and a length of zero, which is what
-                // a caller reads when the install completed on its own.
-                if ((tmpFile >>> 0) !== 0)
+                    // The temp-file out-parameters name no temp file, because
+                    // none was left: an empty string and a length of zero, which
+                    // is what a caller reads when the install completed on its own.
+                    if ((tmpFile >>> 0) !== 0)
+                    {
+                        host.writeMemory(tmpFile >>> 0, new Uint8Array([0]));
+                    }
+                    if ((tmpLen >>> 0) !== 0)
+                    {
+                        host.writeMemory(tmpLen >>> 0, dword(0));
+                    }
+                    return 0;
+                };
+                if (!files.stat(destination)?.exists
+                    || ((flags >>> 0) & VIFF_FORCEINSTALL) !== 0)
                 {
-                    host.writeMemory(tmpFile >>> 0, new Uint8Array([0]));
+                    return install();
                 }
-                if ((tmpLen >>> 0) !== 0)
-                {
-                    host.writeMemory(tmpLen >>> 0, dword(0));
-                }
-                return 0;
+                // Each version may wait for its file's bytes.
+                return after(host.versionInfo?.(destination) ?? null, theirs=>
+                    after(host.versionInfo?.(source) ?? null, ours=>{
+                        const older = fileVersionOf(ours);
+                        const newer = fileVersionOf(theirs);
+                        return newer !== null && older !== null && newer > older
+                            ? VIF_SRCOLD : install();
+                    }));
             },
         },
     };

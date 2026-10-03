@@ -196,6 +196,36 @@ test('GetFileVersionInfoSizeA tells a missing file from one with no version reso
         'ERROR_RESOURCE_DATA_NOT_FOUND: present, but carries no version resource');
 });
 
+test('a version asked of a file whose bytes are still coming is answered once they are, and '
+    + 'an error then is the asking thread\'s', async()=>{
+    const m = machine();
+    /** @type {(value: any) => void} */
+    let resolve = ()=>{};
+    m.host.versionInfo = /** @type {any} */ (()=>new Promise(done=>{
+        resolve = done;
+    }));
+    let on = 'asker';
+    /** @type {[unknown, number][]} */
+    const errors = [];
+    Object.assign(m.host, {
+        currentThread: ()=>on,
+        setLastErrorFor: (/** @type {unknown} */ thread, /** @type {number} */ code)=>
+            errors.push([thread, code]),
+    });
+    m.version = /** @type {any} */ (createVersionFunctions(m.host));
+    m.putString(0x10, 'C:\\thing.exe');
+    const size = m.version.GetFileVersionInfoSizeA.handler([0x10, 0]);
+    assert.equal(typeof size?.then, 'function', 'the call waits for the bytes');
+    resolve(block());
+    assert.equal(await size, ROOMY);
+
+    const copied = m.version.GetFileVersionInfoA.handler([0x10, 0, 8, 0x100]);
+    on = 'somebody else';
+    resolve(block());
+    assert.equal(await copied, 0, 'a buffer short of the block is refused');
+    assert.deepEqual(errors, [['asker', 1813]], 'ERROR_RESOURCE_TYPE_NOT_FOUND, for the asker');
+});
+
 test('a system library the engine answers for has the version of the system it belongs to',
     ()=>{
         // info.c: GetFileVersionInfoSizeA("kernel32.dll") is not zero, and a
