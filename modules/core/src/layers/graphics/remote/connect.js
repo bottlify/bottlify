@@ -18,6 +18,13 @@ import { recordedDirect3D7 } from './d3d7.js';
 import { recordedOpengl } from './opengl.js';
 
 /** GPUTextureUsage, here without the browser's global. */
+/**
+ * The least time between batches of calls no call waits on: a millisecond
+ * keeps the played side fed many times a frame, at a fraction of the
+ * messages a batch a turn made.
+ */
+const BATCH_GAP_MS = 1;
+
 const USAGE = { COPY_SRC: 0x01, COPY_DST: 0x02, TEXTURE_BINDING: 0x04, RENDER_ATTACHMENT: 0x10 };
 
 /**
@@ -174,6 +181,7 @@ export function connectGraphicsWorker(options){
             const sender = createSender({
                 post: (message, transfer)=>port1.postMessage(message, transfer),
                 on: { wrote: writeMemory, divergence, lost, failed },
+                gapMs: BATCH_GAP_MS,
             });
             port1.onmessage = event=>sender.receive(event.data);
             senders.push(sender);

@@ -92,9 +92,12 @@ export function crossable(value, depth = 0){
  * @param {(flush: () => void) => void} [options.later]  how a batch waits for the end of the turn
  * @param {SenderEvents} [options.on]
  * @param {() => number} [options.now]  the clock the waits are timed by
+ * @param {number} [options.gapMs]  at least this long between batches no call waits for,
+ *     with a timer sending one the turns leave behind; zero sends one every turn
+ * @param {(send: () => void, ms: number) => unknown} [options.timer]
  */
 export function createSender({ post, framesAhead = 2, later = queueMicrotask, on = {},
-    now = ()=>performance.now() })
+    now = ()=>performance.now(), gapMs = 0, timer = (send, ms)=>setTimeout(send, ms) })
 {
     const writer = createWriter();
     /**
@@ -126,20 +129,51 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
     let diagnostics = null;
     let failure = /** @type {string | null} */ (null);
 
+    // A turn of the engine's loop ends in a microtask checkpoint, and a
+    // program whose threads hand a lock back and forth takes thousands of
+    // turns a second: a batch a turn was a message a turn, each a copy and a
+    // post on this thread and a task on the other. The played side needs the
+    // calls before it is asked for an answer or a frame -- those send at once
+    // -- and otherwise only soon enough to stay busy.
+    let sentAt = -Infinity;
+    let timed = false;
     const flush = ()=>{
         pending = false;
         if (writer.empty())
         {
             return;
         }
+        sentAt = now();
         const buffer = writer.take();
         post({ type: 'calls', buffer }, [buffer]);
+    };
+    const due = ()=>{
+        if (!pending)
+        {
+            return;
+        }
+        if (gapMs <= 0 || now() - sentAt >= gapMs)
+        {
+            flush();
+            return;
+        }
+        if (!timed)
+        {
+            timed = true;
+            timer(()=>{
+                timed = false;
+                if (pending)
+                {
+                    flush();
+                }
+            }, gapMs);
+        }
     };
     const soon = ()=>{
         if (!pending)
         {
             pending = true;
-            later(flush);
+            later(due);
         }
     };
 
