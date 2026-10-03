@@ -21,6 +21,6 @@ instructions on cork's own instruction model -- the JavaScript interpreter over 
 `ir-x87.js` and `ir-simd.js`, with no wasm tier -- and on translated code, and compares the two
 bit for bit.
 
-Design: `roadmap/cork-x86-translator.md`. Plan: `roadmap/cork-plan.md`. Zero runtime
+Where it goes next: `roadmap/v2/`. Zero runtime
 dependencies; vanilla ES modules with JSDoc; tests are `node:test`, colocated (`*.test.js` for
 units, `*.itest.js` for the corpus suites).

@@ -15,8 +15,7 @@
  * and the registers held in locals with it), what makes a store into
  * translated code visible, and what will carry the memory layer's
  * protections. The test is a shift, a halfword load and a branch per access,
- * or per window of accesses (see the groups below); `roadmap/cork-plan.md`
- * 2.9 measures its share.
+ * or per window of accesses (see the groups below).
  */
 
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
