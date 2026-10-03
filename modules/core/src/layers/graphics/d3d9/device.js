@@ -70,6 +70,7 @@ import {
     volumeLevelCount,
 } from './validity.js';
 import { createAdditionalChain } from './swapchain.js';
+import { runCommands } from './commands.js';
 import { validateStages } from '../d3d8/validity.js';
 import { processStreams } from '../d3d8/process.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
@@ -2067,6 +2068,22 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         /** What the renderer has done and declined to do. Null without a backend. */
         diagnostics(){
             return renderer ? renderer.diagnostics() : null;
+        },
+
+        /**
+         * The calls a run of the command ring carried, made in order
+         * (`commands.js`). The program was told D3D_OK for each when it made
+         * it, so one this device refuses is a divergence, said once.
+         *
+         * @param {Uint8Array} records
+         * @returns {number} how many calls were made
+         */
+        commands(records){
+            return runCommands(/** @type {any} */ (device), records, (name, hr)=>report(
+                `commands:${name}`, name === 'commands'
+                    ? 'a command ring held a record its routines could not have written'
+                    : `${name} made in the guest was answered D3D_OK; the device answers ${
+                        hr.toString(16)}`));
         },
 
         BeginScene(){

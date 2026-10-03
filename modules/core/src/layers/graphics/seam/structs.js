@@ -584,6 +584,17 @@ function sameDwords(a, b){
 }
 
 /**
+ * A light out of the 26 dwords of D3DLIGHT7, whose layout Direct3D 8's and
+ * 9's lights share, given as dwords and as the same bits seen as floats.
+ * Neither is kept.
+ *
+ * @param {Float32Array} floats @param {Uint32Array} dwords
+ */
+export function lightFromDwords(floats, dwords){
+    return lightOf(floats, dwords);
+}
+
+/**
  * A light out of its dwords, as `putLight` lays one out.
  *
  * @param {Float32Array} floats @param {Uint32Array} dwords

@@ -13,6 +13,7 @@ import { createReceiver, createSender } from './channel.js';
 import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK } from '../d3d9/constants.js';
 import { D3DCLEAR, D3DFMT_INDEX, D3DPT, D3DRS, D3DTS } from '../d3d8/constants.js';
 import { D3DQUERYTYPE, createDirect3D9 } from '../d3d9/device.js';
+import { commandSlot } from '../d3d9/commands.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
@@ -517,3 +518,58 @@ test('a getter of plain state answers on the program\'s side and sends nothing',
     assert.equal(device.SetRenderState(D3DRS.LIGHTING, 1), D3D_OK);
     assert.ok(sent > before, 'a set still is');
 });
+
+test('a run of the command ring is one call recorded, and the played device makes every call in it',
+    ()=>{
+        /** @type {any[]} */
+        const playedDevices = [];
+        const played = playedDirect3D((/** @type {any} */ services)=>{
+            const root = createDirect3D9(services);
+            const create = root.CreateDevice.bind(root);
+            /** @param {any} parameters @param {{ device?: any }} out @param {any[]} rest */
+            root.CreateDevice = (parameters, out, ...rest)=>{
+                const hr = create(parameters, out, ...rest);
+                playedDevices.push(out.device);
+                return hr;
+            };
+            return root;
+        }, {});
+        /** @type {string[]} */
+        const names = [];
+        const sender = createSender({
+            post: message=>{
+                played.read(message.buffer, call=>{
+                    names.push(String(call.m));
+                    played.play(call);
+                });
+            },
+            later: flush=>flush(),
+        });
+        const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+        /** @type {{ device?: any }} */
+        const out = {};
+        assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+            backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out),
+        D3D_OK);
+        const one = new Uint32Array(new Float32Array([1]).buffer)[0];
+        const records = new Uint32Array([
+            commandSlot('SetViewport'), 36, 0, 1, 2, 4, 5, 0, one,
+            commandSlot('LightEnable'), 16, 3, 1,
+        ]);
+        names.length = 0;
+        assert.equal(out.device.commands(new Uint8Array(records.buffer)), 2);
+        out.device.BeginScene();
+        /** @type {{ viewport?: any }} */
+        const viewport = {};
+        assert.equal(playedDevices[0].GetViewport(viewport), D3D_OK);
+        assert.deepEqual(viewport.viewport, { X: 1, Y: 2, Width: 4, Height: 5, MinZ: 0, MaxZ: 1 });
+        /** @type {{ enabled?: number }} */
+        const enabled = {};
+        assert.equal(playedDevices[0].GetLightEnable(3, enabled), D3D_OK);
+        assert.ok(enabled.enabled);
+        assert.deepEqual(names.filter(name=>name !== 'BeginScene'), ['commands'],
+            'one call crossed for the two');
+        // The program's side made them too: its answers are its own.
+        assert.equal(out.device.GetViewport(viewport), D3D_OK);
+        assert.equal(viewport.viewport.Width, 4);
+    });

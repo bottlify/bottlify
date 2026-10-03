@@ -163,8 +163,22 @@ export const SHADOW = {
     STREAM_OFFSETS: 4496,
     DECLARATION: 4560,
     PIXEL_SHADER: 4564,
-    SIZE: 4568,
+    /**
+     * The command ring (`commandCode`): where it is, how many bytes it
+     * holds, and how many of them the guest has written -- zero where the
+     * device has none, which sends every command to the host. The host
+     * keeps how far it has read; the guest only ever adds to the head.
+     */
+    COMMANDS: 4568,
+    COMMAND_BYTES: 4572,
+    COMMAND_HEAD: 4576,
+    /** Commands the guest wrote, counted by it. */
+    COMMAND_CALLS: 4580,
+    SIZE: 4584,
 };
+
+/** A command's head: the method's slot, and the record's length in bytes, its own included. */
+export const COMMAND = { SLOT: 0, BYTES: 4, ARGS: 8 };
 
 /**
  * A pointer slot whose object the program let go of. Not an address a
@@ -235,6 +249,14 @@ export const TEXTURE = {
 
 export const FLAG_SLOW_PATH = 1;
 
+/**
+ * The command ring's size, and how near its end the host starts it over:
+ * more than the longest record a routine writes, so that a routine that
+ * found no room is always followed by a start over.
+ */
+const COMMAND_RING_BYTES = 64 * 1024;
+const COMMAND_SLACK = 8 * 1024;
+
 /** What the host clears the marks and the ring's head with; never written to. */
 const ZERO_MARKS = new Uint8Array(SHADOW.MARK_WORDS * 4);
 
@@ -269,16 +291,19 @@ const dword = value=>[
 ];
 
 /**
- * Lays out a routine whose short branches name their targets, so that no
+ * Lays out a routine whose branches name their targets, so that no
  * displacement is counted by hand: a part is bytes, a label, or a branch
- * `{ jcc, to }` that becomes two bytes once every label has a position.
- * A branch that cannot be reached with a byte is a mistake in the routine
- * and is refused rather than truncated.
+ * `{ jcc, to }` that becomes two bytes once every label has a position --
+ * or five or six, `jmp`/`jcc rel32`, when it says `near`. A short branch
+ * that cannot be reached with a byte is a mistake in the routine and is
+ * refused rather than truncated.
  *
- * @param {(number[] | { label: string } | { jcc: number, to: string })[]} parts
+ * @param {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]} parts
  * @returns {Uint8Array}
  */
 function assemble(parts){
+    /** @param {{ jcc: number, near?: boolean }} branch */
+    const sizeOf = branch=>(!branch.near ? 2 : branch.jcc === 0xeb ? 5 : 6);
     /** @type {Map<string, number>} */
     const labels = new Map();
     let at = 0;
@@ -294,7 +319,7 @@ function assemble(parts){
         }
         else
         {
-            at += 2;
+            at += sizeOf(part);
         }
     }
     /** @type {number[]} */
@@ -311,6 +336,13 @@ function assemble(parts){
             if (target === undefined)
             {
                 throw new Error(`shadow: no label ${part.to}`);
+            }
+            if (part.near)
+            {
+                const rel = target - (out.length + sizeOf(part));
+                const opcode = part.jcc === 0xeb ? [0xe9] : [0x0f, part.jcc + 0x10];
+                out.push(...opcode, ...dword(rel | 0));
+                continue;
             }
             const rel = target - (out.length + 2);
             if (rel < -128 || rel > 127)
@@ -354,7 +386,7 @@ const prologue = (slow = 'slow')=>[
  * lands on.
  *
  * @param {number} at @param {number} trap
- * @param {(number[] | { label: string } | { jcc: number, to: string })[]} parts
+ * @param {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]} parts
  */
 const routine = (at, trap, parts)=>{
     const body = assemble([...parts, { label: 'slow' }]);
@@ -1280,6 +1312,147 @@ export function getSurfaceLevelCode(at, trap){
 }
 
 /**
+ * A method a command routine takes: what the record holds and how much of
+ * what the method reads through a pointer is copied with it.
+ *
+ * @typedef {Object} CommandShape
+ * @property {number} slot  the method's slot, which names it to the host
+ * @property {number} args  its arguments, `this` not counted
+ * @property {number} [pointer]  the argument pointing at what the method reads
+ * @property {number} [bytes]  how many bytes that is, or else
+ * @property {{ arg: number, shift: number, most: number }} [count]  the argument
+ *     counting its elements, `1 << shift` bytes each, at most `most` of them
+ */
+
+/**
+ * A method that answers only D3D_OK, as guest code that writes the call
+ * into the device's command ring for the host to make at its next entry --
+ * the arguments, and a copy of what a pointer argument points at, with the
+ * pointer made to point at the copy. What the host would refuse it refuses
+ * then, and reports; a null pointer, a count past `most`, a full ring or a
+ * device without one is the host's now.
+ *
+ * The record is written whole before the head moves past it, in one store,
+ * so a host entry on another thread between any two instructions finds
+ * either all of it or none.
+ *
+ *     (prologue)
+ *     cmp dword [ecx+COMMANDS], 0
+ *     je slow
+ *     [mov eax, [esp+8+4*pointer]; test eax, eax; jz slow]
+ *     mov edx, bytes | mov edx, [esp+8+4*count]; test; jz; cmp edx, most; ja; shl edx, shift
+ *     push ebx; push esi; push edi
+ *     mov ebx, ecx                ; the block
+ *     lea esi, [edx + ARGS + 4*args]   ; the record's length
+ *     mov edi, [ebx+COMMAND_HEAD]
+ *     lea eax, [edi+esi]
+ *     cmp eax, [ebx+COMMAND_BYTES]
+ *     ja full
+ *     add edi, [ebx+COMMANDS]     ; the record
+ *     mov dword [edi], slot
+ *     mov [edi+4], esi
+ *     mov eax, [esp+20+4*i] / lea eax, [edi+ARGS+4*args]; mov [edi+ARGS+4*i], eax  (each)
+ *     [mov esi, [esp+20+4*pointer]] ; the copy
+ *     lea edi, [edi+ARGS+4*args]
+ *     [mov ecx, edx; shr ecx, 2; rep movsd]
+ *     sub edi, [ebx+COMMANDS]
+ *     mov [ebx+COMMAND_HEAD], edi
+ *     inc dword [ebx+COMMAND_CALLS]
+ *     inc dword [ebx+CALLS]
+ *     pop edi; pop esi; pop ebx
+ *     xor eax, eax
+ *     ret 4+4*args
+ *   full:
+ *     pop edi; pop esi; pop ebx
+ *     jmp slow
+ *
+ * @param {number} at @param {number} trap @param {CommandShape} shape
+ * @returns {Uint8Array}
+ */
+export function commandCode(at, trap, shape){
+    const { slot, args, pointer = -1, bytes = 0, count } = shape;
+    const header = COMMAND.ARGS + 4 * args;
+    if (pointer >= 0 && !count && (bytes <= 0 || (bytes & 3) !== 0))
+    {
+        throw new Error(`shadow: a command copies whole dwords, not ${bytes} bytes`);
+    }
+    /** @type {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]} */
+    const parts = [
+        ...prologue('out'),
+        [0x83, 0xb9, ...dword(SHADOW.COMMANDS), 0x00],           // cmp dword [ecx+disp], 0
+        { jcc: 0x74, to: 'out' },                                // je out
+    ];
+    if (pointer >= 0)
+    {
+        parts.push(
+            [0x8b, 0x44, 0x24, 8 + 4 * pointer],                 // mov eax, [esp+8+4p]
+            [0x85, 0xc0],                                        // test eax, eax
+            { jcc: 0x74, to: 'out' });                           // jz out
+    }
+    if (count)
+    {
+        parts.push(
+            [0x8b, 0x54, 0x24, 8 + 4 * count.arg],               // mov edx, [esp+8+4c]
+            [0x85, 0xd2],                                        // test edx, edx
+            { jcc: 0x74, to: 'out' },                            // jz out
+            [0x81, 0xfa, ...dword(count.most)],                  // cmp edx, most
+            { jcc: 0x77, to: 'out' },                            // ja out
+            [0xc1, 0xe2, count.shift]);                          // shl edx, shift
+    }
+    else
+    {
+        parts.push([0xba, ...dword(pointer >= 0 ? bytes : 0)]);  // mov edx, bytes
+    }
+    parts.push(
+        { jcc: 0xeb, to: 'take' },                               // jmp take
+        { label: 'out' },
+        { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
+        { label: 'take' },
+        [0x53, 0x56, 0x57],                                      // push ebx; push esi; push edi
+        [0x89, 0xcb],                                            // mov ebx, ecx
+        [0x8d, 0xb2, ...dword(header)],                          // lea esi, [edx+header]
+        [0x8b, 0xbb, ...dword(SHADOW.COMMAND_HEAD)],             // mov edi, [ebx+disp]
+        [0x8d, 0x04, 0x37],                                      // lea eax, [edi+esi]
+        [0x3b, 0x83, ...dword(SHADOW.COMMAND_BYTES)],            // cmp eax, [ebx+disp]
+        { jcc: 0x77, to: 'full', near: true },                   // ja full
+        [0x03, 0xbb, ...dword(SHADOW.COMMANDS)],                 // add edi, [ebx+disp]
+        [0xc7, 0x07, ...dword(slot)],                            // mov dword [edi], slot
+        [0x89, 0x77, COMMAND.BYTES]);                            // mov [edi+4], esi
+    for (let arg = 0; arg < args; arg++)
+    {
+        parts.push(arg === pointer
+            ? [0x8d, 0x87, ...dword(header)]                     // lea eax, [edi+header]
+            : [0x8b, 0x44, 0x24, 20 + 4 * arg],                  // mov eax, [esp+20+4i]
+        [0x89, 0x47, COMMAND.ARGS + 4 * arg]);                   // mov [edi+8+4i], eax
+    }
+    if (pointer >= 0)
+    {
+        parts.push([0x8b, 0x74, 0x24, 20 + 4 * pointer]);        // mov esi, [esp+20+4p]
+    }
+    parts.push([0x8d, 0xbf, ...dword(header)]);                  // lea edi, [edi+header]
+    if (pointer >= 0)
+    {
+        parts.push(
+            [0x89, 0xd1],                                        // mov ecx, edx
+            [0xc1, 0xe9, 0x02],                                  // shr ecx, 2
+            [0xf3, 0xa5]);                                       // rep movsd
+    }
+    parts.push(
+        [0x2b, 0xbb, ...dword(SHADOW.COMMANDS)],                 // sub edi, [ebx+disp]
+        [0x89, 0xbb, ...dword(SHADOW.COMMAND_HEAD)],             // mov [ebx+disp], edi
+        [0xff, 0x83, ...dword(SHADOW.COMMAND_CALLS)],            // inc dword [ebx+disp]
+        counted(3),                                              // inc dword [ebx+12]
+        [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, 4 + 4 * args, 0x00],                              // ret 4+4*args
+        { label: 'full' },
+        [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
+        { jcc: 0xeb, to: 'slow', near: true });                  // jmp slow
+    return routine(at, trap, parts);
+}
+
+
+/**
  * @typedef {Object} ShadowMaterial
  * @property {{ r: number, g: number, b: number, a: number }} Diffuse
  * @property {{ r: number, g: number, b: number, a: number }} Ambient
@@ -1363,6 +1536,12 @@ export function materialFloats(material){
  */
 
 /**
+ * @typedef {Object} ShadowCommands
+ * @property {(records: Uint8Array) => number} take  makes the calls a run of
+ *     whole records holds, in order, and says how many it made
+ */
+
+/**
  * @typedef {Object} ShadowDeps
  * @property {(bytes: number) => number} allocate     Guest memory.
  * @property {(address: number, length: number) => Uint8Array} readMemory
@@ -1381,6 +1560,9 @@ export function materialFloats(material){
  *     by type: the guest writes one there, and the host sets it back through
  *     SetSamplerState.
  * @property {string} [name]  The device interface a refusal names.
+ * @property {ShadowCommands} [commands]  The methods the device's command
+ *     ring carries (`commandCode`), and how the host makes one: a device
+ *     without them gets no ring.
  * @property {boolean | 'd3d9'} [bindings]  Whose bindings the block holds:
  *     Direct3D 8's streams, indices and vertex shader (the default), Direct3D
  *     9's streams with their offsets and its declaration (`'d3d9'`), or none.
@@ -1457,6 +1639,10 @@ export function createShadow(deps){
     let levelRefs = 0;
     /** Resource blocks are carved from pages of their own, for the same reason as the device's. */
     const pool = { at: 0, left: 0 };
+    /** The command ring's bytes in guest memory, 0 for none, and how far the host has read it. */
+    let commands = 0;
+    let commandTail = 0;
+    let commandsTaken = 0;
 
     /** @param {number} value */
     const dwordBytes = value=>new Uint8Array(dword(value));
@@ -2123,6 +2309,35 @@ export function createShadow(deps){
         }
     };
 
+    /**
+     * Makes the calls the guest wrote into the command ring since the host
+     * last read it, in order. The head is the guest's, moved only past a
+     * whole record; the host starts the ring over only when it is nearly
+     * full, which is when the routines leave their commands to it.
+     */
+    const takeCommands = ()=>{
+        const head = readWord(address + SHADOW.COMMAND_HEAD);
+        if (head === commandTail)
+        {
+            return;
+        }
+        if (head > commandTail && head <= COMMAND_RING_BYTES)
+        {
+            commandsTaken += /** @type {ShadowCommands} */ (deps.commands).take(
+                deps.readMemory(commands + commandTail, head - commandTail));
+        }
+        else
+        {
+            refuse(`${name}::commands`, 'the command ring\'s head went back');
+        }
+        commandTail = head;
+        if (head > COMMAND_RING_BYTES - COMMAND_SLACK)
+        {
+            deps.writeMemory(address + SHADOW.COMMAND_HEAD, dwordBytes(0));
+            commandTail = 0;
+        }
+    };
+
     /** The block, made and mirrored on first use. */
     const place = ()=>{
         if (address === 0)
@@ -2132,6 +2347,14 @@ export function createShadow(deps){
             {
                 deps.writeMemory(address, new Uint8Array(SHADOW.SIZE));
                 mirror();
+                // Pages of its own, as the block's are: the routines write it
+                // on every command.
+                commands = deps.commands ? allocatePage(COMMAND_RING_BYTES) : 0;
+                if (commands !== 0)
+                {
+                    deps.writeMemory(address + SHADOW.COMMANDS,
+                        dwordsBytes([commands, COMMAND_RING_BYTES]));
+                }
             }
         }
         return address;
@@ -2308,6 +2531,10 @@ export function createShadow(deps){
             if (address === 0)
             {
                 return;
+            }
+            if (commands !== 0)
+            {
+                takeCommands();
             }
             const calls = readWord(address + SHADOW.CALLS);
             if (calls === seenCalls)
@@ -2620,6 +2847,8 @@ export function createShadow(deps){
             // which follows what the guest set, not the size of the block.
             compared,
             refused,
+            // Calls the command ring carried past the bridge.
+            commandCalls: commandsTaken,
         }),
     };
 }

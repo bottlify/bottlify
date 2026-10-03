@@ -2097,3 +2097,72 @@ test("an Ex device's GetDirect3D hands back the IDirect3D9Ex that made it", ()=>
     assert.equal(other.device(made.device, 'GetDirect3D', [0x3004]), D3D_OK);
     assert.equal(other.box.memory.readU32(0x3004), plain, 'a plain device, the plain interface');
 });
+
+test('with guest memory, the calls the command ring carried are made at the next entry, in order',
+    ()=>{
+        // As the routines leave them (`commands.itest.js`): records in the ring
+        // and the head past them. A call the device refuses was told D3D_OK in
+        // the guest, so it is a divergence, said once.
+        const h = seamed({ shadow: true });
+        const root = h.create();
+        const { device } = h.createDevice(root);
+        const viewportSlot = slot(IDIRECT3DDEVICE9_SLOTS, 'SetViewport');
+        assert.ok(h.box.isGuest(device, viewportSlot), 'SetViewport runs in the guest');
+        const owner = h.box.memory.readU32(device + 4);
+        const ring = h.box.memory.readU32(owner + SHADOW.COMMANDS);
+        assert.notEqual(ring, 0, 'the device has a ring');
+        assert.ok(h.box.memory.readU32(owner + SHADOW.COMMAND_BYTES) >= 0x8000);
+        /** @type {number[]} */
+        const words = [];
+        /** @param {string} name @param {number[]} args @param {number[]} data */
+        const record = (name, args, data = [])=>{
+            const at = ring + words.length * 4;
+            const pointer = args.indexOf(-1);
+            words.push(slot(IDIRECT3DDEVICE9_SLOTS, name), (2 + args.length + data.length) * 4,
+                ...args.map((arg, i)=>(i === pointer ? at + 8 + args.length * 4 : arg)), ...data);
+        };
+        const one = new Uint32Array(new Float32Array([1]).buffer)[0];
+        record('SetViewport', [-1], [8, 16, 32, 24, 0, one]);
+        record('LightEnable', [2, 1]);
+        record('SetViewport', [-1], [0, 0, 64, 48, 0, one]);
+        // Past the 256 registers a hardware device has: refused, twice.
+        record('SetVertexShaderConstantF', [255, -1, 2], new Array(8).fill(one));
+        record('SetVertexShaderConstantF', [255, -1, 2], new Array(8).fill(one));
+        h.box.memory.writeBytes(ring, new Uint8Array(new Uint32Array(words).buffer));
+        h.box.memory.writeU32(owner + SHADOW.COMMAND_HEAD, words.length * 4);
+        h.box.memory.writeU32(owner + SHADOW.COMMAND_CALLS, 5);
+        h.box.memory.writeU32(owner + SHADOW.CALLS, 5);
+
+        const out = 0x3000;
+        assert.equal(h.device(device, 'GetViewport', [out]), D3D_OK);
+        assert.deepEqual(h.fields.readStruct(out, D3DVIEWPORT9, ['MinZ', 'MaxZ']),
+            { X: 0, Y: 0, Width: 64, Height: 48, MinZ: 0, MaxZ: 1 }, 'the later viewport won');
+        assert.equal(h.device(device, 'GetLightEnable', [2, out]), D3D_OK);
+        assert.notEqual(h.box.memory.readU32(out), 0, 'and the light is on');
+        const refusals = h.divergences.filter(line=>line.includes('SetVertexShaderConstantF'));
+        assert.equal(refusals.length, 1, h.divergences.join('\n'));
+        assert.equal(h.seam.shadow()?.commandCalls, 5);
+
+        // Read once: the next entry makes none of them again.
+        assert.equal(h.device(device, 'SetViewport', [0x3100]), D3D_OK);
+        h.fields.writeStruct(0x3100, D3DVIEWPORT9, { X: 1, Y: 2, Width: 3, Height: 4, MinZ: 0,
+            MaxZ: 1 }, ['MinZ', 'MaxZ']);
+        assert.equal(h.device(device, 'SetViewport', [0x3100]), D3D_OK);
+        assert.equal(h.device(device, 'GetViewport', [out]), D3D_OK);
+        assert.equal(h.box.memory.readU32(out + 8), 3);
+        assert.equal(h.seam.shadow()?.commandCalls, 5);
+        assert.equal(h.release(device), 0);
+        h.release(root);
+    });
+
+test('a device made for several threads has no command ring, and takes each call as it comes', ()=>{
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root, {},
+        D3DCREATE.HARDWARE_VERTEXPROCESSING | D3DCREATE.MULTITHREADED);
+    const owner = h.box.memory.readU32(device + 4);
+    assert.notEqual(owner, 0);
+    assert.equal(h.box.memory.readU32(owner + SHADOW.COMMANDS), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});

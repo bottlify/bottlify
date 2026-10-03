@@ -707,6 +707,6 @@ export function createGraphicsLibraries(
          * What the guest set without crossing, and how much of it. Flat, so a
          * report prints it beside the crossings it stands in for.
          */
-        shadow: ()=>d3d8?.shadow() ?? null,
+        shadow: ()=>d3d9?.shadow() ?? d3d8?.shadow() ?? null,
     };
 }

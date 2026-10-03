@@ -71,13 +71,14 @@ import { createRaster, rasterStatus } from './raster.js';
 import { queryAs, readGuid } from './guid.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import {
-    createShadow, getRenderStateCode, getTextureStageStateCode, getTransformCode, lockCode,
-    unlockCode,
+    commandCode, createShadow, getRenderStateCode, getTextureStageStateCode, getTransformCode,
+    lockCode, unlockCode,
     setMaterialCode,
     setRenderStateCode, setSamplerStateCode, setStreamSource9Code, setTextureCode,
     setTextureStageStateCode, setTransformCode, setBindingCode, SHADOW,
 } from './shadow.js';
 import { D3DTSS9, SAMPLER_STATE_KEY } from '../d3d9/samplerstates.js';
+import { COMMANDS, commandSlot } from '../d3d9/commands.js';
 
 /** Direct3D 9's stage state types below 32, a bit each: what the guest routine takes. */
 const STAGE_STATE_TYPES_9 = Object.values(D3DTSS9)
@@ -2493,6 +2494,9 @@ export function createDirect3D9Seam(
                 setBindingCode(at, trap, SHADOW.VERTEX_SHADER)),
             SetPixelShader: ({ trap })=>placeCode(at=>
                 setBindingCode(at, trap, SHADOW.PIXEL_SHADER)),
+            ...Object.fromEntries(Object.entries(COMMANDS).map(([name, shape])=>[name,
+                (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>
+                    commandCode(at, trap, { ...shape, slot: commandSlot(name) }))])),
         }
         : {};
     const deviceInterfaces = [
@@ -2937,6 +2941,11 @@ export function createDirect3D9Seam(
                 name: 'IDirect3DDevice9',
                 bindings: 'd3d9',
                 samplerStates: SAMPLER_STATE_KEY,
+                // A device the program shares between threads takes each
+                // call when it is made, as the runtime serialises them.
+                commands: ((behaviourFlags >>> 0) & D3DCREATE.MULTITHREADED) !== 0
+                    ? undefined
+                    : { take: records=>held.device.commands(records) },
             });
             shadows.set(held.device, shadow);
             held.device.guestState = ()=>shadow.address();
@@ -3100,6 +3109,9 @@ export function createDirect3D9Seam(
 
         /** What the device this program is drawing through has counted. */
         diagnostics: ()=>lastDevice?.diagnostics?.() ?? null,
+
+        /** What that device's program set in the guest, and the calls that never crossed. */
+        shadow: ()=>(lastDevice ? shadowOf(lastDevice)?.diagnostics() ?? null : null),
 
         /** For tests, which have no guest to call through. */
         interfaces: {
