@@ -429,8 +429,8 @@ under `cork`, which has no emulator compiler; the launcher's per-bundle engine s
 owner's. The paired browser table (`--engine emulator` as the control) that would confirm the
 target ns per instruction is the owner's to run. *2026-09-22, cork 5.5.*
 
-**Direct3D 9's setters and draws are made in the guest and played by the host at its next
-entry; the program is told D3D_OK at the call.** Render, stage and sampler states, transforms,
+**Direct3D 8's and 9's setters and draws are made in the guest and played by the host at its
+next entry; the program is told D3D_OK at the call.** Render, stage and sampler states, transforms,
 the material, textures, streams, indices, the declaration and format, shaders and their
 constants, the viewport, lights, clip planes, the scissor rectangle, software vertex processing,
 `DrawPrimitive` and `DrawIndexedPrimitive` each have a guest routine that writes the call, and a
@@ -447,8 +447,10 @@ states. A null pointer, a count past the most a device of this version has, a re
 block or a full ring take the host's path, which answers as the device does; while a draw waits
 in the ring, a buffer lock other than NOOVERWRITE does too, since the bytes that draw reads are
 the buffer's until it is made. Space in the ring is taken with `lock cmpxchg` and a record counts
-once its length, written last, is there, so a device shared between threads keeps the ring.
-*2026-10-03, 1.8.*
+once its length, written last, is there; and no scheduler slice ends inside a routine the seams
+placed (`kernel.atomicCode`), so a thread switched away mid-record never leaves another thread's
+entry stopped short of its own calls -- a device shared between threads keeps the ring. Direct3D
+8's ring carries the same calls in its own shapes (`d3d8/commands.js`). *2026-10-03, 1.8.*
 
 ## C. Process model and porting
 
