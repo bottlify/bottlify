@@ -8,11 +8,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loopbackDirect3D } from './loopback.js';
 import { createMirror } from './replay.js';
-import { playedDirect3D, recordedDirect3D } from './direct3d.js';
+import { answeredByRenderer, playedDirect3D, recordedDirect3D } from './direct3d.js';
 import { createReceiver, createSender } from './channel.js';
 import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK } from '../d3d9/constants.js';
 import { D3DCLEAR, D3DFMT_INDEX, D3DPT, D3DRS, D3DTS } from '../d3d8/constants.js';
-import { createDirect3D9 } from '../d3d9/device.js';
+import { D3DQUERYTYPE, createDirect3D9 } from '../d3d9/device.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
@@ -440,3 +440,80 @@ test('a buffer locked a few bytes at a time sends those bytes at each unlock, no
         assert.ok(sent - before < 50 * 256 * 2,
             `${sent - before} bytes sent for 50 locks of 256`);
     });
+
+test('an event query answers on the program\'s side; an occlusion query asks the renderer', ()=>{
+    // An event is signalled once its end is issued, as the device without a
+    // renderer signals it: a round trip only made the program wait for the
+    // played side to catch up.
+    let posts = 0;
+    const played = playedDirect3D(createDirect3D9, {});
+    const sender = createSender({
+        post: message=>{
+            posts++;
+            played.read(message.buffer, call=>{
+                played.play(call);
+            });
+        },
+        later: flush=>flush(),
+    });
+    const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+    /** @type {{ device?: any }} */
+    const out = {};
+    assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+        backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out),
+    D3D_OK);
+    /** @type {{ query?: any }} */
+    const made = {};
+    assert.equal(out.device.CreateQuery(D3DQUERYTYPE.EVENT, made), D3D_OK);
+    assert.equal(made.query.Issue(1), D3D_OK);
+    /** @type {{ value?: number }} */
+    const signalled = {};
+    const answer = made.query.GetData(signalled, 4, 1);
+    assert.equal(answer, D3D_OK, 'answered at once, not a promise');
+    assert.equal(signalled.value, 1);
+    assert.equal(sender.waits().GetData, undefined, 'nothing waited for');
+    assert.ok(posts > 0);
+    assert.equal(answeredByRenderer({ type: D3DQUERYTYPE.EVENT }, 'GetData', []), false);
+    assert.equal(answeredByRenderer({ type: D3DQUERYTYPE.OCCLUSION }, 'GetData', []), true);
+    assert.equal(answeredByRenderer({}, 'GetRenderTargetData', []), true);
+});
+
+test('a getter of plain state answers on the program\'s side and sends nothing', ()=>{
+    // The shadow block reads states back after a state block is applied, a
+    // getter a state: each was recorded and played for an answer the recording
+    // device already had.
+    let sent = 0;
+    const played = playedDirect3D(createDirect3D9, {});
+    const sender = createSender({
+        post: message=>{
+            sent += message.buffer.byteLength;
+            played.read(message.buffer, call=>{
+                played.play(call);
+            });
+        },
+        later: flush=>flush(),
+    });
+    const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+    /** @type {{ device?: any }} */
+    const out = {};
+    assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+        backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out),
+    D3D_OK);
+    const device = out.device;
+    assert.equal(device.SetRenderState(D3DRS.LIGHTING, 0), D3D_OK);
+    const before = sent;
+    assert.ok(before > 0);
+    /** @type {{ value?: number }} */
+    const value = {};
+    for (let read = 0; read < 10; read++)
+    {
+        assert.equal(device.GetRenderState(D3DRS.LIGHTING, value), D3D_OK);
+    }
+    assert.equal(value.value, 0, 'the state as set');
+    /** @type {{ matrix?: ArrayLike<number> }} */
+    const matrix = {};
+    assert.equal(device.GetTransform(D3DTS.WORLD, matrix), D3D_OK);
+    assert.equal(sent, before, 'nothing sent for the reads');
+    assert.equal(device.SetRenderState(D3DRS.LIGHTING, 1), D3D_OK);
+    assert.ok(sent > before, 'a set still is');
+});

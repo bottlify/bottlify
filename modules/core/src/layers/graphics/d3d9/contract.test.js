@@ -1001,6 +1001,55 @@ test('StretchRect copies equal rectangles and refuses a stretch, saying why', ()
     assert.equal(device.release(), 0);
 });
 
+test('StretchRect between targets of a device that draws elsewhere moves no guest bytes', ()=>{
+    // The played device makes the copy on the GPU, and a target's guest bytes
+    // hold no pixels to move.
+    /** @param {boolean} elsewhere */
+    const copied = elsewhere=>{
+        const memory = new Uint8Array(1 << 20);
+        let next = 0x1000;
+        let writes = 0;
+        const { device } = make({ services: {
+            renderedElsewhere: elsewhere,
+            allocate: (/** @type {number} */ bytes)=>{
+                const at = next;
+                next += (bytes + 15) & ~15;
+                return at;
+            },
+            readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
+                memory.slice(address, address + length),
+            writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>{
+                writes++;
+                memory.set(bytes, address);
+            },
+        } });
+        /** @type {{ surface?: any }} */
+        const source = {};
+        device.CreateRenderTarget(4, 4, D3DFMT.A8R8G8B8, false, source);
+        /** @type {{ surface?: any }} */
+        const target = {};
+        device.CreateRenderTarget(4, 4, D3DFMT.A8R8G8B8, false, target);
+        /** @type {{ surface?: any }} */
+        const plain = {};
+        device.CreateOffscreenPlainSurface(4, 4, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, plain);
+        memory.fill(7, source.surface.base, source.surface.base + 64);
+        const before = writes;
+        assert.equal(device.StretchRect(source.surface, null, target.surface, null, 1), D3D_OK);
+        const between = writes - before;
+        const intoTarget = memory[target.surface.base];
+        assert.equal(device.StretchRect(source.surface, null, plain.surface, null, 1), D3D_OK);
+        const intoPlain = memory[plain.surface.base];
+        source.surface.release();
+        target.surface.release();
+        plain.surface.release();
+        device.release();
+        return { between, intoTarget, intoPlain };
+    };
+    assert.deepEqual(copied(false), { between: 1, intoTarget: 7, intoPlain: 7 });
+    assert.deepEqual(copied(true), { between: 0, intoTarget: 0, intoPlain: 7 },
+        'into a target nothing moves; into a plain surface the bytes still do');
+});
+
 test('GetRenderTargetData wants a system-memory twin of the target', ()=>{
     /** @type {string[]} */
     const reports = [];

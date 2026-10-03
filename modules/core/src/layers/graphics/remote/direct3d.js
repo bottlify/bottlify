@@ -13,6 +13,9 @@
 import { createMirror, createPlayer, createRecording } from './replay.js';
 import { WAIT, createWriter } from './wire.js';
 
+/** D3DQUERYTYPE_EVENT. */
+const D3DQUERYTYPE_EVENT = 8;
+
 /** D3DUSAGE_RENDERTARGET, the same in Direct3D 8 and 9. */
 const RENDERTARGET = 0x1;
 
@@ -47,6 +50,14 @@ function isRenderTarget(surface){
  * @param {any} target @param {string} name @param {any[]} args
  */
 export function answeredByRenderer(target, name, args){
+    if (name === 'GetData')
+    {
+        // An event query is signalled once its end is issued, by the
+        // recording device as by any other: asking the renderer only made the
+        // program wait for it to play everything before it, which pacing the
+        // presents already bounds.
+        return target?.type !== D3DQUERYTYPE_EVENT;
+    }
     if (ANSWERED.has(name))
     {
         return true;
@@ -89,6 +100,7 @@ export function recordedDirect3D(factory, services, transport){
         // What the played device has to say about the program is the whole
         // of it; this one would add what only lacking a renderer makes it say.
         divergence: undefined,
+        renderedElsewhere: true,
         allocate: (/** @type {number} */ bytes)=>{
             const address = guest(Math.max(bytes, 1));
             recording?.allocated(address, Math.max(bytes, 1));

@@ -32,6 +32,25 @@ import { OP, SECTION, SERVICE_REF, WAIT, createReader, createSite } from './wire
 const PACED = new Set(['Present']);
 
 /**
+ * Getters that answer with plain values from state the recording device holds
+ * as the played one does, and hand out no object and take no reference: made
+ * on the recording device alone, not sent. A getter that hands out an object
+ * stays recorded, for the reference it takes on the played side too.
+ */
+const PURE_GETTERS = new Set([
+    'GetRenderState', 'GetTransform', 'GetTextureStageState', 'GetSamplerState',
+    'GetViewport', 'GetMaterial', 'GetLight', 'GetLightEnable', 'GetClipPlane',
+    'GetClipStatus', 'GetScissorRect', 'GetNPatchMode', 'GetFVF',
+    'GetSoftwareVertexProcessing', 'GetStreamSourceFreq', 'GetCurrentTexturePalette',
+    'GetPaletteEntries', 'GetVertexShaderConstant', 'GetVertexShaderConstantF',
+    'GetVertexShaderConstantI', 'GetVertexShaderConstantB', 'GetPixelShaderConstant',
+    'GetPixelShaderConstantF', 'GetPixelShaderConstantI', 'GetPixelShaderConstantB',
+    'GetDesc', 'GetLevelDesc', 'GetLevelCount', 'GetLOD', 'GetPriority', 'GetType',
+    'GetAvailableTextureMem', 'GetCreationParameters', 'GetNumberOfSwapChains',
+    'GetPresentParameters', 'GetGammaRamp',
+]);
+
+/**
  * Whether a method may hand out one of the device's objects through a
  * structure it is given -- what makes one, gets one or asks for one -- so
  * that the structures are looked through after it. Both sides ask this.
@@ -600,6 +619,7 @@ export function createRecording(options){
         const paced = PACED.has(name);
         const mayAnswer = answers.has(name);
         const making = handsOut(name);
+        const pure = PURE_GETTERS.has(name);
         /** The method's number in the writer's table, once it has one. */
         let nameId = -1;
         /** @type {number | undefined} */
@@ -611,7 +631,7 @@ export function createRecording(options){
             const count = args.length;
             /** What the device is given: its own objects rather than their proxies. */
             let applied = args;
-            if (depth > 0)
+            if (depth > 0 || pure)
             {
                 for (let index = 0; index < count; index++)
                 {
