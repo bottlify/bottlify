@@ -410,7 +410,7 @@ test('the sound output\'s storage crosses once, at start', async()=>{
 
 test('the sound output\'s shape follows the engine\'s own backend, not a fixed contract', async()=>{
     // The whole surface a page has for its worklet is `memory()`/`format()`;
-    // there is no `ring()` here for a caller to fall back to (see host.md's
+    // there is no `ring()` here for a caller to fall back to (docs/core/api.md's
     // `audio.memory()` row) -- a caller written against the engine backend's
     // `{ control, samples }` shape breaks outright on a page that turns out
     // to have shared memory, rather than reading something merely wrong.

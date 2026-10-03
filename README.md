@@ -51,8 +51,12 @@ Building the vendored v86 from source needs Docker (`npm run build:v86 -- --dock
 - `modules/networking/`, `modules/installer/` — the Winsock relay, and adding a program by running
   its installer; each a workspace of its own.
 - `tools/cdp_test/` — dev-only browser harness (`npm run cdp:probe`, `cdp:game`, `cdp:frames`).
-- `docs/core/` — documentation of the core package: [`README.md`](docs/core/README.md) is the
-  index, with one document per layer, the module system, and `createApp`.
+- `docs/architecture.md` — how Bottlify works inside, with diagrams: the threads, cork, the DLLs
+  built from JavaScript, graphics, sound, networking and storage
+  ([Russian](docs/architecture.ru.md)).
+- `docs/core/` — documentation of the core package: [`README.md`](docs/core/README.md) (start
+  here), [`api.md`](docs/core/api.md), [`configuration.md`](docs/core/configuration.md) and
+  [`limits.md`](docs/core/limits.md).
 - `roadmap/` — the phase plans and the knowledge registers.
 
 Licenses for vendored components: `THIRD-PARTY-NOTICES.md`. Bottlify is MPL-2.0.

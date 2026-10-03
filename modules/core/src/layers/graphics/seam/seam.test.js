@@ -157,6 +157,38 @@ test('a program reaches Direct3D through a library, not by asking for an object'
         'one argument, the SDK version');
 });
 
+test('a bottle with one graphics API has that API\'s libraries and builds no other', ()=>{
+    const box = machine();
+    /** @type {string[]} */
+    const made = [];
+    const graphics = {
+        /** @param {string} name */
+        create: name=>{
+            made.push(name);
+            return null;
+        },
+        available: ()=>false,
+    };
+    /** @param {readonly string[]} only */
+    const build = only=>createGraphicsLibraries({
+        graphics, only, memory: box.services, publishInterface: box.publishInterface,
+        screen: ()=>({ width: 800, height: 600, bitsPerPixel: 32 }),
+    });
+
+    assert.deepEqual(Object.keys(build(['D3D8.dll']).libraries), ['D3D8.dll']);
+    assert.deepEqual(Object.keys(build(['D3D10.dll', 'D3D10_1.dll', 'DXGI.dll']).libraries).sort(),
+        ['D3D10.dll', 'D3D10_1.dll', 'DXGI.dll']);
+    const directDraw = build(['DDRAW.dll']);
+    assert.deepEqual(Object.keys(directDraw.libraries), ['DDRAW.dll']);
+    // gdi32's half of OpenGL answers as a machine with no OpenGL driver does.
+    assert.equal(directDraw.opengl.pixelFormat.choose(new Uint8Array(40)), 0);
+    assert.equal(directDraw.opengl.pixelFormat.set(0x10, 1), false);
+    assert.equal(directDraw.opengl.swapBuffers(0x10), false);
+    assert.equal(directDraw.diagnostics().device, null);
+    assert.equal(directDraw.shadow(), null);
+    assert.deepEqual(made, [], 'no API made by the building alone');
+});
+
 test('Direct3DCreate9Ex hands its object back through a pointer, and says when there is none',
     ()=>{
         // Unlike Direct3DCreate9 it answers an HRESULT and writes the

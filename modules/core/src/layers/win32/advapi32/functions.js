@@ -25,7 +25,10 @@
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { COMPUTER_NAME } from '../kernel32/drives.js';
-import { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS, detachedKey } from './registry.js';
+import {
+    HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS, detachedKey,
+} from './registry.js';
+import { STATUS } from '../ntdll/status.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -58,6 +61,23 @@ const HIVE_MAGIC = 'BTLHIVE1\n';
  * no name in a module's exports can be.
  */
 export const UNLOAD_KEY = Symbol('unloadKey');
+
+/**
+ * The native registry calls over this table's keys and handles, which ntdll
+ * publishes: `entries`, and `close(handle)` -- a status for a handle this
+ * table issued or a predefined root, null for one that is not a key.
+ */
+export const REGISTRY_NATIVES = Symbol('registryNatives');
+
+/** NtQueryKey's and NtEnumerateKey's classes, and the value classes, this answers. */
+const KEY_BASIC_INFORMATION = 0;
+const KEY_NODE_INFORMATION = 1;
+const KEY_FULL_INFORMATION = 2;
+const KEY_VALUE_BASIC_INFORMATION = 0;
+const KEY_VALUE_FULL_INFORMATION = 1;
+const KEY_VALUE_PARTIAL_INFORMATION = 2;
+/** The class offset of a key with no class. */
+const NO_CLASS = 0xffffffff;
 
 /**
  * @typedef {{ values?: { name: string, type: number, data: number[] }[],
@@ -112,6 +132,11 @@ const MAX_NAME = 16384;
  */
 const HANDLE_STRIDE = 4;
 const HANDLE_LIMIT = 0x7ffffffc;
+/**
+ * Above every handle the kernel's table issues (it stops at 0x40000000), so a
+ * native call that takes either kind -- NtClose -- knows which a value is.
+ */
+const FIRST_KEY_HANDLE = 0x40000004;
 
 /**
  * Who the program is running as. There is one account and no way to become
@@ -234,13 +259,22 @@ export function createRegistryFunctions(host){
             }
             return deleted;
         },
+        /** @param {any} parent @param {string} name @param {string} to */
+        rename(parent, name, to){
+            const result = host.hive.rename(parent, name, to);
+            if (result === 'renamed')
+            {
+                notify(parent, REG_NOTIFY_CHANGE_NAME);
+            }
+            return result;
+        },
     };
 
     /** @type {Map<number, import('./registry.js').RegistryKey>} */
     const handles = new Map();
     /** @type {number[]} */
     const freed = [];
-    let next = HANDLE_STRIDE;
+    let next = FIRST_KEY_HANDLE;
 
     /**
      * Fresh handles first, closed ones only once the range runs out: a handle
@@ -398,6 +432,424 @@ export function createRegistryFunctions(host){
     const onKey = handler=>args=>{
         const key = keyOf(args[0]);
         return key ? handler(key, args) : ERROR_INVALID_HANDLE;
+    };
+
+    /**
+     * RegCloseKey's body: a predefined root closes as nothing, an app key is
+     * written back, and a change awaited on the key is signalled.
+     *
+     * @param {number} key
+     */
+    const closeKey = key=>{
+        if (hive.root(key))
+        {
+            return ERROR_SUCCESS;
+        }
+        const held = handles.get(key);
+        if (!held || !handles.delete(key))
+        {
+            return ERROR_INVALID_HANDLE;
+        }
+        const file = appKeys.get(key);
+        if (file !== undefined)
+        {
+            appKeys.delete(key);
+            writeHive(held, file, true);
+        }
+        // A key closed while a change is awaited on it signals the wait.
+        for (const watcher of watchers.filter(one=>one.handle === key))
+        {
+            watchers.splice(watchers.indexOf(watcher), 1);
+            watcher.settle();
+        }
+        freed.push(key);
+        return ERROR_SUCCESS;
+    };
+
+    /**
+     * Where a key hangs: its parent and its name there. Looked for from the
+     * roots, as a handle holds only the key; a root has none.
+     *
+     * @param {any} key @returns {{ parent: any, name: string } | null}
+     */
+    const placeOf = key=>{
+        if (key.view === 'classes')
+        {
+            return key.path.length === 0 ? null
+                : { parent: hive.root(HKEY_CLASSES_ROOT), name: key.path.join('\\') };
+        }
+        /** @type {any[]} */
+        const pending = [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS]
+            .map(id=>hive.root(id)).filter(Boolean);
+        const seen = new Set();
+        while (pending.length > 0)
+        {
+            const node = pending.pop();
+            if (seen.has(node))
+            {
+                continue;
+            }
+            seen.add(node);
+            for (const child of node.keys.values())
+            {
+                if (child === key)
+                {
+                    return { parent: node, name: child.name };
+                }
+                pending.push(child);
+            }
+        }
+        return null;
+    };
+
+    /**
+     * The native registry: the same keys and handles, statuses for errors,
+     * names as counted strings, and a path with no root under \REGISTRY.
+     */
+    const nativeRegistry = ()=>{
+        /** @param {number} address  A UNICODE_STRING. @returns {string} */
+        const counted = address=>{
+            if (address === 0)
+            {
+                return '';
+            }
+            const length = readDword(address) & 0xffff;
+            const buffer = readDword(address + 4);
+            const units = buffer === 0 ? new Uint8Array(0) : host.readMemory(buffer, length & ~1);
+            let text = '';
+            for (let at = 0; at + 1 < units.length; at += 2)
+            {
+                text += String.fromCharCode(units[at] | units[at + 1] << 8);
+            }
+            return text;
+        };
+
+        /**
+         * The key an OBJECT_ATTRIBUTES names, or the status it cannot be found
+         * with: its name under its root directory, a key handle, or with no
+         * root \REGISTRY\Machine or \REGISTRY\User and a path under it.
+         *
+         * @param {number} attributes
+         * @returns {{ base: any, path: string } | number}
+         */
+        const namedBy = attributes=>{
+            const root = readDword(attributes + 4);
+            const path = counted(readDword(attributes + 8));
+            if (root !== 0)
+            {
+                const base = keyOf(root);
+                return base ? { base, path } : STATUS.INVALID_HANDLE;
+            }
+            const match = /^\\registry\\(machine|user)(?:\\(.*))?$/i.exec(path);
+            const base = match ? hive.root(match[1].toLowerCase() === 'machine'
+                ? HKEY_LOCAL_MACHINE : HKEY_USERS) : null;
+            return base ? { base, path: match?.[2] ?? '' } : STATUS.OBJECT_NAME_NOT_FOUND;
+        };
+
+        /** @param {string} text */
+        const utf16 = text=>{
+            const bytes = new Uint8Array(text.length * 2);
+            for (let at = 0; at < text.length; at++)
+            {
+                bytes[at * 2] = text.charCodeAt(at) & 0xff;
+                bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
+            }
+            return bytes;
+        };
+
+        /**
+         * A value's information in one of the three classes, or null for
+         * another class.
+         *
+         * @param {{ name: string, type: number, data: Uint8Array }} stored @param {number} kind
+         * @returns {{ bytes: Uint8Array, fixed: number } | null}
+         */
+        const valueInformation = (stored, kind)=>{
+            // Strings answered wide, as a W read answers them.
+            const value = STRING_TYPES.has(stored.type)
+                ? { ...stored, data: widened(stored.data) } : stored;
+            const name = utf16(value.name);
+            /** @type {Record<number, { fixed: number, nameAt: number, dataAt: number }>} */
+            const shapes = {
+                [KEY_VALUE_BASIC_INFORMATION]: { fixed: 12, nameAt: 12, dataAt: -1 },
+                [KEY_VALUE_FULL_INFORMATION]: { fixed: 20, nameAt: 20,
+                    dataAt: (20 + name.length + 3) & ~3 },
+                [KEY_VALUE_PARTIAL_INFORMATION]: { fixed: 12, nameAt: -1, dataAt: 12 },
+            };
+            const shape = shapes[kind];
+            if (!shape)
+            {
+                return null;
+            }
+            const size = shape.dataAt >= 0 ? shape.dataAt + value.data.length
+                : shape.nameAt + name.length;
+            const bytes = new Uint8Array(size);
+            const view = new DataView(bytes.buffer);
+            view.setUint32(4, value.type, true);
+            if (kind === KEY_VALUE_PARTIAL_INFORMATION)
+            {
+                view.setUint32(8, value.data.length, true);
+            }
+            else if (kind === KEY_VALUE_FULL_INFORMATION)
+            {
+                view.setUint32(8, shape.dataAt, true);
+                view.setUint32(12, value.data.length, true);
+                view.setUint32(16, name.length, true);
+            }
+            else
+            {
+                view.setUint32(8, name.length, true);
+            }
+            if (shape.nameAt >= 0)
+            {
+                bytes.set(name, shape.nameAt);
+            }
+            if (shape.dataAt >= 0)
+            {
+                bytes.set(value.data, shape.dataAt);
+            }
+            return { bytes, fixed: shape.fixed };
+        };
+
+        /**
+         * A key's information in one of the three classes, or null for another
+         * class. No time is kept per key, so its last write reads as zero.
+         *
+         * @param {any} key @param {string} name @param {number} kind
+         * @returns {{ bytes: Uint8Array, fixed: number } | null}
+         */
+        const keyInformation = (key, name, kind)=>{
+            const text = utf16(name);
+            if (kind === KEY_BASIC_INFORMATION || kind === KEY_NODE_INFORMATION)
+            {
+                const nameAt = kind === KEY_BASIC_INFORMATION ? 16 : 24;
+                const bytes = new Uint8Array(nameAt + text.length);
+                const view = new DataView(bytes.buffer);
+                if (kind === KEY_NODE_INFORMATION)
+                {
+                    view.setUint32(12, NO_CLASS, true);
+                }
+                view.setUint32(nameAt - 4, text.length, true);
+                bytes.set(text, nameAt);
+                return { bytes, fixed: nameAt };
+            }
+            if (kind !== KEY_FULL_INFORMATION)
+            {
+                return null;
+            }
+            const subkeys = hive.subkeys(key);
+            const values = hive.values(key);
+            const bytes = new Uint8Array(44);
+            const view = new DataView(bytes.buffer);
+            view.setUint32(12, NO_CLASS, true);
+            view.setUint32(20, subkeys.length, true);
+            view.setUint32(24, Math.max(0, ...subkeys.map(one=>one.length * 2)), true);
+            view.setUint32(32, values.length, true);
+            view.setUint32(36, Math.max(0, ...values.map(one=>one.name.length * 2)), true);
+            view.setUint32(40, Math.max(0, ...values.map(one=>one.data.length)), true);
+            return { bytes, fixed: 44 };
+        };
+
+        /**
+         * Writes an answer as far as the buffer holds it: the length it needs
+         * always, nothing when not even the fixed part fits.
+         *
+         * @param {{ bytes: Uint8Array, fixed: number } | null} answer
+         * @param {number} buffer @param {number} length @param {number} needed
+         */
+        const deliver = (answer, buffer, length, needed)=>{
+            if (!answer)
+            {
+                return STATUS.INVALID_PARAMETER;
+            }
+            writeDwordIf(needed >>> 0, answer.bytes.length);
+            if ((length >>> 0) < answer.fixed)
+            {
+                return STATUS.BUFFER_TOO_SMALL;
+            }
+            if ((buffer >>> 0) === 0)
+            {
+                return STATUS.ACCESS_VIOLATION;
+            }
+            host.writeMemory(buffer >>> 0,
+                answer.bytes.subarray(0, Math.min(length >>> 0, answer.bytes.length)));
+            return (length >>> 0) < answer.bytes.length ? STATUS.BUFFER_OVERFLOW : STATUS.SUCCESS;
+        };
+
+        /**
+         * A key a native call names by handle: a predefined root is no handle
+         * to these calls, as on Windows.
+         *
+         * @param {number} handle
+         */
+        const heldKey = handle=>(hive.root(handle >>> 0) ? null
+            : handles.get(handle >>> 0) ?? null);
+
+        /** @param {(key: any, args: number[]) => number} handler */
+        const onHeld = handler=>(/** @type {number[]} */ args)=>{
+            const key = heldKey(args[0]);
+            return key ? handler(key, args) : STATUS.INVALID_HANDLE;
+        };
+
+        /**
+         * @param {number} out @param {number} attributes @param {number} disposition
+         * @param {boolean} create
+         */
+        const openOrCreate = (out, attributes, disposition, create)=>{
+            if ((out >>> 0) === 0 || (attributes >>> 0) === 0)
+            {
+                return STATUS.ACCESS_VIOLATION;
+            }
+            const named = namedBy(attributes >>> 0);
+            if (typeof named === 'number')
+            {
+                return named;
+            }
+            const found = hive.open(named.base, named.path);
+            if (!found && !create)
+            {
+                return STATUS.OBJECT_NAME_NOT_FOUND;
+            }
+            const parts = named.path.split('\\').filter(Boolean);
+            // One level at a time, as NT makes keys: a missing parent is not made.
+            if (!found && parts.length > 1 && !hive.open(named.base, parts.slice(0, -1).join('\\')))
+            {
+                return STATUS.OBJECT_NAME_NOT_FOUND;
+            }
+            const made = found ? { key: found, created: false }
+                : hive.create(named.base, named.path);
+            writeDword(out >>> 0, allocate(made.key));
+            writeDwordIf(disposition >>> 0,
+                made.created ? REG_CREATED_NEW_KEY : REG_OPENED_EXISTING_KEY);
+            return STATUS.SUCCESS;
+        };
+
+        return {
+            entries: {
+                /** NTSTATUS NtOpenKey(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES) */
+                NtOpenKey: {
+                    argBytes: 12,
+                    /** @param {number[]} args */
+                    handler: ([out, , attributes])=>openOrCreate(out, attributes, 0, false),
+                },
+                /**
+                 * NTSTATUS NtCreateKey(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
+                 *     ULONG TitleIndex, PUNICODE_STRING Class, ULONG CreateOptions,
+                 *     PULONG Disposition)
+                 */
+                NtCreateKey: {
+                    argBytes: 28,
+                    /** @param {number[]} args */
+                    handler: ([out, , attributes, , , , disposition])=>
+                        openOrCreate(out, attributes, disposition, true),
+                },
+                /**
+                 * NTSTATUS NtDeleteKey(HANDLE)
+                 *
+                 * The key the handle names goes, unless it has subkeys; the
+                 * handle stays open on the key that is no longer there.
+                 */
+                NtDeleteKey: {
+                    argBytes: 4,
+                    handler: onHeld(key=>{
+                        const place = placeOf(key);
+                        const result = place ? hive.remove(place.parent, place.name) : 'missing';
+                        if (result === 'deleted')
+                        {
+                            return STATUS.SUCCESS;
+                        }
+                        return result === 'has-subkeys' ? STATUS.CANNOT_DELETE
+                            : STATUS.ACCESS_DENIED;
+                    }),
+                },
+                /**
+                 * NTSTATUS NtSetValueKey(HANDLE, PUNICODE_STRING ValueName,
+                 *     ULONG TitleIndex, ULONG Type, PVOID Data, ULONG DataSize)
+                 */
+                NtSetValueKey: {
+                    argBytes: 24,
+                    handler: onHeld((key, [, name, , type, data, size])=>{
+                        const bytes = (size >>> 0) === 0 ? new Uint8Array(0)
+                            : host.readMemory(data >>> 0, size >>> 0).slice();
+                        // The hive keeps a string in the ANSI page, as a W call stores it.
+                        hive.setValue(key, counted(name >>> 0), type >>> 0,
+                            STRING_TYPES.has(type >>> 0) ? narrowed(bytes) : bytes);
+                        return STATUS.SUCCESS;
+                    }),
+                },
+                /** NTSTATUS NtDeleteValueKey(HANDLE, PUNICODE_STRING ValueName) */
+                NtDeleteValueKey: {
+                    argBytes: 8,
+                    handler: onHeld((key, [, name])=>(hive.deleteValue(key, counted(name >>> 0))
+                        ? STATUS.SUCCESS : STATUS.OBJECT_NAME_NOT_FOUND)),
+                },
+                /**
+                 * NTSTATUS NtQueryValueKey(HANDLE, PUNICODE_STRING ValueName,
+                 *     KEY_VALUE_INFORMATION_CLASS, PVOID, ULONG Length, PULONG ResultLength)
+                 */
+                NtQueryValueKey: {
+                    argBytes: 24,
+                    handler: onHeld((key, [, name, kind, buffer, length, needed])=>{
+                        const value = hive.getValue(key, counted(name >>> 0));
+                        return value ? deliver(valueInformation(value, kind >>> 0), buffer, length,
+                            needed) : STATUS.OBJECT_NAME_NOT_FOUND;
+                    }),
+                },
+                /**
+                 * NTSTATUS NtEnumerateValueKey(HANDLE, ULONG Index,
+                 *     KEY_VALUE_INFORMATION_CLASS, PVOID, ULONG Length, PULONG ResultLength)
+                 */
+                NtEnumerateValueKey: {
+                    argBytes: 24,
+                    handler: onHeld((key, [, index, kind, buffer, length, needed])=>{
+                        const value = hive.values(key)[index >>> 0];
+                        return value ? deliver(valueInformation(value, kind >>> 0), buffer, length,
+                            needed) : STATUS.NO_MORE_ENTRIES;
+                    }),
+                },
+                /**
+                 * NTSTATUS NtQueryKey(HANDLE, KEY_INFORMATION_CLASS, PVOID,
+                 *     ULONG Length, PULONG ResultLength)
+                 */
+                NtQueryKey: {
+                    argBytes: 20,
+                    handler: onHeld((key, [, kind, buffer, length, needed])=>
+                        deliver(keyInformation(key, placeOf(key)?.name ?? '', kind >>> 0),
+                            buffer, length, needed)),
+                },
+                /**
+                 * NTSTATUS NtEnumerateKey(HANDLE, ULONG Index, KEY_INFORMATION_CLASS,
+                 *     PVOID, ULONG Length, PULONG ResultLength)
+                 */
+                NtEnumerateKey: {
+                    argBytes: 24,
+                    handler: onHeld((key, [, index, kind, buffer, length, needed])=>{
+                        const name = hive.subkeys(key)[index >>> 0];
+                        const child = name === undefined ? null : hive.open(key, name);
+                        return child ? deliver(keyInformation(child, name, kind >>> 0), buffer,
+                            length, needed) : STATUS.NO_MORE_ENTRIES;
+                    }),
+                },
+            },
+            /**
+             * NtClose of a key: closed as RegCloseKey closes it. A predefined
+             * root is no handle here; anything else is not this table's.
+             *
+             * @param {number} handle @returns {number | null}
+             */
+            close: handle=>{
+                if (hive.root(handle >>> 0))
+                {
+                    return STATUS.INVALID_HANDLE;
+                }
+                if (!handles.has(handle >>> 0))
+                {
+                    return null;
+                }
+                return closeKey(handle >>> 0) === ERROR_SUCCESS ? STATUS.SUCCESS
+                    : STATUS.INVALID_HANDLE;
+            },
+        };
     };
 
     /**
@@ -1462,32 +1914,7 @@ export function createRegistryFunctions(host){
         RegCloseKey: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>{
-                const key = handle >>> 0;
-                if (hive.root(key))
-                {
-                    return ERROR_SUCCESS;
-                }
-                const held = handles.get(key);
-                if (!held || !handles.delete(key))
-                {
-                    return ERROR_INVALID_HANDLE;
-                }
-                const file = appKeys.get(key);
-                if (file !== undefined)
-                {
-                    appKeys.delete(key);
-                    writeHive(held, file, true);
-                }
-                // A key closed while a change is awaited on it signals the wait.
-                for (const watcher of watchers.filter(one=>one.handle === key))
-                {
-                    watchers.splice(watchers.indexOf(watcher), 1);
-                    watcher.settle();
-                }
-                freed.push(key);
-                return ERROR_SUCCESS;
-            },
+            handler: ([handle])=>closeKey(handle >>> 0),
         },
 
         /**
@@ -1828,6 +2255,49 @@ export function createRegistryFunctions(host){
             },
         },
 
+        /**
+         * LSTATUS RegRenameKey(HKEY hKey, LPCWSTR lpSubKeyName, LPCWSTR lpNewKeyName)
+         *
+         * The key, or a subkey of it, under a new name beside its siblings,
+         * its values and subkeys with it. A name another sibling has is
+         * refused, and so is a key of the classes root.
+         */
+        RegRenameKey: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, subKey, newName])=>{
+                if ((subKey >>> 0) === 0 && (newName >>> 0) === 0)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                const key = keyOf(handle >>> 0);
+                if (!key)
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                const named = (subKey >>> 0) === 0 ? key
+                    : hive.open(key, readWideText(subKey >>> 0) ?? '');
+                if (!named)
+                {
+                    return ERROR_FILE_NOT_FOUND;
+                }
+                const to = (newName >>> 0) === 0 ? null : readWideText(newName >>> 0);
+                if (!to || to.includes('\\'))
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                const place = placeOf(named);
+                if (!place || 'view' in named)
+                {
+                    return ERROR_ACCESS_DENIED;
+                }
+                const result = hive.rename(place.parent, place.name, to);
+                return result === 'renamed' ? ERROR_SUCCESS
+                    : result === 'taken' ? ERROR_ALREADY_EXISTS : ERROR_FILE_NOT_FOUND;
+            },
+        },
+
         [UNLOAD_KEY]: unload,
+        [REGISTRY_NATIVES]: nativeRegistry(),
     };
 }

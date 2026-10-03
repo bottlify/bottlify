@@ -301,7 +301,7 @@ export function createDispatcher(deps){
  * deoptimisation for the next -- so each later machine of a process paid for
  * much of its run what the first paid for a moment. A method is one function
  * for every machine, optimised once; what differs between machines is data
- * it reads off the instance (`docs/core/bridge.md`).
+ * it reads off the instance.
  */
 class Dispatcher {
     /** @param {Parameters<typeof createDispatcher>[0]} deps */

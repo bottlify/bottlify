@@ -97,6 +97,7 @@ const FIXED_FILE_VERSION_LS = 12;
  *           itself, with no file behind it. Absent, it answers for none, and
  *           such a library reads as a file that is not there.
  * @property {import('../kernel32/versions.js').WindowsVersion} [windows]
+ * @property {string} [directx]  The DirectX version a DirectX library's file names.
  *           The Windows the machine is, whose version its own libraries carry
  *           -- the real one, even where GetVersionEx is told to answer an older
  *           one, since a file's version is the file's. Absent, the default.
@@ -173,13 +174,17 @@ function buildNode(key, value, children = []){
  *
  * @param {string} name  The file name, extension included.
  * @param {import('../kernel32/versions.js').WindowsVersion} [windows]  The system.
+ * @param {string} [directx]  The DirectX version the bottle reports.
  * @returns {Uint8Array}
  */
-export function systemVersionResource(name, windows = windowsVersion()){
+export function systemVersionResource(
+    name, windows = windowsVersion(), directx = DIRECTX_VERSION,
+)
+{
     const directX = DIRECTX_LIBRARY.test(name);
     const system = [windows.major, windows.minor, windows.build, 0];
-    const quad = directX ? DIRECTX_VERSION.split('.').map(part=>Number(part)) : system;
-    const spelled = directX ? DIRECTX_VERSION : system.join('.');
+    const quad = directX ? directx.split('.').map(part=>Number(part)) : system;
+    const spelled = directX ? directx : system.join('.');
     const fixed = new Uint8Array(FIXED_FILE_INFO_SIZE);
     const view = new DataView(fixed.buffer);
     const most = (quad[0] << 16 | quad[1]) >>> 0;
@@ -371,7 +376,7 @@ export function createVersionFunctions(host){
         const library = exists ? null : systemName(path);
         if (library !== null)
         {
-            return systemVersionResource(library, host.windows);
+            return systemVersionResource(library, host.windows, host.directx);
         }
         host.setLastError(exists ? ERROR_RESOURCE_DATA_NOT_FOUND : ERROR_FILE_NOT_FOUND);
         return null;

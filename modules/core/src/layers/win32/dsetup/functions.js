@@ -29,14 +29,18 @@ export const DSETUPERR_SUCCESS = 0;
  * other, each the decimal number the dotted form spells, as a file version's
  * words are -- `4.09.00.0904` is 0x00040009 and 0x00000388.
  */
-export const DIRECTX_VERSION_WORDS = (()=>{
-    const [major, minor, release, build] = DIRECTX_VERSION.split('.').map(Number);
+export const versionWords = (version = DIRECTX_VERSION)=>{
+    const [major, minor, release, build] = version.split('.').map(Number);
     return { version: (major << 16 | minor) >>> 0, revision: (release << 16 | build) >>> 0 };
-})();
+};
+
+/** The default release's words. */
+export const DIRECTX_VERSION_WORDS = versionWords();
 
 /**
  * @typedef {Object} DsetupHost
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {string} [directx]  The version the bottle reports; absent, 9.0c.
  */
 
 /** @param {number} value */
@@ -47,6 +51,7 @@ const dword = value=>Uint8Array.of(value & 0xff, value >>> 8 & 0xff,
  * @param {DsetupHost} host
  */
 export function createDsetupFunctions(host){
+    const words = versionWords(host.directx);
     /**
      * INT DirectXSetupA(HWND hWnd, LPSTR lpszRootPath, DWORD dwFlags)
      * INT DirectXSetupW(HWND hWnd, LPWSTR lpszRootPath, DWORD dwFlags)
@@ -74,11 +79,11 @@ export function createDsetupFunctions(host){
             handler: ([version, revision])=>{
                 if ((version >>> 0) !== 0)
                 {
-                    host.writeMemory(version >>> 0, dword(DIRECTX_VERSION_WORDS.version));
+                    host.writeMemory(version >>> 0, dword(words.version));
                 }
                 if ((revision >>> 0) !== 0)
                 {
-                    host.writeMemory(revision >>> 0, dword(DIRECTX_VERSION_WORDS.revision));
+                    host.writeMemory(revision >>> 0, dword(words.revision));
                 }
                 return 1;
             },

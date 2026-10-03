@@ -219,7 +219,7 @@ export function profile(layout){
  * The `cpu` layer's always-on sampler, named against the memory layer's
  * module layout the same way a bridge call's own `from` address is
  * (`result.bridge.recent`'s `fromName`). The engine reports raw address
- * buckets on purpose (`docs/core/cpu.md`'s "Sampling") and leaves this
+ * buckets on purpose and leaves this
  * resolving step to whoever reads them.
  *
  * @param {{ slices: number, overflow: number, top: { address: number,
@@ -1396,7 +1396,7 @@ export function createHarness(canvas, how = {}){
                 // boot, the way `jit.published` above already is -- a caller
                 // wanting one window's own top list takes two readings a
                 // window apart and deltas them by bucket key, the overlay's
-                // own pattern (`docs/core/cpu.md`'s "Sampling").
+                // own pattern.
                 samples: layers.cpu?.samples ?? null,
                 // Which guest address belongs to which module, so a driver
                 // can name `jit.published`'s own addresses without waiting

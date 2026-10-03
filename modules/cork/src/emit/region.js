@@ -734,9 +734,13 @@ export class RegionEmitter {
         this.planned = planned;
         /** By ret block: the return addresses it jumps to rather than leaves by. */
         this.returns = planned?.returns ?? inlineReturns(region);
-        /** A call out of this region is a wasm call it goes on after: no MMX state
-         * to carry across one (the x87 stack goes through the state block). */
+        /** A call out of this region is a wasm call it goes on after: no x87 or MMX
+         * state to carry across one. A region with x87 calls by leaving again:
+         * across a wasm call its float values came back wrong to a program's
+         * own math, which raised for an invalid operation where a call that
+         * leaves gives the right ones. */
         this.callReturn = context.callReturn === true
+            && !region.blocks.some(block=>block.instructions.some(isX87))
             && !regionHasMmx(region, context.leaveOut ?? new Set());
         /** Whether the block's call returned here and went on. */
         this.returned = false;

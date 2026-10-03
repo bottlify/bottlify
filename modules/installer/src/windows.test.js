@@ -6,8 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { WINDOWS_CHOICES, windowsChoice } from './windows.js';
+import { GRAPHICS_CHOICES, WINDOWS_CHOICES, graphicsChoice, windowsChoice } from './windows.js';
 import { WINDOWS_VERSIONS } from '../../core/src/layers/win32/kernel32/versions.js';
+import { GRAPHICS_CHOICES as ENGINE_GRAPHICS } from '../../core/src/layers/graphics/choice.js';
 
 test('the choices are the engine\'s own four', ()=>{
     // A name this side accepted and the engine refused would make a bottle
@@ -27,6 +28,18 @@ test('absent is the engine\'s default, and anything but the four is refused by n
     {
         assert.throws(()=>windowsChoice(wrong),
             /unknown Windows version .*: the choices are win2000, winxp, win7, win10/,
+            JSON.stringify(wrong));
+    }
+});
+
+test('a bottle\'s graphics is one of the engine\'s five choices, or none', ()=>{
+    assert.deepEqual([...GRAPHICS_CHOICES], Object.keys(ENGINE_GRAPHICS));
+    assert.equal(graphicsChoice(undefined), undefined);
+    assert.equal(graphicsChoice('directx8'), 'directx8');
+    for (const wrong of ['glide', 'd3d8', 'DirectX8', '', 8])
+    {
+        assert.throws(()=>graphicsChoice(wrong),
+            /unknown graphics choice .*: the choices are directx7, directx8, directx9, directx10, opengl/,
             JSON.stringify(wrong));
     }
 });
