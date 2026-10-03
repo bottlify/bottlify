@@ -1463,7 +1463,9 @@ export function createPropertySheetFunctions(host){
             },
         }), result=>{
             free(msg);
-            return result;
+            // Left by a WM_QUIT rather than ended, the sheet answers whether a
+            // page's changes were saved, as it would have.
+            return sheet.ended ? result : sheet.applied ? 1 : 0;
         });
     };
 

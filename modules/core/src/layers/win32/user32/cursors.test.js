@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { dibToBgra, groupImageId, planesToBgra } from './cursors.js';
+import { ddbToBgra, dibToBgra, groupImageId, planesToBgra } from './cursors.js';
 
 /** The four pixels of the two masks: black, white, the screen, the screen inverted. */
 const BLACK = [0, 0, 0, 255];
@@ -43,6 +43,21 @@ test('CreateCursor\'s planes: AND keeps the screen, XOR colours or inverts it', 
     const xor = Uint8Array.of(0b01010000, 0, 0b10000000, 0);
     assert.deepEqual(pixels(planesToBgra(4, 2, and, xor)),
         [BLACK, WHITE, CLEAR, INVERTED, INVERTED, BLACK, BLACK, BLACK]);
+});
+
+test('CreateIcon\'s colour bitmap is device-dependent, its rows padded to a word: 32, 16 and '
+    + '4 bits', ()=>{
+    // Two pixels a row: the first shows its colour, the second is masked away.
+    const and = Uint8Array.of(0b01000000, 0);
+    const deep = Uint8Array.of(10, 20, 30, 0, 40, 50, 60, 0);
+    assert.deepEqual([...ddbToBgra(2, 1, 32, and, deep)], [10, 20, 30, 255, 0, 0, 0, 255],
+        'blue, green, red, and the masked pixel inverts where its colour is not black');
+    // 5-5-5: red 31, green 0, blue 0 is 0x7c00; the row is four bytes already.
+    const high = Uint8Array.of(0x00, 0x7c, 0, 0);
+    assert.deepEqual([...ddbToBgra(2, 1, 16, and, high)].slice(0, 4), [0, 0, 248, 255]);
+    // Four bits: colour 12 is blue in the sixteen, 0 black; one byte, padded to two.
+    const low = Uint8Array.of(0xc0, 0);
+    assert.deepEqual([...ddbToBgra(2, 1, 4, and, low)], [255, 0, 0, 255, 0, 0, 0, 0]);
 });
 
 test('a monochrome image is read bottom row first through its two-colour table', ()=>{

@@ -29,7 +29,7 @@ import { characterOf, codeForScan, codeForVk, keyFor, keyForCharacter } from './
 import { REFRESH_HZ, displayModes } from './display.js';
 import {
     BORDER, CAPTION_HEIGHT, DIALOG_FRAME, MENU_HEIGHT, SCROLLBAR, SIZE_FRAME, TOOL_CAPTION_HEIGHT,
-    WS_CHILD, WS_VISIBLE, frameOf,
+    WS_CAPTION, WS_CHILD, WS_THICKFRAME, WS_VISIBLE, frameOf,
 } from './frame.js';
 import {
     DEVMODEA,
@@ -51,7 +51,7 @@ import {
 } from './structs.js';
 import { readText, textBytes } from './unicode.js';
 import { LOGFONTA, LOGFONTW_SIZE, logFontBytes } from '../gdi32/structs.js';
-import { threadIdOf } from './messages.js';
+import { ANY_WINDOW, threadIdOf } from './messages.js';
 import { VIDEO_ADAPTER_NAME } from '../devices.js';
 
 /** GetSystemMetrics indices this build has a real answer for. */
@@ -61,6 +61,7 @@ const VA_LIST_SLOTS = 64;
 /** The longest path a file name argument is read to. */
 const MAX_PATH = 260;
 
+const SWP_NOSIZE = 0x0001;
 const SWP_NOZORDER = 0x0004;
 const SWP_NOACTIVATE = 0x0010;
 
@@ -407,6 +408,10 @@ const GCL_HICONSM = -34;
 /** The style bit EnableWindow sets, and the only one it touches. */
 const WS_DISABLED = 0x08000000;
 const WS_MINIMIZE = 0x20000000;
+/** The metrics SPI_SETMINIMIZEDMETRICS and ArrangeIconicWindows go by. */
+const SM_ARRANGE = 56;
+const SM_CXMINIMIZED = 57;
+const SM_CYMINIMIZED = 58;
 const WS_POPUP = 0x80000000;
 /** What the region calls answer: no region, or one rectangle. */
 const REGION_ERROR = 0;
@@ -761,7 +766,6 @@ export function createSystemFunctions({ host, live, windows, classes }){
      * @param {number[]} args  hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags.
      */
     const setWindowPos = ([hwnd, after, x, y, cx, cy, flags])=>{
-        const SWP_NOSIZE = 0x0001;
         const SWP_NOMOVE = 0x0002;
         const SWP_SHOWWINDOW = 0x0040;
         const SWP_HIDEWINDOW = 0x0080;
@@ -1561,13 +1565,24 @@ export function createSystemFunctions({ host, live, windows, classes }){
     };
 
     /**
+     * MINIMIZEDMETRICS past its cbSize, as SPI_SETMINIMIZEDMETRICS last set
+     * it: the width of a minimised window, the gaps between them, and where
+     * ArrangeIconicWindows starts and which way it goes.
+     */
+    let minimizedMetrics = [FIXED_METRICS.get(SM_CXMINIMIZED) ?? 0, 0, 0,
+        FIXED_METRICS.get(SM_ARRANGE) ?? 0];
+
+    /**
      * SystemParametersInfo, both spellings: the work area, the hover
-     * parameters TrackMouseEvent works by and the non-client metrics, and a
-     * refusal for everything else.
+     * parameters TrackMouseEvent works by, the non-client and minimised
+     * windows' metrics, and a refusal for everything else.
      *
      * @param {number} action @param {number} value @param {boolean} wide
      */
     const systemParameter = (action, value, wide)=>{
+        const SPI_GETMINIMIZEDMETRICS = 0x002b;
+        const SPI_SETMINIMIZEDMETRICS = 0x002c;
+        const MINIMIZEDMETRICS_SIZE = 20;
         const SPI_GETNONCLIENTMETRICS = 0x0029;
         const SPI_GETWORKAREA = 0x0030;
         const SPI_GETMOUSEHOVERWIDTH = 0x0062;
@@ -1591,10 +1606,134 @@ export function createSystemFunctions({ host, live, windows, classes }){
             case SPI_GETMOUSEHOVERTIME:
                 writeU32s(host, value, [HOVER_TIME]);
                 return 1;
+            case SPI_GETMINIMIZEDMETRICS:
+            case SPI_SETMINIMIZEDMETRICS: {
+                const fields = new DataView(host.readMemory(value >>> 0,
+                    MINIMIZEDMETRICS_SIZE).slice().buffer);
+                if (fields.getUint32(0, true) !== MINIMIZEDMETRICS_SIZE)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                if ((action >>> 0) === SPI_GETMINIMIZEDMETRICS)
+                {
+                    writeU32s(host, (value >>> 0) + 4, minimizedMetrics);
+                }
+                else
+                {
+                    minimizedMetrics = [4, 8, 12, 16].map(at=>fields.getInt32(at, true));
+                }
+                return 1;
+            }
             default:
                 return 0;
         }
     };
+
+    /**
+     * ArrangeIconicWindows: the minimised children of a window -- top-level
+     * windows, for the desktop -- lined up in its client area as the
+     * minimised metrics say: from the corner they name, the way they name,
+     * a row or column at a time, each the size of a minimised window apart
+     * and the gaps between. Answers how many there were.
+     *
+     * @param {number} hwnd
+     */
+    const arrangeIconic = hwnd=>{
+        const ARW_STARTRIGHT = 1;
+        const ARW_STARTTOP = 2;
+        const ARW_UP = 4;
+        const parent = live(hwnd);
+        if (!parent)
+        {
+            return 0;
+        }
+        const desktop = host.isDesktop?.(parent) === true;
+        const icons = [...windows.values()].filter(record=>!record.destroyed
+            && (record.style & WS_MINIMIZE) !== 0
+            && (desktop ? record.parent === 0 : record.parent === parent.hwnd));
+        const size = host.geometry.clientSize(parent);
+        const [, horzGap, vertGap, arrange] = minimizedMetrics;
+        const width = metric(SM_CXMINIMIZED);
+        const height = metric(SM_CYMINIMIZED);
+        const right = (arrange & ARW_STARTRIGHT) !== 0;
+        const top = (arrange & ARW_STARTTOP) !== 0;
+        const across = width + horzGap;
+        const down = height + vertGap;
+        // The corner of the first icon, and how far the next one is.
+        const startX = right ? size.width - horzGap - width : horzGap;
+        const startY = top ? vertGap : size.height - vertGap - height;
+        let x = startX;
+        let y = startY;
+        for (const icon of icons)
+        {
+            setWindowPos([icon.hwnd, 0, x, y, 0, 0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]);
+            if ((arrange & ARW_UP) === 0)
+            {
+                x += right ? -across : across;
+                if (right ? x < 0 : x + width > size.width)
+                {
+                    x = startX;
+                    y += top ? down : -down;
+                }
+            }
+            else
+            {
+                y += top ? down : -down;
+                if (top ? y + height > size.height : y < 0)
+                {
+                    y = startY;
+                    x += right ? -across : across;
+                }
+            }
+        }
+        return icons.length;
+    };
+
+    /**
+     * The windows CascadeWindows and TileWindows arrange: those of the list
+     * given, or else the parent's children from the top of their stacking
+     * down, that are its visible children with a caption of their own --
+     * and enabled, with MDITILE_SKIPDISABLED -- and the area they go in: the
+     * rectangle given, in the parent's client coordinates, or its client area.
+     *
+     * @param {number} parent @param {number} flags @param {number} rect
+     * @param {number} count @param {number} list
+     * @returns {{ windows: any[], area: { left: number, top: number, right: number,
+     *     bottom: number } } | null}
+     */
+    const arrangement = (parent, flags, rect, count, list)=>{
+        const MDITILE_SKIPDISABLED = 0x0002;
+        const record = live(parent);
+        if (!record)
+        {
+            return null;
+        }
+        const given = (count >>> 0) > 0 && (list >>> 0) !== 0
+            ? Array.from({ length: count >>> 0 }, (_, at)=>live(readU32((list >>> 0) + at * 4)))
+            : ordered();
+        const size = host.geometry.clientSize(record);
+        return {
+            windows: given.filter(child=>child && child.parent === record.hwnd
+                && (child.style & WS_CHILD) !== 0 && (child.style & WS_VISIBLE) !== 0
+                && (child.style & WS_CAPTION) === WS_CAPTION
+                && ((flags & MDITILE_SKIPDISABLED) === 0 || (child.style & WS_DISABLED) === 0)),
+            area: (rect >>> 0) !== 0 ? readRect(host, rect >>> 0)
+                : { left: 0, top: 0, right: size.width, bottom: size.height },
+        };
+    };
+
+    /**
+     * Places one arranged window: a window without a sizing frame keeps its
+     * size and only moves.
+     *
+     * @param {any} record @param {number} x @param {number} y
+     * @param {number} width @param {number} height
+     */
+    const arrangeOne = (record, x, y, width, height)=>setWindowPos([record.hwnd, 0, x, y,
+        width, height, SWP_NOZORDER | SWP_NOACTIVATE
+            | ((record.style & WS_THICKFRAME) !== 0 ? 0 : SWP_NOSIZE)]);
 
     /** @param {number} index */
     const metric = index=>{
@@ -2404,6 +2543,97 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * without moving by setting them, and honouring the arguments anyway
          * would put the window somewhere it never asked for.
          */
+        /**
+         * WORD CascadeWindows(HWND hwndParent, UINT wHow, const RECT *lpRect,
+         *     UINT cKids, const HWND *lpKids)
+         *
+         * From the bottom of the stacking up, or the list's last first, each
+         * window a caption and a frame down and right of the one before --
+         * back to the area's edge when it would leave it -- and three
+         * quarters of the area in size, as an MDI client cascades. Answers
+         * how many it placed.
+         */
+        CascadeWindows: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([parent, how, rect, count, list])=>{
+                const found = arrangement(parent, how, rect, count, list);
+                if (!found || found.windows.length === 0)
+                {
+                    return 0;
+                }
+                const { area } = found;
+                const spacing = metric(SM_CYCAPTION) + metric(SM_CYFIXEDFRAME);
+                const width = Math.floor((area.right - area.left) * 3 / 4);
+                const height = Math.floor((area.bottom - area.top) * 3 / 4);
+                let x = area.left;
+                let y = area.top;
+                for (const [at, record] of [...found.windows].reverse().entries())
+                {
+                    if (at > 0)
+                    {
+                        x = x + spacing + width > area.right ? area.left : x + spacing;
+                        y = y + spacing + height > area.bottom ? area.top : y + spacing;
+                    }
+                    arrangeOne(record, x, y, width, height);
+                }
+                return found.windows.length;
+            },
+        },
+
+        /**
+         * WORD TileWindows(HWND hwndParent, UINT wHow, const RECT *lpRect,
+         *     UINT cKids, const HWND *lpKids)
+         *
+         * From the top of the stacking down, or the list's first first, in
+         * columns of equal width filled top to bottom: as many columns as the
+         * square root of the count, rounded up -- down with
+         * MDITILE_HORIZONTAL, for wide windows -- and the last columns a
+         * window longer when they do not share evenly. None is narrower than
+         * a window can be. Answers how many it placed.
+         */
+        TileWindows: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([parent, how, rect, count, list])=>{
+                const MDITILE_HORIZONTAL = 0x0001;
+                const SM_CXMIN = 28;
+                const found = arrangement(parent, how, rect, count, list);
+                if (!found || found.windows.length === 0)
+                {
+                    return 0;
+                }
+                const { area, windows: tiles } = found;
+                const root = Math.sqrt(tiles.length);
+                const columns = (how & MDITILE_HORIZONTAL) !== 0
+                    ? Math.floor(root) : Math.ceil(root);
+                const width = Math.max(Math.floor((area.right - area.left) / columns),
+                    metric(SM_CXMIN));
+                const shorter = Math.floor(tiles.length / columns);
+                const longer = tiles.length % columns;
+                let at = 0;
+                for (let column = 0; column < columns; column++)
+                {
+                    const rows = shorter + (column >= columns - longer ? 1 : 0);
+                    const height = Math.floor((area.bottom - area.top) / rows);
+                    for (let row = 0; row < rows; row++, at++)
+                    {
+                        arrangeOne(tiles[at], area.left + column * Math.floor(
+                            (area.right - area.left) / columns), area.top + row * height, width,
+                        height);
+                    }
+                }
+                return tiles.length;
+            },
+        },
+
+        /** UINT ArrangeIconicWindows(HWND hWnd) */
+        ArrangeIconicWindows: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>arrangeIconic(hwnd),
+        },
+
         SetWindowPos: {
             argBytes: 28,
             /** @param {number[]} args */
@@ -2493,6 +2723,18 @@ export function createSystemFunctions({ host, live, windows, classes }){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([parent, x, y])=>childFromPoint(parent, x, y, 0),
+        },
+
+        /**
+         * HWND RealChildWindowFromPoint(HWND hwndParent, POINT ptParentClientCoords)
+         *
+         * ChildWindowFromPointEx passing over the children that are hidden and
+         * those a point falls through, as a group box's middle does.
+         */
+        RealChildWindowFromPoint: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([parent, x, y])=>childFromPoint(parent, x, y, 0x0001 | 0x0004),
         },
 
         /**
@@ -3982,6 +4224,59 @@ export function createSystemFunctions({ host, live, windows, classes }){
             handler: ()=>{
                 host.releaseCapture();
                 return 1;
+            },
+        },
+
+        /**
+         * BOOL DragDetect(HWND hwnd, POINT pt)
+         *
+         * With the left button down, the mouse is captured and its messages
+         * taken until the button comes up -- no drag -- or it moves out of
+         * the drag rectangle round the point, which is in the window's client
+         * coordinates as the moves' points are, whatever the documentation
+         * says: a drag. With the button up there is nothing to detect.
+         */
+        DragDetect: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hwnd, x, y])=>{
+                const VK_LBUTTON = 0x01;
+                const WM_MOUSEMOVE = 0x0200;
+                const WM_LBUTTONUP = 0x0202;
+                const WM_MOUSELAST = 0x020e;
+                const SM_CXDRAG = 68;
+                const SM_CYDRAG = 69;
+                const record = live(hwnd);
+                if (!record || ((host.keyState?.(VK_LBUTTON) ?? 0) & 0x8000) === 0)
+                {
+                    return 0;
+                }
+                const thread = threadIdOf(host.callerThread?.());
+                const across = metric(SM_CXDRAG);
+                const down = metric(SM_CYDRAG);
+                host.setCapture(record.hwnd);
+                return (async()=>{
+                    for (;;)
+                    {
+                        const entry = host.queue.peek({ hwnd: ANY_WINDOW, first: WM_MOUSEMOVE,
+                            last: WM_MOUSELAST, remove: true, thread });
+                        if (!entry)
+                        {
+                            await host.idle();
+                            continue;
+                        }
+                        const px = (entry.lParam << 16) >> 16;
+                        const py = entry.lParam >> 16;
+                        const out = entry.message === WM_MOUSEMOVE
+                            && (px < (x | 0) - across || px >= (x | 0) + across
+                                || py < (y | 0) - down || py >= (y | 0) + down);
+                        if (out || entry.message === WM_LBUTTONUP)
+                        {
+                            host.releaseCapture();
+                            return out ? 1 : 0;
+                        }
+                    }
+                })();
             },
         },
 

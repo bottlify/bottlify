@@ -28,7 +28,8 @@ import { createDesktopFunctions } from './desktops.js';
 import { createRawInput } from './rawinput.js';
 import { createMdi } from './mdi.js';
 import {
-    WS_CHILD, WS_DISABLED, contains, createGeometry, frameRings, intersect, isEmpty,
+    WS_CHILD, WS_CLIPSIBLINGS, WS_DISABLED, contains, createGeometry, createdStyles, edgeFor,
+    frameRings, intersect, isEmpty,
 } from './frame.js';
 import {
     COLOR_3DDKSHADOW, COLOR_3DFACE, COLOR_3DHILIGHT, COLOR_3DSHADOW, COLOR_BTNTEXT,
@@ -43,6 +44,7 @@ import {
     WNDCLASSA,
     WNDCLASSEXA,
     readMessage,
+    readRect,
     readU32,
     readWindowClass,
     writeMessage,
@@ -288,8 +290,18 @@ const MINIMISING = new Set([2, SW_MINIMIZE, 7]);
 const RESTORING = new Set([1, 9, 10]);
 const WS_MINIMIZE = 0x20000000;
 const WS_POPUP = 0x80000000;
+const WS_EX_MDICHILD = 0x00000040;
+const ERROR_INVALID_MENU_HANDLE = 1401;
+/** What a call answering with a region says of it. */
+const REGION_ERROR = 0;
+const NULLREGION = 1;
+const SIMPLEREGION = 2;
+/** MDICREATESTRUCT: the class, title, owner, place, size, style and lParam, a dword each. */
+const MDICREATESTRUCT_SIZE = 36;
 /** Painted only once the siblings beneath it have been: a label over a picture. */
 const WS_EX_TRANSPARENT = 0x20;
+/** A layered window is one only once CreateWindowEx has shown the CBT hook the window. */
+const WS_EX_LAYERED = 0x00080000;
 /** The ShowWindow commands that leave activation where it is. */
 const SHOW_WITHOUT_ACTIVATING = new Set([SW_HIDE, 4, 6, 7, 8]);
 
@@ -327,10 +339,11 @@ const WAIT_FAILED = 0xffffffff;
 const INFINITE = 0xffffffff;
 
 /**
- * The kernel objects whose signal a poll reads the same for every thread:
- * a mutex is owned by one, a thread and a process are not polled at all.
+ * The kernel objects whose signal a poll reads the same for every thread -- a
+ * thread's is having ended -- where a mutex is owned by one, and a wait on a
+ * process hands the machine to it.
  */
-const POLLED_KINDS = new Set(['event', 'semaphore', 'timer']);
+const POLLED_KINDS = new Set(['event', 'semaphore', 'timer', 'thread']);
 
 /** The parent a message-only window is made with. */
 const HWND_MESSAGE = 0xfffffffd;
@@ -1861,10 +1874,13 @@ export function createWindowFunctions(host){
                 record.id = value >>> 0;
                 return;
             case GWL_STYLE:
-                record.style = value >>> 0;
+                // A top-level window clips its siblings whatever it is given,
+                // and the window edge follows the frame it now has.
+                record.style = (record.parent === 0 ? value | WS_CLIPSIBLINGS : value) >>> 0;
+                record.exStyle = edgeFor(record.style, record.exStyle);
                 return;
             case GWL_EXSTYLE:
-                record.exStyle = value >>> 0;
+                record.exStyle = edgeFor(record.style, value);
                 return;
             case GWL_USERDATA:
                 record.userData = value >>> 0;
@@ -2130,6 +2146,132 @@ export function createWindowFunctions(host){
      *     a caller that is past an await.
      */
     const createWindow = (args, unicode = false, caller = undefined)=>{
+        const child = mdi.childOf(args);
+        if (child?.refused || (!child && (args[0] & WS_EX_MDICHILD) !== 0))
+        {
+            // WS_EX_MDICHILD names a child of an MDI client: anywhere else, or
+            // a popup under MDIS_ALLCHILDSTYLES, it is no window at all.
+            return 0;
+        }
+        return child ? createMdiChild(child, args, unicode, caller)
+            : makeWindowFor(args, unicode, caller);
+    };
+
+    /**
+     * Empties a text buffer the program handed over, answering whether it
+     * could: zero, or an address nothing is mapped at, cannot be written.
+     *
+     * @param {number} out @param {number} width  Of a character, in bytes.
+     */
+    const emptied = (out, width)=>{
+        if ((out >>> 0) === 0)
+        {
+            return false;
+        }
+        try
+        {
+            host.writeMemory(out >>> 0, new Uint8Array(width));
+            return true;
+        }
+        catch {
+            return false;
+        }
+    };
+
+    /**
+     * Scrolls `scrollRect` (or `area`) of a context by dx, dy, clipped to
+     * `clipRect` (or `area`), and answers the update area: the strip the
+     * pixels moved away from, or its bounding rectangle when it turns a
+     * corner.
+     *
+     * @param {number} hdc
+     * @param {{ left: number, top: number, right: number, bottom: number }} area
+     * @param {number} scrollRect @param {number} clipRect
+     * @param {number} dx @param {number} dy
+     * @returns {{ left: number, top: number, right: number, bottom: number }}
+     */
+    const scrollArea = (hdc, area, scrollRect, clipRect, dx, dy)=>{
+        const scroll = (scrollRect >>> 0) === 0 ? area : readRect(host, scrollRect);
+        const clip = (clipRect >>> 0) === 0 ? area
+            : intersect(readRect(host, clipRect), area);
+        const source = intersect(scroll, clip);
+        if (isEmpty(source) || (dx === 0 && dy === 0))
+        {
+            return { left: 0, top: 0, right: 0, bottom: 0 };
+        }
+        if (hdc !== 0)
+        {
+            draw?.scroll?.(hdc, scroll, dx, dy, clip);
+        }
+        const update = { ...source };
+        if (dx === 0)
+        {
+            update.top = dy < 0 ? Math.max(source.top, source.bottom + dy) : source.top;
+            update.bottom = dy < 0 ? source.bottom : Math.min(source.bottom, source.top + dy);
+        }
+        else if (dy === 0)
+        {
+            update.left = dx < 0 ? Math.max(source.left, source.right + dx) : source.left;
+            update.right = dx < 0 ? source.right : Math.min(source.right, source.left + dx);
+        }
+        return update;
+    };
+
+    /**
+     * Hands a scroll's update area back -- into the region and the rectangle
+     * a caller gave -- runs what follows it, and answers its kind of region.
+     *
+     * @param {{ left: number, top: number, right: number, bottom: number }} update
+     * @param {number} region @param {number} updateRect
+     * @param {() => void} then
+     */
+    const finishScroll = (update, region, updateRect, then)=>{
+        if ((updateRect >>> 0) !== 0)
+        {
+            writeU32s(host, updateRect >>> 0, [update.left, update.top, update.right,
+                update.bottom]);
+        }
+        if ((region >>> 0) !== 0)
+        {
+            host.setRegion?.(region >>> 0, update);
+        }
+        then();
+        return isEmpty(update) ? NULLREGION : SIMPLEREGION;
+    };
+
+    /**
+     * An MDI child, however it was asked for: made with the style, place,
+     * size and id its client gives it, its WM_CREATE handed an MDICREATESTRUCT
+     * of what was asked -- in guest memory for as long as the window is being
+     * made -- and then the client's, activated when it is shown.
+     *
+     * @param {{ client: number, args: number[], asked: number[] }} child
+     * @param {number[]} args @param {boolean} unicode @param {unknown} [caller]
+     */
+    const createMdiChild = (child, args, unicode, caller)=>{
+        const thread = caller ?? host.callerThread?.();
+        const asked = host.allocate?.(MDICREATESTRUCT_SIZE) ?? 0;
+        if (asked !== 0)
+        {
+            host.writeMemory(asked, new Uint8Array(new Uint32Array(child.asked
+                .map(value=>value >>> 0)).buffer));
+        }
+        const params = asked !== 0 ? asked : args[11] ?? 0;
+        return andThen(makeWindowFor([...child.args.slice(0, 11), params], unicode, thread),
+            made=>{
+                if (asked !== 0)
+                {
+                    host.release?.(asked);
+                }
+                return (made >>> 0) === 0 ? 0
+                    : andThen(mdi.adopt(child.client, made >>> 0, thread), ()=>made);
+            });
+    };
+
+    /**
+     * @param {number[]} args @param {boolean} unicode @param {unknown} [caller]
+     */
+    const makeWindowFor = (args, unicode = false, caller = undefined)=>{
         const [exStyle, className, windowName, style, x, y, width, height, parent, menu, instance]
             = args;
         const cls = classOf(className, unicode);
@@ -2143,13 +2285,26 @@ export function createWindowFunctions(host){
             host.setLastError?.(ERROR_TLW_WITH_WSCHILD);
             return 0;
         }
+        // A child that leaves its place and size to the system is given none:
+        // CW_USEDEFAULT means something only for a top-level window.
+        const isChildStyle = (style & (WS_CHILD | WS_POPUP)) === WS_CHILD;
+        // Any other window's hMenu is a menu, and one that is not makes no window.
+        if (!isChildStyle && (menu >>> 0) !== 0
+            && !(/** @type {any} */ (table)).IsMenu.handler([menu >>> 0]))
+        {
+            host.setLastError?.(ERROR_INVALID_MENU_HANDLE);
+            return 0;
+        }
         const record = makeWindow({
             className: cls.name,
             title: (windowName >>> 0) === 0
                 ? '' : readText(host, windowName, unicode, MAX_WINDOW_TEXT),
             unicode: procedures.has(cls.wndProc) || cls.wndProc === 0
                 ? unicode : cls.unicode === true,
-            style: style >>> 0,
+            // Not yet visible while it is being made: CreateWindowEx shows it
+            // once WM_CREATE has been answered (announce), and a CBT hook or
+            // the window's own procedure reads it hidden until then.
+            style: (style & ~WS_VISIBLE) >>> 0,
             exStyle: exStyle >>> 0,
             // A window made on the desktop is a top-level window, which is
             // what a parent of zero already says.
@@ -2164,8 +2319,8 @@ export function createWindowFunctions(host){
             wndProc: cls.wndProc,
             x: coordinate(x, DEFAULT_ORIGIN),
             y: coordinate(y, DEFAULT_ORIGIN),
-            width: coordinate(width, DEFAULT_WIDTH),
-            height: coordinate(height, DEFAULT_HEIGHT),
+            width: coordinate(width, isChildStyle ? 0 : DEFAULT_WIDTH),
+            height: coordinate(height, isChildStyle ? 0 : DEFAULT_HEIGHT),
             extra: new DataView(new ArrayBuffer(Math.max(cls.windowExtra, 0))),
         });
         // Input has to land somewhere, and what a person is looking at is the
@@ -2208,8 +2363,30 @@ export function createWindowFunctions(host){
         // Kept for a procedure on this side that reads it (the MDI client's
         // CLIENTCREATESTRUCT), which is handed no CREATESTRUCT.
         record.createParams = (params ?? 0) >>> 0;
-        /** The window, activated first when it was created visible. */
-        const activated = ()=>andThen(activateCreated(record, thread), ()=>record.hwnd);
+        // The CBT hook sees the styles asked for, the window edge already
+        // following the frame; the procedure, from WM_NCCREATE on, sees the
+        // window as the window manager has settled it.
+        const asked = edgeFor(style, exStyle);
+        record.exStyle = (asked & ~WS_EX_LAYERED) >>> 0;
+        const settle = ()=>{
+            const created = createdStyles(record.style, record.exStyle | (asked & WS_EX_LAYERED));
+            record.style = created.style;
+            record.exStyle = created.exStyle;
+        };
+        /** Visible now, when it was asked to be: the last thing CreateWindowEx does. */
+        const reveal = ()=>{
+            if ((style & WS_VISIBLE) !== 0 && (record.style & WS_VISIBLE) === 0
+                && live(record.hwnd))
+            {
+                record.style = (record.style | WS_VISIBLE) >>> 0;
+                appear(record);
+            }
+        };
+        /** The window, shown and then activated when it was created visible. */
+        const activated = ()=>{
+            reveal();
+            return andThen(activateCreated(record, thread), ()=>record.hwnd);
+        };
         // A procedure on this side reads no CREATESTRUCT: what it needs of one
         // is on the record.
         const onThisSide = ()=>(record.wndProc === 0 ? activated()
@@ -2227,12 +2404,17 @@ export function createWindowFunctions(host){
         // A CBT hook hears of every window, a system class's too: a framework
         // subclasses a dialog there, and the messages that follow go to it.
         const hooked = hooks.some(hook=>hook.type === WH_CBT && hears(hook, thread));
+        if (!hooked)
+        {
+            settle();
+        }
         if (systemProcedure() && !hooked)
         {
             return onThisSide();
         }
         if (!host.allocate)
         {
+            settle();
             return activated();
         }
         // The CREATESTRUCT, and behind it the two words a CBT hook is handed
@@ -2240,6 +2422,7 @@ export function createWindowFunctions(host){
         const create = host.allocate(CREATESTRUCTA.SIZE + CBT_CREATEWNDA.SIZE);
         if (create === 0)
         {
+            settle();
             return activated();
         }
         const bytes = new Uint8Array(CREATESTRUCTA.SIZE + CBT_CREATEWNDA.SIZE);
@@ -2257,7 +2440,7 @@ export function createWindowFunctions(host){
         put(CREATESTRUCTA.style, style);
         put(CREATESTRUCTA.lpszName, windowName);
         put(CREATESTRUCTA.lpszClass, className);
-        put(CREATESTRUCTA.dwExStyle, exStyle);
+        put(CREATESTRUCTA.dwExStyle, asked);
         put(CREATESTRUCTA.SIZE + CBT_CREATEWNDA.lpcs, create);
         put(CREATESTRUCTA.SIZE + CBT_CREATEWNDA.hwndInsertAfter, 0);
         host.writeMemory(create, bytes);
@@ -2294,6 +2477,7 @@ export function createWindowFunctions(host){
             {
                 return andThen(destroyWindow(record.hwnd, thread, 'none'), ()=>done(0));
             }
+            settle();
             // Left with its own procedure by the hook: created as a system
             // window is.
             if (systemProcedure())
@@ -2326,7 +2510,11 @@ export function createWindowFunctions(host){
                     ()=>andThen(send(record.hwnd, WM_MOVE, 0,
                         (((y & 0xffff) << 16) | (x & 0xffff)) >>> 0, thread),
                     ()=>andThen(send(record.hwnd, WM_SHOWWINDOW, 1, 0, thread),
-                        ()=>andThen(activateCreated(record, thread), ()=>done(record.hwnd)))));
+                        ()=>{
+                            reveal();
+                            return andThen(activateCreated(record, thread),
+                                ()=>done(record.hwnd));
+                        })));
                 })));
         });
     };
@@ -3686,7 +3874,7 @@ export function createWindowFunctions(host){
         host,
         call: (name, args)=>/** @type {any} */ (table)[name].handler(args),
         send,
-        create: (args, thread)=>createWindow(args, false, thread),
+        create: (args, thread, unicode)=>createWindow(args, unicode === true, thread),
         show: (hwnd, cmdShow, thread)=>{
             const record = live(hwnd);
             return record ? showWindow(record, cmdShow, thread) : 0;
@@ -4238,7 +4426,13 @@ export function createWindowFunctions(host){
             topLevel: ()=>[...windows.values()]
                 .filter(record=>!record.destroyed && !isChild(record))
                 .reverse()
-                .map(record=>record.hwnd) }),
+                .map(record=>record.hwnd),
+            windowOf: hwnd=>live(hwnd),
+            toBottom: hwnd=>{
+                const HWND_BOTTOM = 1;
+                (/** @type {any} */ (table)).SetWindowPos.handler([hwnd, HWND_BOTTOM, 0, 0, 0, 0,
+                    0x0001 | 0x0002 | 0x0010]);
+            } }),
         ...createObjectFunctions({ host, live,
             clipboardService: service=>{
                 clipboardAccess = service;
@@ -4279,6 +4473,8 @@ export function createWindowFunctions(host){
                     const record = live(hwnd);
                     return record ? showWindow(record, SW_HIDE) : 0;
                 },
+                enable: (/** @type {number} */ hwnd, /** @type {boolean} */ on)=>
+                    (/** @type {any} */ (table)).EnableWindow.handler([hwnd, on ? 1 : 0]),
                 loadImage: (/** @type {number} */ instance, /** @type {number} */ name,
                     /** @type {number} */ type)=>table.LoadImageW.handler([instance, name, type,
                     0, 0, 0]),
@@ -4531,6 +4727,30 @@ export function createWindowFunctions(host){
             handler: args=>createWindow(args, true),
         },
 
+        /**
+         * HWND CreateMDIWindowA/W(LPCSTR lpClassName, LPCSTR lpWindowName,
+         *     DWORD dwStyle, int X, int Y, int nWidth, int nHeight,
+         *     HWND hWndParent, HINSTANCE hInstance, LPARAM lParam)
+         *
+         * An MDI child of the client named, made as CreateWindowEx makes one
+         * with WS_EX_MDICHILD.
+         */
+        CreateMDIWindowA: {
+            argBytes: 40,
+            /** @param {number[]} args */
+            handler: ([className, title, style, x, y, width, height, parent, instance, lParam])=>
+                createWindow([WS_EX_MDICHILD, className, title, style, x, y, width, height,
+                    parent, 0, instance, lParam]),
+        },
+
+        CreateMDIWindowW: {
+            argBytes: 40,
+            /** @param {number[]} args */
+            handler: ([className, title, style, x, y, width, height, parent, instance, lParam])=>
+                createWindow([WS_EX_MDICHILD, className, title, style, x, y, width, height,
+                    parent, 0, instance, lParam], true),
+        },
+
         /** HWND CreateWindowW(...), without the extended style. */
         CreateWindowW: {
             argBytes: 44,
@@ -4667,23 +4887,28 @@ export function createWindowFunctions(host){
                 text=>table.SetDlgItemTextA.handler([dialog, id, text])),
         },
 
-        /** int GetWindowTextA(HWND hWnd, LPSTR lpString, int nMaxCount) */
+        /**
+         * int GetWindowTextA(HWND hWnd, LPSTR lpString, int nMaxCount)
+         *
+         * WM_GETTEXT, as Windows sends it to a window of the calling process:
+         * a procedure that keeps its own text answers with it, and what the
+         * procedure answers is the length, terminated or not. The buffer is
+         * emptied first, for a procedure that writes nothing; one that cannot
+         * be written is no text, not a fault.
+         */
         GetWindowTextA: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([hwnd, out, maxCount])=>{
                 const record = live(hwnd);
                 const room = maxCount | 0;
-                if (!record || room <= 0)
+                // No buffer is no text, whatever count comes with it.
+                if (!record || room <= 0 || !emptied(out, 1))
                 {
                     return 0;
                 }
-                // nMaxCount counts the terminator, and the returned length does
-                // not: the two numbers differ by one, which is the classic way
-                // to lose the last character of a title.
-                const text = record.title.slice(0, room - 1);
-                writeString(out, text);
-                return text.length;
+                return (/** @type {any} */ (table)).SendMessageA.handler([record.hwnd, WM_GETTEXT,
+                    room, out >>> 0]);
             },
         },
 
@@ -4694,7 +4919,28 @@ export function createWindowFunctions(host){
             handler: ([hwnd, out, maxCount])=>{
                 const record = live(hwnd);
                 const room = maxCount | 0;
-                if (!record || room <= 0)
+                if (!record || room <= 0 || !emptied(out, 2))
+                {
+                    return 0;
+                }
+                return (/** @type {any} */ (table)).SendMessageW.handler([record.hwnd, WM_GETTEXT,
+                    room, out >>> 0]);
+            },
+        },
+
+        /**
+         * int InternalGetWindowText(HWND hWnd, LPWSTR pString, int cchMaxCount)
+         *
+         * The text the window manager keeps for the window, read without a
+         * message.
+         */
+        InternalGetWindowText: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hwnd, out, maxCount])=>{
+                const record = live(hwnd);
+                const room = maxCount | 0;
+                if (!record || room <= 0 || (out >>> 0) === 0)
                 {
                     return 0;
                 }
@@ -5169,7 +5415,7 @@ export function createWindowFunctions(host){
          * that has to be held is a poll of both on every turn the host
          * gives, as a wait on the queue alone always was -- but only for
          * handles a poll can answer for any thread: an event, a semaphore, a
-         * waitable timer. A thread, a process or a mutex, whose answer
+         * waitable timer, a thread. A process or a mutex, whose answer
          * depends on who is waiting or whose wait hands the machine to
          * another process, is kernel32's to hold, and a message arriving
          * while it holds one does not end the wait.
@@ -5377,6 +5623,163 @@ export function createWindowFunctions(host){
                     }
                     return 1;
                 })();
+            },
+        },
+
+        /**
+         * int ScrollWindowEx(HWND hWnd, int dx, int dy, const RECT *prcScroll,
+         *     const RECT *prcClip, HRGN hrgnUpdate, LPRECT prcUpdate, UINT flags)
+         *
+         * The client area's pixels within prcScroll -- the whole client by
+         * default -- moved by dx, dy, only what lands inside prcClip changing.
+         * What they move away from is the update area, handed back in the
+         * region and the rectangle and, with SW_INVALIDATE, left to be
+         * painted (erased first with SW_ERASE); SW_SCROLLCHILDREN takes the
+         * children along. Answers what kind of region the update area is.
+         */
+        ScrollWindowEx: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: ([hwnd, dx, dy, scrollRect, clipRect, region, updateRect, flags])=>{
+                const SW_SCROLLCHILDREN = 0x0001;
+                const SW_INVALIDATE = 0x0002;
+                const SW_ERASE = 0x0004;
+                const record = live(hwnd);
+                if (!record)
+                {
+                    return REGION_ERROR;
+                }
+                const size = geometry.clientSize(record);
+                const client = { left: 0, top: 0, right: size.width, bottom: size.height };
+                const hdc = paint.contextOn(record);
+                const update = scrollArea(hdc, client, scrollRect, clipRect, dx | 0, dy | 0);
+                paint.endPaint(record, hdc);
+                if ((flags & SW_SCROLLCHILDREN) !== 0)
+                {
+                    const scrolled = (scrollRect >>> 0) === 0 ? client : readRect(host, scrollRect);
+                    for (const child of childrenOf(record))
+                    {
+                        if (child.x < scrolled.right && child.x + child.width > scrolled.left
+                            && child.y < scrolled.bottom && child.y + child.height > scrolled.top)
+                        {
+                            (/** @type {any} */ (table)).SetWindowPos.handler([child.hwnd, 0,
+                                child.x + (dx | 0), child.y + (dy | 0), 0, 0,
+                                0x0001 | 0x0004 | 0x0010]);
+                        }
+                    }
+                }
+                return finishScroll(update, region, updateRect, ()=>{
+                    if ((flags & SW_INVALIDATE) !== 0 && !isEmpty(update))
+                    {
+                        paint.invalidate(record, update, (flags & SW_ERASE) !== 0);
+                    }
+                });
+            },
+        },
+
+        /**
+         * BOOL ScrollWindow(HWND hWnd, int XAmount, int YAmount,
+         *     const RECT *lpRect, const RECT *lpClipRect)
+         *
+         * ScrollWindowEx invalidating and erasing what is uncovered, and
+         * taking the children along when the whole client area scrolls.
+         */
+        ScrollWindow: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([hwnd, dx, dy, scrollRect, clipRect])=>
+                ((/** @type {any} */ (table)).ScrollWindowEx.handler([hwnd, dx, dy, scrollRect,
+                    clipRect, 0, 0, 0x0002 | 0x0004 | ((scrollRect >>> 0) === 0 ? 0x0001 : 0)])
+                    !== REGION_ERROR ? 1 : 0),
+        },
+
+        /**
+         * BOOL ScrollDC(HDC hDC, int dx, int dy, const RECT *lprcScroll,
+         *     const RECT *lprcClip, HRGN hrgnUpdate, LPRECT lprcUpdate)
+         *
+         * The same move on a context the caller holds; the update area is
+         * handed back and nothing is invalidated.
+         */
+        ScrollDC: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([hdc, dx, dy, scrollRect, clipRect, region, updateRect])=>{
+                // ponytail: with neither rectangle the context's whole surface
+                // would scroll; a generous bound stands in for its size.
+                const surface = { left: 0, top: 0, right: 4096, bottom: 4096 };
+                const update = scrollArea(hdc >>> 0, surface, scrollRect, clipRect,
+                    dx | 0, dy | 0);
+                finishScroll(update, region, updateRect, ()=>{});
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL EnumThreadWindows(DWORD dwThreadId, WNDENUMPROC lpfn, LPARAM lParam)
+         *
+         * The top-level windows the thread made, topmost first, each handed to
+         * the callback until one answers FALSE, which the call then answers;
+         * TRUE otherwise, a thread with none included. A window made where no
+         * thread was named belongs to the one asking, as
+         * GetWindowThreadProcessId says.
+         */
+        EnumThreadWindows: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([threadId, callback, lParam])=>{
+                const call = host.call;
+                if (!call || (callback >>> 0) === 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const thread = host.callerThread?.();
+                const asking = threadIdOf(thread) ?? 1;
+                const listed = [...windows.values()]
+                    .filter(record=>!record.destroyed && !isChild(record)
+                        && (threadIdOf(record.thread) ?? asking) === (threadId >>> 0))
+                    .reverse()
+                    .map(record=>record.hwnd);
+                return (async()=>{
+                    for (const hwnd of listed)
+                    {
+                        if ((await call(callback >>> 0, [hwnd, lParam >>> 0], thread) | 0) === 0)
+                        {
+                            return 0;
+                        }
+                    }
+                    return 1;
+                })();
+            },
+        },
+
+        /**
+         * HICON InternalGetWindowIcon(HWND hwnd, UINT iconType)
+         *
+         * A copy of the icon the window's class shows -- the small one for
+         * ICON_SMALL and ICON_SMALL2, the big one standing in when it has
+         * none -- for the caller to destroy; with none at all, the system's
+         * application icon.
+         */
+        InternalGetWindowIcon: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, type])=>{
+                const ICON_BIG = 1;
+                const IMAGE_ICON = 1;
+                const IDI_APPLICATION = 32512;
+                const record = live(hwnd);
+                if (!record)
+                {
+                    return 0;
+                }
+                const cls = classNamed(String(record.className));
+                const icon = ((type >>> 0) === ICON_BIG ? cls?.icon
+                    : cls?.iconSm || cls?.icon) ?? 0;
+                const copy = icon !== 0
+                    ? (/** @type {any} */ (table)).CopyImage.handler([icon, IMAGE_ICON, 0, 0, 0]) : 0;
+                return copy !== 0 ? copy
+                    : (/** @type {any} */ (table)).LoadIconA.handler([0, IDI_APPLICATION]);
             },
         },
 

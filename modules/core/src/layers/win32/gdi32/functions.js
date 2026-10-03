@@ -4081,6 +4081,41 @@ export function createGdiFunctions(host){
             invert: (hdc, rect)=>drawing.bound(hdc)?.invertRect(hdc >>> 0, rect) === true,
 
             /**
+             * The pixels of a rectangle moved by dx, dy within the context,
+             * only what lands inside `clip` changing: what ScrollDC and
+             * ScrollWindowEx do. Through a copy of their own, the two areas
+             * overlapping.
+             *
+             * @param {number} hdc
+             * @param {{ left: number, top: number, right: number, bottom: number }} rect
+             * @param {number} dx @param {number} dy
+             * @param {{ left: number, top: number, right: number, bottom: number }} clip
+             */
+            scroll: (hdc, rect, dx, dy, clip)=>{
+                const width = rect.right - rect.left;
+                const height = rect.bottom - rect.top;
+                if (width <= 0 || height <= 0 || !drawing.bound(hdc))
+                {
+                    return false;
+                }
+                /** @param {string} name @param {...number} args */
+                const call = (name, ...args)=>(/** @type {any} */ (aliased))[name].handler(args);
+                const memory = call('CreateCompatibleDC', hdc);
+                const bitmap = call('CreateCompatibleBitmap', hdc, width, height);
+                const previous = call('SelectObject', memory, bitmap);
+                call('BitBlt', memory, 0, 0, width, height, hdc, rect.left, rect.top, SRCCOPY);
+                const saved = call('SaveDC', hdc);
+                call('IntersectClipRect', hdc, clip.left, clip.top, clip.right, clip.bottom);
+                call('BitBlt', hdc, rect.left + dx, rect.top + dy, width, height, memory, 0, 0,
+                    SRCCOPY);
+                call('RestoreDC', hdc, saved);
+                call('SelectObject', memory, previous);
+                call('DeleteObject', bitmap);
+                call('DeleteDC', memory);
+                return true;
+            },
+
+            /**
              * Narrows what a context draws in to a rectangle, in its own
              * coordinates: the update area a paint is limited to.
              *

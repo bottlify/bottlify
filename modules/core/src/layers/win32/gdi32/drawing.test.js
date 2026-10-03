@@ -514,6 +514,47 @@ test('GetRgnBox answers a region\'s bounds, an empty one as zeros', ()=>{
     assert.equal(fns.GetRgnBox.handler([fns.CreateRectRgn.handler([5, 5, 5, 9]), BOX]), NULLREGION);
     assert.deepEqual(box(), [0, 0, 0, 0]);
     assert.equal(fns.GetRgnBox.handler([0x9999, BOX]), 0, 'not a region');
+
+    // SetRectRgn makes an existing region that rectangle.
+    const region = fns.CreateRectRgn.handler([0, 0, 0, 0]);
+    assert.equal(fns.SetRectRgn.handler([region, 7, 8, 30, 40]), 1);
+    assert.equal(fns.GetRgnBox.handler([region, BOX]), SIMPLEREGION);
+    assert.deepEqual(box(), [7, 8, 30, 40]);
+    assert.equal(fns.SetRectRgn.handler([0x9999, 0, 0, 1, 1]), 0, 'not a region');
+
+    // EqualRgn: the same pixels, two empty ones equal wherever they are.
+    const same = fns.CreateRectRgn.handler([7, 8, 30, 40]);
+    assert.equal(fns.EqualRgn.handler([region, same]), 1);
+    fns.SetRectRgn.handler([same, 7, 8, 30, 41]);
+    assert.equal(fns.EqualRgn.handler([region, same]), 0);
+    assert.equal(fns.EqualRgn.handler([fns.CreateRectRgn.handler([1, 1, 1, 5]),
+        fns.CreateRectRgn.handler([9, 9, 3, 9])]), 1, 'two empty regions');
+    assert.equal(fns.EqualRgn.handler([region, 0x9999]), 0, 'ERROR');
+});
+
+test('GetRandomRgn\'s SYSRGN is where on the screen a window\'s context draws', ()=>{
+    const graphics = fakeDrawing();
+    const memory = fakeMemory();
+    const gdi = createGdiFunctions({
+        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
+        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
+            memory.writeMemory(a, d),
+        readCString: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readCString(a, n),
+        handles: fakeHandles(),
+        surfaces: fakeSurfaces(),
+        graphics: graphics.services,
+    });
+    const fns = /** @type {Record<string, { handler: (args: number[]) => number }>} */ (
+        /** @type {unknown} */ (gdi.table));
+    const BOX = 0x3000;
+    const hdc = gdi.windowContext(HWND, { left: 100, top: 50, right: 300, bottom: 200 });
+    const region = fns.CreateRectRgn.handler([0, 0, 0, 0]);
+    assert.equal(fns.GetRandomRgn.handler([hdc, region, 4]), 1);
+    fns.GetRgnBox.handler([region, BOX]);
+    assert.deepEqual([0, 4, 8, 12].map(at=>new DataView(memory.bytes.buffer).getInt32(BOX + at,
+        true)), [100, 50, 300, 200], 'the window\'s area, in screen coordinates');
+    assert.equal(fns.GetRandomRgn.handler([hdc, region, 2]), 0, 'METARGN holds nothing');
+    assert.equal(fns.GetRandomRgn.handler([hdc, 0x9999, 4]), 0xffffffff, 'no region');
 });
 
 test('IntersectClipRect narrows the clip, and the program has then selected one', ()=>{

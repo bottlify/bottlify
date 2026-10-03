@@ -714,13 +714,16 @@ test('the base units and MapDialogRect scale the way the template was scaled', (
     assert.equal(fns.MapDialogRect.handler([0x9999, OUT]), 0);
 });
 
-test('a quit retrieved inside a modal loop ends the dialog and is put back', async()=>{
+test('a quit retrieved inside a modal loop ends the dialog, which answers IDOK, and is put '
+    + 'back', async()=>{
+    // user32's window tests (test_dialog_parent): a dialog its loop left on a
+    // WM_QUIT, never ended, answers IDOK.
     const { memory, queue, fns } = setup();
     putTemplate(memory, [{ id: 100, x: 4, y: 8, cx: 20, cy: 6 }]);
     queue.postQuit(3);
 
     assert.equal(await fns.DialogBoxIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]),
-        0);
+        1, 'IDOK');
     assert.equal(queue.quitPending(), true, 'the loop outside has yet to see it');
 });
 
@@ -1653,4 +1656,108 @@ test('IsDlgButtonChecked asks the one button, and answers what it says', ()=>{
     assert.equal(fns.IsDlgButtonChecked.handler([dialog, 10]), 2, 'BST_INDETERMINATE as it is');
     assert.deepEqual(asked, [button]);
     assert.equal(fns.IsDlgButtonChecked.handler([dialog, 99]), 0, 'no such control');
+});
+
+test('every dialog has the 3-D look; a DS_CONTROL one has no caption or system menu of its '
+    + 'own, and it and any dialog that is not a child let the tab walk into it', ()=>{
+    // user32's window tests (test_dialog_styles), the window manager's own
+    // additions -- a top-level window's clipped siblings, an overlapped
+    // one's caption -- on top.
+    const DS_3DLOOK = 0x0004;
+    const DS_CONTROL = 0x0400;
+    const WS_CHILD = 0x40000000;
+    const WS_POPUP = 0x80000000;
+    const WS_CLIPSIBLINGS = 0x04000000;
+    const WS_CAPTION = 0x00c00000;
+    const WS_SYSMENU = 0x00080000;
+    const WS_EX_WINDOWEDGE = 0x100;
+    const WS_EX_CONTROLPARENT = 0x10000;
+    const { memory, fns } = setup();
+    /** @param {number} style @param {number} [parent] */
+    const styles = (style, parent = 0)=>{
+        putTemplate(memory, [], { style });
+        const hwnd = fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, parent,
+            DIALOGPROC, 0]);
+        return [fns.GetWindowLongA.handler([hwnd, -16]) >>> 0,
+            fns.GetWindowLongA.handler([hwnd, -20]) >>> 0, hwnd];
+    };
+    const [style, exStyle, top] = styles(0);
+    assert.deepEqual([style, exStyle], [WS_CLIPSIBLINGS | WS_CAPTION | DS_3DLOOK,
+        WS_EX_WINDOWEDGE | WS_EX_CONTROLPARENT]);
+    assert.deepEqual(styles(WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_CONTROL).slice(0, 2),
+        [(WS_POPUP | DS_CONTROL | WS_CLIPSIBLINGS | DS_3DLOOK) >>> 0, WS_EX_CONTROLPARENT]);
+    assert.deepEqual(styles(WS_CHILD, top).slice(0, 2), [WS_CHILD | DS_3DLOOK, 0],
+        'a child dialog: nothing of the tab walk\'s');
+    assert.deepEqual(styles(WS_CHILD | DS_CONTROL, top).slice(0, 2),
+        [WS_CHILD | DS_CONTROL | DS_3DLOOK, WS_EX_CONTROLPARENT]);
+});
+
+test('DialogBox disables the first window above a child that is not one before WM_INITDIALOG, '
+    + 'tells it WM_ENTERIDLE as the queue runs dry, and only EndDialog enables it', async()=>{
+    // user32's window tests (test_dialog_parent): the owner of a modal dialog
+    // made for a child window is the window above it that can own one, and
+    // the dialog -- a child one too -- is made that window's; ended from
+    // WM_ENTERIDLE, EndDialog gives it back; destroyed there instead, the
+    // dialog answers IDOK and the owner stays disabled; EndDialog of a
+    // modeless child dialog enables its parent.
+    const WS_CHILD = 0x40000000;
+    const WM_ENTERIDLE = 0x0121;
+    const OWNERPROC = 0x402100;
+    /** @type {any} */
+    let table = null;
+    let owner = 0;
+    let child = 0;
+    let how = 'end';
+    /** @type {any[]} */
+    const atInit = [];
+    /** @type {any[]} */
+    const idle = [];
+    const { memory, fns } = setup({
+        dispatch: (wndProc, message)=>{
+            if (wndProc === DIALOGPROC && message.message === WM_INITDIALOG)
+            {
+                atInit.push([table.IsWindowEnabled.handler([owner]),
+                    table.IsWindowEnabled.handler([child]),
+                    table.GetParent.handler([message.hwnd])]);
+            }
+            if (wndProc === OWNERPROC && message.message === WM_ENTERIDLE)
+            {
+                idle.push([message.wParam, message.lParam]);
+                if (how === 'end')
+                {
+                    table.EndDialog.handler([message.lParam, 5]);
+                }
+                else
+                {
+                    table.DestroyWindow.handler([message.lParam]);
+                }
+            }
+            return 0;
+        },
+    });
+    table = fns;
+    putTemplate(memory, []);
+    owner = fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, OWNERPROC, 0]);
+    putTemplate(memory, [], { style: WS_CHILD });
+    child = fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, owner, OWNERPROC, 0]);
+
+    const answer = fns.DialogBoxIndirectParamA.handler([HINSTANCE, TEMPLATE, child, DIALOGPROC,
+        0]);
+    assert.equal(await answer, 5);
+    assert.deepEqual(atInit.splice(0), [[0, 1, owner]],
+        'the owner disabled, the child not, and the dialog the owner\'s');
+    assert.equal(idle.length, 1, 'told once the queue ran dry');
+    assert.equal(idle[0][0], 0, 'MSGF_DIALOGBOX');
+    assert.equal(fns.IsWindowEnabled.handler([owner]), 1, 'given back by EndDialog');
+
+    how = 'destroy';
+    assert.equal(await fns.DialogBoxIndirectParamA.handler([HINSTANCE, TEMPLATE, child,
+        DIALOGPROC, 0]), 1, 'IDOK');
+    assert.equal(fns.IsWindowEnabled.handler([owner]), 0, 'and the owner left disabled');
+
+    const modeless = fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, owner,
+        DIALOGPROC, 0]);
+    assert.equal(fns.EndDialog.handler([modeless, 0]), 1);
+    assert.equal(fns.IsWindowEnabled.handler([owner]), 1,
+        'EndDialog enables the window a dialog belongs to, whoever disabled it');
 });

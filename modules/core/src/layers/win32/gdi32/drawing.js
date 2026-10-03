@@ -1593,6 +1593,87 @@ export function createDrawingFunctions(
                 (rect >>> 0) === 0 ? 0 : newRegion(readRect(host, rect)),
         },
 
+        /** BOOL SetRectRgn(HRGN hrgn, int left, int top, int right, int bottom) */
+        SetRectRgn: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([region, left, top, right, bottom])=>{
+                const target = objects.get(region);
+                if (!target || target.type !== 'region')
+                {
+                    return 0;
+                }
+                target.attributes = { left: left | 0, top: top | 0, right: right | 0,
+                    bottom: bottom | 0 };
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL EqualRgn(HRGN hrgn1, HRGN hrgn2)
+         *
+         * Whether the two hold the same pixels: two empty regions are the
+         * same wherever they sit. A handle that is not a region answers
+         * ERROR, which is zero.
+         */
+        EqualRgn: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([first, second])=>{
+                const a = regionOf(first);
+                const b = regionOf(second);
+                if (!a || !b)
+                {
+                    return REGION_ERROR;
+                }
+                if (isEmpty(a) || isEmpty(b))
+                {
+                    return isEmpty(a) && isEmpty(b) ? 1 : 0;
+                }
+                return a.left === b.left && a.top === b.top && a.right === b.right
+                    && a.bottom === b.bottom ? 1 : 0;
+            },
+        },
+
+        /**
+         * int GetRandomRgn(HDC hdc, HRGN hrgn, INT iNum)
+         *
+         * SYSRGN: the part of the screen the context draws on, in screen
+         * coordinates -- its window's area as far as its clip lets it.
+         * CLIPRGN: the clip the program selected, as GetClipRgn answers it.
+         * The others hold nothing here. -1 for a context or region there is not.
+         */
+        GetRandomRgn: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, region, which])=>{
+                const CLIPRGN = 1;
+                const SYSRGN = 4;
+                const dc = dcOf(handle);
+                const target = objects.get(region);
+                if (!dc || !target || target.type !== 'region')
+                {
+                    return 0xffffffff;
+                }
+                if ((which | 0) === CLIPRGN)
+                {
+                    return functions.GetClipRgn.handler([handle, region]);
+                }
+                if ((which | 0) !== SYSRGN)
+                {
+                    return 0;
+                }
+                const origin = dc.bounds ?? null;
+                const clip = clipOf(dc);
+                const x = origin?.left ?? 0;
+                const y = origin?.top ?? 0;
+                const placed = { left: clip.left + x, top: clip.top + y, right: clip.right + x,
+                    bottom: clip.bottom + y };
+                target.attributes = origin ? intersect(placed, origin) : placed;
+                return 1;
+            },
+        },
+
         /** int GetRgnBox(HRGN hrgn, LPRECT lprc): the bounds, and what kind of region */
         GetRgnBox: {
             argBytes: 8,

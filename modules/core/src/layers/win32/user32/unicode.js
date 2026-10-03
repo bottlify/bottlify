@@ -38,6 +38,11 @@ const WM_SYSDEADCHAR = 0x0107;
 const CREATESTRUCT_NAME = 36;
 const CREATESTRUCT_CLASS = 40;
 const CREATESTRUCT_SIZE = 48;
+const CREATESTRUCT_PARAMS = 0;
+const CREATESTRUCT_EXSTYLE = 44;
+const WS_EX_MDICHILD = 0x00000040;
+/** MDICREATESTRUCT: the class and title first, nine dwords in all. */
+const MDICREATESTRUCT_SIZE = 36;
 
 /** A pointer whose high word is zero is an atom, and names no string. */
 const LAST_ATOM = 0xffff;
@@ -252,7 +257,8 @@ export function translated(memory, message, toUnicode, call){
 /**
  * A copy of a CREATESTRUCT with its two strings in the other encoding, laid
  * out behind it in one block. An atom where the class name would be stays an
- * atom, and a null name stays null.
+ * atom, and a null name stays null. An MDI child's creation parameter is an
+ * MDICREATESTRUCT, copied into the block the same way with its two names.
  *
  * @param {TextMemory} memory @param {number} address
  * @param {boolean} fromUnicode @param {boolean} toUnicode
@@ -266,7 +272,19 @@ function createStruct(memory, address, fromUnicode, toUnicode){
     const nameBytes = name === 0 ? null : textBytes(readText(memory, name, fromUnicode), toUnicode);
     const classBytes = cls <= LAST_ATOM
         ? null : textBytes(readText(memory, cls, fromUnicode), toUnicode);
-    const size = CREATESTRUCT_SIZE + (nameBytes?.length ?? 0) + (classBytes?.length ?? 0);
+    const params = view.getUint32(CREATESTRUCT_PARAMS, true);
+    const mdi = (view.getUint32(CREATESTRUCT_EXSTYLE, true) & WS_EX_MDICHILD) !== 0 && params !== 0
+        ? memory.readMemory(params, MDICREATESTRUCT_SIZE) : null;
+    const mdiView = mdi ? new DataView(mdi.buffer, mdi.byteOffset, mdi.byteLength) : null;
+    const mdiClass = mdiView ? mdiView.getUint32(0, true) : 0;
+    const mdiTitle = mdiView ? mdiView.getUint32(4, true) : 0;
+    const mdiClassBytes = mdiClass <= LAST_ATOM
+        ? null : textBytes(readText(memory, mdiClass, fromUnicode), toUnicode);
+    const mdiTitleBytes = mdiTitle === 0
+        ? null : textBytes(readText(memory, mdiTitle, fromUnicode), toUnicode);
+    const size = CREATESTRUCT_SIZE + (nameBytes?.length ?? 0) + (classBytes?.length ?? 0)
+        + (mdi ? MDICREATESTRUCT_SIZE + (mdiClassBytes?.length ?? 0)
+            + (mdiTitleBytes?.length ?? 0) : 0);
     return {
         size,
         build: base=>{
@@ -274,16 +292,25 @@ function createStruct(memory, address, fromUnicode, toUnicode){
             block.set(header);
             const out = new DataView(block.buffer);
             let at = CREATESTRUCT_SIZE;
-            if (nameBytes)
+            /** @param {Uint8Array | null} bytes @param {number} field */
+            const place = (bytes, field)=>{
+                if (bytes)
+                {
+                    block.set(bytes, at);
+                    out.setUint32(field, (base + at) >>> 0, true);
+                    at += bytes.length;
+                }
+            };
+            place(nameBytes, CREATESTRUCT_NAME);
+            place(classBytes, CREATESTRUCT_CLASS);
+            if (mdi)
             {
-                block.set(nameBytes, at);
-                out.setUint32(CREATESTRUCT_NAME, (base + at) >>> 0, true);
-                at += nameBytes.length;
-            }
-            if (classBytes)
-            {
-                block.set(classBytes, at);
-                out.setUint32(CREATESTRUCT_CLASS, (base + at) >>> 0, true);
+                const mdiAt = at;
+                block.set(mdi, mdiAt);
+                out.setUint32(CREATESTRUCT_PARAMS, (base + mdiAt) >>> 0, true);
+                at += MDICREATESTRUCT_SIZE;
+                place(mdiTitleBytes, mdiAt + 4);
+                place(mdiClassBytes, mdiAt);
             }
             return block;
         },

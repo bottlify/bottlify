@@ -26,6 +26,9 @@ export const WS_HSCROLL = 0x00100000;
 export const WS_CHILD = 0x40000000;
 export const WS_VISIBLE = 0x10000000;
 export const WS_DISABLED = 0x08000000;
+/** What decides whether a window is top-level, and what every top-level window has. */
+export const WS_POPUP = 0x80000000;
+export const WS_CLIPSIBLINGS = 0x04000000;
 
 /**
  * Extended styles that add frame of their own. A client rectangle grown
@@ -36,6 +39,44 @@ export const WS_EX_TOOLWINDOW = 0x00000080;
 export const WS_EX_WINDOWEDGE = 0x00000100;
 export const WS_EX_CLIENTEDGE = 0x00000200;
 export const WS_EX_STATICEDGE = 0x00020000;
+
+/**
+ * WS_EX_WINDOWEDGE as a frame asks for it: with a dialog-modal frame, or a
+ * dialog or sizing frame that no static edge takes the place of, and never
+ * otherwise. What CreateWindowEx shows the CBT hook and the CREATESTRUCT,
+ * and what SetWindowLong makes of either style.
+ *
+ * @param {number} style @param {number} exStyle
+ */
+export function edgeFor(style, exStyle){
+    return ((exStyle & WS_EX_DLGMODALFRAME) !== 0
+        || ((exStyle & WS_EX_STATICEDGE) === 0 && (style & (WS_DLGFRAME | WS_THICKFRAME)) !== 0)
+        ? exStyle | WS_EX_WINDOWEDGE : exStyle & ~WS_EX_WINDOWEDGE) >>> 0;
+}
+
+/**
+ * The styles CreateWindowEx leaves a window with once the CBT hook has seen
+ * those asked for: a top-level window always clips its siblings and an
+ * overlapped one always has a caption, and the window edge then follows the
+ * frame -- which a static edge takes the place of only on a child or a popup.
+ *
+ * @param {number} style @param {number} exStyle  As edgeFor left it.
+ */
+export function createdStyles(style, exStyle){
+    let created = style;
+    if ((created & (WS_CHILD | WS_POPUP)) !== WS_CHILD)
+    {
+        created |= WS_CLIPSIBLINGS | ((created & WS_POPUP) === 0 ? WS_CAPTION : 0);
+    }
+    const framed = (created & (WS_DLGFRAME | WS_THICKFRAME)) !== 0;
+    const replaced = (exStyle & WS_EX_STATICEDGE) !== 0 && (created & (WS_CHILD | WS_POPUP)) !== 0;
+    const edged = (exStyle & WS_EX_DLGMODALFRAME) !== 0 || (framed && !replaced);
+    return {
+        style: created >>> 0,
+        exStyle: (edged ? exStyle | WS_EX_WINDOWEDGE
+            : framed ? exStyle : exStyle & ~WS_EX_WINDOWEDGE) >>> 0,
+    };
+}
 
 /**
  * The classic non-client metrics: a border line, a caption, the frame a

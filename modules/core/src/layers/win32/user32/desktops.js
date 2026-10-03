@@ -28,6 +28,8 @@ const ERROR_FILE_NOT_FOUND = 2;
 /** GetUserObjectInformation's indices. */
 const UOI_FLAGS = 1;
 const UOI_NAME = 2;
+/** What SetShellWindow leaves for a handle that is no window. */
+const ERROR_INVALID_WINDOW_HANDLE = 1400;
 const UOI_TYPE = 3;
 const UOI_USER_SID = 4;
 const UOI_IO = 6;
@@ -39,7 +41,8 @@ const USEROBJECTFLAGS_SIZE = 12;
 const MAX_NAME = 256;
 
 /**
- * @typedef {{ kind: 'desktop' | 'station', name: string, flags: number }} UserObject
+ * @typedef {{ kind: 'desktop' | 'station', name: string, flags: number,
+ *     shell?: number }} UserObject  `shell`: the shell window SetShellWindow named.
  * @typedef {{ object: UserObject, inherit: boolean }} UserHandle
  */
 
@@ -58,8 +61,12 @@ const MAX_NAME = 256;
  *     allocate?: (bytes: number) => number,
  *     release?: (address: number) => void }} options.host
  * @param {() => number[]} options.topLevel  The top-level windows, topmost first.
+ * @param {(hwnd: number) => { exStyle: number } | null} [options.windowOf]
+ *        A live window by its handle.
+ * @param {(hwnd: number) => void} [options.toBottom]
+ *        Puts a top-level window at the bottom of the stacking.
  */
-export function createDesktopFunctions({ host, topLevel }){
+export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
     /** @type {UserObject} */
     const station = { kind: 'station', name: 'WinSta0', flags: 0 };
     /** @type {UserObject} */
@@ -337,6 +344,52 @@ export function createDesktopFunctions({ host, topLevel }){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>close(handle, 'desktop'),
+        },
+
+        /**
+         * HWND GetShellWindow(void)
+         *
+         * The calling thread's desktop's shell window, which only
+         * SetShellWindow names: there is no shell here to have made one.
+         */
+        GetShellWindow: {
+            argBytes: 0,
+            handler: ()=>{
+                const shell = opened.get(threadHandle())?.object.shell ?? 0;
+                return windowOf?.(shell) ? shell : 0;
+            },
+        },
+
+        /**
+         * BOOL SetShellWindow(HWND hwnd)
+         *
+         * Names the desktop's shell window, once: refused while one is, and
+         * for a topmost window. The shell window goes to the bottom of the
+         * stacking.
+         */
+        SetShellWindow: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>{
+                const WS_EX_TOPMOST = 0x00000008;
+                const desktop = opened.get(threadHandle())?.object;
+                const record = windowOf?.(hwnd >>> 0) ?? null;
+                if (!desktop || windowOf?.(desktop.shell ?? 0))
+                {
+                    return 0;
+                }
+                if (!record)
+                {
+                    return fail(ERROR_INVALID_WINDOW_HANDLE);
+                }
+                if ((record.exStyle & WS_EX_TOPMOST) !== 0)
+                {
+                    return 0;
+                }
+                desktop.shell = hwnd >>> 0;
+                toBottom?.(hwnd >>> 0);
+                return 1;
+            },
         },
 
         /**

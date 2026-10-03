@@ -47,7 +47,7 @@
 
 import { ANY_WINDOW, WM_QUIT, threadIdOf } from './messages.js';
 import { readMessage, readRect, writeRect } from './structs.js';
-import { WS_VISIBLE, frameOf } from './frame.js';
+import { WS_CAPTION, WS_VISIBLE, frameOf } from './frame.js';
 import { createTabWalk } from './tabwalk.js';
 import { readText, translated, writeText } from './unicode.js';
 import { encodeAnsi } from '../kernel32/locale.js';
@@ -145,6 +145,15 @@ const WS_EX_CLIENTEDGE = 0x00000200;
 const DS_MODALFRAME = 0x0080;
 const DS_CENTER = 0x0800;
 const WS_EX_DLGMODALFRAME = 0x00000001;
+/** What the dialog manager makes of a template's styles. */
+const DS_3DLOOK = 0x0004;
+const DS_NOIDLEMSG = 0x0100;
+const DS_CONTROL = 0x0400;
+const WS_SYSMENU = 0x00080000;
+const WS_EX_CONTROLPARENT = 0x00010000;
+/** Sent to a modal dialog's owner each time the dialog's queue runs dry. */
+const WM_ENTERIDLE = 0x0121;
+const MSGF_DIALOGBOX = 0;
 
 /**
  * A DLGTEMPLATEEX begins with a version of 1 and a signature of 0xffff, where
@@ -269,6 +278,8 @@ const MAX_RESOURCE_NAME = 256;
  *           Shows a window as ShowWindow(SW_SHOW) would, answering once the
  *           procedures it sent to have.
  * @property {(hwnd: number) => number | Promise<number>} [hide]  And hides one.
+ * @property {(hwnd: number, enable: boolean) => number | Promise<number>} [enable]
+ *           EnableWindow, as the program would call it.
  * @property {(instance: number, name: number, type: number) => number | Promise<number>
  *     } [loadImage]  LoadImage of a module's resource, by ordinal or by a
  *     UTF-16 name in guest memory.
@@ -611,9 +622,17 @@ export function createDialogFunctions(options){
         // The template's size is the client area; the window is that plus
         // the frame its styles give it. DS_MODALFRAME is the extended style
         // of the same name, as the resource compiler means it.
+        // Every dialog has the 3-D look; a DS_CONTROL one is a page inside
+        // another, without a caption or a system menu of its own; and both it
+        // and any dialog that is not a child let the tab walk into its
+        // children.
+        const page = (described.style & DS_CONTROL) !== 0;
+        const dialogStyle = ((described.style | DS_3DLOOK)
+            & ~(page ? WS_CAPTION | WS_SYSMENU : 0)) >>> 0;
         const exStyle = (described.exStyle
-            | ((described.style & DS_MODALFRAME) !== 0 ? WS_EX_DLGMODALFRAME : 0)) >>> 0;
-        const frame = frameOf(described.style, exStyle);
+            | ((described.style & DS_MODALFRAME) !== 0 ? WS_EX_DLGMODALFRAME : 0)
+            | (page || (dialogStyle & WS_CHILD) === 0 ? WS_EX_CONTROLPARENT : 0)) >>> 0;
+        const frame = frameOf(dialogStyle, exStyle);
         const width = acrossFor(described.width, cell) + frame.edge * 2;
         const height = downFor(described.height, cell) + frame.edge * 2 + frame.caption;
         // Placed relative to the owner's client area, or centred on the
@@ -644,7 +663,7 @@ export function createDialogFunctions(options){
             className: '#32770',
             unicode,
             title: described.title,
-            style: (described.style & ~WS_VISIBLE) >>> 0,
+            style: (dialogStyle & ~WS_VISIBLE) >>> 0,
             exStyle,
             parent: parent >>> 0,
             instance: instance >>> 0,
@@ -957,9 +976,10 @@ export function createDialogFunctions(options){
      *     afterwards the thread on the processor may be another, and every
      *     delivery below has to name this one.
      * @param {ModalHook} [first]
+     * @param {number} [owner]  Told WM_ENTERIDLE each time the queue runs dry.
      * @returns {Promise<number>}
      */
-    const runModal = async(hwnd, thread, first)=>{
+    const runModal = async(hwnd, thread, first, owner = 0)=>{
         const record = windows.get(hwnd);
         if (!record)
         {
@@ -970,15 +990,6 @@ export function createDialogFunctions(options){
         if (record.destroyed && record.dialogResult === undefined)
         {
             return DIALOG_FAILED;
-        }
-        // The owner is disabled for as long as the dialog is up, as Windows
-        // disables it: a program asking IsWindowEnabled of its own frame
-        // meanwhile is told no, and a click on the frame reaches nothing.
-        const owner = (record.style & WS_CHILD) === 0 ? live(record.owner ?? 0) : null;
-        const ownerWasEnabled = owner !== null && (owner.style & WS_DISABLED) === 0;
-        if (ownerWasEnabled)
-        {
-            owner.style = (owner.style | WS_DISABLED) >>> 0;
         }
         // A modal dialog is shown by the call whether or not its template
         // says WS_VISIBLE: most templates leave the bit off and rely on this.
@@ -991,6 +1002,7 @@ export function createDialogFunctions(options){
         // the run, and the button chosen is pressed as a click presses it; one
         // that stays up after a few presses is left.
         let presses = 0;
+        let idleTold = false;
         while (!record.destroyed && !record.dialogEnded)
         {
             // The program's own loop would have been GetMessage, and what
@@ -1000,6 +1012,14 @@ export function createDialogFunctions(options){
                     thread: threadIdOf(thread) });
             if (!entry)
             {
+                // Once each time the queue runs dry: the owner may end the
+                // dialog from there.
+                if (!idleTold && (record.style & DS_NOIDLEMSG) === 0 && live(owner))
+                {
+                    idleTold = true;
+                    await host.send(owner, WM_ENTERIDLE, MSGF_DIALOGBOX, hwnd, thread);
+                    continue;
+                }
                 if (host.unattended && presses < UNATTENDED_PRESSES)
                 {
                     presses++;
@@ -1024,6 +1044,7 @@ export function createDialogFunctions(options){
                 await host.idle();
                 continue;
             }
+            idleTold = false;
             if (entry.message === WM_QUIT)
             {
                 host.queue.postQuit(entry.wParam | 0, threadIdOf(thread));
@@ -1039,24 +1060,75 @@ export function createDialogFunctions(options){
             if (taken !== null)
             {
                 await taken;
-                continue;
             }
-            // The loop is the program's message loop for as long as the
-            // dialog is up, so it translates as one does: a key press the
-            // dialog manager left alone becomes the character an edit
-            // types.
-            host.translate?.(entry);
-            await deliver(entry, thread);
+            else
+            {
+                // The loop is the program's message loop for as long as the
+                // dialog is up, so it translates as one does: a key press the
+                // dialog manager left alone becomes the character an edit
+                // types.
+                host.translate?.(entry);
+                await deliver(entry, thread);
+            }
+            // Destroyed by a message it was handed rather than ended, the
+            // dialog has no answer.
+            if (record.destroyed && !record.dialogEnded)
+            {
+                return 0;
+            }
         }
-        if (ownerWasEnabled)
-        {
-            owner.style = (owner.style & ~WS_DISABLED) >>> 0;
-        }
+        // The owner is not enabled here: EndDialog enables it, and a dialog
+        // ended any other way -- a WM_QUIT, DestroyWindow from the owner's
+        // WM_ENTERIDLE -- leaves it as it is, and answers IDOK.
         if (!record.destroyed)
         {
             await destroyWindow(hwnd, thread);
         }
-        return record.dialogResult ?? 0;
+        return record.dialogResult ?? IDOK;
+    };
+
+    /**
+     * Whom a modal dialog takes input away from: the window it was given or,
+     * for a child, the first window above it that is not one, as only such a
+     * window can own another. Named once, by the call: WM_ENTERIDLE keeps
+     * going to it however the dialog is moved meanwhile.
+     *
+     * @param {number} parent
+     */
+    const modalOwner = parent=>{
+        let owner = live(parent);
+        while (owner && (owner.style & (WS_CHILD | WS_POPUP)) === WS_CHILD)
+        {
+            const above = live(owner.parent);
+            if (!above)
+            {
+                break;
+            }
+            owner = above;
+        }
+        return owner;
+    };
+
+    /**
+     * DialogBox, however the template came: the owner is disabled before the
+     * dialog exists -- its WM_INITDIALOG finds it so -- and the dialog is
+     * made the owner's, a child one included. Only EndDialog enables the
+     * owner again, or the dialog failing to be made.
+     *
+     * @param {number} instance @param {number} template @param {number} parent
+     * @param {number} dialogFunc @param {number} initParam @param {boolean} [unicode]
+     * @returns {number | Promise<number>}
+     */
+    const dialogBox = (instance, template, parent, dialogFunc, initParam, unicode = false)=>{
+        const thread = host.callerThread?.();
+        const owner = modalOwner(parent);
+        const disabled = owner && (owner.style & WS_DISABLED) === 0 ? owner.hwnd : 0;
+        /** @param {boolean} on */
+        const enable = on=>(disabled !== 0 ? host.enable?.(disabled, on) ?? 0 : 0);
+        return once(after(enable(false), ()=>createDialog(instance, template,
+            owner ? owner.hwnd : parent, dialogFunc, initParam, unicode)),
+        hwnd=>(hwnd === 0 ? after(enable(true), ()=>DIALOG_FAILED)
+            : runModal(hwnd, thread, undefined, owner?.hwnd ?? 0)));
     };
 
     options.modalLoop?.(runModal);
@@ -1111,17 +1183,13 @@ export function createDialogFunctions(options){
          *   LPARAM dwInitParam)
          *
          * The modal form: the same dialog, and this call does not return until
-         * EndDialog has been called on it. The owner is not disabled, because
-         * no window here answers input on its own account anyway.
+         * the dialog has ended.
          */
         DialogBoxIndirectParamA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([instance, template, parent, dialogFunc, initParam])=>{
-                const thread = host.callerThread?.();
-                return once(createDialog(instance, template, parent, dialogFunc, initParam),
-                    hwnd=>(hwnd === 0 ? DIALOG_FAILED : runModal(hwnd, thread)));
-            },
+            handler: ([instance, template, parent, dialogFunc, initParam])=>
+                dialogBox(instance, template, parent, dialogFunc, initParam),
         },
 
         /**
@@ -1131,12 +1199,9 @@ export function createDialogFunctions(options){
         DialogBoxParamA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([instance, name, parent, dialogFunc, initParam])=>{
-                const thread = host.callerThread?.();
-                return once(createDialog(instance, templateAddress(instance, name), parent,
-                    dialogFunc, initParam),
-                hwnd=>(hwnd === 0 ? DIALOG_FAILED : runModal(hwnd, thread)));
-            },
+            handler: ([instance, name, parent, dialogFunc, initParam])=>
+                dialogBox(instance, templateAddress(instance, name), parent, dialogFunc,
+                    initParam),
         },
 
         /** HWND CreateDialogIndirectParamW(...), a Unicode dialog. */
@@ -1160,23 +1225,17 @@ export function createDialogFunctions(options){
         DialogBoxIndirectParamW: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([instance, template, parent, dialogFunc, initParam])=>{
-                const thread = host.callerThread?.();
-                return once(createDialog(instance, template, parent, dialogFunc, initParam, true),
-                    hwnd=>(hwnd === 0 ? DIALOG_FAILED : runModal(hwnd, thread)));
-            },
+            handler: ([instance, template, parent, dialogFunc, initParam])=>
+                dialogBox(instance, template, parent, dialogFunc, initParam, true),
         },
 
         /** INT_PTR DialogBoxParamW(HINSTANCE, LPCWSTR lpTemplateName, HWND, DLGPROC, LPARAM) */
         DialogBoxParamW: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([instance, name, parent, dialogFunc, initParam])=>{
-                const thread = host.callerThread?.();
-                return once(createDialog(instance, templateAddress(instance, name, true), parent,
-                    dialogFunc, initParam, true),
-                hwnd=>(hwnd === 0 ? DIALOG_FAILED : runModal(hwnd, thread)));
-            },
+            handler: ([instance, name, parent, dialogFunc, initParam])=>
+                dialogBox(instance, templateAddress(instance, name, true), parent, dialogFunc,
+                    initParam, true),
         },
 
         /**
@@ -1248,7 +1307,11 @@ export function createDialogFunctions(options){
                 }
                 record.dialogResult = result | 0;
                 record.dialogEnded = true;
-                return after(host.hide?.(hwnd >>> 0) ?? 0, ()=>1);
+                // The window it belongs to -- its parent, or the owner of one
+                // on the desktop -- is enabled, whoever disabled it.
+                const above = record.parent !== 0 ? record.parent : record.owner ?? 0;
+                return after(live(above) ? host.enable?.(above, true) ?? 0 : 0,
+                    ()=>after(host.hide?.(hwnd >>> 0) ?? 0, ()=>1));
             },
         },
 

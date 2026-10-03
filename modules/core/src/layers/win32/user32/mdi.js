@@ -10,9 +10,12 @@
  * DefMDIChildProc add to DefWindowProc.
  *
  * A frame makes its client in WM_CREATE with a CLIENTCREATESTRUCT -- the
- * Window menu and the first child's id -- and asks it for a child with
- * WM_MDICREATE and an MDICREATESTRUCT, which reaches the child's WM_CREATE
- * as its creation parameter. The client keeps the children in their stacking
+ * Window menu and the first child's id. A child is a window CreateWindowEx
+ * makes with WS_EX_MDICHILD inside the client, whether a program asks for it
+ * there, with CreateMDIWindow or with the client's WM_MDICREATE: the client
+ * gives it its style, place, size and id, and its WM_CREATE is handed an
+ * MDICREATESTRUCT of what was asked -- CW_USEDEFAULT and all, its lParam the
+ * creation parameter. The client keeps the children in their stacking
  * order, the first one the active one, and tells a child it is activated or
  * deactivated with WM_MDIACTIVATE, the deactivated window and the activated
  * one in its two parameters. Everything a document window is made of goes
@@ -58,7 +61,6 @@ const SC_NEXTWINDOW = 0xf040;
 const SC_CLOSE = 0xf060;
 const SC_RESTORE = 0xf120;
 
-const SW_SHOW = 5;
 const SW_RESTORE = 9;
 const SW_SHOWMAXIMIZED = 3;
 
@@ -69,6 +71,7 @@ const WS_SYSMENU = 0x00080000;
 const WS_CAPTION = 0x00c00000;
 const WS_MAXIMIZE = 0x01000000;
 const WS_CLIPSIBLINGS = 0x04000000;
+const WS_DISABLED = 0x08000000;
 const WS_VISIBLE = 0x10000000;
 const WS_CHILD = 0x40000000;
 const WS_POPUP = 0x80000000;
@@ -111,7 +114,7 @@ const inTurn = steps=>steps.reduce((before, step)=>then(before, ()=>step()), 0);
  *     call: (name: string, args: number[]) => any,
  *     send: (hwnd: number, message: number, wParam: number, lParam: number,
  *         thread?: unknown) => Answer,
- *     create: (args: number[], thread: unknown) => Answer,
+ *     create: (args: number[], thread: unknown, unicode?: boolean) => Answer,
  *     show: (hwnd: number, cmdShow: number, thread: unknown) => Answer,
  *     focus: (hwnd: number, thread: unknown) => Answer,
  *     destroy: (hwnd: number, thread: unknown) => Answer,
@@ -135,8 +138,6 @@ export function createMdi(options){
 
     /** @param {number} hwnd */
     const parentOf = hwnd=>call('GetParent', [hwnd]) >>> 0;
-    /** @param {number} address */
-    const int = address=>readU32(host, address) | 0;
 
     /**
      * Makes `child` the client's active window: the one before it told it is
@@ -152,14 +153,19 @@ export function createMdi(options){
         {
             return 0;
         }
-        state.active = child;
-        if (child !== 0)
-        {
-            state.order = [child, ...state.order.filter(other=>other !== child)];
-        }
+        // The one going is told while it is still the active one -- it asks
+        // WM_MDIGETACTIVE and finds itself -- and the new one once it is.
         return inTurn([
             ()=>(old !== 0 ? send(old, WM_NCACTIVATE, 0, 0, thread) : 0),
             ()=>(old !== 0 ? send(old, WM_MDIACTIVATE, old, child, thread) : 0),
+            ()=>{
+                state.active = child;
+                if (child !== 0)
+                {
+                    state.order = [child, ...state.order.filter(other=>other !== child)];
+                }
+                return 0;
+            },
             ()=>(child !== 0
                 ? call('SetWindowPos', [child, 0, 0, 0, 0, 0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE]) : 0),
@@ -171,60 +177,106 @@ export function createMdi(options){
     };
 
     /**
-     * WM_MDICREATE: a child of the class and title the MDICREATESTRUCT names,
-     * placed where it asks or cascaded from the last, shown and activated.
+     * The window CreateWindowEx is asked for, as the client makes it when it
+     * is an MDI child -- WS_EX_MDICHILD inside one of the clients here -- or
+     * null. The style is the client's: what was asked with WS_CHILD and
+     * WS_CLIPSIBLINGS under MDIS_ALLCHILDSTYLES, and otherwise a visible
+     * captioned window with a sizing frame, its system menu and both boxes; a
+     * popup it never is. A place and a size not given are the cascade's, each
+     * child a step down and right of the one before and three quarters of the
+     * client, and an id not given the first free from the client's first.
      *
-     * @param {number} client @param {number} params  the MDICREATESTRUCTA
-     * @param {unknown} thread
-     * @returns {any} the child, or 0
+     * @param {number[]} args  CreateWindowEx's twelve, the extended style first
+     * @returns {null | { client: number, args: number[], asked: number[], refused?: boolean }}
+     *     `asked` is the MDICREATESTRUCT the child's WM_CREATE is handed;
+     *     `refused` a popup asked for under MDIS_ALLCHILDSTYLES, which is none.
      */
-    const createChild = (client, params, thread)=>{
+    const childOf = args=>{
+        const [exStyle, className, title, style, x, y, width, height, parent, menu, instance,
+            params] = args;
+        const client = parent >>> 0;
         const state = clients.get(client);
-        if (!state || (params >>> 0) === 0)
+        if (!state || (exStyle & WS_EX_MDICHILD) === 0)
+        {
+            return null;
+        }
+        const all = (call('GetWindowLongA', [client, GWL_STYLE]) & MDIS_ALLCHILDSTYLES) !== 0;
+        if (all && (style & WS_POPUP) !== 0)
+        {
+            return { client, args, asked: [], refused: true };
+        }
+        const childStyle = ((all ? style | WS_CHILD | WS_CLIPSIBLINGS
+            : style | WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CAPTION | WS_SYSMENU
+                | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX) & ~WS_POPUP) >>> 0;
+        const step = (state.order.length % 8) * CASCADE_STEP;
+        const room = sizeOf(client);
+        const placed = (x >>> 0) !== CW_USEDEFAULT;
+        const sized = (width >>> 0) !== CW_USEDEFAULT;
+        let id = menu >>> 0;
+        if (id === 0)
+        {
+            id = state.firstChild;
+            while (state.ids.has(id))
+            {
+                id++;
+            }
+        }
+        return {
+            client,
+            args: [exStyle, className, title, childStyle, placed ? x : step, placed ? y : step,
+                sized ? width : Math.max(1, Math.floor(room.width * 3 / 4)),
+                sized ? height : Math.max(1, Math.floor(room.height * 3 / 4)),
+                client, id, instance, params],
+            asked: [className, title, instance, x, y, width, height, style, params ?? 0],
+        };
+    };
+
+    /**
+     * A child just made becomes the client's: kept by its id and in the
+     * stacking order, maximized when it was asked to be, and activated when
+     * it is shown and enabled -- a disabled window is never activated.
+     *
+     * @param {number} client @param {number} child @param {unknown} thread
+     * @returns {any}
+     */
+    const adopt = (client, child, thread)=>{
+        const state = clients.get(client);
+        if (!state)
         {
             return 0;
         }
-        const at = params >>> 0;
-        const style = readU32(host, at + 28);
-        const all = (call('GetWindowLongA', [client, GWL_STYLE]) & MDIS_ALLCHILDSTYLES) !== 0;
-        const childStyle = ((all ? style
-            : style | WS_CLIPSIBLINGS | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX
-                | WS_MAXIMIZEBOX) & ~(WS_POPUP | WS_VISIBLE) | WS_CHILD) >>> 0;
-        // A place and a size not given are the cascade's: each child a step
-        // down and right of the one before, three quarters of the client.
-        const step = (state.order.length % 8) * CASCADE_STEP;
-        const rect = sizeOf(client);
-        const given = (/** @type {number} */ value)=>(value >>> 0) !== CW_USEDEFAULT;
-        const x = given(readU32(host, at + 12)) ? int(at + 12) : step;
-        const y = given(readU32(host, at + 16)) ? int(at + 16) : step;
-        const width = given(readU32(host, at + 20)) ? int(at + 20)
-            : Math.max(1, Math.floor(rect.width * 3 / 4));
-        const height = given(readU32(host, at + 24)) ? int(at + 24)
-            : Math.max(1, Math.floor(rect.height * 3 / 4));
-        let id = state.firstChild;
-        while (state.ids.has(id))
+        state.ids.set(call('GetDlgCtrlID', [child]) >>> 0, child);
+        state.order.push(child);
+        const style = call('GetWindowLongA', [child, GWL_STYLE]) >>> 0;
+        return inTurn([
+            ()=>((style & WS_MAXIMIZE) !== 0 ? show(child, SW_SHOWMAXIMIZED, thread) : 0),
+            ()=>{
+                state.maximized = state.maximized || (style & WS_MAXIMIZE) !== 0;
+                return (style & WS_VISIBLE) !== 0 && (style & WS_DISABLED) === 0
+                    ? activate(client, child, thread) : 0;
+            },
+            ()=>0,
+        ]);
+    };
+
+    /**
+     * WM_MDICREATE: the child the MDICREATESTRUCT asks for, made as
+     * CreateWindowEx makes an MDI child, its creation parameter the
+     * structure's lParam.
+     *
+     * @param {number} client @param {number} params  the MDICREATESTRUCT
+     * @param {unknown} thread @param {boolean} unicode  whether its names are wide
+     * @returns {any} the child, or 0
+     */
+    const createChild = (client, params, thread, unicode)=>{
+        if (!clients.has(client) || (params >>> 0) === 0)
         {
-            id++;
+            return 0;
         }
-        return then(create([WS_EX_MDICHILD, readU32(host, at),
-            readU32(host, at + 4), childStyle, x, y, width, height, client, id,
-            readU32(host, at + 8), at], thread), made=>{
-            const child = made >>> 0;
-            if (child === 0)
-            {
-                return 0;
-            }
-            state.ids.set(id, child);
-            state.order.push(child);
-            return inTurn([
-                ()=>show(child, (style & WS_MAXIMIZE) !== 0 ? SW_SHOWMAXIMIZED : SW_SHOW, thread),
-                ()=>{
-                    state.maximized = (style & WS_MAXIMIZE) !== 0;
-                    return activate(client, child, thread);
-                },
-                ()=>child,
-            ]);
-        });
+        const [className, title, owner, x, y, width, height, style, lParam]
+            = [0, 4, 8, 12, 16, 20, 24, 28, 32].map(offset=>readU32(host, (params >>> 0) + offset));
+        return create([WS_EX_MDICHILD, className, title, style, x, y, width, height, client, 0,
+            owner, lParam], thread, unicode);
     };
 
     /**
@@ -290,7 +342,8 @@ export function createMdi(options){
                 clients.delete(client);
                 break;
             case WM_MDICREATE:
-                return createChild(client, lParam, thread);
+                return createChild(client, lParam, thread,
+                    /** @type {any} */ (message).unicode === true);
             case WM_MDIDESTROY:
                 return destroyChild(client, wParam, thread);
             case WM_MDIACTIVATE:
@@ -453,5 +506,5 @@ export function createMdi(options){
             0, thread), ()=>1);
     };
 
-    return { procedure, defFrame, defChild, translateAccelerator, clients };
+    return { procedure, defFrame, defChild, translateAccelerator, childOf, adopt, clients };
 }

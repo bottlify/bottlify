@@ -73,6 +73,66 @@ export function planesToBgra(width, height, and, xor){
     return out;
 }
 
+/** The sixteen colours a four-bit device-dependent bitmap indexes, as r, g, b. */
+const SIXTEEN_COLOURS = Object.freeze([
+    [0, 0, 0], [128, 0, 0], [0, 128, 0], [128, 128, 0], [0, 0, 128], [128, 0, 128],
+    [0, 128, 128], [192, 192, 192], [128, 128, 128], [255, 0, 0], [0, 255, 0], [255, 255, 0],
+    [0, 0, 255], [255, 0, 255], [0, 255, 255], [255, 255, 255],
+]);
+
+/**
+ * An icon made from a monochrome AND plane and an XOR bitmap of `depth`
+ * bits, as CreateIcon takes them: device-dependent, rows top first, each
+ * padded to a WORD. One bit is monochrome, four index the sixteen colours,
+ * sixteen are 5-5-5, twenty-four and thirty-two are blue, green, red.
+ *
+ * @param {number} width @param {number} height @param {number} depth
+ * @param {Uint8Array} and @param {Uint8Array} xor
+ * @returns {Uint8Array}
+ */
+export function ddbToBgra(width, height, depth, and, xor){
+    if (depth === 1)
+    {
+        return planesToBgra(width, height, and, xor);
+    }
+    const maskStride = ((width + 15) >>> 4) * 2;
+    const stride = ((width * depth + 15) >>> 4) * 2;
+    const out = new Uint8Array(width * height * 4);
+    /** @param {number} row @param {number} x @returns {number[]} blue, green, red */
+    const colourAt = (row, x)=>{
+        if (depth >= 24)
+        {
+            const at = row + x * (depth >>> 3);
+            return [xor[at], xor[at + 1], xor[at + 2]];
+        }
+        if (depth === 16)
+        {
+            const value = xor[row + x * 2] | xor[row + x * 2 + 1] << 8;
+            return [(value & 31) << 3, (value >>> 5 & 31) << 3, (value >>> 10 & 31) << 3];
+        }
+        if (depth === 4)
+        {
+            const byte = xor[row + (x >>> 1)];
+            const [r, g, b] = SIXTEEN_COLOURS[(x & 1) === 0 ? byte >>> 4 : byte & 15];
+            return [b, g, r];
+        }
+        // ponytail: eight bits index the device's palette, read as grey here;
+        // the system palette when a title draws one.
+        return [xor[row + x], xor[row + x], xor[row + x]];
+    };
+    for (let y = 0; y < height; y++)
+    {
+        for (let x = 0; x < width; x++)
+        {
+            const [b, g, r] = colourAt(y * stride, x);
+            const bit = 7 - (x & 7);
+            putMasked(out, (y * width + x) * 4,
+                ((and[y * maskStride + (x >>> 3)] >>> bit) & 1) !== 0, b, g, r);
+        }
+    }
+    return out;
+}
+
 /**
  * The image of one icon or cursor entry: a BITMAPINFOHEADER whose height
  * counts both masks, a colour table for 8 bits or fewer, the XOR bitmap and

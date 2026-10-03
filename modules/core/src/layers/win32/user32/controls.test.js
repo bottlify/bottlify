@@ -1614,6 +1614,12 @@ test('ChildWindowFromPoint finds the child at a point in the parent\'s client ar
     assert.equal(context.fns.ChildWindowFromPoint.handler([dialog, x, y]), next);
     assert.equal(context.fns.ChildWindowFromPoint.handler([dialog, 1, 1]), dialog,
         'the parent itself where no child is');
+    assert.equal(context.fns.RealChildWindowFromPoint.handler([dialog, x, y]), next);
+    await context.fns.ShowWindow.handler([next, 0]);
+    assert.equal(context.fns.ChildWindowFromPoint.handler([dialog, x, y]), next,
+        'ChildWindowFromPoint finds a hidden child');
+    assert.equal(context.fns.RealChildWindowFromPoint.handler([dialog, x, y]), dialog,
+        'RealChildWindowFromPoint passes over it');
 });
 
 test('an unread message for a hidden window paints nothing and the desktop stays', async()=>{

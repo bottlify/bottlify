@@ -213,6 +213,22 @@ test('a property is read back, and answers with what removing it took away', ()=
     assert.equal(fns.GetPropA.handler([hwnd, NAME_A]), 0);
 });
 
+test('a property named in either encoding, in any case, is the same property', ()=>{
+    // A property's name is an atom underneath: case-blind, and the same atom
+    // whichever spelling of SetProp added it.
+    const { memory, fns } = setup();
+    const hwnd = makeWindow(memory, fns);
+    memory.putString(NAME_A, 'MyData');
+    putWideString(memory, TEXT, 'MYDATA');
+
+    assert.equal(fns.SetPropA.handler([hwnd, NAME_A, 0x5678]), 1);
+    assert.equal(fns.GetPropW.handler([hwnd, TEXT]), 0x5678);
+    assert.equal(fns.SetPropW.handler([hwnd, TEXT, 0x9abc]), 1);
+    assert.equal(fns.GetPropA.handler([hwnd, NAME_A]), 0x9abc);
+    assert.equal(fns.RemovePropW.handler([hwnd, TEXT]), 0x9abc);
+    assert.equal(fns.GetPropA.handler([hwnd, NAME_A]), 0);
+});
+
 test('a property belongs to one window, and dies with it', ()=>{
     // Handles are recycled. A property that outlived its window would surface
     // on whatever window is handed that value next, as data its new owner never
@@ -857,6 +873,18 @@ test('CopyImage makes a new handle on the same picture, and can let the original
     assert.equal(fns.DestroyCursor.handler([copy]), 0, 'LR_COPYDELETEORG let it go');
     assert.equal(fns.CopyImage.handler([0x7777, 1, 0, 0, 0]), 0, 'nothing to copy');
     assert.equal(fns.CopyImage.handler([moved, 0, 0, 0, 0]), 0, 'a bitmap is not copied here');
+});
+
+test('CreateIcon makes an icon of the size given, its hot spot in the middle', ()=>{
+    const { fns, memory } = setup();
+    const icon = fns.CreateIcon.handler([0, 10, 10, 1, 32, 0x200, 0x400]);
+    assert.notEqual(icon, 0);
+    assert.equal(fns.GetIconInfo.handler([icon, 0x100]), 1);
+    const view = new DataView(memory.bytes.buffer);
+    assert.deepEqual([0, 4, 8].map(at=>view.getUint32(0x100 + at, true)), [1, 5, 5], 'an icon');
+    assert.equal(fns.DestroyIcon.handler([icon]), 1);
+    assert.equal(fns.CreateIcon.handler([0, 0, 10, 1, 32, 0x200, 0x400]), 0, 'no width');
+    assert.equal(fns.CreateIcon.handler([0, 10, 10, 1, 7, 0x200, 0x400]), 0, 'no such depth');
 });
 
 test('GetIconInfo answers the kind and hot spot, and fails on a destroyed handle', ()=>{

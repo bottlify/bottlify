@@ -902,12 +902,10 @@ test('BeginPaint fills the struct the guest allocated', ()=>{
     assert.notEqual(hdc, 0, 'a DC was made for the window');
 
     assert.equal(memory.u32(PAINT_BUFFER + PAINTSTRUCT.hdc), hdc);
-    assert.deepEqual([
-        memory.u32(PAINT_BUFFER + PAINTSTRUCT.rcPaint + RECT.left),
-        memory.u32(PAINT_BUFFER + PAINTSTRUCT.rcPaint + RECT.top),
-        memory.u32(PAINT_BUFFER + PAINTSTRUCT.rcPaint + RECT.right),
-        memory.u32(PAINT_BUFFER + PAINTSTRUCT.rcPaint + RECT.bottom),
-    ], [0, 0, 320, 240], 'a window with no partial damage paints all of itself');
+    const painted = [0, 4, 8, 12].map(at=>memory.u32(PAINT_BUFFER + PAINTSTRUCT.rcPaint + at));
+    fns.GetClientRect.handler([hwnd, RECT_BUFFER]);
+    assert.deepEqual(painted, [0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at)),
+        'a window with no partial damage paints all of its client area');
     assert.equal(memory.u32(PAINT_BUFFER + PAINTSTRUCT.fRestore), 0);
 });
 

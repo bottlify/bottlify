@@ -145,6 +145,33 @@ test('WM_CREATE carries a copy of the structure with its strings converted, an a
     assert.equal(m.lent.size, 0);
 });
 
+test('an MDI child\'s WM_CREATE carries its MDICREATESTRUCT converted too', ()=>{
+    const m = memory();
+    const view = new DataView(m.bytes.buffer);
+    // The CREATESTRUCT: lpCreateParams at 0x700, the name, an atom class, WS_EX_MDICHILD.
+    view.setUint32(0x500 + 0, 0x700, true);
+    view.setUint32(0x500 + 36, 0x600, true);
+    view.setUint32(0x500 + 40, 0xc123, true);
+    view.setUint32(0x500 + 44, 0x40, true);
+    m.writeMemory(0x600, textBytes('Child', true));
+    // The MDICREATESTRUCT: an atom class, a wide title, the rest as asked.
+    [0xc123, 0x7c0, 0x400000, 0x80000000, 0x80000000, 0x80000000, 0x80000000, 0, 0x1234]
+        .forEach((value, at)=>view.setUint32(0x700 + at * 4, value >>> 0, true));
+    m.writeMemory(0x7c0, textBytes('Child', true));
+    translated(m, { hwnd: 1, message: WM_CREATE, wParam: 0, lParam: 0x500, unicode: true }, false,
+        got=>{
+            const mdi = view.getUint32(got.lParam, true);
+            assert.notEqual(mdi, 0x700, 'a copy');
+            assert.equal(view.getUint32(mdi, true), 0xc123, 'an atom kept');
+            assert.notEqual(view.getUint32(mdi + 4, true), 0x7c0);
+            assert.equal(m.readCString(view.getUint32(mdi + 4, true), 100), 'Child');
+            assert.equal(view.getUint32(mdi + 12, true), 0x80000000);
+            assert.equal(view.getUint32(mdi + 32, true), 0x1234);
+            return 0;
+        });
+    assert.equal(m.lent.size, 0);
+});
+
 test('a character message is converted, any other message is not', ()=>{
     const m = memory();
     /** @type {any[]} */

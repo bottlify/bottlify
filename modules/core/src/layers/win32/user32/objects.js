@@ -29,9 +29,9 @@
  *   to open it.
  */
 
-import { planesToBgra } from './cursors.js';
+import { ddbToBgra, planesToBgra } from './cursors.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
-import { readText } from './unicode.js';
+import { readText, readWideString } from './unicode.js';
 
 /** The resource directories a cursor and an icon are named in. */
 export const RT_GROUP_CURSOR = 12;
@@ -658,14 +658,53 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
      * A property is named by a string or by an atom, and the two are told apart
      * the way GetProcAddress tells them apart: a value whose high word is zero
      * is a number rather than a pointer, because no string may live in the first
-     * 64 KiB of the address space.
+     * 64 KiB of the address space. A name is an atom underneath, so the case it
+     * is spelled in, and the encoding, make no difference.
      *
-     * @param {number} value
+     * @param {number} value @param {boolean} [wide]
      * @returns {string | number}
      */
-    const propertyKey = value=>(value >>> 0) <= 0xffff
+    const propertyKey = (value, wide = false)=>((value >>> 0) <= 0xffff
         ? value >>> 0
-        : host.readCString(value >>> 0, MAX_TEXT);
+        : (wide ? readWideString(host, value >>> 0, MAX_TEXT)
+            : host.readCString(value >>> 0, MAX_TEXT)).toUpperCase());
+
+    /**
+     * SetProp, GetProp and RemoveProp, for either spelling.
+     *
+     * @param {boolean} wide
+     */
+    const propertyCalls = wide=>({
+        /** @param {number[]} args */
+        set: ([hwnd, name, data])=>{
+            const record = live(hwnd);
+            if (!record)
+            {
+                return 0;
+            }
+            propertiesOf(record).set(propertyKey(name, wide), data >>> 0);
+            return 1;
+        },
+        /** @param {number[]} args */
+        get: ([hwnd, name])=>{
+            const record = live(hwnd);
+            return record ? propertiesOf(record).get(propertyKey(name, wide)) ?? 0 : 0;
+        },
+        /** @param {number[]} args */
+        remove: ([hwnd, name])=>{
+            const record = live(hwnd);
+            if (!record)
+            {
+                return 0;
+            }
+            const key = propertyKey(name, wide);
+            const held = propertiesOf(record).get(key) ?? 0;
+            propertiesOf(record).delete(key);
+            return held;
+        },
+    });
+    const ansiProperties = propertyCalls(false);
+    const wideProperties = propertyCalls(true);
 
     /** @param {any} record @returns {Map<string | number, number>} */
     const propertiesOf = record=>{
@@ -803,30 +842,13 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
     };
 
     return {
-        /** BOOL SetPropA(HWND hWnd, LPCSTR lpString, HANDLE hData) */
-        SetPropA: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([hwnd, name, data])=>{
-                const record = live(hwnd);
-                if (!record)
-                {
-                    return 0;
-                }
-                propertiesOf(record).set(propertyKey(name), data >>> 0);
-                return 1;
-            },
-        },
+        /** BOOL SetPropA/W(HWND hWnd, LPCSTR lpString, HANDLE hData) */
+        SetPropA: { argBytes: 12, handler: ansiProperties.set },
+        SetPropW: { argBytes: 12, handler: wideProperties.set },
 
-        /** HANDLE GetPropA(HWND hWnd, LPCSTR lpString) */
-        GetPropA: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([hwnd, name])=>{
-                const record = live(hwnd);
-                return record ? propertiesOf(record).get(propertyKey(name)) ?? 0 : 0;
-            },
-        },
+        /** HANDLE GetPropA/W(HWND hWnd, LPCSTR lpString) */
+        GetPropA: { argBytes: 8, handler: ansiProperties.get },
+        GetPropW: { argBytes: 8, handler: wideProperties.get },
 
         /**
          * HANDLE RemovePropA(HWND hWnd, LPCSTR lpString)
@@ -835,21 +857,8 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
          * the program now has to free -- and a program that gets zero back has
          * nothing to free.
          */
-        RemovePropA: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([hwnd, name])=>{
-                const record = live(hwnd);
-                if (!record)
-                {
-                    return 0;
-                }
-                const key = propertyKey(name);
-                const held = propertiesOf(record).get(key) ?? 0;
-                propertiesOf(record).delete(key);
-                return held;
-            },
-        },
+        RemovePropA: { argBytes: 8, handler: ansiProperties.remove },
+        RemovePropW: { argBytes: 8, handler: wideProperties.remove },
 
         /** HMENU CreateMenu(void) */
         CreateMenu: {
@@ -1656,6 +1665,41 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                     hotSpot, width: across, height: down,
                     picture: { width: across, height: down, hotSpot,
                         bgra: planesToBgra(across, down, read(and), read(xor)) },
+                });
+            },
+        },
+
+        /**
+         * HICON CreateIcon(HINSTANCE hInstance, int nWidth, int nHeight, BYTE cPlanes,
+         *   BYTE cBitsPixel, const BYTE *lpbANDbits, const BYTE *lpbXORbits)
+         *
+         * The AND plane monochrome as CreateCursor's, the XOR bitmap of the
+         * planes times bits per pixel, device-dependent with its rows padded
+         * to a WORD; both read now, as the call copies them.
+         */
+        CreateIcon: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([, width, height, planes, bits, and, xor])=>{
+                const MAX_SIDE = 256;
+                const across = width | 0;
+                const down = height | 0;
+                const depth = (planes & 0xff) * (bits & 0xff);
+                if (across <= 0 || down <= 0 || across > MAX_SIDE || down > MAX_SIDE
+                    || ![1, 4, 8, 16, 24, 32].includes(depth))
+                {
+                    return 0;
+                }
+                /** @param {number} plane @param {number} size */
+                const read = (plane, size)=>((plane >>> 0) === 0
+                    ? new Uint8Array(size) : host.readMemory(plane >>> 0, size));
+                const mask = read(and, ((across + 15) >>> 4) * 2 * down);
+                const colour = read(xor, ((across * depth + 15) >>> 4) * 2 * down);
+                const hotSpot = { x: across >> 1, y: down >> 1 };
+                return host.handles.open('icon', {
+                    hotSpot, width: across, height: down,
+                    picture: { width: across, height: down, hotSpot,
+                        bgra: ddbToBgra(across, down, depth, mask, colour) },
                 });
             },
         },
