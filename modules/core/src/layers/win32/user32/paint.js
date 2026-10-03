@@ -29,6 +29,7 @@
 
 import { PAINTSTRUCT, RECT, readRect, writeRect, writeU32s } from './structs.js';
 import { decodeAnsi } from '../kernel32/locale.js';
+import { readText } from './unicode.js';
 
 /** DrawText's flags. */
 const DT_CENTER = 0x0001;
@@ -476,21 +477,25 @@ export function createPaintFunctions(options){
     };
 
     /**
-     * DrawTextA, and DrawTextExA without its parameter block. DT_CALCRECT
-     * measures and writes the rectangle back; anything else draws each line
-     * where the layout put it, in the context's own colour and mode.
+     * DrawText and DrawTextEx without its parameter block, of either kind of
+     * text. DT_CALCRECT measures and writes the rectangle back; anything else
+     * draws each line where the layout put it, in the context's own colour and
+     * mode.
      *
-     * @param {number[]} args
+     * @param {number[]} args @param {boolean} [wide]  UTF-16 text, as the W calls take.
      */
-    const drawText = ([hdc, text, count, rect, format])=>{
+    const drawText = ([hdc, text, count, rect, format], wide = false)=>{
         // A count of -1 means a terminated string; any other count is the
         // string's length, and the text need not be terminated at all -- a
         // caller drawing part of a buffer passes exactly that part.
         const string = (text >>> 0) === 0 || (count | 0) === 0
             ? ''
             : (count | 0) < 0
-                ? host.readCString(text, 0x10000)
-                : decodeAnsi(host.readMemory(text >>> 0, count | 0));
+                ? readText(host, text >>> 0, wide, 0x10000)
+                : wide
+                    ? String.fromCharCode(...new Uint16Array(
+                        host.readMemory(text >>> 0, (count | 0) * 2).slice().buffer))
+                    : decodeAnsi(host.readMemory(text >>> 0, count | 0));
         const bounds = (rect >>> 0) === 0
             ? { left: 0, top: 0, right: 0x7fff, bottom: 0x7fff }
             : readRect(host, rect);
@@ -765,6 +770,24 @@ export function createPaintFunctions(options){
             argBytes: 24,
             /** @param {number[]} args */
             handler: args=>drawText(args.slice(0, 5)),
+        },
+
+        /**
+         * int DrawTextW(HDC, LPCWSTR, int cchText, LPRECT, UINT)
+         * int DrawTextExW(HDC, LPWSTR, int cchText, LPRECT, UINT, LPDRAWTEXTPARAMS)
+         *
+         * The same in UTF-16, the count in characters.
+         */
+        DrawTextW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>drawText(args, true),
+        },
+
+        DrawTextExW: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: args=>drawText(args.slice(0, 5), true),
         },
 
         /**

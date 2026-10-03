@@ -3400,6 +3400,22 @@ test('DrawText with a count draws that many characters of a buffer with no termi
     assert.equal(right - left, 5 * 8, 'five cells, not the eighty that follow');
 });
 
+test('DrawTextW measures UTF-16 text, terminated or counted in characters', ()=>{
+    const { memory, fns } = setup();
+    const DT_CALCRECT = 0x400;
+    memory.writeMemory(TEXT_BUFFER, new Uint8Array(Buffer.from('Steam\0more', 'utf16le')));
+    const width = (/** @type {number} */ count)=>{
+        memory.putU32s(RECT_BUFFER, [0, 0, 0, 0]);
+        assert.ok(fns.DrawTextW.handler([0, TEXT_BUFFER, count, RECT_BUFFER, DT_CALCRECT]) > 0);
+        return (memory.u32(RECT_BUFFER + 8) | 0) - (memory.u32(RECT_BUFFER) | 0);
+    };
+    assert.equal(width(-1), 5 * 8, 'up to the terminator');
+    assert.equal(width(3), 3 * 8, 'three characters, not three bytes');
+    assert.equal(fns.DrawTextExW.handler([0, TEXT_BUFFER, 2, RECT_BUFFER, DT_CALCRECT, 0]), 16);
+    assert.equal(fns.DrawTextW.argBytes, 20);
+    assert.equal(fns.DrawTextExW.argBytes, 24);
+});
+
 // --- wide windows ---
 
 /** @param {ReturnType<typeof fakeMemory>} memory @param {number} address @param {string} text */
