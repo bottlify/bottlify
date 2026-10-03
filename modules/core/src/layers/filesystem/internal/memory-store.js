@@ -260,8 +260,11 @@ export function createMemoryStore(seed = {}){
 
     /**
      * The piece at `index`, this store's own, able to hold `needed` bytes: a
-     * short last piece is doubled, so a small file costs what it holds, not a
-     * whole piece, and one another store holds too is copied first.
+     * short last piece of a small file is doubled, so the file costs what it
+     * holds, not a whole piece, and one another store holds too is copied
+     * first. A piece after the first is whole from the start: the file is
+     * past small, and growing it by doubling would copy, and touch fresh
+     * memory for, twice what it holds.
      *
      * @param {StoredFile} entry @param {number} index @param {number} needed
      */
@@ -276,7 +279,7 @@ export function createMemoryStore(seed = {}){
         {
             return piece;
         }
-        let length = Math.max(piece?.length ?? 0, 4096);
+        let length = Math.max(piece?.length ?? 0, index > 0 ? PIECE_SIZE : 4096);
         while (length < needed)
         {
             length *= 2;

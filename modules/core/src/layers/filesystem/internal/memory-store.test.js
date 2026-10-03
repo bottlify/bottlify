@@ -77,6 +77,22 @@ test('a file larger than a piece reads, writes and cuts across the pieces as one
     assert.deepEqual([...store.read('big.dat', 5 * PIECE_SIZE, 3)], [0, 0, 0]);
 });
 
+test('a small file\'s piece grows as it does, a large file\'s next pieces are whole at once', ()=>{
+    const store = createMemoryStore();
+    const chunk = new Uint8Array(32768).fill(3);
+    for (let at = 0; at < PIECE_SIZE + chunk.length; at += chunk.length)
+    {
+        store.write('big.dat', at, chunk);
+    }
+    store.write('small.dat', 0, chunk);
+    const lengths = (/** @type {string} */ path)=>store.contents?.(path)?.pieces
+        ?.map(piece=>piece?.length);
+    assert.deepEqual(lengths('small.dat'), [32768], 'no more than the file needs');
+    assert.deepEqual(lengths('big.dat'), [PIECE_SIZE, PIECE_SIZE],
+        'the second piece made whole by its first write');
+    assert.deepEqual([...store.read('big.dat', PIECE_SIZE + chunk.length - 1, 2)], [3]);
+});
+
 test('shared bytes stay as they were handed out, whatever is written after', ()=>{
     const store = createMemoryStore();
     store.write('a.dat', 0, new Uint8Array(PIECE_SIZE + 1).fill(4));
