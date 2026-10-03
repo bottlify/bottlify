@@ -62,8 +62,11 @@ const VA_LIST_SLOTS = 64;
 const MAX_PATH = 260;
 
 const SWP_NOSIZE = 0x0001;
+const SWP_NOMOVE = 0x0002;
 const SWP_NOZORDER = 0x0004;
 const SWP_NOACTIVATE = 0x0010;
+/** What a child window is told when it is brought forward to be the active one. */
+const WM_CHILDACTIVATE = 0x0022;
 
 const SM_CXSCREEN = 0;
 const SM_CYSCREEN = 1;
@@ -766,7 +769,6 @@ export function createSystemFunctions({ host, live, windows, classes }){
      * @param {number[]} args  hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags.
      */
     const setWindowPos = ([hwnd, after, x, y, cx, cy, flags])=>{
-        const SWP_NOMOVE = 0x0002;
         const SWP_SHOWWINDOW = 0x0040;
         const SWP_HIDEWINDOW = 0x0080;
         const HWND_BOTTOM = 1;
@@ -814,6 +816,16 @@ export function createSystemFunctions({ host, live, windows, classes }){
         if (isShown && (!wasShown || moved || sized))
         {
             host.appear(record);
+        }
+        // A child placed without SWP_NOACTIVATE is told it is the active
+        // child, shown or not (user32's message tests, WmShowChildSeq_2 and
+        // _4): an MDI child becomes the client's active one this way when its
+        // program brings it to the top.
+        if ((flags & (SWP_NOACTIVATE | SWP_HIDEWINDOW)) === 0
+            && (record.style & (WS_CHILD | WS_POPUP)) === WS_CHILD)
+        {
+            return andThen(host.send(record.hwnd, WM_CHILDACTIVATE, 0, 0, host.callerThread?.()),
+                ()=>1);
         }
         return 1;
     };
@@ -2655,10 +2667,11 @@ export function createSystemFunctions({ host, live, windows, classes }){
         },
 
         /** HWND BringWindowToTop(HWND hWnd) */
+        /** BOOL BringWindowToTop(HWND hWnd): SetWindowPos to HWND_TOP, as Windows does it. */
         BringWindowToTop: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([hwnd])=>(live(hwnd) ? 1 : 0),
+            handler: ([hwnd])=>setWindowPos([hwnd, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE]),
         },
 
         /** BOOL IsIconic(HWND hWnd) */
@@ -3095,7 +3108,8 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 {
                     return 0;
                 }
-                return setWindowPos(placement) ? DEFER_TOKEN : 0;
+                return andThen(setWindowPos(placement),
+                    (/** @type {number} */ placed)=>(placed ? DEFER_TOKEN : 0));
             },
         },
         EndDeferWindowPos: {

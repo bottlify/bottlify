@@ -456,8 +456,10 @@ export function createMdi(options){
             return null;
         }
         switch (message >>> 0){
+            // A disabled child is told and stays as it is.
             case WM_CHILDACTIVATE:
-                return then(activate(client, child, thread), ()=>0);
+                return (call('GetWindowLongA', [child, GWL_STYLE]) & WS_DISABLED) !== 0 ? 0
+                    : then(activate(client, child, thread), ()=>0);
             case WM_SETFOCUS:
                 return state.active === child ? null
                     : then(activate(client, child, thread), ()=>null);

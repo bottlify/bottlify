@@ -4198,3 +4198,60 @@ test('SetShellWindow names the desktop\'s shell window once, never a topmost one
     assert.equal(fns.GetShellWindow.handler(), 0);
     assert.equal(fns.SetShellWindow.handler([other]), 1, 'and named again once it is gone');
 });
+
+test('an MDI child brought to the top is told WM_CHILDACTIVATE and becomes the active one; '
+    + 'ShowWindow alone does not make it so, nor does a disabled child become it', async()=>{
+    // user32's message tests: ShowWindow(SW_SHOWNORMAL) of an MDI child is
+    // WmShowChildSeq, no activation; SetWindowPos without SWP_NOACTIVATE
+    // sends WM_CHILDACTIVATE (WmShowChildSeq_2), which DefMDIChildProc answers
+    // by activating an enabled child (WmChildActivateWindowSeq) and not a
+    // disabled one. MFC shows a document's frame this way, BringWindowToTop
+    // and then ShowWindow, and routes its commands to the active child.
+    const WM_MDIGETACTIVE = 0x0229;
+    const WM_CHILDACTIVATE = 0x0022;
+    const WS_DISABLED = 0x08000000;
+    const CLIENT_CLASS = 0x10400;
+    const CLIENT_CREATE = 0x10500;
+    /** @type {any} */
+    let table = null;
+    let client = 0;
+    /** @type {number[]} */
+    const told = [];
+    const { fns, memory } = setup({ heap: true, reply: message=>{
+        if (message.message === WM_CHILDACTIVATE)
+        {
+            told.push(message.hwnd);
+        }
+        // An MDI child's procedure leaves the rest to DefMDIChildProc.
+        if (client !== 0 && table.GetParent.handler([message.hwnd]) === client)
+        {
+            return table.DefMDIChildProcA.handler([message.hwnd, message.message,
+                message.wParam, message.lParam]);
+        }
+        return message.message === WM_NCCREATE ? 1 : 0;
+    } });
+    table = fns;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const frame = await createWindow(fns, memory);
+    memory.putString(CLIENT_CLASS, 'mdiclient');
+    memory.putU32s(CLIENT_CREATE, [0, 0x100]);
+    client = await fns.CreateWindowExA.handler([0, CLIENT_CLASS, 0,
+        WS_CHILD | WS_VISIBLE | 0x1, 0, 0, 200, 160, frame, 1, HINSTANCE, CLIENT_CREATE]);
+    const active = ()=>fns.SendMessageA.handler([client, WM_MDIGETACTIVE, 0, 0]);
+    const hidden = await fns.CreateMDIWindowA.handler([CLASS_NAME, TITLE, 0, 0, 0, 50, 40,
+        client, HINSTANCE, 0]);
+    const disabled = await fns.CreateMDIWindowA.handler([CLASS_NAME, TITLE, WS_DISABLED,
+        0, 0, 50, 40, client, HINSTANCE, 0]);
+
+    await fns.ShowWindow.handler([hidden, 1]);
+    assert.equal(await active(), 0, 'shown, and still not the active child');
+    await fns.BringWindowToTop.handler([disabled]);
+    assert.deepEqual(told.splice(0), [disabled]);
+    assert.equal(await active(), 0, 'a disabled child is told and stays as it is');
+    await fns.BringWindowToTop.handler([hidden]);
+    assert.deepEqual(told.splice(0), [hidden]);
+    assert.equal(await active(), hidden);
+    await fns.SetWindowPos.handler([hidden, 0, 1, 1, 0, 0, 0x0001 | 0x0004 | 0x0010]);
+    assert.deepEqual(told, [], 'SWP_NOACTIVATE: nothing said');
+});
