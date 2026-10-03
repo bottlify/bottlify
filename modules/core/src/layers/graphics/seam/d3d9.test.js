@@ -1200,6 +1200,40 @@ test('a state block applied brings the stage and sampler states it holds into th
     h.release(root);
 });
 
+test('a state block applied brings the streams it holds into the guest\'s block, and reads no'
+    + ' other binding', ()=>{
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const out = 0x3000;
+    assert.equal(h.device(device, 'CreateVertexBuffer', [96, 0, 0, D3DPOOL.MANAGED, out, 0]),
+        D3D_OK);
+    const buffer = h.box.memory.readU32(out);
+    assert.equal(h.device(device, 'BeginStateBlock'), D3D_OK);
+    assert.equal(h.device(device, 'SetStreamSource', [1, buffer, 16, 24]), D3D_OK);
+    assert.equal(h.device(device, 'EndStateBlock', [out]), D3D_OK);
+    const stateBlock = h.box.memory.readU32(out);
+    const block = h.box.memory.readU32(device + 4);
+    // Bindings the block does not hold, left as the guest wrote them: an Apply
+    // that read every stream, the indices and the shaders back would
+    // overwrite them.
+    h.box.memory.writeU32(block + SHADOW.STREAMS + 3 * 8 + 4, 0xabcd);
+    h.box.memory.writeU32(block + SHADOW.STREAM_OFFSETS + 3 * 4, 0xabcd);
+    h.box.memory.writeU32(block + SHADOW.INDICES, 0xabcd);
+    h.box.memory.writeU32(block + SHADOW.VERTEX_SHADER, 0xabcd);
+    assert.equal(h.box.call(stateBlock, slot(IDIRECT3DSTATEBLOCK9_SLOTS, 'Apply'), []), D3D_OK);
+    assert.equal(h.box.memory.readU32(block + SHADOW.STREAMS + 1 * 8 + 4), 24, 'its stride');
+    assert.equal(h.box.memory.readU32(block + SHADOW.STREAM_OFFSETS + 1 * 4), 16, 'its offset');
+    assert.equal(h.box.memory.readU32(block + SHADOW.STREAMS + 3 * 8 + 4), 0xabcd);
+    assert.equal(h.box.memory.readU32(block + SHADOW.STREAM_OFFSETS + 3 * 4), 0xabcd);
+    assert.equal(h.box.memory.readU32(block + SHADOW.INDICES), 0xabcd);
+    assert.equal(h.box.memory.readU32(block + SHADOW.VERTEX_SHADER), 0xabcd);
+    assert.equal(h.release(stateBlock), 0);
+    h.release(buffer);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
 test('a query answers through its vtable, and a null pointer only asks whether it could', ()=>{
     const h = seamed();
     const root = h.create();
