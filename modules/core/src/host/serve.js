@@ -752,6 +752,14 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 : tables.filter((/** @type {{ name: string }} */ table)=>table.name === layer));
         },
         trace: ()=>app.trace(),
+        // The engine's whole account in one answer, with what only this side
+        // reads: the threads and the guest's time by module.
+        report: ()=>plain({
+            ...app.report(),
+            presented: { count: frames, history: presented.slice() },
+            threads: reading?.threads() ?? [],
+            guestByModule: reading?.guestByModule() ?? {},
+        }),
         'files.list': (/** @type {string} */ path)=>volume().list(path),
         'files.read': (/** @type {string} */ path)=>volume().read(path),
         presented: ()=>({ count: frames, history: presented.slice() }),

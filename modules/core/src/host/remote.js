@@ -382,6 +382,16 @@ export async function createRemoteApp(wiring){
          * @returns {Promise<any[]>}
          */
         diagnostics: layer=>request('diagnostics', layer === undefined ? [] : [layer]),
+        /**
+         * Everything the engine can say about the run in one answer -- every
+         * layer's diagnostics, the phase profile, the last frames, where the
+         * machine stands, the threads, the guest's time by module and its code
+         * around the hottest addresses -- for a report saved with one click.
+         * A request, not for polling.
+         *
+         * @returns {Promise<any>}
+         */
+        report: ()=>request('report'),
         /** Messages by kind since the start, both ways. */
         traffic: ()=>({ ...traffic }),
         /** @returns {Promise<string>} */

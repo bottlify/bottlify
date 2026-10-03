@@ -1,0 +1,56 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * The report a person saves with one click: every layer, the phase profile,
+ * where the machine stands, and the guest's own code around the addresses it
+ * spent itself at -- what a question about the translator's work there is
+ * answered from without asking for the program.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createApp } from './app.js';
+import { buildExe } from '../../../tools/make-pe.mjs';
+
+/** @param {number} value */
+const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
+
+test('a report carries every layer, the profile and the code the guest spent itself in',
+    { timeout: 60000 }, async t=>{
+        // mov ecx, 5000000; L: inc eax; dec ecx; jnz L; push 0; call [ExitProcess]
+        const loop = [0xb9, ...u32(5_000_000), 0x40, 0x49, 0x75, 0xfc];
+        const executable = buildExe({
+            imports: { 'KERNEL32.dll': ['ExitProcess'] },
+            codeSize: 0x20,
+            code: ({ iat })=>[...loop, 0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+        });
+        const app = await createApp({ executable, engine: 'cork' });
+        t.after(()=>app.dispose());
+        assert.equal(await app.run(), 0);
+
+        const report = app.report();
+        const names = report.diagnostics.map((/** @type {{ name: string }} */ table)=>table.name);
+        for (const layer of ['cpu', 'kernel', 'bridge', 'graphics', 'log', 'app'])
+        {
+            assert.ok(names.includes(layer), `${layer} is in it`);
+        }
+        assert.ok(Array.isArray(report.profile.phases), 'the phase profile');
+        assert.match(report.trace, /thread/, 'where the machine stands');
+        const cpu = report.diagnostics.find((/** @type {{ name: string }} */ table)=>
+            table.name === 'cpu');
+        const [hottest] = cpu.metrics.samples.top;
+        assert.ok(hottest, 'the loop was sampled');
+        const page = report.hotCode.find((/** @type {{ address: number }} */ one)=>
+            one.address === (hottest.address & ~0xfff));
+        assert.ok(page, 'and the page it ran in is carried');
+        const bytes = Uint8Array.from(atob(page.base64), c=>c.charCodeAt(0));
+        assert.equal(bytes.length, 0x1000);
+        const at = (hottest.address & 0xfff);
+        const near = [...bytes.subarray(Math.max(0, at - 64), at + 64)];
+        const text = near.map(b=>b.toString(16).padStart(2, '0')).join('');
+        assert.ok(text.includes('404975fc'), 'with the loop\'s own bytes in it');
+    });

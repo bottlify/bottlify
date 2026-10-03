@@ -397,6 +397,9 @@ const MAX_CONCURRENT_REQUESTS = 6;
  */
 const IDLE_CHECK_MS = 50;
 
+/** How many of the hottest sampled addresses a report carries the code around. */
+const HOT_CODE_SAMPLES = 24;
+
 /**
  * Turns blocks into range requests.
  *
@@ -6456,6 +6459,58 @@ async function buildApp(options){
          * @returns {string}
          */
         trace: ()=>formatTrace(captureTrace({ cpu, memory, kernel, bridge })),
+
+        /**
+         * Everything the engine can say about the run in one answer, for a
+         * report a person saves with one click: every layer's diagnostics,
+         * the phase profile and the last frames, where the machine stands, and
+         * the guest's code around the addresses it spent itself at -- the bytes
+         * a question about the translator's code for them is answered from.
+         * A request, not for polling: it reads guest memory and describes
+         * every layer.
+         */
+        report(){
+            const diagnostics = this.diagnostics();
+            const cpuTable = diagnostics.find((/** @type {any} */ table)=>table.name === 'cpu');
+            /** @type {{ address: number, instructions: number }[]} */
+            const top = cpuTable?.metrics?.samples?.top ?? [];
+            /** @type {Set<number>} */
+            const pages = new Set();
+            for (const sample of top.slice(0, HOT_CODE_SAMPLES))
+            {
+                // The page the address is on and the one after: a region the
+                // translator formed there runs on past the page's end.
+                pages.add((sample.address & ~0xfff) >>> 0);
+                pages.add(((sample.address & ~0xfff) + 0x1000) >>> 0);
+            }
+            /** @type {{ address: number, base64: string }[]} */
+            const hotCode = [];
+            for (const page of [...pages].sort((left, right)=>left - right))
+            {
+                try
+                {
+                    const bytes = memory.readBytes(page, 0x1000);
+                    let text = '';
+                    for (let at = 0; at < bytes.length; at++)
+                    {
+                        text += String.fromCharCode(bytes[at]);
+                    }
+                    hotCode.push({ address: page, base64: btoa(text) });
+                }
+                catch {
+                    // A page nothing is mapped at: the sample was in code the
+                    // program has since let go of.
+                }
+            }
+            const log = core.api('log');
+            return {
+                diagnostics,
+                profile: log.profile(20),
+                frames: log.frames(240),
+                trace: this.trace(),
+                hotCode,
+            };
+        },
         dispose(){
             // What the program wrote last is saved now rather than after it
             // settles: the machine it was written on is about to go.
