@@ -59,6 +59,7 @@ import {
 import {
     CLEAR_UNIFORM_FLOATS, COPY_UNIFORM_FLOATS, UNIFORM, UNITS, clearDescriptor, clearKey,
     copyKey, drawDescriptor, drawKey, generateClear, generateCopy, generateDraw, generateShow,
+    sameKeyInputs,
     showDescriptor, showKey,
 } from './wgsl.js';
 
@@ -640,7 +641,8 @@ export function createGpuRenderer(services){
      * @param {string} label @param {number} usage @param {number} size
      */
     const ring = (label, usage, size)=>{
-        let buffer = backend.createDynamicBuffer({ size, usage, label });
+        // Each draw reads only what it wrote, so a wrap keeps nothing.
+        let buffer = backend.createDynamicBuffer({ size, usage, label, keep: false });
         let cursor = 0;
         let fresh = true;
         return {
@@ -651,7 +653,8 @@ export function createGpuRenderer(services){
                 if (aligned > buffer.size)
                 {
                     backend.releaseDynamicBuffer?.(buffer);
-                    buffer = backend.createDynamicBuffer({ size: aligned * 2, usage, label });
+                    buffer = backend.createDynamicBuffer({ size: aligned * 2, usage, label,
+                        keep: false });
                     cursor = 0;
                     fresh = true;
                 }
@@ -1733,6 +1736,14 @@ export function createGpuRenderer(services){
     };
 
     /**
+     * The state and key of the draw before: most draws keep both, and the key
+     * is a long string to build.
+     *
+     * @type {{ state: import('./wgsl.js').DrawState, key: string } | null}
+     */
+    let lastDraw = null;
+
+    /**
      * Records one draw of a laid-out vertex stream.
      *
      * @param {object} context
@@ -1771,7 +1782,9 @@ export function createGpuRenderer(services){
                 + ' both, so the front face\'s were applied to the back face\'s test too');
         }
         const state = drawStateOf(scene, layout, topology);
-        const key = drawKey(state);
+        const key = lastDraw !== null && sameKeyInputs(state, lastDraw.state)
+            ? lastDraw.key : drawKey(state);
+        lastDraw = { state, key };
         const generated = generatedFor(key, state);
         const recording = recordingOf(context);
         if (generated.programs?.error)

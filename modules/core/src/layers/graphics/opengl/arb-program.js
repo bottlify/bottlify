@@ -222,6 +222,11 @@ const CANONICAL_ATTRIB = Object.freeze({
  * @returns {string}
  */
 export function canonicalAttribName(attrib){
+    return ATTRIB_NAMES[attrib] ?? nameOfAttrib(attrib);
+}
+
+/** @param {number} attrib */
+function nameOfAttrib(attrib){
     for (const [name, number] of Object.entries(CANONICAL_ATTRIB))
     {
         if (number === attrib)
@@ -231,6 +236,9 @@ export function canonicalAttribName(attrib){
     }
     return `attrib${attrib}`;
 }
+
+/** The names of the attributes a program can address, asked for on every draw. */
+const ATTRIB_NAMES = Array.from({ length: 16 }, (_, attrib)=>nameOfAttrib(attrib));
 
 /**
  * The limits this implementation reports and enforces, per program kind. The

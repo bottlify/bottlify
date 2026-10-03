@@ -739,8 +739,9 @@ export function createBackend(options){
                 ...descriptor,
                 onUpload: (/** @type {string} */ label, /** @type {number} */ bytes)=>
                     profiler.bufferUpload(label, bytes),
-                carry: (/** @type {import('./internal/buffers.js').Carry} */ carry)=>
-                    carries.push(carry),
+                carry: descriptor.keep === false ? undefined
+                    : (/** @type {import('./internal/buffers.js').Carry} */ carry)=>
+                        carries.push(carry),
                 frames: frameCounts,
                 touched,
             });

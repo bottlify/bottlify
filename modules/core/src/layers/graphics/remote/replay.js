@@ -1129,5 +1129,18 @@ export function createMirror(){
             }
             return out;
         },
+        /**
+         * The bytes in place when they lie in one page that holds them, a
+         * copy otherwise: a window, which its reader copies from before the
+         * next call writes the mirror again.
+         *
+         * @param {number} address @param {number} length @returns {Uint8Array}
+         */
+        window(address, length){
+            const at = address >>> 0;
+            const offset = at & (SIZE - 1);
+            const page = offset + length <= SIZE ? pages.get(at >>> SHIFT) : undefined;
+            return page ? page.subarray(offset, offset + length) : this.read(address, length);
+        },
     };
 }

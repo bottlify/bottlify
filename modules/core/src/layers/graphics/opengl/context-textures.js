@@ -84,6 +84,8 @@ function digestBlocks(bytes){
 
 /** The targets a unit can have textures bound to, lowest priority first. */
 const TARGETS = [GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_CUBE_MAP];
+/** The targets from the highest precedence down, as a unit's enabled target is chosen. */
+const TARGETS_HIGHEST_FIRST = [...TARGETS].reverse();
 
 const BINDING_QUERY = Object.freeze({
     [GL.TEXTURE_1D]: GL.TEXTURE_BINDING_1D,
@@ -324,7 +326,7 @@ export function installTextureCalls(context, kernel){
                 {
                     return;
                 }
-                for (const target of [...TARGETS].reverse())
+                for (const target of TARGETS_HIGHEST_FIRST)
                 {
                     if (unit.enabled.get(target) !== 1)
                     {
