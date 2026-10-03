@@ -1199,18 +1199,22 @@ export function x87StoreRegisters(e, written){
  */
 export function x87BlockStart(e, index){
     const x = e.x87;
+    // Whatever a block before it left stale was written on its every way out;
+    // what is known of the stack words there is the plan's. A cut block too:
+    // the exit it is compiled as is reached from other blocks than the one
+    // emitted before it, and that one -- a block that ended in a `ret` or a
+    // `hlt`, whose own exits wrote its stale words -- left them uncommitted.
+    x.known = unknown();
+    x.exact = 0;
+    x.exactNaN = 0;
     if (x.cut.has(index))
     {
         x.current = null;
+        x.stack = NOTHING;
         return false;
     }
     x.current = x.states[index] === null ? null : cloneState(/** @type {StackState} */ (x.states[index]));
-    // Whatever a block before it left stale was written on its every way out;
-    // what is known of the stack words there is the plan's.
-    x.known = unknown();
     x.stack = x.shapes[index] ?? NOTHING;
-    x.exact = 0;
-    x.exactNaN = 0;
     if (x.current !== null)
     {
         e.b.i32const(x.current.top).localSet(Local.x87Top);
