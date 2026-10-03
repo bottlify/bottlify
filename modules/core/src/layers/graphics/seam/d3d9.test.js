@@ -22,7 +22,7 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createDirect3D9Seam } from './d3d9.js';
-import { BUFFER, SHADOW, STALE_POINTER, transformSlot } from './shadow.js';
+import { BUFFER, SHADOW, transformSlot } from './shadow.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { IDIRECT3D9_SLOTS } from './vtables.js';
 import {
@@ -44,8 +44,7 @@ import {
 import { guidBytes } from './d3d7.js';
 import { D3DCREATE, D3DDEVTYPE, D3DQUERYTYPE, createDirect3D9 } from '../d3d9/device.js';
 import { D3DFMT, D3DPOOL, D3DRS } from '../d3d9/constants.js';
-import { D3DFMT_INDEX, D3DTSS } from '../d3d8/constants.js';
-import { D3DSAMP, SAMPLER_STATE_KEY } from '../d3d9/samplerstates.js';
+import { D3DTSS } from '../d3d8/constants.js';
 import { D3DDECLTYPE, D3DDECLUSAGE } from '../d3d9/declaration.js';
 import { END_TOKEN, SHADER_KIND, versionToken } from '../d3d9/shader.js';
 import { displayModes } from '../../win32/user32/display.js';
@@ -1170,15 +1169,14 @@ test('a state block is recorded, handed back, and applied through its own vtable
     h.release(root);
 });
 
-test('a state block applied brings the stage and sampler states it holds into the guest\'s'
-    + ' block, and reads no other', ()=>{
+test('a state block applied brings the stage states it holds into the guest\'s block, and reads'
+    + ' no other', ()=>{
     const h = seamed({ shadow: true });
     const root = h.create();
     const { device } = h.createDevice(root);
     const out = 0x3000;
     assert.equal(h.device(device, 'BeginStateBlock'), D3D_OK);
     assert.equal(h.device(device, 'SetTextureStageState', [2, D3DTSS.COLOROP, 7]), D3D_OK);
-    assert.equal(h.device(device, 'SetSamplerState', [1, D3DSAMP.MAGFILTER, 2]), D3D_OK);
     assert.equal(h.device(device, 'EndStateBlock', [out]), D3D_OK);
     const stateBlock = h.box.memory.readU32(out);
     const block = h.box.memory.readU32(device + 4);
@@ -1189,47 +1187,10 @@ test('a state block applied brings the stage and sampler states it holds into th
     // Words the block does not hold, left as nothing on the device would leave
     // them: an Apply that read every stage state back would overwrite them.
     h.box.memory.writeU32(word(4, D3DTSS.COLOROP), 0xabcd);
-    h.box.memory.writeU32(word(5, SAMPLER_STATE_KEY[D3DSAMP.MAGFILTER]), 0xabcd);
     assert.equal(h.box.call(stateBlock, slot(IDIRECT3DSTATEBLOCK9_SLOTS, 'Apply'), []), D3D_OK);
     assert.equal(h.box.memory.readU32(word(2, D3DTSS.COLOROP)), 7);
-    assert.equal(h.box.memory.readU32(word(1, SAMPLER_STATE_KEY[D3DSAMP.MAGFILTER])), 2);
     assert.equal(h.box.memory.readU32(word(4, D3DTSS.COLOROP)), 0xabcd);
-    assert.equal(h.box.memory.readU32(word(5, SAMPLER_STATE_KEY[D3DSAMP.MAGFILTER])), 0xabcd);
     assert.equal(h.release(stateBlock), 0);
-    assert.equal(h.release(device), 0);
-    h.release(root);
-});
-
-test('a state block applied brings the streams it holds into the guest\'s block, and reads no'
-    + ' other binding', ()=>{
-    const h = seamed({ shadow: true });
-    const root = h.create();
-    const { device } = h.createDevice(root);
-    const out = 0x3000;
-    assert.equal(h.device(device, 'CreateVertexBuffer', [96, 0, 0, D3DPOOL.MANAGED, out, 0]),
-        D3D_OK);
-    const buffer = h.box.memory.readU32(out);
-    assert.equal(h.device(device, 'BeginStateBlock'), D3D_OK);
-    assert.equal(h.device(device, 'SetStreamSource', [1, buffer, 16, 24]), D3D_OK);
-    assert.equal(h.device(device, 'EndStateBlock', [out]), D3D_OK);
-    const stateBlock = h.box.memory.readU32(out);
-    const block = h.box.memory.readU32(device + 4);
-    // Bindings the block does not hold, left as the guest wrote them: an Apply
-    // that read every stream, the indices and the shaders back would
-    // overwrite them.
-    h.box.memory.writeU32(block + SHADOW.STREAMS + 3 * 8 + 4, 0xabcd);
-    h.box.memory.writeU32(block + SHADOW.STREAM_OFFSETS + 3 * 4, 0xabcd);
-    h.box.memory.writeU32(block + SHADOW.INDICES, 0xabcd);
-    h.box.memory.writeU32(block + SHADOW.VERTEX_SHADER, 0xabcd);
-    assert.equal(h.box.call(stateBlock, slot(IDIRECT3DSTATEBLOCK9_SLOTS, 'Apply'), []), D3D_OK);
-    assert.equal(h.box.memory.readU32(block + SHADOW.STREAMS + 1 * 8 + 4), 24, 'its stride');
-    assert.equal(h.box.memory.readU32(block + SHADOW.STREAM_OFFSETS + 1 * 4), 16, 'its offset');
-    assert.equal(h.box.memory.readU32(block + SHADOW.STREAMS + 3 * 8 + 4), 0xabcd);
-    assert.equal(h.box.memory.readU32(block + SHADOW.STREAM_OFFSETS + 3 * 4), 0xabcd);
-    assert.equal(h.box.memory.readU32(block + SHADOW.INDICES), 0xabcd);
-    assert.equal(h.box.memory.readU32(block + SHADOW.VERTEX_SHADER), 0xabcd);
-    assert.equal(h.release(stateBlock), 0);
-    h.release(buffer);
     assert.equal(h.release(device), 0);
     h.release(root);
 });
@@ -1736,189 +1697,6 @@ test('with guest memory, a buffer locks and unlocks in the guest, and the host s
     assert.equal(h.box.memory.readU32(block + BUFFER.LOCKED), 1);
     assert.equal(h.box.memory.readU32(0x3200), base);
     assert.equal(h.release(pointer), 0);
-});
-
-test('with guest memory, the bindings set in the guest reach the device', ()=>{
-    // The routines leave a pointer, an offset and a stride in the block, and
-    // the next host method adopts them. What the host changes itself -- a
-    // format set, a user-pointer draw emptying stream zero and the indices --
-    // goes back into the block, so the guest's next write of what it had set
-    // before is still a change; and a declaration let go of leaves its slot
-    // stale.
-    const h = seamed({ shadow: true });
-    const root = h.create();
-    const { device } = h.createDevice(root);
-    const out = 0x3100;
-    assert.equal(h.device(device, 'CreateVertexBuffer', [96, 0, 0, D3DPOOL.MANAGED, out, 0]),
-        D3D_OK);
-    const vertices = h.box.memory.readU32(out);
-    const elements = 0x3000;
-    h.box.services.writeMemory(elements, Uint8Array.from([
-        0, 0, 0, 0, D3DDECLTYPE.FLOAT3, 0, D3DDECLUSAGE.POSITION, 0,
-        0xff, 0, 0, 0, D3DDECLTYPE.UNUSED, 0, 0, 0,
-    ]));
-    assert.equal(h.device(device, 'CreateVertexDeclaration', [elements, out]), D3D_OK);
-    const declaration = h.box.memory.readU32(out);
-    assert.equal(h.device(device, 'CreateIndexBuffer',
-        [64, 0, D3DFMT_INDEX.INDEX16, D3DPOOL.MANAGED, out, 0]), D3D_OK);
-    const indexBuffer = h.box.memory.readU32(out);
-    const block = h.box.memory.readU32(device + 4);
-    // As the two routines leave the block (shadow.itest.js runs them): the
-    // values, then the binding calls and every call counted.
-    const counted = ()=>{
-        for (const counter of [SHADOW.BINDING_CALLS, SHADOW.CALLS])
-        {
-            h.box.memory.writeU32(block + counter, h.box.memory.readU32(block + counter) + 1);
-        }
-    };
-    /** @param {number} buffer @param {number} offset @param {number} stride */
-    const setStream = (buffer, offset, stride)=>{
-        h.box.memory.writeU32(block + SHADOW.STREAMS, buffer);
-        h.box.memory.writeU32(block + SHADOW.STREAMS + 4, stride);
-        h.box.memory.writeU32(block + SHADOW.STREAM_OFFSETS, offset);
-        counted();
-    };
-    /** @param {number} pointer */
-    const setDeclaration = pointer=>{
-        h.box.memory.writeU32(block + SHADOW.DECLARATION, pointer);
-        counted();
-    };
-    /** @param {number} pointer */
-    const setIndices = pointer=>{
-        h.box.memory.writeU32(block + SHADOW.INDICES, pointer);
-        counted();
-    };
-
-    /** What the device holds for stream zero, through the host. */
-    const stream = ()=>{
-        assert.equal(h.device(device, 'GetStreamSource', [0, 0x3200, 0x3204, 0x3208]), D3D_OK);
-        const bound = h.box.memory.readU32(0x3200);
-        if (bound !== 0)
-        {
-            h.release(bound);
-        }
-        return [bound, h.box.memory.readU32(0x3204), h.box.memory.readU32(0x3208)];
-    };
-    const held = ()=>{
-        assert.equal(h.device(device, 'GetVertexDeclaration', [0x3300]), D3D_OK);
-        const bound = h.box.memory.readU32(0x3300);
-        if (bound !== 0)
-        {
-            h.release(bound);
-        }
-        return bound;
-    };
-    const indices = ()=>{
-        assert.equal(h.device(device, 'GetIndices', [0x3400]), D3D_OK);
-        const bound = h.box.memory.readU32(0x3400);
-        if (bound !== 0)
-        {
-            h.release(bound);
-        }
-        return bound;
-    };
-
-    setStream(vertices, 12, 12);
-    setDeclaration(declaration);
-    setIndices(indexBuffer);
-    assert.equal(h.box.memory.readU32(block + SHADOW.STREAM_OFFSETS), 12, 'in the block');
-    assert.deepEqual(stream(), [vertices, 12, 12], 'adopted on the way into the host');
-    assert.equal(held(), declaration);
-    assert.equal(indices(), indexBuffer);
-    setIndices(0);
-    assert.equal(indices(), 0, 'none, set in the guest');
-    setIndices(indexBuffer);
-
-    // A format set through the trap makes a declaration of the device's own;
-    // the guest's declaration set again is the change it is.
-    assert.equal(h.device(device, 'SetFVF', [0x002]), D3D_OK);
-    assert.notEqual(held(), declaration);
-    setDeclaration(declaration);
-    assert.equal(held(), declaration, 'the declaration set before, set again');
-
-    // An unbinding is the host's. A bind the guest made just before it, at
-    // another offset and stride, reaches the device first, and the device
-    // keeps what that bind set -- how a program gives an empty stream an
-    // offset and a stride; the block names no buffer after it, so the same
-    // buffer bound again is a change.
-    setStream(vertices, 4, 64);
-    assert.equal(h.device(device, 'SetStreamSource', [0, 0, 0, 0]), D3D_OK);
-    assert.deepEqual(stream(), [0, 4, 64], 'empty, at what the bind before it set');
-    setStream(vertices, 4, 64);
-    assert.deepEqual(stream(), [vertices, 4, 64], 'the same buffer bound again');
-
-    // A user-pointer draw empties stream zero; the buffer bound again is bound.
-    assert.equal(h.device(device, 'BeginScene'), D3D_OK);
-    assert.equal(h.device(device, 'DrawPrimitiveUP', [4, 1, 0x4000, 12]), D3D_OK);
-    assert.equal(stream()[0], 0, 'emptied by the draw');
-    assert.equal(indices(), 0, 'the indices with it');
-    setStream(vertices, 12, 12);
-    setIndices(indexBuffer);
-    assert.deepEqual(stream(), [vertices, 12, 12], 'and bound again');
-    assert.equal(indices(), indexBuffer);
-    assert.equal(h.device(device, 'EndScene'), D3D_OK);
-
-    // The program lets the declaration go: the slot naming it is stale.
-    setDeclaration(declaration);
-    assert.equal(h.release(declaration), 0);
-    assert.equal(h.box.memory.readU32(block + SHADOW.DECLARATION), STALE_POINTER);
-});
-
-test('with guest memory, shaders set in the guest reach the device', ()=>{
-    // SetVertexShader and SetPixelShader leave the pointer in the block as the
-    // other bindings do. A shader the program lets go of leaves its slot
-    // stale, so whatever is made at its address next and set is a change.
-    const h = seamed({ shadow: true, caps: {
-        vertexShaderVersion: { major: 2, minor: 0 }, pixelShaderVersion: { major: 2, minor: 0 },
-    } });
-    const root = h.create();
-    const { device } = h.createDevice(root);
-    const at = 0x3000;
-    const out = 0x3100;
-    /** @param {string} kind @param {string} method */
-    const make = (kind, method)=>{
-        h.box.services.writeMemory(at, new Uint8Array(
-            Uint32Array.from([versionToken(kind, 2, 0), END_TOKEN]).buffer));
-        assert.equal(h.device(device, method, [at, out]), D3D_OK);
-        return h.box.memory.readU32(out);
-    };
-    const vertexShader = make(SHADER_KIND.VERTEX, 'CreateVertexShader');
-    const pixelShader = make(SHADER_KIND.PIXEL, 'CreatePixelShader');
-    const block = h.box.memory.readU32(device + 4);
-    // As the routine leaves the block (shadow.itest.js runs it).
-    /** @param {number} place @param {number} pointer */
-    const set = (place, pointer)=>{
-        h.box.memory.writeU32(block + place, pointer);
-        for (const counter of [SHADOW.BINDING_CALLS, SHADOW.CALLS])
-        {
-            h.box.memory.writeU32(block + counter, h.box.memory.readU32(block + counter) + 1);
-        }
-    };
-    /** What the device holds, through the host. @param {string} method */
-    const bound = method=>{
-        assert.equal(h.device(device, method, [0x3200]), D3D_OK);
-        const shader = h.box.memory.readU32(0x3200);
-        if (shader !== 0)
-        {
-            h.release(shader);
-        }
-        return shader;
-    };
-
-    set(SHADOW.VERTEX_SHADER, vertexShader);
-    set(SHADOW.PIXEL_SHADER, pixelShader);
-    assert.equal(bound('GetVertexShader'), vertexShader, 'adopted on the way into the host');
-    assert.equal(bound('GetPixelShader'), pixelShader);
-    set(SHADOW.PIXEL_SHADER, 0);
-    assert.equal(bound('GetPixelShader'), 0, 'none, set in the guest');
-
-    assert.equal(h.release(vertexShader), 0);
-    assert.equal(h.box.memory.readU32(block + SHADOW.VERTEX_SHADER), STALE_POINTER,
-        'the slot naming a shader let go of');
-    const next = make(SHADER_KIND.VERTEX, 'CreateVertexShader');
-    set(SHADOW.VERTEX_SHADER, next);
-    assert.equal(bound('GetVertexShader'), next, 'the next one set is bound');
-    assert.deepEqual(h.divergences, []);
 });
 
 test('with guest memory, a device\'s setters and draws run in the guest, and its getters answer'

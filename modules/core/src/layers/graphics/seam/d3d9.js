@@ -74,7 +74,7 @@ import {
     RENDER_STATE_MIRROR, TRANSFORM_MIRROR, commandCode, createShadow, getRenderStateCode,
     getTextureStageStateCode, getTransformCode, lockCode, stageStateMirror, unlockCode,
 } from './shadow.js';
-import { D3DTSS9, SAMPLER_STATE_KEY } from '../d3d9/samplerstates.js';
+import { D3DTSS9 } from '../d3d9/samplerstates.js';
 import { COMMANDS, commandObjects, commandSlot } from '../d3d9/commands.js';
 
 /** Direct3D 9's stage state types below 32, a bit each: what the guest routine takes. */
@@ -215,12 +215,9 @@ export function createDirect3D9Seam(
         ((override >>> 0) || chainWindows.get(chain) || deviceWindow) === deviceWindow;
 
     /**
-     * Each device's block of the state its setters write in the guest
-     * (`shadow.js`). Direct3D 9's render states, transforms, stage states,
-     * material and first eight textures are laid out as Direct3D 8's and take
-     * the same routines, and its sampler states share the stage state slots;
-     * its streams, with their offsets, its declaration, indices and shaders
-     * take routines of their own.
+     * Each device's block (`shadow.js`): its command ring, the buffers its
+     * guest unlocked, and the render states, transforms and stage states the
+     * getters in the guest read, laid out as Direct3D 8's are.
      *
      * @type {WeakMap<any, ReturnType<typeof createShadow>>}
      */
@@ -228,21 +225,15 @@ export function createDirect3D9Seam(
     /** @param {any} device */
     const shadowOf = device=>shadows.get(device) ?? null;
     /**
-     * The program let go of a texture. A stage the guest bound it to and the
-     * host has not read yet still names it, so it is adopted now, while the
-     * pointer resolves; after that the pointer is nobody's, and the stage is
-     * made stale so the device keeps what it bound.
+     * The program let go of a resource. A call in the command ring that names
+     * it is made now, while its pointer still resolves; after this the pointer
+     * is nobody's.
      *
-     * @param {any} resource @param {Iterable<number>} pointers
+     * @param {any} resource
      */
-    const retire = (resource, pointers)=>{
+    const retire = resource=>{
         privateData.released(resource);
-        const shadow = shadowOf(owners.get(resource));
-        shadow?.sync();
-        for (const pointer of pointers)
-        {
-            shadow?.forgetPointer(pointer);
-        }
+        shadowOf(owners.get(resource))?.sync();
     };
     /** @param {(at: number) => Uint8Array} code */
     const placeCode = code=>{
@@ -987,7 +978,6 @@ export function createDirect3D9Seam(
             return hr;
         },
     };
-    // A shader let go of leaves no slot of the block naming it.
     const vertexShaderInterfaces = [
         describe(IID_IDirect3DVertexShader9, IDIRECT3DSHADER9_SLOTS, shaderMethods, {}, retire),
     ];
@@ -1010,22 +1000,13 @@ export function createDirect3D9Seam(
                 const shadow = shadowOf(owners.get(block));
                 shadow?.sync();
                 const hr = block.Apply();
-                // What the block holds is all it changed.
+                // What the block holds is all it changed, and the getters in
+                // the guest read only these of it.
                 const record = block.record;
                 shadow?.remirror({
                     renderStates: record.renderStates.keys(),
                     transforms: record.transforms.keys(),
-                    textures: record.textures.size > 0,
                     stageStates: record.stageStates.keys(),
-                    samplerStates: record.samplerStates.keys(),
-                    material: record.material !== undefined,
-                    bindings: {
-                        streams: record.streams.keys(),
-                        indices: record.indices !== undefined,
-                        declaration: record.vertexDeclaration !== undefined,
-                        shaders: record.vertexShader !== undefined
-                            || record.pixelShader !== undefined,
-                    },
                 });
                 return hr;
             },
@@ -2163,21 +2144,16 @@ export function createDirect3D9Seam(
                 startIndex >>> 0, count >>> 0),
 
         /** @param {any} device @param {number[]} args */
-        DrawPrimitiveUP: (device, [type, primitiveCount, vertices, stride])=>{
-            const hr = device.DrawPrimitiveUP(type >>> 0, primitiveCount >>> 0,
+        DrawPrimitiveUP: (device, [type, primitiveCount, vertices, stride])=>
+            device.DrawPrimitiveUP(type >>> 0, primitiveCount >>> 0,
                 readArray(vertices,
                     vertexCountOf(type >>> 0, primitiveCount >>> 0) * (stride >>> 0)),
-                stride >>> 0);
-            // Stream zero is empty after it, which the block has to say.
-            shadowOf(device)?.refreshStreamZero();
-            return hr;
-        },
+                stride >>> 0),
 
         /** @param {any} device @param {number[]} args */
         DrawIndexedPrimitiveUP: (device,
             [type, minIndex, numVertices, count, indices, format, vertices, stride])=>
-        {
-            const hr = device.DrawIndexedPrimitiveUP(type >>> 0, minIndex >>> 0,
+            device.DrawIndexedPrimitiveUP(type >>> 0, minIndex >>> 0,
                 numVertices >>> 0, count >>> 0,
                 readArray(indices,
                     vertexCountOf(type >>> 0, count >>> 0) * indexWidth(format)),
@@ -2185,10 +2161,7 @@ export function createDirect3D9Seam(
                 // An index counts from the start of the vertices, so the
                 // range reaches past its lowest by the count.
                 readArray(vertices, ((minIndex >>> 0) + (numVertices >>> 0)) * (stride >>> 0)),
-                stride >>> 0);
-            shadowOf(device)?.refreshStreamZero();
-            return hr;
-        },
+                stride >>> 0),
 
         /** @param {any} device @param {number[]} args */
         ProcessVertices: (device, [start, index, count, destination, declaration, flags])=>
@@ -2215,11 +2188,8 @@ export function createDirect3D9Seam(
         },
 
         /** @param {any} device @param {number[]} args */
-        SetVertexDeclaration: (device, [declaration])=>{
-            const hr = device.SetVertexDeclaration(publisher.objectAt(declaration));
-            shadowOf(device)?.refreshDeclaration();
-            return hr;
-        },
+        SetVertexDeclaration: (device, [declaration])=>
+            device.SetVertexDeclaration(publisher.objectAt(declaration)),
 
         /** @param {any} device @param {number[]} args */
         GetVertexDeclaration: (device, [out])=>{
@@ -2247,12 +2217,7 @@ export function createDirect3D9Seam(
         },
 
         /** @param {any} device @param {number[]} args */
-        SetFVF: (device, [fvf])=>{
-            // The declaration it makes is one the guest has no pointer to.
-            const hr = device.SetFVF(fvf >>> 0);
-            shadowOf(device)?.refreshDeclaration();
-            return hr;
-        },
+        SetFVF: (device, [fvf])=>device.SetFVF(fvf >>> 0),
         /** @param {any} device @param {number[]} args */
         GetFVF: (device, [out])=>{
             if ((out >>> 0) === 0)
@@ -2362,12 +2327,8 @@ export function createDirect3D9Seam(
         // --- streams ---
 
         /** @param {any} device @param {number[]} args */
-        SetStreamSource: (device, [index, buffer, offset, stride])=>{
-            const hr = device.SetStreamSource(
-                index >>> 0, publisher.objectAt(buffer), offset >>> 0, stride >>> 0);
-            shadowOf(device)?.refreshStream(index >>> 0);
-            return hr;
-        },
+        SetStreamSource: (device, [index, buffer, offset, stride])=>device.SetStreamSource(
+            index >>> 0, publisher.objectAt(buffer), offset >>> 0, stride >>> 0),
 
         /** @param {any} device @param {number[]} args */
         GetStreamSource: (device, [index, out, offset, stride])=>{
@@ -2933,8 +2894,7 @@ export function createDirect3D9Seam(
                 pointerOf: ()=>0,
                 divergence,
                 name: 'IDirect3DDevice9',
-                bindings: 'd3d9',
-                samplerStates: SAMPLER_STATE_KEY,
+                bindings: false,
                 commands: { take: records=>held.device.commands(records,
                     commandObjects(records, publisher.objectAt)) },
             });

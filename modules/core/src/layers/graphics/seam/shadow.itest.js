@@ -21,10 +21,9 @@ import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
 import {
     BUFFER, FLAG_SLOW_PATH, SHADOW, TEXTURE, getRenderStateCode, getSurfaceLevelCode, lockCode,
-    setIndicesCode, setSamplerStateCode,
-    setMaterialCode, setRenderStateCode, setStreamSourceCode, setTextureCode,
+    setIndicesCode, setMaterialCode, setRenderStateCode, setStreamSourceCode, setTextureCode,
     setTextureStageStateCode, setTransformCode, setVertexShaderCode, unlockCode,
-    getTextureStageStateCode, getTransformCode, setStreamSource9Code, setBindingCode,
+    getTextureStageStateCode, getTransformCode,
 } from './shadow.js';
 import { D3DERR_INVALIDCALL, D3DTSS } from '../d3d8/constants.js';
 
@@ -33,9 +32,8 @@ const PROGRAM = 0x8000;
 const ROUTINES = {
     renderState: 0x8800, transform: 0x8880, lock: 0x8900, unlock: 0x89b0,
     stream: 0x8a00, indices: 0x8a80, shader: 0x8b00, texture: 0x8b80, stageState: 0x8c00,
-    material: 0x8c80, surfaceLevel: 0x8d80, getState: 0x8e00, sampler: 0x8e80, texture9: 0x8f00,
-    getStage: 0x8f80, getTransform: 0x9100, stream9: 0x9200, declaration: 0x9300,
-    indices9: 0x9380,
+    material: 0x8c80, surfaceLevel: 0x8d80, getState: 0x8e00, getStage: 0x8f80,
+    getTransform: 0x9100,
 };
 /** Where the routines jump when they leave the case to the host: a halt here. */
 const TRAP = 0x8d00;
@@ -112,27 +110,15 @@ const STEPS = [
     step(ROUTINES.getState, OBJECT, [9, OUT]),           // 36: one it refuses: the trap
     step(ROUTINES.getState, OBJECT, [300, OUT]),         // 37: past the block: the trap
     step(ROUTINES.getState, OBJECT, [8, 0]),             // 38: nowhere to put it: the trap
-    step(ROUTINES.sampler, OBJECT, [1, 5, 2]),           // 39: sampler 1, MAGFILTER
-    step(ROUTINES.sampler, OBJECT, [1, 11, 1]),          // 40: a type with no slot: the trap
-    step(ROUTINES.sampler, OBJECT, [8, 5, 2]),           // 41: a sampler past the block: the trap
-    step(ROUTINES.sampler, OBJECT, [1, 16, 2]),          // 42: past the table: the trap
-    step(ROUTINES.texture9, OBJECT, [8, 0x4242]),        // 43: Direct3D 9's stage 8: the trap
-    step(ROUTINES.getStage, OBJECT, [2, D3DTSS.COLOROP, OUT]),   // 44: what step 20 wrote
-    step(ROUTINES.getStage, OBJECT, [2, 12, OUT]),       // 45: not a type of this version: the trap
-    step(ROUTINES.getStage, OBJECT, [8, D3DTSS.COLOROP, OUT]),   // 46: no such stage: the trap
-    step(ROUTINES.getStage, OBJECT, [2, D3DTSS.COLOROP, 0]),     // 47: nowhere to put it: the trap
-    step(ROUTINES.getTransform, OBJECT, [256, OUT]),     // 48: WORLD, as step 1 set it
-    step(ROUTINES.getTransform, OBJECT, [23, OUT]),      // 49: TEXTURE7, as step 32 set it
-    step(ROUTINES.getTransform, OBJECT, [1, OUT]),       // 50: no such type: the trap
-    step(ROUTINES.getTransform, OBJECT, [260, OUT]),     // 51: past WORLD3: the trap
-    step(ROUTINES.getTransform, OBJECT, [256, 0]),       // 52: nowhere to put it: the trap
-    step(ROUTINES.stream9, OBJECT, [3, 0x2345, 64, 28]), // 53: Direct3D 9's stream 3, at an offset
-    step(ROUTINES.stream9, OBJECT, [3, 0, 8, 99]),       // 54: unbinding: the trap
-    step(ROUTINES.stream9, OBJECT, [16, 1, 0, 1]),       // 55: no such stream: the trap
-    step(ROUTINES.declaration, OBJECT, [0x3456]),        // 56: a declaration
-    step(ROUTINES.declaration, BARE, [0x3456]),          // 57: no block: the trap
-    step(ROUTINES.indices9, OBJECT, [0x4567]),           // 58: Direct3D 9's indices
-    step(ROUTINES.indices9, OBJECT, [0]),                // 59: none, in the guest too
+    step(ROUTINES.getStage, OBJECT, [2, D3DTSS.COLOROP, OUT]),   // 39: what step 20 wrote
+    step(ROUTINES.getStage, OBJECT, [2, 12, OUT]),       // 40: not a type of this version: the trap
+    step(ROUTINES.getStage, OBJECT, [8, D3DTSS.COLOROP, OUT]),   // 41: no such stage: the trap
+    step(ROUTINES.getStage, OBJECT, [2, D3DTSS.COLOROP, 0]),     // 42: nowhere to put it: the trap
+    step(ROUTINES.getTransform, OBJECT, [256, OUT]),     // 43: WORLD, as step 1 set it
+    step(ROUTINES.getTransform, OBJECT, [23, OUT]),      // 44: TEXTURE7, as step 32 set it
+    step(ROUTINES.getTransform, OBJECT, [1, OUT]),       // 45: no such type: the trap
+    step(ROUTINES.getTransform, OBJECT, [260, OUT]),     // 46: past WORLD3: the trap
+    step(ROUTINES.getTransform, OBJECT, [256, 0]),       // 47: nowhere to put it: the trap
 ];
 
 /** @param {typeof STEPS[number]} entry @param {number} at */
@@ -210,14 +196,8 @@ async function routines(){
     host.writePhysical(ROUTINES.surfaceLevel,
         getSurfaceLevelCode(ROUTINES.surfaceLevel, TRAP));
     host.writePhysical(ROUTINES.getState, getRenderStateCode(ROUTINES.getState, TRAP));
-    host.writePhysical(ROUTINES.sampler, setSamplerStateCode(ROUTINES.sampler, TRAP));
-    host.writePhysical(ROUTINES.texture9, setTextureCode(ROUTINES.texture9, TRAP, 'slow'));
     host.writePhysical(ROUTINES.getStage, getTextureStageStateCode(ROUTINES.getStage, TRAP));
     host.writePhysical(ROUTINES.getTransform, getTransformCode(ROUTINES.getTransform, TRAP));
-    host.writePhysical(ROUTINES.stream9, setStreamSource9Code(ROUTINES.stream9, TRAP));
-    host.writePhysical(ROUTINES.declaration,
-        setBindingCode(ROUTINES.declaration, TRAP, SHADOW.DECLARATION));
-    host.writePhysical(ROUTINES.indices9, setBindingCode(ROUTINES.indices9, TRAP, SHADOW.INDICES));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
     host.writePhysical(TEX + 4, new Uint8Array(u32(TBLOCK)));
     host.writePhysical(TBLOCK, new Uint8Array(TEXTURE.SIZE));
@@ -443,62 +423,26 @@ async function routines(){
     assert.equal(read(OUT), 0xdead, 'nothing written by the three the host answers');
     assert.equal(calls(), 16, 'a read is no call the host has to adopt');
 
-    // A sampler state goes to the stage state slot the block's table names
-    // for its type -- MAGFILTER's is 16 -- marked as a stage state is.
-    host.writePhysical(BLOCK + SHADOW.SAMPLER_KEYS + 5, new Uint8Array([16]));
-    const sampled = marks().stages;
-    assert.equal(run(39), 'ok');
-    assert.equal(read(BLOCK + SHADOW.STAGE_STATES + (1 * 32 + 16) * 4), 2);
-    assert.equal(marks().stages[1], (sampled[1] | 1 << 16) >>> 0);
-    assert.equal(calls(), 17);
-    assert.equal(run(40), 'trap', 'a type the table has no slot for');
-    assert.equal(run(41), 'trap', 'a sampler past the stages the block holds');
-    assert.equal(run(42), 'trap', 'a type past the table');
-    assert.equal(run(43), 'trap', 'Direct3D 9 leaves a stage past the block to the host');
-    assert.equal(calls(), 17);
-
     write(OUT, 0);
-    assert.equal(run(44), 'ok', 'a stage state read from the block');
+    assert.equal(run(39), 'ok', 'a stage state read from the block');
     assert.equal(read(OUT), 5, 'what step 20 set');
-    assert.equal(calls(), 17, 'a read is not a call the host must adopt');
-    assert.equal(run(45), 'trap', 'a type the setter leaves to the host');
-    assert.equal(run(46), 'trap', 'a stage past the block');
-    assert.equal(run(47), 'trap', 'a null pointer');
+    assert.equal(calls(), 16, 'a read is not a call the host must adopt');
+    assert.equal(run(40), 'trap', 'a type the setter leaves to the host');
+    assert.equal(run(41), 'trap', 'a stage past the block');
+    assert.equal(run(42), 'trap', 'a null pointer');
 
     /** @returns {number[]} the sixteen floats at OUT */
     const outMatrix = ()=>[...new Float32Array(host.readPhysical(OUT, 64).slice().buffer)];
     host.writePhysical(OUT, new Uint8Array(64));
-    assert.equal(run(48), 'ok', 'WORLD copied out of its slot');
+    assert.equal(run(43), 'ok', 'WORLD copied out of its slot');
     assert.deepEqual(outMatrix(), [...matrix]);
     host.writePhysical(OUT, new Uint8Array(64));
-    assert.equal(run(49), 'ok', 'TEXTURE7 copied out of slot 23');
+    assert.equal(run(44), 'ok', 'TEXTURE7 copied out of slot 23');
     assert.deepEqual(outMatrix(), [...matrix]);
-    assert.equal(run(50), 'trap', 'a type the device refuses');
-    assert.equal(run(51), 'trap', 'a type past WORLD3');
-    assert.equal(run(52), 'trap', 'a null pointer');
-    assert.equal(calls(), 17, 'reads are not calls the host must adopt');
-
-    // Direct3D 9's stream, with its offset in a slot of its own, and its
-    // declaration: binding calls the host adopts like Direct3D 8's.
-    const bindings = read(BLOCK + SHADOW.BINDING_CALLS);
-    assert.equal(run(53), 'ok');
-    assert.equal(read(BLOCK + SHADOW.STREAMS + 3 * 8), 0x2345);
-    assert.equal(read(BLOCK + SHADOW.STREAMS + 3 * 8 + 4), 28);
-    assert.equal(read(BLOCK + SHADOW.STREAM_OFFSETS + 3 * 4), 64);
-    assert.equal(run(54), 'trap', 'an unbinding');
-    assert.equal(read(BLOCK + SHADOW.STREAMS + 3 * 8), 0x2345, 'the block untouched');
-    assert.equal(read(BLOCK + SHADOW.STREAMS + 3 * 8 + 4), 28);
-    assert.equal(read(BLOCK + SHADOW.STREAM_OFFSETS + 3 * 4), 64);
-    assert.equal(run(55), 'trap', 'a stream the block has no slot for');
-    assert.equal(run(56), 'ok');
-    assert.equal(read(BLOCK + SHADOW.DECLARATION), 0x3456);
-    assert.equal(run(57), 'trap', 'an object with no block');
-    assert.equal(run(58), 'ok');
-    assert.equal(read(BLOCK + SHADOW.INDICES), 0x4567);
-    assert.equal(run(59), 'ok');
-    assert.equal(read(BLOCK + SHADOW.INDICES), 0);
-    assert.equal(read(BLOCK + SHADOW.BINDING_CALLS), bindings + 4);
-    assert.equal(calls(), 21);
+    assert.equal(run(45), 'trap', 'a type the device refuses');
+    assert.equal(run(46), 'trap', 'a type past WORLD3');
+    assert.equal(run(47), 'trap', 'a null pointer');
+    assert.equal(calls(), 16, 'reads are not calls the host must adopt');
 
     machine.stop();
 }

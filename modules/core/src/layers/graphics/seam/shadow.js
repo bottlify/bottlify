@@ -156,37 +156,21 @@ export const SHADOW = {
      */
     RENDER_STATE_VALID: 4448,
     /**
-     * A byte per D3DSAMP type below 16: the stage state slot a sampler state
-     * of that type is kept in, zero for one the block does not hold. Written
-     * by the host for a device that has sampler states; zero throughout for
-     * one that does not, which sends every call to the host.
-     */
-    SAMPLER_KEYS: 4480,
-    SAMPLER_KEY_COUNT: 16,
-    /**
-     * Direct3D 9: each stream's offset, beside its pointer and stride in
-     * `STREAMS`, and the vertex declaration's and the pixel shader's
-     * pointers; its indices and its vertex shader take Direct3D 8's slots.
-     */
-    STREAM_OFFSETS: 4496,
-    DECLARATION: 4560,
-    PIXEL_SHADER: 4564,
-    /**
      * The command ring (`commandCode`): where it is, how many bytes it
      * holds, and how many of them the guest has written -- zero where the
      * device has none, which sends every command to the host. The host
      * keeps how far it has read; the guest only ever adds to the head.
      */
-    COMMANDS: 4568,
-    COMMAND_BYTES: 4572,
-    COMMAND_HEAD: 4576,
+    COMMANDS: 4480,
+    COMMAND_BYTES: 4484,
+    COMMAND_HEAD: 4488,
     /**
      * Raised by a draw the ring holds, cleared by the host when it takes the
      * ring: while it is up, a lock in the guest that may overwrite what a
      * draw reads is the host's.
      */
-    DRAWS_PENDING: 4580,
-    SIZE: 4584,
+    DRAWS_PENDING: 4492,
+    SIZE: 4496,
 };
 
 /** A command's head: the method's slot, and the record's length in bytes, its own included. */
@@ -864,76 +848,6 @@ export function setVertexShaderCode(at, trap){
 }
 
 /**
- * HRESULT SetStreamSource(this, UINT index, IDirect3DVertexBuffer9*, UINT
- * offset, UINT stride), as guest code: Direct3D 9's, with an offset.
- * Unbinding is the host's, as Direct3D 8's is: the device keeps the offset
- * and the stride a null buffer comes with.
- *
- *     mov eax, [esp+8]            ; index
- *     cmp eax, STREAM_COUNT
- *     jae slow
- *     mov edx, [esp+12]           ; the buffer
- *     test edx, edx
- *     jz slow
- *     mov [ecx + eax*8 + STREAMS], edx
- *     mov edx, [esp+20]           ; stride
- *     mov [ecx + eax*8 + STREAMS + 4], edx
- *     mov edx, [esp+16]           ; offset
- *     mov [ecx + eax*4 + STREAM_OFFSETS], edx
- *     inc dword [ecx+BINDING_CALLS]
- *     inc dword [ecx+CALLS]
- *     xor eax, eax
- *     ret 20
- *
- * @param {number} at @param {number} trap
- * @returns {Uint8Array}
- */
-export function setStreamSource9Code(at, trap){
-    return routine(at, trap, [
-        ...prologue(),
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0x3d, ...dword(SHADOW.STREAM_COUNT)],                   // cmp eax, 16
-        { jcc: 0x73, to: 'slow' },                               // jae slow
-        [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
-        [0x85, 0xd2],                                            // test edx, edx
-        { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x89, 0x94, 0xc1, ...dword(SHADOW.STREAMS)],            // mov [ecx+eax*8+disp], edx
-        [0x8b, 0x54, 0x24, 0x14],                                // mov edx, [esp+20]
-        [0x89, 0x94, 0xc1, ...dword(SHADOW.STREAMS + 4)],        // mov [ecx+eax*8+disp+4], edx
-        [0x8b, 0x54, 0x24, 0x10],                                // mov edx, [esp+16]
-        [0x89, 0x94, 0x81, ...dword(SHADOW.STREAM_OFFSETS)],     // mov [ecx+eax*4+disp], edx
-        [0xff, 0x81, ...dword(SHADOW.BINDING_CALLS)],            // inc dword [ecx+disp]
-        counted(1),                                              // inc dword [ecx+12]
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x14, 0x00],                                      // ret 20
-    ]);
-}
-
-/**
- * A Direct3D 9 binding made by one pointer -- SetVertexDeclaration,
- * SetIndices, SetVertexShader, SetPixelShader: HRESULT (this, interface*) --
- * as guest code. The pointer is stored as it is, a null one too, which
- * leaves nothing behind that the device keeps; the host turns it into what
- * it names when it next looks.
- *
- * @param {number} at @param {number} trap
- * @param {number} slot  `SHADOW.DECLARATION`, `INDICES`, `VERTEX_SHADER` or
- *     `PIXEL_SHADER`.
- * @returns {Uint8Array}
- */
-export function setBindingCode(at, trap, slot){
-    return routine(at, trap, [
-        ...prologue(),
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0x89, 0x81, ...dword(slot)],                            // mov [ecx+disp], eax
-        [0xff, 0x81, ...dword(SHADOW.BINDING_CALLS)],            // inc dword [ecx+disp]
-        counted(1),                                              // inc dword [ecx+12]
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x08, 0x00],                                      // ret 8
-    ]);
-}
-
-/**
  * The tail a routine answers an argument out of range with: the refusal the
  * interface documents, without a crossing to fetch it.
  *
@@ -954,8 +868,7 @@ const invalidTail = popped=>[
  * HRESULT SetTexture(this, DWORD stage, IDirect3DBaseTexture8*), as guest
  * code. The pointer is stored as it is; the host turns it into the object it
  * names when it next looks, and refuses one that names nothing. A stage past
- * the block's eight is invalid to Direct3D 8; Direct3D 9, whose samplers go
- * further, sends it to the host (`beyond` 'slow').
+ * the block's eight is invalid.
  *
  *     mov eax, [esp+8]            ; stage
  *     cmp eax, 8
@@ -967,15 +880,15 @@ const invalidTail = popped=>[
  *     xor eax, eax
  *     ret 12
  *
- * @param {number} at @param {number} trap @param {'invalid' | 'slow'} [beyond]
+ * @param {number} at @param {number} trap
  * @returns {Uint8Array}
  */
-export function setTextureCode(at, trap, beyond = 'invalid'){
+export function setTextureCode(at, trap){
     return routine(at, trap, [
         ...prologue(),
         [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
         [0x3d, ...dword(SHADOW.STAGE_COUNT)],                    // cmp eax, 8
-        { jcc: 0x73, to: beyond },                               // jae beyond
+        { jcc: 0x73, to: 'invalid' },                            // jae invalid
         [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
         [0x89, 0x94, 0x81, ...dword(SHADOW.TEXTURES)],           // mov [ecx+eax*4+disp], edx
         [0xff, 0x81, ...dword(SHADOW.TEXTURE_CALLS)],            // inc dword [ecx+disp]
@@ -1011,17 +924,15 @@ export function setTextureCode(at, trap, beyond = 'invalid'){
  *     ret 16
  *
  * @param {number} at @param {number} trap
- * @param {number} [types]  The stage state types the routine takes, a bit
- *     each below 32; Direct3D 8's by default. The rest go to the host.
  * @returns {Uint8Array}
  */
-export function setTextureStageStateCode(at, trap, types = STAGE_STATE_TYPES){
+export function setTextureStageStateCode(at, trap){
     return routine(at, trap, [
         ...prologue(),
         [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
         [0x3d, ...dword(SHADOW.STAGE_STATE_STRIDE)],             // cmp eax, 32
         { jcc: 0x73, to: 'slow' },                               // jae slow
-        [0xba, ...dword(types)],                                 // mov edx, imm32
+        [0xba, ...dword(STAGE_STATE_TYPES)],                     // mov edx, imm32
         [0x0f, 0xa3, 0xc2],                                      // bt edx, eax
         { jcc: 0x73, to: 'slow' },                               // jnc slow
         [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
@@ -1174,63 +1085,6 @@ export function getTextureStageStateCode(at, trap, types = STAGE_STATE_TYPES){
         { jcc: 0x74, to: 'slow' },                               // jz slow
         [0x8b, 0x84, 0x81, ...dword(SHADOW.STAGE_STATES)],       // mov eax, [ecx+eax*4+disp]
         [0x89, 0x02],                                            // mov [edx], eax
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x10, 0x00],                                      // ret 16
-    ]);
-}
-
-/**
- * HRESULT SetSamplerState(this, DWORD sampler, D3DSAMPLERSTATETYPE type,
- * DWORD value), as guest code: the state is kept in its sampler's stage
- * state slot for its type, which the block's table names, and marked there
- * as a stage state is. A sampler past the block's stages -- the higher pixel
- * samplers, the displacement and vertex ones -- and a type the table has no
- * slot for go to the host.
- *
- *     (prologue)
- *     mov eax, [esp+12]           ; type
- *     cmp eax, 16
- *     jae slow
- *     movzx eax, byte [ecx + eax + SAMPLER_KEYS]
- *     test eax, eax
- *     jz slow
- *     mov edx, [esp+8]            ; sampler
- *     cmp edx, 8
- *     jae slow
- *     shl edx, 5
- *     add eax, edx                ; sampler * 32 + slot
- *     mov edx, [esp+16]           ; value
- *     mov [ecx + eax*4 + STAGE_STATES], edx
- *     bts [ecx + STAGE_STATE_MARKS], eax
- *     inc dword [ecx + STAGE_STATE_CALLS]
- *     inc dword [ecx + CALLS]
- *     xor eax, eax
- *     ret 16
- *   slow:
- *     jmp trap
- *
- * @param {number} at @param {number} trap
- * @returns {Uint8Array}
- */
-export function setSamplerStateCode(at, trap){
-    return routine(at, trap, [
-        ...prologue(),
-        [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
-        [0x3d, ...dword(SHADOW.SAMPLER_KEY_COUNT)],              // cmp eax, 16
-        { jcc: 0x73, to: 'slow' },                               // jae slow
-        [0x0f, 0xb6, 0x84, 0x01, ...dword(SHADOW.SAMPLER_KEYS)], // movzx eax, byte [ecx+eax+disp]
-        [0x85, 0xc0],                                            // test eax, eax
-        { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x8b, 0x54, 0x24, 0x08],                                // mov edx, [esp+8]
-        [0x81, 0xfa, ...dword(SHADOW.STAGE_COUNT)],              // cmp edx, 8
-        { jcc: 0x73, to: 'slow' },                               // jae slow
-        [0xc1, 0xe2, 0x05],                                      // shl edx, 5
-        [0x01, 0xd0],                                            // add eax, edx
-        [0x8b, 0x54, 0x24, 0x10],                                // mov edx, [esp+16]
-        [0x89, 0x94, 0x81, ...dword(SHADOW.STAGE_STATES)],       // mov [ecx+eax*4+disp], edx
-        mark(SHADOW.STAGE_STATE_MARKS),                          // bts [ecx+disp], eax
-        [0xff, 0x81, ...dword(SHADOW.STAGE_STATE_CALLS)],        // inc dword [ecx+disp]
-        counted(1),                                              // inc dword [ecx+12]
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x10, 0x00],                                      // ret 16
     ]);
@@ -1620,21 +1474,13 @@ export function materialFloats(material){
  * @property {(state: number, out: { value?: number }) => number} GetRenderState
  * @property {(type: number, matrix: ArrayLike<number>) => number} SetTransform
  * @property {(type: number, out: { matrix?: ArrayLike<number> }) => number} GetTransform
- * @property {(index: number, buffer: any, offsetOrStride: number, stride?: number) => number
- *     } SetStreamSource  Direct3D 8's (index, buffer, stride) or 9's (index, buffer,
- *     offset, stride).
- * @property {(index: number, out: { buffer?: any, offset?: number, stride?: number }) => number
- *     } GetStreamSource
- * @property {(declaration: any) => number} [SetVertexDeclaration]  Direct3D 9's.
- * @property {(buffer: any, base?: number) => number} SetIndices  Direct3D 9's has no base.
+ * @property {(index: number, buffer: any, stride: number) => number} SetStreamSource
+ * @property {(index: number, out: { buffer?: any, stride?: number }) => number} GetStreamSource
+ * @property {(buffer: any, base: number) => number} SetIndices
  * @property {(out: { buffer?: any, baseVertexIndex?: number }) => number} GetIndices
- * @property {(handleOrShader: any) => number} SetVertexShader  Direct3D 8's handle or 9's
- *     shader.
- * @property {(shader: any) => number} [SetPixelShader]  Direct3D 9's.
+ * @property {(handle: number) => number} SetVertexShader
  * @property {(out: { handle?: number }) => number} GetVertexShader
  * @property {(stage: number, texture: any) => number} SetTexture
- * @property {(sampler: number, type: number, value: number) => number} [SetSamplerState]
- * @property {(sampler: number, type: number, out: { value?: number }) => number} [GetSamplerState]
  * @property {(stage: number, type: number, value: number) => number} SetTextureStageState
  * @property {(stage: number, type: number, out: { value?: number }) => number
  *     } GetTextureStageState
@@ -1662,17 +1508,13 @@ export function materialFloats(material){
  * @property {(pointer: number) => any} objectAt    The object a pointer the guest wrote names.
  * @property {(buffer: ShadowBuffer) => number} pointerOf   The pointer a buffer is published as.
  * @property {(api: string, detail: string) => void} [divergence]
- * @property {readonly number[]} [samplerStates]  For a device with sampler
- *     states (Direct3D 9), the stage state slot each D3DSAMP type is kept in,
- *     by type: the guest writes one there, and the host sets it back through
- *     SetSamplerState.
  * @property {string} [name]  The device interface a refusal names.
  * @property {ShadowCommands} [commands]  The methods the device's command
  *     ring carries (`commandCode`), and how the host makes one: a device
  *     without them gets no ring.
- * @property {boolean | 'd3d9'} [bindings]  Whose bindings the block holds:
- *     Direct3D 8's streams, indices and vertex shader (the default), Direct3D
- *     9's streams with their offsets and its declaration (`'d3d9'`), or none.
+ * @property {boolean} [bindings]  Whether the block holds the streams, the
+ *     indices and the vertex shader, as Direct3D 8's does (the default); a
+ *     device whose ring carries them leaves them out.
  */
 
 /**
@@ -1683,26 +1525,15 @@ export function materialFloats(material){
 export function createShadow(deps){
     const { device } = deps;
     const name = deps.name ?? 'IDirect3DDevice8';
-    /** The D3DSAMP type kept in each stage state slot, or 0 for a stage state. */
-    const samplerTypes = new Uint8Array(SHADOW.STAGE_STATE_STRIDE);
-    (deps.samplerStates ?? []).forEach((key, type)=>{
-        if (type !== 0 && key < SHADOW.STAGE_STATE_STRIDE && type < SHADOW.SAMPLER_KEY_COUNT)
-        {
-            samplerTypes[key] = type;
-        }
-    });
+    const bindings = deps.bindings !== false;
     let address = 0;
     /** What the host last saw in the block, and so what the device holds. */
     const seenStates = new Uint32Array(SHADOW.RENDER_STATE_COUNT);
     const seenTransforms = new Uint32Array(SHADOW.TRANSFORM_SLOTS * 16);
     const seenStreams = new Uint32Array(SHADOW.STREAM_COUNT * 2);
-    const seenOffsets = new Uint32Array(SHADOW.STREAM_COUNT);
-    let seenDeclaration = 0;
-    const nine = deps.bindings === 'd3d9';
     let seenIndices = 0;
     let seenBaseVertex = 0;
     let seenShader = 0;
-    let seenPixelShader = 0;
     const seenTextures = new Uint32Array(SHADOW.STAGE_COUNT);
     const seenStageStates = new Uint32Array(SHADOW.STAGE_COUNT * SHADOW.STAGE_STATE_STRIDE);
     const seenMaterial = new Uint32Array(SHADOW.MATERIAL_WORDS);
@@ -1845,47 +1676,12 @@ export function createShadow(deps){
     };
 
     /**
-     * Direct3D 9's bindings, as stale pointers beside the offset and stride
-     * the device holds: the next pointer the guest writes is a change whatever
-     * it names, and reading the bound buffer back would take a reference.
+     * A stream, as the pointer the program knows the buffer by. A Get* adds a
+     * reference the caller owes back.
      *
      * @param {number} index
      */
-    const mirrorStream9 = index=>{
-        /** @type {{ buffer?: ShadowBuffer, offset?: number, stride?: number }} */
-        const out = {};
-        const ok = device.GetStreamSource(index, out) === 0;
-        out.buffer?.release();
-        seenStreams[index * 2] = STALE_POINTER;
-        seenStreams[index * 2 + 1] = ok ? (out.stride ?? 0) >>> 0 : 0;
-        seenOffsets[index] = ok ? (out.offset ?? 0) >>> 0 : 0;
-        deps.writeMemory(address + SHADOW.STREAMS + index * 8,
-            dwordsBytes([seenStreams[index * 2], seenStreams[index * 2 + 1]]));
-        deps.writeMemory(address + SHADOW.STREAM_OFFSETS + index * 4,
-            dwordBytes(seenOffsets[index]));
-    };
-    const mirrorDeclaration = ()=>{
-        seenDeclaration = STALE_POINTER;
-        deps.writeMemory(address + SHADOW.DECLARATION, dwordBytes(seenDeclaration));
-    };
-    const mirrorIndices9 = ()=>{
-        seenIndices = STALE_POINTER;
-        deps.writeMemory(address + SHADOW.INDICES, dwordBytes(seenIndices));
-    };
-    const mirrorShaders9 = ()=>{
-        seenShader = STALE_POINTER;
-        seenPixelShader = STALE_POINTER;
-        deps.writeMemory(address + SHADOW.VERTEX_SHADER, dwordBytes(STALE_POINTER));
-        deps.writeMemory(address + SHADOW.PIXEL_SHADER, dwordBytes(STALE_POINTER));
-    };
-
-    /**
-     * Direct3D 8's stream, as the pointer the program knows the buffer by. A
-     * Get* adds a reference the caller owes back.
-     *
-     * @param {number} index
-     */
-    const readStream8 = index=>{
+    const readStream = index=>{
         /** @type {{ buffer?: ShadowBuffer, stride?: number }} */
         const out = {};
         const ok = device.GetStreamSource(index, out) === 0;
@@ -1895,30 +1691,19 @@ export function createShadow(deps){
     };
 
     const mirrorBindings = ()=>{
-        if (nine)
+        for (let index = 0; index < (bindings ? SHADOW.STREAM_COUNT : 0); index++)
         {
-            for (let index = 0; index < SHADOW.STREAM_COUNT; index++)
-            {
-                mirrorStream9(index);
-            }
-            mirrorDeclaration();
-            mirrorIndices9();
-            mirrorShaders9();
-            return;
-        }
-        for (let index = 0; index < (deps.bindings === false ? 0 : SHADOW.STREAM_COUNT); index++)
-        {
-            readStream8(index);
+            readStream(index);
         }
         /** @type {{ buffer?: ShadowBuffer, baseVertexIndex?: number }} */
         const indices = {};
-        const hasIndices = deps.bindings !== false && device.GetIndices(indices) === 0;
+        const hasIndices = bindings && device.GetIndices(indices) === 0;
         seenIndices = hasIndices && indices.buffer ? deps.pointerOf(indices.buffer) : 0;
         seenBaseVertex = hasIndices ? (indices.baseVertexIndex ?? 0) >>> 0 : 0;
         indices.buffer?.release();
         /** @type {{ handle?: number }} */
         const shader = {};
-        seenShader = deps.bindings !== false && device.GetVertexShader(shader) === 0
+        seenShader = bindings && device.GetVertexShader(shader) === 0
             ? (shader.handle ?? 0) >>> 0 : 0;
         deps.writeMemory(address + SHADOW.STREAMS,
             dwordsBytes([...seenStreams, seenIndices, seenBaseVertex, seenShader]));
@@ -1946,24 +1731,6 @@ export function createShadow(deps){
                 seenStageStates[stage * SHADOW.STAGE_STATE_STRIDE + type] = value;
             }
         }
-        // A sampler state is kept in the slot of its stage state key, read as
-        // the device answers it for that sampler.
-        const keys = new Uint8Array(SHADOW.SAMPLER_KEY_COUNT);
-        (deps.samplerStates ?? []).forEach((key, type)=>{
-            if (type === 0 || key >= SHADOW.STAGE_STATE_STRIDE || type >= SHADOW.SAMPLER_KEY_COUNT)
-            {
-                return;
-            }
-            keys[type] = key;
-            for (let stage = 0; stage < SHADOW.STAGE_COUNT; stage++)
-            {
-                /** @type {{ value?: number }} */
-                const out = {};
-                seenStageStates[stage * SHADOW.STAGE_STATE_STRIDE + key] =
-                    device.GetSamplerState?.(stage, type, out) === 0 ? (out.value ?? 0) >>> 0 : 0;
-            }
-        });
-        deps.writeMemory(address + SHADOW.SAMPLER_KEYS, keys);
         deps.writeMemory(address + SHADOW.STAGE_STATES, dwordsBytes([...seenStageStates]));
     };
 
@@ -2010,29 +1777,6 @@ export function createShadow(deps){
         const out = {};
         const slot = stage * SHADOW.STAGE_STATE_STRIDE + type;
         seenStageStates[slot] = device.GetTextureStageState(stage, type, out) === 0
-            ? (out.value ?? 0) >>> 0
-            : 0;
-        deps.writeMemory(address + SHADOW.STAGE_STATES + slot * 4,
-            dwordBytes(seenStageStates[slot]));
-    };
-
-    /**
-     * One sampler state, as the device answers it, into the slot of the stage
-     * state key it is kept under (`mirrorStageStates`).
-     *
-     * @param {number} sampler @param {number} type
-     */
-    const refreshSamplerState = (sampler, type)=>{
-        const key = deps.samplerStates?.[type];
-        if (key === undefined || type === 0 || key >= SHADOW.STAGE_STATE_STRIDE
-            || type >= SHADOW.SAMPLER_KEY_COUNT || sampler >= SHADOW.STAGE_COUNT)
-        {
-            return;
-        }
-        /** @type {{ value?: number }} */
-        const out = {};
-        const slot = sampler * SHADOW.STAGE_STATE_STRIDE + key;
-        seenStageStates[slot] = device.GetSamplerState?.(sampler, type, out) === 0
             ? (out.value ?? 0) >>> 0
             : 0;
         deps.writeMemory(address + SHADOW.STAGE_STATES + slot * 4,
@@ -2158,17 +1902,6 @@ export function createShadow(deps){
         seenStageStates[at] = value;
         const stage = at >>> 5;
         const type = at & (SHADOW.STAGE_STATE_STRIDE - 1);
-        const sampler = samplerTypes[type];
-        if (sampler)
-        {
-            if (device.SetSamplerState?.(stage, sampler, value) !== 0)
-            {
-                refuse('IDirect3DDevice9::SetSamplerState',
-                    `sampler ${stage} state ${sampler} set to ${value} in the guest was accepted;`
-                    + ' the device refuses it');
-            }
-            return;
-        }
         if (device.SetTextureStageState(stage, type, value) !== 0)
         {
             refuse(`${name}::SetTextureStageState`,
@@ -2221,90 +1954,10 @@ export function createShadow(deps){
         return marks !== 0;
     };
 
-    /**
-     * What a pointer the guest bound names. One that names nothing this
-     * device published unbinds, as the call through the trap does with what
-     * it cannot look up, and says so.
-     *
-     * @param {number} pointer @param {string} method
-     * @returns {any}
-     */
-    const named9 = (pointer, method)=>{
-        const object = pointer === 0 ? null : deps.objectAt(pointer) ?? null;
-        if (pointer !== 0 && !object)
-        {
-            refuse(`${name}::${method}`, `0x${pointer.toString(16)} set in the guest is`
-                + ' not an interface this device published');
-        }
-        return object;
-    };
-
-    /** @param {Uint32Array} block */
-    const syncBindings9 = block=>{
-        const from = SHADOW.STREAMS >>> 2;
-        const offsets = SHADOW.STREAM_OFFSETS >>> 2;
-        compared += SHADOW.STREAM_COUNT * 3 + 4;
-        for (let index = 0; index < SHADOW.STREAM_COUNT; index++)
-        {
-            const pointer = block[from + index * 2];
-            const stride = block[from + index * 2 + 1];
-            const offset = block[offsets + index];
-            if (pointer === seenStreams[index * 2] && stride === seenStreams[index * 2 + 1]
-                && offset === seenOffsets[index])
-            {
-                continue;
-            }
-            seenStreams[index * 2] = pointer;
-            seenStreams[index * 2 + 1] = stride;
-            seenOffsets[index] = offset;
-            const buffer = pointer === 0 ? null : deps.objectAt(pointer);
-            if (pointer !== 0 && !buffer)
-            {
-                refuse(`${name}::SetStreamSource`,
-                    `stream ${index} bound in the guest to 0x${pointer.toString(16)},`
-                    + ' which is not an interface this device published');
-            }
-            else if (device.SetStreamSource(index, buffer, offset, stride) !== 0)
-            {
-                refuse(`${name}::SetStreamSource`,
-                    `stream ${index} bound in the guest was accepted; the device refuses it`);
-            }
-        }
-        const declaration = block[SHADOW.DECLARATION >>> 2];
-        if (declaration !== seenDeclaration)
-        {
-            seenDeclaration = declaration;
-            device.SetVertexDeclaration?.(named9(declaration, 'SetVertexDeclaration'));
-        }
-        const indices = block[SHADOW.INDICES >>> 2];
-        if (indices !== seenIndices)
-        {
-            seenIndices = indices;
-            device.SetIndices(named9(indices, 'SetIndices'));
-        }
-        const vertexShader = block[SHADOW.VERTEX_SHADER >>> 2];
-        if (vertexShader !== seenShader)
-        {
-            seenShader = vertexShader;
-            device.SetVertexShader(named9(vertexShader, 'SetVertexShader'));
-        }
-        const pixelShader = block[SHADOW.PIXEL_SHADER >>> 2];
-        if (pixelShader !== seenPixelShader)
-        {
-            seenPixelShader = pixelShader;
-            device.SetPixelShader?.(named9(pixelShader, 'SetPixelShader'));
-        }
-    };
-
     // The three small groups are compared whole: a scan of thirty-five words,
     // eight or seventeen costs less than keeping marks for them would.
     /** @param {Uint32Array} block */
     const syncBindings = block=>{
-        if (nine)
-        {
-            syncBindings9(block);
-            return;
-        }
         const from = SHADOW.STREAMS >>> 2;
         compared += SHADOW.STREAM_COUNT * 2 + 3;
         for (let index = 0; index < SHADOW.STREAM_COUNT; index++)
@@ -2543,13 +2196,9 @@ export function createShadow(deps){
          * each Apply hundreds of calls into the device.
          *
          * @param {{ renderStates?: Iterable<number>, transforms?: Iterable<number>,
-         *     bindings?: boolean | { streams?: Iterable<number>, indices?: boolean,
-         *         declaration?: boolean, shaders?: boolean },
-         *     textures?: boolean,
-         *     stageStates?: true | Iterable<number>, samplerStates?: Iterable<number>,
-         *     material?: boolean }} [touched]  stage and sampler states by
-         *     (stage << 8) | type, or every stage state (true); Direct3D 9's
-         *     bindings by stream and kind, or all of them (true)
+         *     bindings?: boolean, textures?: boolean, stageStates?: true | Iterable<number>,
+         *     material?: boolean }} [touched]  stage states by (stage << 8) | type,
+         *     or every one of them (true)
          */
         remirror(touched){
             if (address === 0)
@@ -2574,30 +2223,7 @@ export function createShadow(deps){
             {
                 refreshTransform(type);
             }
-            const bindings = touched.bindings;
-            if (typeof bindings === 'object' && nine)
-            {
-                for (const index of bindings.streams ?? [])
-                {
-                    if (index >= 0 && index < SHADOW.STREAM_COUNT)
-                    {
-                        mirrorStream9(index);
-                    }
-                }
-                if (bindings.declaration)
-                {
-                    mirrorDeclaration();
-                }
-                if (bindings.indices)
-                {
-                    mirrorIndices9();
-                }
-                if (bindings.shaders)
-                {
-                    mirrorShaders9();
-                }
-            }
-            else if (bindings)
+            if (touched.bindings)
             {
                 mirrorBindings();
             }
@@ -2612,10 +2238,6 @@ export function createShadow(deps){
             for (const key of touched.stageStates === true ? [] : touched.stageStates ?? [])
             {
                 refreshStageState(key >>> 8, key & 0xff);
-            }
-            for (const key of touched.samplerStates ?? [])
-            {
-                refreshSamplerState(key >>> 8, key & 0xff);
             }
             if (touched.material)
             {
@@ -2647,13 +2269,7 @@ export function createShadow(deps){
          * buffer it had bound before would read as no change.
          */
         refreshStreamZero(){
-            if (address !== 0 && nine)
-            {
-                mirrorStream9(0);
-                mirrorIndices9();
-                return;
-            }
-            if (address === 0 || deps.bindings === false
+            if (address === 0 || !bindings
                 || (seenStreams[0] === 0 && seenStreams[1] === 0 && seenIndices === 0
                     && seenBaseVertex === 0))
             {
@@ -2797,20 +2413,6 @@ export function createShadow(deps){
                 seenIndices = STALE_POINTER;
                 deps.writeMemory(address + SHADOW.INDICES, stale);
             }
-            if (nine && seenDeclaration === pointer)
-            {
-                mirrorDeclaration();
-            }
-            if (nine && seenShader === pointer)
-            {
-                seenShader = STALE_POINTER;
-                deps.writeMemory(address + SHADOW.VERTEX_SHADER, stale);
-            }
-            if (nine && seenPixelShader === pointer)
-            {
-                seenPixelShader = STALE_POINTER;
-                deps.writeMemory(address + SHADOW.PIXEL_SHADER, stale);
-            }
         },
 
         /**
@@ -2821,31 +2423,13 @@ export function createShadow(deps){
          * @param {number} index
          */
         refreshStream(index){
-            if (address === 0 || deps.bindings === false || index < 0
-                || index >= SHADOW.STREAM_COUNT)
+            if (address === 0 || !bindings || index < 0 || index >= SHADOW.STREAM_COUNT)
             {
                 return;
             }
-            if (nine)
-            {
-                mirrorStream9(index);
-                return;
-            }
-            readStream8(index);
+            readStream(index);
             deps.writeMemory(address + SHADOW.STREAMS + index * 8,
                 dwordsBytes([seenStreams[index * 2], seenStreams[index * 2 + 1]]));
-        },
-
-        /**
-         * The same after the declaration changed through the trap: SetFVF,
-         * which makes a declaration the guest has no pointer to, or the
-         * routine's slow path.
-         */
-        refreshDeclaration(){
-            if (address !== 0 && nine)
-            {
-                mirrorDeclaration();
-            }
         },
 
         /**
