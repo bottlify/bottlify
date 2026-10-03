@@ -38,6 +38,13 @@ test('an empty allowlist permits nothing', ()=>{
     assert.equal(permits([], 'example.com'), false);
 });
 
+test('a rule of a star alone permits every host, and a star in a name does not', ()=>{
+    assert.equal(permits(['*'], 'example.com'), true);
+    assert.equal(permits(['*'], 'gds1.steampowered.com'), true);
+    assert.equal(permits(['*example.com'], 'attacker.net'), false);
+    assert.equal(permits(['*example.com'], 'notexample.com'), false);
+});
+
 test('an exact rule matches only that host', ()=>{
     assert.equal(permits(['example.com'], 'example.com'), true);
     assert.equal(permits(['example.com'], 'EXAMPLE.COM'), true);
