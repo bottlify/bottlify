@@ -364,8 +364,8 @@ flowchart LR
 
 Where to look in the code: `cork/src/decode/`, `cork/src/region.js`, `cork/src/emit/`,
 `cork/src/wasm/`, `cork/src/runtime/`, `cork/src/interp.js`, `cork/src/interp-wasm.c`; the engine
-glue is `core/src/layers/cpu/internal/cork-host.js`. The full design is in
-`roadmap/cork-x86-translator.md`.
+glue is `core/src/layers/cpu/internal/cork-host.js`. Where cork goes next is
+`roadmap/v2/`.
 
 ## 6. Win32 in JavaScript: how a DLL comes about
 

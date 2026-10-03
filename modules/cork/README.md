@@ -18,6 +18,6 @@ also need the nasm instruction corpus (`npm run fetch:corpus`, pinned by `corpus
 fetched into the gitignored `vendor/`), every case of which is run on the emulator through
 this project's own machine and compared with the state real hardware recorded.
 
-Design: `roadmap/cork-x86-translator.md`. Plan: `roadmap/cork-plan.md`. Zero runtime
+Where it goes next: `roadmap/v2/`. Zero runtime
 dependencies; vanilla ES modules with JSDoc; tests are `node:test`, colocated (`*.test.js`
 without the emulator, `*.itest.js` with it).

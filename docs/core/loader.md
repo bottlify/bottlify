@@ -178,7 +178,7 @@ bring one (the set is `win32.knownDlls()`, from Wine's `[KnownDLLs]` registry de
 redistributable runtimes a layer stands in for -- `audio.runtimes()` (the MPEG provider a sound
 library loads by full path out of its own directory) and `media.runtimes()` (the JPEG library) --
 are answered from the table the same way, whoever's copy the program brought: that is the decision
-that such a runtime is ours (`roadmap/decisions.md`), and a copy found first runs the whole decoder
+that such a runtime is ours, and a copy found first runs the whole decoder
 as emulated x86 (`answeredByEngine` in `src/app.js`). The
 search order is `libraryCandidates` in `src/app.js`: the program's own directory first, then
 `C:\WINDOWS\system32\` and `C:\WINDOWS\`, which is where a title's DirectX setup puts the runtime —

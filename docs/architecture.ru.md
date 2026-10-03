@@ -361,7 +361,7 @@ flowchart LR
 
 Где смотреть в коде: `cork/src/decode/`, `cork/src/region.js`, `cork/src/emit/`, `cork/src/wasm/`,
 `cork/src/runtime/`, `cork/src/interp.js`, `cork/src/interp-wasm.c`; связка с движком —
-`core/src/layers/cpu/internal/cork-host.js`. Подробный дизайн — в `roadmap/cork-x86-translator.md`.
+`core/src/layers/cpu/internal/cork-host.js`. Куда cork идёт дальше — в `roadmap/v2/`.
 
 ## 6. Win32 на JavaScript: как получается DLL
 
