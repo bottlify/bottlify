@@ -52,6 +52,12 @@ export class DwordReader {
         this.version = -1;
         this.spans = new Float64Array(SPANS * 2);
         this.replace = 0;
+        // The span each kind of read found last, asked before the others: a
+        // crossing reads its stack with one and its thread's block with the
+        // other, and a walk of the table from the start was most of what
+        // both cost.
+        this.manyAt = 0;
+        this.oneAt = 0;
     }
 
     /**
@@ -62,19 +68,43 @@ export class DwordReader {
      * @param {number} address @param {number} end
      */
     known(address, end){
+        return this.find(address, end) >= 0;
+    }
+
+    /**
+     * Where in the table a span validated since it last changed lies, or -1.
+     *
+     * @param {number} address @param {number} end
+     */
+    find(address, end){
         if (this.version !== this.regions.version)
         {
-            return false;
+            return -1;
         }
         const spans = this.spans;
         for (let at = 0; at < SPANS * 2; at += 2)
         {
             if (address >= spans[at] && end <= spans[at + 1])
             {
-                return true;
+                return at;
             }
         }
-        return false;
+        return -1;
+    }
+
+    /**
+     * `find`, asking the span at `at` before the rest.
+     *
+     * @param {number} address @param {number} end @param {number} at
+     */
+    spanOf(address, end, at){
+        const spans = this.spans;
+        if (address >= spans[at] && end <= spans[at + 1]
+            && this.version === this.regions.version)
+        {
+            return at;
+        }
+        return this.find(address, end);
     }
 
     /**
@@ -126,8 +156,10 @@ export class DwordReader {
      */
     readU32sInto(address, count, into, at){
         const data = this.data;
-        if (data !== null && this.known(address, address + count * 4))
+        const span = data === null ? -1 : this.spanOf(address, address + count * 4, this.manyAt);
+        if (data !== null && span >= 0)
         {
+            this.manyAt = span;
             try
             {
                 for (let word = 0; word < count; word++)
@@ -184,8 +216,10 @@ export class DwordReader {
     /** @param {number} address */
     readU32(address){
         const data = this.data;
-        if (data !== null && this.known(address, address + 4))
+        const span = data === null ? -1 : this.spanOf(address, address + 4, this.oneAt);
+        if (data !== null && span >= 0)
         {
+            this.oneAt = span;
             try
             {
                 return data.getUint32(address, true);
