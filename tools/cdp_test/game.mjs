@@ -679,6 +679,20 @@ function describeCork(cork, say){
         + ` (no record ${cork.missNoRecord ?? 0}, no module ${cork.missNoModule ?? 0})`
         + `  store batches: ${cork.lookedUpNow ?? 0} at once / ${cork.lookedUpLater ?? 0}`
         + ' a turn later');
+    // Under precise, a NaN hunt's first events, in the order they came (`#n`).
+    const nan = [
+        cork.nanFirst && [cork.nanFirst, `NaN made from ${cork.nanFirst.a} and ${cork.nanFirst.c}`],
+        cork.stackFaultFirst && [cork.stackFaultFirst, `x87 stack fault in the region at`
+            + ` ${cork.stackFaultFirst.region} (entered at top ${cork.stackFaultFirst.entryTop}),`
+            + ` empty mask ${cork.stackFaultFirst.empty}, top ${cork.stackFaultFirst.top}`],
+        cork.nanResultFirst && [cork.nanResultFirst, 'NaN result'],
+        cork.nanLoadFirst && [cork.nanLoadFirst, `NaN loaded from ${cork.nanLoadFirst.from}`],
+        cork.nanStoreFirst && [cork.nanStoreFirst, `NaN stored to ${cork.nanStoreFirst.to}`],
+    ].filter(Boolean).sort((x, y)=>x[0].order - y[0].order);
+    for (const [event, what] of nan)
+    {
+        say(`    first ${what}: #${event.order} at ${event.eip}, ${event.count} in all`);
+    }
     if (cork.topBlocks?.length)
     {
         // The block profile's most executed blocks (--cork-config blockProfile).

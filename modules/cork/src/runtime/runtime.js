@@ -29,7 +29,7 @@
 import { formRegion, formShared, hashRegion } from '../region.js';
 import { TIER_SLOT, enterRegion, mathImports } from '../emit/region.js';
 import { decode } from '../decode/decoder.js';
-import { SHAPE, isX87, trackRegion } from '../emit/x87.js';
+import { NanRecord, SHAPE, isX87, trackRegion } from '../emit/x87.js';
 import { HELD, PRECISION } from '../emit/memory.js';
 import { features as probeFeatures } from '../wasm/features.js';
 import { Body, ModuleBuilder, ValType } from '../wasm/encoder.js';
@@ -82,6 +82,56 @@ function noTierEntry(){
             new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports.none);
     }
     return noTier;
+}
+
+/**
+ * Under `precise`, a NaN hunt's record (`layout.nanFirst`): the first x87 NaN
+ * translated code made from numbers, from what, and how many; the first stack
+ * fault; the first arithmetic with a NaN result; the first NaN read from memory
+ * and the first stored there.
+ *
+ * @param {DataView} view
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ */
+function nanFirst(view, layout){
+    const at = layout.nanFirst ?? -1;
+    if (at < 0)
+    {
+        return {};
+    }
+    const word = (/** @type {number} */ offset)=>view.getUint32(at + offset, true);
+    const hex = (/** @type {number} */ offset)=>`0x${word(offset).toString(16)}`;
+    /** @param {number} slot */
+    const first = slot=>({ eip: hex(slot), count: word(slot + 4),
+        order: word(NanRecord.orderOf[slot]) });
+    /** @type {Record<string, any>} */
+    const out = {};
+    if (word(NanRecord.MADE + 4) > 0)
+    {
+        out.nanFirst = { ...first(NanRecord.MADE), a: view.getFloat64(at + NanRecord.MADE_A, true),
+            c: view.getFloat64(at + NanRecord.MADE_C, true) };
+    }
+    if (word(NanRecord.FAULT + 4) > 0)
+    {
+        // A register read empty or a push onto a held one: the indefinite, a NaN, follows.
+        const r = NanRecord.FAULT_REGION;
+        out.stackFaultFirst = { ...first(NanRecord.FAULT), region: hex(r), entryTop: word(r + 4),
+            empty: hex(r + 8), top: word(r + 12) };
+    }
+    if (word(NanRecord.RESULT + 4) > 0)
+    {
+        // Any arithmetic whose result was a NaN, made or carried from an operand.
+        out.nanResultFirst = first(NanRecord.RESULT);
+    }
+    if (word(NanRecord.LOAD + 4) > 0)
+    {
+        out.nanLoadFirst = { ...first(NanRecord.LOAD), from: hex(NanRecord.LOAD + 8) };
+    }
+    if (word(NanRecord.STORE + 4) > 0)
+    {
+        out.nanStoreFirst = { ...first(NanRecord.STORE), to: hex(NanRecord.STORE + 8) };
+    }
+    return out;
 }
 
 /**
@@ -2960,6 +3010,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 // Translated x87 status-word reads that may see what `precise`
                 // alone keeps: where a strange result is worth a run with it.
                 x87RelaxedReads: counts.x87RelaxedReads,
+                ...nanFirst(view(), layout),
                 stalls: [...stalls],
                 ...(import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.traceStore
                     ? { storeTrace } : {}),
