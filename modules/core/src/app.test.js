@@ -35,6 +35,7 @@ import {
     missingImportCall,
     compatibilityOf,
     createApp,
+    versionResourceOf,
 } from './app.js';
 import { createEvents } from './events.js';
 import { filesystemModule } from './layers/filesystem/module.js';
@@ -1501,3 +1502,74 @@ test('the bundle zstd decoder follows the engine: the emulator while it is loade
         }
         assert.equal(calls.length, 1, 'the emulator decoder was not asked with the wasm present');
     });
+
+test('a file\'s version block is read without reading the file', ()=>{
+    // An installer asks after every file it puts down, a gigabyte archive
+    // among them: the headers, the resource directory and the block are read,
+    // and nothing else of it.
+    const RSRC_RVA = 0x1000;
+    const RSRC_FILE = 0x200;
+    const SECTION_TABLE = 0x178;
+    const block = Uint8Array.from({ length: 92 }, (_, at)=>at + 1);
+    // type 16 -> id 1 -> language 0x409 -> the data entry -> the block, each
+    // node a header of sixteen bytes and one entry of eight.
+    const rsrc = new Uint8Array(88 + block.length);
+    const tree = new DataView(rsrc.buffer);
+    [[16, 24], [1, 48], [0x409, 72]].forEach(([key, next], level)=>{
+        tree.setUint16(level * 24 + 14, 1, true);
+        tree.setUint32(level * 24 + 16, key, true);
+        tree.setUint32(level * 24 + 20, level < 2 ? (next | 0x80000000) >>> 0 : next, true);
+    });
+    tree.setUint32(72, RSRC_RVA + 88, true);
+    tree.setUint32(76, block.length, true);
+    rsrc.set(block, 88);
+    const OVERLAY = 1 << 24;
+    const bytes = new Uint8Array(RSRC_FILE + rsrc.length + OVERLAY);
+    const view = new DataView(bytes.buffer);
+    view.setUint16(0, 0x5a4d, true);
+    view.setUint32(0x3c, 0x80, true);
+    view.setUint32(0x80, 0x00004550, true);
+    view.setUint16(0x84, 0x014c, true);
+    view.setUint16(0x86, 1, true);
+    view.setUint16(0x94, 224, true);
+    view.setUint16(0x98, 0x010b, true);
+    view.setUint32(0x98 + 60, RSRC_FILE, true);
+    view.setUint32(0x98 + 92, 16, true);
+    view.setUint32(0x98 + 96 + 2 * 8, RSRC_RVA, true);
+    view.setUint32(0x98 + 96 + 2 * 8 + 4, 88, true);
+    bytes.set(new TextEncoder().encode('.rsrc'), SECTION_TABLE);
+    view.setUint32(SECTION_TABLE + 8, rsrc.length, true);
+    view.setUint32(SECTION_TABLE + 12, RSRC_RVA, true);
+    view.setUint32(SECTION_TABLE + 16, rsrc.length, true);
+    view.setUint32(SECTION_TABLE + 20, RSRC_FILE, true);
+    bytes.set(rsrc, RSRC_FILE);
+
+    let read = 0;
+    let position = 0;
+    const filesystem = {
+        open: (/** @type {string} */ path)=>{
+            if (path !== 'C:\\Game\\content.gcf')
+            {
+                throw new Error('not found');
+            }
+            return {};
+        },
+        size: ()=>bytes.length,
+        seek: (/** @type {any} */ handle, /** @type {number} */ offset)=>{
+            position = offset;
+        },
+        read: (/** @type {any} */ handle, /** @type {number} */ length)=>{
+            read += length;
+            const out = bytes.slice(position, position + length);
+            position += out.length;
+            return out;
+        },
+        close: ()=>{},
+    };
+    assert.deepEqual(versionResourceOf(filesystem, 'C:\\Game\\content.gcf'), block);
+    assert.ok(read < 0x2000, `${read} bytes read of ${bytes.length}`);
+    assert.equal(versionResourceOf(filesystem, 'C:\\Game\\gone.gcf'), null);
+    view.setUint32(0x98 + 96 + 2 * 8 + 4, 0, true);
+    assert.equal(versionResourceOf(filesystem, 'C:\\Game\\content.gcf'), null,
+        'an image with no resources has no version');
+});
