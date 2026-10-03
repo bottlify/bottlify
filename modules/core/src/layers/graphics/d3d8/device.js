@@ -1460,6 +1460,14 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         get refCount(){
             return count.value;
         },
+        /**
+         * The state blocks by handle, for a caller that keeps a copy of the
+         * device's state elsewhere and has to know what an apply changed. A
+         * property, not a method: what a recording device records is a call.
+         */
+        get stateBlocks(){
+            return stateBlocks;
+        },
         addRef: ()=>count.addRef(),
         release: ()=>{
             const before = count.value;
