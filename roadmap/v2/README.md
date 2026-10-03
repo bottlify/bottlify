@@ -41,52 +41,14 @@ instructions run.
 
 ## Where we are
 
-```mermaid
-%%{init: {"theme": "base", "flowchart": {"curve": "step", "nodeSpacing": 30, "rankSpacing": 50, "padding": 10}, "themeVariables": {"fontFamily": "Inter, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "13px", "primaryColor": "#FFFFFF", "primaryBorderColor": "#2F3A40", "primaryTextColor": "#1B2328", "lineColor": "#5C6970", "clusterBkg": "#F3F5F6", "clusterBorder": "#9AA6AC", "edgeLabelBackground": "#FFFFFF"}}}%%
-flowchart TB
-  P["<b>Page main thread</b><br/>launcher, input, createApp"]
-  E["<b>Engine thread</b><br/>cork runs every guest thread in turn<br/>all of Win32, files, decoding, sound pump<br/>Direct3D 10, Vulkan, presenter"]
-  K["<b>Log keeper</b>"]
-  A["<b>AudioWorklet</b>"]
-  G["<b>Graphics thread</b><br/>Direct3D 7, 8, 9, OpenGL"]
-  T["<b>Translation thread</b><br/>region → wasm module"]
-  P -->|"new Worker"| E
-  P -->|"new Worker"| K
-  P -->|"addModule"| A
-  E -->|"new Worker"| G
-  E -->|"new Worker"| T
-```
+![Program code runs on the engine thread alone](now.svg)
 
 Six threads, of which one runs the program and answers it, and the guest's memory is an ordinary
 `WebAssembly.Memory` only that thread can touch.
 
 ## Where v2 goes
 
-```mermaid
-%%{init: {"theme": "base", "flowchart": {"curve": "step", "nodeSpacing": 30, "rankSpacing": 50, "padding": 10}, "themeVariables": {"fontFamily": "Inter, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "13px", "primaryColor": "#FFFFFF", "primaryBorderColor": "#2F3A40", "primaryTextColor": "#1B2328", "lineColor": "#5C6970", "clusterBkg": "#F3F5F6", "clusterBorder": "#9AA6AC", "edgeLabelBackground": "#FFFFFF"}}}%%
-flowchart TB
-  P["<b>Page main thread</b><br/>launcher, input, createApp"]
-  subgraph SYS["Engine thread · the system"]
-    C["system-wide Windows: processes, registry, files,<br/>windows and focus, named objects<br/>browser event loop: page messages, network, fetch, OPFS<br/>scaling driver: hands cores to processes and services"]
-  end
-  subgraph PROC["Processes · one worker each, run side by side"]
-    PA["<b>Process A</b> · x86 on cork<br/>own memory, per-process Win32<br/>never yields to the browser"]
-    PB["<b>Process B</b> · x64 on cork-x64<br/>launcher, installer, a second program"]
-  end
-  subgraph SVC["Services · workers by load"]
-    T["<b>Translation ×M</b><br/>region → wasm module"]
-    H["<b>Host work ×K</b><br/>zstd, video, JPEG, MP3, block fetch"]
-    G["<b>Graphics ×1</b><br/>all graphics and the canvas"]
-    L["<b>Log keeper, AudioWorklet</b><br/>started by the page"]
-  end
-  M["<b>Shared memory</b> · SharedArrayBuffer<br/>process memory, rings, cork tables"]
-  P -->|"new Worker"| SYS
-  SYS -->|"rings: input, answers, translations"| PROC
-  PROC -->|"regions, tasks, graphics calls"| SVC
-  SYS -.- M
-  PROC -.- M
-  SVC -.- M
-```
+![The engine thread runs the system, processes run code, services help](target.svg)
 
 Three levels, each with one job:
 

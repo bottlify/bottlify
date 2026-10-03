@@ -43,52 +43,14 @@ v2 превращает движок из одного потока, котор�
 
 ## Где мы сейчас
 
-```mermaid
-%%{init: {"theme": "base", "flowchart": {"curve": "step", "nodeSpacing": 30, "rankSpacing": 50, "padding": 10}, "themeVariables": {"fontFamily": "Inter, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "13px", "primaryColor": "#FFFFFF", "primaryBorderColor": "#2F3A40", "primaryTextColor": "#1B2328", "lineColor": "#5C6970", "clusterBkg": "#F3F5F6", "clusterBorder": "#9AA6AC", "edgeLabelBackground": "#FFFFFF"}}}%%
-flowchart TB
-  P["<b>Главный поток страницы</b><br/>лаунчер, ввод, createApp"]
-  E["<b>Поток движка</b><br/>cork по очереди выполняет потоки программы<br/>весь Win32, файлы, декодирование, звук<br/>Direct3D 10, Vulkan, презентер"]
-  K["<b>Хранитель журнала</b>"]
-  A["<b>AudioWorklet</b>"]
-  G["<b>Поток графики</b><br/>Direct3D 7, 8, 9, OpenGL"]
-  T["<b>Поток трансляции</b><br/>регион → модуль wasm"]
-  P -->|"new Worker"| E
-  P -->|"new Worker"| K
-  P -->|"addModule"| A
-  E -->|"new Worker"| G
-  E -->|"new Worker"| T
-```
+![Код программы выполняется только в потоке движка](now.ru.svg)
 
 Шесть потоков, и только один из них выполняет программу и отвечает ей. Память программы — обычная
 `WebAssembly.Memory`, к которой может прикасаться только этот поток.
 
 ## Куда идёт v2
 
-```mermaid
-%%{init: {"theme": "base", "flowchart": {"curve": "step", "nodeSpacing": 30, "rankSpacing": 50, "padding": 10}, "themeVariables": {"fontFamily": "Inter, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "13px", "primaryColor": "#FFFFFF", "primaryBorderColor": "#2F3A40", "primaryTextColor": "#1B2328", "lineColor": "#5C6970", "clusterBkg": "#F3F5F6", "clusterBorder": "#9AA6AC", "edgeLabelBackground": "#FFFFFF"}}}%%
-flowchart TB
-  P["<b>Главный поток страницы</b><br/>лаунчер, ввод, createApp"]
-  subgraph SYS["Поток движка · система"]
-    C["общая часть Windows: процессы, реестр, файлы,<br/>окна и фокус, именованные объекты<br/>цикл событий браузера: сообщения страницы, сеть, fetch, OPFS<br/>драйвер масштабирования: раздаёт ядра процессам и службам"]
-  end
-  subgraph PROC["Процессы · каждый в своём воркере, работают одновременно"]
-    PA["<b>Процесс A</b> · x86 на cork<br/>своя память, Win32 процесса<br/>браузеру управление не отдаёт"]
-    PB["<b>Процесс B</b> · x64 на cork-x64<br/>лаунчер, установщик, вторая программа"]
-  end
-  subgraph SVC["Службы · воркеры по нагрузке"]
-    T["<b>Трансляция ×M</b><br/>регион → модуль wasm"]
-    H["<b>Работа хоста ×K</b><br/>zstd, видео, JPEG, MP3, загрузка блоков"]
-    G["<b>Графика ×1</b><br/>вся графика и холст"]
-    L["<b>Хранитель журнала, AudioWorklet</b><br/>их создаёт страница"]
-  end
-  M["<b>Общая память</b> · SharedArrayBuffer<br/>память процессов, кольца, таблицы cork"]
-  P -->|"new Worker"| SYS
-  SYS -->|"кольца: ввод, ответы, переводы"| PROC
-  PROC -->|"регионы, задачи, вызовы графики"| SVC
-  SYS -.- M
-  PROC -.- M
-  SVC -.- M
-```
+![Поток движка управляет, процессы исполняют, службы помогают](target.ru.svg)
 
 Три уровня, у каждого одна задача:
 
