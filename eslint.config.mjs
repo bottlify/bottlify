@@ -9,7 +9,7 @@ export default [
     {
         // Flat config does not read .gitignore, so everything that is not our
         // source has to be listed here explicitly — otherwise third-party trees
-        // (a Ghidra virtualenv, vendored v86) get linted and drown the report.
+        // (a Ghidra virtualenv, prebuilt binaries) get linted and drown the report.
         ignores: [
             '**/node_modules/**',
             '**/dist/**',

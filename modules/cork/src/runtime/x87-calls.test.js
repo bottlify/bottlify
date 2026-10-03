@@ -13,7 +13,8 @@
  * converting with the rounding mode set and put back (`_ftol`), loading
  * another control word after a call, a value held on the stack across a
  * call, direct and indirect calls, and the regions' budgets running out
- * inside a callee. Every result goes to memory as it is made.
+ * inside a callee. Every result goes to memory as it is made. Beside them, a
+ * callee formed into its caller that makes calls of its own.
  */
 
 import { test } from 'node:test';
@@ -224,18 +225,19 @@ function generate(seed){
  * interpreter a step at a time where none can, the budget given to each run.
  *
  * @param {number[]} code @param {boolean} callReturn @param {number} budget
+ * @param {boolean} [leafCalls]  small callees formed into their callers
  * @returns {Promise<Uint8Array>}  what it left in the data area
  */
-async function runProgram(code, callReturn, budget){
+async function runProgram(code, callReturn, budget, leafCalls = false){
     const layout = ownLayout({ ramSize: 16 << 20 });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
     const bytes = ()=>new Uint8Array(memory.buffer);
     const view = ()=>new DataView(memory.buffer);
     view().setUint8(layout.x87Empty, 0xff);
     view().setUint16(layout.x87Control, 0x37f, true);
-    // No small callee formed into its caller: every call here is a call.
+    // Unless asked, no small callee formed into its caller: every call here is a call.
     /** @type {any} */
-    const config = { leafCalls: false, callReturn };
+    const config = { leafCalls, callReturn };
     const runtime = createCorkRuntime({
         memory, layout, config,
         read: address=>bytes()[layout.ramBase + address],
@@ -293,3 +295,38 @@ for (const [first, budget] of [[1, 10_000_000], [1001, 61]])
         }
     });
 }
+
+test('a callee formed into its caller hands back the stack its own calls left, where the code'
+    + ' after the call is cut', async()=>{
+    // mov ecx, 60; mov edi, DATA; L: push ecx; mov eax, ecx; and eax, 1; call M;
+    // fstp qword [edi]; add edi, 8; pop ecx; dec ecx; jnz L; hlt
+    // M: cmp esi, 12345; je X; call B; R: fadd qword [0.1]; ret; X: jmp esi
+    // B: test eax, eax; jnz B2; call F; fmul qword [1.5]; ret
+    // B2: call F; fild dword [3]; fmulp; ret
+    // F: fld qword [-2.25]; fadd qword [12345.678]; 520 nops; ret
+    // M's region forms B in (F, too long to form, is a call); F returns a float, and R is
+    // reached from B's two rets at two tops -- the code after B2's call pushes first, so it
+    // is compiled for the top the call had -- and is cut. B2's block, ending in its ret,
+    // is emitted just before R's exit.
+    const code = [
+        0xb9, 60, 0, 0, 0, 0xbf, ...le(DATA), 0x51, 0x89, 0xc8, 0x83, 0xe0, 0x01,
+        0xe8, 0x0a, 0, 0, 0, 0xdd, 0x1f, 0x83, 0xc7, 0x08, 0x59, 0x49, 0x75, 0xec, 0xf4,
+        0x81, 0xfe, 0x39, 0x30, 0, 0, 0x74, 0x0c, 0xe8, 0x09, 0, 0, 0,
+        0xdc, 0x05, ...le(CONSTANTS + 0x20), 0xc3, 0xff, 0xe6,
+        0x85, 0xc0, 0x75, 0x0c, 0xe8, 0x15, 0, 0, 0, 0xdc, 0x0d, ...le(CONSTANTS), 0xc3,
+        0xe8, 0x09, 0, 0, 0, 0xdb, 0x05, ...le(CONSTANTS + 0x80), 0xde, 0xc9, 0xc3,
+        0xdd, 0x05, ...le(CONSTANTS + 8), 0xdc, 0x05, ...le(CONSTANTS + 0x30),
+        ...new Array(520).fill(0x90), 0xc3,
+    ];
+    for (const budget of [10_000_000, 61, 13])
+    {
+        const plain = await runProgram(code, false, budget, true);
+        const called = await runProgram(code, true, budget, true);
+        const results = new DataView(plain.buffer);
+        for (let k = 0; k < 60; k++)
+        {
+            assert.ok(Number.isFinite(results.getFloat64(k * 8, true)), `result ${k}`);
+        }
+        assert.deepEqual(called, plain, `budget ${budget}`);
+    }
+});

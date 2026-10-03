@@ -77,6 +77,35 @@ test('a frame the worker sends back is presented as one drawn here, its texture 
     assert.ok(device.calls.includes('destroy'));
 });
 
+test('a picture this thread\'s device refuses has the worker send bytes from the next frame on',
+    ()=>{
+        const worker = fakeWorker();
+        const device = fakeDevice();
+        const refusal = Object.assign(new Error('External image state is not valid'),
+            { name: 'InvalidStateError' });
+        device.queue.copyExternalImageToTexture = ()=>{
+            throw refusal;
+        };
+        /** @type {any[]} */
+        const shown = [];
+        const end = connectGraphicsWorker({ worker, device, presentTo: frame=>shown.push(frame) });
+        let closed = false;
+        const bitmap = { width: 2, height: 2, close: ()=>{
+            closed = true;
+        } };
+        worker.answer({ type: 'frame', bitmap, frameIndex: 1, format: 'bgra8unorm' });
+        assert.equal(shown.length, 0, 'the refused frame is not shown');
+        assert.ok(closed, 'and its picture is given back');
+        assert.deepEqual(worker.posted.map(message=>message.type), ['frames', 'shown']);
+        assert.equal(worker.posted[0].frames, 'pixels');
+        worker.answer({ type: 'frame', pixels: new Uint8Array(256 * 2), bytesPerRow: 256,
+            width: 2, height: 2, frameIndex: 2, format: 'bgra8unorm' });
+        assert.deepEqual(shown.map(frame=>frame.frameIndex), [2]);
+        assert.equal(worker.posted.filter(message=>message.type === 'frames').length, 1,
+            'asked once');
+        end.dispose();
+    });
+
 test('the worker\'s GPU going away is told, and a root is made over a port of its own', ()=>{
     const worker = fakeWorker();
     let lost = 0;

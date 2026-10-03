@@ -178,3 +178,25 @@ test('a service\'s names are kept in the bytes the program gave them', ()=>{
     assert.deepEqual([...held.values.get('displayname').data], [0x80, 0x99, 0x97, 0xe9, 0]);
     assert.deepEqual([...held.values.get('imagepath').data.subarray(3, 5)], [0x80, 0x5c]);
 });
+
+test('DeleteService marks a service, whose key goes with the last handle open on it', ()=>{
+    const ERROR_SERVICE_MARKED_FOR_DELETE = 1072;
+    const { fns, hive, put, serviceKey, lastError } = setup();
+    const manager = fns.OpenSCManagerA.handler([0, 0, 0xf003f]);
+    // A driver a program installs to read the hardware, and gives up on when it
+    // will not start: create, start (fails), stop (fails), delete, close.
+    const service = fns.CreateServiceA.handler([manager, put(NAME, 'PciBus'),
+        put(DISPLAY, 'PciBus'), 0xf01ff, 1, 3, 1, put(PATH, 'pcibus.sys'), 0, 0, 0, 0, 0]);
+    const again = fns.OpenServiceA.handler([manager, NAME, 0xf01ff]);
+    hive.create(/** @type {any} */ (serviceKey('PciBus')), 'Parameters');
+    assert.equal(fns.DeleteService.handler([service]), 1);
+    assert.equal(fns.DeleteService.handler([again]), 0, 'marked once');
+    assert.equal(lastError(), ERROR_SERVICE_MARKED_FOR_DELETE);
+    assert.equal(fns.CloseServiceHandle.handler([service]), 1);
+    assert.ok(serviceKey('PciBus'), 'still there while a handle is open on it');
+    assert.equal(fns.CloseServiceHandle.handler([again]), 1);
+    assert.equal(serviceKey('PciBus'), null, 'gone with the last one, its subkeys too');
+    assert.equal(fns.OpenServiceA.handler([manager, NAME, 0xf01ff]), 0);
+    assert.equal(fns.DeleteService.handler([manager]), 0, 'the manager is no service');
+    assert.equal(lastError(), ERROR_INVALID_HANDLE);
+});

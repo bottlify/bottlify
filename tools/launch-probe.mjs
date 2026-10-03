@@ -19,7 +19,7 @@
  * single guest instruction. The second is where execution stopped, when it got
  * far enough to run at all.
  *
- *     node tools/launch-probe.mjs warcraft-iii-frozen-throne [--turns 200000]
+ *     node tools/launch-probe.mjs <bundle-id> [--turns 200000]
  */
 
 import { createWriteStream } from 'node:fs';
@@ -27,11 +27,9 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { openBundle } from './btl.mjs';
 import { createApp } from '../modules/core/src/app.js';
-import { DEFAULT_ENGINE } from '../modules/core/src/layers/cpu/module.js';
 import { peekBytes } from '../modules/core/src/trace.js';
 import { placementOf } from '../modules/installer/src/prefix.js';
 
-const PREBUILT = new URL('../modules/core/vendor/prebuilt/', import.meta.url);
 const BUNDLES = new URL('../bundles/', import.meta.url);
 
 /** @param {string[]} argv */
@@ -47,9 +45,6 @@ function parse(argv){
         // bundle -- a launcher is a different program from the game it starts,
         // and only running it says whether it runs.
         which: argv.includes('--which') ? argv[argv.indexOf('--which') + 1] : null,
-        // The execution engine (the translator by default), so a title's own code
-        // can be measured on either engine outside a browser.
-        engine: argv.includes('--engine') ? argv[argv.indexOf('--engine') + 1] : undefined,
         // The translator's settings for the run, merged over the probe's own
         // (`feed: 'slice'`, `timings: true`, a translation worker), so two
         // settings compare on one title.
@@ -78,7 +73,7 @@ function parse(argv){
                 return { address: Number(address), length: Number(length ?? 32) };
             })
             : [],
-        // Which of a game's own libraries to watch calls into, as `Storm.dll`
+        // Which of a game's own libraries to watch calls into, as `Engine.dll`
         // for all of one library's exports or `MSVCR80.dll!toupper` for a
         // single function, comma-separated.
         watch: argv.includes('--watch')
@@ -391,7 +386,7 @@ function seriesRow(app, last, began){
 }
 
 async function main(){
-    const { id, turns, map, grep, calls, heap, profile, log, watch, peek, which, engine,
+    const { id, turns, map, grep, calls, heap, profile, log, watch, peek, which,
         corkConfig, series, raster } = parse(process.argv.slice(2));
     if (!id)
     {
@@ -436,27 +431,20 @@ async function main(){
 
     const sink = log ? createWriteStream(log) : null;
 
-    const [wasm] = await Promise.all([readFile(new URL('v86.wasm', PREBUILT))]);
     const placement = placementOf(manifest);
     const app = await createApp({
         executable: new Uint8Array(executable),
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
         // Where the bundle is mounted and the program started from: where its
         // installation put it, when the manifest says, as the launcher does.
         imagePath: placement.imagePath,
-        engine,
         // No frames here to feed the translator between: it takes its
         // candidates inside the slice.
-        ...((engine ?? DEFAULT_ENGINE) === 'cork'
-            ? { cork: { config: { feed: 'slice', timings: true,
-                // Emitting on a translation worker, as a page does: inline, the
-                // engine thread would carry the whole emission a browser moves off it.
-                worker: true, workerUrl: new URL('../modules/cork/src/runtime/translator.worker.js',
-                    import.meta.url).href,
-                ...corkConfig } } } : {}),
+        cork: { config: { feed: 'slice', timings: true,
+            // Emitting on a translation worker, as a page does: inline, the
+            // engine thread would carry the whole emission a browser moves off it.
+            worker: true, workerUrl: new URL('../modules/cork/src/runtime/translator.worker.js',
+                import.meta.url).href,
+            ...corkConfig } },
         heapSize: heap,
         ...(raster ? {} : { graphics: { raster: false } }),
         quantum: profile > 0 ? profile : undefined,

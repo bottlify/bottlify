@@ -32,7 +32,7 @@ publishing). The tables list only the settings that are data. `memory` and `load
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `engine` | `'cork'` | `'cork'` or `'emulator'`. |
+| `engine` | `'cork'` | `'cork'`, or `'emulator'` with a v86 build the caller brings. |
 | `memorySize` | 1 GiB | Guest RAM. |
 | `sampling` | `true` | Sample the guest's instruction pointer at every turn. |
 | `noExecuteBelow` | 0 (`createApp`: `0x10000`) | Code below this address faults when run. |
@@ -61,7 +61,6 @@ publishing). The tables list only the settings that are data. `memory` and `load
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `drives` | `{}` | Drives by letter, each with its stores. |
-| `system` | `null` | The read-only store under `C:\WINDOWS\system32\`. |
 | `openFileLimit` | 4096 | Files open at once. |
 
 ## win32

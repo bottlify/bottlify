@@ -13,8 +13,8 @@
  * The single-instruction corpus judges one instruction at a time against the
  * hardware recording and finds nothing left; this is what
  * `sequences-judge.js` judges *interactions* with -- sequences of two to eight
- * instructions run live against the emulator, which is where a defect one
- * instruction cannot show lives.
+ * instructions run live on translated code and on the instruction model,
+ * which is where a defect one instruction cannot show lives.
  */
 
 /** Where the judged sequence stands, where its preamble runs, and its data. */

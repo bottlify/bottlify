@@ -91,9 +91,9 @@ function runBuild(){
     }
 }
 
-// The environment variable exists for the same reason build-v86.mjs has one:
-// `-- --docker` does not reliably survive a workspace script, and a build that
-// cannot run natively must refuse rather than pretend.
+// The environment variable exists because `-- --docker` does not reliably
+// survive a workspace script, and a build that cannot run natively must refuse
+// rather than pretend.
 const wantsDocker = process.argv.includes('--docker')
     || process.env.BOTTLIFY_VIDEO_DECODER_DOCKER === '1';
 if (!wantsDocker)

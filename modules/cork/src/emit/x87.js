@@ -1204,18 +1204,22 @@ export function x87StoreRegisters(e, written){
  */
 export function x87BlockStart(e, index){
     const x = e.x87;
+    // Whatever a block before it left stale was written on its every way out;
+    // what is known of the stack words there is the plan's. A cut block too:
+    // the exit it is compiled as is reached from other blocks than the one
+    // emitted before it, and that one -- a block that ended in a `ret` or a
+    // `hlt`, whose own exits wrote its stale words -- left them uncommitted.
+    x.known = unknown();
+    x.exact = 0;
+    x.exactNaN = 0;
     if (x.cut.has(index))
     {
         x.current = null;
+        x.stack = NOTHING;
         return false;
     }
     x.current = x.states[index] === null ? null : cloneState(/** @type {StackState} */ (x.states[index]));
-    // Whatever a block before it left stale was written on its every way out;
-    // what is known of the stack words there is the plan's.
-    x.known = unknown();
     x.stack = x.shapes[index] ?? NOTHING;
-    x.exact = 0;
-    x.exactNaN = 0;
     if (x.current !== null)
     {
         e.b.i32const(x.current.top).localSet(Local.x87Top);
@@ -1717,6 +1721,63 @@ export function emitX87(e, instruction, flagsLive){
     const setStatus = mask=>{
         b.localGet(Local.x87Status).i32const(mask).op(I32.or).localSet(Local.x87Status);
     };
+    const nanAt = precise ? e.layout.nanFirst ?? -1 : -1;
+    /** @param {number} slot @param {() => void} [first] */
+    const noteFirst = (slot, first)=>{
+        if (nanAt >= 0)
+        {
+            noteEvent(e, slot, first);
+        }
+    };
+    /** Which instruction asks the invalid-operation helper, for its record (`nanFirst`). */
+    const noteAsker = ()=>{
+        if (nanAt >= 0)
+        {
+            b.i32const(0).i32const(instruction.eip)
+                .store('i32', { offset: nanAt + NanRecord.ASKER });
+        }
+    };
+    /**
+     * A NaN made from numbers where the IE is set inline: the helper asked
+     * only for its record.
+     *
+     * @param {number} a
+     * @param {number | null} c
+     */
+    const noteMade = (a, c)=>{
+        if (nanAt >= 0)
+        {
+            noteAsker();
+            b.localGet(a);
+            if (c === null)
+            {
+                b.f64const(0);
+            }
+            else
+            {
+                b.localGet(c);
+            }
+            b.i32const(0).i32const(0).call(/** @type {number} */ (e.context.x87Invalid)).drop();
+        }
+    };
+    /**
+     * The result on the stack noted when it is a NaN made from numbers: for
+     * what the host's `Math` computes, which hands its NaN out positive.
+     *
+     * @param {number} a
+     * @param {number | null} c
+     */
+    const noteIfMade = (a, c)=>{
+        if (nanAt < 0)
+        {
+            return;
+        }
+        b.localTee(x.temp3).localGet(x.temp3).op(F64.ne);
+        b.if(EMPTY);
+        noteMade(a, c);
+        b.end();
+        b.localGet(x.temp3);
+    };
     /** Pushes the QNaN indefinite. */
     const indefinite = ()=>b.i64const(-0x0008000000000000n).op(F64.reinterpretI64);
     /** The last guard decided while translating that nothing faults (t1 is 0). */
@@ -1783,6 +1844,14 @@ export function emitX87(e, instruction, flagsLive){
         b.localGet(Local.t1);
         e.openGuard('fault', EMPTY);
         setStatus(Status.IE | Status.SF);
+        // Which region, entered at which top, and the stack as it found it.
+        noteFirst(NanRecord.FAULT, ()=>{
+            const at = nanAt + NanRecord.FAULT_REGION;
+            b.i32const(0).i32const(e.region.entry).store('i32', { offset: at });
+            b.i32const(0).i32const(e.entryTop).store('i32', { offset: at + 4 });
+            b.i32const(0).localGet(Local.x87Empty).store('i32', { offset: at + 8 });
+            b.i32const(0).localGet(Local.x87Top).store('i32', { offset: at + 12 });
+        });
         if (overflowChecked)
         {
             b.localGet(Local.x87Empty).i32const(into).op(I32.and).op(I32.eqz);
@@ -1837,11 +1906,50 @@ export function emitX87(e, instruction, flagsLive){
     };
 
     /**
+     * Two NaN operands' result into `x.temp3`, chosen as the x87 chooses it --
+     * a quiet one over a signalling one, then the larger significand, then the
+     * positive, quieted (the model's `twoNaN`) -- where the host's operation
+     * keeps whichever its operand order put first.
+     *
+     * @param {number} a @param {number} c  the locals holding the operands
+     */
+    const twoNaN = (a, c)=>{
+        const bitsOf = (/** @type {number} */ local)=>b.localGet(local).op(I64.reinterpretF64);
+        const quietOf = (/** @type {number} */ local)=>bitsOf(local)
+            .i64const(0x0008000000000000n).op(I64.and).i64const(0n).op(I64.ne);
+        const fractionOf = (/** @type {number} */ local)=>bitsOf(local)
+            .i64const(0x000fffffffffffffn).op(I64.and);
+        b.localGet(a).localGet(a).op(F64.ne);
+        b.localGet(c).localGet(c).op(F64.ne);
+        b.op(I32.and);
+        e.openGuard('twoNaN', EMPTY);
+        bitsOf(a);
+        bitsOf(c);
+        quietOf(a);
+        fractionOf(a);
+        fractionOf(c);
+        b.op(I64.gtU);
+        bitsOf(a).i64const(0n).op(I64.ltS).op(I32.eqz);
+        fractionOf(a);
+        fractionOf(c);
+        b.op(I64.ne);
+        b.select();
+        quietOf(a);
+        quietOf(c);
+        b.op(I32.ne);
+        b.select();
+        b.select();
+        b.i64const(0x0008000000000000n).op(I64.or).op(F64.reinterpretI64).localSet(x.temp3);
+        e.close();
+    };
+
+    /**
      * The result on the stack, a NaN the operation itself made given the
      * processor's sign: x86 hands out the negative indefinite, a host whose
      * default NaN is positive hands out the other, and the corpus tells
      * them apart through a store. A NaN that came in as an operand is
-     * propagated as it was.
+     * propagated as it was; under `precise`, of two the x87's choice
+     * (`twoNaN`).
      *
      * With `invalid`, the same NaN out of operands that were not raises IE
      * too: the arithmetic's invalid operation, found by the one compare.
@@ -1865,7 +1973,8 @@ export function emitX87(e, instruction, flagsLive){
             invalid = false;
             memory = null;
         }
-        if (!fix && !invalid && memory === null)
+        const choose = precise && inputs.length > 1;
+        if (!fix && !invalid && memory === null && !choose && nanAt < 0)
         {
             return;
         }
@@ -1873,10 +1982,16 @@ export function emitX87(e, instruction, flagsLive){
         b.localSet(x.temp3);
         b.localGet(x.temp3).localGet(x.temp3).op(F64.ne);
         e.openGuard('nan', EMPTY);
+        noteFirst(NanRecord.RESULT);
+        if (choose)
+        {
+            twoNaN(inputs[0], inputs[1]);
+        }
         if (!fix && invalid)
         {
             // The rare branch as one call, so the hot path around it stays
             // the compare: its body inline cost half again what the compare did.
+            noteAsker();
             b.localGet(inputs[0]);
             if (inputs.length > 1)
             {
@@ -1920,6 +2035,7 @@ export function emitX87(e, instruction, flagsLive){
         if (invalid)
         {
             setStatus(Status.IE);
+            noteMade(inputs[0], inputs.length > 1 ? inputs[1] : null);
         }
         e.close();
         e.close();
@@ -2158,6 +2274,7 @@ export function emitX87(e, instruction, flagsLive){
                 b.localGet(st(0)).f64const(0).op(F64.lt);
                 e.openGuard('negative', EMPTY);
                 setStatus(Status.IE);
+                noteMade(st(0), null);
                 e.close();
             }
             b.localGet(st(0)).localTee(x.temp).op(F64.sqrt);
@@ -2353,6 +2470,7 @@ export function emitX87(e, instruction, flagsLive){
                     e.close();
                 }
                 b.localGet(st(1)).localGet(x.temp).call(math.log2).op(F64.mul);
+                noteIfMade(st(1), x.temp);
             }
             else
             {
@@ -2365,6 +2483,7 @@ export function emitX87(e, instruction, flagsLive){
                 }
                 b.localGet(st(1)).localGet(x.temp).call(math.log1p).f64const(Math.LN2).op(F64.div)
                     .op(F64.mul);
+                noteIfMade(st(1), x.temp);
             }
             orIndefinite();
             b.localSet(st(1));
@@ -2392,6 +2511,7 @@ export function emitX87(e, instruction, flagsLive){
             b.localGet(Local.t1).op(I32.or);
             e.openGuard('invalid', EMPTY);
             setStatus(Status.IE);
+            noteMade(x.temp, x.temp2);
             indefinite();
             b.localSet(st(0));
             b.else();
@@ -2869,6 +2989,30 @@ function rawSignalling(e, operand){
  * @param {'checked' | 'quick' | 'unchecked'} [mode]
  */
 function loadFloat(e, operand, mode = 'checked'){
+    loadFloatValue(e, operand, mode);
+    const at = e.context.precise === true ? e.layout.nanFirst ?? -1 : -1;
+    if (at < 0)
+    {
+        return;
+    }
+    // A NaN hunt's record of a NaN read from memory, and the address it was read from.
+    const { b } = e;
+    const value = e.x87.temp3;
+    b.localTee(value).localGet(value).op(F64.ne);
+    b.if(EMPTY);
+    noteEvent(e, NanRecord.LOAD, ()=>{
+        b.i32const(0).localGet(Local.addr).store('i32', { offset: at + NanRecord.LOAD + 8 });
+    });
+    b.end();
+    b.localGet(value);
+}
+
+/**
+ * `loadFloat` without the NaN hunt's record.
+ *
+ * @param {E} e @param {Operand} operand @param {'checked' | 'quick' | 'unchecked'} [mode]
+ */
+function loadFloatValue(e, operand, mode = 'checked'){
     const { b } = e;
     if (e.context.precise !== true)
     {
@@ -2965,6 +3109,20 @@ function storeFloat(e, operand, pushValue){
     const { b } = e;
     prepare(e, operand);
     noteStore(e, operand.size);
+    const at = e.context.precise === true ? e.layout.nanFirst ?? -1 : -1;
+    if (at >= 0)
+    {
+        // A NaN hunt's record of a NaN stored, and the address it went to.
+        const value = e.x87.temp3;
+        pushValue();
+        b.localTee(value).localGet(value).op(F64.ne);
+        b.if(EMPTY);
+        noteEvent(e, NanRecord.STORE, ()=>{
+            b.i32const(0).localGet(Local.addr).store('i32', { offset: at + NanRecord.STORE + 8 });
+        });
+        b.end();
+        pushValue = ()=>b.localGet(value);
+    }
     if (operand.size === 10)
     {
         pushValue();
@@ -3205,10 +3363,52 @@ function signalling(e, a, c){
 }
 
 /**
+ * A NaN hunt's record (`layout.nanFirst`), by offset: each event's first
+ * instruction and its count, then what an event keeps beside them -- a NaN
+ * made: its two operands as f64 and the asking instruction (`addInvalidHelper`);
+ * a load or a store: the address in memory; a stack fault: the region, the
+ * top it was entered at, and the empty mask and the top it found -- and the
+ * order the first events came in.
+ */
+export const NanRecord = Object.freeze({
+    MADE: 0, MADE_A: 8, MADE_C: 16, ASKER: 24, FAULT: 28, RESULT: 36, LOAD: 44, STORE: 56,
+    ORDER: 68, FAULT_REGION: 92, SIZE: 108,
+    /** By event, where its place in the order is kept. */
+    orderOf: /** @type {Record<number, number>} */ ({ 0: 72, 28: 76, 36: 80, 44: 84, 56: 88 }),
+});
+
+/**
+ * One event of a NaN hunt at the instruction being emitted: its count and,
+ * the first time, its address, its place in the order, and what `first`
+ * stores beside them.
+ *
+ * @param {E} e @param {number} slot  the event (`NanRecord`)
+ * @param {() => void} [first]
+ */
+function noteEvent(e, slot, first){
+    const { b } = e;
+    const at = /** @type {number} */ (e.layout.nanFirst);
+    b.i32const(0).i32const(0).load('i32', { offset: at + slot + 4 }).i32const(1).op(I32.add)
+        .store('i32', { offset: at + slot + 4 });
+    b.i32const(0).load('i32', { offset: at + slot }).op(I32.eqz);
+    b.if(EMPTY);
+    b.i32const(0).i32const(/** @type {import('../decode/decoder.js').Instruction} */ (e.current).eip)
+        .store('i32', { offset: at + slot });
+    b.i32const(0).i32const(0).load('i32', { offset: at + NanRecord.ORDER }).i32const(1).op(I32.add)
+        .store('i32', { offset: at + NanRecord.ORDER });
+    b.i32const(0).i32const(0).load('i32', { offset: at + NanRecord.ORDER })
+        .store('i32', { offset: at + NanRecord.orderOf[slot] });
+    first?.();
+    b.end();
+}
+
+/**
  * The invalid-operation helper: `x87Invalid(a, c, address, size) -> IE`, for
  * an arithmetic whose result is a NaN. IE when the NaN was made from operands
  * that were not NaNs, or when the memory operand (`size` 4 or 8 at the wasm
- * address; 0 for none) holds a signalling NaN; 0 otherwise.
+ * address; 0 for none) holds a signalling NaN; 0 otherwise. A NaN made is
+ * noted at `layout.nanFirst`, the asking instruction's address read from
+ * past the record, where the region stored it.
  *
  * @param {import('../wasm/encoder.js').ModuleBuilder} m
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
@@ -3219,8 +3419,26 @@ export function addInvalidHelper(m, layout){
     });
     const b = new Body();
     const offset = layout.ramBase;
+    const at = layout.nanFirst ?? -1;
     b.localGet(0).localGet(0).op(F64.eq).localGet(1).localGet(1).op(F64.eq).op(I32.and);
     b.if(EMPTY);
+    if (at >= 0)
+    {
+        // A NaN hunt's record: how many, and the first one's instruction and operands.
+        b.i32const(0).i32const(0).load('i32', { offset: at + NanRecord.MADE + 4 }).i32const(1)
+            .op(I32.add).store('i32', { offset: at + NanRecord.MADE + 4 });
+        b.i32const(0).load('i32', { offset: at + NanRecord.MADE + 4 }).i32const(1).op(I32.eq);
+        b.if(EMPTY);
+        b.i32const(0).i32const(0).load('i32', { offset: at + NanRecord.ASKER })
+            .store('i32', { offset: at + NanRecord.MADE });
+        b.i32const(0).localGet(0).store('f64', { offset: at + NanRecord.MADE_A });
+        b.i32const(0).localGet(1).store('f64', { offset: at + NanRecord.MADE_C });
+        b.i32const(0).i32const(0).load('i32', { offset: at + NanRecord.ORDER }).i32const(1)
+            .op(I32.add).store('i32', { offset: at + NanRecord.ORDER });
+        b.i32const(0).i32const(0).load('i32', { offset: at + NanRecord.ORDER })
+            .store('i32', { offset: at + NanRecord.orderOf[NanRecord.MADE] });
+        b.end();
+    }
     b.i32const(Status.IE).op(0x0f); // return
     b.end();
     b.localGet(3).i32const(4).op(I32.eq);

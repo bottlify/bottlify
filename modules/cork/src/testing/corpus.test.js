@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { gzipSync } from 'node:zlib';
 import {
     ARITH_MASK, BSS, BSS_SIZE, STATUS_MASK, TAG_ALL_INVALID,
-    diffFixture, loadCorpus, parseElf32, parseFixture, runCase,
+    diffFixture, loadCorpus, parseElf32, parseFixture,
 } from './corpus.js';
 
 /**
@@ -178,64 +178,4 @@ test('a case that died compares the faulting address and nothing else', ()=>{
     const alive = parseFixture(fixtureText());
     assert.deepEqual(diffFixture(alive, outcome),
         [{ name: 'exception', expected: 'none', actual: 'UD at 0x80005' }]);
-});
-
-test('runCase places the segments, points the ROM at the entry, steps to the halt', ()=>{
-    const ram = new Uint8Array(0x110000);
-    const registers = /** @type {Record<string, number>} */ ({
-        eax: 0, ecx: 0, edx: 0, ebx: 0, esp: 0, ebp: 0, esi: 0, edi: 0, eip: 0, eflags: 2,
-    });
-    let halted = false;
-    /** @type {((id: number) => void) | null} */
-    let onTrap = null;
-    let steps = 0;
-    const host = {
-        /** @param {string} name */
-        readReg32: name=>registers[name],
-        /** @param {number} address @param {number} length */
-        readPhysical: (address, length)=>ram.subarray(address, address + length),
-        /** @param {number} address @param {Uint8Array} bytes */
-        writePhysical: (address, bytes)=>ram.set(bytes, address),
-        /** @param {number} address */
-        readU32: address=>new DataView(ram.buffer).getUint32(address, true),
-        readXmm: ()=>new Uint32Array(4),
-        x87State: ()=>({
-            top: 6, empty: 0x3f, control: 0x37f, status: 0x3000,
-            registers: Float64Array.from([0, 0, 0, 0, 0, 0, 3, 1.5]), raw: new Uint8Array(128),
-        }),
-        /** @param {(id: number) => void} handler */
-        onTrap: handler=>{
-            onTrap = handler;
-        },
-        halted: ()=>halted,
-        wake: ()=>{
-            halted = false;
-        },
-        /** @param {number} budget */
-        step: budget=>{
-            steps++;
-            // The pretend guest: the first slice raises a divide error from
-            // 0x80002 with a frame at esp, then halts as the stub would.
-            registers.esp = 0x101ff0;
-            new DataView(ram.buffer).setUint32(0x101ff0, 0x80002, true);
-            onTrap?.(0xf000);
-            registers.eax = 42;
-            halted = true;
-            return Math.min(budget, 3);
-        },
-    };
-    const { segments, entry } = parseElf32(tinyElf());
-    const testCase = { name: 'tiny', segments, entry, expected: parseFixture(fixtureText()) };
-    const outcome = runCase(host, testCase, {
-        entryVector: 0x7000, faultTrapBase: 0xf000,
-        faultEip: (vector, esp)=>host.readU32(esp),
-    });
-    assert.deepEqual([...ram.subarray(0x80000, 0x80002)], [0x90, 0xf4]);
-    assert.equal(new DataView(ram.buffer).getUint32(0x7000, true), 0x80000, 'the entry vector');
-    assert.equal(steps, 1);
-    assert.equal(outcome.halted, true);
-    assert.deepEqual(outcome.exception, { name: 'DE', eip: 0x80002 });
-    assert.equal(outcome.reg32[0], 42);
-    assert.deepEqual(outcome.st, [3, 1.5, 0, 0, 0, 0, 0, 0],
-        'ST(i) is read relative to the top, empty registers by their contents');
 });

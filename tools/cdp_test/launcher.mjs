@@ -27,7 +27,13 @@ import { CdpEndpoint } from './cdp.mjs';
 import { summarise } from './profile.mjs';
 
 const argv = process.argv.slice(2);
-const bundleId = argv.find(arg=>!arg.startsWith('--')) ?? 'warcraft-iii-frozen-throne';
+const bundleId = argv.find(arg=>!arg.startsWith('--'));
+if (!bundleId)
+{
+    console.error('usage: node tools/cdp_test/launcher.mjs <bundle-id> [--seconds 30]'
+        + ' [--settle 40] [--url URL] [--heap] [--headless]');
+    process.exit(2);
+}
 /** @param {string} flag @param {number} fallback */
 const number = (flag, fallback)=>{
     const at = argv.indexOf(flag);

@@ -89,6 +89,7 @@ export const DDCKEY_DESTBLT = 0x00000002;
 export const DDCKEY_SRCBLT = 0x00000008;
 
 /** DDCAPS.dwCaps, the bits this build reports. */
+export const DDCAPS_3D = 0x00000001;
 export const DDCAPS_BLT = 0x00000040;
 export const DDCAPS_BLTSTRETCH = 0x00000200;
 export const DDCAPS_BLTCOLORFILL = 0x04000000;
@@ -96,6 +97,7 @@ export const DDCAPS_COLORKEY = 0x00400000;
 export const DDCAPS_GDI = 0x00000400;
 export const DDCAPS_PALETTE = 0x00008000;
 export const DDCAPS_CANBLTSYSMEM = 0x80000000;
+export const DDCAPS_BLTDEPTHFILL = 0x10000000;
 export const DDCAPS2_CERTIFIED = 0x00000001;
 export const DDCAPS2_WIDESURFACES = 0x00001000;
 export const DDCAPS2_PRIMARYGAMMA = 0x00020000;

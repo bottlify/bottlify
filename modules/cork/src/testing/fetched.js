@@ -8,9 +8,9 @@ import { existsSync } from 'node:fs';
 
 /**
  * The skip option of a test that needs data fetched beside the code -- the
- * hardware corpus, the prebuilt emulator. Skipped in a checkout that never
- * fetched it; run wherever CI is set, so a run that should have judged the
- * corpus fails on the missing file rather than going green without it.
+ * hardware corpus. Skipped in a checkout that never fetched it; run wherever
+ * CI is set, so a run that should have judged the corpus fails on the missing
+ * file rather than going green without it.
  *
  * @param {...URL} urls
  * @returns {string | false}

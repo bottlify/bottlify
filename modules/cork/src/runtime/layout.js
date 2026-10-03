@@ -25,8 +25,10 @@ export const PAGE = 65536;
 
 /**
  * What lies at `layout.tables`, as offsets from it: the page-flag table
- * (one byte per 4 KiB page of the 4 GiB space), the address of the last
- * store into a code page, the undo ring a differential build fills
+ * (one byte per 4 KiB page of the 4 GiB space), the bytes the stores into
+ * code pages since the runtime last looked span (the lowest address,
+ * complemented so that zero is none, and one past the highest), the undo
+ * ring a differential build fills
  * (a count, then entries of address, size and sixteen old bytes), and the
  * entry hash: open addressing over the guest address, slots of the
  * address, the region's index in the function table, the block's label
@@ -39,8 +41,8 @@ export const PAGE = 65536;
 export const Tables = Object.freeze({
     PAGE_FLAGS: 0,
     PAGE_FLAGS_SIZE: 1 << 20,
-    STALE_ADDRESS: 1 << 20,
-    STALE_SIZE: (1 << 20) + 4,
+    STALE_LOW: 1 << 20,
+    STALE_END: (1 << 20) + 4,
     // Transfers between regions through the hash, counted when a run asks.
     TRANSFERS: (1 << 20) + 12,
     UNDO_HEAD: (1 << 20) + 8,
@@ -107,6 +109,8 @@ export function ownLayout({ ramSize }){
         callProfile: 352,
         // The budget the run started with, past the call profile's sixteen pairs.
         origin: 488,
+        // Past the state block, so a thread switch does not carry it.
+        nanFirst: 1024,
         tables: ramBase + ramSize,
         codePages: -1,
         // The entry hash's slot is the top bits of eip times the golden ratio,

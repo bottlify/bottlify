@@ -18,7 +18,6 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 const FIXTURE = new URL('../test/fixtures/hello.exe', import.meta.url);
 
 /** What the same binary prints when Windows runs it. */
@@ -33,17 +32,10 @@ const EXPECTED_OUTPUT = 'Hello from Bottlify\r\n';
  * @param {Partial<import('./app.js').AppOptions>} [extra]
  */
 async function startApp(t, extra = {}){
-    const [wasm, exe] = await Promise.all([
-        readFile(new URL('v86.wasm', PREBUILT)),
-        readFile(FIXTURE),
-    ]);
+    const exe = await readFile(FIXTURE);
 
     const app = await createApp({
         executable: new Uint8Array(exe),
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
         ...extra,
     });
     t.after(()=>app.dispose());

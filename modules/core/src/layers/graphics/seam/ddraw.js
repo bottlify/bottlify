@@ -65,7 +65,8 @@ import {
     DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_DEPTHFILL, DDBLT_KEYDESTOVERRIDE,
     DDBLT_KEYSRCOVERRIDE, DDPF_ZBUFFER, DDCAPS2_CANRENDERWINDOWED, DDCAPS2_CERTIFIED,
     DDCAPS2_PRIMARYGAMMA,
-    DDCAPS2_WIDESURFACES, DDCAPS_BLT, DDCAPS_BLTCOLORFILL, DDCAPS_BLTSTRETCH, DDCAPS_CANBLTSYSMEM,
+    DDCAPS2_WIDESURFACES, DDCAPS_3D, DDCAPS_BLT, DDCAPS_BLTCOLORFILL, DDCAPS_BLTDEPTHFILL,
+    DDCAPS_BLTSTRETCH, DDCAPS_CANBLTSYSMEM,
     DDCAPS_COLORKEY, DDCAPS_GDI, DDCAPS_PALETTE, DDCKEYCAPS_DESTBLT, DDCKEYCAPS_SRCBLT,
     DDCKEY_DESTBLT, DDCKEY_SRCBLT, DDERR_ALREADYINITIALIZED, DDERR_INVALIDPARAMS,
     DDERR_NOTAOVERLAYSURFACE, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND, DDERR_SURFACEBUSY,
@@ -78,6 +79,7 @@ import {
     DDSD_CAPS, DDSD_CKDESTBLT, DDSD_CKSRCBLT, DDSD_HEIGHT, DDSD_MIPMAPCOUNT, DDSD_PITCH,
     DDSD_PIXELFORMAT, DDSD_REFRESHRATE, DDSD_WIDTH, DD_OK, DDGDI_GETHOSTIDENTIFIER,
 } from '../ddraw/constants.js';
+import { DDBD_16, DDBD_32 } from '../d3d7/constants.js';
 import { pixelFormatForDepth } from '../ddraw/objects.js';
 import { blt, bltFast } from '../ddraw/blit.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
@@ -1201,8 +1203,10 @@ export function createDirectDrawSeam(
     /**
      * The capabilities this build reports, for the hardware and the emulation
      * layer alike: one backend answers as both, and a program that branches on
-     * the difference finds none. No 3D is claimed here; that is Direct3D 7's
-     * decision to make when it arrives.
+     * the difference finds none. 3D is among them -- DirectDraw carries
+     * Direct3D 7, and a DirectX 7 program looks for DDCAPS_3D here before it
+     * asks Direct3D anything -- with the depth fill Blt does and the depths of
+     * the z-buffer formats Direct3D enumerates.
      *
      * @param {number} pointer
      */
@@ -1216,13 +1220,15 @@ export function createDirectDrawSeam(
         memory.writeMemory(at, new Uint8Array(size));
         fields.writeStruct(at, DDCAPS, {
             dwSize: size,
-            dwCaps: DDCAPS_BLT | DDCAPS_BLTSTRETCH | DDCAPS_BLTCOLORFILL | DDCAPS_COLORKEY
-                | DDCAPS_GDI | DDCAPS_PALETTE | DDCAPS_CANBLTSYSMEM,
+            dwCaps: (DDCAPS_3D | DDCAPS_BLT | DDCAPS_BLTSTRETCH | DDCAPS_BLTCOLORFILL
+                | DDCAPS_BLTDEPTHFILL | DDCAPS_COLORKEY | DDCAPS_GDI | DDCAPS_PALETTE
+                | DDCAPS_CANBLTSYSMEM) >>> 0,
             // A primary's gamma ramp is claimed where the display applies it.
             dwCaps2: DDCAPS2_CERTIFIED | DDCAPS2_WIDESURFACES | DDCAPS2_CANRENDERWINDOWED
                 | (gamma?.applies() ? DDCAPS2_PRIMARYGAMMA : 0),
             dwCKeyCaps: DDCKEYCAPS_SRCBLT | DDCKEYCAPS_DESTBLT,
             dwPalCaps: DDPCAPS_8BIT | DDPCAPS_PRIMARYSURFACE | DDPCAPS_ALLOW256,
+            dwZBufferBitDepths: DDBD_16 | DDBD_32,
             dwVidMemTotal: VIDEO_MEMORY,
             dwVidMemFree: VIDEO_MEMORY,
             ddsOldCaps: SURFACE_CAPS,

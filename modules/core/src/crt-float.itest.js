@@ -6,23 +6,20 @@
 
 /**
  * The runtime's floating-point environment, classifications, number reading
- * and division through the import, as a program calls them, on cork and on
- * the emulator: a precision `_controlfp` sets is the precision the program's
- * own division then rounds to, `_clearfp` answers the zero-divide a division
- * by zero raised and clears it, strtod reads its number and its end and sets
- * errno for an overflow -- the three calls past the fast path handed to the
- * host, the rest answered in the guest -- and div answers its remainder in EDX -- each result
- * written to the console and held to msvcrt's answer.
+ * and division through the import, as a program calls them: a precision
+ * `_controlfp` sets is the precision the program's own division then rounds
+ * to, `_clearfp` answers the zero-divide a division by zero raised and clears
+ * it, strtod reads its number and its end and sets errno for an overflow --
+ * the three calls past the fast path handed to the host, the rest answered in
+ * the guest -- and div answers its remainder in EDX -- each result written to
+ * the console and held to msvcrt's answer.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 import { ERANGE } from './layers/win32/msvcrt/globals.js';
-
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
@@ -163,16 +160,9 @@ function buildFloatExe(){
     });
 }
 
-/** @param {'cork' | 'emulator'} engine */
-async function run(engine){
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
+async function run(){
     const app = await createApp({
         executable: buildFloatExe(),
-        engine,
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
     });
     /** @type {string[]} */
     const output = [];
@@ -205,42 +195,39 @@ async function run(engine){
     }
 }
 
-for (const engine of /** @type {const} */ (['cork', 'emulator']))
-{
-    test(`the runtime's floating-point environment and conversions, under ${engine}`,
-        { timeout: 120000 }, async()=>{
-            const { eax, edx, doubles, errnos, ends, thirds, crossed } = await run(engine);
-            assert.equal(eax[0], 0xa001f, '_controlfp answers single precision');
-            assert.equal(thirds[0], Math.fround(1 / 3), 'and the program\'s 1 / 3 rounds to it');
-            assert.equal(eax[1], 0x9001f, '_controlfp answers double precision again');
-            assert.equal(thirds[1], 1 / 3, 'and 1 / 3 is the double');
-            assert.equal(eax[2], 0x9001f, '_control87 reads the same word');
-            assert.equal(eax[4] & 0x8, 0x8, '_clearfp answers the zero-divide raised');
-            assert.equal(eax[5], 0, 'and cleared it');
-            assert.equal(doubles[6], 3.14159);
-            assert.equal(doubles[7], -1.5e300);
-            assert.equal(ends[7] - placed.text7, 8, 'strtod stops before the x');
-            assert.equal(ends[8] - placed.text8, 5);
-            assert.equal(ends[9] - placed.text9, 27);
-            assert.equal(doubles[8], Infinity);
-            assert.equal(errnos[8], ERANGE, 'an overflow sets ERANGE');
-            assert.equal(errnos[7], 0, 'a number in range sets nothing');
-            assert.equal(doubles[9], Number('0.1281832188491894198128921'));
-            assert.ok(Object.is(doubles[10], -2.5));
-            assert.equal(doubles[11], -1);
-            assert.equal(eax[12], 0x20, '-0 is a negative zero');
-            assert.equal(eax[13], 1);
-            assert.equal(eax[14], 0);
-            assert.equal(doubles[15], 10);
-            assert.equal(doubles[16], 1 + 2 ** -52);
-            assert.equal(doubles[17], 1024);
-            assert.deepEqual([eax[18] | 0, edx[18] | 0], [-3, -1], 'div(-7, 2)');
-            assert.deepEqual([eax[19] | 0, edx[19] | 0], [-3, 1], 'ldiv(7, -2)');
-            for (const [name] of CALLS)
-            {
-                const handed = name === 'strtod' ? 3 : 0;
-                assert.equal(crossed.get(`msvcrt.dll!${name}`) ?? 0, handed,
-                    `${name}: only the calls it hands over crossed into the host`);
-            }
-        });
-}
+test(`the runtime's floating-point environment and conversions`,
+    { timeout: 120000 }, async()=>{
+        const { eax, edx, doubles, errnos, ends, thirds, crossed } = await run();
+        assert.equal(eax[0], 0xa001f, '_controlfp answers single precision');
+        assert.equal(thirds[0], Math.fround(1 / 3), 'and the program\'s 1 / 3 rounds to it');
+        assert.equal(eax[1], 0x9001f, '_controlfp answers double precision again');
+        assert.equal(thirds[1], 1 / 3, 'and 1 / 3 is the double');
+        assert.equal(eax[2], 0x9001f, '_control87 reads the same word');
+        assert.equal(eax[4] & 0x8, 0x8, '_clearfp answers the zero-divide raised');
+        assert.equal(eax[5], 0, 'and cleared it');
+        assert.equal(doubles[6], 3.14159);
+        assert.equal(doubles[7], -1.5e300);
+        assert.equal(ends[7] - placed.text7, 8, 'strtod stops before the x');
+        assert.equal(ends[8] - placed.text8, 5);
+        assert.equal(ends[9] - placed.text9, 27);
+        assert.equal(doubles[8], Infinity);
+        assert.equal(errnos[8], ERANGE, 'an overflow sets ERANGE');
+        assert.equal(errnos[7], 0, 'a number in range sets nothing');
+        assert.equal(doubles[9], Number('0.1281832188491894198128921'));
+        assert.ok(Object.is(doubles[10], -2.5));
+        assert.equal(doubles[11], -1);
+        assert.equal(eax[12], 0x20, '-0 is a negative zero');
+        assert.equal(eax[13], 1);
+        assert.equal(eax[14], 0);
+        assert.equal(doubles[15], 10);
+        assert.equal(doubles[16], 1 + 2 ** -52);
+        assert.equal(doubles[17], 1024);
+        assert.deepEqual([eax[18] | 0, edx[18] | 0], [-3, -1], 'div(-7, 2)');
+        assert.deepEqual([eax[19] | 0, edx[19] | 0], [-3, 1], 'ldiv(7, -2)');
+        for (const [name] of CALLS)
+        {
+            const handed = name === 'strtod' ? 3 : 0;
+            assert.equal(crossed.get(`msvcrt.dll!${name}`) ?? 0, handed,
+                `${name}: only the calls it hands over crossed into the host`);
+        }
+    });

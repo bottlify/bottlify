@@ -96,11 +96,16 @@ const SEPARATOR = String.fromCharCode(92);
  *        the root of the volume: a program works out where its data lives from
  *        where it is itself, and a bundle mounted at the root makes every
  *        answer to that question -- right or wrong -- happen to work.
+ * @param {Record<string, string>} [options.relocate]
+ *        Directories of the bundle that appear somewhere other than under
+ *        `prefix`, by their path in the bundle: what a bottle carries for
+ *        `C:\WINDOWS\system32` lies in the bundle beside its registry, and is
+ *        found where Windows keeps it. No separators at either end of either.
  * @returns {import('../memory-store.js').SourceStore}
  */
 export function createBundleSource({
     bundle, readBlock, decode, cacheBlocks = DEFAULT_CACHE_BLOCKS,
-    hotBlocks = DEFAULT_HOT_BLOCKS, prefix = '',
+    hotBlocks = DEFAULT_HOT_BLOCKS, prefix = '', relocate = {},
 })
 {
     /** @type {import('../memory-store.js').StoredEntry[]} */
@@ -109,8 +114,23 @@ export function createBundleSource({
     const byPath = new Map();
 
     const under = prefix === '' ? '' : prefix + SEPARATOR;
+    const moved = Object.entries(relocate).map(([from, to])=>({ from: foldName(from), to }));
     /** @param {string} path */
-    const outward = path=>`${under}${path}`;
+    const outward = path=>{
+        const folded = foldName(path);
+        for (const { from, to } of moved)
+        {
+            if (folded === from)
+            {
+                return to;
+            }
+            if (folded.startsWith(from + SEPARATOR))
+            {
+                return `${to}${path.slice(from.length)}`;
+            }
+        }
+        return `${under}${path}`;
+    };
 
     for (const file of bundle.files)
     {
@@ -126,14 +146,18 @@ export function createBundleSource({
         entries.push({ path: outward(path), directory: true, size: 0 });
     }
     // The prefix's own components are directories nothing else declares: they
-    // hold the bundle rather than coming from it.
-    const parts = prefix.split(SEPARATOR).filter(Boolean);
-    for (const part of parts.map((_, at)=>parts.slice(0, at + 1).join(SEPARATOR)))
+    // hold the bundle rather than coming from it. So are a relocated
+    // directory's.
+    for (const holder of [prefix, ...moved.map(({ to })=>to)])
     {
-        if (!directories.has(foldName(part)))
+        const parts = holder.split(SEPARATOR).filter(Boolean);
+        for (const part of parts.map((_, at)=>parts.slice(0, at + 1).join(SEPARATOR)))
         {
-            directories.add(foldName(part));
-            entries.push({ path: part, directory: true, size: 0 });
+            if (!directories.has(foldName(part)))
+            {
+                directories.add(foldName(part));
+                entries.push({ path: part, directory: true, size: 0 });
+            }
         }
     }
 

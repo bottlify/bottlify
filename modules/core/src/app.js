@@ -27,7 +27,6 @@ import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
 import { synthesiseProcessInit, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH }
     from './layers/loader/internal/init.js';
 import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
-import { createMemoryStore } from './layers/filesystem/internal/memory-store.js';
 import { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
 import { resolveTranslationStore } from './layers/cpu/internal/translation-store.js';
 import { createBlockCache, resolveBlockStore }
@@ -55,12 +54,10 @@ import { createReplicas } from './replicas.js';
 /**
  * @typedef {Object} AppOptions
  * @property {Uint8Array} executable      The program to run.
- * @property {Object} [v86]               Emulator artifacts, when the package's
- *           own are not wanted: any of these overrides its counterpart, and
- *           what is not named is taken from beside this module.
- * @property {string} [v86.moduleUrl]     The emulator's module.
- * @property {string} [v86.wasmUrl]       Where its binary is fetched from.
- * @property {ArrayBuffer} [v86.wasmBytes]  Or the binary itself.
+ * @property {Object} [v86]               The emulator, for `engine: 'emulator'`. The
+ *           package carries none: a caller that wants it brings both halves.
+ * @property {string} [v86.moduleUrl]     The emulator's module (`libv86.mjs`).
+ * @property {ArrayBuffer} [v86.wasmBytes]  Its binary (`v86.wasm`).
  * @property {Object} [cork]              The translator, for every engine but `emulator`.
  * @property {string} [cork.moduleUrl]    Its entry module; the package beside core by default.
  * @property {import('./layers/cpu/engine.js').EngineConfig} [cork.config]  Its settings;
@@ -80,15 +77,6 @@ import { createReplicas } from './replicas.js';
  *           it attaches to the same compiled module and linear memory rather
  *           than instantiate the binary again. Set by `createApp` on a rebuilt
  *           machine and not something a caller supplies.
- * @property {Object} [system]            The engine's own read-only volume.
- * @property {{ path: string, bytes: Uint8Array }[]} [system.files]
- *           Files to mount read-only under `C:\WINDOWS\system32\`, a name
- *           each, as though the machine had always had them. The engine carries
- *           none of its own: a library a title's installer puts there (the
- *           DirectX setup's `d3dx9_*`) is written to the drive like any other
- *           file. Absent, the volume has no system layer. The bytes are handed
- *           in the way the decoder's are, because what a build carries is the
- *           assembling caller's decision.
  * @property {number} [stackSize]
  * @property {number} [memorySize]   Guest RAM in bytes; a power of two.
  * @property {number} [heapSize]     Bytes the guest's heap may allocate out of.
@@ -178,9 +166,9 @@ import { createReplicas } from './replicas.js';
  * @property {Record<string, number>} [jit]
  *     The emulator's compiler budgets, by config index. For measurement.
  * @property {'emulator' | 'cork'} [engine]
- *     Which execution engine runs the program. Default `cork`. Chosen per
- *     launch: a launcher passes the person's choice for the bundle, or the
- *     bundle manifest's suggestion.
+ *     Which execution engine runs the program. Default `cork`, the one the
+ *     package carries; `emulator` only with `v86` handed in, and refused
+ *     without it.
  * @property {boolean} [sampling]  The `cpu` layer's always-on guest sampler.
  *     `false` turns it off, for a caller measuring the emulator's own compiler
  *     rather than the guest's code.
@@ -1081,9 +1069,9 @@ export function idleWait({ fetching, idlers, suspended, spun }){
  * Whether a library is answered from this engine's table even when the program
  * brought a file of that name: a KnownDLL, which Windows never looks for beside
  * the program, or a redistributable runtime a layer stands in for -- a sound
- * library's MPEG provider, a JPEG library -- which the decision in
- * `roadmap/decisions.md` makes ours whoever's copy it is, since the program's
- * copy found first runs the whole decoder as emulated x86. Every other name the
+ * library's MPEG provider, a JPEG library -- which this engine makes ours
+ * whoever's copy it is, since the program's copy found first runs the whole
+ * decoder as emulated x86. Every other name the
  * program's own file wins, and the table is the fallback.
  *
  * @param {readonly string[]} knownDlls
@@ -1232,12 +1220,13 @@ export function clockCredit(source, clock, cap){
 }
 
 /**
- * Where the emulator's artifacts are, relative to this module.
+ * Where the package's own binaries are, relative to this module: the bundle
+ * decoder's wasm build.
  *
  * A built package carries them beside itself and the build says where; the
  * source tree keeps them in its prebuilt directory. One expression rather
- * than two entry points, so a caller that imports either gets an engine that
- * boots without being told where its own emulator is.
+ * than two entry points, so a caller that imports either finds them without
+ * being told.
  */
 const VENDOR = /** @type {{ env?: { BOTTLIFY_VENDOR?: string } }} */ (import.meta).env?.BOTTLIFY_VENDOR
     ?? '../vendor/prebuilt/';
@@ -1261,21 +1250,25 @@ export function corkArtifacts(asked, here = import.meta.url){
 }
 
 /**
- * The emulator to boot: what the caller named, and the package's own for the
- * rest.
+ * The emulator the caller brought, for `engine: 'emulator'`; null for any other
+ * engine. The package carries no emulator, so a launch that names it without
+ * handing one in is refused before anything is built.
  *
- * @param {{ moduleUrl?: string, wasmUrl?: string, wasmBytes?: ArrayBuffer } | undefined} asked
- * @param {string} [here]  The module the defaults are relative to.
- * @returns {{ moduleUrl: string, wasmUrl: string | null, wasmBytes: ArrayBuffer | null }}
+ * @param {Pick<AppOptions, 'engine' | 'v86'>} options
+ * @returns {{ moduleUrl: string, wasmBytes: ArrayBuffer } | null}
  */
-export function emulatorArtifacts(asked, here = import.meta.url){
-    return {
-        moduleUrl: asked?.moduleUrl ?? new URL(`${VENDOR}libv86.mjs`, here).href,
-        wasmUrl: asked?.wasmBytes
-            ? null
-            : (asked?.wasmUrl ?? new URL(`${VENDOR}v86.wasm`, here).href),
-        wasmBytes: asked?.wasmBytes ?? null,
-    };
+export function emulatorOf(options){
+    if ((options.engine ?? DEFAULT_ENGINE) !== 'emulator')
+    {
+        return null;
+    }
+    const { moduleUrl, wasmBytes } = options.v86 ?? {};
+    if (!moduleUrl || !wasmBytes)
+    {
+        throw new Error('cpu: the emulator is not installed -- engine "emulator" needs'
+            + ' the caller\'s v86, as `v86: { moduleUrl, wasmBytes }`');
+    }
+    return { moduleUrl, wasmBytes };
 }
 
 /**
@@ -1343,36 +1336,8 @@ export function resolveLibraryPath(name, imagePath){
 /** Where Windows looks for a bare library name after the program's own directory. */
 const SYSTEM_LIBRARY_DIRECTORIES = ['C:\\WINDOWS\\system32\\', 'C:\\WINDOWS\\'];
 
-/** The directory the engine's own volume appears under, without a trailing separator. */
-export const SYSTEM_VOLUME_DIRECTORY = 'WINDOWS\\system32';
-
-/**
- * The engine's read-only volume, as a store, from the files the caller handed in.
- *
- * The paths the caller gave are bare names -- `d3dx9_26.dll` -- because that is
- * what a runtime directory is; where they appear is this engine's decision and
- * is the same place Windows keeps them. Absent any files the volume has no
- * system layer at all.
- *
- * @param {any} system  The `system` option, or nothing.
- * @returns {import('./layers/filesystem/internal/memory-store.js').SourceStore | null}
- */
-export function systemVolume(system){
-    const files = system?.files ?? [];
-    if (files.length === 0)
-    {
-        return null;
-    }
-    /** @type {Record<string, Uint8Array>} */
-    const seed = {};
-    for (const file of files)
-    {
-        // Forward slashes are accepted and normalised, so a caller that built a
-        // path with them does not silently miss the search that uses backslashes.
-        seed[`${SYSTEM_VOLUME_DIRECTORY}\\${file.path.replace(/\//g, '\\')}`] = file.bytes;
-    }
-    return createMemoryStore(seed);
-}
+/** The system directory, on the volume, without its drive or a trailing separator. */
+const SYSTEM_DIRECTORY = 'WINDOWS\\system32';
 
 /**
  * Every place a LoadLibrary at run time looks, in order: beside the
@@ -1657,6 +1622,14 @@ const BUNDLE_DIRECTORY = 'App';
  * writes it there (`@bottlify/installer`'s `REGISTRY_PATH`).
  */
 export const BOTTLE_REGISTRY_PATH = '.bottlify\\registry.json';
+
+/**
+ * Where in a bottle the files its installation added to `C:\WINDOWS\system32`
+ * are kept -- the libraries its DirectX setup installed, say -- beside the
+ * registry, and mounted back where Windows keeps them. The installer puts
+ * them there (`@bottlify/installer`'s `SYSTEM_PATH`, the same path).
+ */
+export const BOTTLE_SYSTEM_PATH = '.bottlify\\system32';
 
 /**
  * The version resource of a file on the volume, or null: for a file that is
@@ -2135,6 +2108,9 @@ async function mountBundle({ options, cpu, filesystem, events, translationStore 
         // root are the same place, so every answer to "where do I live" happens
         // to work and a wrong one is invisible until it is not.
         prefix: options.bundle.prefix ?? BUNDLE_DIRECTORY,
+        // What the installation left in system32 is found there again, read
+        // from the bundle a block at a time like any of its files.
+        relocate: { [BOTTLE_SYSTEM_PATH]: SYSTEM_DIRECTORY },
     });
 
     filesystem.mount('C', { source });
@@ -2995,12 +2971,6 @@ async function buildApp(options){
     const ownsTranslationStore = storeSpec === 'local';
 
     const core = await assembleModules({
-        filesystem: {
-            // The host's own files live in the volume before the bundle is
-            // mounted, so every drive gets them, and the bundle's own copy of
-            // one, when it has one, still wins.
-            system: systemVolume(options.system),
-        },
         kernel: {
             // How many guest instructions a thread runs before the next one
             // gets a turn. Lowering it is how a sampled profile gets enough
@@ -3422,7 +3392,7 @@ async function buildApp(options){
             compatibility: compatibilityOf(options.executable),
             // The speed the registry reports: the rate the engine's rdtsc
             // advances at. The emulator's counter keeps the default.
-            processorMhz: options.engine === 'cork' ? CORK_TSC_MHZ : undefined,
+            processorMhz: (options.engine ?? DEFAULT_ENGINE) === 'cork' ? CORK_TSC_MHZ : undefined,
             // The one namespace a named mutex, event, semaphore, timer and
             // file mapping all share, carried in from outside this build so a
             // name a parent registered is one a child still finds: the table
@@ -3845,38 +3815,9 @@ async function buildApp(options){
     const audio = core.api('audio');
     const input = core.api('input');
 
-    const chosen = options.engine ?? DEFAULT_ENGINE;
-    if (chosen === 'cork')
-    {
-        // Cork runs with nothing of the emulator loaded: its own host, its own
-        // memory, and the translator named by `engineUrl`.
-        await cpu.boot();
-    }
-    else
-    {
-        const emulator = emulatorArtifacts(options.v86);
-        /** @type {ArrayBuffer} */
-        let wasmBytes;
-        if (emulator.wasmBytes)
-        {
-            wasmBytes = emulator.wasmBytes;
-        }
-        else
-        {
-            try
-            {
-                wasmBytes = await bytesAt(/** @type {string} */ (emulator.wasmUrl));
-            }
-            catch (e){
-                // A build without the emulator's artifacts: the layer is
-                // optional, and a launch that names it is told so rather than
-                // handed a fetch's error.
-                throw new Error('cpu: the emulator is not available in this build'
-                    + ` (engine "${chosen}" needs it)`, { cause: e });
-            }
-        }
-        await cpu.boot({ moduleUrl: emulator.moduleUrl, wasmBytes });
-    }
+    // Cork runs with nothing of the emulator loaded: its own host, its own
+    // memory, and the translator named by `engineUrl`.
+    await cpu.boot(emulatorOf(options) ?? undefined);
 
     // A processor exception goes to the handlers the program registered
     // before it stops the machine. The thread waits the way a host call does
@@ -4390,6 +4331,17 @@ async function buildApp(options){
 
     /** The libraries this build synthesises, as opposed to ones a program brings. */
     const systemLibraries = new Set(Object.keys(allLibraries).map(moduleKeyOf));
+
+    /**
+     * Those of them that are Windows' own, by file name: a copy an installation
+     * left in system32 would be mapped in place of the engine's, so a bottle
+     * carries none (`@bottlify/installer`'s `collect`). The redistributables a
+     * table only stands in for -- the D3DX helpers -- are not among them.
+     */
+    const redistributables = new Set(
+        (/** @type {() => string[]} */ (win32.redistributables)?.() ?? []).map(moduleKeyOf));
+    const windowsLibraries = Object.keys(allLibraries)
+        .filter(name=>!redistributables.has(moduleKeyOf(name)));
 
     // Where a call to an import nothing claims lands. The branch that returns
     // and the branch that faults are made in `createMissingImports`; what it
@@ -6301,6 +6253,14 @@ async function buildApp(options){
         registry: ()=>win32.registry(),
 
         /**
+         * The libraries this build synthesises as Windows' own, by file name
+         * (`windowsLibraries`): what a bottle does not carry out of system32.
+         *
+         * @returns {string[]}
+         */
+        systemLibraries: ()=>[...windowsLibraries],
+
+        /**
          * The session: everything the program has written, and the way to put
          * files in from outside.
          */
@@ -6493,6 +6453,7 @@ export async function createApp(options){
     // fails later somewhere that says nothing about why.
     windowsVersion(options.windows);
     graphicsChoice(options.graphicsApi);
+    emulatorOf(options);
     // Both outlive every process: subscriptions a caller made before the first
     // child existed still have to fire for the last one, and the record of what
     // asked for a replacement is worthless if it dies with the asker.

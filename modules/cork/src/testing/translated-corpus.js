@@ -17,7 +17,7 @@
  * Run in parts, `emit/corpus-N.itest.js`, each every `of`-th case from its
  * own offset, so a part stays inside the minute the runner gives a file.
  *
- * Needs the corpus (`npm run fetch:corpus`); no emulator.
+ * Needs the corpus (`npm run fetch:corpus`).
  */
 
 import { test } from 'node:test';
@@ -35,7 +35,7 @@ const VECTOR_NAMES = new Map([[0, 'DE'], [6, 'UD'], [13, 'GP']]);
  * and these compute something only an 80-bit register holds (a product or a
  * scaling past the double's range, stored as a tword). Counted under `x87.precision`,
  * not failed; the list is the acceptance, and a case leaving or joining it is
- * a change to be looked at (`roadmap/cork-plan.md` 3.1).
+ * a change to be looked at.
  */
 const X87_PRECISION = new Set(['x87-int-binop', 'fscale-wide']);
 

@@ -10,10 +10,8 @@
  * from one of the versions d3dx9_24 to d3dx9_43, called under a
  * double-precision control word and under the single-precision one Direct3D
  * leaves, the outputs and the result dumped to the console and held to the
- * x87's model of the source (`scripts/guest-code/model.mjs`), to the bit
- * under cork and under the emulator alike -- the emulator's transcendentals
- * are its own library's, and for these inputs its floats are the same. None
- * of the calls reaches the host.
+ * x87's model of the source (`scripts/guest-code/model.mjs`), to the bit.
+ * None of the calls reaches the host.
  */
 
 import { test } from 'node:test';
@@ -23,8 +21,6 @@ import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 import { guestEntry } from './layers/win32/msvcrt/guest-code.js';
 import { loadModel } from '../scripts/guest-code/model.mjs';
-
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 
 /** Each module of d3dx9's guest code: its model and what the build made of it. */
 const MODULES = await Promise.all(['inguest', 'inguest-matrix', 'inguest-vector',
@@ -207,18 +203,10 @@ function buildD3dxExe(){
 /**
  * Runs the program; answers each case's output bytes and result, and the
  * host's calls by name.
- *
- * @param {'cork' | 'emulator'} engine
  */
-async function run(engine){
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
+async function run(){
     const app = await createApp({
         executable: buildD3dxExe(),
-        engine,
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
     });
     /** @type {string[]} */
     const output = [];
@@ -291,37 +279,34 @@ function expected(c, i){
     };
 }
 
-for (const engine of /** @type {const} */ (['cork', 'emulator']))
-{
-    test(`d3dx9's mathematics through the import, under ${engine}`, { timeout: 120000 },
-        async()=>{
-            const { outs, results, crossed } = await run(engine);
-            /** @type {string[]} */
-            const wrong = [];
-            CASES.forEach((c, i)=>{
-                const what = `${c.dll}!${c.name} under 0x${c.control.toString(16)}`;
-                const want = expected(c, i);
-                const got = new DataView(outs[i].buffer);
-                const wanted = new DataView(want.out.buffer);
-                for (let at = 0; at < OUT_SIZE; at += 4)
-                {
-                    if (got.getUint32(at, true) !== wanted.getUint32(at, true))
-                    {
-                        wrong.push(`${what}: +${at} is ${got.getFloat32(at, true)} where the model `
-                            + `answers ${wanted.getFloat32(at, true)}`);
-                    }
-                }
-                if (c.result !== 'void' && results[i] !== want.result)
-                {
-                    wrong.push(`${what}: answers 0x${results[i].toString(16)} where the model `
-                        + `answers 0x${want.result.toString(16)}`);
-                }
-            });
-            assert.deepEqual(wrong, []);
-            for (const [dll, name] of CALLS)
+test(`d3dx9's mathematics through the import`, { timeout: 120000 },
+    async()=>{
+        const { outs, results, crossed } = await run();
+        /** @type {string[]} */
+        const wrong = [];
+        CASES.forEach((c, i)=>{
+            const what = `${c.dll}!${c.name} under 0x${c.control.toString(16)}`;
+            const want = expected(c, i);
+            const got = new DataView(outs[i].buffer);
+            const wanted = new DataView(want.out.buffer);
+            for (let at = 0; at < OUT_SIZE; at += 4)
             {
-                assert.equal(crossed.get(`${dll}!${name}`) ?? 0, 0,
-                    `${dll}!${name}: no call crossed into the host`);
+                if (got.getUint32(at, true) !== wanted.getUint32(at, true))
+                {
+                    wrong.push(`${what}: +${at} is ${got.getFloat32(at, true)} where the model `
+                        + `answers ${wanted.getFloat32(at, true)}`);
+                }
+            }
+            if (c.result !== 'void' && results[i] !== want.result)
+            {
+                wrong.push(`${what}: answers 0x${results[i].toString(16)} where the model `
+                    + `answers 0x${want.result.toString(16)}`);
             }
         });
-}
+        assert.deepEqual(wrong, []);
+        for (const [dll, name] of CALLS)
+        {
+            assert.equal(crossed.get(`${dll}!${name}`) ?? 0, 0,
+                `${dll}!${name}: no call crossed into the host`);
+        }
+    });

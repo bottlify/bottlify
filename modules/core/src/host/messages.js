@@ -34,7 +34,7 @@
  *     'executable' | 'v86' | 'device' | 'bundle' | 'storage' | 'watchImport'
  *     | 'sample' | 'onCall' | 'pageHidden' | 'pacing' | 'discs'> & {
  *     executable: Uint8Array,
- *     v86: { moduleUrl: string, wasmBytes: ArrayBuffer },
+ *     v86?: { moduleUrl: string, wasmBytes: ArrayBuffer },
  *     bundle?: { url: string, store?: string | null, id?: string, prefix?: string,
  *         prefetch?: boolean, indexSha256?: string,
  *         retry?: { attempts?: number, baseDelayMs?: number, maxDelayMs?: number } },

@@ -114,8 +114,24 @@ export function connectGraphicsWorker(options){
         // frame, so one texture serves every frame.
         if (bitmap)
         {
-            device.queue.copyExternalImageToTexture({ source: bitmap },
-                { texture: surface.texture }, [width, height]);
+            try
+            {
+                device.queue.copyExternalImageToTexture({ source: bitmap },
+                    { texture: surface.texture }, [width, height]);
+            }
+            catch (e){
+                // Safari refuses a picture taken from the worker's WebGPU
+                // canvas as an external image (InvalidStateError). The worker
+                // sends the frames as bytes from the next on; this one is not
+                // shown.
+                bitmap.close?.();
+                if (/** @type {any} */ (e)?.name !== 'InvalidStateError')
+                {
+                    throw e;
+                }
+                worker.postMessage({ type: 'frames', frames: 'pixels' });
+                return;
+            }
             bitmap.close?.();
         }
         else

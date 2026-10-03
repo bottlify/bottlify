@@ -1208,6 +1208,13 @@ test('the caps say what this build can do, and refuse a structure of an unknown 
     h.box.memory.writeU32(caps + DDCAPS.dwSize, DDCAPS.SIZE);
     assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'GetCaps'), [caps, 0]), DD_OK);
     assert.equal(h.box.memory.readU32(caps + DDCAPS.dwCaps) & DDCAPS_BLT, DDCAPS_BLT);
+    // DirectDraw carries Direct3D 7: the 3D a DirectX 7 program looks for here
+    // before it asks Direct3D anything, the depth fill its Blt does, and the
+    // depths the z-buffer formats Direct3D enumerates have (16 and 32).
+    const threeD = 0x00000001 | 0x10000000; // DDCAPS_3D | DDCAPS_BLTDEPTHFILL
+    assert.equal(h.box.memory.readU32(caps + DDCAPS.dwCaps) & threeD, threeD);
+    assert.equal(h.box.memory.readU32(caps + DDCAPS.dwZBufferBitDepths), 0x400 | 0x100,
+        'DDBD_16 | DDBD_32');
     assert.ok(h.box.memory.readU32(caps + DDCAPS.dwVidMemTotal) > 0);
     // Wine's ddraw tests look here for DDSCAPS_TEXTURE | DDSCAPS_MIPMAP before
     // building a mip chain; both copies of the surface caps carry it.

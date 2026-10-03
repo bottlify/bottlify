@@ -150,7 +150,7 @@ flowchart TB
 | Page main thread | the browser | always | The launcher's interface, the `createApp` call and DOM events live here. Per frame it does one thing only: polls the gamepads (`requestAnimationFrame` → `input.poll`) |
 | Engine thread | the page, `core/src/host/create.js` | always. With `?host=thread` the engine runs on the page's thread instead, over the same protocol | The program runs in long quanta. On the page's thread it would be interrupted by garbage collection and the interface's rendering, and a click would wait for the quantum to end. Synchronous OPFS access also exists only in a worker. A WebGPU device cannot move between threads, so the worker opens its own and gets the canvas as an `OffscreenCanvas` |
 | Log keeper | the page, `core/src/host/remote.js` | always. Without `Worker`, a `MessageChannel` on the page takes its place | The engine writes its journal, counters and tables into shared memory and answers no questions. The keeper drains the ring before it laps, keeps the history and works out frames, the profile and the per-module breakdown. Logging then costs neither the page nor the engine anything |
-| Graphics thread | the engine thread, `core/src/host/graphics-worker.js` (called from `serve.js`) | at start, if the engine has a canvas and `device.graphicsWorker: false` is not set (`?graphicsWorker=off` in the launcher). Survives a change of program. If it opens no device within 10 s, everything draws on the engine thread | Its job is to draw all the graphics, so the engine thread only keeps state and answers the program. Today Direct3D 7, 8, 9 and OpenGL are played here on a WebGPU device of its own; Direct3D 10 and Vulkan will move here too. In the `tools/graphics-bench --remote` bench the engine thread spends 0.69 ms a Direct3D frame instead of 2.95 |
+| Graphics thread | the engine thread, `core/src/host/graphics-worker.js` (called from `serve.js`) | at start, if the engine has a canvas and `device.graphicsWorker: false` is not set (`?graphicsWorker=off` in the launcher). Survives a change of program. If it opens no device within 10 s, everything draws on the engine thread | Its job is to draw all the graphics, so the engine thread only keeps state and answers the program. Today Direct3D 7, 8, 9 and OpenGL are played here on a WebGPU device of its own; Direct3D 10 and Vulkan will move here too. It arrived in cork 1.3. In the `tools/graphics-bench --remote` bench the engine thread spends 0.69 ms a Direct3D frame instead of 2.95 |
 | Translation thread | cork's runtime inside the engine thread, `cork/src/runtime/translator.js` | when the engine is cork. Until it answers `ready`, regions are translated on the engine thread | Emits wasm for regions, builds a module and compiles it. The engine thread does not wait for it: it posts a batch and publishes the result between frames, whenever it arrives |
 | AudioWorklet | the page, `ui/src/engine/session.js` | if the page is cross-origin isolated (`crossOriginIsolated`) and sound is on | The Web Audio real-time thread. It reads the voices from shared memory on its own clock, so sound does not break up even while the engine is busy |
 
@@ -197,7 +197,6 @@ sequenceDiagram
   participant A as AudioWorklet
   Note over S,P: the launcher, ui/src/engine/session.js
   P->>S: /engine/core.js, /bundles/id/entry, the video decoder's wasm
-  P->>P: the DirectX system volume from Cache Storage
   P->>P: AudioContext, addModule(worklet.js)
   Note over P,E: createApp, core/src/host/
   P->>E: new Worker(engine.worker.js)
@@ -363,8 +362,8 @@ flowchart LR
 
 Where to look in the code: `cork/src/decode/`, `cork/src/region.js`, `cork/src/emit/`,
 `cork/src/wasm/`, `cork/src/runtime/`, `cork/src/interp.js`, `cork/src/interp-wasm.c`; the engine
-glue is `core/src/layers/cpu/internal/cork-host.js`. The full design is in
-`roadmap/cork-x86-translator.md`.
+glue is `core/src/layers/cpu/internal/cork-host.js`. Where cork goes next is
+`roadmap/v2/`.
 
 ## 6. Win32 in JavaScript: how a DLL comes about
 
@@ -482,9 +481,9 @@ flowchart TD
 - **A real DLL** is parsed and relocated by the loader, its dependencies are loaded first, its
   imports (delayed ones included) are bound, and its `DllMain` is called through the bridge as
   program code. TLS is supported for the main image and for statically loaded libraries.
-- **The system volume** is the DirectX runtime (`d3dx9_*` and other Microsoft redistributables). The
-  launcher mounts it read-only at `C:\WINDOWS\system32\`. Without it, the engine's table answers for
-  `d3dx9_*`.
+- **DirectX's redistributables** (`d3dx9_*` and the rest) are not part of the engine: a game brings
+  them, through its installer's DirectX setup, which puts them in `C:\WINDOWS\system32\`, or as DLLs
+  beside its `.exe`. Without them, the engine's table answers for `d3dx9_*`.
 
 Where to look in the code: `core/src/layers/loader/internal/synth.js` (the image),
 `core/src/layers/cpu/internal/thunks.js` (the stubs), `core/src/layers/bridge/` (the bridge), the
@@ -495,8 +494,9 @@ tables in `core/src/layers/win32/<dll>/`, the search order in `core/src/app.js`
 
 The graphics thread is there to draw all of the program's graphics. The engine thread keeps only
 the devices' state and answers the program, while their twins draw on the graphics thread, on a
-WebGPU device of its own. Direct3D 7, 8, 9 and OpenGL work this way today. Direct3D 10 and Vulkan
-still draw on the engine thread and will move to the graphics thread next.
+WebGPU device of its own. The graphics thread arrived in cork 1.3, for Direct3D 8 and 9 at first;
+OpenGL and Direct3D 7 moved there in cork 1.6. Direct3D 10 and Vulkan still draw on the engine
+thread and will move to the graphics thread next.
 
 | Where | What it does |
 | --- | --- |
@@ -691,7 +691,6 @@ address: from another machine, without a secure context, there is neither OPFS n
 | Block cache | OPFS: `<id>.blocks`, `<id>.present`, `<id>.order` | bundle blocks already fetched from the server | Block N sits at offset N × the block size (taken from the bundle's header, 256 KiB by default). `.present` is a bitmap of the fetched blocks, `.order` the order they were first asked for in (up to 4096). Access goes through synchronous handles: at most 16 are open, and the one unused the longest closes first |
 | cork translations | OPFS: `cork/<id>.v3/` | translated regions | `records` holds the records one after another, `index` a log of where each one is. The index is read once, a miss touches no disk, a hit is one read at an offset. New records are appended in batches; the file is compacted, with a 1 GiB cap |
 | Session | OPFS: `<id>.session` | the files the program wrote, and its registry | All in one deflate-raw stream. Applied before the first instruction, saved 250 ms after the program stops writing. The bundle itself never changes |
-| System volume | Cache Storage: `bottlify-system-volume` | the DirectX runtime: `d3dx9_*` and other redistributables | The page downloads it once and mounts it read-only at `C:\WINDOWS\system32\` |
 | Settings | localStorage | the launcher's settings, time to first frame | — |
 
 How the program reads a file:
@@ -722,4 +721,4 @@ flowchart TD
 Where to look in the code: `core/src/layers/filesystem/internal/bundle/cache.js` (blocks),
 `core/src/layers/filesystem/internal/opfs-store.js` (handles),
 `core/src/layers/cpu/internal/translation-store.js` (translations), `core/src/storage.js`
-(sessions), `ui/src/engine/session.js` (the system volume).
+(sessions).

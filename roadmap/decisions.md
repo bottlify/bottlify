@@ -255,7 +255,7 @@ built to boot an operating system (paging on every access, x87 as a stack in mem
 block per unit, an interpreter for the rest); per-title kernels that hand-replace hot loops buy
 one program a frame, not the engine a property. Graphics are on the GPU, so the processor side
 is the ceiling for every title; the target is 0.5–1 ns per instruction as an engine property.
-Design, scope and milestones: `roadmap/cork-x86-translator.md`. *2026-09-20.*
+Design, scope and milestones were `roadmap/cork-x86-translator.md`, now in git history. *2026-09-20.*
 
 **Translated code tests a page-flag table before every access instead of relying on the
 wasm bounds check alone.** The design's §5.1 named the browser's bounds check as the only
@@ -451,6 +451,8 @@ beside the parent's, which stays paused where it blocked, and the parent's wait 
 the child's exit code once it exits, the files and registry the child wrote copied back. Only one
 of the two machines runs at a time, so this is still not two processes executing at once -- the
 Battlefield 2 installer's shape (run a stage, wait, go on) is what it covers. *2026-09-24.*
+`roadmap/v2/` plans processes side by side, each in a worker with its own memory (stage 2); until
+that lands, this decision stands.
 
 **Only Windows system libraries are reimplemented; a redistributable middleware runtime is ours to
 reimplement too (§B above); anything else a game ships in its own directory is loaded and run as

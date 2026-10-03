@@ -46,8 +46,10 @@ export const GUEST_PAGE = 4096;
  * @property {(address: number, length: number, flag: number) => void} markRange
  *     every page any byte of the range touches (the granularity is the page)
  * @property {(address: number, length: number, flag: number) => void} clearRange
- * @property {() => number} staleAddress  the address of the last store into a code page
- * @property {() => number} staleSize     and its width
+ * @property {() => number} staleAddress  the lowest byte the stores into code pages since
+ *     `clearStale` wrote
+ * @property {() => number} staleSize     the bytes from it to the highest, 0 when none
+ * @property {() => void} clearStale
  */
 
 /**
@@ -160,10 +162,15 @@ export function createPageTable(memory, layout){
             }
         },
         staleAddress(){
-            return tableWords().getUint32(layout.tables + Tables.STALE_ADDRESS, true);
+            return ~tableWords().getUint32(layout.tables + Tables.STALE_LOW, true) >>> 0;
         },
         staleSize(){
-            return tableWords().getUint32(layout.tables + Tables.STALE_SIZE, true);
+            const end = tableWords().getUint32(layout.tables + Tables.STALE_END, true);
+            return end === 0 ? 0 : (end - this.staleAddress()) >>> 0;
+        },
+        clearStale(){
+            tableWords().setUint32(layout.tables + Tables.STALE_LOW, 0, true);
+            tableWords().setUint32(layout.tables + Tables.STALE_END, 0, true);
         },
     };
 }

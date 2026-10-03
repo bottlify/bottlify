@@ -1876,8 +1876,22 @@ export function createDirect3D8Seam(
 
         /** @param {any} device @param {number[]} args */
         ApplyStateBlock: (device, [handle])=>{
+            /** @type {import('../d3d8/stateblock.js').StateBlock | undefined} */
+            const block = device.stateBlocks?.get(handle >>> 0);
             const hr = device.ApplyStateBlock(handle >>> 0);
-            shadowOf(device)?.remirror();
+            // What the block holds is all it changed: the guest's copy is
+            // brought to those states and no others, rather than read back
+            // whole -- every render state, matrix and stage state -- on
+            // every apply.
+            shadowOf(device)?.remirror(block && {
+                renderStates: block.renderStates.keys(),
+                transforms: block.transforms.keys(),
+                textures: block.textures.size > 0,
+                stageStates: block.stageStates.keys(),
+                material: block.material !== undefined,
+                bindings: block.streams.size > 0 || block.indices !== undefined
+                    || block.vertexShader !== undefined || block.pixelShader !== undefined,
+            });
             return hr;
         },
 

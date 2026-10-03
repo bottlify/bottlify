@@ -16,13 +16,14 @@ import { findBoundaryIssues } from './lib/boundaries.mjs';
  * Rules that fail the build:
  *  - anything in src/system must not import src/layers;
  *  - a layer may import another layer only if it declared it in `requires`;
- *  - vendor/v86 is importable only from src/layers/cpu;
+ *  - nothing imports vendor/: it holds binaries, which the root of src
+ *    reaches by URL;
  *  - no file may import an engine package (`lib/boundaries.mjs`): the cpu layer
- *    loads one by URL when a launch selects it, and the core runs without it;
+ *    loads one by URL when a launch selects it;
  *  - layers must not import core.js (the facade is a consumer, not a dependency);
- *  - no file may import from outside src/ (except vendor through the cpu layer),
- *    whether by a relative path, a package name or a module-relative URL; the
- *    platform's own `node:` modules are not outside it;
+ *  - no file may import from outside src/, whether by a relative path, a
+ *    package name or a module-relative URL, and only the root of src may name
+ *    a URL outside it; the platform's own `node:` modules are not outside it;
  *  - only the cpu layer and the files at the root of src/ may import a module
  *    by a computed argument -- the one form nothing here can check;
  *  - the import graph over src/ must be acyclic.

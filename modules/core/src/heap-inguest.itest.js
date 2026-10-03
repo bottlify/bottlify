@@ -7,22 +7,19 @@
 /**
  * The heap's small blocks, allocated and freed by the guest itself
  * (`kernel32/guest-heap.js`), called through the imports as a program calls
- * them, on cork and on the emulator: HeapAlloc, HeapFree, HeapSize and
- * HeapReAlloc, malloc and its family, and what the host answers about the
- * same blocks -- HeapValidate, HeapSummary, HeapDestroy -- and three threads
- * preempted inside the routines, allocating, filling, checking and freeing.
+ * them: HeapAlloc, HeapFree, HeapSize and HeapReAlloc, malloc and its
+ * family, and what the host answers about the same blocks -- HeapValidate,
+ * HeapSummary, HeapDestroy -- and three threads preempted inside the
+ * routines, allocating, filling, checking and freeing.
  *
  * Each program exits 0, or with the number of the first check that failed.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 import { assemble } from './layers/win32/msvcrt/guest-code.js';
-
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
@@ -278,19 +275,12 @@ function buildRaceExe(){
  * Runs a program to its exit, and reads before the machine goes what crossed
  * into the host.
  *
- * @param {Uint8Array} executable @param {'emulator' | 'cork'} engine
- * @param {number} [quantum]
+ * @param {Uint8Array} executable @param {number} [quantum]
  */
-async function run(executable, engine, quantum){
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
+async function run(executable, quantum){
     const app = await createApp({
         executable,
-        engine,
         quantum,
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
     });
     try
     {
@@ -308,23 +298,20 @@ async function run(executable, engine, quantum){
     }
 }
 
-for (const engine of /** @type {const} */ (['cork', 'emulator']))
-{
-    test(`the heap calls answer in the guest as the host answers them, under ${engine}`,
-        { timeout: 60000 }, async()=>{
-            const { code, crossed } = await run(buildCallsExe(), engine);
-            assert.equal(code, 0, 'the number of the first check that failed');
-            const handed = (crossed['<heap-alloc>'] ?? 0) + (crossed['<heap-free>'] ?? 0);
-            assert.ok(handed < 50, `${handed} of ${2 * SMALL_CALLS} and more HeapAlloc and`
-                + ` HeapFree calls crossed: ${JSON.stringify(crossed)}`);
-        });
+test(`the heap calls answer in the guest as the host answers them`,
+    { timeout: 60000 }, async()=>{
+        const { code, crossed } = await run(buildCallsExe());
+        assert.equal(code, 0, 'the number of the first check that failed');
+        const handed = (crossed['<heap-alloc>'] ?? 0) + (crossed['<heap-free>'] ?? 0);
+        assert.ok(handed < 50, `${handed} of ${2 * SMALL_CALLS} and more HeapAlloc and`
+            + ` HeapFree calls crossed: ${JSON.stringify(crossed)}`);
+    });
 
-    test(`three preempted threads allocate, fill, check and free, under ${engine}`,
-        { timeout: 60000 }, async()=>{
-            const { code, crossed } = await run(buildRaceExe(), engine, 97);
-            assert.equal(code, 0, 'a block two threads shared, a size wrong, or a free refused');
-            console.log(`heap race under ${engine}: host crossings ${JSON.stringify(
-                Object.fromEntries(Object.entries(crossed).filter(([name])=>name.startsWith('<')
-                    && /heap|malloc|free|size/.test(name))))}`);
-        });
-}
+test(`three preempted threads allocate, fill, check and free`,
+    { timeout: 60000 }, async()=>{
+        const { code, crossed } = await run(buildRaceExe(), 97);
+        assert.equal(code, 0, 'a block two threads shared, a size wrong, or a free refused');
+        console.log(`heap race: host crossings ${JSON.stringify(
+            Object.fromEntries(Object.entries(crossed).filter(([name])=>name.startsWith('<')
+                && /heap|malloc|free|size/.test(name))))}`);
+    });

@@ -86,6 +86,10 @@ test('the table reads and writes the same bytes after the memory grows', ()=>{
     const raw = new Uint8Array(memory.buffer, layout.tables + Tables.PAGE_FLAGS,
         Tables.PAGE_FLAGS_SIZE);
     assert.equal(raw[0x42], PageFlag.VOLATILE, 'the write reached the grown memory');
-    new DataView(memory.buffer).setUint32(layout.tables + Tables.STALE_ADDRESS, 0x41008, true);
+    new DataView(memory.buffer).setUint32(layout.tables + Tables.STALE_LOW, ~0x41008, true);
+    new DataView(memory.buffer).setUint32(layout.tables + Tables.STALE_END, 0x4100c, true);
     assert.equal(pages.staleAddress(), 0x41008);
+    assert.equal(pages.staleSize(), 4);
+    pages.clearStale();
+    assert.equal(pages.staleSize(), 0, 'nothing once looked at');
 });

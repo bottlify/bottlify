@@ -31,6 +31,9 @@ differently raises a `divergence` event naming the API.
 - DXT textures are decoded on the CPU unless `graphics.compressedTextures` is on and the GPU has
   `texture-compression-bc`.
 - Shaders and pipelines are cached in memory only; every run builds them again.
+- No DirectX redistributables ship with the engine: a program brings `d3dx9_*`, XAudio2 and the rest
+  itself (its installer's DirectX setup, or the DLLs beside its exe); without them the engine's own
+  `d3dx9` table answers.
 - `maxFps` is accepted but not applied: the presenter is given no scheduler, so frames reach the
   canvas as fast as the program presents them.
 

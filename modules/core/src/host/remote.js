@@ -641,6 +641,14 @@ export async function createRemoteApp(wiring){
                 return left.registry;
             },
         }),
+        /** The libraries the engine synthesises as Windows' own, as of the exit. */
+        systemLibraries(){
+            if (!left)
+            {
+                throw new Error('the program has not exited yet');
+            }
+            return left.systemLibraries ?? [];
+        },
 
         async dispose(){
             if (feeder)

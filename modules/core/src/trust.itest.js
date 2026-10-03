@@ -14,12 +14,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 import { certificates, signedCabinet } from './layers/win32/wintrust/fixtures.test.js';
 
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 const CERT_E_CHAINING = 0x800b010a;
 
 /** @param {number} value @returns {number[]} */
@@ -63,15 +61,10 @@ function buildProgram(){
 
 /** @param {{ win32?: { trustedRoots?: (Uint8Array | string)[] } }} options */
 async function verified(options){
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
     const app = await createApp({
         executable: buildProgram(),
         imagePath: 'C:\\App\\Trust.exe',
         files: [{ path: 'C:\\App\\signed.cab', bytes: signedCabinet() }],
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
         ...options,
     });
     try

@@ -23,7 +23,7 @@ Everything below crosses to the engine's worker by `postMessage`, so every value
 | `executable` | `Uint8Array` | required | The program's PE image. Only 32-bit x86 (PE32) is accepted. |
 | `imagePath` | string | `'C:\app.exe'` | Where the program believes it was loaded from; also its start directory. |
 | `commandLine` | string | the quoted `imagePath` | What `GetCommandLine` answers. Quote argv[0] yourself if you compose it. |
-| `engine` | `'cork'` \| `'emulator'` | `'cork'` | Who runs the x86 code: the cork translator, or the v86 emulator. |
+| `engine` | `'cork'` \| `'emulator'` | `'cork'` | Who runs the x86 code: cork, which the package carries, or a v86 emulator the caller brings (`v86`); without one `'emulator'` is refused. |
 | `windows` | `'win2000'` \| `'winxp'` \| `'win7'` \| `'win10'` | `'winxp'` | The Windows the program sees: `GetVersionEx`, `RtlGetVersion`, the registry, system file versions and profile folders all agree. Windows 10 reports 6.2 to a program whose manifest does not declare it. |
 | `graphicsApi` | `'directx7'` \| `'directx8'` \| `'directx9'` \| `'directx10'` \| `'opengl'` | every API | The graphics the program gets. `directxN` keeps every DirectX up to N (DirectDraw, then Direct3D 8, 9, then Direct3D 10 with DXGI); `opengl` keeps OpenGL alone. Only those system DLLs exist and only their code is built. The registry, `DirectXSetupGetVersion`, DxDiag and the DLLs' file versions report DirectX 7.0, 8.1 or 9.0c (9.0c for 9 and 10). Absent: every API, DirectX 9.0c. |
 | `memorySize` | number | 1 GiB | Guest RAM in bytes, a power of two. Reserved, not committed. |
@@ -33,7 +33,7 @@ Everything below crosses to the engine's worker by `postMessage`, so every value
 | `preemption` | boolean | `false` | End a turn early when a thread of higher priority is due. |
 | `unattended` | boolean | `false` | Nobody is at the screen: every modal dialog and message box is answered with its default button, and each answer is reported as a `divergence` event. |
 | `cork` | `{ moduleUrl?, config? }` | the package's | Where cork is loaded from, and its settings ([configuration.md](configuration.md#cpu)). |
-| `v86` | `{ moduleUrl, wasmBytes }` | — | The emulator's module and binary; needed only with `engine: 'emulator'`. |
+| `v86` | `{ moduleUrl, wasmBytes }` | — | A v86 build of the caller's own, for `engine: 'emulator'`; the package carries none. |
 | `zstd` | `{ wasmUrl?, wasmBytes? }` | the package's | The bundle decoder's wasm build; without it a JavaScript decoder is used. |
 | `media` | `{ wasmBytes }` | — | The video decoder (FFmpeg in wasm). Without it the program is told no clip can be played. |
 
@@ -61,7 +61,6 @@ Everything below crosses to the engine's worker by `postMessage`, so every value
 | `id` | string | — | Names the session (and the bundle cache when `bundle.id` is absent). |
 | `files` | `{ path, bytes }[]` | — | Edits laid over the session at every start; they win over what the program last saved. The bundle never changes. |
 | `discs` | `{ image, letter? }[]` | — | Disc images mounted as CD-ROM drives, `D:` or the next free letter. `image` is a `Blob` (read a range at a time) or bytes. |
-| `system` | `{ files }` | — | Files mounted read-only under `C:\WINDOWS\system32\`, such as the DirectX runtime's `d3dx9_*`. |
 | `collectOnExit` | boolean | `false` | The run's exit carries the files the program wrote, for `session.export()`. |
 
 ### Network

@@ -17,7 +17,7 @@ import {
     resolveLibraryPath, startDirectoryOf, libraryCandidates, timedWait, pagePacing,
     PAGE_YIELD_MS,
     retryingFetch,
-    moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, feedFilmSound, emulatorArtifacts,
+    moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, feedFilmSound, emulatorOf,
     heapSizeFor,
     spaceAbove,
     resourceLookup,
@@ -518,7 +518,7 @@ test('a bare name is looked for beside the executable, then where the system kee
 
 test('a redistributable runtime is answered by the engine whoever brought a copy', ()=>{
     // A sound library loads its MPEG provider out of its own directory by full
-    // path; the engine stands in for that runtime (roadmap/decisions.md), so
+    // path; the engine stands in for that runtime, so
     // the program's copy is not what loads -- run as emulated x86 it was a
     // third of the machine. A KnownDLL is answered the same way; any other
     // library the engine has a table for still loses to the program's file.
@@ -531,13 +531,13 @@ test('a redistributable runtime is answered by the engine whoever brought a copy
     assert.equal(ours('mss32.dll'), false, 'the sound library itself runs as shipped');
 });
 
-test('a library missing beside the program is read from the system volume', async()=>{
+test('a library missing beside the program is read from system32', async()=>{
     // The runtime a title links against lives in `system32`, where its
     // installer's `DXSETUP` put it. A search that stopped beside the
     // executable would report every one of them missing.
     const d3dx = new Uint8Array([1, 2, 3, 4]);
     const filesystem = await filesystemModule.create({
-        system: createMemoryStore({ 'WINDOWS\\system32\\d3dx9_26.dll': d3dx }),
+        drives: { C: { source: createMemoryStore({ 'WINDOWS\\system32\\d3dx9_26.dll': d3dx }) } },
     });
     const read = shippedLibraryReader(filesystem, null, IMAGE);
 
@@ -546,12 +546,13 @@ test('a library missing beside the program is read from the system volume', asyn
     assert.equal(await read('nothing.dll'), null);
 });
 
-test('a file beside the program still wins over the system volume', async()=>{
+test('a file beside the program still wins over system32', async()=>{
     const beside = new Uint8Array([9]);
     const system = new Uint8Array([7]);
     const filesystem = await filesystemModule.create({
-        system: createMemoryStore({ 'WINDOWS\\system32\\d3dx9_26.dll': system }),
-        drives: { C: { source: createMemoryStore({ 'App\\d3dx9_26.dll': beside }) } },
+        drives: { C: { source: createMemoryStore({
+            'WINDOWS\\system32\\d3dx9_26.dll': system, 'App\\d3dx9_26.dll': beside,
+        }) } },
     });
     const read = shippedLibraryReader(filesystem, null, IMAGE);
     assert.deepEqual([.../** @type {Uint8Array} */ (await read('d3dx9_26.dll'))], [9]);
@@ -567,7 +568,7 @@ test('an import the engine has a table for is planned from the system file', asy
         code: ()=>[0xc3],
     }));
     const filesystem = await filesystemModule.create({
-        system: createMemoryStore({ 'WINDOWS\\system32\\d3dx9_26.dll': d3dx }),
+        drives: { C: { source: createMemoryStore({ 'WINDOWS\\system32\\d3dx9_26.dll': d3dx }) } },
     });
 
     const { order, missing } = await planDependencies({
@@ -1165,24 +1166,19 @@ test('the guest clock is credited with all the wall time between credits, capped
     assert.deepEqual(advanced, [3, 4, 0, 250, 2000]);
 });
 
-test('the emulator is found beside the module unless the caller names it', ()=>{
-    // A caller starting a bundle from code should not have to know where the
-    // package keeps its emulator; naming a part overrides that part only.
-    const here = 'https://example.test/lib/dist/core.js';
-    const own = emulatorArtifacts(undefined, here);
-    assert.match(own.moduleUrl, /libv86\.mjs$/);
-    assert.match(String(own.wasmUrl), /v86\.wasm$/);
-    assert.equal(own.wasmBytes, null);
-    assert.equal(new URL(own.moduleUrl).origin, 'https://example.test', 'relative to the module');
-
-    const theirs = emulatorArtifacts({ moduleUrl: 'https://cdn.test/v86.mjs' }, here);
-    assert.equal(theirs.moduleUrl, 'https://cdn.test/v86.mjs');
-    assert.match(String(theirs.wasmUrl), /v86\.wasm$/, 'the rest is still the package\'s own');
-
+test('the emulator is the caller\'s: named without one, it is refused as not installed', ()=>{
+    // The package carries no emulator, so `engine: 'emulator'` needs both
+    // halves handed in, and cork -- the default -- needs neither.
     const bytes = new ArrayBuffer(4);
-    const given = emulatorArtifacts({ wasmBytes: bytes }, here);
-    assert.equal(given.wasmBytes, bytes);
-    assert.equal(given.wasmUrl, null, 'bytes in hand are not fetched again');
+    assert.equal(emulatorOf({}), null, 'the default engine is cork');
+    assert.equal(emulatorOf({ engine: 'cork', v86: { moduleUrl: 'x', wasmBytes: bytes } }), null,
+        'cork ignores an emulator it was handed');
+    assert.deepEqual(emulatorOf({ engine: 'emulator', v86: { moduleUrl: 'x', wasmBytes: bytes } }),
+        { moduleUrl: 'x', wasmBytes: bytes });
+    for (const v86 of [undefined, { moduleUrl: 'x' }, { wasmBytes: bytes }])
+    {
+        assert.throws(()=>emulatorOf({ engine: 'emulator', v86 }), /emulator is not installed/);
+    }
 });
 
 test('the space above the program moves up past an image too large for the fixed layout', ()=>{

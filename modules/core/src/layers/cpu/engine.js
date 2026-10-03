@@ -7,15 +7,14 @@
 /**
  * The executor contract: what an execution engine gives the cpu layer.
  *
- * The layer runs a program on one of two engines -- the vendored emulator,
- * adapted by `internal/v86-host.js`, or a translator package such as
- * `@bottlify/cork`, loaded at `boot()` by the module URL in the layer's
- * configuration, the way the emulator is. This file is the whole of what the
- * two sides agree on: an engine package implements these names, the layer's
- * hosts (`internal/hybrid-host.js`, `internal/cork-host.js`) compose a runtime
- * with the layer's own contexts, traps and faults. Typedefs only; nothing here
- * runs, and the layer never imports an engine package -- a launch that selects
- * the emulator runs with every engine package absent.
+ * The layer runs a program on one of two engines -- a translator package such
+ * as `@bottlify/cork`, loaded at `boot()` by the module URL in the layer's
+ * configuration, or the v86 emulator a caller brings, adapted by
+ * `internal/v86-host.js`. This file is the whole of what the layer and a
+ * translator package agree on: the package implements these names, and the
+ * layer's host (`internal/cork-host.js`) composes a runtime with the layer's
+ * own contexts, traps and faults. Typedefs only; nothing here runs, and the
+ * layer never imports an engine package.
  *
  * Every field is sized for 32-bit code today and named so that a 64-bit engine
  * implements the same contract with `bits: 64` rather than a second one.
@@ -61,6 +60,8 @@
  *     its target, the last calls (`callTargets`); absent, no profile.
  * @property {number} [origin]     Cork's own: i32, the budget the current run started with,
  *     which the retired count is taken from when it leaves for the host.
+ * @property {number} [nanFirst]   Cork's own, outside the state block: under `precise`, a NaN
+ *     hunt's record (`NanRecord` in cork's emit/x87.js).
  * @property {number} tables       Wasm address of the engine's own tables.
  * @property {number} codePages    Wasm address of the other executor's byte-per-page
  *                                 "has compiled code" table (hybrid), or -1: a store into
@@ -113,8 +114,8 @@
  * @property {number} [maxRegionBytes]   Default 8192.
  * @property {boolean} [precise]         Nothing relaxed for speed: the x87 exception flags,
  *     signalling NaNs, underflow and C1 kept as the processor keeps them, and the flags an
- *     instruction leaves undefined left as the emulator leaves them rather than as the cheapest
- *     code does. Default false, as games run; the
+ *     instruction leaves undefined left as the instruction model leaves them rather than as the
+ *     cheapest code does. Default false, as games run; the
  *     corpora run with it.
  * @property {boolean} [blockProfile]    A diagnostic: every block counts its executions.
  * @property {number} [blockProfileFrom]  With `blockProfile`: seconds after start at which the
@@ -289,6 +290,19 @@
  * @property {number} [x87RelaxedReads]  Translated x87 status-word reads (`fnstsw` into memory or
  *     into AX not read as C0 C2 C3 alone, `fnstenv`, `fnsave`) that may see the exception flags
  *     or C1, which only a `precise` run keeps: a strange result there is worth one.
+ * @property {{ eip: string, count: number, order: number, a: number, c: number }} [nanFirst]
+ *     Under `precise`: the first x87 NaN translated code made from numbers, its operands, how
+ *     many were made; `order` is its place among the first events of a NaN hunt, from 1.
+ * @property {{ eip: string, count: number, order: number, region: string, entryTop: number,
+ *     empty: string, top: number }} [stackFaultFirst]  Under `precise`: the first x87 stack fault
+ *     (an empty register read, a held one pushed onto), the region and the top it was entered at,
+ *     the empty mask and the top it found, and how many.
+ * @property {{ eip: string, count: number, order: number }} [nanResultFirst]  Under `precise`:
+ *     the first x87 arithmetic with a NaN result, made or carried from an operand, and how many.
+ * @property {{ eip: string, count: number, order: number, from: string }} [nanLoadFirst]  Under
+ *     `precise`: the first x87 float load that read a NaN, the guest address it read, how many.
+ * @property {{ eip: string, count: number, order: number, to: string }} [nanStoreFirst]  Under
+ *     `precise`: the first x87 float store of a NaN, the guest address it wrote, how many.
  * @property {[number, number, number, number][]} [blockCounts]  With `blockProfile`: every
  *     counted block as [address, executions, shared slot, the entry of a region it is in
  *     or -1], most executed first.
@@ -371,13 +385,3 @@
  *
  * @typedef {(env: EngineEnv) => Runtime} EngineFactory
  */
-
-/**
- * How much of the top of the guest's RAM an engine may take for its own
- * tables when it runs over the emulator's memory, as the translator's
- * sequence corpus runs it (`cork/src/testing/hybrid-host.js`), where
- * the memory cannot be grown behind the emulator's views. The RAM below it
- * is the memory's size to everything else, so nothing of the guest is
- * placed there.
- */
-export const TABLES_RESERVE = 8 * 1024 * 1024;

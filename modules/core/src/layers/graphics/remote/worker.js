@@ -317,6 +317,11 @@ export function serveGraphics(scope, deps){
                 opened.then(({ adapter })=>scope.postMessage({ type: 'opened', adapter }),
                     e=>scope.postMessage({ type: 'failed', message: String(e?.message ?? e) }));
                 break;
+            case 'frames':
+                // The program's thread could not take a picture: from here on
+                // the frames go as bytes.
+                frames = data.frames;
+                break;
             case 'shown':
                 sending = false;
                 opened?.then(({ device })=>send(device), ()=>{});

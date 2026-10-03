@@ -23,7 +23,7 @@
  *                                  [--command-line STRING] [--windows NAME]
  *                                  [--file HOST=GUEST] [--save-files]
  *                                  [--user-data-dir DIR] [--port N] [--store local] [--prefetch]
- *                                  [--exact] [--cpu-profile SECONDS] [--heap-profile [old]]
+ *                                  [--cpu-profile SECONDS] [--heap-profile [old]]
  *                                  [--export-translations FILE]
  *                                  [--watch SECONDS]
  *
@@ -240,9 +240,6 @@ function parse(argv){
         // The translator's own settings as JSON ('{"countTransfers":true}').
         corkConfig: argv.includes('--cork-config')
             ? JSON.parse(argv[argv.indexOf('--cork-config') + 1]) : undefined,
-        // Which execution engine runs the program (`cork`, the default, or
-        // `emulator`), so two runs differ by that alone.
-        engine: argv.includes('--engine') ? argv[argv.indexOf('--engine') + 1] : undefined,
         // The display the program is told it has, as `WxH`. The launcher
         // names the person's own screen, which is rarely a size a program of
         // this era lists, so what a title does on one is a different path.
@@ -447,11 +444,6 @@ function parse(argv){
         // `crossOriginIsolated` with `SharedArrayBuffer` -- what the shared-
         // table audio backend and its worklet need to run at all.
         coi: argv.includes('--coi'),
-        // Keeps the emulator's own account of every block it ran, by address,
-        // for the whole run rather than a sampled guess -- what `profile-
-        // lights.mjs` asks a live route for, here asked of a demo playback
-        // instead. Costs a call per block, so only on request.
-        exact: argv.includes('--exact'),
     };
 }
 
@@ -546,8 +538,8 @@ async function poll(cdp, sessionId, expression, timeoutMs){
 /**
  * The most text one answer carries, before it is escaped twice on its way. An
  * answer of 4 MB closed the connection where one of 2 MB did not, and a run's
- * result is more than that once the files a title wrote are in it -- Doom 3's
- * timed demo answered 6 MB, most of it its files and the last frame's pixels.
+ * result is more than that once the files a title wrote and the last frame's
+ * pixels are in it.
  */
 const RESULT_CHUNK = 1 << 19;
 
@@ -657,12 +649,12 @@ function symbolName(at, symbols){
 }
 
 /**
- * The translator's own account, when an engine has one: the share of retired
- * instructions it ran, why the rest ran interpreted (the refused opcodes and
- * the untranslated exits by target), and how much translating cost. The
- * loading-phase question -- is a loop left interpreted by a policy or by a
- * decoder gap -- is answered by `exitsByTarget`'s reasons and `refusedWhy`,
- * which the `[ready]` table drops because their shapes are not scalars.
+ * The translator's own account: the share of retired instructions it ran, why
+ * the rest ran interpreted (the refused opcodes and the untranslated exits by
+ * target), and how much translating cost. The loading-phase question -- is a
+ * loop left interpreted by a policy or by a decoder gap -- is answered by
+ * `exitsByTarget`'s reasons and `refusedWhy`, which the `[ready]` table drops
+ * because their shapes are not scalars.
  *
  * @param {any} cork
  * @param {(text: string) => void} say
@@ -687,6 +679,26 @@ function describeCork(cork, say){
         + ` (no record ${cork.missNoRecord ?? 0}, no module ${cork.missNoModule ?? 0})`
         + `  store batches: ${cork.lookedUpNow ?? 0} at once / ${cork.lookedUpLater ?? 0}`
         + ' a turn later');
+    if (cork.staleRegions)
+    {
+        // --cork-config checkStale: translated code a write left standing.
+        say(`    stale regions: ${cork.staleRegions.length} `
+            + cork.staleRegions.slice(0, 20).join(' '));
+    }
+    // Under precise, a NaN hunt's first events, in the order they came (`#n`).
+    const nan = [
+        cork.nanFirst && [cork.nanFirst, `NaN made from ${cork.nanFirst.a} and ${cork.nanFirst.c}`],
+        cork.stackFaultFirst && [cork.stackFaultFirst, `x87 stack fault in the region at`
+            + ` ${cork.stackFaultFirst.region} (entered at top ${cork.stackFaultFirst.entryTop}),`
+            + ` empty mask ${cork.stackFaultFirst.empty}, top ${cork.stackFaultFirst.top}`],
+        cork.nanResultFirst && [cork.nanResultFirst, 'NaN result'],
+        cork.nanLoadFirst && [cork.nanLoadFirst, `NaN loaded from ${cork.nanLoadFirst.from}`],
+        cork.nanStoreFirst && [cork.nanStoreFirst, `NaN stored to ${cork.nanStoreFirst.to}`],
+    ].filter(Boolean).sort((x, y)=>x[0].order - y[0].order);
+    for (const [event, what] of nan)
+    {
+        say(`    first ${what}: #${event.order} at ${event.eip}, ${event.count} in all`);
+    }
     if (cork.topBlocks?.length)
     {
         // The block profile's most executed blocks (--cork-config blockProfile).
@@ -1259,7 +1271,8 @@ export async function game(options){
     // gets one over HTTP, which is how the page reads everything else.
     const opened = await openBundle(bundlePath);
     // Another program of the bundle than the one the manifest starts, when
-    // asked: `--entry war3.exe` starts the game where the launcher starts.
+    // asked: `--entry game.exe` starts the game itself where the manifest's
+    // entry is its launcher.
     const entry = options.entry ?? manifest.entry;
     const executable = await opened.read(entry);
     await opened.close();
@@ -1340,7 +1353,6 @@ export async function game(options){
             hooks: options.watches,
             maxTurns: options.turns,
             maxMs: options.runSeconds > 0 ? options.runSeconds * 1000 : null,
-            engine: options.engine,
             // A harness run is a diagnostic one: the translator's timings and its
             // record of long holds are on unless the run turns them off.
             cork: { config: { timings: true, ...options.corkConfig } },
@@ -1390,7 +1402,6 @@ export async function game(options){
             prefetch: options.prefetch,
             exportTranslations: options.exportTranslations !== null,
             bundleId: options.id,
-            exact: options.exact,
         });
         // Made before the profiler asks for the page's workers, so the engine
         // worker is seen whichever request attaches it.
@@ -1751,7 +1762,7 @@ the run as it stands: ${path}`;
             }
             else
             {
-                console.log('translations: none (no translating engine, or no store)');
+                console.log('translations: none (no store)');
             }
             delete result.translations;
         }
@@ -1818,18 +1829,6 @@ the run as it stands: ${path}`;
             drawsPath = join(REPORTS_DIR, `game-${stamp}-draws.txt`);
             writeFileSync(drawsPath, `${drawn.join('\n')}\n`);
         }
-        // The exact account, in `funcs-lights.py fold`'s own shape: a demo's
-        // run is one window, so `windowInstr`/`dt` are the whole run's.
-        let hotPath = null;
-        if (result.exact)
-        {
-            hotPath = join(REPORTS_DIR, `game-${stamp}.hot.json`);
-            writeFileSync(hotPath, JSON.stringify({
-                phase: 'demo', windowInstr: result.exact.retired,
-                dt: result.elapsedMs / 1000, blocks: result.exact.hot,
-            }));
-        }
-
         // The texels behind those draws, as images. A rectangle in a frame is
         // either something a draw put there or something already in what it
         // sampled, and only the texture itself tells those apart.
@@ -1853,7 +1852,6 @@ the run as it stands: ${path}`;
             report: text,
             reportPath,
             drawsPath,
-            hotPath,
             screenshot: shotPath,
             events: thrown,
         };
@@ -1885,10 +1883,6 @@ try
     if (answer.drawsPath)
     {
         console.log(`draws:      ${answer.drawsPath}`);
-    }
-    if (answer.hotPath)
-    {
-        console.log(`hot:        ${answer.hotPath}`);
     }
     console.log(`screenshot: ${answer.screenshot ?? '-'}`);
     for (const line of answer.events ?? [])

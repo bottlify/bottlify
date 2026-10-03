@@ -65,10 +65,6 @@ function parse(argv){
         video: argv.includes('--video'),
         // Sample where the guest's instruction pointer is, once a turn.
         profile: argv.includes('--profile'),
-        // The emulator's own account instead: every compiled block counts
-        // itself, so the attribution is by the code that ran and not by
-        // where the turn happened to stop.
-        exact: argv.includes('--exact'),
         // Sample what the engine allocates during the window, by the
         // function that allocated it. A heap that grows ten megabytes a
         // frame is collected as often, and a collection slows everything on
@@ -81,16 +77,6 @@ function parse(argv){
         // carry: they read guest memory on every host call, which is a cost
         // the engine outside this harness does not pay.
         trace: !argv.includes('--no-trace'),
-        // The emulator's compiler budgets, as "index=value,index=value".
-        jit: (()=>{
-            const at = argv.indexOf('--jit');
-            if (at === -1)
-            {
-                return null;
-            }
-            return Object.fromEntries(argv[at + 1].split(',')
-                .map(pair=>pair.split('=').map(Number)));
-        })(),
     };
 }
 
@@ -116,23 +102,6 @@ function describe(before, after, windowMs){
     say(`  ${(frames / seconds).toFixed(1)} frames per second`
         + (frames > 0 ? `, ${asMs(windowMs / frames)} per frame` : ''));
     say(`  ${(instructions / seconds / 1e6).toFixed(1)}M guest instructions per second`);
-    if (after.jit && after.jit.compiledSteps >= 0)
-    {
-        const was = before.jit ?? {};
-        /** @param {string} key */
-        const grew = key=>Math.max(0, (after.jit[key] ?? 0) - (was[key] ?? 0));
-        const compiled = grew('compiledSteps');
-        const interpreted = grew('interpretedSteps');
-        const total = Math.max(1, compiled + interpreted);
-        say(`  ${(compiled / total * 100).toFixed(1)}% of instructions ran compiled`
-            + `, ${(interpreted / total * 100).toFixed(1)}% interpreted`);
-        say(`  ${(grew('f80Conversions') / seconds / 1e6).toFixed(2)}M 80-bit float`
-            + ` conversions per second`);
-    }
-    if (after.jit)
-    {
-        say(`  the compiler: ${JSON.stringify(after.jit)}`);
-    }
     if (draws > 0)
     {
         say(`  ${(draws / Math.max(1, frames)).toFixed(0)} draw calls per frame`);
@@ -142,7 +111,7 @@ function describe(before, after, windowMs){
     say('one frame, as the engine measured it:');
     frameSpread(before, after).lines.forEach(say);
     // The share is what says which side to change. Mostly the guest means the
-    // answer is the emulator; mostly ours means it is our own code.
+    // answer is the translator; mostly ours means it is the layers.
     say(`  ours ${(after.hostShare * 100).toFixed(1)}% of a frame,`
         + ` the guest ${((1 - after.hostShare) * 100).toFixed(1)}%`);
     say('');
@@ -191,31 +160,6 @@ function describe(before, after, windowMs){
         for (const row of after.profile.pages.slice(0, 12))
         {
             say(`  ${(row.share * 100).toFixed(1).padStart(5)}%  ${row.at}`);
-        }
-        say('');
-    }
-
-    if (after.exact)
-    {
-        const exact = after.exact;
-        say(`where the guest ran, by the emulator's own count`
-            + ` (${exact.blocks} blocks, ${exact.retired} instructions`
-            + `${exact.dropped ? `, ${exact.dropped} dropped for want of room` : ''}):`);
-        for (const row of exact.pages.slice(0, 12))
-        {
-            say(`  ${(row.share * 100).toFixed(1).padStart(5)}%  ${row.at}`);
-        }
-        say('the hottest blocks, by instructions, with how often each was entered:');
-        for (const row of exact.hot)
-        {
-            say(`  ${(row.share * 100).toFixed(2).padStart(6)}%`
-                + `  ${String(row.instructions).padStart(11)}`
-                + `  x${String(row.hits).padEnd(9)}  ${row.at}`);
-        }
-        say('the bytes at the hottest, for a disassembler:');
-        for (const row of exact.hot.slice(0, 12))
-        {
-            say(`  ${row.at}: ${row.bytes}`);
         }
         say('');
     }
@@ -463,9 +407,7 @@ try
         maxTurns: Number.MAX_SAFE_INTEGER,
         video: options.video,
         quantum: options.quantum || undefined,
-        jit: options.jit || undefined,
         profile: options.profile || undefined,
-        exact: options.exact || undefined,
         trace: options.trace,
     })}); null`);
 
@@ -503,11 +445,6 @@ try
 
     console.log(`letting ${manifest.title} settle for ${options.settle}s`);
     await sleep(options.settle * 1000);
-    if (options.exact)
-    {
-        // The account is kept from boot; the window wants only itself.
-        await evaluate('window.__bottlify__.exactRestart && window.__bottlify__.exactRestart()');
-    }
     if (options.allocations)
     {
         // The engine runs on the page's own thread in this harness, so the

@@ -215,7 +215,7 @@ function fakeDevice(){
     return device;
 }
 
-/** @param {{ readU32?: boolean }} [options] */
+/** @param {{ readU32?: boolean, samplerStates?: number[] }} [options] */
 function machine(options = {}){
     const memory = new Uint8Array(0x20000);
     /**
@@ -268,6 +268,7 @@ function machine(options = {}){
             return 0;
         },
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
+        samplerStates: options.samplerStates,
     });
     const view = new DataView(memory.buffer);
     return {
@@ -1002,6 +1003,47 @@ test('stage states the guest wrote reach the device by stage and type', ()=>{
     assert.equal(m.divergences.length, 1);
     assert.match(m.divergences[0], /SetTextureStageState.*stage 7 state 13 set to 3/);
     assert.equal(m.shadow.diagnostics().stageStateCalls, 4);
+});
+
+test('a re-mirror of the stage and sampler states a block named reads only those', ()=>{
+    // Sampler type 5 is kept in the slot of stage state key 16.
+    const m = machine({ samplerStates: [0, 0, 0, 0, 0, 16] });
+    const at = m.shadow.address();
+    /** @type {string[]} */
+    const asked = [];
+    const { GetTextureStageState } = m.device;
+    /** @param {number} stage @param {number} type @param {{ value?: number }} out */
+    m.device.GetTextureStageState = (stage, type, out)=>{
+        asked.push(`tss ${stage}.${type}`);
+        return GetTextureStageState(stage, type, out);
+    };
+    /** @param {number} sampler @param {number} type @param {{ value?: number }} out */
+    const getSamplerState = (sampler, type, out)=>{
+        asked.push(`samp ${sampler}.${type}`);
+        out.value = 0x40 + sampler;
+        return 0;
+    };
+    Object.assign(m.device, { GetSamplerState: getSamplerState });
+    const tss = (/** @type {number} */ stage, /** @type {number} */ type)=>
+        m.u32(at + SHADOW.STAGE_STATES + (stage * SHADOW.STAGE_STATE_STRIDE + type) * 4);
+    // The host changed two stage states; a block names one of them, and a sampler.
+    m.device.stageStates[2].set(D3DTSS.COLOROP, 9);
+    m.device.stageStates[4].set(D3DTSS.COLOROP, 5);
+    const before = tss(4, D3DTSS.COLOROP);
+    m.shadow.remirror({ stageStates: [(2 << 8) | D3DTSS.COLOROP], samplerStates: [(3 << 8) | 5] });
+    assert.deepEqual(asked, [`tss 2.${D3DTSS.COLOROP}`, 'samp 3.5'], 'one read each, no scan');
+    assert.equal(tss(2, D3DTSS.COLOROP), 9, 'the state named, as the device holds it');
+    assert.equal(tss(3, 16), 0x43, 'the sampler state, in its key\'s slot');
+    assert.equal(tss(4, D3DTSS.COLOROP), before, 'a state not named is not read');
+    // A stage past the block's, or a sampler type with no slot, is passed over.
+    asked.length = 0;
+    m.shadow.remirror({ stageStates: [(8 << 8) | D3DTSS.COLOROP], samplerStates: [(1 << 8) | 7] });
+    assert.equal(asked.length, 0);
+    // Every stage state, when that is what is asked.
+    m.shadow.remirror({ stageStates: true });
+    assert.equal(asked.filter(one=>one.startsWith('tss')).length,
+        SHADOW.STAGE_COUNT * SHADOW.STAGE_STATE_STRIDE);
+    assert.equal(tss(4, D3DTSS.COLOROP), 5);
 });
 
 test('a material the guest wrote reaches the device as its seventeen floats', ()=>{

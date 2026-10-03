@@ -26,7 +26,6 @@ import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { packSession, unpackSession } from './storage.js';
 
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 const FIXTURE = new URL('../test/fixtures/session.exe', import.meta.url);
 
 /** What the fixture writes; it must come back out of the second run verbatim. */
@@ -47,10 +46,7 @@ const PAYLOAD = 'SAVED-01';
  * @param {{ path: string, bytes: Uint8Array }[]} incoming
  */
 async function runOnce(incoming){
-    const [wasm, exe] = await Promise.all([
-        readFile(new URL('v86.wasm', PREBUILT)),
-        readFile(FIXTURE),
-    ]);
+    const exe = await readFile(FIXTURE);
 
     /** @type {{ path: string, bytes: Uint8Array }[]} */
     let saved = [];
@@ -59,10 +55,6 @@ async function runOnce(incoming){
 
     const app = await createApp({
         executable: new Uint8Array(exe),
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
         storage: {
             load: async()=>incoming,
             /** @param {{ files: any[] }} session @param {any[]} changes */

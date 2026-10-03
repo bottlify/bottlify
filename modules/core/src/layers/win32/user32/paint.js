@@ -279,6 +279,9 @@ export function createPaintFunctions(options){
         return { left: 0, top: 0, right: size.width, bottom: size.height };
     };
 
+    /** The window LockWindowUpdate holds, or 0. */
+    let lockedWindow = 0;
+
     /** @param {any} record @param {any} rect @param {boolean} [erase] */
     const invalidate = (record, rect, erase = false)=>{
         if (isEmpty(rect))
@@ -1025,6 +1028,34 @@ export function createPaintFunctions(options){
                     return 0;
                 }
                 validate(record, (rect >>> 0) === 0 ? null : readRect(host, rect));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL LockWindowUpdate(HWND hWndLock)
+         *
+         * One window at a time: while one is locked, locking any fails, and a
+         * null window unlocks. Drawing into the locked window is not held
+         * back -- a program locks one against flicker while it changes it, and
+         * the picture it ends with is the same.
+         */
+        LockWindowUpdate: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>{
+                const window = hwnd >>> 0;
+                if (window === 0)
+                {
+                    lockedWindow = 0;
+                    return 1;
+                }
+                if (lockedWindow !== 0 || !live(window))
+                {
+                    return 0;
+                }
+                lockedWindow = window;
+                host.divergence?.('LockWindowUpdate', 'drawing is not held back while locked');
                 return 1;
             },
         },

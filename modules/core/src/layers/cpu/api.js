@@ -5,11 +5,11 @@
  */
 
 /**
- * cpu layer — guest execution. The single point of contact with vendor/v86.
+ * cpu layer — guest execution, on the engine a launch selects: cork, loaded by
+ * URL, or the v86 emulator a caller brought.
  *
- * Responsibilities (master plan §8.1): run a quantum, stop, registers,
- * breakpoints, physical memory read/write. v86 patches live here.
- * Phase 0: stub.
+ * Responsibilities: run a quantum, stop, registers, breakpoints, physical
+ * memory read/write.
  *
  * @typedef {import("../../system/contract.js").ModuleConfig} Config
  */

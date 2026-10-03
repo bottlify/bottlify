@@ -24,29 +24,21 @@ const VENDOR_OUT = join(DIST, 'vendor');
  * @property {string} name       File under vendor/prebuilt/, and under dist/vendor/.
  * @property {string} lock       The lock file that pins its checksum.
  * @property {string} fetch      The command that puts it in vendor/prebuilt/.
- * @property {boolean} rebuilt   Whether the containerised v86 build also emits it,
- *                               i.e. whether the reproducibility gate covers it.
  */
 
 /**
- * The binaries the published package has to carry. `createApp()` cannot start a
- * machine without the emulator, and the media layer decodes nothing without the
- * decoder; the rest of a v86 release (its non-module bundle, the BIOS images) is
- * not on any path this engine takes, so it is not shipped.
+ * The binaries the published package carries when the build has them. Both
+ * are optional: the media layer says it decodes nothing without the decoder,
+ * and the JavaScript zstd decoder stands in for the wasm one.
  * @type {readonly VendorArtifact[]}
  */
 const VENDOR_ARTIFACTS = [
-    { name: 'libv86.mjs', lock: 'vendor-lock.json', fetch: 'npm run fetch:v86', rebuilt: true },
-    { name: 'v86.wasm', lock: 'vendor-lock.json', fetch: 'npm run fetch:v86', rebuilt: true },
     {
         name: 'video-decoder.wasm',
         lock: 'video-decoder-lock.json',
         fetch: 'npm run fetch:video-decoder',
-        rebuilt: false,
     },
-    // The bundle decoder's wasm build: optional, the JavaScript decoder (or the
-    // emulator's) standing in when a build leaves it out.
-    { name: 'zstd.wasm', lock: 'zstd-lock.json', fetch: 'npm run fetch:zstd', rebuilt: false },
+    { name: 'zstd.wasm', lock: 'zstd-lock.json', fetch: 'npm run fetch:zstd' },
 ];
 
 /** Files that must travel with the package, copied from the repository root. */
@@ -97,9 +89,7 @@ async function writeChecksums(){
 }
 
 /**
- * Copies the prebuilt emulator artifacts into dist/vendor/ and records what
- * they are. A package missing them installs cleanly and then cannot boot, so
- * an absent artifact stops the build rather than shipping that.
+ * Copies the prebuilt binaries into dist/vendor/ and records what they are.
  */
 async function copyVendor(){
     await mkdir(VENDOR_OUT, { recursive: true });
@@ -109,8 +99,6 @@ async function copyVendor(){
     const artifacts = {};
     /** @type {Record<string, string>} */
     const sources = {};
-    /** @type {string[]} */
-    const reproducible = [];
 
     for (const artifact of VENDOR_ARTIFACTS)
     {
@@ -128,26 +116,19 @@ async function copyVendor(){
         const lock = JSON.parse(await readFile(join(ROOT, artifact.lock), 'utf8'));
         artifacts[`./${artifact.name}`] = await sha256File(join(VENDOR_OUT, artifact.name));
         sources[`./${artifact.name}`] = `${lock.repo}@${lock.tag}`;
-        if (artifact.rebuilt)
-        {
-            reproducible.push(artifact.name);
-        }
     }
 
-    // The emulator is an optional layer since 5.5: a build without it ships
-    // and runs the demos under `cork`, and a launch that selects `emulator`
-    // is refused with the layer's message. Each artifact present
-    // is still recorded and copied; each absent is named so a build log says
-    // what the package does not carry.
+    // Each absent artifact is named, so a build log says what the package
+    // does not carry.
     for (const artifact of missing)
     {
         console.log(`dist: ${artifact.name} absent (${artifact.fetch}); the package will `
-            + 'not carry the emulator');
+            + 'not carry it');
     }
 
     await writeFile(
         join(VENDOR_OUT, 'manifest.json'),
-        JSON.stringify({ artifacts, sources, reproducible }, null, 2),
+        JSON.stringify({ artifacts, sources }, null, 2),
     );
     return Object.keys(artifacts).length;
 }
@@ -192,8 +173,9 @@ await build({
     // it, and the package is the built thing.
     minify: true,
     sourcemap: false,
-    // The built module's own directory holds the emulator (see copyVendor)
-    // and the translator (below), so the engine finds both without being told.
+    // The built module's own directory holds the prebuilt binaries (see
+    // copyVendor) and the translator (below), so the engine finds both without
+    // being told.
     define: {
         ...DIAGNOSTICS_OFF,
         'import.meta.env.BOTTLIFY_VENDOR': '"./vendor/"',

@@ -7,8 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    MEDIA_DIRECTORY, REGISTRY_PATH, chooseRoot, collect, guessEntry, installLocations,
-    prefixOptions,
+    MEDIA_DIRECTORY, REGISTRY_PATH, SYSTEM_PATH, chooseRoot, collect, guessEntry,
+    installLocations, prefixOptions,
 } from './prefix.js';
 
 /** @param {string} text */
@@ -167,11 +167,54 @@ test('among equally shallow candidates the one with more executables wins', ()=>
 
 test('files the root does not cover are reported rather than dropped silently', ()=>{
     const prefix = collect({
-        files: tree(['C:\\Games\\Title\\title.exe', 'C:\\Windows\\System32\\runtime.dll']),
+        files: tree(['C:\\Games\\Title\\title.exe', 'C:\\Windows\\Fonts\\title.ttf']),
     });
 
     assert.deepEqual(prefix.files.map(file=>file.path), ['title.exe']);
-    assert.deepEqual(prefix.outside, ['C:\\Windows\\System32\\runtime.dll']);
+    assert.deepEqual(prefix.outside, ['C:\\Windows\\Fonts\\title.ttf']);
+});
+
+test('what the install added to system32 travels beside the registry', ()=>{
+    // A setup installs the runtime its program links against there -- the D3DX
+    // libraries a DirectX setup puts in -- and the program looks nowhere else.
+    const prefix = collect({
+        files: tree([
+            'C:\\Games\\Title\\title.exe',
+            'C:\\WINDOWS\\system32\\d3dx9_30.dll',
+            'C:\\Windows\\System32\\xinput1_3.dll',
+            'C:\\WINDOWS\\system32\\drivers\\title.sys',
+        ]),
+    });
+
+    assert.deepEqual(prefix.files.map(file=>file.path), [
+        'title.exe',
+        `${SYSTEM_PATH}\\d3dx9_30.dll`,
+        `${SYSTEM_PATH}\\xinput1_3.dll`,
+        `${SYSTEM_PATH}\\drivers\\title.sys`,
+    ]);
+    assert.equal(new TextDecoder().decode(prefix.files[1].bytes),
+        'C:\\WINDOWS\\system32\\d3dx9_30.dll', 'the bytes the install wrote');
+    assert.deepEqual(prefix.outside, []);
+    assert.equal(prefix.entry, 'title.exe', 'a file in system32 is never the program to start');
+});
+
+test('a library the engine synthesises is not carried out of system32', ()=>{
+    // Mounted back, a copy of one of Windows' own libraries would be mapped in
+    // place of the engine's; the redistributables are not in the list.
+    const prefix = collect({
+        files: tree([
+            'C:\\Games\\Title\\title.exe',
+            'C:\\WINDOWS\\system32\\d3d9.dll',
+            'C:\\WINDOWS\\system32\\DSOUND.DLL',
+            'C:\\WINDOWS\\system32\\d3dx9_30.dll',
+        ]),
+        synthesised: ['D3D9.dll', 'DSOUND.dll', 'KERNEL32.dll'],
+    });
+
+    assert.deepEqual(prefix.files.map(file=>file.path),
+        ['title.exe', `${SYSTEM_PATH}\\d3dx9_30.dll`]);
+    assert.deepEqual(prefix.answered,
+        ['C:\\WINDOWS\\system32\\d3d9.dll', 'C:\\WINDOWS\\system32\\DSOUND.DLL']);
 });
 
 test('the registry travels as a file inside the tree', ()=>{
