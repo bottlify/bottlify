@@ -30,6 +30,7 @@ const ERROR_INVALID_NAME = 123;
 const ERROR_SERVICE_REQUEST_TIMEOUT = 1053;
 const ERROR_SERVICE_DOES_NOT_EXIST = 1060;
 const ERROR_SERVICE_NOT_ACTIVE = 1062;
+const ERROR_SERVICE_MARKED_FOR_DELETE = 1072;
 const ERROR_SERVICE_EXISTS = 1073;
 
 /** Where the manager keeps every service it knows. */
@@ -151,6 +152,23 @@ export function createServiceFunctions(host){
         {
             hive.setValue(key, 'ObjectName', REG_SZ, sz(config.objectName));
         }
+    };
+
+    /** The services DeleteService marked, whose keys go with their last handle. */
+    const marked = new Set();
+
+    /** @param {import('./registry.js').RegistryKey} parent @param {string} name */
+    const removeTree = (parent, name)=>{
+        const key = hive.open(parent, name);
+        if (!key)
+        {
+            return;
+        }
+        for (const child of hive.subkeys(key))
+        {
+            removeTree(key, child);
+        }
+        hive.remove(parent, name);
     };
 
     /** @param {number} handle @param {'manager' | 'service' | 'lock'} kind */
@@ -315,11 +333,52 @@ export function createServiceFunctions(host){
                 : fail(ERROR_INVALID_HANDLE)),
         },
 
+        /**
+         * BOOL DeleteService(SC_HANDLE hService)
+         *
+         * Marks the service for deletion. No service runs here, so its key
+         * goes as soon as no handle is open on it, which is when the manager
+         * removes a stopped one.
+         */
+        DeleteService: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([service])=>{
+                const object = held(service, 'service');
+                if (!object)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const name = /** @type {string} */ (object.name);
+                if (marked.has(name))
+                {
+                    return fail(ERROR_SERVICE_MARKED_FOR_DELETE);
+                }
+                marked.add(name);
+                return 1;
+            },
+        },
+
         /** BOOL CloseServiceHandle(SC_HANDLE hSCObject) */
         CloseServiceHandle: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>(handles.delete(handle >>> 0) ? 1 : fail(ERROR_INVALID_HANDLE)),
+            handler: ([handle])=>{
+                const object = handles.get(handle >>> 0);
+                if (!object)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                handles.delete(handle >>> 0);
+                const name = object.name;
+                if (object.kind === 'service' && name !== undefined && marked.has(name)
+                    && ![...handles.values()].some(other=>other.name === name))
+                {
+                    marked.delete(name);
+                    removeTree(servicesKey(), name);
+                }
+                return 1;
+            },
         },
     };
 }
