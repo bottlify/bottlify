@@ -6,18 +6,24 @@
 
 /**
  * WMI, as far as a program asking about its machine goes: CLSID_WbemLocator,
- * the namespace it connects to, and the instances of the one class programs
- * read to size themselves, Win32_VideoController.
+ * the namespace it connects to, and the instances of the classes programs read
+ * to size themselves or to describe the machine in a report --
+ * Win32_VideoController, Win32_SoundDevice, Win32_Processor, Win32_BIOS,
+ * Win32_BaseBoard, the physical memory and its array, a slot and a disk. Every figure is the one
+ * the machine gives the same program another way: the processor's CPUID and
+ * speed, the physical memory GlobalMemoryStatus reports, the video memory
+ * Direct3D's GetAvailableTextureMem reports, the computer's name.
  *
  * A program that is refused the locator does not fail; it assumes the least
- * hardware it supports and chooses its settings for that, quietly. The
- * figure it reads is AdapterRAM, so the controller answers with the same
- * video memory Direct3D's GetAvailableTextureMem reports. Every other class
- * enumerates empty and every other method is refused, each through the
+ * hardware it supports and chooses its settings for that, quietly. Every other
+ * class enumerates empty and every other method is refused, each through the
  * divergence reporter, so a program that asks for more says what it asked.
  */
 
 import { createComObject } from './objects.js';
+import { COMPUTER_NAME } from '../kernel32/drives.js';
+import { CPUID, PROCESSOR, PROCESSOR_IDENTIFIER } from '../kernel32/processor.js';
+import { SOUND_ADAPTER_NAME, VIDEO_ADAPTER_NAME } from '../devices.js';
 
 export const CLSID_WBEM_LOCATOR = '{4590F811-1D3A-11D0-891F-00AA004B2E24}';
 export const IID_IWBEM_LOCATOR = '{DC12A687-737F-11CF-884D-00AA004B2E24}';
@@ -36,31 +42,151 @@ const WBEM_E_INVALID_QUERY_TYPE = 0x80041038 | 0;
 
 const VT_I4 = 3;
 const VT_BSTR = 8;
+const VT_BOOL = 11;
+const VT_ARRAY = 0x2000;
 const CIM_STRING = 8;
+const CIM_BOOLEAN = 11;
+const CIM_UINT16 = 18;
 const CIM_UINT32 = 19;
+const CIM_UINT64 = 21;
+const CIM_DATETIME = 101;
+const CIM_REFERENCE = 102;
+const CIM_FLAG_ARRAY = 0x2000;
 
 /** How far a namespace, class name or query is read. */
 const MAX_WBEM_STRING = 1024;
 
 /** The video memory reported, the figure GetAvailableTextureMem also gives. */
 export const ADAPTER_RAM = 256 << 20;
-export const ADAPTER_NAME = 'Bottlify WebGPU Display Adapter';
+export const ADAPTER_NAME = VIDEO_ADAPTER_NAME;
 
 /**
- * A class's properties as `name -> [cimType, value]`; the keys are matched
- * without regard to case, as WMI matches them.
+ * A property: its CIM type and its value. WMI hands every integer of 32 bits
+ * or less over as VT_I4, a 64-bit one as a string, an array as a SAFEARRAY of
+ * VT_I4, a boolean as VT_BOOL.
  *
- * @type {Record<string, Record<string, [number, number | string]>>}
+ * @typedef {[number, number | string | boolean | number[]]} WbemProperty
  */
-const CLASSES = {
-    win32_videocontroller: {
-        adapterram: [CIM_UINT32, ADAPTER_RAM],
-        name: [CIM_STRING, ADAPTER_NAME],
-        caption: [CIM_STRING, ADAPTER_NAME],
-        description: [CIM_STRING, ADAPTER_NAME],
-        videoprocessor: [CIM_STRING, ADAPTER_NAME],
-    },
-};
+
+/**
+ * Each kept class's instances, each instance its properties keyed in lower
+ * case, as WMI matches names without regard to it.
+ *
+ * @param {{ physicalMemory?: number }} machine
+ * @returns {Record<string, Record<string, WbemProperty>[]>}
+ */
+function machineClasses({ physicalMemory = 0 }){
+    const hex = (/** @type {number} */ value)=>(value >>> 0).toString(16).toUpperCase()
+        .padStart(8, '0');
+    // A reference names its instance by the computer, the namespace, the
+    // class and its key, as an association's ends are written.
+    const reference = (/** @type {string} */ path)=>`\\\\${COMPUTER_NAME}\\root\\cimv2:${path}`;
+    const memory = Math.max(physicalMemory, 0);
+    return {
+        win32_videocontroller: [{
+            adapterram: [CIM_UINT32, ADAPTER_RAM],
+            name: [CIM_STRING, ADAPTER_NAME],
+            caption: [CIM_STRING, ADAPTER_NAME],
+            description: [CIM_STRING, ADAPTER_NAME],
+            videoprocessor: [CIM_STRING, ADAPTER_NAME],
+        }],
+        win32_sounddevice: [{
+            deviceid: [CIM_STRING, 'BOTTLIFY\\SOUND\\0000'],
+            name: [CIM_STRING, SOUND_ADAPTER_NAME],
+            productname: [CIM_STRING, SOUND_ADAPTER_NAME],
+            caption: [CIM_STRING, SOUND_ADAPTER_NAME],
+            description: [CIM_STRING, SOUND_ADAPTER_NAME],
+            manufacturer: [CIM_STRING, 'Bottlify'],
+            status: [CIM_STRING, 'OK'],
+            statusinfo: [CIM_UINT16, 3], // enabled
+        }],
+        win32_processor: [{
+            deviceid: [CIM_STRING, 'CPU0'],
+            manufacturer: [CIM_STRING, PROCESSOR.vendor],
+            name: [CIM_STRING, PROCESSOR_IDENTIFIER],
+            caption: [CIM_STRING, PROCESSOR_IDENTIFIER],
+            description: [CIM_STRING, PROCESSOR_IDENTIFIER],
+            // CPUID leaf 1's EDX, then its EAX.
+            processorid: [CIM_STRING, hex(CPUID.edx) + hex(CPUID.signature)],
+            maxclockspeed: [CIM_UINT32, PROCESSOR.mhz],
+            currentclockspeed: [CIM_UINT32, PROCESSOR.mhz],
+            extclock: [CIM_UINT32, 100],
+            processortype: [CIM_UINT16, 3], // a central processor
+            upgrademethod: [CIM_UINT16, 2], // unknown
+            family: [CIM_UINT16, 2], // unknown
+            architecture: [CIM_UINT16, 0], // x86
+            level: [CIM_UINT16, PROCESSOR.family],
+            revision: [CIM_UINT16, PROCESSOR.model << 8 | PROCESSOR.stepping],
+            addresswidth: [CIM_UINT16, 32],
+            datawidth: [CIM_UINT16, 32],
+            socketdesignation: [CIM_STRING, 'CPU 1'],
+        }],
+        win32_bios: [{
+            manufacturer: [CIM_STRING, 'Bottlify'],
+            name: [CIM_STRING, 'Bottlify BIOS'],
+            version: [CIM_STRING, 'BTLFY - 1'],
+            smbiosbiosversion: [CIM_STRING, '1.0'],
+            serialnumber: [CIM_STRING, '0'],
+            releasedate: [CIM_DATETIME, '20260101000000.000000+000'],
+            // PCI, plug and play, upgradeable, shadowing, boot from CD,
+            // selectable boot, EDD, the floppy and print services.
+            bioscharacteristics: [CIM_UINT16 | CIM_FLAG_ARRAY,
+                [7, 9, 11, 12, 15, 16, 19, 26, 27, 28, 29, 30, 32, 33]],
+        }],
+        win32_baseboard: [{
+            tag: [CIM_STRING, 'Base Board'],
+            manufacturer: [CIM_STRING, 'Bottlify'],
+            product: [CIM_STRING, 'Bottlify Board'],
+            version: [CIM_STRING, '1.0'],
+            serialnumber: [CIM_STRING, '0'],
+        }],
+        win32_physicalmemoryarray: [{
+            tag: [CIM_STRING, 'Physical Memory Array 0'],
+            location: [CIM_UINT16, 3], // the system board
+            use: [CIM_UINT16, 3], // system memory
+            memoryerrorcorrection: [CIM_UINT16, 3], // none
+            maxcapacity: [CIM_UINT32, Math.floor(memory / 1024)],
+            memorydevices: [CIM_UINT16, 1],
+        }],
+        win32_physicalmemory: [{
+            tag: [CIM_STRING, 'Physical Memory 0'],
+            capacity: [CIM_UINT64, String(memory)],
+            devicelocator: [CIM_STRING, 'DIMM 1'],
+            banklabel: [CIM_STRING, 'BANK 0'],
+            datawidth: [CIM_UINT16, 64],
+            totalwidth: [CIM_UINT16, 64],
+            formfactor: [CIM_UINT16, 8], // a DIMM
+            memorytype: [CIM_UINT16, 17], // SDRAM
+            typedetail: [CIM_UINT16, 128], // synchronous
+            speed: [CIM_UINT32, 133],
+        }],
+        win32_memorydevicelocation: [{
+            antecedent: [CIM_REFERENCE,
+                reference('Win32_PhysicalMemoryArray.Tag="Physical Memory Array 0"')],
+            dependent: [CIM_REFERENCE, reference('Win32_PhysicalMemory.Tag="Physical Memory 0"')],
+        }],
+        win32_systemslot: [{
+            tag: [CIM_STRING, 'System Slot 0'],
+            slotdesignation: [CIM_STRING, 'AGP'],
+            currentusage: [CIM_UINT16, 5], // in use
+            maxdatawidth: [CIM_UINT16, 2], // 32 bits
+            supportshotplug: [CIM_BOOLEAN, false],
+            connectortype: [CIM_UINT16 | CIM_FLAG_ARRAY, [2]], // other
+        }],
+        win32_diskdrive: [{
+            deviceid: [CIM_STRING, '\\\\.\\PHYSICALDRIVE0'],
+            index: [CIM_UINT32, 0],
+            model: [CIM_STRING, 'Bottlify Virtual Disk'],
+            caption: [CIM_STRING, 'Bottlify Virtual Disk'],
+            manufacturer: [CIM_STRING, '(Standard disk drives)'],
+            interfacetype: [CIM_STRING, 'IDE'],
+            mediatype: [CIM_STRING, 'Fixed hard disk media'],
+            size: [CIM_UINT64, String(64 * 1024 ** 3)],
+            bytespersector: [CIM_UINT32, 512],
+            partitions: [CIM_UINT32, 1],
+        }],
+    };
+}
 
 /**
  * Slots after IUnknown's three, `[name, argBytes]` with `this` counted.
@@ -100,6 +226,7 @@ const SLOTS = {
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readWideString
+ * @property {number} [physicalMemory]  What GlobalMemoryStatus reports as physical memory.
  * @property {(api: string, detail: string) => void} [divergence]
  */
 
@@ -109,6 +236,7 @@ const SLOTS = {
  * @param {WbemHost} host
  */
 export function registerWbemClasses(host){
+    const CLASSES = machineClasses({ physicalMemory: host.physicalMemory });
     const diverge = (/** @type {string} */ api, /** @type {string} */ detail)=>
         host.divergence?.(api, detail);
     const writeU32 = (/** @type {number} */ address, /** @type {number} */ value)=>{
@@ -185,10 +313,38 @@ export function registerWbemClasses(host){
     };
 
     /**
+     * A SAFEARRAY of VT_I4 over the values, laid out and allocated as
+     * SafeArrayCreate lays out its own -- so SafeArrayDestroy and VariantClear
+     * free it -- or 0.
+     *
+     * @param {number[]} values @returns {number}
+     */
+    const allocateArray = values=>{
+        const descriptor = host.heap.allocate(24);
+        const data = host.heap.allocate(Math.max(1, values.length * 4));
+        if (descriptor === 0 || data === 0)
+        {
+            return 0;
+        }
+        const header = new Uint8Array(24);
+        const view = new DataView(header.buffer);
+        view.setUint16(0, 1, true); // one dimension
+        view.setUint32(4, 4, true); // four bytes an element
+        view.setUint32(12, data, true);
+        view.setUint32(16, values.length, true); // its count, from a lower bound of 0
+        host.writeMemory(descriptor, header);
+        const elements = new Uint8Array(values.length * 4);
+        values.forEach((value, index)=>new DataView(elements.buffer)
+            .setUint32(index * 4, value >>> 0, true));
+        host.writeMemory(data, elements);
+        return descriptor;
+    };
+
+    /**
      * IWbemClassObject over one instance: Get reads a property, the rest is
      * refused.
      *
-     * @param {Record<string, [number, number | string]>} properties
+     * @param {Record<string, WbemProperty>} properties
      * @param {number} out
      */
     const publishInstance = (properties, out)=>publish(CLSID_WBEM_LOCATOR, {
@@ -216,6 +372,21 @@ export function registerWbemClasses(host){
                         view.setUint16(0, VT_BSTR, true);
                         view.setUint32(8, bstr, true);
                     }
+                    else if (typeof content === 'boolean')
+                    {
+                        view.setUint16(0, VT_BOOL, true);
+                        view.setUint16(8, content ? 0xffff : 0, true);
+                    }
+                    else if (Array.isArray(content))
+                    {
+                        const array = allocateArray(content);
+                        if (array === 0)
+                        {
+                            return E_OUTOFMEMORY;
+                        }
+                        view.setUint16(0, VT_ARRAY | VT_I4, true);
+                        view.setUint32(8, array, true);
+                    }
                     else
                     {
                         // WMI hands a uint32 over as VT_I4.
@@ -240,7 +411,7 @@ export function registerWbemClasses(host){
     /**
      * IEnumWbemClassObject over the instances of one class.
      *
-     * @param {Record<string, [number, number | string]>[]} instances
+     * @param {Record<string, WbemProperty>[]} instances
      * @param {number} out
      * @returns {number} an HRESULT
      */
@@ -289,13 +460,13 @@ export function registerWbemClasses(host){
      * @param {string} api
      */
     const instancesOf = (name, api)=>{
-        const properties = CLASSES[name.toLowerCase()];
-        if (!properties)
+        const instances = CLASSES[name.toLowerCase()];
+        if (!instances)
         {
             diverge(api, `class ${name} has no instances here; enumerated empty`);
             return [];
         }
-        return [properties];
+        return instances;
     };
 
     const services = describe(IID_IWBEM_SERVICES, 'IWbemServices', SLOTS.services, {

@@ -38,6 +38,7 @@ function setup(){
             },
         },
         heap: { allocate: size=>(nextBlock += size + 16) - size - 16 },
+        physicalMemory: 512 << 20,
         readMemory: (address, length)=>bytes.subarray(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
         readWideString: address=>{
@@ -138,14 +139,84 @@ test('a WQL query names its class; another namespace or class is refused or empt
     assert.equal(host.view.getUint32(OUT + 4, true), 1);
 
     assert.equal(host.call(services, 'ExecQuery',
-        [host.wide('WQL'), host.wide('SELECT * FROM Win32_Processor'), 0, 0, OUT]), 0);
+        [host.wide('WQL'), host.wide('SELECT * FROM Win32_NetworkAdapter'), 0, 0, OUT]), 0);
     assert.equal(host.call(host.view.getUint32(OUT, true), 'Next', [0, 1, 0x300, OUT + 4]), 1);
     assert.equal(host.view.getUint32(OUT + 4, true), 0);
 
     assert.equal(host.call(services, 'GetObject', [0, 0, 0, OUT, 0]), 0x8004100c | 0);
     assert.deepEqual(host.reported, [
         'IWbemLocator::ConnectServer: no namespace root\\default',
-        'IWbemServices::ExecQuery: class Win32_Processor has no instances here; enumerated empty',
+        'IWbemServices::ExecQuery: class Win32_NetworkAdapter has no instances here; '
+            + 'enumerated empty',
         'IWbemServices::GetObject: not implemented; refused',
     ]);
+});
+
+test('the machine classes answer as Windows does: one instance each, a boolean as VT_BOOL, '
+    + 'an array as a SAFEARRAY of VT_I4, a 64-bit figure as a string', ()=>{
+    const host = setup();
+    const object = /** @type {any} */ (host.registry.create(CLSID_WBEM_LOCATOR));
+    const connect = object.interfaceFor(IID_IWBEM_LOCATOR).methods[3];
+    assert.equal(connect.invoke(object, [host.wide('root\\cimv2'), 0, 0, 0, 0, 0, 0, OUT]), 0);
+    const services = host.view.getUint32(OUT, true);
+    /** @param {string} name */
+    const only = name=>{
+        assert.equal(host.call(services, 'CreateInstanceEnum', [host.wide(name), 0, 0, OUT]), 0);
+        const enumerator = host.view.getUint32(OUT, true);
+        assert.equal(host.call(enumerator, 'Next', [0, 1, OUT, OUT + 4]), 0, `${name}: one`);
+        const instance = host.view.getUint32(OUT, true);
+        assert.equal(host.call(enumerator, 'Next', [0, 1, OUT + 8, OUT + 4]), 1, 'and no more');
+        return instance;
+    };
+    const variant = 0x200;
+    /** @param {number} instance @param {string} name */
+    const get = (instance, name)=>{
+        assert.equal(host.call(instance, 'Get', [host.wide(name), 0, variant, OUT, 0]), 0, name);
+        return { vt: host.view.getUint16(variant, true),
+            value: host.view.getUint32(variant + 8, true),
+            cim: host.view.getUint32(OUT, true) };
+    };
+    /** @param {number} bstr */
+    const text = bstr=>{
+        let out = '';
+        for (let at = bstr; host.view.getUint16(at, true) !== 0; at += 2)
+        {
+            out += String.fromCharCode(host.view.getUint16(at, true));
+        }
+        return out;
+    };
+
+    const bios = only('WIN32_BIOS');
+    const date = get(bios, 'ReleaseDate');
+    assert.deepEqual([date.vt, date.cim], [8, 101]);
+    assert.match(text(date.value), /^\d{14}\.\d{6}[+-]\d{3}$/);
+    const characteristics = get(bios, 'BiosCharacteristics');
+    assert.deepEqual([characteristics.vt, characteristics.cim], [0x2003, 0x2012]);
+    const array = characteristics.value;
+    assert.equal(host.view.getUint16(array, true), 1, 'one dimension');
+    assert.equal(host.view.getUint32(array + 4, true), 4, 'of four-byte elements');
+    const count = host.view.getUint32(array + 16, true);
+    assert.ok(count > 0);
+    assert.equal(host.view.getUint32(host.view.getUint32(array + 12, true), true), 7, 'PCI first');
+
+    const slot = only('Win32_SystemSlot');
+    const hotPlug = get(slot, 'SupportsHotPlug');
+    assert.deepEqual([hotPlug.vt, hotPlug.cim, hotPlug.value & 0xffff], [11, 11, 0]);
+
+    const memory = only('Win32_PhysicalMemory');
+    const capacity = get(memory, 'Capacity');
+    assert.deepEqual([capacity.vt, capacity.cim], [8, 21]);
+    assert.equal(text(capacity.value), String(512 << 20), 'the physical memory reported');
+    assert.equal(get(only('Win32_PhysicalMemoryArray'), 'MaxCapacity').value, 512 << 10);
+
+    const processor = get(only('Win32_Processor'), 'ProcessorId');
+    assert.equal(text(processor.value), '0780A97900000673', 'CPUID leaf 1: EDX, then EAX');
+    assert.equal(get(only('Win32_Processor'), 'MaxClockSpeed').value, 1000);
+
+    const location = only('Win32_MemoryDeviceLocation');
+    assert.equal(text(get(location, 'Antecedent').value),
+        '\\\\BOTTLIFY\\root\\cimv2:Win32_PhysicalMemoryArray.Tag="Physical Memory Array 0"');
+    assert.ok(text(get(only('WIN32_BaseBoard'), 'Product').value).length > 0);
+    assert.ok(text(get(only('Win32_DiskDrive'), 'Model').value).length > 0);
+    assert.deepEqual(host.reported, []);
 });

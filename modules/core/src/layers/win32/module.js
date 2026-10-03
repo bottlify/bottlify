@@ -972,10 +972,11 @@ export function createWin32Module(){
                 divergence: config?.divergence,
             });
 
-            // WMI's locator, which a program asks for its video memory.
+            // WMI's locator, which a program asks about its video memory and its
+            // machine.
             registerWbemClasses({
                 registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
-                divergence: config?.divergence,
+                physicalMemory: arena.size, divergence: config?.divergence,
             });
 
             // DxDiag's provider, which an installer asks which DirectX this is
