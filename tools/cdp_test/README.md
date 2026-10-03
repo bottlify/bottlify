@@ -274,6 +274,37 @@ Reading it:
 - An unresolved import is a real answer, not noise: a program that cannot bind
   one may take a different path silently.
 
+### Translated code gone wrong
+
+When a title fails only translated (`--cork-config '{"translate":false}'`
+runs it whole on the interpreter): `{"interpretRange":[from,to]}` leaves
+those addresses to the interpreter, so halving the range finds the code
+whose translation breaks; `{"checkStale":true}` puts `stale regions` in the
+report -- published regions whose bytes no longer form as they did, code a
+write should have dropped and did not.
+
+### A NaN
+
+A float exception (0xC0000090 and its kin), NaN vertices or an object that
+flies off start where something first made a NaN, long before anyone notices.
+Run with `--cork-config '{"precise":true}'` and the cork section of the report
+names the first of each, by the guest address of the instruction:
+
+- `first NaN made` -- x87 arithmetic, a square root, a logarithm (`fyl2x`,
+  `fyl2xp1`) or a remainder that made a NaN out of numbers (0/0, inf-inf, the
+  root or the log of a negative), with its two operands;
+- `first x87 stack fault` -- a register read while empty or pushed onto while
+  held; the indefinite it produces is a NaN;
+- `first NaN result` -- any x87 arithmetic whose result was a NaN, made or
+  carried in from an operand;
+- `first NaN loaded`, `first NaN stored` -- an x87 float load that read a NaN
+  and a store that wrote one, with the address in memory. A NaN read before
+  any was made or stored was written there by something else (interpreted
+  code, SSE, integer stores of what was never a float).
+
+Only translated x87 code is watched; interpreted code and SSE are not.
+Compare the addresses with a run that does not fail.
+
 ### A page that does not answer
 
 The page's report reads the last frame back, and that read waits until the

@@ -109,6 +109,8 @@ export function ownLayout({ ramSize }){
         callProfile: 352,
         // The budget the run started with, past the call profile's sixteen pairs.
         origin: 488,
+        // Past the state block, so a thread switch does not carry it.
+        nanFirst: 1024,
         tables: ramBase + ramSize,
         codePages: -1,
         // The entry hash's slot is the top bits of eip times the golden ratio,

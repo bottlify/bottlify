@@ -29,7 +29,7 @@
 import { formRegion, formShared, hashRegion } from '../region.js';
 import { TIER_SLOT, enterRegion, mathImports } from '../emit/region.js';
 import { decode } from '../decode/decoder.js';
-import { SHAPE, isX87, trackRegion } from '../emit/x87.js';
+import { NanRecord, SHAPE, isX87, trackRegion } from '../emit/x87.js';
 import { HELD, PRECISION } from '../emit/memory.js';
 import { features as probeFeatures } from '../wasm/features.js';
 import { Body, ModuleBuilder, ValType } from '../wasm/encoder.js';
@@ -85,6 +85,56 @@ function noTierEntry(){
 }
 
 /**
+ * Under `precise`, a NaN hunt's record (`layout.nanFirst`): the first x87 NaN
+ * translated code made from numbers, from what, and how many; the first stack
+ * fault; the first arithmetic with a NaN result; the first NaN read from memory
+ * and the first stored there.
+ *
+ * @param {DataView} view
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ */
+function nanFirst(view, layout){
+    const at = layout.nanFirst ?? -1;
+    if (at < 0)
+    {
+        return {};
+    }
+    const word = (/** @type {number} */ offset)=>view.getUint32(at + offset, true);
+    const hex = (/** @type {number} */ offset)=>`0x${word(offset).toString(16)}`;
+    /** @param {number} slot */
+    const first = slot=>({ eip: hex(slot), count: word(slot + 4),
+        order: word(NanRecord.orderOf[slot]) });
+    /** @type {Record<string, any>} */
+    const out = {};
+    if (word(NanRecord.MADE + 4) > 0)
+    {
+        out.nanFirst = { ...first(NanRecord.MADE), a: view.getFloat64(at + NanRecord.MADE_A, true),
+            c: view.getFloat64(at + NanRecord.MADE_C, true) };
+    }
+    if (word(NanRecord.FAULT + 4) > 0)
+    {
+        // A register read empty or a push onto a held one: the indefinite, a NaN, follows.
+        const r = NanRecord.FAULT_REGION;
+        out.stackFaultFirst = { ...first(NanRecord.FAULT), region: hex(r), entryTop: word(r + 4),
+            empty: hex(r + 8), top: word(r + 12) };
+    }
+    if (word(NanRecord.RESULT + 4) > 0)
+    {
+        // Any arithmetic whose result was a NaN, made or carried from an operand.
+        out.nanResultFirst = first(NanRecord.RESULT);
+    }
+    if (word(NanRecord.LOAD + 4) > 0)
+    {
+        out.nanLoadFirst = { ...first(NanRecord.LOAD), from: hex(NanRecord.LOAD + 8) };
+    }
+    if (word(NanRecord.STORE + 4) > 0)
+    {
+        out.nanStoreFirst = { ...first(NanRecord.STORE), to: hex(NanRecord.STORE + 8) };
+    }
+    return out;
+}
+
+/**
  * @param {EngineEnv & { features?: ReturnType<typeof probeFeatures> }} env
  * @returns {Runtime & { pages: import('./pages.js').PageTable }}
  */
@@ -113,6 +163,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // Diagnostic: every store key put and every one missed, as
         // `entry:hash:top`, in the diagnostics -- what tells two runs' keys apart.
         traceStore: false,
+        // Diagnostic: the regions still published whose bytes no longer form
+        // as they did -- translated code a write left standing -- in the
+        // diagnostics (`staleRegions`), formed again when they are asked for.
+        checkStale: false,
+        // Diagnostic: addresses in [from, to) are left to the interpreter.
+        interpretRange: /** @type {[number, number] | null} */ (null),
         // Batch modules published before the running regions are gathered into
         // big ones (0: never), and how many regions go into each of those:
         // a tail call into another module costs more the more modules there are,
@@ -876,7 +932,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
 
     /** @param {number} address */
     const translatable = address=>(pages.get(address >>> 12)
-        & (PageFlag.VOLATILE | PageFlag.INACCESSIBLE | PageFlag.NO_EXECUTE)) === 0;
+        & (PageFlag.VOLATILE | PageFlag.INACCESSIBLE | PageFlag.NO_EXECUTE)) === 0
+        // A diagnostic: a range left to the interpreter, to find which code a
+        // translation goes wrong in by halving it.
+        && !(settings.interpretRange && address >= settings.interpretRange[0]
+            && address < settings.interpretRange[1]);
 
     /**
      * Why the translator has no entry at an untranslated exit's target, the
@@ -2664,7 +2724,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 this.missAt(view().getUint32(layout.eip, true), view().getUint8(layout.x87Top),
                     code >>> 8 === HELD);
             }
-            if (kind === 'stale')
+            // Looked at whatever the run left by: a rep that stored into code and
+            // ran out of budget on a later page in bulk leaves by the budget, and
+            // the run that finishes it stores no code of its own.
+            if (kind === 'stale' || view().getUint32(layout.tables + Tables.STALE_END, true) !== 0)
             {
                 // Every page the run's stores into code reached, from the
                 // lowest of them to the highest.
@@ -2963,6 +3026,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 // Translated x87 status-word reads that may see what `precise`
                 // alone keeps: where a strange result is worth a run with it.
                 x87RelaxedReads: counts.x87RelaxedReads,
+                // With `checkStale`, the regions still published whose bytes no
+                // longer form as they did: translated code a write did not drop.
+                ...(settings.checkStale ? { staleRegions: [...regions]
+                    .filter(record=>formRegion(read, record.entry, { ...formOptions, translatable,
+                        ...(record.targets === undefined
+                            ? {} : { callTargets: new Map(record.targets) }) }).hash
+                        !== record.hash)
+                    .map(record=>`0x${record.entry.toString(16)}`) } : {}),
+                ...nanFirst(view(), layout),
                 stalls: [...stalls],
                 ...(import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.traceStore
                     ? { storeTrace } : {}),

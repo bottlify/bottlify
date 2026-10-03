@@ -2470,6 +2470,26 @@ test('with callReturn a region\'s control word reaches the callee, though the ca
     assert.deepEqual(called.state, plain.state);
 });
 
+test('with callReturn a value held on the x87 stack across a call to a callee that leaves the'
+    + ' stack alone is the value after it', async()=>{
+    // mov dword [0x3000], 3.0; mov dword [0x3104], 1.0; mov ecx, 100;
+    // L: fld dword [0x3000]; push 0; push 4; push 0x3100; call F; fsub dword [eax]; fchs;
+    // fstp dword [0x3000]; dec ecx; jnz L; hlt;
+    // F: mov eax, [esp + 4]; add eax, 4; ret 12 -- the first x87 instruction after the
+    // call reads ST0, which the caller loaded before it
+    const [plain, called] = await bothWays([
+        0xc7, 0x05, 0, 0x30, 0, 0, 0, 0, 0x40, 0x40,
+        0xc7, 0x05, 0x04, 0x31, 0, 0, 0, 0, 0x80, 0x3f,
+        0xb9, 100, 0, 0, 0,
+        0xd9, 0x05, 0, 0x30, 0, 0, 0x6a, 0, 0x6a, 0x04, 0x68, 0, 0x31, 0, 0,
+        0xe8, 0x0e, 0, 0, 0, 0xd8, 0x20, 0xd9, 0xe0, 0xd9, 0x1d, 0, 0x30, 0, 0,
+        0x49, 0x75, 0xdf, 0xf4,
+        0x8b, 0x44, 0x24, 0x04, 0x83, 0xc0, 0x04, 0xc2, 0x0c, 0,
+    ]);
+    assert.equal(plain.state[3], 0x40400000, 'a = 1 - a a hundred times from 3');
+    assert.deepEqual(called.state, plain.state);
+});
+
 test('with callReturn calls deeper than the stack of waiting calls go on as plain transfers',
     async()=>{
         // Mutual recursion 600 deep, past CallStack.LIMIT:
@@ -2497,3 +2517,137 @@ test('with callReturn calls deeper than the stack of waiting calls go on as plai
         assert.deepEqual(results[1], results[0]);
         assert.deepEqual(results[1].slice(1, 5), [0, 300, 299, 0x80000]);
     });
+
+test('under precise the first x87 NaN made from numbers, NaN result, stack fault, NaN load and '
+    + 'NaN store are noted with their instructions, and outside it nothing is', async()=>{
+    // fldz; fld st0; fdivp st1, st0 (0/0); fstp st0; fld1; fchs; fsqrt (of -1); fstp st0; hlt
+    const program = [0xd9, 0xee, 0xd9, 0xc0, 0xde, 0xf9, 0xdd, 0xd8, 0xd9, 0xe8, 0xd9, 0xe0,
+        0xd9, 0xfa, 0xdd, 0xd8, 0xf4];
+    const m = machine({ precise: true });
+    m.write(CODE, program);
+    new DataView(m.memory.buffer).setUint32(m.layout.eip, CODE, true);
+    await runToHalt(m);
+    const d = m.runtime.diagnostics();
+    // The 0/0 is a NaN result first, then one made (the helper's record after the guard's).
+    assert.deepEqual(d.nanFirst,
+        { eip: `0x${(CODE + 4).toString(16)}`, count: 2, order: 2, a: 0, c: 0 });
+    assert.deepEqual(d.nanResultFirst, { eip: `0x${(CODE + 4).toString(16)}`, count: 2, order: 1 });
+    assert.equal(d.stackFaultFirst, undefined);
+    assert.equal(d.nanStoreFirst, undefined, 'the NaNs were popped, never stored');
+    // fld st0 on an empty stack; fstp st0; hlt: the stack fault, its indefinite no NaN made.
+    const empty = machine({ precise: true });
+    empty.write(CODE, [0xd9, 0xc0, 0xdd, 0xd8, 0xf4]);
+    new DataView(empty.memory.buffer).setUint32(empty.layout.eip, CODE, true);
+    await runToHalt(empty);
+    assert.deepEqual(empty.runtime.diagnostics().stackFaultFirst, { eip: `0x${CODE.toString(16)}`,
+        count: 1, order: 1, region: `0x${CODE.toString(16)}`, entryTop: 0, empty: '0xff', top: 0 });
+    assert.equal(empty.runtime.diagnostics().nanFirst, undefined);
+    // fld dword [0x2000] of a quiet NaN; fstp st0; hlt: the load and where it read.
+    const loaded = machine({ precise: true });
+    loaded.write(CODE, [0xd9, 0x05, 0x00, 0x20, 0, 0, 0xdd, 0xd8, 0xf4]);
+    loaded.write(0x2000, [0, 0, 0xc0, 0x7f]);
+    new DataView(loaded.memory.buffer).setUint32(loaded.layout.eip, CODE, true);
+    await runToHalt(loaded);
+    assert.deepEqual(loaded.runtime.diagnostics().nanLoadFirst,
+        { eip: `0x${CODE.toString(16)}`, count: 1, order: 1, from: '0x2000' });
+    // fld1; fld1; fchs; fyl2x (1 * log2 -1, the host's Math); fstp st0; hlt
+    const log = machine({ precise: true });
+    log.write(CODE, [0xd9, 0xe8, 0xd9, 0xe8, 0xd9, 0xe0, 0xd9, 0xf1, 0xdd, 0xd8, 0xf4]);
+    new DataView(log.memory.buffer).setUint32(log.layout.eip, CODE, true);
+    await runToHalt(log);
+    assert.deepEqual(log.runtime.diagnostics().nanFirst,
+        { eip: `0x${(CODE + 6).toString(16)}`, count: 1, order: 1, a: 1, c: -1 });
+    // fld dword [0x2000]; fstp qword [0x2010]; hlt: the store and where it went.
+    const stored = machine({ precise: true });
+    stored.write(CODE, [0xd9, 0x05, 0x00, 0x20, 0, 0, 0xdd, 0x1d, 0x10, 0x20, 0, 0, 0xf4]);
+    stored.write(0x2000, [0, 0, 0xc0, 0x7f]);
+    new DataView(stored.memory.buffer).setUint32(stored.layout.eip, CODE, true);
+    await runToHalt(stored);
+    assert.deepEqual(stored.runtime.diagnostics().nanStoreFirst,
+        { eip: `0x${(CODE + 6).toString(16)}`, count: 1, order: 2, to: '0x2010' });
+    const loose = machine();
+    loose.write(CODE, program);
+    new DataView(loose.memory.buffer).setUint32(loose.layout.eip, CODE, true);
+    await runToHalt(loose);
+    assert.equal(loose.runtime.diagnostics().nanFirst, undefined);
+});
+
+test('a rep movs over several pages of translated code drops every page\'s regions, not only '
+    + 'the last one it wrote', async()=>{
+    for (const precise of [false, true])
+    {
+        const m = machine({ precise });
+        // A countdown loop on each of three pages, each translated: its region is the code
+        // a program overwrites, as a compiler of its own does when it compiles again over
+        // the code it compiled before.
+        const loops = [0x10000, 0x11000, 0x12000];
+        for (const at of loops)
+        {
+            m.write(at + 0x100, COUNTDOWN);
+            m.runtime.noteHot(at + 0x100);
+        }
+        // mov esi, 0x30000; mov edi, 0x10000; mov ecx, 0xc00; cld; rep movsd; hlt -- three
+        // pages of new bytes over the three, in one instruction.
+        const copier = 0x20000;
+        m.write(copier, [0xbe, 0, 0, 3, 0, 0xbf, 0, 0, 1, 0, 0xb9, 0, 0x0c, 0, 0, 0xfc,
+            0xf3, 0xa5, 0xf4]);
+        m.write(0x30000, new Array(0x3000).fill(0x90));
+        m.runtime.noteHot(copier);
+        await m.runtime.translatePending();
+        for (const at of loops)
+        {
+            assert.notEqual(m.runtime.entryOf(at + 0x100), -1, `the loop at ${at.toString(16)}`);
+        }
+        new DataView(m.memory.buffer).setUint32(m.layout.eip, copier, true);
+        // The host resumes the copy where an exit leaves it, as the slice loop does.
+        for (let turn = 0; turn < 16 && m.eip() < copier + 0x12; turn++)
+        {
+            const entry = m.runtime.entryOf(m.eip());
+            if (entry < 0)
+            {
+                m.runtime.noteHot(m.eip());
+                await m.runtime.translatePending();
+            }
+            m.runtime.run(m.runtime.entryOf(m.eip()), 1_000_000);
+        }
+        assert.ok(m.eip() >= copier + 0x12, 'the copy ran to its end');
+        assert.equal(m.reg(1), 0);
+        for (const at of loops)
+        {
+            assert.equal(m.runtime.entryOf(at + 0x100), -1,
+                `precise ${precise}: the loop at ${at.toString(16)}, overwritten, is dropped`);
+        }
+    }
+});
+
+test('a rep stos that stored into code and runs out of budget on a later page in bulk still '
+    + 'drops the code it wrote, the runtime looking at the note at that exit', async()=>{
+    const m = machine();
+    // A countdown loop translated at 0x10100; the copy starts on it and goes on through
+    // three plain pages, where it runs in bulk.
+    m.write(0x10100, COUNTDOWN);
+    m.runtime.noteHot(0x10100);
+    // mov edi, 0x10100; mov ecx, 0xfc0; xor eax, eax; cld; rep stosd; hlt
+    const copier = 0x20000;
+    m.write(copier, [0xbf, 0, 1, 1, 0, 0xb9, 0xc0, 0x0f, 0, 0, 0x31, 0xc0, 0xfc, 0xf3, 0xab,
+        0xf4]);
+    m.runtime.noteHot(copier);
+    await m.runtime.translatePending();
+    assert.notEqual(m.runtime.entryOf(0x10100), -1);
+    new DataView(m.memory.buffer).setUint32(m.layout.eip, copier, true);
+    // Enough for the elements on the loop's page one at a time, not for the bulk after.
+    const first = m.runtime.run(m.runtime.entryOf(copier), 960 + 40);
+    assert.equal(first.kind, 'budget', 'the budget ran out in the bulk part');
+    assert.ok(m.reg(1) > 0 && m.reg(7) > 0x11000, 'past the loop\'s page, the copy not done');
+    for (let turn = 0; turn < 8 && m.reg(1) !== 0; turn++)
+    {
+        if (m.runtime.entryOf(m.eip()) < 0)
+        {
+            m.runtime.noteHot(m.eip());
+            await m.runtime.translatePending();
+        }
+        m.runtime.run(m.runtime.entryOf(m.eip()), 1_000_000);
+    }
+    assert.equal(m.reg(1), 0, 'the copy finished');
+    assert.equal(m.runtime.entryOf(0x10100), -1, 'the loop it overwrote is dropped');
+});

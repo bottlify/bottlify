@@ -60,6 +60,8 @@
  *     its target, the last calls (`callTargets`); absent, no profile.
  * @property {number} [origin]     Cork's own: i32, the budget the current run started with,
  *     which the retired count is taken from when it leaves for the host.
+ * @property {number} [nanFirst]   Cork's own, outside the state block: under `precise`, a NaN
+ *     hunt's record (`NanRecord` in cork's emit/x87.js).
  * @property {number} tables       Wasm address of the engine's own tables.
  * @property {number} codePages    Wasm address of the other executor's byte-per-page
  *                                 "has compiled code" table (hybrid), or -1: a store into
@@ -288,6 +290,19 @@
  * @property {number} [x87RelaxedReads]  Translated x87 status-word reads (`fnstsw` into memory or
  *     into AX not read as C0 C2 C3 alone, `fnstenv`, `fnsave`) that may see the exception flags
  *     or C1, which only a `precise` run keeps: a strange result there is worth one.
+ * @property {{ eip: string, count: number, order: number, a: number, c: number }} [nanFirst]
+ *     Under `precise`: the first x87 NaN translated code made from numbers, its operands, how
+ *     many were made; `order` is its place among the first events of a NaN hunt, from 1.
+ * @property {{ eip: string, count: number, order: number, region: string, entryTop: number,
+ *     empty: string, top: number }} [stackFaultFirst]  Under `precise`: the first x87 stack fault
+ *     (an empty register read, a held one pushed onto), the region and the top it was entered at,
+ *     the empty mask and the top it found, and how many.
+ * @property {{ eip: string, count: number, order: number }} [nanResultFirst]  Under `precise`:
+ *     the first x87 arithmetic with a NaN result, made or carried from an operand, and how many.
+ * @property {{ eip: string, count: number, order: number, from: string }} [nanLoadFirst]  Under
+ *     `precise`: the first x87 float load that read a NaN, the guest address it read, how many.
+ * @property {{ eip: string, count: number, order: number, to: string }} [nanStoreFirst]  Under
+ *     `precise`: the first x87 float store of a NaN, the guest address it wrote, how many.
  * @property {[number, number, number, number][]} [blockCounts]  With `blockProfile`: every
  *     counted block as [address, executions, shared slot, the entry of a region it is in
  *     or -1], most executed first.
