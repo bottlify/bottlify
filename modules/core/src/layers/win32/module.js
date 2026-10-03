@@ -76,6 +76,7 @@ import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
 import { createIostreamFunctions } from './msvcirt/functions.js';
 import { formatToString } from './msvcrt/format.js';
 import { createDsetupFunctions } from './dsetup/functions.js';
+import { createDpnhpastFunctions } from './dpnhpast/functions.js';
 import { createSetupapiFunctions } from './setupapi/functions.js';
 import { createWintrustFunctions } from './wintrust/functions.js';
 import { createD3dxFunctions } from './d3dx9/functions.js';
@@ -1782,6 +1783,11 @@ export function createWin32Module(){
                 // The DirectX setup library a game's autorun asks for the
                 // installed runtime's version before it decides to install one.
                 'DSETUP.dll': createDsetupFunctions({ writeMemory, directx: directx?.version }),
+
+                // DirectX 8.1's DirectPlay NAT helper: a version check finds
+                // DirectX 8.1 by this library being there beside d3d8.dll.
+                'DPNHPAST.dll': createDpnhpastFunctions({ writeMemory,
+                    divergence: config?.divergence }),
 
                 // An installer's INF files, cabinets and file queues, over the
                 // volume every file call uses; a queue's notifications go to the
