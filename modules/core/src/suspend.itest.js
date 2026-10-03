@@ -14,11 +14,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
-
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[
@@ -84,14 +81,9 @@ function buildProgram(){
 
 test('a thread created suspended waits for ResumeThread, and one ended cannot be suspended',
     { timeout: 60000 }, async t=>{
-        const wasm = await readFile(new URL('v86.wasm', PREBUILT));
         const app = await createApp({
             executable: buildProgram(),
             imagePath: 'C:\\App\\Suspend.exe',
-            v86: {
-                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-            },
         });
         t.after(()=>app.dispose());
 

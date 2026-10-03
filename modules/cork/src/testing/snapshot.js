@@ -8,10 +8,9 @@
  * The machine, as something a program can observe, in one record: taken from
  * any host through the cpu layer's accessors, restorable, and diffable.
  *
- * Test support for the differential harness: an instruction is accepted when
- * the translator and the emulator leave the same record behind from the same
- * one, and a program is migrated when whole slices do. Nothing here runs in
- * the product.
+ * Test support for the differential harness: translated code is accepted
+ * when it leaves the same record behind as the instruction model from the
+ * same one. Nothing here runs in the product.
  *
  * What is compared, and what deliberately is not:
  *
@@ -45,7 +44,7 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  */
 
 /**
- * The host surface a snapshot needs. The cpu layer's emulator host has every
+ * The host surface a snapshot needs. The cpu layer's cork host has every
  * one of these; a fake in a unit test needs only these.
  *
  * @typedef {Object} SnapshotHost

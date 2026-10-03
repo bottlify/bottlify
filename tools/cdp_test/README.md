@@ -7,8 +7,12 @@ This folder is how the engine is put in front of a real browser with a real
 GPU, driven, and asked what happened.
 
 Nothing here is a unit test and nothing here is imported by a package. The
-scenarios serve `modules/core` from source (no build step) and need a bundle
-under `bundles/<id>/` (`bundle.btl` + `manifest.json`), which is not in the
+scenarios serve `modules/core` and the translator beside it (`modules/cork`)
+from source, with no build step, and the engine is cork: there is nothing to
+fetch first. The one prebuilt file a page reads is the optional video decoder,
+`modules/core/vendor/prebuilt/video-decoder.wasm` (`npm run fetch:video-decoder`);
+without it a title's films do not play. The title scenarios need a bundle under
+`bundles/<id>/` (`bundle.btl` + `manifest.json`), which is not in the
 repository; without one they say so and stop. A bundle mounts at `C:\App` in
 the guest, its files directly in that directory.
 
@@ -20,7 +24,7 @@ the guest, its files directly in that directory.
 | `frames.mjs` | lets a title settle, watches a window, reports what a frame costs and why | `npm run cdp:frames -- <bundle-id> [flags]` |
 | `launcher.mjs` | starts a title in the launcher the way a person does and profiles the page thread | `node tools/cdp_test/launcher.mjs <bundle-id> [flags]` (launcher running: `npm run ui`) |
 | `triangle.mjs` | the graphics acceptance scenario: a fixture draws a triangle, four pixels are compared byte for byte; `--graphics-worker pixels` draws it in the graphics worker (`bitmap`, its default way of sending frames back, makes headless SwiftShader lose the read-back's `mapAsync`) | `node tools/cdp_test/triangle.mjs [--graphics-worker pixels]` |
-| `probe.mjs` / `cli.mjs` | the Phase 0 acceptance probe: browser, page, worker, ping, screenshot | `npm run cdp:probe` |
+| `probe.mjs` / `cli.mjs` | the acceptance probe: browser, page, worker, ping, screenshot | `npm run cdp:probe` |
 | `browser.mjs` | finds and launches a Chromium with a CDP endpoint | library |
 | `cdp.mjs` | a minimal CDP client over WebSocket | library |
 | `server.mjs` | a static server for the sandbox pages, the sources and a bundle | library |
@@ -61,10 +65,10 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--screen WxH` | 640x480 | the display the program is told it has. The launcher names the person's own screen, which is rarely a size a program of this era lists, and what a title does on one is a path of its own |
 | `--run-seconds N` | off | how long the engine itself runs before it stops and reports. A title that reaches its loop runs out the turns hours later; this ends the run while the page can still be asked |
 | `--snap-frame N` | off | the frame presented N frames after the last stall of 1.5 s or more, written as `game-<stamp>-snap.png` and taken again after any later stall; with `--snap-count C --snap-every K`, C frames K apart from it, each also as `-snap-<frame>.png` -- a series tells a scene that changes by itself from one drawn wrong |
-| `--keep-images N,M` | off | the texels of those uncompressed OpenGL uploads (indices as the report's `imageDigests` count them) written as `game-<stamp>-image-<N>.png` -- what shows how two engines' images differ once their digests say they do |
+| `--keep-images N,M` | off | the texels of those uncompressed OpenGL uploads (indices as the report's `imageDigests` count them) written as `game-<stamp>-image-<N>.png` -- what shows how two runs' images differ once their digests say they do |
 | `--no-hooks` | off | leave the bundle's `hooks.json`/`hooks.mjs` unbound, so two runs differ by the hooks and nothing else |
-| `--snap-from-start` | off | count `--snap-frame` from the first presented frame instead of the last stall: a program whose clock steps once per frame (Doom 3's `com_fixedTic 1`) is then caught at the same game moment on two engines whose stalls differ |
-| `--steady-frames N` | off | the log's frame averages (frame, guest, host, over its last 240 frames) taken once N frames came after the last stall of 1.5 s or more, printed as `steady`. For a program that advances one step a frame and is given no input (Doom 3's `com_fixedTic 1`) those are the same frames of play in every run, so the guest milliseconds of two builds compare; a load draws a few hundred frames of its own before the map, so N is taken past them |
+| `--snap-from-start` | off | count `--snap-frame` from the first presented frame instead of the last stall: a program whose clock steps once per frame is then caught at the same moment in two runs whose stalls differ |
+| `--steady-frames N` | off | the log's frame averages (frame, guest, host, over its last 240 frames) taken once N frames came after the last stall of 1.5 s or more, printed as `steady`. For a program that advances one step a frame and is given no input those are the same frames of play in every run, so the guest milliseconds of two builds compare; a load draws a few hundred frames of its own before the map, so N is taken past them |
 | `--series N` | off | a row every N presents: the log's frame, host and guest milliseconds averaged over those frames, and the draws the backend encoded, the host calls the bridge dispatched and the bytes uploaded, per frame -- so per draw too. Printed as `frame series` and written as `game-<stamp>-series.json`. How a frame's cost moves with what it draws shows here and nowhere in a run's totals; each row reads every layer's diagnostics once, so a window of fewer than about thirty presents measures that as well |
 | `--cpu-profile N` | off | with `--worker`: the browser's own sampling profiler on the engine's workers for N seconds from the start (or until the run ends). The report gets self time by file and by function -- a translated region is a function named by its address (`r004ea329`), the interpreter, the runtime and the layers are their own functions -- and the raw `.cpuprofile` lands beside the report for the browser's Performance panel. This is how "translated code is slow" is told apart from "the interpreter is slow" or "the runtime is" |
 | `--profile-calls` | off | every host call timed as a phase of its own, so the phase table says which API a frame's host time went to rather than only that it went to the crossing |
@@ -84,7 +88,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--graphics-config JSON` | none | fields of the graphics layer's configuration (`docs/core/configuration.md`, graphics) merged into `createApp`'s `graphics` option: `--graphics-config '{"compressedTextures":true}'` turns the block-compressed upload path on for one run |
 | `--audio-config JSON` | none | fields of the audio layer's configuration merged into `createApp`'s `audio` option: `--audio-config '{"mp3":false}'` runs the program's own MP3 decoder instead of the hosted one, an A/B of the two |
 | `--capture-audio FROM:TO` | off | what the sound device mixed from FROM to TO seconds of the run, written as `game-<stamp>-audio.wav` (16-bit stereo at the device rate). With `--worker --coi` the device runs on the page, off the engine's thread, as a launcher's worklet does -- so a program the engine cannot keep fed is heard, and counted in the audio layer's `staleBytes`, as it is in the launcher |
-| `--entry PATH` | the manifest's | another program of the bundle to start: `--entry war3.exe` with `--command-line '"C:\App\war3.exe" -loadfile <map>'` starts a map directly |
+| `--entry PATH` | the manifest's | another program of the bundle to start, with `--command-line` for its arguments: `--entry tool.exe --command-line '"C:\App\tool.exe" -x'` |
 | `--trace` | off | peek every pointer argument of every host call for a string. Off by default: a title's draws pay for it and a measurement run should not without asking |
 | `--hook SPEC` | none | a watch in front of a routine inside one of the program's own modules, `module:offset:label:argBytes:len,len[:what+what]` as the launcher's `?hook=` takes it (instruction lengths from a disassembly; no relative branch among them). Each call goes to `--log`, and its answer as `label -> result ...` with what `what` named: a stack slot or `ecx`/`edx` read as a C string, `ecx*104` as that many bytes of the object, `[ecx.88]*64` as the bytes of the object a field points at, `@hex` for an absolute address. Repeatable |
 | `--worker` | page thread | run the engine in a worker with the page's canvas transferred to it, which is how the launcher runs it |
@@ -94,10 +98,10 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--port N` | random | fixes the static server's port, so `http://127.0.0.1:<port>` -- the origin OPFS is scoped to -- is the same origin every run. Pair with `--user-data-dir` for a warm store to survive between separate invocations of this tool; without a fixed port each run is a different origin no matter which profile it opens |
 | `--store local` | none (nothing kept) | fetched bundle blocks are cached in OPFS instead of thrown away with the page. Requires `--worker` (only a worker can open OPFS synchronously) and, to survive to a later run, `--user-data-dir` and `--port` held fixed |
 | `--prefetch` | off | with `--store local`: fill the rest of the cache from the bundle in the background beyond whatever the run itself reads, for a fuller warm-up between runs at the cost of the bandwidth to do it |
-| `--export-translations FILE` | off | once the run ends, what the translator made of the title (`app.exportTranslations()`, the store kept to what its lookups can reach) is written to FILE as the seed a bundle carries; `node tools/make-btl.mjs translations <bundle-id> FILE` puts it into the bundle, so every first run of it starts from those translations. Needs a translating `--engine`; the store is the origin's file system (`--worker` for its synchronous handles), so a run on a kept profile (`--user-data-dir`, `--port`) exports what earlier runs made as well |
+| `--export-translations FILE` | off | once the run ends, what the translator made of the title (`app.exportTranslations()`, the store kept to what its lookups can reach) is written to FILE as the seed a bundle carries; `node tools/make-btl.mjs translations <bundle-id> FILE` puts it into the bundle, so every first run of it starts from those translations. The store is the origin's file system (`--worker` for its synchronous handles), so a run on a kept profile (`--user-data-dir`, `--port`) exports what earlier runs made as well |
 
-The run is headless and always on a fresh profile. The browser flags it needs
-are in `browser.mjs` (below).
+The run is headless, on a fresh profile unless `--user-data-dir` names one.
+The browser flags it needs are in `browser.mjs` (below).
 
 ## `live/` -- watching a title a person is playing
 
@@ -147,11 +151,9 @@ A frame is counted where the engine presents.
 | `--settle N` | 20 | how long to let it start first; measuring through loading measures loading |
 | `--video` | off | keep the decoder (a cinematic is minutes long and is not the steady state) |
 | `--profile` | off | sample the guest's instruction pointer once a turn |
-| `--exact` | off | the emulator's own account instead: every compiled block counts itself |
 | `--allocations` | off | sample what the engine allocates in the window, by the function that allocated it |
 | `--quantum N` | engine default | guest instructions per scheduler turn -- the one number that decides how long a thread may hold the machine |
 | `--no-trace` | trace on | without the per-call string peeks, which read guest memory on every host call |
-| `--jit i=v,...` | off | the emulator's compiler budgets by index |
 
 ## `launcher.mjs` -- the launcher path, profiled
 
@@ -236,8 +238,8 @@ presented last, which a page screenshot of the WebGPU canvas does not show.
 compared over the same frames rather than the same seconds with
 `node tools/frame-span.mjs <presents.json>... [--skip N] [--frames N]`: the span
 starts after the load's last long stall, and for a program whose simulation
-advances one step a frame (Doom 3's `com_fixedTic 1`) and is given no input it
-is the same work in every run. With `--cpu-profile`, the report also says how
+advances one step a frame and is given no input it is the same work in every
+run. With `--cpu-profile`, the report also says how
 many frames were presented inside the profile's window and how long each took,
 so the profile's milliseconds divide into a frame's. Runs on one machine vary by
 a quarter from one to the next: a difference is only a measurement across
@@ -277,33 +279,19 @@ Reading it:
 The page's report reads the last frame back, and that read waits until the
 device has finished every frame queued before it. A present waits for the
 device once it is the graphics layer's bound of frames behind
-(`maxFrameLatency`, three by default; `docs/core/configuration.md`, graphics),
-so the queue holds a few frames and the report answers soon after
-the run: on a software adapter (SwiftShader, which is what a machine without
-a GPU hands out) the program then goes at the device's pace, which is several
-times slower than it would present. Measured with the engine in a worker and
-the browser on the same two cores, Doom 3's timed demo ran at 2.2 to 3.1
-frames a second by the wall clock and its report answered 1.0 to 2.7 s after
-the run. With the bound off (`--graphics-config '{"maxFrameLatency":0}'`),
-as it was before there was one, the program presents 15.4 to 16.4 frames a
-second while the device finishes 1.7 to 3.3, a run whose program has long
-stopped still has minutes of frames queued -- the report answered 53 to
-118 s after a 58 s run -- and a `--wait` shorter than that ends in `the page
-did not answer`. The whole takes about as long either way, the device being
-what sets it: one run each of this tool, the demo's run lasting 61.3 s
-before the bound and 115.5 s with it, answered 117.0 and 116.6 s after the
-start. The result is read a piece at a time, since a run's is larger than one
-answer carries -- Doom 3's is 6 MB, and a 4 MB answer closed the connection
-where 2 MB did not.
+(`maxFrameLatency`, three by default; `docs/core/configuration.md`,
+graphics), so the report answers soon after the run. On a software adapter
+(SwiftShader, what a machine without a GPU hands out) the program then goes
+at the device's pace, several times slower than it would present. With the
+bound off (`--graphics-config '{"maxFrameLatency":0}'`) the program presents
+faster than the device finishes, a run whose program has stopped can still
+have minutes of frames queued, and a `--wait` shorter than that drain ends in
+`the page did not answer`. The result is read a piece at a time, since a
+run's is larger than one answer carries.
 
 So bound the run -- `--run-seconds`, or a scene that ends by itself, such as a
 title's own timed demo that quits when done -- and give `--wait` the run plus
-its drain, which the program's own pace now includes. Doom 3's demo build
-reads a demo file only with `fs_restrict` off:
-`--file <bench.demo>=C:\App\demo\demos\bench.demo --command-line
-'"C:\App\Doom3.exe" +set fs_restrict 0 +set logFile 2 +timeDemoQuit bench'`
-plays every frame of it, writes `frames rendered in ... = ... fps` (on the
-guest's clock) to `qconsole.log` and exits. While it waits, the driver says how far behind the device is every
+its drain. While it waits, the driver says how far behind the device is every
 30 s once the oldest unfinished submit is five seconds old, and a timeout's
 reason ends with the same count (`device-lag.mjs` wraps `GPUQueue.submit` in
 the realm the engine runs in, the page or its worker); a report that did
@@ -312,17 +300,16 @@ the device and for how long in all.
 
 ## `../host-call-bench.mjs` -- what a call into an import costs
 
-`node tools/host-call-bench.mjs [N] [--rounds R] [--call SPEC]... [--engine cork|emulator]
-[--root DIR] [--baseline DIR] [--json]` runs, in node, a program that calls an import N times
-(1 000 000 by default) against the same loop with the call's pushes and pops but no call, and
-prints the difference over N: for a host handler one call out of translated code into the host
-and back, for an import that is code in the guest's own library that code. A SPEC is
-`DLL!name(arg,...)[:st0][@cdecl|@stdcall]`, each argument `s:text` (a pointer to the string,
-`s:"a,b"` with a comma), `b:N` (a pointer to N zeroed bytes), `i:N` (a dword), `d:X` (a double,
-two slots), `x:X` (a double on the x87 stack, for `_ftol`) or `c:` (a pointer to a cdecl
-comparator of two signed dwords in the program's own code, for `qsort` and `bsearch`); `:st0`
-pops a double result; the
-convention is cdecl for the C runtimes and stdcall otherwise unless one is named. Several
+`node tools/host-call-bench.mjs [N] [--rounds R] [--call SPEC]... [--root DIR] [--baseline DIR]
+[--json]` runs, in node, a program that calls an import N times (1 000 000 by default) against
+the same loop with the call's pushes and pops but no call, and prints the difference over N: for
+a host handler one call out of translated code into the host and back, for an import that is
+code in the guest's own library that code. A SPEC is `DLL!name(arg,...)[:st0][@cdecl|@stdcall]`,
+each argument `s:text` (a pointer to the string, `s:"a,b"` with a comma), `b:N` (a pointer to N
+zeroed bytes), `i:N` (a dword), `d:X` (a double, two slots), `x:X` (a double on the x87 stack,
+for `_ftol`) or `c:` (a pointer to a cdecl comparator of two signed dwords in the program's own
+code, for `qsort` and `bsearch`); `:st0` pops a double result; the convention is cdecl for the C
+runtimes and stdcall otherwise unless one is named. Several
 `--call`s are timed in one run; each is timed in every round, in turn with its loop, and printed
 as the median over the rounds with the spread and the bridge's count of host calls -- some
 imports never cross (`GetLastError` runs in the guest's kernel32, `strncmp` in its msvcrt), and a

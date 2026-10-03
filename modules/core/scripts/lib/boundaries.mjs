@@ -11,10 +11,10 @@ import { dirname, join, normalize, resolve, sep } from 'node:path';
  * Packages that implement the cpu layer's executor contract.
  *
  * The core loads one of them by a module URL in its configuration when a
- * launch selects it, and must run with every one of them absent -- a launch
- * that selects the vendored emulator needs no translator installed. So no
- * file under the core's `src/` may import one: the dependency would make the
- * optional engine a required one, and the boundary checker refuses it.
+ * launch selects it, and builds, checks and assembles its graph with every
+ * one of them absent. So no file under the core's `src/` may import one: the
+ * dependency would make an engine loaded by URL a static one, and the
+ * boundary checker refuses it.
  */
 export const ENGINE_PACKAGES = Object.freeze(['@bottlify/cork']);
 
@@ -200,7 +200,8 @@ function walk(dir){
  *
  * @param {Object} tree
  * @param {string} tree.src  The package's `src/`.
- * @param {string} tree.vendor  Its `vendor/`, reachable from the cpu layer alone.
+ * @param {string} tree.vendor  Its `vendor/`: binaries the root of src reaches by URL, and
+ *     that nothing imports.
  * @param {Map<string, Set<string>>} tree.requires  Each layer's declared `requires`.
  * @returns {{ files: string[], issues: string[] }}
  */
@@ -244,8 +245,7 @@ export function findBoundaryIssues({ src, vendor, requires }){
             {
                 continue;
             }
-            const allowed = kind === 'root' || (layer === 'cpu' && target.startsWith(vendor + sep));
-            if (!allowed)
+            if (kind !== 'root')
             {
                 issues.push(`${file} reaches outside src by URL (${url})`);
             }
@@ -276,11 +276,8 @@ export function findBoundaryIssues({ src, vendor, requires }){
             const target = resolve(dirname(file), spec);
             if (target.startsWith(vendor + sep))
             {
-                if (layer !== 'cpu')
-                {
-                    issues.push(`${file} imports vendor (${spec}): `
-                        + 'vendor is reachable only from layers/cpu');
-                }
+                issues.push(`${file} imports vendor (${spec}): vendor holds binaries the `
+                    + 'root of src reaches by URL, and nothing imports it');
                 continue;
             }
             if (!target.startsWith(src + sep))

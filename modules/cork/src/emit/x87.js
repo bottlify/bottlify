@@ -1813,11 +1813,50 @@ export function emitX87(e, instruction, flagsLive){
     };
 
     /**
+     * Two NaN operands' result into `x.temp3`, chosen as the x87 chooses it --
+     * a quiet one over a signalling one, then the larger significand, then the
+     * positive, quieted (the model's `twoNaN`) -- where the host's operation
+     * keeps whichever its operand order put first.
+     *
+     * @param {number} a @param {number} c  the locals holding the operands
+     */
+    const twoNaN = (a, c)=>{
+        const bitsOf = (/** @type {number} */ local)=>b.localGet(local).op(I64.reinterpretF64);
+        const quietOf = (/** @type {number} */ local)=>bitsOf(local)
+            .i64const(0x0008000000000000n).op(I64.and).i64const(0n).op(I64.ne);
+        const fractionOf = (/** @type {number} */ local)=>bitsOf(local)
+            .i64const(0x000fffffffffffffn).op(I64.and);
+        b.localGet(a).localGet(a).op(F64.ne);
+        b.localGet(c).localGet(c).op(F64.ne);
+        b.op(I32.and);
+        e.openGuard('twoNaN', EMPTY);
+        bitsOf(a);
+        bitsOf(c);
+        quietOf(a);
+        fractionOf(a);
+        fractionOf(c);
+        b.op(I64.gtU);
+        bitsOf(a).i64const(0n).op(I64.ltS).op(I32.eqz);
+        fractionOf(a);
+        fractionOf(c);
+        b.op(I64.ne);
+        b.select();
+        quietOf(a);
+        quietOf(c);
+        b.op(I32.ne);
+        b.select();
+        b.select();
+        b.i64const(0x0008000000000000n).op(I64.or).op(F64.reinterpretI64).localSet(x.temp3);
+        e.close();
+    };
+
+    /**
      * The result on the stack, a NaN the operation itself made given the
      * processor's sign: x86 hands out the negative indefinite, a host whose
      * default NaN is positive hands out the other, and the corpus tells
      * them apart through a store. A NaN that came in as an operand is
-     * propagated as it was.
+     * propagated as it was; under `precise`, of two the x87's choice
+     * (`twoNaN`).
      *
      * With `invalid`, the same NaN out of operands that were not raises IE
      * too: the arithmetic's invalid operation, found by the one compare.
@@ -1841,7 +1880,8 @@ export function emitX87(e, instruction, flagsLive){
             invalid = false;
             memory = null;
         }
-        if (!fix && !invalid && memory === null)
+        const choose = precise && inputs.length > 1;
+        if (!fix && !invalid && memory === null && !choose)
         {
             return;
         }
@@ -1849,6 +1889,10 @@ export function emitX87(e, instruction, flagsLive){
         b.localSet(x.temp3);
         b.localGet(x.temp3).localGet(x.temp3).op(F64.ne);
         e.openGuard('nan', EMPTY);
+        if (choose)
+        {
+            twoNaN(inputs[0], inputs[1]);
+        }
         if (!fix && invalid)
         {
             // The rare branch as one call, so the hot path around it stays

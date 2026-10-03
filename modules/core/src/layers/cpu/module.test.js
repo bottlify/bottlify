@@ -95,30 +95,19 @@ test('an engine a launch may select is named, and one that is not is refused', a
         'cork is built and reports before boot');
     await cpuModule.dispose();
 
-    await assert.rejects(cpuModule.create({ engine: 'hybrid' }, /** @type {any} */ ({
-        requireApi: ()=>({}), provide: ()=>{},
-    })), { message: 'cpu: unknown engine "hybrid" (emulator, cork)' }, 'hybrid is gone');
-
     await open();
     assert.equal(cpuModule.diagnostics().metrics?.engine, 'cork', 'the default');
     await cpuModule.dispose();
 });
 
-test('an engine that needs the emulator says so when the launch passes none', async()=>{
-    // Since 5.5 the emulator is an optional layer: a build may carry none of
-    // it, and a launch that selects it is told the layer is missing rather
-    // than failing deeper on an absent file.
-    for (const engine of ['emulator'])
-    {
-        const api = await cpuModule.create({ engine }, /** @type {any} */ ({
-            requireApi: ()=>({}), provide: ()=>{},
-        }));
-        await assert.rejects(api.boot(), {
-            message: `cpu: the emulator is not available in this build`
-                + ` (engine "${engine}" needs it)`,
-        });
-        await cpuModule.dispose();
-    }
+test('the emulator says it is not installed when the launch passes none', async()=>{
+    // The package carries no emulator: a launch that selects it is told so
+    // rather than failing deeper on an absent file.
+    const api = await cpuModule.create({ engine: 'emulator' }, /** @type {any} */ ({
+        requireApi: ()=>({}), provide: ()=>{},
+    }));
+    await assert.rejects(api.boot(), { message: /^cpu: the emulator is not installed/ });
+    await cpuModule.dispose();
 });
 
 test('diagnostics answers for the live instance', async()=>{

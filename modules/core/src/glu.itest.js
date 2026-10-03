@@ -9,7 +9,7 @@
  * gluPerspective, gluLookAt, gluOrtho2D and gluPickMatrix each over the
  * identity, read back with glGetDoublev; gluProject, gluUnProject and
  * gluUnProject4 of a point; gluCheckExtension, gluErrorString and a quadric
- * drawn -- under cork and under the emulator. The matrices are held to the
+ * drawn. The matrices are held to the
  * arithmetic's source (the program runs under the control word a process
  * starts with, where the x87 computes in doubles as JavaScript does), and
  * none of the arithmetic's exports crosses into the host: only the GL calls
@@ -18,7 +18,6 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 import {
@@ -26,8 +25,6 @@ import {
 } from '../../../tools/gl-program.mjs';
 import { guestMemory } from './layers/win32/msvcrt/guest-code.js';
 import * as glu from './layers/graphics/glu/inguest.js';
-
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 
 const GL_MODELVIEW = 0x1700;
 const GL_PROJECTION = 0x1701;
@@ -124,18 +121,11 @@ function u32le(value){
     return [value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 }
 
-/** @param {'cork' | 'emulator'} engine */
-async function run(engine){
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
+async function run(){
     const app = await createApp({
         executable: program(),
-        engine,
         // Drawn on the processor with nothing rasterised: the state is what is read back.
         graphics: /** @type {any} */ ({ raster: false }),
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
     });
     /** @type {string[]} */
     const output = [];
@@ -184,40 +174,37 @@ function expected(){
     };
 }
 
-for (const engine of /** @type {const} */ (['cork', 'emulator']))
-{
-    test(`GLU32 through the import, under ${engine}`, { timeout: 120000 }, async()=>{
-        const { out, crossed } = await run(engine);
-        const view = new DataView(out.buffer);
-        /** @param {number} at @param {number} [count] */
-        const doubles = (at, count = 16)=>Array.from({ length: count },
-            (_, i)=>view.getFloat64(at + i * 8, true));
-        const want = expected();
-        /** Zeros of either sign alike: the product with the identity keeps no sign of zero. */
-        const same = (/** @type {number[]} */ got, /** @type {number[]} */ wanted, /** @type {string} */ what)=>
-            assert.deepEqual(got.map(v=>v + 0), wanted.map(v=>v + 0), what);
-        same(doubles(OUT.perspective), want.perspective, 'gluPerspective over the identity');
-        const look = doubles(OUT.lookAt);
-        same(look.slice(0, 12), want.lookAt.slice(0, 12), 'gluLookAt\'s rotation');
-        for (let row = 0; row < 3; row++)
-        {
-            const moved = want.lookAt[row] * want.eye[0] + want.lookAt[4 + row] * want.eye[1]
-                + want.lookAt[8 + row] * want.eye[2];
-            assert.ok(Math.abs(look[12 + row] - moved) < 1e-12, 'and its translation');
-        }
-        same(doubles(OUT.ortho), want.ortho, 'gluOrtho2D');
-        same(doubles(OUT.pick), want.pick, 'gluPickMatrix');
-        const results = [0, 1, 2, 3].map(i=>view.getUint32(OUT.results + i * 4, true));
-        assert.deepEqual(results, [1, 1, 1, 1], 'project, unproject, unproject4, the extension');
-        const win = doubles(OUT.project, 3);
-        assert.ok(win[0] > 10 && win[0] < 650 && win[2] > 0 && win[2] < 1, `${win}`);
-        const text = new TextDecoder().decode(out.subarray(OUT.error, OUT.error + 17));
-        assert.equal(text, 'invalid enumerant');
-        for (const name of ['gluPerspective', 'gluLookAt', 'gluOrtho2D', 'gluPickMatrix',
-            'gluProject', 'gluUnProject', 'gluUnProject4', 'gluCheckExtension'])
-        {
-            assert.equal(crossed.get(`GLU32.dll!${name}`) ?? 0, 0, `${name} stays in the guest`);
-        }
-        assert.ok((crossed.get('GLU32.dll!gluSphere') ?? 0) > 0, 'the quadric is the host\'s');
-    });
-}
+test(`GLU32 through the import`, { timeout: 120000 }, async()=>{
+    const { out, crossed } = await run();
+    const view = new DataView(out.buffer);
+    /** @param {number} at @param {number} [count] */
+    const doubles = (at, count = 16)=>Array.from({ length: count },
+        (_, i)=>view.getFloat64(at + i * 8, true));
+    const want = expected();
+    /** Zeros of either sign alike: the product with the identity keeps no sign of zero. */
+    const same = (/** @type {number[]} */ got, /** @type {number[]} */ wanted, /** @type {string} */ what)=>
+        assert.deepEqual(got.map(v=>v + 0), wanted.map(v=>v + 0), what);
+    same(doubles(OUT.perspective), want.perspective, 'gluPerspective over the identity');
+    const look = doubles(OUT.lookAt);
+    same(look.slice(0, 12), want.lookAt.slice(0, 12), 'gluLookAt\'s rotation');
+    for (let row = 0; row < 3; row++)
+    {
+        const moved = want.lookAt[row] * want.eye[0] + want.lookAt[4 + row] * want.eye[1]
+            + want.lookAt[8 + row] * want.eye[2];
+        assert.ok(Math.abs(look[12 + row] - moved) < 1e-12, 'and its translation');
+    }
+    same(doubles(OUT.ortho), want.ortho, 'gluOrtho2D');
+    same(doubles(OUT.pick), want.pick, 'gluPickMatrix');
+    const results = [0, 1, 2, 3].map(i=>view.getUint32(OUT.results + i * 4, true));
+    assert.deepEqual(results, [1, 1, 1, 1], 'project, unproject, unproject4, the extension');
+    const win = doubles(OUT.project, 3);
+    assert.ok(win[0] > 10 && win[0] < 650 && win[2] > 0 && win[2] < 1, `${win}`);
+    const text = new TextDecoder().decode(out.subarray(OUT.error, OUT.error + 17));
+    assert.equal(text, 'invalid enumerant');
+    for (const name of ['gluPerspective', 'gluLookAt', 'gluOrtho2D', 'gluPickMatrix',
+        'gluProject', 'gluUnProject', 'gluUnProject4', 'gluCheckExtension'])
+    {
+        assert.equal(crossed.get(`GLU32.dll!${name}`) ?? 0, 0, `${name} stays in the guest`);
+    }
+    assert.ok((crossed.get('GLU32.dll!gluSphere') ?? 0) > 0, 'the quadric is the host\'s');
+});

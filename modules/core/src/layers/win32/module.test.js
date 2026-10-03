@@ -273,6 +273,23 @@ test('the KnownDLLs are the ones Windows never searches beside the program', asy
     await win32Module.dispose();
 });
 
+test('the D3DX helpers are the redistributables, and Windows\' own libraries are not', async()=>{
+    // A bottle carries what an installation put in system32 except the
+    // libraries the engine synthesises as Windows' own; these are the ones a
+    // setup installs, whose table is only the fallback.
+    const api = await win32Module.create({}, stubHost());
+    const redistributable = api.redistributables();
+    assert.equal(redistributable.length, 20);
+    assert.ok(redistributable.includes('d3dx9_24.dll') && redistributable.includes('d3dx9_43.dll'));
+    for (const name of redistributable)
+    {
+        assert.ok(name in api.libraries(), `${name} has a table`);
+    }
+    assert.ok(!redistributable.some((/** @type {string} */ name)=>/^(kernel32|user32|d3d9)/i
+        .test(name)));
+    await win32Module.dispose();
+});
+
 test('shfolder is the shell folder call under the name a program linked against', async()=>{
     // The library Windows ships with exactly two exports, both forwarders.
     // A program that imported SHGetFolderPathA from it has to get shell32's

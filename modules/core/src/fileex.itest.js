@@ -16,11 +16,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
-
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[
@@ -126,15 +123,10 @@ function buildProgram(){
 
 test('ReadFileEx and WriteFileEx finish through a routine run at an alertable wait',
     { timeout: 60000 }, async t=>{
-        const wasm = await readFile(new URL('v86.wasm', PREBUILT));
         const app = await createApp({
             executable: buildProgram(),
             imagePath: 'C:\\App\\FileEx.exe',
             files: [{ path: 'C:\\App\\data.bin', bytes: new TextEncoder().encode('abcdef') }],
-            v86: {
-                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-            },
         });
         t.after(()=>app.dispose());
 

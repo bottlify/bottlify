@@ -358,3 +358,23 @@ test('a range covers only the blocks it touches', async()=>{
     assert.deepEqual(bundle.rangesFor(file, 10, 0), []);
     assert.equal(bundle.blockSize, BLOCK_SIZE);
 });
+
+test('a relocated directory appears where it is mapped, outside the prefix', async()=>{
+    const bundle = await open();
+    const source = createBundleSource({
+        bundle, readBlock: blockReader().readBlock, decode: decodeBlock, prefix: 'App',
+        relocate: { 'game\\DATA': 'WINDOWS\\system32' },
+    });
+    const notes = CONTENT['Game\\Data\\Notes.txt'];
+
+    same(source.read('WINDOWS\\system32\\Notes.txt', 0, notes.length), notes,
+        'found by the case it is mapped to, whatever case named it');
+    assert.equal(source.stat('App\\Game\\Data\\Notes.txt'), null, 'and not where it lay');
+    assert.deepEqual(source.stat('App\\Game\\Ramp.dat'),
+        { directory: false, size: CONTENT['Game\\Ramp.dat'].length }, 'the rest under the prefix');
+    assert.deepEqual(source.stat('WINDOWS\\system32'), { directory: true, size: 0 });
+    const paths = source.list().map(entry=>entry.path);
+    assert.ok(paths.includes('WINDOWS') && paths.includes('WINDOWS\\system32'),
+        'the directories it is mapped into are listed');
+    assert.ok(!paths.some(path=>/data/i.test(path)), 'nothing is left at the old place');
+});

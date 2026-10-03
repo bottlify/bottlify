@@ -7,21 +7,18 @@
 /**
  * The differential driver: one slice, two executors, one diff.
  *
- * From one machine state, the oracle (the emulator) retires a given number
- * of instructions and its state is recorded; the state is put back and the
- * subject (the translator, or in the harness's own proof the emulator again)
- * retires the same number; the two records are compared. This is how an
- * instruction is accepted and how a program is migrated: a region of
- * translated code is not done until it agrees with the oracle on every
- * register, every flag a program can read, the x87 block and every memory
- * word written.
+ * From one machine state, the oracle retires a given number of instructions
+ * and its state is recorded; the subject is put in the same state and retires
+ * the same number; the two records are compared. A region of translated code
+ * is not done until it agrees with the oracle on every register, every flag a
+ * program can read, the x87 block and every memory word written.
  *
- * Both executors share one host in hybrid mode -- one register file, one
- * memory -- so the driver never copies a machine: it snapshots, runs,
- * snapshots, restores, runs, snapshots. The memory spans in the record are
- * the caller's to name; from the translator's own steps on they come from
- * the subject's undo log, and in the harness's proof they are the corpus
- * case's data area and stack.
+ * Each executor is restored and read through its own host, so the two may be
+ * separate machines -- the interpreter running the instruction model, and the
+ * translator over a host of its own -- or one host run twice. The oracle's
+ * record is taken before the subject runs, so on one host the second run
+ * cannot overwrite the first's. The memory spans compared are the caller's to
+ * name.
  */
 
 import { compare, restore, snapshot } from './snapshot.js';
@@ -51,18 +48,32 @@ export function retireExactly(step, halted, instructions){
 }
 
 /**
- * @typedef {Object} Executor
- * @property {(instructions: number) => number} step
- * @property {() => boolean} halted
- * @property {() => void} wake
+ * An executor over the host its state is restored into and read from.
+ *
+ * @typedef {import('./snapshot.js').SnapshotHost & {
+ *     step: (instructions: number) => number,
+ *     halted: () => boolean,
+ *     wake: () => void,
+ * }} Executor
  */
 
 /**
+ * Puts `state` into the executor's host and runs it for `instructions`.
+ *
+ * @param {Executor} executor
+ * @param {import('./snapshot.js').MachineState} state
+ * @param {number} instructions
+ */
+function replay(executor, state, instructions){
+    restore(executor, state);
+    executor.wake();
+    return retireExactly(executor.step, executor.halted, instructions);
+}
+
+/**
  * @param {Object} run
- * @param {import('./snapshot.js').SnapshotHost & Executor} run.oracle
- *     The reference executor, whose host is where the state lives.
- * @param {Executor} run.subject
- *     The executor under test, over the same host.
+ * @param {Executor} run.oracle   The reference executor: its record is the expected one.
+ * @param {Executor} run.subject  The executor under test.
  * @param {import('./snapshot.js').MachineState} run.state  The common start.
  * @param {number} run.instructions   How many both must retire.
  * @param {{ address: number, length: number }[]} run.spans  Memory compared afterwards.
@@ -73,15 +84,11 @@ export function retireExactly(step, halted, instructions){
  *     subjectState: import('./snapshot.js').MachineState }}
  */
 export function replaySlice({ oracle, subject, state, instructions, spans, compare: options = {} }){
-    restore(oracle, state);
-    oracle.wake();
-    const retiredOracle = retireExactly(oracle.step, oracle.halted, instructions);
+    const retiredOracle = replay(oracle, state, instructions);
     const oracleState = snapshot(oracle, spans);
 
-    restore(oracle, state);
-    subject.wake();
-    const retiredSubject = retireExactly(subject.step, subject.halted, instructions);
-    const subjectState = snapshot(oracle, spans);
+    const retiredSubject = replay(subject, state, instructions);
+    const subjectState = snapshot(subject, spans);
 
     const divergences = compare(oracleState, subjectState, options);
     if (retiredOracle !== retiredSubject)

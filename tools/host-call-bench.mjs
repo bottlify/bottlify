@@ -13,7 +13,7 @@
  * back; for an import that is code in the guest's own library, that code.
  *
  *   node tools/host-call-bench.mjs [N] [--rounds R] [--call SPEC]...
- *       [--engine cork|emulator] [--root DIR] [--baseline DIR] [--json]
+ *       [--root DIR] [--baseline DIR] [--json]
  *   node tools/host-call-bench.mjs --compare BEFORE.json AFTER.json
  *   node tools/host-call-bench.mjs [N] --call SPEC --profile
  *
@@ -293,27 +293,18 @@ export function program(spec, n, withCall){
 }
 
 /**
- * The engine of a checkout, and what a launch under the emulator needs.
+ * The engine of a checkout.
  *
- * @param {string} root @param {'cork' | 'emulator'} engine
+ * @param {string} root
  */
-async function engineOf(root, engine){
+async function engineOf(root){
     const { createApp } = await import(
         pathToFileURL(join(root, 'modules', 'core', 'src', 'app.js')).href);
-    /** @type {Record<string, unknown>} */
-    const extra = {};
-    if (engine === 'emulator')
-    {
-        const prebuilt = join(root, 'modules', 'core', 'vendor', 'prebuilt');
-        const wasm = await readFile(join(prebuilt, 'v86.wasm'));
-        extra.v86 = {
-            moduleUrl: pathToFileURL(join(prebuilt, 'libv86.mjs')).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        };
-    }
     /** @param {Uint8Array} executable @returns {Promise<{ ms: number, calls: number }>} */
     return async executable=>{
-        const app = await createApp({ executable, engine, ...extra });
+        // Named rather than left to the default: `--root` and `--baseline` may be
+        // checkouts whose default is another engine.
+        const app = await createApp({ executable, engine: 'cork' });
         const started = performance.now();
         const code = await app.run({ timeoutMs: 600000, maxTurns: 1e9 });
         const ms = performance.now() - started;
@@ -398,20 +389,13 @@ function options(argv){
             calls.push(argv[i + 1]);
         }
     });
-    const engine = value('--engine') ?? 'cork';
-    if (engine !== 'cork' && engine !== 'emulator')
-    {
-        throw new Error(`--engine is cork or emulator, not ${engine}`);
-    }
-    const flagged = new Set(['--rounds', '--call', '--engine', '--root', '--baseline',
-        '--compare']);
+    const flagged = new Set(['--rounds', '--call', '--root', '--baseline', '--compare']);
     const positional = argv.filter((arg, i)=>!arg.startsWith('--')
         && !flagged.has(argv[i - 1] ?? ''));
     return {
         n: Number(positional[0] ?? 1_000_000),
         rounds: Number(value('--rounds') ?? 3),
         specs: (calls.length > 0 ? calls : ['KERNEL32.dll!lstrlenA(s:a)']).map(parseSpec),
-        engine: /** @type {'cork' | 'emulator'} */ (engine),
         root: resolve(value('--root') ?? HERE),
         baseline: value('--baseline') === undefined ? null
             : resolve(/** @type {string} */ (value('--baseline'))),
@@ -430,7 +414,7 @@ async function measure(o){
     {
         trees.unshift(['baseline', o.baseline]);
     }
-    const runners = await Promise.all(trees.map(([, root])=>engineOf(root, o.engine)));
+    const runners = await Promise.all(trees.map(([, root])=>engineOf(root)));
     const loops = o.specs.map(spec=>program(spec, o.n, false));
     const bodies = o.specs.map(spec=>program(spec, o.n, true));
     /** @type {Map<string, { ns: number[], hostCalls: number }>} */
@@ -464,13 +448,12 @@ async function measure(o){
         results.push({ call, tree, ns, median: median(ns), min: Math.min(...ns),
             max: Math.max(...ns), hostCalls });
     }
-    return { n: o.n, rounds: o.rounds, engine: o.engine,
-        trees: Object.fromEntries(trees), results };
+    return { n: o.n, rounds: o.rounds, trees: Object.fromEntries(trees), results };
 }
 
 /** @param {ReturnType<typeof options>} o */
 async function profile(o){
-    const run = await engineOf(o.root, o.engine);
+    const run = await engineOf(o.root);
     const session = new Session();
     session.connect();
     await session.post('Profiler.enable');
@@ -526,8 +509,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href)
         }
         else
         {
-            console.log(`N ${o.n}, ${o.rounds} rounds, ${o.engine}; ns a call is the median `
-                + 'over the rounds');
+            console.log(`N ${o.n}, ${o.rounds} rounds; ns a call is the median over the rounds`);
             console.log(table(measured.results, Object.keys(measured.trees)));
         }
     }

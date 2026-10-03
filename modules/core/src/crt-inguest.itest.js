@@ -15,13 +15,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 import { assemble } from './layers/win32/msvcrt/guest-code.js';
 import { ERANGE } from './layers/win32/msvcrt/globals.js';
-
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
@@ -596,18 +593,10 @@ function buildNeighbourExe(){
  * Runs a program to its exit and reads, before the machine goes, the host's
  * calls by name.
  *
- * @param {Uint8Array} executable @param {'emulator' | 'cork'} engine
+ * @param {Uint8Array} executable
  */
-async function runCounting(executable, engine){
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
-    const app = await createApp({
-        executable,
-        engine,
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
-    });
+async function runCounting(executable){
+    const app = await createApp({ executable });
     try
     {
         const code = await app.run({ timeoutMs: 30000 });
@@ -666,17 +655,9 @@ function buildPrologExe(){
     });
 }
 
-/** @param {Uint8Array} executable @param {'emulator' | 'cork'} engine */
-async function exitCodeOf(executable, engine){
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
-    const app = await createApp({
-        executable,
-        engine,
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
-    });
+/** @param {Uint8Array} executable */
+async function exitCodeOf(executable){
+    const app = await createApp({ executable });
     try
     {
         return await app.run({ timeoutMs: 30000 });
@@ -705,51 +686,49 @@ test('a host write into the runtime\'s variables keeps none of its code from tra
         }
     });
 
-for (const engine of /** @type {const} */ (['cork', 'emulator']))
-{
-    test(`_ftol answers the whole __int64 in EDX:EAX under ${engine}`, { timeout: 60000 },
-        async()=>{
-            assert.equal(await exitCodeOf(buildCastExe(), engine), 0,
-                'the number of the first cast that came back wrong');
-        });
+test('_ftol answers the whole __int64 in EDX:EAX', { timeout: 60000 },
+    async()=>{
+        assert.equal(await exitCodeOf(buildCastExe()), 0,
+            'the number of the first cast that came back wrong');
+    });
 
-    test(`floor, toupper and strncmp answer through the import, in the guest, under ${engine}`,
-        { timeout: 60000 }, async()=>{
-            assert.equal(await exitCodeOf(buildPrototypeExe(), engine), 0,
-                'the number of the first call that came back wrong');
-        });
-
-    test(`the classifiers, the case-blind comparisons, atoi and bsearch, in the guest, under `
-        + `${engine}`, { timeout: 60000 }, async()=>{
-        assert.equal(await exitCodeOf(buildLibraryExe(), engine), 0,
+test(`floor, toupper and strncmp answer through the import, in the guest`,
+    { timeout: 60000 }, async()=>{
+        assert.equal(await exitCodeOf(buildPrototypeExe()), 0,
             'the number of the first call that came back wrong');
     });
 
-    test(`the comparisons, atoi, WEOF and the Latin-1 classes answer as msvcrt.dll does, `
-        + `under ${engine}`, { timeout: 60000 }, async()=>{
-        assert.equal(await exitCodeOf(buildMsvcrtAnswersExe(), engine), 0,
+test('the classifiers, the case-blind comparisons, atoi and bsearch, in the guest',
+    { timeout: 60000 }, async()=>{
+        assert.equal(await exitCodeOf(buildLibraryExe()), 0,
             'the number of the first call that came back wrong');
     });
 
-    test(`the memory and string functions, in the guest, under ${engine}`, { timeout: 60000 },
-        async()=>{
-            assert.equal(await exitCodeOf(buildMemoryExe(), engine), 0,
-                'the number of the first call that came back wrong');
-        });
-
-    test(`abs, ceil, fabs, the searches, strcat, strncpy, the case changes and the wide `
-        + `functions answer in the guest, under ${engine}`, { timeout: 60000 }, async()=>{
-        const { code, crossed } = await runCounting(buildMoreExe(), engine);
-        assert.equal(code, 0, 'the number of the first call that came back wrong');
-        const inGuest = new Set(['abs', 'labs', 'ceil', 'fabs', 'strchr', 'strrchr', 'strstr',
-            'strcat', 'strncpy', '_strupr', '_strlwr', 'wcslen', 'wcscmp', 'wcscpy']);
-        assert.deepEqual([...crossed.keys()].filter(name=>inGuest.has(name.split('!')[1])), [],
-            'none of them crossed into the host');
+test('the comparisons, atoi, WEOF and the Latin-1 classes answer as msvcrt.dll does',
+    { timeout: 60000 }, async()=>{
+        assert.equal(await exitCodeOf(buildMsvcrtAnswersExe()), 0,
+            'the number of the first call that came back wrong');
     });
 
-    test(`strtol and strtoul answer in the guest, and hand the host what sets errno, under `
-        + `${engine}`, { timeout: 60000 }, async()=>{
-        const { code, crossed } = await runCounting(buildConversionExe(), engine);
+test(`the memory and string functions, in the guest`, { timeout: 60000 },
+    async()=>{
+        assert.equal(await exitCodeOf(buildMemoryExe()), 0,
+            'the number of the first call that came back wrong');
+    });
+
+test(`abs, ceil, fabs, the searches, strcat, strncpy, the case changes and the wide `
+    + `functions answer in the guest`, { timeout: 60000 }, async()=>{
+    const { code, crossed } = await runCounting(buildMoreExe());
+    assert.equal(code, 0, 'the number of the first call that came back wrong');
+    const inGuest = new Set(['abs', 'labs', 'ceil', 'fabs', 'strchr', 'strrchr', 'strstr',
+        'strcat', 'strncpy', '_strupr', '_strlwr', 'wcslen', 'wcscmp', 'wcscpy']);
+    assert.deepEqual([...crossed.keys()].filter(name=>inGuest.has(name.split('!')[1])), [],
+        'none of them crossed into the host');
+});
+
+test('strtol and strtoul answer in the guest, and hand the host what sets errno',
+    { timeout: 60000 }, async()=>{
+        const { code, crossed } = await runCounting(buildConversionExe());
         assert.equal(code, 0, 'the number of the first check that failed');
         for (const name of ['strtol', 'strtoul'])
         {
@@ -759,16 +738,15 @@ for (const engine of /** @type {const} */ (['cork', 'emulator']))
         }
     });
 
-    test(`_EH_prolog builds the caller's frame on its own stack under ${engine}`,
-        { timeout: 60000 }, async()=>{
-            assert.equal(await exitCodeOf(buildPrologExe(), engine), 0,
-                'the number of the first check that failed');
-        });
+test('_EH_prolog builds the caller\'s frame on its own stack',
+    { timeout: 60000 }, async()=>{
+        assert.equal(await exitCodeOf(buildPrologExe()), 0,
+            'the number of the first check that failed');
+    });
 
-    test(`qsort sorts through the program's comparator, in the guest, under ${engine}`,
-        { timeout: 60000 }, async()=>{
-            assert.equal(await exitCodeOf(buildSortExe(200, 4), engine), 0, 'two hundred keys');
-            assert.equal(await exitCodeOf(buildSortExe(60, 12), engine), 0,
-                'sixty records of twelve bytes, each moved whole');
-        });
-}
+test(`qsort sorts through the program's comparator, in the guest`,
+    { timeout: 60000 }, async()=>{
+        assert.equal(await exitCodeOf(buildSortExe(200, 4)), 0, 'two hundred keys');
+        assert.equal(await exitCodeOf(buildSortExe(60, 12)), 0,
+            'sixty records of twelve bytes, each moved whole');
+    });

@@ -708,6 +708,9 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 code,
                 registry,
                 files: started?.collectOnExit ? app.session.export() : [],
+                // What an installer's output is sorted against: the libraries
+                // a bottle does not carry out of system32.
+                systemLibraries: started?.collectOnExit ? app.systemLibraries?.() ?? [] : [],
             };
         },
         pause: ()=>app.pause(),

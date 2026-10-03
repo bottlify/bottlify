@@ -5,7 +5,7 @@
  */
 
 /**
- * The sequence corpus's own data, checked without an emulator: every form in
+ * The sequence corpus's own data, checked without running it: every form in
  * the pool is what its name says (decoded by this package's decoder, so a
  * hand-encoding mistake is named here rather than surfacing as a divergence
  * blamed on the translator), the generator repeats from its seed, and the

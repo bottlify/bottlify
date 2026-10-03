@@ -14,8 +14,8 @@
  * table of 8, 512 or 4096 small functions, in order or scattered, where only
  * the number of distinct targets changes (`calls*`), and the x87 float ones
  * again under single precision control, as Direct3D leaves it (`pc24`) --
- * compiled to i386 (`build.sh`, `images/`) and run on cork alone, the cork
- * host with no emulator, as a launch under `engine: 'cork'` runs a program.
+ * compiled to i386 (`build.sh`, `images/`) and run on the cork host, as a
+ * launch runs a program.
  *
  *   node tools/cork-bench/bench.mjs [name...] [--warm N] [--iters N] [--reps N]
  *       [--cork JSON] [--root DIR] [--json] [--store fresh | --seed DIR | --capture DIR]

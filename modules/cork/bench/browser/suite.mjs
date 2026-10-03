@@ -12,10 +12,9 @@
  *     node modules/cork/bench/browser/suite.mjs '<configurations>' [options]
  *
  * The configurations are a JSON object of labels, each naming its `bundle`
- * (default the label), its `engine` (cork or emulator) and its translator
- * configuration (`cork`):
+ * (default the label) and its translator configuration (`cork`):
  *
- *     '{"cork":{"bundle":"head"},"v86":{"bundle":"head","engine":"emulator"}}'
+ *     '{"head":{},"calls":{"bundle":"head","cork":{"callTargets":true}}}'
  *
  *   --variants x87,sse    which builds (default both)
  *   --only a,b,c          workloads to run (default all)
@@ -60,7 +59,7 @@ const { launchWithGpu, shutdown } = await tool('browser.mjs');
 const args = process.argv.slice(2);
 const flag = (/** @type {string} */ name, /** @type {string} */ fallback)=>
     (args.includes(name) ? args[args.indexOf(name) + 1] : fallback);
-/** @type {Record<string, { bundle?: string, engine?: string, cork?: object }>} */
+/** @type {Record<string, { bundle?: string, cork?: object }>} */
 const configs = JSON.parse(args[0] ?? '{"head":{}}');
 const labels = Object.keys(configs);
 const variants = flag('--variants', 'x87,sse').split(',');
@@ -168,7 +167,6 @@ async function newTab(){
 async function job(label, variant, workload, iterations){
     const config = configs[label];
     const options = {
-        engine: config.engine ?? 'cork',
         cork: config.cork ?? {},
         commandLine: `"C:\\app.exe" ${workload} ${iterations}`,
     };

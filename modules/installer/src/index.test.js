@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { placementOf, publish } from './index.js';
+import { SYSTEM_PATH, collectFrom, placementOf, publish } from './index.js';
 
 /** A prefix with one installed file, which is the least a bottle is made of. */
 const PREFIX = {
@@ -71,4 +71,23 @@ test('a bottle is mounted where its installation put it, and started from there'
     assert.deepEqual(placementOf({ entry: 'game.exe', root: 'D:\\Games\\Game' }),
         { prefix: 'App', imagePath: 'C:\\App\\game.exe' },
         'a bundle is mounted on C:, whatever drive it was installed on');
+});
+
+test('what an app finished with is sorted against the libraries its engine synthesises', ()=>{
+    const bytes = new TextEncoder().encode('MZ');
+    const app = {
+        session: { export: ()=>[
+            { path: 'C:\\Install\\Setup.exe', bytes },
+            { path: 'C:\\Games\\Game\\game.exe', bytes },
+            { path: 'C:\\WINDOWS\\system32\\d3dx9_30.dll', bytes },
+            { path: 'C:\\WINDOWS\\system32\\ddraw.dll', bytes },
+        ] },
+        registry: ()=>({ toJSON: ()=>({ roots: [] }) }),
+        systemLibraries: ()=>['DDRAW.dll', 'KERNEL32.dll'],
+    };
+    const prefix = collectFrom(app, { name: 'Setup.exe', bytes });
+
+    assert.deepEqual(prefix.files.map(file=>file.path),
+        ['game.exe', `${SYSTEM_PATH}\\d3dx9_30.dll`, '.bottlify\\registry.json']);
+    assert.deepEqual(prefix.answered, ['C:\\WINDOWS\\system32\\ddraw.dll']);
 });

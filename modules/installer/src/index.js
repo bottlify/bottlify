@@ -42,7 +42,8 @@ import { finish, partSink } from './upload.js';
 import { graphicsChoice, windowsChoice } from './windows.js';
 
 export {
-    MEDIA_DIRECTORY, REGISTRY_PATH, chooseRoot, collect, guessEntry, placementOf, prefixOptions,
+    MEDIA_DIRECTORY, REGISTRY_PATH, SYSTEM_PATH, chooseRoot, collect, guessEntry, placementOf,
+    prefixOptions,
 } from './prefix.js';
 export { DEFAULT_BLOCK_SIZE, packBundle, packBlock, sha256 } from './pack.js';
 export {
@@ -64,6 +65,8 @@ export {
  * @typedef {Object} InstalledApp
  * @property {{ export: () => { path: string, bytes: Uint8Array }[] }} session
  * @property {() => { toJSON: () => unknown }} registry
+ * @property {() => string[]} [systemLibraries]  The libraries the engine synthesises
+ *           as Windows' own, which a bottle does not carry out of system32.
  */
 
 /**
@@ -111,6 +114,7 @@ export function collectFrom(app, media, root){
         // A disc is a drive of its own and was never in the prefix.
         seeded: isDiscMedia(media) ? [] : prefixOptions(media).seeded,
         root,
+        synthesised: app.systemLibraries?.() ?? [],
     });
 }
 

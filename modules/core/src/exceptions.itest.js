@@ -21,36 +21,24 @@ import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
-
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 
 /**
  * @param {import('node:test').TestContext} t
  * @param {string} name
- * @param {'emulator' | 'cork'} [engine]
  */
-async function run(t, name, engine = 'emulator'){
+async function run(t, name){
     const exe = await readFile(new URL(`../test/fixtures/${name}.exe`, import.meta.url));
-    return runExecutable(t, new Uint8Array(exe), engine);
+    return runExecutable(t, new Uint8Array(exe));
 }
 
 /**
  * @param {import('node:test').TestContext} t
  * @param {Uint8Array} executable
- * @param {'emulator' | 'cork'} engine
  */
-async function runExecutable(t, executable, engine){
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
-    const app = await createApp({
-        executable,
-        engine,
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
-    });
+async function runExecutable(t, executable){
+    const app = await createApp({ executable });
     t.after(()=>app.dispose());
     /** @type {string[]} */
     const output = [];
@@ -86,19 +74,6 @@ test('structured exceptions: raised, faulted, nested, and left by longjmp', { ti
             'no host call is left waiting: each handler that found its block let go of the stack');
     });
 
-test('under cork, the same faults reach the same handlers', { timeout: 60000 }, async t=>{
-    // Cork has no interrupt table: its tiers build the fault record and offer
-    // it through the host, and the program cannot tell the difference.
-    const { code, text, suspended } = await run(t, 'seh', 'cork');
-    const lines = verdicts(text);
-
-    assert.deepEqual(lines.filter(line=>!line.ok).map(line=>line.property), [],
-        `every property holds:\n${text}`);
-    assert.equal(lines.length, 9);
-    assert.equal(code, 0);
-    assert.equal(suspended, 0);
-});
-
 test('C++ exceptions: catch, destroy, rethrow, across a callback and two threads',
     { timeout: 60000 }, async t=>{
         const { code, text, suspended } = await run(t, 'cxxeh');
@@ -122,11 +97,11 @@ test('a C++ exception nothing catches ends the process with its code', { timeout
 
 /**
  * A fault taken with the direction flag set, as one inside a copy going down
- * (`std; rep movsd`) is taken -- here an invalid opcode, which faults at the
- * same place on every engine. The handler reads the flags it runs with and
- * the context's, fills four bytes with `rep stosb` -- forwards only if DF is
- * clear -- and continues at a block of its choosing with DF left set in the
- * context, and the block reads the flags it continues with.
+ * (`std; rep movsd`) is taken -- here an invalid opcode. The handler reads the
+ * flags it runs with and the context's, fills four bytes with `rep stosb` --
+ * forwards only if DF is clear -- and continues at a block of its choosing
+ * with DF left set in the context, and the block reads the flags it continues
+ * with.
  *
  * Exits 0, or with a bit per property that failed: 1 the handler ran with DF
  * set, 2 the context did not have it, 4 the handler's fill went down, 8 the
@@ -199,30 +174,24 @@ function buildDirectionFlagExe(){
     });
 }
 
-for (const engine of /** @type {const} */ (['cork', 'emulator']))
-{
-    test(`a handler runs with DF clear and the context gives it back, under ${engine}`,
-        { timeout: 60000 }, async t=>{
-            const { code } = await runExecutable(t, buildDirectionFlagExe(), engine);
-            assert.equal(code, 0, '1: DF set in the handler; 2: not in the context; 4: the'
-                + ' handler\'s fill went down; 8: the block continued without it');
-        });
-}
+test(`a handler runs with DF clear and the context gives it back`,
+    { timeout: 60000 }, async t=>{
+        const { code } = await runExecutable(t, buildDirectionFlagExe());
+        assert.equal(code, 0, '1: DF set in the handler; 2: not in the context; 4: the'
+            + ' handler\'s fill went down; 8: the block continued without it');
+    });
 
-for (const engine of /** @type {const} */ (['cork', 'emulator']))
-{
-    test(`an entry point that returns ends the process with its answer, under ${engine}`,
-        { timeout: 60000 }, async t=>{
-            const exe = buildExe({
-                imports: { 'KERNEL32.dll': ['ExitProcess'] },
-                data: {},
-                codeSize: 0x10,
-                code: ()=>[0xb8, ...u32(5), 0xc3, ...new Array(10).fill(0xcc)], // mov eax, 5; ret
-            });
-            const { code } = await runExecutable(t, exe, engine);
-            assert.equal(code, 5);
+test(`an entry point that returns ends the process with its answer`,
+    { timeout: 60000 }, async t=>{
+        const exe = buildExe({
+            imports: { 'KERNEL32.dll': ['ExitProcess'] },
+            data: {},
+            codeSize: 0x10,
+            code: ()=>[0xb8, ...u32(5), 0xc3, ...new Array(10).fill(0xcc)], // mov eax, 5; ret
         });
-}
+        const { code } = await runExecutable(t, exe);
+        assert.equal(code, 5);
+    });
 
 /**
  * A vectored handler registered first in line, an invalid opcode it fixes by
@@ -281,12 +250,9 @@ function buildVectoredExe(){
     });
 }
 
-for (const engine of /** @type {const} */ (['cork', 'emulator']))
-{
-    test(`a vectored handler takes an exception before any frame and goes on from its context, `
-        + `under ${engine}`, { timeout: 60000 }, async t=>{
-        const { code } = await runExecutable(t, buildVectoredExe(), engine);
+test('a vectored handler takes an exception before any frame and goes on from its context',
+    { timeout: 60000 }, async t=>{
+        const { code } = await runExecutable(t, buildVectoredExe());
         assert.equal(code, 0, '1: the handler ran other than once; 2: it saw another code;'
             + ' 3: it could not be removed');
     });
-}

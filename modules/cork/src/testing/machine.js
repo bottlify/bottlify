@@ -7,7 +7,7 @@
 /**
  * A machine for the emitter's tests: cork's own layout over a small memory,
  * code written where a test says, a region formed and translated at an
- * entry, the function run, the state read back. No emulator, no runtime:
+ * entry, the function run, the state read back. No host, no runtime:
  * the smallest thing that executes translated code.
  */
 

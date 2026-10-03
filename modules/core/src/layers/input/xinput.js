@@ -9,7 +9,7 @@
  *
  * xinput9_1_0.dll (Vista's) and xinput1_4.dll (Windows 8's) are system
  * libraries rather than part of the DirectX redistributable, so no file of
- * either comes with a program or sits on the system volume, and a program
+ * either comes with a program or its DirectX setup, and a program
  * that imports XInputGetState from one has nowhere else to be answered. An
  * import nothing answers stops the process on its first call.
  *

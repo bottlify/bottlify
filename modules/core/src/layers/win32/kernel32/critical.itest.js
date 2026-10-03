@@ -15,11 +15,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { createV86Host } from '../../cpu/internal/v86-host.js';
+import { createCorkHost } from '../../cpu/internal/cork-host.js';
+import * as cork from '../../../../../cork/src/index.js';
 import { COUNTERS, CS, enterCode, leaveCode, tryEnterCode } from './critical.js';
-
-const PREBUILT = new URL('../../../../vendor/prebuilt/', import.meta.url);
 
 const PROGRAM = 0x8000;
 const ENTER = 0x8100;
@@ -70,14 +68,13 @@ function program(){
 }
 
 test('enter, leave and try run on the processor and keep the structure Windows keeps', async()=>{
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
-    const host = await createV86Host({
-        moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-        wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+    const host = createCorkHost({
+        engine: cork,
         memorySize: 64 * 1024 * 1024,
         trapPort: 0xb077,
         entryVector: 0x7000,
         initialStack: 0x300000,
+        cork: {},
     });
 
     host.writePhysical(ENTER, enterCode(ENTER, TRAP, COUNTERS_AT));
@@ -91,7 +88,7 @@ test('enter, leave and try run on the processor and keep the structure Windows k
     const code = program();
     host.writePhysical(PROGRAM, code);
     host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
-    host.cpu().main_loop();
+    host.runSlice(1000);
 
     /** @param {number} at */
     const read = at=>{
@@ -100,11 +97,11 @@ test('enter, leave and try run on the processor and keep the structure Windows k
     };
     /** Runs one phase: from the halt that ended the last one to the next halt. */
     const run = ()=>{
-        host.cpu().in_hlt[0] = 0;
-        return host.cpu().run_slice(1000);
+        host.wake();
+        return host.runSlice(1000);
     };
 
-    // The boot's own pass ran the first phase, up to its halt.
+    // The first slice ran the first phase, up to its halt.
     // First enter: free -> owned by 7, entered once, LockCount 0.
     assert.equal(read(SECTION + CS.LOCK_COUNT), 0);
     assert.equal(read(SECTION + CS.OWNING_THREAD), 7);

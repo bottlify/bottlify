@@ -16,7 +16,7 @@ import test from 'node:test';
 /**
  * Proves the published package is usable: pack it, install the tarball somewhere
  * that knows nothing about this repository, import it by its own name, and check
- * that the emulator binaries a machine cannot start without are really there.
+ * that the files its exports name are really there.
  *
  * A unit test cannot see this failure. Everything resolves inside the working
  * tree whether or not `files`, `exports` and the build agree with each other;
@@ -25,7 +25,7 @@ import test from 'node:test';
 
 const PACKAGE = resolve(fileURLToPath(new URL('..', import.meta.url)));
 
-/** Smallest a real emulator artifact can be; a stub or a truncated copy is not. */
+/** Smallest a real wasm artifact can be; a stub or a truncated copy is not. */
 const MIN_BYTES = 256 * 1024;
 
 /**
@@ -48,7 +48,7 @@ function npm(cwd, args){
 const PROBE = `
 import { createApp } from '@bottlify/core';
 
-const subpaths = ['worklet.js', 'libv86.mjs', 'v86.wasm', 'video-decoder.wasm'];
+const subpaths = ['worklet.js', 'video-decoder.wasm'];
 const artifacts = Object.fromEntries(
     subpaths.map(name=>[name, import.meta.resolve(\`@bottlify/core/\${name}\`)]));
 console.log(JSON.stringify({ createApp: typeof createApp, artifacts }));
@@ -58,7 +58,7 @@ console.log(JSON.stringify({ createApp: typeof createApp, artifacts }));
 // and their wall time is npm's and the disk's, not the engine's: measured on
 // this one machine, back to back, from under a minute to over three. The
 // bound below is a backstop against a genuinely stuck process, not an SLA.
-test('the packed tarball installs and hands a consumer the emulator',
+test('the packed tarball installs and hands a consumer its artifacts',
     { timeout: 600000 }, async t=>{
         npm(PACKAGE, ['run', 'build']);
 
@@ -90,9 +90,9 @@ test('the packed tarball installs and hands a consumer the emulator',
 
         const checksums = JSON.parse(await readFile(
             join(consumer, 'node_modules', '@bottlify', 'core', 'dist', 'checksums.json'), 'utf8'));
-        // The video decoder is an optional artifact like the emulator since
-        // 5.5: absent, its export still resolves, and there is nothing to
-        // check; present, it is held to the same floor.
+        // The video decoder is an optional artifact: absent, its export still
+        // resolves, and there is nothing to check; present, it is held to the
+        // floor.
         const optional = new Set(['video-decoder.wasm']);
         for (const [name, url] of Object.entries(result.artifacts))
         {
@@ -108,12 +108,12 @@ test('the packed tarball installs and hands a consumer the emulator',
                 }
             }
             const { size } = await stat(path);
-            // The worklet is a page of code; the emulator's artifacts are not.
+            // The worklet is a page of code; the decoder is not.
             const floor = name === 'worklet.js' ? 1000 : MIN_BYTES;
             assert.ok(size >= floor, `${name}: ${size} bytes is not a real artifact`);
             const hash = createHash('sha256').update(await readFile(path)).digest('hex');
-            // The manifest is the emulator's account of itself; the worklet is ours
-            // and is checked by the build's own checksums.
+            // The manifest is the prebuilt binaries' account of themselves; the
+            // worklet is ours and is checked by the build's own checksums.
             const recorded = name === 'worklet.js'
                 ? checksums.files[`./${name}`]
                 : manifest.artifacts[`./${name}`];

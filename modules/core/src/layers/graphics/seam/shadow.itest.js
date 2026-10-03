@@ -12,14 +12,11 @@
  * exactly its arguments, and leaves for the trap in every case it does not
  * take -- a state past the block, the host's flag, a lock already held, a
  * range past the buffer, a full ring -- and that the marks it leaves name the
- * words it wrote. On both engines: the marks are `bts` into a string of bits,
- * an addressing form each executes on its own.
+ * words it wrote.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { createV86Host } from '../../cpu/internal/v86-host.js';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
 import {
@@ -30,8 +27,6 @@ import {
     getTextureStageStateCode, getTransformCode, setStreamSource9Code, setBindingCode,
 } from './shadow.js';
 import { D3DERR_INVALIDCALL, D3DTSS } from '../d3d8/constants.js';
-
-const PREBUILT = new URL('../../../../vendor/prebuilt/', import.meta.url);
 
 const PROGRAM = 0x8000;
 /** Past the program, which is a few hundred bytes of pushes and calls. */
@@ -170,72 +165,36 @@ function program(){
 }
 
 /**
- * A processor of either engine, as the one thing the test needs of it: run a
- * step from its first byte on a fresh stack until the halt after it.
- *
- * @param {'emulator' | 'cork'} engine
+ * The processor, as the one thing the test needs of it: run a step from its
+ * first byte on a fresh stack until the halt after it.
  */
-async function processor(engine){
-    const config = {
+function processor(){
+    const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK,
-    };
-    if (engine === 'cork')
-    {
-        const host = createCorkHost({ ...config, engine: cork, cork: {} });
-        return {
-            host,
-            /** @param {number} at */
-            run(at){
-                host.writeReg32('eip', at);
-                host.writeReg32('esp', STACK);
-                host.runSlice(1000);
-            },
-            eip: ()=>host.readReg32('eip'),
-            esp: ()=>host.readReg32('esp'),
-            eax: ()=>host.readReg32('eax'),
-            stop: ()=>{},
-        };
-    }
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
-    const host = await createV86Host({
-        ...config,
-        moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-        wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+        initialStack: STACK, engine: cork, cork: {},
     });
-    let booted = false;
     return {
         host,
         /** @param {number} at */
         run(at){
-            if (!booted)
-            {
-                host.cpu().main_loop();
-                booted = true;
-            }
-            host.cpu().instruction_pointer[0] = at;
-            host.cpu().reg32[4] = STACK;
-            host.cpu().in_hlt[0] = 0;
-            host.cpu().run_slice(1000);
+            host.writeReg32('eip', at);
+            host.writeReg32('esp', STACK);
+            host.runSlice(1000);
         },
-        eip: ()=>host.cpu().instruction_pointer[0] >>> 0,
-        esp: ()=>host.cpu().reg32[4] >>> 0,
-        eax: ()=>host.cpu().reg32[0] >>> 0,
-        stop: ()=>host.stop(),
+        eip: ()=>host.readReg32('eip'),
+        esp: ()=>host.readReg32('esp'),
+        eax: ()=>host.readReg32('eax'),
+        stop: ()=>{},
     };
 }
 
-for (const engine of /** @type {const} */ (['emulator', 'cork']))
-{
-    test(`the guest routines write the blocks and leave what they cannot take to the trap, under ${
-        engine}`, async()=>{
-        await routines(engine);
+test('the guest routines write the blocks and leave what they cannot take to the trap',
+    async()=>{
+        await routines();
     });
-}
 
-/** @param {'emulator' | 'cork'} engine */
-async function routines(engine){
-    const machine = await processor(engine);
+async function routines(){
+    const machine = processor();
     const { host } = machine;
 
     host.writePhysical(ROUTINES.renderState, setRenderStateCode(ROUTINES.renderState, TRAP));

@@ -16,20 +16,11 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
-
 test('APCs run in alertable waits, on their own thread, and nowhere else', { timeout: 60000 },
     async t=>{
-        const [wasm, exe] = await Promise.all([
-            readFile(new URL('v86.wasm', PREBUILT)),
-            readFile(new URL('../test/fixtures/apc.exe', import.meta.url)),
-        ]);
+        const exe = await readFile(new URL('../test/fixtures/apc.exe', import.meta.url));
         const app = await createApp({
             executable: new Uint8Array(exe),
-            v86: {
-                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-            },
         });
         t.after(()=>app.dispose());
         /** @type {string[]} */

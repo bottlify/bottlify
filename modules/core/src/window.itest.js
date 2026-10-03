@@ -21,7 +21,6 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 const FIXTURE = new URL('../test/fixtures/window.exe', import.meta.url);
 
 /** The message the fixture answers, and the value it is asked to remember. */
@@ -36,17 +35,10 @@ const PROBE_VALUE = 0x2a;
  * @param {import('node:test').TestContext} t
  */
 async function runFixture(t){
-    const [wasm, exe] = await Promise.all([
-        readFile(new URL('v86.wasm', PREBUILT)),
-        readFile(FIXTURE),
-    ]);
+    const exe = await readFile(FIXTURE);
 
     const app = await createApp({
         executable: new Uint8Array(exe),
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
     });
     t.after(()=>app.dispose());
 
@@ -110,16 +102,9 @@ test('the whole path was used, not shortcut', { timeout: 20000 }, async t=>{
  * @param {import('node:test').TestContext} t
  */
 async function startApp(t){
-    const [wasm, exe] = await Promise.all([
-        readFile(new URL('v86.wasm', PREBUILT)),
-        readFile(FIXTURE),
-    ]);
+    const exe = await readFile(FIXTURE);
     const app = await createApp({
         executable: new Uint8Array(exe),
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
     });
     t.after(()=>app.dispose());
     return app;
