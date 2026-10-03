@@ -2019,8 +2019,11 @@ export function createWin32Module(){
                     // own system classes use: comctl32 owns their behaviour, not
                     // their registration.
                     registerControls: (controlHost, toolkit, register)=>{
-                        for (const definition
-                            of createCommonControls(controlHost, toolkit, imageLists))
+                        for (const definition of createCommonControls(controlHost, toolkit,
+                            imageLists, {
+                                loadBitmap: (instance, id)=>libraries['USER32.dll']
+                                    ?.LoadBitmapA?.handler([instance, id]) ?? 0,
+                            }))
                         {
                             register(definition);
                         }

@@ -22,17 +22,25 @@
 import { PROGRESS_CLASS, PROGRESS_ATOM, createProgressProcedure } from './progress.js';
 import { TREEVIEW_CLASS, TREEVIEW_ATOM, createTreeViewProcedure } from './treeview.js';
 import { TAB_CLASS, TAB_ATOM, createTabProcedure } from './tab.js';
+import { TOOLBAR_CLASS, TOOLBAR_ATOM, createToolbarProcedure } from './toolbar.js';
+import { STATUSBAR_CLASS, STATUSBAR_ATOM, createStatusBarProcedure } from './statusbar.js';
+
+/** The face colour's brush, as a class's background names it: the index plus one. */
+const FACE_BACKGROUND = 15 + 1;
 
 /**
  * The classes, in the order a program is likeliest to meet them.
  *
  * @param {import('../user32/controls.js').ControlHost} host
  * @param {any} toolkit  The drawing helpers the system classes share.
- * @param {import('./tab.js').TabImages} [images]  The image lists a tab draws from.
+ * @param {import('./toolbar.js').ToolbarImages} [images]  The image lists a tab and a
+ *     toolbar draw from.
+ * @param {{ loadBitmap?: (instance: number, id: number) => number }} [resources]
+ *     A module's bitmap resources, which a toolbar takes its images from.
  * @returns {{ name: string, procedure: any, atom: number,
  *     windowExtra?: number, background?: number }[]}
  */
-export function createCommonControls(host, toolkit, images){
+export function createCommonControls(host, toolkit, images, resources){
     return [
         {
             name: PROGRESS_CLASS,
@@ -48,6 +56,18 @@ export function createCommonControls(host, toolkit, images){
             name: TAB_CLASS,
             atom: TAB_ATOM,
             procedure: createTabProcedure(host, toolkit, images),
+        },
+        {
+            name: TOOLBAR_CLASS,
+            atom: TOOLBAR_ATOM,
+            procedure: createToolbarProcedure(host, toolkit, images, resources),
+            background: FACE_BACKGROUND,
+        },
+        {
+            name: STATUSBAR_CLASS,
+            atom: STATUSBAR_ATOM,
+            procedure: createStatusBarProcedure(host, toolkit),
+            background: FACE_BACKGROUND,
         },
     ];
 }

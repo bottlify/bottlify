@@ -51,6 +51,7 @@ const SRCPAINT = 0x00ee0086;
 const DSNA = 0x00220326;
 const PATCOPY = 0x00f00021;
 const BLACKNESS = 0x00000042;
+const PSDPXAX = 0x00b8074a;
 
 /** IMAGELISTDRAWPARAMS, and the smallest size of it a caller may pass. */
 const IMAGELISTDRAWPARAMS = Object.freeze({
@@ -780,8 +781,63 @@ export function createImageLists(host){
         },
     };
 
+    /**
+     * An image as a disabled toolbar button shows it, embossed: its dark
+     * pixels -- every one neither the face colour nor the highlight, and not
+     * transparent -- drawn in the highlight a pixel down and to the right,
+     * and in the shadow over that.
+     *
+     * @param {number} handle @param {number} index @param {number} hdc
+     * @param {number} x @param {number} y
+     * @param {{ face: number, light: number, shadow: number }} colors
+     * @returns {boolean} false for no list, no such image or no DC
+     */
+    const drawEmbossed = (handle, index, hdc, x, y, colors)=>{
+        const list = listOf(handle);
+        if (!list || !host.gdi32 || list.image === 0 || (index | 0) < 0
+            || (index | 0) >= list.count || (hdc >>> 0) === 0)
+        {
+            return false;
+        }
+        const from = (index | 0) * list.cx;
+        // Into monochrome a colour source is 1 where it is its background
+        // colour: the face, then the highlight, then the transparent part.
+        const shape = gdi('CreateBitmap', list.cx, list.cy, 1, 1, 0);
+        withDCs([shape, list.image], (target, source)=>{
+            gdi('SetBkColor', source, colors.face);
+            gdi('BitBlt', target, 0, 0, list.cx, list.cy, source, from, 0, SRCCOPY);
+            gdi('SetBkColor', source, colors.light);
+            gdi('BitBlt', target, 0, 0, list.cx, list.cy, source, from, 0, SRCPAINT);
+        });
+        if (list.mask !== 0)
+        {
+            withDCs([shape, list.mask], (target, source)=>gdi('BitBlt', target, 0, 0, list.cx,
+                list.cy, source, from, 0, SRCPAINT));
+        }
+        // Out of monochrome a 0 is the text colour: black, so PSDPxax puts the
+        // brush where the shape is 0 and leaves the rest.
+        const text = gdi('SetTextColor', hdc, 0x000000);
+        const back = gdi('SetBkColor', hdc, 0xffffff);
+        withDCs([shape], source=>{
+            for (const [offset, rgb] of [[1, colors.light], [0, colors.shadow]])
+            {
+                const brush = gdi('CreateSolidBrush', rgb);
+                const previous = gdi('SelectObject', hdc, brush);
+                gdi('BitBlt', hdc, x + offset, y + offset, list.cx, list.cy, source, 0, 0,
+                    PSDPXAX);
+                gdi('SelectObject', hdc, previous);
+                gdi('DeleteObject', brush);
+            }
+        });
+        gdi('SetTextColor', hdc, text);
+        gdi('SetBkColor', hdc, back);
+        gdi('DeleteObject', shape);
+        return true;
+    };
+
     return {
         functions,
+        drawEmbossed,
         /** @param {number} handle @returns {{ cx: number, cy: number } | null} */
         size: handle=>{
             const list = listOf(handle);
