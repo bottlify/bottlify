@@ -63,6 +63,9 @@ import { ErrorCode, fsError } from './errors.js';
  *           caller may hand them on as they are.
  * @property {(path: string, bytes: Uint8Array) => void} [adopt]  Makes `bytes` a
  *           file's contents without copying them, and never writes into them.
+ * @property {(from: string, to: string) => void} [move]  Gives a file another
+ *           path, its bytes staying where they are; `to` must not exist and its
+ *           parent must. A store that cannot leaves it out, and a move copies.
  */
 
 /** @typedef {SourceStore & WritableStoreMethods} WritableStore */
@@ -245,6 +248,22 @@ export function createMemoryStore(seed = {}){
             const entry = file(path);
             entry.data = bytes;
             entry.shared = true;
+        },
+
+        /** @param {string} from @param {string} to */
+        move(from, to){
+            const entry = entries.get(from);
+            if (!entry || entry.directory)
+            {
+                throw fsError(ErrorCode.NOT_FOUND, `No file "${from}" to move`);
+            }
+            if (entries.has(to))
+            {
+                throw fsError(ErrorCode.ALREADY_EXISTS, `"${to}" already exists`);
+            }
+            requireParent(to);
+            entries.delete(from);
+            entries.set(to, entry);
         },
 
         /** @param {string} path */

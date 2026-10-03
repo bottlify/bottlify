@@ -274,6 +274,53 @@ test('a disposed volume answers not found rather than throwing', async()=>{
     assert.doesNotThrow(()=>fs.onChanged(()=>{}));
 });
 
+test('a rename moves a file the program wrote, and copies one the source holds', async()=>{
+    // An installer unpacks every file under a temporary name and renames it,
+    // a gigabyte at a time; a copy was seconds of the install for each.
+    const writable = createMemoryStore();
+    let written = 0;
+    const counting = {
+        ...writable,
+        /** @param {string} path @param {number} offset @param {Uint8Array} data */
+        write: (path, offset, data)=>{
+            written += data.length;
+            writable.write(path, offset, data);
+        },
+    };
+    const fs = await filesystemModule.create({ drives: { C: {
+        source: createMemoryStore({ 'Game\\Setup.EXE': 'binary' }),
+        writable: counting,
+    } } });
+    fs.createDirectory('C:\\Temp');
+    const handle = fs.open('C:\\Temp\\~GLH0000.TMP',
+        { write: true, disposition: fs.Disposition.CREATE_NEW });
+    fs.write(handle, new Uint8Array(1 << 20).fill(7));
+    fs.close(handle);
+    fs.setModified('C:\\Temp\\~GLH0000.TMP', Date.UTC(2004, 11, 21));
+    written = 0;
+
+    fs.createDirectory('C:\\Steam');
+    fs.rename('C:\\Temp\\~GLH0000.TMP', 'C:\\Steam\\Content.gcf');
+    assert.equal(written, 0, 'not a byte copied');
+    assert.equal(fs.stat('C:\\Temp\\~GLH0000.TMP'), null, 'the old name is gone');
+    const moved = fs.stat('c:\\steam\\content.GCF');
+    assert.equal(moved?.size, 1 << 20);
+    assert.equal(moved?.name, 'Content.gcf', 'spelt as it was renamed to');
+    assert.equal(moved?.modified, Date.UTC(2004, 11, 21), 'and as old as it was');
+    const reopened = fs.open('C:\\Steam\\Content.gcf');
+    assert.deepEqual([...fs.read(reopened, 3)], [7, 7, 7]);
+    fs.close(reopened);
+    assert.deepEqual(fs.list('C:\\Temp'), []);
+
+    fs.rename('C:\\Game\\Setup.EXE', 'C:\\Game\\Setup.old');
+    assert.equal(written, 6, 'what the source holds is copied');
+    assert.equal(fs.stat('C:\\Game\\Setup.EXE'), null, 'and its name does not come back');
+    assert.throws(()=>fs.rename('C:\\Steam\\Content.gcf', 'C:\\Game\\Setup.old'),
+        /already exists/);
+    assert.equal(fs.stat('C:\\Steam\\Content.gcf')?.size, 1 << 20, 'a refused move moves nothing');
+    await filesystemModule.dispose();
+});
+
 test('diagnostics answers for the live instance', async()=>{
     await volume();
     const second = await filesystemModule.create(undefined);

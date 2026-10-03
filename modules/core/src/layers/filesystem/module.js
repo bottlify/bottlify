@@ -624,11 +624,14 @@ export function createFilesystemModule(){
                 /**
                  * Moves a name to another name.
                  *
-                 * Not a rename in the writable layer: whatever is being moved may
-                 * live in the read-only source, where nothing can be renamed. So it
-                 * is a copy followed by a delete, which is what the overlay would
-                 * have to do anyway -- and the delete leaves the tombstone that
-                 * keeps the old name from coming back from the source.
+                 * A file only the writable layer holds, moved within its drive,
+                 * is given the new name and keeps its bytes: an installer writes
+                 * every file it unpacks under a temporary name and renames it, a
+                 * gigabyte at a time. Anything else may live in the read-only
+                 * source, where nothing can be renamed, so it is a copy followed
+                 * by a delete, which is what the overlay would have to do anyway
+                 * -- and the delete leaves the tombstone that keeps the old name
+                 * from coming back from the source.
                  *
                  * @param {string} from
                  * @param {string} to
@@ -656,6 +659,14 @@ export function createFilesystemModule(){
                             this.rename(`${from}\\${child.name}`, `${to}\\${child.name}`);
                         }
                         this.removeDirectory(from);
+                        return;
+                    }
+
+                    const leaving = locate(from);
+                    const arriving = locate(to);
+                    if (leaving.tree === arriving.tree
+                        && leaving.tree.moveFile(leaving.components, arriving.components))
+                    {
                         return;
                     }
 

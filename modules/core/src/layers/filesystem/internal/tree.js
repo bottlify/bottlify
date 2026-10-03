@@ -577,6 +577,47 @@ export function createOverlay({
             return true;
         },
 
+        /**
+         * Gives a file another name with its bytes where they are: what a
+         * rename is for a file only the writable layer holds. False, with
+         * nothing done, for one the source holds too -- the source keeps its
+         * name whatever happens -- or a store that cannot move a file; the
+         * caller copies it then.
+         *
+         * @param {string[]} from @param {string[]} to
+         * @returns {boolean}
+         */
+        moveFile(from, to){
+            mustBeWritable(from);
+            const node = mustFind(from);
+            if (node.directory || node.inSource || !node.inWritable || !writable.move)
+            {
+                return false;
+            }
+            const parent = parentOf(to);
+            const name = to[to.length - 1];
+            if (name === undefined)
+            {
+                throw fsError(ErrorCode.INVALID_PATH, 'A root is not a file');
+            }
+            const existing = parent.children.get(foldName(name));
+            if (existing && !existing.tombstone)
+            {
+                throw fsError(ErrorCode.ALREADY_EXISTS, `"${existing.path}" already exists`);
+            }
+            const target = childFor(parent, name);
+            target.directory = false;
+            materialiseParents(target);
+            writable.move(node.path, target.path);
+            target.inWritable = true;
+            target.modified = node.modified;
+            node.inWritable = false;
+            forget(node);
+            changed(node.path, 'removed');
+            changed(target.path, 'written');
+            return true;
+        },
+
         /** @param {string[]} components */
         removeFile(components){
             mustBeWritable(components);
