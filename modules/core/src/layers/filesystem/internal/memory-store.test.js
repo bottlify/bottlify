@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createMemoryStore } from './memory-store.js';
+import { PIECE_SIZE, createMemoryStore } from './memory-store.js';
 
 const bytes = Uint8Array.from([1, 2, 3]);
 
@@ -51,6 +51,48 @@ test('a file appended to in small pieces is whole, and its size is what was writ
     store.truncate('big.dat', 3);
     assert.equal(store.stat('big.dat')?.size, 3);
     assert.deepEqual([...store.read('big.dat', 0, 8)], [0, 0, 0]);
+});
+
+test('a file larger than a piece reads, writes and cuts across the pieces as one', ()=>{
+    // Kept in pieces so that growing a file never copies what it holds; none
+    // of that may show in what is read back.
+    const store = createMemoryStore();
+    const span = new Uint8Array(PIECE_SIZE + 10).map((_, at)=>at % 251);
+    store.write('big.dat', PIECE_SIZE - 5, span);
+    assert.equal(store.stat('big.dat')?.size, 2 * PIECE_SIZE + 5);
+    assert.deepEqual([...store.read('big.dat', PIECE_SIZE - 7, 4)], [0, 0, 0, 1],
+        'the gap before the first write is zeroes');
+    assert.deepEqual([...store.read('big.dat', 2 * PIECE_SIZE - 2, 8)],
+        [...span.subarray(PIECE_SIZE + 3)], 'and the bytes run on over a piece\'s edge');
+
+    store.write('big.dat', 5 * PIECE_SIZE, bytes);
+    assert.deepEqual([...store.read('big.dat', 3 * PIECE_SIZE, 3)], [0, 0, 0],
+        'a piece never written is zeroes');
+    assert.deepEqual([...store.read('big.dat', 5 * PIECE_SIZE, 8)], [1, 2, 3]);
+
+    store.truncate('big.dat', PIECE_SIZE + 2);
+    store.truncate('big.dat', 6 * PIECE_SIZE);
+    assert.deepEqual([...store.read('big.dat', PIECE_SIZE, 4)], [...span.subarray(5, 7), 0, 0],
+        'what a cut took is zeroes when the file grows again');
+    assert.deepEqual([...store.read('big.dat', 5 * PIECE_SIZE, 3)], [0, 0, 0]);
+});
+
+test('shared bytes stay as they were handed out, whatever is written after', ()=>{
+    const store = createMemoryStore();
+    store.write('a.dat', 0, new Uint8Array(PIECE_SIZE + 1).fill(4));
+    const shared = store.share?.('a.dat') ?? new Uint8Array(0);
+    assert.equal(shared.length, PIECE_SIZE + 1);
+    assert.equal(store.share?.('a.dat'), shared, 'shared twice is the same bytes');
+    store.write('a.dat', PIECE_SIZE, Uint8Array.of(9));
+    assert.equal(shared[PIECE_SIZE], 4, 'the copy handed out is not written into');
+    assert.deepEqual([...store.read('a.dat', PIECE_SIZE - 1, 2)], [4, 9]);
+
+    const given = new Uint8Array(10).fill(1);
+    store.adopt?.('b.dat', given);
+    store.truncate('b.dat', 4);
+    store.write('b.dat', 0, Uint8Array.of(2));
+    assert.deepEqual([...given], new Array(10).fill(1), 'nor are adopted bytes');
+    assert.deepEqual([...store.read('b.dat', 0, 8)], [2, 1, 1, 1]);
 });
 
 test('a read is clamped to what is there rather than failing', ()=>{

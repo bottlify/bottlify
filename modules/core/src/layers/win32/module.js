@@ -1459,6 +1459,9 @@ export function createWin32Module(){
                     ...createFileFunctions({
                         divergence: config?.divergence,
                         readMemory,
+                        windowMemory: typeof memory.window === 'function'
+                            ? (address, length)=>memory.window(address, length)
+                            : undefined,
                         writeMemory,
                         readCString,
                         readWideString,
