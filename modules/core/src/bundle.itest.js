@@ -22,9 +22,10 @@ import { open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { BOTTLE_REGISTRY_PATH, createApp, READ_AHEAD_BYTES } from './app.js';
+import { BOTTLE_REGISTRY_PATH, BOTTLE_SYSTEM_PATH, createApp, READ_AHEAD_BYTES } from './app.js';
 import { writeBundle } from './bundle-node.js';
 import { createHive, HKEY_LOCAL_MACHINE, REG_SZ } from './layers/win32/advapi32/registry.js';
+import { buildExe } from '../../../tools/make-pe.mjs';
 
 /** The fixture's blocks, small so a read of a few bytes still misses one. */
 const BLOCK_SIZE = 64 * 1024;
@@ -328,4 +329,85 @@ test('the registry a bottle carries is the machine\'s from the start, under what
         };
         assert.equal(read('InstallDir'), 'C:\\Games\\Game');
         assert.equal(read('Language'), 'French', 'what the session saved since is kept');
+    });
+
+/** @param {number} value @returns {number[]} */
+const u32 = value=>[
+    value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
+];
+
+/**
+ * A library exporting `Answer`, which returns 42, its DllMain answering TRUE:
+ * made movable and marked a DLL, a relocation directory of one empty block
+ * after the code, since it has no absolute address of its own.
+ */
+function answerLibrary(){
+    const file = buildExe({
+        imports: { 'KERNEL32.dll': ['GetVersion'] },
+        exports: [{ name: 'Answer', offset: 0x10 }],
+        codeSize: 0x60,
+        code: ()=>[
+            0xb8, ...u32(1), 0xc2, 0x0c, 0x00, //       DllMain: mov eax, TRUE; ret 12
+            ...new Array(8).fill(0xcc),
+            0xb8, ...u32(42), 0xc3, //                  Answer: mov eax, 42; ret
+        ],
+    });
+    const view = new DataView(file.buffer, file.byteOffset, file.byteLength);
+    const coff = view.getUint32(0x3c, true) + 4;
+    const optional = coff + 20;
+    view.setUint16(coff + 18, view.getUint16(coff + 18, true) | 0x2000, true);
+    view.setUint32(optional + 96 + 5 * 8, 0x1040, true);
+    view.setUint32(optional + 96 + 5 * 8 + 4, 8, true);
+    view.setUint32(0x240, 0x1000, true);
+    view.setUint32(0x244, 8, true);
+    return file;
+}
+
+test('what a bottle\'s installation left in system32 is found there, and loaded by bare name',
+    { timeout: 30000 }, async t=>{
+        // A setup puts the runtime its program links against in system32 --
+        // what a DirectX setup installs -- and the program looks nowhere else.
+        const root = await mkdtemp(join(tmpdir(), 'btl-src-'));
+        const out = await mkdtemp(join(tmpdir(), 'btl-out-'));
+        const [folder, system] = BOTTLE_SYSTEM_PATH.split('\\');
+        await mkdir(join(root, folder, system), { recursive: true });
+        const library = answerLibrary();
+        await writeFile(join(root, folder, system, 'runtime.dll'), library);
+        await writeFile(join(root, 'game.dat'), randomBytes(1024));
+        const path = join(out, 'bundle.btl');
+        await writeBundle({ root, output: path, blockSize: BLOCK_SIZE });
+        const handle = await open(path, 'r');
+        t.after(async()=>{
+            await handle.close();
+            await rm(root, { recursive: true, force: true });
+            await rm(out, { recursive: true, force: true });
+        });
+        /** @param {number} offset @param {number} length */
+        const fetch = async(offset, length)=>{
+            const buffer = Buffer.alloc(length);
+            await handle.read(buffer, 0, length, offset);
+            return new Uint8Array(buffer);
+        };
+
+        const app = await createApp({
+            executable: buildExe({
+                imports: { 'runtime.dll': ['Answer'], 'KERNEL32.dll': ['ExitProcess'] },
+                code: ({ iat })=>[
+                    0xff, 0x15, ...u32(iat('Answer')), //       call [Answer]
+                    0x50, //                                    push eax
+                    0xff, 0x15, ...u32(iat('ExitProcess')), //  call [ExitProcess]
+                ],
+            }),
+            imagePath: 'C:\\Games\\Game\\Game.exe',
+            bundle: { fetch, store: null, prefix: 'Games\\Game' },
+        });
+        t.after(()=>app.dispose());
+
+        assert.deepEqual([...app.files.read('C:\\WINDOWS\\system32\\runtime.dll')], [...library],
+            'the library is where Windows keeps it');
+        const placed = app.files.list('C:\\Games\\Game')
+            .map((/** @type {any} */ entry)=>entry.name);
+        assert.deepEqual(placed, ['game.dat'], 'and not where the bottle carried it');
+        assert.equal(await app.run({ timeoutMs: 20000 }), 42,
+            'the program bound its import to it and called it');
     });

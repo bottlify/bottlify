@@ -43,6 +43,19 @@ bottle, beneath whatever registry the bottle's session has saved since: a key th
 installer made is there before the program's first instruction, and a value the
 program changed afterwards stays changed.
 
+What the installation added to `C:\WINDOWS\system32` comes out too, under
+`.bottlify\system32\` (`SYSTEM_PATH`) beside the registry: a setup puts the
+runtime its program links against there -- the D3DX libraries a DirectX setup
+installs -- and the program looks for it nowhere else. The engine maps that
+directory back to `C:\WINDOWS\system32\` when it mounts the bottle, its files
+read a block at a time and copied up on a write like any other file of the
+bottle, so the loader finds those libraries by its ordinary search. A file there
+named like a library the engine synthesises as Windows' own is not carried,
+because mounted back it would be mapped in place of the engine's: `collectFrom`
+sorts against the app's `systemLibraries()`, which leaves out the D3DX helpers
+the engine's table only stands in for, and the prefix lists what it left out as
+`answered`.
+
 The manifest says where the installation put the tree, `root`
 (`C:\Program Files\Vendor\Game`), and `placementOf(manifest)` answers where to
 mount the bottle and start its program from: there again, so the install path the

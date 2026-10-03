@@ -178,6 +178,7 @@ function fakeApp({ capacity = 4096, shared = true, audioShared = false } = {}){
             },
         },
         registry: ()=>({ toJSON: ()=>({ HKLM: {} }) }),
+        systemLibraries: ()=>['KERNEL32.dll', 'D3D9.dll'],
         session: { export: ()=>[{ path: 'C:\\a.txt', bytes: Uint8Array.of(1, 2) }] },
         files: {
             /** @param {string} path */
@@ -541,6 +542,8 @@ test('run answers with the exit code and what the exit left behind', async()=>{
     assert.equal(await remote.run({ maxTurns: 5 }), 7);
     assert.deepEqual(remote.session.export(), [{ path: 'C:\\a.txt', bytes: Uint8Array.of(1, 2) }]);
     assert.deepEqual(remote.registry().toJSON(), { HKLM: {} });
+    assert.deepEqual(remote.systemLibraries(), ['KERNEL32.dll', 'D3D9.dll'],
+        'and what an installer\'s output is sorted against');
     await remote.dispose();
 });
 

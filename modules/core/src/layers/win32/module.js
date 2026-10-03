@@ -2307,6 +2307,17 @@ export function createWin32Module(){
                 knownDlls: ()=>[...KNOWN_DLLS],
 
                 /**
+                 * The libraries with a table here that are not Windows' own but a
+                 * redistributable a setup installs -- the D3DX helpers. The
+                 * table only stands in for a program that brought none; a copy
+                 * an installation put in system32 is what a program means to
+                 * load, where a copy of Windows' own would displace the engine's.
+                 *
+                 * @returns {string[]}
+                 */
+                redistributables: ()=>Object.keys(d3dxLibraries({})),
+
+                /**
                  * What an undecorated export of a library is, when nothing else
                  * says: `'cdecl'` for the C runtime family, `'stdcall'` for the rest.
                  *

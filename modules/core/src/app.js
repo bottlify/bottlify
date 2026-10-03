@@ -1336,6 +1336,8 @@ export function resolveLibraryPath(name, imagePath){
 /** Where Windows looks for a bare library name after the program's own directory. */
 const SYSTEM_LIBRARY_DIRECTORIES = ['C:\\WINDOWS\\system32\\', 'C:\\WINDOWS\\'];
 
+/** The system directory, on the volume, without its drive or a trailing separator. */
+const SYSTEM_DIRECTORY = 'WINDOWS\\system32';
 
 /**
  * Every place a LoadLibrary at run time looks, in order: beside the
@@ -1620,6 +1622,14 @@ const BUNDLE_DIRECTORY = 'App';
  * writes it there (`@bottlify/installer`'s `REGISTRY_PATH`).
  */
 export const BOTTLE_REGISTRY_PATH = '.bottlify\\registry.json';
+
+/**
+ * Where in a bottle the files its installation added to `C:\WINDOWS\system32`
+ * are kept -- the libraries its DirectX setup installed, say -- beside the
+ * registry, and mounted back where Windows keeps them. The installer puts
+ * them there (`@bottlify/installer`'s `SYSTEM_PATH`, the same path).
+ */
+export const BOTTLE_SYSTEM_PATH = '.bottlify\\system32';
 
 /**
  * The version resource of a file on the volume, or null: for a file that is
@@ -2098,6 +2108,9 @@ async function mountBundle({ options, cpu, filesystem, events, translationStore 
         // root are the same place, so every answer to "where do I live" happens
         // to work and a wrong one is invisible until it is not.
         prefix: options.bundle.prefix ?? BUNDLE_DIRECTORY,
+        // What the installation left in system32 is found there again, read
+        // from the bundle a block at a time like any of its files.
+        relocate: { [BOTTLE_SYSTEM_PATH]: SYSTEM_DIRECTORY },
     });
 
     filesystem.mount('C', { source });
@@ -4319,6 +4332,17 @@ async function buildApp(options){
     /** The libraries this build synthesises, as opposed to ones a program brings. */
     const systemLibraries = new Set(Object.keys(allLibraries).map(moduleKeyOf));
 
+    /**
+     * Those of them that are Windows' own, by file name: a copy an installation
+     * left in system32 would be mapped in place of the engine's, so a bottle
+     * carries none (`@bottlify/installer`'s `collect`). The redistributables a
+     * table only stands in for -- the D3DX helpers -- are not among them.
+     */
+    const redistributables = new Set(
+        (/** @type {() => string[]} */ (win32.redistributables)?.() ?? []).map(moduleKeyOf));
+    const windowsLibraries = Object.keys(allLibraries)
+        .filter(name=>!redistributables.has(moduleKeyOf(name)));
+
     // Where a call to an import nothing claims lands. The branch that returns
     // and the branch that faults are made in `createMissingImports`; what it
     // needs from this closure is the evidence that decides between them.
@@ -6227,6 +6251,14 @@ async function buildApp(options){
 
         /** The registry the program reads and writes; it outlives the process. */
         registry: ()=>win32.registry(),
+
+        /**
+         * The libraries this build synthesises as Windows' own, by file name
+         * (`windowsLibraries`): what a bottle does not carry out of system32.
+         *
+         * @returns {string[]}
+         */
+        systemLibraries: ()=>[...windowsLibraries],
 
         /**
          * The session: everything the program has written, and the way to put
