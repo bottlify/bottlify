@@ -551,6 +551,8 @@ const OPAQUE = 2;
  *           build with no heap behind it, and then a notification that needs
  *           a structure cannot be sent.
  * @property {(address: number) => void} [release]
+ * @property {(entry: number, args: number[], thread?: unknown) => number | Promise<number>} [call]
+ *           Calls the program's own code: a callback a control is handed.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {import('./objects.js').ClipboardService} [clipboard]
  *           The clipboard an edit copies to and pastes from. Absent, the
@@ -1489,7 +1491,14 @@ export function createControlProcedures(host){
         const draw = /** @type {Drawing} */ (host.draw);
         const state = editState(record);
         const readOnly = (record.style & ES_READONLY) !== 0 || disabled(record);
-        background(hdc, rect, brush, readOnly ? COLOR_3DFACE : COLOR_WINDOW);
+        if (state.richBackground !== undefined)
+        {
+            draw.fill(hdc, rect, state.richBackground);
+        }
+        else
+        {
+            background(hdc, rect, brush, readOnly ? COLOR_3DFACE : COLOR_WINDOW);
+        }
         const grid = editGrid(record, hdc);
         const lines = editLines(record, grid.columns);
         const ink = color(disabled(record) ? COLOR_GRAYTEXT : COLOR_WINDOWTEXT);
@@ -1792,12 +1801,14 @@ export function createControlProcedures(host){
         const readOnly = ()=>(record.style & ES_READONLY) !== 0;
         switch (message.message){
             case WM_PAINT:
-                return painting(record, (hdc, rect)=>after(
-                    controlColor(record, readOnly() || disabled(record)
+                // A rich edit paints in a background of its own and asks its
+                // parent for none.
+                return painting(record, (hdc, rect)=>after(state.richBackground !== undefined
+                    ? 0 : controlColor(record, readOnly() || disabled(record)
                         ? WM_CTLCOLORSTATIC : WM_CTLCOLOREDIT, hdc, thread), brush=>{
-                        paintEdit(record, hdc, rect, brush);
-                        return 0;
-                    }));
+                    paintEdit(record, hdc, rect, brush);
+                    return 0;
+                }));
             case WM_ERASEBKGND:
                 return 1;
             case WM_GETDLGCODE:
@@ -3255,7 +3266,7 @@ export function createControlProcedures(host){
             color, glyph, edge, buttonEdge, sunkenEdge, etchedFrame, drawText,
             clientRect, stateOf, notify, controlColor, background, painting,
             common, disabled, writeU32, writeString, scrollOf, itemHeight,
-            paintScrollBar, scrollHit, shrink, contains,
+            paintScrollBar, scrollHit, shrink, contains, editProc,
         },
     };
 }

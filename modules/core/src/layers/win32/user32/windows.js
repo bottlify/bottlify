@@ -3614,6 +3614,7 @@ export function createWindowFunctions(host){
         keyDown: key=>((host.keyState?.(key) ?? 0) & 0x8000) !== 0,
         allocate: host.allocate,
         release: host.release,
+        call: host.call,
         divergence: host.divergence,
     };
     const controls = createControlProcedures(controlHost);

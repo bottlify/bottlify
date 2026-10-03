@@ -13,6 +13,7 @@ import { createProcessFunctions, createThreadState } from './kernel32/process.js
 import { TEB } from './kernel32/teb.js';
 import { createModuleFunctions } from './kernel32/modules.js';
 import { createFileFunctions } from './kernel32/files.js';
+import { createRichEditControls } from './riched/richedit.js';
 import { createSyncFunctions } from './kernel32/sync.js';
 import { createCodeArena } from './kernel32/code-arena.js';
 import { createGuestHeap } from './kernel32/guest-heap.js';
@@ -2032,7 +2033,8 @@ export function createWin32Module(){
                     // their registration.
                     registerControls: (controlHost, toolkit, register)=>{
                         for (const definition
-                            of createCommonControls(controlHost, toolkit, imageLists))
+                            of [...createCommonControls(controlHost, toolkit, imageLists),
+                                ...createRichEditControls(controlHost, toolkit)])
                         {
                             register(definition);
                         }
