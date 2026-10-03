@@ -48,11 +48,12 @@ import { installArrayCalls } from './context-arrays.js';
 import { installPixelCalls } from './context-pixels.js';
 import { installProgramCalls } from './context-programs.js';
 import { createSceneBuilder } from './context-scene.js';
+import { VIDEO_ADAPTER_NAME } from '../../win32/devices.js';
 
 /** What this implementation answers glGetString with. */
 const STRINGS = Object.freeze({
     [GL.VENDOR]: 'Bottlify Project',
-    [GL.RENDERER]: 'Bottlify OpenGL',
+    [GL.RENDERER]: VIDEO_ADAPTER_NAME,
     // The version is what the core entry points implement; everything past it
     // is reported as an extension, which is how a program of the era expects
     // to find it.

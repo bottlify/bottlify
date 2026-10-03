@@ -983,10 +983,11 @@ export function createWin32Module(){
                 divergence: config?.divergence,
             });
 
-            // WMI's locator, which a program asks for its video memory.
+            // WMI's locator, which a program asks about its video memory and its
+            // machine.
             registerWbemClasses({
                 registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
-                divergence: config?.divergence,
+                physicalMemory: arena.size, divergence: config?.divergence,
             });
 
             // DxDiag's provider, which an installer asks which DirectX this is
@@ -2032,9 +2033,12 @@ export function createWin32Module(){
                     // own system classes use: comctl32 owns their behaviour, not
                     // their registration.
                     registerControls: (controlHost, toolkit, register)=>{
-                        for (const definition
-                            of [...createCommonControls(controlHost, toolkit, imageLists),
-                                ...createRichEditControls(controlHost, toolkit)])
+                        for (const definition of [
+                            ...createCommonControls(controlHost, toolkit, imageLists, {
+                                loadBitmap: (instance, id)=>libraries['USER32.dll']
+                                    ?.LoadBitmapA?.handler([instance, id]) ?? 0,
+                            }),
+                            ...createRichEditControls(controlHost, toolkit)])
                         {
                             register(definition);
                         }

@@ -1509,7 +1509,8 @@ test('GetDeviceIdentifier names the driver DLL and the adapter, and fills its ow
             h.box.bytes.fill(0xcc, out, out + size + 8);
             assert.equal(h.box.call(ddraw, identifierSlot, [out, flags]), DD_OK);
             assert.match(text(DDDEVICEIDENTIFIER2.szDriver), /\.dll/);
-            assert.equal(text(DDDEVICEIDENTIFIER2.szDescription), 'nvidia ampere');
+            assert.equal(text(DDDEVICEIDENTIFIER2.szDescription),
+                'Bottlify WebGPU Video Adapter');
             assert.equal(h.box.bytes[out + MAX_DDDEVICEID_STRING - 1], 0);
             assert.equal(h.box.bytes[out + DDDEVICEIDENTIFIER2.szDescription
                 + MAX_DDDEVICEID_STRING - 1], 0);

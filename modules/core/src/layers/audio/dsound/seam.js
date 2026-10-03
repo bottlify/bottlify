@@ -35,6 +35,7 @@ import { createSoundBuffer, normaliseFormat, DSBSTATUS_PLAYING } from './buffers
 import {
     createSpatial, IDIRECTSOUND3DLISTENER_SLOTS, IDIRECTSOUND3DBUFFER_SLOTS,
 } from './spatial.js';
+import { SOUND_ADAPTER_NAME } from '../../win32/devices.js';
 
 export const DS_OK = 0;
 const DS_UNCERTIFIED = 1;
@@ -1681,7 +1682,7 @@ export function createDirectSound({
         }
         const primary = stringForGuest('Primary Sound Driver', wide);
         const blank = stringForGuest('', wide);
-        const device = stringForGuest('Bottlify Audio', wide);
+        const device = stringForGuest(SOUND_ADAPTER_NAME, wide);
         // A GUID is sixteen bytes and a program keeps it to open that device by
         // name later.
         const guid = allocate(16);

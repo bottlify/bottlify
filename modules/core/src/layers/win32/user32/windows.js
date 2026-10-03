@@ -26,6 +26,7 @@ import { createObjectFunctions } from './objects.js';
 import { createDialogFunctions } from './dialogs.js';
 import { createDesktopFunctions } from './desktops.js';
 import { createRawInput } from './rawinput.js';
+import { createMdi } from './mdi.js';
 import {
     WS_CHILD, WS_DISABLED, contains, createGeometry, frameRings, intersect, isEmpty,
 } from './frame.js';
@@ -139,6 +140,7 @@ const COLOR_ACTIVECAPTION = 2;
 const COLOR_INACTIVECAPTION = 3;
 const COLOR_MENU = 4;
 const COLOR_CAPTIONTEXT = 9;
+const COLOR_APPWORKSPACE = 12;
 const COLOR_INACTIVECAPTIONTEXT = 19;
 /** A system colour plus one, as a class background names it. */
 const SYS_COLOR_BRUSH_LIMIT = 31;
@@ -2201,9 +2203,13 @@ export function createWindowFunctions(host){
         // Named once, before anything is awaited: a call made after the hook
         // has answered is answering a call the bridge has already let go of.
         const thread = caller ?? host.callerThread?.();
+        // Kept for a procedure on this side that reads it (the MDI client's
+        // CLIENTCREATESTRUCT), which is handed no CREATESTRUCT.
+        record.createParams = (params ?? 0) >>> 0;
         /** The window, activated first when it was created visible. */
         const activated = ()=>andThen(activateCreated(record, thread), ()=>record.hwnd);
-        // A procedure on this side reads nothing out of a CREATESTRUCT.
+        // A procedure on this side reads no CREATESTRUCT: what it needs of one
+        // is on the record.
         const onThisSide = ()=>(record.wndProc === 0 ? activated()
             : andThen(callProcedure(record.wndProc, {
                 hwnd: record.hwnd, message: WM_CREATE, wParam: 0, lParam: 0,
@@ -3603,6 +3609,8 @@ export function createWindowFunctions(host){
             paint.invalidate(record, { left: 0, top: 0, right: size.width, bottom: size.height },
                 true);
         },
+        move: (hwnd, x, y, width, height)=>/** @type {any} */ (table).MoveWindow
+            .handler([hwnd, x, y, width, height, 1]),
         setFocus,
         focus: focusWindow,
         setCapture: hwnd=>{
@@ -3649,6 +3657,21 @@ export function createWindowFunctions(host){
         controlProcedures[definition.name] = definition.procedure;
     };
     host.registerControls?.(controlHost, controls.toolkit, registerSystemClass);
+
+    // The MDI client: a built-in class whose procedure keeps a frame's document
+    // windows, through the window manager's own calls (mdi.js).
+    const mdi = createMdi({
+        host,
+        call: (name, args)=>/** @type {any} */ (table)[name].handler(args),
+        send: (hwnd, message, wParam, lParam)=>send(hwnd, message, wParam, lParam),
+        defWindowProc,
+        sizeOf: hwnd=>{
+            const record = live(hwnd);
+            return record ? geometry.clientSize(record) : { width: 0, height: 0 };
+        },
+    });
+    registerSystemClass({ name: 'MDIClient', procedure: mdi.procedure,
+        background: COLOR_APPWORKSPACE + 1 });
 
     // The system classes: known under their names and their atoms, each
     // with a procedure on this side and, once wanted, an address a program
@@ -5396,45 +5419,51 @@ export function createWindowFunctions(host){
          * LRESULT DefFrameProcA/W(HWND hWnd, HWND hWndMDIClient, UINT uMsg,
          *     WPARAM wParam, LPARAM lParam)
          *
-         * The default procedure of an MDI frame. There is no MDI child here,
-         * so the frame behaves as its ordinary default procedure does: the
-         * client window argument is taken and the message goes to
-         * DefWindowProc.
+         * The default procedure of an MDI frame: what concerns its client --
+         * a child chosen from the Window menu, a new size, the focus -- the
+         * client answers (mdi.js), the rest DefWindowProc.
          */
         DefFrameProcA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([hwnd, , message, wParam, lParam])=>
-                table.DefWindowProcA.handler([hwnd, message, wParam, lParam]),
+            handler: args=>mdi.defFrame(args)
+                ?? table.DefWindowProcA.handler([args[0], args[2], args[3], args[4]]),
         },
 
         DefFrameProcW: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([hwnd, , message, wParam, lParam])=>
-                table.DefWindowProcW.handler([hwnd, message, wParam, lParam]),
+            handler: args=>mdi.defFrame(args)
+                ?? table.DefWindowProcW.handler([args[0], args[2], args[3], args[4]]),
         },
 
         /**
          * LRESULT DefMDIChildProcA/W(HWND hWnd, UINT uMsg, WPARAM wParam,
          *     LPARAM lParam)
          *
-         * The default procedure of an MDI child. There is no MDI here, so a
-         * child behaves as its ordinary default procedure does: the message
-         * goes to DefWindowProc.
+         * The default procedure of an MDI child: activation, the focus,
+         * closing and the system menu's commands go to its client (mdi.js),
+         * the rest to DefWindowProc.
          */
         DefMDIChildProcA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([hwnd, message, wParam, lParam])=>
-                table.DefWindowProcA.handler([hwnd, message, wParam, lParam]),
+            handler: args=>andThen(mdi.defChild(args), answer=>answer
+                ?? table.DefWindowProcA.handler(args)),
         },
 
         DefMDIChildProcW: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([hwnd, message, wParam, lParam])=>
-                table.DefWindowProcW.handler([hwnd, message, wParam, lParam]),
+            handler: args=>andThen(mdi.defChild(args), answer=>answer
+                ?? table.DefWindowProcW.handler(args)),
+        },
+
+        /** BOOL TranslateMDISysAccel(HWND hWndClient, LPMSG lpMsg) */
+        TranslateMDISysAccel: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([client, msg])=>mdi.translateAccelerator(client, msg),
         },
     };
     // A message box is a dialog user32 makes out of its own calls, so it is

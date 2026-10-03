@@ -78,6 +78,8 @@ const DIGCF_ALLCLASSES = 0x4;
 
 /** sizeof(SP_DEVINFO_DATA): cbSize, the class GUID, DevInst, Reserved. */
 const SP_DEVINFO_DATA_SIZE = 28;
+/** SP_DEVICE_INTERFACE_DATA's cbSize: a GUID, two DWORDs and a ULONG_PTR. */
+const SP_DEVICE_INTERFACE_DATA_SIZE = 28;
 
 /** SetupInstallFromInfSection's flags. */
 const SPINST_FILES = 0x10;
@@ -1164,6 +1166,36 @@ export function createSetupapiFunctions(host){
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 if (readU32(data) !== SP_DEVINFO_DATA_SIZE)
+                {
+                    return fail(ERROR_INVALID_USER_BUFFER);
+                }
+                return (index >>> 0) < devices.length ? 1 : fail(ERROR_NO_MORE_ITEMS);
+            },
+        },
+
+        /**
+         * BOOL SetupDiEnumDeviceInterfaces(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVINFO_DATA DeviceInfoData, const GUID *InterfaceClassGuid,
+         *     DWORD MemberIndex, PSP_DEVICE_INTERFACE_DATA DeviceInterfaceData)
+         *
+         * A set holds no device, so it has no interface of any class: the
+         * arguments checked as Windows checks them, then the end of the
+         * enumeration.
+         */
+        SetupDiEnumDeviceInterfaces: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([set, , interfaceClass, index, data])=>{
+                const devices = deviceSet(set);
+                if (!devices)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if ((data >>> 0) === 0 || (interfaceClass >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if (readU32(data) !== SP_DEVICE_INTERFACE_DATA_SIZE)
                 {
                     return fail(ERROR_INVALID_USER_BUFFER);
                 }

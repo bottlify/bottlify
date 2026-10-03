@@ -538,6 +538,9 @@ const OPAQUE = 2;
  *           measuring with; given back through endPaint.
  * @property {(record: any, hdc: number) => void} endPaint
  * @property {(record: any) => void} invalidate   The whole client area, erased.
+ * @property {(hwnd: number, x: number, y: number, width: number, height: number)
+ *     => number | Promise<number>} [move]
+ *           MoveWindow, for a control that places itself in its parent.
  * @property {(hwnd: number, thread?: unknown) => number | Promise<number>} setFocus
  * @property {() => number} focus
  * @property {(hwnd: number) => void} setCapture

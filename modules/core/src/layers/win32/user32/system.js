@@ -52,6 +52,7 @@ import {
 import { readText, textBytes } from './unicode.js';
 import { LOGFONTA, LOGFONTW_SIZE, logFontBytes } from '../gdi32/structs.js';
 import { threadIdOf } from './messages.js';
+import { VIDEO_ADAPTER_NAME } from '../devices.js';
 
 /** GetSystemMetrics indices this build has a real answer for. */
 /** How many argument slots a `va_list` is read for, since it carries no count. */
@@ -1454,7 +1455,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
             return 0;
         }
         const who = adapter
-            ? { name: DISPLAY_ADAPTER_NAME, description: 'Browser display adapter',
+            ? { name: DISPLAY_ADAPTER_NAME, description: VIDEO_ADAPTER_NAME,
                 flags: DISPLAY_DEVICE_ATTACHED_TO_DESKTOP | DISPLAY_DEVICE_PRIMARY_DEVICE,
                 id: '' }
             : { name: '', description: 'Default Monitor',
