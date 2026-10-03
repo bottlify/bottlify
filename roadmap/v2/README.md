@@ -1,5 +1,7 @@
 # Roadmap v2 — a multi-worker platform
 
+Русская версия: [README.ru.md](README.ru.md).
+
 **Status:** proposed 2026-10-03, against `main` cf293c0. How the engine works today is in
 [`docs/architecture.md`](../../docs/architecture.md); this document is where it goes next.
 
