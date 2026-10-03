@@ -138,8 +138,6 @@ test('a command routine writes the call into the ring and leaves the rest to the
     assert.equal(read(RING + COMMAND.BYTES), 36, 'whole');
     assert.equal(read(RING + COMMAND.ARGS), RING + 12, 'the pointer names the copy');
     assert.deepEqual(Array.from({ length: 6 }, (unused, i)=>read(RING + 12 + 4 * i)), viewport);
-    assert.equal(read(BLOCK + SHADOW.CALLS), 0,
-        'the count an entry looks at first is the block\'s setters\', not the ring\'s');
 
     assert.equal(run(CONSTANTS, [5, DATA + 0x100, 2]), 'ok');
     const second = RING + 36;
@@ -177,6 +175,7 @@ test('a command routine writes the call into the ring and leaves the rest to the
     assert.equal(run(LOCK, [0, 16, OUT, 0], VBUF), 'trap', 'a plain lock waits for the host');
     assert.equal(run(LOCK, [0, 16, OUT, 0x2000], VBUF), 'trap', 'and so does DISCARD');
     assert.equal(run(LOCK, [16, 16, OUT, 0x1000], VBUF), 'ok', 'NOOVERWRITE does not');
+    assert.equal(read(BLOCK + SHADOW.LOCK_CALLS), 2, 'each lock taken in the guest counted');
 
     // What the host makes of them: the calls, in order, with what was copied.
     /** @type {any[]} */

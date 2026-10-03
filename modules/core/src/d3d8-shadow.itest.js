@@ -10,12 +10,11 @@
  * share the device's command ring.
  *
  * The program makes a device and a second thread, and each thread loops:
- * the main thread sets three render states in three rows of the block's
- * marks, two stage states on stages 3 and 7 and two transforms, then reads
- * every one back through the host; the second thread does the same with a
- * render state and a stage state of its own. Every value changes from one
- * iteration to the next, so a setter adopted late, or a mark lost, reads back
- * the value before. The loops run long enough for the routines to be
+ * the main thread sets three render states, two stage states on stages 3 and
+ * 7 and two transforms, then reads every one back through the host; the
+ * second thread does the same with a render state and a stage state of its
+ * own. Every value changes from one iteration to the next, so a record made
+ * late, or lost, reads back the value before. The loops run long enough for the routines to be
  * translated, and the two threads' setters interleave with each other's
  * entries into the host. The program reports each thread's mismatches.
  */

@@ -61,9 +61,9 @@ import { declarationLength } from '../d3d8/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
 import {
     RENDER_STATE_MIRROR, TRANSFORM_MIRROR, commandCode, createShadow, getRenderStateCode,
-    getSurfaceLevelCode, lockCode, materialOf, stageStateMirror, unlockCode,
+    getSurfaceLevelCode, lockCode, stageStateMirror, unlockCode,
 } from './shadow.js';
-import { D3D8_COMMANDS } from '../d3d8/commands.js';
+import { D3D8_COMMANDS, materialOf } from '../d3d8/commands.js';
 import { D3DTSS } from '../d3d8/constants.js';
 
 /** Direct3D 8's stage state types below 32, a bit each: what the block keeps for them. */
@@ -264,8 +264,9 @@ export function createDirect3D8Seam(
     const privateData = createPrivateData({ memory, publisher, rules: D3D_PRIVATE_DATA });
 
     /**
-     * Each device's block of state the guest sets without crossing, and the
-     * host's side of it. Only with somewhere to put one: a build without an
+     * Each device's block (`shadow.js`): its command ring, the buffers its
+     * guest unlocked, and what the getters in the guest read; and the host's
+     * side of it. Only with somewhere to put one: a build without an
      * allocator keeps every setter a trap.
      *
      * @type {WeakMap<any, ReturnType<typeof createShadow>>}
@@ -274,7 +275,7 @@ export function createDirect3D8Seam(
     /**
      * The shadow of the device each buffer and texture belongs to, for the
      * host's own lock and unlock to settle the guest's first, and for a
-     * release to be seen by the block that may still name the object.
+     * release to make the calls in the ring that may still name the object.
      *
      * @type {WeakMap<object, ReturnType<typeof createShadow>>}
      */
@@ -282,25 +283,15 @@ export function createDirect3D8Seam(
     /** @param {any} device */
     const shadowOf = device=>shadows.get(device) ?? null;
     /**
-     * The program let go of a resource. A binding the guest wrote and the
-     * host has not read yet still names it, so it is adopted now, while the
-     * pointer resolves; after that the pointer is nobody's, and every slot
-     * holding it is made stale so the device keeps what it bound.
+     * The program let go of a resource. A call in the command ring that names
+     * it is made now, while its pointer still resolves; after this the pointer
+     * is nobody's.
      *
-     * @param {any} resource @param {Iterable<number>} pointers
+     * @param {any} resource
      */
-    const retire = (resource, pointers)=>{
+    const retire = resource=>{
         privateData.released(resource);
-        const shadow = resourceShadows.get(resource);
-        if (!shadow)
-        {
-            return;
-        }
-        shadow.sync();
-        for (const pointer of pointers)
-        {
-            shadow.forgetPointer(pointer);
-        }
+        resourceShadows.get(resource)?.sync();
     };
     /** @param {(at: number) => Uint8Array} code */
     const placeCode = code=>{
@@ -388,20 +379,6 @@ export function createDirect3D8Seam(
         const pointer = publisher.publish(object, interfaces, id);
         fields.writeU32(out, pointer);
         return pointer === 0 ? failure : D3D_OK;
-    };
-
-    /**
-     * A user-pointer draw's answer, once the shadow block has taken the empty
-     * stream zero and index binding the draw left on the device.
-     *
-     * @param {any} device @param {number} hr
-     */
-    const refreshedStreamZero = (device, hr)=>{
-        if (hr === D3D_OK)
-        {
-            shadowOf(device)?.refreshStreamZero();
-        }
-        return hr;
     };
 
     /**
@@ -1294,14 +1271,8 @@ export function createDirect3D8Seam(
             device.SetTexture(stage >>> 0, publisher.objectAt(texture)),
 
         /** @param {any} device @param {number[]} args */
-        SetStreamSource: (device, [index, buffer, stride])=>{
-            const hr = device.SetStreamSource(
-                index >>> 0, publisher.objectAt(buffer), stride >>> 0);
-            // An unbinding comes here past the routine, which left the block
-            // naming the buffer before.
-            shadowOf(device)?.refreshStream(index >>> 0);
-            return hr;
-        },
+        SetStreamSource: (device, [index, buffer, stride])=>
+            device.SetStreamSource(index >>> 0, publisher.objectAt(buffer), stride >>> 0),
 
         /** @param {any} device @param {number[]} args */
         SetIndices: (device, [buffer, base])=>
@@ -1349,16 +1320,16 @@ export function createDirect3D8Seam(
         // times the stride the caller declared.
         /** @param {any} device @param {number[]} args */
         DrawPrimitiveUP: (device, [type, primitiveCount, vertices, stride])=>
-            refreshedStreamZero(device, device.DrawPrimitiveUP(
+            device.DrawPrimitiveUP(
                 type >>> 0, primitiveCount >>> 0,
                 readArray(vertices,
                     vertexCountOf(type >>> 0, primitiveCount >>> 0) * (stride >>> 0)),
-                stride >>> 0)),
+                stride >>> 0),
 
         /** @param {any} device @param {number[]} args */
         DrawIndexedPrimitiveUP: (device,
             [type, minIndex, numVertices, count, indices, format, vertices, stride])=>
-            refreshedStreamZero(device, device.DrawIndexedPrimitiveUP(
+            device.DrawIndexedPrimitiveUP(
                 type >>> 0, minIndex >>> 0, numVertices >>> 0, count >>> 0,
                 readArray(indices,
                     vertexCountOf(type >>> 0, count >>> 0) * indexWidth(format)),
@@ -1366,7 +1337,7 @@ export function createDirect3D8Seam(
                 // An index counts from the start of the vertices, so the
                 // range reaches past its lowest by the count.
                 readArray(vertices, ((minIndex >>> 0) + (numVertices >>> 0)) * (stride >>> 0)),
-                stride >>> 0)),
+                stride >>> 0),
 
         /** @param {any} device @param {number[]} args */
         SetRenderTarget: (device, [target, depth])=>
@@ -1903,11 +1874,7 @@ export function createDirect3D8Seam(
             shadowOf(device)?.remirror(block && {
                 renderStates: block.renderStates.keys(),
                 transforms: block.transforms.keys(),
-                textures: block.textures.size > 0,
                 stageStates: block.stageStates.keys(),
-                material: block.material !== undefined,
-                bindings: block.streams.size > 0 || block.indices !== undefined
-                    || block.vertexShader !== undefined || block.pixelShader !== undefined,
             });
             return hr;
         },
@@ -2068,13 +2035,7 @@ export function createDirect3D8Seam(
         // as a handle, and that is how every fixed-function draw declares its
         // vertices.
         /** @param {any} device @param {number[]} args */
-        SetVertexShader: (device, [handle])=>{
-            const hr = device.SetVertexShader(handle >>> 0);
-            // The guest routine takes a vertex format and leaves a handle
-            // here: the block is told what the device holds now.
-            shadowOf(device)?.refreshShader();
-            return hr;
-        },
+        SetVertexShader: (device, [handle])=>device.SetVertexShader(handle >>> 0),
 
         GetVertexShaderDeclaration: tokensOf('GetVertexShaderDeclaration'),
         GetVertexShaderFunction: tokensOf('GetVertexShaderFunction'),
@@ -2119,12 +2080,7 @@ export function createDirect3D8Seam(
         },
 
         /** @param {any} device @param {number[]} args */
-        DeleteVertexShader: (device, [handle])=>{
-            const hr = device.DeleteVertexShader(handle >>> 0);
-            // Deleting the bound shader unbinds it.
-            shadowOf(device)?.refreshShader();
-            return hr;
-        },
+        DeleteVertexShader: (device, [handle])=>device.DeleteVertexShader(handle >>> 0),
 
         /** @param {any} device @param {number[]} args */
         CreatePixelShader: (device, [code, out])=>{
@@ -2190,10 +2146,11 @@ export function createDirect3D8Seam(
         DeletePixelShader: (device, [handle])=>device.DeletePixelShader(handle >>> 0),
     };
 
-    // Every method of the device adopts what the guest set on its way in, so
-    // a read, a draw or a present sees the state the program set last --
-    // through the same setters a trap would have called, which is where
-    // validation and invalidation live.
+    // Every method of the device first makes what the guest did since the
+    // host last looked -- the buffers it let go of, then the calls in the
+    // command ring -- so a read, a draw or a present sees the state the
+    // program set last, through the same methods a trap would have called,
+    // which is where validation and invalidation live.
     /** @type {Record<string, (device: any, args: number[]) => number | Promise<number>>} */
     const syncedMethods = Object.fromEntries(Object.entries(deviceMethods)
         .map(([name, method])=>[name, (/** @type {any} */ device, /** @type {number[]} */ args)=>{
@@ -2615,19 +2572,7 @@ export function createDirect3D8Seam(
                     readU32: memory.readU32,
                     writeMemory: memory.writeMemory,
                     device: held.device,
-                    objectAt: publisher.objectAt,
-                    // A buffer is published as the interface its kind has;
-                    // publishing is memoised, so this is the pointer the
-                    // program already holds.
-                    pointerOf: buffer=>(buffer.type === D3DRTYPE.INDEXBUFFER
-                        ? publisher.publish(buffer, indexBufferInterfaces,
-                            IID_IDirect3DIndexBuffer8)
-                        : publisher.publish(buffer, vertexBufferInterfaces,
-                            IID_IDirect3DVertexBuffer8)),
                     divergence,
-                    // The bindings travel in the command ring, in order with
-                    // the draws; the block keeps none of them.
-                    bindings: false,
                     commands: { take: records=>held.device.commands(records,
                         D3D8_COMMANDS.commandObjects(records, publisher.objectAt)) },
                 });

@@ -883,9 +883,10 @@ export function createDirect3D9Seam(
         if (shadow)
         {
             buffer.guestState = ()=>shadow.attachBuffer(buffer);
-            // A binding the guest made and the host has not read is adopted
-            // before the buffer's count is touched: the device holds what is
-            // bound, and a Release of the last reference must find it held.
+            // A binding the guest made in the command ring and the host has
+            // not made yet is made before the buffer's count is touched: the
+            // device holds what is bound, and a Release of the last reference
+            // must find it held.
             buffer.settleGuestRefs = ()=>shadow.sync();
         }
     };
@@ -2430,9 +2431,10 @@ export function createDirect3D9Seam(
     };
 
     /**
-     * Every method adopts what the guest set on its way in, so a read, a draw
-     * or a present sees the state the program set last -- through the same
-     * setters a trap would have called.
+     * Every method first makes what the guest did since the host last looked
+     * -- the buffers it let go of, then the calls in the command ring -- so a
+     * read, a draw or a present sees the state the program set last, through
+     * the same methods a trap would have called.
      *
      * @param {Record<string, any>} methods
      * @returns {Record<string, any>}
@@ -2890,11 +2892,8 @@ export function createDirect3D9Seam(
                 readU32: memory.readU32,
                 writeMemory: memory.writeMemory,
                 device: held.device,
-                objectAt: publisher.objectAt,
-                pointerOf: ()=>0,
                 divergence,
                 name: 'IDirect3DDevice9',
-                bindings: false,
                 commands: { take: records=>held.device.commands(records,
                     commandObjects(records, publisher.objectAt)) },
             });

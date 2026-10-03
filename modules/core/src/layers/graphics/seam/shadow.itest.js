@@ -5,14 +5,15 @@
  */
 
 /**
- * The state setters that run in the guest, run by the real processor.
+ * The buffer routines and the getters that run in the guest, run by the real
+ * processor.
  *
  * The unit test pins the bytes and the layout; this is the check that the
- * bytes are x86 that writes the blocks the way the host reads them, pops
+ * bytes are x86 that reads and writes the blocks the way the host does, pops
  * exactly its arguments, and leaves for the trap in every case it does not
- * take -- a state past the block, the host's flag, a lock already held, a
- * range past the buffer, a full ring -- and that the marks it leaves name the
- * words it wrote.
+ * take -- the host's flag, an object without a block, a lock already held, a
+ * range past the buffer, a full ring, a state or a level the block does not
+ * answer for, nowhere to put the answer.
  */
 
 import { test } from 'node:test';
@@ -20,20 +21,19 @@ import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
 import {
-    BUFFER, FLAG_SLOW_PATH, SHADOW, TEXTURE, getRenderStateCode, getSurfaceLevelCode, lockCode,
-    setIndicesCode, setMaterialCode, setRenderStateCode, setStreamSourceCode, setTextureCode,
-    setTextureStageStateCode, setTransformCode, setVertexShaderCode, unlockCode,
-    getTextureStageStateCode, getTransformCode,
+    BUFFER, FLAG_SLOW_PATH, SHADOW, TEXTURE, getRenderStateCode, getSurfaceLevelCode,
+    getTextureStageStateCode, getTransformCode, lockCode, unlockCode,
 } from './shadow.js';
 import { D3DERR_INVALIDCALL, D3DTSS } from '../d3d8/constants.js';
 
+/** Direct3D 8's stage state types, a bit each: what the stage-state getter answers. */
+const STAGE_STATE_TYPES = Object.values(D3DTSS).reduce((mask, type)=>mask | (1 << type), 0) >>> 0;
+
 const PROGRAM = 0x8000;
-/** Past the program, which is a few hundred bytes of pushes and calls. */
+/** Past the program, which is a few hundred bytes of pushes and calls; lockCode is the longest. */
 const ROUTINES = {
-    renderState: 0x8800, transform: 0x8880, lock: 0x8900, unlock: 0x89b0,
-    stream: 0x8a00, indices: 0x8a80, shader: 0x8b00, texture: 0x8b80, stageState: 0x8c00,
-    material: 0x8c80, surfaceLevel: 0x8d80, getState: 0x8e00, getStage: 0x8f80,
-    getTransform: 0x9100,
+    lock: 0x8800, unlock: 0x8900, surfaceLevel: 0x8980, getState: 0x8a00, getStage: 0x8a80,
+    getTransform: 0x8b00,
 };
 /** Where the routines jump when they leave the case to the host: a halt here. */
 const TRAP = 0x8d00;
@@ -44,12 +44,10 @@ const VBUF = 0x9400;
 const BARE = 0x9800;
 /** Two pages, as the device's block is. */
 const BLOCK = 0xa000;
-const MATRIX = 0xc000;
 const VBLOCK = 0xc400;
 const VBASE = 0xd000;
 const VLENGTH = 0x100;
 const OUT = 0xc800;
-const MATERIAL = 0xcc00;
 /** A texture object and its block: three levels, the middle one published. */
 const TEX = 0x9c00;
 const TBLOCK = 0xd400;
@@ -71,54 +69,33 @@ const step = (target, object, args)=>({ target, object, args });
 
 /** The program, as the steps a test runs one by one from a fresh stack. */
 const STEPS = [
-    step(ROUTINES.renderState, OBJECT, [8, 7]),          // 0: state 8 = 7
-    step(ROUTINES.transform, OBJECT, [256, MATRIX]),     // 1: WORLD = the matrix
-    step(ROUTINES.renderState, OBJECT, [300, 1]),        // 2: past the block: the trap
-    step(ROUTINES.renderState, OBJECT, [8, 9]),          // 3: with the flag up: the trap
-    step(ROUTINES.renderState, BARE, [8, 9]),            // 4: no block: the trap
-    step(ROUTINES.lock, VBUF, [16, 32, OUT, 0x2000]),    // 5: a lock, DISCARD
-    step(ROUTINES.lock, VBUF, [0, 0, OUT, 0]),           // 6: locked already: the trap
-    step(ROUTINES.unlock, VBUF, []),                     // 7: onto the ring
-    step(ROUTINES.unlock, VBUF, []),                     // 8: not locked: the trap
-    step(ROUTINES.lock, VBUF, [0xf0, 0x20, OUT, 0]),     // 9: past the end: the trap
-    step(ROUTINES.lock, VBUF, [0, 0, OUT, 0]),           // 10: the whole buffer, widening
-    step(ROUTINES.stream, OBJECT, [2, 0x1234, 20]),      // 11: stream 2
-    step(ROUTINES.stream, OBJECT, [2, 0, 99]),           // 12: unbinding: the trap
-    step(ROUTINES.stream, OBJECT, [16, 1, 1]),           // 13: no such stream: the trap
-    step(ROUTINES.indices, OBJECT, [0x5678, 3]),         // 14
-    step(ROUTINES.shader, OBJECT, [0x102]),              // 15: a vertex format
-    step(ROUTINES.shader, OBJECT, [0x3]),                // 16: a shader handle: the trap
-    step(ROUTINES.unlock, VBUF, []),                     // 17: with the ring full: the trap
-    step(ROUTINES.texture, OBJECT, [1, 0x4242]),         // 18: stage 1
-    step(ROUTINES.texture, OBJECT, [8, 0x4242]),         // 19: no such stage: refused here
-    step(ROUTINES.stageState, OBJECT, [2, D3DTSS.COLOROP, 5]),   // 20
-    step(ROUTINES.stageState, OBJECT, [2, 12, 5]),       // 21: not a type of this version: the trap
-    step(ROUTINES.stageState, OBJECT, [2, 40, 5]),       // 22: past the table: the trap
-    step(ROUTINES.stageState, OBJECT, [8, D3DTSS.COLOROP, 5]),   // 23: no such stage: refused here
-    step(ROUTINES.material, OBJECT, [MATERIAL]),         // 24: copied in
-    step(ROUTINES.material, OBJECT, [0]),                // 25: null: the trap
-    step(ROUTINES.surfaceLevel, TEX, [1, OUT]),          // 26: the published level
-    step(ROUTINES.surfaceLevel, TEX, [0, OUT]),          // 27: not published yet: the trap
-    step(ROUTINES.surfaceLevel, TEX, [3, OUT]),          // 28: no such level: refused here
-    step(ROUTINES.surfaceLevel, TEX, [1, 0]),            // 29: nowhere to put it: the trap
-    step(ROUTINES.renderState, OBJECT, [255, 3]),        // 30: the last state: bit 31 of row 7
-    step(ROUTINES.renderState, OBJECT, [40, 4]),         // 31: row 1
-    step(ROUTINES.transform, OBJECT, [23, MATRIX]),      // 32: TEXTURE7, slot 23
-    step(ROUTINES.transform, OBJECT, [259, MATRIX]),     // 33: WORLD3, slot 27
-    step(ROUTINES.stageState, OBJECT, [7, D3DTSS.TEXTURETRANSFORMFLAGS, 2]),  // 34: the last stage
-    step(ROUTINES.getState, OBJECT, [8, OUT]),           // 35: a state the device answers for
-    step(ROUTINES.getState, OBJECT, [9, OUT]),           // 36: one it refuses: the trap
-    step(ROUTINES.getState, OBJECT, [300, OUT]),         // 37: past the block: the trap
-    step(ROUTINES.getState, OBJECT, [8, 0]),             // 38: nowhere to put it: the trap
-    step(ROUTINES.getStage, OBJECT, [2, D3DTSS.COLOROP, OUT]),   // 39: what step 20 wrote
-    step(ROUTINES.getStage, OBJECT, [2, 12, OUT]),       // 40: not a type of this version: the trap
-    step(ROUTINES.getStage, OBJECT, [8, D3DTSS.COLOROP, OUT]),   // 41: no such stage: the trap
-    step(ROUTINES.getStage, OBJECT, [2, D3DTSS.COLOROP, 0]),     // 42: nowhere to put it: the trap
-    step(ROUTINES.getTransform, OBJECT, [256, OUT]),     // 43: WORLD, as step 1 set it
-    step(ROUTINES.getTransform, OBJECT, [23, OUT]),      // 44: TEXTURE7, as step 32 set it
-    step(ROUTINES.getTransform, OBJECT, [1, OUT]),       // 45: no such type: the trap
-    step(ROUTINES.getTransform, OBJECT, [260, OUT]),     // 46: past WORLD3: the trap
-    step(ROUTINES.getTransform, OBJECT, [256, 0]),       // 47: nowhere to put it: the trap
+    step(ROUTINES.lock, VBUF, [16, 32, OUT, 0x2000]),    // 0: a lock, DISCARD
+    step(ROUTINES.lock, VBUF, [0, 0, OUT, 0]),           // 1: locked already: the trap
+    step(ROUTINES.unlock, VBUF, []),                     // 2: onto the ring
+    step(ROUTINES.unlock, VBUF, []),                     // 3: not locked: the trap
+    step(ROUTINES.lock, VBUF, [0xf0, 0x20, OUT, 0]),     // 4: past the end: the trap
+    step(ROUTINES.lock, VBUF, [0, 0, OUT, 0]),           // 5: the whole buffer, widening
+    step(ROUTINES.unlock, VBUF, []),                     // 6: with the ring full: the trap
+    step(ROUTINES.lock, VBUF, [0, 0, OUT, 0x10]),        // 7: READONLY: the trap
+    step(ROUTINES.surfaceLevel, TEX, [1, OUT]),          // 8: the published level
+    step(ROUTINES.surfaceLevel, TEX, [0, OUT]),          // 9: not published yet: the trap
+    step(ROUTINES.surfaceLevel, TEX, [3, OUT]),          // 10: no such level: refused here
+    step(ROUTINES.surfaceLevel, TEX, [1, 0]),            // 11: nowhere to put it: the trap
+    step(ROUTINES.getState, OBJECT, [8, OUT]),           // 12: a state the device answers for
+    step(ROUTINES.getState, OBJECT, [9, OUT]),           // 13: one it refuses: the trap
+    step(ROUTINES.getState, OBJECT, [300, OUT]),         // 14: past the block: the trap
+    step(ROUTINES.getState, OBJECT, [8, 0]),             // 15: nowhere to put it: the trap
+    step(ROUTINES.getState, OBJECT, [8, OUT]),           // 16: with the flag up: the trap
+    step(ROUTINES.getState, BARE, [8, OUT]),             // 17: no block: the trap
+    step(ROUTINES.getStage, OBJECT, [2, D3DTSS.COLOROP, OUT]),   // 18: from the block
+    step(ROUTINES.getStage, OBJECT, [2, 12, OUT]),       // 19: not a type of this version: the trap
+    step(ROUTINES.getStage, OBJECT, [8, D3DTSS.COLOROP, OUT]),   // 20: no such stage: the trap
+    step(ROUTINES.getStage, OBJECT, [2, D3DTSS.COLOROP, 0]),     // 21: nowhere to put it: the trap
+    step(ROUTINES.getTransform, OBJECT, [256, OUT]),     // 22: WORLD, slot 24
+    step(ROUTINES.getTransform, OBJECT, [23, OUT]),      // 23: TEXTURE7, slot 23
+    step(ROUTINES.getTransform, OBJECT, [1, OUT]),       // 24: no such type: the trap
+    step(ROUTINES.getTransform, OBJECT, [260, OUT]),     // 25: past WORLD3: the trap
+    step(ROUTINES.getTransform, OBJECT, [256, 0]),       // 26: nowhere to put it: the trap
 ];
 
 /** @param {typeof STEPS[number]} entry @param {number} at */
@@ -170,11 +147,10 @@ function processor(){
         eip: ()=>host.readReg32('eip'),
         esp: ()=>host.readReg32('esp'),
         eax: ()=>host.readReg32('eax'),
-        stop: ()=>{},
     };
 }
 
-test('the guest routines write the blocks and leave what they cannot take to the trap',
+test('the guest routines read and write the blocks and leave what they cannot take to the trap',
     async()=>{
         await routines();
     });
@@ -183,22 +159,25 @@ async function routines(){
     const machine = processor();
     const { host } = machine;
 
-    host.writePhysical(ROUTINES.renderState, setRenderStateCode(ROUTINES.renderState, TRAP));
-    host.writePhysical(ROUTINES.transform, setTransformCode(ROUTINES.transform, TRAP));
-    host.writePhysical(ROUTINES.lock, lockCode(ROUTINES.lock, TRAP));
-    host.writePhysical(ROUTINES.unlock, unlockCode(ROUTINES.unlock, TRAP));
-    host.writePhysical(ROUTINES.stream, setStreamSourceCode(ROUTINES.stream, TRAP));
-    host.writePhysical(ROUTINES.indices, setIndicesCode(ROUTINES.indices, TRAP));
-    host.writePhysical(ROUTINES.shader, setVertexShaderCode(ROUTINES.shader, TRAP));
-    host.writePhysical(ROUTINES.texture, setTextureCode(ROUTINES.texture, TRAP));
-    host.writePhysical(ROUTINES.stageState, setTextureStageStateCode(ROUTINES.stageState, TRAP));
-    host.writePhysical(ROUTINES.material, setMaterialCode(ROUTINES.material, TRAP));
-    host.writePhysical(ROUTINES.surfaceLevel,
-        getSurfaceLevelCode(ROUTINES.surfaceLevel, TRAP));
-    host.writePhysical(ROUTINES.getState, getRenderStateCode(ROUTINES.getState, TRAP));
-    host.writePhysical(ROUTINES.getStage, getTextureStageStateCode(ROUTINES.getStage, TRAP));
-    host.writePhysical(ROUTINES.getTransform, getTransformCode(ROUTINES.getTransform, TRAP));
-    host.writePhysical(TRAP, new Uint8Array([0xf4]));
+    const { bytes: image, starts, end } = program();
+    assert.ok(PROGRAM + image.length <= ROUTINES.lock, 'the program ends before the routines');
+    /** @type {[number, Uint8Array][]} */
+    const placed = [
+        [ROUTINES.lock, lockCode(ROUTINES.lock, TRAP)],
+        [ROUTINES.unlock, unlockCode(ROUTINES.unlock, TRAP)],
+        [ROUTINES.surfaceLevel, getSurfaceLevelCode(ROUTINES.surfaceLevel, TRAP)],
+        [ROUTINES.getState, getRenderStateCode(ROUTINES.getState, TRAP)],
+        [ROUTINES.getStage, getTextureStageStateCode(ROUTINES.getStage, TRAP, STAGE_STATE_TYPES)],
+        [ROUTINES.getTransform, getTransformCode(ROUTINES.getTransform, TRAP)],
+        [TRAP, new Uint8Array([0xf4])],
+    ];
+    placed.sort(([a], [b])=>a - b);
+    placed.forEach(([at, code], i)=>{
+        const next = placed[i + 1]?.[0] ?? OBJECT;
+        assert.ok(at + code.length <= next,
+            `the routine at 0x${at.toString(16)} ends before the next`);
+        host.writePhysical(at, code);
+    });
     host.writePhysical(TEX + 4, new Uint8Array(u32(TBLOCK)));
     host.writePhysical(TBLOCK, new Uint8Array(TEXTURE.SIZE));
     host.writePhysical(TBLOCK + TEXTURE.LEVEL_COUNT, new Uint8Array(u32(3)));
@@ -211,12 +190,17 @@ async function routines(){
         ...u32(0), ...u32(VBASE), ...u32(VLENGTH), ...u32(0),
         ...u32(0), ...u32(0), ...u32(0), ...u32(BLOCK),
     ]));
+    // What the host mirrors and the setters' command routines keep: state 8,
+    // which the device answers for, a stage state, and two matrices.
+    host.writePhysical(BLOCK + SHADOW.RENDER_STATES + 8 * 4, new Uint8Array(u32(7)));
+    host.writePhysical(BLOCK + SHADOW.RENDER_STATE_VALID, new Uint8Array(u32(1 << 8)));
+    host.writePhysical(BLOCK + SHADOW.STAGE_STATES + (2 * 32 + D3DTSS.COLOROP) * 4,
+        new Uint8Array(u32(5)));
     const matrix = new Float32Array(16).map((unused, i)=>i * 1.5);
-    host.writePhysical(MATRIX, new Uint8Array(matrix.buffer));
-    const material = new Float32Array(17).map((unused, i)=>i + 0.25);
-    host.writePhysical(MATERIAL, new Uint8Array(material.buffer));
+    const reversed = matrix.slice().reverse();
+    host.writePhysical(BLOCK + SHADOW.TRANSFORMS + 24 * 64, new Uint8Array(matrix.buffer));
+    host.writePhysical(BLOCK + SHADOW.TRANSFORMS + 23 * 64, new Uint8Array(reversed.buffer));
 
-    const { bytes: image, starts, end } = program();
     host.writePhysical(PROGRAM, image);
     host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
 
@@ -254,50 +238,7 @@ async function routines(){
         return 'ok';
     };
 
-    /** The block's marks, as the host would find them. */
-    const marks = ()=>({
-        states: Array.from({ length: 8 }, (unused, row)=>
-            read(BLOCK + SHADOW.RENDER_STATE_MARKS + row * 4)),
-        stages: Array.from({ length: 8 }, (unused, stage)=>
-            read(BLOCK + SHADOW.STAGE_STATE_MARKS + stage * 4)),
-        transforms: read(BLOCK + SHADOW.TRANSFORM_MARKS),
-    });
-    const unmarked = marks();
-    /** Every call a routine took is counted once more, where an entry looks first. */
-    const calls = ()=>read(BLOCK + SHADOW.CALLS);
-
     assert.equal(run(0), 'ok');
-    assert.equal(read(BLOCK + SHADOW.RENDER_STATES + 8 * 4), 7);
-    assert.equal(read(BLOCK + SHADOW.RENDER_STATE_CALLS), 1);
-    assert.equal(calls(), 1);
-    assert.deepEqual(marks(), { ...unmarked, states: [1 << 8, 0, 0, 0, 0, 0, 0, 0] },
-        'state 8 marked, and nothing else');
-
-    assert.equal(run(1), 'ok');
-    const slot = BLOCK + SHADOW.TRANSFORMS + 24 * 64;
-    const written = new Float32Array(host.readPhysical(slot, 64).slice().buffer);
-    assert.deepEqual([...written], [...matrix], 'WORLD copied into its slot');
-    assert.equal(read(BLOCK + SHADOW.TRANSFORM_CALLS), 1);
-    assert.equal(read(BLOCK + SHADOW.RENDER_STATE_CALLS), 1, 'the other counter untouched');
-    assert.equal(marks().transforms, 1 << 24, 'slot 24 marked');
-    assert.equal(read(BLOCK + SHADOW.TRANSFORMS + 25 * 64), 0, 'and the slot after untouched');
-    assert.equal(calls(), 2);
-
-    const before = marks();
-    assert.equal(run(2), 'trap', 'a state past the block');
-    assert.equal(read(BLOCK + SHADOW.RENDER_STATE_CALLS), 1, 'and not counted');
-    assert.deepEqual(marks(), before, 'nor marked');
-    assert.equal(calls(), 2);
-
-    write(BLOCK + SHADOW.FLAGS, FLAG_SLOW_PATH);
-    assert.equal(run(3), 'trap', 'with the flag up, a valid state too');
-    assert.equal(read(BLOCK + SHADOW.RENDER_STATES + 8 * 4), 7, 'and the block was not written');
-    write(BLOCK + SHADOW.FLAGS, 0);
-
-    assert.equal(run(4), 'trap', 'an object without a block');
-    assert.equal(read(SHADOW.RENDER_STATES + 8 * 4), 0, 'and nothing was written at address zero');
-
-    assert.equal(run(5), 'ok');
     assert.equal(read(OUT), VBASE + 16, 'the address handed back is inside the buffer');
     assert.equal(read(VBLOCK + BUFFER.LOCKED), 1);
     assert.equal(read(VBLOCK + BUFFER.FROM), 16);
@@ -305,144 +246,84 @@ async function routines(){
     assert.equal(read(VBLOCK + BUFFER.LOCK_FLAGS), 0x2000);
     assert.equal(read(BLOCK + SHADOW.LOCK_CALLS), 1);
 
-    assert.equal(run(6), 'trap', 'a second lock is the host\'s to refuse');
+    assert.equal(run(1), 'trap', 'a second lock is the host\'s to refuse');
     assert.equal(read(BLOCK + SHADOW.LOCK_CALLS), 1);
 
-    assert.equal(run(7), 'ok');
+    assert.equal(run(2), 'ok');
     assert.equal(read(VBLOCK + BUFFER.LOCKED), 0);
     assert.equal(read(BLOCK + SHADOW.RING_HEAD), 1);
     assert.equal(read(BLOCK + SHADOW.RING), VBLOCK, 'the buffer\'s block is on the ring');
     assert.equal(read(BLOCK + SHADOW.UNLOCK_CALLS), 1);
 
-    assert.equal(run(8), 'trap', 'an unlock with no lock held');
+    assert.equal(run(3), 'trap', 'an unlock with no lock held');
+    assert.equal(read(BLOCK + SHADOW.UNLOCK_CALLS), 1);
 
-    assert.equal(run(9), 'trap', 'a range past the end of the buffer');
+    assert.equal(run(4), 'trap', 'a range past the end of the buffer');
     assert.equal(read(VBLOCK + BUFFER.LOCKED), 0);
 
-    assert.equal(run(10), 'ok');
+    assert.equal(run(5), 'ok');
     assert.equal(read(OUT), VBASE);
     assert.equal(read(VBLOCK + BUFFER.FROM), 0, 'the range widened to take the new lock');
     assert.equal(read(VBLOCK + BUFFER.TO), VLENGTH);
     assert.equal(read(VBLOCK + BUFFER.LOCK_FLAGS), 0x2000, 'and kept the earlier flags');
     assert.equal(read(BLOCK + SHADOW.LOCK_CALLS), 2);
 
-    assert.equal(run(11), 'ok');
-    assert.equal(read(BLOCK + SHADOW.STREAMS + 2 * 8), 0x1234);
-    assert.equal(read(BLOCK + SHADOW.STREAMS + 2 * 8 + 4), 20);
-    // The bind before it is still in the block for the host to adopt first.
-    assert.equal(run(12), 'trap', 'an unbinding');
-    assert.equal(read(BLOCK + SHADOW.STREAMS + 2 * 8), 0x1234, 'the block untouched');
-    assert.equal(read(BLOCK + SHADOW.STREAMS + 2 * 8 + 4), 20);
-    assert.equal(run(13), 'trap', 'a stream the block has no slot for');
-    assert.equal(read(BLOCK + SHADOW.BINDING_CALLS), 1);
-
-    assert.equal(run(14), 'ok');
-    assert.equal(read(BLOCK + SHADOW.INDICES), 0x5678);
-    assert.equal(read(BLOCK + SHADOW.BASE_VERTEX), 3);
-
-    assert.equal(run(15), 'ok');
-    assert.equal(read(BLOCK + SHADOW.VERTEX_SHADER), 0x102);
-    assert.equal(read(BLOCK + SHADOW.BINDING_CALLS), 3);
-    assert.equal(run(16), 'trap', 'a shader handle is the host\'s to check');
-    assert.equal(read(BLOCK + SHADOW.VERTEX_SHADER), 0x102);
-
     write(BLOCK + SHADOW.RING_HEAD, SHADOW.RING_CAPACITY);
-    assert.equal(run(17), 'trap', 'with the ring full, an unlock is the host\'s');
+    assert.equal(run(6), 'trap', 'with the ring full, an unlock is the host\'s');
     assert.equal(read(VBLOCK + BUFFER.LOCKED), 1, 'and the lock is still held');
-
-    assert.equal(run(18), 'ok');
-    assert.equal(read(BLOCK + SHADOW.TEXTURES + 4), 0x4242);
-    assert.equal(read(BLOCK + SHADOW.TEXTURE_CALLS), 1);
-    assert.equal(run(19), 'invalid', 'a stage past the last is refused without the trap');
-    assert.equal(read(BLOCK + SHADOW.TEXTURE_CALLS), 1, 'and not counted');
-
-    assert.equal(run(20), 'ok');
-    assert.equal(read(BLOCK + SHADOW.STAGE_STATES + (2 * 32 + D3DTSS.COLOROP) * 4), 5);
-    assert.equal(read(BLOCK + SHADOW.STAGE_STATE_CALLS), 1);
-    assert.deepEqual(marks().stages, [0, 0, 1 << D3DTSS.COLOROP, 0, 0, 0, 0, 0],
-        'the type\'s bit in stage 2\'s marks');
-    const staged = marks();
-    assert.equal(run(21), 'trap', 'a type this version has not got is the host\'s');
-    assert.equal(run(22), 'trap', 'a type past the table is the host\'s');
-    assert.equal(run(23), 'invalid');
-    assert.equal(read(BLOCK + SHADOW.STAGE_STATE_CALLS), 1);
-    assert.deepEqual(marks(), staged, 'none of those marked');
-
-    assert.equal(run(24), 'ok');
-    const copied = new Float32Array(host.readPhysical(BLOCK + SHADOW.MATERIAL, 68).slice().buffer);
-    assert.deepEqual([...copied], [...material], 'the material copied into the block');
-    assert.equal(read(BLOCK + SHADOW.MATERIAL_CALLS), 1);
-    assert.equal(run(25), 'trap', 'a null material is the host\'s to refuse');
-    assert.equal(read(BLOCK + SHADOW.MATERIAL_CALLS), 1);
+    write(VBLOCK + BUFFER.LOCKED, 0);
+    assert.equal(run(7), 'trap', 'a lock for reading is the host\'s');
+    assert.equal(read(BLOCK + SHADOW.LOCK_CALLS), 2);
 
     write(OUT, 0);
-    assert.equal(run(26), 'ok');
+    assert.equal(run(8), 'ok');
     assert.equal(read(OUT), LEVEL1, 'the pointer the host published for that level');
     assert.equal(read(TBLOCK + TEXTURE.REFS), 1, 'and the reference it owes is counted');
 
     write(OUT, 0);
-    assert.equal(run(27), 'trap', 'a level the host has not published yet');
+    assert.equal(run(9), 'trap', 'a level the host has not published yet');
     assert.equal(read(TBLOCK + TEXTURE.REFS), 1, 'and nothing owed for it');
     assert.equal(read(OUT), 0);
 
-    assert.equal(run(28), 'invalid', 'a level the texture has not got, refused without the trap');
+    assert.equal(run(10), 'invalid', 'a level the texture has not got, refused without the trap');
     assert.equal(read(TBLOCK + TEXTURE.REFS), 1);
-    assert.equal(run(29), 'trap', 'a null out-pointer is refused by the host');
+    assert.equal(run(11), 'trap', 'a null out-pointer is refused by the host');
     assert.equal(read(TBLOCK + TEXTURE.REFS), 1);
-
-    // The far ends of each string of marks: the sign bit of the last row,
-    // the last stage, the last slot.
-    assert.equal(run(30), 'ok');
-    assert.equal(run(31), 'ok');
-    assert.equal(read(BLOCK + SHADOW.RENDER_STATES + 255 * 4), 3);
-    assert.equal(read(BLOCK + SHADOW.RENDER_STATES + 40 * 4), 4);
-    assert.deepEqual(marks().states, [1 << 8, 1 << 8, 0, 0, 0, 0, 0, 0x80000000]);
-    assert.equal(run(32), 'ok');
-    assert.equal(run(33), 'ok');
-    assert.equal(marks().transforms, (1 << 23 | 1 << 24 | 1 << 27) >>> 0);
-    assert.equal(read(BLOCK + SHADOW.TRANSFORM_CALLS), 3);
-    assert.equal(run(34), 'ok');
-    assert.equal(read(BLOCK + SHADOW.STAGE_STATES
-        + (7 * 32 + D3DTSS.TEXTURETRANSFORMFLAGS) * 4), 2);
-    assert.equal(marks().stages[7], 1 << D3DTSS.TEXTURETRANSFORMFLAGS);
-    // One for every call a routine answered on the device's behalf: steps 0,
-    // 1, 5, 7, 10, 11, 12, 14, 15, 18, 20, 24 and 30 to 34. A refusal made
-    // in the guest is not one, and a level handed out is the texture's.
-    assert.equal(calls(), 16);
 
     // The getter answers from the block for a state the host marked as one
-    // the device answers for, and changes nothing the host counts.
-    write(BLOCK + SHADOW.RENDER_STATE_VALID, 1 << 8);
+    // the device answers for.
     write(OUT, 0xdead);
-    assert.equal(run(35), 'ok');
-    assert.equal(read(OUT), 7, 'state 8 as the guest set it');
+    assert.equal(run(12), 'ok');
+    assert.equal(read(OUT), 7, 'state 8 as the block holds it');
     write(OUT, 0xdead);
-    assert.equal(run(36), 'trap', 'a state the device refuses');
-    assert.equal(run(37), 'trap', 'a state past the block');
-    assert.equal(run(38), 'trap', 'a null out-pointer');
-    assert.equal(read(OUT), 0xdead, 'nothing written by the three the host answers');
-    assert.equal(calls(), 16, 'a read is no call the host has to adopt');
+    assert.equal(run(13), 'trap', 'a state the device refuses');
+    assert.equal(run(14), 'trap', 'a state past the block');
+    assert.equal(run(15), 'trap', 'a null out-pointer');
+    write(BLOCK + SHADOW.FLAGS, FLAG_SLOW_PATH);
+    assert.equal(run(16), 'trap', 'with the flag up, a state the block answers for too');
+    write(BLOCK + SHADOW.FLAGS, 0);
+    assert.equal(run(17), 'trap', 'an object without a block');
+    assert.equal(read(OUT), 0xdead, 'nothing written by those the host answers');
 
     write(OUT, 0);
-    assert.equal(run(39), 'ok', 'a stage state read from the block');
-    assert.equal(read(OUT), 5, 'what step 20 set');
-    assert.equal(calls(), 16, 'a read is not a call the host must adopt');
-    assert.equal(run(40), 'trap', 'a type the setter leaves to the host');
-    assert.equal(run(41), 'trap', 'a stage past the block');
-    assert.equal(run(42), 'trap', 'a null pointer');
+    assert.equal(run(18), 'ok', 'a stage state read from the block');
+    assert.equal(read(OUT), 5);
+    assert.equal(run(19), 'trap', 'a type the version has not got');
+    assert.equal(run(20), 'trap', 'a stage past the block');
+    assert.equal(run(21), 'trap', 'a null pointer');
 
     /** @returns {number[]} the sixteen floats at OUT */
     const outMatrix = ()=>[...new Float32Array(host.readPhysical(OUT, 64).slice().buffer)];
     host.writePhysical(OUT, new Uint8Array(64));
-    assert.equal(run(43), 'ok', 'WORLD copied out of its slot');
+    assert.equal(run(22), 'ok', 'WORLD copied out of its slot');
     assert.deepEqual(outMatrix(), [...matrix]);
     host.writePhysical(OUT, new Uint8Array(64));
-    assert.equal(run(44), 'ok', 'TEXTURE7 copied out of slot 23');
-    assert.deepEqual(outMatrix(), [...matrix]);
-    assert.equal(run(45), 'trap', 'a type the device refuses');
-    assert.equal(run(46), 'trap', 'a type past WORLD3');
-    assert.equal(run(47), 'trap', 'a null pointer');
-    assert.equal(calls(), 16, 'reads are not calls the host must adopt');
+    assert.equal(run(23), 'ok', 'TEXTURE7 copied out of slot 23');
+    assert.deepEqual(outMatrix(), [...reversed]);
+    assert.equal(run(24), 'trap', 'a type the device refuses');
+    assert.equal(run(25), 'trap', 'a type past WORLD3');
+    assert.equal(run(26), 'trap', 'a null pointer');
 
-    machine.stop();
+    // The getters wrote nothing the host reads: the counts are the buffers'.
+    assert.deepEqual([read(BLOCK + SHADOW.LOCK_CALLS), read(BLOCK + SHADOW.UNLOCK_CALLS)], [2, 1]);
 }

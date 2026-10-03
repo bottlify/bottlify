@@ -1676,7 +1676,6 @@ test('with guest memory, a buffer locks and unlocks in the guest, and the host s
     h.box.memory.writeU32(owner + SHADOW.RING_HEAD, 1);
     h.box.memory.writeU32(owner + SHADOW.LOCK_CALLS, 1);
     h.box.memory.writeU32(owner + SHADOW.UNLOCK_CALLS, 1);
-    h.box.memory.writeU32(owner + SHADOW.CALLS, 2);
     h.box.memory.writeU32(base, 0x3f800000);
     const buffer = h.publisher.objectAt(pointer);
     /** @type {[number, number][]} */
@@ -1691,6 +1690,8 @@ test('with guest memory, a buffer locks and unlocks in the guest, and the host s
     assert.deepEqual(replayed, [[0, 16]], 'the range is replayed on the way into the host');
     assert.equal(h.box.memory.readU32(owner + SHADOW.RING_HEAD), 0, 'and the ring emptied');
     assert.equal(h.box.memory.readU32(block + BUFFER.TO), 0);
+    assert.deepEqual([h.seam.shadow()?.lockCalls, h.seam.shadow()?.unlockCalls], [1, 1],
+        'the calls the routines took, counted');
 
     // A lock the host takes is the block's too, so the guest refuses a second.
     assert.equal(h.box.trap(pointer, 'Lock', [0, 0, 0x3200, 0]), D3D_OK);
