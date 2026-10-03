@@ -632,3 +632,27 @@ test('a signalling NaN from memory raises IE and goes on quiet, a quiet one does
     r = run([0xd9, 0xe8, 0xd8, 0x1d, ...d], { data: qNaN32 });
     assert.equal(r.status() & 0x4501, 0x4501, 'unordered, and IE');
 });
+
+test('arithmetic on two NaNs answers the x87\'s choice: quiet first, the larger significand',
+    ()=>{
+        const d = [DATA & 255, DATA >> 8, 0, 0];
+        const d8 = [(DATA + 8) & 255, (DATA + 8) >> 8, 0, 0];
+        const bits = (/** @type {ReturnType<typeof run>} */ r)=>r.view.getBigUint64(
+            r.m.layout.x87 + ((r.top() & 7) * 16), true);
+        /** @param {bigint} value */
+        const qword = value=>[...new Uint8Array(BigUint64Array.of(value).buffer)];
+        const small = 0x7ff8000000000001n;
+        const large = 0xfff8000000000002n;
+        // fld qword [DATA+8]; fld qword [DATA]; fmul st0, st1 -- ST0 the smaller.
+        let r = run([0xdd, 0x05, ...d8, 0xdd, 0x05, ...d, 0xd8, 0xc9],
+            { data: [...qword(small), ...qword(large)] });
+        assert.equal(bits(r), large, 'fmul st0, st1: the larger significand, not ST0');
+        // The same with ST1 the smaller, through faddp.
+        r = run([0xdd, 0x05, ...d8, 0xdd, 0x05, ...d, 0xde, 0xc1],
+            { data: [...qword(large), ...qword(small)] });
+        assert.equal(bits(r), large, 'faddp: the larger significand, not ST1');
+        // Equal significands: the positive one.
+        r = run([0xdd, 0x05, ...d8, 0xdd, 0x05, ...d, 0xd8, 0xc9],
+            { data: [...qword(0xfff8000000000005n), ...qword(0x7ff8000000000005n)] });
+        assert.equal(bits(r), 0x7ff8000000000005n, 'of equal significands, the positive');
+    });
