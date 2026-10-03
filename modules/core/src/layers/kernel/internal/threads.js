@@ -62,6 +62,9 @@ export const SLOW_SLICE_COLUMNS = ['ms', 'instructions', 'from', 'at', 'thread']
 /** A thread's state as the table stores it. */
 export const THREAD_STATES = ['ready', 'running', 'blocked', 'terminated'];
 
+/** How many seconds back the busy time by thread is kept. */
+const BUSY_SECONDS = 10;
+
 /** A wait this short or shorter, in guest ms, is a thread working in short periods. */
 const SHORT_WAIT_MS = 20;
 
@@ -143,6 +146,39 @@ export function createScheduler(options){
      */
     const recentTurns = [];
     let lastEnd = 0;
+    /**
+     * Host ms each thread held the machine, and ms between slices, by second
+     * of the last BUSY_SECONDS: how much of the machine's time each thread
+     * is, over a window short enough to be the scene in front of it rather
+     * than the loading before. What would be left of that time with each
+     * thread on a processor of its own is the most a second executor buys.
+     * @type {Map<string, number[]>}
+     */
+    const busyByThread = new Map();
+    /** @type {number[]} */
+    const between = new Array(BUSY_SECONDS).fill(0);
+    let busySecond = -1;
+    /** @param {number} at  host ms @returns {number} the slot of `at`'s second */
+    const busySlot = at=>{
+        const second = Math.floor(at / 1000);
+        if (second !== busySecond)
+        {
+            // Every second skipped since the last slice is an empty one.
+            const passed = busySecond < 0 ? BUSY_SECONDS
+                : Math.min(second - busySecond, BUSY_SECONDS);
+            for (let step = 1; step <= passed; step++)
+            {
+                const slot = (busySecond + step) % BUSY_SECONDS;
+                between[slot] = 0;
+                for (const seconds of busyByThread.values())
+                {
+                    seconds[slot] = 0;
+                }
+            }
+            busySecond = second;
+        }
+        return second % BUSY_SECONDS;
+    };
     const wall = import.meta.BOTTLIFY_DIAGNOSTICS !== false
         ? options.wall ?? (()=>performance.now()) : ()=>0;
     /**
@@ -692,6 +728,18 @@ export function createScheduler(options){
             {
                 recentTurns.push({ thread: next.name ?? '?', ms: held, end: began + held,
                     outside: lastEnd === 0 ? 0 : began - lastEnd });
+                const slot = busySlot(began);
+                const name = next.name ?? '?';
+                let seconds = busyByThread.get(name);
+                if (seconds === undefined)
+                {
+                    seconds = new Array(BUSY_SECONDS).fill(0);
+                    busyByThread.set(name, seconds);
+                }
+                seconds[slot] += held;
+                // Only the part of the gap inside the window.
+                const windowStart = (Math.floor(began / 1000) - BUSY_SECONDS + 1) * 1000;
+                between[slot] += lastEnd === 0 ? 0 : began - Math.max(lastEnd, windowStart);
                 if (recentTurns.length > 256)
                 {
                     recentTurns.shift();
@@ -1004,6 +1052,29 @@ export function createScheduler(options){
         },
 
         diagnostics(){
+            /** The busy time by thread over the window, and what it says of more executors. */
+            const busyReport = ()=>{
+                const totals = [...busyByThread]
+                    .map(([name, seconds])=>({ name, ms: seconds.reduce((a, b)=>a + b, 0) }))
+                    .filter(one=>one.ms > 0)
+                    .sort((a, b)=>b.ms - a.ms);
+                const inSlices = totals.reduce((sum, one)=>sum + one.ms, 0);
+                const outside = between.reduce((a, b)=>a + b, 0);
+                return {
+                    // Each thread's host ms in its own slices -- its code and
+                    // the host calls it made -- over the last ten seconds.
+                    busyByThread: totals.map(one=>`${one.name} ${Math.round(one.ms)}ms ${
+                        inSlices > 0 ? Math.round(one.ms / inSlices * 100) : 0}%`).join(' | '),
+                    busyInSlicesMs: Math.round(inSlices),
+                    // The loop's own work between slices, and its waits.
+                    busyBetweenSlicesMs: Math.round(outside),
+                    // The slices' time over the busiest thread's: how many
+                    // times shorter they could be with every thread on its
+                    // own executor, and nothing to wait for between them.
+                    parallelBound: totals.length > 0
+                        ? Math.round(inSlices / totals[0].ms * 100) / 100 : 1,
+                };
+            };
             /** @type {Record<string, number>} */
             const byState = {};
             for (const thread of threads)
@@ -1047,6 +1118,7 @@ export function createScheduler(options){
                     .join(' '),
                 threads: threads.length,
                 byState,
+                ...busyReport(),
                 // Which thread the machine actually spent itself on. A run that
                 // is too slow at something -- feeding a sound device, drawing --
                 // is either a machine running everything slowly or one thread

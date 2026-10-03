@@ -264,6 +264,41 @@ test('the report says which thread the machine was spent on', ()=>{
     assert.match(byThread, /worker 100/, 'and the one that ran once, once');
 });
 
+test('the report says how much of the last seconds each thread held the machine, and the most'
+    + ' an executor of its own each would buy', ()=>{
+    let tick = 0;
+    /** Host ms the next slice takes, by thread in turn. */
+    const costs = [30, 10];
+    let turn = 0;
+    const cpu = { ...fakeCpu(), runSlice: ()=>{
+        tick += costs[turn++ % 2];
+        return 100;
+    } };
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000,
+        wall: ()=>tick });
+    sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0, name: 'main' });
+    sched.create({ entry: 0x3000, stackTop: 0x4000, tebAddress: 0, name: 'worker' });
+    // Long before the window: a loading screen the window must not count.
+    for (let slice = 0; slice < 10; slice++)
+    {
+        sched.runOnce();
+    }
+    // Then nothing until a second's start: the nine seconds of the window
+    // before it are the loop waiting.
+    tick = 60_000;
+    for (let slice = 0; slice < 20; slice++)
+    {
+        sched.runOnce();
+        tick += 2;
+    }
+    const report = sched.diagnostics();
+    assert.equal(report.busyByThread, 'main 300ms 75% | worker 100ms 25%');
+    assert.equal(report.busyInSlicesMs, 400);
+    assert.equal(report.parallelBound, 1.33, 'the slices over the busiest thread\'s share');
+    assert.equal(report.busyBetweenSlicesMs, 9000 + 19 * 2,
+        'the wait inside the window and the loop\'s two ms between slices');
+});
+
 test('the report says where the guest ran, by page and weighted by the slice', ()=>{
     let at = 0x00401000;
     const cpu = { ...fakeCpu(), eip: ()=>at, runSlice: ()=>100 };
