@@ -743,6 +743,16 @@ test('this machine\'s device tree has no devices to enumerate or change', async(
     assert.equal(m.fns.SetupDiEnumDeviceInfo.handler([set, 0, device]), 0);
     assert.equal(m.lastError(), ERROR_INVALID_USER_BUFFER, 'an SP_DEVINFO_DATA of the wrong size');
     m.view.setUint32(device, 28, true);
+    // No device, so no interface of any class -- once the arguments pass.
+    const face = m.buffer(28);
+    m.view.setUint32(face, 28, true);
+    assert.equal(m.fns.SetupDiEnumDeviceInterfaces.handler([set, 0, guid, 0, face]), 0);
+    assert.equal(m.lastError(), ERROR_NO_MORE_ITEMS);
+    assert.equal(m.fns.SetupDiEnumDeviceInterfaces.handler([set, 0, 0, 0, face]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_PARAMETER, 'no interface class');
+    m.view.setUint32(face, 32, true);
+    assert.equal(m.fns.SetupDiEnumDeviceInterfaces.handler([set, 0, guid, 0, face]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_USER_BUFFER, 'an interface data of the wrong size');
     assert.equal(m.fns.SetupDiGetDeviceRegistryPropertyA.handler([set, device, 0, 0, 0, 0, 0]),
         0);
     assert.equal(m.lastError(), ERROR_NO_SUCH_DEVINST);
