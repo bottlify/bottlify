@@ -584,10 +584,13 @@ export function createDrawingFunctions(
      * @param {number} usage  What the colour table holds.
      * @param {any} dc  Whose palette a palette-relative table indexes.
      * @param {number} [lines]  How many rows the bits hold: all of them by default.
+     * @param {boolean} [lazy]  The bits and the colour table read when the drawing
+     *     first asks for them, for a caller that hands the DIB on and is done with it
+     *     before it returns: a picture the clip leaves out is never read.
      * @returns {{ header: import('./structs.js').BitmapInfoHeaderFields, bits: Uint8Array,
      *             colors: number[], masks: number[] } | null}
      */
-    const readDib = (info, bits, usage, dc, lines)=>{
+    const readDib = (info, bits, usage, dc, lines, lazy = false)=>{
         const header = readBitmapInfoHeader(host, info);
         const masked = header.compression === BI_BITFIELDS
             && (header.bitCount === 16 || header.bitCount === 32);
@@ -612,11 +615,32 @@ export function createDrawingFunctions(
         // DIB_PAL_INDICES has no table for biClrUsed to shorten.
         const size = 1 << header.bitCount;
         const count = usage === DIB_PAL_INDICES ? size : Math.min(header.clrUsed || size, size);
-        const colors = header.bitCount <= 8
+        const readColors = ()=>(header.bitCount <= 8
             ? readColorTable(info + header.size, count, usage, dc, colorEntryBytes(header))
-            : [];
-        return { header, bits: host.readMemory(bits, rle ? header.sizeImage : stride * rows),
-            colors, masks };
+            : []);
+        const readBits = ()=>host.readMemory(bits, rle ? header.sizeImage : stride * rows);
+        if (!lazy)
+        {
+            return { header, bits: readBits(), colors: readColors(), masks };
+        }
+        /** @type {Uint8Array | null} */
+        let read = null;
+        /** @type {number[] | null} */
+        let table = null;
+        return {
+            header,
+            masks,
+            get bits(){
+                const bytes = read ?? readBits();
+                read = bytes;
+                return bytes;
+            },
+            get colors(){
+                const colors = table ?? readColors();
+                table = colors;
+                return colors;
+            },
+        };
     };
 
     /**
@@ -842,7 +866,8 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                const image = readDib(info >>> 0, bits >>> 0, usage >>> 0, dcOf(dest));
+                const image = readDib(info >>> 0, bits >>> 0, usage >>> 0, dcOf(dest),
+                    undefined, true);
                 if (!image)
                 {
                     return 0;

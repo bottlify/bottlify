@@ -385,6 +385,37 @@ test('the blits that need no source, and the ones that scale, reach the service'
     assert.equal(fns.StretchDIBits.argBytes, 52);
 });
 
+test('StretchDIBits reads a DIB\'s bits and colours only when the drawing asks for them', ()=>{
+    // A window that repaints one bar of itself draws its whole picture into a
+    // clip that leaves the picture out; the drawing does not look at the bits
+    // then, and they are not copied out of the guest for nothing.
+    /** @type {any[]} */
+    const asked = [];
+    const graphics = fakeDrawing();
+    /** @param {number} hdc @param {any} request */
+    const stretchDIBits = (hdc, request)=>{
+        asked.push(request.image);
+        return 1;
+    };
+    /** @type {any} */ (graphics.drawing).stretchDIBits = stretchDIBits;
+    const { fns, hdc, memory } = setup(graphics.services);
+    const read = memory.readMemory;
+    let bitsRead = 0;
+    memory.readMemory = (address, length)=>{
+        bitsRead += address === 0x2000 ? 1 : 0;
+        return read(address, length);
+    };
+    memory.putU32s(0x800, [40, 2, 2, 0x00080001]);
+    assert.equal(fns.StretchDIBits.handler(
+        [hdc, 0, 0, 4, 4, 0, 0, 2, 2, 0x2000, 0x800, DIB_RGB_COLORS, SRCCOPY]), 1);
+    assert.equal(bitsRead, 0, 'a drawing that leaves the picture out reads none of it');
+    memory.bytes.set([0xab, 0, 0, 0, 0xcd], 0x2000);
+    assert.equal(asked[0].bits[0], 0xab, 'and one that draws it reads the bits as they are');
+    assert.equal(bitsRead, 1);
+    assert.equal(asked[0].colors.length, 256);
+    assert.equal(asked[0].bits, asked[0].bits, 'once');
+});
+
 test('a draw on a window\'s own context shows the desktop; one on a memory context does not', ()=>{
     // A program that fetches its window's DC once at start-up and blits into
     // it every frame -- never through BeginPaint/EndPaint, never releasing --
