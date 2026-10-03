@@ -2014,17 +2014,7 @@ test('a device is handed out with its block already in place, and reads what the
     assert.equal(h.box.memory.readU32(block + SHADOW.RENDER_STATES + cull * 4),
         h.box.memory.readU32(out), 'mirrored as the device holds it');
 
-    // What the guest method does: write the state, mark it, count the call.
-    h.box.memory.writeU32(block + SHADOW.RENDER_STATES + cull * 4, 1);
-    h.box.memory.writeU32(block + SHADOW.RENDER_STATE_MARKS, 1 << cull);
-    counted(h, block, SHADOW.RENDER_STATE_CALLS, 1);
-    assert.equal(h.device(device, 'GetRenderState', [cull, out]), D3D_OK);
-    assert.equal(h.box.memory.readU32(out), 1, 'the host answers from the block');
-    assert.equal(h.libraries.shadow().renderStateCalls, 1);
-    assert.deepEqual(h.divergences, []);
-
-    // A buffer's block names the device's, and a binding the guest wrote
-    // reads back as the buffer the pointer names.
+    // A buffer's block names the device's.
     const created = 0xe100;
     assert.equal(h.device(device, 'CreateVertexBuffer', [256, 0, 0, D3DPOOL.MANAGED, created]),
         D3D_OK);
@@ -2033,31 +2023,6 @@ test('a device is handed out with its block already in place, and reads what the
     assert.notEqual(vblock, 0, 'the buffer has a block');
     assert.equal(h.box.memory.readU32(vblock + BUFFER.DEVICE), block);
     assert.equal(h.box.memory.readU32(vblock + BUFFER.LENGTH), 256);
-    h.box.memory.writeU32(block + SHADOW.STREAMS, vb);
-    h.box.memory.writeU32(block + SHADOW.STREAMS + 4, 24);
-    counted(h, block, SHADOW.BINDING_CALLS, 1);
-    const stride = 0xe200;
-    assert.equal(h.device(device, 'GetStreamSource', [0, out, stride]), D3D_OK);
-    assert.equal(h.box.memory.readU32(out), vb, 'bound to the buffer the guest named');
-    assert.equal(h.box.memory.readU32(stride), 24);
-    h.release(h.box.memory.readU32(out));
-
-    // An unbinding is the host's. A bind the guest made just before it, at
-    // another stride, reaches the device first, and the device keeps the
-    // stride that bind set; the block names no buffer after it, so the same
-    // buffer bound again is a change.
-    h.box.memory.writeU32(block + SHADOW.STREAMS + 4, 40);
-    counted(h, block, SHADOW.BINDING_CALLS, 2);
-    assert.equal(h.device(device, 'SetStreamSource', [0, 0, 0]), D3D_OK);
-    assert.equal(h.device(device, 'GetStreamSource', [0, out, stride]), D3D_OK);
-    assert.equal(h.box.memory.readU32(out), 0, 'unbound');
-    assert.equal(h.box.memory.readU32(stride), 40, 'at the stride the bind before it set');
-    assert.equal(h.box.memory.readU32(block + SHADOW.STREAMS), 0, 'and the block says so');
-    h.box.memory.writeU32(block + SHADOW.STREAMS, vb);
-    counted(h, block, SHADOW.BINDING_CALLS, 3);
-    assert.equal(h.device(device, 'GetStreamSource', [0, out, stride]), D3D_OK);
-    assert.equal(h.box.memory.readU32(out), vb, 'the same buffer bound again');
-    h.release(h.box.memory.readU32(out));
 
     // A lock taken in the guest is a lock the host's path refuses; once the
     // guest lets go, the host's path locks, and the block says so.
@@ -2412,7 +2377,7 @@ test('the guest routines a device writes come from the code pages, not the heap 
         /** @type {[number, number][]} */
         const code = [];
         const h = seamed({ shadow: true, allocateCode: (/** @type {number} */ size)=>{
-            const at = 0xf000 + code.length * 0x100;
+            const at = 0xf000 + code.length * 0x200;
             code.push([at, size]);
             return at;
         } });
@@ -2421,7 +2386,7 @@ test('the guest routines a device writes come from the code pages, not the heap 
         assert.equal(h.device(device,
             'CreateTexture', [8, 8, 2, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out]), D3D_OK);
         assert.ok(code.length > 0, 'a guest routine was placed');
-        assert.ok(code.every(([, size])=>size > 0 && size <= 0x100));
+        assert.ok(code.every(([, size])=>size > 0 && size <= 0x200));
     });
 
 test('an additional swap chain has back buffers of its own, and writes back only its count',

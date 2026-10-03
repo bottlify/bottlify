@@ -6,8 +6,8 @@
 
 /**
  * What a Direct3D 8 program sets through the guest routines is what its
- * getters read back, on every call, and an entry into the host compares
- * only what was set.
+ * getters read back, on every call, from either of two threads whose calls
+ * share the device's command ring.
  *
  * The program makes a device and a second thread, and each thread loops:
  * the main thread sets three render states in three rows of the block's
@@ -262,16 +262,8 @@ test(`what a Direct3D 8 program sets in the guest is what it reads back`,
         assert.equal(result.worker, 0, 'and every value the second thread set');
         const { shadow } = result;
         assert.ok(shadow, 'the device kept its state in the guest');
-        assert.equal(shadow.renderStateCalls, MAIN * 3 + WORKER,
-            'every render state in the guest');
-        assert.equal(shadow.stageStateCalls, MAIN * 2 + WORKER);
-        assert.equal(shadow.transformCalls, MAIN * 2);
+        // Every setter of both threads went through the command ring, the two
+        // threads' records interleaved, and the host made each one.
+        assert.equal(shadow.commandCalls, MAIN * (3 + 2 + 2) + WORKER * (1 + 1));
         assert.deepEqual(shadow.refused, 0);
-        // An entry that found something compared what was set since the one
-        // before: at most the three states, two stage states and two
-        // matrices of one iteration of each thread -- where a scan of the
-        // three groups compared 960 words.
-        assert.ok(shadow.synced >= MAIN, `${shadow.synced} entries found something`);
-        assert.ok(shadow.compared / shadow.synced <= 3 + 2 + 32 + 1 + 1,
-            `${shadow.compared} words over ${shadow.synced} entries`);
     });

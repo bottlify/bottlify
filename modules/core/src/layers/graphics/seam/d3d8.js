@@ -60,10 +60,27 @@ import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import { declarationLength } from '../d3d8/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
 import {
-    createShadow, getRenderStateCode, getSurfaceLevelCode, lockCode, materialOf, setIndicesCode,
-    setMaterialCode, setRenderStateCode, setStreamSourceCode, setTextureCode,
-    setTextureStageStateCode, setTransformCode, setVertexShaderCode, unlockCode,
+    RENDER_STATE_MIRROR, TRANSFORM_MIRROR, commandCode, createShadow, getRenderStateCode,
+    getSurfaceLevelCode, lockCode, materialOf, stageStateMirror, unlockCode,
 } from './shadow.js';
+import { D3D8_COMMANDS } from '../d3d8/commands.js';
+import { D3DTSS } from '../d3d8/constants.js';
+
+/** Direct3D 8's stage state types below 32, a bit each: what the block keeps for them. */
+const STAGE_STATE_TYPES_8 = Object.values(D3DTSS)
+    .reduce((mask, type)=>(type < 32 ? mask | (1 << type) : mask), 0) >>> 0;
+
+/**
+ * What the command routines of the setters keep in the block for the getter
+ * that runs in the guest, and for the host's mirroring (`shadow.js`).
+ *
+ * @type {Record<string, any[]>}
+ */
+const GETTER_MIRRORS = {
+    SetRenderState: [...RENDER_STATE_MIRROR],
+    SetTransform: [...TRANSFORM_MIRROR],
+    SetTextureStageState: stageStateMirror(STAGE_STATE_TYPES_8),
+};
 
 /**
  * The capability bits reported by GetDeviceCaps.
@@ -2186,16 +2203,11 @@ export function createDirect3D8Seam(
     /** @type {Record<string, (builder: { trap: number }) => number>} */
     const deviceGuests = allocate
         ? {
-            SetRenderState: ({ trap })=>placeCode(at=>setRenderStateCode(at, trap)),
             GetRenderState: ({ trap })=>placeCode(at=>getRenderStateCode(at, trap)),
-            SetTransform: ({ trap })=>placeCode(at=>setTransformCode(at, trap)),
-            SetStreamSource: ({ trap })=>placeCode(at=>setStreamSourceCode(at, trap)),
-            SetIndices: ({ trap })=>placeCode(at=>setIndicesCode(at, trap)),
-            SetVertexShader: ({ trap })=>placeCode(at=>setVertexShaderCode(at, trap)),
-            SetTexture: ({ trap })=>placeCode(at=>setTextureCode(at, trap)),
-            SetTextureStageState: ({ trap })=>
-                placeCode(at=>setTextureStageStateCode(at, trap)),
-            SetMaterial: ({ trap })=>placeCode(at=>setMaterialCode(at, trap)),
+            ...Object.fromEntries(Object.entries(D3D8_COMMANDS.COMMANDS).map(([name, shape])=>[
+                name, (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>commandCode(at,
+                    trap, { ...shape, slot: D3D8_COMMANDS.commandSlot(name),
+                        mirror: GETTER_MIRRORS[name] }))])),
         }
         : {};
     const deviceInterfaces = [
@@ -2613,6 +2625,11 @@ export function createDirect3D8Seam(
                         : publisher.publish(buffer, vertexBufferInterfaces,
                             IID_IDirect3DVertexBuffer8)),
                     divergence,
+                    // The bindings travel in the command ring, in order with
+                    // the draws; the block keeps none of them.
+                    bindings: false,
+                    commands: { take: records=>held.device.commands(records,
+                        D3D8_COMMANDS.commandObjects(records, publisher.objectAt)) },
                 });
                 shadows.set(held.device, shadow);
                 held.device.guestState = ()=>shadow.address();

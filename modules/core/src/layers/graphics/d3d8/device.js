@@ -71,6 +71,7 @@ import {
 } from './declaration.js';
 import { elementsOfFvf, fixedFunctionLayoutOf } from '../d3d9/declaration.js';
 import { SHADER_KIND, createConstantFile, functionOf, parseShader } from '../d3d9/shader.js';
+import { D3D8_COMMANDS } from './commands.js';
 
 export { DEVICE_STATE, LIGHT_ENABLED };
 
@@ -1697,6 +1698,23 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          */
         idle(){
             return renderer ? renderer.idle() : Promise.resolve();
+        },
+
+        /**
+         * The calls a run of the command ring carried, made in order
+         * (`commands.js`). The program was told D3D_OK for each when it made
+         * it, so one this device refuses is a divergence, said once.
+         *
+         * @param {Uint8Array} records
+         * @param {readonly any[]} [objects]  what the records' object arguments name, in order
+         * @returns {number} how many calls were made
+         */
+        commands(records, objects = []){
+            return D3D8_COMMANDS.runCommands(device, records, objects, (name, hr)=>reportOnce(
+                `commands:${name}`, name === 'commands'
+                    ? 'a command ring held a record its routines could not have written'
+                    : `${name} made in the guest was answered D3D_OK; the device answers ${
+                        hr.toString(16)}`));
         },
 
         /** What the renderer has done and declined to do. Null without a backend. */
