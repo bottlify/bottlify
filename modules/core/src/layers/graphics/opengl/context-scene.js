@@ -277,7 +277,7 @@ export function createSceneBuilder(kernel){
             lighting,
             fog,
             units,
-            current: kernel.currentVertex(),
+            current: kernel.currentAttributes(),
             blend: blendOn ? { src, dst } : null,
             stencil: stencilFront,
             // GL_EXT_stencil_two_side's back-face record: the layer's own

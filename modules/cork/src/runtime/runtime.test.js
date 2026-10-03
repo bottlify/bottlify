@@ -2427,16 +2427,22 @@ async function bothWays(program){
     return runs;
 }
 
-test('with callReturn a region with x87 calls by leaving, its state as without', async()=>{
-    // mov ecx, 100; L: call F; fld1; fstp dword [0x3000]; dec ecx; jnz L; hlt;
-    // F: inc edx; ret
-    const [plain, called] = await bothWays([
-        0xb9, 100, 0, 0, 0, 0xe8, 0x0c, 0, 0, 0, 0xd9, 0xe8, 0xd9, 0x1d, 0, 0x30, 0, 0,
-        0x49, 0x75, 0xf0, 0xf4, 0x42, 0xc3,
-    ]);
-    assert.deepEqual(called.state, plain.state);
-    assert.deepEqual(called.state, [0, 100, 0x80000, 0x3f800000, 0, 0xff]);
-});
+test('with callReturn a region with x87 makes its calls as wasm calls and goes on after them',
+    async()=>{
+        // mov ecx, 100; L: call F; fld1; fstp dword [0x3000]; dec ecx; jnz L; hlt;
+        // F: inc edx; ret
+        const [plain, called] = await bothWays([
+            0xb9, 100, 0, 0, 0, 0xe8, 0x0c, 0, 0, 0, 0xd9, 0xe8, 0xd9, 0x1d, 0, 0x30, 0, 0,
+            0x49, 0x75, 0xf0, 0xf4, 0x42, 0xc3,
+        ]);
+        assert.deepEqual(called.state, plain.state);
+        assert.deepEqual(called.state, [0, 100, 0x80000, 0x3f800000, 0, 0xff]);
+        if (plain.transfers > 0)
+        {
+            assert.ok(called.transfers <= plain.transfers / 2 + 2,
+                `returns do not go through the hash: ${called.transfers} of ${plain.transfers}`);
+        }
+    });
 
 test('with callReturn a callee that returns a float on the x87 stack has its caller leave at the'
     + ' return address, the stack as the callee left it', async()=>{

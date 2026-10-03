@@ -770,6 +770,17 @@ export function createOpengl(services){
         return typeof result === 'number' ? result : 0;
     }
 
+    /**
+     * A context method's answer as the guest takes it: a number, or zero for
+     * nothing -- and nothing when there is no current context, whose method
+     * is then not called at all (`current()?.`), without a closure made for
+     * every call.
+     *
+     * @param {any} result
+     * @returns {number}
+     */
+    const answer = result=>(typeof result === 'number' ? result : 0);
+
     /** @type {Record<string, (args: number[]) => number>} */
     const implemented = {};
 
@@ -850,17 +861,17 @@ export function createOpengl(services){
     {
         const decode = DECODE[type];
         const read = vectorReader(type);
-        implemented[`glIndex${type}`] = args=>call(context=>context.glIndexi(decode(args, 0)));
-        implemented[`glIndex${type}v`] = ([address])=>call(context=>context.glIndexi(
+        implemented[`glIndex${type}`] = args=>answer(current()?.glIndexi(decode(args, 0)));
+        implemented[`glIndex${type}v`] = ([address])=>answer(current()?.glIndexi(
             read(address, 1)[0]));
     }
     for (const type of SIGNED)
     {
         const decode = DECODE[type];
         const step = TYPES[type].words;
-        implemented[`glRect${type}`] = args=>call(context=>context.glRectf(
+        implemented[`glRect${type}`] = args=>answer(current()?.glRectf(
             decode(args, 0), decode(args, step), decode(args, 2 * step), decode(args, 3 * step)));
-        implemented[`glRect${type}v`] = ([a, b])=>call(context=>context.glRectf(
+        implemented[`glRect${type}v`] = ([a, b])=>answer(current()?.glRectf(
             ...readTyped(type, a, 2), ...readTyped(type, b, 2)));
     }
     /**
@@ -1026,10 +1037,10 @@ export function createOpengl(services){
     parameterFamily('glTexGen', 2, parameter=>(parameter === GL.TEXTURE_GEN_MODE ? 1 : 4),
         new Set(),
         (context, [coord, parameter], values)=>context.glTexGenfv(coord, parameter, values));
-    implemented.glTexGend = ([coord, parameter, low, high])=>call(context=>
-        context.glTexGenfv(coord >>> 0, parameter >>> 0, [asDouble(low, high)]));
-    implemented.glTexGendv = ([coord, parameter, address])=>call(context=>
-        context.glTexGenfv(coord >>> 0, parameter >>> 0,
+    implemented.glTexGend = ([coord, parameter, low, high])=>answer(
+        current()?.glTexGenfv(coord >>> 0, parameter >>> 0, [asDouble(low, high)]));
+    implemented.glTexGendv = ([coord, parameter, address])=>answer(
+        current()?.glTexGenfv(coord >>> 0, parameter >>> 0,
             readF64s(address, (parameter >>> 0) === GL.TEXTURE_GEN_MODE ? 1 : 4)));
 
     /**
@@ -1186,7 +1197,7 @@ export function createOpengl(services){
         const answers = wanted.map(attribute=>(attribute === WGL.NUMBER_PIXEL_FORMATS_ARB
             ? PIXEL_FORMATS.length
             : format ? formatAttribute(format, attribute) : null));
-        if (answers.some(answer=>answer === null))
+        if (answers.some(value=>value === null))
         {
             return 0;
         }
@@ -1365,10 +1376,10 @@ export function createOpengl(services){
 
         // --- capabilities and queries ---
 
-        glEnable: ([cap])=>call(context=>context.glEnable(cap >>> 0)),
-        glDisable: ([cap])=>call(context=>context.glDisable(cap >>> 0)),
+        glEnable: ([cap])=>answer(current()?.glEnable(cap >>> 0)),
+        glDisable: ([cap])=>answer(current()?.glDisable(cap >>> 0)),
         glIsEnabled: ([cap])=>current()?.glIsEnabled(cap >>> 0) ?? GL.FALSE,
-        glHint: ([target, mode])=>call(context=>context.glHint(target >>> 0, mode >>> 0)),
+        glHint: ([target, mode])=>answer(current()?.glHint(target >>> 0, mode >>> 0)),
 
         glGetBooleanv: ([query, out])=>
             call(context=>writeQuery(out, context.glGetBooleanv(query >>> 0), 'byte')),
@@ -1385,92 +1396,92 @@ export function createOpengl(services){
 
         // --- the state a program sets before it draws ---
 
-        glClear: ([mask])=>call(context=>context.glClear(mask >>> 0)),
-        glClearColor: ([r, g, b, a])=>call(context=>
-            context.glClearColor(asFloat(r), asFloat(g), asFloat(b), asFloat(a))),
-        glClearAccum: ([r, g, b, a])=>call(context=>
-            context.glClearAccum(asFloat(r), asFloat(g), asFloat(b), asFloat(a))),
-        glClearDepth: ([low, high])=>call(context=>context.glClearDepth(asDouble(low, high))),
-        glClearStencil: ([value])=>call(context=>context.glClearStencil(value | 0)),
+        glClear: ([mask])=>answer(current()?.glClear(mask >>> 0)),
+        glClearColor: ([r, g, b, a])=>answer(
+            current()?.glClearColor(asFloat(r), asFloat(g), asFloat(b), asFloat(a))),
+        glClearAccum: ([r, g, b, a])=>answer(
+            current()?.glClearAccum(asFloat(r), asFloat(g), asFloat(b), asFloat(a))),
+        glClearDepth: ([low, high])=>answer(current()?.glClearDepth(asDouble(low, high))),
+        glClearStencil: ([value])=>answer(current()?.glClearStencil(value | 0)),
         glBlendFunc: ([source, destination])=>
-            call(context=>context.glBlendFunc(source >>> 0, destination >>> 0)),
-        glDepthFunc: ([func])=>call(context=>context.glDepthFunc(func >>> 0)),
-        glDepthMask: ([flag])=>call(context=>context.glDepthMask(asBoolean(flag))),
+            answer(current()?.glBlendFunc(source >>> 0, destination >>> 0)),
+        glDepthFunc: ([func])=>answer(current()?.glDepthFunc(func >>> 0)),
+        glDepthMask: ([flag])=>answer(current()?.glDepthMask(asBoolean(flag))),
         glDepthRange: ([nl, nh, fl, fh])=>
-            call(context=>context.glDepthRange(asDouble(nl, nh), asDouble(fl, fh))),
-        glColorMask: ([r, g, b, a])=>call(context=>
-            context.glColorMask(asBoolean(r), asBoolean(g), asBoolean(b), asBoolean(a))),
-        glCullFace: ([mode])=>call(context=>context.glCullFace(mode >>> 0)),
-        glFrontFace: ([mode])=>call(context=>context.glFrontFace(mode >>> 0)),
-        glShadeModel: ([mode])=>call(context=>context.glShadeModel(mode >>> 0)),
-        glLogicOp: ([op])=>call(context=>context.glLogicOp(op >>> 0)),
-        glAlphaFunc: ([func, ref])=>call(context=>context.glAlphaFunc(func >>> 0, asFloat(ref))),
+            answer(current()?.glDepthRange(asDouble(nl, nh), asDouble(fl, fh))),
+        glColorMask: ([r, g, b, a])=>answer(
+            current()?.glColorMask(asBoolean(r), asBoolean(g), asBoolean(b), asBoolean(a))),
+        glCullFace: ([mode])=>answer(current()?.glCullFace(mode >>> 0)),
+        glFrontFace: ([mode])=>answer(current()?.glFrontFace(mode >>> 0)),
+        glShadeModel: ([mode])=>answer(current()?.glShadeModel(mode >>> 0)),
+        glLogicOp: ([op])=>answer(current()?.glLogicOp(op >>> 0)),
+        glAlphaFunc: ([func, ref])=>answer(current()?.glAlphaFunc(func >>> 0, asFloat(ref))),
         glStencilFunc: ([func, ref, mask])=>
-            call(context=>context.glStencilFunc(func >>> 0, ref | 0, mask >>> 0)),
+            answer(current()?.glStencilFunc(func >>> 0, ref | 0, mask >>> 0)),
         glStencilOp: ([fail, zfail, zpass])=>
-            call(context=>context.glStencilOp(fail >>> 0, zfail >>> 0, zpass >>> 0)),
-        glStencilMask: ([mask])=>call(context=>context.glStencilMask(mask >>> 0)),
+            answer(current()?.glStencilOp(fail >>> 0, zfail >>> 0, zpass >>> 0)),
+        glStencilMask: ([mask])=>answer(current()?.glStencilMask(mask >>> 0)),
 
         // --- GL_EXT_stencil_two_side ---
         glActiveStencilFaceEXT: ([face])=>
-            call(context=>context.glActiveStencilFaceEXT(face >>> 0)),
+            answer(current()?.glActiveStencilFaceEXT(face >>> 0)),
         glPolygonMode: ([face, mode])=>
-            call(context=>context.glPolygonMode(face >>> 0, mode >>> 0)),
+            answer(current()?.glPolygonMode(face >>> 0, mode >>> 0)),
         glPolygonOffset: ([factor, units])=>
-            call(context=>context.glPolygonOffset(asFloat(factor), asFloat(units))),
-        glLineWidth: ([width])=>call(context=>context.glLineWidth(asFloat(width))),
-        glPointSize: ([size])=>call(context=>context.glPointSize(asFloat(size))),
+            answer(current()?.glPolygonOffset(asFloat(factor), asFloat(units))),
+        glLineWidth: ([width])=>answer(current()?.glLineWidth(asFloat(width))),
+        glPointSize: ([size])=>answer(current()?.glPointSize(asFloat(size))),
         glLineStipple: ([factor, pattern])=>
-            call(context=>context.glLineStipple(factor | 0, pattern & 0xffff)),
+            answer(current()?.glLineStipple(factor | 0, pattern & 0xffff)),
         glPixelStorei: ([parameter, value])=>
-            call(context=>context.glPixelStorei(parameter >>> 0, value | 0)),
+            answer(current()?.glPixelStorei(parameter >>> 0, value | 0)),
         glPixelStoref: ([parameter, value])=>
-            call(context=>context.glPixelStorei(parameter >>> 0, Math.round(asFloat(value)))),
-        glPixelZoom: ([x, y])=>call(context=>context.glPixelZoom(asFloat(x), asFloat(y))),
+            answer(current()?.glPixelStorei(parameter >>> 0, Math.round(asFloat(value)))),
+        glPixelZoom: ([x, y])=>answer(current()?.glPixelZoom(asFloat(x), asFloat(y))),
         glViewport: ([x, y, width, height])=>
-            call(context=>context.glViewport(x | 0, y | 0, width | 0, height | 0)),
+            answer(current()?.glViewport(x | 0, y | 0, width | 0, height | 0)),
         glScissor: ([x, y, width, height])=>
-            call(context=>context.glScissor(x | 0, y | 0, width | 0, height | 0)),
-        glDrawBuffer: ([mode])=>call(context=>context.glDrawBuffer(mode >>> 0)),
-        glReadBuffer: ([mode])=>call(context=>context.glReadBuffer(mode >>> 0)),
-        glRenderMode: ([mode])=>call(context=>context.glRenderMode(mode >>> 0)),
-        glAccum: ([op, value])=>call(context=>context.glAccum(op >>> 0, asFloat(value))),
-        glFlush: ()=>call(context=>context.glFlush()),
-        glFinish: ()=>call(context=>context.glFinish()),
+            answer(current()?.glScissor(x | 0, y | 0, width | 0, height | 0)),
+        glDrawBuffer: ([mode])=>answer(current()?.glDrawBuffer(mode >>> 0)),
+        glReadBuffer: ([mode])=>answer(current()?.glReadBuffer(mode >>> 0)),
+        glRenderMode: ([mode])=>answer(current()?.glRenderMode(mode >>> 0)),
+        glAccum: ([op, value])=>answer(current()?.glAccum(op >>> 0, asFloat(value))),
+        glFlush: ()=>answer(current()?.glFlush()),
+        glFinish: ()=>answer(current()?.glFinish()),
         glColorMaterial: ([face, mode])=>
-            call(context=>context.glColorMaterial(face >>> 0, mode >>> 0)),
+            answer(current()?.glColorMaterial(face >>> 0, mode >>> 0)),
         glClipPlane: ([plane, equation])=>
-            call(context=>context.glClipPlane(plane >>> 0, readF64s(equation, 4))),
+            answer(current()?.glClipPlane(plane >>> 0, readF64s(equation, 4))),
 
         // --- the matrix stacks ---
 
-        glMatrixMode: ([mode])=>call(context=>context.glMatrixMode(mode >>> 0)),
-        glPushMatrix: ()=>call(context=>context.glPushMatrix()),
-        glPopMatrix: ()=>call(context=>context.glPopMatrix()),
-        glLoadIdentity: ()=>call(context=>context.glLoadIdentity()),
-        glLoadMatrixf: ([m])=>call(context=>
-            context.glLoadMatrixf(readF32Vector(m, floatScratch16))),
-        glLoadMatrixd: ([m])=>call(context=>context.glLoadMatrixf(readF64s(m, 16))),
-        glMultMatrixf: ([m])=>call(context=>
-            context.glMultMatrixf(readF32Vector(m, floatScratch16))),
-        glMultMatrixd: ([m])=>call(context=>context.glMultMatrixf(readF64s(m, 16))),
+        glMatrixMode: ([mode])=>answer(current()?.glMatrixMode(mode >>> 0)),
+        glPushMatrix: ()=>answer(current()?.glPushMatrix()),
+        glPopMatrix: ()=>answer(current()?.glPopMatrix()),
+        glLoadIdentity: ()=>answer(current()?.glLoadIdentity()),
+        glLoadMatrixf: ([m])=>answer(
+            current()?.glLoadMatrixf(readF32Vector(m, floatScratch16))),
+        glLoadMatrixd: ([m])=>answer(current()?.glLoadMatrixf(readF64s(m, 16))),
+        glMultMatrixf: ([m])=>answer(
+            current()?.glMultMatrixf(readF32Vector(m, floatScratch16))),
+        glMultMatrixd: ([m])=>answer(current()?.glMultMatrixf(readF64s(m, 16))),
         glTranslatef: ([x, y, z])=>
-            call(context=>context.glTranslatef(asFloat(x), asFloat(y), asFloat(z))),
-        glTranslated: a=>call(context=>context.glTranslatef(
+            answer(current()?.glTranslatef(asFloat(x), asFloat(y), asFloat(z))),
+        glTranslated: a=>answer(current()?.glTranslatef(
             asDouble(a[0], a[1]), asDouble(a[2], a[3]), asDouble(a[4], a[5]))),
-        glScalef: ([x, y, z])=>call(context=>
-            context.glScalef(asFloat(x), asFloat(y), asFloat(z))),
-        glScaled: a=>call(context=>context.glScalef(
+        glScalef: ([x, y, z])=>answer(
+            current()?.glScalef(asFloat(x), asFloat(y), asFloat(z))),
+        glScaled: a=>answer(current()?.glScalef(
             asDouble(a[0], a[1]), asDouble(a[2], a[3]), asDouble(a[4], a[5]))),
-        glRotatef: ([angle, x, y, z])=>call(context=>
-            context.glRotatef(asFloat(angle), asFloat(x), asFloat(y), asFloat(z))),
-        glRotated: a=>call(context=>context.glRotatef(
+        glRotatef: ([angle, x, y, z])=>answer(
+            current()?.glRotatef(asFloat(angle), asFloat(x), asFloat(y), asFloat(z))),
+        glRotated: a=>answer(current()?.glRotatef(
             asDouble(a[0], a[1]), asDouble(a[2], a[3]), asDouble(a[4], a[5]),
             asDouble(a[6], a[7]))),
-        glOrtho: a=>call(context=>context.glOrtho(
+        glOrtho: a=>answer(current()?.glOrtho(
             asDouble(a[0], a[1]), asDouble(a[2], a[3]), asDouble(a[4], a[5]),
             asDouble(a[6], a[7]), asDouble(a[8], a[9]), asDouble(a[10], a[11]))),
-        glFrustum: a=>call(context=>context.glFrustum(
+        glFrustum: a=>answer(current()?.glFrustum(
             asDouble(a[0], a[1]), asDouble(a[2], a[3]), asDouble(a[4], a[5]),
             asDouble(a[6], a[7]), asDouble(a[8], a[9]), asDouble(a[10], a[11]))),
 
@@ -1483,10 +1494,10 @@ export function createOpengl(services){
                 writeU32s(out, names);
             }
         }),
-        glDeleteTextures: ([count, list])=>call(context=>context.glDeleteTextures(
+        glDeleteTextures: ([count, list])=>answer(current()?.glDeleteTextures(
             (count | 0) > 0 && (list >>> 0) !== 0 ? readU32s(list, count | 0) : [])),
         glBindTexture: ([target, name])=>
-            call(context=>context.glBindTexture(target >>> 0, name >>> 0)),
+            answer(current()?.glBindTexture(target >>> 0, name >>> 0)),
         glIsTexture: ([name])=>current()?.glIsTexture(name >>> 0) ?? GL.FALSE,
         glAreTexturesResident: ([count, list, out])=>call(context=>{
             const names = (count | 0) > 0 ? readU32s(list, count | 0) : [];
@@ -1497,27 +1508,27 @@ export function createOpengl(services){
             }
             return all;
         }),
-        glPrioritizeTextures: ([count, list, priorities])=>call(context=>
-            context.glPrioritizeTextures(
+        glPrioritizeTextures: ([count, list, priorities])=>answer(
+            current()?.glPrioritizeTextures(
                 readU32s(list, count | 0), readF32s(priorities, count | 0))),
-        glTexImage2D: a=>call(context=>context.glTexImage2D(
+        glTexImage2D: a=>answer(current()?.glTexImage2D(
             a[0] >>> 0, a[1] | 0, a[2] | 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] >>> 0, a[7] >>> 0,
             a[8] >>> 0)),
-        glTexImage1D: a=>call(context=>context.glTexImage1D(
+        glTexImage1D: a=>answer(current()?.glTexImage1D(
             a[0] >>> 0, a[1] | 0, a[2] | 0, a[3] | 0, a[4] | 0, a[5] >>> 0, a[6] >>> 0,
             a[7] >>> 0)),
-        glTexSubImage2D: a=>call(context=>context.glTexSubImage2D(
+        glTexSubImage2D: a=>answer(current()?.glTexSubImage2D(
             a[0] >>> 0, a[1] | 0, a[2] | 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] >>> 0, a[7] >>> 0,
             a[8] >>> 0)),
-        glTexSubImage1D: a=>call(context=>context.glTexSubImage1D(
+        glTexSubImage1D: a=>answer(current()?.glTexSubImage1D(
             a[0] >>> 0, a[1] | 0, a[2] | 0, a[3] | 0, a[4] >>> 0, a[5] >>> 0, a[6] >>> 0)),
-        glCopyTexImage2D: a=>call(context=>context.glCopyTexImage2D(
+        glCopyTexImage2D: a=>answer(current()?.glCopyTexImage2D(
             a[0] >>> 0, a[1] | 0, a[2] | 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] | 0, a[7] | 0)),
-        glCopyTexImage1D: a=>call(context=>context.glCopyTexImage2D(
+        glCopyTexImage1D: a=>answer(current()?.glCopyTexImage2D(
             a[0] >>> 0, a[1] | 0, a[2] | 0, a[3] | 0, a[4] | 0, a[5] | 0, 1, a[6] | 0)),
-        glCopyTexSubImage2D: a=>call(context=>context.glCopyTexSubImage2D(
+        glCopyTexSubImage2D: a=>answer(current()?.glCopyTexSubImage2D(
             a[0] >>> 0, a[1] | 0, a[2] | 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] | 0, a[7] | 0)),
-        glCopyTexSubImage1D: a=>call(context=>context.glCopyTexSubImage2D(
+        glCopyTexSubImage1D: a=>answer(current()?.glCopyTexSubImage2D(
             a[0] >>> 0, a[1] | 0, a[2] | 0, 0, a[3] | 0, a[4] | 0, a[5] | 0, 1)),
         glGetTexImage: ([target, level, format, type, out])=>call(context=>{
             const texels = context.glGetTexImage(target >>> 0, level | 0, format >>> 0, type >>> 0);
@@ -1542,30 +1553,30 @@ export function createOpengl(services){
 
         // --- GL_ARB_multitexture and the rest of the texture extensions ---
 
-        glActiveTextureARB: ([unit])=>call(context=>context.glActiveTextureARB(unit >>> 0)),
+        glActiveTextureARB: ([unit])=>answer(current()?.glActiveTextureARB(unit >>> 0)),
         glClientActiveTextureARB: ([unit])=>
-            call(context=>context.glClientActiveTextureARB(unit >>> 0)),
-        glCompressedTexImage2DARB: a=>call(context=>context.glCompressedTexImage2DARB(
+            answer(current()?.glClientActiveTextureARB(unit >>> 0)),
+        glCompressedTexImage2DARB: a=>answer(current()?.glCompressedTexImage2DARB(
             a[0] >>> 0, a[1] | 0, a[2] >>> 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] | 0,
             a[7] >>> 0)),
-        glCompressedTexSubImage2DARB: a=>call(context=>context.glCompressedTexSubImage2DARB(
+        glCompressedTexSubImage2DARB: a=>answer(current()?.glCompressedTexSubImage2DARB(
             a[0] >>> 0, a[1] | 0, a[2] | 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] >>> 0, a[7] | 0,
             a[8] >>> 0)),
-        glCompressedTexImage1DARB: a=>call(context=>context.glCompressedTexImage1DARB(a[0] >>> 0)),
-        glCompressedTexImage3DARB: a=>call(context=>context.glCompressedTexImage3DARB(a[0] >>> 0)),
+        glCompressedTexImage1DARB: a=>answer(current()?.glCompressedTexImage1DARB(a[0] >>> 0)),
+        glCompressedTexImage3DARB: a=>answer(current()?.glCompressedTexImage3DARB(a[0] >>> 0)),
         glCompressedTexSubImage1DARB: a=>
-            call(context=>context.glCompressedTexSubImage1DARB(a[0] >>> 0)),
+            answer(current()?.glCompressedTexSubImage1DARB(a[0] >>> 0)),
         glCompressedTexSubImage3DARB: a=>
-            call(context=>context.glCompressedTexSubImage3DARB(a[0] >>> 0)),
+            answer(current()?.glCompressedTexSubImage3DARB(a[0] >>> 0)),
         glGetCompressedTexImageARB: ([target, level])=>
-            call(context=>context.glGetCompressedTexImageARB(target >>> 0, level | 0)),
+            answer(current()?.glGetCompressedTexImageARB(target >>> 0, level | 0)),
 
         // --- display lists ---
 
         glGenLists: ([count])=>current()?.glGenLists(count | 0) ?? 0,
-        glNewList: ([name, mode])=>call(context=>context.glNewList(name >>> 0, mode >>> 0)),
-        glEndList: ()=>call(context=>context.glEndList()),
-        glCallList: ([name])=>call(context=>context.glCallList(name >>> 0)),
+        glNewList: ([name, mode])=>answer(current()?.glNewList(name >>> 0, mode >>> 0)),
+        glEndList: ()=>answer(current()?.glEndList()),
+        glCallList: ([name])=>answer(current()?.glCallList(name >>> 0)),
         glCallLists: ([count, type, lists])=>call(context=>{
             const letter = LIST_TYPES.get(type >>> 0);
             if (!letter)
@@ -1593,57 +1604,57 @@ export function createOpengl(services){
             context.glCallLists(count | 0, readTyped(letter, lists, Math.max(0, count | 0)));
         }),
         glDeleteLists: ([first, count])=>
-            call(context=>context.glDeleteLists(first >>> 0, count | 0)),
+            answer(current()?.glDeleteLists(first >>> 0, count | 0)),
         glIsList: ([name])=>current()?.glIsList(name >>> 0) ?? GL.FALSE,
-        glListBase: ([base])=>call(context=>context.glListBase(base >>> 0)),
+        glListBase: ([base])=>answer(current()?.glListBase(base >>> 0)),
 
         // --- immediate mode ---
 
-        glBegin: ([mode])=>call(context=>context.glBegin(mode >>> 0)),
-        glEnd: ()=>call(context=>context.glEnd()),
-        glEdgeFlag: ([flag])=>call(context=>context.glEdgeFlag(asBoolean(flag))),
+        glBegin: ([mode])=>answer(current()?.glBegin(mode >>> 0)),
+        glEnd: ()=>answer(current()?.glEnd()),
+        glEdgeFlag: ([flag])=>answer(current()?.glEdgeFlag(asBoolean(flag))),
         glEdgeFlagv: ([address])=>
-            call(context=>context.glEdgeFlag(services.readMemory(address >>> 0, 1)[0])),
-        glFogCoordfEXT: ([coord])=>call(context=>context.glFogCoordfEXT(asFloat(coord))),
+            answer(current()?.glEdgeFlag(services.readMemory(address >>> 0, 1)[0])),
+        glFogCoordfEXT: ([coord])=>answer(current()?.glFogCoordfEXT(asFloat(coord))),
         glFogCoordfvEXT: ([address])=>
-            call(context=>context.glFogCoordfEXT(readF32s(address, 1)[0])),
-        glFogCoorddEXT: ([low, high])=>call(context=>context.glFogCoordfEXT(asDouble(low, high))),
+            answer(current()?.glFogCoordfEXT(readF32s(address, 1)[0])),
+        glFogCoorddEXT: ([low, high])=>answer(current()?.glFogCoordfEXT(asDouble(low, high))),
         glFogCoorddvEXT: ([address])=>
-            call(context=>context.glFogCoordfEXT(readF64s(address, 1)[0])),
+            answer(current()?.glFogCoordfEXT(readF64s(address, 1)[0])),
 
         // --- vertex arrays ---
 
-        glVertexPointer: ([size, type, stride, address])=>call(context=>
-            context.glVertexPointer(size | 0, type >>> 0, stride | 0, address >>> 0)),
-        glNormalPointer: ([type, stride, address])=>call(context=>
-            context.glNormalPointer(type >>> 0, stride | 0, address >>> 0)),
-        glColorPointer: ([size, type, stride, address])=>call(context=>
-            context.glColorPointer(size | 0, type >>> 0, stride | 0, address >>> 0)),
-        glIndexPointer: ([type, stride, address])=>call(context=>
-            context.glIndexPointer(type >>> 0, stride | 0, address >>> 0)),
-        glTexCoordPointer: ([size, type, stride, address])=>call(context=>
-            context.glTexCoordPointer(size | 0, type >>> 0, stride | 0, address >>> 0)),
-        glEdgeFlagPointer: ([stride, address])=>call(context=>
-            context.glEdgeFlagPointer(stride | 0, address >>> 0)),
-        glSecondaryColorPointerEXT: ([size, type, stride, address])=>call(context=>
-            context.glSecondaryColorPointerEXT(size | 0, type >>> 0, stride | 0, address >>> 0)),
-        glFogCoordPointerEXT: ([type, stride, address])=>call(context=>
-            context.glFogCoordPointerEXT(type >>> 0, stride | 0, address >>> 0)),
-        glEnableClientState: ([cap])=>call(context=>context.glEnableClientState(cap >>> 0)),
-        glDisableClientState: ([cap])=>call(context=>context.glDisableClientState(cap >>> 0)),
-        glInterleavedArrays: ([format, stride, address])=>call(context=>
-            context.glInterleavedArrays(format >>> 0, stride | 0, address >>> 0)),
-        glArrayElement: ([index])=>call(context=>context.glArrayElement(index | 0)),
+        glVertexPointer: ([size, type, stride, address])=>answer(
+            current()?.glVertexPointer(size | 0, type >>> 0, stride | 0, address >>> 0)),
+        glNormalPointer: ([type, stride, address])=>answer(
+            current()?.glNormalPointer(type >>> 0, stride | 0, address >>> 0)),
+        glColorPointer: ([size, type, stride, address])=>answer(
+            current()?.glColorPointer(size | 0, type >>> 0, stride | 0, address >>> 0)),
+        glIndexPointer: ([type, stride, address])=>answer(
+            current()?.glIndexPointer(type >>> 0, stride | 0, address >>> 0)),
+        glTexCoordPointer: ([size, type, stride, address])=>answer(
+            current()?.glTexCoordPointer(size | 0, type >>> 0, stride | 0, address >>> 0)),
+        glEdgeFlagPointer: ([stride, address])=>answer(
+            current()?.glEdgeFlagPointer(stride | 0, address >>> 0)),
+        glSecondaryColorPointerEXT: ([size, type, stride, address])=>answer(
+            current()?.glSecondaryColorPointerEXT(size | 0, type >>> 0, stride | 0, address >>> 0)),
+        glFogCoordPointerEXT: ([type, stride, address])=>answer(
+            current()?.glFogCoordPointerEXT(type >>> 0, stride | 0, address >>> 0)),
+        glEnableClientState: ([cap])=>answer(current()?.glEnableClientState(cap >>> 0)),
+        glDisableClientState: ([cap])=>answer(current()?.glDisableClientState(cap >>> 0)),
+        glInterleavedArrays: ([format, stride, address])=>answer(
+            current()?.glInterleavedArrays(format >>> 0, stride | 0, address >>> 0)),
+        glArrayElement: ([index])=>answer(current()?.glArrayElement(index | 0)),
         glDrawArrays: ([mode, first, count])=>
-            call(context=>context.glDrawArrays(mode >>> 0, first | 0, count | 0)),
-        glDrawElements: ([mode, count, type, indices])=>call(context=>
-            context.glDrawElements(mode >>> 0, count | 0, type >>> 0, indices >>> 0)),
-        glDrawRangeElementsEXT: ([mode, start, end, count, type, indices])=>call(context=>
-            context.glDrawRangeElementsEXT(
+            answer(current()?.glDrawArrays(mode >>> 0, first | 0, count | 0)),
+        glDrawElements: ([mode, count, type, indices])=>answer(
+            current()?.glDrawElements(mode >>> 0, count | 0, type >>> 0, indices >>> 0)),
+        glDrawRangeElementsEXT: ([mode, start, end, count, type, indices])=>answer(
+            current()?.glDrawRangeElementsEXT(
                 mode >>> 0, start >>> 0, end >>> 0, count | 0, type >>> 0, indices >>> 0)),
         glLockArraysEXT: ([first, count])=>
-            call(context=>context.glLockArraysEXT(first | 0, count | 0)),
-        glUnlockArraysEXT: ()=>call(context=>context.glUnlockArraysEXT()),
+            answer(current()?.glLockArraysEXT(first | 0, count | 0)),
+        glUnlockArraysEXT: ()=>answer(current()?.glUnlockArraysEXT()),
 
         // --- GL_ARB_vertex_buffer_object ---
 
@@ -1654,15 +1665,15 @@ export function createOpengl(services){
                 writeU32s(out, names);
             }
         }),
-        glDeleteBuffersARB: ([count, list])=>call(context=>context.glDeleteBuffersARB(
+        glDeleteBuffersARB: ([count, list])=>answer(current()?.glDeleteBuffersARB(
             (count | 0) > 0 && (list >>> 0) !== 0 ? readU32s(list, count | 0) : [])),
         glBindBufferARB: ([target, name])=>
-            call(context=>context.glBindBufferARB(target >>> 0, name >>> 0)),
+            answer(current()?.glBindBufferARB(target >>> 0, name >>> 0)),
         glIsBufferARB: ([name])=>current()?.glIsBufferARB(name >>> 0) ?? GL.FALSE,
-        glBufferDataARB: ([target, size, data, usage])=>call(context=>
-            context.glBufferDataARB(target >>> 0, size | 0, (data >>> 0) || null, usage >>> 0)),
-        glBufferSubDataARB: ([target, offset, size, data])=>call(context=>
-            context.glBufferSubDataARB(target >>> 0, offset | 0, size | 0, data >>> 0)),
+        glBufferDataARB: ([target, size, data, usage])=>answer(
+            current()?.glBufferDataARB(target >>> 0, size | 0, (data >>> 0) || null, usage >>> 0)),
+        glBufferSubDataARB: ([target, offset, size, data])=>answer(
+            current()?.glBufferSubDataARB(target >>> 0, offset | 0, size | 0, data >>> 0)),
         glGetBufferSubDataARB: ([target, offset, size, out])=>call(context=>{
             const bytes = context.glGetBufferSubDataARB(target >>> 0, offset | 0, size | 0);
             if (bytes && (out >>> 0) !== 0)
@@ -1671,8 +1682,8 @@ export function createOpengl(services){
             }
         }),
         glMapBufferARB: ([target, access])=>
-            call(context=>context.glMapBufferARB(target >>> 0, access >>> 0)),
-        glUnmapBufferARB: ([target])=>call(context=>context.glUnmapBufferARB(target >>> 0)),
+            answer(current()?.glMapBufferARB(target >>> 0, access >>> 0)),
+        glUnmapBufferARB: ([target])=>answer(current()?.glUnmapBufferARB(target >>> 0)),
         glGetBufferParameterivARB: ([target, parameter, out])=>call(context=>writeQuery(
             out, context.glGetBufferParameterivARB(target >>> 0, parameter >>> 0), 'word')),
         glGetBufferPointervARB: ([target, parameter, out])=>call(context=>writeQuery(
@@ -1687,38 +1698,39 @@ export function createOpengl(services){
                 writeU32s(out, names);
             }
         }),
-        glDeleteProgramsARB: ([count, list])=>call(context=>context.glDeleteProgramsARB(
+        glDeleteProgramsARB: ([count, list])=>answer(current()?.glDeleteProgramsARB(
             (count | 0) > 0 && (list >>> 0) !== 0 ? readU32s(list, count | 0) : [])),
         glIsProgramARB: ([name])=>current()?.glIsProgramARB(name >>> 0) ?? GL.FALSE,
         glBindProgramARB: ([target, name])=>
-            call(context=>context.glBindProgramARB(target >>> 0, name >>> 0)),
-        glProgramStringARB: ([target, format, length, string])=>call(context=>
-            context.glProgramStringARB(target >>> 0, format >>> 0, length | 0, string >>> 0)),
+            answer(current()?.glBindProgramARB(target >>> 0, name >>> 0)),
+        glProgramStringARB: ([target, format, length, string])=>answer(
+            current()?.glProgramStringARB(target >>> 0, format >>> 0, length | 0, string >>> 0)),
 
-        glProgramEnvParameter4fARB: ([target, index, x, y, z, w])=>call(context=>
-            context.glProgramEnvParameter4fARB(target >>> 0, index >>> 0,
+        glProgramEnvParameter4fARB: ([target, index, x, y, z, w])=>answer(
+            current()?.glProgramEnvParameter4fARB(target >>> 0, index >>> 0,
                 [asFloat(x), asFloat(y), asFloat(z), asFloat(w)])),
-        glProgramEnvParameter4fvARB: ([target, index, address])=>call(context=>
-            context.glProgramEnvParameter4fARB(target >>> 0, index >>> 0,
+        glProgramEnvParameter4fvARB: ([target, index, address])=>answer(
+            current()?.glProgramEnvParameter4fARB(target >>> 0, index >>> 0,
                 readF32Vector(address, floatScratch4))),
-        glProgramEnvParameter4dARB: a=>call(context=>context.glProgramEnvParameter4fARB(
+        glProgramEnvParameter4dARB: a=>answer(current()?.glProgramEnvParameter4fARB(
             a[0] >>> 0, a[1] >>> 0,
             [asDouble(a[2], a[3]), asDouble(a[4], a[5]), asDouble(a[6], a[7]),
                 asDouble(a[8], a[9])])),
-        glProgramEnvParameter4dvARB: ([target, index, address])=>call(context=>
-            context.glProgramEnvParameter4fARB(target >>> 0, index >>> 0, readF64s(address, 4))),
-        glProgramLocalParameter4fARB: ([target, index, x, y, z, w])=>call(context=>
-            context.glProgramLocalParameter4fARB(target >>> 0, index >>> 0,
+        glProgramEnvParameter4dvARB: ([target, index, address])=>answer(
+            current()?.glProgramEnvParameter4fARB(target >>> 0, index >>> 0, readF64s(address, 4))),
+        glProgramLocalParameter4fARB: ([target, index, x, y, z, w])=>answer(
+            current()?.glProgramLocalParameter4fARB(target >>> 0, index >>> 0,
                 [asFloat(x), asFloat(y), asFloat(z), asFloat(w)])),
-        glProgramLocalParameter4fvARB: ([target, index, address])=>call(context=>
-            context.glProgramLocalParameter4fARB(target >>> 0, index >>> 0,
+        glProgramLocalParameter4fvARB: ([target, index, address])=>answer(
+            current()?.glProgramLocalParameter4fARB(target >>> 0, index >>> 0,
                 readF32Vector(address, floatScratch4))),
-        glProgramLocalParameter4dARB: a=>call(context=>context.glProgramLocalParameter4fARB(
+        glProgramLocalParameter4dARB: a=>answer(current()?.glProgramLocalParameter4fARB(
             a[0] >>> 0, a[1] >>> 0,
             [asDouble(a[2], a[3]), asDouble(a[4], a[5]), asDouble(a[6], a[7]),
                 asDouble(a[8], a[9])])),
-        glProgramLocalParameter4dvARB: ([target, index, address])=>call(context=>
-            context.glProgramLocalParameter4fARB(target >>> 0, index >>> 0, readF64s(address, 4))),
+        glProgramLocalParameter4dvARB: ([target, index, address])=>answer(
+            current()?.glProgramLocalParameter4fARB(target >>> 0, index >>> 0,
+                readF64s(address, 4))),
 
         glGetProgramEnvParameterfvARB: ([target, index, out])=>call(context=>writeQuery(
             out, context.glGetProgramEnvParameterfvARB(target >>> 0, index >>> 0), 'float')),
@@ -1738,16 +1750,16 @@ export function createOpengl(services){
             }
         }),
 
-        glVertexAttrib4NubARB: ([index, x, y, z, w])=>call(context=>
-            context.glVertexAttrib4fARB(index >>> 0, (x & 0xff) / 255, (y & 0xff) / 255,
+        glVertexAttrib4NubARB: ([index, x, y, z, w])=>answer(
+            current()?.glVertexAttrib4fARB(index >>> 0, (x & 0xff) / 255, (y & 0xff) / 255,
                 (z & 0xff) / 255, (w & 0xff) / 255)),
         glVertexAttribPointerARB: ([index, size, type, normalised, stride, pointer])=>
-            call(context=>context.glVertexAttribPointerARB(index >>> 0, size | 0, type >>> 0,
+            answer(current()?.glVertexAttribPointerARB(index >>> 0, size | 0, type >>> 0,
                 asBoolean(normalised), stride | 0, pointer >>> 0)),
         glEnableVertexAttribArrayARB: ([index])=>
-            call(context=>context.glEnableVertexAttribArrayARB(index >>> 0)),
+            answer(current()?.glEnableVertexAttribArrayARB(index >>> 0)),
         glDisableVertexAttribArrayARB: ([index])=>
-            call(context=>context.glDisableVertexAttribArrayARB(index >>> 0)),
+            answer(current()?.glDisableVertexAttribArrayARB(index >>> 0)),
         glGetVertexAttribfvARB: ([index, pname, out])=>call(context=>writeQuery(
             out, context.glGetVertexAttribfvARB(index >>> 0, pname >>> 0), 'float')),
         glGetVertexAttribdvARB: ([index, pname, out])=>call(context=>writeQuery(
@@ -1759,10 +1771,10 @@ export function createOpengl(services){
 
         // --- the attribute stacks ---
 
-        glPushAttrib: ([mask])=>call(context=>context.glPushAttrib(mask >>> 0)),
-        glPopAttrib: ()=>call(context=>context.glPopAttrib()),
-        glPushClientAttrib: ([mask])=>call(context=>context.glPushClientAttrib(mask >>> 0)),
-        glPopClientAttrib: ()=>call(context=>context.glPopClientAttrib()),
+        glPushAttrib: ([mask])=>answer(current()?.glPushAttrib(mask >>> 0)),
+        glPopAttrib: ()=>answer(current()?.glPopAttrib()),
+        glPushClientAttrib: ([mask])=>answer(current()?.glPushClientAttrib(mask >>> 0)),
+        glPopClientAttrib: ()=>answer(current()?.glPopClientAttrib()),
 
         // --- pixels ---
 
@@ -1783,9 +1795,9 @@ export function createOpengl(services){
                 : null;
             context.glDrawPixels(width | 0, height | 0, format >>> 0, type >>> 0, texels);
         }),
-        glCopyPixels: ([x, y, width, height, type])=>call(context=>
-            context.glCopyPixels(x | 0, y | 0, width | 0, height | 0, type >>> 0)),
-        glBitmap: a=>call(context=>context.glBitmap(
+        glCopyPixels: ([x, y, width, height, type])=>answer(
+            current()?.glCopyPixels(x | 0, y | 0, width | 0, height | 0, type >>> 0)),
+        glBitmap: a=>answer(current()?.glBitmap(
             a[0] | 0, a[1] | 0, asFloat(a[2]), asFloat(a[3]), asFloat(a[4]), asFloat(a[5]))),
     };
     Object.assign(implemented, handlers);

@@ -146,7 +146,9 @@ export function playedDirect3D(factory, services){
         // Without memory of the caller's, nor does this one have any: a
         // device that draws refuses to be made so.
         readMemory: services.readMemory && mirror.read,
-        windowMemory: services.readMemory && mirror.read,
+        windowMemory: services.readMemory
+            && ((/** @type {number} */ address, /** @type {number} */ length)=>
+                mirror.window(address, length)),
         writeMemory: write && ((/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>{
             mirror.write(address, bytes);
             if (!playing)

@@ -22,6 +22,30 @@ import { INTERLEAVED_LAYOUTS, componentBytes, readElement, readIndex } from './a
 import { createBufferObject } from './objects.js';
 import { TEXTURE_UNITS } from './state.js';
 
+/** The conventional arrays after the position, in the order a draw reads them. */
+const CONVENTIONAL = /** @type {const} */ (['color', 'secondary', 'normal', 'fogCoord']);
+
+/** Each unit's coordinate array by name, asked for on every draw. */
+const TEX_COORD_NAMES = Array.from({ length: TEXTURE_UNITS }, (_, unit)=>`texCoord${unit}`);
+
+/**
+ * The generic array a program reads under a canonical name, if one is on.
+ *
+ * @template {{ name: string }} T
+ * @param {readonly T[]} generic @param {string} name
+ * @returns {T | undefined}
+ */
+function genericNamed(generic, name){
+    for (const entry of generic)
+    {
+        if (entry.name === name)
+        {
+            return entry;
+        }
+    }
+    return undefined;
+}
+
 /** @type {Set<number>} */
 const PRIMITIVE_MODES = new Set([
     GL.POINTS, GL.LINES, GL.LINE_LOOP, GL.LINE_STRIP, GL.TRIANGLES, GL.TRIANGLE_STRIP,
@@ -170,26 +194,42 @@ export function installArrayCalls(context, kernel){
     /** @param {string} name @returns {import('./arrays.js').ArrayPointer} */
     const pointerOf = name=>(name === 'texCoord' ? texCoordPointers[clientActive] : pointers[name]);
 
+    /**
+     * One value of the mirror, replaced only when it differs: a record's
+     * values are replaced whole on a change and never written in place, and
+     * a program sets its pointers before nearly every draw, mostly to what
+     * they already were.
+     *
+     * @param {number} query @param {number} value
+     */
+    const mirrorOne = (query, value)=>{
+        const values = record(query).values;
+        if (values.length !== 1 || values[0] !== value)
+        {
+            setState(query, [value]);
+        }
+    };
+
     /** Rewrites the flat mirror of one array's record. @param {string} name */
     const mirror = name=>{
         const spec = ARRAYS[name];
         const pointer = pointerOf(name);
         if (spec.size !== null)
         {
-            setState(spec.size, [pointer.size]);
+            mirrorOne(spec.size, pointer.size);
         }
         if (name !== 'edgeFlag')
         {
-            setState(spec.type, [pointer.type]);
+            mirrorOne(spec.type, pointer.type);
         }
-        setState(spec.stride, [pointer.stride]);
+        mirrorOne(spec.stride, pointer.stride);
         if (spec.binding !== null)
         {
-            setState(spec.binding, [pointer.buffer]);
+            mirrorOne(spec.binding, pointer.buffer);
         }
         if (name === 'texCoord')
         {
-            setState(GL.TEXTURE_COORD_ARRAY, [texCoordEnabled[clientActive]]);
+            mirrorOne(GL.TEXTURE_COORD_ARRAY, texCoordEnabled[clientActive]);
         }
     };
 
@@ -364,69 +404,59 @@ export function installArrayCalls(context, kernel){
      * @returns {import('./gpu-layout.js').ArrayRequest[]}
      */
     function enabledArrays(){
-        const enabled = (/** @type {string} */ name)=>record(ARRAYS[name].enable).values[0] !== 0;
         /** @type {{ name: string, normalised: boolean,
          *           pointer: import('./arrays.js').ArrayPointer }[]} */
         const generic = record(GL.VERTEX_PROGRAM_ARB).values[0] !== 0
             ? kernel.side.programs?.genericArrays() ?? []
             : [];
-        const genericByName = new Map(generic.map(entry=>[entry.name, entry]));
-        /**
-         * @param {string} name
-         * @param {import('./arrays.js').ArrayPointer} pointer
-         * @param {boolean} normalised
-         */
-        const push = (name, pointer, normalised)=>arrays.push({ name, pointer, normalised });
         /** @type {import('./gpu-layout.js').ArrayRequest[]} */
         const arrays = [];
-        /** @param {string} name @param {import('./arrays.js').ArrayPointer} pointer
-         *  @param {boolean} normalised */
-        const named = (name, pointer, normalised)=>{
-            if (!arrays.some(entry=>entry.name === name))
-            {
-                push(name, pointer, normalised);
-            }
-        };
-        const fromGeneric = genericByName.get('position');
-        if (enabled('vertex') || !fromGeneric)
+        const fromGeneric = genericNamed(generic, 'position');
+        if (record(ARRAYS.vertex.enable).values[0] !== 0 || !fromGeneric)
         {
-            push('position', pointers.vertex, false);
+            arrays.push({ name: 'position', pointer: pointers.vertex, normalised: false });
         }
         else
         {
-            push('position', fromGeneric.pointer, fromGeneric.normalised);
+            arrays.push({ name: 'position', pointer: fromGeneric.pointer,
+                normalised: fromGeneric.normalised });
         }
-        for (const [name, as] of [['color', 'color'], ['secondary', 'secondary'],
-            ['normal', 'normal'], ['fogCoord', 'fogCoord']])
+        for (const name of CONVENTIONAL)
         {
-            if (enabled(name))
+            if (record(ARRAYS[name].enable).values[0] !== 0)
             {
-                push(as, pointers[name], pointers[name].normalised !== 0);
+                arrays.push({ name, pointer: pointers[name],
+                    normalised: pointers[name].normalised !== 0 });
                 continue;
             }
-            const entry = genericByName.get(as);
+            const entry = genericNamed(generic, name);
             if (entry)
             {
-                push(as, entry.pointer, entry.normalised);
+                arrays.push({ name, pointer: entry.pointer, normalised: entry.normalised });
             }
         }
         for (let unit = 0; unit < TEXTURE_UNITS; unit++)
         {
-            const as = `texCoord${unit}`;
+            const name = TEX_COORD_NAMES[unit];
             if (texCoordEnabled[unit] !== 0)
             {
-                push(as, texCoordPointers[unit], texCoordPointers[unit].normalised !== 0);
+                arrays.push({ name, pointer: texCoordPointers[unit],
+                    normalised: texCoordPointers[unit].normalised !== 0 });
                 continue;
             }
-            const entry = genericByName.get(as);
+            const entry = genericNamed(generic, name);
             if (entry)
             {
-                push(as, entry.pointer, entry.normalised);
+                arrays.push({ name, pointer: entry.pointer, normalised: entry.normalised });
             }
         }
         for (const entry of generic)
         {
-            named(entry.name, entry.pointer, entry.normalised);
+            if (!arrays.some(array=>array.name === entry.name))
+            {
+                arrays.push({ name: entry.name, pointer: entry.pointer,
+                    normalised: entry.normalised });
+            }
         }
         return arrays;
     }
