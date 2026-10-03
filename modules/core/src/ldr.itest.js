@@ -16,11 +16,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[
@@ -69,14 +67,9 @@ function buildWalkLdrExe(){
 }
 
 test('a fixture that walks InLoadOrderModuleList counts every module, never a null', async t=>{
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
     const app = await createApp({
         executable: buildWalkLdrExe(),
         imagePath: 'C:\\App\\Walk.exe',
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
     });
     t.after(()=>app.dispose());
 
@@ -137,14 +130,9 @@ test('a module is there for GetModuleHandle once it is loaded, and not before', 
     // Wine's own tests find comctl32 absent from a program that imports only
     // user32 and friends; a system library the program imports brings in
     // those it imports itself, and kernel32 is in every process.
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
     const app = await createApp({
         executable: buildHandlesExe(),
         imagePath: 'C:\\App\\Handles.exe',
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
     });
     t.after(()=>app.dispose());
 

@@ -10,9 +10,9 @@ import { replaySlice, retireExactly } from './differential.js';
 import { snapshot } from './snapshot.js';
 
 /**
- * A machine of arrays whose "program" is a function run once per step: it
- * stands in for both executors, since in hybrid mode both work the same
- * host, and its program is what the test varies.
+ * A machine of arrays whose "program" is a function run once per step: each
+ * side of a replay is one, or both sides are the same one, and its program is
+ * what the test varies.
  */
 function fakeMachine(){
     /** @type {Record<string, number>} */
@@ -67,14 +67,14 @@ function fakeMachine(){
         },
     };
     /**
-     * An executor over the machine: each instruction adds one to ecx and
-     * stores the total at 0x2000, plus whatever the program does extra.
+     * An executor over the machine, its accessors included: each instruction
+     * adds one to ecx and stores the total at 0x2000, plus whatever the
+     * program does extra.
      *
      * @param {(m: typeof machine, retired: number) => void} [extra]
      */
     const executor = (extra = ()=>{})=>({
-        halted: machine.halted,
-        wake: machine.wake,
+        ...machine,
         /** @param {number} instructions */
         step: instructions=>{
             let retired = 0;
@@ -108,11 +108,11 @@ test('an executor that stops on boundaries is run until the count is reached', (
 });
 
 test('the same program on both sides diffs to nothing, and both retire the count', ()=>{
-    const { machine, executor } = fakeMachine();
-    const state = snapshot(machine, SPANS);
-    const oracle = { ...machine, ...executor() };
+    const model = fakeMachine();
+    const state = snapshot(model.machine, SPANS);
     const result = replaySlice({
-        oracle, subject: executor(), state, instructions: 7, spans: SPANS,
+        oracle: model.executor(), subject: fakeMachine().executor(), state, instructions: 7,
+        spans: SPANS,
     });
     assert.deepEqual(result.divergences, []);
     assert.equal(result.retiredOracle, 7);
@@ -122,17 +122,18 @@ test('the same program on both sides diffs to nothing, and both retire the count
 });
 
 test('a subject that adds one to ecx diverges on ecx and the word it stored, nothing else', ()=>{
-    const { machine, executor } = fakeMachine();
-    const state = snapshot(machine, SPANS);
-    const oracle = { ...machine, ...executor() };
-    const subject = executor((m, retired)=>{
+    const model = fakeMachine();
+    const state = snapshot(model.machine, SPANS);
+    const subject = fakeMachine().executor((m, retired)=>{
         if (retired === 7)
         {
             m.registers.ecx += 1;
             new DataView(m.ram.buffer).setUint32(0x2000, m.registers.ecx, true);
         }
     });
-    const { divergences } = replaySlice({ oracle, subject, state, instructions: 7, spans: SPANS });
+    const { divergences } = replaySlice({
+        oracle: model.executor(), subject, state, instructions: 7, spans: SPANS,
+    });
     assert.deepEqual(divergences, [
         { name: 'ecx', expected: 7, actual: 8 },
         { name: 'mem[0x2000]', expected: 7, actual: 8 },
@@ -140,26 +141,45 @@ test('a subject that adds one to ecx diverges on ecx and the word it stored, not
 });
 
 test('a subject that retires fewer instructions diverges on the count first, then on eip', ()=>{
-    const { machine, executor } = fakeMachine();
-    const state = snapshot(machine, SPANS);
-    const oracle = { ...machine, ...executor() };
-    const subject = executor((m, retired)=>{
+    const model = fakeMachine();
+    const state = snapshot(model.machine, SPANS);
+    const subject = fakeMachine().executor((m, retired)=>{
         if (retired === 5)
         {
             m.halt();
         }
     });
-    const result = replaySlice({ oracle, subject, state, instructions: 7, spans: SPANS });
+    const result = replaySlice({
+        oracle: model.executor(), subject, state, instructions: 7, spans: SPANS,
+    });
     assert.equal(result.retiredSubject, 5);
     assert.deepEqual(result.divergences.map(d=>d.name), ['retired', 'ecx', 'eip', 'mem[0x2000]']);
     assert.deepEqual(result.divergences[0], { name: 'retired', expected: 7, actual: 5 });
 });
 
-test('the state is restored between the two runs, memory included', ()=>{
+test('each side is restored into its own host and read from it, memory included', ()=>{
+    const model = fakeMachine();
+    model.machine.registers.ecx = 100;
+    const state = snapshot(model.machine, SPANS);
+    const other = fakeMachine();
+    other.machine.registers.ecx = 5000;
+    other.machine.ram.fill(0xee, 0x2000, 0x2008);
+    other.machine.halt();
+    const result = replaySlice({
+        oracle: model.executor(), subject: other.executor(), state, instructions: 3,
+        spans: SPANS,
+    });
+    assert.deepEqual(result.divergences, []);
+    assert.equal(other.machine.registers.ecx, 103, 'the subject ran from the common state');
+    assert.equal(model.machine.registers.ecx, 103, 'and the oracle on its own host');
+    assert.deepEqual([...result.subjectState.memory[0].bytes.subarray(4)], [0, 0, 0, 0],
+        'the span the subject did not write is the common state\'s, not what its host held');
+});
+
+test('on one host, the state is restored between the two runs, memory included', ()=>{
     const { machine, executor } = fakeMachine();
     machine.registers.ecx = 100;
     const state = snapshot(machine, SPANS);
-    const oracle = { ...machine, ...executor() };
     let seenAtStart = -1;
     const subject = executor((m, retired)=>{
         if (retired === 1)
@@ -167,7 +187,11 @@ test('the state is restored between the two runs, memory included', ()=>{
             seenAtStart = m.registers.ecx - 1;
         }
     });
-    replaySlice({ oracle, subject, state, instructions: 3, spans: SPANS });
+    const result = replaySlice({
+        oracle: executor(), subject, state, instructions: 3, spans: SPANS,
+    });
     assert.equal(seenAtStart, 100,
         'the subject started from the common state, not the oracle\'s end');
+    assert.equal(result.oracleState.reg32[1], 103, 'the oracle was read before the subject ran');
+    assert.deepEqual(result.divergences, []);
 });

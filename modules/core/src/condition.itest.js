@@ -14,11 +14,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
-
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[
@@ -131,13 +128,8 @@ function buildOnceExe(){
 
 test('InitOnceExecuteOnce runs the program\'s function once and hands back its context',
     { timeout: 30000 }, async t=>{
-        const wasm = await readFile(new URL('v86.wasm', PREBUILT));
         const app = await createApp({
             executable: buildOnceExe(),
-            v86: {
-                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-            },
         });
         t.after(()=>app.dispose());
 
@@ -146,13 +138,8 @@ test('InitOnceExecuteOnce runs the program\'s function once and hands back its c
 
 test('a timed sleep on a condition variable answers FALSE and holds the lock again',
     { timeout: 30000 }, async t=>{
-        const wasm = await readFile(new URL('v86.wasm', PREBUILT));
         const app = await createApp({
             executable: buildConditionExe(),
-            v86: {
-                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-            },
         });
         t.after(()=>app.dispose());
 

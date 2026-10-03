@@ -18,20 +18,11 @@ import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { CPUID } from './layers/win32/kernel32/processor.js';
 
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
-
 test('every description of the processor agrees with CPUID, and the record is CPUID',
     { timeout: 60000 }, async t=>{
-        const [wasm, exe] = await Promise.all([
-            readFile(new URL('v86.wasm', PREBUILT)),
-            readFile(new URL('../test/fixtures/processor.exe', import.meta.url)),
-        ]);
+        const exe = await readFile(new URL('../test/fixtures/processor.exe', import.meta.url));
         const app = await createApp({
             executable: new Uint8Array(exe),
-            v86: {
-                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-            },
         });
         t.after(()=>app.dispose());
         /** @type {string[]} */

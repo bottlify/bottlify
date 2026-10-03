@@ -14,11 +14,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { createApp, spaceAbove } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
-
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[
@@ -82,15 +79,10 @@ test('the startup arena stays below the thread stacks when the libraries reach t
     { timeout: 60000 }, async t=>{
         const executable = buildProgram();
         const { stackPoolBase } = spaceAbove(0x400000 + 0x3000);
-        const wasm = await readFile(new URL('v86.wasm', PREBUILT));
         const app = await createApp({
             executable,
             imagePath: 'C:\\App\\Arena.exe',
             files: [{ path: 'C:\\App\\big.dll', bytes: buildLibrary(stackPoolBase) }],
-            v86: {
-                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-            },
         });
         t.after(()=>app.dispose());
 

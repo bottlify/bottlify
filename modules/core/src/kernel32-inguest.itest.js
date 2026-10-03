@@ -6,20 +6,17 @@
 
 /**
  * The kernel32 exports that are code in the guest's own kernel32, called
- * through the import as a program calls them, on cork and on the emulator:
- * the interlocked arithmetic, thread-local storage, and critical sections --
- * whose contended entry is the one place any of them reaches the host.
+ * through the import as a program calls them: the interlocked arithmetic,
+ * thread-local storage, and critical sections -- whose contended entry is the
+ * one place any of them reaches the host.
  *
  * Each program exits 0, or with the number of the first check that failed.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
-
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
@@ -497,20 +494,10 @@ function buildSimpleCallsExe(){
  * into the host: the bridge's most frequent calls, and what the host's half
  * of the critical sections counted.
  *
- * @param {Uint8Array} executable @param {'emulator' | 'cork'} engine
- * @param {number} [quantum]
+ * @param {Uint8Array} executable @param {number} [quantum]
  */
-async function run(executable, engine, quantum){
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
-    const app = await createApp({
-        executable,
-        engine,
-        quantum,
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
-    });
+async function run(executable, quantum){
+    const app = await createApp({ executable, quantum });
     try
     {
         const code = await app.run({ timeoutMs: 30000 });
@@ -529,34 +516,32 @@ async function run(executable, engine, quantum){
     }
 }
 
-for (const engine of /** @type {const} */ (['cork', 'emulator']))
-{
-    test(`the interlocked exports answer as Windows does, in the guest, under ${engine}`,
-        { timeout: 60000 }, async()=>{
-            const { code, hot } = await run(buildInterlockedExe(), engine);
-            assert.equal(code, 0, 'the number of the first check that failed');
-            assert.deepEqual(hot.filter(([name])=>name.includes('Interlocked')), [],
-                'and none of them crossed into the host');
-        });
+test(`the interlocked exports answer as Windows does, in the guest`,
+    { timeout: 60000 }, async()=>{
+        const { code, hot } = await run(buildInterlockedExe());
+        assert.equal(code, 0, 'the number of the first check that failed');
+        assert.deepEqual(hot.filter(([name])=>name.includes('Interlocked')), [],
+            'and none of them crossed into the host');
+    });
 
-    test(`interlocked increments from three preempted threads all land, under ${engine}`,
-        { timeout: 60000 }, async()=>{
-            const { code } = await run(buildInterlockedRaceExe(), engine, 97);
-            assert.equal(code, 0, '1: an increment was lost; 2: an addition was');
-        });
+test(`interlocked increments from three preempted threads all land`,
+    { timeout: 60000 }, async()=>{
+        const { code } = await run(buildInterlockedRaceExe(), 97);
+        assert.equal(code, 0, '1: an increment was lost; 2: an addition was');
+    });
 
-    test(`a thread-local slot set in the guest is the slot every reader sees, under ${engine}`,
-        { timeout: 60000 }, async()=>{
-            const { code, hot } = await run(buildTlsExe(), engine);
-            assert.equal(code, 0, 'the number of the first check that failed');
-            const crossed = Object.fromEntries(hot);
-            assert.equal(crossed['<tls-set>'], 2, 'only the two sets past the array crossed');
-            assert.equal(crossed['<tls-get>'], 1, 'and the one get');
-        });
+test(`a thread-local slot set in the guest is the slot every reader sees`,
+    { timeout: 60000 }, async()=>{
+        const { code, hot } = await run(buildTlsExe());
+        assert.equal(code, 0, 'the number of the first check that failed');
+        const crossed = Object.fromEntries(hot);
+        assert.equal(crossed['<tls-set>'], 2, 'only the two sets past the array crossed');
+        assert.equal(crossed['<tls-get>'], 1, 'and the one get');
+    });
 
-    test(`three threads share a section with recursion and the count comes out exact, `
-        + `under ${engine}`, { timeout: 60000 }, async()=>{
-        const { code, sections } = await run(buildSectionRaceExe(), engine, 97);
+test('three threads share a section with recursion and the count comes out exact',
+    { timeout: 60000 }, async()=>{
+        const { code, sections } = await run(buildSectionRaceExe(), 97);
         assert.equal(code, 0, '1: a thread found the section wrong inside it; 2: an update'
             + ' was lost; 3-5: the section was not left free');
         const passes = WORKERS * SECTION_TURNS * 2;
@@ -568,30 +553,29 @@ for (const engine of /** @type {const} */ (['cork', 'emulator']))
         assert.equal(sections.owed, 0);
     });
 
-    test(`the calls a few instructions long answer in the guest as the host does, under ${engine}`,
-        { timeout: 60000 }, async()=>{
-            const { code, hot } = await run(buildSimpleCallsExe(), engine);
-            assert.equal(code, 0, 'the number of the first check that failed');
-            const crossed = Object.fromEntries(hot);
-            for (const name of ['GetProcessHeap', 'GetVersion', 'GetCurrentProcess',
-                'GetCurrentThread', 'lstrlenW', 'lstrcpyA', 'lstrcpyW'])
-            {
-                assert.equal(crossed[`KERNEL32.dll!${name}`], undefined, `${name} crossed`);
-            }
-            assert.equal(crossed['KERNEL32.dll!lstrlenA'], 1, 'only the pointer at 0x100');
-            assert.equal(crossed['KERNEL32.dll!lstrcmpA'], 1, 'lstrcmpA stays the host\'s');
-        });
+test(`the calls a few instructions long answer in the guest as the host does`,
+    { timeout: 60000 }, async()=>{
+        const { code, hot } = await run(buildSimpleCallsExe());
+        assert.equal(code, 0, 'the number of the first check that failed');
+        const crossed = Object.fromEntries(hot);
+        for (const name of ['GetProcessHeap', 'GetVersion', 'GetCurrentProcess',
+            'GetCurrentThread', 'lstrlenW', 'lstrcpyA', 'lstrcpyW'])
+        {
+            assert.equal(crossed[`KERNEL32.dll!${name}`], undefined, `${name} crossed`);
+        }
+        assert.equal(crossed['KERNEL32.dll!lstrlenA'], 1, 'only the pointer at 0x100');
+        assert.equal(crossed['KERNEL32.dll!lstrcmpA'], 1, 'lstrcmpA stays the host\'s');
+    });
 
-    test(`a thread waiting for a section waits in the host and is handed it, under ${engine}`,
-        { timeout: 60000 }, async()=>{
-            const { code, sections } = await run(buildSectionHandoffExe(), engine);
-            assert.equal(code, 0, 'the number of the first check that failed');
-            assert.equal(sections.waits, 1, 'the second thread waited once');
-            assert.equal(sections.wakes, 1, 'the main thread\'s leave woke it');
-            assert.equal(sections.handoffs, 1);
-            assert.equal(sections.queued, 0);
-            assert.equal(sections.entered, 3,
-                'two entries and the owner\'s try, and not the refused one');
-            assert.equal(sections.left, 3);
-        });
-}
+test(`a thread waiting for a section waits in the host and is handed it`,
+    { timeout: 60000 }, async()=>{
+        const { code, sections } = await run(buildSectionHandoffExe());
+        assert.equal(code, 0, 'the number of the first check that failed');
+        assert.equal(sections.waits, 1, 'the second thread waited once');
+        assert.equal(sections.wakes, 1, 'the main thread\'s leave woke it');
+        assert.equal(sections.handoffs, 1);
+        assert.equal(sections.queued, 0);
+        assert.equal(sections.entered, 3,
+            'two entries and the owner\'s try, and not the refused one');
+        assert.equal(sections.left, 3);
+    });

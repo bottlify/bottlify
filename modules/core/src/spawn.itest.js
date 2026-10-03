@@ -26,29 +26,20 @@ import {
 } from './layers/win32/advapi32/registry.js';
 import { createMemoryDirectory } from './layers/cpu/internal/translation-store.js';
 
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
-
 /**
  * @param {import('node:test').TestContext} t
- * @param {'emulator' | 'cork'} engine
  */
-async function spawnOn(t, engine){
-    const [wasm, parent, child] = await Promise.all([
-        readFile(new URL('v86.wasm', PREBUILT)),
+async function spawnOn(t){
+    const [parent, child] = await Promise.all([
         readFile(new URL('../test/fixtures/spawn.exe', import.meta.url)),
         readFile(new URL('../test/fixtures/spawn_child.exe', import.meta.url)),
     ]);
     const app = await createApp({
         executable: new Uint8Array(parent),
         imagePath: 'C:\\App\\spawn.exe',
-        engine,
         storage: { load: async()=>({
             files: [{ path: 'C:\\App\\spawn_child.exe', bytes: new Uint8Array(child) }],
         }) },
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
     });
     t.after(()=>app.dispose());
     /** @type {string[]} */
@@ -96,8 +87,7 @@ test('a child starts from its parent\'s registry, and the parent keeps its own a
         // A launcher writes its settings and then starts the program that reads
         // them. One registry is the machine's, not the process's: the child
         // sees what the parent wrote, and the parent what the child did.
-        const [wasm, parent, child] = await Promise.all([
-            readFile(new URL('v86.wasm', PREBUILT)),
+        const [parent, child] = await Promise.all([
             readFile(new URL('../test/fixtures/spawn.exe', import.meta.url)),
             readFile(new URL('../test/fixtures/spawn_child.exe', import.meta.url)),
         ]);
@@ -105,10 +95,6 @@ test('a child starts from its parent\'s registry, and the parent keeps its own a
             executable: new Uint8Array(parent),
             imagePath: 'C:\\App\\spawn.exe',
             files: [{ path: 'C:\\App\\spawn_child.exe', bytes: new Uint8Array(child) }],
-            v86: {
-                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-            },
         });
         t.after(()=>app.dispose());
         const hive = app.registry();
@@ -129,10 +115,7 @@ test('a child starts from its parent\'s registry, and the parent keeps its own a
     });
 
 test('a parent waiting on its child goes on after the child exits, with what it left',
-    { timeout: 120000 }, t=>spawnOn(t, 'emulator'));
-
-test('under cork, the child runs on a machine of its own beside the parent\'s as well',
-    { timeout: 120000 }, t=>spawnOn(t, 'cork'));
+    { timeout: 120000 }, t=>spawnOn(t));
 
 /**
  * The origin's file system as a worker has it: a file with a synchronous
@@ -214,7 +197,7 @@ test('a child beside its parent writes to the run\'s one translation store', { t
         withOrigin(t, exclusiveDirectory(), ()=>{
             opened++;
         });
-        await spawnOn(t, 'cork');
+        await spawnOn(t);
         assert.equal(opened, 1, 'one store for the run, the children\'s machines included');
     });
 
@@ -226,8 +209,7 @@ test('the run\'s translation store keeps its records file open past a child, unt
         // copies -- forty seconds of an installer's COM server standing still.
         const directory = exclusiveDirectory();
         withOrigin(t, directory);
-        const [wasm, parent, child] = await Promise.all([
-            readFile(new URL('v86.wasm', PREBUILT)),
+        const [parent, child] = await Promise.all([
             readFile(new URL('../test/fixtures/spawn.exe', import.meta.url)),
             readFile(new URL('../test/fixtures/spawn_child.exe', import.meta.url)),
         ]);
@@ -236,10 +218,6 @@ test('the run\'s translation store keeps its records file open past a child, unt
             imagePath: 'C:\\App\\spawn.exe',
             engine: 'cork',
             files: [{ path: 'C:\\App\\spawn_child.exe', bytes: new Uint8Array(child) }],
-            v86: {
-                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-            },
         });
         /** @type {boolean[]} */
         const heldAfterChild = [];
@@ -615,34 +593,22 @@ function buildOutputChild(){
     });
 }
 
-// Under cork alone: the handing over is the process layer's, whichever engine
-// runs, and two emulators beside the file's others exhaust a node process.
-for (const engine of /** @type {const} */ (['cork']))
-{
-    test('a child writes into the file its parent handed it as its output',
-        { timeout: 120000 }, async t=>{
-            const wasm = await readFile(new URL('v86.wasm', PREBUILT));
-            const app = await createApp({
-                executable: buildOutputParent(),
-                imagePath: 'C:\\App\\parent.exe',
-                engine,
-                files: [{ path: 'C:\\App\\child.exe', bytes: buildOutputChild() }],
-                v86: {
-                    moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-                    wasmBytes: wasm.buffer.slice(wasm.byteOffset,
-                        wasm.byteOffset + wasm.byteLength),
-                },
-            });
-            t.after(()=>app.dispose());
-            /** @type {string[]} */
-            const console = [];
-            app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>
-                console.push(text));
-            const code = await app.run({ timeoutMs: 60000 });
-            assert.equal(code, 0x306, 'the file reads "childP": the child first, the parent after');
-            assert.equal(console.join('').includes('child'), false, 'nothing went to the console');
+test('a child writes into the file its parent handed it as its output',
+    { timeout: 120000 }, async t=>{
+        const app = await createApp({
+            executable: buildOutputParent(),
+            imagePath: 'C:\\App\\parent.exe',
+            files: [{ path: 'C:\\App\\child.exe', bytes: buildOutputChild() }],
         });
-}
+        t.after(()=>app.dispose());
+        /** @type {string[]} */
+        const console = [];
+        app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>
+            console.push(text));
+        const code = await app.run({ timeoutMs: 60000 });
+        assert.equal(code, 0x306, 'the file reads "childP": the child first, the parent after');
+        assert.equal(console.join('').includes('child'), false, 'nothing went to the console');
+    });
 
 test('a child that ran beside its parent is let go once it has exited', { timeout: 120000 },
     async t=>{
@@ -651,8 +617,7 @@ test('a child that ran beside its parent is let go once it has exited', { timeou
         // process test, starting dozens, ran out of room for the next.
         v8.setFlagsFromString('--expose-gc');
         const gc = vm.runInNewContext('gc');
-        const [wasm, parent, child] = await Promise.all([
-            readFile(new URL('v86.wasm', PREBUILT)),
+        const [parent, child] = await Promise.all([
             readFile(new URL('../test/fixtures/spawn.exe', import.meta.url)),
             readFile(new URL('../test/fixtures/spawn_child.exe', import.meta.url)),
         ]);
@@ -663,10 +628,6 @@ test('a child that ran beside its parent is let go once it has exited', { timeou
             storage: { load: async()=>({
                 files: [{ path: 'C:\\App\\spawn_child.exe', bytes: new Uint8Array(child) }],
             }) },
-            v86: {
-                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-            },
         });
         t.after(()=>app.dispose());
         // The fixture reports through its standard output, which goes nowhere

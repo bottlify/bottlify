@@ -15,11 +15,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 const IMAGE_BASE = 0x400000;
 
 /** @param {number} value @returns {number[]} */
@@ -92,14 +90,9 @@ function buildSelfLoadExe(){
 
 test('a program that names its own image gets the one it runs from, exports included',
     { timeout: 15000 }, async t=>{
-        const wasm = await readFile(new URL('v86.wasm', PREBUILT));
         const app = await createApp({
             executable: buildSelfLoadExe(),
             imagePath: 'C:\\App\\Self.exe',
-            v86: {
-                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-            },
         });
         t.after(()=>app.dispose());
         const code = await app.run({ timeoutMs: 8000 });

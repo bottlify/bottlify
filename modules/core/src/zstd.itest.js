@@ -5,11 +5,10 @@
  */
 
 /**
- * The new decoder against the emulator's own, on the bundle's actual blocks:
- * every zstd block of a written bundle must decode byte for byte to what the
- * vendored wasm gives, and the per-megabyte cost of both is printed. A
- * JavaScript decoder is expected within a few times the wasm one, and a
- * guest file read is not a hot path.
+ * This project's decoder against libzstd, Node's own, on the bundle's actual
+ * blocks: every zstd block of a written bundle must decode byte for byte to
+ * what libzstd gives, and the per-megabyte cost of each is printed. A guest
+ * file read is not a hot path.
  */
 
 import { test } from 'node:test';
@@ -19,7 +18,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import zlib from 'node:zlib';
-import { createV86Host } from './layers/cpu/internal/v86-host.js';
 import { writeBundle } from './bundle-node.js';
 import { openBundle, Codec } from './layers/filesystem/internal/bundle/format.js';
 import { decompressZstd } from './zstd.js';
@@ -65,7 +63,7 @@ async function buildBundle(){
     }
 }
 
-test('every zstd block of a bundle matches the emulator\'s decoder', async t=>{
+test('every zstd block of a bundle matches libzstd', async()=>{
     // The largest bundle's blocks when one is named (the owner's own), the
     // fixture below otherwise: `BOTTLIFY_ZSTD_BUNDLE=/path/to/bundle.btl`.
     const named = process.env.BOTTLIFY_ZSTD_BUNDLE;
@@ -87,16 +85,8 @@ test('every zstd block of a bundle matches the emulator\'s decoder', async t=>{
     }
     assert.ok(zstdBlocks.length >= 1, 'the fixture carries zstd blocks');
 
-    const [wasm] = await Promise.all([readFile(new URL('v86.wasm', PREBUILT))]);
-    // The emulator's decoder lives in its wasm and left the cpu api in 5.5,
-    // so the machine is built directly to judge this project's own decoder.
-    const machine = await createV86Host({
-        moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-        wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: 0x300000,
-    });
-    t.after(()=>machine.stop());
+    /** @param {Uint8Array} packed */
+    const libzstd = packed=>new Uint8Array(zlib.zstdDecompressSync(packed));
 
     let packed = 0;
     let unpacked = 0;
@@ -105,7 +95,7 @@ test('every zstd block of a bundle matches the emulator\'s decoder', async t=>{
         packed += block.packed.length;
         const mine = decompressZstd(block.packed, block.length);
         assert.equal(mine.length, block.length);
-        const theirs = machine.decompressZstd(block.packed, block.length);
+        const theirs = libzstd(block.packed);
         assert.deepEqual([...mine], [...theirs], `block of ${block.packed.length} bytes`);
         unpacked += mine.length;
     }
@@ -115,7 +105,7 @@ test('every zstd block of a bundle matches the emulator\'s decoder', async t=>{
         for (const block of zstdBlocks)
         {
             decompressZstd(block.packed, block.length);
-            machine.decompressZstd(block.packed, block.length);
+            libzstd(block.packed);
         }
     }
     const mineAt = performance.now();
@@ -127,7 +117,7 @@ test('every zstd block of a bundle matches the emulator\'s decoder', async t=>{
     const theirsAt = performance.now();
     for (const block of zstdBlocks)
     {
-        machine.decompressZstd(block.packed, block.length);
+        libzstd(block.packed);
     }
     const theirsMs = performance.now() - theirsAt;
 
@@ -135,12 +125,12 @@ test('every zstd block of a bundle matches the emulator\'s decoder', async t=>{
     console.log(`zstd (${named ?? 'the itest fixture'}): ${zstdBlocks.length} blocks, `
         + `${(packed / 1024).toFixed(0)} KiB packed, ${mb.toFixed(1)} MiB out; `
         + `ours ${(mb / (mineMs / 1000)).toFixed(1)} MiB/s (${(mineMs / 1000).toFixed(2)} s), `
-        + `the emulator's ${(mb / (theirsMs / 1000)).toFixed(1)} MiB/s`
+        + `libzstd ${(mb / (theirsMs / 1000)).toFixed(1)} MiB/s`
         + ` (${(theirsMs / 1000).toFixed(2)} s)`);
     assert.ok(mb > 0.1, `enough to time: ${mb} MiB`);
 
     // The wasm build of the same decoder, when this checkout carries it: byte
-    // for byte the emulator's answer, and not slower than the emulator's decoder.
+    // for byte libzstd's answer, and not slower than the JavaScript decoder.
     let wasmBytes = null;
     try
     {
@@ -156,7 +146,7 @@ test('every zstd block of a bundle matches the emulator\'s decoder', async t=>{
         for (const block of zstdBlocks)
         {
             assert.deepEqual([...ours.decompress(block.packed, block.length)],
-                [...machine.decompressZstd(block.packed, block.length)],
+                [...libzstd(block.packed)],
                 `wasm build, block of ${block.packed.length} bytes`);
         }
         for (let round = 0; round < 3; round++)
@@ -174,8 +164,8 @@ test('every zstd block of a bundle matches the emulator\'s decoder', async t=>{
         const wasmMs = performance.now() - wasmAt;
         console.log(`zstd wasm build: ${(mb / (wasmMs / 1000)).toFixed(1)} MiB/s`
             + ` (${(wasmMs / 1000).toFixed(2)} s)`);
-        assert.ok(wasmMs <= theirsMs * 1.25,
-            `the wasm build (${wasmMs.toFixed(0)} ms) is not slower than the emulator's decoder`
-            + ` (${theirsMs.toFixed(0)} ms) beyond timing noise`);
+        assert.ok(wasmMs <= mineMs * 1.25,
+            `the wasm build (${wasmMs.toFixed(0)} ms) is not slower than the JavaScript decoder`
+            + ` (${mineMs.toFixed(0)} ms) beyond timing noise`);
     }
 });

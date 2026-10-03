@@ -7,16 +7,13 @@
 /**
  * FS names the running thread's TEB whatever a program does to the register:
  * `push fs; pop fs` reloads it from its descriptor, which the thread switch
- * keeps on the thread's TEB, and both engines answer the same selector.
+ * keeps on the thread's TEB.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
-
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
@@ -40,20 +37,9 @@ const program = ()=>buildExe({
     ],
 });
 
-for (const engine of /** @type {const} */ (['emulator', 'cork']))
-{
-    test(`a reloaded FS still names the thread's TEB (${engine})`, { timeout: 60000 }, async t=>{
-        const wasm = await readFile(new URL('v86.wasm', PREBUILT));
-        const app = await createApp({
-            executable: program(),
-            engine,
-            v86: {
-                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-            },
-        });
-        t.after(()=>app.dispose());
-        const code = await app.run({ timeoutMs: 20000 });
-        assert.equal(code, 0x18, 'the same TEB after the reload, and the thread\'s selector');
-    });
-}
+test('a reloaded FS still names the thread\'s TEB', { timeout: 60000 }, async t=>{
+    const app = await createApp({ executable: program() });
+    t.after(()=>app.dispose());
+    const code = await app.run({ timeoutMs: 20000 });
+    assert.equal(code, 0x18, 'the same TEB after the reload, and the thread\'s selector');
+});

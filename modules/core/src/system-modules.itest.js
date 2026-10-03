@@ -19,11 +19,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { createApp, spaceAbove } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 
 /** Windows' allocation granularity, at which every image is placed. */
 const GRANULE = 0x10000;
@@ -45,22 +43,6 @@ const floats = values=>values.flatMap(value=>{
 
 /** @param {number} value */
 const up = value=>Math.ceil(value / GRANULE) * GRANULE;
-
-/** @param {'cork' | 'emulator'} engine */
-async function engineOptions(engine){
-    if (engine === 'cork')
-    {
-        return { engine };
-    }
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
-    return {
-        engine,
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
-    };
-}
 
 test('the system modules take their own images\' room in the module window, and no more',
     { timeout: 60000 }, async t=>{
@@ -212,69 +194,65 @@ function buildProgram(){
     return { executable, at, expected };
 }
 
-for (const engine of /** @type {const} */ (['cork', 'emulator']))
-{
-    test(`a program importing d3dx9_30, d3dx9_43 and msvcrt finds each and computes, under ${
-        engine}`, { timeout: 60000 }, async t=>{
-        const { executable, at, expected } = buildProgram();
-        const app = await createApp({ executable, imagePath: 'C:\\App\\Versions.exe',
-            ...await engineOptions(engine) });
-        t.after(()=>app.dispose());
-        assert.equal(await app.run({ timeoutMs: 30000 }), 0, 'the program exits 0');
+test('a program importing d3dx9_30, d3dx9_43 and msvcrt finds each and computes', {
+    timeout: 60000 }, async t=>{
+    const { executable, at, expected } = buildProgram();
+    const app = await createApp({ executable, imagePath: 'C:\\App\\Versions.exe' });
+    t.after(()=>app.dispose());
+    assert.equal(await app.run({ timeoutMs: 30000 }), 0, 'the program exits 0');
 
-        const bytes = (/** @type {number} */ address, /** @type {number} */ length)=>
-            new DataView(Uint8Array.from(app.debug.read(address, length)).buffer);
-        const words = bytes(at.words, 20 * 4);
-        const w = (/** @type {number} */ i)=>words.getUint32(i * 4, true);
-        const sizeOf = (/** @type {number} */ base)=>{
-            const header = bytes(base, 0x400);
-            return header.getUint32(header.getUint32(0x3c, true) + 0x50, true);
-        };
-        /** @param {number} address @param {number} base */
-        const inside = (address, base)=>address >= base && address < base + sizeOf(base);
-        const text = (/** @type {number} */ address, /** @type {number} */ length)=>
-            String.fromCharCode(...app.debug.read(address, length));
+    const bytes = (/** @type {number} */ address, /** @type {number} */ length)=>
+        new DataView(Uint8Array.from(app.debug.read(address, length)).buffer);
+    const words = bytes(at.words, 20 * 4);
+    const w = (/** @type {number} */ i)=>words.getUint32(i * 4, true);
+    const sizeOf = (/** @type {number} */ base)=>{
+        const header = bytes(base, 0x400);
+        return header.getUint32(header.getUint32(0x3c, true) + 0x50, true);
+    };
+    /** @param {number} address @param {number} base */
+    const inside = (address, base)=>address >= base && address < base + sizeOf(base);
+    const text = (/** @type {number} */ address, /** @type {number} */ length)=>
+        String.fromCharCode(...app.debug.read(address, length));
 
-        const [h30, h43, h36] = [w(0), w(1), w(9)];
-        for (const [name, handle] of /** @type {const} */ ([['d3dx9_30', h30], ['d3dx9_43', h43],
-            ['d3dx9_36', h36]]))
-        {
-            assert.notEqual(handle, 0, `${name} has a handle`);
-            assert.equal(handle % GRANULE, 0, `${name} is at the allocation granularity`);
-        }
-        assert.equal(new Set([h30, h43, h36]).size, 3, 'three versions, three modules');
+    const [h30, h43, h36] = [w(0), w(1), w(9)];
+    for (const [name, handle] of /** @type {const} */ ([['d3dx9_30', h30], ['d3dx9_43', h43],
+        ['d3dx9_36', h36]]))
+    {
+        assert.notEqual(handle, 0, `${name} has a handle`);
+        assert.equal(handle % GRANULE, 0, `${name} is at the allocation granularity`);
+    }
+    assert.equal(new Set([h30, h43, h36]).size, 3, 'three versions, three modules');
 
-        assert.equal(w(2), w(3), 'd3dx9_30: GetProcAddress answers the address the import got');
-        assert.ok(inside(w(2), h30), 'inside d3dx9_30\'s own image');
-        assert.equal(w(4), w(5), 'd3dx9_43: GetProcAddress answers the address the import got');
-        assert.ok(inside(w(4), h43), 'inside d3dx9_43\'s own image');
-        assert.ok(inside(w(17), h43) && w(17) !== w(2),
-            'd3dx9_43\'s D3DXMatrixMultiply is its own export, not d3dx9_30\'s');
+    assert.equal(w(2), w(3), 'd3dx9_30: GetProcAddress answers the address the import got');
+    assert.ok(inside(w(2), h30), 'inside d3dx9_30\'s own image');
+    assert.equal(w(4), w(5), 'd3dx9_43: GetProcAddress answers the address the import got');
+    assert.ok(inside(w(4), h43), 'inside d3dx9_43\'s own image');
+    assert.ok(inside(w(17), h43) && w(17) !== w(2),
+        'd3dx9_43\'s D3DXMatrixMultiply is its own export, not d3dx9_30\'s');
 
-        assert.match(text(at.file30, w(6)), /\\d3dx9_30\.dll$/i, 'd3dx9_30 names its own file');
-        assert.match(text(at.file43, w(7)), /\\d3dx9_43\.dll$/i, 'd3dx9_43 names its own file');
+    assert.match(text(at.file30, w(6)), /\\d3dx9_30\.dll$/i, 'd3dx9_30 names its own file');
+    assert.match(text(at.file43, w(7)), /\\d3dx9_43\.dll$/i, 'd3dx9_43 names its own file');
 
-        assert.equal(w(8), 0, 'd3dx9_36 is not loaded before the program loads it');
-        assert.ok(inside(w(10), h36) && w(10) !== w(2) && w(10) !== w(17),
-            'd3dx9_36\'s export is in d3dx9_36');
-        assert.equal(w(11), at.out36, 'the product through d3dx9_36 answers its output');
-        assert.equal(w(12), 1, 'freeing d3dx9_36 succeeds');
-        assert.equal(w(13), 0, 'and it is gone');
-        assert.notEqual(w(14), 0, 'freeing the imported d3dx9_30 answers TRUE');
-        assert.equal(w(15), h30, 'and leaves it loaded: an import is pinned');
-        assert.equal(w(16), at.out30);
-        assert.equal(w(18), at.out43);
-        assert.equal(w(19), at.outVector);
+    assert.equal(w(8), 0, 'd3dx9_36 is not loaded before the program loads it');
+    assert.ok(inside(w(10), h36) && w(10) !== w(2) && w(10) !== w(17),
+        'd3dx9_36\'s export is in d3dx9_36');
+    assert.equal(w(11), at.out36, 'the product through d3dx9_36 answers its output');
+    assert.equal(w(12), 1, 'freeing d3dx9_36 succeeds');
+    assert.equal(w(13), 0, 'and it is gone');
+    assert.notEqual(w(14), 0, 'freeing the imported d3dx9_30 answers TRUE');
+    assert.equal(w(15), h30, 'and leaves it loaded: an import is pinned');
+    assert.equal(w(16), at.out30);
+    assert.equal(w(18), at.out43);
+    assert.equal(w(19), at.outVector);
 
-        for (const out of ['out30', 'out36', 'out43'])
-        {
-            const product = bytes(at[out], 64);
-            assert.deepEqual(expected.map((_, i)=>product.getFloat32(i * 4, true)), expected,
-                `the product in ${out}`);
-        }
-        const vector = bytes(at.outVector, 12);
-        assert.deepEqual([0, 1, 2].map(i=>vector.getFloat32(i * 4, true)),
-            [Math.fround(0.6), 0, Math.fround(-0.8)], 'the vector normalised');
-        assert.equal(bytes(at.number, 8).getFloat64(0, true), 2500, 'atof read its number');
-    });
-}
+    for (const out of ['out30', 'out36', 'out43'])
+    {
+        const product = bytes(at[out], 64);
+        assert.deepEqual(expected.map((_, i)=>product.getFloat32(i * 4, true)), expected,
+            `the product in ${out}`);
+    }
+    const vector = bytes(at.outVector, 12);
+    assert.deepEqual([0, 1, 2].map(i=>vector.getFloat32(i * 4, true)),
+        [Math.fround(0.6), 0, Math.fround(-0.8)], 'the vector normalised');
+    assert.equal(bytes(at.number, 8).getFloat64(0, true), 2500, 'atof read its number');
+});

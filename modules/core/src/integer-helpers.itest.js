@@ -6,7 +6,7 @@
 
 /**
  * kernel32's MulDiv and ntdll's 64-bit helpers through the import, as a
- * compiled program calls them, on cork and on the emulator: each call's
+ * compiled program calls them: each call's
  * EAX, EDX, ECX and EBX written to the console and held to the arithmetic
  * in BigInts -- the stack each leaves checked by the program going on --
  * and none of them crossing into the host.
@@ -14,11 +14,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
-
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
@@ -142,16 +139,9 @@ function buildHelpersExe(){
     });
 }
 
-/** @param {'cork' | 'emulator'} engine */
-async function run(engine){
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
+async function run(){
     const app = await createApp({
         executable: buildHelpersExe(),
-        engine,
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
     });
     /** @type {string[]} */
     const output = [];
@@ -176,15 +166,12 @@ async function run(engine){
     }
 }
 
-for (const engine of /** @type {const} */ (['cork', 'emulator']))
-{
-    test(`MulDiv and the 64-bit helpers through the import, under ${engine}`,
-        { timeout: 120000 }, async()=>{
-            const { registers, crossed } = await run(engine);
-            CALLS.forEach((call, i)=>call.check(registers[i]));
-            for (const { dll, name } of CALLS)
-            {
-                assert.equal(crossed.get(`${dll}!${name}`) ?? 0, 0, `${name} stays in the guest`);
-            }
-        });
-}
+test(`MulDiv and the 64-bit helpers through the import`,
+    { timeout: 120000 }, async()=>{
+        const { registers, crossed } = await run();
+        CALLS.forEach((call, i)=>call.check(registers[i]));
+        for (const { dll, name } of CALLS)
+        {
+            assert.equal(crossed.get(`${dll}!${name}`) ?? 0, 0, `${name} stays in the guest`);
+        }
+    });

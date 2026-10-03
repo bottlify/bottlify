@@ -9,14 +9,12 @@
  * seed, packed into the bundle, and a first run of that bundle on a fresh
  * store starts from it -- through `createApp`, the bundle fetched by range as
  * a launch fetches it. A store that has taken the seed does not fetch it
- * again, an engine without the translator never fetches it, and a bundle
- * without one runs as it always did.
+ * again, and a bundle without one runs as it always did.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
-import { mkdtemp, writeFile, rm, open, readFile } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from './app.js';
@@ -36,9 +34,6 @@ import { buildExe } from '../../../tools/make-pe.mjs';
 const layerOf = (app, name)=>app.diagnostics()
     .find((/** @type {any} */ layer)=>layer.name === name);
 
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
-const missing = ['v86.wasm', 'libv86.mjs']
-    .filter((/** @type {string} */ name)=>!existsSync(new URL(name, PREBUILT)));
 const BUNDLE_ID = 'seed-test';
 
 /** @param {number} value */
@@ -108,20 +103,13 @@ async function bundleOf(translations){
 const freshStore = ()=>createDirectoryTranslationStore(createMemoryDirectory(), BUNDLE_ID);
 
 /**
- * @param {'cork' | 'emulator' | undefined} engine  none: the default
  * @param {any} store
  * @param {Awaited<ReturnType<typeof bundleOf>>} source
  */
-async function run(engine, store, source){
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
+async function run(store, source){
     const app = await createApp({
         executable: LOOP,
-        engine,
         cork: { config: { feed: 'slice', timings: true, traceStore: true, store } },
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
         bundle: { fetch: source.fetch, prefix: '', id: BUNDLE_ID, store: null },
     });
     /** @type {any[]} */
@@ -141,12 +129,12 @@ async function run(engine, store, source){
 }
 
 test('a bundle\'s seed gives the first run on a fresh store the regions a run elsewhere made',
-    { skip: missing.length > 0 && `missing ${missing.join(', ')}`, timeout: 120000 }, async t=>{
+    { timeout: 120000 }, async t=>{
         // Elsewhere: a run of the bundle without a seed, its store exported.
         const plain = await bundleOf();
         t.after(()=>plain.cleanup());
         const elsewhere = await freshStore();
-        const first = await run('cork', elsewhere, plain);
+        const first = await run(elsewhere, plain);
         assert.ok(first.cork.regions >= 1, 'the loop was translated');
         assert.equal(first.cork.cacheHits, 0);
         assert.deepEqual(first.seeded, [], 'a bundle without a seed seeds nothing');
@@ -160,11 +148,10 @@ test('a bundle\'s seed gives the first run on a fresh store the regions a run el
         const member = carrying.summary.translations;
         assert.equal(member.size, seed.length);
 
-        // Here: a store that never saw the program, under a launch that names
-        // no engine and so runs cork.
+        // Here: a store that never saw the program.
         const machine = createMemoryDirectory();
         const here = await createDirectoryTranslationStore(machine, BUNDLE_ID);
-        const second = await run(undefined, here, carrying);
+        const second = await run(here, carrying);
         assert.equal(second.code, first.code, 'the program ends as it did');
         // Which starts turn hot depends on where the run's slices end, so the
         // two runs need not form the same regions; none the first made and
@@ -184,23 +171,10 @@ test('a bundle\'s seed gives the first run on a fresh store the regions a run el
             ([offset, length])=>offset < seedEnd && offset + length > seedStart);
         assert.ok(reaches(carrying.ranges), 'the first run fetched the seed');
         const before = carrying.ranges.length;
-        const third = await run('cork',
-            await createDirectoryTranslationStore(machine, BUNDLE_ID), carrying);
+        const third = await run(await createDirectoryTranslationStore(machine, BUNDLE_ID),
+            carrying);
         assert.equal(third.code, first.code);
         assert.ok(third.cork.cacheHits >= 1);
         assert.ok(!reaches(carrying.ranges.slice(before)), 'the second did not');
         assert.deepEqual(third.seeded.map(one=>one.taken), [false]);
-    });
-
-test('an engine without the translator leaves the seed alone',
-    { skip: missing.length > 0 && `missing ${missing.join(', ')}`, timeout: 60000 }, async t=>{
-        const carrying = await bundleOf(new Uint8Array(4096).fill(1));
-        t.after(()=>carrying.cleanup());
-        const store = await freshStore();
-        const done = await run('emulator', store, carrying);
-        assert.deepEqual(done.seeded, []);
-        assert.equal(await store.seededWith(), null);
-        const [seedStart, seedEnd] = /** @type {number[]} */ (carrying.seedSpan);
-        assert.ok(!carrying.ranges.some(([offset, length])=>offset < seedEnd
-            && offset + length > seedStart), 'nothing fetched of it');
     });

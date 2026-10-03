@@ -5,20 +5,17 @@
  */
 
 /**
- * Whole programs under `cork` with the emulator's machine absent (plan step
- * 5.3): the interpreter runs the cold code, the hotness the interpreter counts
- * forms regions at the threshold, and the program ends as it ends on the
- * emulator alone. The fixtures -- `hello`, a calling loop (`imports`), `qsort`
- * (callbacks) and the threaded fixture -- prove the scheduler, the loader and
- * the trap channel still agree when the only executor is cork's own.
- *
- * The emulator is read only to produce the reference each program is judged
- * against; the cork run itself loads nothing of it.
+ * Whole programs under `cork`: the interpreter runs the cold code, the hotness
+ * it counts forms regions at the threshold, and the program ends as it ends on
+ * cork's instruction model alone -- the JavaScript interpreter over `ir.js`,
+ * with nothing translated and no wasm tier. The fixtures -- `hello`, a calling
+ * loop (`imports`), `qsort` (callbacks) and the threaded fixture -- prove the
+ * scheduler, the loader and the trap channel agree with translated code as
+ * they do with the model.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
@@ -34,12 +31,11 @@ import { assemble } from './layers/win32/msvcrt/guest-code.js';
 const layerOf = (app, name)=>app.diagnostics()
     .find((/** @type {any} */ layer)=>layer.name === name);
 
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 /** @param {string} name */
 const FIXTURE = name=>new URL(`../test/fixtures/${name}`, import.meta.url);
 const ITERATIONS = 2_000_000;
-const missing = ['v86.wasm', 'libv86.mjs']
-    .filter((/** @type {string} */ name)=>!existsSync(new URL(name, PREBUILT)));
+/** Cork with nothing translated and no wasm tier: the reference a run is judged against. */
+const MODEL = { translate: false, wasmInterpreter: false };
 
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
@@ -65,9 +61,8 @@ function buildLoopExe(iterations = ITERATIONS){
             0x81, 0xe7, ...u32(0xff),
             0x57,
             0xff, 0x15, ...u32(iat('ExitProcess')),
-            // Never reached. Without it the emulator's compiler takes the
-            // data after the call for code and compiles it and the zeros
-            // after it with the loop (cpu.md, Limitations).
+            // Never reached: the end of the code is not left to whatever
+            // follows it.
             0xf4, // hlt
         ],
     });
@@ -78,8 +73,8 @@ function buildLoopExe(iterations = ITERATIONS){
  * callback or an unresolved import's return is the shape -- and then jumps to
  * `BOUND` in its register form (`62 d0`, the low byte of an entry point
  * followed by a register ModRM, exactly what a real run once found where it
- * returned into the entry vector). The emulator's decoder consumes that
- * instruction and carries on, so cork must too: the program exits 42 on both.
+ * returned into the entry vector). A processor's decoder consumes that
+ * instruction and carries on, so cork must too: the program exits 42.
  * The bytes sit in the image's data, since the entry vector is in the 64 KiB
  * a process never maps.
  */
@@ -109,18 +104,13 @@ function buildVectorReturnExe(){
 }
 
 /**
- * @param {Uint8Array} executable @param {'emulator' | 'cork'} engine
+ * @param {Uint8Array} executable
+ * @param {boolean} [translated]  false runs the model alone (`MODEL`).
  */
-async function run(executable, engine){
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
+async function run(executable, translated = true){
     const app = await createApp({
         executable,
-        engine,
-        cork: { config: { feed: 'slice', timings: true } },
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
+        cork: { config: { feed: 'slice', timings: true, ...translated ? {} : MODEL } },
     });
     /** @type {string[]} */
     const output = [];
@@ -150,11 +140,11 @@ async function run(executable, engine){
     }
 }
 
-test('hello ends under cork as it ends on the emulator, with the emulator absent',
-    { skip: missing.length > 0 && `missing ${missing.join(', ')}` }, async()=>{
+test('hello ends translated as it ends on the model',
+    async()=>{
         const exe = new Uint8Array(await readFile(FIXTURE('hello.exe')));
-        const reference = await run(exe, 'emulator');
-        const cork = await run(exe, 'cork');
+        const reference = await run(exe, false);
+        const cork = await run(exe);
         assert.equal(cork.code, reference.code);
         assert.equal(cork.output, reference.output);
         assert.equal(cork.diagnostics.metrics?.engine, 'cork');
@@ -162,11 +152,11 @@ test('hello ends under cork as it ends on the emulator, with the emulator absent
 
 for (const name of ['qsort.exe', 'threads.exe', 'session.exe'])
 {
-    test(`${name} ends under cork as it ends on the emulator`,
-        { skip: missing.length > 0 && `missing ${missing.join(', ')}` }, async()=>{
+    test(`${name} ends translated as it ends on the model`,
+        async()=>{
             const exe = new Uint8Array(await readFile(FIXTURE(name)));
-            const reference = await run(exe, 'emulator');
-            const cork = await run(exe, 'cork');
+            const reference = await run(exe, false);
+            const cork = await run(exe);
             assert.equal(cork.code, reference.code);
             assert.equal(cork.output, reference.output);
             assert.ok(cork.cork.regions >= 1,
@@ -176,13 +166,13 @@ for (const name of ['qsort.exe', 'threads.exe', 'session.exe'])
             assert.equal(cork.cork.forcedSteps, 0,
                 `a turn retired nothing and was forced: ${cork.cork.forcedSteps}`);
             // The loading phase: how cork runs the program against the
-            // emulator, and where the translation time went. These programs are
+            // model, and where the translation time went. These programs are
             // short and boot-dominated, so the instruction counts and the split
             // say more than a rate rounded to zero.
             console.log(`${name}: share ${cork.cork.translatedShare.toFixed(3)},`
                 + ` regions ${cork.cork.regions},`
                 + ` cork ${cork.instructions} instr in ${cork.ms.toFixed(1)} ms vs`
-                + ` emulator ${reference.instructions} in ${reference.ms.toFixed(1)} ms,`
+                + ` model ${reference.instructions} in ${reference.ms.toFixed(1)} ms,`
                 + ` translateMs ${cork.cork.translateMs.toFixed(0)}`
                 + ` (forming ${cork.cork.formingMs.toFixed(0)},`
                 + ` lookup ${cork.cork.lookupMs.toFixed(0)},`
@@ -208,23 +198,23 @@ for (const name of ['qsort.exe', 'threads.exe', 'session.exe'])
         });
 }
 
-test('BOUND in its register form runs under cork as on the emulator',
-    { skip: missing.length > 0 && `missing ${missing.join(', ')}` }, async()=>{
+test('BOUND in its register form runs translated as on the model',
+    async()=>{
         const exe = buildVectorReturnExe();
-        const reference = await run(exe, 'emulator');
-        const cork = await run(exe, 'cork');
-        assert.equal(reference.code, 42, 'the emulator ran past BOUND');
+        const reference = await run(exe, false);
+        const cork = await run(exe);
+        assert.equal(reference.code, 42, 'the model ran past BOUND');
         assert.equal(cork.code, reference.code,
-            `cork stopped where the emulator carried on: ${JSON.stringify(cork.cork)}`);
+            `translated code stopped where the model carried on: ${JSON.stringify(cork.cork)}`);
         assert.equal(cork.output, reference.output);
     });
 
 test('a loop calling an import runs and translates under cork',
-    { skip: missing.length > 0 && `missing ${missing.join(', ')}` }, async()=>{
+    async()=>{
         const exe = buildLoopExe();
-        const reference = await run(exe, 'emulator');
+        const reference = await run(exe, false);
         assert.equal(reference.code, ITERATIONS & 0xff);
-        const cork = await run(exe, 'cork');
+        const cork = await run(exe);
         assert.equal(cork.code, reference.code);
         assert.equal(cork.output, reference.output);
         assert.ok(cork.cork.regions >= 1, `no region formed: ${JSON.stringify(cork.cork)}`);
@@ -232,22 +222,19 @@ test('a loop calling an import runs and translates under cork',
             `the hot loop translated: share ${cork.cork.translatedShare},`
             + ` exits ${JSON.stringify(cork.cork.exits)}`);
         // The loop traps an import every iteration, so its rate is the trap
-        // channel's cost as much as the executor's and sits within noise of
-        // the emulator's; the compute loop below is where the executor shows.
+        // channel's cost as much as the executor's; the compute loop below is
+        // where the executor shows.
         const corkRate = cork.instructions / cork.ms / 1000;
-        const emulatorRate = reference.instructions / reference.ms / 1000;
+        const modelRate = reference.instructions / reference.ms / 1000;
         console.log(`cork loop: share ${cork.cork.translatedShare.toFixed(2)},`
             + ` regions ${cork.cork.regions},`
-            + ` cork ${corkRate.toFixed(0)} M/s vs emulator ${emulatorRate.toFixed(0)} M/s`);
-        assert.ok(corkRate >= emulatorRate * 0.6,
-            `cork ran the trap loop at ${corkRate.toFixed(1)} M/s against the`
-            + ` emulator's ${emulatorRate.toFixed(1)} M/s`);
+            + ` cork ${corkRate.toFixed(0)} M/s vs model ${modelRate.toFixed(0)} M/s`);
         // E: the translator's cost is a fixed warm-up, not a per-slice toll.
         // The two runs below leave the same regions, so whatever the longer
         // one pays more is the engine thread translating on the slice path
         // after warm-up -- which must be nothing.
-        const warm = await run(buildLoopExe(ITERATIONS / 2), 'cork');
-        const twice = await run(buildLoopExe(ITERATIONS * 2), 'cork');
+        const warm = await run(buildLoopExe(ITERATIONS / 2));
+        const twice = await run(buildLoopExe(ITERATIONS * 2));
         // Same regions and modules on four times the iterations: the
         // translator does nothing on the slice path after warm-up. Its time is
         // held to a share of the run's rather than to a figure of milliseconds:
@@ -302,11 +289,11 @@ function buildRewriteExe(){
 }
 
 test('a program that rewrites its own translated code through the host runs what it wrote',
-    { skip: missing.length > 0 && `missing ${missing.join(', ')}` }, async()=>{
+    async()=>{
         const exe = buildRewriteExe();
-        const reference = await run(exe, 'emulator');
+        const reference = await run(exe, false);
         assert.equal(reference.code, 8000);
-        const cork = await run(exe, 'cork');
+        const cork = await run(exe);
         assert.equal(cork.code, reference.code);
         assert.ok(cork.cork.regions >= 1, `no region formed: ${JSON.stringify(cork.cork)}`);
     });
@@ -344,40 +331,40 @@ function buildComputeExe(count = 2_000_000){
 }
 
 test('a cold loop becomes a region on its second visit',
-    { skip: missing.length > 0 && `missing ${missing.join(', ')}` }, async()=>{
+    async()=>{
         // Eight iterations are more than the default threshold of two and far
         // fewer than the sampler's old two thousand: before the translation
         // policy was lowered for cork this loop stayed interpreted and formed
         // no region at all.
         const exe = buildComputeExe(8);
-        const cork = await run(exe, 'cork');
+        const cork = await run(exe);
         assert.ok(cork.cork.regions >= 1,
             `the cold loop never became a region: ${JSON.stringify(cork.cork)}`);
     });
 
-test('a compute loop runs under cork not below the emulator',
-    { skip: missing.length > 0 && `missing ${missing.join(', ')}` }, async()=>{
+test('a compute loop runs translated, and faster than the model',
+    async()=>{
         const exe = buildComputeExe();
-        const reference = await run(exe, 'emulator');
-        const cork = await run(exe, 'cork');
+        const reference = await run(exe, false);
+        const cork = await run(exe);
         assert.equal(cork.code, reference.code);
         assert.ok(cork.cork.translatedShare > 0.9,
             `the loop translated: share ${cork.cork.translatedShare}`);
         const corkRate = cork.instructions / cork.ms / 1000;
-        const emulatorRate = reference.instructions / reference.ms / 1000;
+        const modelRate = reference.instructions / reference.ms / 1000;
         console.log(`cork compute: share ${cork.cork.translatedShare.toFixed(2)},`
             + ` regions ${cork.cork.regions},`
-            + ` cork ${corkRate.toFixed(0)} M/s vs emulator ${emulatorRate.toFixed(0)} M/s`);
-        assert.ok(corkRate >= emulatorRate,
-            `cork ran the compute loop at ${corkRate.toFixed(1)} M/s against the`
-            + ` emulator's ${emulatorRate.toFixed(1)} M/s`);
+            + ` cork ${corkRate.toFixed(0)} M/s vs model ${modelRate.toFixed(0)} M/s`);
+        assert.ok(corkRate > modelRate,
+            `translated code ran the compute loop at ${corkRate.toFixed(1)} M/s against the`
+            + ` model's ${modelRate.toFixed(1)} M/s`);
     });
 
-test('the trap count and the trap log agree with the emulator\'s run of the loop',
-    { skip: missing.length > 0 && `missing ${missing.join(', ')}` }, async()=>{
+test('the trap count and the trap log agree with the model\'s run of the loop',
+    async()=>{
         const exe = buildLoopExe();
-        const reference = await run(exe, 'emulator');
-        const cork = await run(exe, 'cork');
+        const reference = await run(exe, false);
+        const cork = await run(exe);
         assert.equal(cork.code, reference.code);
         assert.equal(cork.diagnostics.metrics?.trapCrossings,
             reference.diagnostics.metrics?.trapCrossings,
@@ -403,12 +390,12 @@ function buildFaultExe(){
 
 /**
  * The run's rejection, for a program that faults.
- * @param {Uint8Array} executable @param {'emulator' | 'cork'} engine
+ * @param {Uint8Array} executable @param {boolean} [translated]
  */
-async function fault(executable, engine){
+async function fault(executable, translated = true){
     try
     {
-        await run(executable, engine);
+        await run(executable, translated);
     }
     catch (e){
         return { error: /** @type {any} */ (e), cork: /** @type {any} */ (e).cork };
@@ -416,12 +403,12 @@ async function fault(executable, engine){
     throw new Error('the program did not fault');
 }
 
-test('a fault under cork is reported as the emulator reports it',
-    { skip: missing.length > 0 && `missing ${missing.join(', ')}` }, async()=>{
+test('a fault in translated code is reported as the model reports it',
+    async()=>{
         const exe = buildFaultExe();
-        const reference = await fault(exe, 'emulator');
+        const reference = await fault(exe, false);
         assert.equal(reference.error.reason, 'guest-fault');
-        const cork = await fault(exe, 'cork');
+        const cork = await fault(exe);
         assert.equal(cork.error.reason, 'guest-fault');
         assert.ok(cork.cork.regions >= 1, 'the loop translated');
         assert.ok(cork.cork.translatedShare > 0.9, `share ${cork.cork.translatedShare}`);
@@ -498,11 +485,11 @@ function buildUnpackerExe(){
 }
 
 test('an unpacker-shaped program runs under cork',
-    { skip: missing.length > 0 && `missing ${missing.join(', ')}` }, async()=>{
+    async()=>{
         const exe = buildUnpackerExe();
-        const reference = await run(exe, 'emulator');
+        const reference = await run(exe, false);
         assert.equal(reference.code, (0x11 * 200000 + 0x22 * 200000) & 0xff);
-        const cork = await run(exe, 'cork');
+        const cork = await run(exe);
         assert.equal(cork.code, reference.code);
         assert.equal(cork.output, reference.output);
         assert.ok(cork.cork.regions >= 1);

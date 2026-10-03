@@ -23,12 +23,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { parsePe, rvaToFileOffset } from './layers/loader/internal/pe.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 /** Where the fixture builder puts every image it makes. */
 const IMAGE_BASE = 0x400000;
 
@@ -200,7 +198,6 @@ test('LoadLibraryEx loads as data, or leaves a module unresolved, as asked', { t
         assert.deepEqual([probe.slot, probe.unbound, tool.slot, tool.unbound],
             [unplaced.slot, unplaced.unbound, unplaced.slot, unplaced.unbound]);
 
-        const wasm = await readFile(new URL('v86.wasm', PREBUILT));
         const app = await createApp({
             executable,
             imagePath: 'C:\\App\\LoadEx.exe',
@@ -208,10 +205,6 @@ test('LoadLibraryEx loads as data, or leaves a module unresolved, as asked', { t
                 { path: 'C:\\App\\probe.dll', bytes: library(probe.file) },
                 { path: 'C:\\App\\tool.exe', bytes: tool.file },
             ],
-            v86: {
-                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-            },
         });
         t.after(()=>app.dispose());
 

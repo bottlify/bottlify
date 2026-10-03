@@ -21,24 +21,16 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 const FIXTURE = new URL('../test/fixtures/threads.exe', import.meta.url);
 
 /** What the same binary produces under Windows: two workers, a hundred each. */
 const EXPECTED_TOTAL = 200;
 
 async function startApp(){
-    const [wasm, exe] = await Promise.all([
-        readFile(new URL('v86.wasm', PREBUILT)),
-        readFile(FIXTURE),
-    ]);
+    const exe = await readFile(FIXTURE);
 
     return createApp({
         executable: new Uint8Array(exe),
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
     });
 }
 

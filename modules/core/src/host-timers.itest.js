@@ -12,8 +12,7 @@
  * and WM_TIMERs are on its own clock -- but much of what the host does for it
  * does: a present held until the device finishes a frame, a wait for the
  * vertical blank, a select() that times out, a file read or a fetch answering,
- * a translation coming back from its worker, the emulator's compiled code
- * being installed. The run loop gives the host a turn between scheduler
+ * a translation coming back from its worker. The run loop gives the host a turn between scheduler
  * turns; this holds it to one the host's timers and I/O get too.
  *
  * The program only counts, for ever. While it runs for a second and a half,
@@ -23,11 +22,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { open, readFile } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
-
-const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
@@ -40,7 +37,7 @@ const TIMER_MS = 5;
 
 /**
  * Late past this is a timer that waited for something other than a turn: a
- * turn of this program is a fraction of a millisecond on either engine, and
+ * turn of this program is a fraction of a millisecond, and
  * the loop gives the host a turn at least every few, so this is room for a
  * loaded machine.
  */
@@ -48,8 +45,8 @@ const LATE_MS = 250;
 
 /**
  * `inc dword [counter]; jmp` to the inc. The counter is a page past the code:
- * a store into the page the code is on would have the emulator throw its
- * compiled code away on every pass.
+ * a store into the page the code is on would have the translator throw its
+ * code away on every pass.
  */
 function buildCountingExe(){
     return buildExe({
@@ -60,17 +57,8 @@ function buildCountingExe(){
     });
 }
 
-/** @param {'cork' | 'emulator'} engine */
-async function runCounting(engine){
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
-    const app = await createApp({
-        executable: buildCountingExe(),
-        engine,
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
-    });
+async function runCounting(){
+    const app = await createApp({ executable: buildCountingExe() });
     const file = await open(new URL(import.meta.url), 'r');
     try
     {
@@ -102,7 +90,7 @@ async function runCounting(engine){
         state.running = false;
         await reading;
         const cpu = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'cpu');
-        return { late, reads, compiledSteps: cpu?.metrics?.jit?.compiledSteps ?? null };
+        return { late, reads, translatedShare: cpu?.metrics?.cork?.translatedShare ?? null };
     }
     finally
     {
@@ -111,28 +99,24 @@ async function runCounting(engine){
     }
 }
 
-for (const engine of /** @type {const} */ (['cork', 'emulator']))
-{
-    test(`a host timer comes due on time while a program runs under ${engine}`,
-        { timeout: 30000 }, async t=>{
-            const { late, reads } = await runCounting(engine);
-            const worst = Math.max(...late);
-            t.diagnostic(`${late.length} timers, the latest ${worst.toFixed(1)} ms late;`
-                + ` ${reads} reads`);
-            // A timer that came due only when the run ended fired once, and
-            // RUN_MS late.
-            assert.ok(late.length >= 30,
-                `${late.length} ${TIMER_MS} ms timers in ${RUN_MS} ms of running`);
-            assert.ok(worst < LATE_MS, `a ${TIMER_MS} ms timer came ${worst.toFixed(1)} ms late`);
-            assert.ok(reads >= 30, `${reads} file reads answered in ${RUN_MS} ms of running`);
-        });
-}
+test('a host timer comes due on time while a program runs',
+    { timeout: 30000 }, async t=>{
+        const { late, reads } = await runCounting();
+        const worst = Math.max(...late);
+        t.diagnostic(`${late.length} timers, the latest ${worst.toFixed(1)} ms late;`
+            + ` ${reads} reads`);
+        // A timer that came due only when the run ended fired once, and
+        // RUN_MS late.
+        assert.ok(late.length >= 30,
+            `${late.length} ${TIMER_MS} ms timers in ${RUN_MS} ms of running`);
+        assert.ok(worst < LATE_MS, `a ${TIMER_MS} ms timer came ${worst.toFixed(1)} ms late`);
+        assert.ok(reads >= 30, `${reads} file reads answered in ${RUN_MS} ms of running`);
+    });
 
-test("the emulator's compiled code arrives while the program runs", { timeout: 30000 }, async()=>{
-    // The emulator compiles a hot page into a module of its own and installs
-    // it when the compile answers, which is a task of the host's; until then
-    // it interprets.
-    const { compiledSteps } = await runCounting('emulator');
-    assert.ok(compiledSteps !== null && compiledSteps > 0,
-        `the emulator ran ${compiledSteps} steps of compiled code`);
+test('translated code arrives while the program runs', { timeout: 30000 }, async()=>{
+    // The translator's worker answers with a region, and installing it is a
+    // task of the host's; until then the loop is interpreted.
+    const { translatedShare } = await runCounting();
+    assert.ok(translatedShare !== null && translatedShare > 0,
+        `translated code ran ${translatedShare} of the instructions`);
 });

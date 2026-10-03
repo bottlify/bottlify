@@ -12,10 +12,10 @@
  * runner's own processor under a debugger, and recorded: the eight
  * registers, EIP, ST0..7 relative to the top, MM0..7, XMM0..7, the 8 KiB
  * of `.bss`, EFLAGS, the tag and status words -- or the signal the case
- * died with. This module turns the published document into cases, runs one
- * on any host the cpu layer offers, and diffs the outcome against the
- * recording with the same masks and tolerances the fork's own runner uses,
- * so a case that passes here passes there for the same reason.
+ * died with. This module turns the published document into cases and diffs
+ * an outcome against the recording with the same masks and tolerances the
+ * fork's own runner uses, so a case that passes here passes there for the
+ * same reason.
  *
  * Test support only: nothing in the product reads a corpus.
  */
@@ -25,12 +25,6 @@ import { gunzipSync } from 'node:zlib';
 /** Where a case keeps its data and stack, and the span the recording holds. */
 export const BSS = 0x100000;
 export const BSS_SIZE = 0x2000;
-/** Where a case's code is linked, and how much room a restore clears for it. */
-export const TEXT = 0x80000;
-export const TEXT_SIZE = 0x10000;
-/** The multiboot header every case carries, unused here but placed. */
-export const HEADER = 0x20000;
-export const HEADER_SIZE = 0x1000;
 
 /** CF PF AF ZF SF OF, the flags the recording is compared on. */
 export const ARITH_MASK = 1 | 1 << 2 | 1 << 4 | 1 << 6 | 1 << 7 | 1 << 11;
@@ -45,7 +39,7 @@ const FLOAT_EPSILON = 1e-7;
 const SIGNALS = Object.freeze({
     SIGFPE: 'DE', SIGILL: 'UD', SIGSEGV: 'GP', SIGBUS: 'PF',
 });
-/** The same, by the vector a fault stub reports. */
+/** The same, by exception vector. */
 export const VECTOR_NAMES = Object.freeze({ 0: 'DE', 6: 'UD', 13: 'GP', 14: 'PF' });
 
 /**
@@ -215,111 +209,6 @@ export function parseFixture(text){
  * @property {Int32Array} memory
  * @property {number} eflags
  */
-
-/**
- * The host surface a case needs, which the cpu layer's emulator host has.
- *
- * @typedef {Object} CaseHost
- * @property {(name: string) => number} readReg32
- * @property {(address: number, length: number) => Uint8Array} readPhysical
- * @property {(address: number, bytes: Uint8Array) => void} writePhysical
- * @property {(address: number) => number} readU32
- * @property {(index: number) => Uint32Array} readXmm
- * @property {() => import('./snapshot.js').X87State} x87State
- * @property {(handler: (id: number) => void) => void} onTrap
- * @property {() => boolean} halted
- * @property {() => void} wake
- * @property {(instructions: number) => number} step   runs at most that many, answers retired
- */
-
-/**
- * Runs one case on a host that has been put back into its pristine state
- * (registers as after boot, EIP on the ROM's jump into guest code, the
- * case's memory spans cleared) and reads the outcome.
- *
- * @param {CaseHost} host
- * @param {CorpusCase} testCase
- * @param {Object} options
- * @param {number} options.entryVector    where the ROM's jump reads its target
- * @param {number} options.faultTrapBase  the trap id of vector 0
- * @param {(vector: number, esp: number) => number} options.faultEip
- *     the faulting instruction's address, read off the frame the stub found
- * @param {number} [options.budget]       instructions before giving up
- * @returns {Outcome}
- */
-export function runCase(host, testCase,
-    { entryVector, faultTrapBase, faultEip, budget = 5_000_000 })
-{
-    for (const { address, bytes } of testCase.segments)
-    {
-        host.writePhysical(address, bytes);
-    }
-    const vector = new Uint8Array(4);
-    new DataView(vector.buffer).setUint32(0, testCase.entry, true);
-    host.writePhysical(entryVector, vector);
-
-    /** @type {{ name: string, eip: number } | null} */
-    let exception = null;
-    host.onTrap(id=>{
-        const number = id - faultTrapBase;
-        if (number >= 0 && number < 256 && exception === null)
-        {
-            exception = {
-                name: /** @type {Record<number, string>} */ (VECTOR_NAMES)[number] ?? `#${number}`,
-                eip: faultEip(number, host.readReg32('esp')),
-            };
-        }
-    });
-    host.wake();
-    let left = budget;
-    while (left > 0 && !host.halted())
-    {
-        const ran = host.step(Math.min(left, 100_000));
-        left -= Math.max(ran, 1);
-    }
-    host.onTrap(()=>{});
-
-    const x87 = host.x87State();
-    // ST(i) by value whether or not the register is held: the recording prints
-    // an empty register's contents too (a fresh process holds zeros), and the
-    // fork's runner compares them, so an outcome that answered "invalid" for
-    // an empty register would diverge on every case that never used the FPU.
-    /** @type {(number | 'invalid')[]} */
-    const st = [];
-    for (let index = 0; index < 8; index++)
-    {
-        st.push(x87.registers[(x87.top + index) & 7]);
-    }
-    const rawWords = new Int32Array(x87.raw.buffer, x87.raw.byteOffset, 32);
-    const mm = new Int32Array(16);
-    for (let index = 0; index < 8; index++)
-    {
-        mm[index * 2] = rawWords[index * 4];
-        mm[index * 2 + 1] = rawWords[index * 4 + 1];
-    }
-    const xmm = new Int32Array(32);
-    for (let index = 0; index < 8; index++)
-    {
-        xmm.set(Int32Array.from(host.readXmm(index), word=>word | 0), index * 4);
-    }
-    const bss = Uint8Array.from(host.readPhysical(BSS, BSS_SIZE));
-    const reg32 = new Int32Array(8);
-    ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'].forEach((name, index)=>{
-        reg32[index] = host.readReg32(name) | 0;
-    });
-    return {
-        exception,
-        halted: host.halted(),
-        reg32,
-        eip: host.readReg32('eip') >>> 0,
-        st,
-        fstat: x87.status,
-        mm,
-        xmm,
-        memory: new Int32Array(bss.buffer, bss.byteOffset, BSS_SIZE / 4),
-        eflags: host.readReg32('eflags') >>> 0,
-    };
-}
 
 /** @param {number} x @param {number} y  the runner's seven-digit comparison */
 function floatEqual(x, y){
