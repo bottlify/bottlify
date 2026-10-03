@@ -100,6 +100,7 @@ export function recordedDirect3D(factory, services, transport){
         // What the played device has to say about the program is the whole
         // of it; this one would add what only lacking a renderer makes it say.
         divergence: undefined,
+        renderedElsewhere: true,
         allocate: (/** @type {number} */ bytes)=>{
             const address = guest(Math.max(bytes, 1));
             recording?.allocated(address, Math.max(bytes, 1));

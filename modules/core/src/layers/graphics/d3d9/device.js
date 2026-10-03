@@ -438,6 +438,8 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  *     Told of every frame a present queues; what it answers is what the
  *     present waits on before it answers the program. Absent, a present never
  *     waits.
+ * @property {boolean} [renderedElsewhere]  the device records for one that draws in
+ *     another thread, which makes the GPU's copies there
  */
 
 /**
@@ -459,7 +461,7 @@ export function createDirect3D9(options = {}){
     const {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, divergence, dumpDraws, dumpEvery, maxDraws, skipTexture, probeTexture,
-        fog, mips, onDeviceLost, gamma, frameQueued, ...caps
+        fog, mips, onDeviceLost, gamma, frameQueued, renderedElsewhere, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
@@ -467,7 +469,7 @@ export function createDirect3D9(options = {}){
     const services = {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, divergence, dumpDraws, dumpEvery, maxDraws, skipTexture, probeTexture,
-        fog, mips, onDeviceLost, gamma, frameQueued,
+        fog, mips, onDeviceLost, gamma, frameQueued, renderedElsewhere,
     };
     if (backend && !readMemory)
     {
@@ -4002,6 +4004,16 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             }
             if (isGpuResident(source))
             {
+                // Recording for a device that draws elsewhere, the copy
+                // between two surfaces that live on the GPU is made there,
+                // and their guest bytes hold no pixels: moving them was a
+                // render target's worth of bytes copied on the program's
+                // thread for nothing.
+                if (services.renderedElsewhere === true && isGpuResident(destination))
+                {
+                    out.moves = [];
+                    return D3D_OK;
+                }
                 report('readback', 'StretchRect copies a target\'s guest bytes, which the'
                     + ' rendered pixels are never read back into');
             }
