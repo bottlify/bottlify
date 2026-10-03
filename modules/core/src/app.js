@@ -1633,18 +1633,21 @@ export const BOTTLE_SYSTEM_PATH = '.bottlify\\system32';
 
 /**
  * The version resource of a file on the volume, or null: for a file that is
- * not there, is not an image, carries none, or whose bytes have not arrived --
- * the last because this is asked from inside a guest call and cannot wait,
- * and a file the program has just written is on the volume already.
+ * not there, is not an image or carries none. A file of a bundle whose bytes
+ * have not arrived answers with a promise: the blocks the read missed are
+ * fetched and the walk made again, as ReadFile waits for its own, so the guest
+ * call is parked until they are here. Without `blocks` such a file is null.
  *
  * Only the headers, the resource directory and the block itself are read: an
  * installer asks after every file it puts down, a gigabyte archive among them.
  *
  * @param {any} filesystem
  * @param {string} path
- * @returns {Uint8Array | null}
+ * @param {{ fetch: (blocks: any) => Promise<unknown> } | null} [blocks]
+ * @param {number} [tries]  Walks left: each of its reads may miss once.
+ * @returns {Uint8Array | null | Promise<Uint8Array | null>}
  */
-export function versionResourceOf(filesystem, path){
+export function versionResourceOf(filesystem, path, blocks = null, tries = 4){
     const RT_VERSION = 16;
     const DIR_RESOURCE = 2;
     const HEADER_BYTES = 0x1000;
@@ -1706,7 +1709,13 @@ export function versionResourceOf(filesystem, path){
         const block = readAt(rvaToFileOffset(image, found.rva), found.size);
         return block.length === found.size ? block : null;
     }
-    catch {
+    catch (e){
+        const miss = /** @type {any} */ (e);
+        if (miss?.code === 'BLOCK_MISS' && blocks && tries > 0)
+        {
+            return blocks.fetch(miss.blocks)
+                .then(()=>versionResourceOf(filesystem, path, blocks, tries - 1), ()=>null);
+        }
         return null;
     }
     finally
@@ -3643,7 +3652,7 @@ async function buildApp(options){
                  *
                  * @param {string} path
                  */
-                versionInfo: path=>versionResourceOf(filesystem, path),
+                versionInfo: path=>versionResourceOf(filesystem, path, blocks),
                 /**
                  * Whether a library is one this build synthesises, which has
                  * a version though no file.

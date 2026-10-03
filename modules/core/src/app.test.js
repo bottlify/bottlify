@@ -1573,3 +1573,92 @@ test('a file\'s version block is read without reading the file', ()=>{
     assert.equal(versionResourceOf(filesystem, 'C:\\Game\\content.gcf'), null,
         'an image with no resources has no version');
 });
+
+test('the version block of a bundle file whose bytes are still coming is waited for, as a read '
+    + 'waits for its own', async()=>{
+    // Headers, a section table, a resource tree and the block, each in a
+    // block of its own that has not arrived: every read misses once.
+    const PAGE = 0x1000;
+    const RSRC_RVA = 0x3000;
+    const RSRC_FILE = 0x3000;
+    const block = Uint8Array.from({ length: 64 }, (_, i)=>i + 1);
+    const rsrc = new Uint8Array(PAGE + block.length);
+    const tree = new DataView(rsrc.buffer);
+    // Type 16, name 1, language 0, each a directory of one entry, then the leaf.
+    [16, 1, 0].forEach((key, level)=>{
+        const next = (level + 1) * 24;
+        tree.setUint16(level * 24 + 14, 1, true);
+        tree.setUint32(level * 24 + 16, key, true);
+        tree.setUint32(level * 24 + 20, level < 2 ? (next | 0x80000000) >>> 0 : next, true);
+    });
+    tree.setUint32(72, RSRC_RVA + PAGE, true);
+    tree.setUint32(76, block.length, true);
+    rsrc.set(block, PAGE);
+    const bytes = new Uint8Array(RSRC_FILE + rsrc.length);
+    const view = new DataView(bytes.buffer);
+    view.setUint16(0, 0x5a4d, true);
+    view.setUint32(0x3c, 0x80, true);
+    view.setUint32(0x80, 0x00004550, true);
+    view.setUint16(0x84, 0x014c, true);
+    view.setUint16(0x86, 1, true);
+    view.setUint16(0x94, 224, true);
+    view.setUint16(0x98, 0x010b, true);
+    view.setUint32(0x98 + 60, PAGE, true);
+    view.setUint32(0x98 + 92, 16, true);
+    view.setUint32(0x98 + 96 + 2 * 8, RSRC_RVA, true);
+    view.setUint32(0x98 + 96 + 2 * 8 + 4, 88, true);
+    const SECTION_TABLE = 0x80 + 24 + 224;
+    bytes.set(new TextEncoder().encode('.rsrc'), SECTION_TABLE);
+    view.setUint32(SECTION_TABLE + 8, rsrc.length, true);
+    view.setUint32(SECTION_TABLE + 12, RSRC_RVA, true);
+    view.setUint32(SECTION_TABLE + 16, rsrc.length, true);
+    view.setUint32(SECTION_TABLE + 20, RSRC_FILE, true);
+    bytes.set(rsrc, RSRC_FILE);
+
+    /** The pages that have arrived; a read of any other throws the volume's miss. */
+    const resident = new Set();
+    let position = 0;
+    const filesystem = {
+        open: ()=>({}),
+        size: ()=>bytes.length,
+        seek: (/** @type {any} */ handle, /** @type {number} */ offset)=>{
+            position = offset;
+        },
+        read: (/** @type {any} */ handle, /** @type {number} */ length)=>{
+            const pages = [];
+            for (let page = Math.floor(position / PAGE); page * PAGE < position + length; page++)
+            {
+                if (!resident.has(page))
+                {
+                    pages.push(page);
+                }
+            }
+            if (pages.length > 0)
+            {
+                throw Object.assign(new Error('not resident'), { code: 'BLOCK_MISS',
+                    blocks: pages });
+            }
+            const out = bytes.slice(position, position + length);
+            position += out.length;
+            return out;
+        },
+        close: ()=>{},
+    };
+    /** @type {number[][]} */
+    const fetched = [];
+    const blocks = {
+        fetch: async(/** @type {number[]} */ pages)=>{
+            fetched.push(pages);
+            pages.forEach(page=>resident.add(page));
+        },
+    };
+
+    assert.equal(versionResourceOf(filesystem, 'C:\\Game\\steam.exe'), null,
+        'with nothing to fetch the bytes through, a file still coming has none');
+    const answer = versionResourceOf(filesystem, 'C:\\Game\\steam.exe', blocks);
+    assert.equal(typeof (/** @type {any} */ (answer))?.then, 'function', 'it waits');
+    assert.deepEqual(await answer, block);
+    assert.ok(fetched.length >= 2 && fetched.length <= 4, `${fetched.length} fetches`);
+    assert.deepEqual(versionResourceOf(filesystem, 'C:\\Game\\steam.exe', blocks), block,
+        'and once they are here it answers at once');
+});
