@@ -641,7 +641,8 @@ export function createGpuRenderer(services){
      * @param {string} label @param {number} usage @param {number} size
      */
     const ring = (label, usage, size)=>{
-        let buffer = backend.createDynamicBuffer({ size, usage, label });
+        // Each draw reads only what it wrote, so a wrap keeps nothing.
+        let buffer = backend.createDynamicBuffer({ size, usage, label, keep: false });
         let cursor = 0;
         let fresh = true;
         return {
@@ -652,7 +653,8 @@ export function createGpuRenderer(services){
                 if (aligned > buffer.size)
                 {
                     backend.releaseDynamicBuffer?.(buffer);
-                    buffer = backend.createDynamicBuffer({ size: aligned * 2, usage, label });
+                    buffer = backend.createDynamicBuffer({ size: aligned * 2, usage, label,
+                        keep: false });
                     cursor = 0;
                     fresh = true;
                 }

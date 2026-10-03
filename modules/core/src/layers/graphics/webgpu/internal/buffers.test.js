@@ -353,6 +353,26 @@ test('a NOOVERWRITE lock over bytes a draw not yet submitted reads renames, and 
     assert.equal(dynamic.diagnostics().overwrites, 1);
 });
 
+test('a buffer that keeps nothing renames on DISCARD with no carry and sends only what follows',
+    ()=>{
+        // A renderer's scratch ring: each draw reads what it wrote since the wrap.
+        const gpu = createFakeDevice();
+        /** @type {any[]} */
+        const carries = [];
+        const dynamic = createDynamicBuffer({
+            device: gpu.device, queue: gpu.queue, size: 4096, usage: 0, label: 'scratch',
+            keep: false, carry: carry=>carries.push(carry),
+        });
+        fill(dynamic, 0, 4096, LockFlags.DISCARD, 0x22);
+        dynamic.flush();
+        const before = gpu.of('writeBuffer').length;
+        fill(dynamic, 0, 64, LockFlags.DISCARD, 0x33);
+        dynamic.flush();
+        assert.equal(carries.length, 0, 'nothing carried');
+        const sent = gpu.of('writeBuffer').slice(before);
+        assert.equal(sent.reduce((sum, one)=>sum + one.size, 0), 64, 'only the new bytes');
+    });
+
 test('carried ranges are the complement of what was written, in order', ()=>{
     assert.deepEqual(carriedRanges({ from: null, to: null, size: 100,
         written: [{ start: 40, end: 60 }, { start: 0, end: 8 }, { start: 50, end: 70 }] }),

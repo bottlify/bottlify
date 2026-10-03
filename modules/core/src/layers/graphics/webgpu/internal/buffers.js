@@ -122,6 +122,9 @@ export function carriedRanges(carry){
  * @param {(label: string, bytes: number)=>void} [options.onUpload]
  * @param {(carry: Carry)=>void} [options.carry]  Takes the GPU copy a rename
  *     that keeps the contents needs; without it, the whole buffer is resent.
+ * @param {boolean} [options.keep]  False for a buffer whose draws read only
+ *     what was written since its last DISCARD -- a renderer's own scratch
+ *     ring: a rename then carries nothing over and resends nothing.
  * @param {{ presents: number, submits: number }} [options.frames]  The frames
  *     presented and submitted, counted once for every buffer of a backend; without
  *     it the buffer counts its own `markPresent` and `endFrame` calls.
@@ -292,6 +295,10 @@ export function createDynamicBuffer(options){
         readIn = -1;
         reads = [];
         carryInto = null;
+        if (options.keep === false)
+        {
+            return;
+        }
         if (options.carry)
         {
             carryInto = { from: old, to: gpu, size: capacity, written: [] };
