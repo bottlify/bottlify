@@ -819,6 +819,10 @@ test('CLSIDFromProgID reads the ProgID key, and an unknown ProgID is not a class
     assert.equal(host.u32(PPV), 0);
     assert.equal(withHive.CreateItemMoniker.handler([0, 0, PPV]), E_OUTOFMEMORY);
     assert.ok(host.reported.some(text=>text.includes('CreateItemMoniker')));
+    host.fill(PPV, 1);
+    assert.equal(withHive.CoGetObject.handler([0, 0, 0, PPV]) >>> 0, 0x800401e4, 'MK_E_SYNTAX');
+    assert.equal(host.u32(PPV), 0);
+    assert.ok(host.reported.some(text=>text.includes('CoGetObject')));
 });
 
 test('the table declares stdcall argument sizes and nothing else', ()=>{
@@ -879,6 +883,7 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         CoGetPSClsid: 8,
         CoRegisterPSClsid: 8,
         GetRunningObjectTable: 8,
+        CoGetObject: 16,
         CreateItemMoniker: 12,
         StringFromCLSID: 8,
         StringFromIID: 8,
@@ -1136,6 +1141,55 @@ test('a class the registry names an InprocServer32 for is made by the server\'s 
             'then CreateInstance on the class object, which is let go');
         assert.equal(host.u32(PPV), CREATED);
         void fns;
+    });
+
+test('a DLL a surrogate would serve as a local server is made in process, and said to be',
+    async()=>{
+        const { host, calls, view } = withGuestCalls();
+        const MODULE = 0x7000000;
+        const DLL_GET_CLASS_OBJECT = METHOD_BASE + 0x100;
+        const APP_ID = '{0A0B0C0D-0000-0000-0000-0000000000A1}';
+        /** @param {string} text */
+        const ansi = text=>({
+            data: Uint8Array.from([...text].map(c=>c.charCodeAt(0)).concat([0])),
+        });
+        /** @type {any} */ (host).hive = {
+            root: ()=>'HKCR',
+            /** @param {any} _root @param {string} key */
+            open: (_root, key)=>([`CLSID\\${CLSID_GUEST}\\INPROCSERVER32`, `CLSID\\${CLSID_GUEST}`,
+                `APPID\\${APP_ID}`].includes(key.toUpperCase()) ? key.toUpperCase() : null),
+            /** @param {string} key @param {string} name */
+            getValue: (key, name)=>(key.endsWith('INPROCSERVER32') ? ansi('C:\\FMSI.DLL')
+                : name === 'AppID' ? ansi(APP_ID) : name === 'DllSurrogate' ? ansi('') : null),
+        };
+        /** @type {any} */ (host).libraries = {
+            load: ()=>0,
+            free: ()=>0,
+            loadAnsi: ()=>MODULE,
+            procAddress: ()=>DLL_GET_CLASS_OBJECT,
+        };
+        const methods = /** @type {any} */ (host).call;
+        /** @param {number} entry @param {number[]} args */
+        const serve = async(entry, args)=>{
+            if (entry === DLL_GET_CLASS_OBJECT)
+            {
+                calls.push({ slot: -1, args });
+                view.setUint32(args[2], GUEST_OBJECT, true);
+                return 0;
+            }
+            return methods(entry, args);
+        };
+        /** @type {any} */ (host).call = serve;
+        const served = createOleFunctions(/** @type {any} */ (host));
+        initialize(served, COINIT_APARTMENTTHREADED);
+
+        const CLSCTX_LOCAL_SERVER = 4;
+        assert.equal(await served.CoCreateInstance.handler([GUEST_CLSID_ARG, 0, CLSCTX_LOCAL_SERVER,
+            IID_ARG, PPV]), S_OK);
+        assert.equal(host.u32(PPV), CREATED, 'made by the DLL\'s class object');
+        assert.ok(host.reported.some(text=>text.includes('surrogate')));
+        assert.equal(/** @type {any} */ (host).registry.mtaUsage?.users, 1,
+            'the multithreaded apartment a surrogate runs its DLL in is open');
     });
 
 // --- drag and drop, and the OLE clipboard ---

@@ -11,6 +11,7 @@ import {
     ADAPTER_RAM, CLSID_WBEM_LOCATOR, IID_IENUM_WBEM_CLASS_OBJECT, IID_IWBEM_CLASS_OBJECT,
     IID_IWBEM_LOCATOR, IID_IWBEM_SERVICES, registerWbemClasses,
 } from './wbem.js';
+import { WINDOWS_VERSIONS } from '../kernel32/versions.js';
 
 function setup(){
     const bytes = new Uint8Array(0x10000);
@@ -39,6 +40,7 @@ function setup(){
         },
         heap: { allocate: size=>(nextBlock += size + 16) - size - 16 },
         physicalMemory: 512 << 20,
+        windows: WINDOWS_VERSIONS.winxp,
         readMemory: (address, length)=>bytes.subarray(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
         readWideString: address=>{
@@ -77,6 +79,39 @@ function setup(){
 }
 
 const OUT = 0x100;
+
+test('there is one operating system, the Windows the process is told it runs on', ()=>{
+    // A program takes the first instance without asking whether there was
+    // one; with none it reads a pointer the enumerator never wrote.
+    const host = setup();
+    const object = /** @type {any} */ (host.registry.create(CLSID_WBEM_LOCATOR));
+    const locator = object.interfaceFor(IID_IWBEM_LOCATOR);
+    const connect = locator.methods.find((/** @type {any} */ m)=>m.name === 'ConnectServer');
+    assert.equal(connect.invoke(object, [host.wide('root\\cimv2'), 0, 0, 0, 0, 0, 0, OUT]), 0);
+    const services = host.view.getUint32(OUT, true);
+    assert.equal(host.call(services, 'CreateInstanceEnum',
+        [host.wide('Win32_OperatingSystem'), 1, 0, OUT]), 0);
+    const enumerator = host.view.getUint32(OUT, true);
+    assert.equal(host.call(enumerator, 'Next', [10000, 1, OUT, OUT + 4]), 0);
+    assert.equal(host.view.getUint32(OUT + 4, true), 1);
+    const instance = host.view.getUint32(OUT, true);
+    /** @param {string} name */
+    const text = name=>{
+        const variant = 0x200;
+        assert.equal(host.call(instance, 'Get', [host.wide(name), 0, variant, 0, 0]), 0);
+        const bstr = host.view.getUint32(variant + 8, true);
+        let read = '';
+        for (let at = bstr; host.view.getUint16(at, true) !== 0; at += 2)
+        {
+            read += String.fromCharCode(host.view.getUint16(at, true));
+        }
+        return read;
+    };
+    assert.equal(text('Caption'), 'Microsoft Windows XP Professional');
+    assert.equal(text('Version'), '5.1.2600');
+    assert.equal(text('CSDVersion'), 'Service Pack 3');
+    assert.equal(host.call(enumerator, 'Next', [10000, 1, OUT, OUT + 4]), 1, 'and only one');
+});
 
 test('a program reads the video controller\'s AdapterRAM the way it asks for it', ()=>{
     const host = setup();
@@ -117,9 +152,13 @@ test('a program reads the video controller\'s AdapterRAM the way it asks for it'
     const bstr = host.view.getUint32(variant + 8, true);
     assert.ok(host.view.getUint32(bstr - 4, true) > 0);
 
-    assert.equal(host.call(instance, 'Get', [host.wide('Nonsense'), 0, variant, 0, 0]),
-        0x80041002 | 0);
-    assert.deepEqual(host.reported, ['IWbemClassObject::Get: no property Nonsense']);
+    // One with no value kept is NULL, as WMI answers a property without one,
+    // and said: an empty VARIANT reads to a client as a string.
+    assert.equal(host.call(instance, 'Get', [host.wide('PNPDeviceID'), 0, variant, OUT, 0]), 0);
+    assert.equal(host.view.getUint16(variant, true), 1, 'VT_NULL');
+    assert.equal(host.view.getUint32(OUT, true), 8, 'CIM_STRING');
+    assert.deepEqual(host.reported,
+        ['IWbemClassObject::Get: no value kept for PNPDeviceID; it reads as NULL']);
 });
 
 test('a WQL query names its class; another namespace or class is refused or empty, and said', ()=>{

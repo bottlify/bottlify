@@ -1138,7 +1138,9 @@ export function createRuntime(host){
          *     CStdPSFactoryBuffer *pPSFactoryBuffer)
          *
          * The factory is the DLL's own CStdPSFactoryBuffer, filled in the
-         * first time.
+         * first time. It is handed out for the DLL's class, and for the IID
+         * of any interface the DLL carries: that is how a DLL built without a
+         * class names its factory.
          */
         NdrDllGetClassObject: {
             argBytes: 24,
@@ -1151,7 +1153,9 @@ export function createRuntime(host){
                 w32(out, 0);
                 const interfaces = readProxyFiles(host, list >>> 0);
                 const clsid = factoryClass(host, interfaces, pclsid >>> 0);
-                if (clsid === null || guidAt(rclsid) !== clsid)
+                const asked = guidAt(rclsid);
+                if (clsid === null
+                    || (asked !== clsid && !interfaces.some(entry=>entry.iid === asked)))
                 {
                     return CLASS_E_CLASSNOTAVAILABLE;
                 }

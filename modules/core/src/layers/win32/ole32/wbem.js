@@ -34,13 +34,13 @@ export const IID_IWBEM_CLASS_OBJECT = '{DC12A681-737F-11CF-884D-00AA004B2E24}';
 const S_OK = 0;
 const WBEM_S_FALSE = 1;
 const E_OUTOFMEMORY = 0x8007000e | 0;
-const WBEM_E_NOT_FOUND = 0x80041002 | 0;
 const WBEM_E_INVALID_PARAMETER = 0x80041008 | 0;
 const WBEM_E_NOT_SUPPORTED = 0x8004100c | 0;
 const WBEM_E_INVALID_NAMESPACE = 0x8004100e | 0;
 const WBEM_E_INVALID_QUERY_TYPE = 0x80041038 | 0;
 
 const VT_I4 = 3;
+const VT_NULL = 1;
 const VT_BSTR = 8;
 const VT_BOOL = 11;
 const VT_ARRAY = 0x2000;
@@ -72,17 +72,52 @@ export const ADAPTER_NAME = VIDEO_ADAPTER_NAME;
  * Each kept class's instances, each instance its properties keyed in lower
  * case, as WMI matches names without regard to it.
  *
- * @param {{ physicalMemory?: number }} machine
+ * @param {{ physicalMemory?: number,
+ *     windows?: import('../kernel32/versions.js').WindowsVersion }} machine
  * @returns {Record<string, Record<string, WbemProperty>[]>}
  */
-function machineClasses({ physicalMemory = 0 }){
+function machineClasses({ physicalMemory = 0, windows }){
     const hex = (/** @type {number} */ value)=>(value >>> 0).toString(16).toUpperCase()
         .padStart(8, '0');
     // A reference names its instance by the computer, the namespace, the
     // class and its key, as an association's ends are written.
     const reference = (/** @type {string} */ path)=>`\\\\${COMPUTER_NAME}\\root\\cimv2:${path}`;
     const memory = Math.max(physicalMemory, 0);
+    // The one operating system, as the process is told it is elsewhere --
+    // GetVersionEx, the registry's ProductName: a program reads it without
+    // asking whether there is one, since there always is.
+    /** @type {Record<string, Record<string, WbemProperty>[]>} */
+    const system = windows ? {
+        win32_operatingsystem: [{
+            caption: [CIM_STRING, windows.productName.startsWith('Microsoft')
+                ? `${windows.productName}${windows.major === 5 ? ' Professional' : ''}`
+                : `Microsoft ${windows.productName}`],
+            version: [CIM_STRING, `${windows.major}.${windows.minor}.${windows.build}`],
+            buildnumber: [CIM_STRING, String(windows.build)],
+            csdversion: [CIM_STRING, windows.csdVersion],
+            servicepackmajorversion: [CIM_UINT16, windows.servicePackMajor],
+            servicepackminorversion: [CIM_UINT16, windows.servicePackMinor],
+            manufacturer: [CIM_STRING, 'Microsoft Corporation'],
+            ostype: [CIM_UINT16, 18], // WINNT
+            producttype: [CIM_UINT32, windows.productType],
+            systemdirectory: [CIM_STRING, 'C:\\WINDOWS\\system32'],
+            windowsdirectory: [CIM_STRING, 'C:\\WINDOWS'],
+            systemdrive: [CIM_STRING, 'C:'],
+            csname: [CIM_STRING, COMPUTER_NAME],
+            oslanguage: [CIM_UINT32, 1033],
+            countrycode: [CIM_STRING, '1'],
+            locale: [CIM_STRING, '0409'],
+            codeset: [CIM_STRING, '1252'],
+            totalvisiblememorysize: [CIM_UINT64, String(Math.floor(memory / 1024))],
+            freephysicalmemory: [CIM_UINT64, String(Math.floor(memory / 2048))],
+            numberofprocesses: [CIM_UINT32, 1],
+            numberofusers: [CIM_UINT32, 1],
+            primary: [CIM_BOOLEAN, true],
+            status: [CIM_STRING, 'OK'],
+        }],
+    } : {};
     return {
+        ...system,
         win32_videocontroller: [{
             adapterram: [CIM_UINT32, ADAPTER_RAM],
             name: [CIM_STRING, ADAPTER_NAME],
@@ -227,6 +262,8 @@ const SLOTS = {
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readWideString
  * @property {number} [physicalMemory]  What GlobalMemoryStatus reports as physical memory.
+ * @property {import('../kernel32/versions.js').WindowsVersion} [windows]
+ *           The Windows the process is told it runs on.
  * @property {(api: string, detail: string) => void} [divergence]
  */
 
@@ -236,7 +273,7 @@ const SLOTS = {
  * @param {WbemHost} host
  */
 export function registerWbemClasses(host){
-    const CLASSES = machineClasses({ physicalMemory: host.physicalMemory });
+    const CLASSES = machineClasses({ physicalMemory: host.physicalMemory, windows: host.windows });
     const diverge = (/** @type {string} */ api, /** @type {string} */ detail)=>
         host.divergence?.(api, detail);
     const writeU32 = (/** @type {number} */ address, /** @type {number} */ value)=>{
@@ -342,7 +379,10 @@ export function registerWbemClasses(host){
 
     /**
      * IWbemClassObject over one instance: Get reads a property, the rest is
-     * refused.
+     * refused. A property this build keeps no value for reads as VT_NULL, as
+     * one the machine has no value for does in WMI -- a client tells a value
+     * from none by VT_NULL, and an empty VARIANT reads to it as a string it
+     * was given -- and it is said.
      *
      * @param {Record<string, WbemProperty>} properties
      * @param {number} out
@@ -354,8 +394,22 @@ export function registerWbemClasses(host){
                 const property = properties[key.toLowerCase()];
                 if (!property)
                 {
-                    diverge('IWbemClassObject::Get', `no property ${key}`);
-                    return WBEM_E_NOT_FOUND;
+                    diverge('IWbemClassObject::Get', `no value kept for ${key}; it reads as NULL`);
+                    if ((value >>> 0) !== 0)
+                    {
+                        const variant = new Uint8Array(16);
+                        new DataView(variant.buffer).setUint16(0, VT_NULL, true);
+                        host.writeMemory(value >>> 0, variant);
+                    }
+                    if ((type >>> 0) !== 0)
+                    {
+                        writeU32(type >>> 0, CIM_STRING);
+                    }
+                    if ((flavor >>> 0) !== 0)
+                    {
+                        writeU32(flavor >>> 0, 0);
+                    }
+                    return S_OK;
                 }
                 const [cimType, content] = property;
                 if ((value >>> 0) !== 0)

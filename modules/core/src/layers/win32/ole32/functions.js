@@ -687,14 +687,58 @@ export function createOleFunctions(host){
     const localServer = clsid=>classKeyValue(clsid, 'LocalServer32')
         ?? classKeyValue(clsid, 'LocalServer');
 
+    /** The classes already said to be made in process rather than in a surrogate. */
+    const toldSurrogate = new Set();
+
+    /**
+     * Whether a class whose server is a DLL is served to other processes by a
+     * surrogate -- its AppID names a DllSurrogate, dllhost.exe on Windows,
+     * which is how a DLL is a local server and how COM elevation runs one.
+     * There is one address space here, so such a class is made in the
+     * caller's process, and that is said once. The surrogate's apartment
+     * comes with it: dllhost runs in the multithreaded apartment, so a thread
+     * the DLL starts without entering one is in it implicitly -- the MTA is
+     * opened here for the rest of the run, as dllhost keeps its own open.
+     *
+     * @param {string} clsid
+     */
+    const surrogated = clsid=>{
+        const root = host.hive?.root(HKEY_CLASSES_ROOT);
+        const key = root ? host.hive?.open(root, `CLSID\\${clsid}`) : null;
+        const appId = key ? host.hive?.getValue(key, 'AppID') : null;
+        if (!appId || classKeyValue(clsid, 'InprocServer32') === null)
+        {
+            return false;
+        }
+        const id = String.fromCharCode(...appId.data).replace(/\0[\s\S]*$/, '');
+        const app = host.hive?.open(root, `AppID\\${id}`);
+        if (!app || !host.hive?.getValue(app, 'DllSurrogate'))
+        {
+            return false;
+        }
+        if (!toldSurrogate.has(clsid))
+        {
+            if (toldSurrogate.size === 0)
+            {
+                host.registry?.mtaUsage?.enter();
+            }
+            toldSurrogate.add(clsid);
+            host.divergence?.('COM', `${clsid} would run in a surrogate process;`
+                + ' it is made in this one');
+        }
+        return true;
+    };
+
     /**
      * Whether a class is made in another process: the caller accepts a local
-     * server, and either has not asked for one in process or there is none.
+     * server, and either has not asked for one in process or there is none --
+     * unless the local server would be a surrogate around the class's DLL.
      *
      * @param {string} clsid @param {number} context  CLSCTX_*.
      */
     const outOfProcess = (clsid, context)=>(context & CLSCTX_LOCAL_SERVER) !== 0
-        && ((context & CLSCTX_INPROC) === 0 || classKeyValue(clsid, 'InprocServer32') === null);
+        && ((context & CLSCTX_INPROC) === 0 || classKeyValue(clsid, 'InprocServer32') === null)
+        && !surrogated(clsid);
 
     /**
      * A string value of the class's key under HKEY_CLASSES_ROOT\CLSID, or
@@ -2130,6 +2174,29 @@ export function createOleFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, , out])=>refuseObject('CreateItemMoniker', out >>> 0),
+        },
+
+        /**
+         * HRESULT CoGetObject(LPCWSTR pszName, BIND_OPTS *pBindOptions, REFIID riid,
+         *                     void **ppv)
+         *
+         * An object bound by its display name: no moniker class is registered
+         * here -- WMI's winmgmts: among them -- so no name parses, which is
+         * MK_E_SYNTAX, and the name is said.
+         */
+        CoGetObject: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([name, , , out])=>{
+                const MK_E_SYNTAX = 0x800401e4 | 0;
+                if ((out >>> 0) !== 0)
+                {
+                    writeU32(out >>> 0, 0);
+                }
+                host.divergence?.('CoGetObject', `no moniker binds ${JSON.stringify(
+                    (name >>> 0) === 0 ? '' : readOleString(name >>> 0, MAX_PROGID))}`);
+                return MK_E_SYNTAX;
+            },
         },
 
         /**

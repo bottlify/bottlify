@@ -219,6 +219,16 @@ test('the factory is the DLL\'s own buffer, handed out for its class and no othe
     assert.notEqual(g.u32(dll.factory), 0, 'with a vtable of its own');
     assert.equal(g.u32(dll.factory + 8), dll.list);
     assert.equal(NdrDllCanUnloadNow.handler([dll.factory]), 1, 'S_FALSE while it is held');
+
+    // With a class of its own, for that class and for the IID of an
+    // interface it carries alike; for anything else, still not.
+    const named = g.place('{0A0B0C0D-0000-0000-0000-00000000C1A5}');
+    assert.equal(NdrDllGetClassObject.handler([named, factoryIid, out, dll.list, named,
+        dll.factory]), 0);
+    assert.equal(NdrDllGetClassObject.handler([dll.iid, factoryIid, out, dll.list, named,
+        dll.factory]), 0, 'an interface\'s IID names the factory too');
+    assert.equal(NdrDllGetClassObject.handler([other, factoryIid, out, dll.list, named,
+        dll.factory]) >>> 0, 0x80040111);
 });
 
 test('a proxy is a CStdProxyBuffer aggregated on its outer object', async()=>{

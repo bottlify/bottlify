@@ -1209,6 +1209,38 @@ export function createAutomationFunctions(host){
     };
 
     /**
+     * Var*FromStr for an integral type: the text read as VarR8FromStr reads
+     * it, rounded as every conversion to an integral type here rounds, and an
+     * overflow outside the type's range rather than a wrap.
+     *
+     * @param {number} type @param {number} size  the bytes written
+     */
+    const integerFromString = (type, size)=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([strIn, , , out])=>{
+            if ((strIn >>> 0) === 0 || (out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            const number = parseText(wideAt(strIn >>> 0));
+            if (number === null || !Number.isFinite(number))
+            {
+                return DISP_E_TYPEMISMATCH;
+            }
+            const whole = truncate(number);
+            if (!fits(type, whole))
+            {
+                return DISP_E_OVERFLOW;
+            }
+            const bytes = new Uint8Array(4);
+            new DataView(bytes.buffer).setInt32(0, whole | 0, true);
+            host.writeMemory(out >>> 0, bytes.subarray(0, size));
+            return S_OK;
+        },
+    });
+
+    /**
      * An NDR user-marshal routine for a type whose wire form is not
      * implemented -- nor is the NDR engine that would call it (rpcrt4's
      * NdrClientCall2), so nothing here marshals across apartments. A proxy a
@@ -1865,6 +1897,17 @@ export function createAutomationFunctions(host){
                 return S_OK;
             },
         },
+
+        /**
+         * HRESULT VarI4FromStr(OLECHAR *strIn, LCID lcid, ULONG dwFlags, LONG *plOut),
+         * and the same for the other integral types
+         */
+        VarI1FromStr: integerFromString(VT_I1, 1),
+        VarUI1FromStr: integerFromString(VT_UI1, 1),
+        VarI2FromStr: integerFromString(VT_I2, 2),
+        VarUI2FromStr: integerFromString(VT_UI2, 2),
+        VarI4FromStr: integerFromString(VT_I4, 4),
+        VarUI4FromStr: integerFromString(VT_UI4, 4),
 
         /** HRESULT VarUdateFromDate(DATE dateIn, ULONG dwFlags, UDATE *pudateOut) */
         VarUdateFromDate: {
@@ -3039,10 +3082,13 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     40: 'SafeArrayRedim',
     46: 'VarParseNumFromStr',
     47: 'VarNumFromParseNum',
+    54: 'VarI2FromStr',
+    64: 'VarI4FromStr',
     82: 'VarR8FromCy',
     84: 'VarR8FromStr',
     100: 'VarCyFromI4',
     116: 'VarBstrFromBool',
+    136: 'VarUI1FromStr',
     161: 'LoadTypeLib',
     162: 'LoadRegTypeLib',
     163: 'RegisterTypeLib',
@@ -3058,6 +3104,9 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     201: 'SetErrorInfo',
     202: 'CreateErrorInfo',
     220: 'VarR8FromDec',
+    251: 'VarI1FromStr',
+    264: 'VarUI2FromStr',
+    277: 'VarUI4FromStr',
     283: 'BSTR_UserSize',
     284: 'BSTR_UserMarshal',
     285: 'BSTR_UserUnmarshal',

@@ -278,6 +278,24 @@ test('a VARIANT or a SAFEARRAY is freed as the stubs ask, and marshaled as nothi
     assert.ok(host.said.some(line=>line.includes('LPSAFEARRAY_UserMarshal')));
 });
 
+test('an integral type is read from a string, rounded, and refused outside its range', ()=>{
+    setUp();
+    const OUT = 0x3000;
+    host.putWide(TEXT, '4000000000');
+    assert.equal(call('VarUI4FromStr', [TEXT, 0x409, 0, OUT]), S_OK);
+    assert.equal(host.u32(OUT), 4000000000);
+    assert.equal(call('VarI4FromStr', [TEXT, 0x409, 0, OUT]), 0x8002000a, 'DISP_E_OVERFLOW');
+    host.putWide(TEXT, ' 12.6 ');
+    assert.equal(call('VarI2FromStr', [TEXT, 0x409, 0, OUT]), S_OK);
+    assert.equal(host.u16(OUT), 13);
+    host.putWide(TEXT, '-1');
+    assert.equal(call('VarUI1FromStr', [TEXT, 0x409, 0, OUT]), 0x8002000a);
+    host.putWide(TEXT, 'twelve');
+    assert.equal(call('VarUI2FromStr', [TEXT, 0x409, 0, OUT]), 0x80020005, 'DISP_E_TYPEMISMATCH');
+    assert.equal(fx.VarUI4FromStr.argBytes, 16);
+    assert.equal(OLEAUT32_ORDINALS[277], 'VarUI4FromStr');
+});
+
 test('SysReAllocString replaces the string in the slot and frees the old one', ()=>{
     setUp();
     host.putWide(TEXT, 'old');
