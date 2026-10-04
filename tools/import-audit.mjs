@@ -8,7 +8,7 @@
  * What a title's programs import that this build does not export, found by
  * reading their import tables rather than by running them.
  *
- *   node tools/import-audit.mjs <path>... [--all]
+ *   node tools/import-audit.mjs <path>... [--all] [--used] [--dynamic]
  *
  * A path is a file, a directory (walked), a bundle (`.btl`) or a disc image
  * (`.iso`, ISO 9660). Every PE image found is read: its imports are checked
@@ -16,13 +16,17 @@
  * and then against the system libraries this build makes, asked of the engine
  * itself. What is printed is each missing function with the images that
  * import it, each library nobody provides, and each image that looks packed.
- * `--all` prints the images that import nothing missing too.
+ * `--all` prints the images that import nothing missing too; `--used` every
+ * function of this build's libraries the images import, the missing ones
+ * marked; `--dynamic` what the images name in their strings rather than their
+ * import tables -- a library this build does not make, named for LoadLibrary,
+ * and a function of one it does make, named for GetProcAddress.
  *
  * What this cannot see: an image packed so its real import table only exists
  * once its own code has run (it is named as packed), a payload still inside a
  * compressed cabinet or a setup's overlay (run the setup once with
- * install-watch `--copy` and audit what it unpacked), and what a program asks
- * of GetProcAddress at run time.
+ * install-watch `--copy` and audit what it unpacked), and a name a program
+ * builds at run time rather than keeps as a string.
  */
 import { open, readdir, readFile, stat } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
@@ -36,7 +40,7 @@ const paths = argv.filter(arg=>!arg.startsWith('--'));
 if (paths.length === 0)
 {
     console.log('usage: node tools/import-audit.mjs'
-        + ' <file|directory|bundle.btl|disc.iso>... [--all]');
+        + ' <file|directory|bundle.btl|disc.iso>... [--all] [--used] [--dynamic]');
     process.exit(2);
 }
 
@@ -209,6 +213,15 @@ const app = await createApp({
 
 /** @type {Map<string, Map<string, Set<string>>>} missing function -> importers, by library */
 const missing = new Map();
+/** @type {Map<string, Map<string, Set<string>>>} every function used -> importers, by library */
+const used = new Map();
+/** @param {Map<string, Map<string, Set<string>>>} into @param {string} library
+ *  @param {string} name @param {string} importer */
+const note = (into, library, name, importer)=>{
+    const byName = into.get(library) ?? new Map();
+    byName.set(name, (byName.get(name) ?? new Set()).add(importer));
+    into.set(library, byName);
+};
 /** @type {Map<string, Set<string>>} */
 const absent = new Map();
 /** @type {string[]} */
@@ -235,11 +248,13 @@ for (const image of /** @type {any[]} */ (images))
                 gaps++;
                 break;
             }
+            if (!ownLibrary)
+            {
+                note(used, library.dll, label, image.name);
+            }
             if (!provided)
             {
-                const byName = missing.get(library.dll) ?? new Map();
-                byName.set(label, (byName.get(label) ?? new Set()).add(image.name));
-                missing.set(library.dll, byName);
+                note(missing, library.dll, label, image.name);
                 gaps++;
             }
         }
@@ -256,6 +271,83 @@ for (const image of /** @type {any[]} */ (images))
     if (gaps === 0)
     {
         clean.push(image.where);
+    }
+}
+/**
+ * The printable runs of an image, in single bytes and in UTF-16: where a name
+ * handed to LoadLibrary or GetProcAddress is kept.
+ *
+ * @param {Uint8Array} bytes
+ */
+const stringsOf = bytes=>{
+    /** @type {Set<string>} */
+    const found = new Set();
+    for (const step of [1, 2])
+    {
+        let run = '';
+        for (let at = 0; at + step <= bytes.length; at += step)
+        {
+            const code = step === 1 ? bytes[at] : bytes[at] | bytes[at + 1] << 8;
+            if (code >= 0x20 && code < 0x7f)
+            {
+                run += String.fromCharCode(code);
+                continue;
+            }
+            if (run.length >= 4 && run.length <= 80)
+            {
+                found.add(run);
+            }
+            run = '';
+        }
+    }
+    return found;
+};
+
+/** @type {Map<string, Set<string>>} a library named in strings that nothing provides */
+const unnamed = new Map();
+/** @type {Map<string, Map<string, Set<string>>>} a function named in strings, by library */
+const dynamic = new Map();
+if (argv.includes('--dynamic'))
+{
+    for (const image of /** @type {any[]} */ (images))
+    {
+        const strings = stringsOf(image.bytes);
+        const imported = new Set(image.imports.flatMap((/** @type {any} */ library)=>
+            library.entries.map((/** @type {any} */ entry)=>
+                `${String(library.dll).toLowerCase()}!${entry.name}`)));
+        /** @type {Set<string>} */
+        const libraries = new Set(image.imports.map((/** @type {any} */ library)=>
+            String(library.dll)));
+        for (const text of strings)
+        {
+            const named = /^[A-Za-z0-9_.-]+\.(dll|drv|ocx)$/i.exec(text);
+            if (!named || own.has(text.toLowerCase()))
+            {
+                continue;
+            }
+            if (app.debug.exported(text, '\u0000') === null)
+            {
+                unnamed.set(text, (unnamed.get(text) ?? new Set()).add(image.name));
+                continue;
+            }
+            libraries.add(text);
+        }
+        for (const text of strings)
+        {
+            if (!/^[A-Za-z_][A-Za-z0-9_]{3,}$/.test(text))
+            {
+                continue;
+            }
+            for (const library of libraries)
+            {
+                if (!own.has(library.toLowerCase())
+                    && !imported.has(`${library.toLowerCase()}!${text}`)
+                    && app.debug.exported(library, text) === true)
+                {
+                    note(dynamic, library, text, image.name);
+                }
+            }
+        }
     }
 }
 await app.dispose();
@@ -276,6 +368,30 @@ for (const [library, importers] of absent)
 for (const where of packed)
 {
     console.log(`PACKED? ${where}: its imports are looked up at run time`);
+}
+if (argv.includes('--used'))
+{
+    for (const [library, names] of [...used].sort(([a], [b])=>a.localeCompare(b)))
+    {
+        console.log(`USED ${library} (${names.size})`);
+        for (const [name, importers] of [...names].sort(([a], [b])=>a.localeCompare(b)))
+        {
+            const gap = missing.get(library)?.has(name) ? ' MISSING' : '';
+            console.log(`  ${name}${gap}  <- ${[...importers].join(', ')}`);
+        }
+    }
+}
+for (const [library, importers] of unnamed)
+{
+    console.log(`NAMED, NO LIBRARY ${library}  <- ${[...importers].join(', ')}`);
+}
+for (const [library, names] of [...dynamic].sort(([a], [b])=>a.localeCompare(b)))
+{
+    console.log(`BY NAME ${library} (${names.size})`);
+    for (const [name, importers] of [...names].sort(([a], [b])=>a.localeCompare(b)))
+    {
+        console.log(`  ${name}  <- ${[...importers].join(', ')}`);
+    }
 }
 if (argv.includes('--all'))
 {

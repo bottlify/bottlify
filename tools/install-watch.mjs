@@ -20,7 +20,7 @@
  *
  * `--journal S` prints, S seconds in, the last cross-process COM calls and
  * message waits from the call journal (every call area on); `--trace S` prints
- * the last three thousand calls of every kind instead, with their first
+ * the last three thousand calls of every kind instead (`--trace-lines N`), with their first
  * arguments -- what a process that loops without waiting keeps calling. A run
  * that ends sooner prints either when it ends. `--strings` peeks every pointer
  * argument for a string, so those lines name the paths and texts themselves.
@@ -40,7 +40,8 @@
  * what it decided. `--copy DIR TO` writes a directory of the volume out to TO
  * on this machine -- what a setup unpacked, for the PE tools to read. `--peek
  * ADDRESS LENGTH` prints guest memory there once the run is over, and `--args
- * '...'` is what follows the program's own path on its command line.
+ * '...'` is what follows the program's own path on its command line. `--registry
+ * FILE` writes the registry as it stands once the run is over.
  * `--collect` takes that prefix off the finished run as the installer's own
  * wizard does (`collectFrom`) and says which root, entry and
  * files a bottle would get;
@@ -423,7 +424,7 @@ const printJournal = ()=>{
     const crossing = /OleMainThread|CoWait|MsgWait|PostMessage|PostThread|SendMessage|WaitFor/;
     const trail = app.log.recent(100000).filter((/** @type {any} */ entry)=>traceAt > 0
         || entry.category === 'call.com' || crossing.test(entry.text));
-    for (const entry of trail.slice(traceAt > 0 ? -3000 : -150))
+    for (const entry of trail.slice(traceAt > 0 ? -number('--trace-lines', 3000) : -150))
     {
         console.log('JOURNAL', (entry.time / 1000).toFixed(2), entry.text.slice(0, 220));
     }
@@ -463,6 +464,12 @@ if (listAt)
     catch (e){
         console.log('list failed:', e instanceof Error ? e.message : e);
     }
+}
+if (argv.includes('--registry'))
+{
+    const to = argv[argv.indexOf('--registry') + 1];
+    mkdirSync(dirname(to), { recursive: true });
+    writeFileSync(to, JSON.stringify(app.registry().toJSON()));
 }
 for (const path of all('--cat'))
 {
