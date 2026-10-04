@@ -2755,11 +2755,10 @@ export function createKernelGl(opengl, journalCall, traced, counters){
  * @param {AppOptions & {
  *     events?: any,
  *     seed?: { path: string, bytes?: Uint8Array, delete?: boolean }[],
- *     hive?: any,
  *     patches?: { address: number, bytes: Uint8Array }[],
  *     spawned?: (request: any) => void,
  *     logSinks?: Map<Function, (payload: any) => void>,
- *     namedObjects?: Map<string, { kind: string, object: any }>,
+ *     system?: { namedObjects: Map<string, any>, hive: any },
  *     com?: { table: any, process: unknown },
  * }} options
  * @returns {Promise<any>} an AppController
@@ -3507,13 +3506,14 @@ async function buildApp(options){
             // The speed the registry reports: the rate the engine's rdtsc
             // advances at. The emulator's counter keeps the default.
             processorMhz: (options.engine ?? DEFAULT_ENGINE) === 'cork' ? CORK_TSC_MHZ : undefined,
-            // The one namespace a named mutex, event, semaphore, timer and
-            // file mapping all share, carried in from outside this build so a
-            // name a parent registered is one a child still finds: the table
-            // outlives the process the way the log's sinks and the sound
-            // ring do, for the same reason -- a replacement rebuilds this
-            // layer, and the name was never this process's to keep.
-            namedObjects: options.namedObjects,
+            // What every process of the run shares, as one Windows does: the
+            // namespace a named mutex, event, semaphore, timer and file
+            // mapping are found in, and the registry. Carried in from outside
+            // this build, so a name a parent registered is one a child still
+            // finds and a key it wrote is one the child reads -- a
+            // replacement rebuilds this layer, and neither was ever this
+            // process's to keep.
+            system: options.system,
             processId: options.processId,
             standardFiles: options.standardFiles,
             // The run's table of class objects served out of process, and this
@@ -3852,16 +3852,14 @@ async function buildApp(options){
     // settings and its name are here as often as in a file, and a program
     // that finds the key empty writes its defaults over them. The files wait
     // for the volume they belong on, which the bundle mount below replaces.
-    if (seeded.registry)
+    // A process the run started after the first has the run's registry
+    // already, with what its parent wrote a moment before starting it -- a
+    // write no save may have reached -- and reading the save back over it
+    // would undo that.
+    const registryInherited = core.api('win32').registryInherited?.() ?? false;
+    if (seeded.registry && !registryInherited)
     {
         core.api('win32').registry().fromJSON(seeded.registry);
-    }
-    // And the registry of the process that started this one, which is the
-    // same registry: a machine has one, and a child reads what its parent
-    // wrote a moment before starting it -- a write no save may have reached.
-    if (options.hive)
-    {
-        core.api('win32').registry().fromJSON(options.hive);
     }
 
     // One way out. What the program writes is announced once the writes settle;
@@ -3869,6 +3867,7 @@ async function buildApp(options){
     const persist = storage.save;
     /** @type {ReturnType<typeof coalescedSaver> | null} */
     let saver = null;
+    let stopSavingRegistry = ()=>{};
     if (persist)
     {
         saver = coalescedSaver({
@@ -3890,7 +3889,10 @@ async function buildApp(options){
         filesystem.onChanged(save);
         // A registry write is a change to the session like a file write is,
         // announced without a path: the whole hive travels with every save.
-        core.api('win32').registry().onChanged(()=>save([{ kind: 'registry' }]));
+        // The hive is the run's and outlives this machine: the subscription
+        // goes with it (`dispose`).
+        stopSavingRegistry = core.api('win32').registry().onChanged(
+            ()=>save([{ kind: 'registry' }]));
     }
 
     // Every event the engine reports also goes to the journal, so that one
@@ -3987,7 +3989,7 @@ async function buildApp(options){
     // the session saved since is kept over it. A process started by another
     // has that one's registry, which holds it already.
     const installedRegistry = await blocks?.registry;
-    if (installedRegistry && !options.hive)
+    if (installedRegistry && !registryInherited)
     {
         core.api('win32').registry().fillFromJSON(installedRegistry);
     }
@@ -6666,6 +6668,7 @@ async function buildApp(options){
             // What the program wrote last is saved now rather than after it
             // settles: the machine it was written on is about to go.
             saver?.flush();
+            stopSavingRegistry();
             // Before the graph goes: the background filler would otherwise go
             // on asking for blocks nobody can put anywhere.
             blocks?.stop();
@@ -6751,6 +6754,14 @@ export async function createApp(options){
     // makes of this same process -- discovering it by that name.
     /** @type {Map<string, { kind: string, object: any }>} */
     const namedObjects = new Map();
+    /**
+     * What every process of the run shares (`win32`'s `system`): the named
+     * objects, and the registry -- the first process's hive, the one each
+     * later process is handed rather than a copy of it.
+     *
+     * @type {{ namedObjects: Map<string, any>, hive: any }}
+     */
+    const system = { namedObjects, hive: null };
     /** @type {Map<string, string | number>} */
     const logLevels = new Map();
     /** @type {string | number | null} */
@@ -6821,7 +6832,7 @@ export async function createApp(options){
         events,
         spawned: remember,
         logSinks,
-        namedObjects,
+        system,
         log: {
             ...options.log, sequenceBase: logSequence, ...runJournal ? { journal: runJournal } : {},
             now: journalClock,
@@ -7091,7 +7102,6 @@ export async function createApp(options){
             imagePath: found.path,
             commandLine: `${request.command.trim()} -Embedding`,
             seed: parent.session.export(),
-            hive: parent.registry().toJSON(),
         });
         replicas.track(server);
         // A line of processes of its own: a server that starts a child and
@@ -7154,7 +7164,6 @@ export async function createApp(options){
             processId: request.id,
             standardFiles: request.standardFiles,
             seed: parent.session.export(),
-            hive: parent.registry().toJSON(),
         });
         replayLogLevels();
         Object.assign(facade, line.current, own);
@@ -7171,20 +7180,17 @@ export async function createApp(options){
 
         // Read while the child's machine stands, and put back into the
         // parent's: what an installer's second stage laid down is what the
-        // first stage goes on to find. The child's registry began as the
-        // parent's, and the parent wrote nothing while it waited, so the
-        // child's is the whole of it.
+        // first stage goes on to find. Its registry is the parent's own
+        // hive, the run's one, so what it wrote there is there already.
         const child = line.current;
         await retire(child);
         const files = child.session.export();
-        const registry = child.registry().toJSON();
         noteLogSequence();
         mediaInstance = child.media.instance() ?? mediaInstance;
         await child.dispose();
 
         line.current = parent;
         parent.session.apply(files);
-        parent.registry().fromJSON(registry);
         // Brought up to date wholesale, so what it holds now is its own
         // starting point again.
         if (replicas.tracked(parent))
@@ -7245,7 +7251,6 @@ export async function createApp(options){
             // child is launched against files that no longer exist.
             const child = await line.current.readImage(request.imagePath);
             const carried = line.current.session.export();
-            const hive = line.current.registry().toJSON();
             // The sequence the journal reached, read while the machine that
             // wrote it still stands. The child's journal continues from
             // here, so the cursor a reader is holding points into it rather
@@ -7277,7 +7282,6 @@ export async function createApp(options){
                 patches: request.patches,
                 processId: request.id,
                 seed: carried,
-                hive,
             });
             if (line.main)
             {

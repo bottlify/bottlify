@@ -345,7 +345,10 @@ export function createReplicas(report){
                             + ` ${e instanceof Error ? e.message : e}`);
                     }
                 }
-                if (changes.values.length + changes.removedValues.length + changes.keys.length
+                // Processes the run built with its one hive share it, and
+                // there is nothing to carry.
+                if (other.registry() !== process.registry()
+                    && changes.values.length + changes.removedValues.length + changes.keys.length
                     + changes.removedKeys.length > 0)
                 {
                     const hive = other.registry().toJSON();

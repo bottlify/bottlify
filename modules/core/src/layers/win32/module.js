@@ -225,11 +225,14 @@ export function createWin32Module(){
             const filesystem = host.requireApi('filesystem');
             const journal = host.requireApi('log');
 
-            // The one namespace a mutex, event, semaphore, timer and file mapping
-            // all share. Handed a table from outside when there is a process
-            // replacement to survive; a caller with nothing to carry across a
-            // rebuild gets one that does not.
-            const namedObjects = createNamedObjects({ table: config?.namedObjects });
+            // What the run's processes share, as one Windows does: handed in
+            // from outside when there is a process beside or after this one
+            // to share it with; a caller with nothing to share it with gets
+            // its own. The one namespace a mutex, event, semaphore, timer and
+            // file mapping all share is part of it.
+            /** @type {{ namedObjects: Map<string, any>, hive: any } | null} */
+            const system = config?.system ?? null;
+            const namedObjects = createNamedObjects({ table: system?.namedObjects });
             // What GetCurrentProcessId answers: a child is the process its parent
             // was told of in PROCESS_INFORMATION, not a second copy of the first.
             const processId = (config?.processId ?? 0x1000) >>> 0;
@@ -384,7 +387,18 @@ export function createWin32Module(){
                 file.position += volume.write(node, file.position, encodeAnsi(text));
                 volume.close(node);
             };
-            const hive = createHive({ processorMhz: config?.processorMhz, windows, directx });
+            // The registry is the run's: the first process's hive, handed to
+            // every process after it rather than copied into each, so a key a
+            // parent writes is there for its child the moment it is written,
+            // and the child's writes are the parent's without being carried
+            // back when it exits.
+            const inheritedHive = system?.hive ?? null;
+            const hive = inheritedHive
+                ?? createHive({ processorMhz: config?.processorMhz, windows, directx });
+            if (system)
+            {
+                system.hive = hive;
+            }
             // The guest's clock, because a timer is due against the clock the
             // program itself reads, and the input layer's key state, because a
             // hot key fires on a combination and only the layer that sees the
@@ -2490,6 +2504,13 @@ export function createWin32Module(){
 
                 /** The registry, whose contents outlive the process (§9). */
                 registry: ()=>hive,
+
+                /**
+                 * Whether the registry came from a process before this one,
+                 * filled already: what a save or an installation would put
+                 * into a fresh hive is in it, and newer.
+                 */
+                registryInherited: ()=>inheritedHive !== null,
 
                 // The running thread's last error, for whoever is tracing. A
                 // program reports a code long after the call that produced it has
