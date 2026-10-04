@@ -2114,13 +2114,13 @@ export async function zstdWasmFor(options, here = import.meta.url){
  * of this, which is what a repeated read actually hits.
  *
  * @param {any} deps
- * @returns {Promise<{ fetch: (needed: any[]) => Promise<void>,
+ * @returns {Promise<{ source: any, fetch: (needed: any[]) => Promise<void>,
  *                     stop: () => void, ahead: () => number,
  *                     refetched: () => { blocks: number, bytes: number },
  *                     ranges: () => { requests: number, bytes: number },
  *                     registry: Promise<any> } | null>}
  */
-async function mountBundle({ options, cpu, filesystem, events, translationStore }){
+async function mountBundle({ options, cpu, events, translationStore }){
     if (!options.bundle?.fetch)
     {
         return null;
@@ -2196,7 +2196,6 @@ async function mountBundle({ options, cpu, filesystem, events, translationStore 
         relocate: { [BOTTLE_SYSTEM_PATH]: SYSTEM_DIRECTORY },
     });
 
-    filesystem.mount('C', { source });
 
     /**
      * A member's bytes, read before the program runs: one request for its run
@@ -2524,6 +2523,8 @@ async function mountBundle({ options, cpu, filesystem, events, translationStore 
     // left, which is the whole session.
     fill();
     return {
+        /** The bundle's files as a drive's read-only layer, for each machine to mount. */
+        source,
         fetch: demand,
         registry,
         /** How many blocks were brought in ahead of a read, ever. */
@@ -2758,7 +2759,7 @@ export function createKernelGl(opengl, journalCall, traced, counters){
  *     patches?: { address: number, bytes: Uint8Array }[],
  *     spawned?: (request: any) => void,
  *     logSinks?: Map<Function, (payload: any) => void>,
- *     system?: { namedObjects: Map<string, any>, hive: any,
+ *     system?: { namedObjects: Map<string, any>, hive: any, bundle: any,
  *         ids: { thread: number, process: number } },
  *     mainThreadId?: number,
  *     com?: { table: any, process: unknown },
@@ -2890,7 +2891,8 @@ async function buildApp(options){
 
     // Filled in once the emulator is up and a bundle, if any, is mounted. win32
     // is built before that and is handed the lookup rather than the answer.
-    /** @type {{ fetch: (needed: any[]) => Promise<void>, stop: () => void, ahead: () => number,
+    /** @type {{ source: any, fetch: (needed: any[]) => Promise<void>, stop: () => void,
+     *          ahead: () => number,
      *          refetched: () => { blocks: number, bytes: number },
      *          ranges: () => { requests: number, bytes: number },
      *          registry: Promise<any> } | null} */
@@ -3987,7 +3989,20 @@ async function buildApp(options){
 
     // Mounted after the machine is up. A zstd block is decoded by this
     // project's own decoder now, so the mount no longer needs the emulator.
-    blocks = await mountBundle({ options, cpu, filesystem, events, translationStore });
+    // The bundle is the run's: the first process opens it -- its index, its
+    // block cache, the background fill -- and every process after it mounts
+    // the same one, rather than each reading the index again and filling a
+    // second cache from the network beside the first.
+    blocks = options.system?.bundle
+        ?? await mountBundle({ options, cpu, events, translationStore });
+    if (options.system && blocks)
+    {
+        options.system.bundle = blocks;
+    }
+    if (blocks)
+    {
+        filesystem.mount('C', { source: blocks.source });
+    }
     // What the installation wrote to the registry is the machine's before the
     // program's first instruction, as it was on the machine it was installed
     // on: a launcher finds its game installed by the key its setup made. What
@@ -6676,8 +6691,12 @@ async function buildApp(options){
             saver?.flush();
             stopSavingRegistry();
             // Before the graph goes: the background filler would otherwise go
-            // on asking for blocks nobody can put anywhere.
-            blocks?.stop();
+            // on asking for blocks nobody can put anywhere. A run's bundle is
+            // the run's to stop, after its last process.
+            if (!options.system)
+            {
+                blocks?.stop();
+            }
             breathe.close();
             return core.dispose().then(()=>{
                 if (ownsTranslationStore)
@@ -6765,10 +6784,11 @@ export async function createApp(options){
      * objects, and the registry -- the first process's hive, the one each
      * later process is handed rather than a copy of it.
      *
-     * @type {{ namedObjects: Map<string, any>, hive: any,
+     * @type {{ namedObjects: Map<string, any>, hive: any, bundle: any,
      *     ids: { thread: number, process: number } }}
      */
-    const system = { namedObjects, hive: null, ids: { thread: 1, process: 0x2000 } };
+    const system = { namedObjects, hive: null, bundle: null,
+        ids: { thread: 1, process: 0x2000 } };
     /**
      * A process id and its first thread's, from the run's, for a process no
      * parent was told of: a class's server, which COM starts.
@@ -7359,6 +7379,7 @@ export async function createApp(options){
         dispose: ()=>Promise.all([...serving].map(line=>line.current.dispose()))
             .then(()=>current.dispose())
             .then(()=>{
+                system.bundle?.stop();
                 // The run's store outlives each machine it was handed to, and
                 // goes with the last of them.
                 if (runStoreSpec === 'local')
