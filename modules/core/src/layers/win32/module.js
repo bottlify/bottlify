@@ -1237,6 +1237,20 @@ export function createWin32Module(){
                         // reads it answers what a call would have answered.
                         publishClock: refresh=>kernel.clock.whenMoved(refresh),
                         moduleHandle: name=>modules.find(name)?.base ?? 0,
+                        /** @param {number} address */
+                        moduleContaining: address=>modules.containing?.(address)?.base ?? 0,
+                        /** @param {number} base @param {boolean} pin */
+                        holdModule: (base, pin)=>{
+                            const held = modules.byBase(base);
+                            if (held)
+                            {
+                                held.references = (held.references ?? 0) + 1;
+                                if (pin)
+                                {
+                                    held.pinned = true;
+                                }
+                            }
+                        },
                         version: reported,
                         setRegisters,
                         // Actually waiting is the scheduler's, and there is no timed
@@ -1316,6 +1330,7 @@ export function createWin32Module(){
                         readMemory,
                         writeMemory,
                         readCString,
+                        readWideString,
                         files: volume,
                         setLastError: setError,
                     }),
@@ -1418,6 +1433,7 @@ export function createWin32Module(){
                     ...createAtomFunctions({
                         writeMemory,
                         readCString,
+                        readWideString,
                         setLastError: setError,
                     }),
                     ...createSpawnFunctions({

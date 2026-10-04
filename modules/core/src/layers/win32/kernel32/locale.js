@@ -685,6 +685,15 @@ const characterType = code=>{
  */
 export function createLocaleFunctions(host){
     /**
+     * The locale each thread set for itself, by thread; one slot where there
+     * is no thread to tell them apart.
+     *
+     * @type {Map<unknown, number>}
+     */
+    const threadLocales = new Map();
+    const threadKey = ()=>host.callerThread?.() ?? null;
+
+    /**
      * The source of a conversion, as characters.
      *
      * A length of -1 means the string is NUL-terminated and the terminator
@@ -1583,7 +1592,27 @@ export function createLocaleFunctions(host){
                 ((geoClass >>> 0) === GEOCLASS_NATION ? GEOID_UNITED_STATES : -1),
         },
         GetSystemDefaultLCID: { argBytes: 0, handler: ()=>LCID_EN_US },
-        GetThreadLocale: { argBytes: 0, handler: ()=>LCID_EN_US },
+        GetThreadLocale: { argBytes: 0, handler: ()=>threadLocales.get(threadKey()) ?? LCID_EN_US },
+
+        /**
+         * BOOL SetThreadLocale(LCID Locale)
+         *
+         * The calling thread's locale, as GetThreadLocale answers it from then
+         * on; the default placeholders are the one locale there is. Text is
+         * still formatted as that one locale, the only one this system has
+         * the data of.
+         */
+        SetThreadLocale: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([locale])=>{
+                const asked = locale >>> 0;
+                threadLocales.set(threadKey(),
+                    asked === LOCALE_USER_DEFAULT || asked === LOCALE_SYSTEM_DEFAULT
+                        ? LCID_EN_US : asked);
+                return 1;
+            },
+        },
 
         /**
          * LCID ConvertDefaultLocale(LCID Locale)

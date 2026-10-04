@@ -125,6 +125,11 @@ const NORMAL_PRIORITY_CLASS = 0x20;
  * @property {() => number} systemTimeMs   Guest wall clock, milliseconds since 1970.
  * @property {(name: string | null) => number} moduleHandle
  *           The base of a loaded module, or 0; null asks for the running image.
+ * @property {(address: number) => number} [moduleContaining]
+ *           The base of the module an address lies in, or 0.
+ * @property {(base: number, pin: boolean) => void} [holdModule]
+ *           One more reference on a loaded module, as LoadLibrary takes; a
+ *           pinned one is never let go.
  * @property {(milliseconds: number) => void} sleep
  * @property {() => any} park  The token that says the caller has been stopped.
  * @property {() => number} [tlsBlock]  The running thread's array of TLS slots,
@@ -419,6 +424,44 @@ export function createProcessFunctions(host){
         }
         return handle;
     };
+
+    /**
+     * GetModuleHandleEx, reading a name with `read`: GetModuleHandle that
+     * takes a reference as LoadLibrary does unless told not to -- or for
+     * good, pinned -- and that finds a module by an address inside it too.
+     *
+     * @param {(pointer: number) => string} read
+     */
+    const moduleHandleEx = read=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([flags, name, out])=>{
+            const PIN = 1;
+            const UNCHANGED_REFCOUNT = 2;
+            const FROM_ADDRESS = 4;
+            const asked = flags >>> 0;
+            const both = PIN | UNCHANGED_REFCOUNT;
+            if ((out >>> 0) === 0 || (asked & both) === both)
+            {
+                setError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            const base = (asked & FROM_ADDRESS) !== 0
+                ? (host.moduleContaining?.(name >>> 0) ?? 0) >>> 0
+                : host.moduleHandle((name >>> 0) === 0 ? null : read(name >>> 0)) >>> 0;
+            host.writeMemory(out >>> 0, Uint8Array.from(dword(base)));
+            if (base === 0)
+            {
+                setError(ERROR_MOD_NOT_FOUND);
+                return 0;
+            }
+            if ((asked & UNCHANGED_REFCOUNT) === 0)
+            {
+                host.holdModule?.(base, (asked & PIN) !== 0);
+            }
+            return 1;
+        },
+    });
 
     /**
      * The guest-side paths, placed once and shared by the exports that use
@@ -798,6 +841,34 @@ export function createProcessFunctions(host){
             handler: ([pointer])=>moduleHandleOf(pointer === 0
                 ? null
                 : host.readWideString?.(pointer >>> 0, MAX_MODULE_NAME) ?? ''),
+        },
+
+        /** BOOL GetModuleHandleExA(DWORD dwFlags, LPCSTR lpModuleName, HMODULE *phModule) */
+        GetModuleHandleExA: moduleHandleEx(pointer=>host.readCString(pointer, MAX_MODULE_NAME)),
+
+        /** BOOL GetModuleHandleExW(DWORD dwFlags, LPCWSTR lpModuleName, HMODULE *phModule) */
+        GetModuleHandleExW: moduleHandleEx(pointer=>
+            host.readWideString?.(pointer, MAX_MODULE_NAME) ?? ''),
+
+        /**
+         * BOOL GetSystemPowerStatus(LPSYSTEM_POWER_STATUS lpSystemPowerStatus)
+         *
+         * A desktop on mains power: online, no system battery, its charge and
+         * both lifetimes unknown.
+         */
+        GetSystemPowerStatus: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([status])=>{
+                if ((status >>> 0) === 0)
+                {
+                    setError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                host.writeMemory(status >>> 0,
+                    Uint8Array.of(1, 128, 255, 0, ...dword(0xffffffff), ...dword(0xffffffff)));
+                return 1;
+            },
         },
 
         /** DWORD GetVersion(VOID) */

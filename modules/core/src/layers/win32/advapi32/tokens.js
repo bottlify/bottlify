@@ -492,6 +492,53 @@ export function createTokenFunctions(host){
         },
 
         /**
+         * BOOL AddAce(PACL pAcl, DWORD dwAceRevision, DWORD dwStartingAceIndex,
+         *             LPVOID pAceList, DWORD nAceListLength)
+         *
+         * ACEs already laid out, put in at an index -- MAXDWORD, or one past
+         * the last, appends -- the ones from there on moved up behind them.
+         */
+        AddAce: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([acl, , index, list, length])=>{
+                const aces = (acl >>> 0) === 0 ? null : acesOf(acl);
+                if (aces === null)
+                {
+                    return fail(ERROR_INVALID_ACL);
+                }
+                const size = length >>> 0;
+                if ((list >>> 0) === 0 || size === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const added = host.readMemory(list >>> 0, size).slice();
+                let count = 0;
+                for (let at = 0; at < size; count++)
+                {
+                    const aceSize = added[at + 2] | added[at + 3] << 8;
+                    if (aceSize < 8 || at + aceSize > size)
+                    {
+                        return fail(ERROR_INVALID_PARAMETER);
+                    }
+                    at += aceSize;
+                }
+                const end = aces.length === 0 ? ACL.HEADER : aces[aces.length - 1].next;
+                if (end + size > readWord((acl >>> 0) + ACL.SIZE))
+                {
+                    return fail(ERROR_ALLOTTED_SPACE_EXCEEDED);
+                }
+                const at = (index >>> 0) >= aces.length ? end
+                    : (index >>> 0) === 0 ? ACL.HEADER : aces[(index >>> 0) - 1].next;
+                const moved = host.readMemory((acl >>> 0) + at, end - at).slice();
+                host.writeMemory((acl >>> 0) + at, added);
+                host.writeMemory((acl >>> 0) + at + size, moved);
+                writeWord((acl >>> 0) + ACL.COUNT, aces.length + count);
+                return 1;
+            },
+        },
+
+        /**
          * BOOL AddAccessDeniedAce(PACL pAcl, DWORD dwAceRevision, DWORD AccessMask, PSID pSid)
          */
         AddAccessDeniedAce: {

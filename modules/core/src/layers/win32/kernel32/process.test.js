@@ -900,3 +900,42 @@ test('the thread-state and clock routines are placed where the host keeps code',
     assert.ok(placed.includes(lastError), 'GetLastError from the code pages');
     assert.ok(placed.includes(ticks), 'GetTickCount from the code pages');
 });
+
+test('GetModuleHandleEx takes a reference unless told not to, and finds a module by an address',
+    ()=>{
+        const { host, fns } = setup();
+        /** @type {[number, boolean][]} */
+        const held = [];
+        Object.assign(host, {
+            /** @param {number} address */
+            moduleContaining: address=>(address >= IMAGE_BASE && address < IMAGE_BASE + 0x10000
+                ? IMAGE_BASE : 0),
+            /** @param {number} base @param {boolean} pin */
+            holdModule: (base, pin)=>held.push([base, pin]),
+        });
+        const OUT = 0x800;
+        assert.equal(fns.GetModuleHandleExW.handler([0, 0, OUT]), 1);
+        assert.equal(host.view.getUint32(OUT, true), IMAGE_BASE);
+        assert.deepEqual(held, [[IMAGE_BASE, false]], 'a reference, as LoadLibrary takes');
+        assert.equal(fns.GetModuleHandleExW.handler([4 | 2, IMAGE_BASE + 0x1234, OUT]), 1,
+            'FROM_ADDRESS with UNCHANGED_REFCOUNT');
+        assert.equal(host.view.getUint32(OUT, true), IMAGE_BASE);
+        assert.equal(held.length, 1, 'and no reference taken');
+        assert.equal(fns.GetModuleHandleExW.handler([4 | 1, IMAGE_BASE + 4, OUT]), 1);
+        assert.deepEqual(held[1], [IMAGE_BASE, true], 'pinned');
+        assert.equal(fns.GetModuleHandleExA.handler([4, 0x123, OUT]), 0, 'an address in no module');
+        assert.equal(host.view.getUint32(OUT, true), 0);
+        assert.equal(fns.GetLastError.handler(), ERROR_MOD_NOT_FOUND);
+        assert.equal(fns.GetModuleHandleExW.handler([3, 0, OUT]), 0, 'PIN with UNCHANGED_REFCOUNT');
+        assert.equal(fns.GetModuleHandleExW.handler([0, 0, 0]), 0, 'nowhere to answer');
+        assert.equal(fns.GetModuleHandleExW.argBytes, 12);
+    });
+
+test('the power status is a desktop on mains power, with no battery', ()=>{
+    const { host, fns } = setup();
+    assert.equal(fns.GetSystemPowerStatus.handler([0x800]), 1);
+    assert.deepEqual([0, 1, 2, 3].map(at=>host.view.getUint8(0x800 + at)), [1, 128, 255, 0]);
+    assert.equal(host.view.getUint32(0x804, true), 0xffffffff, 'lifetime unknown');
+    assert.equal(host.view.getUint32(0x808, true), 0xffffffff);
+    assert.equal(fns.GetSystemPowerStatus.argBytes, 4);
+});

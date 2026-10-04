@@ -238,6 +238,22 @@ test('a DACL allowing only the administrators lets the one account in', ()=>{
     // No room left for another ACE, and a revision no descriptor has.
     assert.equal(fns.AddAccessAllowedAce.handler([ACL_AT, 2, ACCESS_READ, SID]), 0);
     assert.equal(errors.at(-1), 1344, 'ERROR_ALLOTTED_SPACE_EXCEEDED');
+
+    // AddAce puts ACEs already laid out in at an index, the rest moved up.
+    const WIDE = 0x800;
+    const aceSize = 8 + 12;
+    assert.equal(fns.InitializeAcl.handler([WIDE, 8 + 2 * aceSize, 2]), 1);
+    assert.equal(fns.AddAccessAllowedAce.handler([WIDE, 2, ACCESS_READ, SID]), 1);
+    const denied = bytes.slice(WIDE + 8, WIDE + 8 + aceSize);
+    denied[0] = 1;   // ACCESS_DENIED_ACE_TYPE
+    bytes.set(denied, 0x900);
+    assert.equal(fns.AddAce.handler([WIDE, 2, 0, 0x900, aceSize]), 1);
+    assert.equal(bytes[WIDE + 4] | bytes[WIDE + 5] << 8, 2, 'two ACEs');
+    assert.equal(bytes[WIDE + 8], 1, 'the denied one first');
+    assert.equal(bytes[WIDE + 8 + aceSize], 0, 'the allowed one moved behind it');
+    assert.equal(fns.AddAce.handler([WIDE, 2, 0xffffffff, 0x900, aceSize]), 0, 'no room');
+    assert.equal(errors.at(-1), 1344);
+    assert.equal(fns.AddAce.argBytes, 20);
     assert.equal(fns.InitializeSecurityDescriptor.handler([DESCRIPTOR, 2]), 0);
     assert.equal(errors.at(-1), 1305, 'ERROR_UNKNOWN_REVISION');
 });

@@ -195,6 +195,9 @@ export function createConsoleIoFunctions(host){
         },
         FreeConsole: { argBytes: 0, handler: ()=>1 },
 
+        /** HWND GetConsoleWindow(void): there is no console, so no window of one */
+        GetConsoleWindow: { argBytes: 0, handler: ()=>0 },
+
         /**
          * BOOL SetConsoleCtrlHandler(PHANDLER_ROUTINE HandlerRoutine, BOOL Add)
          *

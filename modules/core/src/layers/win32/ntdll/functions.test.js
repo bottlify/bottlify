@@ -110,6 +110,11 @@ test('the aliases carry the argument sizes the guest compiled against', ()=>{
     // These are the numbers a caller of the ntdll spelling pushes.
     const fns = createNtdllFunctions(fakeHost());
 
+    // A native call answers to its Zw name as to its Nt one.
+    assert.equal(fns.ZwQuerySystemInformation, fns.NtQuerySystemInformation);
+    assert.ok(Object.keys(fns).filter(name=>name.startsWith('Nt'))
+        .every(name=>fns[`Zw${name.slice(2)}`] !== undefined), 'every Nt has its Zw');
+
     assert.equal(fns.RtlAllocateHeap.argBytes, 12);
     assert.equal(fns.RtlFreeHeap.argBytes, 12);
     assert.equal(fns.RtlReAllocateHeap.argBytes, 16);

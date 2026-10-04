@@ -47,6 +47,7 @@ const MAX_VALUE = 0x10000;
  * @typedef {Object} ProfileHost
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(address: number, maxLength: number) => string} [readWideString]
  * @property {import('./files.js').FileSystem} files
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
  *           What a structure is written from. Without it a structure cannot
@@ -117,6 +118,11 @@ export function createProfileFunctions(host){
     const text = (pointer, limit)=>((pointer >>> 0) === 0
         ? null
         : host.readCString(pointer >>> 0, limit));
+
+    /** text for the wide entry points. @param {number} pointer @param {number} limit */
+    const wideText = (pointer, limit)=>((pointer >>> 0) === 0
+        ? null
+        : host.readWideString?.(pointer >>> 0, limit) ?? null);
 
     /**
      * Where the file named is. A bare name is in the Windows directory, a
@@ -383,18 +389,15 @@ export function createProfileFunctions(host){
      * @param {string | null} path @param {number} section @param {number} key
      * @param {number} value
      */
-    const put = (path, section, key, value)=>putText(path, section, key, text(value, MAX_VALUE));
+    const put = (path, section, key, value)=>putText(path, text(section, MAX_NAME),
+        text(key, MAX_NAME), text(value, MAX_VALUE));
 
     /**
-     * @param {string | null} path @param {number} section @param {number} key
+     * @param {string | null} path @param {string | null} section @param {string | null} key
      * @param {string | null} value
      */
     const putText = (path, section, key, value)=>{
-        const wanted = {
-            section: text(section, MAX_NAME),
-            key: text(key, MAX_NAME),
-            value,
-        };
+        const wanted = { section, key, value };
         if (path === null || wanted.section === null)
         {
             return 0;
@@ -509,6 +512,17 @@ export function createProfileFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([section, key, value, file])=>put(pathOf(file), section, key, value),
+        },
+
+        /** BOOL WritePrivateProfileStringW(...): WritePrivateProfileStringA in UTF-16 */
+        WritePrivateProfileStringW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([section, key, value, file])=>{
+                const name = wideText(file, MAX_VALUE);
+                return putText(name === null ? null : resolve(name), wideText(section, MAX_NAME),
+                    wideText(key, MAX_NAME), wideText(value, MAX_VALUE));
+            },
         },
 
         /**
@@ -632,7 +646,7 @@ export function createProfileFunctions(host){
                     return 0;
                 }
                 const value = structText(host.readMemory(structure >>> 0, size >>> 0));
-                return putText(pathOf(file), section, key, value);
+                return putText(pathOf(file), text(section, MAX_NAME), text(key, MAX_NAME), value);
             },
         },
 

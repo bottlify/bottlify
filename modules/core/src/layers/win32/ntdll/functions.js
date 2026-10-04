@@ -279,7 +279,7 @@ export function createNtdllFunctions(host){
     // handles they are, and a key handle closes there.
     const registry = host.advapi32?.[REGISTRY_NATIVES] ?? null;
 
-    return {
+    const table = {
         ...alias(kernel32, KERNEL32_ALIASES),
         ...natives,
         ...registry?.entries ?? {},
@@ -541,4 +541,16 @@ export function createNtdllFunctions(host){
             },
         },
     };
+    // A native call answers to both its names: user mode reaches the same
+    // entry through Zw as through Nt, and a program asks GetProcAddress for
+    // either.
+    for (const [name, entry] of Object.entries(table))
+    {
+        const twin = `Zw${name.slice(2)}`;
+        if (name.startsWith('Nt') && !(twin in table))
+        {
+            /** @type {any} */ (table)[twin] = entry;
+        }
+    }
+    return table;
 }

@@ -405,3 +405,40 @@ test('a section written whole replaces every line it had, is added when missing,
         assert.ok(!files.text('C:\\WINDOWS\\TEMP\\setup.ini').includes('[Added]'));
         assert.equal(fns.WritePrivateProfileSectionA.argBytes, 12);
     });
+
+test('WritePrivateProfileStringW writes what the A call writes, read from UTF-16', ()=>{
+    const memory = fakeMemory();
+    const files = fakeFiles();
+    /** @param {number} at @param {string} text */
+    const wide = (at, text)=>{
+        [...text, '\0'].forEach((unit, index)=>{
+            memory.bytes[at + index * 2] = unit.charCodeAt(0) & 0xff;
+            memory.bytes[at + index * 2 + 1] = unit.charCodeAt(0) >> 8;
+        });
+        return at;
+    };
+    const fns = createProfileFunctions({
+        writeMemory: memory.writeMemory,
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        readWideString: (address, maxLength)=>{
+            let text = '';
+            for (let at = address; text.length < maxLength; at += 2)
+            {
+                const unit = memory.bytes[at] | memory.bytes[at + 1] << 8;
+                if (unit === 0)
+                {
+                    break;
+                }
+                text += String.fromCharCode(unit);
+            }
+            return text;
+        },
+        files,
+    });
+    assert.equal(fns.WritePrivateProfileStringW.argBytes, 16);
+    assert.equal(fns.WritePrivateProfileStringW.handler([wide(SECTION, 'Setup'), wide(KEY, 'Path'),
+        wide(VALUE, 'C:\\Temp'), wide(FILE, 'C:\\WORK\\w.ini')]), 1);
+    assert.equal(files.text('C:\\WORK\\w.ini'), '[Setup]\r\nPath=C:\\Temp\r\n');
+    assert.equal(fns.WritePrivateProfileStringW.handler([0, wide(KEY, 'Path'), 0, FILE]), 0,
+        'a NULL section is refused');
+});

@@ -93,3 +93,29 @@ test('a name in the upper half of the ANSI page reads back as the bytes it was a
     assert.equal(fns.GetAtomNameA.handler([atom, OUT, 64]), 4);
     assert.deepEqual([...read(OUT, 5)], [0x80, 0x99, 0x97, 0xe9, 0]);
 });
+
+test('the wide spellings add and find in the same table', ()=>{
+    const bytes = new Uint8Array(0x10400);
+    const fns = createAtomFunctions({
+        writeMemory: (address, data)=>bytes.set(data, address),
+        readCString: ()=>'',
+        readWideString(address, maxLength){
+            let text = '';
+            for (let at = address; text.length < maxLength && (bytes[at] | bytes[at + 1]) !== 0;
+                at += 2)
+            {
+                text += String.fromCharCode(bytes[at] | bytes[at + 1] << 8);
+            }
+            return text;
+        },
+    });
+    const WIDE_NAME = 0x10100;
+    [...'Futuremark'].forEach((unit, index)=>{
+        bytes[WIDE_NAME + index * 2] = unit.charCodeAt(0);
+    });
+    const atom = fns.GlobalAddAtomW.handler([WIDE_NAME]);
+    assert.ok(atom >= 0xc000);
+    assert.equal(fns.GlobalFindAtomW.handler([WIDE_NAME]), atom);
+    assert.equal(fns.AddAtomW.handler([WIDE_NAME]), atom, 'one table for both spellings');
+    assert.equal(fns.FindAtomW.handler([0x1234]), 0x1234, 'an integer atom is itself');
+});

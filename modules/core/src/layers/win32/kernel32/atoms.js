@@ -37,6 +37,7 @@ const MAX_ATOM_NAME = 255;
  * @typedef {Object} AtomHost
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(address: number, maxLength: number) => string} [readWideString]
  * @property {(code: number) => void} [setLastError]
  */
 
@@ -59,21 +60,22 @@ export function createAtomFunctions(host){
      * A name argument: below 64 KiB it is an integer atom passed by value, so
      * it is returned as itself; otherwise it is a pointer to a string.
      *
-     * @param {number} pointer
+     * @param {number} pointer @param {boolean} [wide]
      * @returns {{ integer: number } | { text: string }}
      */
-    const nameOf = pointer=>{
+    const nameOf = (pointer, wide = false)=>{
         const raw = pointer >>> 0;
         if (raw < MAX_INTEGER_ATOM)
         {
             return { integer: raw };
         }
-        return { text: host.readCString(raw, MAX_ATOM_NAME) };
+        return { text: wide ? host.readWideString?.(raw, MAX_ATOM_NAME) ?? ''
+            : host.readCString(raw, MAX_ATOM_NAME) };
     };
 
-    /** @param {number} pointer @returns {number} */
-    const add = pointer=>{
-        const name = nameOf(pointer);
+    /** @param {number} pointer @param {boolean} [wide] @returns {number} */
+    const add = (pointer, wide = false)=>{
+        const name = nameOf(pointer, wide);
         if ('integer' in name)
         {
             return name.integer;
@@ -96,9 +98,9 @@ export function createAtomFunctions(host){
         return atom;
     };
 
-    /** @param {number} pointer @returns {number} */
-    const find = pointer=>{
-        const name = nameOf(pointer);
+    /** @param {number} pointer @param {boolean} [wide] @returns {number} */
+    const find = (pointer, wide = false)=>{
+        const name = nameOf(pointer, wide);
         if ('integer' in name)
         {
             return name.integer;
@@ -156,6 +158,12 @@ export function createAtomFunctions(host){
         /** ATOM FindAtomA(LPCSTR lpString) */
         FindAtomA: { argBytes: 4, handler: (/** @type {number[]} */ [p])=>find(p) },
         GlobalFindAtomA: { argBytes: 4, handler: (/** @type {number[]} */ [p])=>find(p) },
+
+        /** ATOM AddAtomW(LPCWSTR lpString), FindAtomW and the global spellings: one table */
+        AddAtomW: { argBytes: 4, handler: (/** @type {number[]} */ [p])=>add(p, true) },
+        GlobalAddAtomW: { argBytes: 4, handler: (/** @type {number[]} */ [p])=>add(p, true) },
+        FindAtomW: { argBytes: 4, handler: (/** @type {number[]} */ [p])=>find(p, true) },
+        GlobalFindAtomW: { argBytes: 4, handler: (/** @type {number[]} */ [p])=>find(p, true) },
 
         /** ATOM DeleteAtom(ATOM nAtom) -- zero on success, the atom back on failure. */
         DeleteAtom: { argBytes: 4, handler: (/** @type {number[]} */ [a])=>remove(a) },
