@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { createComRegistry } from './objects.js';
 import {
     ADAPTER_RAM, CLSID_WBEM_LOCATOR, IID_IENUM_WBEM_CLASS_OBJECT, IID_IWBEM_CLASS_OBJECT,
-    IID_IWBEM_LOCATOR, IID_IWBEM_SERVICES, registerWbemClasses,
+    IID_IWBEM_LOCATOR, IID_IWBEM_SERVICES, WBEM_SCHEMAS, machineClasses, registerWbemClasses,
 } from './wbem.js';
 import { WINDOWS_VERSIONS } from '../kernel32/versions.js';
 
@@ -258,4 +258,48 @@ test('the machine classes answer as Windows does: one instance each, a boolean a
     assert.ok(text(get(only('WIN32_BaseBoard'), 'Product').value).length > 0);
     assert.ok(text(get(only('Win32_DiskDrive'), 'Model').value).length > 0);
     assert.deepEqual(host.reported, []);
+});
+
+test('a name the class does not have is WBEM_E_NOT_FOUND, its VARIANT left alone, as Windows '
+    + 'answers; one it has with no value kept is NULL', ()=>{
+    // A client that asks an association for a device's DeviceID checks for
+    // WBEM_E_NOT_FOUND; made S_OK and NULL, its string conversion threw.
+    const host = setup();
+    const object = /** @type {any} */ (host.registry.create(CLSID_WBEM_LOCATOR));
+    const connect = object.interfaceFor(IID_IWBEM_LOCATOR).methods[3];
+    assert.equal(connect.invoke(object, [host.wide('root\\cimv2'), 0, 0, 0, 0, 0, 0, OUT]), 0);
+    const services = host.view.getUint32(OUT, true);
+    /** @param {string} name */
+    const only = name=>{
+        assert.equal(host.call(services, 'CreateInstanceEnum', [host.wide(name), 0, 0, OUT]), 0);
+        assert.equal(host.call(host.view.getUint32(OUT, true), 'Next', [0, 1, OUT, OUT + 4]), 0);
+        return host.view.getUint32(OUT, true);
+    };
+    const variant = 0x200;
+    const WBEM_E_NOT_FOUND = 0x80041002 | 0;
+    host.view.setUint16(variant, 0x1234, true);
+    const location = only('Win32_MemoryDeviceLocation');
+    assert.equal(host.call(location, 'Get', [host.wide('DeviceID'), 0, variant, 0, 0]),
+        WBEM_E_NOT_FOUND);
+    assert.equal(host.view.getUint16(variant, true), 0x1234, 'the VARIANT as it was');
+    assert.equal(host.call(only('Win32_Processor'), 'Get',
+        [host.wide('NoSuchProperty'), 0, variant, 0, 0]), WBEM_E_NOT_FOUND);
+    assert.deepEqual(host.reported, [], 'what Windows answers is not said');
+
+    assert.equal(host.call(only('Win32_Processor'), 'Get',
+        [host.wide('l2cachesize'), 0, variant, 0, 0]), 0, 'a property of the class, any case');
+    assert.equal(host.view.getUint16(variant, true), 1, 'VT_NULL');
+});
+
+test('every property kept is one its class has in Windows', ()=>{
+    const classes = machineClasses({ physicalMemory: 512 << 20, windows: WINDOWS_VERSIONS.winxp });
+    for (const [name, instances] of Object.entries(classes))
+    {
+        const schema = WBEM_SCHEMAS[name];
+        assert.ok(schema, `${name} has a schema`);
+        for (const property of instances.flatMap(instance=>Object.keys(instance)))
+        {
+            assert.ok(schema.has(property), `${name}.${property}`);
+        }
+    }
 });

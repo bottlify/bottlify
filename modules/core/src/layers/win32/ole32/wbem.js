@@ -39,6 +39,8 @@ const WBEM_E_NOT_SUPPORTED = 0x8004100c | 0;
 const WBEM_E_INVALID_NAMESPACE = 0x8004100e | 0;
 const WBEM_E_INVALID_QUERY_TYPE = 0x80041038 | 0;
 
+const WBEM_E_NOT_FOUND = 0x80041002 | 0;
+
 const VT_I4 = 3;
 const VT_NULL = 1;
 const VT_BSTR = 8;
@@ -68,6 +70,92 @@ export const ADAPTER_NAME = VIDEO_ADAPTER_NAME;
  * @typedef {[number, number | string | boolean | number[]]} WbemProperty
  */
 
+/** CIM_ManagedSystemElement's properties, which every class below has. */
+const ELEMENT = ['Caption', 'Description', 'InstallDate', 'Name', 'Status'];
+/** CIM_LogicalDevice's, a device's. */
+const DEVICE = [...ELEMENT, 'Availability', 'ConfigManagerErrorCode', 'ConfigManagerUserConfig',
+    'CreationClassName', 'DeviceID', 'ErrorCleared', 'ErrorDescription', 'LastErrorCode',
+    'PNPDeviceID', 'PowerManagementCapabilities', 'PowerManagementSupported', 'StatusInfo',
+    'SystemCreationClassName', 'SystemName'];
+/** CIM_PhysicalElement's, a piece of hardware's. */
+const PHYSICAL = [...ELEMENT, 'CreationClassName', 'Manufacturer', 'Model', 'OtherIdentifyingInfo',
+    'PartNumber', 'PoweredOn', 'SerialNumber', 'SKU', 'Tag', 'Version'];
+/** CIM_PhysicalPackage's, hardware that holds other hardware. */
+const PACKAGE = [...PHYSICAL, 'Depth', 'Height', 'HotSwappable', 'Removable', 'Replaceable',
+    'Weight', 'Width'];
+
+/**
+ * The properties each kept class has in Windows XP's WMI. Get of one that
+ * this build keeps no value for reads as VT_NULL, as a property without a
+ * value does; of a name the class does not have, WBEM_E_NOT_FOUND, as Windows
+ * answers -- a program that asks a class for what it may not have checks the
+ * answer, and one that reads every property it knows reads them unchecked.
+ * ponytail: the system properties (__CLASS, __PATH and the rest) are not
+ * kept; add them when a program asks for one.
+ *
+ * @type {Record<string, Set<string>>}
+ */
+export const WBEM_SCHEMAS = Object.fromEntries(Object.entries({
+    Win32_OperatingSystem: [...ELEMENT, 'BootDevice', 'BuildNumber', 'BuildType', 'CodeSet',
+        'CountryCode', 'CreationClassName', 'CSCreationClassName', 'CSDVersion', 'CSName',
+        'CurrentTimeZone', 'DataExecutionPrevention_32BitApplications',
+        'DataExecutionPrevention_Available', 'DataExecutionPrevention_Drivers',
+        'DataExecutionPrevention_SupportPolicy', 'Debug', 'Distributed', 'EncryptionLevel',
+        'ForegroundApplicationBoost', 'FreePhysicalMemory', 'FreeSpaceInPagingFiles',
+        'FreeVirtualMemory', 'LargeSystemCache', 'LastBootUpTime', 'LocalDateTime', 'Locale',
+        'Manufacturer', 'MaxNumberOfProcesses', 'MaxProcessMemorySize', 'NumberOfLicensedUsers',
+        'NumberOfProcesses', 'NumberOfUsers', 'Organization', 'OSLanguage', 'OSProductSuite',
+        'OSType', 'OtherTypeDescription', 'PlusProductID', 'PlusVersionNumber', 'Primary',
+        'ProductType', 'QuantumLength', 'QuantumType', 'RegisteredUser', 'SerialNumber',
+        'ServicePackMajorVersion', 'ServicePackMinorVersion', 'SizeStoredInPagingFiles',
+        'SuiteMask', 'SystemDevice', 'SystemDirectory', 'SystemDrive', 'TotalSwapSpaceSize',
+        'TotalVirtualMemorySize', 'TotalVisibleMemorySize', 'Version', 'WindowsDirectory'],
+    Win32_VideoController: [...DEVICE, 'AcceleratorCapabilities', 'AdapterCompatibility',
+        'AdapterDACType', 'AdapterRAM', 'CapabilityDescriptions', 'ColorTableEntries',
+        'CurrentBitsPerPixel', 'CurrentHorizontalResolution', 'CurrentNumberOfColors',
+        'CurrentNumberOfColumns', 'CurrentNumberOfRows', 'CurrentRefreshRate', 'CurrentScanMode',
+        'CurrentVerticalResolution', 'DeviceSpecificPens', 'DitherType', 'DriverDate',
+        'DriverVersion', 'ICMIntent', 'ICMMethod', 'InfFilename', 'InfSection',
+        'InstalledDisplayDrivers', 'MaxMemorySupported', 'MaxNumberControlled', 'MaxRefreshRate',
+        'MinRefreshRate', 'Monochrome', 'NumberOfColorPlanes', 'NumberOfVideoPages',
+        'ProtocolSupported', 'ReservedSystemPaletteEntries', 'SpecificationVersion',
+        'SystemPaletteEntries', 'TimeOfLastReset', 'VideoArchitecture', 'VideoMemoryType',
+        'VideoMode', 'VideoModeDescription', 'VideoProcessor'],
+    Win32_SoundDevice: [...DEVICE, 'DMABufferSize', 'Manufacturer', 'MPU401Address',
+        'ProductName'],
+    Win32_Processor: [...DEVICE, 'AddressWidth', 'Architecture', 'CpuStatus', 'CurrentClockSpeed',
+        'CurrentVoltage', 'DataWidth', 'ExtClock', 'Family', 'L2CacheSize', 'L2CacheSpeed',
+        'Level', 'LoadPercentage', 'Manufacturer', 'MaxClockSpeed', 'OtherFamilyDescription',
+        'ProcessorId', 'ProcessorType', 'Revision', 'Role', 'SocketDesignation', 'Stepping',
+        'UniqueId', 'UpgradeMethod', 'Version', 'VoltageCaps'],
+    Win32_BIOS: [...ELEMENT, 'BiosCharacteristics', 'BIOSVersion', 'BuildNumber', 'CodeSet',
+        'CurrentLanguage', 'IdentificationCode', 'InstallableLanguages', 'LanguageEdition',
+        'ListOfLanguages', 'Manufacturer', 'OtherTargetOS', 'PrimaryBIOS', 'ReleaseDate',
+        'SerialNumber', 'SMBIOSBIOSVersion', 'SMBIOSMajorVersion', 'SMBIOSMinorVersion',
+        'SMBIOSPresent', 'SoftwareElementID', 'SoftwareElementState', 'TargetOperatingSystem',
+        'Version'],
+    Win32_BaseBoard: [...PACKAGE, 'ConfigOptions', 'HostingBoard', 'Product',
+        'RequirementsDescription', 'RequiresDaughterBoard', 'SlotLayout', 'SpecialRequirements'],
+    Win32_PhysicalMemoryArray: [...PACKAGE, 'Location', 'MaxCapacity', 'MemoryDevices',
+        'MemoryErrorCorrection', 'Use'],
+    Win32_PhysicalMemory: [...PHYSICAL, 'BankLabel', 'Capacity', 'DataWidth', 'DeviceLocator',
+        'FormFactor', 'HotSwappable', 'InterleaveDataDepth', 'InterleavePosition', 'MemoryType',
+        'PositionInRow', 'Removable', 'Replaceable', 'Speed', 'TotalWidth', 'TypeDetail'],
+    // An association: its two ends and nothing else.
+    Win32_MemoryDeviceLocation: ['Antecedent', 'Dependent'],
+    Win32_SystemSlot: [...PHYSICAL, 'ConnectorPinout', 'ConnectorType', 'CurrentUsage',
+        'HeightAllowed', 'LengthAllowed', 'MaxDataWidth', 'Number', 'PMESignal',
+        'PurposeDescription', 'Shared', 'SlotDesignation', 'SpecialPurpose', 'SupportsHotPlug',
+        'ThermalRating', 'VccMixedVoltageSupport', 'VppMixedVoltageSupport'],
+    Win32_DiskDrive: [...DEVICE, 'BytesPerSector', 'Capabilities', 'CapabilityDescriptions',
+        'CompressionMethod', 'DefaultBlockSize', 'Index', 'InterfaceType', 'Manufacturer',
+        'MaxBlockSize', 'MaxMediaSize', 'MediaLoaded', 'MediaType', 'MinBlockSize', 'Model',
+        'NeedsCleaning', 'NumberOfMediaSupported', 'Partitions', 'SCSIBus', 'SCSILogicalUnit',
+        'SCSIPort', 'SCSITargetId', 'SectorsPerTrack', 'Signature', 'Size', 'TotalCylinders',
+        'TotalHeads', 'TotalSectors', 'TotalTracks', 'TracksPerCylinder'],
+}).map(([name, properties])=>[name.toLowerCase(),
+    new Set(properties.map(property=>property.toLowerCase()))]));
+
 /**
  * Each kept class's instances, each instance its properties keyed in lower
  * case, as WMI matches names without regard to it.
@@ -76,7 +164,7 @@ export const ADAPTER_NAME = VIDEO_ADAPTER_NAME;
  *     windows?: import('../kernel32/versions.js').WindowsVersion }} machine
  * @returns {Record<string, Record<string, WbemProperty>[]>}
  */
-function machineClasses({ physicalMemory = 0, windows }){
+export function machineClasses({ physicalMemory = 0, windows }){
     const hex = (/** @type {number} */ value)=>(value >>> 0).toString(16).toUpperCase()
         .padStart(8, '0');
     // A reference names its instance by the computer, the namespace, the
@@ -155,6 +243,17 @@ function machineClasses({ physicalMemory = 0, windows }){
             addresswidth: [CIM_UINT16, 32],
             datawidth: [CIM_UINT16, 32],
             socketdesignation: [CIM_STRING, 'CPU 1'],
+            // As Windows XP writes it; a program that reads it takes it for
+            // the string every machine has.
+            version: [CIM_STRING, `Model ${PROCESSOR.model}, Stepping ${PROCESSOR.stepping}`],
+            stepping: [CIM_STRING, String(PROCESSOR.stepping)],
+            role: [CIM_STRING, 'CPU'],
+            status: [CIM_STRING, 'OK'],
+            cpustatus: [CIM_UINT16, 1], // enabled
+            availability: [CIM_UINT16, 3], // running at full power
+            creationclassname: [CIM_STRING, 'Win32_Processor'],
+            systemcreationclassname: [CIM_STRING, 'Win32_ComputerSystem'],
+            systemname: [CIM_STRING, COMPUTER_NAME],
         }],
         win32_bios: [{
             manufacturer: [CIM_STRING, 'Bottlify'],
@@ -177,6 +276,10 @@ function machineClasses({ physicalMemory = 0, windows }){
         }],
         win32_physicalmemoryarray: [{
             tag: [CIM_STRING, 'Physical Memory Array 0'],
+            name: [CIM_STRING, 'Physical Memory Array'],
+            caption: [CIM_STRING, 'Physical Memory Array'],
+            description: [CIM_STRING, 'Physical Memory Array'],
+            creationclassname: [CIM_STRING, 'Win32_PhysicalMemoryArray'],
             location: [CIM_UINT16, 3], // the system board
             use: [CIM_UINT16, 3], // system memory
             memoryerrorcorrection: [CIM_UINT16, 3], // none
@@ -185,6 +288,15 @@ function machineClasses({ physicalMemory = 0, windows }){
         }],
         win32_physicalmemory: [{
             tag: [CIM_STRING, 'Physical Memory 0'],
+            // A module's maker, part and serial are strings on every machine
+            // whose SMBIOS lists its memory: a program reads them unchecked.
+            manufacturer: [CIM_STRING, 'Bottlify'],
+            partnumber: [CIM_STRING, 'BTLFY-DIMM'],
+            serialnumber: [CIM_STRING, '00000000'],
+            name: [CIM_STRING, 'Physical Memory'],
+            caption: [CIM_STRING, 'Physical Memory'],
+            description: [CIM_STRING, 'Physical Memory'],
+            creationclassname: [CIM_STRING, 'Win32_PhysicalMemory'],
             capacity: [CIM_UINT64, String(memory)],
             devicelocator: [CIM_STRING, 'DIMM 1'],
             banklabel: [CIM_STRING, 'BANK 0'],
@@ -206,6 +318,7 @@ function machineClasses({ physicalMemory = 0, windows }){
             currentusage: [CIM_UINT16, 5], // in use
             maxdatawidth: [CIM_UINT16, 2], // 32 bits
             supportshotplug: [CIM_BOOLEAN, false],
+            shared: [CIM_BOOLEAN, false],
             connectortype: [CIM_UINT16 | CIM_FLAG_ARRAY, [2]], // other
         }],
         win32_diskdrive: [{
@@ -378,20 +491,26 @@ export function registerWbemClasses(host){
     };
 
     /**
-     * IWbemClassObject over one instance: Get reads a property, the rest is
-     * refused. A property this build keeps no value for reads as VT_NULL, as
-     * one the machine has no value for does in WMI -- a client tells a value
-     * from none by VT_NULL, and an empty VARIANT reads to it as a string it
-     * was given -- and it is said.
+     * IWbemClassObject over one instance of a class: Get reads a property,
+     * the rest is refused. A property of the class that this build keeps no
+     * value for reads as VT_NULL, as one the machine has no value for does in
+     * WMI -- a client tells a value from none by VT_NULL, and an empty VARIANT
+     * reads to it as a string it was given -- and it is said; a name the
+     * class does not have is WBEM_E_NOT_FOUND, its VARIANT left alone.
      *
+     * @param {string} className  In lower case.
      * @param {Record<string, WbemProperty>} properties
      * @param {number} out
      */
-    const publishInstance = (properties, out)=>publish(CLSID_WBEM_LOCATOR, {
+    const publishInstance = (className, properties, out)=>publish(CLSID_WBEM_LOCATOR, {
         interfaces: [describe(IID_IWBEM_CLASS_OBJECT, 'IWbemClassObject', SLOTS.object, {
             Get: ([name, , value, type, flavor])=>{
                 const key = readString(name >>> 0);
                 const property = properties[key.toLowerCase()];
+                if (!property && !WBEM_SCHEMAS[className]?.has(key.toLowerCase()))
+                {
+                    return WBEM_E_NOT_FOUND;
+                }
                 if (!property)
                 {
                     diverge('IWbemClassObject::Get', `no value kept for ${key}; it reads as NULL`);
@@ -465,11 +584,12 @@ export function registerWbemClasses(host){
     /**
      * IEnumWbemClassObject over the instances of one class.
      *
+     * @param {string} className  In lower case.
      * @param {Record<string, WbemProperty>[]} instances
      * @param {number} out
      * @returns {number} an HRESULT
      */
-    const publishEnumerator = (instances, out)=>{
+    const publishEnumerator = (className, instances, out)=>{
         let index = 0;
         return publish(CLSID_WBEM_LOCATOR, {
             interfaces: [describe(IID_IENUM_WBEM_CLASS_OBJECT, 'IEnumWbemClassObject',
@@ -486,7 +606,7 @@ export function registerWbemClasses(host){
                         let fetched = 0;
                         while (fetched < (count >>> 0) && index < instances.length)
                         {
-                            const hr = publishInstance(instances[index],
+                            const hr = publishInstance(className, instances[index],
                                 (objects >>> 0) + fetched * 4);
                             if (hr !== S_OK)
                             {
@@ -530,9 +650,9 @@ export function registerWbemClasses(host){
                 return WBEM_E_INVALID_PARAMETER;
             }
             writeU32(out >>> 0, 0);
-            return publishEnumerator(
-                instancesOf(readString(filter >>> 0), 'IWbemServices::CreateInstanceEnum'),
-                out >>> 0);
+            const name = readString(filter >>> 0);
+            return publishEnumerator(name.toLowerCase(),
+                instancesOf(name, 'IWbemServices::CreateInstanceEnum'), out >>> 0);
         },
         ExecQuery: ([language, query, , , out])=>{
             if ((out >>> 0) === 0)
@@ -555,8 +675,8 @@ export function registerWbemClasses(host){
             {
                 diverge('IWbemServices::ExecQuery', `the condition in "${text}" is ignored`);
             }
-            return publishEnumerator(instancesOf(from[1], 'IWbemServices::ExecQuery'),
-                out >>> 0);
+            return publishEnumerator(from[1].toLowerCase(),
+                instancesOf(from[1], 'IWbemServices::ExecQuery'), out >>> 0);
         },
     });
 
