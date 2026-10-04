@@ -416,10 +416,15 @@ export function createDirect3D8Seam(
         if (owner)
         {
             owners.set(object, owner);
-            // A record in the device's ring may name it: the ring is played
-            // before its count is touched on the host, which the last
-            // reference's Release always is.
-            object.settleGuestRefs ??= ()=>shadowOf(owner)?.sync();
+        }
+        // A record in the device's ring may name it -- or, for a level, a
+        // face or a volume, the container whose count it shares: the ring is
+        // played before its count is touched on the host, which the last
+        // reference's Release always is.
+        const device = ownerOf(object);
+        if (device)
+        {
+            object.settleGuestRefs ??= ()=>shadowOf(device)?.sync();
         }
         const pointer = publisher.publish(object, interfaces, id);
         fields.writeU32(out, pointer);
@@ -2662,6 +2667,9 @@ export function createDirect3D8Seam(
                 });
                 shadows.set(held.device, shadow);
                 held.device.guestState = ()=>shadow.address();
+                // The device's count holds what is bound at a count of zero
+                // until it is unbound, which may be a record in the ring.
+                held.device.settleGuestRefs = ()=>shadow.sync();
             }
             const result = handBack(held.device, deviceInterfaces, IID_IDirect3DDevice8,
                 out >>> 0, D3DERR_OUTOFVIDEOMEMORY);

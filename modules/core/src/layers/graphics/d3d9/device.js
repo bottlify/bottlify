@@ -1569,8 +1569,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * @returns {number | null} null when the binding is unusable
      */
     const streamBias = ()=>{
-        const source = stream(0);
-        if (!source.buffer || !(source.stride > 0) || source.offset % source.stride !== 0)
+        // Read, not made: `stream` keeps an entry for the index it is asked,
+        // and a state block of everything captures every entry there is.
+        const source = streams.get(0);
+        if (!source?.buffer || !(source.stride > 0) || source.offset % source.stride !== 0)
         {
             return null;
         }

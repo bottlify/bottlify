@@ -1768,7 +1768,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             const target = renderTarget ? describe(renderTarget) : null;
             return {
                 drawable: (inScene ? 1 : 0) | (declared ? 2 : 0)
-                    | (stream(0).buffer ? 4 : 0) | (indices ? 8 : 0),
+                    | (streams.get(0)?.buffer ? 4 : 0) | (indices ? 8 : 0),
                 targetWidth: target?.Width ?? 0,
                 targetHeight: target?.Height ?? 0,
                 clipPlanes: CLIP_PLANES,

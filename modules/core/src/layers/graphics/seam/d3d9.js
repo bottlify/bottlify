@@ -887,7 +887,8 @@ export function createDirect3D9Seam(
             {
                 return hr;
             }
-            return handBack(held.volume, volumeInterfaces, IID_IDirect3DVolume9, out >>> 0);
+            return handBack(held.volume, volumeInterfaces, IID_IDirect3DVolume9, out >>> 0,
+                E_OUTOFMEMORY, owners.get(texture));
         },
         /** @param {any} texture @param {number[]} args */
         LockBox: (texture, [level, out, box, flags])=>lockBox(out,
@@ -3065,6 +3066,9 @@ export function createDirect3D9Seam(
             });
             shadows.set(held.device, shadow);
             held.device.guestState = ()=>shadow.address();
+            // The device's count holds what is bound at a count of zero
+            // until it is unbound, which may be a record in the ring.
+            held.device.settleGuestRefs = ()=>shadow.sync();
         }
         // The window is now this resolution; the reported screen is too.
         // Fullscreen, the device's window follows the mode, as the real
