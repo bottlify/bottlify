@@ -764,3 +764,254 @@ test('this machine\'s device tree has no devices to enumerate or change', async(
     assert.equal(m.fns.SetupDiEnumDeviceInfo.handler([set, 0, device]), 0);
     assert.equal(m.lastError(), ERROR_INVALID_HANDLE);
 });
+
+test('a line\'s fields one at a time, by index: the key is field 0', async()=>{
+    const m = await machine();
+    m.file('C:\\src\\t.inf', [INF, '[Lone]', 'only', 'a,b'].join('\r\n'));
+    const inf = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\src\\t.inf'), 0,
+        INF_STYLE_WIN4, 0]);
+    const context = m.buffer(16);
+    const out = m.buffer(64);
+    const size = m.buffer(4);
+    assert.equal(m.fns.SetupFindFirstLineA.handler([inf, m.str('Section'), 0, context]), 1);
+    assert.equal(m.fns.SetupGetStringFieldA.handler([context, 0, out, 64, size]), 1);
+    assert.equal(m.readCString(out, 64), 'Key1');
+    assert.equal(m.u32(size), 5);
+    assert.equal(m.fns.SetupGetStringFieldA.handler([context, 3, out, 64, size]), 1);
+    assert.equal(m.readCString(out, 64), 'Field3');
+    assert.equal(m.u32(size), 7, 'the terminator counted');
+    assert.equal(m.fns.SetupGetStringFieldA.handler([context, 2, 0, 0, size]), 1,
+        'a NULL buffer asks for the size');
+    assert.equal(m.u32(size), 7);
+    assert.equal(m.fns.SetupGetStringFieldA.handler([context, 2, out, 6, size]), 0);
+    assert.equal(m.lastError(), ERROR_INSUFFICIENT_BUFFER);
+    assert.equal(m.fns.SetupGetStringFieldA.handler([context, 4, out, 64, size]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_PARAMETER, 'past the last field');
+
+    assert.equal(m.fns.SetupFindFirstLineA.handler([inf, m.str('Lone'), 0, context]), 1);
+    assert.equal(m.fns.SetupGetStringFieldA.handler([context, 0, out, 64, 0]), 1);
+    assert.equal(m.readCString(out, 64), 'only', 'a lone field is the key as well');
+    assert.equal(m.fns.SetupGetStringFieldA.handler([context, 1, out, 64, 0]), 1);
+    assert.equal(m.readCString(out, 64), 'only');
+    assert.equal(m.fns.SetupFindNextLine.handler([context, context]), 1);
+    assert.equal(m.fns.SetupGetStringFieldA.handler([context, 0, out, 64, 0]), 0,
+        'several fields and no = have no key');
+    assert.equal(m.lastError(), ERROR_INVALID_PARAMETER);
+    assert.equal(m.fns.SetupGetStringFieldA.handler([context, 2, out, 64, 0]), 1);
+    assert.equal(m.readCString(out, 64), 'b');
+});
+
+test('a line by its index in a section', async()=>{
+    const m = await machine();
+    m.file('C:\\src\\t.inf', INF);
+    const inf = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\src\\t.inf'), 0,
+        INF_STYLE_WIN4, 0]);
+    const context = m.buffer(16);
+    const out = m.buffer(64);
+    assert.equal(m.fns.SetupGetLineByIndexA.handler([inf, m.str('section'), 1, context]), 1);
+    assert.equal(m.lastError(), 0);
+    assert.equal(m.fns.SetupGetLineTextA.handler([context, 0, 0, 0, out, 64, 0]), 1);
+    assert.equal(m.readCString(out, 64), 'Field4,Field5');
+    assert.equal(m.fns.SetupGetLineByIndexA.handler([inf, m.str('Section'), 2, context]), 0);
+    assert.equal(m.lastError(), ERROR_LINE_NOT_FOUND, 'past the end');
+    assert.equal(m.fns.SetupGetLineByIndexA.handler([inf, m.str('Nowhere'), 0, context]), 0);
+    assert.equal(m.lastError(), ERROR_LINE_NOT_FOUND, 'no such section');
+    assert.equal(m.fns.SetupGetLineByIndexA.handler([0x999, m.str('Section'), 0, context]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_HANDLE);
+});
+
+test('user DIRIDs are the INF\'s own, in its text and where its files go', async()=>{
+    const m = await machine();
+    m.file('C:\\src\\ids.inf', ['[Version]', 'Signature="$Chicago$"', '[Install]',
+        'CopyFiles=Files', '[Paths]', 'Where=%32768%\\sub,%32769%,%10%',
+        '[SourceDisksNames]', '1="The disk"', '[SourceDisksFiles]', 'a.dll=1',
+        '[DestinationDirs]', 'Files=32768,bin', '[Files]', 'a.dll', ''].join('\r\n'));
+    m.file('C:\\src\\a.dll', 'A');
+    const inf = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\src\\ids.inf'), 0,
+        INF_STYLE_WIN4, 0]);
+    const out = m.buffer(128);
+    const context = m.buffer(16);
+
+    assert.equal(m.fns.SetupSetDirectoryIdA.handler([inf, 0x7fff, m.str('C:\\x')]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_PARAMETER, 'below DIRID_USER');
+    assert.equal(m.fns.SetupSetDirectoryIdA.handler([0x999, 0x8000, m.str('C:\\x')]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_HANDLE);
+    assert.equal(m.fns.SetupSetDirectoryIdA.handler([inf, 0x8000, m.str('C:\\App\\')]), 1);
+    assert.equal(m.fns.SetupSetDirectoryIdA.handler([inf, 0x8001, m.str('C:\\Other')]), 1);
+
+    assert.equal(m.fns.SetupGetLineTextA.handler([0, inf, m.str('Paths'), m.str('Where'), out,
+        128, 0]), 1);
+    assert.equal(m.readCString(out, 128), 'C:\\App\\sub,C:\\Other,C:\\WINDOWS');
+    assert.equal(m.fns.SetupFindFirstLineA.handler([inf, m.str('Paths'), 0, context]), 1);
+    assert.equal(m.fns.SetupGetStringFieldA.handler([context, 2, out, 128, 0]), 1);
+    assert.equal(m.readCString(out, 128), 'C:\\Other');
+
+    assert.equal(m.fns.SetupSetDirectoryIdA.handler([inf, 0x8001, 0]), 1, 'NULL unassigns');
+    assert.equal(m.fns.SetupGetStringFieldA.handler([context, 2, out, 128, 0]), 1);
+    assert.equal(m.readCString(out, 128), '%32769%', 'left as written');
+
+    const forward = m.callback(([given, message, param1, param2])=>
+        m.fns.SetupDefaultQueueCallbackA.handler([given, message, param1, param2]));
+    assert.equal(await m.fns.SetupInstallFromInfSectionA.handler([0, inf, m.str('Install'),
+        SPINST_FILES, 0, m.str('C:\\src'), 0, forward, 0, 0, 0]), 1);
+    assert.equal(m.contents('C:\\App\\bin\\a.dll'), 'A', 'DestinationDirs by a user DIRID');
+
+    assert.equal(m.fns.SetupSetDirectoryIdA.handler([inf, 0, 0]), 1, 'id 0 clears them all');
+    assert.equal(m.fns.SetupGetStringFieldA.handler([context, 1, out, 128, 0]), 1);
+    assert.equal(m.readCString(out, 128), '%32768%\\sub');
+});
+
+test('another INF appended to an open one, by name or as its LayoutFile', async()=>{
+    const m = await machine();
+    m.file('C:\\src\\main.inf', ['[Version]', 'Signature="$Chicago$"',
+        'LayoutFile=lay.inf', '[Section]', 'Key1=one', ''].join('\r\n'));
+    m.file('C:\\WINDOWS\\inf\\lay.inf', ['[Version]', 'Signature="$Chicago$"',
+        '[SourceDisksNames]', '1=%Disk%', '[Strings]', 'Disk="Layout disk"', ''].join('\r\n'));
+    m.file('C:\\src\\more.inf', ['[Version]', 'Signature="$Chicago$"', '[Section]', 'Key2=two',
+        '[Extra]', 'Key3=three', ''].join('\r\n'));
+    m.file('C:\\src\\broken.inf', ['[Version]', 'Signature="$Chicago$"', '[Bad', ''].join('\r\n'));
+    m.file('C:\\src\\plain.inf', ['[Version]', 'Signature="$Chicago$"', ''].join('\r\n'));
+    const inf = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\src\\main.inf'), 0,
+        INF_STYLE_WIN4, 0]);
+    const out = m.buffer(64);
+    const context = m.buffer(16);
+    const line = m.buffer(4);
+
+    assert.equal(await m.fns.SetupOpenAppendInfFileA.handler([m.str('C:\\src\\more.inf'), inf,
+        0]), 1);
+    assert.equal(m.fns.SetupGetLineByIndexA.handler([inf, m.str('Section'), 1, context]), 1,
+        'a section of the same name gets the lines');
+    assert.equal(m.fns.SetupGetStringFieldA.handler([context, 1, out, 64, 0]), 1);
+    assert.equal(m.readCString(out, 64), 'two');
+    assert.equal(m.fns.SetupFindFirstLineA.handler([inf, m.str('Extra'), 0, context]), 1,
+        'a new section is found');
+    assert.equal(m.fns.SetupGetStringFieldA.handler([context, 1, out, 64, 0]), 1);
+    assert.equal(m.readCString(out, 64), 'three');
+
+    assert.equal(await m.fns.SetupOpenAppendInfFileA.handler([0, inf, 0]), 1,
+        'NULL appends the LayoutFile, a bare name from the inf directory');
+    assert.equal(m.fns.SetupGetLineTextA.handler([0, inf, m.str('SourceDisksNames'), m.str('1'),
+        out, 64, 0]), 1);
+    assert.equal(m.readCString(out, 64), 'Layout disk');
+
+    const plain = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\src\\plain.inf'), 0,
+        INF_STYLE_WIN4, 0]);
+    assert.equal(await m.fns.SetupOpenAppendInfFileA.handler([0, plain, 0]), 0);
+    assert.equal(m.lastError(), ERROR_LINE_NOT_FOUND, 'no LayoutFile to append');
+    assert.equal(await m.fns.SetupOpenAppendInfFileA.handler([m.str('C:\\src\\none.inf'), inf,
+        0]), 0);
+    assert.equal(m.lastError(), ERROR_FILE_NOT_FOUND);
+    assert.equal(await m.fns.SetupOpenAppendInfFileA.handler([m.str('C:\\src\\broken.inf'), inf,
+        line]), 0);
+    assert.equal(m.lastError(), 0xe0000001, 'ERROR_BAD_SECTION_NAME_LINE');
+    assert.equal(m.u32(line), 3);
+    assert.equal(await m.fns.SetupOpenAppendInfFileA.handler([m.str('C:\\src\\more.inf'), 0x999,
+        0]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_HANDLE);
+});
+
+test('the default callback\'s context is a block of its own, given back once', async()=>{
+    const m = await machine();
+    const one = m.fns.SetupInitDefaultQueueCallback.handler([0x1234]);
+    const two = m.fns.SetupInitDefaultQueueCallbackEx.handler([0x1234, 0, 0, 0, 0]);
+    assert.notEqual(one, 0);
+    assert.notEqual(two, 0);
+    assert.notEqual(one, two);
+    assert.equal(m.fns.SetupInitDefaultQueueCallbackEx.argBytes, 20);
+    m.fns.SetupTermDefaultQueueCallback.handler([one]);
+    m.fns.SetupTermDefaultQueueCallback.handler([two]);
+    m.fns.SetupTermDefaultQueueCallback.handler([0]);
+});
+
+test('copies queued one by one, then committed through the callback', async()=>{
+    const m = await machine();
+    m.volume.mkdir('C:\\src\\disk');
+    m.file('C:\\src\\disk\\one.dll', 'ONE');
+    m.file('C:\\src\\two.dll', 'TWO');
+    const queue = m.fns.SetupOpenFileQueue.handler();
+    assert.equal(m.fns.SetupQueueCopyA.handler([queue, m.str('C:\\src'), m.str('disk'),
+        m.str('one.dll'), m.str('Disk'), 0, m.str('C:\\dst\\lib'), 0, 0]), 1);
+    assert.equal(m.fns.SetupQueueCopyA.handler([queue, m.str('C:\\src'), 0, m.str('two.dll'), 0,
+        0, m.str('C:\\dst'), m.str('renamed.dll'), 0]), 1);
+    assert.equal(m.fns.SetupQueueCopyA.handler([queue, m.str('C:\\src'), 0, 0, 0, 0,
+        m.str('C:\\dst'), 0, 0]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_PARAMETER, 'no source name');
+    assert.equal(m.fns.SetupQueueCopyA.handler([queue, m.str('C:\\src'), 0, m.str('two.dll'), 0,
+        0, 0, 0, 0]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_PARAMETER, 'no target directory');
+    assert.equal(m.fns.SetupQueueCopyA.handler([0x999, m.str('C:\\src'), 0, m.str('two.dll'), 0,
+        0, m.str('C:\\dst'), 0, 0]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_HANDLE);
+
+    /** @type {any[]} */
+    const heard = [];
+    const forward = m.callback(([context, message, param1, param2])=>{
+        if (message === SPFILENOTIFY.STARTCOPY)
+        {
+            heard.push([m.readCString(m.u32(param1 + 4), 260), m.readCString(m.u32(param1), 260)]);
+        }
+        assert.equal(context, 0x55);
+        return m.fns.SetupDefaultQueueCallbackA.handler([context, message, param1, param2]);
+    });
+    assert.equal(await m.fns.SetupCommitFileQueueA.handler([0, queue, forward, 0x55]), 1);
+    assert.equal(m.lastError(), 0);
+    assert.deepEqual(heard, [['C:\\src\\disk\\one.dll', 'C:\\dst\\lib\\one.dll'],
+        ['C:\\src\\two.dll', 'C:\\dst\\renamed.dll']]);
+    assert.equal(m.contents('C:\\dst\\lib\\one.dll'), 'ONE');
+    assert.equal(m.contents('C:\\dst\\renamed.dll'), 'TWO');
+
+    const missing = m.fns.SetupOpenFileQueue.handler();
+    m.fns.SetupQueueCopyA.handler([missing, m.str('C:\\src'), 0, m.str('none.dll'), 0, 0,
+        m.str('C:\\dst'), 0, 0]);
+    assert.equal(await m.fns.SetupCommitFileQueueA.handler([0, missing, forward, 0x55]), 0);
+    assert.equal(m.lastError(), ERROR_FILE_NOT_FOUND);
+    assert.equal(m.fns.SetupCommitFileQueueA.handler([0, 0x999, forward, 0]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_HANDLE);
+});
+
+test('a line\'s fields from an index on, as one hexadecimal byte each', async()=>{
+    const m = await machine();
+    m.file('C:\\src\\t.inf', [INF, '[Bytes]', 'Data=001,ff,0x7A', 'Bad=1,100', 'Odd=1,zz']
+        .join('\r\n'));
+    const inf = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\src\\t.inf'), 0,
+        INF_STYLE_WIN4, 0]);
+    const context = m.buffer(16);
+    const out = m.buffer(8);
+    const size = m.buffer(4);
+    assert.equal(m.fns.SetupFindFirstLineA.handler([inf, m.str('Bytes'), m.str('Data'), context]),
+        1);
+    assert.equal(m.fns.SetupGetBinaryField.handler([context, 1, out, 8, size]), 1);
+    assert.deepEqual([...new Uint8Array(m.view.buffer, out, 3)], [0x01, 0xff, 0x7a]);
+    assert.equal(m.u32(size), 3);
+    assert.equal(m.fns.SetupGetBinaryField.handler([context, 2, 0, 0, size]), 1,
+        'a NULL buffer asks for the size');
+    assert.equal(m.u32(size), 2);
+    assert.equal(m.fns.SetupGetBinaryField.handler([context, 1, out, 2, size]), 0);
+    assert.equal(m.lastError(), ERROR_INSUFFICIENT_BUFFER);
+    assert.equal(m.fns.SetupGetBinaryField.handler([context, 0, out, 8, size]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_PARAMETER, 'field 0 is not data');
+    assert.equal(m.fns.SetupGetBinaryField.handler([context, 4, out, 8, size]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_PARAMETER, 'past the last field');
+    assert.equal(m.fns.SetupFindNextLine.handler([context, context]), 1);
+    assert.equal(m.fns.SetupGetBinaryField.handler([context, 1, out, 8, size]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_DATA, 'more than a byte');
+    assert.equal(m.fns.SetupFindNextLine.handler([context, context]), 1);
+    assert.equal(m.fns.SetupGetBinaryField.handler([context, 1, out, 8, size]), 0);
+    assert.equal(m.lastError(), ERROR_INVALID_DATA, 'not hexadecimal');
+});
+
+test('a section\'s line count, -1 for a section that is not there', async()=>{
+    // Wine's setupapi test_GLE: a missing section is ERROR_SECTION_NOT_FOUND
+    // here, where the line calls say ERROR_LINE_NOT_FOUND.
+    const m = await machine();
+    m.file('C:\\src\\t.inf', [INF, '[Empty]', ''].join('\r\n'));
+    const inf = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\src\\t.inf'), 0,
+        INF_STYLE_WIN4, 0]);
+    assert.equal(m.fns.SetupGetLineCountA.handler([inf, m.str('section')]), 2);
+    assert.equal(m.lastError(), 0);
+    assert.equal(m.fns.SetupGetLineCountA.handler([inf, m.str('Empty')]), 0);
+    assert.equal(m.fns.SetupGetLineCountA.handler([inf, m.str('Section.NT5')]), -1);
+    assert.equal(m.lastError(), 0xe0000101);
+    assert.equal(m.fns.SetupGetLineCountA.handler([0x999, m.str('Section')]), -1);
+    assert.equal(m.lastError(), ERROR_INVALID_HANDLE);
+});

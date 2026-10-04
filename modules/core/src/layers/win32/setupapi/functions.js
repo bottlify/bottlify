@@ -81,6 +81,12 @@ const SP_DEVINFO_DATA_SIZE = 28;
 /** SP_DEVICE_INTERFACE_DATA's cbSize: a GUID, two DWORDs and a ULONG_PTR. */
 const SP_DEVICE_INTERFACE_DATA_SIZE = 28;
 
+/** The first DIRID a program may assign with SetupSetDirectoryId. */
+const DIRID_USER = 0x8000;
+
+/** A default queue callback's context: the owner, progress window and message. */
+const DEFAULT_CONTEXT_SIZE = 16;
+
 /** SetupInstallFromInfSection's flags. */
 const SPINST_FILES = 0x10;
 const SPINST_ALL = 0x3ff;
@@ -244,11 +250,37 @@ export function createSetupapiFunctions(host){
     })[id] ?? null;
 
     /**
-     * An open INF: what a HINF names.
+     * An open INF: what a HINF names, and the user DIRIDs set on it.
      *
      * @typedef {{ inf: import('./inf.js').Inf, path: string,
-     *     list: import('./inf.js').InfSection[] }} OpenInf
+     *     list: import('./inf.js').InfSection[], ids: Map<number, string> }} OpenInf
      */
+
+    /**
+     * What a DIRID stands for in one INF: its own user DIRIDs first.
+     *
+     * @param {OpenInf} open
+     */
+    const diridOf = open=>(/** @type {number} */ id)=>open.ids.get(id) ?? dirid(id);
+
+    /**
+     * A value with the user DIRIDs set since the INF was opened put in: the
+     * parser leaves a %N% it could not resolve as written, and a user DIRID is
+     * only known after opening. As the parser does, a directory's trailing
+     * separator merges with one that follows it.
+     *
+     * @param {OpenInf} open @param {string} value
+     */
+    const expand = (open, value)=>(open.ids.size === 0 || !value.includes('%') ? value
+        : value.replace(/%(\d+)%/g, (whole, id, at, all)=>{
+            const directory = open.ids.get(Number(id));
+            if (directory === undefined)
+            {
+                return whole;
+            }
+            return directory.endsWith('\\') && all[at + whole.length] === '\\'
+                ? directory.slice(0, -1) : directory;
+        }));
 
     /** @param {number} handle @returns {OpenInf | null} */
     const openInf = handle=>{
@@ -295,7 +327,8 @@ export function createSetupapiFunctions(host){
             {
                 return result;
             }
-            return { open: { inf: result.inf, path, list: [...result.inf.sections.values()] } };
+            return { open: { inf: result.inf, path, list: [...result.inf.sections.values()],
+                ids: new Map() } };
         };
         return bytes instanceof Uint8Array ? parse(bytes) : bytes.then(parse);
     };
@@ -496,8 +529,72 @@ export function createSetupapiFunctions(host){
         }
     };
 
+    /**
+     * Merges an INF into an open one: lines of a section both have go after
+     * the open one's, and new sections after its last, where an INFCONTEXT's
+     * section index reaches them.
+     *
+     * @param {OpenInf} open @param {import('./inf.js').Inf} inf
+     */
+    const appendInf = (open, inf)=>{
+        for (const [lower, section] of inf.sections)
+        {
+            const there = open.inf.sections.get(lower);
+            if (there)
+            {
+                there.lines.push(...section.lines);
+            }
+            else
+            {
+                open.inf.sections.set(lower, section);
+                open.list.push(section);
+            }
+        }
+    };
+
     /** An open file queue: what a HSPFILEQ names. */
     const newQueue = ()=>({ copies: [], deletes: [], renames: [] });
+
+    /**
+     * The queue a HSPFILEQ names, or null for a handle that is not one.
+     *
+     * @param {number} handle @returns {import('./queue.js').FileQueue | null}
+     */
+    const fileQueue = handle=>{
+        try
+        {
+            return host.handles.resolve(handle >>> 0, 'file-queue') ?? null;
+        }
+        catch {
+            return null;
+        }
+    };
+
+    /** The contexts SetupInitDefaultQueueCallback handed out, not yet given back. */
+    const callbackContexts = new Set();
+
+    /**
+     * A default callback's context: the windows it was told of, in a block
+     * the program holds and gives back. SetupDefaultQueueCallback has no one
+     * to show progress to, so it does not read it.
+     *
+     * @param {number} owner @param {number} progress @param {number} message
+     */
+    const defaultContext = (owner, progress, message)=>{
+        const at = host.allocate(DEFAULT_CONTEXT_SIZE);
+        if (!at)
+        {
+            return fail(ERROR_NOT_ENOUGH_MEMORY);
+        }
+        const bytes = new Uint8Array(DEFAULT_CONTEXT_SIZE);
+        const view = new DataView(bytes.buffer);
+        view.setUint32(0, owner >>> 0, true);
+        view.setUint32(4, progress >>> 0, true);
+        view.setUint32(8, message >>> 0, true);
+        host.writeMemory(at, bytes);
+        callbackContexts.add(at);
+        return at;
+    };
 
     /**
      * Runs a queue against the program's callback: the notification
@@ -747,18 +844,21 @@ export function createSetupapiFunctions(host){
             handler: ([context, handle, sectionPointer, keyPointer, buffer, size, required])=>{
                 /** @type {import('./inf.js').InfLine | undefined} */
                 let line;
+                /** @type {OpenInf | null} */
+                let open;
                 if ((context >>> 0) !== 0)
                 {
                     const at = readContext(context);
-                    line = openInf(at.handle)?.list[at.section]?.lines[at.line];
-                    if (!line)
+                    open = openInf(at.handle);
+                    line = open?.list[at.section]?.lines[at.line];
+                    if (!open || !line)
                     {
                         return fail(ERROR_INVALID_PARAMETER);
                     }
                 }
                 else
                 {
-                    const open = openInf(handle);
+                    open = openInf(handle);
                     if (!open)
                     {
                         return fail(ERROR_INVALID_HANDLE);
@@ -771,8 +871,240 @@ export function createSetupapiFunctions(host){
                         return fail(ERROR_LINE_NOT_FOUND);
                     }
                 }
-                const answered = answerText(line.fields.join(','), buffer, size, required);
+                const value = line.fields.map(field=>expand(/** @type {OpenInf} */ (open), field))
+                    .join(',');
+                const answered = answerText(value, buffer, size, required);
                 return answered ? fail(ERROR_SUCCESS, 1) : 0;
+            },
+        },
+
+        /**
+         * BOOL SetupGetStringFieldA(PINFCONTEXT Context, DWORD FieldIndex,
+         *     PSTR ReturnBuffer, DWORD ReturnBufferSize, PDWORD RequiredSize)
+         *
+         * Field 0 is the line's key -- which a line of several fields and no
+         * `=` does not have -- and field N the Nth value after it. A field
+         * that is not there is ERROR_INVALID_PARAMETER.
+         */
+        SetupGetStringFieldA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([context, index, buffer, size, required])=>{
+                if ((context >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const at = readContext(context);
+                const open = openInf(at.handle);
+                const line = open?.list[at.section]?.lines[at.line];
+                if (!open || !line)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const field = (index >>> 0) === 0 ? line.key : line.fields[(index >>> 0) - 1];
+                if (field === null || field === undefined)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const answered = answerText(expand(open, field), buffer, size, required);
+                return answered ? fail(ERROR_SUCCESS, 1) : 0;
+            },
+        },
+
+        /**
+         * BOOL SetupGetBinaryField(PINFCONTEXT Context, DWORD FieldIndex,
+         *     PBYTE ReturnBuffer, DWORD ReturnBufferSize, LPDWORD RequiredSize)
+         *
+         * The fields from FieldIndex (1-based; 0 is not data) to the end of
+         * the line, each one byte in hexadecimal; a field that is not one is
+         * ERROR_INVALID_DATA. The size needed is reported whatever the buffer.
+         */
+        SetupGetBinaryField: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([context, index, buffer, size, required])=>{
+                if ((context >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const at = readContext(context);
+                const line = openInf(at.handle)?.list[at.section]?.lines[at.line];
+                const first = index >>> 0;
+                if (!line || first === 0 || first > line.fields.length)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const fields = line.fields.slice(first - 1);
+                if (!fields.every(field=>/^(0x)?[0-9a-f]+$/i.test(field)
+                    && Number.parseInt(field, 16) <= 0xff))
+                {
+                    return fail(ERROR_INVALID_DATA);
+                }
+                if ((required >>> 0) !== 0)
+                {
+                    writeU32(required, fields.length);
+                }
+                if ((buffer >>> 0) === 0)
+                {
+                    return fail(ERROR_SUCCESS, 1);
+                }
+                if ((size >>> 0) < fields.length)
+                {
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                host.writeMemory(buffer >>> 0,
+                    Uint8Array.from(fields, field=>Number.parseInt(field, 16)));
+                return fail(ERROR_SUCCESS, 1);
+            },
+        },
+
+        /**
+         * LONG SetupGetLineCountA(HINF InfHandle, PCSTR Section)
+         *
+         * -1 for a section that is not there, with ERROR_SECTION_NOT_FOUND
+         * (Wine's setupapi test_GLE) -- how a caller tells a missing section
+         * from an empty one, as it does probing for a platform-decorated one.
+         */
+        SetupGetLineCountA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, sectionPointer])=>{
+                const open = openInf(handle);
+                if (!open)
+                {
+                    return fail(ERROR_INVALID_HANDLE, -1);
+                }
+                const section = open.inf.section(text(sectionPointer) ?? '');
+                return section ? fail(ERROR_SUCCESS, section.lines.length)
+                    : fail(ERROR_SECTION_NOT_FOUND, -1);
+            },
+        },
+
+        /**
+         * BOOL SetupGetLineByIndexA(HINF InfHandle, PCSTR Section, DWORD Index,
+         *                           PINFCONTEXT Context)
+         *
+         * ERROR_LINE_NOT_FOUND for a section that is not there as well as
+         * for an index past its end.
+         */
+        SetupGetLineByIndexA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, sectionPointer, index, context])=>{
+                const open = openInf(handle);
+                if (!open)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const name = (text(sectionPointer) ?? '').toLowerCase();
+                const section = open.list.findIndex(entry=>entry.name.toLowerCase() === name);
+                if (section < 0 || (index >>> 0) >= open.list[section].lines.length)
+                {
+                    return fail(ERROR_LINE_NOT_FOUND);
+                }
+                writeContext(context, handle, section, index >>> 0);
+                return fail(ERROR_SUCCESS, 1);
+            },
+        },
+
+        /**
+         * BOOL SetupSetDirectoryIdA(HINF InfHandle, DWORD Id, PCSTR Directory)
+         *
+         * A user DIRID (DIRID_USER, 0x8000, and above) for this INF alone:
+         * what its DestinationDirs and its %N% stand for from now on. A NULL
+         * directory unassigns the id, and id 0 unassigns every one; an id
+         * below DIRID_USER is ERROR_INVALID_PARAMETER.
+         */
+        SetupSetDirectoryIdA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, id, directoryPointer])=>{
+                const open = openInf(handle);
+                if (!open)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const number = id >>> 0;
+                if (number === 0)
+                {
+                    open.ids.clear();
+                    return fail(ERROR_SUCCESS, 1);
+                }
+                if (number < DIRID_USER)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const directory = text(directoryPointer);
+                if (directory === null)
+                {
+                    open.ids.delete(number);
+                }
+                else
+                {
+                    open.ids.set(number, directory);
+                }
+                return fail(ERROR_SUCCESS, 1);
+            },
+        },
+
+        /**
+         * BOOL SetupOpenAppendInfFileA(PCSTR FileName, HINF InfHandle, PUINT ErrorLine)
+         *
+         * Another INF's sections become the open one's: a section it already
+         * has gets the lines after its own, and the others are added after
+         * its last. A NULL name means each file [Version]'s LayoutFile lists,
+         * and no LayoutFile is ERROR_LINE_NOT_FOUND. A name is looked for as
+         * SetupOpenInfFile looks for it; a file that does not parse leaves
+         * its line in ErrorLine.
+         */
+        SetupOpenAppendInfFileA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([namePointer, handle, errorLine])=>{
+                const open = openInf(handle);
+                if (!open)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const name = text(namePointer);
+                let names = name === null ? null : [name];
+                if (names === null)
+                {
+                    const layout = open.inf.section('Version')?.lines
+                        .find(line=>line.key?.toLowerCase() === 'layoutfile');
+                    if (!layout)
+                    {
+                        return fail(ERROR_LINE_NOT_FOUND);
+                    }
+                    names = layout.fields.filter(field=>field !== '');
+                }
+                const thread = host.callerThread();
+                const loads = names.map(file=>{
+                    const candidates = infCandidates(file);
+                    return loadInf(candidates.find(place=>host.files.stat(place))
+                        ?? candidates[0]);
+                });
+                /** @param {({ open: OpenInf } | { error: number, line: number })[]} results */
+                const finish = results=>{
+                    for (const result of results)
+                    {
+                        if ('error' in result)
+                        {
+                            if ((errorLine >>> 0) !== 0)
+                            {
+                                writeU32(errorLine, result.line);
+                            }
+                            host.setLastErrorFor(thread, result.error);
+                            return 0;
+                        }
+                        appendInf(open, result.open.inf);
+                    }
+                    host.setLastErrorFor(thread, ERROR_SUCCESS);
+                    return 1;
+                };
+                return loads.some(loaded=>'then' in loaded) ? Promise.all(loads).then(finish)
+                    : finish(/** @type {({ open: OpenInf } | { error: number, line: number })[]} */
+                        (loads));
             },
         },
 
@@ -958,6 +1290,111 @@ export function createSetupapiFunctions(host){
             },
         },
 
+        /** PVOID SetupInitDefaultQueueCallback(HWND OwnerWindow) */
+        SetupInitDefaultQueueCallback: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([owner])=>defaultContext(owner, 0, 0),
+        },
+
+        /**
+         * PVOID SetupInitDefaultQueueCallbackEx(HWND OwnerWindow,
+         *     HWND AlternateProgressWindow, UINT ProgressMessage, DWORD Reserved1,
+         *     PVOID Reserved2)
+         */
+        SetupInitDefaultQueueCallbackEx: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([owner, progress, message])=>defaultContext(owner, progress, message),
+        },
+
+        /**
+         * VOID SetupTermDefaultQueueCallback(PVOID Context) -- a context not
+         * handed out, or already given back, is ignored.
+         */
+        SetupTermDefaultQueueCallback: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([context])=>{
+                if (callbackContexts.delete(context >>> 0))
+                {
+                    host.free(context >>> 0);
+                }
+                return 0;
+            },
+        },
+
+        /**
+         * BOOL SetupQueueCopyA(HSPFILEQ QueueHandle, PCSTR SourceRootPath,
+         *     PCSTR SourcePath, PCSTR SourceFilename, PCSTR SourceDescription,
+         *     PCSTR SourceTagfile, PCSTR TargetDirectory, PCSTR TargetFilename,
+         *     DWORD CopyStyle)
+         *
+         * The file is looked for under the root joined with SourcePath, and
+         * the tag file at the root. No target name means the source's; no
+         * source name or no target directory is ERROR_INVALID_PARAMETER.
+         */
+        SetupQueueCopyA: {
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: ([handle, rootPointer, pathPointer, filePointer, descriptionPointer,
+                tagPointer, directoryPointer, targetPointer, style])=>{
+                const queue = fileQueue(handle);
+                if (!queue)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const sourceFile = text(filePointer);
+                const targetDirectory = text(directoryPointer);
+                if (!sourceFile || !targetDirectory)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const root = text(rootPointer) ?? '';
+                const where = joinPath(root, text(pathPointer) ?? '');
+                const sourcePath = where === '' ? '' : host.fullPath(where);
+                queue.copies.push({
+                    sourceRoot: root === '' ? sourcePath : host.fullPath(root),
+                    sourcePath,
+                    sourceFile,
+                    description: text(descriptionPointer) || null,
+                    tagfile: text(tagPointer) || null,
+                    targetDirectory: host.fullPath(targetDirectory),
+                    targetFile: text(targetPointer) || sourceFile,
+                    flags: style >>> 0,
+                });
+                return fail(ERROR_SUCCESS, 1);
+            },
+        },
+
+        /**
+         * BOOL SetupCommitFileQueueA(HWND Owner, HSPFILEQ QueueHandle,
+         *                            PSP_FILE_CALLBACK_A MsgHandler, PVOID Context)
+         *
+         * The queue's operations, through MsgHandler, in SetupCommitFileQueue's
+         * order; FALSE with the error that ended it when it did not finish.
+         */
+        SetupCommitFileQueueA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([, handle, callback, context])=>{
+                const queue = fileQueue(handle);
+                if (!queue)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if ((callback >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const thread = host.callerThread();
+                return commit(queue, callback, context, thread).then(code=>{
+                    host.setLastErrorFor(thread, code);
+                    return code === ERROR_SUCCESS ? 1 : 0;
+                });
+            },
+        },
+
         /**
          * BOOL SetupInstallFromInfSectionA(HWND Owner, HINF InfHandle, PCSTR SectionName,
          *     UINT Flags, HKEY RelativeKeyRoot, PCSTR SourceRootPath, UINT CopyFlags,
@@ -1009,7 +1446,7 @@ export function createSetupapiFunctions(host){
                 const root = text(rootPointer) || directoryOf(open.path).replace(/\\$/, '');
                 const queue = newQueue();
                 queueInstallSection(queue, open.inf, section, {
-                    root, copyFlags: copyFlags >>> 0, dirid,
+                    root, copyFlags: copyFlags >>> 0, dirid: diridOf(open),
                 });
                 const thread = host.callerThread();
                 return commit(queue, callback, context, thread).then(code=>{

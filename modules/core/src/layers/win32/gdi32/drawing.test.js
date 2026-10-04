@@ -17,7 +17,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { arcPoints, combine, roundRectPoints } from './drawing.js';
+import { arcPoints, bezierPoints, combine, isPolyDrawable, roundRectPoints } from './drawing.js';
 import { createGdiFunctions } from './functions.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 
@@ -1449,4 +1449,297 @@ test('the arc direction is the DC\'s, and a clockwise Arc runs the other way rou
     fns.Arc.handler([hdc, 0, 0, 20, 20, 20, 10, 10, 0]);
     const drawn = graphics.calls.filter(call=>call[0] === 'lineTo').map(([, , x, y])=>({ x, y }));
     assert.ok(drawn.some(({ x })=>x === 0), 'the long way round, past the left side');
+});
+
+// --- curves from the current position, and the clip combined and moved ---
+
+/**
+ * The recording service, with the current position kept where the real
+ * drawing context keeps it: on the DC record bind is handed, which a line
+ * moves and GetCurrentPositionEx reads.
+ */
+function positionedDrawing(){
+    const graphics = fakeDrawing();
+    /** @type {Map<number, any>} */
+    const states = new Map();
+    /** @type {any} */
+    const drawing = graphics.drawing;
+    /** @param {number} hdc @param {any} surface @param {any} state */
+    drawing.bind = (hdc, surface, state)=>{
+        graphics.calls.push(['bind', hdc]);
+        states.set(hdc, state);
+    };
+    /** @param {number} hdc @param {number} x @param {number} y */
+    drawing.lineTo = (hdc, x, y)=>{
+        graphics.calls.push(['lineTo', hdc, x, y]);
+        states.get(hdc).position = { x, y };
+    };
+    /** @param {number} hdc @param {number} x @param {number} y */
+    drawing.moveToEx = (hdc, x, y)=>{
+        graphics.calls.push(['moveToEx', hdc, x, y]);
+        const previous = states.get(hdc).position;
+        states.get(hdc).position = { x, y };
+        return previous;
+    };
+    /** @param {number} hdc @param {number} x @param {number} y */
+    drawing.setBrushOrgEx = (hdc, x, y)=>{
+        graphics.calls.push(['setBrushOrgEx', hdc, x, y]);
+        return true;
+    };
+    return graphics;
+}
+
+/** @param {ReturnType<typeof setup>} context */
+const positionOf = ({ fns, memory, hdc })=>{
+    assert.equal(fns.GetCurrentPositionEx.handler([hdc, OUT]), 1);
+    const view = new DataView(memory.bytes.buffer);
+    return { x: view.getInt32(OUT, true), y: view.getInt32(OUT + 4, true) };
+};
+
+/** @param {any[]} calls */
+const linesIn = calls=>calls.filter(call=>call[0] === 'lineTo' || call[0] === 'moveToEx')
+    .map(([name, , x, y])=>[name, x, y]);
+
+test('a Bézier curve starts and ends on its own points and never repeats one', ()=>{
+    const curve = bezierPoints({ x: 0, y: 0 }, { x: 0, y: 30 }, { x: 30, y: 30 }, { x: 30, y: 0 });
+    assert.deepEqual(curve[0], { x: 0, y: 0 });
+    assert.deepEqual(curve.at(-1), { x: 30, y: 0 });
+    assert.ok(curve.length > 10, 'a segment for every couple of pixels');
+    assert.ok(curve.every(({ y })=>y >= 0 && y <= 23), 'inside the hull, short of the controls');
+    assert.ok(curve.slice(1).every((point, index)=>point.x !== curve[index].x
+        || point.y !== curve[index].y), 'no point twice in a row');
+    assert.ok(bezierPoints({ x: 0, y: 5 }, { x: 10, y: 5 }, { x: 20, y: 5 }, { x: 40, y: 5 })
+        .every(({ y })=>y === 5), 'controls on the line keep the curve on it');
+    assert.deepEqual(bezierPoints({ x: 3, y: 3 }, { x: 3, y: 3 }, { x: 3, y: 3 }, { x: 3, y: 3 }),
+        [{ x: 3, y: 3 }]);
+});
+
+test('ArcTo draws a line to the arc and the arc, and leaves the position at its end', ()=>{
+    assert.equal(setup().fns.ArcTo.handler([setup().hdc, 0, 0, 20, 20, 20, 10, 10, 0]), 0,
+        'nothing to draw with');
+    const graphics = positionedDrawing();
+    const context = setup(graphics.services);
+    const { fns, hdc } = context;
+    assert.equal(fns.ArcTo.argBytes, 36);
+    fns.MoveToEx.handler([hdc, 50, 50, 0]);
+    const before = graphics.calls.length;
+    assert.equal(fns.ArcTo.handler([hdc, 0, 0, 20, 20, 20, 10, 10, 0]), 1);
+    const drawn = linesIn(graphics.calls.slice(before));
+    assert.deepEqual(drawn[0], ['lineTo', 20, 10], 'from (50, 50) to where the arc starts');
+    assert.ok(drawn.every(([name])=>name === 'lineTo'), 'one stroke, no move');
+    assert.deepEqual(positionOf(context), { x: 10, y: 0 }, 'and the arc\'s end is the position');
+
+    fns.SetArcDirection.handler([hdc, 2]);
+    fns.MoveToEx.handler([hdc, 0, 0, 0]);
+    const clockwise = graphics.calls.length;
+    fns.ArcTo.handler([hdc, 0, 0, 20, 20, 20, 10, 10, 0]);
+    assert.deepEqual(linesIn(graphics.calls.slice(clockwise))[0], ['lineTo', 20, 10]);
+    assert.deepEqual(positionOf(context), { x: 10, y: 0 }, 'clockwise ends there too');
+    assert.ok(linesIn(graphics.calls.slice(clockwise)).some(([, x])=>x === 0),
+        'having gone the long way round');
+    assert.equal(fns.ArcTo.handler([0x7777, 0, 0, 1, 1, 0, 0, 0, 0]), 0, 'not a DC');
+});
+
+test('PolyBezierTo draws whole curves from the current position and moves it', ()=>{
+    const graphics = positionedDrawing();
+    const context = setup(graphics.services);
+    const { fns, memory, hdc } = context;
+    const at = 0x500;
+    memory.writeMemory(at, new Uint8Array(new Int32Array([
+        0, 20, 20, 20, 20, 0,
+        20, -20, 40, -20, 40, 0,
+    ]).buffer));
+    assert.equal(fns.PolyBezierTo.argBytes, 12);
+    assert.equal(fns.PolyBezierTo.handler([hdc, at, 4]), 0, 'not a whole number of curves');
+    assert.equal(fns.PolyBezierTo.handler([hdc, at, 0]), 0, 'no curve at all');
+    assert.equal(linesIn(graphics.calls).length, 0, 'and nothing was drawn for either');
+
+    assert.equal(fns.PolyBezierTo.handler([hdc, at, 6]), 1);
+    const drawn = linesIn(graphics.calls);
+    assert.ok(drawn.length > 6 && drawn.every(([name])=>name === 'lineTo'));
+    assert.ok(drawn.some(([, x, y])=>x === 20 && y === 0), 'through the first curve\'s end');
+    assert.deepEqual(drawn.at(-1), ['lineTo', 40, 0]);
+    assert.deepEqual(positionOf(context), { x: 40, y: 0 });
+    assert.equal(setup().fns.PolyBezierTo.handler([setup().hdc, at, 3]), 0,
+        'nothing to draw with');
+});
+
+test('PolyDraw moves, lines, curves and closes, and refuses a type array Windows would', ()=>{
+    const PT_CLOSEFIGURE = 1;
+    const PT_LINETO = 2;
+    const PT_BEZIERTO = 4;
+    const PT_MOVETO = 6;
+    assert.ok(isPolyDrawable(Uint8Array.of(PT_MOVETO, PT_LINETO, PT_LINETO | PT_CLOSEFIGURE)));
+    assert.ok(isPolyDrawable(Uint8Array.of(PT_BEZIERTO, PT_BEZIERTO,
+        PT_BEZIERTO | PT_CLOSEFIGURE)));
+    assert.ok(!isPolyDrawable(Uint8Array.of(PT_BEZIERTO, PT_BEZIERTO)), 'a curve cut short');
+    assert.ok(!isPolyDrawable(Uint8Array.of(PT_BEZIERTO, PT_BEZIERTO | PT_CLOSEFIGURE,
+        PT_BEZIERTO)), 'a close inside a curve');
+    assert.ok(!isPolyDrawable(Uint8Array.of(PT_MOVETO | PT_CLOSEFIGURE)), 'a closing move');
+    assert.ok(!isPolyDrawable(Uint8Array.of(0)), 'no type');
+
+    const graphics = positionedDrawing();
+    const context = setup(graphics.services);
+    const { fns, memory, hdc } = context;
+    const points = 0x500;
+    const types = 0x600;
+    memory.writeMemory(points, new Uint8Array(new Int32Array([
+        10, 10, 30, 10, 30, 30,
+        100, 100, 100, 120, 120, 120, 120, 100,
+    ]).buffer));
+    memory.writeMemory(types, Uint8Array.of(PT_MOVETO, PT_LINETO, PT_LINETO | PT_CLOSEFIGURE,
+        PT_MOVETO, PT_BEZIERTO, PT_BEZIERTO, PT_BEZIERTO | PT_CLOSEFIGURE));
+    assert.equal(fns.PolyDraw.argBytes, 16);
+    assert.equal(fns.PolyDraw.handler([hdc, points, types, 6]), 0,
+        'the curve is cut short by the count');
+    assert.equal(linesIn(graphics.calls).length, 0, 'and nothing is drawn of what came before');
+
+    assert.equal(fns.PolyDraw.handler([hdc, points, types, 7]), 1);
+    const drawn = linesIn(graphics.calls);
+    assert.deepEqual(drawn.slice(0, 5), [
+        ['moveToEx', 10, 10], ['lineTo', 30, 10], ['lineTo', 30, 30], ['lineTo', 10, 10],
+        ['moveToEx', 100, 100],
+    ], 'the triangle closed back to its move');
+    assert.deepEqual(drawn.at(-2), ['lineTo', 120, 100], 'the curve to its end');
+    assert.deepEqual(drawn.at(-1), ['lineTo', 100, 100], 'and closed back to the second move');
+    assert.deepEqual(positionOf(context), { x: 100, y: 100 });
+
+    // With no move, the figure starts at the position the call found.
+    fns.MoveToEx.handler([hdc, 5, 6, 0]);
+    memory.writeMemory(types, Uint8Array.of(PT_LINETO | PT_CLOSEFIGURE));
+    const before = graphics.calls.length;
+    assert.equal(fns.PolyDraw.handler([hdc, points, types, 1]), 1);
+    assert.deepEqual(linesIn(graphics.calls.slice(before)),
+        [['lineTo', 10, 10], ['lineTo', 5, 6]]);
+    assert.equal(fns.PolyDraw.handler([hdc, points, types, 0]), 1, 'nothing to draw is drawn');
+    assert.equal(fns.PolyDraw.handler([hdc, points, types, -1]), 0);
+    assert.equal(fns.PolyDraw.handler([0x7777, points, types, 1]), 0, 'not a DC');
+});
+
+test('ExtSelectClipRgn combines the region into the clip in each mode, exactly', ()=>{
+    const graphics = fakeDrawing();
+    const { fns, hdc } = setup(graphics.services);
+    const COMPLEXREGION = 3;
+    const RGN_XOR = 3;
+    const RGN_DIFF = 4;
+    const lastClip = ()=>graphics.calls.filter(call=>call[0] === 'setClipRect'
+        || call[0] === 'setClipRegion').at(-1)?.[2];
+    /** @param {any} area */
+    const sorted = area=>[...area].sort((a, b)=>a.top - b.top || a.left - b.left);
+    const band = fns.CreateRectRgn.handler([0, 0, 100, 50]);
+    const square = fns.CreateRectRgn.handler([50, 25, 150, 75]);
+    assert.equal(fns.ExtSelectClipRgn.argBytes, 12);
+
+    assert.equal(fns.ExtSelectClipRgn.handler([hdc, band, RGN_AND]), SIMPLEREGION,
+        'with no clip, AND is the region inside the surface');
+    assert.deepEqual(lastClip(), { left: 0, top: 0, right: 100, bottom: 50 });
+    assert.equal(fns.ExtSelectClipRgn.handler([hdc, square, RGN_AND]), SIMPLEREGION);
+    assert.deepEqual(lastClip(), { left: 50, top: 25, right: 100, bottom: 50 });
+
+    assert.equal(fns.ExtSelectClipRgn.handler([hdc, band, RGN_COPY]), SIMPLEREGION);
+    assert.equal(fns.ExtSelectClipRgn.handler([hdc, square, RGN_OR]), COMPLEXREGION);
+    assert.deepEqual(sorted(lastClip()), [
+        { left: 0, top: 0, right: 100, bottom: 50 },
+        { left: 100, top: 25, right: 150, bottom: 50 },
+        { left: 50, top: 50, right: 150, bottom: 75 },
+    ], 'the union, not its bounding box');
+
+    assert.equal(fns.ExtSelectClipRgn.handler([hdc, band, RGN_COPY]), SIMPLEREGION);
+    assert.equal(fns.ExtSelectClipRgn.handler([hdc, square, RGN_DIFF]), COMPLEXREGION);
+    assert.deepEqual(sorted(lastClip()), [
+        { left: 0, top: 0, right: 100, bottom: 25 },
+        { left: 0, top: 25, right: 50, bottom: 50 },
+    ]);
+
+    assert.equal(fns.ExtSelectClipRgn.handler([hdc, band, RGN_COPY]), SIMPLEREGION);
+    assert.equal(fns.ExtSelectClipRgn.handler([hdc, square, RGN_XOR]), COMPLEXREGION);
+    assert.equal(lastClip().length, 4, 'the band less the square, and the square less the band');
+    assert.equal(fns.ExtSelectClipRgn.handler([hdc, band, RGN_XOR]), SIMPLEREGION,
+        'XOR with the band again gives the square back');
+    assert.deepEqual(lastClip(), { left: 50, top: 25, right: 150, bottom: 75 });
+
+    assert.equal(fns.ExtSelectClipRgn.handler([hdc, square, RGN_DIFF]), NULLREGION);
+    assert.equal(fns.ExtSelectClipRgn.handler([hdc, 0, RGN_COPY]), SIMPLEREGION,
+        'a null region with RGN_COPY is no clip');
+    assert.equal(fns.GetClipRgn.handler([hdc, fns.CreateRectRgn.handler([0, 0, 0, 0])]), 0);
+    assert.equal(fns.ExtSelectClipRgn.handler([hdc, 0, RGN_AND]), 0,
+        'and with any other mode an error');
+    assert.equal(fns.ExtSelectClipRgn.handler([hdc, band, 9]), 0, 'no such mode');
+    assert.equal(fns.ExtSelectClipRgn.handler([0x7777, band, RGN_AND]), 0, 'not a DC');
+});
+
+test('OffsetRgn moves a region and OffsetClipRgn the clip, answering the kind each is', ()=>{
+    const graphics = fakeDrawing();
+    const { fns, memory, hdc } = setup(graphics.services);
+    const BOX = 0x3000;
+    const box = ()=>[0, 4, 8, 12].map(at=>
+        new DataView(memory.bytes.buffer).getInt32(BOX + at, true));
+    const region = fns.CreateRectRgn.handler([10, 20, 30, 40]);
+    assert.equal(fns.OffsetRgn.argBytes, 12);
+    assert.equal(fns.OffsetRgn.handler([region, -15, 5]), SIMPLEREGION);
+    fns.GetRgnBox.handler([region, BOX]);
+    assert.deepEqual(box(), [-5, 25, 15, 45]);
+    assert.equal(fns.OffsetRgn.handler([fns.CreateRectRgn.handler([5, 5, 5, 9]), 3, 3]),
+        NULLREGION, 'an empty region stays empty');
+    assert.equal(fns.OffsetRgn.handler([hdc, 1, 1]), 0, 'not a region');
+
+    assert.equal(fns.OffsetClipRgn.argBytes, 12);
+    assert.equal(fns.OffsetClipRgn.handler([hdc, 5, 5]), SIMPLEREGION,
+        'with no clip selected there is nothing to move');
+    assert.equal(fns.GetClipRgn.handler([hdc, region]), 0, 'and none is selected by it');
+    fns.IntersectClipRect.handler([hdc, 10, 10, 20, 20]);
+    assert.equal(fns.OffsetClipRgn.handler([hdc, 5, -5]), SIMPLEREGION);
+    assert.deepEqual(graphics.calls.filter(call=>call[0] === 'setClipRect').at(-1)?.[2],
+        { left: 15, top: 5, right: 25, bottom: 15 });
+    fns.ExcludeClipRect.handler([hdc, 18, 8, 20, 10]);
+    assert.equal(fns.OffsetClipRgn.handler([hdc, 1, 1]), 3, 'a frame moves as a frame');
+    assert.ok(graphics.calls.filter(call=>call[0] === 'setClipRegion').at(-1)?.[2]
+        .some((/** @type {any} */ piece)=>piece.left === 16 && piece.top === 6));
+    assert.equal(fns.OffsetClipRgn.handler([0x7777, 0, 0]), 0, 'not a DC');
+});
+
+test('SelectClipPath has no closed path to clip to, and says so', ()=>{
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errors = [];
+    const { table } = createGdiFunctions({
+        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
+        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
+            memory.writeMemory(a, d),
+        readCString: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readCString(a, n),
+        handles: fakeHandles(),
+        surfaces: fakeSurfaces(),
+        setLastError: code=>errors.push(code),
+    });
+    const fns = /** @type {Record<string, { argBytes: number,
+        handler: (args: number[]) => number }>} */ (/** @type {unknown} */ (table));
+    const hdc = fns.GetDC.handler([HWND]);
+    assert.equal(fns.SelectClipPath.argBytes, 8);
+    assert.equal(fns.SelectClipPath.handler([hdc, RGN_COPY]), 0);
+    assert.equal(fns.SelectClipPath.handler([0x7777, RGN_COPY]), 0);
+    assert.deepEqual(errors, [1003, 6], 'ERROR_CAN_NOT_COMPLETE, then a handle that is no DC');
+});
+
+test('the brush origin is the DC\'s, answered back, saved, and given to the drawing', ()=>{
+    const graphics = positionedDrawing();
+    const { fns, memory, hdc } = setup(graphics.services);
+    const view = new DataView(memory.bytes.buffer);
+    const origins = ()=>graphics.calls.filter(call=>call[0] === 'setBrushOrgEx');
+    assert.equal(fns.SetBrushOrgEx.argBytes, 16);
+    assert.equal(fns.SetBrushOrgEx.handler([hdc, 3, -4, OUT]), 1);
+    assert.deepEqual([view.getInt32(OUT, true), view.getInt32(OUT + 4, true)], [0, 0]);
+    assert.equal(origins().length, 0, 'nothing is bound yet, and nothing is bound for it');
+
+    fns.LineTo.handler([hdc, 1, 1]);
+    assert.deepEqual(origins().at(-1), ['setBrushOrgEx', hdc, 3, -4], 'handed over at the bind');
+    const level = fns.SaveDC.handler([hdc]);
+    assert.equal(fns.SetBrushOrgEx.handler([hdc, 7, 8, OUT]), 1);
+    assert.deepEqual([view.getInt32(OUT, true), view.getInt32(OUT + 4, true)], [3, -4]);
+    assert.deepEqual(origins().at(-1), ['setBrushOrgEx', hdc, 7, 8], 'and when it changes');
+    fns.RestoreDC.handler([hdc, level]);
+    assert.deepEqual(origins().at(-1), ['setBrushOrgEx', hdc, 3, -4], 'and when restored');
+    assert.equal(fns.SetBrushOrgEx.handler([hdc, 0, 0, 0]), 1, 'a null pointer wants no answer');
+    assert.equal(fns.SetBrushOrgEx.handler([0x7777, 0, 0, OUT]), 0, 'not a DC');
+    assert.equal(setup().fns.SetBrushOrgEx.handler([setup().hdc, 1, 2, 0]), 1,
+        'kept without anything to draw with');
 });

@@ -252,6 +252,30 @@ const DCB_SET = DCB_RESET | DCB_ACCUMULATE;
 const DCB_ENABLE = 0x0004;
 const DCB_DISABLE = 0x0008;
 
+/** SetPolyFillMode's two rules for which parts of a self-crossing polygon are inside. */
+const ALTERNATE = 1;
+const WINDING = 2;
+
+/** What the print-job calls answer when there is no job: -1 as an int. */
+const SP_ERROR = 0xffffffff;
+
+/**
+ * COLORADJUSTMENT: twelve 16-bit fields, signed from caContrast on, and the
+ * ranges each is documented to keep to. A DC starts at the identity: gamma
+ * 1.0 (10000) on every channel, black and white at the ends of their scale.
+ */
+const COLORADJUSTMENT_SIZE = 24;
+const CA_FLAGS = 0x0003;
+const ILLUMINANT_MAX_INDEX = 8;
+const COLOR_ADJUSTMENT_RANGES = Object.freeze([
+    [0, ILLUMINANT_MAX_INDEX],
+    [2500, 65000], [2500, 65000], [2500, 65000],
+    [0, 4000], [6000, 10000],
+    [-100, 100], [-100, 100], [-100, 100], [-100, 100],
+]);
+const DEFAULT_COLOR_ADJUSTMENT = Object.freeze(
+    [COLORADJUSTMENT_SIZE, 0, 0, 10000, 10000, 10000, 0, 10000, 0, 0, 0, 0]);
+
 /** @param {any} memory @param {number} address @param {number} count @returns {number[]} */
 const readU32s = (memory, address, count)=>Array.from({ length: count },
     (_, index)=>readU32(memory, (address >>> 0) + index * 4));
@@ -661,6 +685,13 @@ export function createGdiFunctions(host){
             characterExtra: 0,
             /** The miter limit, a FLOAT's value; 10 until the program sets one. */
             miterLimit: 10,
+            polyFillMode: ALTERNATE,
+            /** SetBrushOrgEx's origin, which the drawing context is given when bound. */
+            brushOrg: { x: 0, y: 0 },
+            /** SetMapperFlags' flags, which only the font mapper would read. */
+            mapperFlags: 0,
+            /** SetColorAdjustment's COLORADJUSTMENT, as its twelve fields. */
+            colorAdjustment: DEFAULT_COLOR_ADJUSTMENT,
             viewportOrg: { x: 0, y: 0 },
             windowOrg: { x: 0, y: 0 },
             viewportExt: { cx: 1, cy: 1 },
@@ -748,6 +779,10 @@ export function createGdiFunctions(host){
         layout: dc.layout,
         characterExtra: dc.characterExtra,
         miterLimit: dc.miterLimit,
+        polyFillMode: dc.polyFillMode,
+        brushOrg: { ...dc.brushOrg },
+        mapperFlags: dc.mapperFlags,
+        colorAdjustment: dc.colorAdjustment,
         viewportOrg: { ...dc.viewportOrg },
         windowOrg: { ...dc.windowOrg },
         viewportExt: { ...dc.viewportExt },
@@ -818,6 +853,10 @@ export function createGdiFunctions(host){
         dc.layout = state.layout;
         dc.characterExtra = state.characterExtra;
         dc.miterLimit = state.miterLimit;
+        dc.polyFillMode = state.polyFillMode;
+        dc.brushOrg = state.brushOrg;
+        dc.mapperFlags = state.mapperFlags;
+        dc.colorAdjustment = state.colorAdjustment;
         dc.viewportOrg = state.viewportOrg;
         dc.windowOrg = state.windowOrg;
         dc.viewportExt = state.viewportExt;
@@ -849,6 +888,57 @@ export function createGdiFunctions(host){
         }
         dc[field] = { x: x | 0, y: y | 0 };
         return 1;
+    };
+
+    /**
+     * Reads one of those points back: GetCurrentPositionEx and the origin
+     * getters, which fail with nowhere to write.
+     *
+     * @param {number[]} args  hdc, then the out pointer.
+     * @param {'viewportOrg' | 'windowOrg' | 'position'} field
+     */
+    const getOrigin = ([handle, out], field)=>{
+        const dc = dcOf(handle);
+        if (!dc || (out >>> 0) === 0)
+        {
+            return 0;
+        }
+        writePoint(host, out >>> 0, dc[field]);
+        return 1;
+    };
+
+    /**
+     * The print-job calls on a DC that is not a printer's -- which is every
+     * DC here: CreateDC opens only the display, and this machine has no
+     * printer. Windows refuses them on a display or memory DC with SP_ERROR
+     * and the handle as the reason, so a program's print command fails the
+     * way it does with no printer installed rather than printing nowhere.
+     */
+    const noPrintJob = ()=>{
+        host.setLastError?.(ERROR_INVALID_HANDLE);
+        return SP_ERROR;
+    };
+
+    /**
+     * CopyMetaFileA and W. A copy in memory is a new metafile holding what
+     * the source does; one on disk is refused as CreateMetaFile refuses one.
+     *
+     * @param {number[]} args @param {string} api
+     */
+    const copyMetaFile = ([source, file], api)=>{
+        const record = objects.get(source);
+        if (record?.type !== 'metafile')
+        {
+            host.setLastError?.(ERROR_INVALID_HANDLE);
+            return 0;
+        }
+        if ((file >>> 0) !== 0)
+        {
+            host.divergence?.(api, 'a metafile on disk is not written; refused');
+            host.setLastError?.(ERROR_NOT_SUPPORTED);
+            return 0;
+        }
+        return objects.create('metafile', { ...record.attributes });
     };
 
     /**
@@ -2084,6 +2174,7 @@ export function createGdiFunctions(host){
                 }
                 applyState(dc, dc.saved.pop());
                 drawing.restoreClip(handle);
+                drawing.restoreBrushOrigin(handle);
                 return 1;
             },
         },
@@ -2873,6 +2964,106 @@ export function createGdiFunctions(host){
         },
 
         /**
+         * int SetPolyFillMode(HDC hdc, int mode) / int GetPolyFillMode(HDC hdc)
+         *
+         * ALTERNATE until a program says WINDING; any other mode is refused
+         * with zero, as is a handle that is no DC.
+         */
+        SetPolyFillMode: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, mode])=>{
+                const dc = dcOf(handle);
+                if (!dc || ((mode | 0) !== ALTERNATE && (mode | 0) !== WINDING))
+                {
+                    return 0;
+                }
+                const previous = dc.polyFillMode;
+                dc.polyFillMode = mode | 0;
+                return previous;
+            },
+        },
+        GetPolyFillMode: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>dcOf(handle)?.polyFillMode ?? 0,
+        },
+
+        /**
+         * DWORD SetMapperFlags(HDC hdc, DWORD flags)
+         *
+         * Whether the font mapper should prefer faces drawn for the device's
+         * aspect ratio. Every face here is drawn for every ratio, so the
+         * flags are kept and the ones they replaced answered, and they change
+         * no choice; GDI_ERROR for a handle that is no DC.
+         */
+        SetMapperFlags: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, flags])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return GDI_ERROR;
+                }
+                const previous = dc.mapperFlags;
+                dc.mapperFlags = flags >>> 0;
+                return previous;
+            },
+        },
+
+        /**
+         * BOOL SetColorAdjustment(HDC hdc, const COLORADJUSTMENT *lpca)
+         * BOOL GetColorAdjustment(HDC hdc, LPCOLORADJUSTMENT lpca)
+         *
+         * The adjustment HALFTONE stretching applies to a source. It is kept,
+         * saved with the DC and read back; a structure of the wrong size,
+         * with an unknown flag or a field outside its documented range is
+         * refused. Stretching does not apply it.
+         */
+        SetColorAdjustment: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, given])=>{
+                const dc = dcOf(handle);
+                if (!dc || (given >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const bytes = host.readMemory(given >>> 0, COLORADJUSTMENT_SIZE);
+                const view = new DataView(bytes.buffer, bytes.byteOffset, COLORADJUSTMENT_SIZE);
+                const fields = Array.from({ length: 12 }, (_, index)=>(index < 8
+                    ? view.getUint16(index * 2, true) : view.getInt16(index * 2, true)));
+                const [size, flags, ...ranged] = fields;
+                if (size !== COLORADJUSTMENT_SIZE || (flags & ~CA_FLAGS) !== 0
+                    || ranged.some((value, index)=>value < COLOR_ADJUSTMENT_RANGES[index][0]
+                        || value > COLOR_ADJUSTMENT_RANGES[index][1]))
+                {
+                    return 0;
+                }
+                dc.colorAdjustment = fields;
+                return 1;
+            },
+        },
+        GetColorAdjustment: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                const dc = dcOf(handle);
+                if (!dc || (out >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const bytes = new Uint8Array(COLORADJUSTMENT_SIZE);
+                const view = new DataView(bytes.buffer);
+                dc.colorAdjustment.forEach((/** @type {number} */ value,
+                    /** @type {number} */ index)=>view.setUint16(index * 2, value & 0xffff, true));
+                host.writeMemory(out >>> 0, bytes);
+                return 1;
+            },
+        },
+
+        /**
          * int SetMapMode(HDC hdc, int iMode)
          *
          * The mode sets the extents it fixes -- one to one for MM_TEXT, the
@@ -3111,6 +3302,31 @@ export function createGdiFunctions(host){
         },
 
         /**
+         * BOOL GetCurrentPositionEx(HDC hdc, LPPOINT lppt)
+         * BOOL GetViewportOrgEx(HDC hdc, LPPOINT lppt)
+         * BOOL GetWindowOrgEx(HDC hdc, LPPOINT lppt)
+         *
+         * The current position is the drawing's as much as MoveToEx's: the
+         * drawing context keeps it on this same record, so a LineTo or a
+         * PolyBezierTo has moved it by the time it is read.
+         */
+        GetCurrentPositionEx: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>getOrigin(args, 'position'),
+        },
+        GetViewportOrgEx: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>getOrigin(args, 'viewportOrg'),
+        },
+        GetWindowOrgEx: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>getOrigin(args, 'windowOrg'),
+        },
+
+        /**
          * Clipping and scaling a framework's device-context class wraps,
          * whether or not the program draws. A point is always visible and
          * the clip box is the whole surface (RectVisible, which reads the
@@ -3197,6 +3413,72 @@ export function createGdiFunctions(host){
         },
 
         /**
+         * HMETAFILE CopyMetaFileA(HMETAFILE hmfSrc, LPCSTR lpszFile)
+         * HMETAFILE CopyMetaFileW(HMETAFILE hmfSrc, LPCWSTR lpszFile)
+         */
+        CopyMetaFileA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>copyMetaFile(args, 'CopyMetaFileA'),
+        },
+        CopyMetaFileW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>copyMetaFile(args, 'CopyMetaFileW'),
+        },
+
+        /**
+         * BOOL EnumMetaFile(HDC hdc, HMETAFILE hmf, MFENUMPROC proc, LPARAM lParam)
+         *
+         * Each record but the end-of-file one goes to the callback. A metafile
+         * here holds no other: drawing on a metafile DC is not recorded (which
+         * CreateMetaFile reports) and none is made from bits. So the callback
+         * is never called and the enumeration completes, TRUE; a handle that
+         * is no metafile is FALSE.
+         */
+        EnumMetaFile: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([, metafile])=>(objects.get(metafile)?.type === 'metafile' ? 1 : 0),
+        },
+
+        /**
+         * BOOL PlayMetaFileRecord(HDC hdc, LPHANDLETABLE lpht, LPMETARECORD lpmr,
+         *                         UINT noObjs)
+         *
+         * No metafile record is played here, as no metafile is: refused, and
+         * reported, so the caller draws without it.
+         */
+        PlayMetaFileRecord: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, , record])=>{
+                if (dcOf(handle) && (record >>> 0) !== 0)
+                {
+                    host.divergence?.('PlayMetaFileRecord', 'metafile records are not played');
+                }
+                return 0;
+            },
+        },
+
+        /**
+         * int StartDocA(HDC hdc, const DOCINFOA *lpdi)
+         * int StartDocW(HDC hdc, const DOCINFOW *lpdi)
+         * int StartPage(HDC hdc)
+         * int EndPage(HDC hdc)
+         * int EndDoc(HDC hdc)
+         * int AbortDoc(HDC hdc)
+         * int SetAbortProc(HDC hdc, ABORTPROC proc)
+         */
+        StartDocA: { argBytes: 8, handler: noPrintJob },
+        StartDocW: { argBytes: 8, handler: noPrintJob },
+        StartPage: { argBytes: 4, handler: noPrintJob },
+        EndPage: { argBytes: 4, handler: noPrintJob },
+        EndDoc: { argBytes: 4, handler: noPrintJob },
+        AbortDoc: { argBytes: 4, handler: noPrintJob },
+        SetAbortProc: { argBytes: 8, handler: noPrintJob },
+
+        /**
          * int EnumFontFamiliesExA(HDC hdc, LPLOGFONTA lpLogfont, FONTENUMPROCA lpProc,
          *                         LPARAM lParam, DWORD dwFlags)
          * int EnumFontFamiliesExW(HDC hdc, LPLOGFONTW lpLogfont, FONTENUMPROCW lpProc,
@@ -3228,6 +3510,22 @@ export function createGdiFunctions(host){
             handler: ([hdc, family, proc, lParam])=>enumerateFaces([hdc, 0, proc, lParam], false, {
                 charSet: DEFAULT_CHARSET,
                 faceName: (family >>> 0) === 0 ? '' : host.readCString(family >>> 0, MAX_FACE_NAME),
+            }),
+        },
+
+        /**
+         * int EnumFontFamiliesW(HDC hdc, LPCWSTR lpszFamily, FONTENUMPROCW lpProc,
+         *                      LPARAM lParam)
+         *
+         * EnumFontFamiliesA with the family named in UTF-16 and the
+         * callback handed ENUMLOGFONTW and NEWTEXTMETRICW.
+         */
+        EnumFontFamiliesW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hdc, family, proc, lParam])=>enumerateFaces([hdc, 0, proc, lParam], true, {
+                charSet: DEFAULT_CHARSET,
+                faceName: (family >>> 0) === 0 ? '' : wideText(family >>> 0, MAX_FACE_NAME),
             }),
         },
 

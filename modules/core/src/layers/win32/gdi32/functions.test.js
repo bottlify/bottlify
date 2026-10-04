@@ -2487,3 +2487,183 @@ test('GetCharacterPlacement places one glyph per character by its advance', ()=>
     assert.equal(fns.GetCharacterPlacementA.handler([hdc, TEXT, 9, 0, 0, 0]), size, 'no results');
     assert.equal(fns.GetCharacterPlacementA.handler([hdc, TEXT, 0, 0, RESULTS, 0]), 0);
 });
+
+// --- the state MFC's device-context class reads and sets, printing, and metafiles ---
+
+/** gdi32 whose last errors and divergences are kept for the test to read. */
+function withErrors(){
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errors = [];
+    /** @type {string[]} */
+    const said = [];
+    const { table: fns } = createGdiFunctions({
+        readMemory: (address, length)=>memory.readMemory(address, length),
+        writeMemory: (address, data)=>memory.writeMemory(address, data),
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        handles: fakeHandles(),
+        surfaces: fakeSurfaces(),
+        setLastError: code=>errors.push(code),
+        divergence: (api, detail)=>said.push(`${api}: ${detail}`),
+    });
+    const table = /** @type {Record<string, { argBytes: number,
+        handler: (args: number[]) => number }>} */ (/** @type {unknown} */ (fns));
+    return { memory, errors, said, fns: table, hdc: table.GetDC.handler([HWND]) };
+}
+
+test('the current position and the origins are read back where they were set', ()=>{
+    const { fns, memory, hdc } = withDC();
+    const point = ()=>[memory.i32(OUT + POINT.x), memory.i32(OUT + POINT.y)];
+    assert.deepEqual([fns.GetCurrentPositionEx, fns.GetViewportOrgEx, fns.GetWindowOrgEx]
+        .map(fn=>fn.argBytes), [8, 8, 8]);
+
+    memory.fill(OUT, POINT.SIZE / 4);
+    assert.equal(fns.GetCurrentPositionEx.handler([hdc, OUT]), 1);
+    assert.deepEqual(point(), [0, 0], 'a fresh DC starts at the origin');
+    fns.MoveToEx.handler([hdc, -7, 9, 0]);
+    assert.equal(fns.GetCurrentPositionEx.handler([hdc, OUT]), 1);
+    assert.deepEqual(point(), [-7, 9]);
+
+    fns.SetViewportOrgEx.handler([hdc, 11, 12, 0]);
+    fns.SetWindowOrgEx.handler([hdc, -13, 14, 0]);
+    assert.equal(fns.GetViewportOrgEx.handler([hdc, OUT]), 1);
+    assert.deepEqual(point(), [11, 12]);
+    assert.equal(fns.GetWindowOrgEx.handler([hdc, OUT]), 1);
+    assert.deepEqual(point(), [-13, 14]);
+    fns.OffsetWindowOrgEx.handler([hdc, 3, 1, 0]);
+    fns.GetWindowOrgEx.handler([hdc, OUT]);
+    assert.deepEqual(point(), [-10, 15]);
+
+    assert.equal(fns.GetCurrentPositionEx.handler([hdc, 0]), 0, 'nowhere to write');
+    assert.equal(fns.GetViewportOrgEx.handler([0x9999, OUT]), 0, 'not a DC');
+});
+
+test('the polygon fill mode is ALTERNATE until set, refuses others, and is saved', ()=>{
+    const { fns, hdc } = withDC();
+    const ALTERNATE = 1;
+    const WINDING = 2;
+    assert.deepEqual([fns.SetPolyFillMode.argBytes, fns.GetPolyFillMode.argBytes], [8, 4]);
+    assert.equal(fns.GetPolyFillMode.handler([hdc]), ALTERNATE);
+    assert.equal(fns.SetPolyFillMode.handler([hdc, WINDING]), ALTERNATE);
+    assert.equal(fns.SetPolyFillMode.handler([hdc, 3]), 0, 'no such mode');
+    assert.equal(fns.SetPolyFillMode.handler([hdc, 0]), 0);
+    assert.equal(fns.GetPolyFillMode.handler([hdc]), WINDING, 'a refusal changes nothing');
+    const level = fns.SaveDC.handler([hdc]);
+    fns.SetPolyFillMode.handler([hdc, ALTERNATE]);
+    fns.RestoreDC.handler([hdc, level]);
+    assert.equal(fns.GetPolyFillMode.handler([hdc]), WINDING);
+    assert.equal(fns.GetPolyFillMode.handler([0x9999]), 0);
+    assert.equal(fns.SetPolyFillMode.handler([0x9999, WINDING]), 0);
+});
+
+test('SetMapperFlags keeps the flags and answers the ones it replaced', ()=>{
+    const { fns, hdc } = withDC();
+    const ASPECT_FILTERING = 1;
+    assert.equal(fns.SetMapperFlags.argBytes, 8);
+    assert.equal(fns.SetMapperFlags.handler([hdc, ASPECT_FILTERING]), 0);
+    assert.equal(fns.SetMapperFlags.handler([hdc, 0]), ASPECT_FILTERING);
+    assert.equal(fns.SetMapperFlags.handler([0x9999, 0]), 0xffffffff, 'GDI_ERROR');
+});
+
+test('a colour adjustment is kept when every field is in its range, and read back', ()=>{
+    const { fns, memory, hdc } = withDC();
+    /** @param {number[]} fields */
+    const put = fields=>fields.forEach((value, index)=>memory.putU16(STRUCT + index * 2, value));
+    const read = ()=>Array.from({ length: 12 }, (_, index)=>{
+        const word = memory.bytes[OUT + index * 2] | memory.bytes[OUT + index * 2 + 1] << 8;
+        return index < 8 ? word : (word << 16) >> 16;
+    });
+    assert.deepEqual([fns.SetColorAdjustment.argBytes, fns.GetColorAdjustment.argBytes], [8, 8]);
+    assert.equal(fns.GetColorAdjustment.handler([hdc, OUT]), 1);
+    assert.deepEqual(read(), [24, 0, 0, 10000, 10000, 10000, 0, 10000, 0, 0, 0, 0],
+        'a DC starts at the identity');
+
+    const wanted = [24, 1, 3, 20000, 2500, 65000, 4000, 6000, -100, 100, 5, -5];
+    put(wanted);
+    assert.equal(fns.SetColorAdjustment.handler([hdc, STRUCT]), 1);
+    fns.GetColorAdjustment.handler([hdc, OUT]);
+    assert.deepEqual(read(), wanted);
+
+    for (const [index, value] of [[0, 20], [1, 4], [2, 9], [3, 2499], [6, 4001], [7, 5999],
+        [8, -101], [11, 101]])
+    {
+        const fields = [...wanted];
+        fields[index] = value;
+        put(fields);
+        assert.equal(fns.SetColorAdjustment.handler([hdc, STRUCT]), 0,
+            `field ${index} at ${value} is out of its range`);
+    }
+    fns.GetColorAdjustment.handler([hdc, OUT]);
+    assert.deepEqual(read(), wanted, 'and a refusal changes nothing');
+    assert.equal(fns.SetColorAdjustment.handler([hdc, 0]), 0);
+    assert.equal(fns.GetColorAdjustment.handler([0x9999, OUT]), 0);
+});
+
+test('a print job cannot start on a DC that is no printer\'s, and none is', ()=>{
+    const { fns, errors, hdc } = withErrors();
+    const SP_ERROR = 0xffffffff;
+    const memoryDc = fns.CreateCompatibleDC.handler([0]);
+    /** @type {[string, number][]} */
+    const calls = [['StartDocA', 8], ['StartDocW', 8], ['StartPage', 4], ['EndPage', 4],
+        ['EndDoc', 4], ['AbortDoc', 4], ['SetAbortProc', 8]];
+    for (const [name, argBytes] of calls)
+    {
+        assert.equal(fns[name].argBytes, argBytes, `${name} pops its arguments`);
+        for (const target of [hdc, memoryDc, 0x9999])
+        {
+            errors.length = 0;
+            assert.equal(fns[name].handler([target, STRUCT]) >>> 0, SP_ERROR, name);
+            assert.deepEqual(errors, [6], 'ERROR_INVALID_HANDLE');
+        }
+    }
+});
+
+test('a metafile is copied in memory, enumerates as empty, and plays no record', ()=>{
+    const { fns, memory, errors, said, hdc } = withErrors();
+    const OBJ_METAFILE = 9;
+    const source = fns.CloseMetaFile.handler([fns.CreateMetaFileA.handler([0])]);
+    assert.deepEqual([fns.CopyMetaFileA, fns.CopyMetaFileW, fns.EnumMetaFile,
+        fns.PlayMetaFileRecord].map(fn=>fn.argBytes), [8, 8, 16, 16]);
+
+    const copy = fns.CopyMetaFileA.handler([source, 0]);
+    assert.ok(copy !== 0 && copy !== source, 'a new handle');
+    assert.equal(fns.GetObjectType.handler([copy]), OBJ_METAFILE);
+    assert.equal(fns.DeleteMetaFile.handler([source]), 1);
+    assert.equal(fns.GetObjectType.handler([copy]), OBJ_METAFILE, 'the copy outlives its source');
+    assert.notEqual(fns.CopyMetaFileW.handler([copy, 0]), 0);
+
+    errors.length = 0;
+    memory.putString(STRUCT, 'copy.wmf');
+    assert.equal(fns.CopyMetaFileA.handler([copy, STRUCT]), 0, 'not onto disk');
+    assert.ok(said.some(line=>line.startsWith('CopyMetaFileA:') && line.includes('on disk')));
+    assert.equal(fns.CopyMetaFileW.handler([0x9999, 0]), 0, 'not a metafile');
+    assert.deepEqual(errors, [50, 6]);
+
+    assert.equal(fns.EnumMetaFile.handler([hdc, copy, 0x405000, 0]), 1,
+        'no record before its end, so the enumeration completes');
+    assert.equal(fns.EnumMetaFile.handler([hdc, hdc, 0x405000, 0]), 0, 'not a metafile');
+
+    said.length = 0;
+    assert.equal(fns.PlayMetaFileRecord.handler([hdc, STRUCT, STRUCT, 1]), 0);
+    assert.ok(said.some(line=>line.startsWith('PlayMetaFileRecord:')));
+    assert.equal(fns.PlayMetaFileRecord.handler([0x9999, STRUCT, STRUCT, 1]), 0);
+});
+
+test('EnumFontFamiliesW names a family in UTF-16 and hands back wide names', async()=>{
+    const { fns, memory, seen, hdc } = withEnumeration(true);
+    assert.equal(fns.EnumFontFamiliesW.argBytes, 16);
+    assert.equal(await fns.EnumFontFamiliesW.handler([hdc, 0, ENUMPROC, 0x66]), 1);
+    assert.ok(seen.map(one=>one.face).includes('Times New Roman'), 'no name: every family');
+    assert.equal(seen[0].lParam, 0x66);
+
+    seen.length = 0;
+    const name = 'lucida console';
+    for (let index = 0; index <= name.length; index++)
+    {
+        memory.putU16(STRUCT + index * 2, index < name.length ? name.charCodeAt(index) : 0);
+    }
+    await fns.EnumFontFamiliesW.handler([hdc, STRUCT, ENUMPROC, 0]);
+    assert.deepEqual(seen.map(({ face, fullName })=>({ face, fullName })),
+        [{ face: 'Lucida Console', fullName: 'Lucida Console' }]);
+    assert.equal(await fns.EnumFontFamiliesW.handler([0x9999, 0, ENUMPROC, 0]), 0, 'not a DC');
+});

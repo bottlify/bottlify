@@ -162,6 +162,8 @@ const isRle = header=>(header.compression === 1 && header.bitCount === 8)
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PIXEL_FORMAT = 2000;
+/** What SelectClipPath says when the DC has no closed path to clip to. */
+const ERROR_CAN_NOT_COMPLETE = 1003;
 /** Bits per pixel the DIB decoder reads. */
 const DIB_BIT_COUNTS = new Set([1, 4, 8, 16, 24, 32]);
 
@@ -187,6 +189,15 @@ const NULLREGION = 1;
 const SIMPLEREGION = 2;
 const COMPLEXREGION = 3;
 const REGION_ERROR = 0;
+
+/**
+ * PolyDraw's point types. PT_MOVETO is the other two together, and a close
+ * goes on a line's point or on a curve's last.
+ */
+const PT_CLOSEFIGURE = 0x01;
+const PT_LINETO = 0x02;
+const PT_BEZIERTO = 0x04;
+const PT_MOVETO = 0x06;
 
 /**
  * RGNDATAHEADER, then the rectangles. iType is the only value it may hold, and
@@ -423,6 +434,66 @@ export function roundRectPoints(box, rx, ry){
 }
 
 /**
+ * The points of a cubic Bézier curve from `start` to `end` pulled towards the
+ * two control points, a segment for about every two pixels of the control
+ * polygon -- which is never shorter than the curve -- and the same point never
+ * twice in a row. The ends are the points given, exactly.
+ *
+ * @param {{ x: number, y: number }} start @param {{ x: number, y: number }} first
+ * @param {{ x: number, y: number }} second @param {{ x: number, y: number }} end
+ * @returns {{ x: number, y: number }[]}
+ */
+export function bezierPoints(start, first, second, end){
+    const reach = Math.hypot(first.x - start.x, first.y - start.y)
+        + Math.hypot(second.x - first.x, second.y - first.y)
+        + Math.hypot(end.x - second.x, end.y - second.y);
+    const steps = Math.max(1, Math.ceil(reach / 2));
+    /** @type {{ x: number, y: number }[]} */
+    const points = [];
+    for (let index = 0; index <= steps; index++)
+    {
+        const t = index / steps;
+        const u = 1 - t;
+        const weights = [u * u * u, 3 * u * u * t, 3 * u * t * t, t * t * t];
+        /** @param {'x' | 'y'} axis */
+        const along = axis=>Math.round(weights[0] * start[axis] + weights[1] * first[axis]
+            + weights[2] * second[axis] + weights[3] * end[axis]);
+        const point = { x: along('x'), y: along('y') };
+        const last = points.at(-1);
+        if (!last || last.x !== point.x || last.y !== point.y)
+        {
+            points.push(point);
+        }
+    }
+    return points;
+}
+
+/**
+ * Whether a PolyDraw type array is one Windows draws: every entry a move, a
+ * line (closing or not) or the first of three curve points whose middle one
+ * does not close. Nothing is drawn from an array that is not.
+ *
+ * @param {Uint8Array} types
+ */
+export function isPolyDrawable(types){
+    for (let index = 0; index < types.length; index++)
+    {
+        const type = types[index];
+        if (type === PT_MOVETO || (type & ~PT_CLOSEFIGURE) === PT_LINETO)
+        {
+            continue;
+        }
+        if (type !== PT_BEZIERTO || index + 2 >= types.length || types[index + 1] !== PT_BEZIERTO
+            || (types[index + 2] & ~PT_CLOSEFIGURE) !== PT_BEZIERTO)
+        {
+            return false;
+        }
+        index += 2;
+    }
+    return true;
+}
+
+/**
  * @param {Object} options
  * @param {any} options.host
  * @param {any} options.objects   The GDI object table.
@@ -549,6 +620,11 @@ export function createDrawingFunctions(
             else if (dc.clip)
             {
                 interfaces.setClipRect(handle >>> 0, dc.clip);
+            }
+            // So does a brush origin; the drawing context starts at zero.
+            if (dc.brushOrg)
+            {
+                interfaces.setBrushOrgEx?.(handle >>> 0, dc.brushOrg.x, dc.brushOrg.y);
             }
         }
         // A window's pixels are the desktop's, and a program that fetches its
@@ -744,6 +820,50 @@ export function createDrawingFunctions(
         dc.clipSelected = true;
         bound(handle)?.setClipRegion(handle >>> 0, area);
         return COMPLEXREGION;
+    };
+
+    /**
+     * What kind of region an area is, as the clipping calls report it.
+     *
+     * @param {import('./rects.js').Rect[]} area
+     */
+    const areaKind = area=>{
+        const pieces = area.filter(piece=>!isEmpty(piece)).length;
+        return pieces === 0 ? NULLREGION : pieces === 1 ? SIMPLEREGION : COMPLEXREGION;
+    };
+
+    /**
+     * An area less every piece of another: what of `area` lies outside `holes`.
+     *
+     * @param {import('./rects.js').Rect[]} area @param {import('./rects.js').Rect[]} holes
+     */
+    const outside = (area, holes)=>holes.reduce((rest, hole)=>subtractFromArea(rest, hole), area);
+
+    /**
+     * Arc's outline in the DC's arc direction, from the start radial's end of
+     * it to the end radial's.
+     *
+     * @param {any} dc @param {number[]} box  left, top, right, bottom, then the radials.
+     */
+    const directedArc = (dc, [left, top, right, bottom, xStart, yStart, xEnd, yEnd])=>(
+        // Clockwise is the counterclockwise arc from the end radial back.
+        dc?.arcDirection === AD_CLOCKWISE
+            ? arcPoints(left | 0, top | 0, right | 0, bottom | 0,
+                xEnd | 0, yEnd | 0, xStart | 0, yStart | 0).reverse()
+            : arcPoints(left | 0, top | 0, right | 0, bottom | 0,
+                xStart | 0, yStart | 0, xEnd | 0, yEnd | 0));
+
+    /**
+     * Lines from the current position through each point, which leaves the
+     * position at the last of them: how the -To calls draw.
+     *
+     * @param {any} interfaces @param {number} handle @param {{ x: number, y: number }[]} points
+     */
+    const lineThrough = (interfaces, handle, points)=>{
+        for (const point of points)
+        {
+            interfaces.lineTo(handle >>> 0, point.x, point.y);
+        }
     };
 
     /** @param {number} handle @returns {any | null} */
@@ -1093,19 +1213,13 @@ export function createDrawingFunctions(
         Arc: {
             argBytes: 36,
             /** @param {number[]} args */
-            handler: ([handle, left, top, right, bottom, xStart, yStart, xEnd, yEnd])=>{
+            handler: ([handle, ...box])=>{
                 const interfaces = bound(handle);
                 if (!interfaces)
                 {
                     return 0;
                 }
-                // Clockwise is the counterclockwise arc from the end radial back.
-                const clockwise = dcOf(handle)?.arcDirection === AD_CLOCKWISE;
-                const points = clockwise
-                    ? arcPoints(left | 0, top | 0, right | 0, bottom | 0,
-                        xEnd | 0, yEnd | 0, xStart | 0, yStart | 0).reverse()
-                    : arcPoints(left | 0, top | 0, right | 0, bottom | 0,
-                        xStart | 0, yStart | 0, xEnd | 0, yEnd | 0);
+                const points = directedArc(dcOf(handle), box);
                 const back = interfaces.moveToEx(handle >>> 0, points[0].x, points[0].y);
                 for (const point of points.slice(1))
                 {
@@ -1162,9 +1276,118 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                for (const point of pointsAt(points >>> 0, count >>> 0))
+                lineThrough(interfaces, handle, pointsAt(points >>> 0, count >>> 0));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL ArcTo(HDC hdc, int left, int top, int right, int bottom,
+         *            int xr1, int yr1, int xr2, int yr2)
+         *
+         * Arc, joined on: a line from the current position to where the arc
+         * starts, then the arc in the DC's direction, and the current
+         * position left where the arc ends.
+         */
+        ArcTo: {
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: ([handle, ...box])=>{
+                const interfaces = bound(handle);
+                if (!interfaces)
                 {
-                    interfaces.lineTo(handle >>> 0, point.x, point.y);
+                    return 0;
+                }
+                lineThrough(interfaces, handle, directedArc(dcOf(handle), box));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL PolyBezierTo(HDC hdc, const POINT *apt, DWORD cpt)
+         *
+         * Cubic curves from the current position, three points each -- two
+         * control points and the end, which the next curve starts from --
+         * drawn with the pen as lines do, and the position left at the last
+         * end. A count that is not a whole number of curves draws nothing.
+         */
+        PolyBezierTo: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, points, count])=>{
+                const dc = dcOf(handle);
+                const interfaces = bound(handle);
+                if (!interfaces || (points >>> 0) === 0 || (count >>> 0) === 0
+                    || (count >>> 0) % 3 !== 0)
+                {
+                    return 0;
+                }
+                const through = pointsAt(points >>> 0, count >>> 0);
+                let from = { ...dc.position };
+                for (let at = 0; at < through.length; at += 3)
+                {
+                    lineThrough(interfaces, handle,
+                        bezierPoints(from, through[at], through[at + 1], through[at + 2]).slice(1));
+                    from = through[at + 2];
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL PolyDraw(HDC hdc, const POINT *apt, const BYTE *aj, int cpt)
+         *
+         * Moves, lines and curves from the current position, each point's
+         * type saying which; a type with PT_CLOSEFIGURE also draws a line back
+         * to where the figure began -- the last move, or the position the
+         * call started from. The position ends where the drawing did. A type
+         * array Windows would not draw is refused before anything is drawn.
+         */
+        PolyDraw: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, points, kinds, count])=>{
+                const dc = dcOf(handle);
+                const interfaces = bound(handle);
+                const total = count | 0;
+                if (!interfaces || total < 0 || (total > 0
+                    && ((points >>> 0) === 0 || (kinds >>> 0) === 0)))
+                {
+                    return 0;
+                }
+                const types = total === 0 ? new Uint8Array(0) : host.readMemory(kinds >>> 0, total);
+                if (!isPolyDrawable(types))
+                {
+                    return 0;
+                }
+                const through = pointsAt(points >>> 0, total);
+                let current = { ...dc.position };
+                let figure = current;
+                for (let at = 0; at < total; at++)
+                {
+                    const point = through[at];
+                    if (types[at] === PT_MOVETO)
+                    {
+                        interfaces.moveToEx(handle >>> 0, point.x, point.y);
+                        current = figure = point;
+                    }
+                    else if (types[at] === PT_BEZIERTO)
+                    {
+                        lineThrough(interfaces, handle, bezierPoints(current, point,
+                            through[at + 1], through[at + 2]).slice(1));
+                        at += 2;
+                        current = through[at];
+                    }
+                    else
+                    {
+                        interfaces.lineTo(handle >>> 0, point.x, point.y);
+                        current = point;
+                    }
+                    if ((types[at] & PT_CLOSEFIGURE) !== 0)
+                    {
+                        interfaces.lineTo(handle >>> 0, figure.x, figure.y);
+                        current = figure;
+                    }
                 }
                 return 1;
             },
@@ -1814,11 +2037,148 @@ export function createDrawingFunctions(
                 const hole = { left: left | 0, top: top | 0, right: right | 0, bottom: bottom | 0 };
                 if (isEmpty(hole) || area.every(piece=>isEmpty(intersect(piece, hole))))
                 {
-                    const pieces = area.filter(piece=>!isEmpty(piece));
-                    return pieces.length === 0 ? NULLREGION
-                        : pieces.length === 1 ? SIMPLEREGION : COMPLEXREGION;
+                    return areaKind(area);
                 }
                 return setClipArea(handle, dc, subtractFromArea(area, hole));
+            },
+        },
+
+        /**
+         * int ExtSelectClipRgn(HDC hdc, HRGN hrgn, int mode)
+         *
+         * The clip combined with the region: RGN_COPY is SelectClipRgn, a
+         * null region included; the others take the clip as it stands --
+         * the whole surface when none was selected -- and AND, OR, XOR or
+         * DIFF the region into it. The clip is an area of pieces, so every
+         * mode is exact here, where CombineRgn's are not. A null region with
+         * any mode but RGN_COPY is an error.
+         */
+        ExtSelectClipRgn: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, region, mode])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return REGION_ERROR;
+                }
+                if ((mode | 0) === RGN_COPY)
+                {
+                    return functions.SelectClipRgn.handler([handle, region]);
+                }
+                const rect = regionOf(region);
+                if (!rect || (mode | 0) < RGN_AND || (mode | 0) > RGN_DIFF)
+                {
+                    return REGION_ERROR;
+                }
+                const area = clipAreaOf(dc).filter(piece=>!isEmpty(piece));
+                const given = isEmpty(rect) ? [] : [{ ...rect }];
+                switch (mode | 0){
+                    case RGN_AND:
+                        return setClipArea(handle, dc, intersectArea(area, rect));
+                    case RGN_OR:
+                        return setClipArea(handle, dc, [...area, ...outside(given, area)]);
+                    case RGN_XOR:
+                        return setClipArea(handle, dc,
+                            [...outside(area, given), ...outside(given, area)]);
+                    default:
+                        return setClipArea(handle, dc, outside(area, given));
+                }
+            },
+        },
+
+        /**
+         * int OffsetClipRgn(HDC hdc, int x, int y)
+         *
+         * The clip the program selected, moved; the kind of region it then
+         * is. With none selected there is nothing to move, and the answer is
+         * the kind the clip the DC draws under is. Like the other clipping
+         * calls here the offset is taken in device units.
+         */
+        OffsetClipRgn: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, x, y])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return REGION_ERROR;
+                }
+                if (!dc.clipSelected)
+                {
+                    return areaKind(clipAreaOf(dc));
+                }
+                return setClipArea(handle, dc, clipAreaOf(dc).map(piece=>({
+                    left: piece.left + (x | 0), top: piece.top + (y | 0),
+                    right: piece.right + (x | 0), bottom: piece.bottom + (y | 0),
+                })));
+            },
+        },
+
+        /**
+         * int OffsetRgn(HRGN hrgn, int x, int y)
+         *
+         * The region moved, and the kind it is; an empty one stays empty.
+         */
+        OffsetRgn: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([region, x, y])=>{
+                const target = objects.get(region);
+                if (!target || target.type !== 'region')
+                {
+                    return REGION_ERROR;
+                }
+                const rect = target.attributes;
+                target.attributes = {
+                    left: (rect.left + (x | 0)) | 0, top: (rect.top + (y | 0)) | 0,
+                    right: (rect.right + (x | 0)) | 0, bottom: (rect.bottom + (y | 0)) | 0,
+                };
+                return isEmpty(target.attributes) ? NULLREGION : SIMPLEREGION;
+            },
+        },
+
+        /**
+         * BOOL SelectClipPath(HDC hdc, int mode)
+         *
+         * A path is opened by BeginPath and closed by EndPath, and this
+         * library has neither: no DC ever holds a closed path, which is
+         * the case Windows refuses with ERROR_CAN_NOT_COMPLETE.
+         */
+        SelectClipPath: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle])=>(dcOf(handle) ? refuse(ERROR_CAN_NOT_COMPLETE)
+                : refuse(ERROR_INVALID_HANDLE)),
+        },
+
+        /**
+         * BOOL SetBrushOrgEx(HDC hdc, int x, int y, LPPOINT lppt)
+         *
+         * Where the next brush's pattern is aligned, with the origin it
+         * replaced written out. It is the DC's, kept whether or not anything
+         * draws, and handed to the drawing context when there is one.
+         */
+        SetBrushOrgEx: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, x, y, out])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return 0;
+                }
+                const previous = dc.brushOrg ?? { x: 0, y: 0 };
+                if ((out >>> 0) !== 0)
+                {
+                    writeU32s(host, out >>> 0, [previous.x, previous.y]);
+                }
+                dc.brushOrg = { x: x | 0, y: y | 0 };
+                if (dc.boundSurface)
+                {
+                    draw()?.setBrushOrgEx?.(handle >>> 0, x | 0, y | 0);
+                }
+                return 1;
             },
         },
 
@@ -2395,7 +2755,20 @@ export function createDrawingFunctions(
         }
     };
 
-    return { functions, bound, setDIBits, restoreClip };
+    /**
+     * Gives the drawing layer the brush origin RestoreDC put back.
+     *
+     * @param {number} handle
+     */
+    const restoreBrushOrigin = handle=>{
+        const dc = dcOf(handle);
+        if (dc?.boundSurface && dc.brushOrg)
+        {
+            draw()?.setBrushOrgEx?.(handle >>> 0, dc.brushOrg.x, dc.brushOrg.y);
+        }
+    };
+
+    return { functions, bound, setDIBits, restoreClip, restoreBrushOrigin };
 }
 
 /**
