@@ -161,8 +161,13 @@ export function createReferenceCount(options = {}){
         get placed(){
             return cell?.address ?? 0;
         },
+        // An implicit resource is the device's own for as long as the device
+        // lives, so a binding has nothing to keep alive.
         hold(){
-            held++;
+            if (!implicit)
+            {
+                held++;
+            }
         },
         letGo(){
             if (held === 0)
@@ -313,6 +318,8 @@ const D3DTEXF_LINEAR = 2;
  * @property {{ place: (cell: CountCell | null) => void, placed: number }} counter
  * @property {() => number} addRef
  * @property {() => number} release
+ * @property {() => void} hold     The device binds it as a target.
+ * @property {() => void} letGo
  * @property {(out: LockedRect, rect?: LockRectangle | null, flags?: number)
  *            => number | Promise<number>} LockRect
  *           A promise when the surface is a render target whose pixels are
@@ -451,6 +458,9 @@ export function createSurface(options){
         counter: options.count,
         addRef: ()=>options.count.addRef(),
         release: ()=>options.count.release(),
+        /** The device binds it as a target (see `createReferenceCount`). */
+        hold: ()=>options.count.hold?.(),
+        letGo: ()=>options.count.letGo?.(),
 
         /** @param {{ desc?: SurfaceDesc }} out */
         GetDesc(out){

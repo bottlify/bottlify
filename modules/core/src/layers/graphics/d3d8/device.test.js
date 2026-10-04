@@ -2558,3 +2558,34 @@ test('packed video is made where the runtime holds it and nowhere a device draws
             D3DERR_INVALIDCALL);
     }
 });
+
+test('a render target and a depth stencil released to nothing while set live on until replaced',
+    ()=>{
+        const device = createDevice();
+        /** @type {{ surface?: any }} */
+        const made = {};
+        assert.equal(device.CreateRenderTarget(32, 32, D3DFMT.A8R8G8B8, false, made), D3D_OK);
+        const target = made.surface;
+        assert.equal(device.CreateDepthStencilSurface(32, 32, D3DFMT.D24S8, made), D3D_OK);
+        const depth = made.surface;
+        /** @type {{ surface?: any }} */
+        const original = {};
+        assert.equal(device.GetRenderTarget(original), D3D_OK);
+        assert.equal(device.SetRenderTarget(target, depth), D3D_OK);
+        assert.equal(target.release(), 0);
+        assert.equal(depth.release(), 0);
+        assert.equal(target.destroyed, false, 'set, it lives on');
+        /** @type {{ surface?: any }} */
+        const out = {};
+        assert.equal(device.GetRenderTarget(out), D3D_OK);
+        assert.equal(out.surface, target, 'and is the one handed back');
+        assert.equal(target.release(), 0);
+        assert.equal(device.GetDepthStencilSurface(out), D3D_OK);
+        assert.equal(out.surface, depth);
+        assert.equal(depth.release(), 0);
+        assert.equal(device.SetRenderTarget(original.surface, null), D3D_OK);
+        assert.equal(target.destroyed, true, 'replaced, it goes');
+        assert.equal(depth.destroyed, true);
+        original.surface.release();
+        assertFullyReleased(device);
+    });

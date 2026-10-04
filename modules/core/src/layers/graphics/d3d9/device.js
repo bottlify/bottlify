@@ -1863,6 +1863,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 // What it kept bound goes with it.
                 streams.clear();
                 indices = rebound(indices, null);
+                rebound(renderTargets.get(0), null);
+                renderTargets.clear();
+                depthStencil = rebound(depthStencil, null);
                 retireImplicitSurfaces();
                 // The reference CreateDevice took on the object that made it.
                 identity?.direct3D?.release?.();
@@ -2184,9 +2187,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             }
             makeImplicitSurfaces();
             adoptBackBuffers();
-            renderTargets.clear();
-            renderTargets.set(0, backBuffers[0]);
-            depthStencil = autoDepthStencil;
+            renderTargets.set(0, rebound(renderTargets.get(0), backBuffers[0]));
+            depthStencil = rebound(depthStencil, autoDepthStencil);
             const target = describe(backBuffers[0]);
             // An extended device keeps the depth range it had.
             viewport = viewportState({
@@ -3324,7 +3326,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            renderTargets.set(index, surface);
+            renderTargets.set(index, rebound(renderTargets.get(index), surface));
             // A new target resets the viewport and the scissor to all of it,
             // so that one left over from a smaller target cannot stay latched.
             viewport = fullTarget({ width: target.Width, height: target.Height });
@@ -3414,12 +3416,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            const surface = renderTargets.get(index);
+            const surface = handOut(renderTargets.get(index), 'GetRenderTarget');
             if (!surface)
             {
                 return D3DERR_NOTFOUND;
             }
-            surface.addRef();
             out.surface = surface;
             return D3D_OK;
         },
@@ -3451,7 +3452,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            depthStencil = surface ?? null;
+            depthStencil = rebound(depthStencil, surface ?? null);
             drawStateVersion++;
             return D3D_OK;
         },
@@ -3467,9 +3468,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 out.surface = null;
                 return D3DERR_NOTFOUND;
             }
-            depthStencil.addRef();
-            out.surface = depthStencil;
-            return D3D_OK;
+            out.surface = handOut(depthStencil, 'GetDepthStencilSurface');
+            return out.surface ? D3D_OK : D3DERR_NOTFOUND;
         },
 
         /**
@@ -4490,7 +4490,7 @@ function fullMipCount(width, height){
  * @param {any} previous @param {any} next
  * @returns {any} next
  */
-function rebound(previous, next){
+export function rebound(previous, next){
     if (previous !== next)
     {
         next?.hold?.();

@@ -63,7 +63,7 @@ import {
     rectMoveOf, regionAtLevel, volumeUpdate, writeFrontBuffer, writePixels,
 } from '../d3d9/resources.js';
 import { volumeCreateResult, volumeLevelCount } from '../d3d9/validity.js';
-import { DEVICE_STATE, LIGHT_ENABLED, createPalettes } from '../d3d9/device.js';
+import { DEVICE_STATE, LIGHT_ENABLED, createPalettes, rebound } from '../d3d9/device.js';
 import { createAdditionalChain } from '../d3d9/swapchain.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
 import {
@@ -856,15 +856,20 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         {
             liveDefaultPoolResources++;
         }
+        // The reference on the device and the hold on a Reset follow the
+        // program's count: one the device keeps bound past the program's last
+        // Release holds neither, or a target bound at a count of zero would
+        // keep its device for ever.
         return createReferenceCount({
-            onLastRef: ()=>{
-                onGone();
-                count.release();
-                if (blocking)
-                {
-                    liveDefaultPoolResources--;
-                }
+            onFirstRef: ()=>{
+                count.addRef();
+                liveDefaultPoolResources += blocking ? 1 : 0;
             },
+            onZero: ()=>{
+                count.release();
+                liveDefaultPoolResources -= blocking ? 1 : 0;
+            },
+            onLastRef: onGone,
         });
     };
 
@@ -982,8 +987,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 count: implicitCount(),
             })
             : null;
-        renderTarget = backBuffers[0];
-        depthStencil = autoDepthStencil;
+        renderTarget = rebound(renderTarget, backBuffers[0]);
+        depthStencil = rebound(depthStencil, autoDepthStencil);
         viewport = fullTarget({ width, height });
     }
 
@@ -1482,6 +1487,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 stopWatchingLoss?.();
                 showGamma(true);
+                // The targets it kept bound go with it.
+                renderTarget = rebound(renderTarget, null);
+                depthStencil = rebound(depthStencil, null);
                 retireImplicitResources();
                 // The reference CreateDevice took on the object that made it.
                 identity?.direct3D?.release?.();
@@ -2623,9 +2631,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             }
             if (target)
             {
-                renderTarget = target;
+                renderTarget = rebound(renderTarget, target);
             }
-            depthStencil = depth ?? null;
+            depthStencil = rebound(depthStencil, depth ?? null);
             const bound = describe(renderTarget);
             viewport = fullTarget({ width: bound.Width, height: bound.Height });
             drawStateVersion++;
@@ -2633,15 +2641,14 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         },
 
         /**
-         * There is always a colour target, so this cannot fail. D3D9 takes an
-         * index here; this version has exactly one.
+         * There is always a colour target, kept by the device while it is
+         * bound. D3D9 takes an index here; this version has exactly one.
          *
          * @param {{ surface?: any }} out
          */
         GetRenderTarget(out){
-            renderTarget.addRef();
-            out.surface = renderTarget;
-            return D3D_OK;
+            out.surface = handOut(renderTarget, 'GetRenderTarget');
+            return out.surface ? D3D_OK : D3DERR_NOTFOUND;
         },
 
         /**
@@ -2656,9 +2663,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 out.surface = null;
                 return D3DERR_NOTFOUND;
             }
-            depthStencil.addRef();
-            out.surface = depthStencil;
-            return D3D_OK;
+            out.surface = handOut(depthStencil, 'GetDepthStencilSurface');
+            return out.surface ? D3D_OK : D3DERR_NOTFOUND;
         },
 
         /**

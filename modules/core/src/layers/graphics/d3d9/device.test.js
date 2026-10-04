@@ -786,3 +786,36 @@ test('a signed bump-map format is a texture, sampled and never drawn into', ()=>
         assert.equal(device.CreateRenderTarget(64, 64, format, false, {}), D3DERR_INVALIDCALL);
     }
 });
+
+test('a render target and a depth stencil released to nothing while set live on until replaced',
+    ()=>{
+        const device = createDevice();
+        /** @type {{ surface?: any }} */
+        const made = {};
+        assert.equal(device.CreateRenderTarget(32, 32, D3DFMT.A8R8G8B8, false, made), D3D_OK);
+        const target = made.surface;
+        assert.equal(device.CreateDepthStencilSurface(32, 32, D3DFMT.D24S8, made), D3D_OK);
+        const depth = made.surface;
+        /** @type {{ surface?: any }} */
+        const original = {};
+        assert.equal(device.GetRenderTarget(0, original), D3D_OK);
+        assert.equal(device.SetRenderTarget(0, target), D3D_OK);
+        assert.equal(device.SetDepthStencilSurface(depth), D3D_OK);
+        assert.equal(target.release(), 0);
+        assert.equal(depth.release(), 0);
+        assert.equal(target.destroyed, false, 'set, it lives on');
+        /** @type {{ surface?: any }} */
+        const out = {};
+        assert.equal(device.GetRenderTarget(0, out), D3D_OK);
+        assert.equal(out.surface, target, 'and is the one handed back');
+        assert.equal(target.release(), 0);
+        assert.equal(device.GetDepthStencilSurface(out), D3D_OK);
+        assert.equal(out.surface, depth);
+        assert.equal(depth.release(), 0);
+        assert.equal(device.SetRenderTarget(0, original.surface), D3D_OK);
+        assert.equal(device.SetDepthStencilSurface(null), D3D_OK);
+        assert.equal(target.destroyed, true, 'replaced, it goes');
+        assert.equal(depth.destroyed, true);
+        original.surface.release();
+        assertFullyReleased(device);
+    });
