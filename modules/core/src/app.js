@@ -2758,7 +2758,9 @@ export function createKernelGl(opengl, journalCall, traced, counters){
  *     patches?: { address: number, bytes: Uint8Array }[],
  *     spawned?: (request: any) => void,
  *     logSinks?: Map<Function, (payload: any) => void>,
- *     system?: { namedObjects: Map<string, any>, hive: any },
+ *     system?: { namedObjects: Map<string, any>, hive: any,
+ *         ids: { thread: number, process: number } },
+ *     mainThreadId?: number,
  *     com?: { table: any, process: unknown },
  * }} options
  * @returns {Promise<any>} an AppController
@@ -3092,6 +3094,9 @@ async function buildApp(options){
                 size: threadStackSize,
                 limit: STACK_POOL_BASE + STACK_POOL_SIZE,
             },
+            // The run's thread and process ids, which every process numbers
+            // its own from (`system`).
+            ids: options.system?.ids,
         },
         cpu: {
             jit: options.jit, sampling: options.sampling, memorySize,
@@ -5290,21 +5295,22 @@ async function buildApp(options){
 
     // The program's first thread. Everything after this runs under the
     // scheduler, including the main thread -- there is no privileged path.
-    const mainBlock = process.createThreadBlock({
-        id: 1,
-        stackBase: initialStack,
-        stackLimit: initialStack - stackSize,
-    });
+    // Its id the one the parent was told, for a child.
     const mainThread = kernel.createThread({
         entry: start,
         stackTop: initialStack,
         stackLimit: initialStack - stackSize,
-        tebAddress: mainBlock.teb,
         name: 'main',
+        id: options.mainThreadId,
         // A program whose entry point returns ends as one that called
         // ExitThread with its answer, as Windows' process start routine sees to.
         returnTo: win32.threadReturn(),
     });
+    mainThread.tebAddress = process.createThreadBlock({
+        id: mainThread.id,
+        stackBase: initialStack,
+        stackLimit: initialStack - stackSize,
+    }).teb;
 
     /** The mixer, when this build has one. Read once; it does not change. */
     const sound = core.api('audio')?.output?.() ?? null;
@@ -6759,9 +6765,20 @@ export async function createApp(options){
      * objects, and the registry -- the first process's hive, the one each
      * later process is handed rather than a copy of it.
      *
-     * @type {{ namedObjects: Map<string, any>, hive: any }}
+     * @type {{ namedObjects: Map<string, any>, hive: any,
+     *     ids: { thread: number, process: number } }}
      */
-    const system = { namedObjects, hive: null };
+    const system = { namedObjects, hive: null, ids: { thread: 1, process: 0x2000 } };
+    /**
+     * A process id and its first thread's, from the run's, for a process no
+     * parent was told of: a class's server, which COM starts.
+     */
+    const newProcessIds = ()=>{
+        const processId = system.ids.process;
+        // Eight, as the kernel's process table steps: a process and its thread.
+        system.ids.process += 8;
+        return { processId, mainThreadId: processId + 1 };
+    };
     /** @type {Map<string, string | number>} */
     const logLevels = new Map();
     /** @type {string | number | null} */
@@ -7101,6 +7118,7 @@ export async function createApp(options){
             executable: found.image,
             imagePath: found.path,
             commandLine: `${request.command.trim()} -Embedding`,
+            ...newProcessIds(),
             seed: parent.session.export(),
         });
         replicas.track(server);
@@ -7162,6 +7180,7 @@ export async function createApp(options){
             commandLine: request.commandLine,
             patches: request.patches,
             processId: request.id,
+            mainThreadId: request.threadId,
             standardFiles: request.standardFiles,
             seed: parent.session.export(),
         });
@@ -7281,6 +7300,7 @@ export async function createApp(options){
                 commandLine: request.commandLine,
                 patches: request.patches,
                 processId: request.id,
+                mainThreadId: request.threadId,
                 seed: carried,
             });
             if (line.main)

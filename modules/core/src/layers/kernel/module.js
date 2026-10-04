@@ -162,6 +162,7 @@ export function createKernelModule(){
                 // Below a page the emulator cannot honour a smaller quantum anyway,
                 // so asking for one would only be a lie in the configuration.
                 quantum: config?.quantum ?? 100_000,
+                ids: config?.ids,
                 ...published(cpu, log),
             });
             if (typeof log.metrics?.onFrame === 'function')
@@ -182,7 +183,7 @@ export function createKernelModule(){
             }
             state.sync = createSyncObjects({ scheduler: state.scheduler });
             state.handles = createHandleTable();
-            state.processes = createProcessTable();
+            state.processes = createProcessTable(config?.ids);
 
             /**
              * Whether this instance is still open. A call still in flight when the
@@ -218,6 +219,9 @@ export function createKernelModule(){
                  * @param {number} [options.stackReserve]  The reserve a caller asked for.
                  * @param {number} [options.tebAddress]
                  * @param {string} [options.name]
+                 * @param {number} [options.id]  The id the thread was promised
+                 *   before it was made: a child's first thread has the one its
+                 *   parent was told in PROCESS_INFORMATION.
                  * @param {number} [options.returnTo]
                  *   Where the start routine returns to. A thread that returns has
                  *   ended, and something has to notice: left at the park loop it
@@ -232,7 +236,7 @@ export function createKernelModule(){
                  */
                 createThread({
                     entry, parameter = 0, stackTop, stackLimit, stackSize, stackReserve,
-                    tebAddress, name, returnTo,
+                    tebAddress, name, returnTo, id,
                 })
                 {
                     if (!live())
@@ -282,6 +286,7 @@ export function createKernelModule(){
                         stackLimit: low,
                         tebAddress: tebAddress ?? 0,
                         name,
+                        id,
                     });
                     thread.handle = state.handles.open('thread', thread);
                     if (slot)

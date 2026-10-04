@@ -63,10 +63,13 @@ export const STILL_ACTIVE = 259;
 const FIRST_ID = 0x2000;
 const ID_STRIDE = 4;
 
-export function createProcessTable(){
+/**
+ * @param {{ process: number }} [ids]  the run's, where processes are started
+ *     from more than one: a child's children are numbered on from its parent's
+ */
+export function createProcessTable(ids = { process: FIRST_ID }){
     /** @type {ProcessRecord[]} */
     const records = [];
-    let nextId = FIRST_ID;
 
     return {
         /**
@@ -82,9 +85,10 @@ export function createProcessTable(){
          * @returns {ProcessRecord}
          */
         create({ imagePath, commandLine, suspended = false, completed = false }){
+            const id = ids.process;
             const record = {
-                id: nextId,
-                threadId: nextId + 1,
+                id,
+                threadId: id + 1,
                 imagePath,
                 commandLine,
                 suspended,
@@ -95,7 +99,7 @@ export function createProcessTable(){
                 handle: 0,
                 threadHandle: 0,
             };
-            nextId += ID_STRIDE * 2;
+            ids.process += ID_STRIDE * 2;
             records.push(record);
             return record;
         },

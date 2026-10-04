@@ -130,6 +130,8 @@ const ATOMIC_STEPS = 16;
  * @param {{ set: (row: number, column: number, value: number) => void,
  *     used: (count: number) => void, rows: number }} [options.slowSliceTable]
  * @param {(text: string) => number} [options.intern]  A name as a dictionary id.
+ * @param {{ thread: number }} [options.ids]  The run's next thread id, shared with
+ *        the schedulers of the processes beside or after this one.
  */
 export function createScheduler(options){
     const { cpu, switcher, quantum = 100_000, now = ()=>0, skipTo = ()=>0 } = options;
@@ -256,7 +258,10 @@ export function createScheduler(options){
     const threads = [];
     /** @type {any} */
     let current = null;
-    let nextId = 1;
+    // Thread ids are the run's, as a machine's are: a process started beside
+    // or after this one numbers its threads on from where this one got to,
+    // so no two threads of the run answer GetCurrentThreadId alike.
+    const ids = options.ids ?? { thread: 1 };
     let turns = 0;
     /**
      * Where the machine went, by 64 KiB page of guest code.
@@ -483,12 +488,15 @@ export function createScheduler(options){
          * @param {number} [options.stackLimit]  The low end of the same stack, when known.
          * @param {number} options.tebAddress
          * @param {string} [options.name]
+         * @param {number} [options.id]  the id it was already given: the one a
+         *     parent was told its child's first thread has
          * @returns {any} the thread
          */
-        create({ entry, stackTop, stackLimit, tebAddress, name }){
+        create({ entry, stackTop, stackLimit, tebAddress, name, id }){
+            const made = id ?? ids.thread++;
             const thread = {
-                id: nextId++,
-                name: name ?? `thread-${nextId - 1}`,
+                id: made,
+                name: name ?? `thread-${made}`,
                 state: ThreadState.READY,
                 tebAddress,
                 stackTop,

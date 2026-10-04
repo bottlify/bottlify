@@ -521,6 +521,54 @@ test('a child is the process its parent was told of: GetCurrentProcessId is PROC
         assert.notEqual(told, 0x1000, 'which is not the parent\'s');
     });
 
+test('a child\'s first thread is the thread its parent was told of: GetCurrentThreadId is'
+    + ' PROCESS_INFORMATION\'s', { timeout: 60000 }, async t=>{
+    // An injector or a debugger opens the child's thread by the id it was
+    // handed; the child's own answer has to be that one, and no thread of the
+    // parent's may answer it too -- the run numbers threads as one machine.
+    const parent = buildExe({
+        imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject', 'ExitProcess'] },
+        data: {
+            command: ascii('C:\\App\\child.exe'),
+            startup: [...u32(68), ...new Array(64).fill(0)],
+            info: new Array(16).fill(0),
+        },
+        codeSize: 0x60,
+        code: ({ iat, at })=>[
+            0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+            0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+            0x68, ...u32(at('command')), 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateProcessA')),
+            0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+            // ExitProcess(info.dwThreadId)
+            0xff, 0x35, ...u32(at('info') + 12),
+            0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    const child = buildExe({
+        imports: { 'KERNEL32.dll': ['GetCurrentThreadId', 'ExitProcess'] },
+        code: ({ iat })=>[
+            0xff, 0x15, ...u32(iat('GetCurrentThreadId')),
+            0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    const app = await createApp({
+        executable: parent,
+        imagePath: 'C:\\App\\parent.exe',
+        engine: 'cork',
+        storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
+    });
+    t.after(()=>app.dispose());
+    /** @type {number[]} */
+    const childCodes = [];
+    app.on('process-resumed', (/** @type {any} */ event)=>childCodes.push(event.code >>> 0));
+    const told = (await app.run({ timeoutMs: 30000 })) >>> 0;
+    assert.notEqual(told, 0, 'the parent was handed a thread id');
+    assert.deepEqual(childCodes, [told], 'and the child\'s first thread answers that one');
+    assert.notEqual(told, 1, 'which is not the parent\'s first thread');
+});
+
 /** @param {number} value */
 const le32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 /** @param {string} text */
