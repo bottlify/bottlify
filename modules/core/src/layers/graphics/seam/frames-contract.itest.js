@@ -59,6 +59,12 @@ const VERTICES_FOR = /** @type {Record<number, (triangles: number) => number>} *
 const D3DTS_WORLD = 256;
 const D3DRS_LIGHTING = 137;
 const D3DRS_TEXTUREFACTOR = 60;
+const D3DPOOL_SYSTEMMEM = 2;
+const D3DSBT_ALL = 1;
+const D3DCLEAR_TARGET = 1;
+const ONE = 0x3f800000;
+/** Where the program keeps the indices it draws from its own memory. */
+const USER_INDICES = 0x20400;
 /** Where the out-parameters are written (`guest-machine`). */
 const OUT = 0x10000;
 /** Where the program keeps the vertices it draws from its own memory. */
@@ -82,6 +88,11 @@ const DEVICE = '#1';
 const STREAMS = ['#2', '#3'];
 const IB = '#4';
 const TEXTURES = ['#5', '#6'];
+/** A system-memory texture the program fills, and one in the default pool it copies it to. */
+const SOURCE = '#7';
+const COPY = '#8';
+/** What a draw may sample: the textures it fills, and the one it copies into. */
+const SAMPLED = [...TEXTURES, COPY];
 
 /** @param {string} on */
 const kindOf = on=>(on === IB ? 'indices' : STREAMS.includes(on) ? 'vertices' : 'texture');
@@ -109,8 +120,9 @@ const callsOf = version=>{
                 D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY, fvf, D3DPOOL_DEFAULT, 'out', ...tail])),
             device('CreateIndexBuffer', [INDEX_BYTES, D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY,
                 D3DFMT_INDEX16, D3DPOOL_DEFAULT, 'out', ...tail]),
-            ...TEXTURES.map(()=>device('CreateTexture', [TEXELS, TEXELS, 1, 0, D3DFMT_A8R8G8B8,
-                D3DPOOL_MANAGED, 'out', ...tail])),
+            ...[...TEXTURES.map(()=>D3DPOOL_MANAGED), D3DPOOL_SYSTEMMEM, D3DPOOL_DEFAULT]
+                .map(pool=>device('CreateTexture', [TEXELS, TEXELS, 1, 0, D3DFMT_A8R8G8B8, pool,
+                    'out', ...tail])),
             device('SetRenderState', [D3DRS_LIGHTING, 0]),
         ],
         device,
@@ -211,7 +223,17 @@ function gpuReads(gpu){
         for (let i = from; i < calls.length; i++)
         {
             const call = calls[i];
-            if (call.op === 'createRenderPipeline')
+            if (call.op === 'beginRenderPass')
+            {
+                const clears = (call.descriptor.colorAttachments ?? [])
+                    .filter((/** @type {any} */ each)=>each?.loadOp === 'clear')
+                    .map((/** @type {any} */ each)=>JSON.stringify(each.clearValue));
+                if (clears.length > 0)
+                {
+                    drawn.push({ line: `clear ${clears.join(',')}`, textures: [] });
+                }
+            }
+            else if (call.op === 'createRenderPipeline')
             {
                 pipelines.set(call.createRenderPipeline, call.descriptor);
             }
@@ -317,6 +339,12 @@ const bytesFor = (indices, length, fill)=>(indices
  *     | { kind: 'user' }
  *     | { kind: 'world', seed: number } | { kind: 'factor', value: number }
  *     | { kind: 'reference', on: string }
+ *     | { kind: 'copy', through: 'texture' | 'surface' }
+ *     | { kind: 'record', texture: string | null, seed: number }
+ *     | { kind: 'capture' } | { kind: 'apply', block: number }
+ *     | { kind: 'recapture', block: number }
+ *     | { kind: 'clear', color: number, viewport: number[] | null }
+ *     | { kind: 'indexedUser' }
  *     | { kind: 'present' }} Step
  */
 
@@ -339,9 +367,16 @@ function generate(seed, steps, upUnbinds){
     let stream = 0;
     let base = 0;
     let bound = true;
+    /**
+     * The state blocks made so far, by the order they were made in: what one
+     * of everything holds of the stream and its base, none for one recorded.
+     *
+     * @type {({ stream: number, base: number, bound: boolean } | null)[]}
+     */
+    const blocks = [];
     while (program.length < steps)
     {
-        const roll = below(40);
+        const roll = below(52);
         if (roll < 12)
         {
             const on = pick([...STREAMS, IB]);
@@ -386,7 +421,7 @@ function generate(seed, steps, upUnbinds){
         }
         else if (roll < 16)
         {
-            program.push({ kind: 'texture', on: pick([...TEXTURES, null]) });
+            program.push({ kind: 'texture', on: pick([...SAMPLED, null]) });
         }
         else if (roll < 18)
         {
@@ -453,7 +488,52 @@ function generate(seed, steps, upUnbinds){
         }
         else if (roll < 38)
         {
-            program.push({ kind: 'reference', on: pick([...STREAMS, IB, ...TEXTURES]) });
+            program.push({ kind: 'reference', on: pick([...STREAMS, IB, ...SAMPLED, SOURCE]) });
+        }
+        else if (roll < 40)
+        {
+            program.push({ kind: 'texels', on: SOURCE, through: 'texture', fill: below(256) });
+            program.push({ kind: 'copy', through: pick(['texture', 'surface']) });
+        }
+        else if (roll < 42)
+        {
+            blocks.push(null);
+            program.push({ kind: 'record', texture: pick([...SAMPLED, null]), seed: below(1000) });
+        }
+        else if (roll < 43)
+        {
+            blocks.push({ stream, base, bound });
+            program.push({ kind: 'capture' });
+        }
+        else if (roll < 45 && blocks.length > 0)
+        {
+            const block = below(blocks.length);
+            const held = blocks[block];
+            if (held)
+            {
+                ({ stream, base, bound } = held);
+            }
+            program.push({ kind: 'apply', block });
+        }
+        else if (roll < 46 && blocks.length > 0)
+        {
+            const block = below(blocks.length);
+            if (blocks[block])
+            {
+                blocks[block] = { stream, base, bound };
+            }
+            program.push({ kind: 'recapture', block });
+        }
+        else if (roll < 48)
+        {
+            program.push({ kind: 'clear', color: below(0x1000000) | 0xff000000,
+                viewport: below(2) === 0 ? null : [below(16), below(16), 8 + below(32),
+                    8 + below(32)] });
+        }
+        else if (roll < 49)
+        {
+            program.push({ kind: 'indexedUser' });
+            bound = !upUnbinds;
         }
         else
         {
@@ -526,17 +606,57 @@ async function play(version, guestCode, steps, worker = false){
         run(calls.unlock(on));
     };
 
+    /** @param {string} on @returns {string} a level's surface, to be released */
+    const levelOf = on=>/** @type {string} */ (run({ on, kind: 'texture',
+        method: 'GetSurfaceLevel', args: [0, 'out'] }).out);
+    /** @param {string} surface */
+    const release = surface=>run({ on: surface, kind: 'level', method: 'Release', args: [] });
+    /** @param {'texture' | 'surface'} through */
+    const copy = through=>{
+        if (through === 'texture')
+        {
+            run(calls.device('UpdateTexture', [SOURCE, COPY]));
+            return;
+        }
+        const from = levelOf(SOURCE);
+        const to = levelOf(COPY);
+        run(calls.nine ? calls.device('UpdateSurface', [from, 0, to, 0])
+            : calls.device('CopyRects', [from, 0, 0, to, 0]));
+        release(to);
+        release(from);
+    };
+    /** The state blocks made, as the program holds each: a pointer, or a token. */
+    /** @type {(string | number)[]} */
+    const blocks = [];
+    /** What each block made of everything holds of the stream, as `generate` tracks it. */
+    /** @type {(number | null)[]} */
+    const blockStreams = [];
+    /** @param {string} method @param {any[]} args */
+    const makeBlock = (method, args)=>{
+        const answer = run(calls.device(method, args));
+        blocks.push(calls.nine ? /** @type {string} */ (answer.out) : m.memory.readU32(OUT));
+    };
+    /** @param {number} block @param {'Apply' | 'Capture'} what */
+    const onBlock = (block, what)=>{
+        const held = blocks[block];
+        run(typeof held === 'string'
+            ? { on: held, kind: 'block', method: what, args: [] }
+            : calls.device(`${what}StateBlock`, [held]));
+    };
+
     for (const call of calls.make)
     {
         run(call);
     }
     m.memory.writeBytes(USER, bytesFor(false, 3 * FORMATS[0].stride, 99));
+    m.memory.writeBytes(USER_INDICES, new Uint8Array(new Uint16Array([0, 1, 2]).buffer));
     // A frame of every kind of draw, from either buffer, with a texture and
     // without, and time for the shaders it needs to be compiled: a draw whose
     // pipeline is not ready yet is left out of its frame, and the two
     // machines would leave out different ones.
     [...STREAMS, IB].forEach((on, i)=>fill(on, 1 + i));
-    TEXTURES.forEach((on, i)=>texels(on, 'texture', 7 + i));
+    [...TEXTURES, SOURCE].forEach((on, i)=>texels(on, 'texture', 7 + i));
+    copy('texture');
     for (let pass = 0; pass < 2; pass++)
     {
         run(calls.device('BeginScene'));
@@ -554,8 +674,14 @@ async function play(version, guestCode, steps, worker = false){
                 }
                 run(calls.device('DrawPrimitiveUP', [D3DPT_TRIANGLELIST, 1, USER,
                     FORMATS[0].stride]));
+                run(calls.device('DrawIndexedPrimitiveUP', [D3DPT_TRIANGLELIST, 0, 3, 1,
+                    USER_INDICES, D3DFMT_INDEX16, USER, FORMATS[0].stride]));
             }
         }
+        run(calls.device('SetViewport', [{ words: [4, 4, 16, 16, 0, ONE] }]));
+        run(calls.device('Clear', [0, 0, D3DCLEAR_TARGET, 0xff102030, ONE, 0]));
+        run(calls.device('SetViewport', [{ words: [0, 0, 64, 64, 0, ONE] }]));
+        run(calls.device('Clear', [0, 0, D3DCLEAR_TARGET, 0xff302010, ONE, 0]));
         calls.stream(0).forEach(call=>run(call));
         run(calls.indices(0));
         run(calls.device('EndScene'));
@@ -643,6 +769,55 @@ async function play(version, guestCode, steps, worker = false){
             run(calls.device('SetRenderState', [D3DRS_TEXTUREFACTOR, step.value]));
             run(calls.device('GetRenderState', [D3DRS_TEXTUREFACTOR, 'out']), 4);
         }
+        else if (step.kind === 'copy')
+        {
+            copy(step.through);
+        }
+        else if (step.kind === 'record')
+        {
+            run(calls.device('BeginStateBlock'));
+            run(calls.device('SetTexture', [0, step.texture ?? 0]));
+            const words = Array.from({ length: 16 }, (unused, i)=>new Uint32Array(
+                new Float32Array([i % 5 === 0 ? 1 : (step.seed % (i + 2)) / 5]).buffer)[0]);
+            run(calls.device('SetTransform', [D3DTS_WORLD, { words }]));
+            run(calls.device('SetRenderState', [D3DRS_TEXTUREFACTOR, step.seed * 4099]));
+            makeBlock('EndStateBlock', ['out']);
+            blockStreams.push(null);
+        }
+        else if (step.kind === 'capture')
+        {
+            makeBlock('CreateStateBlock', [D3DSBT_ALL, 'out']);
+            blockStreams.push(stream);
+        }
+        else if (step.kind === 'apply')
+        {
+            onBlock(step.block, 'Apply');
+            stream = blockStreams[step.block] ?? stream;
+        }
+        else if (step.kind === 'recapture')
+        {
+            onBlock(step.block, 'Capture');
+            if (blockStreams[step.block] !== null)
+            {
+                blockStreams[step.block] = stream;
+            }
+        }
+        else if (step.kind === 'clear')
+        {
+            if (step.viewport)
+            {
+                run(calls.device('SetViewport', [{ words: [...step.viewport, 0, ONE] }]));
+            }
+            run(calls.device('Clear', [0, 0, D3DCLEAR_TARGET, step.color, ONE, 0]));
+            run(calls.device('SetViewport', [{ words: [0, 0, 64, 64, 0, ONE] }]));
+        }
+        else if (step.kind === 'indexedUser')
+        {
+            calls.stream(0).forEach(call=>run(call));
+            run(calls.device('DrawIndexedPrimitiveUP', [D3DPT_TRIANGLELIST, 0, 3, 1,
+                USER_INDICES, D3DFMT_INDEX16, USER, FORMATS[0].stride]));
+            calls.stream(stream).forEach(call=>run(call));
+        }
         else if (step.kind === 'reference')
         {
             run({ on: step.on, kind: kindOf(step.on), method: 'AddRef', args: [] });
@@ -683,7 +858,9 @@ const parting = (trap, guest, what)=>{
 /** The calls each part of the guest code takes, which a run must have taken in the guest. */
 const COVERED = ['Lock', 'Unlock', 'GetSurfaceLevel', 'AddRef', 'Release', 'SetTexture',
     'SetStreamSource', 'SetIndices', 'DrawPrimitive', 'DrawIndexedPrimitive', 'DrawPrimitiveUP',
-    'SetTransform', 'GetTransform', 'SetRenderState', 'GetRenderState'];
+    'SetTransform', 'GetTransform', 'SetRenderState', 'GetRenderState', 'Clear', 'SetViewport'];
+/** And those only Direct3D 9's ring carries: a state block's own Capture and Apply. */
+const COVERED_9 = ['Apply', 'Capture'];
 
 for (const [version, worker] of /** @type {[Version, boolean][]} */ ([[D3D8, false],
     [D3D9, false], [D3D8, true], [D3D9, true]]))
@@ -715,7 +892,8 @@ for (const [version, worker] of /** @type {[Version, boolean][]} */ ([[D3D8, fal
             }
         }
         assert.deepEqual(wrong, []);
-        assert.deepEqual(COVERED.filter(method=>!((taken.get(method) ?? 0) > 20)), [],
+        const covered = [...COVERED, ...version === D3D9 ? COVERED_9 : []];
+        assert.deepEqual(covered.filter(method=>!((taken.get(method) ?? 0) > 20)), [],
             `each part of the guest code took calls: ${JSON.stringify([...taken])}`);
     });
 }

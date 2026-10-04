@@ -3080,6 +3080,9 @@ export function createDirect3D9Seam(
                             }
                         }
                         shadow.remirror({ viewport: true });
+                        // And what a draw is checked against: the bindings
+                        // the block set are the device's now.
+                        shadow.settled();
                         shadow.fresh();
                     }
                     return made;
