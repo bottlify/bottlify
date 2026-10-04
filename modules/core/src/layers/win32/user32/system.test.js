@@ -3117,3 +3117,104 @@ test('GetKeyNameText names a key from its scan code, the extended bit and the si
     assert.deepEqual([...memory.bytes.slice(0x100, 0x106)], [0x53, 0, 0x68, 0, 0, 0]);
     assert.equal(fns.GetKeyNameTextW.argBytes, 12);
 });
+
+/** @param {any} memory @param {number} at @param {string} text */
+function putWideText(memory, at, text){
+    memory.writeMemory(at, new Uint8Array(Buffer.from(`${text}\0`, 'utf16le')));
+}
+
+/** @param {any} memory @param {number} at */
+function readWideText(memory, at){
+    let end = at;
+    while (memory.bytes[end] !== 0 || memory.bytes[end + 1] !== 0)
+    {
+        end += 2;
+    }
+    return Buffer.from(memory.bytes.subarray(at, end)).toString('utf16le');
+}
+
+test('CharUpperW and CharLowerW convert UTF-16 in place, or one character by value', ()=>{
+    const { memory, fns } = setup();
+    putWideText(memory, TEXT_BUFFER, 'Ab-zéбß');
+
+    assert.equal(fns.CharUpperW.argBytes, 4);
+    assert.equal(fns.CharUpperW.handler([TEXT_BUFFER]), TEXT_BUFFER, 'the pointer is the answer');
+    assert.equal(readWideText(memory, TEXT_BUFFER), 'AB-ZÉБß',
+        'a letter whose upper case is two is left alone; the string cannot grow');
+    assert.equal(fns.CharLowerW.handler([TEXT_BUFFER]), TEXT_BUFFER);
+    assert.equal(readWideText(memory, TEXT_BUFFER), 'ab-zéбß');
+
+    assert.equal(fns.CharUpperW.handler([0x0431]), 0x0411, 'a zero high word is a character');
+    assert.equal(fns.CharLowerW.handler(['Q'.charCodeAt(0)]), 'q'.charCodeAt(0));
+    assert.equal(fns.CharUpperW.handler([0]), 0);
+
+    putWideText(memory, TEXT_BUFFER, 'ab\0c');
+    assert.equal(fns.CharUpperBuffW.handler([TEXT_BUFFER, 4]), 4, 'a counted buffer, NUL included');
+    assert.equal(Buffer.from(memory.bytes.subarray(TEXT_BUFFER, TEXT_BUFFER + 8))
+        .toString('utf16le'), 'AB\0C');
+    assert.equal(fns.CharLowerBuffW.handler([0, 4]), 0);
+});
+
+test('wvsprintfW formats wide through the list it was handed', ()=>{
+    const { memory, fns } = setup();
+    putWideText(memory, FORMAT_BUFFER, '%s scored %d of %S');
+    putWideText(memory, TEXT_BUFFER, 'Spieler');
+    memory.putString(TEXT_BUFFER + 0x40, 'hundert');
+    memory.putU32s(RECT_BUFFER, [TEXT_BUFFER, 42, TEXT_BUFFER + 0x40]);
+
+    const written = fns.wvsprintfW.handler([OUT_BUFFER, FORMAT_BUFFER, RECT_BUFFER]);
+
+    assert.equal(readWideText(memory, OUT_BUFFER), 'Spieler scored 42 of hundert');
+    assert.equal(written, 'Spieler scored 42 of hundert'.length);
+    assert.equal(fns.wvsprintfW.argBytes, 12, 'stdcall: three pointers, and the callee pops them');
+});
+
+test('GetTabbedTextExtent answers the width and height of a line with its tabs expanded', ()=>{
+    // With no font to measure, every character is the estimated cell: eight
+    // wide and sixteen high.
+    const { memory, fns } = setup();
+    memory.putString(TEXT_BUFFER, 'ab\tc');
+    memory.putU32s(RECT_BUFFER, [40]);
+
+    assert.equal(fns.GetTabbedTextExtentA.argBytes, 20);
+    assert.equal(fns.GetTabbedTextExtentA.handler([0, TEXT_BUFFER, 4, 1, RECT_BUFFER]),
+        (16 << 16 | 48) >>> 0, 'the c starts at the stop at 40');
+    assert.equal(fns.GetTabbedTextExtentA.handler([0, TEXT_BUFFER, 4, 0, 0]),
+        (16 << 16 | 72) >>> 0, 'no stops: every eight average characters');
+    assert.equal(fns.GetTabbedTextExtentA.handler([0, TEXT_BUFFER, 2, 1, RECT_BUFFER]),
+        (16 << 16 | 16) >>> 0, 'only the count given is read');
+    assert.equal(fns.GetTabbedTextExtentA.handler([0, TEXT_BUFFER, 0, 1, RECT_BUFFER]), 0,
+        'user32\'s text tests: no characters is a zero extent');
+
+    putWideText(memory, TEXT_BUFFER, '\tx');
+    memory.putU32s(RECT_BUFFER, [-40 >>> 0]);
+    assert.equal(fns.GetTabbedTextExtentW.handler([0, TEXT_BUFFER, 2, 1, RECT_BUFFER]),
+        (16 << 16 | 40) >>> 0, 'a negative stop right-aligns what follows it');
+});
+
+test('WindowFromDC names the window a context was handed out on, until it is given back', ()=>{
+    const { memory, fns } = setup();
+    const hwnd = makeWindow(memory, fns, WS_OVERLAPPED | WS_VISIBLE);
+
+    const hdc = fns.GetDC.handler([hwnd]);
+    assert.equal(fns.WindowFromDC.argBytes, 4);
+    assert.equal(fns.WindowFromDC.handler([hdc]), hwnd);
+    fns.ReleaseDC.handler([hwnd, hdc]);
+    assert.equal(fns.WindowFromDC.handler([hdc]), 0, 'user32\'s DCE tests: not once released');
+
+    const whole = fns.GetWindowDC.handler([hwnd]);
+    assert.equal(fns.WindowFromDC.handler([whole]), hwnd);
+    fns.ReleaseDC.handler([hwnd, whole]);
+
+    fns.InvalidateRect.handler([hwnd, 0, 0]);
+    const painting = fns.BeginPaint.handler([hwnd, PAINT_BUFFER]);
+    assert.equal(fns.WindowFromDC.handler([painting]), hwnd);
+    fns.EndPaint.handler([hwnd, PAINT_BUFFER]);
+    assert.equal(fns.WindowFromDC.handler([painting]), 0);
+
+    const screen = fns.GetDC.handler([0]);
+    assert.equal(fns.WindowFromDC.handler([screen]), fns.GetDesktopWindow.handler([]),
+        'the screen\'s context is the desktop\'s');
+    fns.ReleaseDC.handler([0, screen]);
+    assert.equal(fns.WindowFromDC.handler([0x5555]), 0, 'a context on no window');
+});

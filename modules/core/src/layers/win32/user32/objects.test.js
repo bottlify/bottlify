@@ -896,3 +896,154 @@ test('GetIconInfo answers the kind and hot spot, and fails on a destroyed handle
     fns.DestroyCursor.handler([cursor]);
     assert.equal(fns.GetIconInfo.handler([cursor, 0x100]), 0);
 });
+
+// --- the flag-described menu calls, accelerators out of resources, help ids ---
+
+test('InsertMenu puts an item before the one named, and at the end for a place past the last', ()=>{
+    const MF_POPUP = 0x10;
+    const MF_HILITE = 0x80;
+    const { memory, fns } = setup();
+    const outer = fns.CreateMenu.handler([]);
+    const inner = fns.CreatePopupMenu.handler([]);
+    memory.putString(TEXT, 'x');
+    fns.AppendMenuA.handler([inner, 0, 10, TEXT]);
+    fns.AppendMenuA.handler([outer, MF_POPUP, inner, TEXT]);
+    /** @param {number} menu */
+    const ids = menu=>Array.from({ length: fns.GetMenuItemCount.handler([menu]) },
+        (_, at)=>fns.GetMenuItemID.handler([menu, at]));
+
+    assert.equal(fns.InsertMenuA.argBytes, 20);
+    assert.equal(fns.InsertMenuA.handler([outer, 0, MF_BYPOSITION, 1, TEXT]), 1);
+    assert.equal(fns.InsertMenuA.handler([outer, -1, MF_BYPOSITION, 2, TEXT]), 1);
+    assert.equal(fns.InsertMenuA.handler([outer, 99, MF_BYPOSITION, 3, TEXT]), 1);
+    assert.deepEqual(ids(outer), [1, -1, 2, 3], 'first, then -1 and a place past the last append');
+
+    // By command the item is found inside the popup, and the new one joins it.
+    assert.equal(fns.InsertMenuA.handler([outer, 10, MF_HILITE, 11, TEXT]), 1);
+    assert.deepEqual(ids(inner), [11, 10]);
+    assert.equal(fns.GetMenuState.handler([inner, 11, 0]) & MF_HILITE, MF_HILITE,
+        'InsertMenu keeps MF_HILITE, as user32\'s menu tests expect');
+    assert.equal(fns.InsertMenuA.handler([outer, 777, 0, 12, TEXT]), 1);
+    assert.equal(ids(outer).at(-1), 12, 'a command no item has appends to the menu named');
+    assert.equal(fns.InsertMenuA.handler([0x9999, 0, MF_BYPOSITION, 1, TEXT]), 0);
+});
+
+test('the wide menu calls read their text as UTF-16', ()=>{
+    const { memory, fns } = setup();
+    const menu = fns.CreateMenu.handler([]);
+    putWideString(memory, TEXT, 'Öffnen…');
+    assert.equal(fns.AppendMenuW.argBytes, 16);
+    assert.equal(fns.AppendMenuW.handler([menu, 0, 5, TEXT]), 1);
+    putWideString(memory, TEXT, 'Neu');
+    assert.equal(fns.InsertMenuW.handler([menu, 0, MF_BYPOSITION, 4, TEXT]), 1);
+
+    assert.equal(fns.GetMenuStringW.handler([menu, 5, OUT, 16, 0]), 7);
+    assert.equal(Buffer.from(memory.bytes.subarray(OUT, OUT + 14)).toString('utf16le'),
+        'Öffnen…');
+    assert.equal(fns.GetMenuStringA.handler([menu, 0, OUT, 16, MF_BYPOSITION]), 3);
+    assert.equal(memory.readCString(OUT, 16), 'Neu');
+});
+
+test('CopyAcceleratorTable counts with no destination and copies what fits', ()=>{
+    // user32's resource tests: a null destination answers the entry count
+    // whatever the count argument says; a copy answers how many it wrote;
+    // the key comes back as given and the flags without their top bit.
+    const { memory, fns } = setup();
+    memory.bytes.set([0xff, 0, 0xff, 0xff, 0xff, 0xff], ACCEL);
+    memory.bytes.set([FVIRTKEY, 0, 0x41, 0, 0xe8, 0x03], ACCEL + 6);
+    const table = fns.CreateAcceleratorTableA.handler([ACCEL, 2]);
+
+    assert.equal(fns.CopyAcceleratorTableA.argBytes, 12);
+    for (const room of [0, 1, 100])
+    {
+        assert.equal(fns.CopyAcceleratorTableA.handler([table, 0, room]), 2);
+    }
+    memory.bytes.fill(0xa5, OUT, OUT + 12);
+    assert.equal(fns.CopyAcceleratorTableA.handler([table, OUT, 1]), 1);
+    assert.deepEqual([...memory.bytes.subarray(OUT, OUT + 6)].filter((_, at)=>at !== 1),
+        [0x7f, 0xff, 0xff, 0xff, 0xff]);
+    assert.equal(memory.bytes[OUT + 6], 0xa5, 'nothing past the room given');
+    assert.equal(fns.CopyAcceleratorTableW.handler([table, OUT, 5]), 2);
+    assert.deepEqual([...memory.bytes.subarray(OUT + 6, OUT + 12)].filter((_, at)=>at !== 1),
+        [FVIRTKEY, 0x41, 0, 0xe8, 0x03]);
+    assert.equal(fns.CopyAcceleratorTableA.handler([0x9999, 0, 0]), 0, 'no such table');
+});
+
+/**
+ * An RT_ACCELERATOR resource: eight bytes to an entry, the last flagged 0x80.
+ *
+ * @param {[number, number, number][]} entries  flags, key, command
+ */
+function acceleratorResource(entries){
+    const bytes = new Uint8Array(entries.length * 8);
+    entries.forEach(([flags, key, command], index)=>{
+        const at = index * 8;
+        bytes.set([flags | (index === entries.length - 1 ? 0x80 : 0), 0,
+            key & 0xff, key >>> 8, command & 0xff, command >>> 8, 0, 0], at);
+    });
+    return bytes;
+}
+
+/** A host whose module holds one accelerator resource, filed under `name`. */
+function acceleratorHost(/** @type {Uint8Array} */ resource, /** @type {number | string} */ name){
+    const BASE = 0x400;
+    const RVA = 0x10;
+    return {
+        base: BASE,
+        host: {
+            /** @param {number} instance @param {number} type @param {number | string} asked */
+            findResource: (instance, type, asked)=>(type === 9 && instance === BASE
+                && (asked === name || (typeof asked === 'string' && typeof name === 'string'
+                    && asked.toUpperCase() === name.toUpperCase()))
+                ? { rva: RVA, size: resource.length } : null),
+            moduleBase: ()=>BASE,
+        },
+        /** @param {any} memory */
+        plant(memory){
+            memory.writeMemory(BASE + RVA, resource);
+        },
+    };
+}
+
+test('LoadAccelerators reads a resource\'s eight-byte entries, its end flag not kept', ()=>{
+    const VK_F5 = 0x74;
+    const source = acceleratorHost(acceleratorResource([
+        [FVIRTKEY, VK_F5, 0x100],
+        [FVIRTKEY | FCONTROL, 0x53, 0x101],
+    ]), 'MAINACCEL');
+    const { memory, fns } = setup(source.host);
+    source.plant(memory);
+    memory.putString(NAME_A, 'MainAccel');
+    const hwnd = makeWindow(memory, fns);
+
+    const table = fns.LoadAcceleratorsA.handler([source.base, NAME_A]);
+    assert.notEqual(table, 0);
+    assert.equal(fns.CopyAcceleratorTableA.handler([table, 0, 0]), 2, 'stops at the flagged one');
+    fns.CopyAcceleratorTableA.handler([table, OUT, 2]);
+    assert.equal(memory.bytes[OUT + 6], FVIRTKEY | FCONTROL, 'the end flag is the resource\'s');
+    assert.equal(memory.bytes[OUT + 10] | memory.bytes[OUT + 11] << 8, 0x101);
+
+    putWideString(memory, NAME_B, 'mainaccel');
+    assert.equal(fns.LoadAcceleratorsW.handler([source.base, NAME_B]), table,
+        'the module\'s table, by a name in any case and either spelling, is the one table');
+    assert.equal(fns.LoadAcceleratorsA.handler([source.base, 7]), 0, 'an id it lacks');
+    assert.equal(fns.LoadAcceleratorsA.handler([0x999, NAME_A]), 0, 'a module it is not in');
+
+    memory.putU32s(MSG, [hwnd, WM_KEYDOWN, VK_F5, 0]);
+    assert.equal(fns.TranslateAcceleratorW.argBytes, 12);
+    assert.equal(fns.TranslateAcceleratorW.handler([hwnd, table, MSG]), 1);
+    assert.equal(fns.GetMessageA.handler([OUT, 0, 0, 0]), 1);
+    assert.equal(memory.u32(OUT + 4), WM_COMMAND);
+    assert.equal(memory.u32(OUT + 8), (1 << 16 | 0x100) >>> 0);
+});
+
+test('a window\'s context help id is read back, and a window that is not one has none', ()=>{
+    const { memory, fns } = setup();
+    const hwnd = makeWindow(memory, fns);
+    assert.equal(fns.GetWindowContextHelpId.handler([hwnd]), 0);
+    assert.equal(fns.SetWindowContextHelpId.argBytes, 8);
+    assert.equal(fns.SetWindowContextHelpId.handler([hwnd, 0x20001]), 1);
+    assert.equal(fns.GetWindowContextHelpId.handler([hwnd]), 0x20001);
+    assert.equal(fns.SetWindowContextHelpId.handler([0x9999, 1]), 0);
+    assert.equal(fns.GetWindowContextHelpId.handler([0x9999]), 0);
+});

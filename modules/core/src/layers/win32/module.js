@@ -1767,6 +1767,12 @@ export function createWin32Module(){
                     files: volume,
                     /** @param {string} path */
                     fullPath: path=>filesystem.resolve(path).path,
+                    // Read when called: the table is still being built here.
+                    advapi32: ()=>libraries['ADVAPI32.dll'],
+                    /** @param {number} bytes */
+                    allocate: bytes=>heap.allocate(bytes),
+                    /** @param {number} address */
+                    free: address=>heap.free(address),
                 }),
 
                 'ADVPACK.dll': createAdvpackFunctions({

@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createPaintFunctions, layoutText } from './paint.js';
+import { createPaintFunctions, layoutText, tabbedWidth } from './paint.js';
 
 const DT_CENTER = 0x0001;
 const DT_RIGHT = 0x0002;
@@ -232,4 +232,58 @@ test('DrawState embosses disabled text and takes the mnemonic out of prefix text
     assert.equal(table.DrawStateA.handler([HDC, 0, 0x401000, 0, 0, 0, 0, 8, 8, DST_COMPLEX]), 1,
         'a procedure\'s drawing is left out and the call succeeds');
     assert.deepEqual(said, ['DrawState']);
+});
+
+test('tabs expand to the first stop past the text, a negative stop right-aligning '
+    + 'what follows', ()=>{
+    // user32's text tests (test_TabbedText), whose stops sit a pixel either
+    // side of four characters to catch an off-by-one: the stop is taken only
+    // when strictly past where the text has reached -- for a right-aligned
+    // one, when the text that follows it would start strictly past there.
+    for (const cx of [7, 8])
+    {
+        /** @param {string} text */
+        const widthOf = text=>text.length * cx;
+        for (const t of [-1, 0, 1])
+        {
+            const tab = cx * 4 + t;
+            for (const count of [1, 8])
+            {
+                /** @param {number} sign @param {string} text */
+                const width = (sign, text)=>tabbedWidth(text, widthOf,
+                    Array.from({ length: count }, (_, i)=>sign * (i + 1) * tab), 8 * cx);
+                const left = {
+                    '\t': tab, 'xxx\t': tab, '\tx': tab + cx, '\t\t': tab * 2,
+                    '\tx\t': tab * 2, 'x\tx': tab + cx, 'xx\tx': tab + cx,
+                    'xxx\tx': tab + cx, 'xxxx\tx': t > 0 ? tab + cx : 2 * tab + cx,
+                    'xxxxx\tx': 2 * tab + cx,
+                };
+                const right = {
+                    '\t': tab, 'xxx\t': tab, '\tx': tab, '\t\t': tab * 2, '\tx\t': tab * 2,
+                    'x\tx': tab, 'xx\tx': tab, 'xxx\tx': 4 * cx >= tab ? 2 * tab : tab,
+                    'xxxx\tx': 2 * tab, 'xxxxx\tx': 2 * tab,
+                };
+                for (const [text, expected] of Object.entries(left))
+                {
+                    assert.equal(width(1, text), expected,
+                        `${JSON.stringify(text)} t=${t} n=${count}`);
+                }
+                for (const [text, expected] of Object.entries(right))
+                {
+                    assert.equal(width(-1, text), expected,
+                        `right-aligned ${JSON.stringify(text)} t=${t} n=${count}`);
+                }
+            }
+        }
+    }
+});
+
+test('with no stops, or past the last of several, tabs fall every default interval', ()=>{
+    /** @param {string} text */
+    const widthOf = text=>text.length * 8;
+    assert.equal(tabbedWidth('ab\tc', widthOf, [], 64), 72);
+    assert.equal(tabbedWidth('ab\tc\td', widthOf, [20, 24], 64), 72,
+        'the second tab is past the last stop');
+    assert.equal(tabbedWidth('\tc', widthOf, [0], 64), 72, 'a zero interval is none');
+    assert.equal(tabbedWidth('plain', widthOf, [10], 64), 40);
 });

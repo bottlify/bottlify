@@ -22,6 +22,12 @@ const MAX_PATH = 260;
 
 const FILE_ATTRIBUTE_DIRECTORY = 0x10;
 
+const ERROR_SUCCESS = 0;
+const ERROR_NOT_ENOUGH_MEMORY = 8;
+const ERROR_CALL_NOT_IMPLEMENTED = 120;
+const ERROR_KEY_HAS_CHILDREN = 1020;
+const KEY_READ = 0x20019;
+
 const S_OK = 0;
 const E_POINTER = 0x80004003;
 const E_INVALIDARG = 0x80070057;
@@ -106,6 +112,13 @@ const isSeparator = c=>c === '\\' || c === '/';
  *           functions make it.
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
  *           For the counts a caller passes by pointer.
+ * @property {() => Record<string, { handler: (args: number[]) => any }>} [advapi32]
+ *           advapi32's exports, for the registry helpers -- read when called, so
+ *           an HKEY the program holds names the key it does there. Absent, those
+ *           helpers answer ERROR_CALL_NOT_IMPLEMENTED.
+ * @property {(bytes: number) => number} [allocate]
+ * @property {(address: number) => void} [free]
+ *           Guest memory for the handle and counts a helper asks advapi32 for.
  */
 
 /**
@@ -405,7 +418,102 @@ export function createShlwapiFunctions(host){
         }
     };
 
+    /**
+     * Calls advapi32's own function of that name with the program's
+     * arguments as they came, so either width reads its strings itself.
+     *
+     * @param {string} name @param {number[]} args @returns {number}
+     */
+    const registry = (name, args)=>
+        /** @type {number} */ (host.advapi32?.()[name].handler(args)) >>> 0;
+
+    /**
+     * SHDeleteEmptyKey for either width: the key opened, its subkeys and
+     * values counted, and deleted only when it has neither.
+     *
+     * @param {'A' | 'W'} width
+     */
+    const deleteEmptyKey = width=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([key, subKey])=>{
+            if (!host.advapi32 || !host.allocate || !host.readMemory)
+            {
+                return ERROR_CALL_NOT_IMPLEMENTED;
+            }
+            const out = host.allocate(12);
+            if (!out)
+            {
+                return ERROR_NOT_ENOUGH_MEMORY;
+            }
+            try
+            {
+                const opened = registry(`RegOpenKeyEx${width}`, [key, subKey, 0, KEY_READ, out]);
+                if (opened !== ERROR_SUCCESS)
+                {
+                    return opened;
+                }
+                const counts = new DataView(host.readMemory(out, 4).slice().buffer);
+                const handle = counts.getUint32(0, true);
+                const queried = registry(`RegQueryInfoKey${width}`,
+                    [handle, 0, 0, 0, out + 4, 0, 0, out + 8, 0, 0, 0, 0]);
+                registry('RegCloseKey', [handle]);
+                if (queried !== ERROR_SUCCESS)
+                {
+                    return queried;
+                }
+                const found = new DataView(host.readMemory(out + 4, 8).slice().buffer);
+                if (found.getUint32(0, true) !== 0 || found.getUint32(4, true) !== 0)
+                {
+                    return ERROR_KEY_HAS_CHILDREN;
+                }
+                return registry(`RegDeleteKey${width}`, [key, subKey]);
+            }
+            finally
+            {
+                host.free?.(out);
+            }
+        },
+    });
+
+    /**
+     * A registry helper that is one advapi32 call under another name.
+     *
+     * @param {string} name @param {number} argBytes
+     */
+    const through = (name, argBytes)=>({
+        argBytes,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ args)=>(host.advapi32
+            ? registry(name, args) : ERROR_CALL_NOT_IMPLEMENTED),
+    });
+
     return {
+        /**
+         * DWORD SHDeleteKeyA(HKEY hkey, LPCSTR pszSubKey)
+         *
+         * The subkey, its values and every key beneath it: RegDeleteTree's
+         * work, where RegDeleteKey refuses a key with subkeys.
+         */
+        SHDeleteKeyA: through('RegDeleteTreeA', 8),
+        /** DWORD SHDeleteKeyW(HKEY hkey, LPCWSTR pszSubKey) */
+        SHDeleteKeyW: through('RegDeleteTreeW', 8),
+
+        /**
+         * DWORD SHDeleteEmptyKeyA(HKEY hkey, LPCSTR pszSubKey)
+         *
+         * A key with a subkey or a value is not empty, and is kept:
+         * ERROR_KEY_HAS_CHILDREN.
+         */
+        SHDeleteEmptyKeyA: deleteEmptyKey('A'),
+        /** DWORD SHDeleteEmptyKeyW(HKEY hkey, LPCWSTR pszSubKey) */
+        SHDeleteEmptyKeyW: deleteEmptyKey('W'),
+
+        /** DWORD SHDeleteValueA(HKEY hkey, LPCSTR pszSubKey, LPCSTR pszValue) */
+        SHDeleteValueA: through('RegDeleteKeyValueA', 12),
+        /** DWORD SHDeleteValueW(HKEY hkey, LPCWSTR pszSubKey, LPCWSTR pszValue) */
+        SHDeleteValueW: through('RegDeleteKeyValueW', 12),
+
         /** LPSTR PathFindExtensionA(LPCSTR pszPath) */
         PathFindExtensionA: pathFindExtension(pathAt, 1),
 

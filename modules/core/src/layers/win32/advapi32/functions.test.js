@@ -733,7 +733,7 @@ test('a build with nowhere to put a SID says it ran out of memory rather than fa
         [0x100, 1, 18, 0, 0, 0, 0, 0, 0, 0, OUT_HANDLE]), 0);
 });
 
-test('the wide file security call is refused like the narrow one, popping what it was pushed', ()=>{
+test('the wide file security calls are refused like the narrow ones, popping what they took', ()=>{
     const memory = fakeMemory();
     /** @type {number[]} */
     const errors = [];
@@ -746,6 +746,9 @@ test('the wide file security call is refused like the narrow one, popping what i
     assert.equal(fns.SetFileSecurityW.handler(), 0);
     assert.deepEqual(errors, [120], 'ERROR_CALL_NOT_IMPLEMENTED');
     assert.equal(fns.SetFileSecurityW.argBytes, 12);
+    assert.equal(fns.GetFileSecurityW.handler(), 0);
+    assert.deepEqual(errors, [120, 120], 'and asking for a descriptor is not implemented either');
+    assert.equal(fns.GetFileSecurityW.argBytes, 20);
 });
 
 test('impersonating oneself succeeds, and the file security calls refuse plainly', ()=>{

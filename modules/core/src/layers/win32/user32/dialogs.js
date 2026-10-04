@@ -247,6 +247,25 @@ const IMAGE_ICON = 1;
 /** What DialogBox answers when the dialog could not be made. */
 const DIALOG_FAILED = -1;
 
+/**
+ * GetDlgItemInt's reading of a control's text, null when it holds no number
+ * in range.
+ *
+ * @param {string} text @param {boolean} signed
+ * @returns {number | null} the value, as the UINT the call answers
+ */
+export function dialogInteger(text, signed){
+    const found = (signed ? /^ *(-?)(\d+)/ : /^ *()(\d+)/).exec(text);
+    if (!found)
+    {
+        return null;
+    }
+    // Digits past what a double holds exactly are already far out of range.
+    const value = (found[1] === '-' ? -1 : 1) * Number(found[2]);
+    const fits = signed ? value >= -0x80000000 && value <= 0x7fffffff : value <= 0xffffffff;
+    return fits ? value >>> 0 : null;
+}
+
 /** RT_DIALOG: the resource type a dialog template is filed under. */
 const RT_DIALOG = 5;
 /** A resource name below this is an integer id, not a pointer to text. */
@@ -313,6 +332,9 @@ const MAX_RESOURCE_NAME = 256;
  *     Who answers it, and without one the default button.
  * @property {(instance: number, type: number, name: number | string) => unknown} [findResource]
  * @property {(instance: number) => number} [moduleBase]
+ * @property {(bytes: number) => number} [allocate]
+ *           Guest memory for a text this side makes and a message carries.
+ * @property {(address: number) => void} [release]
  */
 
 /**
@@ -1490,6 +1512,64 @@ export function createDialogFunctions(options){
                     return 0;
                 }
                 return writeText(host, out >>> 0, controlOf(hwnd, id)?.title ?? '', room, true);
+            },
+        },
+
+        /**
+         * UINT GetDlgItemInt(HWND hDlg, int nIDDlgItem, BOOL *lpTranslated, BOOL bSigned)
+         *
+         * The control's text read as a decimal number: spaces before it are
+         * skipped, a minus sign is one only when bSigned says so, and the
+         * number ends at the first character that is not a digit. Text with
+         * no digits where the number should start, or a number past what an
+         * int (signed) or a UINT holds, is the documented failure -- zero,
+         * and FALSE in lpTranslated -- so a caller can tell a real zero from
+         * none.
+         */
+        GetDlgItemInt: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, id, translatedOut, signed])=>{
+                const control = controlOf(hwnd, id);
+                const value = control ? dialogInteger(String(control.title ?? ''), signed !== 0)
+                    : null;
+                if ((translatedOut >>> 0) !== 0)
+                {
+                    host.writeMemory(translatedOut >>> 0, Uint8Array.of(value === null ? 0 : 1,
+                        0, 0, 0));
+                }
+                return value ?? 0;
+            },
+        },
+
+        /**
+         * BOOL SetDlgItemInt(HWND hDlg, int nIDDlgItem, UINT uValue, BOOL bSigned)
+         *
+         * The number as decimal text, a minus sign before it when bSigned
+         * reads the value as an int, set as SetDlgItemText sets it: through
+         * WM_SETTEXT, so a control that keeps its own text is told.
+         */
+        SetDlgItemInt: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, id, value, signed])=>{
+                const control = controlOf(hwnd, id);
+                if (!control || !host.allocate)
+                {
+                    return 0;
+                }
+                const text = String(signed !== 0 ? value | 0 : value >>> 0);
+                const address = host.allocate(text.length + 1);
+                if (address === 0)
+                {
+                    return 0;
+                }
+                writeString(address, text, text.length + 1);
+                return after(host.send(control.hwnd, WM_SETTEXT, 0, address,
+                    host.callerThread?.()), ()=>{
+                    host.release?.(address);
+                    return 1;
+                });
             },
         },
 

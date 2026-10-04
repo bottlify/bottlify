@@ -39,6 +39,8 @@ export const RT_GROUP_ICON = 14;
 
 /** The resource directory a menu template is filed under. */
 const RT_MENU = 4;
+/** And an accelerator table. */
+const RT_ACCELERATOR = 9;
 
 /** A resource name is an integer below this and a pointer to a string above. */
 const MAX_INTEGER_RESOURCE = 0x10000;
@@ -88,6 +90,7 @@ const MF_BYPOSITION = 0x0400;
 const MF_GRAYED = 0x0001;
 const MF_DISABLED = 0x0002;
 const MF_CHECKED = 0x0008;
+const MF_HILITE = 0x0080;
 const MFT_SEPARATOR = 0x0800;
 const MF_BITMAP = 0x0004;
 const MF_POPUP = 0x0010;
@@ -171,6 +174,11 @@ const ESB_ENABLE_BOTH = 0;
  * of them walked at four-byte stride reads every second entry as rubbish.
  */
 const ACCEL_SIZE = 6;
+/** An entry of an RT_ACCELERATOR resource, and the flag its last one carries. */
+const ACCEL_RESOURCE_SIZE = 8;
+const ACCEL_LAST = 0x80;
+/** The flags a table keeps of an entry's byte. */
+const ACCEL_FLAGS = 0x7f;
 const FVIRTKEY = 0x01;
 const FSHIFT = 0x04;
 const FCONTROL = 0x08;
@@ -235,6 +243,16 @@ function destroyObjectHandle(host, handle){
  * @property {number} state
  * @property {ParsedMenuItem[] | null} popup  The items a popup holds, else null.
  * @property {string} text
+ */
+
+/**
+ * One entry of an accelerator table: the key -- a virtual key under FVIRTKEY,
+ * else a character -- and the command it sends.
+ *
+ * @typedef {Object} AcceleratorEntry
+ * @property {number} flags
+ * @property {number} key
+ * @property {number} command
  */
 
 /** How deep a menu resource may nest before it is read as damaged. */
@@ -404,6 +422,9 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
     const menus = new Map();
     /** @type {Map<number, any>} */
     const accelerators = new Map();
+    /** The tables loaded out of a module, by module and name, to their handles. */
+    /** @type {Map<string, number>} */
+    const loadedAccelerators = new Map();
 
     /**
      * The clipboard, and who has it open. Zero is a valid owner -- a program may
@@ -818,6 +839,189 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         return items === null ? 0 : materializeMenu(items, false);
     };
 
+    /**
+     * The item AppendMenu and InsertMenu describe with flags: the id is a
+     * submenu's handle when MF_POPUP is among them, and the last argument is
+     * the text unless the item is a separator, a bitmap or owner-drawn --
+     * when it is a handle or data the program will read back, not a string.
+     *
+     * @param {number} uFlags @param {number} id @param {number} newItem
+     * @param {boolean} wide
+     */
+    const flaggedItem = (uFlags, id, newItem, wide)=>{
+        const flags = uFlags >>> 0;
+        const separator = (flags & MF_SEPARATOR) !== 0;
+        const popup = (flags & MF_POPUP) !== 0;
+        return {
+            id: popup ? 0 : id >>> 0,
+            type: (separator ? MFT_SEPARATOR : 0) | (flags & MF_OWNERDRAW),
+            state: flags & (MF_GRAYED | MF_DISABLED | MF_CHECKED | MF_HILITE),
+            submenu: popup ? id >>> 0 : 0,
+            data: (flags & MF_OWNERDRAW) !== 0 ? newItem >>> 0 : 0,
+            text: separator || (flags & (MF_BITMAP | MF_OWNERDRAW)) !== 0 || (newItem >>> 0) === 0
+                ? ''
+                : readText(host, newItem >>> 0, wide, MAX_TEXT),
+        };
+    };
+
+    /** AppendMenuA or AppendMenuW. @param {boolean} wide */
+    const appendMenu = wide=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [handle, flags, id, newItem])=>{
+            const menu = menuOf(handle);
+            if (!menu)
+            {
+                return 0;
+            }
+            menu.items.push(flaggedItem(flags, id, newItem, wide));
+            return 1;
+        },
+    });
+
+    /** InsertMenuA or InsertMenuW. @param {boolean} wide */
+    const insertMenu = wide=>({
+        argBytes: 20,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [handle, position, flags, id, newItem])=>{
+            const menu = menuOf(handle);
+            if (!menu)
+            {
+                return 0;
+            }
+            const found = findItem(menu, position, flags);
+            const into = found?.menu ?? menu;
+            into.items.splice(found ? found.at : into.items.length, 0,
+                flaggedItem(flags, id, newItem, wide));
+            return 1;
+        },
+    });
+
+    /**
+     * A table made out of its entries and given a handle.
+     *
+     * @param {AcceleratorEntry[]} entries @param {string | null} [loadedAs]
+     *     The module and name a loaded table answers to again.
+     */
+    const openAccelerators = (entries, loadedAs = null)=>{
+        /** @type {{ handle: number, entries: AcceleratorEntry[], loadedAs: string | null }} */
+        const record = { handle: 0, entries, loadedAs };
+        record.handle = host.handles.open('accelerator', record);
+        accelerators.set(record.handle, record);
+        return record;
+    };
+
+    /** LoadAcceleratorsA or LoadAcceleratorsW. @param {boolean} wide */
+    const loadAccelerators = wide=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [instance, name])=>{
+            const module = instance >>> 0;
+            const raw = name >>> 0;
+            const key = raw < MAX_INTEGER_RESOURCE
+                ? raw
+                : readText(host, raw, wide, MAX_RESOURCE_NAME);
+            // A resource name compares without regard to case.
+            const loadedAs = `${module}:${typeof key === 'number' ? `#${key}` : key.toUpperCase()}`;
+            const held = loadedAccelerators.get(loadedAs);
+            if (held !== undefined)
+            {
+                return held;
+            }
+            const found = /** @type {{ rva: number, size: number } | null} */ (
+                host.findResource?.(module, RT_ACCELERATOR, key) ?? null);
+            const base = host.moduleBase?.(module) ?? 0;
+            if (found === null || base === 0)
+            {
+                return 0;
+            }
+            const bytes = host.readMemory((base + found.rva) >>> 0, found.size);
+            /** @type {AcceleratorEntry[]} */
+            const entries = [];
+            for (let at = 0; at + ACCEL_RESOURCE_SIZE <= bytes.length; at += ACCEL_RESOURCE_SIZE)
+            {
+                const flags = bytes[at];
+                entries.push({
+                    flags: flags & ACCEL_FLAGS,
+                    key: bytes[at + 2] | bytes[at + 3] << 8,
+                    command: bytes[at + 4] | bytes[at + 5] << 8,
+                });
+                if ((flags & ACCEL_LAST) !== 0)
+                {
+                    break;
+                }
+            }
+            if (entries.length === 0)
+            {
+                return 0;
+            }
+            const record = openAccelerators(entries, loadedAs);
+            loadedAccelerators.set(loadedAs, record.handle);
+            return record.handle;
+        },
+    });
+
+    /** CopyAcceleratorTable, either spelling. @param {number[]} args */
+    const copyAccelerators = ([handle, out, room])=>{
+        const record = accelerators.get(handle >>> 0);
+        if (!record)
+        {
+            return 0;
+        }
+        if ((out >>> 0) === 0)
+        {
+            return record.entries.length;
+        }
+        const count = Math.min(Math.max(room | 0, 0), record.entries.length);
+        const bytes = new Uint8Array(count * ACCEL_SIZE);
+        for (let index = 0; index < count; index++)
+        {
+            /** @type {AcceleratorEntry} */
+            const entry = record.entries[index];
+            const at = index * ACCEL_SIZE;
+            bytes[at] = entry.flags;
+            bytes[at + 2] = entry.key & 0xff;
+            bytes[at + 3] = entry.key >>> 8;
+            bytes[at + 4] = entry.command & 0xff;
+            bytes[at + 5] = entry.command >>> 8;
+        }
+        host.writeMemory(out >>> 0, bytes);
+        return count;
+    };
+
+    /** @param {number[]} args */
+    const translateAccelerator = ([hwnd, handle, msg])=>{
+        const record = accelerators.get(handle >>> 0);
+        const target = live(hwnd);
+        if (!record || !target || (msg >>> 0) === 0)
+        {
+            return 0;
+        }
+        const message = readU32((msg >>> 0) + 4);
+        if (message !== WM_KEYDOWN && message !== WM_SYSKEYDOWN)
+        {
+            return 0;
+        }
+        const key = readU32((msg >>> 0) + 8) & 0xffff;
+        const match = record.entries.find((/** @type {any} */ entry)=>
+            entry.key === key
+            && (entry.flags & FVIRTKEY) !== 0
+            && (entry.flags & (FSHIFT | FCONTROL | FALT)) === 0);
+        if (!match)
+        {
+            return 0;
+        }
+        host.queue.post({
+            hwnd: target.hwnd,
+            message: WM_COMMAND,
+            // The high word says an accelerator produced this, not a
+            // menu, which is how a handler tells the two apart.
+            wParam: (1 << 16 | match.command) >>> 0,
+            lParam: 0,
+        });
+        return 1;
+    };
+
     /** @param {any} record @param {number} bar */
     const scrollOf = (record, bar)=>{
         record.scroll ??= new Map();
@@ -859,6 +1063,33 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
          */
         RemovePropA: { argBytes: 8, handler: ansiProperties.remove },
         RemovePropW: { argBytes: 8, handler: wideProperties.remove },
+
+        /**
+         * BOOL SetWindowContextHelpId(HWND hwnd, DWORD dwContextHelpId)
+         * DWORD GetWindowContextHelpId(HWND hwnd)
+         *
+         * A number the program hangs on a window for its own help to find
+         * when F1 is pressed over it; it lives on the window record, so it
+         * dies with the window as a property does. Zero for no window.
+         */
+        SetWindowContextHelpId: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, id])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    return 0;
+                }
+                record.contextHelpId = id >>> 0;
+                return 1;
+            },
+        },
+        GetWindowContextHelpId: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>live(hwnd)?.contextHelpId ?? 0,
+        },
 
         /** HMENU CreateMenu(void) */
         CreateMenu: {
@@ -1233,38 +1464,29 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
 
         /**
          * BOOL AppendMenuA(HMENU hMenu, UINT uFlags, UINT_PTR uIDNewItem, LPCSTR lpNewItem)
+         * BOOL AppendMenuW(HMENU hMenu, UINT uFlags, UINT_PTR uIDNewItem, LPCWSTR lpNewItem)
          *
-         * The older spelling of an insertion at the end: the flags say what
-         * the item is, the id is a submenu handle when MF_POPUP is among
-         * them, and the text is a string unless the item is a separator or
-         * owner-drawn -- when it is data the program will read back.
+         * The older spelling of an insertion at the end, the item described
+         * by flags rather than by a MENUITEMINFO (`flaggedItem`).
          */
-        AppendMenuA: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([handle, uFlags, id, newItem])=>{
-                const menu = menuOf(handle);
-                if (!menu)
-                {
-                    return 0;
-                }
-                const flags = uFlags >>> 0;
-                const separator = (flags & MF_SEPARATOR) !== 0;
-                const text = separator || (flags & (MF_BITMAP | MF_OWNERDRAW)) !== 0
-                    || (newItem >>> 0) === 0
-                    ? ''
-                    : host.readCString(newItem >>> 0, MAX_TEXT);
-                menu.items.push({
-                    id: (flags & MF_POPUP) !== 0 ? 0 : id >>> 0,
-                    type: (separator ? MFT_SEPARATOR : 0) | (flags & MF_OWNERDRAW),
-                    state: flags & (MF_GRAYED | MF_DISABLED | MF_CHECKED),
-                    submenu: (flags & MF_POPUP) !== 0 ? id >>> 0 : 0,
-                    data: (flags & MF_OWNERDRAW) !== 0 ? newItem >>> 0 : 0,
-                    text,
-                });
-                return 1;
-            },
-        },
+        AppendMenuA: appendMenu(false),
+        AppendMenuW: appendMenu(true),
+
+        /**
+         * BOOL InsertMenuA(HMENU hMenu, UINT uPosition, UINT uFlags,
+         *                  UINT_PTR uIDNewItem, LPCSTR lpNewItem)
+         * BOOL InsertMenuW(HMENU hMenu, UINT uPosition, UINT uFlags,
+         *                  UINT_PTR uIDNewItem, LPCWSTR lpNewItem)
+         *
+         * The new item goes before the one uPosition names. MF_BYPOSITION
+         * counts places, and -1 or a place past the last item is the end;
+         * by command the item is searched for through the submenus as every
+         * by-command call searches, and the new one joins whichever menu
+         * holds it. A command no item has puts the new one at the end of the
+         * menu named, as a position past the last does.
+         */
+        InsertMenuA: insertMenu(false),
+        InsertMenuW: insertMenu(true),
 
         /** BOOL GetMenuItemInfoA(HMENU, UINT, BOOL, LPMENUITEMINFOA) */
         GetMenuItemInfoA: {
@@ -1435,22 +1657,49 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                     return 0;
                 }
                 const bytes = host.readMemory(table >>> 0, entries * ACCEL_SIZE);
-                /** @type {{ handle: number, entries: any[] }} */
-                const record = { handle: 0, entries: [] };
+                /** @type {AcceleratorEntry[]} */
+                const read = [];
                 for (let index = 0; index < entries; index++)
                 {
                     const at = index * ACCEL_SIZE;
-                    record.entries.push({
-                        flags: bytes[at],
+                    read.push({
+                        flags: bytes[at] & ACCEL_FLAGS,
                         key: bytes[at + 2] | bytes[at + 3] << 8,
                         command: bytes[at + 4] | bytes[at + 5] << 8,
                     });
                 }
-                record.handle = host.handles.open('accelerator', record);
-                accelerators.set(record.handle, record);
-                return record.handle;
+                return openAccelerators(read).handle;
             },
         },
+
+        /**
+         * HACCEL LoadAcceleratorsA(HINSTANCE hInstance, LPCSTR lpTableName)
+         * HACCEL LoadAcceleratorsW(HINSTANCE hInstance, LPCWSTR lpTableName)
+         *
+         * A table out of a module's RT_ACCELERATOR resource. The resource's
+         * entries are eight bytes each, a word apiece for the flags, the key
+         * and the command and one of padding, and the last says it is the
+         * last with 0x80 in its flags; that bit is the resource's and not
+         * the table's. The table belongs to the module: loading the same one
+         * again answers the same handle rather than another copy, which is
+         * why a program never destroys what it loaded. Null for a module
+         * that does not carry the resource.
+         */
+        LoadAcceleratorsA: loadAccelerators(false),
+        LoadAcceleratorsW: loadAccelerators(true),
+
+        /**
+         * int CopyAcceleratorTableA(HACCEL hAccelSrc, LPACCEL lpAccelDst, int cAccelEntries)
+         * int CopyAcceleratorTableW(HACCEL hAccelSrc, LPACCEL lpAccelDst, int cAccelEntries)
+         *
+         * A null destination asks how many entries there are, whatever the
+         * count says; otherwise as many as fit are written and their number
+         * is the answer. The key is written back as it was given, in either
+         * spelling, and the flags without their top bit -- user32's
+         * resource tests read back 0x7f for a table made with 0xff.
+         */
+        CopyAcceleratorTableA: { argBytes: 12, handler: copyAccelerators },
+        CopyAcceleratorTableW: { argBytes: 12, handler: copyAccelerators },
 
         /** BOOL DestroyAcceleratorTable(HACCEL hAccel) */
         DestroyAcceleratorTable: {
@@ -1463,6 +1712,10 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                     return 0;
                 }
                 accelerators.delete(record.handle);
+                if (record.loadedAs !== null)
+                {
+                    loadedAccelerators.delete(record.loadedAs);
+                }
                 host.handles.close(record.handle);
                 return 1;
             },
@@ -1470,6 +1723,7 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
 
         /**
          * int TranslateAcceleratorA(HWND hWnd, HACCEL hAccTable, LPMSG lpMsg)
+         * int TranslateAcceleratorW(HWND hWnd, HACCEL hAccTable, LPMSG lpMsg)
          *
          * A match turns the key message into WM_COMMAND, and the caller must
          * then *not* translate or dispatch it -- which is what the return value
@@ -1480,42 +1734,12 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
          * there is none: an accelerator that requires a modifier cannot be
          * matched here, and saying so is better than firing a command on the
          * unmodified key.
+         *
+         * The two spellings differ only in how a WM_CHAR's character is read,
+         * and only virtual-key entries are matched here, so they are one.
          */
-        TranslateAcceleratorA: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([hwnd, handle, msg])=>{
-                const record = accelerators.get(handle >>> 0);
-                const target = live(hwnd);
-                if (!record || !target || (msg >>> 0) === 0)
-                {
-                    return 0;
-                }
-                const message = readU32((msg >>> 0) + 4);
-                if (message !== WM_KEYDOWN && message !== WM_SYSKEYDOWN)
-                {
-                    return 0;
-                }
-                const key = readU32((msg >>> 0) + 8) & 0xffff;
-                const match = record.entries.find((/** @type {any} */ entry)=>
-                    entry.key === key
-                    && (entry.flags & FVIRTKEY) !== 0
-                    && (entry.flags & (FSHIFT | FCONTROL | FALT)) === 0);
-                if (!match)
-                {
-                    return 0;
-                }
-                host.queue.post({
-                    hwnd: target.hwnd,
-                    message: WM_COMMAND,
-                    // The high word says an accelerator produced this, not a
-                    // menu, which is how a handler tells the two apart.
-                    wParam: (1 << 16 | match.command) >>> 0,
-                    lParam: 0,
-                });
-                return 1;
-            },
-        },
+        TranslateAcceleratorA: { argBytes: 12, handler: translateAccelerator },
+        TranslateAcceleratorW: { argBytes: 12, handler: translateAccelerator },
 
         /** BOOL OpenClipboard(HWND hWndNewOwner) */
         OpenClipboard: {

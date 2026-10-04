@@ -124,6 +124,11 @@ export const RADIO_DOT = [
     '.##.',
 ];
 
+/** A tab with no stops given is this many average characters. */
+const TAB_CHARACTERS = 8;
+/** The most tab stops read out of a caller's array. */
+const MAX_TAB_STOPS = 1024;
+
 /** What a character cell measures when nothing better is known. */
 const ESTIMATED_CHAR_WIDTH = 8;
 const ESTIMATED_LINE_HEIGHT = 16;
@@ -318,6 +323,45 @@ export function layoutText(text, rect, format, metrics){
 }
 
 /**
+ * Where a line with tabs in it ends, laid out as TabbedTextOut lays it: each
+ * tab moves on to the first stop past where the text has reached. A stop
+ * given as a negative number is that far but right-aligned -- the text up to
+ * the next tab ends at it, and the stop is taken only if that text then
+ * starts past where the line has reached. One stop alone is an interval that
+ * repeats, its sign still the alignment; with none, or past the last of
+ * several, the stops are `interval` apart. Every comparison is strict, which
+ * is what user32's text tests pin down: text that ends exactly on a stop
+ * moves on to the next one.
+ *
+ * @param {string} text
+ * @param {(piece: string) => number} widthOf
+ * @param {number[]} stops   Positions from where the line starts.
+ * @param {number} interval  Eight average characters, the default.
+ * @returns {number} the width of the line
+ */
+export function tabbedWidth(text, widthOf, stops, interval){
+    const [first, ...rest] = text.split('\t');
+    let x = widthOf(first);
+    for (const segment of rest)
+    {
+        const width = widthOf(segment);
+        if (stops.length === 1 && stops[0] !== 0)
+        {
+            const step = Math.abs(stops[0]);
+            x = stops[0] < 0
+                ? (Math.floor((x + width) / step) + 1) * step
+                : (Math.floor(x / step) + 1) * step + width;
+            continue;
+        }
+        const stop = stops.find(at=>(at < 0 ? -at - width > x : at > x));
+        x = stop === undefined
+            ? (Math.floor(x / interval) + 1) * interval + width
+            : stop < 0 ? -stop : stop + width;
+    }
+    return x;
+}
+
+/**
  * Builds the painting half of user32, over the window records the bookkeeping
  * half already keeps.
  *
@@ -340,6 +384,9 @@ export function layoutText(text, rect, format, metrics){
  *        RDW_ALLCHILDREN paints them in.
  * @param {(record: any) => boolean} [options.shown]
  *        Whether a window is on the screen: it and every parent WS_VISIBLE.
+ * @param {() => number} [options.desktop]
+ *        The desktop window, which the screen's context GetDC(NULL) answers
+ *        belongs to.
  */
 export function createPaintFunctions(options){
     const { host, live, WM_PAINT, geometry, send, invalidated, painted, descendants } = options;
@@ -450,6 +497,25 @@ export function createPaintFunctions(options){
 
     /** The DC service, or null in a build that cannot make one. */
     const contexts = ()=>host.dc?.() ?? null;
+
+    /**
+     * The window each context a program was handed is on, for WindowFromDC,
+     * until the program hands it back. Only the contexts the guest is given
+     * are here: the ones this layer takes to draw a frame or a control are
+     * never seen by a program.
+     *
+     * @type {Map<number, number>}
+     */
+    const owners = new Map();
+
+    /** @param {number} hwnd @param {number} hdc */
+    const handedOut = (hwnd, hdc)=>{
+        if (hdc !== 0)
+        {
+            owners.set(hdc, hwnd >>> 0);
+        }
+        return hdc;
+    };
 
     /**
      * A device context on a window's client area, or on the whole window:
@@ -808,6 +874,29 @@ export function createPaintFunctions(options){
         return height;
     };
 
+    /**
+     * GetTabbedTextExtent of either kind of text.
+     *
+     * @param {number[]} args @param {boolean} wide
+     */
+    const tabbedExtent = ([hdc, text, count, positions, stops], wide)=>{
+        if ((text >>> 0) === 0 || (count | 0) <= 0)
+        {
+            return 0;
+        }
+        const string = readCounted(text, count | 0, wide);
+        const cell = cellOf(hdc);
+        const widthOf = cell.width ?? ((/** @type {string} */ piece)=>piece.length * cell.cellWidth);
+        const given = (stops >>> 0) === 0 ? 0 : Math.min(Math.max(positions | 0, 0), MAX_TAB_STOPS);
+        const bytes = host.readMemory(stops >>> 0, given * 4);
+        const list = Array.from({ length: given }, (_, index)=>
+            bytes[index * 4] | bytes[index * 4 + 1] << 8 | bytes[index * 4 + 2] << 16
+            | bytes[index * 4 + 3] << 24);
+        // An x is as wide as the font's average character, near enough.
+        const width = tabbedWidth(string, widthOf, list, TAB_CHARACTERS * widthOf('x'));
+        return ((cell.cellHeight & 0xffff) << 16 | width & 0xffff) >>> 0;
+    };
+
     const table = {
         /** HDC GetDC(HWND hWnd) */
         GetDC: {
@@ -815,7 +904,8 @@ export function createPaintFunctions(options){
             /** @param {number[]} args */
             handler: ([hwnd])=>{
                 const record = live(hwnd);
-                return record ? contextOn(record) : contexts()?.get(hwnd >>> 0, null) ?? 0;
+                return handedOut(hwnd,
+                    record ? contextOn(record) : contexts()?.get(hwnd >>> 0, null) ?? 0);
             },
         },
 
@@ -827,6 +917,7 @@ export function createPaintFunctions(options){
                 const released = contexts()?.release(hwnd >>> 0, hdc >>> 0) ?? 0;
                 if (released)
                 {
+                    owners.delete(hdc >>> 0);
                     painted();
                 }
                 return released;
@@ -854,7 +945,7 @@ export function createPaintFunctions(options){
                     writeU32s(host, paintStruct + PAINTSTRUCT.hdc, [hdc, erase ? 1 : 0]);
                     writeRect(host, paintStruct + PAINTSTRUCT.rcPaint, rect);
                     writeU32s(host, paintStruct + PAINTSTRUCT.fRestore, [0, 0]);
-                    return hdc;
+                    return handedOut(record.hwnd, hdc);
                 });
             },
         },
@@ -867,6 +958,7 @@ export function createPaintFunctions(options){
                 const record = live(hwnd);
                 const hdc = host.readMemory(paintStruct + PAINTSTRUCT.hdc, 4);
                 const handle = (hdc[0] | hdc[1] << 8 | hdc[2] << 16 | hdc[3] << 24) >>> 0;
+                owners.delete(handle);
                 if (record)
                 {
                     endPaint(record, handle);
@@ -1054,6 +1146,47 @@ export function createPaintFunctions(options){
         },
 
         /**
+         * DWORD GetTabbedTextExtentA(HDC hDC, LPCSTR lpString, int chCount,
+         *                            int nTabPositions, const INT *lpnTabStopPositions)
+         * DWORD GetTabbedTextExtentW(HDC hDC, LPCWSTR lpString, int chCount,
+         *                            int nTabPositions, const INT *lpnTabStopPositions)
+         *
+         * The width in the low word and the height in the high, the tabs
+         * expanded as `tabbedWidth` lays them out; zero for no text.
+         */
+        GetTabbedTextExtentA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>tabbedExtent(args, false),
+        },
+        GetTabbedTextExtentW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>tabbedExtent(args, true),
+        },
+
+        /**
+         * HWND WindowFromDC(HDC hDC)
+         *
+         * The window a context from GetDC, GetDCEx, GetWindowDC or BeginPaint
+         * is on, until it is released; the screen's context is the desktop's.
+         * Null for any other context -- one in memory, one released, one on a
+         * window that has since been destroyed.
+         */
+        WindowFromDC: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hdc])=>{
+                const owner = owners.get(hdc >>> 0);
+                if (owner === undefined)
+                {
+                    return 0;
+                }
+                return owner === 0 ? options.desktop?.() ?? 0 : live(owner)?.hwnd ?? 0;
+            },
+        },
+
+        /**
          * int FillRect(HDC hDC, const RECT *lprc, HBRUSH hbr)
          *
          * The brush is a handle the program owns, or a system colour plus
@@ -1109,11 +1242,9 @@ export function createPaintFunctions(options){
             handler: ([hwnd, , flags])=>{
                 const DCX_WINDOW = 0x1;
                 const record = live(hwnd);
-                if (!record)
-                {
-                    return contexts()?.get(hwnd >>> 0, null) ?? 0;
-                }
-                return contextOn(record, (flags & DCX_WINDOW) !== 0);
+                return handedOut(hwnd, record
+                    ? contextOn(record, (flags & DCX_WINDOW) !== 0)
+                    : contexts()?.get(hwnd >>> 0, null) ?? 0);
             },
         },
 
@@ -1128,7 +1259,8 @@ export function createPaintFunctions(options){
             /** @param {number[]} args */
             handler: ([hwnd])=>{
                 const record = live(hwnd);
-                return record ? contextOn(record, true) : contexts()?.get(hwnd >>> 0, null) ?? 0;
+                return handedOut(hwnd,
+                    record ? contextOn(record, true) : contexts()?.get(hwnd >>> 0, null) ?? 0);
             },
         },
 

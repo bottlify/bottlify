@@ -1761,3 +1761,72 @@ test('DialogBox disables the first window above a child that is not one before W
     assert.equal(fns.IsWindowEnabled.handler([owner]), 1,
         'EndDialog enables the window a dialog belongs to, whoever disabled it');
 });
+
+test('GetDlgItemInt reads a number after spaces, up to the first non-digit, and says whether '
+    + 'it found one', ()=>{
+    // MSDN's GetDlgItemInt: leading spaces are stripped, a minus sign counts
+    // only when bSigned, and a value past INT_MAX or UINT_MAX is a failure.
+    // A failure is zero with FALSE in lpTranslated, so a caller tells "0"
+    // from nothing.
+    const TRANSLATED = 0x11400;
+    const { memory, fns } = setup();
+    putTemplate(memory, [{ id: 300, x: 0, y: 0, cx: 10, cy: 4, title: '' }]);
+    const dialog = fns.CreateDialogIndirectParamA.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    /** @param {string} text @param {number} signed */
+    const read = (text, signed)=>{
+        memory.putString(TEXT, text);
+        fns.SetDlgItemTextA.handler([dialog, 300, TEXT]);
+        memory.bytes.fill(0xa5, TRANSLATED, TRANSLATED + 4);
+        const value = fns.GetDlgItemInt.handler([dialog, 300, TRANSLATED, signed]);
+        return [value, memory.u32(TRANSLATED)];
+    };
+
+    assert.equal(fns.GetDlgItemInt.argBytes, 16);
+    assert.deepEqual(read('42', 0), [42, 1]);
+    assert.deepEqual(read('0', 0), [0, 1], 'a real zero is translated');
+    assert.deepEqual(read('   17', 0), [17, 1], 'spaces before it are skipped');
+    assert.deepEqual(read('12px', 0), [12, 1], 'the number ends at a non-digit');
+    assert.deepEqual(read('-42', 1), [(-42 >>> 0), 1], 'signed, a minus sign is one');
+    assert.deepEqual(read('-42', 0), [0, 0], 'unsigned, it is not a digit');
+    assert.deepEqual(read('', 0), [0, 0], 'no text is no number');
+    assert.deepEqual(read('abc', 1), [0, 0]);
+    assert.deepEqual(read('4294967295', 0), [0xffffffff, 1]);
+    assert.deepEqual(read('4294967296', 0), [0, 0], 'past UINT_MAX');
+    assert.deepEqual(read('2147483647', 1), [0x7fffffff, 1]);
+    assert.deepEqual(read('2147483648', 1), [0, 0], 'past INT_MAX');
+    assert.deepEqual(read('-2147483648', 1), [0x80000000, 1]);
+    assert.deepEqual(read('-2147483649', 1), [0, 0]);
+
+    memory.bytes.fill(0xa5, TRANSLATED, TRANSLATED + 4);
+    assert.equal(fns.GetDlgItemInt.handler([dialog, 999, TRANSLATED, 0]), 0, 'no such control');
+    assert.equal(memory.u32(TRANSLATED), 0);
+    assert.equal(fns.GetDlgItemInt.handler([dialog, 300, 0, 0]), 0, 'lpTranslated may be null');
+});
+
+test('SetDlgItemInt sets the number as text, signed when asked', ()=>{
+    let next = 0x13000;
+    const { memory, fns } = setup({
+        allocate: bytes=>{
+            const at = next;
+            next += bytes;
+            return at;
+        },
+    });
+    putTemplate(memory, [{ id: 300, x: 0, y: 0, cx: 10, cy: 4, title: 'Ready' }]);
+    const dialog = fns.CreateDialogIndirectParamA.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    /** @param {number} value @param {number} signed */
+    const set = (value, signed)=>{
+        assert.equal(fns.SetDlgItemInt.handler([dialog, 300, value >>> 0, signed]), 1);
+        fns.GetDlgItemTextA.handler([dialog, 300, OUT, 32]);
+        return memory.readCString(OUT, 32);
+    };
+
+    assert.equal(fns.SetDlgItemInt.argBytes, 16);
+    assert.equal(set(1234, 0), '1234');
+    assert.equal(set(-5, 1), '-5');
+    assert.equal(set(-5, 0), '4294967291', 'unsigned, the same bits are a large number');
+    assert.equal(fns.GetDlgItemInt.handler([dialog, 300, 0, 0]), 4294967291);
+    assert.equal(fns.SetDlgItemInt.handler([dialog, 999, 1, 0]), 0, 'no such control');
+});

@@ -924,6 +924,65 @@ export function createSystemFunctions({ host, live, windows, classes }){
     });
 
     /**
+     * CharUpperW and CharLowerW: CharUpperA's two meanings of the one
+     * argument, over UTF-16 units. A unit whose other case is not one unit --
+     * a sharp s, which uppercases to two letters -- is left as it was, since
+     * the string is converted in place and cannot grow.
+     *
+     * @param {boolean} upper
+     */
+    const caseOfWideString = upper=>({
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([text])=>{
+            const at = text >>> 0;
+            if (at === 0)
+            {
+                return 0;
+            }
+            if ((at & 0xffff0000) === 0)
+            {
+                return caseOfUnit(at, upper);
+            }
+            const string = readWideString(at);
+            // By unit, not by code point: a surrogate has no case and keeps its place.
+            const changed = string.split('').map(
+                unit=>String.fromCharCode(caseOfUnit(unit.charCodeAt(0), upper))).join('');
+            writeWideString(at, changed, changed.length + 1);
+            return at;
+        },
+    });
+
+    /**
+     * CharUpperBuffW and CharLowerBuffW: cchLength units, a NUL among them
+     * included, and the count is the answer.
+     *
+     * @param {boolean} upper
+     */
+    const caseOfWideBuffer = upper=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([text, count])=>{
+            const at = text >>> 0;
+            const length = count >>> 0;
+            if (at === 0 || length === 0)
+            {
+                return 0;
+            }
+            const units = new Uint16Array(host.readMemory(at, length * 2).slice().buffer);
+            host.writeMemory(at, new Uint8Array(units.map(unit=>caseOfUnit(unit, upper)).buffer));
+            return length;
+        },
+    });
+
+    /** @param {number} unit @param {boolean} upper */
+    const caseOfUnit = (unit, upper)=>{
+        const character = String.fromCharCode(unit);
+        const changed = upper ? character.toUpperCase() : character.toLowerCase();
+        return changed.length === 1 ? changed.charCodeAt(0) : unit;
+    };
+
+    /**
      * The IsChar family's one test: the character, as the ANSI page or UTF-16
      * reads it, against a Unicode category -- the classification CharUpper
      * and CharLower already work from, so the two never disagree about a
@@ -2958,6 +3017,18 @@ export function createSystemFunctions({ host, live, windows, classes }){
         CharUpperBuffA: caseOfBuffer(true),
 
         /**
+         * LPWSTR CharLowerW(LPWSTR lpsz) / LPWSTR CharUpperW(LPWSTR lpsz)
+         * DWORD CharLowerBuffW(LPWSTR lpsz, DWORD cchLength)
+         * DWORD CharUpperBuffW(LPWSTR lpsz, DWORD cchLength)
+         *
+         * The same, a character being a UTF-16 unit.
+         */
+        CharLowerW: caseOfWideString(false),
+        CharUpperW: caseOfWideString(true),
+        CharLowerBuffW: caseOfWideBuffer(false),
+        CharUpperBuffW: caseOfWideBuffer(true),
+
+        /**
          * BOOL IsCharAlphaA(CHAR ch) / IsCharAlphaNumericA / IsCharLowerA /
          * IsCharUpperA, and the W spellings over a WCHAR
          *
@@ -3062,6 +3133,28 @@ export function createSystemFunctions({ host, live, windows, classes }){
         },
 
         /**
+         * int wvsprintfW(LPWSTR lpOut, LPCWSTR lpFmt, va_list arglist)
+         *
+         * wvsprintfA's list with wsprintfW's text: the format and the output
+         * are UTF-16, and `%s` takes a wide string.
+         */
+        wvsprintfW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([out, format, list])=>{
+                const readString = (/** @type {number} */ address)=>
+                    (address >>> 0) === 0 ? '(null)' : host.readCString(address, 0x10000);
+                const readWide = (/** @type {number} */ address)=>
+                    (address >>> 0) === 0 ? '(null)' : readWideString(address >>> 0);
+                const varargs = varargsSlots(host.readMemory,
+                    address=>host.regionAt?.(address) ?? null, list >>> 0, VA_LIST_SLOTS);
+                const text = formatToString(readWide(format), varargs, readString,
+                    { readWideString: readWide, wide: true, decodeBytes: decodeAnsi });
+                return writeWideString(out, text, text.length + 1);
+            },
+        },
+
+        /**
          * DWORD WaitForInputIdle(HANDLE hProcess, DWORD dwMilliseconds)
          *
          * Answers that the process is idle at once. Nothing here can tell
@@ -3076,13 +3169,12 @@ export function createSystemFunctions({ host, live, windows, classes }){
 
         /**
          * The entry points a windowing framework imports and this build has
-         * nothing behind: accelerators out of resources, help, DDE packing,
+         * nothing behind: help, DDE packing,
          * the drawing of text this build does not draw, a session end. Each
          * pops what it was pushed and answers as the call does when the thing
          * asked for is not there; a stub popping nothing would walk the
          * caller's stack off by the width of its arguments.
          *
-         * HACCEL LoadAcceleratorsA(HINSTANCE, LPCSTR)
          * BOOL UnpackDDElParam(UINT, LPARAM, PUINT_PTR, PUINT_PTR)
          * LPARAM ReuseDDElParam(LPARAM, UINT, UINT, UINT_PTR, UINT_PTR)
          * BOOL GrayStringA(HDC, HBRUSH, GRAYSTRINGPROC, LPARAM, int, int, int, int, int)
@@ -3090,7 +3182,6 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * BOOL WinHelpA(HWND, LPCSTR, UINT, ULONG_PTR)
          * BOOL ExitWindowsEx(UINT, DWORD)
          */
-        LoadAcceleratorsA: { argBytes: 8, handler: ()=>0 },
         UnpackDDElParam: { argBytes: 16, handler: ()=>0 },
         ReuseDDElParam: { argBytes: 20, handler: ()=>0 },
         GrayStringA: { argBytes: 36, handler: ()=>0 },

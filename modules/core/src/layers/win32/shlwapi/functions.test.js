@@ -8,6 +8,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createShlwapiFunctions } from './functions.js';
 import { decodeAnsi } from '../kernel32/locale.js';
+import { createRegistryFunctions } from '../advapi32/functions.js';
+import { createHive } from '../advapi32/registry.js';
 
 const AT = 0x100;
 
@@ -430,4 +432,157 @@ test('each declares the arguments it pops', ()=>{
     assert.deepEqual(['PathCombineA', 'PathCombineW', 'PathMatchSpecA', 'PathMatchSpecW',
         'ColorHLSToRGB', 'ColorRGBToHLS'].map(name=>table[name]?.argBytes),
     [12, 12, 8, 8, 12, 16]);
+});
+
+/**
+ * The shell's registry helpers over advapi32's own table, as the system's
+ * library calls through to the registry's.
+ */
+function registryMachine(){
+    const memory = new Uint8Array(0x40000);
+    const view = new DataView(memory.buffer);
+    let next = 0x30000;
+    const readCString = (/** @type {number} */ address, /** @type {number} */ maxLength)=>{
+        let text = '';
+        for (let at = address; at < address + maxLength && memory[at] !== 0; at++)
+        {
+            text += String.fromCharCode(memory[at]);
+        }
+        return text;
+    };
+    const readWideString = (/** @type {number} */ address, /** @type {number} */ maxLength)=>{
+        let text = '';
+        for (let at = address; at < address + maxLength * 2 && view.getUint16(at, true) !== 0;
+            at += 2)
+        {
+            text += String.fromCharCode(view.getUint16(at, true));
+        }
+        return text;
+    };
+    const base = {
+        readCString,
+        readWideString,
+        readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
+            memory.subarray(address, address + length),
+        writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
+            memory.set(bytes, address),
+        allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += (bytes + 15) & ~15;
+            return at;
+        },
+        free: ()=>{},
+    };
+    const registry = createRegistryFunctions({ ...base, hive: createHive() });
+    const fns = createShlwapiFunctions({ ...base, advapi32: ()=>registry });
+    let argAt = 0x10100;
+    /** @param {string} text */
+    const str = text=>{
+        const at = argAt;
+        memory.set([...text, '\0'].map(c=>c.charCodeAt(0)), at);
+        argAt += text.length + 8;
+        return at;
+    };
+    /** @param {string} text */
+    const wide = text=>{
+        const at = argAt;
+        [...text, '\0'].forEach((c, i)=>view.setUint16(at + i * 2, c.charCodeAt(0), true));
+        argAt += text.length * 2 + 8;
+        return at;
+    };
+    const OUT = 0x10000;
+    /** @param {string} path */
+    const create = path=>{
+        assert.equal(registry.RegCreateKeyA.handler([HKEY_CURRENT_USER, str(path), OUT]), 0);
+        return view.getUint32(OUT, true);
+    };
+    /** @param {string} path */
+    const exists = path=>{
+        const status = registry.RegOpenKeyA.handler([HKEY_CURRENT_USER, str(path), OUT]);
+        if (status === 0)
+        {
+            registry.RegCloseKey.handler([view.getUint32(OUT, true)]);
+        }
+        return status === 0;
+    };
+    /** @param {number} key @param {string} name */
+    const setValue = (key, name)=>{
+        const data = str('x');
+        assert.equal(registry.RegSetValueExA.handler([key, str(name), 0, 1, data, 2]), 0);
+    };
+    return { fns, registry, str, wide, create, exists, setValue };
+}
+
+const HKEY_CURRENT_USER = 0x80000001;
+const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_INVALID_HANDLE = 6;
+const ERROR_KEY_HAS_CHILDREN = 1020;
+
+test('SHDeleteKey takes a key and everything beneath it', ()=>{
+    // Wine's shlwapi test_SHDeleteKey: a key with subkeys and values goes,
+    // where RegDeleteKey would refuse it.
+    const m = registryMachine();
+    const key = m.create('Software\\Test\\Tree');
+    m.setValue(key, 'v');
+    m.registry.RegCloseKey.handler([key]);
+    m.registry.RegCloseKey.handler([m.create('Software\\Test\\Tree\\Child\\Grandchild')]);
+    assert.equal(m.fns.SHDeleteKeyA.handler([HKEY_CURRENT_USER, m.str('Software\\Test\\Tree')]),
+        0);
+    assert.equal(m.exists('Software\\Test\\Tree'), false);
+    assert.equal(m.exists('Software\\Test'), true, 'the parent stays');
+    assert.equal(m.fns.SHDeleteKeyA.handler([HKEY_CURRENT_USER, m.str('Software\\Test\\Tree')]),
+        ERROR_FILE_NOT_FOUND);
+    assert.equal(m.fns.SHDeleteKeyA.handler([0x1234, m.str('Software')]), ERROR_INVALID_HANDLE);
+
+    m.registry.RegCloseKey.handler([m.create('Software\\Wide\\Child')]);
+    assert.equal(m.fns.SHDeleteKeyW.handler([HKEY_CURRENT_USER, m.wide('Software\\Wide')]), 0);
+    assert.equal(m.exists('Software\\Wide'), false);
+    assert.equal(m.fns.SHDeleteKeyA.argBytes, 8);
+});
+
+test('SHDeleteEmptyKey takes a key only with no subkeys and no values', ()=>{
+    const m = registryMachine();
+    m.registry.RegCloseKey.handler([m.create('Software\\Empty')]);
+    m.registry.RegCloseKey.handler([m.create('Software\\Parent\\Child')]);
+    const valued = m.create('Software\\Valued');
+    m.setValue(valued, 'v');
+    m.registry.RegCloseKey.handler([valued]);
+
+    assert.equal(m.fns.SHDeleteEmptyKeyA.handler([HKEY_CURRENT_USER, m.str('Software\\Parent')]),
+        ERROR_KEY_HAS_CHILDREN);
+    assert.equal(m.fns.SHDeleteEmptyKeyA.handler([HKEY_CURRENT_USER, m.str('Software\\Valued')]),
+        ERROR_KEY_HAS_CHILDREN, 'a value is enough to keep it');
+    assert.equal(m.exists('Software\\Parent\\Child'), true);
+    assert.equal(m.exists('Software\\Valued'), true);
+    assert.equal(m.fns.SHDeleteEmptyKeyA.handler([HKEY_CURRENT_USER, m.str('Software\\Empty')]),
+        0);
+    assert.equal(m.exists('Software\\Empty'), false);
+    assert.equal(m.fns.SHDeleteEmptyKeyW.handler([HKEY_CURRENT_USER,
+        m.wide('Software\\Parent\\Child')]), 0);
+    assert.equal(m.exists('Software\\Parent\\Child'), false);
+    assert.equal(m.fns.SHDeleteEmptyKeyA.handler([HKEY_CURRENT_USER, m.str('Software\\None')]),
+        ERROR_FILE_NOT_FOUND);
+});
+
+test('SHDeleteValue takes one value of a subkey', ()=>{
+    const m = registryMachine();
+    const key = m.create('Software\\Values');
+    m.setValue(key, 'one');
+    m.setValue(key, 'two');
+    m.registry.RegCloseKey.handler([key]);
+    assert.equal(m.fns.SHDeleteValueA.handler([HKEY_CURRENT_USER, m.str('Software\\Values'),
+        m.str('one')]), 0);
+    assert.equal(m.fns.SHDeleteValueA.handler([HKEY_CURRENT_USER, m.str('Software\\Values'),
+        m.str('one')]), ERROR_FILE_NOT_FOUND);
+    assert.equal(m.fns.SHDeleteValueW.handler([HKEY_CURRENT_USER, m.wide('Software\\Values'),
+        m.wide('two')]), 0);
+    assert.equal(m.fns.SHDeleteValueA.handler([HKEY_CURRENT_USER, m.str('Software\\Nowhere'),
+        m.str('one')]), ERROR_FILE_NOT_FOUND);
+    assert.equal(m.fns.SHDeleteValueA.argBytes, 12);
+});
+
+test('without a registry the helpers say so rather than pretend', ()=>{
+    const { fns } = machine();
+    assert.equal(fns.SHDeleteKeyA.handler([HKEY_CURRENT_USER, AT]), 120,
+        'ERROR_CALL_NOT_IMPLEMENTED');
 });

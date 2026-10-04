@@ -3727,6 +3727,7 @@ export function createWindowFunctions(host){
         }),
         live, WM_PAINT, geometry, send, invalidated, painted, shown,
         descendants: (/** @type {any} */ record)=>paintedDescendantsOf(record),
+        desktop: ()=>desktopWindow().hwnd,
     });
 
     /**

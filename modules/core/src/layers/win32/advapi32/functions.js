@@ -1825,6 +1825,7 @@ export function createRegistryFunctions(host){
          * BOOL GetFileSecurityA(LPCSTR, SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
          *                      DWORD nLength, LPDWORD lpnLengthNeeded)
          * BOOL SetFileSecurityA(LPCSTR, SECURITY_INFORMATION, PSECURITY_DESCRIPTOR)
+         * BOOL GetFileSecurityW(LPCWSTR, ...), the same with a wide name
          *
          * This machine's volume carries no security descriptors, and the
          * honest answer is the one the consumer line of Windows gave: the
@@ -1834,6 +1835,7 @@ export function createRegistryFunctions(host){
          */
         GetFileSecurityA: { argBytes: 20, handler: notImplemented },
         SetFileSecurityA: { argBytes: 12, handler: notImplemented },
+        GetFileSecurityW: { argBytes: 20, handler: notImplemented },
 
         /**
          * BOOL ImpersonateSelf(SECURITY_IMPERSONATION_LEVEL)
