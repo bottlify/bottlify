@@ -56,7 +56,8 @@
  * `--worker` plays the devices' calls in a graphics worker over the fake GPU,
  * as a page does; `--unshared` keeps guest memory out of a SharedArrayBuffer,
  * as on a page that is not cross-origin isolated; `--cork JSON` sets cork's
- * own settings (`EngineConfig`).
+ * own settings (`EngineConfig`), and `--graphics JSON` the graphics layer's
+ * (`{"guestCode":false}` traps every Direct3D call).
  */
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { open } from 'node:fs/promises';
@@ -198,7 +199,9 @@ const app = await createApp({
         ...argv.includes('--cork') ? JSON.parse(argv[argv.indexOf('--cork') + 1]) : {},
         ...argv.includes('--unshared') ? { sharedMemory: false } : {},
     } },
-    graphics: { raster: false },
+    // `--graphics JSON`: the graphics layer's settings beside these, `guestCode` among them.
+    graphics: { raster: false,
+        ...argv.includes('--graphics') ? JSON.parse(argv[argv.indexOf('--graphics') + 1]) : {} },
     ...argv.includes('--worker') ? { device: graphicsDevice() } : {},
     // Nobody at the screen unless `--attended`: then a message box is drawn
     // on the desktop and waits for a key or a click like any dialog.
