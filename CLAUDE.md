@@ -213,6 +213,13 @@ separately-maintained rule file.
   works on that test is the engine changed, and the game run confirms it afterwards. A browser
   A/B run of a guess is not a diagnosis: a game's frame varies by a quarter from one run to the
   next.
+- **An optimisation that adds a second path lands with its gate, in the same change.** A fast
+  path beside a slow one -- guest routines beside host traps, a ring beside direct calls, a
+  recording replayed in a worker beside a device that draws itself -- gets a differential test
+  that runs the same random programs down both and compares everything a program can observe
+  (answers, out-structures, guest memory, what the GPU is given). A benchmark shows that the
+  frame rate rose; only the gate shows that nothing else changed. A new command, getter or path
+  without cases in its gate fails the gate.
 - **Judge a change on more than one scenario** (play, menu, load): a change that made Doom 3's
   play 3% faster doubled the guest's time in its menu.
 - **No hacks and no per-title hooks while another way exists.** The first lever is the translator
