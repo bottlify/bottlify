@@ -90,6 +90,7 @@ publishing). The tables list only the settings that are data. `memory` and `load
 | `choice` | every API | `createApp`'s `graphicsApi`: which roots are built ([api.md](api.md)). |
 | `raster` | `true` | `false` leaves OpenGL primitives drawn without a GPU unrasterised, for measurement. |
 | `lendMemory` | `true` | With a graphics worker and shared guest memory: what a Direct3D 8 or 9 program unlocks is read by the worker in place instead of copied to it. `false` copies it, for measurement. |
+| `guestCode` | `true` | Direct3D 8 and 9 keep the state a program sets, the calls it makes in order and the counts of its references in guest memory, and answer its getters there, so most calls never cross to the host. `false` traps every call, as before they did: a fault that goes away with it is in that guest code. |
 
 ## audio
 

@@ -201,12 +201,13 @@ function machine(){
  * @param {{ shadow?: boolean,
  *           windowClientSize?: (window: number) => { width: number,
  *               height: number } | null,
- *           allocateCode?: (bytes: number) => number, caps?: object }} [options]
+ *           allocateCode?: (bytes: number) => number, caps?: object,
+ *           guestCode?: boolean }} [options]
  *     Whether the device keeps a block in guest memory, as it does under a
  *     running processor, how a window's client area is measured when a
  *     program asks for zero, and what the root is made with.
  */
-function seamed({ shadow = false, windowClientSize, allocateCode, caps } = {}){
+function seamed({ shadow = false, windowClientSize, allocateCode, caps, guestCode } = {}){
     const box = machine();
     /** The display's clock, which the test moves. */
     const clock = { time: 0 };
@@ -254,6 +255,7 @@ function seamed({ shadow = false, windowClientSize, allocateCode, caps } = {}){
         publisher,
         allocate: shadow ? box.allocate : undefined,
         allocateCode,
+        guestCode,
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         cursor: (/** @type {any} */ notice)=>cursors.push(notice),
@@ -2425,6 +2427,18 @@ test('what the host locks comes after the draws the command ring holds that read
     assert.equal(h.device(device, 'SetStreamSource', [0, 0, 0]), D3D_OK);
     h.release(buffer);
     h.release(texture);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+test('without guest code every call of the device is a trap, and it has no block', ()=>{
+    const h = seamed({ shadow: true, guestCode: false });
+    const root = h.create();
+    const device = h.createDevice(root);
+    assert.equal(h.box.isGuest(device, slot(IDIRECT3DDEVICE8_SLOTS, 'SetRenderState')), false);
+    assert.equal(h.box.isGuest(device, slot(IDIRECT3DDEVICE8_SLOTS, 'DrawPrimitive')), false);
+    assert.equal(h.box.memory.readU32(device + 4), 0, 'no block one word past the interface');
+    assert.equal(h.device(device, 'SetRenderState', [22, 1]), D3D_OK, 'D3DRS_CULLMODE, trapped');
     assert.equal(h.release(device), 0);
     h.release(root);
 });

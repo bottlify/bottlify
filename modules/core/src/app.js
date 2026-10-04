@@ -216,7 +216,8 @@ import { withRunMode } from './mode.js';
  *           has finished and its process has stopped. On by default; a
  *           nonzero code is the page's error report instead.
  * @property {any} [device]          The GPU to draw on, when there is one.
- * @property {{ presenter?: any, compressedTextures?: boolean, maxFrameLatency?: number }}
+ * @property {{ presenter?: any, compressedTextures?: boolean, maxFrameLatency?: number,
+ *     lendMemory?: boolean, guestCode?: boolean }}
  *           [graphics]
  *           The graphics layer's configuration (docs/core/configuration.md,
  *           graphics), forwarded to it as given: `compressedTextures`

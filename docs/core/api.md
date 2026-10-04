@@ -49,7 +49,7 @@ Everything below crosses to the engine's worker by `postMessage`, so every value
 | `transfer` | `Transferable[]` | — | Buffers in the options to hand over instead of copying (the wasm binaries). |
 | `screen` | `{ width, height, bitsPerPixel }` | 640 × 480, 32 | The display the program is told it has. |
 | `maxFps` | number | 60 | Accepted, not applied yet ([limits.md](limits.md#graphics)). |
-| `graphics` | `{ compressedTextures?, maxFrameLatency? }` | `false`, 3 | BC-compressed texture upload where the GPU has `texture-compression-bc`; how many frames the GPU may still be drawing when `Present` returns (0: no bound). |
+| `graphics` | `{ compressedTextures?, maxFrameLatency?, lendMemory?, guestCode? }` | `false`, 3, `true`, `true` | BC-compressed texture upload where the GPU has `texture-compression-bc`; how many frames the GPU may still be drawing when `Present` returns (0: no bound); the last two as [configuration.md](configuration.md#graphics) says. |
 | `device.graphicsWorker` | `true` \| `'pixels'` \| `false` | `true` | Draw Direct3D 7–9 and OpenGL in a graphics worker that sends each frame back as an `ImageBitmap`; `'pixels'` sends the frame's bytes instead; `false` draws on the engine thread. |
 | `audio` | `{ drained?, sampleRate?, mp3?, port? }` | `false`, —, `true`, — | `drained`: an `AudioWorkletNode` really reads the output, so play cursors follow the sound rather than a clock. `port`: on a page without shared memory, the engine's end of a `MessageChannel` whose other end the worklet holds; the mix is posted down it (see [README.md](README.md#sound)). `sampleRate`: the `AudioContext`'s rate. `mp3: false`: the program decodes MP3 with the library it ships instead of the engine's provider. |
 

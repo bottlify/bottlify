@@ -144,6 +144,10 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  * @param {(ms: number, run: () => void) => void} [deps.schedule]
  *        How a wait for the vertical blank is woken; a host timer when none is
  *        given.
+ * @param {boolean} [deps.guestCode]
+ *        Whether Direct3D 8 and 9 answer and record in the guest -- the state
+ *        block, the command ring, the getters and the counts -- or trap every
+ *        call; on unless false.
  * @returns {{ libraries: Record<string, Record<string, any>>,
  *             opengl: { pixelFormat: { size: () => number, count: () => number,
  *                                      choose: (bytes: Uint8Array) => number,
@@ -162,7 +166,7 @@ export function createGraphicsLibraries(
         free, exportAddress, processHeapAllocate,
         currentThread,
         scratch, render, allocate, allocateCode, divergence, cursor, resolution, windowClientSize,
-        gamma, deactivated, deactivations, now = ()=>performance.now(),
+        gamma, deactivated, deactivations, now = ()=>performance.now(), guestCode = true,
         schedule = (ms, run)=>{
             setTimeout(run, ms);
         } },
@@ -170,7 +174,7 @@ export function createGraphicsLibraries(
 {
     const publisher = shared ?? createPublisher({
         publishInterface, unpublishInterface,
-        cells: allocate && memory?.readU32 && memory.writeU32
+        cells: guestCode && allocate && memory?.readU32 && memory.writeU32
             ? createCountCells({ allocate, memory }) : undefined,
     });
     const fields = createFields(memory);
@@ -295,14 +299,20 @@ export function createGraphicsLibraries(
     function built(library, make){
         return has(library) ? make() : /** @type {T} */ (/** @type {unknown} */ (null));
     }
+    // Without guest code, Direct3D 8 and 9 keep no block, ring or getters in
+    // the guest: every call is a trap, which is what a regression in them is
+    // told apart by.
+    const guestAllocate = guestCode ? allocate : undefined;
+    const guestAllocateCode = guestCode ? allocateCode : undefined;
     const d3d8 = built('D3D8.dll', ()=>createDirect3D8Seam({
-        publisher, memory, screen, allocate, allocateCode, divergence, cursor, resolution,
+        publisher, memory, screen, allocate: guestAllocate, allocateCode: guestAllocateCode,
+        divergence, cursor, resolution,
         windowClientSize, now,
         identity: ()=>graphics.adapter?.() ?? null,
     }));
     const d3d9 = built('D3D9.dll', ()=>createDirect3D9Seam({
         publisher, memory, screen, divergence, cursor, resolution, windowClientSize, gdi, now,
-        allocate, allocateCode,
+        allocate: guestAllocate, allocateCode: guestAllocateCode,
         identity: ()=>graphics.adapter?.() ?? null,
     }));
     const d3d10 = built('D3D10.dll', ()=>createDirect3D10Seam({
