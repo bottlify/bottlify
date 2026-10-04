@@ -56,3 +56,37 @@ test('a module that imports no memory is left as it was', ()=>{
     const bytes = m.toBytes();
     assert.deepEqual([...withSharedMemoryImport(bytes)], [...bytes]);
 });
+
+test('a module with a section of megabytes is rewritten, as the interpreter tier\'s code is', ()=>{
+    const bytes = built();
+    // A custom section of eight megabytes after the others: a section too
+    // large to pass as arguments, which a worker's stack is smaller for.
+    const payload = 8 << 20;
+    const name = [...new TextEncoder().encode('padding')];
+    /** @param {number} value */
+    const leb = value=>{
+        const out = [(value & 0x7f) | (value >= 0x80 ? 0x80 : 0)];
+        for (value = Math.floor(value / 128); value > 0; value = Math.floor(value / 128))
+        {
+            out.push((value & 0x7f) | (value >= 0x80 ? 0x80 : 0));
+        }
+        return out;
+    };
+    const body = [...leb(name.length), ...name];
+    const head = [0, ...leb(body.length + payload), ...body];
+    const big = new Uint8Array(bytes.length + head.length + payload);
+    big.set(bytes);
+    big.set(head, bytes.length);
+    big.fill(0xab, bytes.length + head.length);
+    const rewritten = withSharedMemoryImport(big);
+    assert.equal(rewritten.length - big.length, withSharedMemoryImport(bytes).length - bytes.length,
+        'the import section changed as in the small module, nothing else');
+    assert.equal(rewritten[rewritten.length - 1], 0xab, 'the section after it copied whole');
+    const memory = new WebAssembly.Memory({ initial: 2, maximum: 2, shared: true });
+    const instance = new WebAssembly.Instance(
+        new WebAssembly.Module(/** @type {Uint8Array<ArrayBuffer>} */ (rewritten)),
+        { env: { memory, note: ()=>{}, base: 0,
+            table: new WebAssembly.Table({ initial: 4, element: 'anyfunc' }) } });
+    /** @type {any} */ (instance.exports).store(0x10, 7);
+    assert.equal(new DataView(memory.buffer).getUint32(0x10, true), 7);
+});

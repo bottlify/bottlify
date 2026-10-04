@@ -773,7 +773,12 @@ export function createCpuModule(){
                                 + ' while delivering a fault'
                                 + (paging
                                     ? `; paging is on with cr3 0x${cr3.toString(16)}`
-                                    : ''),
+                                    : '')
+                                // Any range error reads so, and a host's own --
+                                // its stack spent on something else -- is told
+                                // apart by where it was thrown.
+                                + `; the host said: ${String(/** @type {any} */ (e).stack ?? e)
+                                    .split('\n').slice(0, 3).join(' ')}`,
                         });
                         // Nothing more may run: the next slice would only walk
                         // into the same fault. A halt is what the stub behind a

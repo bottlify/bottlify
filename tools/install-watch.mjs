@@ -45,13 +45,20 @@
  * or at `--which`, a path in the bundle -- a launcher's dialog driven by the
  * same keys, clicks and pictures as a wizard's. `--attended` leaves a message
  * box on the desktop for those to answer rather than answering it unseen.
+ *
+ * `--worker` plays the devices' calls in a graphics worker over the fake GPU,
+ * as a page does; `--unshared` keeps guest memory out of a SharedArrayBuffer,
+ * as on a page that is not cross-origin isolated; `--cork JSON` sets cork's
+ * own settings (`EngineConfig`).
  */
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
+import { Worker } from 'node:worker_threads';
 import { deflateSync } from 'node:zlib';
 import { openBundle } from './btl.mjs';
 import { createApp } from '../modules/core/src/app.js';
+import { createFakeDevice } from '../modules/core/src/layers/graphics/webgpu/internal/fake-device.js';
 import { collectFrom, placementOf, prefixOptions } from '../modules/installer/src/index.js';
 
 const argv = process.argv.slice(2);
@@ -134,6 +141,38 @@ const media = bundleId ? null : {
     ...argv.includes('--siblings') ? { files: besideSetup() } : {},
 };
 const prefix = media ? prefixOptions(media) : await mountBundle(file);
+/**
+ * `--worker`: the devices draw as a page's do, in a graphics worker -- a
+ * worker thread playing their calls over the fake GPU, which this thread
+ * stands in front of too.
+ */
+const graphicsDevice = ()=>{
+    const gpu = createFakeDevice();
+    const gpuDevice = /** @type {any} */ (gpu.device);
+    gpuDevice.features = new Set();
+    gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor });
+    const thread = new Worker(new URL('./fake-graphics-worker.mjs', import.meta.url));
+    thread.unref();
+    thread.postMessage({ type: 'open', frames: 'none' });
+    /** @type {Map<Function, (data: any) => void>} */
+    const listeners = new Map();
+    return {
+        device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
+        adapter: { vendor: 'fake', architecture: '', description: 'a stand-in' },
+        worker: {
+            postMessage: (/** @type {any} */ message, /** @type {any} */ transfer)=>
+                thread.postMessage(message, transfer),
+            addEventListener: (/** @type {string} */ type, /** @type {Function} */ listener)=>{
+                const relay = (/** @type {any} */ data)=>listener({ data });
+                listeners.set(listener, relay);
+                thread.on('message', relay);
+            },
+            removeEventListener: (/** @type {string} */ type, /** @type {Function} */ listener)=>{
+                thread.off('message', /** @type {any} */ (listeners.get(listener)));
+            },
+        },
+    };
+};
 const started = Date.now();
 const seconds = ()=>((Date.now() - started) / 1000).toFixed(1);
 const app = await createApp({
@@ -142,7 +181,15 @@ const app = await createApp({
     storage: prefix.storage,
     ...'bundle' in prefix ? { bundle: prefix.bundle } : {},
     engine: 'cork',
+    // `--unshared`: guest memory not a SharedArrayBuffer, as on a page that is
+    // not cross-origin isolated.
+    // `--cork JSON`: cork's settings (`EngineConfig`), beside `--unshared`.
+    cork: { config: {
+        ...argv.includes('--cork') ? JSON.parse(argv[argv.indexOf('--cork') + 1]) : {},
+        ...argv.includes('--unshared') ? { sharedMemory: false } : {},
+    } },
     graphics: { raster: false },
+    ...argv.includes('--worker') ? { device: graphicsDevice() } : {},
     // Nobody at the screen unless `--attended`: then a message box is drawn
     // on the desktop and waits for a key or a click like any dialog.
     unattended: !argv.includes('--attended'),
