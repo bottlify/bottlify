@@ -164,8 +164,97 @@ export const FLAG_SLOW_PATH = 1;
  * more than the longest record a routine writes, so that a routine that
  * found no room is always followed by a start over.
  */
-const COMMAND_RING_BYTES = 64 * 1024;
+export const COMMAND_RING_BYTES = 64 * 1024;
 const COMMAND_SLACK = 8 * 1024;
+
+/**
+ * Writes an empty command ring into a block: `ring` is pages of its own,
+ * zeroed so that a length is only ever a finished record's.
+ *
+ * @param {number} block @param {number} ring
+ * @param {(address: number, bytes: Uint8Array) => void} writeMemory
+ */
+export function placeCommandRing(block, ring, writeMemory){
+    writeMemory(ring, new Uint8Array(COMMAND_RING_BYTES));
+    const header = new Uint32Array([ring, COMMAND_RING_BYTES]);
+    writeMemory(block + SHADOW.COMMANDS, new Uint8Array(header.buffer));
+}
+
+/**
+ * The host's end of a command ring (`commandCode`): what the guest wrote into
+ * it since the host last read it, handed to `take` in order -- every record
+ * whose length is there, up to the first one a routine has taken the space
+ * for and not yet finished. The head is the guest's; the host starts the ring
+ * over -- zeroing what it read, so that a length is only ever a finished
+ * record's -- once it has read everything up to a head near the end.
+ *
+ * @param {Object} deps
+ * @param {number} deps.block @param {number} deps.ring
+ * @param {(address: number) => number} deps.readWord
+ * @param {(address: number, words: number) => Uint32Array} deps.readWords
+ * @param {(address: number, bytes: Uint8Array) => void} deps.writeMemory
+ * @param {(records: Uint8Array) => number} deps.take  makes the calls, says how many
+ * @param {(detail: string) => void} deps.refuse
+ */
+export function createCommandReader(deps){
+    const { block, ring, readWord, readWords, writeMemory, take, refuse } = deps;
+    let tail = 0;
+    let taken = 0;
+    const zero = new Uint8Array(4);
+    return {
+        take(){
+            if (readWord(block + SHADOW.DRAWS_PENDING) !== 0)
+            {
+                // Lowered before the head is read: a draw written after this
+                // raises it again, and one before it is read now.
+                writeMemory(block + SHADOW.DRAWS_PENDING, zero);
+            }
+            const head = readWord(block + SHADOW.COMMAND_HEAD);
+            if (head === tail)
+            {
+                return;
+            }
+            if (head < tail || head > COMMAND_RING_BYTES)
+            {
+                refuse('the command ring\'s head went back');
+                tail = head;
+                return;
+            }
+            const words = readWords(ring + tail, (head - tail) >>> 2);
+            let whole = 0;
+            while (whole < words.length)
+            {
+                const length = words[whole + (COMMAND.BYTES >>> 2)] >>> 2;
+                if (length === 0)
+                {
+                    break;
+                }
+                if (length < (COMMAND.ARGS >>> 2) || whole + length > words.length)
+                {
+                    refuse('a command record the routines could not have written');
+                    whole = words.length;
+                    break;
+                }
+                whole += length;
+            }
+            if (whole > 0)
+            {
+                taken += take(new Uint8Array(words.buffer, words.byteOffset, whole * 4));
+            }
+            tail += whole * 4;
+            if (tail === head && head > COMMAND_RING_BYTES - COMMAND_SLACK)
+            {
+                // A routine between reading the head and taking its space finds
+                // the head moved and takes it again, from the start.
+                writeMemory(ring, new Uint8Array(head));
+                writeMemory(block + SHADOW.COMMAND_HEAD, zero);
+                tail = 0;
+            }
+        },
+        /** How many calls the ring has carried. */
+        taken: ()=>taken,
+    };
+}
 
 /** What the host clears a word of the block with; never written to. */
 const ZERO_WORD = new Uint8Array(4);
@@ -295,6 +384,31 @@ const prologue = (slow = 'slow')=>[
     [0xf7, 0x01, ...dword(FLAG_SLOW_PATH)],                  // test dword [ecx], 1
     { jcc: 0x75, to: slow },                                 // jnz slow
 ];
+
+/**
+ * The prologue of a function rather than a method: the block is the calling
+ * thread's, in its TEB where Windows keeps the thread's current OpenGL
+ * context (`GlContext`), written by the host when a context is made current.
+ *
+ *     mov ecx, fs:[TEB_GL_CONTEXT]
+ *     test ecx, ecx
+ *     jz slow                     ; no context current: the host's
+ *     test dword [ecx], 1
+ *     jnz slow
+ *
+ * @param {string} [slow]
+ * @returns {(number[] | { jcc: number, to: string })[]}
+ */
+const threadPrologue = (slow = 'slow')=>[
+    [0x64, 0x8b, 0x0d, ...dword(TEB_GL_CONTEXT)],            // mov ecx, fs:[disp]
+    [0x85, 0xc9],                                            // test ecx, ecx
+    { jcc: 0x74, to: slow },                                 // jz slow
+    [0xf7, 0x01, ...dword(FLAG_SLOW_PATH)],                  // test dword [ecx], 1
+    { jcc: 0x75, to: slow },                                 // jnz slow
+];
+
+/** Where a thread's block is in its TEB: the slot Windows keeps its GL context in. */
+export const TEB_GL_CONTEXT = 0xbf0;
 
 /**
  * A routine's bytes: its body, then the jump to the trap its slow label
@@ -756,8 +870,12 @@ export function getSurfaceLevelCode(at, trap){
  *     } [mirror]  guest code run first, with the block in ECX, that keeps what
  *     a getter in the guest reads current; it may leave for the host through
  *     `out`, and leaves ECX and the stack as it found them
+ * @property {{ arg: number, cases: readonly [number, number][], otherwise: number }} [choose]
+ *     or else the bytes chosen by an argument's value: its case's, or `otherwise`
  * @property {boolean} [draws]  a draw: a lock in the guest that may overwrite
  *     what it reads waits for the host to make it
+ * @property {boolean} [thread]  a function rather than a method: no `this`, and
+ *     the block is the calling thread's (`threadPrologue`)
  */
 
 /**
@@ -803,15 +921,20 @@ export function getSurfaceLevelCode(at, trap){
  * @returns {Uint8Array}
  */
 export function commandCode(at, trap, shape){
-    const { slot, args, pointer = -1, bytes = 0, count, mirror = [], draws = false } = shape;
+    const { slot, args, pointer = -1, bytes = 0, count, choose, mirror = [], draws = false,
+        thread = false } = shape;
     const header = COMMAND.ARGS + 4 * args;
-    if (pointer >= 0 && !count && (bytes <= 0 || (bytes & 3) !== 0))
+    if (pointer >= 0 && !count && !choose && (bytes <= 0 || (bytes & 3) !== 0))
     {
         throw new Error(`shadow: a command copies whole dwords, not ${bytes} bytes`);
     }
+    // Where argument i is on entry, and once three registers are pushed:
+    // past `this` for a method, at once for a function.
+    const entry = thread ? 4 : 8;
+    const pushed = entry + 12;
     /** @type {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]} */
     const parts = [
-        ...prologue('early'),
+        ...(thread ? threadPrologue('early') : prologue('early')),
         [0x83, 0xb9, ...dword(SHADOW.COMMANDS), 0x00],           // cmp dword [ecx+disp], 0
         { jcc: 0x74, to: 'early' },                              // je early
         { jcc: 0xeb, to: 'body' },                               // jmp body
@@ -823,14 +946,25 @@ export function commandCode(at, trap, shape){
     if (pointer >= 0)
     {
         parts.push(
-            [0x8b, 0x44, 0x24, 8 + 4 * pointer],                 // mov eax, [esp+8+4p]
+            [0x8b, 0x44, 0x24, entry + 4 * pointer],             // mov eax, [esp+entry+4p]
             [0x85, 0xc0],                                        // test eax, eax
             { jcc: 0x74, to: 'out' });                           // jz out
     }
-    if (count)
+    if (choose)
     {
         parts.push(
-            [0x8b, 0x54, 0x24, 8 + 4 * count.arg],               // mov edx, [esp+8+4c]
+            [0x8b, 0x44, 0x24, entry + 4 * choose.arg],          // mov eax, [esp+entry+4c]
+            [0xba, ...dword(choose.otherwise)]);                 // mov edx, otherwise
+        choose.cases.forEach(([value, size], index)=>parts.push(
+            [0x3d, ...dword(value)],                             // cmp eax, value
+            { jcc: 0x75, to: `case${index}` },                   // jne next
+            [0xba, ...dword(size)],                              // mov edx, size
+            { label: `case${index}` }));
+    }
+    else if (count)
+    {
+        parts.push(
+            [0x8b, 0x54, 0x24, entry + 4 * count.arg],           // mov edx, [esp+entry+4c]
             [0x85, 0xd2],                                        // test edx, edx
             { jcc: 0x74, to: 'out' },                            // jz out
             [0x81, 0xfa, ...dword(count.most)],                  // cmp edx, most
@@ -863,14 +997,14 @@ export function commandCode(at, trap, shape){
     {
         parts.push(arg === pointer
             ? [0x8d, 0x87, ...dword(header)]                     // lea eax, [edi+header]
-            : [0x8b, 0x44, 0x24, 20 + 4 * arg],                  // mov eax, [esp+20+4i]
+            : [0x8b, 0x44, 0x24, pushed + 4 * arg],              // mov eax, [esp+pushed+4i]
         [0x89, 0x47, COMMAND.ARGS + 4 * arg]);                   // mov [edi+8+4i], eax
     }
     if (pointer >= 0)
     {
         parts.push(
             [0x89, 0xf8],                                        // mov eax, edi
-            [0x8b, 0x74, 0x24, 20 + 4 * pointer],                // mov esi, [esp+20+4p]
+            [0x8b, 0x74, 0x24, pushed + 4 * pointer],            // mov esi, [esp+pushed+4p]
             [0x8d, 0xbf, ...dword(header)],                      // lea edi, [edi+header]
             [0x89, 0xd1],                                        // mov ecx, edx
             [0xc1, 0xe9, 0x02],                                  // shr ecx, 2
@@ -886,7 +1020,7 @@ export function commandCode(at, trap, shape){
     parts.push(
         [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
         [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 4 + 4 * args, 0x00],                              // ret 4+4*args
+        [0xc2, entry - 4 + 4 * args, 0x00],                      // ret 4*args (+4 for this)
         { label: 'full' },
         [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
         { jcc: 0xeb, to: 'slow', near: true });                  // jmp slow
@@ -1041,8 +1175,6 @@ export function createShadow(deps){
     const pool = { at: 0, left: 0 };
     /** The command ring's bytes in guest memory, 0 for none, and how far the host has read it. */
     let commands = 0;
-    let commandTail = 0;
-    let commandsTaken = 0;
 
     /** @param {number} value */
     const dwordBytes = value=>new Uint8Array(dword(value));
@@ -1227,64 +1359,9 @@ export function createShadow(deps){
     };
 
 
-    /**
-     * Makes the calls the guest wrote into the command ring since the host
-     * last read it, in order: every record whose length is there, up to the
-     * first one a routine has taken the space for and not yet finished. The
-     * head is the guest's; the host starts the ring over -- zeroing what it
-     * read, so that a length is only ever a finished record's -- once it has
-     * read everything up to a head near the end.
-     */
-    const takeCommands = ()=>{
-        if (readWord(address + SHADOW.DRAWS_PENDING) !== 0)
-        {
-            // Lowered before the head is read: a draw written after this
-            // raises it again, and one before it is read now.
-            deps.writeMemory(address + SHADOW.DRAWS_PENDING, ZERO_WORD);
-        }
-        const head = readWord(address + SHADOW.COMMAND_HEAD);
-        if (head === commandTail)
-        {
-            return;
-        }
-        if (head < commandTail || head > COMMAND_RING_BYTES)
-        {
-            refuse(`${name}::commands`, 'the command ring\'s head went back');
-            commandTail = head;
-            return;
-        }
-        const words = readWords(commands + commandTail, (head - commandTail) >>> 2);
-        let whole = 0;
-        while (whole < words.length)
-        {
-            const length = words[whole + (COMMAND.BYTES >>> 2)] >>> 2;
-            if (length === 0)
-            {
-                break;
-            }
-            if (length < (COMMAND.ARGS >>> 2) || whole + length > words.length)
-            {
-                refuse(`${name}::commands`, 'a command record the routines could not have written');
-                whole = words.length;
-                break;
-            }
-            whole += length;
-        }
-        if (whole > 0)
-        {
-            commandsTaken += /** @type {ShadowCommands} */ (deps.commands).take(
-                new Uint8Array(words.buffer, words.byteOffset, whole * 4));
-        }
-        commandTail += whole * 4;
-        if (commandTail === head && head > COMMAND_RING_BYTES - COMMAND_SLACK)
-        {
-            // A routine between reading the head and taking its space finds
-            // the head moved and takes it again, from the start.
-            deps.writeMemory(commands, new Uint8Array(head));
-            deps.writeMemory(address + SHADOW.COMMAND_HEAD, dwordBytes(0));
-            commandTail = 0;
-        }
-    };
+    /** The command ring's reader, once the block has one. @type {ReturnType<typeof createCommandReader> | null} */
+    let commandReader = null;
+    const takeCommands = ()=>commandReader?.take();
 
     /**
      * Replays the locks and unlocks of buffers the guest let go of since the
@@ -1324,9 +1401,11 @@ export function createShadow(deps){
                 commands = deps.commands ? allocatePage(COMMAND_RING_BYTES) : 0;
                 if (commands !== 0)
                 {
-                    deps.writeMemory(commands, new Uint8Array(COMMAND_RING_BYTES));
-                    deps.writeMemory(address + SHADOW.COMMANDS,
-                        dwordsBytes([commands, COMMAND_RING_BYTES]));
+                    placeCommandRing(address, commands, deps.writeMemory);
+                    commandReader = createCommandReader({ block: address, ring: commands,
+                        readWord, readWords, writeMemory: deps.writeMemory,
+                        take: /** @type {ShadowCommands} */ (deps.commands).take,
+                        refuse: detail=>refuse(`${name}::commands`, detail) });
                 }
             }
         }
@@ -1577,7 +1656,7 @@ export function createShadow(deps){
             surfaceLevelCalls: levelRefs,
             refused,
             // Calls the command ring carried past the bridge.
-            commandCalls: commandsTaken,
+            commandCalls: commandReader?.taken() ?? 0,
         }),
     };
 }

@@ -4111,6 +4111,15 @@ async function buildApp(options){
         {
             bridge.label(Number(address), `${name}!${exported}`);
         }
+        // An export whose code writes what another thread's entry into the
+        // host reads, and never waits, runs unbroken (the kernel's atomicCode).
+        for (const entry of exports)
+        {
+            if (table[entry.name]?.unbroken && 'code' in entry)
+            {
+                core.api('kernel').atomicCode(Number(addresses.get(entry.name)), entry.code.length);
+            }
+        }
 
         const record = {
             name,

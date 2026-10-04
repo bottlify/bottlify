@@ -49,8 +49,8 @@
  * a direct jump's displacement filled in where the code lands.
  *
  * @typedef {Object} CodeBuilder
- * @property {(trap: { convention: string, argBytes: number, handler: Function }) => number}
- *     register  Answers the trap's address.
+ * @property {(trap: { convention: string, argBytes: number, handler: Function,
+ *     lastError?: boolean }) => number} register  Answers the trap's address.
  * @property {(at: number, target: number) => void} jump
  *     The four bytes at `at` in the code are a jump's displacement to `target`.
  */

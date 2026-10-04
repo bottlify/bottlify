@@ -560,6 +560,9 @@ export function createGraphicsModule(){
                     // A context is current on one thread at a time, and another
                     // thread's MakeCurrent or DeleteContext of it is ERROR_BUSY.
                     currentThread: ()=>bridge.callerThread?.()?.id ?? 0,
+                    // Where the routines of a context's command ring find its
+                    // block: the calling thread's TEB.
+                    currentTeb: ()=>bridge.callerThread?.()?.tebAddress ?? 0,
                     // On the configuration rather than the device handle: it
                     // concerns the build that has no device.
                     raster: config?.raster,

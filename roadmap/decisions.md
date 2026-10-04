@@ -452,6 +452,19 @@ placed (`kernel.atomicCode`), so a thread switched away mid-record never leaves 
 entry stopped short of its own calls -- a device shared between threads keeps the ring. Direct3D
 8's ring carries the same calls in its own shapes (`d3d8/commands.js`). *2026-10-03, 1.8.*
 
+**OpenGL's state calls go through a command ring in the guest too, and every other entry plays
+it first.** The calls that answer nothing -- states, bindings, array pointers, matrices, program
+parameters, texture environment and generation, immediate-mode vertices (`opengl/commands.js`)
+-- are routines in OPENGL32 that write the call and what it points at into the ring of the
+calling thread's current context, found through a slot of its TEB the way the system's
+`opengl32` keeps its own context there; wglMakeCurrent writes the slot and deleting the context
+clears it. With no current context or no room, the routine falls through to the same handler.
+OpenGL reports errors only to `glGetError`, which is an entry like any other and plays the ring
+before it answers, so unlike Direct3D nothing here is told an answer the context did not give.
+Measured on a node harness of a GL title's per-draw pattern (sixteen ring calls per draw), the
+engine thread's host time fell from 1091–1144 ms to 627–650 ms per 80 000 draws.
+*2026-10-04, 1.8.*
+
 ## C. Process model and porting
 
 **Process replacement, not two processes in one address space or two machines.** `CreateProcess`

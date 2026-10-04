@@ -54,6 +54,12 @@ import { compressedDigest, imageDigests, imageTimes, keptImages } from './contex
 import { imageBytes, unpackImage } from './texture.js';
 import { packImage } from './context-pixels.js';
 import { PFD } from './constants.js';
+import {
+    COMMAND_RING_BYTES, TEB_GL_CONTEXT, createCommandReader, placeCommandRing,
+} from '../seam/shadow.js';
+
+/** A page: the block and the ring each take pages of their own. */
+const RING_PAGE = 4096;
 
 /**
  * Every core export of OPENGL32.dll, grouped by how many stack words it
@@ -285,6 +291,10 @@ const LIST_TYPES = new Map([
  *           the screen -- which is right for the one window a program of this
  *           era opens and wrong as soon as it opens two.
  * @property {() => number} [currentThread]
+ * @property {() => number} [currentTeb]
+ *           The calling thread's TEB, where the routines of the command ring
+ *           find the block of the context current on it. Absent, every call
+ *           is a trap.
  * @property {(code: number) => void} [setLastError]
  * @property {{ allocate: (bytes: number) => number }} [scratch]
  *           Guest memory, for what must live there: the strings glGetString
@@ -441,6 +451,98 @@ export function createOpengl(services){
 
     /** @returns {any | null} the calling thread's context */
     const current = ()=>wgl.wglGetCurrentContext();
+
+    /**
+     * Each context's command ring (`commands.js`): a block whose address the
+     * routines read out of the TEB of the thread it is current on, and the
+     * host's reader of what they wrote. Made when the context is first made
+     * current; none where there is no guest memory to make one in.
+     *
+     * @type {WeakMap<any, { block: number, reader: ReturnType<typeof createCommandReader> }>}
+     */
+    const rings = new WeakMap();
+    /** Calls the rings carried past the bridge, every context's. */
+    let ringCalls = 0;
+    /** The TEB each context's block was written into, while it is current. @type {Map<any, number>} */
+    const tebsOf = new Map();
+    /** @param {any} context */
+    const ringOf = context=>{
+        const made = rings.get(context);
+        if (made || !services.scratch || !services.currentTeb)
+        {
+            return made ?? null;
+        }
+        const span = services.scratch.allocate(COMMAND_RING_BYTES + 3 * RING_PAGE);
+        if (span === 0)
+        {
+            return null;
+        }
+        // Pages of their own: the routines write them on every call.
+        const block = (span + RING_PAGE - 1) & ~(RING_PAGE - 1);
+        const ring = block + RING_PAGE;
+        services.writeMemory(block, new Uint8Array(RING_PAGE));
+        placeCommandRing(block, ring, services.writeMemory);
+        /** @param {number} address @param {number} words */
+        const readWords = (address, words)=>{
+            const bytes = windowMemory(address >>> 0, words * 4);
+            return new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >>> 2);
+        };
+        const reader = createCommandReader({
+            block, ring, readWords,
+            readWord: address=>readWords(address, 1)[0],
+            writeMemory: services.writeMemory,
+            take: records=>{
+                const calls = context.commands(records);
+                ringCalls += calls;
+                return calls;
+            },
+            refuse: detail=>services.divergence?.('OpenGL', detail),
+        });
+        const entry = { block, reader };
+        rings.set(context, entry);
+        return entry;
+    };
+    /**
+     * Makes the calls the calling thread's context has waiting in its ring,
+     * before any other call reaches it: every entry point that is not a
+     * routine, a swap, and whoever draws through the context directly.
+     */
+    const drain = ()=>{
+        const context = current();
+        if (context)
+        {
+            rings.get(context)?.reader.take();
+        }
+    };
+    /**
+     * Tells the calling thread's routines which block to write: the one of
+     * the context now current on it, or none.
+     *
+     * @param {any} context
+     */
+    const pointRoutines = context=>{
+        const teb = services.currentTeb?.() ?? 0;
+        if (teb === 0)
+        {
+            return;
+        }
+        for (const [other, at] of tebsOf)
+        {
+            if (at === teb)
+            {
+                tebsOf.delete(other);
+            }
+        }
+        const ring = context ? ringOf(context) : null;
+        writeWord(teb + TEB_GL_CONTEXT, ring?.block ?? 0);
+        if (context && ring)
+        {
+            tebsOf.set(context, teb);
+        }
+    };
+    /** @param {number} address @param {number} value */
+    const writeWord = (address, value)=>services.writeMemory(address >>> 0,
+        new Uint8Array(new Uint32Array([value >>> 0]).buffer));
 
     /** The window over guest memory when the host offers one, a copy otherwise. */
     const windowMemory = services.windowMemory ?? services.readMemory;
@@ -1222,6 +1324,12 @@ export function createOpengl(services){
             {
                 return 0;
             }
+            const teb = tebsOf.get(context);
+            if (teb !== undefined)
+            {
+                writeWord(teb + TEB_GL_CONTEXT, 0);
+                tebsOf.delete(context);
+            }
             // The handle is not reused: a program that deletes a context and
             // then uses the stale handle must be told it is stale, not handed
             // whatever was made next.
@@ -1237,7 +1345,12 @@ export function createOpengl(services){
                 services.setLastError?.(ERROR_INVALID_HANDLE);
                 return 0;
             }
-            return wgl.wglMakeCurrent(hdc >>> 0, context ?? null) ? 1 : 0;
+            if (!wgl.wglMakeCurrent(hdc >>> 0, context ?? null))
+            {
+                return 0;
+            }
+            pointRoutines(context ?? null);
+            return 1;
         },
 
         wglGetCurrentContext: ()=>{
@@ -1868,6 +1981,16 @@ export function createOpengl(services){
         }
         table[name].handler = handler;
     }
+    // Every call into the host plays what the ring holds first, so that it
+    // meets the context the program left.
+    for (const entry of Object.values(table))
+    {
+        const handler = entry.handler;
+        entry.handler = args=>{
+            drain();
+            return handler(args);
+        };
+    }
 
     return {
         table,
@@ -1888,6 +2011,7 @@ export function createOpengl(services){
          * @returns {T | null}
          */
         withContext(body){
+            drain();
             const context = current();
             return context ? body(context) : null;
         },
@@ -1904,7 +2028,10 @@ export function createOpengl(services){
          * @param {string} name
          * @returns {((args: number[]) => number) | null}
          */
-        entry: name=>implemented[name] ?? null,
+        entry: name=>(implemented[name]
+            // The swaps, which may wait, are not among these.
+            ? /** @type {(args: number[]) => number} */ (table[name].handler)
+            : null),
 
         /**
          * Presenting a frame, for gdi32's spelling of it.
@@ -1919,6 +2046,7 @@ export function createOpengl(services){
          *     when the swap waits for the device before it answers
          */
         swapBuffers(hdc){
+            drain();
             if (!wgl.SwapBuffers(hdc >>> 0))
             {
                 return false;
@@ -1959,6 +2087,7 @@ export function createOpengl(services){
 
         diagnostics: ()=>({
             contexts: contexts.size,
+            commandCalls: ringCalls,
             // What a program reached for and did not get is the most useful
             // thing this layer can say about a run that drew nothing.
             unimplemented: Object.fromEntries(unimplemented),
