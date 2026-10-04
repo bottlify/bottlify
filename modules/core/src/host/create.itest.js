@@ -52,3 +52,26 @@ test('hello.exe runs through the package entry, headless, on this thread',
         assert.ok(cpu.metrics.instructions > 0, 'the reads that cross the port answer as promises');
         assert.ok((await app.log.recent(10)).length >= 0, 'the keeper answers with a promise');
     });
+
+test('hello.exe runs the same in the workers mode, its engine fed through the inbound ring',
+    { timeout: 15000 }, async t=>{
+        const exe = await readFile(FIXTURE);
+        const app = await createApp({
+            host: 'thread',
+            executable: new Uint8Array(exe),
+            mode: 'workers',
+        });
+        t.after(()=>app.dispose());
+        /** @type {string[]} */
+        const output = [];
+        app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>
+            output.push(text));
+        const code = await app.run({ maxTurns: 200000, timeoutMs: 8000 });
+        assert.equal(code, 0);
+        assert.equal(output.join(''), 'Hello from Bottlify\r\n');
+        const layers = await app.diagnostics();
+        const metrics = layers.find((/** @type {any} */ layer)=>layer.name === 'app').metrics;
+        assert.equal(metrics.mode, 'workers');
+        assert.deepEqual(Object.keys(metrics.pacing),
+            ['drained', 'yields', 'slept', 'sleptMs', 'woken'], 'the ring pacing counted the run');
+    });

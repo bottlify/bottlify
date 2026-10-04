@@ -13,10 +13,15 @@
  * SharedArrayBuffer, so `isolated` cannot run on it; `auto` -- the default --
  * takes `isolated` where it can and `compatible` where it cannot.
  *
- * @typedef {'auto' | 'compatible' | 'isolated'} RunMode
+ * `workers` is `isolated` with the engine's thread fed through shared memory
+ * rather than its event loop (roadmap/v2): what the page sends while a
+ * program runs is read between two turns, and an idle engine sleeps on a
+ * word rather than looking again on a timer. `auto` never takes it.
+ *
+ * @typedef {'auto' | 'compatible' | 'isolated' | 'workers'} RunMode
  */
 
-export const RUN_MODES = Object.freeze(['auto', 'compatible', 'isolated']);
+export const RUN_MODES = Object.freeze(['auto', 'compatible', 'isolated', 'workers']);
 
 /** Whether this thread can share memory with another. */
 export function canShareMemory(){
@@ -31,7 +36,7 @@ export function canShareMemory(){
  *
  * @param {RunMode | undefined | null} asked
  * @param {boolean} [shareable]
- * @returns {'compatible' | 'isolated'}
+ * @returns {'compatible' | 'isolated' | 'workers'}
  */
 export function runModeOf(asked, shareable = canShareMemory()){
     const mode = asked ?? 'auto';
@@ -40,9 +45,9 @@ export function runModeOf(asked, shareable = canShareMemory()){
         throw new Error(`unknown mode ${JSON.stringify(asked)}: the modes are`
             + ` ${RUN_MODES.join(', ')}`);
     }
-    if (mode === 'isolated' && !shareable)
+    if ((mode === 'isolated' || mode === 'workers') && !shareable)
     {
-        throw new Error('mode "isolated" needs shared memory, and this page has none: it is not'
+        throw new Error(`mode "${mode}" needs shared memory, and this page has none: it is not`
             + ' cross-origin isolated (Cross-Origin-Opener-Policy: same-origin,'
             + ' Cross-Origin-Embedder-Policy: require-corp). "compatible" or "auto" runs here.');
     }
@@ -52,16 +57,16 @@ export function runModeOf(asked, shareable = canShareMemory()){
 /**
  * The options a run is built from, with its mode settled: in `compatible` mode the
  * guest's memory is not shared and nothing is lent from it, whatever the
- * caller's cork and graphics settings say; in `isolated` mode those settings stand.
+ * caller's cork and graphics settings say; in `isolated` and `workers` those settings stand.
  *
  * @template {{ mode?: RunMode, cork?: any, graphics?: any }} T
  * @param {T} options
  * @param {boolean} [shareable]
- * @returns {T & { mode: 'compatible' | 'isolated' }}
+ * @returns {T & { mode: 'compatible' | 'isolated' | 'workers' }}
  */
 export function withRunMode(options, shareable = canShareMemory()){
     const mode = runModeOf(options.mode, shareable);
-    if (mode === 'isolated')
+    if (mode !== 'compatible')
     {
         return { ...options, mode };
     }

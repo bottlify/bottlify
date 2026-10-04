@@ -40,3 +40,13 @@ test('full leaves the caller\'s settings as they are', ()=>{
     assert.equal(settled.mode, 'isolated');
     assert.deepEqual(settled.graphics, { lendMemory: false });
 });
+
+test('workers is isolated fed through shared memory: asked for, never taken by auto, and refused'
+    + ' without shared memory', ()=>{
+    assert.equal(runModeOf('workers', true), 'workers');
+    assert.throws(()=>runModeOf('workers', false), /"workers" needs shared memory/);
+    const options = { mode: /** @type {const} */ ('workers'), graphics: { lendMemory: true } };
+    const settled = withRunMode(options, true);
+    assert.equal(settled.mode, 'workers');
+    assert.deepEqual(settled.graphics, { lendMemory: true }, 'the caller\'s settings stand');
+});

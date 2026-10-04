@@ -6563,6 +6563,10 @@ async function buildApp(options){
                     kernelGlCalls: glCounters.calls,
                     // Whether the guest's memory is shared with other threads (`mode.js`).
                     mode: options.mode ?? null,
+                    // What a pacing that counts said of the run: in the workers
+                    // mode, the page's messages read between turns, the yields
+                    // to the event loop, and the sleeps on the doorbell.
+                    pacing: /** @type {any} */ (pacing).counts?.() ?? null,
                 },
             },
         ],

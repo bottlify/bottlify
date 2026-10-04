@@ -30,6 +30,8 @@
 
 import { createDomInput } from '../layers/input/dom.js';
 import { serveKeeper, MIRROR_MS, MIRROR_LIMIT, MIRROR_CAPACITY } from './keeper.js';
+import { createRingMemory } from '../system/ring.js';
+import { INBOUND_BYTES, createInboundWriter } from './inbound.js';
 
 /**
  * The keeper, in a worker of its own. A test can hand in its own port instead
@@ -102,14 +104,31 @@ export async function createRemoteApp(wiring){
         : null;
     /** What crossed the port, by kind: the cost of the page's own tooling, counted. */
     const traffic = { input: 0, request: 0, visibility: 0, answer: 0, event: 0, 'log-memory': 0 };
+    // The `workers` mode's channel: input and visibility written into a ring
+    // rung on the signal word, which the engine reads between turns.
+    const inbound = signal && options.mode === 'workers'
+        ? createRingMemory(INBOUND_BYTES, { buffer: /** @type {SharedArrayBuffer} */ (
+            signal.buffer), index: 0 })
+        : null;
+    const inboundWriter = inbound ? createInboundWriter(inbound) : null;
     /** @param {any} message @param {any[]} [handOver] */
     const send = (message, handOver)=>{
-        if (signal)
-        {
-            Atomics.add(signal, 0, 1);
-        }
         traffic[/** @type {keyof typeof traffic} */ (message.type)]++;
-        worker.postMessage(message, handOver);
+        const post = ()=>{
+            if (signal)
+            {
+                Atomics.add(signal, 0, 1);
+            }
+            worker.postMessage(message, handOver);
+        };
+        if (inboundWriter)
+        {
+            inboundWriter.send(message, post);
+        }
+        else
+        {
+            post();
+        }
     };
     /** @type {Map<string, Set<(payload: any) => void>>} */
     const handlers = new Map();
@@ -282,7 +301,8 @@ export async function createRemoteApp(wiring){
     const offscreen = canvas?.transferControlToOffscreen?.() ?? canvas ?? null;
     /** @type {import('./messages.js').Started} */
     const started = await request('start',
-        [{ ...options, signal: signal ? signal.buffer : undefined }, offscreen],
+        [{ ...options, signal: signal ? signal.buffer : undefined, inbound: inbound ?? undefined },
+            offscreen],
         [...transfer, ...(offscreen && offscreen !== canvas ? [offscreen] : []),
             ...(options.audio?.port && !transfer.includes(options.audio.port)
                 ? [options.audio.port] : [])]);

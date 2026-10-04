@@ -1,0 +1,108 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * The run loop's pacing in the `workers` mode, the engine's side of
+ * `inbound.js`: kept apart from it because the page loads that one, and this
+ * one reaches into the engine.
+ */
+
+import { doorbellOf, waitDoorbell } from '../system/ring.js';
+import { pacedYield } from '../app.js';
+
+/**
+ * How long an idle engine sleeps on the doorbell before it gives its event
+ * loop a turn anyway. Nothing the guest waits on needs the event loop while
+ * it sleeps -- the wait is taken only when no host answer is outstanding --
+ * but a frame to compose or a session to save does, and this bounds how long
+ * they wait behind an idle machine.
+ */
+export const IDLE_SLEEP_MS = 50;
+
+/**
+ * The pacing of an engine fed through a ring: what the page says is read at
+ * every turn boundary without giving the thread away, the thread is given to
+ * the event loop only for what arrives there -- host answers, fetches, a turn
+ * that ran nothing, and the interval bound for the rest -- and a machine with
+ * nothing to run and nothing outstanding sleeps on the doorbell.
+ *
+ * @param {Object} deps
+ * @param {{ bell: { buffer: SharedArrayBuffer, index: number }, drain: () => number }} deps.inbound
+ * @param {() => Promise<void>} deps.macrotask
+ * @param {() => number} deps.now
+ * @param {number} deps.intervalMs
+ * @param {(bell: { buffer: SharedArrayBuffer, index: number }, seen: number,
+ *     timeoutMs: number) => any} [deps.sleep]   a blocking wait; `waitDoorbell` unless a test says
+ * @returns {import('../app.js').RunPacing & { counts: () => Record<string, number> }}
+ */
+export function ringPacing({ inbound, macrotask, now, intervalMs, sleep = waitDoorbell }){
+    const counts = { drained: 0, yields: 0, slept: 0, sleptMs: 0, woken: 0 };
+    const yieldNow = pacedYield({ macrotask: ()=>{
+        counts.yields++;
+        return macrotask();
+    }, now, intervalMs });
+    const drain = ()=>{
+        const taken = inbound.drain();
+        counts.drained += taken;
+        return taken;
+    };
+    return {
+        counts: ()=>({ ...counts }),
+        yield(pending){
+            drain();
+            return yieldNow(pending);
+        },
+        wait({ sleep: idle, deadlineMs, wakes }){
+            // The count first: a message written after it and before the
+            // sleep makes the sleep return at once.
+            const seen = doorbellOf(inbound.bell);
+            if (drain() > 0)
+            {
+                return Promise.resolve();
+            }
+            if (!idle)
+            {
+                counts.yields++;
+                return macrotask();
+            }
+            if (wakes.length > 0)
+            {
+                // An answer is due on the event loop: wait there, for it, the
+                // deadline or the doorbell.
+                /** @type {Promise<unknown>[]} */
+                const waits = [...wakes];
+                const bell = /** @type {any} */ (Atomics).waitAsync?.(
+                    new Int32Array(inbound.bell.buffer), inbound.bell.index, seen);
+                if (bell?.async)
+                {
+                    waits.push(bell.value);
+                }
+                /** @type {ReturnType<typeof setTimeout> | null} */
+                let timer = null;
+                waits.push(new Promise(resolve=>{
+                    timer = setTimeout(resolve, Math.min(deadlineMs ?? IDLE_SLEEP_MS,
+                        bell?.async ? IDLE_SLEEP_MS : intervalMs));
+                }));
+                counts.yields++;
+                return Promise.race(waits).then(()=>{
+                    if (timer !== null)
+                    {
+                        clearTimeout(timer);
+                    }
+                });
+            }
+            const limit = Math.max(0, Math.min(deadlineMs ?? IDLE_SLEEP_MS, IDLE_SLEEP_MS));
+            const started = now();
+            counts.slept++;
+            if (sleep(inbound.bell, seen, limit) !== 'timed-out')
+            {
+                counts.woken++;
+            }
+            counts.sleptMs += now() - started;
+            return Promise.resolve();
+        },
+    };
+}

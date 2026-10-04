@@ -51,11 +51,19 @@
  *     hooks?: HookSpec[],
  *     collectOnExit?: boolean,
  *     signal?: SharedArrayBuffer,
+ *     inbound?: import('../system/ring.js').RingMemory,
  *     pacing?: 'page' | 'event',
  *     network?: { module: string, url: string, room: string, token?: string },
  *     files?: { path: string, bytes: Uint8Array }[],
  *     discs?: { image: Blob | Uint8Array, letter?: string }[],
  * }} StartOptions
+ */
+
+/*
+ * `inbound` is the `workers` mode's channel from the page (`inbound.js`): a
+ * ring in shared memory, rung on the `signal` word, that input, visibility
+ * and the requests handing nothing over are written into instead of posted.
+ * The engine reads it between turns, and sleeps on the word when idle.
  */
 
 /*
