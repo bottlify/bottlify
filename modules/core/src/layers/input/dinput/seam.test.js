@@ -2134,3 +2134,37 @@ test('GetCapabilities takes either size of DIDEVCAPS', ()=>{
     f.memory.setU32(AT.caps, 68);
     assert.equal(f.bridge.call(f.device, 'GetCapabilities', [AT.caps]), DIERR_INVALIDPARAM);
 });
+
+test('a format built against DirectX 3\'s headers names any instance 0xff, under any version', ()=>{
+    // DIDFT_ANYINSTANCE was 0x0000FF00 before DirectInput 5; a mouse format
+    // built against those headers asks for its X axis as type 0xff03, and
+    // read as a word that is instance 255, which no mouse has.
+    for (const version of [0x0300, 0x0700])
+    {
+        const f = fixture();
+        assert.equal(f.dinput.libraries['DINPUT.dll']
+            .DirectInputCreateA.handler([INSTANCE, version, AT.out, 0]), DI_OK);
+        const root = f.memory.u32(AT.out);
+        writeGuid(f.memory, AT.guid, GUID_SysMouse);
+        assert.equal(f.bridge.call(root, 'CreateDevice', [AT.guid, AT.out, 0]), DI_OK);
+        const device = f.memory.u32(AT.out);
+        const AXIS_3 = 0x0000ff03;
+        const BUTTON_3 = 0x0000ff0c;
+        const format = dataFormat(f.memory, 16, [
+            { guid: GUID_XAxis, offset: 0, type: AXIS_3 },
+            { guid: GUID_YAxis, offset: 4, type: AXIS_3 },
+            { guid: GUID_ZAxis, offset: 8, type: (DIDFT_OPTIONAL | AXIS_3) >>> 0 },
+            ...[0, 1, 2, 3].map(button=>({
+                guid: null, offset: 12 + button, type: (DIDFT_OPTIONAL | BUTTON_3) >>> 0,
+            })),
+        ]);
+        assert.equal(f.bridge.call(device, 'SetDataFormat', [format]), DI_OK, `version ${version}`);
+        assert.equal(f.bridge.call(device, 'Acquire', []), DI_OK);
+        f.dinput.post({ kind: 'mouseMove', x: 5, y: 7 });
+        f.dinput.post({ kind: 'mouseButton', code: 0, down: true });
+        assert.equal(f.bridge.call(device, 'GetDeviceState', [16, AT.state]), DI_OK);
+        const view = new DataView(f.memory.bytes.buffer);
+        assert.deepEqual([view.getInt32(AT.state, true), view.getInt32(AT.state + 4, true),
+            f.memory.bytes[AT.state + 12]], [5, 7, 0x80], 'the axes and the first button');
+    }
+});

@@ -427,6 +427,10 @@ const DIEDBSFL_AVAILABLEDEVICES = 0x1000;
 /** The owner a device is given by a SetActionMap that names no user: whoever is logged on. */
 const LOGGED_ON_USER = Symbol('logged-on user');
 const DIDFT_ANYINSTANCE = 0xffff;
+// DirectX 3's headers made an instance a byte and any instance 0xff; a format
+// built against them asks for that, and DirectInput takes it as any instance
+// whatever version the program asked for.
+const DIDFT_ANYINSTANCE_DX3 = 0xff;
 const DIDFT_OPTIONAL = 0x80000000;
 
 /**
@@ -475,7 +479,8 @@ export function readFormat(readU32, guidAt, format, objects, refused = ()=>{}){
         const object = objects.find(candidate=>!taken.has(candidate)
             && (named === null || candidate.guidType === named)
             && ((type & 0xff) === 0 || (candidate.type & type & 0xff) !== 0)
-            && (instance === DIDFT_ANYINSTANCE || ((candidate.type >>> 8) & 0xffff) === instance));
+            && (instance === DIDFT_ANYINSTANCE || instance === DIDFT_ANYINSTANCE_DX3
+                || ((candidate.type >>> 8) & 0xffff) === instance));
         if (!object)
         {
             if ((type & DIDFT_OPTIONAL) === 0)
