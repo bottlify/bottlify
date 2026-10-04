@@ -36,6 +36,7 @@ import { mountDiscs } from './discs.js';
 import { loadZstdWasm } from './zstd-wasm.js';
 import { createClassTable } from './layers/win32/ole32/remote.js';
 import { createReplicas } from './replicas.js';
+import { withRunMode } from './mode.js';
 
 /**
  * createApp — the consumer-facing entry point: run a Win32 application.
@@ -143,6 +144,11 @@ import { createReplicas } from './replicas.js';
  *     the profile folders the registry, the shell and the environment name.
  *     Windows 10 tells a program whose manifest does not declare it 6.2, as
  *     the real one does. Default `winxp`; any other name is refused.
+ * @property {import('./mode.js').RunMode} [mode]
+ *     How much rides on shared memory: `full` shares the guest's memory with the
+ *     graphics worker, `safe` keeps it the engine thread's own and copies what
+ *     crosses, `auto` (the default) is `full` on a cross-origin isolated page and
+ *     `safe` elsewhere. `full` where memory cannot be shared is refused.
  * @property {'directx7' | 'directx8' | 'directx9' | 'directx10' | 'opengl'} [graphicsApi]
  *     The graphics a bottle prefers: every DirectX up to the one named --
  *     DirectX 9 has DirectDraw and Direct3D 8 as well -- or OpenGL alone. Only
@@ -6460,6 +6466,8 @@ async function buildApp(options){
                     // read beside the bridge's own per-hook rows: these calls
                     // never cross the bridge, so they are not in `hooks` at all.
                     kernelGlCalls: glCounters.calls,
+                    // Whether the guest's memory is shared with other threads (`mode.js`).
+                    mode: options.mode ?? null,
                 },
             },
         ],
@@ -6577,6 +6585,8 @@ export async function createApp(options){
     // Refused before anything is built: a machine made to the wrong Windows
     // fails later somewhere that says nothing about why.
     windowsVersion(options.windows);
+    // Settled once, here, so every process the run makes is built in it.
+    options = withRunMode(options);
     graphicsChoice(options.graphicsApi);
     emulatorOf(options);
     // Both outlive every process: subscriptions a caller made before the first
