@@ -319,9 +319,11 @@ const ZERO_WORD = new Uint8Array(4);
 const D3DLOCK_READONLY = 0x10;
 /**
  * A lock that promises not to overwrite what a draw already made reads: the
- * one a buffer may take in the guest while the command ring holds a draw.
+ * one a buffer may take in the guest while the command ring holds a draw --
+ * unless it discards as well, which promises nothing of the kind.
  */
 const D3DLOCK_NOOVERWRITE = 0x1000;
+const D3DLOCK_DISCARD = 0x2000;
 
 /** D3DTS_WORLD is 256 and WORLD1..3 follow it; they take the slots after TEXTURE7. */
 const WORLD_TYPE = 256;
@@ -534,8 +536,9 @@ export function getRenderStateCode(at, trap){
  * The cases left to the host: a lock already held (the host refuses it), a
  * lock for reading, an empty or out-of-range lock, a null out-pointer -- and,
  * while the device's command ring holds a draw the host has not made, any
- * lock but NOOVERWRITE: the bytes that draw reads are the buffer's until
- * then, and the host makes it before it takes the lock.
+ * lock but NOOVERWRITE alone: the bytes that draw reads are the buffer's until
+ * then, and the host makes it before it takes the lock. A DISCARD with it
+ * promises nothing about those bytes, and the buffer has one storage.
  *
  *     cmp dword [ecx+LOCKED], 0
  *     jne slow
@@ -544,8 +547,10 @@ export function getRenderStateCode(at, trap){
  *     mov edx, [ecx+DEVICE]
  *     cmp dword [edx+DRAWS_PENDING], 0
  *     je free
- *     test dword [esp+20], NOOVERWRITE
- *     jz slow
+ *     mov eax, [esp+20]
+ *     and eax, NOOVERWRITE | DISCARD
+ *     cmp eax, NOOVERWRITE
+ *     jne slow
  *   free:
  *     mov eax, [esp+8]            ; offset
  *     mov edx, [esp+12]           ; size
@@ -607,8 +612,10 @@ export function lockCode(at, trap){
         [0x8b, 0x51, BUFFER.DEVICE],                             // mov edx, [ecx+28]
         [0x83, 0xba, ...dword(SHADOW.DRAWS_PENDING), 0x00],      // cmp dword [edx+disp], 0
         { jcc: 0x74, to: 'free' },                               // je free
-        [0xf7, 0x44, 0x24, 0x14, ...dword(D3DLOCK_NOOVERWRITE)], // test dword [esp+20], 0x1000
-        { jcc: 0x74, to: 'hop' },                                // jz hop
+        [0x8b, 0x44, 0x24, 0x14],                                // mov eax, [esp+20]
+        [0x25, ...dword(D3DLOCK_NOOVERWRITE | D3DLOCK_DISCARD)], // and eax, 0x3000
+        [0x3d, ...dword(D3DLOCK_NOOVERWRITE)],                   // cmp eax, 0x1000
+        { jcc: 0x75, to: 'hop' },                                // jne hop
         { label: 'free' },
         [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
         [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
