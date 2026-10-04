@@ -271,7 +271,7 @@ test('a cover and a wallpaper go beside the manifest, and a new one replaces the
         await publish({ prefix, endpoint: host.endpoint, id: 'pictured',
             manifest: { title: 'Game', entry: 'game.exe' } });
         const send = (/** @type {string} */ slot, /** @type {string} */ type,
-            /** @type {Uint8Array} */ body, id = 'pictured')=>fetch(
+            /** @type {Uint8Array<ArrayBuffer>} */ body, id = 'pictured')=>fetch(
             `${host.endpoint.url}/bottles/${id}/art/${slot}`, {
                 method: 'POST',
                 headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': type },
