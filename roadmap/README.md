@@ -16,7 +16,7 @@ The documents before v2 — the phase history and cork's design and integration 
 when v2 was written. They remain in git history.
 
 The `00-*` files beside these are **not in git** (`.gitignore` excludes `roadmap/00-*`):
-`00-TODO-list.md` is an index of them -- the week's goal and one file per area (cork, v86,
+`00-TODO-list.md` is an index of them -- the week's goal and one file per area (cork,
 graphics, win32 and kernel, audio and input, installers and bundles, diagnostics), each holding
 that area's open work and then its pitfalls, the ones that each cost weeks and are required reading
 before touching the kernel, bridge, graphics or audio layers -- beside `00-product-plan.md`, what

@@ -1,326 +1,131 @@
-System Instruction: Bottlify Architect
+# Bottlify
 
-Working Rule: Do Not Stop in the Middle (mandatory, read first)
+Bottlify runs Win32 x86 programs in the browser: **cork**, our x86 → wasm translator
+(`modules/cork`), in a Web Worker, under a from-scratch Win32/DirectX layer (`modules/core`) on
+WebGPU, WebAudio and OPFS. Where this file and the tree disagree, the tree is right and this file
+is the bug.
 
-A turn does not end in the middle of a step. A step of agreed work ends in one of two ways and no
-other: **its solution is found** -- implemented, tested, verified on what it was for -- or **it has
-reached a dead end** -- every approach tried was refuted by measurement and no next approach is
-known. The last message of the step says which of the two it is, with the evidence.
+## Working rule: finish the step
 
-- A report before that is a line in the middle of the work, not the end of a turn: give the
-  numbers, then start the next step in the same turn.
-- Never end on "if you don't object, I'll do X", "shall I start?", or a menu of options for a goal
-  that is already set. Choose the next step and take it.
-- The only other reasons to stop: a decision that is genuinely the user's -- a direction not yet
-  chosen, an irreversible or outward-facing action -- or a wait a rule imposes, such as a rebuild
-  on the user's host. Then say what is waiting on what.
+A step ends in one of two ways: **solved** (implemented, tested, verified on what it was for) or
+**a dead end** (every approach refuted by measurement, no next one known). The last message of the
+step says which, with the evidence. A progress report is a line in the middle of the work, not the
+end of a turn. Never end on "shall I start?" or a menu of options for a goal already set. Stop only
+for a decision that is genuinely the user's (a direction not chosen, an irreversible or
+outward-facing action) or for a wait a rule imposes, and say what waits on what.
 
-Project State
+## Priorities
 
-Bottlify runs original Win32 x86 games in the browser: cork, our own x86 → wasm translator, in a
-Web Worker, plus a from-scratch Win32/DirectX HLE layer on top of WebGPU/WebAudio/OPFS.
+1. **x86-64 and the multi-worker process runner** (`roadmap/v2/`). Work on the workers — the
+   engine, graphics, translation and audio threads and what crosses between them — pays off for the
+   whole application, not one title.
+2. **Correctness, speed, reuse.** Optimisation and standardisation are part of the job, not
+   extras: one shared mechanism over three similar ones, a contract written once and enforced by a
+   test.
+3. **No per-title hacks.** Never branch on a program's name, executable or hash, never hardcode an
+   offset for one title. A title that misbehaves is a signal about a generic contract we got wrong
+   (an FPU context switch, a `GetProcAddress` epoch, a DLU→px conversion, an mmap write-back gap);
+   fix it there, once, for every title on that path.
 
-The plan is `roadmap/v2/`: the engine becomes a multi-worker platform whose capacity follows the
-load, then x86-64 and ARM and ARM64, with Direct3D 11 alongside. Day-to-day work is ordered by
-`roadmap/00-TODO-list.md` (local), which opens with the week's goal; installers and networking are
-areas in it, not phases.
+## Where things are
 
-What runs today, end to end through `createApp()`: the engine is cork, our own x86 → wasm
-translator (`modules/cork`), judged by its tests against the hardware corpus and against its own
-instruction model (`ir.js`, `ir-x87.js`, `ir-simd.js`). The v86 emulator is not in the repository:
-`engine: 'emulator'` runs only a build the caller brings (`v86: { moduleUrl, wasmBytes }`), through
-the cpu layer's adapter and a 64 KiB ROM of our own (no BIOS). The loader maps a 32-bit PE and synthesises a real in-guest module per
-system library, so an address from `GetProcAddress` is the one an import was bound to; threads run
-under a round-robin scheduler whose quantum is retired guest instructions; the bridge marshals
-stdcall, cdecl and thiscall, parks a caller that cannot be answered yet, calls back into guest code,
-and puts COM interfaces into guest memory. **Warcraft III draws its main menu on a real GPU** —
-a windowed program registers its class, pumps messages, mounts its archives, creates Direct3D 8
-textures and presents lit, fogged frames.
+- `docs/architecture.md` (`.ru.md`) — how the whole thing works: threads, startup, cork, Win32,
+  graphics, sound, networking, storage.
+- `docs/core/` — `@bottlify/core`'s public contract: API, configuration, current limits. Kept
+  current as work lands; written for someone outside the project.
+- `modules/cork/README.md` — the translator and its runtime.
+- `roadmap/README.md` — the index of the plans: `v2/` (the plan), `bottles/`, `steam/`, and
+  `decisions.md` (behaviour chosen rather than derived from a specification).
+- `roadmap/00-*` — local working notes, not in git (`.gitignore` excludes exactly these): the TODO
+  index, per-area open work and **pitfalls** (read the area's pitfalls before touching the kernel,
+  bridge, graphics or audio layers), plans and reports. Everything else in `roadmap/` ships with
+  the repo and is written for a reader who is not you.
 
-Every layer is real: `cpu`, `memory`, `kernel`, `bridge`, `loader`, `log`, `filesystem`, `win32`,
-`graphics`, `audio`, `input`, `media`. `win32` covers kernel32, msvcrt, user32, gdi32, advapi32 with
-the registry, ole32, quartz, winmm, wsock32 and more; `graphics` covers DirectDraw, Direct3D 7, 8
-and 9, OpenGL and the WebGPU backend they all render through.
+## Code
 
-Do not trust this paragraph over the tree. It has been stale before, and a claim here that the code
-contradicts is a bug in this file.
+- **Vanilla ES modules + JSDoc**, checked by `tsc --checkJs --noEmit`; a `.d.ts` only where JSDoc
+  cannot say it. WASM only where it is already required (cork's output, the prebuilt FFmpeg and
+  zstd decoders) or where a profile proves a hot path needs it.
+- **Zero runtime dependencies** in `@bottlify/core`; nothing in the product fetches its own code.
+- **Modules are standalone libraries.** Each `src/layers/<name>/module.js` declares `name`,
+  `requires`, `create(config, host)`, `diagnostics()`, `dispose()`; a module reaches another only
+  through `host.requireApi(name)` for a name in its own `requires` — no direct imports, no shared
+  singletons. A disabled module something needs is installed as a stub, so pulling a module out
+  degrades the system without breaking it. `npm run check:boundaries` enforces the graph:
 
-Planning documents live in `roadmap/`. Only the `00-*` files are local: `.gitignore` excludes
-`roadmap/00-*` and nothing else, because they are personal working-notes territory. Everything
-else in there is tracked and ships with the repo, so it is written for a reader who is not you.
+  ```
+  log → nothing          cpu, filesystem, media → log          memory → cpu, log
+  kernel, loader → cpu, memory, log                 bridge → cpu, kernel, memory, log
+  win32 → bridge, kernel, memory, loader, filesystem, log
+  graphics, audio, input → win32, bridge, memory
+  ```
+- **Derived from the specification, not a reference implementation**: contract (ABI, signatures,
+  struct layout, return codes, edge cases) → test → implementation. Wine is a source of knowledge
+  (its conformance tests say what real Windows answers), never of code.
+- **Someone else's work** — a component, an algorithm, a snippet — gets a `THIRD-PARTY-NOTICES.md`
+  entry in the commit that brings it in.
+- **Comments say why**, not what; no changelog comments, no tombstones, no claims about titles we
+  did not measure, no earlier projects or local paths in anything committed.
+- Lint has zero tolerance: `--max-warnings 0`.
 
-`roadmap/00-TODO-list.md` is the index: the week's goal and one local file per area —
-`00-cork.md`, `00-v86.md`, `00-graphics.md`, `00-win32-kernel.md`, `00-audio-input.md`,
-`00-installers-bundles.md`, `00-diagnostics.md` — each holding that area's open work followed by its
-pitfalls (the hard-won bugs that each cost weeks; `00-pitfalls.md` maps the old section numbers to
-files). `roadmap/00-product-plan.md` is the product around the engine (public API, launcher, accounts,
-sharing, Steam, thresholds); `roadmap/00-references.md` is the external reading list. The product model, the rules and the layer graph are this file and `docs/core/`; the plan is `roadmap/v2/`; the decisions still in force are `roadmap/decisions.md`, and earlier plans are in git history.
+## Tests
 
-The tracked part:
+Nothing is done until it is tested: unit, contract (Wine's expectations), graphical (reference
+frames) and end to end. Tests use `node:test`, colocated as `*.test.js` (unit) and `*.itest.js`
+(integration and gates); no test dependencies.
 
-- `roadmap/README.md` — the index, and the first thing to read.
-- `roadmap/v2/` — the plan: the target architecture, its stages and their acceptance.
-- `roadmap/bottles/` and `roadmap/steam/` — bottles kept and edited on the device, and Steam in a
-  bottle: what exists, what is missing, the stages and their acceptance.
-- `roadmap/decisions.md` — behaviour this project chose rather than derived from a specification,
-  each defended on its merits and recorded as reconsidered when it is.
+**Every second path has a gate.** An optimisation that puts a fast path beside a slow one — guest
+routines beside host traps, a command ring beside direct calls, a recording replayed in a worker
+beside a device that draws itself, a device mixer beside the guest clock — lands with a
+differential test in the same change: seeded random programs down both paths, comparing everything
+a program can observe (answers, out-structures, guest memory, what the GPU or the mixer is given).
+A benchmark shows the frame rate rose; only the gate shows nothing else changed. A new command,
+getter or path without cases in its gate fails the gate.
 
-The pitfalls sections of the area files (index: `roadmap/00-pitfalls.md`) are not optional reading before touching the kernel, bridge, graphics or
-audio layers: it is the register of what has already cost weeks once.
+**Run what the change touches; the full suite before main.**
 
-This file is tracked and ships with the repo, so it is written for any checkout: no absolute paths,
-no machine-specific setup. The durable reference for users of the package is `docs/core/` — versioned documentation of
-`@bottlify/core`'s actual module contract, configuration, and current limitations, kept current as
-phases land. Only the `00-*` files are local to this checkout; the rest of `roadmap/` travels with the repo.
+| Changed | Run |
+| --- | --- |
+| cork | `npm test -w @bottlify/cork` and `npm run test:integration -w @bottlify/cork` — the x86 corpus with expected results (`npm run fetch:corpus` once) |
+| a core layer (gdi32, d3d9, dsound, …) | that layer's unit tests by interface and its gates: `node --test "src/layers/<layer>/**/*.test.js" "src/layers/<layer>/**/*.itest.js"` in `modules/core` |
+| anything, before it goes to main | `npm run typecheck`, `npm run lint`, `npm test`, `npm run test:integration`, `npm run check:boundaries`, `npm run build` |
 
-Repo layout:
-- `package.json` — workspace root (npm workspaces, `modules/*`).
-- `modules/core/` — `@bottlify/core`. `src/system/` is the module contract/host/registry/config
-  machinery; `src/layers/<name>/` is one directory per architectural layer (see graph below), each
-  with `api.js` (JSDoc interface) + `module.js` (the `BottlifyModule` definition).
-  `vendor/prebuilt/` (gitignored) holds the pinned decoder binaries the build copies in.
-  `scripts/` holds build, vendor-build and boundary-check tooling, all zero-dependency Node
-  scripts.
-- `tools/cdp_test/` — the Phase 0 acceptance harness: launches a headless Chromium via CDP, serves
-  `modules/core/test/page/`, and asserts the worker answers a ping. Dev tooling; never imported by
-  a package.
-- `docs/core/` — durable, git-tracked documentation of `@bottlify/core`'s module contract,
-  configuration shape and current limitations (kept up to date as phases land). This is the
-  documentation written for someone outside the project, as against the roadmap's working plans.
+CI (`.github/workflows/ci.yml`) runs the full set plus `npm run cdp:probe` in a real headless
+Chrome; both jobs must be green.
 
-1. Language & Runtime Contour (fixed for the whole Phase 0+ core package)
+## Performance
 
-- **Vanilla ES modules + JSDoc, not TypeScript.** No transpilation step in development. Types are
-  part of the contract and are enforced by `tsc --checkJs --noEmit` (`modules/core/jsconfig.json`),
-  not by writing `.ts`. Where JSDoc can't express something, a `.d.ts` lives next to the code
-  (ambient types only — no translated/compiled TS ships in the product).
-- **WASM only where it's already required** — the code cork emits, and the prebuilt decoders
-  (FFmpeg, zstd). Our own code is JS until profiling proves a hot path needs WASM (performance is a
-  correctness concern, not a default).
-- **Zero runtime dependencies** in `@bottlify/core`. Everything external is built into `dist/`;
-  nothing in the running product does a network `fetch` for its own code.
-- **Tests:** Node's built-in `node:test`, zero test dependencies, `*.test.js` colocated with the
-  code it tests (no separate `test/` tree for unit tests — `modules/core/test/page/` is the
-  cdp_test browser sandbox, not unit tests).
+Performance is part of correctness: a slow implementation does not reproduce how the program ran.
+Bugs and costs are found by measurement — the harness, ring buffers, phase profiler and guest CPU
+attribution are first-class.
 
-2. Ownership & Third-Party Code
+- **An optimisation works on a test before it touches the engine**: a node test that reproduces a
+  real scenario (a block profile, the bytes from the bundle), then the solution, then the engine,
+  then the game run to confirm. A browser A/B of a guess is not a diagnosis — a frame varies by a
+  quarter between runs.
+- **Judge on more than one scenario** (play, menu, load).
+- **The first lever is the translator** — caching, larger blocks and regions — because it speeds
+  up every title at once. Small generic gains count.
 
-- **v86 is not part of the repository.** Our fork, `github.com/bottlify/v86`, keeps its patches on
-  its own branch, one commit per patch, each a candidate to upstream, and its releases host the
-  nasm corpus the translator's tests fetch. The cpu layer keeps an adapter for a v86 build a caller
-  brings; nothing here builds or ships one.
-- **Patches are written from scratch, not adapted.** Knowing that a defect exists and where it
-  lives is the valuable part and is worth taking from anywhere; the patch itself is ours, written
-  against the behaviour of the code it changes. Verify the claim against that source first — a
-  reported defect may already be fixed in the version in hand, and acting on a second-hand
-  description would then "fix" something that is not broken.
-- **Wine is a source of knowledge, not code**: conformance-test expectations (which arguments
-  succeed, which fail, what the observable semantics are) inform our HLE implementations; nothing is
-  copied or translated from Wine's source.
-- **Anything reused from someone else's work gets a `THIRD-PARTY-NOTICES.md` entry, in the same
-  commit that introduces it** — not just whole components like FFmpeg. A smaller borrowed
-  piece (an algorithm, a snippet, an approach lifted from a library, blog post, or another repo
-  rather than written fresh for this project) is still someone else's work and still needs
-  attribution there.
+## Bringing up a program
 
-3. Six Rules the Whole Project Is Built On
+Audit before the first run: `node tools/import-audit.mjs <exe|dir|.btl|.iso> --dynamic --specs
+<dir>` (`--fetch-specs <dir>` downloads the export lists once), and implement every missing entry
+point it lists in one pass. A setup unpacks as it runs: run it once under
+`tools/install-watch.mjs --copy` and audit what it left. Packed images and `GetProcAddress` lookups
+are found only by running.
 
-These aren't aspirational — they're how disputes about a design get resolved, from Phase 0 through the
-last phase.
+## Delegating
 
-1. **Modularity: every module is a standalone library.** A module has an interface (what it
-   promises), a configuration (data, not code), a lifecycle (`create`/`diagnostics`/`dispose`), and
-   its own tests. It knows about other modules only through their declared `requires` — never a
-   direct import, never a shared singleton. The practical test: pull a module out, and the rest of
-   the system still builds and runs, degraded but not broken (`graphics: null` → the game runs
-   without rendering). `check:boundaries` enforces the dependency graph in CI; this is not
-   negotiable by comment or convention.
-2. **A layer is derived from its specification, not from a reference implementation.** Order of
-   work: contract → test → implementation. The contract is the ABI, the signatures, the struct
-   layout, the return codes, the edge-case behavior. A reference tree answers "how does real Windows
-   behave", never "how do I write this".
-3. **Everything is tested, including graphics** — unit, contract (Wine conformance expectations),
-   graphical (reference-frame comparison), and end-to-end (the harness driving a real game). A layer
-   without tests is not considered done.
-4. **No per-game crutches.** Never branch on a game's name/exe/hash, never hardcode an offset for
-   one title, never special-case a quirk to keep a single game limping along. Nearly every
-   "this game doesn't work" symptom root-caused to a *generic* layer bug —
-   FPU context-switch, `GetProcAddress` epoch, a DLU→px conversion, an mmap write-back gap, an
-   async-callback invariant — and fixing the generic bug once helped every title on that path. If a
-   game misbehaves, that's where to look.
-5. **Performance is part of correctness.** A slow implementation doesn't faithfully reproduce how
-   the app actually ran. Performance targets are set from day one and checked automatically (see
-   `roadmap/00-product-plan.md`, Thresholds, for the actual numbers), not addressed "when there's
-   time".
-6. **Diagnostics are first-class from day one.** The harness, ring buffers, phase profiler and guest
-   CPU attribution are built alongside the core, not bolted on later — because in this domain a bug
-   is found by measurement, not by reading code. (The canonical example: a 9x FPS
-   regression was one line of a buffer-locking contract; reading code didn't find it for months, a
-   phase profiler found it in one run.)
+Independent work runs in parallel: an investigation that returns a conclusion, work confined to a
+folder nobody else touches, anything whose output is a report. Two streams editing the same files
+do not.
 
-4. The Module Contract (as implemented in `modules/core/src/system/`)
-
-```js
-/**
- * @typedef {Object} BottlifyModule
- * @property {string} name
- * @property {string} version
- * @property {readonly string[]} requires   // interfaces this module consumes — never implementations
- * @property {(config, host: ScopedModuleHost) => Promise<ModuleApi>} create
- * @property {() => ModuleDiagnostics} diagnostics   // required — no exceptions
- * @property {() => Promise<void>} dispose
- */
-```
-
-- `system/contract.js` — the JSDoc typedefs only; no runtime exports.
-- `system/host.js` (`makeScopedHost`) — every module gets its own view: `requireApi(name)` only
-  works for names in that module's own `requires`; `provide(name, api)` only accepts its own name.
-  There is exactly one shared registry underneath, but no module ever sees more of it than its
-  declared dependencies — this is what "no singletons between modules" means concretely.
-- `system/registry.js` (`ModuleRegistry`) — turns a `{ moduleName: boolean | object }` configuration
-  into a topologically-ordered creation plan. A disabled module that nothing needs is dropped
-  entirely; a disabled module that something *does* need is installed as a stub instead (so the
-  interface is always bound for whoever requires it). Cycles and unknown names are configuration
-  errors, not runtime surprises.
-- `system/stub.js` — `NOT_IMPLEMENTED` for any method on a disabled or not-yet-built module. Every
-  layer under `src/layers/*/module.js` is a stub today; implementing a layer means replacing its
-  `module.js`/`api.js` while keeping the same `name`/`requires` contract the registry and
-  `check:boundaries` already enforce.
-
-Layer dependency graph (enforced by `scripts/check-boundaries.mjs`, not just documented):
-
-```
-cpu → log                                          log → (nothing)
-memory → cpu, log                                   filesystem → log
-kernel → cpu, memory, log                           loader → cpu, memory, log
-bridge → cpu, kernel, memory, log
-win32 → bridge, kernel, memory, loader, filesystem, log
-graphics / audio / input → win32, bridge, memory
-```
-
-`system/*` never imports `layers/*` (contract lives in `system/`, layers implement it — not the
-other way round); a layer imports another layer only if it's declared in `requires`; nothing outside
-`src/` is importable (`vendor/` holds binaries, which only the root of `src/` reaches, by URL); the
-whole `src/` import graph must be acyclic. All of this is checked by `npm run check:boundaries`,
-which parses the real `requires` arrays out of each `module.js` rather than trusting a
-separately-maintained rule file.
-
-5. Optimisation Discipline
-
-- **An optimisation works on a test before it touches the engine.** First a test that reproduces
-  a scenario that really occurs -- in node, on the instructions a title actually runs (a block
-  profile, the bytes from the bundle) -- then a proposed solution, and only when the solution
-  works on that test is the engine changed, and the game run confirms it afterwards. A browser
-  A/B run of a guess is not a diagnosis: a game's frame varies by a quarter from one run to the
-  next.
-- **An optimisation that adds a second path lands with its gate, in the same change.** A fast
-  path beside a slow one -- guest routines beside host traps, a ring beside direct calls, a
-  recording replayed in a worker beside a device that draws itself -- gets a differential test
-  that runs the same random programs down both and compares everything a program can observe
-  (answers, out-structures, guest memory, what the GPU is given). A benchmark shows that the
-  frame rate rose; only the gate shows that nothing else changed. A new command, getter or path
-  without cases in its gate fails the gate.
-- **Judge a change on more than one scenario** (play, menu, load): a change that made Doom 3's
-  play 3% faster doubled the guest's time in its menu.
-- **No hacks and no per-title hooks while another way exists.** The first lever is the translator
-  itself -- more caching, larger and more complex blocks and regions -- because it speeds up every
-  title at once. Small gains count when they are generic.
-
-6. Comment Discipline
-
-- Comments explain WHY — a non-obvious invariant, a workaround, something that would surprise a
-  reader — never WHAT the code already says.
-- No changelog-style comments (dates, one-off measured counts, "this used to do X, was fixed by Y").
-  No removal tombstones — when code is deleted, delete it cleanly; the absence speaks for itself.
-- Match the comment density of the surrounding code. A one-line note beats a paragraph; a paragraph
-  beats a wall of history nobody asked for.
-- **No claims about specific titles that this project did not measure.** Never write "this makes game
-  X work" or quote a frame rate from someone else's run. If a property plausibly matters for real
-  programs, say it may be needed for some titles and leave it to our own measurement; results from
-  tests this project actually ran are facts and can be stated as such.
-- **Committed artifacts never mention earlier projects or local machine paths** — that context
-  belongs only in the local `roadmap/00-*` files.
-
-7. Workflow
-
-```
-npm ci
-npm run typecheck        # tsc --checkJs --noEmit over modules/core/src
-npm run lint             # eslint.config.mjs — flat config, zero warnings tolerated
-npm test                 # node --test "src/**/*.test.js"
-npm run check:boundaries # scripts/check-boundaries.mjs — layer graph + acyclic import check
-npm run build            # esbuild → modules/core/dist/, plus dist/checksums.json
-npm run cdp:probe        # tools/cdp_test — browser → worker → ping → screenshot, the Phase 0 acceptance test
-```
-
-**Audit before the first run.** Before installing a program or bringing up a title, run
-`node tools/import-audit.mjs <files> --dynamic --specs <dir>` over its files (an exe, a directory, a
-`.btl` bundle or an `.iso`; `--fetch-specs <dir>` downloads the export lists once) and implement
-every missing function it lists, by import table and by name, in one pass, instead of meeting them
-one crash at a time.
-A setup unpacks its payload as it runs: run it once with `tools/install-watch.mjs --copy` and audit
-what it unpacked. The audit sees missing entry points only; a packed image, a payload still
-compressed and what a program asks GetProcAddress for at run time are found by running it.
-
-`eslint.config.mjs` turns `no-undef` off deliberately: `tsc --checkJs` already knows the real global
-set for each file (Node script vs. Worker vs. browser page) and checks it more precisely than a
-single ESLint environment could without per-file overrides duplicating that config. Everything else
-in `eslint:recommended` stays on — it has already caught real dead code during Phase 0 review (an unused
-helper function, a useless variable initializer).
-
-CI (`.github/workflows/ci.yml`) runs two independent jobs: `core` (install → typecheck → lint →
-test → check:boundaries → integration tests → build) and `probe` (the cdp_test acceptance scenario,
-with a real headless Chrome). Both must be green for a change to land. `.github/workflows/vendor.yml`
-rebuilds the prebuilt decoders (FFmpeg, zstd) in containers when their own inputs change.
-
-8. Delegating Work
-
-**If a task splits into parts that do not depend on each other, run them in parallel.** Sequential
-execution of independent work is wasted time, and this codebase produces such splits constantly:
-a question to be answered by measurement, an implementation that needs no answer to proceed, and a
-piece of tooling in its own folder are three streams that never touch.
-
-What has actually parallelised well here:
-
-- **Investigations that read a lot and return a conclusion.** "Can the emulator be preempted at an
-  instruction count?" and "what exactly must a context switch save?" were answered concurrently by
-  two agents while a third stream of implementation continued. Their intermediate reading never had
-  to enter the main conversation — only the finding did.
-- **Work confined to a folder nobody else touches.** A UI in `ui/`, a spike in the scratchpad.
-- **Anything whose output is a report rather than a diff.**
-
-What does not: two streams editing the same files, or a design that one investigation is about to
-change. Sequence those instead — and when a finding lands that invalidates the plan, update the plan
-before continuing, not after.
-
-Rules that keep concurrent work from colliding:
-
-- **Give each agent an exclusive area and say so explicitly.** Name what it may create and forbid
-  everything else — shared files (`package.json`, `eslint.config.mjs`) are wired by the parent
-  afterwards, never by an agent, because two agents editing one file is the collision.
-- **An investigation writes only to the scratchpad.** It may read anything and import the repo's own
-  modules read-only, but a spike that leaves nothing behind cannot conflict with anything.
-- **Brief the constraints, or they are violated in good faith.** The house style, the lint warning
-  cap, "do not commit", "do not run a repo-wide autofix". An agent that does not know the cap exists
-  will add warnings and break the build for everyone.
-- **Require verification, and require honesty about its absence.** Ask for "say plainly if you could
-  not verify this" — a report that assumes success is worse than no report.
-- **Verify a second-hand claim before acting on it.** One reported defect in the emulator turned out
-  not to apply to the version we used; acting on the description would have "fixed" something that
-  was not broken.
-
-Choosing the agent kind:
-
-- A **fork** inherits the whole conversation — the constraints, the style, what was already tried.
-  It always runs on the parent's model; a model override is ignored. This is the right default here,
-  because the briefing is the expensive part.
-- A **named type** starts cold and *can* take a model override, which is worth it for mechanical
-  work that needs little context. Pay for the full briefing when you do this: it knows nothing.
-
-9. Forward-Looking: No Per-Game Hacks (repeated because it will be tempting)
-
-Once Phase 1+ lands real x86 execution and Win32 surfaces, the single most valuable thing this project
-holds to is rule 4 above. A bring-up bug is a diagnostic signal about
-our recreation of a generic contract, never a target to patch around for one title. When a game
-does something unexpected, the question is "what is the real API contract here, and what are we
-doing differently" — not "how do I make this one executable proceed".
+- Give each agent an exclusive area by name; shared files (`package.json`, `eslint.config.mjs`) are
+  wired by the parent afterwards.
+- An investigation writes only to the scratchpad.
+- Brief the constraints (style, lint cap, no commits, no repo-wide autofix) and require it to say
+  plainly what it could not verify.
+- Verify a second-hand claim against the code before acting on it.
+- A fork inherits the conversation and the parent's model — the default, since the briefing is the
+  expensive part; a named agent type starts cold and needs the full briefing.
