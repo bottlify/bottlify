@@ -171,6 +171,23 @@ export function createDirect3D9Seam(
     const owners = new WeakMap();
 
     /**
+     * A resource's interface, whose methods the host makes after the calls
+     * the program made before them: those its device's command ring still
+     * holds are made first, as the device's own methods make them (`synced`).
+     * A draw in the ring that samples a texture, or reads a buffer, then
+     * meets it as it was rather than as the lock about to be taken leaves it.
+     *
+     * @type {typeof describe}
+     */
+    const describeResource = (id, slots, methods, ...rest)=>describe(id, slots,
+        Object.fromEntries(Object.entries(methods ?? {}).map(([name, method])=>[name,
+            (/** @type {any} */ object, /** @type {number[]} */ args)=>{
+                shadowOf(owners.get(object)
+                    ?? (object.container ? owners.get(object.container) : undefined))?.sync();
+                return method(object, args);
+            }])), ...rest);
+
+    /**
      * A create that failed leaves a null where its interface would have gone,
      * as Direct3D does.
      *
@@ -490,7 +507,7 @@ export function createDirect3D9Seam(
     };
 
     /** @type {import('./com.js').InterfaceDescriptor[]} */
-    const surfaceInterfaces = [describe(IID_IDirect3DSurface9, IDIRECT3DSURFACE9_SLOTS, {
+    const surfaceInterfaces = [describeResource(IID_IDirect3DSurface9, IDIRECT3DSURFACE9_SLOTS, {
         ...resourceMethods(D3DRTYPE.SURFACE),
         /** @param {any} surface @param {number[]} args */
         GetDesc: (surface, [out])=>{
@@ -727,9 +744,9 @@ export function createDirect3D9Seam(
      * @param {string} id @param {[string, number][]} slots @param {any} methods
      */
     const textureFamily = (id, slots, methods, guests = {})=>[
-        describe(id, slots, methods, guests, retire),
-        describe(IID_IDirect3DBaseTexture9, IDIRECT3DBASETEXTURE9_SLOTS, methods),
-        describe(IID_IDirect3DResource9, IDIRECT3DRESOURCE9_SLOTS, methods),
+        describeResource(id, slots, methods, guests, retire),
+        describeResource(IID_IDirect3DBaseTexture9, IDIRECT3DBASETEXTURE9_SLOTS, methods),
+        describeResource(IID_IDirect3DResource9, IDIRECT3DRESOURCE9_SLOTS, methods),
     ];
     const textureInterfaces = textureFamily(IID_IDirect3DTexture9, IDIRECT3DTEXTURE9_SLOTS,
         textureMethods, allocate
@@ -796,7 +813,7 @@ export function createDirect3D9Seam(
     // test_volume_resource): it answers for itself and IUnknown alone, and
     // names its texture as its container (test_volume_get_container).
     /** @type {import('./com.js').InterfaceDescriptor[]} */
-    const volumeInterfaces = [describe(IID_IDirect3DVolume9, IDIRECT3DVOLUME9_SLOTS, {
+    const volumeInterfaces = [describeResource(IID_IDirect3DVolume9, IDIRECT3DVOLUME9_SLOTS, {
         ...privateData.methods,
         /** @param {any} volume @param {number[]} args */
         GetDevice: (volume, args)=>getDevice(volume.container, args),
@@ -926,7 +943,7 @@ export function createDirect3D9Seam(
     };
 
     const vertexBufferInterfaces = [
-        describe(IID_IDirect3DVertexBuffer9, IDIRECT3DVERTEXBUFFER9_SLOTS, {
+        describeResource(IID_IDirect3DVertexBuffer9, IDIRECT3DVERTEXBUFFER9_SLOTS, {
             ...resourceMethods(D3DRTYPE.VERTEXBUFFER),
             ...bufferMethods,
             /** @param {any} buffer @param {number[]} args */
@@ -943,7 +960,7 @@ export function createDirect3D9Seam(
         }, bufferGuests, retire),
     ];
     const indexBufferInterfaces = [
-        describe(IID_IDirect3DIndexBuffer9, IDIRECT3DINDEXBUFFER9_SLOTS, {
+        describeResource(IID_IDirect3DIndexBuffer9, IDIRECT3DINDEXBUFFER9_SLOTS, {
             ...resourceMethods(D3DRTYPE.INDEXBUFFER),
             ...bufferMethods,
             /** @param {any} buffer @param {number[]} args */
@@ -1040,7 +1057,7 @@ export function createDirect3D9Seam(
         commandCode(at, trap, { ...COMMANDS[`StateBlock.${name}`],
             slot: commandSlot(`StateBlock.${name}`) }));
     const stateBlockInterfaces = [
-        describe(IID_IDirect3DStateBlock9, IDIRECT3DSTATEBLOCK9_SLOTS, {
+        describeResource(IID_IDirect3DStateBlock9, IDIRECT3DSTATEBLOCK9_SLOTS, {
             GetDevice: getDevice,
             // A block reads and writes the device's state, which the guest
             // may have set since the device last looked.
@@ -1077,7 +1094,7 @@ export function createDirect3D9Seam(
             E_OUTOFMEMORY, device);
     };
 
-    const queryInterfaces = [describe(IID_IDirect3DQuery9, IDIRECT3DQUERY9_SLOTS, {
+    const queryInterfaces = [describeResource(IID_IDirect3DQuery9, IDIRECT3DQUERY9_SLOTS, {
         GetDevice: getDevice,
         /** @param {any} query */
         GetType: query=>query.GetType(),
@@ -1187,7 +1204,7 @@ export function createDirect3D9Seam(
 
     /** @type {import('./com.js').InterfaceDescriptor[]} */
     const swapChainInterfaces = [
-        describe(IID_IDirect3DSwapChain9, IDIRECT3DSWAPCHAIN9_SLOTS, swapChainMethods),
+        describeResource(IID_IDirect3DSwapChain9, IDIRECT3DSWAPCHAIN9_SLOTS, swapChainMethods),
     ];
 
     /**
@@ -1224,7 +1241,7 @@ export function createDirect3D9Seam(
      * @type {import('./com.js').InterfaceDescriptor[]}
      */
     const exSwapChainInterfaces = [
-        describe(IID_IDirect3DSwapChain9Ex,
+        describeResource(IID_IDirect3DSwapChain9Ex,
             [...IDIRECT3DSWAPCHAIN9_SLOTS, ...IDIRECT3DSWAPCHAIN9EX_SLOTS], {
                 ...swapChainMethods,
                 /** @param {any} chain @param {number[]} args */

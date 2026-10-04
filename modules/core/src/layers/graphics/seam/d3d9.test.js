@@ -1975,6 +1975,52 @@ test("an Ex device's GetDirect3D hands back the IDirect3D9Ex that made it", ()=>
     assert.equal(other.box.memory.readU32(0x3004), plain, 'a plain device, the plain interface');
 });
 
+test('a texture locked by the host comes after the draws the command ring holds that sample it',
+    ()=>{
+        // A program draws with a texture, then rewrites it in the same frame:
+        // the draw is in the ring, and must be made before the lock lets the
+        // texture change under it.
+        const h = seamed({ shadow: true });
+        const root = h.create();
+        const { device } = h.createDevice(root);
+        const owner = h.box.memory.readU32(device + 4);
+        const ring = h.box.memory.readU32(owner + SHADOW.COMMANDS);
+        const out = 0x3000;
+        assert.equal(h.device(device, 'CreateTexture', [4, 4, 1, 0, D3DFMT.A8R8G8B8,
+            D3DPOOL.MANAGED, out, 0]), D3D_OK);
+        const texture = h.box.memory.readU32(out);
+        const words = [
+            slot(IDIRECT3DDEVICE9_SLOTS, 'SetTexture'), 16, 0, texture,
+            slot(IDIRECT3DDEVICE9_SLOTS, 'DrawIndexedPrimitive'), 32, 4, 0, 0, 4, 0, 2,
+        ];
+        h.box.memory.writeBytes(ring, new Uint8Array(new Uint32Array(words).buffer));
+        h.box.memory.writeU32(owner + SHADOW.COMMAND_HEAD, words.length * 4);
+
+        /** @type {string[]} */
+        const order = [];
+        const made = h.object(device);
+        const draw = made.DrawIndexedPrimitive.bind(made);
+        made.DrawIndexedPrimitive = (/** @type {any[]} */ ...args)=>{
+            order.push('draw');
+            return draw(...args);
+        };
+        const object = h.object(texture);
+        const lock = object.LockRect.bind(object);
+        object.LockRect = (/** @type {any[]} */ ...args)=>{
+            order.push('lock');
+            return lock(...args);
+        };
+        const locked = 0x3200;
+        assert.equal(h.box.call(texture, slot(IDIRECT3DTEXTURE9_SLOTS, 'LockRect'),
+            [0, locked, 0, 0]), D3D_OK);
+        assert.deepEqual(order, ['draw', 'lock']);
+        assert.equal(h.box.call(texture, slot(IDIRECT3DTEXTURE9_SLOTS, 'UnlockRect'), [0]),
+            D3D_OK);
+        h.release(texture);
+        assert.equal(h.release(device), 0);
+        h.release(root);
+    });
+
 test('with guest memory, the calls the command ring carried are made at the next entry, in order',
     ()=>{
         // As the routines leave them (`commands.itest.js`): records in the ring

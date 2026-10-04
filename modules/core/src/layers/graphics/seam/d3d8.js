@@ -284,6 +284,22 @@ export function createDirect3D8Seam(
     const resourceShadows = new WeakMap();
     /** @param {any} device */
     const shadowOf = device=>shadows.get(device) ?? null;
+
+    /**
+     * A resource's interface, whose methods the host makes after the calls
+     * the program made before them: those its device's command ring still
+     * holds are made first, as the device's own methods make them. A draw in
+     * the ring that samples a texture, or reads a buffer, then meets it as it
+     * was rather than as the lock about to be taken leaves it.
+     *
+     * @type {typeof describe}
+     */
+    const describeResource = (id, slots, methods, ...rest)=>describe(id, slots,
+        Object.fromEntries(Object.entries(methods ?? {}).map(([name, method])=>[name,
+            (/** @type {any} */ object, /** @type {number[]} */ args)=>{
+                (resourceShadows.get(object) ?? shadowOf(ownerOf(object)))?.sync();
+                return method(object, args);
+            }])), ...rest);
     /**
      * The program let go of a resource. A call in the command ring that names
      * it is made now, while its pointer still resolves; after this the pointer
@@ -441,27 +457,28 @@ export function createDirect3D8Seam(
     // IDirect3DSwapChain8: a present, whose rectangles and dirty region are
     // not honoured and whose window decides whether the display shows the
     // picture, and the back buffers.
-    const swapChainInterfaces = [describe(IID_IDirect3DSwapChain8, IDIRECT3DSWAPCHAIN8_SLOTS, {
+    const swapChainInterfaces = [describeResource(IID_IDirect3DSwapChain8,
+        IDIRECT3DSWAPCHAIN8_SLOTS, {
         /** @param {any} chain @param {number[]} args */
-        Present: (chain, [, , override])=>chain.Present(
-            ((override >>> 0) || chainWindows.get(chain) || deviceWindow) === deviceWindow),
-        /** @param {any} chain @param {number[]} args */
-        GetBackBuffer: (chain, [index, type, out])=>{
-            if ((out >>> 0) === 0)
-            {
-                return D3DERR_INVALIDCALL;
-            }
-            /** @type {{ surface?: any }} */
-            const held = {};
-            const hr = chain.GetBackBuffer(index >>> 0, type >>> 0, held);
-            if (hr !== D3D_OK || !held.surface)
-            {
-                return hr;
-            }
-            return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8, out >>> 0,
-                E_OUTOFMEMORY, owners.get(chain));
-        },
-    })];
+            Present: (chain, [, , override])=>chain.Present(
+                ((override >>> 0) || chainWindows.get(chain) || deviceWindow) === deviceWindow),
+            /** @param {any} chain @param {number[]} args */
+            GetBackBuffer: (chain, [index, type, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                /** @type {{ surface?: any }} */
+                const held = {};
+                const hr = chain.GetBackBuffer(index >>> 0, type >>> 0, held);
+                if (hr !== D3D_OK || !held.surface)
+                {
+                    return hr;
+                }
+                return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8, out >>> 0,
+                    E_OUTOFMEMORY, owners.get(chain));
+            },
+        })];
 
     /**
      * The device each resource was made by, for GetDevice. A texture's levels
@@ -512,7 +529,7 @@ export function createDirect3D8Seam(
 
     // Resources carry no behaviour of their own here beyond what the API
     // objects already do, so their descriptors are built once.
-    const surfaceInterfaces = [describe(IID_IDirect3DSurface8, IDIRECT3DSURFACE8_SLOTS, {
+    const surfaceInterfaces = [describeResource(IID_IDirect3DSurface8, IDIRECT3DSURFACE8_SLOTS, {
         ...privateData.methods,
         GetDevice: getDevice,
 
@@ -636,10 +653,10 @@ export function createDirect3D8Seam(
     // The two interfaces a texture derives from are answered too, over the
     // same methods: their slots are the front of the texture's own.
     const textureInterfaces = [
-        describe(IID_IDirect3DTexture8, IDIRECT3DTEXTURE8_SLOTS, textureMethods,
+        describeResource(IID_IDirect3DTexture8, IDIRECT3DTEXTURE8_SLOTS, textureMethods,
             textureGuests, retire),
-        describe(IID_IDirect3DBaseTexture8, IDIRECT3DBASETEXTURE8_SLOTS, textureMethods),
-        describe(IID_IDirect3DResource8, IDIRECT3DRESOURCE8_SLOTS, textureMethods),
+        describeResource(IID_IDirect3DBaseTexture8, IDIRECT3DBASETEXTURE8_SLOTS, textureMethods),
+        describeResource(IID_IDirect3DResource8, IDIRECT3DRESOURCE8_SLOTS, textureMethods),
     ];
 
     // A cube map: the base texture's methods, then each of its own naming a
@@ -684,10 +701,11 @@ export function createDirect3D8Seam(
         AddDirtyRect: (texture, [face, rect])=>texture.AddDirtyRect(readRect(rect), face >>> 0),
     };
     const cubeTextureInterfaces = [
-        describe(IID_IDirect3DCubeTexture8, IDIRECT3DCUBETEXTURE8_SLOTS, cubeTextureMethods,
+        describeResource(IID_IDirect3DCubeTexture8, IDIRECT3DCUBETEXTURE8_SLOTS, cubeTextureMethods,
             {}, retire),
-        describe(IID_IDirect3DBaseTexture8, IDIRECT3DBASETEXTURE8_SLOTS, cubeTextureMethods),
-        describe(IID_IDirect3DResource8, IDIRECT3DRESOURCE8_SLOTS, cubeTextureMethods),
+        describeResource(IID_IDirect3DBaseTexture8, IDIRECT3DBASETEXTURE8_SLOTS,
+            cubeTextureMethods),
+        describeResource(IID_IDirect3DResource8, IDIRECT3DRESOURCE8_SLOTS, cubeTextureMethods),
     ];
 
     /**
@@ -746,7 +764,7 @@ export function createDirect3D8Seam(
     // A volume texture's level: not a resource, so it answers for itself and
     // for IUnknown alone, and names its texture as its container.
     /** @type {import('./com.js').InterfaceDescriptor[]} */
-    const volumeInterfaces = [describe(IID_IDirect3DVolume8, IDIRECT3DVOLUME8_SLOTS, {
+    const volumeInterfaces = [describeResource(IID_IDirect3DVolume8, IDIRECT3DVOLUME8_SLOTS, {
         ...privateData.methods,
         GetDevice: getDevice,
         /** @param {any} volume @param {number[]} args @returns {number} */
@@ -805,10 +823,11 @@ export function createDirect3D8Seam(
     };
     /** @type {import('./com.js').InterfaceDescriptor[]} */
     const volumeTextureInterfaces = [
-        describe(IID_IDirect3DVolumeTexture8, IDIRECT3DVOLUMETEXTURE8_SLOTS,
+        describeResource(IID_IDirect3DVolumeTexture8, IDIRECT3DVOLUMETEXTURE8_SLOTS,
             volumeTextureMethods, {}, retire),
-        describe(IID_IDirect3DBaseTexture8, IDIRECT3DBASETEXTURE8_SLOTS, volumeTextureMethods),
-        describe(IID_IDirect3DResource8, IDIRECT3DRESOURCE8_SLOTS, volumeTextureMethods),
+        describeResource(IID_IDirect3DBaseTexture8, IDIRECT3DBASETEXTURE8_SLOTS,
+            volumeTextureMethods),
+        describeResource(IID_IDirect3DResource8, IDIRECT3DRESOURCE8_SLOTS, volumeTextureMethods),
     ];
 
     /**
@@ -893,14 +912,14 @@ export function createDirect3D8Seam(
     };
 
     const vertexBufferInterfaces = [
-        describe(IID_IDirect3DVertexBuffer8, IDIRECT3DVERTEXBUFFER8_SLOTS, {
+        describeResource(IID_IDirect3DVertexBuffer8, IDIRECT3DVERTEXBUFFER8_SLOTS, {
             ...resourceMethods(D3DRTYPE.VERTEXBUFFER),
             ...bufferMethods,
             GetDesc: describeBuffer(D3DVERTEXBUFFER_DESC9),
         }, bufferGuests, retire),
     ];
     const indexBufferInterfaces = [
-        describe(IID_IDirect3DIndexBuffer8, IDIRECT3DINDEXBUFFER8_SLOTS, {
+        describeResource(IID_IDirect3DIndexBuffer8, IDIRECT3DINDEXBUFFER8_SLOTS, {
             ...resourceMethods(D3DRTYPE.INDEXBUFFER),
             ...bufferMethods,
             GetDesc: describeBuffer(D3DINDEXBUFFER_DESC9),

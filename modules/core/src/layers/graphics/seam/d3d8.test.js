@@ -2360,3 +2360,71 @@ test('D3DCAPS2_FULLSCREENGAMMA is claimed where a full-screen device\'s ramp is 
     assert.equal(h.release(device), 0);
     h.release(root);
 });
+
+test('what the host locks comes after the draws the command ring holds that read it', ()=>{
+    // A program draws with a texture and a vertex buffer and then rewrites
+    // both in the same frame: the draw is in the ring, and must be made
+    // before a lock lets either change under it.
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const device = h.createDevice(root);
+    const owner = h.box.memory.readU32(device + 4);
+    const ring = h.box.memory.readU32(owner + SHADOW.COMMANDS);
+    assert.notEqual(ring, 0, 'the device has a ring');
+    const out = 0xe500;
+    assert.equal(h.device(device, 'CreateTexture', [4, 4, 1, 0, D3DFMT.A8R8G8B8,
+        D3DPOOL.MANAGED, out]), D3D_OK);
+    const texture = h.box.memory.readU32(out);
+    assert.equal(h.device(device, 'CreateVertexBuffer', [256, 0, 0x002, D3DPOOL.MANAGED, out]),
+        D3D_OK);
+    const buffer = h.box.memory.readU32(out);
+    /** @type {number[]} */
+    const words = [];
+    /** @param {string} name @param {number[]} args */
+    const record = (name, args)=>words.push(slot(IDIRECT3DDEVICE8_SLOTS, name),
+        (2 + args.length) * 4, ...args);
+
+    /** @type {string[]} */
+    const order = [];
+    const made = h.object(device);
+    const draw = made.DrawPrimitive.bind(made);
+    made.DrawPrimitive = (/** @type {any[]} */ ...args)=>{
+        order.push('draw');
+        return draw(...args);
+    };
+    for (const [pointer, name] of /** @type {[number, string][]} */ ([[texture, 'LockRect'],
+        [buffer, 'Lock']]))
+    {
+        const object = h.object(pointer);
+        const lock = object[name].bind(object);
+        object[name] = (/** @type {any[]} */ ...args)=>{
+            order.push(name);
+            return lock(...args);
+        };
+    }
+    // Each time after what the ring already holds, as the routines write it.
+    const queue = ()=>{
+        record('SetTexture', [0, texture]);
+        record('SetStreamSource', [0, buffer, 12]);
+        record('DrawPrimitive', [4, 0, 1]);
+        h.box.memory.writeBytes(ring, new Uint8Array(new Uint32Array(words).buffer));
+        h.box.memory.writeU32(owner + SHADOW.COMMAND_HEAD, words.length * 4);
+    };
+
+    queue();
+    assert.equal(h.box.trap(texture, 'LockRect', [0, 0xe600, 0, 0]), D3D_OK);
+    assert.deepEqual(order, ['draw', 'LockRect'], 'the texture after the draw that samples it');
+    assert.equal(h.box.trap(texture, 'UnlockRect', [0]), D3D_OK);
+
+    order.length = 0;
+    queue();
+    assert.equal(h.box.trap(buffer, 'Lock', [0, 0, 0xe600, 0]), D3D_OK);
+    assert.deepEqual(order, ['draw', 'Lock'], 'the buffer after the draw that reads it');
+    assert.equal(h.box.trap(buffer, 'Unlock', []), D3D_OK);
+    assert.equal(h.device(device, 'SetTexture', [0, 0]), D3D_OK);
+    assert.equal(h.device(device, 'SetStreamSource', [0, 0, 0]), D3D_OK);
+    h.release(buffer);
+    h.release(texture);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
