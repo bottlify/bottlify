@@ -83,6 +83,7 @@ export function manifestChanges(asked){
         if ((key === 'title' && text && text.length <= 200)
             || (key === 'version' && text !== null && text.length <= 40)
             || (key === 'description' && text !== null && text.length <= 2000)
+            || (key === 'rightsHolder' && text !== null && text.length <= 200)
             // Where the bottle's files came from, shown with it: a web address
             // or nothing, so it cannot be made to say anything else.
             || (key === 'source' && text !== null && text.length <= 500
@@ -93,6 +94,10 @@ export function manifestChanges(asked){
         else if (key === 'labels' && Array.isArray(value) && value.every(one=>LABELS.has(one)))
         {
             fields.labels = [...new Set(value)];
+        }
+        else if (key === 'year' && Number.isInteger(value) && value >= 1970 && value <= 2100)
+        {
+            fields.year = value;
         }
         else if (key === 'kind' && KINDS.has(value))
         {

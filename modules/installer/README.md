@@ -144,7 +144,8 @@ Three routes, all `POST` and all authenticated:
   `manifest.json` beside `bundle.btl`.
 - `/bottles/<id>/manifest` — a bottle's settings changed in its `manifest.json`
   without sending it again: `title`, `description`, `source` (a web address
-  the bottle's files came from, or nothing), `version`, `labels`
+  the bottle's files came from, or nothing), `year` (when the program
+  came out), `rightsHolder` (who owns it now), `version`, `labels`
   (`demo`, `benchmark`, `test`), `kind` (`game`, `application`), `windows`,
   `graphics`. Any other field is refused; the entry and the bundle record are
   the upload's.

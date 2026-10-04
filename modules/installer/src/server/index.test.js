@@ -260,6 +260,11 @@ test('only the settings of a bottle are taken, each checked', ()=>{
         { fields: { source: 'https://example.org/demo' } });
     assert.deepEqual(manifestChanges({ source: '' }), { fields: { source: '' } });
     assert.ok('refused' in manifestChanges({ source: 'javascript:alert(1)' }));
+    assert.deepEqual(manifestChanges({ year: 1999, rightsHolder: ' Ubisoft ' }),
+        { fields: { year: 1999, rightsHolder: 'Ubisoft' } });
+    assert.ok('refused' in manifestChanges({ year: '1999' }));
+    assert.ok('refused' in manifestChanges({ year: 1800 }));
+    assert.ok('refused' in manifestChanges({ rightsHolder: 'x'.repeat(201) }));
     assert.ok('refused' in manifestChanges({ kind: 'movie' }));
     assert.ok('refused' in manifestChanges({ windows: '../etc' }));
     assert.ok('refused' in manifestChanges(['title']));
