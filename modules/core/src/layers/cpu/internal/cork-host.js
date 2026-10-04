@@ -170,7 +170,12 @@ export function createCorkHost(config){
     const wasmArea = layout.tables + Tables.SIZE + profileSize;
     const pages = pagesFor(layout, Tables.SIZE + profileSize
         + (wasmWanted ? engine.WASM_INTERPRETER_AREA : 0));
-    const memory = new WebAssembly.Memory({ initial: pages, maximum: pages });
+    // Shared where the host can share it -- a page that is cross-origin
+    // isolated, or node -- so another worker can read and write guest memory
+    // in place; the translated code runs as fast on either.
+    const shared = corkConfig?.sharedMemory !== false && typeof SharedArrayBuffer === 'function'
+        && /** @type {any} */ (globalThis).crossOriginIsolated !== false;
+    const memory = new WebAssembly.Memory({ initial: pages, maximum: pages, shared });
 
     // The memory is fixed (initial === maximum), so the buffer never detaches
     // and the views are taken once.

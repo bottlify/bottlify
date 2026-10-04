@@ -33,7 +33,8 @@ The page needs:
 - **WebGPU** for any picture: https, or `localhost`.
 - **Cross-origin isolation** (`Cross-Origin-Opener-Policy: same-origin`,
   `Cross-Origin-Embedder-Policy: require-corp`) for `SharedArrayBuffer`. Sound needs it; without
-  it the log is read by asking the engine instead of from shared memory.
+  it the log is read by asking the engine instead of from shared memory, and guest memory is
+  the engine's alone rather than shared with the workers beside it.
 
 ## Sound
 

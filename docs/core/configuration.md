@@ -37,7 +37,7 @@ publishing). The tables list only the settings that are data. `memory` and `load
 | `sampling` | `true` | Sample the guest's instruction pointer at every turn. |
 | `noExecuteBelow` | 0 (`createApp`: `0x10000`) | Code below this address faults when run. |
 | `closedBelow` | 0 | Memory below this address faults when read or written. |
-| `cork.config` | | cork's settings: `precise` (`false`; keep the x87 flags and undefined flags exact), `store` (`'local'`: translations in OPFS; `null`: none), `worker` (translate in a worker where one exists), `batchRegions` (32), `maxBatchRegions` (256), `hotThreshold` (2000), `wasmInterpreter` (`true`), `timings` (`false`). The full list is `EngineConfig` in `src/layers/cpu/engine.js`. |
+| `cork.config` | | cork's settings: `precise` (`false`; keep the x87 flags and undefined flags exact), `store` (`'local'`: translations in OPFS; `null`: none), `worker` (translate in a worker where one exists), `batchRegions` (32), `maxBatchRegions` (256), `hotThreshold` (2000), `wasmInterpreter` (`true`), `sharedMemory` (`true`: guest memory is a `SharedArrayBuffer` wherever the page is cross-origin isolated; `false` keeps it unshared), `timings` (`false`). The full list is `EngineConfig` in `src/layers/cpu/engine.js`. |
 | `jit` | — | The emulator's compiler budgets, by index. |
 
 ## kernel

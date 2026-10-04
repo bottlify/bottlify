@@ -1012,6 +1012,10 @@ export function createCpuModule(){
                     // Which execution engine this launch selected, so a report
                     // says what the figures below were measured on.
                     engine: instance.engine,
+                    // Whether guest memory is a SharedArrayBuffer another worker
+                    // can read and write in place.
+                    sharedMemory: typeof SharedArrayBuffer === 'function'
+                        && instance.host.wasmMemory?.()?.buffer instanceof SharedArrayBuffer,
                     running: instance.running,
                     instructions: instance.host.instructionCount(),
                     protectedMode: instance.host.inProtectedMode(),

@@ -175,6 +175,8 @@ async function runOne({ cdp, sessionId, executable }){
         pixels,
         drew: pixels.every(check=>check.ok),
         calls: result.bridge,
+        sharedMemory: result.sharedMemory ?? null,
+        translation: result.translation ?? null,
         graphics: result.graphics?.seam ?? null,
         renderer: result.graphics?.backend ?? null,
         pageErrors: result.errors ?? [],
@@ -196,6 +198,9 @@ export async function triangle(){
         srcDir: join(PACKAGE_DIR, 'src'),
         // The translator package beside core, where app.js resolves the default engine.
         extra: [{ prefix: '/cork/', root: join(PACKAGE_DIR, '..', 'cork') }],
+        // `--isolated`: the page is cross-origin isolated, so guest memory is
+        // a SharedArrayBuffer, as the product serves it.
+        coi: process.argv.includes('--isolated'),
     });
     const browser = await launchWithGpu();
     mkdirSync(REPORTS_DIR, { recursive: true });

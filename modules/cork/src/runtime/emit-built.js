@@ -238,13 +238,15 @@ function keep(cache, key, shape, { typeIndex, locals, body, hints }, built){
  *     blockProfile?: boolean, timings?: boolean, place?: boolean,
  *     leaveOut?: Set<string> | string[], wide?: boolean, narrow?: boolean,
  *     structure?: boolean, precise?: boolean, profileCalls?: boolean, resume?: boolean,
- *     callReturn?: boolean, looseStacks?: boolean }}
+ *     callReturn?: boolean, looseStacks?: boolean,
+ *     memory?: { shared?: boolean, maxPages?: number } }}
  *     [options]
  *     timings: `emitMs` and `encodeMs` are measured (the runtime's `timings`), else 0;
  *     precise: nothing relaxed (the runtime's `precise`); place: job i's function goes at
  *     the module's range of the table plus i, a transfer into the range a direct tail call
  *     and one out of it counted (`finishModule`); resume: a miss of the hash runs the
- *     interpreter tier in wasm (`prepareModule`)
+ *     interpreter tier in wasm (`prepareModule`); memory: how the modules import the
+ *     memory, shared for a shared one
  * @param {EmitCache} [cache]  functions emitted before, taken again rather than emitted
  * @returns {BuiltBatch}
  */
@@ -255,7 +257,7 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
         ? options.leaveOut
         : new Set(options.leaveOut ?? []);
     const m = new ModuleBuilder();
-    const context = prepareModule(m, layout, features, {}, {
+    const context = prepareModule(m, layout, features, options.memory ?? {}, {
         undoLog: options.undoLog === true,
         hash: options.hash === true,
         countTransfers: options.countTransfers === true,
