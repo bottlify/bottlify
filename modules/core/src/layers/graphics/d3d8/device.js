@@ -63,7 +63,9 @@ import {
     rectMoveOf, regionAtLevel, volumeUpdate, writeFrontBuffer, writePixels,
 } from '../d3d9/resources.js';
 import { volumeCreateResult, volumeLevelCount } from '../d3d9/validity.js';
-import { DEVICE_STATE, LIGHT_ENABLED, createPalettes, rebound } from '../d3d9/device.js';
+import {
+    DEVICE_STATE, LIGHT_ENABLED, answerViewport, createPalettes, depthWordsOf, rebound,
+} from '../d3d9/device.js';
 import { createAdditionalChain } from '../d3d9/swapchain.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
 import {
@@ -302,6 +304,8 @@ function isTransformType(type){
  * @property {number} Height
  * @property {number} MinZ
  * @property {number} MaxZ
+ * @property {number} [MinZWord]  MinZ's bits as the program gave them, for SetViewport
+ * @property {number} [MaxZWord]
  */
 
 /**
@@ -2466,6 +2470,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 minDepth: value.MinZ,
                 maxDepth: value.MaxZ,
             });
+            next.depthWords = depthWordsOf(value);
             if (recording)
             {
                 recording.viewport = next;
@@ -2476,17 +2481,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             return D3D_OK;
         },
 
-        /** @param {{ viewport?: Viewport }} out */
+        /** @param {{ viewport?: Viewport, depthWords?: [number, number] }} out */
         GetViewport(out){
-            const rect = viewport.rect;
-            out.viewport = {
-                X: rect.x,
-                Y: rect.y,
-                Width: rect.width,
-                Height: rect.height,
-                MinZ: rect.minDepth,
-                MaxZ: rect.maxDepth,
-            };
+            answerViewport(viewport, out);
             return D3D_OK;
         },
 

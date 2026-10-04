@@ -1247,20 +1247,27 @@ export function createDirect3D8Seam(
             {
                 return D3DERR_INVALIDCALL;
             }
-            const hr = device.SetViewport(
-                fields.readStruct(pointer >>> 0, D3DVIEWPORT8, ['MinZ', 'MaxZ']));
+            const hr = device.SetViewport({
+                ...fields.readStruct(pointer >>> 0, D3DVIEWPORT8, ['MinZ', 'MaxZ']),
+                MinZWord: fields.readU32((pointer >>> 0) + 16),
+                MaxZWord: fields.readU32((pointer >>> 0) + 20),
+            });
             shadowOf(device)?.remirror({ viewport: true });
             return hr;
         },
 
         /** @param {any} device @param {number[]} args */
         GetViewport: (device, [out])=>{
-            /** @type {{ viewport?: any }} */
+            /** @type {{ viewport?: any, depthWords?: [number, number] }} */
             const held = {};
             const hr = device.GetViewport(held);
             if (hr === D3D_OK && (out >>> 0) !== 0 && held.viewport)
             {
-                fields.writeStruct(out >>> 0, D3DVIEWPORT8, held.viewport, ['MinZ', 'MaxZ']);
+                // The depth range as the words the program set: a float
+                // written from a number would quiet a signalling NaN.
+                fields.writeStruct(out >>> 0, D3DVIEWPORT8, held.depthWords
+                    ? { ...held.viewport, MinZ: held.depthWords[0], MaxZ: held.depthWords[1] }
+                    : held.viewport, held.depthWords ? [] : ['MinZ', 'MaxZ']);
             }
             return hr;
         },

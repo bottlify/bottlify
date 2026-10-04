@@ -1917,7 +1917,7 @@ export function createShadow(deps){
 
     const mirrorViewport = ()=>{
         /** @type {{ viewport?: { X: number, Y: number, Width: number, Height: number,
-         *     MinZ: number, MaxZ: number } }} */
+         *     MinZ: number, MaxZ: number }, depthWords?: [number, number] }} */
         const out = {};
         if (typeof device.GetViewport !== 'function' || device.GetViewport(out) !== 0
             || !out.viewport)
@@ -1927,6 +1927,13 @@ export function createShadow(deps){
         const { X, Y, Width, Height, MinZ, MaxZ } = out.viewport;
         const words = new Uint32Array([X, Y, Width, Height, 0, 0]);
         new Float32Array(words.buffer, 16, 2).set([MinZ, MaxZ]);
+        // The words the program set, where the device kept them: a
+        // signalling NaN through a number would come out quiet.
+        if (out.depthWords)
+        {
+            words[4] = out.depthWords[0];
+            words[5] = out.depthWords[1];
+        }
         deps.writeMemory(address + SHADOW.VIEWPORT, new Uint8Array(words.buffer));
     };
 

@@ -197,7 +197,8 @@ test('a command routine writes the call into the ring and leaves the rest to the
         assert.fail('nothing refused');
     }), 6);
     assert.deepEqual(made, [
-        ['SetViewport', { X: 0, Y: 0, Width: 640, Height: 480, MinZ: 0, MaxZ: 1 }],
+        ['SetViewport', { X: 0, Y: 0, Width: 640, Height: 480, MinZ: 0, MaxZ: 1,
+            MinZWord: 0, MaxZWord: 0x3f800000 }],
         ['SetVertexShaderConstantF', 5, [...floats.slice(0, 8)], 2],
         ['LightEnable', 3, true],
         ['SetRenderState', 7, 0x1234],

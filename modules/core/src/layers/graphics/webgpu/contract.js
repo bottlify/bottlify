@@ -117,6 +117,7 @@
  * @property {Required<ViewportRect>} rect      what the hardware viewport is set to
  * @property {[number, number]} offset          the vertex stage's inverse offset
  * @property {[number, number]} scale           the vertex stage's inverse extent
+ * @property {[number, number]} [depthWords]   the depth range's words as the program gave them
  */
 
 /**

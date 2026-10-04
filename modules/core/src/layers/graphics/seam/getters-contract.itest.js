@@ -913,12 +913,8 @@ function gate(version, options, seeds, length, skip){
 /**
  * What the gate's programs leave out: the kinds of step that meet a
  * divergence a todo test below holds. Each goes when its divergence is fixed.
- *
- * - `signalling NaN viewport`: the device keeps a viewport's depth range as
- *   numbers, so the host's path answers a signalling NaN quiet, while the
- *   block holds the bits the program set.
  */
-const KNOWN = new Set(['signalling NaN viewport']);
+const KNOWN = new Set();
 
 const SEEDS = Array.from({ length: 12 }, (unused, i)=>1 + i);
 const LENGTH = 300;
@@ -1088,10 +1084,8 @@ test('a signalling NaN set in a matrix reads back as it was set, in the guest an
         }
     });
 
-test('a signalling NaN set in a viewport reads back as it was set, in the guest and on the host', {
-    todo: 'the device keeps a viewport\'s depth range as numbers, so its getter answers a '
-        + 'signalling NaN quiet, while the block holds the bits the program set',
-}, ()=>{
+test('a signalling NaN set in a viewport reads back as it was set, in the guest and on the host',
+    ()=>{
     const get = getters(D3D9);
     for (const version of [D3D9, D3D8])
     {

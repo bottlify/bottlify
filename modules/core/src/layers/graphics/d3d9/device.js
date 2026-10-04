@@ -3360,10 +3360,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             }
             // The same rectangle again keeps the object a renderer names the
             // state by, so the state it names is still the one it has.
-            const held = viewport.rect;
-            if (!recording && held.x === value.X && held.y === value.Y
-                && held.width === value.Width && held.height === value.Height
-                && held.minDepth === (value.MinZ ?? 0) && held.maxDepth === (value.MaxZ ?? 1))
+            /** @type {{ viewport?: any, depthWords?: [number, number] }} */
+            const held = {};
+            answerViewport(viewport, held);
+            const words = depthWordsOf(value);
+            if (!recording && held.viewport.X === value.X && held.viewport.Y === value.Y
+                && held.viewport.Width === value.Width && held.viewport.Height === value.Height
+                && held.depthWords?.[0] === words[0] && held.depthWords?.[1] === words[1])
             {
                 return D3D_OK;
             }
@@ -3375,6 +3378,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 minDepth: value.MinZ,
                 maxDepth: value.MaxZ,
             });
+            next.depthWords = words;
             return setState(
                 record=>{
                     record.viewport = next;
@@ -3384,17 +3388,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 });
         },
 
-        /** @param {{ viewport?: any }} out */
+        /** @param {{ viewport?: any, depthWords?: [number, number] }} out */
         GetViewport(out){
-            const rect = viewport.rect;
-            out.viewport = {
-                X: rect.x,
-                Y: rect.y,
-                Width: rect.width,
-                Height: rect.height,
-                MinZ: rect.minDepth,
-                MaxZ: rect.maxDepth,
-            };
+            answerViewport(viewport, out);
             return D3D_OK;
         },
 
@@ -4480,6 +4476,34 @@ function fullMipCount(width, height){
         levels++;
     }
     return levels;
+}
+
+/**
+ * The depth range's words as the program gave them. A float taken through a
+ * number loses a signalling NaN's bits, and GetViewport answers the words the
+ * program set, as the block the guest reads from holds them.
+ *
+ * @param {{ MinZ?: number, MaxZ?: number, MinZWord?: number, MaxZWord?: number }} value
+ * @returns {[number, number]}
+ */
+export function depthWordsOf(value){
+    const words = new Uint32Array(new Float32Array([value.MinZ ?? 0, value.MaxZ ?? 1]).buffer);
+    return [(value.MinZWord ?? words[0]) >>> 0, (value.MaxZWord ?? words[1]) >>> 0];
+}
+
+/**
+ * GetViewport's answer: the viewport, and the depth range's words beside it
+ * for whoever writes it out to the program.
+ *
+ * @param {import('../webgpu/contract.js').ViewportState} state
+ * @param {{ viewport?: any, depthWords?: [number, number] }} out
+ */
+export function answerViewport(state, out){
+    const rect = state.rect;
+    out.viewport = { X: rect.x, Y: rect.y, Width: rect.width, Height: rect.height,
+        MinZ: rect.minDepth, MaxZ: rect.maxDepth };
+    out.depthWords = state.depthWords
+        ?? depthWordsOf({ MinZ: rect.minDepth, MaxZ: rect.maxDepth });
 }
 
 /**
