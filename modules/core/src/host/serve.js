@@ -179,6 +179,59 @@ export function watchFrom({ libraries, strings }){
 }
 
 /**
+ * Puts a watch in front of the routines the hooks name, in each module of
+ * theirs: as it loads, and -- for the ones mapped before a process runs, its
+ * own image and the libraries it imports, which announce no load -- when the
+ * run starts and in each process that replaces it. A module is named by its
+ * file, whatever path the program asked for it by. A diagnostic, and a
+ * rewrite of the program's code.
+ *
+ * @param {{ on: (name: string, handler: (payload: any) => void) => unknown,
+ *     debug: { hook: (address: number, spec: any) => unknown,
+ *         modules: () => { name: string, base: number }[] } }} app
+ * @param {import('./messages.js').HookSpec[]} hooks
+ * @param {(type: string, payload: any) => void} emit
+ */
+export function placeHooks(app, hooks, emit){
+    // A module loaded at run time may also have been mapped when the process
+    // was; a second watch at one address would wrap the first.
+    let placed = new Set();
+    const place = (/** @type {string} */ name, /** @type {number} */ base)=>{
+        const file = String(name).toLowerCase().split(/[\\/]/).pop();
+        for (const spec of hooks)
+        {
+            const address = (base + spec.offset) >>> 0;
+            if (file !== spec.module || placed.has(address))
+            {
+                continue;
+            }
+            placed.add(address);
+            try
+            {
+                app.debug.hook(address, spec);
+                emit('hook', { label: spec.label, address });
+            }
+            catch (e){
+                emit('hook', { label: spec.label, refused: describe(e).message });
+            }
+        }
+    };
+    const mapped = ()=>{
+        for (const module of app.debug.modules())
+        {
+            place(module.name, module.base);
+        }
+    };
+    app.on('library-loaded', ({ name, base })=>place(name, base));
+    // A new machine: the old one's watches went with it.
+    app.on('process-started', ()=>{
+        placed = new Set();
+        mapped();
+    });
+    mapped();
+}
+
+/**
  * A failure as it travels. The properties a page shows are copied by name
  * because a structured clone of an Error keeps none of its own.
  *
@@ -512,32 +565,6 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
         };
     };
 
-    /**
-     * Puts a watch in front of the routines the hooks name, as each module
-     * they live in is loaded. A diagnostic, and a rewrite of the program's code.
-     *
-     * @param {import('./messages.js').HookSpec[]} hooks
-     */
-    const installHooks = hooks=>{
-        app.on('library-loaded', (/** @type {{ name: string, base: number }} */ { name, base })=>{
-            for (const spec of hooks)
-            {
-                if (String(name).toLowerCase() !== spec.module)
-                {
-                    continue;
-                }
-                try
-                {
-                    app.debug.hook(base + spec.offset, spec);
-                    emit('hook', { label: spec.label, address: base + spec.offset });
-                }
-                catch (e){
-                    emit('hook', { label: spec.label, refused: describe(e).message });
-                }
-            }
-        });
-    };
-
     /** @type {Record<string, (...args: any[]) => unknown>} */
     const methods = {
         /**
@@ -677,7 +704,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 });
             if (hooks && hooks.length > 0)
             {
-                installHooks(hooks);
+                placeHooks(app, hooks, emit);
             }
             // Confined to the canvas the frames land in: its pixels are the
             // picture, so they are the space a pointer position lives in. The
