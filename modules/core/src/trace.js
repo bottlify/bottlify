@@ -27,7 +27,7 @@
  */
 const SCAN_BYTES = 0x1000;
 const MAX_FRAMES = 24;
-const MAX_SCANNED = 48;
+const MAX_SCANNED = 64;
 
 /**
  * How much of what a register points at to show.
@@ -153,6 +153,56 @@ function isCode({ memory, bridge }, address){
 }
 
 /**
+ * Whether the instruction that ends where `address` starts is a call: what a
+ * return address is, and what a pointer to data or to the start of a
+ * function -- which the image is full of, and a stack holds plenty of -- is
+ * not. Code that cannot be read is given the benefit of the doubt.
+ *
+ * @param {TraceSources} sources
+ * @param {number} address
+ */
+function followsCall({ memory }, address){
+    let bytes;
+    try
+    {
+        bytes = memory.readBytes((address - 7) >>> 0, 7);
+    }
+    catch (e){
+        void e;
+        return true;
+    }
+    if (!bytes || bytes.length < 7)
+    {
+        return true;
+    }
+    // CALL rel32, five bytes.
+    if (bytes[2] === 0xe8)
+    {
+        return true;
+    }
+    // CALL r/m32 (FF /2), two to seven bytes by its addressing form.
+    for (let length = 2; length <= 7; length++)
+    {
+        const at = 7 - length;
+        const modrm = bytes[at + 1];
+        if (bytes[at] !== 0xff || ((modrm >> 3) & 7) !== 2)
+        {
+            continue;
+        }
+        const mod = modrm >> 6;
+        const rm = modrm & 7;
+        const sib = rm === 4 && mod !== 3;
+        const disp = mod === 1 ? 1 : mod === 2 || (mod === 0 && rm === 5) ? 4
+            : sib && mod === 0 && (bytes[at + 2] & 7) === 5 ? 4 : 0;
+        if (2 + (sib ? 1 : 0) + disp === length)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
  * Reads the guest stack and reports what on it looks like a way back.
  *
  * @param {TraceSources} sources
@@ -211,7 +261,7 @@ function walkStack(sources, esp, ebp, top = Infinity){
             void e;
             break;
         }
-        if (value !== repeated && isCode(sources, value))
+        if (value !== repeated && isCode(sources, value) && followsCall(sources, value))
         {
             scanned.push(`  ${hex(at)}: ${describeAddress(sources, value)}`);
         }
@@ -331,6 +381,7 @@ export function captureTrace(sources){
             .map((/** @type {any} */ thread)=>({
                 name: thread.name,
                 state: thread.state,
+                entry: thread.entry,
                 // Parked in a call, a thread resumes on the stack the call
                 // left; its saved registers are the trap's.
                 stack: walkStack(sources, thread.resumeStack ?? thread.context.reg32[4],
@@ -453,7 +504,8 @@ export function formatTrace(trace){
     {
         if (other.stack.length > 0)
         {
-            lines.push(`thread ${other.name} (${other.state}):`, ...other.stack);
+            lines.push(`thread ${other.name} (${other.state})`
+                + `${other.entry ? `, started at ${hex(other.entry)}` : ''}:`, ...other.stack);
         }
     }
     return lines.join('\n');

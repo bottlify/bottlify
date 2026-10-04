@@ -239,3 +239,29 @@ test('every other thread\'s stack is read from where it stopped, past a kilobyte
     assert.equal(own.match(/image\+0x00001600/g)?.length, 1, 'a run of one stale pointer is one entry');
     assert.doesNotMatch(text, /thread-9/, 'a thread that ended has no stack to read');
 });
+
+test('the scan keeps what follows a call and drops pointers to data and to functions', ()=>{
+    const esp = STACK + 0x8000;
+    const fixture = machine({
+        stack: {
+            [esp]: IMAGE + 0x1200, //      after `call rel32`
+            [esp + 4]: IMAGE + 0x1300, //  after `call [disp32]`
+            [esp + 8]: IMAGE + 0x1400, //  after `call eax`
+            [esp + 12]: IMAGE + 0x1500, // a table in the image, after nothing callable
+        },
+    });
+    const code = new Uint8Array(0x2000);
+    code.set([0xe8, 1, 2, 3, 4], 0x1200 - 5);
+    code.set([0xff, 0x15, 1, 2, 3, 4], 0x1300 - 6);
+    code.set([0xff, 0xd0], 0x1400 - 2);
+    code.set([0x8b, 0x45, 0x08, 0x90, 0x90, 0x90, 0x90], 0x1500 - 7);
+    const memory = /** @type {any} */ (fixture.memory);
+    memory.readBytes = (/** @type {number} */ address, /** @type {number} */ length)=>
+        code.subarray(address - IMAGE, address - IMAGE + length);
+
+    const rendered = captureTrace(fixture).stack.join('\n');
+    assert.match(rendered, /image\+0x00001200/);
+    assert.match(rendered, /image\+0x00001300/);
+    assert.match(rendered, /image\+0x00001400/);
+    assert.doesNotMatch(rendered, /image\+0x00001500/, 'nothing calls to land there');
+});
