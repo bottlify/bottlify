@@ -72,8 +72,9 @@ import { queryAs, readGuid } from './guid.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import {
     RENDER_STATE_MIRROR, SAMPLER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_MIRROR, commandCode,
-    createShadow, getRenderStateCode, getSamplerStateCode, getTextureStageStateCode,
-    getTransformCode, getViewportCode, lockCode, stageStateMirror, unlockCode,
+    createShadow, getRenderStateCode, getSamplerStateCode, getSurfaceLevelCode,
+    getTextureStageStateCode, getTransformCode, getViewportCode, lockCode, stageStateMirror,
+    unlockCode,
 } from './shadow.js';
 import { D3DTSS9 } from '../d3d9/samplerstates.js';
 import { COMMANDS, commandObjects, commandSlot } from '../d3d9/commands.js';
@@ -630,8 +631,13 @@ export function createDirect3D9Seam(
             const hr = texture.GetSurfaceLevel(level >>> 0, held);
             if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
             {
-                return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface9,
+                const answer = handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface9,
                     out >>> 0, E_OUTOFMEMORY, owners.get(texture));
+                // Published, so the guest may hand the level out itself from
+                // now on: publishing is memoised, and this is its pointer.
+                shadowOf(owners.get(texture))?.noteLevel(texture, level >>> 0,
+                    fields.readU32(out >>> 0));
+                return answer;
             }
             return hr;
         },
@@ -698,13 +704,16 @@ export function createDirect3D9Seam(
      *
      * @param {string} id @param {[string, number][]} slots @param {any} methods
      */
-    const textureFamily = (id, slots, methods)=>[
-        describe(id, slots, methods, {}, retire),
+    const textureFamily = (id, slots, methods, guests = {})=>[
+        describe(id, slots, methods, guests, retire),
         describe(IID_IDirect3DBaseTexture9, IDIRECT3DBASETEXTURE9_SLOTS, methods),
         describe(IID_IDirect3DResource9, IDIRECT3DRESOURCE9_SLOTS, methods),
     ];
     const textureInterfaces = textureFamily(IID_IDirect3DTexture9, IDIRECT3DTEXTURE9_SLOTS,
-        textureMethods);
+        textureMethods, allocate
+            ? { GetSurfaceLevel: (/** @type {{ trap: number }} */ { trap })=>
+                placeCode(at=>getSurfaceLevelCode(at, trap)) }
+            : {});
     const cubeTextureInterfaces = textureFamily(IID_IDirect3DCubeTexture9,
         IDIRECT3DCUBETEXTURE9_SLOTS, cubeTextureMethods);
 
@@ -1562,6 +1571,15 @@ export function createDirect3D9Seam(
                 format >>> 0, pool >>> 0, held, userMemory);
             if (hr === D3D_OK && held.texture)
             {
+                // Its block, where the guest's GetSurfaceLevel finds the
+                // levels, is written as the interface is published.
+                const shadow = shadowOf(device);
+                const texture = held.texture;
+                if (shadow)
+                {
+                    texture.guestState = ()=>shadow.attachTexture(texture,
+                        publisher.countCell(texture));
+                }
                 return handBack(held.texture, textureInterfaces, IID_IDirect3DTexture9,
                     out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }

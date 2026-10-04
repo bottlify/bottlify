@@ -8,14 +8,15 @@
  * The references a program takes and gives back on a Direct3D 9 texture and
  * its level, with every answer checked, come to the host only when the count
  * crosses zero: the guest's AddRef and Release (`bridge/internal/vtable.js`)
- * answer the rest from the word the count is kept in, and the host's own
- * references -- a level handed out -- land in the same word.
+ * answer the rest from the word the count is kept in, and the references a
+ * level handed out takes land in the same word, on the host or in the guest.
  *
  * The program makes a texture of two levels and loops: AddRef the texture,
- * ask for its second level (a reference the host takes), AddRef the level and
- * give back two references through it and one through the texture, checking
- * each count it is answered against the one it owes. Then it gives back the
- * last reference and exits with how many answers were wrong.
+ * ask for its second level (the host the first time, the guest after), AddRef
+ * the level and give back two references through it and one through the
+ * texture, checking each count it is answered against the one it owes. Then
+ * it gives back the last reference and exits with how many answers were
+ * wrong.
  */
 
 import { test } from 'node:test';
@@ -142,6 +143,9 @@ test('references not crossing zero are taken and given back in the guest, each a
                 .reduce((sum, line)=>sum + Number(line.split(' ')[1]), 0);
             assert.ok(crossings < 10, `${crossings} AddRef and Release calls reached the host`
                 + ` of ${ITERATIONS * 5 + 1}`);
+            const levels = byFunction.filter(line=>/::GetSurfaceLevel /.test(line))
+                .reduce((sum, line)=>sum + Number(line.split(' ')[1]), 0);
+            assert.equal(levels, 1, 'the level is handed out in the guest once published');
         }
         finally
         {
