@@ -85,8 +85,9 @@ export const LENGTH = 15;
 export const POSITION = 16;
 /** Engine-owned: 1 to go round at the end, 0 to stop there. */
 export const LOOPING = 17;
-/** 1 while playing. The engine sets it to play and clears it to stop; the
- * device clears it when a voice that does not loop reaches its end. */
+/** Not zero while playing: the engine sets it to play, to a number of that
+ * Play's own, and clears it to stop; the device clears it when a voice that
+ * does not loop reaches the end of the Play it holds. */
 export const PLAYING = 18;
 /** Device-owned counters: laps a looping voice has come round, and ends a
  * voice that does not loop has reached -- what a program's notifications and
@@ -365,7 +366,10 @@ export function resampleInto({ block, blockFrames, header, pcm, arena, outputRat
  * @returns {number} output frames this voice produced
  */
 function playVoice({ block, blockFrames, header, arena, outputRate, seam }){
-    if (Atomics.load(header, PLAYING) === 0)
+    // Which Play this is: the engine stores a new number at every one, so
+    // the end of this block can tell its own Play from one made during it.
+    const playing = Atomics.load(header, PLAYING);
+    if (playing === 0)
     {
         return 0;
     }
@@ -391,7 +395,8 @@ function playVoice({ block, blockFrames, header, arena, outputRate, seam }){
     const gain = Atomics.load(header, GAIN) / GAIN_SCALE;
     const leftGain = gain * (1 - Atomics.load(header, LEFT_CUT) / GAIN_SCALE);
     const rightGain = gain * (1 - Atomics.load(header, RIGHT_CUT) / GAIN_SCALE);
-    const start = Math.floor(Atomics.load(header, POSITION) / stride) % frames;
+    const cursor = Atomics.load(header, POSITION);
+    const start = Math.floor(cursor / stride) % frames;
 
     /** @param {number} frame frames from `start` @param {number} channel @returns {number} */
     const sample = (frame, channel)=>{
@@ -444,6 +449,13 @@ function playVoice({ block, blockFrames, header, arena, outputRate, seam }){
         pos += step;
         produced++;
     }
+    // A block can fill on a one-shot's last frame. The next frame to read is
+    // then past the end as surely as if the loop had come round to it, and
+    // read as a lap it starts the sound again from the beginning.
+    if (!ended && Math.floor(pos) > end)
+    {
+        ended = true;
+    }
     if (!ended && produced < blockFrames)
     {
         Atomics.add(header, HELD, blockFrames - produced);
@@ -460,23 +472,29 @@ function playVoice({ block, blockFrames, header, arena, outputRate, seam }){
     {
         seam.held = 0;
     }
+    // The engine runs while this block is made. Each write below is over
+    // what the block read and nothing newer: a Play or a SetCurrentPosition
+    // made meanwhile stands, and is what the next block plays.
     if (ended)
     {
         seam.pos = 0;
-        Atomics.store(header, POSITION, 0);
-        Atomics.store(header, PLAYING, 0);
-        Atomics.add(header, ENDS, 1);
+        if (Atomics.compareExchange(header, PLAYING, playing, 0) === playing)
+        {
+            Atomics.compareExchange(header, POSITION, cursor, 0);
+            Atomics.add(header, ENDS, 1);
+        }
     }
     else
     {
         const consumed = Math.floor(pos);
         seam.pos = pos - consumed;
         const reached = start + consumed;
-        if (reached >= frames)
+        const next = (reached % frames) * stride;
+        if (Atomics.compareExchange(header, POSITION, cursor, next) === cursor
+            && reached >= frames)
         {
             Atomics.add(header, LAPS, Math.floor(reached / frames));
         }
-        Atomics.store(header, POSITION, (reached % frames) * stride);
     }
     if (produced > 0)
     {

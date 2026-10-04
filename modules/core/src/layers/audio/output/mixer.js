@@ -770,6 +770,7 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
             voices++;
             let closed = false;
             let nextWrite = -1;
+            let plays = 0;
             return {
                 slot,
                 /** Bytes of the program's buffer into the mirror, at `offset`. @param {number} offset @param {Uint8Array} data */
@@ -839,7 +840,11 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
                     Atomics.store(header, STREAMING, 0);
                     nextWrite = -1;
                     Atomics.store(header, LOOPING, looping ? 1 : 0);
-                    Atomics.store(header, PLAYING, 1);
+                    // A number of its own rather than 1, so that the device,
+                    // ending the Play before this one in a block it was part
+                    // way through, does not end this one with it.
+                    plays = plays % 0x7fffffff + 1;
+                    Atomics.store(header, PLAYING, plays);
                 },
                 stop(){
                     Atomics.store(header, PLAYING, 0);

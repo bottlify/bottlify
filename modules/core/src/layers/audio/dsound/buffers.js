@@ -181,9 +181,8 @@ export function createSoundBuffer({
      * @type {{ voice: any, copy: (from: number, count: number) => void } | null}
      */
     let device = null;
-    /** The device's lap and end counts as last seen. */
+    /** The device's lap count as last seen. */
     let seenLaps = 0;
-    let seenEnds = 0;
     /**
      * Which bytes the program has written since they were last handed over.
      *
@@ -302,10 +301,11 @@ export function createSoundBuffer({
         }
         if (device)
         {
-            const ends = device.voice.ends;
-            if (ends !== seenEnds || (!looping && !device.voice.playing))
+            // The device clears PLAYING at the end of the Play it was given
+            // and of no other, so it is the whole answer: a count of ends
+            // can move for a Play the program has since made again.
+            if (!device.voice.playing)
             {
-                seenEnds = ends;
                 playing = false;
                 anchorByte = 0;
                 anchorMs = now();
@@ -525,7 +525,6 @@ export function createSoundBuffer({
             if (device)
             {
                 device.voice.position = anchorByte;
-                seenEnds = device.voice.ends;
                 device.voice.play(looping);
             }
         },
@@ -539,8 +538,11 @@ export function createSoundBuffer({
             // first one repeated. The same holds after a one-shot ran to
             // its end, where the cursor reads zero again and a read pulled
             // back there hands over the whole sound a second time.
-            device?.voice.stop();
+            // Read before the voice is stopped: a stopped voice is what a
+            // voice that ran to its end looks like, and taken for one the
+            // cursor goes back to the start.
             anchorByte = playCursor();
+            device?.voice.stop();
             anchorMs = now();
             // Only a buffer that was playing stops; one that already ran to
             // its end said so when it got there.
@@ -840,7 +842,6 @@ export function createSoundBuffer({
             copy(0, bytes);
             voice.position = at;
             seenLaps = voice.laps;
-            seenEnds = voice.ends;
             anchorByte = at;
             if (playing)
             {
