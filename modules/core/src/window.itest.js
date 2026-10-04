@@ -51,12 +51,19 @@ async function runFixture(t){
         }
     });
 
-    // Delivered from outside the machine, the way a keystroke would be: the
-    // program is already waiting in GetMessage by the time these arrive.
-    setTimeout(()=>{
+    // Delivered from outside the machine, the way a keystroke would be, once
+    // the window exists: posted before it, a message has no window to go to
+    // and DispatchMessage drops it, which a loaded machine made happen.
+    const deliver = ()=>{
+        if (app.debug.windows().length === 0)
+        {
+            setTimeout(deliver, 5);
+            return;
+        }
         app.post({ message: WM_APP_PROBE, wParam: PROBE_VALUE });
         setTimeout(()=>app.post({ message: WM_CLOSE }), 20);
-    }, 40);
+    };
+    setTimeout(deliver, 40);
 
     const exitCode = await app.run({ maxTurns: 20000, timeoutMs: 15000 });
     const seen = bytes.length >= 4
