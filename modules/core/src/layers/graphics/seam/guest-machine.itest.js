@@ -20,6 +20,9 @@ import * as cork from '../../../../../cork/src/index.js';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { IID_IUNKNOWN } from '../../win32/ole32/objects.js';
 import { createGraphicsLibraries } from './exports.js';
+import { createBackend } from '../webgpu/backend.js';
+import { playedAtOnce, playedDirect3D, recordedDirect3D } from '../remote/direct3d.js';
+import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { SHADOW } from './shadow.js';
 import { guidBytes } from './d3d7.js';
 import {
@@ -277,11 +280,16 @@ export const D3D8 = {
  *
  * @param {Version} version
  * @param {boolean} guestCode
- * @param {{ onDevice?: (device: any) => void }} [options]  told of each device made
+ * @param {{ onDevice?: (device: any) => void, gpu?: boolean, worker?: boolean }} [options]
+ *     `onDevice` is told of each device made; `gpu` has the devices draw
+ *     through a backend over a recording GPU, the machine's `gpu`; `worker`
+ *     has them record what they are asked, as in a graphics worker, for a
+ *     twin that plays each call at once to draw
  */
 export function machine(version, guestCode, options = {}){
     /** @type {(device: any) => void} */
     const onDevice = options.onDevice ?? (()=>{});
+    const gpu = options.gpu ? createFakeDevice() : null;
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: {},
@@ -373,9 +381,23 @@ export function machine(version, guestCode, options = {}){
                     return null;
                 }
                 // The device keeps its resources in this machine's memory, as
-                // the graphics layer has it keep them in the guest's.
-                const root = version.root({ allocate, free: ()=>{}, readMemory: readBytes,
-                    writeMemory: writeBytes, windowMemory: readBytes });
+                // the graphics layer has it keep them in the guest's, and
+                // draws through a backend over the recording GPU when asked.
+                const services = { allocate, free: ()=>{}, readMemory: readBytes,
+                    writeMemory: writeBytes, windowMemory: readBytes };
+                const drawing = gpu ? {
+                    backend: createBackend({ device: gpu.device, queue: gpu.queue,
+                        presentTo: ()=>{}, now: ()=>0 }),
+                    createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler',
+                        id: `sampler-${JSON.stringify(descriptor)}`, descriptor }),
+                } : {};
+                // In a graphics worker the program's device records, and a
+                // twin plays what it recorded and draws.
+                const root = options.worker
+                    ? recordedDirect3D(version.root, services, playedAtOnce(playedDirect3D(
+                        version.root, { ...drawing, readMemory: true,
+                            writeMemory: writeBytes })))
+                    : version.root({ ...services, ...drawing });
                 const make = root.CreateDevice;
                 root.CreateDevice = (/** @type {any[]} */ ...args)=>{
                     const hr = make.apply(root, args);
@@ -561,6 +583,8 @@ export function machine(version, guestCode, options = {}){
         run,
         /** The machine's memory, for what a program writes through a pointer it was handed. */
         memory,
+        /** The recording GPU the devices draw on, when asked for. */
+        gpu,
         pending,
         gone,
         /** Which of the objects named so far the host has let go of, in naming order. */

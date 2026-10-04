@@ -2055,6 +2055,18 @@ export function createShadow(deps){
             if (entry.buffer.Lock(from, to - from, {}, words[BUFFER.LOCK_FLAGS / 4]) === 0)
             {
                 entry.hostLocked = true;
+                if (locked)
+                {
+                    // Still being written in the guest -- another thread came
+                    // in, or the program's own call between its lock and its
+                    // unlock. What it unlocked before reaches the device now,
+                    // for the draws in the ring that read it; what it is
+                    // writing comes at its unlock, under a lock taken again
+                    // that keeps what the buffer holds.
+                    entry.buffer.Unlock();
+                    entry.hostLocked = entry.buffer.Lock(from, to - from, {},
+                        D3DLOCK_NOOVERWRITE) === 0;
+                }
             }
             else
             {

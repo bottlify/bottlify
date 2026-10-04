@@ -472,14 +472,16 @@ test('a lock the guest holds across an entry is held by the host until the guest
     const vb = fakeBuffer(0x8000, 0x100);
     const block = m.shadow.attachBuffer(vb);
 
-    // Locked in the guest, then a crossing: the host locks too, and a lock
-    // through the host's own path is refused as the real interface would.
+    // Locked in the guest, then a crossing: what the range held reaches the
+    // buffer now, for the draws that read it, and the host locks again,
+    // keeping it, so that a lock through the host's own path is refused as
+    // the real interface would.
     m.put32(block + BUFFER.LOCKED, 1);
     m.put32(block + BUFFER.FROM, 0);
     m.put32(block + BUFFER.TO, 64);
     m.put32(at + SHADOW.LOCK_CALLS, 1);
     m.shadow.settleBuffer(vb);
-    assert.deepEqual(vb.calls, ['lock 0+64 0x0']);
+    assert.deepEqual(vb.calls, ['lock 0+64 0x0', 'unlock', 'lock 0+64 0x1000']);
     assert.equal(vb.Lock(0, 0, {}), -1, 'the real buffer is locked');
     vb.calls.length = 0;
 
