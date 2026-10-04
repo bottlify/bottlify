@@ -82,7 +82,11 @@ export function manifestChanges(asked){
         const text = typeof value === 'string' ? value.trim() : null;
         if ((key === 'title' && text && text.length <= 200)
             || (key === 'version' && text !== null && text.length <= 40)
-            || (key === 'description' && text !== null && text.length <= 2000))
+            || (key === 'description' && text !== null && text.length <= 2000)
+            // Where the bottle's files came from, shown with it: a web address
+            // or nothing, so it cannot be made to say anything else.
+            || (key === 'source' && text !== null && text.length <= 500
+                && (text === '' || /^https?:\/\/\S+$/i.test(text))))
         {
             fields[key] = text;
         }

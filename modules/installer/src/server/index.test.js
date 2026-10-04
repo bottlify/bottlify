@@ -256,6 +256,10 @@ test('only the settings of a bottle are taken, each checked', ()=>{
     assert.deepEqual(manifestChanges({ description: ' What it is. ' }),
         { fields: { description: 'What it is.' } });
     assert.ok('refused' in manifestChanges({ description: 'x'.repeat(2001) }));
+    assert.deepEqual(manifestChanges({ source: ' https://example.org/demo ' }),
+        { fields: { source: 'https://example.org/demo' } });
+    assert.deepEqual(manifestChanges({ source: '' }), { fields: { source: '' } });
+    assert.ok('refused' in manifestChanges({ source: 'javascript:alert(1)' }));
     assert.ok('refused' in manifestChanges({ kind: 'movie' }));
     assert.ok('refused' in manifestChanges({ windows: '../etc' }));
     assert.ok('refused' in manifestChanges(['title']));

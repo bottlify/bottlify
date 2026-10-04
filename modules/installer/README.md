@@ -143,7 +143,8 @@ Three routes, all `POST` and all authenticated:
   writes them where they belong, computes the block region's digest, and writes
   `manifest.json` beside `bundle.btl`.
 - `/bottles/<id>/manifest` — a bottle's settings changed in its `manifest.json`
-  without sending it again: `title`, `description`, `version`, `labels`
+  without sending it again: `title`, `description`, `source` (a web address
+  the bottle's files came from, or nothing), `version`, `labels`
   (`demo`, `benchmark`, `test`), `kind` (`game`, `application`), `windows`,
   `graphics`. Any other field is refused; the entry and the bundle record are
   the upload's.
