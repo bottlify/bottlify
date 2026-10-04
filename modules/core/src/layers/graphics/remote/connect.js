@@ -63,11 +63,13 @@ function plainOf(services){
  *     a root the program is given, whose twin the worker plays
  * @property {() => { roots: number, frames: number, dropped: number,
  *     waits: Record<string, { count: number, ms: number, maxMs: number }>, behind: number[],
- *     readBack: { sent: number, shared: number }, lent: Record<string, number> }}
+ *     readBack: { sent: number, shared: number }, lent: Record<string, number>,
+ *     sent: { batches: number, bytes: number } }}
  *     diagnostics  `waits`: what the program's thread waited on the worker for, by call;
  *     `readBack`: the bytes the worker wrote into guest memory, sent here to be written or
  *     written in shared memory in place; `lent`: the unlocked bytes lent to the worker rather
- *     than copied, those taken into the stash first, and the claims that waited
+ *     than copied, those taken into the stash first, and the claims that waited; `sent`: the
+ *     batches of calls posted to the worker and their bytes, copied guest memory included
  * @property {() => void} dispose
  */
 
@@ -260,6 +262,10 @@ export function connectGraphicsWorker(options){
             }
             return { roots: ports.length, frames, dropped, waits,
                 behind: senders.map(sender=>sender.behind()), readBack: { ...readBack },
+                sent: senders.reduce((sum, sender)=>{
+                    const { batches, bytes } = sender.sent();
+                    return { batches: sum.batches + batches, bytes: sum.bytes + bytes };
+                }, { batches: 0, bytes: 0 }),
                 lent: lentOf(senders) };
         },
         dispose(){

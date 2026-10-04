@@ -155,6 +155,8 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
     let timed = false;
     /** Calls since the clock was last read. */
     let unchecked = 0;
+    /** The batches posted, and their bytes. */
+    const sent = { batches: 0, bytes: 0 };
     const flush = ()=>{
         pending = false;
         if (writer.empty())
@@ -163,6 +165,8 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
         }
         sentAt = now();
         const buffer = writer.take();
+        sent.batches++;
+        sent.bytes += buffer.byteLength;
         post({ type: 'calls', buffer }, [buffer]);
         lender?.sent();
     };
@@ -327,6 +331,9 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
 
         /** How many presents the played side still owes. */
         behind: ()=>presents - presented,
+
+        /** The batches posted so far, and their bytes. */
+        sent: ()=>({ ...sent }),
 
         /** The calls waited on, by name, with the milliseconds they took. */
         waits: ()=>Object.fromEntries([...waits].map(([name, sum])=>[name, {
