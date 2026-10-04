@@ -234,6 +234,28 @@ test('the bytes sent to the played side are counted by what sent them: a buffer\
     }
 });
 
+test('the bytes of the batches are counted by the method whose record they are', ()=>{
+    const { root, ram, sender, play } = toyAcross(false);
+    /** @type {{ thing?: any }} */
+    const out = {};
+    root.CreateThing(out);
+    /** @type {{ pBits?: number }} */
+    const locked = {};
+    for (let round = 0; round < 3; round++)
+    {
+        out.thing.Lock(locked);
+        ram.set([1, 2, 3, 4], /** @type {number} */ (locked.pBits));
+        out.thing.Unlock();
+    }
+    play();
+    const counted = Object.fromEntries(sender.methodBytes().map(({ name, count, bytes })=>[name,
+        { count, carries: bytes > 0 }]));
+    assert.deepEqual(counted.Unlock, { count: 3, carries: true });
+    assert.deepEqual(counted.Lock, { count: 3, carries: true });
+    const unlock = /** @type {any} */ (sender.methodBytes().find(entry=>entry.name === 'Unlock'));
+    assert.ok(unlock.bytes >= 3 * 16, 'its records hold the bytes the unlocks sent');
+});
+
 test('a lend the played side read before the program locks again is not stashed', ()=>{
     const { root, ram, sender, played, play } = toyAcross(true);
     /** @type {{ thing?: any }} */

@@ -293,6 +293,8 @@ function visit(value, bind){
  * @property {() => void} recorded  a record that is not a call was written
  * @property {(kind: ShippedKind, bytes: number) => void} [shipped]
  *     bytes of guest memory just copied into the record, by what copied them
+ * @property {(name: string, bytes: number) => void} [recordedCall]
+ *     a call's record is whole, this many bytes of the batch, copies included
  * @property {import('./lending.js').Lender | null} [lender]
  *     where the played side reads guest memory in place: what an unlock let
  *     the program write is lent rather than copied
@@ -950,6 +952,7 @@ export function createRecording(options){
             }
             /** @type {any[] | null} */
             let replies = null;
+            const start = writer.size();
             if (nameId < 0)
             {
                 writer.u8(OP.CALL);
@@ -1048,6 +1051,12 @@ export function createRecording(options){
                 {
                     writeMemory(wrote);
                     shippedAs('writes', wrote);
+                }
+                // Which calls the batches are made of, for a report; a batch
+                // sent while the record was written leaves it uncounted.
+                if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && writer.size() >= start)
+                {
+                    transport.recordedCall?.(name, writer.size() - start);
                 }
                 if (failed)
                 {

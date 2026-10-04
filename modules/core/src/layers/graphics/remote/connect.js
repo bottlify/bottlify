@@ -64,14 +64,16 @@ function plainOf(services){
  * @property {() => { roots: number, frames: number, dropped: number,
  *     waits: Record<string, { count: number, ms: number, maxMs: number }>, behind: number[],
  *     readBack: { sent: number, shared: number }, lent: Record<string, number>,
- *     sent: { batches: number, bytes: number }, shipped: Record<string, number> }}
+ *     sent: { batches: number, bytes: number }, shipped: Record<string, number>,
+ *     calls: string }}
  *     diagnostics  `waits`: what the program's thread waited on the worker for, by call;
  *     `readBack`: the bytes the worker wrote into guest memory, sent here to be written or
  *     written in shared memory in place; `lent`: the unlocked bytes lent to the worker rather
  *     than copied, those taken into the stash first, and the claims that waited; `sent`: the
  *     batches of calls posted to the worker and their bytes, copied guest memory included;
  *     `shipped`: that guest memory by what copied it -- buffers' unlocks, surfaces' (lent ones
- *     aside), what calls read out of guest memory and what they wrote into it
+ *     aside), what calls read out of guest memory and what they wrote into it; `calls`: the
+ *     methods whose records fill the batches, the heaviest first
  * @property {() => void} dispose
  */
 
@@ -277,6 +279,24 @@ export function connectGraphicsWorker(options){
                     }
                     return sum;
                 }, /** @type {Record<string, number>} */ ({})),
+                // The methods whose records fill the batches, the heaviest
+                // first, as "name calls bytes".
+                calls: (()=>{
+                    /** @type {Map<string, { count: number, bytes: number }>} */
+                    const sum = new Map();
+                    for (const sender of senders)
+                    {
+                        for (const { name, count, bytes } of sender.methodBytes())
+                        {
+                            const entry = sum.get(name) ?? { count: 0, bytes: 0 };
+                            entry.count += count;
+                            entry.bytes += bytes;
+                            sum.set(name, entry);
+                        }
+                    }
+                    return [...sum].sort(([, a], [, b])=>b.bytes - a.bytes).slice(0, 24)
+                        .map(([name, { count, bytes }])=>`${name} ${count} ${bytes}`).join(' | ');
+                })(),
                 lent: lentOf(senders) };
         },
         dispose(){

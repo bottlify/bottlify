@@ -162,6 +162,9 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
      * what a lend of buffers, or of anything else, would have left in place.
      */
     const shipped = { buffers: 0, surfaces: 0, reads: 0, writes: 0 };
+    /** The calls the batches are made of, by method: how many, and their bytes. */
+    /** @type {Map<string, { count: number, bytes: number }>} */
+    const byMethod = new Map();
     const flush = ()=>{
         pending = false;
         if (writer.empty())
@@ -351,6 +354,24 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
 
         /** The guest bytes copied into the batches so far, by what copied them. */
         shippedBytes: ()=>({ ...shipped }),
+
+        /** @param {string} name @param {number} bytes */
+        recordedCall(name, bytes){
+            const entry = byMethod.get(name);
+            if (entry)
+            {
+                entry.count++;
+                entry.bytes += bytes;
+            }
+            else
+            {
+                byMethod.set(name, { count: 1, bytes });
+            }
+        },
+
+        /** The calls recorded so far by method, the most bytes first. */
+        methodBytes: ()=>[...byMethod].map(([name, { count, bytes }])=>({ name, count, bytes }))
+            .sort((a, b)=>b.bytes - a.bytes),
 
         /** The calls waited on, by name, with the milliseconds they took. */
         waits: ()=>Object.fromEntries([...waits].map(([name, sum])=>[name, {
