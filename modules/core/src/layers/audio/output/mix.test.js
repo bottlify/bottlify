@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    resampleInto, createSeam, slotHeaderOffset, slotPcmOffset,
+    resampleInto, createSeam, slotHeaderOffset, slotPcmOffset, createFeed, playFeed,
     SLOT_HEADER_INT32, SLOT_BYTES, GLOBAL_HEADER_INT32,
     STATE, GENERATION, RATE, CHANNELS, BITS, GAIN, PAUSED, WRITTEN, READ, DROP_TO,
     STATE_OPEN, GAIN_SCALE, TABLE_BYTES, KIND, KIND_DMA, BASE, LENGTH, POSITION, LOOPING, PLAYING,
@@ -279,4 +279,34 @@ test('a stream nobody writes for a quarter of a second is played on round the ci
     assert.equal(mix(12001).produced, 0);
     assert.equal(Atomics.load(header, STREAMING), 0);
     assert.deepEqual(mix(2).left, [100, 200]);
+});
+
+/** @param {number} at @param {number[]} values */
+const chunk = (at, values)=>({ at, frames: Float32Array.from(values) });
+
+test('a feed plays the chunks posted to it in order, across their edges', ()=>{
+    const queue = createFeed();
+    queue.chunks.push(chunk(0, [1, -1, 2, -2, 3, -3]), chunk(3, [4, -4, 5, -5]));
+    const block = new Float32Array(8);
+    assert.equal(playFeed(queue, block, 4), 4);
+    assert.deepEqual([...block], [1, -1, 2, -2, 3, -3, 4, -4]);
+    assert.equal(queue.position, 4, 'where in the ring it has played to');
+    assert.equal(playFeed(queue, block, 4), 1);
+    assert.deepEqual([...block], [5, -5, 0, 0, 0, 0, 0, 0], 'silence where nothing came');
+    assert.equal(queue.position, 5);
+    assert.deepEqual({ blocks: queue.blocks, starvedBlocks: queue.starvedBlocks,
+        starvedFrames: queue.starvedFrames }, { blocks: 2, starvedBlocks: 1, starvedFrames: 3 });
+    assert.equal(queue.chunks.length, 0);
+});
+
+test('a feed skips to where a chunk says it starts, as after the ring was cleared', ()=>{
+    const queue = createFeed();
+    queue.chunks.push(chunk(100, [7, -7]));
+    const block = new Float32Array(2);
+    assert.equal(playFeed(queue, block, 1), 1);
+    assert.equal(queue.position, 101, 'counted from the ring, not from zero');
+    queue.chunks.push(chunk(150, [8, -8]));
+    playFeed(queue, block, 1);
+    assert.deepEqual([...block], [8, -8]);
+    assert.equal(queue.position, 151);
 });

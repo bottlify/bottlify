@@ -23,6 +23,7 @@
 import { createMacrotask, pacedYield, pagePacing } from '../app.js';
 import { openGraphicsWorker } from './graphics-worker.js';
 import { createLogReader } from '../layers/log/reader.js';
+import { FEED_AHEAD_MS, createFeeder } from '../layers/audio/output/feed.js';
 
 /** How many presented frames are remembered for a diagnostic to read back. */
 const PRESENT_HISTORY = 600;
@@ -371,6 +372,8 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
     let app = null;
     /** The relay transport opened for the run, closed with it. @type {any} */
     let transport = null;
+    /** The sound posted to a worklet that cannot share memory. @type {any} */
+    let feeder = null;
     let hidden = false;
     /** @type {import('./messages.js').Presented[]} */
     const presented = [];
@@ -594,8 +597,10 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                     url: relay.url, room: relay.room, token: relay.token,
                 });
             }
+            const { port: soundPort, ...soundOptions } = rest.audio ?? {};
             app = await createApp({
                 ...rest,
+                audio: rest.audio ? soundOptions : undefined,
                 win32: { ...rest.win32, network: transport ?? rest.win32?.network },
                 // The page's pacing either way unless asked, with the signal
                 // word in both: a message the page posted is seen between
@@ -691,6 +696,22 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             catch {
                 // No mixer in this build: a run without sound is a run.
             }
+            // A port to the worklet comes only from a page without shared
+            // memory, where the mix stays in the engine's own ring and is
+            // posted to the worklet from here.
+            feeder?.close();
+            feeder = null;
+            if (soundPort && audio && 'control' in audio.memory)
+            {
+                feeder = createFeeder({
+                    memory: audio.memory, channels: audio.channels, port: soundPort,
+                    aheadFrames: Math.round(audio.sampleRate * FEED_AHEAD_MS / 1000),
+                });
+            }
+            else
+            {
+                soundPort?.close();
+            }
 
             // The log's memory crosses here, once, in the answer that starts
             // the program -- it is shared memory, so crossing is sharing, and
@@ -753,6 +774,8 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             started = null;
             reading = null;
             await ending?.dispose();
+            feeder?.close();
+            feeder = null;
             transport?.dispose?.();
             transport = null;
             device?.destroy?.();

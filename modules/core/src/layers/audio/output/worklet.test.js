@@ -155,3 +155,25 @@ test('MIXED_FRAMES and READ advance by exactly what was mixed', ()=>{
     assert.equal(outputs[0][0][7], 1000 / 32768);
     assert.equal(outputs[0][0][8], 0, 'nothing left to mix, so silence rather than a stale value');
 });
+
+test('without a table, the processor plays what is posted to the port it is handed', ()=>{
+    const BottlifyOutput = loadWorkletClass();
+    const processor = new BottlifyOutput({ processorOptions: { channels: 2 } });
+    /** @type {any[]} */
+    const said = [];
+    const feed = { onmessage: /** @type {any} */ (null), postMessage: (/** @type {any} */ m)=>said.push(m) };
+    processor.port.onmessage({ data: { type: 'feed', port: feed } });
+    feed.onmessage({ data: { at: 10, frames: Float32Array.from([1, -1, 2, -2, 3, -3]) } });
+
+    const outputs = [outputBlock(4)];
+    assert.equal(processor.process([], outputs), true);
+    assert.deepEqual([...outputs[0][0]], [1, 2, 3, 0]);
+    assert.deepEqual([...outputs[0][1]], [-1, -2, -3, 0]);
+    for (let block = 1; block < 4; block++)
+    {
+        processor.process([], [outputBlock(4)]);
+    }
+    assert.deepEqual({ ...said.at(-1) },
+        { played: 13, blocks: 4, starvedBlocks: 4, starvedFrames: 13 },
+        'what it played, as a place in the engine\'s ring, and what it found missing');
+});

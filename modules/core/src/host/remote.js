@@ -283,7 +283,9 @@ export async function createRemoteApp(wiring){
     /** @type {import('./messages.js').Started} */
     const started = await request('start',
         [{ ...options, signal: signal ? signal.buffer : undefined }, offscreen],
-        [...transfer, ...(offscreen && offscreen !== canvas ? [offscreen] : [])]);
+        [...transfer, ...(offscreen && offscreen !== canvas ? [offscreen] : []),
+            ...(options.audio?.port && !transfer.includes(options.audio.port)
+                ? [options.audio.port] : [])]);
 
     // The first block, handed to the keeper. On an origin without shared
     // memory there is nothing to hand over, and the keeper is fed below by

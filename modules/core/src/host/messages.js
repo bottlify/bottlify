@@ -30,11 +30,15 @@
  * seeded volume by its files, a watch by the libraries and ordinals it covers.
  * A disc crosses as the `Blob` the person chose, which is cloned by reference
  * rather than copied, and the worker reads it a range at a time.
+ * On a page without shared memory, `audio.port` is the engine's end of a
+ * channel whose other end the page gave its audio worklet: the worker posts
+ * the mix down it, and the worklet says back what it played.
  *
  * @typedef {Omit<import('../app.js').AppOptions,
  *     'executable' | 'v86' | 'device' | 'bundle' | 'storage' | 'watchImport'
- *     | 'sample' | 'onCall' | 'pageHidden' | 'pacing' | 'discs'> & {
+ *     | 'sample' | 'onCall' | 'pageHidden' | 'pacing' | 'discs' | 'audio'> & {
  *     executable: Uint8Array,
+ *     audio?: NonNullable<import('../app.js').AppOptions['audio']> & { port?: MessagePort },
  *     v86?: { moduleUrl: string, wasmBytes: ArrayBuffer },
  *     bundle?: { url?: string, file?: Blob, store?: string | null, id?: string, prefix?: string,
  *         prefetch?: boolean, indexSha256?: string,

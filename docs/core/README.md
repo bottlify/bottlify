@@ -32,9 +32,10 @@ The page needs:
 
 - **WebGPU** for any picture: https, or `localhost`.
 - **Cross-origin isolation** (`Cross-Origin-Opener-Policy: same-origin`,
-  `Cross-Origin-Embedder-Policy: require-corp`) for `SharedArrayBuffer`. Sound needs it; without
-  it the log is read by asking the engine instead of from shared memory, and guest memory is
-  the engine's alone rather than shared with the workers beside it.
+  `Cross-Origin-Embedder-Policy: require-corp`) for `SharedArrayBuffer`, which the `isolated` mode
+  runs on. Without it the engine runs `compatible`: the log is read by asking the engine instead
+  of from shared memory, guest memory is the engine's alone, and sound is mixed on the engine's
+  thread and posted to the worklet.
 
 ## Which mode, and why
 
@@ -44,7 +45,7 @@ page has to allow.
 | Mode | Choose it when | What it gives | What it costs |
 | --- | --- | --- | --- |
 | `isolated` | The page can be cross-origin isolated: your own origin serves the player and everything it loads, and nothing on it has to come from a site that does not opt in | The guest's memory is shared with the workers beside the engine: the graphics worker reads what a program unlocked straight out of it rather than from a copy made per unlock, and sound plays from shared memory | The page is isolated: an iframe, image or script from another origin loads only if it sends `Cross-Origin-Resource-Policy` or CORS headers, and a sign-in pop-up from another origin cannot reach back to the page through `window.opener` |
-| `compatible` | The page cannot be isolated — the player sits in another site's iframe, or next to third-party content or sign-in pop-ups — or the program draws little and gains nothing from sharing: an installer, a console tool such as SteamCMD | Runs on any page | What crosses to another thread is copied; no sound yet (see [limits.md](limits.md)) |
+| `compatible` | The page cannot be isolated — the player sits in another site's iframe, or next to third-party content or sign-in pop-ups — or the program draws little and gains nothing from sharing: an installer, a console tool such as SteamCMD | Runs on any page | What crosses to another thread is copied, sound included: it is mixed on the engine's thread and posted to the worklet, and lags further behind the picture (see [limits.md](limits.md)) |
 | `auto` | You want what the page allows: the default | `isolated` on an isolated page, `compatible` elsewhere | — |
 
 The network does not depend on the mode: the relay is a WebSocket to the page's own origin, which
@@ -64,6 +65,21 @@ const node = new AudioWorkletNode(audio, 'bottlify-output', {
     outputChannelCount: [channels],
     processorOptions: { table: app.audio.memory().table, channels },
 });
+node.connect(audio.destination);
+```
+
+On a page that is not cross-origin isolated there is no table to share. The engine mixes on its own
+thread and posts the mix down a channel the page makes, one end to the engine, the other to the
+worklet:
+
+```js
+const sound = new MessageChannel();
+const app = await createApp({ ...options,
+    audio: { drained: true, sampleRate: audio.sampleRate, port: sound.port2 } });
+const node = new AudioWorkletNode(audio, 'bottlify-output', {
+    outputChannelCount: [2], processorOptions: { channels: 2 },
+});
+node.port.postMessage({ type: 'feed', port: sound.port1 }, [sound.port1]);
 node.connect(audio.destination);
 ```
 

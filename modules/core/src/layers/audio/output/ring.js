@@ -181,6 +181,55 @@ export function createRing({ channels, capacityFrames, memory }){
             return have;
         },
 
+        /**
+         * A copy of `count` frames from frame `from` on, for a reader on a
+         * thread this storage cannot be shared with. Peeking consumes nothing:
+         * the frames keep their room until the reader says it has played them,
+         * so the play cursor follows the sound rather than the posting.
+         *
+         * @param {number} from   a frame count, between `consumed()` and `written()`
+         * @param {number} count
+         * @returns {Float32Array}
+         */
+        peek(from, count){
+            const out = new Float32Array(count * channels);
+            for (let frame = 0; frame < count; frame++)
+            {
+                const at = (from + frame & mask) * channels;
+                for (let channel = 0; channel < channels; channel++)
+                {
+                    out[frame * channels + channel] = samples[at + channel];
+                }
+            }
+            return out;
+        },
+
+        /**
+         * What a reader elsewhere has played, as a frame count over this
+         * storage's life. Neither goes backwards nor past what was written: a
+         * report that arrives late, or crosses a `clear`, says nothing new.
+         *
+         * @param {number} played
+         */
+        acknowledge(played){
+            const read = Atomics.load(control, READ);
+            const written = Atomics.load(control, WRITTEN);
+            Atomics.store(control, READ, Math.max(read, Math.min(played, written)));
+        },
+
+        /**
+         * A reader elsewhere's own counts of what it asked for and found
+         * missing, its totals rather than increments, so a report lost or
+         * repeated costs nothing.
+         *
+         * @param {{ blocks: number, starvedBlocks: number, starvedFrames: number }} counts
+         */
+        reportStarved({ blocks, starvedBlocks, starvedFrames }){
+            Atomics.store(control, BLOCKS, blocks);
+            Atomics.store(control, STARVED_BLOCKS, starvedBlocks);
+            Atomics.store(control, STARVED_FRAMES, starvedFrames);
+        },
+
         /** Throws away everything queued, as stopping a device does. */
         clear(){
             Atomics.store(control, READ, Atomics.load(control, WRITTEN));

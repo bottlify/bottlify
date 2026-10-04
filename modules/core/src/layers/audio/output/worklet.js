@@ -531,19 +531,118 @@ function mixBlock({ global, slots, seams, block, blockFrames, outputRate, arena 
     return maxProduced;
 }
 
+/**
+ * The audio thread's end of a ring it cannot share: on a page without shared
+ * memory the engine posts the frames it mixed, in chunks, each tagged with the
+ * frame of the ring it starts at, and this plays them in order. `position` is
+ * that same count for the frame played last, so what the audio thread reports
+ * back is a place in the ring rather than a number of its own, and a chunk that
+ * starts further on -- the engine cleared the ring -- is played from where it
+ * says rather than shifted back to close the gap.
+ *
+ * @typedef {{ chunks: { at: number, frames: Float32Array }[], offset: number,
+ *     position: number, blocks: number, starvedBlocks: number,
+ *     starvedFrames: number }} Feed
+ * @returns {Feed}
+ */
+function createFeed(){
+    return { chunks: [], offset: 0, position: 0, blocks: 0, starvedBlocks: 0, starvedFrames: 0 };
+}
+
+/**
+ * One block out of a feed, interleaved stereo as `mixBlock` makes it, with
+ * silence where nothing has come yet.
+ *
+ * @param {Feed} feed
+ * @param {Float32Array} block
+ * @param {number} blockFrames
+ * @returns {number} the frames that were sound rather than silence
+ */
+function playFeed(feed, block, blockFrames){
+    feed.blocks++;
+    let frame = 0;
+    while (frame < blockFrames && feed.chunks.length > 0)
+    {
+        const chunk = feed.chunks[0];
+        if (feed.offset === 0 && chunk.at > feed.position)
+        {
+            feed.position = chunk.at;
+        }
+        const take = Math.min(chunk.frames.length / 2 - feed.offset, blockFrames - frame);
+        block.set(chunk.frames.subarray(feed.offset * 2, (feed.offset + take) * 2), frame * 2);
+        frame += take;
+        feed.offset += take;
+        feed.position += take;
+        if (feed.offset * 2 >= chunk.frames.length)
+        {
+            feed.chunks.shift();
+            feed.offset = 0;
+        }
+    }
+    if (frame < blockFrames)
+    {
+        block.fill(0, frame * 2, blockFrames * 2);
+        feed.starvedBlocks++;
+        feed.starvedFrames += blockFrames - frame;
+    }
+    return frame;
+}
+
 /* WORKLET-SHARED:END */
+
+/**
+ * Blocks between two reports of a feed's progress: about ten milliseconds at
+ * 48 kHz, so the engine hears often enough to keep the feed topped up, and the
+ * audio thread posts a hundred small messages a second rather than one a block.
+ */
+const REPORT_BLOCKS = 4;
 
 class BottlifyOutput extends AudioWorkletProcessor {
     /** @param {any} options */
     constructor(options){
         super();
         const { table, channels } = options.processorOptions;
-        this.global = new Int32Array(table, 0, GLOBAL_HEADER_INT32);
         this.channels = channels;
+        // 128 is the largest block WebAudio has ever asked for; grown on a
+        // bigger request rather than assumed, so a future engine's bigger
+        // quantum does not overrun it.
+        this.block = new Float32Array(128 * 2);
+        this.running = true;
+        /** @type {Feed | null} */
+        this.feed = null;
+        /** @type {MessagePort | null} */
+        this.feedPort = null;
+        this.port.onmessage = (/** @type {any} */ event)=>{
+            if (event.data === 'stop')
+            {
+                this.running = false;
+            }
+            else if (event.data?.type === 'feed')
+            {
+                // The engine's own end of a channel the page made, so the
+                // frames come straight from the engine's thread rather than
+                // through the page's, which a busy interface would hold up.
+                const port = event.data.port;
+                port.onmessage = (/** @type {any} */ message)=>{
+                    this.feed?.chunks.push(message.data);
+                };
+                this.feedPort = port;
+            }
+        };
         /** @type {{ header: Int32Array, pcm: Uint8Array }[]} */
         this.slots = [];
         /** @type {Seam[]} */
         this.seams = [];
+        if (!table)
+        {
+            // No shared memory to read a table from: the engine mixes on its
+            // own thread and posts the mix.
+            this.feed = createFeed();
+            this.global = null;
+            this.arena = null;
+            return;
+        }
+        this.global = new Int32Array(table, 0, GLOBAL_HEADER_INT32);
         for (let slot = 0; slot < SLOTS; slot++)
         {
             this.slots.push({
@@ -557,17 +656,6 @@ class BottlifyOutput extends AudioWorkletProcessor {
         const arenaAt = GLOBAL_HEADER_BYTES + SLOTS * SLOT_STRIDE;
         this.arena = table.byteLength >= arenaAt + ARENA_BYTES
             ? new Uint8Array(table, arenaAt, ARENA_BYTES) : null;
-        // 128 is the largest block WebAudio has ever asked for; grown on a
-        // bigger request rather than assumed, so a future engine's bigger
-        // quantum does not overrun it.
-        this.block = new Float32Array(128 * 2);
-        this.running = true;
-        this.port.onmessage = (/** @type {any} */ event)=>{
-            if (event.data === 'stop')
-            {
-                this.running = false;
-            }
-        };
     }
 
     /**
@@ -586,15 +674,31 @@ class BottlifyOutput extends AudioWorkletProcessor {
         {
             this.block = new Float32Array(blockFrames * 2);
         }
-        // The engine's own idea of its output rate, not the audio context's:
-        // a mismatch between the two is a configuration error elsewhere, and
-        // resampling against the rate the engine actually assumed is what
-        // keeps this processor self-consistent regardless.
-        const outputRate = Atomics.load(this.global, OUTPUT_RATE);
-        mixBlock({
-            global: this.global, slots: this.slots, seams: this.seams,
-            block: this.block, blockFrames, outputRate, arena: this.arena,
-        });
+        if (this.feed)
+        {
+            const feed = this.feed;
+            playFeed(feed, this.block, blockFrames);
+            if (feed.blocks % REPORT_BLOCKS === 0)
+            {
+                this.feedPort?.postMessage({
+                    played: feed.position, blocks: feed.blocks,
+                    starvedBlocks: feed.starvedBlocks, starvedFrames: feed.starvedFrames,
+                });
+            }
+        }
+        else
+        {
+            // The engine's own idea of its output rate, not the audio
+            // context's: a mismatch between the two is a configuration error
+            // elsewhere, and resampling against the rate the engine actually
+            // assumed is what keeps this processor self-consistent regardless.
+            const global = /** @type {Int32Array} */ (this.global);
+            const outputRate = Atomics.load(global, OUTPUT_RATE);
+            mixBlock({
+                global, slots: this.slots, seams: this.seams,
+                block: this.block, blockFrames, outputRate, arena: this.arena,
+            });
+        }
         for (let channel = 0; channel < output.length; channel++)
         {
             // A mono graph over a stereo mix takes the left side rather than

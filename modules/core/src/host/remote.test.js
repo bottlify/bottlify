@@ -13,6 +13,7 @@ import {
 import { serveKeeper } from './keeper.js';
 import { PAGE_YIELD_MS } from '../app.js';
 import { createEvents } from '../events.js';
+import { createRing } from '../layers/audio/output/ring.js';
 import { createJournal, Level } from '../layers/log/internal/journal.js';
 import { createMetrics } from '../layers/log/internal/metrics.js';
 import {
@@ -74,6 +75,9 @@ function fakeApp({ capacity = 4096, shared = true, audioShared = false } = {}){
     // `emit()` fired, and that is `events.js`'s contract to keep, not this
     // fake's to reimplement.
     const events = createEvents();
+    // The engine mixer's own ring, with a little already mixed into it.
+    const ring = createRing({ channels: 2, capacityFrames: 8 });
+    ring.write(Float32Array.of(1, -1, 2, -2, 3, -3));
     const journal = createJournal({ now: ()=>0, capacity, shared });
     const registry = createMetrics({ shared });
     const own = registry.counters('log', ['rejected']);
@@ -87,6 +91,7 @@ function fakeApp({ capacity = 4096, shared = true, audioShared = false } = {}){
         intern: journal.intern,
     });
     const app = {
+        ring,
         options: /** @type {any} */ (null),
         sent: /** @type {any[]} */ ([]),
         attached: /** @type {any[]} */ ([]),
@@ -134,9 +139,7 @@ function fakeApp({ capacity = 4096, shared = true, audioShared = false } = {}){
             },
         },
         audio: {
-            memory: ()=>(audioShared
-                ? { table: new ArrayBuffer(64) }
-                : { control: new ArrayBuffer(16), samples: new ArrayBuffer(64) }),
+            memory: ()=>(audioShared ? { table: new ArrayBuffer(64) } : ring.memory),
             format: ()=>({ sampleRate: 48000, channels: 2 }),
         },
         /** How many times the log's memory has been asked for. */
@@ -436,6 +439,26 @@ test('the sound output\'s shape follows the engine\'s own backend, not a fixed c
     assert.deepEqual(Object.keys(unshared.remote.audio.memory()).sort(), ['control', 'samples']);
     await unshared.remote.dispose();
 });
+
+test('without shared memory the mix is posted to the worklet, which says what it played',
+    async()=>{
+        const worklet = new MessageChannel();
+        opened.push(()=>worklet.port2.close());
+        const { remote, app, built } = await connect(
+            { audio: { drained: true, sampleRate: 48000, port: worklet.port1 } },
+            { audioShared: false });
+        assert.equal(built().audio.port, undefined, 'the port is the worker\'s, not the engine\'s');
+        assert.equal(built().audio.drained, true);
+        /** @type {any} */
+        const chunk = await new Promise(done=>{
+            worklet.port2.onmessage = event=>done(event.data);
+        });
+        assert.equal(chunk.at, 0);
+        assert.deepEqual([...chunk.frames], [1, -1, 2, -2, 3, -3]);
+        worklet.port2.postMessage({ played: 2, blocks: 1, starvedBlocks: 0, starvedFrames: 0 });
+        await until(()=>app.ring.consumed() === 2);
+        await remote.dispose();
+    });
 
 test('an input event arrives at the router as it left the page', async()=>{
     const { remote, app } = await connect();

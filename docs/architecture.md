@@ -623,9 +623,12 @@ flowchart TB
 - **Limits.** With no free slot, a buffer plays through a queue track, and its cursor follows the
   clock instead. The DirectSound 3D interfaces exist and keep their parameters, but they do not change
   the sound. Capture returns `DSERR_NODRIVER`.
-- **Without cross-origin isolation** (the COOP/COEP headers, which `ui/server.mjs` sets) there is no
-  `SharedArrayBuffer`, and then there is no sound at all. The launcher says so outright, the engine
-  mixes nothing, and the cursors follow the clock.
+- **Without cross-origin isolation** (the COOP/COEP headers, which `ui/server.mjs` sets unless
+  `ISOLATION=off`) there is no `SharedArrayBuffer`. The engine then mixes into a ring of its own,
+  and `output/feed.js` posts the mix to the worklet over a `MessageChannel` the page made, in
+  chunks no more than 160 ms ahead of what the worklet has played; the worklet reports how far it
+  got every four blocks, and that report is what the ring counts as consumed. A DirectSound
+  buffer's cursor follows the clock here.
 
 Where to look in the code: `core/src/layers/audio/` — `output/mixer.js`, `output/mix.js`,
 `output/worklet.js`, `dsound/buffers.js`, `asi/provider.js`; waveOut is

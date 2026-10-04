@@ -527,6 +527,63 @@ export function mixBlock({ global, slots, seams, block, blockFrames, outputRate,
     return maxProduced;
 }
 
+/**
+ * The audio thread's end of a ring it cannot share: on a page without shared
+ * memory the engine posts the frames it mixed, in chunks, each tagged with the
+ * frame of the ring it starts at, and this plays them in order. `position` is
+ * that same count for the frame played last, so what the audio thread reports
+ * back is a place in the ring rather than a number of its own, and a chunk that
+ * starts further on -- the engine cleared the ring -- is played from where it
+ * says rather than shifted back to close the gap.
+ *
+ * @typedef {{ chunks: { at: number, frames: Float32Array }[], offset: number,
+ *     position: number, blocks: number, starvedBlocks: number,
+ *     starvedFrames: number }} Feed
+ * @returns {Feed}
+ */
+export function createFeed(){
+    return { chunks: [], offset: 0, position: 0, blocks: 0, starvedBlocks: 0, starvedFrames: 0 };
+}
+
+/**
+ * One block out of a feed, interleaved stereo as `mixBlock` makes it, with
+ * silence where nothing has come yet.
+ *
+ * @param {Feed} feed
+ * @param {Float32Array} block
+ * @param {number} blockFrames
+ * @returns {number} the frames that were sound rather than silence
+ */
+export function playFeed(feed, block, blockFrames){
+    feed.blocks++;
+    let frame = 0;
+    while (frame < blockFrames && feed.chunks.length > 0)
+    {
+        const chunk = feed.chunks[0];
+        if (feed.offset === 0 && chunk.at > feed.position)
+        {
+            feed.position = chunk.at;
+        }
+        const take = Math.min(chunk.frames.length / 2 - feed.offset, blockFrames - frame);
+        block.set(chunk.frames.subarray(feed.offset * 2, (feed.offset + take) * 2), frame * 2);
+        frame += take;
+        feed.offset += take;
+        feed.position += take;
+        if (feed.offset * 2 >= chunk.frames.length)
+        {
+            feed.chunks.shift();
+            feed.offset = 0;
+        }
+    }
+    if (frame < blockFrames)
+    {
+        block.fill(0, frame * 2, blockFrames * 2);
+        feed.starvedBlocks++;
+        feed.starvedFrames += blockFrames - frame;
+    }
+    return frame;
+}
+
 /* WORKLET-SHARED:END */
 
 /** Engine-only: where the arena starts, and the whole table's byte size, to allocate it. */

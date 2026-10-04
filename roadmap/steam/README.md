@@ -72,14 +72,13 @@ the relay's, in Node, where no browser policy reaches. So:
 | --- | --- | --- |
 | SteamCMD signs in, downloads | through the relay, in either mode | no: `compatible` is enough |
 | Packing the bottle | none | no |
-| The game | none, or the relay for multiplayer | no; `isolated` is faster where the page allows it, and sound needs it today |
+| The game | none, or the relay for multiplayer | no; `isolated` is faster where the page allows it |
 
 Isolation never blocks the network; the browser blocks something else: a page cannot open TCP or
 UDP at all, isolated or not, and it cannot `fetch` Steam's content servers, which send no CORS
 headers. That is why the relay exists. Running an installer, or SteamCMD, in `compatible` mode is
-reasonable: it draws little and loses nothing. What `compatible` loses today is sound, because the
-AudioWorklet reads a `SharedArrayBuffer` ring; a message-port path for sound is open work in the
-audio area.
+reasonable: it draws little and loses nothing; its sound, mixed on the engine's thread and posted
+to the worklet, lags the picture more than in `isolated`.
 
 ## How a Steam game starts
 

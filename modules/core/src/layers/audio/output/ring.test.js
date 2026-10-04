@@ -104,3 +104,26 @@ test('clearing drops what was queued without disturbing the count', ()=>{
     assert.equal(ring.filled(), 0);
     assert.equal(ring.consumed(), 3, 'discarded is still gone, as a device does');
 });
+
+test('a reader on another thread is sent copies and says what it played', ()=>{
+    const ring = createRing({ channels: 2, capacityFrames: 4 });
+    ring.write(new Float32Array([1, 2, 3, 4, 5, 6]));
+    const copy = ring.peek(1, 2);
+    assert.deepEqual([...copy], [3, 4, 5, 6]);
+    copy[0] = 99;
+    assert.equal(ring.consumed(), 0, 'a copy sent is not yet played');
+    assert.equal(ring.room(), 1, 'and keeps its room until it is');
+    ring.acknowledge(2);
+    assert.equal(ring.consumed(), 2);
+    ring.acknowledge(1);
+    assert.equal(ring.consumed(), 2, 'what was played stays played');
+    ring.acknowledge(9);
+    assert.equal(ring.consumed(), 3, 'nothing is played that was never written');
+    assert.deepEqual([...ring.peek(2, 1)], [5, 6], 'the copy is the reader\'s, not the ring\'s');
+});
+
+test('a reader on another thread reports what it found missing', ()=>{
+    const ring = createRing({ channels: 2, capacityFrames: 4 });
+    ring.reportStarved({ blocks: 7, starvedBlocks: 2, starvedFrames: 100 });
+    assert.deepEqual(ring.starved(), { blocks: 2, frames: 100, asked: 7 });
+});

@@ -51,7 +51,7 @@ Everything below crosses to the engine's worker by `postMessage`, so every value
 | `maxFps` | number | 60 | Accepted, not applied yet ([limits.md](limits.md#graphics)). |
 | `graphics` | `{ compressedTextures?, maxFrameLatency? }` | `false`, 3 | BC-compressed texture upload where the GPU has `texture-compression-bc`; how many frames the GPU may still be drawing when `Present` returns (0: no bound). |
 | `device.graphicsWorker` | `true` \| `'pixels'` \| `false` | `true` | Draw Direct3D 7–9 and OpenGL in a graphics worker that sends each frame back as an `ImageBitmap`; `'pixels'` sends the frame's bytes instead; `false` draws on the engine thread. |
-| `audio` | `{ drained?, sampleRate?, mp3? }` | `false`, —, `true` | `drained`: an `AudioWorkletNode` really reads the output, so play cursors follow the sound rather than a clock. `sampleRate`: the `AudioContext`'s rate. `mp3: false`: the program decodes MP3 with the library it ships instead of the engine's provider. |
+| `audio` | `{ drained?, sampleRate?, mp3?, port? }` | `false`, —, `true`, — | `drained`: an `AudioWorkletNode` really reads the output, so play cursors follow the sound rather than a clock. `port`: on a page without shared memory, the engine's end of a `MessageChannel` whose other end the worklet holds; the mix is posted down it (see [README.md](README.md#sound)). `sampleRate`: the `AudioContext`'s rate. `mp3: false`: the program decodes MP3 with the library it ships instead of the engine's provider. |
 
 ### Storage, bundles and discs
 
