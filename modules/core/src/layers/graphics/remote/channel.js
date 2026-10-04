@@ -21,13 +21,21 @@
  *                      { type: 'presented', count }
  *                      { type: 'diagnostics', diagnostics }
  *                                                      what a device said of itself when asked
- *                      { type: 'wrote', writes }       guest memory the played side wrote later
+ *                      { type: 'wrote', writes }       guest memory the played side wrote later:
+ *                                                      the bytes, or where it wrote shared memory
  *                      { type: 'divergence', api, detail }
  *                      { type: 'lost' }                its GPU went away
  *                      { type: 'failed', message }     a call could not be played
  */
 
 import { WAIT, createWriter } from './wire.js';
+import { createLender } from './lending.js';
+
+/** How many calls go between two readings of the clock for a batch the turn has kept too long. */
+const CHECKED_EVERY = 64;
+
+/** The least time between batches sent early for what they lend. */
+const LENT_GAP_MS = 0.25;
 
 /**
  * A value as it can cross: the device's objects and functions left out, its
@@ -78,6 +86,8 @@ export function crossable(value, depth = 0){
  * @typedef {Object} SenderEvents
  * @property {(address: number, bytes: Uint8Array) => void} [wrote]
  *     guest memory the played side wrote outside a call: a read-back's pixels
+ * @property {(address: number, length: number) => void} [adopted]
+ *     the same, written by the played side into shared guest memory itself
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {() => void} [lost]
  * @property {(message: string) => void} [failed]
@@ -95,11 +105,17 @@ export function crossable(value, depth = 0){
  * @param {number} [options.gapMs]  at least this long between batches no call waits for,
  *     with a timer sending one the turns leave behind; zero sends one every turn
  * @param {(send: () => void, ms: number) => unknown} [options.timer]
+ * @param {{ slots: SharedArrayBuffer, stash: SharedArrayBuffer, memory: Uint8Array,
+ *     base?: number } | null} [options.lending]
+ *     where the played side reads guest memory in place, the parts of a
+ *     lending (`lending.js`) it was sent
  */
 export function createSender({ post, framesAhead = 2, later = queueMicrotask, on = {},
-    now = ()=>performance.now(), gapMs = 0, timer = (send, ms)=>setTimeout(send, ms) })
+    now = ()=>performance.now(), gapMs = 0, timer = (send, ms)=>setTimeout(send, ms),
+    lending = null })
 {
     const writer = createWriter();
+    const lender = lending && createLender({ ...lending, now });
     /**
      * The calls the program's thread waited on the played side for, by name:
      * how many, and the milliseconds from the call to its answer -- what turns
@@ -137,6 +153,10 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
     // -- and otherwise only soon enough to stay busy.
     let sentAt = -Infinity;
     let timed = false;
+    /** Calls since the clock was last read. */
+    let unchecked = 0;
+    /** The batches posted, and their bytes. */
+    const sent = { batches: 0, bytes: 0 };
     const flush = ()=>{
         pending = false;
         if (writer.empty())
@@ -145,7 +165,10 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
         }
         sentAt = now();
         const buffer = writer.take();
+        sent.batches++;
+        sent.bytes += buffer.byteLength;
         post({ type: 'calls', buffer }, [buffer]);
+        lender?.sent();
     };
     const due = ()=>{
         if (!pending)
@@ -179,6 +202,7 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
 
     return {
         writer,
+        lender,
 
         /**
          * @param {number} wait @param {string} name
@@ -226,6 +250,27 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                         resolve(0);
                     } }));
             }
+            // Lent bytes are claimed when the program locks them again, often
+            // the next frame: the batch goes at once, so the played side has
+            // read them by then rather than the claim copying them.
+            if (lender?.unsent() && now() - sentAt >= LENT_GAP_MS)
+            {
+                flush();
+                return undefined;
+            }
+            // A turn may be long -- a program drawing a frame without giving
+            // the thread back -- and the played side idle until it ends: a
+            // call that finds the gap past sends the batch itself, at the end
+            // of a record. The clock is read only every so many calls.
+            if (gapMs > 0 && ++unchecked >= CHECKED_EVERY)
+            {
+                unchecked = 0;
+                if (now() - sentAt >= gapMs)
+                {
+                    flush();
+                    return undefined;
+                }
+            }
             soon();
             return undefined;
         },
@@ -254,9 +299,16 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                     }
                     break;
                 case 'wrote':
-                    for (const { address, bytes } of message.writes)
+                    for (const { address, bytes, length } of message.writes)
                     {
-                        on.wrote?.(address, bytes);
+                        if (bytes)
+                        {
+                            on.wrote?.(address, bytes);
+                        }
+                        else
+                        {
+                            on.adopted?.(address, length);
+                        }
                     }
                     break;
                 case 'divergence':
@@ -279,6 +331,9 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
 
         /** How many presents the played side still owes. */
         behind: ()=>presents - presented,
+
+        /** The batches posted so far, and their bytes. */
+        sent: ()=>({ ...sent }),
 
         /** The calls waited on, by name, with the milliseconds they took. */
         waits: ()=>Object.fromEntries([...waits].map(([name, sum])=>[name, {

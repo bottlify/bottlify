@@ -10,10 +10,12 @@ import { loopbackDirect3D } from './loopback.js';
 import { createMirror } from './replay.js';
 import { answeredByRenderer, playedDirect3D, recordedDirect3D } from './direct3d.js';
 import { createReceiver, createSender } from './channel.js';
+import { createBorrower, createLendingBuffers } from './lending.js';
 import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK } from '../d3d9/constants.js';
 import { D3DCLEAR, D3DFMT_INDEX, D3DPT, D3DRS, D3DTS } from '../d3d8/constants.js';
 import { D3DQUERYTYPE, createDirect3D9 } from '../d3d9/device.js';
 import { commandSlot } from '../d3d9/commands.js';
+import { createReferenceCount } from '../d3d9/resources.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
@@ -22,7 +24,8 @@ const RAM_BASE = 0x40000000;
 
 /**
  * A root of a device's shape, small enough to see through: each side's
- * services and what its objects saw are kept in `sides`, the recorded first.
+ * services and what its objects saw are kept in `sides`, which side each is
+ * by `played` (the played one is made first).
  *
  * @param {any[]} sides
  */
@@ -45,11 +48,50 @@ function toy(sides){
                         side.seen.push([...services.readMemory(base, 4)]);
                         return D3D_OK;
                     },
+                    /** @param {{ pBits?: number }} locked @param {any} rect @param {number} flags */
+                    LockRect(locked, rect, flags){
+                        void rect;
+                        void flags;
+                        locked.pBits = base;
+                        return D3D_OK;
+                    },
+                    UnlockRect: ()=>D3D_OK,
+                    // A lock whose address the played device answers later, as
+                    // a render target's does: none is known when it is recorded.
+                    /** @param {{ pBits?: number }} locked @param {any} rect @param {number} flags */
+                    LockRectAnswered(locked, rect, flags){
+                        void locked;
+                        void rect;
+                        void flags;
+                        return D3D_OK;
+                    },
+                    // What the played device holds there; the recorded one
+                    // reads nothing, which would send the bytes itself.
+                    Peek(){
+                        if (side.played)
+                        {
+                            side.seen.push([...services.readMemory(base, 4)]);
+                        }
+                        return D3D_OK;
+                    },
                     /** @param {{ create: () => number }} gdi */
                     MakeDc(gdi){
                         side.seen.push(gdi.create());
                         return D3D_OK;
                     },
+                };
+                return D3D_OK;
+            },
+            /** @param {{ thing?: any }} out */
+            CreateCounted(out){
+                const count = createReferenceCount({ onLastRef: ()=>side.seen.push('gone') });
+                out.thing = {
+                    counter: count,
+                    get refCount(){
+                        return count.value;
+                    },
+                    addRef: ()=>count.addRef(),
+                    release: ()=>count.release(),
                 };
                 return D3D_OK;
             },
@@ -87,8 +129,124 @@ function toyLoop(){
             at + length),
         writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>ram.set(bytes, at),
     });
-    return { root, ram, recorded: sides[0], played: sides[1] };
+    return { root, ram, recorded: sides.find(side=>!side.played),
+        played: sides.find(side=>side.played) };
 }
+
+/**
+ * A toy root whose calls cross a port the test empties itself, over a shared
+ * guest memory: with `lend`, what its unlocks let the program write is lent
+ * to the played side rather than copied.
+ *
+ * @param {boolean} lend
+ */
+function toyAcross(lend){
+    /** @type {any[]} */
+    const sides = [];
+    const ram = new Uint8Array(new SharedArrayBuffer(1 << 16));
+    let next = 0x100;
+    const services = {
+        backend: {},
+        allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += bytes;
+            return at;
+        },
+        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>ram.slice(at,
+            at + length),
+        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>ram.set(bytes, at),
+    };
+    const buffers = createLendingBuffers();
+    const played = playedDirect3D(toy(sides), { ...services,
+        borrow: createBorrower({ ...buffers, memory: ram }) });
+    const receiver = createReceiver({ played, post: ()=>{} });
+    /** @type {any[]} */
+    const sent = [];
+    const sender = createSender({ post: message=>sent.push(message), later: ()=>{},
+        lending: lend ? { ...buffers, memory: ram } : null });
+    const root = recordedDirect3D(toy(sides), services, sender);
+    return {
+        root, ram, sender,
+        played: sides.find(side=>side.played),
+        /** The played side plays what was sent. */
+        play(){
+            sender.flush();
+            for (const message of sent.splice(0))
+            {
+                receiver.receive(message);
+            }
+        },
+    };
+}
+
+test('bytes lent to the played side are what the program wrote before the unlock, though it'
+    + ' locks and writes them again before they are played', ()=>{
+    for (const lend of [false, true])
+    {
+        const { root, ram, sender, played, play } = toyAcross(lend);
+        /** @type {{ thing?: any }} */
+        const out = {};
+        root.CreateThing(out);
+        const thing = out.thing;
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        thing.LockRect(locked, null, 0);
+        const at = /** @type {number} */ (locked.pBits);
+        ram.set([1, 2, 3, 4], at);
+        thing.UnlockRect();
+        thing.Peek();
+        thing.LockRect(locked, null, 0);
+        ram.set([5, 6, 7, 8], at);
+        thing.UnlockRect();
+        thing.Peek();
+        play();
+        assert.deepEqual(played.seen, [[1, 2, 3, 4], [5, 6, 7, 8]], `lent: ${lend}`);
+        assert.deepEqual(sender.lender?.diagnostics() ?? null, lend ? { lent: 2, lentBytes: 32,
+            stashed: 1, stashedBytes: 16, waited: 0, waitedMs: 0 } : null);
+    }
+});
+
+test('a lend the played side read before the program locks again is not stashed', ()=>{
+    const { root, ram, sender, played, play } = toyAcross(true);
+    /** @type {{ thing?: any }} */
+    const out = {};
+    root.CreateThing(out);
+    /** @type {{ pBits?: number }} */
+    const locked = {};
+    out.thing.LockRect(locked, null, 0);
+    ram.set([1, 2, 3, 4], /** @type {number} */ (locked.pBits));
+    out.thing.UnlockRect();
+    out.thing.Peek();
+    play();
+    out.thing.LockRect(locked, null, 0);
+    assert.deepEqual(played.seen, [[1, 2, 3, 4]]);
+    assert.equal(sender.lender?.diagnostics().stashed, 0);
+    assert.equal(sender.lender?.diagnostics().lent, 1);
+});
+
+test('what the recorded device writes over lent bytes waits until the played side has them',
+    ()=>{
+        const { root, ram, sender, played, play } = toyAcross(true);
+        /** @type {{ thing?: any }} */
+        const out = {};
+        root.CreateThing(out);
+        /** @type {{ thing?: any }} */
+        const source = {};
+        root.CreateThing(source);
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        out.thing.LockRect(locked, null, 0);
+        const at = /** @type {number} */ (locked.pBits);
+        ram.set([1, 2, 3, 4], at);
+        out.thing.UnlockRect();
+        out.thing.Peek();
+        ram.set([6, 6, 6, 6], source.thing.base);
+        root.Copy(source.thing.base, at);
+        out.thing.Peek();
+        play();
+        assert.deepEqual(played.seen, [[1, 2, 3, 4], [6, 6, 6, 6]]);
+        assert.equal(sender.lender?.diagnostics().stashed, 1);
+    });
 
 test('what a lock let the program write is the played device\'s at the unlock', ()=>{
     const { root, ram, played } = toyLoop();
@@ -101,6 +259,33 @@ test('what a lock let the program write is the played device\'s at the unlock', 
     ram.set([1, 2, 3, 4], /** @type {number} */ (locked.pBits));
     assert.equal(out.thing.Unlock(), D3D_OK);
     assert.deepEqual(played.seen, [[1, 2, 3, 4]]);
+});
+
+test('a lock taken to read sends nothing back at its unlock; one taken to write does', ()=>{
+    const { root, ram, played } = toyLoop();
+    /** @type {{ thing?: any }} */
+    const out = {};
+    root.CreateThing(out);
+    const thing = out.thing;
+    /** @type {{ pBits?: number }} */
+    const locked = {};
+    const D3DLOCK_READONLY = 0x10;
+    assert.equal(thing.LockRect(locked, null, D3DLOCK_READONLY | 0x800), D3D_OK);
+    ram.set([5, 6, 7, 8], /** @type {number} */ (locked.pBits));
+    assert.equal(thing.UnlockRect(), D3D_OK);
+    thing.Peek();
+    assert.deepEqual(played.seen, [[0, 0, 0, 0]], 'read, not written: nothing went');
+    assert.equal(thing.LockRect(locked, null, 0), D3D_OK);
+    assert.equal(thing.UnlockRect(), D3D_OK);
+    thing.Peek();
+    assert.deepEqual(played.seen[1], [5, 6, 7, 8], 'written: the bytes went');
+
+    ram.set([9, 9, 9, 9], /** @type {number} */ (locked.pBits));
+    assert.equal(thing.LockRectAnswered(locked, null, D3DLOCK_READONLY), D3D_OK);
+    assert.equal(thing.UnlockRect(), D3D_OK);
+    thing.Peek();
+    assert.deepEqual(played.seen[2], [5, 6, 7, 8],
+        'read, with no address on record: still nothing went');
 });
 
 test('a method the caller wraps is its own: what it calls through is played once', ()=>{
@@ -156,6 +341,27 @@ test('what the recorded device copies in guest memory is the played device\'s to
     out.thing.Lock(locked);
     out.thing.Unlock();
     assert.deepEqual(played.seen, [[9, 8, 7, 6]]);
+});
+
+test('references the guest took and gave back unseen leave the played count where the'
+    + ' recorded one is', ()=>{
+    const { root, recorded, played } = toyLoop();
+    /** @type {{ thing?: any }} */
+    const out = {};
+    root.CreateCounted(out);
+    const thing = out.thing;
+    // The recorded object's count kept in a word the guest moves itself, as
+    // the guest's AddRef and Release do, never across zero.
+    let word = 0;
+    thing.counter.place({ address: 4, read: ()=>word, write: (/** @type {number} */ value)=>{
+        word = value;
+    } });
+    word += 3;
+    assert.equal(thing.addRef(), 5, 'a reference taken through the host');
+    word -= 4;
+    assert.equal(thing.release(), 0, 'the last one, given back through the host');
+    assert.deepEqual(recorded.seen, ['gone']);
+    assert.deepEqual(played.seen, ['gone'], 'the played object ended with it');
 });
 
 test('a present the played device holds is held for the caller too', async()=>{

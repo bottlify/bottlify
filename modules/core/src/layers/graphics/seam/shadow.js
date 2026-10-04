@@ -5,80 +5,53 @@
  */
 
 /**
- * Device state that a program sets without leaving the guest.
+ * What a device's guest routines read and write without crossing into the
+ * host, and the host's side of it.
  *
- * A program of this era sets render states, transforms and stream bindings
- * hundreds of times a frame, and locks and unlocks a buffer around every
- * draw; every one was a crossing into the host -- a trap, a dispatch and a
- * return -- to store a dword, sixteen floats or a pointer. So the most
- * frequent setters are guest code that writes into a block of guest memory
- * the device owns, and the host reads the block on its way into any method
- * of its own.
+ * A program of this era sets render states, transforms and textures hundreds
+ * of times a frame, draws between them, and locks and unlocks a buffer around
+ * every draw; every one was a crossing into the host -- a trap, a dispatch and
+ * a return. So the setters and the draws are guest code (`commandCode`) that
+ * writes the call into a command ring of the device's, and the host makes the
+ * calls, in order, through the device's own methods, on its way into any
+ * method of its own. The order is what a block of latest values cannot keep
+ * and a draw that waits needs. Space in the ring is taken with `lock
+ * cmpxchg`, and a record counts once its length, written last, is there, so
+ * two threads may share one device's ring.
+ *
+ * The getters that run in the guest -- GetRenderState, and Direct3D 9's
+ * GetTransform and GetTextureStageState -- answer from the device's block.
+ * The command routines of their setters write the value there as they record
+ * the call, and the host writes what it changes on its own -- at creation,
+ * after a reset, after a state block is applied, after MultiplyTransform --
+ * so that the block holds what the device holds.
  *
  * A buffer's storage is guest memory already, so a lock in the guest is an
  * address handed back and a range remembered, and an unlock is the buffer's
  * block appended to a ring in the device's block. The host replays each
- * remembered lock and unlock against the real buffer when it next looks, and
- * that is when the bytes reach the renderer -- before any draw it makes. A
- * lock the guest holds across a crossing is mirrored as a lock the host
- * holds, so a second lock, through either path, is refused the way the real
- * interface refuses it.
+ * remembered lock and unlock against the real buffer when it next looks,
+ * before it makes the calls the command ring holds, so a draw there meets the
+ * bytes the program wrote. A lock the guest holds across a crossing is
+ * mirrored as a lock the host holds, so a second lock, through either path,
+ * is refused the way the real interface refuses it; and while the ring holds
+ * a draw, a lock that may overwrite what the draw reads is the host's, which
+ * makes the draw first.
  *
- * Direct3D 9 goes further: its setters and its draws write each call into a
- * command ring (`commandCode`), and the host makes them, in order, when it
- * next looks -- after the buffers, before anything else. The order is what a
- * block of latest values cannot keep and a draw that waits needs; the block
- * stays for the getters that run in the guest, which the routines keep
- * current. While a draw waits, a lock that may overwrite what it reads is the
- * host's, which makes the draw first.
+ * A texture's level is one surface however often it is asked for, so its
+ * pointer sits in the texture's own block and GetSurfaceLevel in the guest
+ * reads it there. What such a call owes is a reference, and a reference
+ * cannot be taken without the host -- so the guest counts them and the host
+ * charges the count before any reference of that texture is read or given
+ * back.
  *
- * The block is one-way and untrusted. The guest writes it, and nothing the
- * host derives from state -- a pipeline, a shader, a binding -- is keyed on
- * the block directly. On every entry into the host what the guest wrote is
- * compared with the host's own copy, and each difference goes through the
- * same setter the trap would have called, which is where validation and
- * invalidation live. Nothing is taken on the guest's word: a mark or a count
- * the routines leave says only where to look, a mark on a word that did not
- * change costs a comparison, and a word written by other means than the
- * routines is not looked at until one of them marks it -- the device keeps
- * what it was last told, never anything unchecked. The host writes the block
- * only to mirror its own state into it -- at creation, after a state block
- * is applied, after a reset -- so that "unchanged" in the block means
- * "unchanged" on the device.
- *
- * Two things the fast path cannot do stay with the host. While a state block
- * is recording, the block must capture what the program set rather than what
- * changed, so the host raises a flag the fast path checks and falls back on.
- * And a value the device would refuse is refused by the host at the next
- * entry rather than at the call; the program was told success, and the
- * difference is reported as a divergence once.
- *
- * The block also counts the calls it absorbed, because the host no longer
- * sees them and a saving nobody can measure is a belief. It counts them per
- * group and once more in all, and an entry reads the one count first: an
- * entry after no setter reads one word. After some, the host looks at the
- * small groups whose count moved, whole, and at the three large ones --
- * 256 render states, 28 matrices, 256 stage states -- through marks: the
- * routine marks the word or matrix it wrote, a bit each, and the host
- * compares only what is marked. A burst of render states between two draws
- * costs the next draw the states that were set, not a scan of the 256.
- *
- * A getter answers from the block too, where what it answers cannot change:
- * a texture's level is one surface however often it is asked for, so the
- * pointer sits in the texture's own block and the guest reads it. What such a
- * call owes is a reference, and a reference cannot be taken without the host
- * -- so the guest counts them and the host charges the count before any
- * reference of that texture is read or given back.
- *
- * A pointer the guest wrote names an object only while the program holds
- * it. When the last reference goes the host marks every slot still naming
- * that pointer as stale -- in the block and in its copy -- so the device
- * keeps what it had bound, as the runtime does, and a later write of the
- * same pointer, which by then may name a new object, is seen as the change
- * it is.
+ * Nothing is taken on the guest's word. A record the routines could not have
+ * written is refused, a call the device refuses was answered D3D_OK in the
+ * guest and is reported as a divergence, and while a state block records --
+ * when every call has to reach the host as it is made -- the host raises a
+ * flag every routine checks first, and leaves to the trap.
  */
 
-import { D3DERR_INVALIDCALL, D3DTSS } from '../d3d8/constants.js';
+import { D3DERR_INVALIDCALL } from '../d3d8/constants.js';
 
 /**
  * The block takes pages of its own. The routines that write it are guest
@@ -94,109 +67,56 @@ const PAGES = 2;
 export const SHADOW = {
     /** Bit 0 set by the host: take the slow path. */
     FLAGS: 0,
-    /** Fast-path SetRenderState calls, counted by the guest. */
-    RENDER_STATE_CALLS: 4,
-    /** Fast-path SetTransform calls, counted by the guest. */
-    TRANSFORM_CALLS: 8,
-    /**
-     * Every call the routines take, counted once more: the one word an entry
-     * reads when nothing was set.
-     */
-    CALLS: 12,
-    /** 256 dwords, one per D3DRENDERSTATETYPE below 256. */
-    RENDER_STATES: 16,
-    RENDER_STATE_COUNT: 256,
-    /** 28 matrices of 16 floats: types 0..23 as they are, then WORLD..WORLD3. */
-    TRANSFORMS: 16 + 256 * 4,
-    TRANSFORM_SLOTS: 28,
-    /** Fast-path SetStreamSource, SetIndices and SetVertexShader calls. */
-    BINDING_CALLS: 2832,
-    /** Fast-path buffer locks and unlocks. */
-    LOCK_CALLS: 2836,
-    UNLOCK_CALLS: 2840,
-    /** How many buffer blocks the ring holds: raised by an unlock, zeroed by the host. */
-    RING_HEAD: 2844,
-    /** 16 streams of { buffer pointer, stride }. */
-    STREAMS: 2848,
-    STREAM_COUNT: 16,
-    INDICES: 2976,
-    BASE_VERTEX: 2980,
-    VERTEX_SHADER: 2984,
-    /** The buffers unlocked since the host last looked, as their block addresses. */
-    RING: 2988,
-    RING_CAPACITY: 64,
-    /** Fast-path SetTexture, SetTextureStageState and SetMaterial calls. */
-    TEXTURE_CALLS: 3244,
-    STAGE_STATE_CALLS: 3248,
-    MATERIAL_CALLS: 3252,
-    /** 8 texture pointers, one per stage. */
-    TEXTURES: 3256,
-    STAGE_COUNT: 8,
-    /** D3DMATERIAL8: four colours of four floats and a power. */
-    MATERIAL: 3288,
-    MATERIAL_WORDS: 17,
-    /** 8 stages of 32 dwords, one per D3DTEXTURESTAGESTATETYPE below 32. */
-    STAGE_STATES: 3356,
-    STAGE_STATE_STRIDE: 32,
-    /**
-     * The marks: a bit per word or matrix the guest wrote since the host last
-     * looked. 256 bits over 8 dwords for the render states, one dword for
-     * the 28 matrices, and a dword per stage for the stage states. One run,
-     * so the host clears them all with one write.
-     */
-    MARKS: 4380,
-    RENDER_STATE_MARKS: 4380,
-    TRANSFORM_MARKS: 4412,
-    STAGE_STATE_MARKS: 4416,
-    MARK_WORDS: 17,
-    /**
-     * A bit per render state the device answers for, set by the host when it
-     * mirrors: the getter answers those from the block and leaves the rest,
-     * which the device refuses, to the host.
-     */
-    RENDER_STATE_VALID: 4448,
     /**
      * The command ring (`commandCode`): where it is, how many bytes it
      * holds, and how many of them the guest has written -- zero where the
      * device has none, which sends every command to the host. The host
      * keeps how far it has read; the guest only ever adds to the head.
      */
-    COMMANDS: 4480,
-    COMMAND_BYTES: 4484,
-    COMMAND_HEAD: 4488,
+    COMMANDS: 4,
+    COMMAND_BYTES: 8,
+    COMMAND_HEAD: 12,
     /**
      * Raised by a draw the ring holds, cleared by the host when it takes the
      * ring: while it is up, a lock in the guest that may overwrite what a
      * draw reads is the host's.
      */
-    DRAWS_PENDING: 4492,
-    SIZE: 4496,
+    DRAWS_PENDING: 16,
+    /** Buffer locks and unlocks taken in the guest, counted by the routines. */
+    LOCK_CALLS: 20,
+    UNLOCK_CALLS: 24,
+    /** How many buffer blocks the ring holds: raised by an unlock, zeroed by the host. */
+    RING_HEAD: 28,
+    /** The buffers unlocked since the host last looked, as their block addresses. */
+    RING: 32,
+    RING_CAPACITY: 64,
+    /** 256 dwords, one per D3DRENDERSTATETYPE below 256. */
+    RENDER_STATES: 32 + 64 * 4,
+    RENDER_STATE_COUNT: 256,
+    /**
+     * A bit per render state the device answers for, set by the host when it
+     * mirrors: the getter answers those from the block and leaves the rest,
+     * which the device refuses, to the host.
+     */
+    RENDER_STATE_VALID: 288 + 256 * 4,
+    /** 28 matrices of 16 floats: types 0..23 as they are, then WORLD..WORLD3. */
+    TRANSFORMS: 1312 + 256 / 8,
+    TRANSFORM_SLOTS: 28,
+    /** 8 stages of 32 dwords, one per D3DTEXTURESTAGESTATETYPE below 32. */
+    STAGE_STATES: 1344 + 28 * 64,
+    STAGE_COUNT: 8,
+    STAGE_STATE_STRIDE: 32,
+    /** The viewport, as D3DVIEWPORT8 and 9 both lay it out: six dwords. */
+    VIEWPORT: 3136 + 8 * 32 * 4,
+    /** 16 samplers of 16 dwords, one per D3DSAMPLERSTATETYPE below 16. */
+    SAMPLER_STATES: 4160 + 6 * 4,
+    SAMPLER_COUNT: 16,
+    SAMPLER_STATE_STRIDE: 16,
+    SIZE: 4184 + 16 * 16 * 4,
 };
 
 /** A command's head: the method's slot, and the record's length in bytes, its own included. */
 export const COMMAND = { SLOT: 0, BYTES: 4, ARGS: 8 };
-
-/**
- * A pointer slot whose object the program let go of. Not an address a
- * program can hold, so a slot reading it was written by the host, and a slot
- * that still reads it was not written by the program since.
- */
-export const STALE_POINTER = 0xffffffff;
-
-/** The counters, in the order the host keeps its copy of them. */
-const COUNTERS = [
-    SHADOW.RENDER_STATE_CALLS, SHADOW.TRANSFORM_CALLS, SHADOW.BINDING_CALLS, SHADOW.LOCK_CALLS,
-    SHADOW.UNLOCK_CALLS, SHADOW.RING_HEAD, SHADOW.TEXTURE_CALLS, SHADOW.STAGE_STATE_CALLS,
-    SHADOW.MATERIAL_CALLS,
-];
-const [RENDER_STATE_GROUP, TRANSFORM_GROUP, BINDING_GROUP, LOCK_GROUP, UNLOCK_GROUP,
-    RING_GROUP, TEXTURE_GROUP, STAGE_STATE_GROUP, MATERIAL_GROUP] = COUNTERS.keys();
-
-/**
- * The stage state types this version has, as a bit per type: the guest
- * routine takes those and leaves the rest to the host, which refuses them.
- */
-const STAGE_STATE_TYPES = Object.values(D3DTSS).reduce((mask, type)=>mask | (1 << type), 0) >>> 0;
 
 /** Byte offsets within a buffer's block, which the device's block points at through a ring. */
 export const BUFFER = {
@@ -233,28 +153,137 @@ export const TEXTURE = {
     /** How many levels the texture has; a level past them is refused here. */
     LEVEL_COUNT: 4,
     /**
-     * Levels handed out by the guest routine, counted by it. Each is a
-     * reference the program owns and the host has not charged yet.
+     * Where the texture's count is kept in the guest (`seam/com.js`,
+     * `createCountCells`), which the routine takes the reference a level
+     * owes in; zero sends every level to the host.
      */
-    REFS: 8,
+    COUNT: 8,
     /** A pointer per level, zero for one the host has not published yet. */
     LEVELS: 12,
     LEVEL_SLOTS: 16,
     SIZE: 12 + 16 * 4,
 };
 
+/**
+ * Byte offsets within a surface's block: its description, which nothing
+ * changes while the surface lives, so GetDesc is answered from it.
+ */
+export const SURFACE = {
+    /** Bit 0 set by the host: take the slow path. */
+    FLAGS: 0,
+    /** D3DSURFACE_DESC, as the version lays it out. */
+    DESC: 4,
+    SIZE: 4 + 8 * 4,
+};
+
 export const FLAG_SLOW_PATH = 1;
+/**
+ * Bit 1, set by a state block's Apply in the ring: what the block mirrors may
+ * be what the device held before it, so the getters go to the host, which
+ * plays the ring, mirrors what the applied blocks hold and clears the bit.
+ * The setters and draws go on through the ring.
+ */
+export const FLAG_STALE = 2;
 
 /**
  * The command ring's size, and how near its end the host starts it over:
  * more than the longest record a routine writes, so that a routine that
  * found no room is always followed by a start over.
  */
-const COMMAND_RING_BYTES = 64 * 1024;
-const COMMAND_SLACK = 8 * 1024;
+export const COMMAND_RING_BYTES = 64 * 1024;
+const COMMAND_SLACK = 20 * 1024;
 
-/** What the host clears the marks and the ring's head with; never written to. */
-const ZERO_MARKS = new Uint8Array(SHADOW.MARK_WORDS * 4);
+/**
+ * Writes an empty command ring into a block: `ring` is pages of its own,
+ * zeroed so that a length is only ever a finished record's.
+ *
+ * @param {number} block @param {number} ring
+ * @param {(address: number, bytes: Uint8Array) => void} writeMemory
+ */
+export function placeCommandRing(block, ring, writeMemory){
+    writeMemory(ring, new Uint8Array(COMMAND_RING_BYTES));
+    const header = new Uint32Array([ring, COMMAND_RING_BYTES]);
+    writeMemory(block + SHADOW.COMMANDS, new Uint8Array(header.buffer));
+}
+
+/**
+ * The host's end of a command ring (`commandCode`): what the guest wrote into
+ * it since the host last read it, handed to `take` in order -- every record
+ * whose length is there, up to the first one a routine has taken the space
+ * for and not yet finished. The head is the guest's; the host starts the ring
+ * over -- zeroing what it read, so that a length is only ever a finished
+ * record's -- once it has read everything up to a head near the end.
+ *
+ * @param {Object} deps
+ * @param {number} deps.block @param {number} deps.ring
+ * @param {(address: number) => number} deps.readWord
+ * @param {(address: number, words: number) => Uint32Array} deps.readWords
+ * @param {(address: number, bytes: Uint8Array) => void} deps.writeMemory
+ * @param {(records: Uint8Array) => number} deps.take  makes the calls, says how many
+ * @param {(detail: string) => void} deps.refuse
+ */
+export function createCommandReader(deps){
+    const { block, ring, readWord, readWords, writeMemory, take, refuse } = deps;
+    let tail = 0;
+    let taken = 0;
+    const zero = new Uint8Array(4);
+    return {
+        take(){
+            if (readWord(block + SHADOW.DRAWS_PENDING) !== 0)
+            {
+                // Lowered before the head is read: a draw written after this
+                // raises it again, and one before it is read now.
+                writeMemory(block + SHADOW.DRAWS_PENDING, zero);
+            }
+            const head = readWord(block + SHADOW.COMMAND_HEAD);
+            if (head === tail)
+            {
+                return;
+            }
+            if (head < tail || head > COMMAND_RING_BYTES)
+            {
+                refuse('the command ring\'s head went back');
+                tail = head;
+                return;
+            }
+            const words = readWords(ring + tail, (head - tail) >>> 2);
+            let whole = 0;
+            while (whole < words.length)
+            {
+                const length = words[whole + (COMMAND.BYTES >>> 2)] >>> 2;
+                if (length === 0)
+                {
+                    break;
+                }
+                if (length < (COMMAND.ARGS >>> 2) || whole + length > words.length)
+                {
+                    refuse('a command record the routines could not have written');
+                    whole = words.length;
+                    break;
+                }
+                whole += length;
+            }
+            if (whole > 0)
+            {
+                taken += take(new Uint8Array(words.buffer, words.byteOffset, whole * 4));
+            }
+            tail += whole * 4;
+            if (tail === head && head > COMMAND_RING_BYTES - COMMAND_SLACK)
+            {
+                // A routine between reading the head and taking its space finds
+                // the head moved and takes it again, from the start.
+                writeMemory(ring, new Uint8Array(head));
+                writeMemory(block + SHADOW.COMMAND_HEAD, zero);
+                tail = 0;
+            }
+        },
+        /** How many calls the ring has carried. */
+        taken: ()=>taken,
+    };
+}
+
+/** What the host clears a word of the block with; never written to. */
+const ZERO_WORD = new Uint8Array(4);
 
 /** A lock for reading has nothing to remember; the host takes it. */
 const D3DLOCK_READONLY = 0x10;
@@ -373,14 +402,42 @@ const jump = (from, to)=>[0xe9, ...dword((to - (from + 5)) | 0)];
  * @param {string} [slow]  The label those two cases go to.
  * @returns {(number[] | { jcc: number, to: string })[]}
  */
-const prologue = (slow = 'slow')=>[
+const prologue = (slow = 'slow', flags = FLAG_SLOW_PATH)=>[
     [0x8b, 0x4c, 0x24, 0x04],                                // mov ecx, [esp+4]
     [0x8b, 0x49, 0x04],                                      // mov ecx, [ecx+4]
+    [0x85, 0xc9],                                            // test ecx, ecx
+    { jcc: 0x74, to: slow },                                 // jz slow
+    [0xf7, 0x01, ...dword(flags)],                           // test dword [ecx], flags
+    { jcc: 0x75, to: slow },                                 // jnz slow
+];
+
+/** A getter's prologue: a block the ring may have made stale is the host's too. */
+const getterPrologue = ()=>prologue('slow', FLAG_SLOW_PATH | FLAG_STALE);
+
+/**
+ * The prologue of a function rather than a method: the block is the calling
+ * thread's, in its TEB where Windows keeps the thread's current OpenGL
+ * context (`GlContext`), written by the host when a context is made current.
+ *
+ *     mov ecx, fs:[TEB_GL_CONTEXT]
+ *     test ecx, ecx
+ *     jz slow                     ; no context current: the host's
+ *     test dword [ecx], 1
+ *     jnz slow
+ *
+ * @param {string} [slow]
+ * @returns {(number[] | { jcc: number, to: string })[]}
+ */
+const threadPrologue = (slow = 'slow')=>[
+    [0x64, 0x8b, 0x0d, ...dword(TEB_GL_CONTEXT)],            // mov ecx, fs:[disp]
     [0x85, 0xc9],                                            // test ecx, ecx
     { jcc: 0x74, to: slow },                                 // jz slow
     [0xf7, 0x01, ...dword(FLAG_SLOW_PATH)],                  // test dword [ecx], 1
     { jcc: 0x75, to: slow },                                 // jnz slow
 ];
+
+/** Where a thread's block is in its TEB: the slot Windows keeps its GL context in. */
+export const TEB_GL_CONTEXT = 0xbf0;
 
 /**
  * A routine's bytes: its body, then the jump to the trap its slow label
@@ -393,74 +450,6 @@ const routine = (at, trap, parts)=>{
     const body = assemble([...parts, { label: 'slow' }]);
     return new Uint8Array([...body, ...jump(at + body.length, trap)]);
 };
-
-/**
- * `bts [ecx + marks], eax`: marks word `eax` of a group as written. With a
- * register offset into memory, `bts` addresses a string of bits, so the
- * index is the bit whatever dword of the marks it falls in.
- *
- * A routine marks after it writes and counts after it marks. Another thread
- * can enter the host between any two of its instructions, and the host
- * adopts every word marked when it looks and clears every mark: a word is
- * marked only once it holds the value, so a mark adopted early adopts that
- * value, and a count that comes after its word was adopted finds it done.
- *
- * @param {number} marks  The group's marks, as an offset in the block.
- * @returns {number[]}
- */
-const mark = marks=>[0x0f, 0xab, 0x81, ...dword(marks)];
-
-/**
- * `inc dword [reg + CALLS]`, a routine's last write: the call counted where
- * an entry looks first. The register holds the device's block.
- *
- * @param {number} reg  1 for ECX, 2 for EDX, 3 for EBX.
- * @returns {number[]}
- */
-const counted = reg=>[0xff, 0x40 | reg, SHADOW.CALLS];
-
-/**
- * HRESULT SetRenderState(this, D3DRENDERSTATETYPE state, DWORD value), as
- * guest code. The block is one word past `this`.
- *
- *     mov ecx, [esp+4]            ; this
- *     mov ecx, [ecx+4]            ; the block
- *     test ecx, ecx
- *     jz slow                     ; no block: the host's
- *     test dword [ecx], 1         ; the host wants the slow path?
- *     jnz slow
- *     mov eax, [esp+8]            ; state
- *     cmp eax, 256
- *     jae slow                    ; not a state the block holds
- *     mov edx, [esp+12]           ; value
- *     mov [ecx + eax*4 + RENDER_STATES], edx
- *     bts [ecx + RENDER_STATE_MARKS], eax
- *     inc dword [ecx + RENDER_STATE_CALLS]
- *     inc dword [ecx + CALLS]
- *     xor eax, eax                ; D3D_OK
- *     ret 12
- *   slow:
- *     jmp trap
- *
- * @param {number} at    Where these bytes will live.
- * @param {number} trap  The method's own trap.
- * @returns {Uint8Array}
- */
-export function setRenderStateCode(at, trap){
-    return routine(at, trap, [
-        ...prologue(),
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0x3d, ...dword(SHADOW.RENDER_STATE_COUNT)],             // cmp eax, 256
-        { jcc: 0x73, to: 'slow' },                               // jae slow
-        [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
-        [0x89, 0x94, 0x81, ...dword(SHADOW.RENDER_STATES)],      // mov [ecx+eax*4+disp], edx
-        mark(SHADOW.RENDER_STATE_MARKS),                         // bts [ecx+disp], eax
-        [0xff, 0x41, SHADOW.RENDER_STATE_CALLS],                 // inc dword [ecx+4]
-        counted(1),                                              // inc dword [ecx+12]
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x0c, 0x00],                                      // ret 12
-    ]);
-}
 
 /**
  * HRESULT GetRenderState(this, D3DRENDERSTATETYPE state, DWORD *value), as
@@ -490,7 +479,7 @@ export function setRenderStateCode(at, trap){
  */
 export function getRenderStateCode(at, trap){
     return routine(at, trap, [
-        ...prologue(),
+        ...getterPrologue(),
         [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
         [0x3d, ...dword(SHADOW.RENDER_STATE_COUNT)],             // cmp eax, 256
         { jcc: 0x73, to: 'slow' },                               // jae slow
@@ -503,84 +492,6 @@ export function getRenderStateCode(at, trap){
         [0x89, 0x02],                                            // mov [edx], eax
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 12, 0x00],                                        // ret 12
-    ]);
-}
-
-/**
- * HRESULT SetTransform(this, D3DTRANSFORMSTATETYPE type, const D3DMATRIX*),
- * as guest code. Copies the sixteen floats into the type's slot.
- *
- *     mov ecx, [esp+4]
- *     mov ecx, [ecx+4]
- *     test ecx, ecx
- *     jz slow
- *     test dword [ecx], 1
- *     jnz slow
- *     mov eax, [esp+8]            ; type
- *     cmp eax, 24
- *     jb slot
- *     sub eax, 232                ; WORLD..WORLD3 -> 24..27; anything else out of range
- *     cmp eax, 24
- *     jb slow
- *     cmp eax, 28
- *     jae slow
- *   slot:
- *     mov edx, [esp+12]           ; the matrix
- *     test edx, edx
- *     jz slow                     ; NULL is refused by the host
- *     push esi
- *     push edi
- *     mov esi, edx
- *     mov edi, eax
- *     shl edi, 6                  ; slot * 64
- *     lea edi, [ecx + edi + TRANSFORMS]
- *     mov edx, ecx                ; the block, kept across the copy
- *     mov ecx, 16
- *     rep movsd
- *     bts [edx + TRANSFORM_MARKS], eax   ; the slot, once it holds the matrix
- *     inc dword [edx + TRANSFORM_CALLS]
- *     inc dword [edx + CALLS]
- *     pop edi
- *     pop esi
- *     xor eax, eax
- *     ret 12                      ; this, the type and the matrix pointer
- *   slow:
- *     jmp trap
- *
- * @param {number} at @param {number} trap
- * @returns {Uint8Array}
- */
-export function setTransformCode(at, trap){
-    return routine(at, trap, [
-        ...prologue(),
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0x3d, ...dword(WORLD_SLOT)],                            // cmp eax, 24
-        { jcc: 0x72, to: 'slot' },                               // jb slot
-        [0x2d, ...dword(WORLD_TYPE - WORLD_SLOT)],               // sub eax, 232
-        [0x3d, ...dword(WORLD_SLOT)],                            // cmp eax, 24
-        { jcc: 0x72, to: 'slow' },                               // jb slow
-        [0x3d, ...dword(SHADOW.TRANSFORM_SLOTS)],                // cmp eax, 28
-        { jcc: 0x73, to: 'slow' },                               // jae slow
-        { label: 'slot' },
-        [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
-        [0x85, 0xd2],                                            // test edx, edx
-        { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x56],                                                  // push esi
-        [0x57],                                                  // push edi
-        [0x89, 0xd6],                                            // mov esi, edx
-        [0x89, 0xc7],                                            // mov edi, eax
-        [0xc1, 0xe7, 0x06],                                      // shl edi, 6
-        [0x8d, 0xbc, 0x39, ...dword(SHADOW.TRANSFORMS)],         // lea edi, [ecx+edi+disp]
-        [0x89, 0xca],                                            // mov edx, ecx
-        [0xb9, ...dword(16)],                                    // mov ecx, 16
-        [0xf3, 0xa5],                                            // rep movsd
-        [0x0f, 0xab, 0x82, ...dword(SHADOW.TRANSFORM_MARKS)],    // bts [edx+disp], eax
-        [0xff, 0x42, SHADOW.TRANSFORM_CALLS],                    // inc dword [edx+8]
-        counted(2),                                              // inc dword [edx+12]
-        [0x5f],                                                  // pop edi
-        [0x5e],                                                  // pop esi
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x0c, 0x00],                                      // ret 12
     ]);
 }
 
@@ -649,7 +560,6 @@ export function setTransformCode(at, trap){
  *     mov dword [ecx+LOCKED], 1
  *     mov ebx, [ecx+DEVICE]
  *     inc dword [ebx+LOCK_CALLS]
- *     inc dword [ebx+CALLS]
  *     pop ebx
  *     xor eax, eax
  *     ret 20
@@ -713,7 +623,6 @@ export function lockCode(at, trap){
         [0xc7, 0x41, BUFFER.LOCKED, ...dword(1)],                // mov dword [ecx+12], 1
         [0x8b, 0x59, BUFFER.DEVICE],                             // mov ebx, [ecx+28]
         [0xff, 0x83, ...dword(SHADOW.LOCK_CALLS)],               // inc dword [ebx+disp]
-        counted(3),                                              // inc dword [ebx+12]
         [0x5b],                                                  // pop ebx
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x14, 0x00],                                      // ret 20
@@ -735,7 +644,6 @@ export function lockCode(at, trap){
  *     inc dword [edx+RING_HEAD]
  *     mov dword [ecx+LOCKED], 0
  *     inc dword [edx+UNLOCK_CALLS]
- *     inc dword [edx+CALLS]
  *     xor eax, eax
  *     ret 4
  *
@@ -755,95 +663,8 @@ export function unlockCode(at, trap){
         [0xff, 0x82, ...dword(SHADOW.RING_HEAD)],                // inc dword [edx+disp]
         [0xc7, 0x41, BUFFER.LOCKED, ...dword(0)],                // mov dword [ecx+12], 0
         [0xff, 0x82, ...dword(SHADOW.UNLOCK_CALLS)],             // inc dword [edx+disp]
-        counted(2),                                              // inc dword [edx+12]
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x04, 0x00],                                      // ret 4
-    ]);
-}
-
-/**
- * HRESULT SetStreamSource(this, UINT index, IDirect3DVertexBuffer8*, UINT
- * stride), as guest code. Unbinding is the host's, the block untouched: the
- * device keeps the stride a null buffer comes with, so a bind just before it,
- * which did set the stride, has to reach the device first -- and the host
- * adopts the block before any call it takes.
- *
- *     mov eax, [esp+8]            ; index
- *     cmp eax, STREAM_COUNT
- *     jae slow
- *     mov edx, [esp+12]           ; the buffer
- *     test edx, edx
- *     jz slow
- *     mov [ecx + eax*8 + STREAMS], edx
- *     mov edx, [esp+16]           ; stride
- *     mov [ecx + eax*8 + STREAMS + 4], edx
- *     inc dword [ecx+BINDING_CALLS]
- *     inc dword [ecx+CALLS]
- *     xor eax, eax
- *     ret 16
- *
- * @param {number} at @param {number} trap
- * @returns {Uint8Array}
- */
-export function setStreamSourceCode(at, trap){
-    return routine(at, trap, [
-        ...prologue(),
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0x3d, ...dword(SHADOW.STREAM_COUNT)],                   // cmp eax, 16
-        { jcc: 0x73, to: 'slow' },                               // jae slow
-        [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
-        [0x85, 0xd2],                                            // test edx, edx
-        { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x89, 0x94, 0xc1, ...dword(SHADOW.STREAMS)],            // mov [ecx+eax*8+disp], edx
-        [0x8b, 0x54, 0x24, 0x10],                                // mov edx, [esp+16]
-        [0x89, 0x94, 0xc1, ...dword(SHADOW.STREAMS + 4)],        // mov [ecx+eax*8+disp+4], edx
-        [0xff, 0x81, ...dword(SHADOW.BINDING_CALLS)],            // inc dword [ecx+disp]
-        counted(1),                                              // inc dword [ecx+12]
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x10, 0x00],                                      // ret 16
-    ]);
-}
-
-/**
- * HRESULT SetIndices(this, IDirect3DIndexBuffer8*, UINT baseVertexIndex),
- * as guest code.
- *
- * @param {number} at @param {number} trap
- * @returns {Uint8Array}
- */
-export function setIndicesCode(at, trap){
-    return routine(at, trap, [
-        ...prologue(),
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0x89, 0x81, ...dword(SHADOW.INDICES)],                  // mov [ecx+disp], eax
-        [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
-        [0x89, 0x81, ...dword(SHADOW.BASE_VERTEX)],              // mov [ecx+disp], eax
-        [0xff, 0x81, ...dword(SHADOW.BINDING_CALLS)],            // inc dword [ecx+disp]
-        counted(1),                                              // inc dword [ecx+12]
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x0c, 0x00],                                      // ret 12
-    ]);
-}
-
-/**
- * HRESULT SetVertexShader(this, DWORD handle), as guest code. A vertex
- * format is taken; a shader handle has bit zero set and is the host's,
- * which knows whether it is live.
- *
- * @param {number} at @param {number} trap
- * @returns {Uint8Array}
- */
-export function setVertexShaderCode(at, trap){
-    return routine(at, trap, [
-        ...prologue(),
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0xa8, 0x01],                                            // test al, 1
-        { jcc: 0x75, to: 'slow' },                               // jnz slow
-        [0x89, 0x81, ...dword(SHADOW.VERTEX_SHADER)],            // mov [ecx+disp], eax
-        [0xff, 0x81, ...dword(SHADOW.BINDING_CALLS)],            // inc dword [ecx+disp]
-        counted(1),                                              // inc dword [ecx+12]
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x08, 0x00],                                      // ret 8
     ]);
 }
 
@@ -863,93 +684,6 @@ const invalidTail = popped=>[
     [0xb8, ...dword(D3DERR_INVALIDCALL)],                        // mov eax, D3DERR_INVALIDCALL
     [0xc2, popped, 0x00],                                        // ret n
 ];
-
-/**
- * HRESULT SetTexture(this, DWORD stage, IDirect3DBaseTexture8*), as guest
- * code. The pointer is stored as it is; the host turns it into the object it
- * names when it next looks, and refuses one that names nothing. A stage past
- * the block's eight is invalid.
- *
- *     mov eax, [esp+8]            ; stage
- *     cmp eax, 8
- *     jae invalid
- *     mov edx, [esp+12]           ; the texture
- *     mov [ecx + eax*4 + TEXTURES], edx
- *     inc dword [ecx+TEXTURE_CALLS]
- *     inc dword [ecx+CALLS]
- *     xor eax, eax
- *     ret 12
- *
- * @param {number} at @param {number} trap
- * @returns {Uint8Array}
- */
-export function setTextureCode(at, trap){
-    return routine(at, trap, [
-        ...prologue(),
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0x3d, ...dword(SHADOW.STAGE_COUNT)],                    // cmp eax, 8
-        { jcc: 0x73, to: 'invalid' },                            // jae invalid
-        [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
-        [0x89, 0x94, 0x81, ...dword(SHADOW.TEXTURES)],           // mov [ecx+eax*4+disp], edx
-        [0xff, 0x81, ...dword(SHADOW.TEXTURE_CALLS)],            // inc dword [ecx+disp]
-        counted(1),                                              // inc dword [ecx+12]
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x0c, 0x00],                                      // ret 12
-        ...invalidTail(12),
-    ]);
-}
-
-/**
- * HRESULT SetTextureStageState(this, DWORD stage, D3DTEXTURESTAGESTATETYPE
- * type, DWORD value), as guest code. A type this version has not got is the
- * host's, which refuses it; a stage past the last is refused here.
- *
- *     mov eax, [esp+12]           ; type
- *     cmp eax, 32
- *     jae slow
- *     mov edx, STAGE_STATE_TYPES
- *     bt edx, eax
- *     jnc slow                    ; not a type of this version
- *     mov eax, [esp+8]            ; stage
- *     cmp eax, 8
- *     jae invalid
- *     shl eax, 5                  ; stage * 32
- *     add eax, [esp+12]           ; + type
- *     mov edx, [esp+16]           ; value
- *     mov [ecx + eax*4 + STAGE_STATES], edx
- *     bts [ecx + STAGE_STATE_MARKS], eax  ; the stage's dword, the type's bit
- *     inc dword [ecx+STAGE_STATE_CALLS]
- *     inc dword [ecx+CALLS]
- *     xor eax, eax
- *     ret 16
- *
- * @param {number} at @param {number} trap
- * @returns {Uint8Array}
- */
-export function setTextureStageStateCode(at, trap){
-    return routine(at, trap, [
-        ...prologue(),
-        [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
-        [0x3d, ...dword(SHADOW.STAGE_STATE_STRIDE)],             // cmp eax, 32
-        { jcc: 0x73, to: 'slow' },                               // jae slow
-        [0xba, ...dword(STAGE_STATE_TYPES)],                     // mov edx, imm32
-        [0x0f, 0xa3, 0xc2],                                      // bt edx, eax
-        { jcc: 0x73, to: 'slow' },                               // jnc slow
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0x3d, ...dword(SHADOW.STAGE_COUNT)],                    // cmp eax, 8
-        { jcc: 0x73, to: 'invalid' },                            // jae invalid
-        [0xc1, 0xe0, 0x05],                                      // shl eax, 5
-        [0x03, 0x44, 0x24, 0x0c],                                // add eax, [esp+12]
-        [0x8b, 0x54, 0x24, 0x10],                                // mov edx, [esp+16]
-        [0x89, 0x94, 0x81, ...dword(SHADOW.STAGE_STATES)],       // mov [ecx+eax*4+disp], edx
-        mark(SHADOW.STAGE_STATE_MARKS),                          // bts [ecx+disp], eax
-        [0xff, 0x81, ...dword(SHADOW.STAGE_STATE_CALLS)],        // inc dword [ecx+disp]
-        counted(1),                                              // inc dword [ecx+12]
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x10, 0x00],                                      // ret 16
-        ...invalidTail(16),
-    ]);
-}
 
 /** The transform types below WORLD a device answers for: VIEW, PROJECTION, TEXTURE0..7. */
 const ANSWERED_TRANSFORMS = (1 << 2 | 1 << 3 | 0xff << 16) >>> 0;
@@ -999,7 +733,7 @@ const ANSWERED_TRANSFORMS = (1 << 2 | 1 << 3 | 0xff << 16) >>> 0;
  */
 export function getTransformCode(at, trap){
     return routine(at, trap, [
-        ...prologue(),
+        ...getterPrologue(),
         [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
         [0x3d, ...dword(WORLD_SLOT)],                            // cmp eax, 24
         { jcc: 0x72, to: 'low' },                                // jb low
@@ -1034,11 +768,11 @@ export function getTransformCode(at, trap){
 
 /**
  * HRESULT GetTextureStageState(this, DWORD stage, D3DTEXTURESTAGESTATETYPE
- * type, DWORD *value), as guest code: a type the version's setter takes is
- * kept in the block, where the guest's own writes land and the host mirrors
- * every change it makes itself, so the answer is read there. A stage past the
- * block, a type the setter leaves to the host, a null pointer and the host's
- * flag go to the host.
+ * type, DWORD *value), as guest code: a type the version has is kept in the
+ * block, where the setter's command routine writes it (`stageStateMirror`)
+ * and the host mirrors every change it makes itself, so the answer is read
+ * there. A stage past the block, a type the version has not got, a null
+ * pointer and the host's flag go to the host.
  *
  *     (prologue)
  *     mov eax, [esp+12]           ; type
@@ -1063,12 +797,12 @@ export function getTransformCode(at, trap){
  *     jmp trap
  *
  * @param {number} at @param {number} trap
- * @param {number} [types]  The stage state types the setter takes, Direct3D 8's by default.
+ * @param {number} types  The version's stage state types below 32, a bit each.
  * @returns {Uint8Array}
  */
-export function getTextureStageStateCode(at, trap, types = STAGE_STATE_TYPES){
+export function getTextureStageStateCode(at, trap, types){
     return routine(at, trap, [
-        ...prologue(),
+        ...getterPrologue(),
         [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
         [0x3d, ...dword(SHADOW.STAGE_STATE_STRIDE)],             // cmp eax, 32
         { jcc: 0x73, to: 'slow' },                               // jae slow
@@ -1091,50 +825,138 @@ export function getTextureStageStateCode(at, trap, types = STAGE_STATE_TYPES){
 }
 
 /**
- * HRESULT SetMaterial(this, const D3DMATERIAL8*), as guest code. Copies the
- * seventeen floats into the block; a null pointer is the host's to refuse.
- * The call is counted once the copy is done, so that an entry another
- * thread makes during it does not take half a material as the whole.
+ * HRESULT GetViewport(this, D3DVIEWPORT *out), as guest code: the block
+ * holds the device's viewport, which SetViewport's routine keeps and the
+ * host mirrors whenever it changes it itself (a render target, a reset, a
+ * state block). A null pointer and the host's flag go to the host.
  *
- *     mov edx, [esp+8]            ; the material
+ *     (prologue)
+ *     mov edx, [esp+8]            ; out
  *     test edx, edx
  *     jz slow
  *     push esi
  *     push edi
- *     mov esi, edx
- *     lea edi, [ecx + MATERIAL]
- *     mov edx, ecx                ; the block, kept across the copy
- *     mov ecx, 17
+ *     lea esi, [ecx + VIEWPORT]
+ *     mov edi, edx
+ *     mov ecx, 6
  *     rep movsd
- *     inc dword [edx+MATERIAL_CALLS]
- *     inc dword [edx+CALLS]
  *     pop edi
  *     pop esi
- *     xor eax, eax
+ *     xor eax, eax                ; D3D_OK
  *     ret 8
  *
  * @param {number} at @param {number} trap
  * @returns {Uint8Array}
  */
-export function setMaterialCode(at, trap){
+export function getViewportCode(at, trap){
+    return routine(at, trap, [
+        ...getterPrologue(),
+        [0x8b, 0x54, 0x24, 0x08],                                // mov edx, [esp+8]
+        [0x85, 0xd2],                                            // test edx, edx
+        { jcc: 0x74, to: 'slow' },                               // jz slow
+        [0x56, 0x57],                                            // push esi; push edi
+        [0x8d, 0xb1, ...dword(SHADOW.VIEWPORT)],                 // lea esi, [ecx+disp]
+        [0x89, 0xd7],                                            // mov edi, edx
+        [0xb9, ...dword(6)],                                     // mov ecx, 6
+        [0xf3, 0xa5],                                            // rep movsd
+        [0x5f, 0x5e],                                            // pop edi; pop esi
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, 0x08, 0x00],                                      // ret 8
+    ]);
+}
+
+/**
+ * HRESULT GetDesc(this, D3DSURFACE_DESC *out), as guest code for a surface:
+ * the description out of the surface's block. A null pointer is the host's.
+ *
+ *     (prologue)
+ *     mov edx, [esp+8]            ; out
+ *     test edx, edx
+ *     jz slow
+ *     push esi
+ *     push edi
+ *     lea esi, [ecx + DESC]
+ *     mov edi, edx
+ *     mov ecx, 8
+ *     rep movsd
+ *     pop edi
+ *     pop esi
+ *     xor eax, eax                ; D3D_OK
+ *     ret 8
+ *
+ * @param {number} at @param {number} trap
+ * @returns {Uint8Array}
+ */
+export function getSurfaceDescCode(at, trap){
     return routine(at, trap, [
         ...prologue(),
         [0x8b, 0x54, 0x24, 0x08],                                // mov edx, [esp+8]
         [0x85, 0xd2],                                            // test edx, edx
         { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x56],                                                  // push esi
-        [0x57],                                                  // push edi
-        [0x89, 0xd6],                                            // mov esi, edx
-        [0x8d, 0xb9, ...dword(SHADOW.MATERIAL)],                 // lea edi, [ecx+disp]
-        [0x89, 0xca],                                            // mov edx, ecx
-        [0xb9, ...dword(SHADOW.MATERIAL_WORDS)],                 // mov ecx, 17
+        [0x56, 0x57],                                            // push esi; push edi
+        [0x8d, 0x71, SURFACE.DESC],                              // lea esi, [ecx+4]
+        [0x89, 0xd7],                                            // mov edi, edx
+        [0xb9, ...dword((SURFACE.SIZE - SURFACE.DESC) / 4)],     // mov ecx, 8
         [0xf3, 0xa5],                                            // rep movsd
-        [0xff, 0x82, ...dword(SHADOW.MATERIAL_CALLS)],           // inc dword [edx+disp]
-        counted(2),                                              // inc dword [edx+12]
-        [0x5f],                                                  // pop edi
-        [0x5e],                                                  // pop esi
+        [0x5f, 0x5e],                                            // pop edi; pop esi
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x08, 0x00],                                      // ret 8
+    ]);
+}
+
+/** The sampler state types a device answers for: D3DSAMP_ADDRESSU (1) to DMAPOFFSET (13). */
+const SAMPLER_STATE_TYPES = 0x3ffe;
+
+/**
+ * HRESULT GetSamplerState(this, DWORD sampler, D3DSAMPLERSTATETYPE type,
+ * DWORD *value), as guest code: the value, for one of the sixteen pixel
+ * samplers and a type the device answers for. A displacement or vertex
+ * sampler, a type it refuses and a null pointer go to the host.
+ *
+ *     (prologue)
+ *     mov eax, [esp+12]           ; type
+ *     cmp eax, 16
+ *     jae slow
+ *     mov edx, SAMPLER_STATE_TYPES
+ *     bt edx, eax
+ *     jnc slow
+ *     mov eax, [esp+8]            ; sampler
+ *     cmp eax, 16
+ *     jae slow
+ *     shl eax, 4
+ *     add eax, [esp+12]
+ *     mov edx, [esp+16]           ; value
+ *     test edx, edx
+ *     jz slow
+ *     mov eax, [ecx + eax*4 + SAMPLER_STATES]
+ *     mov [edx], eax
+ *     xor eax, eax
+ *     ret 16
+ *
+ * @param {number} at @param {number} trap
+ * @returns {Uint8Array}
+ */
+export function getSamplerStateCode(at, trap){
+    return routine(at, trap, [
+        ...getterPrologue(),
+        [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
+        [0x3d, ...dword(SHADOW.SAMPLER_STATE_STRIDE)],           // cmp eax, 16
+        { jcc: 0x73, to: 'slow' },                               // jae slow
+        [0xba, ...dword(SAMPLER_STATE_TYPES)],                   // mov edx, imm32
+        [0x0f, 0xa3, 0xc2],                                      // bt edx, eax
+        { jcc: 0x73, to: 'slow' },                               // jnc slow
+        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        [0x3d, ...dword(SHADOW.SAMPLER_COUNT)],                  // cmp eax, 16
+        { jcc: 0x73, to: 'slow' },                               // jae slow
+        [0xc1, 0xe0, 0x04],                                      // shl eax, 4
+        [0x03, 0x44, 0x24, 0x0c],                                // add eax, [esp+12]
+        [0x8b, 0x54, 0x24, 0x10],                                // mov edx, [esp+16]
+        [0x85, 0xd2],                                            // test edx, edx
+        { jcc: 0x74, to: 'slow' },                               // jz slow
+        [0x8b, 0x84, 0x81, ...dword(SHADOW.SAMPLER_STATES)],     // mov eax, [ecx+eax*4+disp]
+        [0x89, 0x02],                                            // mov [edx], eax
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, 0x10, 0x00],                                      // ret 16
     ]);
 }
 
@@ -1144,11 +966,11 @@ export function setMaterialCode(at, trap){
  * that level, out of the texture's own block; a level the texture has not
  * got is refused here, as the interface refuses it.
  *
- * The reference the call owes is counted rather than taken: taking one is
- * the host's business, and the count is what the host charges before any
- * reference of that texture is read or given back. A level the host has not
- * published yet reads zero and goes to the host, which makes the surface and
- * fills the slot in.
+ * The reference the call owes is taken in the word the texture's count is
+ * kept in, which its levels share: the program holds the texture, so the
+ * count is not at zero and taking one is no crossing of it. A level the host
+ * has not published yet reads zero and goes to the host, which makes the
+ * surface and fills the slot in.
  *
  *     mov ecx, [esp+4]            ; this
  *     mov ecx, [ecx+4]            ; the block
@@ -1164,11 +986,14 @@ export function setMaterialCode(at, trap){
  *     mov edx, [ecx + eax*4 + LEVELS]
  *     test edx, edx
  *     jz slow                     ; not published yet
+ *     mov ecx, [ecx + COUNT]
+ *     test ecx, ecx
+ *     jz slow                     ; a count the host keeps
  *     mov eax, [esp+12]           ; out
  *     test eax, eax
  *     jz slow                     ; a null out-pointer is the host's to refuse
  *     mov [eax], edx
- *     inc dword [ecx + REFS]
+ *     lock inc dword [ecx]
  *     xor eax, eax                ; D3D_OK
  *     ret 12
  *
@@ -1186,11 +1011,14 @@ export function getSurfaceLevelCode(at, trap){
         [0x8b, 0x94, 0x81, ...dword(TEXTURE.LEVELS)],            // mov edx, [ecx+eax*4+disp]
         [0x85, 0xd2],                                            // test edx, edx
         { jcc: 0x74, to: 'slow' },                               // jz slow
+        [0x8b, 0x49, TEXTURE.COUNT],                             // mov ecx, [ecx+8]
+        [0x85, 0xc9],                                            // test ecx, ecx
+        { jcc: 0x74, to: 'slow' },                               // jz slow
         [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
         [0x85, 0xc0],                                            // test eax, eax
         { jcc: 0x74, to: 'slow' },                               // jz slow
         [0x89, 0x10],                                            // mov [eax], edx
-        [0xff, 0x41, TEXTURE.REFS],                              // inc dword [ecx+8]
+        [0xf0, 0xff, 0x01],                                      // lock inc dword [ecx]
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x0c, 0x00],                                      // ret 12
         ...invalidTail(12),
@@ -1209,12 +1037,26 @@ export function getSurfaceLevelCode(at, trap){
  * @property {number} [bytes]  how many bytes that is, or else
  * @property {{ arg: number, shift: number, most: number }} [count]  the argument
  *     counting its elements, `1 << shift` bytes each, at most `most` of them
+ * @property {{ type: number, count: number, stride: number, most: number }} [vertices]
+ *     or the vertices a draw's primitives span, of the type and count those
+ *     arguments give, `stride` bytes each: at most `most` bytes
+ * @property {boolean} [self]  the record's first argument is the object's own
+ *     pointer -- a method of an object of the device's that is not the device
+ * @property {boolean} [stale]  the call may change what the block mirrors
+ *     (`FLAG_STALE`)
+ * @property {'empty' | 'any'} [nullable]  the pointer may be null, and is
+ *     then recorded as null with nothing copied: with a count of zero alone
+ *     ('empty'), or whatever the count ('any')
  * @property {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]
  *     } [mirror]  guest code run first, with the block in ECX, that keeps what
  *     a getter in the guest reads current; it may leave for the host through
  *     `out`, and leaves ECX and the stack as it found them
+ * @property {{ arg: number, cases: readonly [number, number][], otherwise: number }} [choose]
+ *     or else the bytes chosen by an argument's value: its case's, or `otherwise`
  * @property {boolean} [draws]  a draw: a lock in the guest that may overwrite
  *     what it reads waits for the host to make it
+ * @property {boolean} [thread]  a function rather than a method: no `this`, and
+ *     the block is the calling thread's (`threadPrologue`)
  */
 
 /**
@@ -1260,15 +1102,38 @@ export function getSurfaceLevelCode(at, trap){
  * @returns {Uint8Array}
  */
 export function commandCode(at, trap, shape){
-    const { slot, args, pointer = -1, bytes = 0, count, mirror = [], draws = false } = shape;
+    const { slot, args, pointer = -1, bytes = 0, count, choose, vertices, mirror = [],
+        draws = false, thread = false, self = false, stale = false, nullable = false } = shape;
+    if (nullable && !count)
+    {
+        throw new Error('shadow: a pointer that may be null is counted by an argument');
+    }
     const header = COMMAND.ARGS + 4 * args;
-    if (pointer >= 0 && !count && (bytes <= 0 || (bytes & 3) !== 0))
+    // A copy counted in bytes need not be whole dwords: the record is rounded
+    // up and the tail copied a byte at a time, never read past.
+    const ragged = count !== undefined && count.shift < 2;
+    /** ESI = the record's length, the copy's bytes in EDX: whole dwords, or rounded up. */
+    const recordLength = ragged
+        ? [[0x8d, 0xb2, ...dword(header + 3)], [0x83, 0xe6, 0xfc]] // lea esi, [edx+h+3]; and -4
+        : [[0x8d, 0xb2, ...dword(header)]];                    // lea esi, [edx+header]
+    if (self && (thread || pointer >= 0 || count || choose || vertices))
+    {
+        throw new Error('shadow: a record of the object itself copies nothing');
+    }
+    // What the routine pops: the record's arguments, the object's own pointer
+    // among them when it is the first.
+    const popped = self ? args - 1 : args;
+    if (pointer >= 0 && !count && !choose && !vertices && (bytes <= 0 || (bytes & 3) !== 0))
     {
         throw new Error(`shadow: a command copies whole dwords, not ${bytes} bytes`);
     }
+    // Where argument i is on entry, and once three registers are pushed:
+    // past `this` for a method, at once for a function.
+    const entry = thread ? 4 : 8;
+    const pushed = entry + 12;
     /** @type {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]} */
     const parts = [
-        ...prologue('early'),
+        ...(thread ? threadPrologue('early') : prologue('early')),
         [0x83, 0xb9, ...dword(SHADOW.COMMANDS), 0x00],           // cmp dword [ecx+disp], 0
         { jcc: 0x74, to: 'early' },                              // je early
         { jcc: 0xeb, to: 'body' },                               // jmp body
@@ -1280,14 +1145,66 @@ export function commandCode(at, trap, shape){
     if (pointer >= 0)
     {
         parts.push(
-            [0x8b, 0x44, 0x24, 8 + 4 * pointer],                 // mov eax, [esp+8+4p]
+            [0x8b, 0x44, 0x24, entry + 4 * pointer],             // mov eax, [esp+entry+4p]
             [0x85, 0xc0],                                        // test eax, eax
-            { jcc: 0x74, to: 'out' });                           // jz out
+            { jcc: 0x74, to: nullable ? 'none' : 'out', near: true }); // jz out
     }
-    if (count)
+    if (choose)
     {
         parts.push(
-            [0x8b, 0x54, 0x24, 8 + 4 * count.arg],               // mov edx, [esp+8+4c]
+            [0x8b, 0x44, 0x24, entry + 4 * choose.arg],          // mov eax, [esp+entry+4c]
+            [0xba, ...dword(choose.otherwise)]);                 // mov edx, otherwise
+        choose.cases.forEach(([value, size], index)=>parts.push(
+            [0x3d, ...dword(value)],                             // cmp eax, value
+            { jcc: 0x75, to: `case${index}` },                   // jne next
+            [0xba, ...dword(size)],                              // mov edx, size
+            { label: `case${index}` }));
+    }
+    else if (vertices)
+    {
+        // How many vertices the primitives span, by type (`vertexCountOf`),
+        // times the stride: an unknown type, no primitives, a stride that is
+        // not whole dwords or a copy past `most` bytes is the host's.
+        /** @type {[number, number[][]][]} */
+        const steps = [
+            [1, []],                                             // POINTLIST: n
+            [2, [[0x01, 0xd2]]],                                 // LINELIST: add edx, edx
+            [3, [[0x42]]],                                       // LINESTRIP: inc edx
+            [4, [[0x8d, 0x14, 0x52]]],                           // TRIANGLELIST: lea edx, [edx*3]
+            [5, [[0x83, 0xc2, 0x02]]],                           // TRIANGLESTRIP: add edx, 2
+            [6, [[0x83, 0xc2, 0x02]]],                           // TRIANGLEFAN: add edx, 2
+        ];
+        parts.push(
+            [0x8b, 0x44, 0x24, entry + 4 * vertices.type],       // mov eax, [esp+entry+4t]
+            [0x8b, 0x54, 0x24, entry + 4 * vertices.count],      // mov edx, [esp+entry+4c]
+            [0x85, 0xd2],                                        // test edx, edx
+            { jcc: 0x74, to: 'out', near: true },                // jz out
+            [0x81, 0xfa, ...dword(vertices.most)],               // cmp edx, most
+            { jcc: 0x77, to: 'out', near: true },                // ja out
+            ...steps.flatMap(([type], index)=>[
+                [0x83, 0xf8, type],                              // cmp eax, type
+                { jcc: 0x74, to: `type${index}` }]),             // je typeN
+            { jcc: 0xeb, to: 'out', near: true },                // jmp out
+            ...steps.flatMap(([, step], index)=>[
+                { label: `type${index}` },
+                ...step,
+                { jcc: 0xeb, to: 'stride', near: true }]),       // jmp stride
+            { label: 'stride' },
+            [0x8b, 0x44, 0x24, entry + 4 * vertices.stride],     // mov eax, [esp+entry+4s]
+            [0xa8, 0x03],                                        // test al, 3
+            { jcc: 0x75, to: 'out', near: true },                // jnz out
+            [0x3d, ...dword(vertices.most)],                     // cmp eax, most
+            { jcc: 0x77, to: 'out', near: true },                // ja out
+            [0x0f, 0xaf, 0xd0],                                  // imul edx, eax
+            [0x85, 0xd2],                                        // test edx, edx
+            { jcc: 0x74, to: 'out', near: true },                // jz out
+            [0x81, 0xfa, ...dword(vertices.most)],               // cmp edx, most
+            { jcc: 0x77, to: 'out', near: true });               // ja out
+    }
+    else if (count)
+    {
+        parts.push(
+            [0x8b, 0x54, 0x24, entry + 4 * count.arg],           // mov edx, [esp+entry+4c]
             [0x85, 0xd2],                                        // test edx, edx
             { jcc: 0x74, to: 'out' },                            // jz out
             [0x81, 0xfa, ...dword(count.most)],                  // cmp edx, most
@@ -1298,6 +1215,24 @@ export function commandCode(at, trap, shape){
     {
         parts.push([0xba, ...dword(pointer >= 0 ? bytes : 0)]);  // mov edx, bytes
     }
+    if (nullable === 'empty' && count)
+    {
+        // No pointer is no elements: a count with it is the host's to refuse.
+        parts.push(
+            { jcc: 0xeb, to: 'take' },                           // jmp take
+            { label: 'none' },
+            [0x8b, 0x54, 0x24, entry + 4 * count.arg],           // mov edx, [esp+entry+4c]
+            [0x85, 0xd2],                                        // test edx, edx
+            { jcc: 0x75, to: 'out' });                           // jnz out
+    }
+    else if (nullable)
+    {
+        // No pointer copies nothing, whatever the count says.
+        parts.push(
+            { jcc: 0xeb, to: 'take' },                           // jmp take
+            { label: 'none' },
+            [0x31, 0xd2]);                                       // xor edx, edx
+    }
     parts.push(
         { jcc: 0xeb, to: 'take' },                               // jmp take
         { label: 'out' },
@@ -1305,7 +1240,7 @@ export function commandCode(at, trap, shape){
         { label: 'take' },
         [0x53, 0x56, 0x57],                                      // push ebx; push esi; push edi
         [0x89, 0xcb],                                            // mov ebx, ecx
-        [0x8d, 0xb2, ...dword(header)],                          // lea esi, [edx+header]
+        ...recordLength,
         { label: 'reserve' },
         [0x8b, 0x83, ...dword(SHADOW.COMMAND_HEAD)],             // mov eax, [ebx+disp]
         [0x8d, 0x3c, 0x30],                                      // lea edi, [eax+esi]
@@ -1318,32 +1253,53 @@ export function commandCode(at, trap, shape){
         [0xc7, 0x07, ...dword(slot)]);                           // mov dword [edi], slot
     for (let arg = 0; arg < args; arg++)
     {
-        parts.push(arg === pointer
-            ? [0x8d, 0x87, ...dword(header)]                     // lea eax, [edi+header]
-            : [0x8b, 0x44, 0x24, 20 + 4 * arg],                  // mov eax, [esp+20+4i]
-        [0x89, 0x47, COMMAND.ARGS + 4 * arg]);                   // mov [edi+8+4i], eax
+        if (arg === pointer && nullable)
+        {
+            parts.push(
+                [0x8b, 0x44, 0x24, pushed + 4 * arg],            // mov eax, [esp+pushed+4p]
+                [0x85, 0xc0],                                    // test eax, eax
+                { jcc: 0x74, to: 'null' },                       // jz null: it stays 0
+                [0x8d, 0x87, ...dword(header)],                  // lea eax, [edi+header]
+                { label: 'null' });
+        }
+        else
+        {
+            parts.push(arg === pointer
+                ? [0x8d, 0x87, ...dword(header)]                 // lea eax, [edi+header]
+                : [0x8b, 0x44, 0x24, pushed + 4 * (arg - (self ? 1 : 0))]); // mov eax, [esp+..]
+        }
+        parts.push([0x89, 0x47, COMMAND.ARGS + 4 * arg]);        // mov [edi+8+4i], eax
     }
     if (pointer >= 0)
     {
         parts.push(
             [0x89, 0xf8],                                        // mov eax, edi
-            [0x8b, 0x74, 0x24, 20 + 4 * pointer],                // mov esi, [esp+20+4p]
+            [0x8b, 0x74, 0x24, pushed + 4 * pointer],            // mov esi, [esp+pushed+4p]
             [0x8d, 0xbf, ...dword(header)],                      // lea edi, [edi+header]
             [0x89, 0xd1],                                        // mov ecx, edx
             [0xc1, 0xe9, 0x02],                                  // shr ecx, 2
             [0xf3, 0xa5],                                        // rep movsd
+            ...(ragged ? [
+                [0x89, 0xd1],                                    // mov ecx, edx
+                [0x83, 0xe1, 0x03],                              // and ecx, 3
+                [0xf3, 0xa4],                                    // rep movsb
+            ] : []),
             [0x89, 0xc7],                                        // mov edi, eax
-            [0x8d, 0xb2, ...dword(header)]);                     // lea esi, [edx+header]
+            ...recordLength);
     }
     parts.push([0x89, 0x77, COMMAND.BYTES]);                     // mov [edi+4], esi
     if (draws)
     {
         parts.push([0xc7, 0x83, ...dword(SHADOW.DRAWS_PENDING), ...dword(1)]); // mov [ebx+disp], 1
     }
+    if (stale)
+    {
+        parts.push([0xf0, 0x83, 0x0b, FLAG_STALE]);              // lock or dword [ebx], 2
+    }
     parts.push(
         [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
         [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 4 + 4 * args, 0x00],                              // ret 4+4*args
+        [0xc2, entry - 4 + 4 * popped, 0x00],                    // ret 4*args (+4 for this)
         { label: 'full' },
         [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
         { jcc: 0xeb, to: 'slow', near: true });                  // jmp slow
@@ -1389,6 +1345,38 @@ export const TRANSFORM_MIRROR = Object.freeze([
     [0x5f, 0x5e],                                                // pop edi; pop esi
 ]);
 
+/** The same for SetViewport: the six dwords into the block. */
+export const VIEWPORT_MIRROR = Object.freeze([
+    [0x8b, 0x54, 0x24, 0x08],                                    // mov edx, [esp+8]
+    [0x85, 0xd2],                                                // test edx, edx
+    { jcc: 0x74, to: 'out', near: true },                        // jz out
+    [0x56, 0x57],                                                // push esi; push edi
+    [0x89, 0xd6],                                                // mov esi, edx
+    [0x8d, 0xb9, ...dword(SHADOW.VIEWPORT)],                     // lea edi, [ecx+disp]
+    [0x89, 0xca],                                                // mov edx, ecx
+    [0xb9, ...dword(6)],                                         // mov ecx, 6
+    [0xf3, 0xa5],                                                // rep movsd
+    [0x89, 0xd1],                                                // mov ecx, edx
+    [0x5f, 0x5e],                                                // pop edi; pop esi
+]);
+
+/**
+ * The same for SetSamplerState: the value into its sampler's slot. A sampler
+ * or a type past the block is the host's.
+ */
+export const SAMPLER_STATE_MIRROR = Object.freeze([
+    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
+    [0x3d, ...dword(SHADOW.SAMPLER_COUNT)],                      // cmp eax, 16
+    { jcc: 0x73, to: 'out', near: true },                        // jae out
+    [0x8b, 0x54, 0x24, 0x0c],                                    // mov edx, [esp+12]
+    [0x81, 0xfa, ...dword(SHADOW.SAMPLER_STATE_STRIDE)],         // cmp edx, 16
+    { jcc: 0x73, to: 'out', near: true },                        // jae out
+    [0xc1, 0xe0, 0x04],                                          // shl eax, 4
+    [0x01, 0xd0],                                                // add eax, edx
+    [0x8b, 0x54, 0x24, 0x10],                                    // mov edx, [esp+16]
+    [0x89, 0x94, 0x81, ...dword(SHADOW.SAMPLER_STATES)],         // mov [ecx+eax*4+disp], edx
+]);
+
 /**
  * The same for SetTextureStageState, given the types the version has: the
  * value into its stage's slot. A stage past the block, or a type it does not
@@ -1412,46 +1400,6 @@ export const stageStateMirror = types=>[
     [0x89, 0x94, 0x81, ...dword(SHADOW.STAGE_STATES)],           // mov [ecx+eax*4+disp], edx
 ];
 
-
-/**
- * @typedef {Object} ShadowMaterial
- * @property {{ r: number, g: number, b: number, a: number }} Diffuse
- * @property {{ r: number, g: number, b: number, a: number }} Ambient
- * @property {{ r: number, g: number, b: number, a: number }} Specular
- * @property {{ r: number, g: number, b: number, a: number }} Emissive
- * @property {number} Power
- */
-
-/**
- * A material from the seventeen floats D3DMATERIAL8 lays out.
- *
- * @param {ArrayLike<number>} f
- * @returns {ShadowMaterial}
- */
-export function materialOf(f){
-    const colour = (/** @type {number} */ at)=>(
-        { r: f[at], g: f[at + 1], b: f[at + 2], a: f[at + 3] });
-    return {
-        Diffuse: colour(0),
-        Ambient: colour(4),
-        Specular: colour(8),
-        Emissive: colour(12),
-        Power: f[16],
-    };
-}
-
-/**
- * @param {ShadowMaterial} material
- * @returns {Float32Array} the seventeen floats D3DMATERIAL8 lays out
- */
-export function materialFloats(material){
-    const colours = [material.Diffuse, material.Ambient, material.Specular, material.Emissive];
-    return Float32Array.from([
-        ...colours.flatMap(one=>[one.r, one.g, one.b, one.a]),
-        material.Power,
-    ]);
-}
-
 /**
  * @typedef {Object} ShadowBuffer
  * @property {number} base        Where its bytes are in guest memory.
@@ -1467,25 +1415,15 @@ export function materialFloats(material){
 /**
  * @typedef {Object} ShadowTexture
  * @property {number} levels
- * @property {() => number} addRef
  *
  * @typedef {Object} ShadowDevice
- * @property {(state: number, value: number) => number} SetRenderState
  * @property {(state: number, out: { value?: number }) => number} GetRenderState
- * @property {(type: number, matrix: ArrayLike<number>) => number} SetTransform
  * @property {(type: number, out: { matrix?: ArrayLike<number> }) => number} GetTransform
- * @property {(index: number, buffer: any, stride: number) => number} SetStreamSource
- * @property {(index: number, out: { buffer?: any, stride?: number }) => number} GetStreamSource
- * @property {(buffer: any, base: number) => number} SetIndices
- * @property {(out: { buffer?: any, baseVertexIndex?: number }) => number} GetIndices
- * @property {(handle: number) => number} SetVertexShader
- * @property {(out: { handle?: number }) => number} GetVertexShader
- * @property {(stage: number, texture: any) => number} SetTexture
- * @property {(stage: number, type: number, value: number) => number} SetTextureStageState
  * @property {(stage: number, type: number, out: { value?: number }) => number
  *     } GetTextureStageState
- * @property {(material: ShadowMaterial) => number} SetMaterial
- * @property {(out: { material?: ShadowMaterial }) => number} GetMaterial
+ * @property {(out: { viewport?: any }) => number} [GetViewport]
+ * @property {(sampler: number, type: number, out: { value?: number }) => number
+ *     } [GetSamplerState]
  */
 
 /**
@@ -1502,19 +1440,14 @@ export function materialFloats(material){
  *     keeps what it returns past the call that read it.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number) => number} [readU32]
- *     A dword read in place, for the count looked at on every call: a view
+ *     A dword read in place, for the words looked at on every call: a view
  *     per call was a measured share of a frame.
  * @property {ShadowDevice} device
- * @property {(pointer: number) => any} objectAt    The object a pointer the guest wrote names.
- * @property {(buffer: ShadowBuffer) => number} pointerOf   The pointer a buffer is published as.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {string} [name]  The device interface a refusal names.
  * @property {ShadowCommands} [commands]  The methods the device's command
  *     ring carries (`commandCode`), and how the host makes one: a device
  *     without them gets no ring.
- * @property {boolean} [bindings]  Whether the block holds the streams, the
- *     indices and the vertex shader, as Direct3D 8's does (the default); a
- *     device whose ring carries them leaves them out.
  */
 
 /**
@@ -1525,36 +1458,12 @@ export function materialFloats(material){
 export function createShadow(deps){
     const { device } = deps;
     const name = deps.name ?? 'IDirect3DDevice8';
-    const bindings = deps.bindings !== false;
     let address = 0;
-    /** What the host last saw in the block, and so what the device holds. */
-    const seenStates = new Uint32Array(SHADOW.RENDER_STATE_COUNT);
-    const seenTransforms = new Uint32Array(SHADOW.TRANSFORM_SLOTS * 16);
-    const seenStreams = new Uint32Array(SHADOW.STREAM_COUNT * 2);
-    let seenIndices = 0;
-    let seenBaseVertex = 0;
-    let seenShader = 0;
-    const seenTextures = new Uint32Array(SHADOW.STAGE_COUNT);
-    const seenStageStates = new Uint32Array(SHADOW.STAGE_COUNT * SHADOW.STAGE_STATE_STRIDE);
-    const seenMaterial = new Uint32Array(SHADOW.MATERIAL_WORDS);
-    /**
-     * The guest's counters as of the last sync, in the order of COUNTERS;
-     * a group whose count is unchanged has nothing to adopt.
-     */
-    const seenCounters = new Uint32Array(COUNTERS.length);
-    /** The count of every call the routines took, as of the last entry. */
-    let seenCalls = 0;
-    const counters = new Uint32Array(COUNTERS.length);
-    /** The counters as the last entry that found something read them. */
-    const absorbed = new Uint32Array(COUNTERS.length);
-    /** @param {number} group */
-    const changed = group=>counters[group] !== seenCounters[group];
     let refused = 0;
-    /** Words of the block compared with the host's copy, over every entry. */
-    let compared = 0;
     let slow = false;
-    let synced = 0;
-    let skipped = 0;
+    /** The guest's lock and unlock counts, as the last entry that settled a buffer read them. */
+    let lockCalls = 0;
+    let unlockCalls = 0;
     /**
      * The buffers with a block, by block address, with whether the host
      * holds a lock on the buffer to mirror one the guest holds.
@@ -1564,23 +1473,14 @@ export function createShadow(deps){
     const blocks = new Map();
     /** @type {WeakMap<object, number>} */
     const blockOf = new WeakMap();
-    /**
-     * The textures with a block, with how many of the references the guest
-     * took on their levels the host has charged. One count for the texture
-     * and all of its levels, because that is how the resource itself counts
-     * them.
-     *
-     * @type {WeakMap<object, { block: number, charged: number }>}
-     */
+    /** The textures with a block. @type {WeakMap<object, { block: number }>} */
     const textureBlocks = new WeakMap();
-    /** References charged so far, which is what the guest routine absorbed. */
-    let levelRefs = 0;
+    /** The surfaces with a block. @type {WeakMap<object, number>} */
+    const surfaceBlocks = new WeakMap();
     /** Resource blocks are carved from pages of their own, for the same reason as the device's. */
     const pool = { at: 0, left: 0 };
     /** The command ring's bytes in guest memory, 0 for none, and how far the host has read it. */
     let commands = 0;
-    let commandTail = 0;
-    let commandsTaken = 0;
 
     /** @param {number} value */
     const dwordBytes = value=>new Uint8Array(dword(value));
@@ -1588,7 +1488,7 @@ export function createShadow(deps){
     const dwordsBytes = values=>new Uint8Array(values.flatMap(dword));
     /**
      * Guest bytes as words, in place when they are aligned for it and copied
-     * when they are not: the block is read on every device call.
+     * when they are not.
      *
      * @param {Uint8Array} bytes
      */
@@ -1629,10 +1529,10 @@ export function createShadow(deps){
         deps.divergence?.(api, detail);
     };
 
-    /**
-     * Writes the device's current values into the block, so that the block
-     * and the copy agree with the device before the guest touches either.
-     */
+    // The host writes what the getters in the guest read: what the device
+    // holds, so that the block agrees with the device before the guest reads
+    // it, and again whenever the host changed state on its own.
+
     /** @param {number} state @returns {number | null} what the device holds, if it answers */
     const renderStateOf = state=>{
         /** @type {{ value?: number }} */
@@ -1647,9 +1547,7 @@ export function createShadow(deps){
         for (let state = 0; state < SHADOW.RENDER_STATE_COUNT; state++)
         {
             const answered = renderStateOf(state);
-            const value = answered ?? 0;
-            seenStates[state] = value;
-            view.setUint32(state * 4, value, true);
+            view.setUint32(state * 4, answered ?? 0, true);
             if (answered !== null)
             {
                 valid[state >>> 3] |= 1 << (state & 7);
@@ -1671,77 +1569,26 @@ export function createShadow(deps){
                 floats.set(out.matrix, slot * 16);
             }
         }
-        seenTransforms.set(new Uint32Array(matrices.buffer));
         deps.writeMemory(address + SHADOW.TRANSFORMS, matrices);
     };
 
-    /**
-     * A stream, as the pointer the program knows the buffer by. A Get* adds a
-     * reference the caller owes back.
-     *
-     * @param {number} index
-     */
-    const readStream = index=>{
-        /** @type {{ buffer?: ShadowBuffer, stride?: number }} */
+    /** @param {number} stage @param {number} type */
+    const stageStateOf = (stage, type)=>{
+        /** @type {{ value?: number }} */
         const out = {};
-        const ok = device.GetStreamSource(index, out) === 0;
-        seenStreams[index * 2] = ok && out.buffer ? deps.pointerOf(out.buffer) : 0;
-        seenStreams[index * 2 + 1] = ok ? (out.stride ?? 0) >>> 0 : 0;
-        out.buffer?.release();
-    };
-
-    const mirrorBindings = ()=>{
-        for (let index = 0; index < (bindings ? SHADOW.STREAM_COUNT : 0); index++)
-        {
-            readStream(index);
-        }
-        /** @type {{ buffer?: ShadowBuffer, baseVertexIndex?: number }} */
-        const indices = {};
-        const hasIndices = bindings && device.GetIndices(indices) === 0;
-        seenIndices = hasIndices && indices.buffer ? deps.pointerOf(indices.buffer) : 0;
-        seenBaseVertex = hasIndices ? (indices.baseVertexIndex ?? 0) >>> 0 : 0;
-        indices.buffer?.release();
-        /** @type {{ handle?: number }} */
-        const shader = {};
-        seenShader = bindings && device.GetVertexShader(shader) === 0
-            ? (shader.handle ?? 0) >>> 0 : 0;
-        deps.writeMemory(address + SHADOW.STREAMS,
-            dwordsBytes([...seenStreams, seenIndices, seenBaseVertex, seenShader]));
-    };
-
-    const mirrorTextures = ()=>{
-        // The textures are mirrored as stale rather than as pointers: a
-        // program that never writes a stage leaves the device with what it
-        // holds, and reading a bound texture back would take a reference on
-        // one the program may already have let go of.
-        seenTextures.fill(STALE_POINTER);
-        deps.writeMemory(address + SHADOW.TEXTURES, dwordsBytes([...seenTextures]));
+        return device.GetTextureStageState(stage, type, out) === 0 ? (out.value ?? 0) >>> 0 : 0;
     };
 
     const mirrorStageStates = ()=>{
+        const values = new Uint32Array(SHADOW.STAGE_COUNT * SHADOW.STAGE_STATE_STRIDE);
         for (let stage = 0; stage < SHADOW.STAGE_COUNT; stage++)
         {
             for (let type = 0; type < SHADOW.STAGE_STATE_STRIDE; type++)
             {
-                /** @type {{ value?: number }} */
-                const out = {};
-                const value = device.GetTextureStageState(stage, type, out) === 0
-                    ? (out.value ?? 0) >>> 0
-                    : 0;
-                seenStageStates[stage * SHADOW.STAGE_STATE_STRIDE + type] = value;
+                values[stage * SHADOW.STAGE_STATE_STRIDE + type] = stageStateOf(stage, type);
             }
         }
-        deps.writeMemory(address + SHADOW.STAGE_STATES, dwordsBytes([...seenStageStates]));
-    };
-
-    const mirrorMaterial = ()=>{
-        /** @type {{ material?: ShadowMaterial }} */
-        const held = {};
-        const material = device.GetMaterial(held) === 0 && held.material
-            ? materialFloats(held.material)
-            : new Float32Array(SHADOW.MATERIAL_WORDS);
-        seenMaterial.set(new Uint32Array(material.buffer));
-        deps.writeMemory(address + SHADOW.MATERIAL, new Uint8Array(material.buffer));
+        deps.writeMemory(address + SHADOW.STAGE_STATES, new Uint8Array(values.buffer));
     };
 
     /** @param {number} type */
@@ -1757,39 +1604,55 @@ export function createShadow(deps){
         {
             return;
         }
-        const floats = new Float32Array(out.matrix);
-        seenTransforms.set(new Uint32Array(floats.buffer), slot * 16);
         deps.writeMemory(address + SHADOW.TRANSFORMS + slot * 64,
-            new Uint8Array(floats.buffer));
+            new Uint8Array(new Float32Array(out.matrix).buffer));
     };
 
-    /**
-     * One stage state, as the device answers it, into its slot.
-     *
-     * @param {number} stage @param {number} type
-     */
-    const refreshStageState = (stage, type)=>{
-        if (stage >= SHADOW.STAGE_COUNT || type >= SHADOW.STAGE_STATE_STRIDE)
+    const mirrorViewport = ()=>{
+        /** @type {{ viewport?: { X: number, Y: number, Width: number, Height: number,
+         *     MinZ: number, MaxZ: number } }} */
+        const out = {};
+        if (typeof device.GetViewport !== 'function' || device.GetViewport(out) !== 0
+            || !out.viewport)
         {
             return;
         }
+        const { X, Y, Width, Height, MinZ, MaxZ } = out.viewport;
+        const words = new Uint32Array([X, Y, Width, Height, 0, 0]);
+        new Float32Array(words.buffer, 16, 2).set([MinZ, MaxZ]);
+        deps.writeMemory(address + SHADOW.VIEWPORT, new Uint8Array(words.buffer));
+    };
+
+    /** @param {number} sampler @param {number} type */
+    const samplerStateOf = (sampler, type)=>{
         /** @type {{ value?: number }} */
         const out = {};
-        const slot = stage * SHADOW.STAGE_STATE_STRIDE + type;
-        seenStageStates[slot] = device.GetTextureStageState(stage, type, out) === 0
-            ? (out.value ?? 0) >>> 0
-            : 0;
-        deps.writeMemory(address + SHADOW.STAGE_STATES + slot * 4,
-            dwordBytes(seenStageStates[slot]));
+        return device.GetSamplerState?.(sampler, type, out) === 0 ? (out.value ?? 0) >>> 0 : 0;
+    };
+
+    const mirrorSamplerStates = ()=>{
+        if (typeof device.GetSamplerState !== 'function')
+        {
+            return;
+        }
+        const values = new Uint32Array(SHADOW.SAMPLER_COUNT * SHADOW.SAMPLER_STATE_STRIDE);
+        for (let sampler = 0; sampler < SHADOW.SAMPLER_COUNT; sampler++)
+        {
+            for (let type = 0; type < SHADOW.SAMPLER_STATE_STRIDE; type++)
+            {
+                values[sampler * SHADOW.SAMPLER_STATE_STRIDE + type] =
+                    samplerStateOf(sampler, type);
+            }
+        }
+        deps.writeMemory(address + SHADOW.SAMPLER_STATES, new Uint8Array(values.buffer));
     };
 
     const mirror = ()=>{
         mirrorRenderStates();
         mirrorTransforms();
-        mirrorBindings();
-        mirrorTextures();
         mirrorStageStates();
-        mirrorMaterial();
+        mirrorViewport();
+        mirrorSamplerStates();
     };
 
     /**
@@ -1842,310 +1705,33 @@ export function createShadow(deps){
         }
     };
 
-    // Each group below reads the block through `block`, one view of all of
-    // it, taken once per entry: a view per group, or a read per word, each
-    // cost more than the words they read. A difference goes through the
-    // device's own setter; a value the setter refuses is reported once and
-    // kept as the guest set it, so it is not reported again.
 
-    /**
-     * The render states and stage states marked in one group's marks, each
-     * adopted in ascending order -- the order a scan of the whole group took
-     * them in -- by `adopt`. Answers whether any was marked.
-     *
-     * @param {Uint32Array} block
-     * @param {number} marksAt  The group's marks, as an offset in the block.
-     * @param {(block: Uint32Array, index: number) => void} adopt
-     */
-    const takeMarked = (block, marksAt, adopt)=>{
-        let any = false;
-        for (let row = 0; row < 8; row++)
-        {
-            const marks = block[(marksAt >>> 2) + row];
-            if (marks === 0)
-            {
-                continue;
-            }
-            any = true;
-            for (let bits = marks; bits !== 0; bits &= bits - 1)
-            {
-                compared++;
-                adopt(block, row * 32 + (31 - Math.clz32(bits & -bits)));
-            }
-        }
-        return any;
-    };
-
-    /** @param {Uint32Array} block @param {number} state */
-    const adoptRenderState = (block, state)=>{
-        const value = block[(SHADOW.RENDER_STATES >>> 2) + state];
-        if (value === seenStates[state])
-        {
-            return;
-        }
-        seenStates[state] = value;
-        if (device.SetRenderState(state, value) !== 0)
-        {
-            refuse(`${name}::SetRenderState`,
-                `state ${state} set to ${value} in the guest was accepted;`
-                + ' the device refuses it');
-        }
-    };
-
-    /** @param {Uint32Array} block @param {number} at  The stage times 32, plus the type. */
-    const adoptStageState = (block, at)=>{
-        const value = block[(SHADOW.STAGE_STATES >>> 2) + at];
-        if (value === seenStageStates[at])
-        {
-            return;
-        }
-        seenStageStates[at] = value;
-        const stage = at >>> 5;
-        const type = at & (SHADOW.STAGE_STATE_STRIDE - 1);
-        if (device.SetTextureStageState(stage, type, value) !== 0)
-        {
-            refuse(`${name}::SetTextureStageState`,
-                `stage ${stage} state ${type} set to ${value} in the guest was accepted;`
-                + ' the device refuses it');
-        }
-    };
-
-    /**
-     * A transform is sixteen words and there are 28, so its marks are one
-     * dword. A mark past the 28 names nothing: only a write by other means
-     * than the routines puts one there.
-     *
-     * @param {Uint32Array} block
-     */
-    const syncTransforms = block=>{
-        const marks = block[SHADOW.TRANSFORM_MARKS >>> 2];
-        for (let bits = marks; bits !== 0; bits &= bits - 1)
-        {
-            const slot = 31 - Math.clz32(bits & -bits);
-            if (slot >= SHADOW.TRANSFORM_SLOTS)
-            {
-                continue;
-            }
-            compared += 16;
-            const from = (SHADOW.TRANSFORMS >>> 2) + slot * 16;
-            let same = true;
-            for (let word = 0; word < 16; word++)
-            {
-                if (block[from + word] !== seenTransforms[slot * 16 + word])
-                {
-                    same = false;
-                    break;
-                }
-            }
-            if (same)
-            {
-                continue;
-            }
-            const words = block.subarray(from, from + 16);
-            seenTransforms.set(words, slot * 16);
-            const matrix = new Float32Array(words.buffer, words.byteOffset, 16);
-            if (device.SetTransform(transformType(slot), matrix) !== 0)
-            {
-                refuse(`${name}::SetTransform`,
-                    `type ${transformType(slot)} set in the guest was accepted;`
-                    + ' the device refuses it');
-            }
-        }
-        return marks !== 0;
-    };
-
-    // The three small groups are compared whole: a scan of thirty-five words,
-    // eight or seventeen costs less than keeping marks for them would.
-    /** @param {Uint32Array} block */
-    const syncBindings = block=>{
-        const from = SHADOW.STREAMS >>> 2;
-        compared += SHADOW.STREAM_COUNT * 2 + 3;
-        for (let index = 0; index < SHADOW.STREAM_COUNT; index++)
-        {
-            const pointer = block[from + index * 2];
-            const stride = block[from + index * 2 + 1];
-            if (pointer === seenStreams[index * 2] && stride === seenStreams[index * 2 + 1])
-            {
-                continue;
-            }
-            seenStreams[index * 2] = pointer;
-            seenStreams[index * 2 + 1] = stride;
-            const buffer = pointer === 0 ? null : deps.objectAt(pointer);
-            if (pointer !== 0 && !buffer)
-            {
-                refuse(`${name}::SetStreamSource`,
-                    `stream ${index} bound in the guest to 0x${pointer.toString(16)},`
-                    + ' which is not an interface this device published');
-            }
-            else if (device.SetStreamSource(index, buffer, stride) !== 0)
-            {
-                refuse(`${name}::SetStreamSource`,
-                    `stream ${index} bound in the guest was accepted; the device refuses it`);
-            }
-        }
-        const indices = block[SHADOW.INDICES >>> 2];
-        const baseVertex = block[SHADOW.BASE_VERTEX >>> 2];
-        if (indices !== seenIndices || baseVertex !== seenBaseVertex)
-        {
-            seenIndices = indices;
-            seenBaseVertex = baseVertex;
-            const buffer = seenIndices === 0 ? null : deps.objectAt(seenIndices);
-            if (seenIndices !== 0 && !buffer)
-            {
-                refuse(`${name}::SetIndices`,
-                    `indices bound in the guest to 0x${seenIndices.toString(16)},`
-                    + ' which is not an interface this device published');
-            }
-            else if (device.SetIndices(buffer, seenBaseVertex) !== 0)
-            {
-                refuse(`${name}::SetIndices`,
-                    'indices bound in the guest were accepted; the device refuses them');
-            }
-        }
-        const shader = block[SHADOW.VERTEX_SHADER >>> 2];
-        if (shader !== seenShader)
-        {
-            seenShader = shader;
-            if (device.SetVertexShader(seenShader) !== 0)
-            {
-                refuse(`${name}::SetVertexShader`,
-                    `vertex format 0x${seenShader.toString(16)} set in the guest was`
-                    + ' accepted; the device refuses it');
-            }
-        }
-    };
-
-    /** @param {Uint32Array} block */
-    const syncTextures = block=>{
-        const from = SHADOW.TEXTURES >>> 2;
-        compared += SHADOW.STAGE_COUNT;
-        for (let stage = 0; stage < SHADOW.STAGE_COUNT; stage++)
-        {
-            const pointer = block[from + stage];
-            if (pointer === seenTextures[stage])
-            {
-                continue;
-            }
-            seenTextures[stage] = pointer;
-            const texture = pointer === 0 ? null : deps.objectAt(pointer);
-            if (pointer !== 0 && !texture)
-            {
-                refuse(`${name}::SetTexture`,
-                    `stage ${stage} bound in the guest to 0x${pointer.toString(16)},`
-                    + ' which is not an interface this device published');
-            }
-            else if (device.SetTexture(stage, texture) !== 0)
-            {
-                refuse(`${name}::SetTexture`,
-                    `stage ${stage} bound in the guest was accepted; the device refuses it`);
-            }
-        }
-    };
-
-    /** @param {Uint32Array} block */
-    const syncMaterial = block=>{
-        const from = SHADOW.MATERIAL >>> 2;
-        compared += SHADOW.MATERIAL_WORDS;
-        let same = true;
-        for (let word = 0; word < SHADOW.MATERIAL_WORDS; word++)
-        {
-            if (block[from + word] !== seenMaterial[word])
-            {
-                same = false;
-                break;
-            }
-        }
-        if (same)
-        {
-            return;
-        }
-        const words = block.subarray(from, from + SHADOW.MATERIAL_WORDS);
-        seenMaterial.set(words);
-        const floats = new Float32Array(words.buffer, words.byteOffset, SHADOW.MATERIAL_WORDS);
-        if (device.SetMaterial(materialOf(floats)) !== 0)
-        {
-            refuse(`${name}::SetMaterial`,
-                'a material set in the guest was accepted; the device refuses it');
-        }
-    };
-
-    /**
-     * Makes the calls the guest wrote into the command ring since the host
-     * last read it, in order: every record whose length is there, up to the
-     * first one a routine has taken the space for and not yet finished. The
-     * head is the guest's; the host starts the ring over -- zeroing what it
-     * read, so that a length is only ever a finished record's -- once it has
-     * read everything up to a head near the end.
-     */
-    const takeCommands = ()=>{
-        if (readWord(address + SHADOW.DRAWS_PENDING) !== 0)
-        {
-            // Lowered before the head is read: a draw written after this
-            // raises it again, and one before it is read now.
-            deps.writeMemory(address + SHADOW.DRAWS_PENDING, ZERO_MARKS.subarray(0, 4));
-        }
-        const head = readWord(address + SHADOW.COMMAND_HEAD);
-        if (head === commandTail)
-        {
-            return;
-        }
-        if (head < commandTail || head > COMMAND_RING_BYTES)
-        {
-            refuse(`${name}::commands`, 'the command ring\'s head went back');
-            commandTail = head;
-            return;
-        }
-        const words = readWords(commands + commandTail, (head - commandTail) >>> 2);
-        let whole = 0;
-        while (whole < words.length)
-        {
-            const length = words[whole + (COMMAND.BYTES >>> 2)] >>> 2;
-            if (length === 0)
-            {
-                break;
-            }
-            if (length < (COMMAND.ARGS >>> 2) || whole + length > words.length)
-            {
-                refuse(`${name}::commands`, 'a command record the routines could not have written');
-                whole = words.length;
-                break;
-            }
-            whole += length;
-        }
-        if (whole > 0)
-        {
-            commandsTaken += /** @type {ShadowCommands} */ (deps.commands).take(
-                new Uint8Array(words.buffer, words.byteOffset, whole * 4));
-        }
-        commandTail += whole * 4;
-        if (commandTail === head && head > COMMAND_RING_BYTES - COMMAND_SLACK)
-        {
-            // A routine between reading the head and taking its space finds
-            // the head moved and takes it again, from the start.
-            deps.writeMemory(commands, new Uint8Array(head));
-            deps.writeMemory(address + SHADOW.COMMAND_HEAD, dwordBytes(0));
-            commandTail = 0;
-        }
-    };
+    /** The command ring's reader, once the block has one. @type {ReturnType<typeof createCommandReader> | null} */
+    let commandReader = null;
+    const takeCommands = ()=>commandReader?.take();
 
     /**
      * Replays the locks and unlocks of buffers the guest let go of since the
-     * host last looked, and empties the ring of them.
+     * host last looked, and empties the ring of them. The routines' two
+     * counts lie just before the ring, so one read takes them with it.
      *
      * @param {number} heads  how many the ring holds
-     * @param {Uint32Array} [block]  the block as read, when it was
      */
-    const settleUnlocked = (heads, block)=>{
-        const ring = block
-            ? block.slice(SHADOW.RING >>> 2,
-                (SHADOW.RING >>> 2) + Math.min(heads, SHADOW.RING_CAPACITY))
-            : readWords(address + SHADOW.RING, Math.min(heads, SHADOW.RING_CAPACITY)).slice();
-        for (const buffer of ring)
+    const settleUnlocked = heads=>{
+        const count = Math.min(heads, SHADOW.RING_CAPACITY);
+        const words = readWords(address + SHADOW.LOCK_CALLS, 3 + count).slice();
+        if (words.length < 3 + count)
+        {
+            // No memory to read -- a machine that has stopped.
+            return;
+        }
+        lockCalls = words[0];
+        unlockCalls = words[1];
+        for (const buffer of words.subarray(3))
         {
             settle(buffer);
         }
-        deps.writeMemory(address + SHADOW.RING_HEAD, ZERO_MARKS.subarray(0, 4));
-        seenCounters[RING_GROUP] = 0;
+        deps.writeMemory(address + SHADOW.RING_HEAD, ZERO_WORD);
     };
 
     /** The block, made and mirrored on first use. */
@@ -2162,21 +1748,24 @@ export function createShadow(deps){
                 commands = deps.commands ? allocatePage(COMMAND_RING_BYTES) : 0;
                 if (commands !== 0)
                 {
-                    deps.writeMemory(commands, new Uint8Array(COMMAND_RING_BYTES));
-                    deps.writeMemory(address + SHADOW.COMMANDS,
-                        dwordsBytes([commands, COMMAND_RING_BYTES]));
+                    placeCommandRing(address, commands, deps.writeMemory);
+                    commandReader = createCommandReader({ block: address, ring: commands,
+                        readWord, readWords, writeMemory: deps.writeMemory,
+                        take: /** @type {ShadowCommands} */ (deps.commands).take,
+                        refuse: detail=>refuse(`${name}::commands`, detail) });
                 }
             }
         }
         return address;
     };
 
+
     return {
         address: place,
 
         /**
          * Whether the fast path is to stand aside. Raised while a state block
-         * records, so the block captures what was set and not what changed.
+         * records, so every call reaches the host as it is made.
          *
          * @param {boolean} on
          */
@@ -2184,21 +1773,39 @@ export function createShadow(deps){
             slow = on;
             if (address !== 0)
             {
-                deps.writeMemory(address + SHADOW.FLAGS, dwordBytes(on ? FLAG_SLOW_PATH : 0));
+                const flags = readWord(address + SHADOW.FLAGS) & ~FLAG_SLOW_PATH;
+                deps.writeMemory(address + SHADOW.FLAGS,
+                    dwordBytes(flags | (on ? FLAG_SLOW_PATH : 0)));
+            }
+        },
+
+        /**
+         * Whether a state block applied in the ring may have left what the
+         * block mirrors behind the device (`FLAG_STALE`).
+         */
+        stale: ()=>address !== 0 && (readWord(address + SHADOW.FLAGS) & FLAG_STALE) !== 0,
+
+        /** What the block mirrors is the device's again. */
+        fresh(){
+            if (address !== 0)
+            {
+                deps.writeMemory(address + SHADOW.FLAGS,
+                    dwordBytes(readWord(address + SHADOW.FLAGS) & ~FLAG_STALE));
             }
         },
 
         /**
          * After the host changed state on its own -- a state block applied, a
          * reset -- the block is brought to what the device now holds: the
-         * groups named, or all of it. A small state block applied between
+         * states named, or all of it. A small state block applied between
          * draws is common, and reading back every state the block holds cost
          * each Apply hundreds of calls into the device.
          *
          * @param {{ renderStates?: Iterable<number>, transforms?: Iterable<number>,
-         *     bindings?: boolean, textures?: boolean, stageStates?: true | Iterable<number>,
-         *     material?: boolean }} [touched]  stage states by (stage << 8) | type,
-         *     or every one of them (true)
+         *     stageStates?: true | Iterable<number>, viewport?: boolean,
+         *     samplerStates?: Iterable<number> }} [touched]  stage states by
+         *     (stage << 8) | type, or every one of them (true); sampler states
+         *     by (sampler << 8) | type
          */
         remirror(touched){
             if (address === 0)
@@ -2214,77 +1821,45 @@ export function createShadow(deps){
             {
                 if (state >= 0 && state < SHADOW.RENDER_STATE_COUNT)
                 {
-                    seenStates[state] = renderStateOf(state) ?? 0;
                     deps.writeMemory(address + SHADOW.RENDER_STATES + state * 4,
-                        dwordBytes(seenStates[state]));
+                        dwordBytes(renderStateOf(state) ?? 0));
                 }
             }
             for (const type of touched.transforms ?? [])
             {
                 refreshTransform(type);
             }
-            if (touched.bindings)
+            if (touched.viewport)
             {
-                mirrorBindings();
+                mirrorViewport();
             }
-            if (touched.textures)
+            for (const key of touched.samplerStates ?? [])
             {
-                mirrorTextures();
+                const sampler = key >>> 8;
+                const type = key & 0xff;
+                if (sampler < SHADOW.SAMPLER_COUNT && type < SHADOW.SAMPLER_STATE_STRIDE)
+                {
+                    deps.writeMemory(address + SHADOW.SAMPLER_STATES
+                        + (sampler * SHADOW.SAMPLER_STATE_STRIDE + type) * 4,
+                    dwordBytes(samplerStateOf(sampler, type)));
+                }
             }
             if (touched.stageStates === true)
             {
                 mirrorStageStates();
-            }
-            for (const key of touched.stageStates === true ? [] : touched.stageStates ?? [])
-            {
-                refreshStageState(key >>> 8, key & 0xff);
-            }
-            if (touched.material)
-            {
-                mirrorMaterial();
-            }
-        },
-
-        /**
-         * After a call through the trap set a value the block holds -- a
-         * shader handle, which the routine leaves to the host -- the block and
-         * the copy take the value the device now holds. Otherwise the guest's
-         * next write of the value before would read as no change, and the
-         * device would keep the handle.
-         */
-        refreshShader(){
-            if (address === 0)
-            {
                 return;
             }
-            /** @type {{ handle?: number }} */
-            const shader = {};
-            seenShader = device.GetVertexShader(shader) === 0 ? (shader.handle ?? 0) >>> 0 : 0;
-            deps.writeMemory(address + SHADOW.VERTEX_SHADER, dwordBytes(seenShader));
-        },
-
-        /**
-         * The same after a user-pointer draw, which empties stream zero and the
-         * index binding on the device: without it a program binding the
-         * buffer it had bound before would read as no change.
-         */
-        refreshStreamZero(){
-            if (address === 0 || !bindings
-                || (seenStreams[0] === 0 && seenStreams[1] === 0 && seenIndices === 0
-                    && seenBaseVertex === 0))
+            for (const key of touched.stageStates ?? [])
             {
-                return;
+                const stage = key >>> 8;
+                const type = key & 0xff;
+                if (stage < SHADOW.STAGE_COUNT && type < SHADOW.STAGE_STATE_STRIDE)
+                {
+                    const slot = stage * SHADOW.STAGE_STATE_STRIDE + type;
+                    deps.writeMemory(address + SHADOW.STAGE_STATES + slot * 4,
+                        dwordBytes(stageStateOf(stage, type)));
+                }
             }
-            /** @type {{ stride?: number }} */
-            const out = {};
-            device.GetStreamSource(0, out);
-            /** @type {any} */ (out).buffer?.release();
-            seenStreams[0] = 0;
-            seenStreams[1] = (out.stride ?? 0) >>> 0;
-            seenIndices = 0;
-            seenBaseVertex = 0;
-            deps.writeMemory(address + SHADOW.STREAMS, dwordsBytes([0, seenStreams[1]]));
-            deps.writeMemory(address + SHADOW.INDICES, dwordsBytes([0, 0]));
         },
 
         /**
@@ -2296,140 +1871,24 @@ export function createShadow(deps){
         refreshTransform,
 
         /**
-         * Adopts whatever the guest wrote since the last entry. Every
-         * difference goes through the device's own setter, and a value the
-         * setter refuses is reported once and left as the guest set it, so
-         * it is not reported again.
+         * Makes what the guest did since the last entry reach the device: the
+         * buffers it let go of first, then the calls in the command ring that
+         * may read them.
          */
         sync(){
             if (address === 0)
             {
                 return;
             }
+            const unlocked = readWord(address + SHADOW.RING_HEAD);
+            if (unlocked !== 0)
+            {
+                settleUnlocked(unlocked);
+            }
             if (commands !== 0)
             {
-                // What the buffers the guest let go of hold reaches the device
-                // before the draws in the ring that read it.
-                const unlocked = readWord(address + SHADOW.RING_HEAD);
-                if (unlocked !== 0)
-                {
-                    settleUnlocked(unlocked);
-                }
                 takeCommands();
             }
-            const calls = readWord(address + SHADOW.CALLS);
-            if (calls === seenCalls)
-            {
-                // Nothing was set and nothing unlocked since the last look:
-                // the routines count every call they take.
-                skipped++;
-                return;
-            }
-            const block = readWords(address, SHADOW.SIZE >>> 2);
-            if (block.length < SHADOW.SIZE >>> 2)
-            {
-                // No memory to read -- a machine that has stopped: nothing
-                // the guest wrote is there to adopt.
-                return;
-            }
-            seenCalls = calls;
-            synced++;
-            for (let group = 0; group < COUNTERS.length; group++)
-            {
-                counters[group] = block[COUNTERS[group] >>> 2];
-            }
-            // By index: `set` on arrays this short cost more than the loop.
-            for (let group = 0; group < COUNTERS.length; group++)
-            {
-                absorbed[group] = counters[group];
-            }
-            // The marked groups are taken by their marks whichever count
-            // moved, and every mark with them, so that one write clears the
-            // lot: a routine that marked and has not counted yet is adopted
-            // here, and its count finds nothing left to do.
-            let marked = takeMarked(block, SHADOW.RENDER_STATE_MARKS, adoptRenderState);
-            marked = syncTransforms(block) || marked;
-            if (changed(BINDING_GROUP))
-            {
-                syncBindings(block);
-            }
-            if (changed(TEXTURE_GROUP))
-            {
-                syncTextures(block);
-            }
-            marked = takeMarked(block, SHADOW.STAGE_STATE_MARKS, adoptStageState) || marked;
-            if (changed(MATERIAL_GROUP))
-            {
-                syncMaterial(block);
-            }
-            if (marked)
-            {
-                deps.writeMemory(address + SHADOW.MARKS, ZERO_MARKS);
-            }
-            for (let group = 0; group < COUNTERS.length; group++)
-            {
-                seenCounters[group] = counters[group];
-            }
-
-            const ringHead = counters[RING_GROUP];
-            if (ringHead !== 0)
-            {
-                settleUnlocked(ringHead, block);
-            }
-        },
-
-        /**
-         * After the program let go of an object: every slot still naming its
-         * pointer is made stale, in the block and in the copy, so the device
-         * keeps what it had bound and the pointer's next appearance -- which
-         * may be a new object's -- is a change.
-         *
-         * @param {number} pointer
-         */
-        forgetPointer(pointer){
-            if (address === 0 || pointer === 0)
-            {
-                return;
-            }
-            const stale = dwordBytes(STALE_POINTER);
-            for (let stage = 0; stage < SHADOW.STAGE_COUNT; stage++)
-            {
-                if (seenTextures[stage] === pointer)
-                {
-                    seenTextures[stage] = STALE_POINTER;
-                    deps.writeMemory(address + SHADOW.TEXTURES + stage * 4, stale);
-                }
-            }
-            for (let index = 0; index < SHADOW.STREAM_COUNT; index++)
-            {
-                if (seenStreams[index * 2] === pointer)
-                {
-                    seenStreams[index * 2] = STALE_POINTER;
-                    deps.writeMemory(address + SHADOW.STREAMS + index * 8, stale);
-                }
-            }
-            if (seenIndices === pointer)
-            {
-                seenIndices = STALE_POINTER;
-                deps.writeMemory(address + SHADOW.INDICES, stale);
-            }
-        },
-
-        /**
-         * After a call through the trap changed a stream -- the routine's
-         * slow path -- the block takes what the device now holds, so the
-         * guest's next write of the binding before is the change it is.
-         *
-         * @param {number} index
-         */
-        refreshStream(index){
-            if (address === 0 || !bindings || index < 0 || index >= SHADOW.STREAM_COUNT)
-            {
-                return;
-            }
-            readStream(index);
-            deps.writeMemory(address + SHADOW.STREAMS + index * 8,
-                dwordsBytes([seenStreams[index * 2], seenStreams[index * 2 + 1]]));
         },
 
         /**
@@ -2463,13 +1922,15 @@ export function createShadow(deps){
         },
 
         /**
-         * A texture's block, made on first use: how many levels it has, and a
-         * table of their pointers the host fills in as it publishes them.
+         * A texture's block, made on first use: how many levels it has, where
+         * its count is kept, and a table of their pointers the host fills in
+         * as it publishes them.
          *
          * @param {ShadowTexture} texture
+         * @param {number} [count]  the word its count is kept in, 0 for none
          * @returns {number} the block, or 0 when there is no memory for one
          */
-        attachTexture(texture){
+        attachTexture(texture, count = 0){
             const existing = textureBlocks.get(texture);
             if (existing)
             {
@@ -2482,8 +1943,33 @@ export function createShadow(deps){
             }
             const zeroed = new Uint8Array(TEXTURE.SIZE);
             zeroed.set(dwordBytes(texture.levels ?? 1), TEXTURE.LEVEL_COUNT);
+            zeroed.set(dwordBytes(count), TEXTURE.COUNT);
             deps.writeMemory(block, zeroed);
-            textureBlocks.set(texture, { block, charged: 0 });
+            textureBlocks.set(texture, { block });
+            return block;
+        },
+
+        /**
+         * A surface's block, made on first use, with its description, which
+         * `describe` writes at the address it is given.
+         *
+         * @param {object} surface @param {(at: number) => void} describe
+         * @returns {number} the block, or 0 when there is no memory for one
+         */
+        attachSurface(surface, describe){
+            const existing = surfaceBlocks.get(surface);
+            if (existing !== undefined)
+            {
+                return existing;
+            }
+            const block = carve(SURFACE.SIZE);
+            if (block === 0)
+            {
+                return 0;
+            }
+            deps.writeMemory(block, new Uint8Array(SURFACE.SIZE));
+            describe(block + SURFACE.DESC);
+            surfaceBlocks.set(surface, block);
             return block;
         },
 
@@ -2500,33 +1986,6 @@ export function createShadow(deps){
                 return;
             }
             deps.writeMemory(entry.block + TEXTURE.LEVELS + level * 4, dwordBytes(pointer));
-        },
-
-        /**
-         * Charges the references the guest took on a texture's levels.
-         *
-         * Called before any reference of that texture -- or of one of its
-         * levels, which share its count -- is read or given back, and that is
-         * the whole of what keeps the count honest: a Release the program
-         * makes for a level it obtained in the guest would otherwise take the
-         * count one past what it owes, and a texture the program still holds
-         * would be destroyed under it.
-         *
-         * @param {ShadowTexture} texture
-         */
-        settleTexture(texture){
-            const entry = textureBlocks.get(texture);
-            if (!entry)
-            {
-                return;
-            }
-            const taken = readWord(entry.block + TEXTURE.REFS);
-            for (let owed = taken - entry.charged; owed > 0; owed--)
-            {
-                texture.addRef();
-                levelRefs++;
-            }
-            entry.charged = taken;
         },
 
         /**
@@ -2567,30 +2026,14 @@ export function createShadow(deps){
             // numbers and drops anything else.
             placed: address !== 0 ? 1 : 0,
             slowPath: slow ? 1 : 0,
-            // What never crossed into the host, which is the point of all this.
-            renderStateCalls: absorbed[RENDER_STATE_GROUP],
-            transformCalls: absorbed[TRANSFORM_GROUP],
-            bindingCalls: absorbed[BINDING_GROUP],
-            lockCalls: absorbed[LOCK_GROUP],
-            unlockCalls: absorbed[UNLOCK_GROUP],
-            textureCalls: absorbed[TEXTURE_GROUP],
-            stageStateCalls: absorbed[STAGE_STATE_GROUP],
-            materialCalls: absorbed[MATERIAL_GROUP],
+            // Buffer locks and unlocks that never crossed into the host, as of
+            // the last entry that settled a buffer the guest let go of.
+            lockCalls,
+            unlockCalls,
             buffers: blocks.size,
-            // Levels handed out in the guest, as the references charged for
-            // them: a level the program still holds is counted once the host
-            // next looks at that texture's references.
-            surfaceLevelCalls: levelRefs,
-            // How often an entry found something to adopt, against how often
-            // the counters said there was nothing.
-            synced,
-            skipped,
-            // Words compared with the host's copy: what the entries cost,
-            // which follows what the guest set, not the size of the block.
-            compared,
             refused,
             // Calls the command ring carried past the bridge.
-            commandCalls: commandsTaken,
+            commandCalls: commandReader?.taken() ?? 0,
         }),
     };
 }

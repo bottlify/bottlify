@@ -263,6 +263,28 @@ test('the host boots a real runtime over cork\'s own memory', ()=>{
     assert.equal(h.inProtectedMode(), true);
 });
 
+test('guest memory is shared where the host can share it, and regions translate over it',
+    async()=>{
+        const h = host();
+        assert.ok(h.wasmMemory().buffer instanceof SharedArrayBuffer, 'node can share it');
+        // mov ecx, 1000; L: add eax, ecx; dec ecx; jnz L; hlt
+        load(h, 0x1000, [0xb9, 0xe8, 0x03, 0, 0, 0x01, 0xc8, 0x49, 0x75, 0xfb, 0xf4]);
+        h.cork().noteHot(0x1000, 0);
+        assert.ok(await h.cork().translatePending() >= 1, 'a region was published over it');
+        h.writeReg32('eip', 0x1000);
+        for (let slice = 0; slice < 100 && !h.halted(); slice++)
+        {
+            h.runSlice(10_000);
+        }
+        assert.equal(h.readReg32('eax'), 500500);
+        assert.deepEqual(/** @type {any} */ (h.cork().diagnostics()).refused?.batch, undefined,
+            'and no batch refused');
+
+        const plain = host({ cork: { sharedMemory: false } });
+        assert.ok(!(plain.wasmMemory().buffer instanceof SharedArrayBuffer),
+            'unless it is told not');
+    });
+
 test('the interpreter stops only at an entry for the top the machine has', async()=>{
     const h = host();
     // fld1; hlt -- translated at top 0 alone.

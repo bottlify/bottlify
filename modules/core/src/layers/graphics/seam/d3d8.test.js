@@ -23,10 +23,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
-import { createPublisher } from './com.js';
+import { createCountCells, createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
-import { BUFFER, SHADOW, STALE_POINTER, TEXTURE } from './shadow.js';
+import { BUFFER, SHADOW, TEXTURE } from './shadow.js';
 import {
     IDIRECT3D8_SLOTS, IDIRECT3DCUBETEXTURE8_SLOTS, IDIRECT3DDEVICE8_SLOTS,
     IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS, IDIRECT3DVERTEXBUFFER8_SLOTS,
@@ -45,7 +45,7 @@ import {
 } from '../d3d8/structs.js';
 import { createDirect3D8 } from '../d3d8/device.js';
 import {
-    D3DDEVTYPE, D3DFMT, D3DPOOL, D3DSBT, D3DTOP, D3DTS, D3DTSS, floatToDword,
+    D3DDEVTYPE, D3DFMT, D3DPOOL, D3DSBT, D3DTS, D3DTSS, floatToDword,
 } from '../d3d8/constants.js';
 
 const D3D_OK = 0;
@@ -223,7 +223,12 @@ function seamed({ shadow = false, windowClientSize, allocateCode, caps } = {}){
     const measureWindow = window=>{
         return window === HWND ? { width: 640, height: 480 } : null;
     };
-    const publisher = createPublisher({ publishInterface: box.publishInterface });
+    const publisher = createPublisher({
+        publishInterface: box.publishInterface,
+        cells: shadow
+            ? createCountCells({ allocate: box.allocate, memory: box.memory })
+            : undefined,
+    });
     const libraries = createGraphicsLibraries({
         graphics: {
             /** @param {string} name */
@@ -1892,79 +1897,6 @@ test('a create with nowhere to put the interface fails instead of answering succ
     assert.equal(h.box.memory.readU32(out), 0);
 });
 
-/**
- * A group's count as a guest routine leaves it, and the count of every call
- * raised with it, which is what an entry reads first.
- *
- * @param {ReturnType<typeof seamed>} h @param {number} block
- * @param {number} counter @param {number} value
- */
-function counted(h, block, counter, value){
-    h.box.memory.writeU32(block + counter, value);
-    h.box.memory.writeU32(block + SHADOW.CALLS, h.box.memory.readU32(block + SHADOW.CALLS) + 1);
-}
-
-test('a value the host set through the trap is one the guest\'s next write is seen to change', ()=>{
-    // The routines leave a shader handle to the host, and MultiplyTransform
-    // is the host's alone: both set a value the block holds. Were the block
-    // left as it was, the guest setting the value before once more would
-    // write what the block already held and read as no change, and the
-    // device would keep the handle, or the product.
-    const h = seamed({ shadow: true });
-    const device = h.createDevice(h.create());
-    const block = h.box.memory.readU32(device + 4);
-    const out = 0xe000;
-    /** @param {number} at @param {number[]} words */
-    const write = (at, words)=>h.box.services.writeMemory(at,
-        new Uint8Array(Uint32Array.from(words).buffer));
-    write(0x7000, [0x20000000, 0x40020000, 0xffffffff]);
-    write(0x7100, [0xfffe0101, 0x00000009, 0xc0010000, 0x90e40000, 0xa0e40000, 0x0000ffff]);
-    assert.equal(h.device(device, 'CreateVertexShader', [0x7000, 0x7100, out, 0]), D3D_OK);
-    const handle = h.box.memory.readU32(out);
-    const fvf = 0x142;
-    /** What the guest routine does with a vertex format. */
-    const guestFormat = ()=>{
-        h.box.memory.writeU32(block + SHADOW.VERTEX_SHADER, fvf);
-        counted(h, block, SHADOW.BINDING_CALLS,
-            h.box.memory.readU32(block + SHADOW.BINDING_CALLS) + 1);
-    };
-    const bound = ()=>{
-        assert.equal(h.device(device, 'GetVertexShader', [out]), D3D_OK);
-        return h.box.memory.readU32(out);
-    };
-
-    guestFormat();
-    assert.equal(bound(), fvf);
-    assert.equal(h.box.trap(device, 'SetVertexShader', [handle]), D3D_OK);
-    assert.equal(bound(), handle);
-    guestFormat();
-    assert.equal(bound(), fvf, 'the format again, after the handle');
-    assert.equal(h.box.trap(device, 'SetVertexShader', [handle]), D3D_OK);
-    assert.equal(h.device(device, 'DeleteVertexShader', [handle]), D3D_OK);
-    assert.equal(bound(), 0, 'deleting the bound shader unbinds it');
-    guestFormat();
-    assert.equal(bound(), fvf);
-
-    // WORLD set in the guest, multiplied by the host, set in the guest again.
-    const matrix = Array.from({ length: 16 }, (_, i)=>floatToDword(i % 5 === 0 ? 2 : 0));
-    const world = block + SHADOW.TRANSFORMS + 24 * 64;
-    const guestWorld = ()=>{
-        write(world, matrix);
-        h.box.memory.writeU32(block + SHADOW.TRANSFORM_MARKS, 1 << 24);
-        counted(h, block, SHADOW.TRANSFORM_CALLS,
-            h.box.memory.readU32(block + SHADOW.TRANSFORM_CALLS) + 1);
-    };
-    write(0x8000, matrix);
-    guestWorld();
-    assert.equal(h.device(device, 'MultiplyTransform', [D3DTS.WORLD, 0x8000]), D3D_OK);
-    assert.equal(h.device(device, 'GetTransform', [D3DTS.WORLD, 0x8100]), D3D_OK);
-    assert.equal(h.fields.readF32(0x8100), 4, 'twice by twice');
-    guestWorld();
-    assert.equal(h.device(device, 'GetTransform', [D3DTS.WORLD, 0x8100]), D3D_OK);
-    assert.equal(h.fields.readF32(0x8100), 2, 'the matrix again, after the product');
-    assert.deepEqual(h.divergences, []);
-});
-
 test('a state block applied brings the states it holds into the guest\'s block, and reads no'
     + ' other', ()=>{
     const h = seamed({ shadow: true });
@@ -2029,13 +1961,13 @@ test('a device is handed out with its block already in place, and reads what the
     h.box.memory.writeU32(vblock + BUFFER.LOCKED, 1);
     h.box.memory.writeU32(vblock + BUFFER.FROM, 0);
     h.box.memory.writeU32(vblock + BUFFER.TO, 64);
-    counted(h, block, SHADOW.LOCK_CALLS, 1);
+    h.box.memory.writeU32(block + SHADOW.LOCK_CALLS, 1);
     const bits = 0xe300;
     assert.equal(h.buffer(vb, 'Lock', [0, 0, bits, 0]), D3DERR_INVALIDCALL);
     h.box.memory.writeU32(vblock + BUFFER.LOCKED, 0);
     h.box.memory.writeU32(block + SHADOW.RING, vblock);
     h.box.memory.writeU32(block + SHADOW.RING_HEAD, 1);
-    counted(h, block, SHADOW.UNLOCK_CALLS, 1);
+    h.box.memory.writeU32(block + SHADOW.UNLOCK_CALLS, 1);
     assert.equal(h.buffer(vb, 'Lock', [0, 0, bits, 0]), D3D_OK);
     assert.equal(h.box.memory.readU32(vblock + BUFFER.LOCKED), 1, 'the guest routine sees it');
     assert.equal(h.buffer(vb, 'Unlock'), D3D_OK);
@@ -2046,11 +1978,10 @@ test('a device is handed out with its block already in place, and reads what the
 
 test('a level obtained in the guest leaves the count where the host path leaves it', ()=>{
     // GetSurfaceLevel takes a reference on the surface it hands back, and a
-    // level's surface shares its texture's count. The guest routine cannot
-    // take one, so it counts what it owes and the host charges the count
-    // before any reference is read or given back -- and if that is wrong in
-    // either direction, a program that asks for a level every frame either
-    // leaks its texture or loses it while it is still drawing with it.
+    // level's surface shares its texture's count. The guest routine takes it
+    // in the word the count is kept in -- and if that is wrong in either
+    // direction, a program that asks for a level every frame either leaks
+    // its texture or loses it while it is still drawing with it.
     const h = seamed({ shadow: true });
     const device = h.createDevice(h.create());
     const out = 0xe500;
@@ -2063,6 +1994,10 @@ test('a level obtained in the guest leaves the count where the host path leaves 
     assert.equal(h.box.memory.readU32(block + TEXTURE.LEVELS), 0, 'nothing published yet');
     const object = h.object(texture);
     const held = object.refCount;
+    const count = h.box.memory.readU32(block + TEXTURE.COUNT);
+    assert.notEqual(count, 0, 'the texture\'s count is kept in the guest');
+    assert.equal(h.box.memory.readU32(count), held);
+    assert.equal(h.box.memory.readU32(texture + 8), count, 'where its AddRef finds it too');
 
     // The host's path, which is what the routine falls back to: it publishes
     // the level and fills its slot in.
@@ -2071,19 +2006,19 @@ test('a level obtained in the guest leaves the count where the host path leaves 
     assert.notEqual(level, 0);
     assert.equal(h.box.memory.readU32(block + TEXTURE.LEVELS), level);
     assert.equal(object.refCount, held + 1, 'the reference the call owes');
+    assert.equal(h.box.memory.readU32(level + 8), count, 'the level shares the word');
     assert.equal(h.release(level), held, 'and the program gives it back');
     assert.equal(object.refCount, held);
 
     // What the guest routine does with the slot now filled: the pointer, and
-    // the reference counted rather than taken.
-    h.box.memory.writeU32(block + TEXTURE.REFS, 1);
-    assert.equal(h.release(level), held, 'charged, then given back');
-    assert.equal(object.refCount, held, 'the same count the host path left');
-    assert.equal(h.libraries.shadow().surfaceLevelCalls, 1);
+    // the reference taken in the word.
+    h.box.memory.writeU32(count, held + 1);
+    assert.equal(object.refCount, held + 1, 'the object reads its count there');
+    assert.equal(h.release(level), held, 'and the reference is given back');
 
     // And the count is honest while the program still holds such a level: a
     // Release of the texture cannot take it to zero under the program.
-    h.box.memory.writeU32(block + TEXTURE.REFS, 2);
+    h.box.memory.writeU32(count, held + 1);
     assert.equal(h.release(texture), 1, 'the level the guest took keeps it alive');
     assert.equal(object.refCount, 1);
     assert.equal(h.release(level), 0);
@@ -2181,83 +2116,6 @@ test('a reset that changes the mode names the window it presents into', ()=>{
     assert.equal(h.device(device, 'Reset', [at]), D3D_OK);
     assert.deepEqual(h.resolutions.at(-1), [64, 64, HWND, false],
         'and so does the reset back to windowed');
-});
-
-test('a texture, a stage state and a material the guest wrote reach the device', ()=>{
-    const h = seamed({ shadow: true });
-    const device = h.createDevice(h.create());
-    const block = h.box.memory.readU32(device + 4);
-    const out = 0xe000;
-    const created = 0xe100;
-    assert.equal(h.device(device, 'CreateTexture', [8, 8, 1, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED,
-        created]), D3D_OK);
-    const texture = h.box.memory.readU32(created);
-    const object = h.object(texture);
-
-    // What the guest routines leave: a pointer in a stage slot, a value in
-    // the stage table, seventeen floats, and a count for each.
-    h.box.memory.writeU32(block + SHADOW.TEXTURES + 3 * 4, texture);
-    counted(h, block, SHADOW.TEXTURE_CALLS, 1);
-    h.box.memory.writeU32(block + SHADOW.STAGE_STATES + (3 * 32 + D3DTSS.COLOROP) * 4, D3DTOP.ADD);
-    h.box.memory.writeU32(block + SHADOW.STAGE_STATE_MARKS + 3 * 4, 1 << D3DTSS.COLOROP);
-    counted(h, block, SHADOW.STAGE_STATE_CALLS, 1);
-    const material = 0xe300;
-    h.fields.writeF32(block + SHADOW.MATERIAL + 16 * 4, 12.5);   // Power
-    counted(h, block, SHADOW.MATERIAL_CALLS, 1);
-
-    assert.equal(h.device(device, 'GetTexture', [3, out]), D3D_OK);
-    assert.equal(h.box.memory.readU32(out), texture, 'bound to the texture the guest named');
-    h.release(texture);   // GetTexture's own reference
-    assert.equal(h.device(device, 'GetTextureStageState', [3, D3DTSS.COLOROP, out]), D3D_OK);
-    assert.equal(h.box.memory.readU32(out), D3DTOP.ADD);
-    assert.equal(h.device(device, 'GetMaterial', [material]), D3D_OK);
-    assert.equal(h.fields.readF32(material + 16 * 4), 12.5);
-    assert.equal(h.libraries.shadow().textureCalls, 1);
-    assert.equal(h.libraries.shadow().stageStateCalls, 1);
-    assert.equal(h.libraries.shadow().materialCalls, 1);
-    assert.deepEqual(h.divergences, []);
-
-    // The program binds through the guest and lets go of its reference
-    // before the host has looked. The release adopts the binding while the
-    // pointer still names the texture -- adopted after, it would be a
-    // pointer nobody published, and a divergence -- and the slot reads
-    // stale after, so the device keeps the texture until the program binds
-    // something else there.
-    assert.equal(h.device(device, 'CreateTexture', [8, 8, 1, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED,
-        created]), D3D_OK);
-    const second = h.box.memory.readU32(created);
-    h.box.memory.writeU32(block + SHADOW.TEXTURES, second);
-    counted(h, block, SHADOW.TEXTURE_CALLS, 2);
-    assert.equal(h.release(second), 0);
-    assert.equal(h.object(second), null, 'the program holds nothing');
-    assert.equal(h.box.memory.readU32(block + SHADOW.TEXTURES), STALE_POINTER);
-    assert.equal(h.libraries.shadow().textureCalls, 2, 'adopted by the release');
-    assert.deepEqual(h.divergences, []);
-
-    // The next texture may well be published at the released pointer; bound
-    // through the guest, the slot changes from stale and the new one is
-    // what the device gets.
-    assert.equal(h.device(device, 'CreateTexture', [8, 8, 1, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED,
-        created]), D3D_OK);
-    const third = h.box.memory.readU32(created);
-    h.box.memory.writeU32(block + SHADOW.TEXTURES, third);
-    counted(h, block, SHADOW.TEXTURE_CALLS, 3);
-    assert.equal(h.device(device, 'GetTexture', [0, out]), D3D_OK);
-    assert.equal(h.object(h.box.memory.readU32(out)), h.object(third));
-    h.release(h.box.memory.readU32(out));
-
-    // Unbinding through the guest leaves it, and a stage the program never
-    // wrote is left alone whatever the device holds.
-    h.box.memory.writeU32(block + SHADOW.TEXTURES, 0);
-    counted(h, block, SHADOW.TEXTURE_CALLS, 4);
-    assert.equal(h.device(device, 'GetTexture', [0, out]), D3D_OK);
-    assert.equal(h.box.memory.readU32(out), 0);
-    assert.equal(h.device(device, 'GetTexture', [3, out]), D3D_OK);
-    assert.equal(h.object(h.box.memory.readU32(out)), object);
-    h.release(h.box.memory.readU32(out));
-    h.release(third);
-    h.release(texture);
-    assert.deepEqual(h.divergences, []);
 });
 
 test('a surface description fills every field, leaving no stack of the caller to be read',

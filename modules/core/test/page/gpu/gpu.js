@@ -308,6 +308,10 @@ async function run(request){
     const metrics = name=>diagnostics.find((/** @type {any} */ entry)=>entry.name === name)
         ?.metrics ?? null;
     result.graphics = metrics('graphics');
+    result.sharedMemory = metrics('cpu')?.sharedMemory ?? null;
+    const cork = metrics('cpu')?.cork;
+    result.translation = cork ? { translatedShare: cork.translatedShare, worker: cork.worker,
+        refused: cork.refused } : null;
     result.bridge = {
         calls: metrics('bridge')?.calls,
         lastCall: metrics('bridge')?.lastCall,

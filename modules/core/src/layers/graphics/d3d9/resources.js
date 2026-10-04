@@ -52,6 +52,16 @@ const D3DLOCK_READONLY = 0x00000010;
 export const D3DLOCK_NO_DIRTY_UPDATE = 0x00008000;
 
 /**
+ * A word of guest memory a count is kept in, where guest code can take and
+ * give back references itself (`bridge/internal/vtable.js`).
+ *
+ * @typedef {Object} CountCell
+ * @property {number} address
+ * @property {() => number} read
+ * @property {(value: number) => void} write
+ */
+
+/**
  * @typedef {Object} ReferenceCount
  * @property {number} value
  * @property {boolean} destroyed
@@ -60,6 +70,9 @@ export const D3DLOCK_NO_DIRTY_UPDATE = 0x00008000;
  * @property {() => void} [hold]   The device's own reference, kept while the
  *           resource is bound and never counted in `value` (see below).
  * @property {() => void} [letGo]
+ * @property {(cell: CountCell | null) => void} place  Keeps the count in the
+ *           cell from now on, or, given null, back on the host.
+ * @property {number} placed  The address of the cell it is kept in, or 0.
  */
 
 /**
@@ -71,8 +84,26 @@ export const D3DLOCK_NO_DIRTY_UPDATE = 0x00008000;
  */
 export function createReferenceCount(options = {}){
     const implicit = options.implicit === true;
-    let count = implicit ? 0 : 1;
+    let kept = implicit ? 0 : 1;
+    /** @type {CountCell | null} */
+    let cell = null;
     let destroyed = false;
+    // Read and written where it is kept: guest code may have moved it since.
+    const count = {
+        get value(){
+            return cell ? cell.read() : kept;
+        },
+        set value(value){
+            if (cell)
+            {
+                cell.write(value);
+            }
+            else
+            {
+                kept = value;
+            }
+        },
+    };
     // The device's references to a resource bound to it. Windows keeps a
     // bound resource alive past the program's last Release, with a count of
     // zero, and hands the same object back when asked for what is bound; it
@@ -85,7 +116,7 @@ export function createReferenceCount(options = {}){
 
     return {
         get value(){
-            return count;
+            return count.value;
         },
         // Whether the last reference has gone for good. An implicit resource
         // never reaches this: the device owns it and hands out the same pointer
@@ -98,30 +129,37 @@ export function createReferenceCount(options = {}){
             {
                 throw new Error('AddRef on a resource whose last reference was released');
             }
-            if (count === 0)
+            if (count.value === 0)
             {
                 options.onFirstRef?.();
             }
-            count++;
-            return count;
+            return ++count.value;
         },
         release(){
-            if (count === 0)
+            if (count.value === 0)
             {
                 return 0;
             }
-            count--;
-            if (count === 0)
+            const left = --count.value;
+            if (left === 0)
             {
                 options.onZero?.();
             }
             // An implicit resource outlives its own count: the device owns
             // it, so the pointer a program kept stays the same one.
-            if (count === 0 && held === 0)
+            if (left === 0 && held === 0)
             {
                 gone();
             }
-            return count;
+            return left;
+        },
+        place(next){
+            const value = count.value;
+            cell = next;
+            count.value = value;
+        },
+        get placed(){
+            return cell?.address ?? 0;
         },
         hold(){
             held++;
@@ -132,7 +170,7 @@ export function createReferenceCount(options = {}){
                 return;
             }
             held--;
-            if (held === 0 && count === 0 && !destroyed)
+            if (held === 0 && count.value === 0 && !destroyed)
             {
                 gone();
             }
@@ -165,6 +203,11 @@ function sharedCount(count, retire){
                 retire();
             }
             return left;
+        },
+        /** @param {CountCell | null} cell */
+        place: cell=>count.place(cell),
+        get placed(){
+            return count.placed;
         },
     };
 }
@@ -267,6 +310,7 @@ const D3DTEXF_LINEAR = 2;
  * @property {boolean} destroyed      Whether its last reference has gone for good.
  * @property {() => boolean} reachable  Whether a pointer to it still reaches it at a count
  *           of zero: while its device or chain owns it.
+ * @property {{ place: (cell: CountCell | null) => void, placed: number }} counter
  * @property {() => number} addRef
  * @property {() => number} release
  * @property {(out: LockedRect, rect?: LockRectangle | null, flags?: number)
@@ -403,6 +447,8 @@ export function createSurface(options){
             return options.count.destroyed;
         },
         reachable: ()=>!options.count.destroyed,
+        // Where guest code may count its references (`ReferenceCount.place`).
+        counter: options.count,
         addRef: ()=>options.count.addRef(),
         release: ()=>options.count.release(),
 
@@ -983,6 +1029,8 @@ export function createTexture(options){
         get refCount(){
             return options.count.value;
         },
+        // Where guest code may count its references (`ReferenceCount.place`).
+        counter: count,
         addRef: ()=>options.count.addRef(),
 
         /**
@@ -1204,6 +1252,8 @@ export function createVolume(options){
             return options.count.destroyed;
         },
         reachable: ()=>!options.count.destroyed,
+        // Where guest code may count its references (`ReferenceCount.place`).
+        counter: options.count,
         addRef: ()=>options.count.addRef(),
         release: ()=>options.count.release(),
 
@@ -1413,6 +1463,8 @@ export function createVolumeTexture(options){
         get refCount(){
             return options.count.value;
         },
+        // Where guest code may count its references (`ReferenceCount.place`).
+        counter: count,
         addRef: ()=>options.count.addRef(),
 
         /** Gives the levels' storage back when the last reference goes, here or through one. */

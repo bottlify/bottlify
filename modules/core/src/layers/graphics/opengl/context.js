@@ -49,6 +49,7 @@ import { installPixelCalls } from './context-pixels.js';
 import { installProgramCalls } from './context-programs.js';
 import { createSceneBuilder } from './context-scene.js';
 import { VIDEO_ADAPTER_NAME } from '../../win32/devices.js';
+import { GL_COMMANDS } from './commands.js';
 
 /** What this implementation answers glGetString with. */
 const STRINGS = Object.freeze({
@@ -456,6 +457,24 @@ export function createGlContext(options = {}){
         destroy(){
             destroyed = true;
             shareGroup.contexts--;
+        },
+
+        /**
+         * The calls a run of the command ring carried, made in order
+         * (`commands.js`). None of them answers anything, so only a record
+         * the routines could not have written is worth saying.
+         *
+         * @param {Uint8Array} records
+         * @returns {number} how many calls were made
+         */
+        commands(records){
+            return GL_COMMANDS.runCommands(context, records, [], name=>{
+                if (name === 'commands')
+                {
+                    options.divergence?.('a command ring held a record its routines could not'
+                        + ' have written');
+                }
+            });
         },
 
         // --- the error flag ---

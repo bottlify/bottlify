@@ -250,6 +250,38 @@ export function createMemoryModule(){
                 },
                 window: (/** @type {number} */ address, /** @type {number} */ length)=>
                     live() ? state.accessors.window(address, length) : EMPTY,
+                /**
+                 * The RAM as a view over a SharedArrayBuffer, byte 0 at address
+                 * 0, for a worker to read and write in place; null where the
+                 * memory is not shared.
+                 *
+                 * @returns {Uint8Array | null}
+                 */
+                shared: ()=>{
+                    /** @type {Uint8Array | null} */
+                    let ram = null;
+                    try
+                    {
+                        ram = live() ? cpu.ramView?.() ?? null : null;
+                    }
+                    catch {
+                        // No machine yet: nothing to share.
+                    }
+                    return ram && typeof SharedArrayBuffer === 'function'
+                        && ram.buffer instanceof SharedArrayBuffer ? ram : null;
+                },
+                /**
+                 * What a worker wrote into the shared RAM, taken as a write of
+                 * this thread's (`accessors.adopt`).
+                 *
+                 * @param {number} address @param {number} length
+                 */
+                adopt: (/** @type {number} */ address, /** @type {number} */ length)=>{
+                    if (live())
+                    {
+                        state.accessors.adopt(address, length);
+                    }
+                },
                 readU8: (/** @type {number} */ address)=>live() ? state.accessors.readU8(address) : 0,
                 readU16: (/** @type {number} */ address)=>
                     live() ? state.accessors.readU16(address) : 0,

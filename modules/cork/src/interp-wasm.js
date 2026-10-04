@@ -27,6 +27,7 @@
 import { MODULE_BASE64 } from './interp-wasm.bytes.js';
 import { eflagsOf } from './emit/flags.js';
 import { Tables } from './runtime/layout.js';
+import { withSharedMemoryImport } from './wasm/shared-import.js';
 
 /** How a run of the tier ended. `interp-wasm.c` has the same numbers. */
 export const WasmExit = Object.freeze({
@@ -72,9 +73,18 @@ let compiled = null;
  * start is paid once a process, so the stretch that waits for it to pay is the process's too. */
 const stretch = { work: 0 };
 
-/** The module, compiled once a process. */
-function wasmModule(){
-    if (compiled === null)
+/** The same module importing a shared memory, compiled when one is first wanted.
+ * @type {WebAssembly.Module | null} */
+let compiledShared = null;
+
+/**
+ * The module, compiled once a process: its memory import declared shared for
+ * a shared memory, which an import declared otherwise does not link to.
+ *
+ * @param {boolean} shared
+ */
+function wasmModule(shared){
+    if ((shared ? compiledShared : compiled) === null)
     {
         const text = atob(MODULE_BASE64);
         const bytes = new Uint8Array(text.length);
@@ -82,9 +92,17 @@ function wasmModule(){
         {
             bytes[i] = text.charCodeAt(i);
         }
-        compiled = new WebAssembly.Module(bytes);
+        if (shared)
+        {
+            compiledShared = new WebAssembly.Module(
+                /** @type {Uint8Array<ArrayBuffer>} */ (withSharedMemoryImport(bytes)));
+        }
+        else
+        {
+            compiled = new WebAssembly.Module(bytes);
+        }
     }
-    return compiled;
+    return /** @type {WebAssembly.Module} */ (shared ? compiledShared : compiled);
 }
 
 /** @typedef {import('../../core/src/layers/cpu/engine.js').WasmInterpreter} WasmInterpreter */
@@ -127,8 +145,10 @@ export function createWasmInterpreter({ memory, layout, area, hotThreshold, trap
     /** @type {((budget: number) => number) | null} */
     let enter = null;
     const instantiate = ()=>{
-        const exports = /** @type {any} */ (
-            new WebAssembly.Instance(wasmModule(), { env: { memory, ...HOST_MATH } }).exports);
+        const shared = typeof SharedArrayBuffer === 'function'
+            && memory.buffer instanceof SharedArrayBuffer;
+        const exports = /** @type {any} */ (new WebAssembly.Instance(wasmModule(shared),
+            { env: { memory, ...HOST_MATH } }).exports);
         exports.configure(layout.ramBase, layout.tables + Tables.PAGE_FLAGS,
             layout.tables + Tables.CODE_RANGES, layout.tables + Tables.HASH, layout.hashShift ?? 16,
             layout.regs, layout.eip, layout.eflags, layout.fsBase, area, HOT_SLOTS, hotThreshold,

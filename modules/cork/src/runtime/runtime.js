@@ -33,6 +33,7 @@ import { NanRecord, SHAPE, isX87, trackRegion } from '../emit/x87.js';
 import { HELD, PRECISION } from '../emit/memory.js';
 import { features as probeFeatures } from '../wasm/features.js';
 import { Body, ModuleBuilder, ValType } from '../wasm/encoder.js';
+import { SHARED_MAX_PAGES } from '../wasm/shared-import.js';
 import { createEmitCache, emitBatch, relinkBatch } from './emit-built.js';
 import { buildHelpersModule } from '../emit/helpers.js';
 import { openTranslationWorker } from './translator.js';
@@ -276,6 +277,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             + ` at ${layout.tables} + ${Tables.SIZE}`);
     }
     const found = features ?? probeFeatures();
+    // A shared memory links only to modules whose import says so, with a
+    // maximum: every module emitted here, and the helpers, declare it.
+    const sharedMemory = typeof SharedArrayBuffer === 'function'
+        && memory.buffer instanceof SharedArrayBuffer
+        ? { shared: true, maxPages: SHARED_MAX_PAGES }
+        : undefined;
     const pages = createPageTable(memory, layout);
     // The five helper functions every region imports, defined once here and
     // instantiated over this memory when the first region is published.
@@ -285,7 +292,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         if (helperInstance === null)
         {
             const module = new WebAssembly.Module(
-                /** @type {Uint8Array<ArrayBuffer>} */ (buildHelpersModule(layout)));
+                /** @type {Uint8Array<ArrayBuffer>} */ (buildHelpersModule(layout, sharedMemory)));
             helperInstance = new WebAssembly.Instance(module, { env: { memory } }).exports;
         }
         return /** @type {any} */ (helperInstance);
@@ -1091,6 +1098,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         leaveOut,
         timings: import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.timings === true,
         ...(settings.trapPort === undefined ? {} : { trapPort: settings.trapPort }),
+        ...(sharedMemory ? { memory: sharedMemory } : {}),
     });
 
     /** Folds what the emitter left out into the run's refusal maps, the reads of
@@ -1529,7 +1537,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const variant = (settings.structure !== false ? 'S' : '')
         + (settings.precise === true ? 'P' : '') + (settings.countTransfers ? 'T' : '')
         + (settings.dispatch === true ? 'D' : '') + (settings.callTargets === true ? 'C' : '')
-        + (settings.callReturn === true ? 'R' : '')
+        + (settings.callReturn === true ? 'R' : '') + (sharedMemory ? 'M' : '')
         + `p${(settings.trapPort ?? 0).toString(16)}`;
     /** The store key of one formed region: an x87 region compiled for the wide
      * precision controls or for single, or checked, is another translation of the same
@@ -1713,7 +1721,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 if (!copies.has(page))
                 {
                     const at = layout.ramBase + page * 4096;
-                    copies.set(page, new Uint8Array(memory.buffer.slice(at, at + 4096)));
+                    // A copy of its own: a slice of a shared memory's buffer is
+                    // shared too, and cannot be transferred to the translator.
+                    copies.set(page, new Uint8Array(memory.buffer, at, 4096).slice());
                 }
             }
         }

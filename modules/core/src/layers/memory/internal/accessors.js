@@ -423,6 +423,31 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
         fillBytes: fill,
 
         /**
+         * Bytes another thread wrote into the guest's memory in place -- a
+         * worker sharing it -- taken as this thread's own write: the range is
+         * the program's to have written, it is charged, and a range the
+         * guest could execute is told to the emulator's compiler, as a write
+         * through here would have been.
+         *
+         * @param {number} address @param {number} length
+         */
+        adopt(address, length){
+            if (length <= 0)
+            {
+                return;
+            }
+            regions.assert(address, length, 'write');
+            if (charge)
+            {
+                charge(length);
+            }
+            if (!raw.writeData || regions.executable(address))
+            {
+                raw.writePhysical(address, raw.readPhysical(address, length).slice());
+            }
+        },
+
+        /**
          * The window the copy above refuses: the emulator's own bytes, valid
          * only until control returns to the guest. For a path that reads a
          * block every call and has measured what the copy costs.

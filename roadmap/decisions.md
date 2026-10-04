@@ -451,6 +451,55 @@ once its length, written last, is there; and no scheduler slice ends inside a ro
 placed (`kernel.atomicCode`), so a thread switched away mid-record never leaves another thread's
 entry stopped short of its own calls -- a device shared between threads keeps the ring. Direct3D
 8's ring carries the same calls in its own shapes (`d3d8/commands.js`). *2026-10-03, 1.8.*
+Later in 1.8 the ring took Clear, BeginScene, EndScene, SetRenderTarget, SetDepthStencilSurface,
+DrawPrimitiveUP (its vertices copied) and a Direct3D 9 state block's Capture and Apply, on the
+same terms: a nested BeginScene or a draw outside a scene is answered D3D_OK and reported once.
+While an Apply or a new target waits in the ring the guest's getters go to the host, which plays
+the ring before it answers; the setters and draws do not wait. *2026-10-04, 1.8.*
+
+**A reference count is kept in guest memory, and the guest answers every AddRef and Release
+that does not cross zero.** The count of a Direct3D resource lives in a word the bridge's
+IUnknown routines change with `lock cmpxchg`; the first reference and the last come to the host,
+which is where an object's life is decided. Each answer is the count the object holds, so a
+program reading counts back (Wine's `get_refcount`) sees what it would on Windows. The played
+copy behind the graphics worker never sees the references the guest moved, so the host sends
+it the count each host-side AddRef or Release left, not the call: a last Release ends both.
+Measured on a node harness of the real engine path: 400 000 AddRef and Release calls took the
+engine thread's host time from 293-311 ms to 38-48 ms. *2026-10-04, 1.8.*
+
+**OpenGL's state calls go through a command ring in the guest too, and every other entry plays
+it first.** The calls that answer nothing -- states, bindings, array pointers, matrices, program
+parameters, texture environment and generation, immediate-mode vertices (`opengl/commands.js`)
+-- are routines in OPENGL32 that write the call and what it points at into the ring of the
+calling thread's current context, found through a slot of its TEB the way the system's
+`opengl32` keeps its own context there; wglMakeCurrent writes the slot and deleting the context
+clears it. With no current context or no room, the routine falls through to the same handler.
+OpenGL reports errors only to `glGetError`, which is an entry like any other and plays the ring
+before it answers, so unlike Direct3D nothing here is told an answer the context did not give.
+Measured on a node harness of a GL title's per-draw pattern (sixteen ring calls per draw), the
+engine thread's host time fell from 1091–1144 ms to 627–650 ms per 80 000 draws.
+*2026-10-04, 1.8.*
+
+**Where guest memory is shared, what a Direct3D 8 or 9 program unlocks is lent to the graphics
+worker, not copied to it.** The record says only where the bytes lie (`remote/lending.js`), and
+the worker copies them out of guest memory when it plays the record. Until then the bytes must
+stay as they were, so everything on the engine's side that lets the range be written -- a lock,
+a `GetDC`, a copy the device or its caller makes, the block given back -- claims it first: a lend
+the worker has not begun is copied into a stash both threads see and pointed there, one it is
+reading waits out the copy, one it has read costs nothing. Each lend's room in the stash is taken
+when it is lent, so a claim never waits for room or for a record still unsent; a range with no
+slot or room left is copied into the batch as before. What the program writes through a pointer
+it kept past the unlock now reaches the played device up to when the worker reads the bytes,
+not up to the next call that reads them -- the same kind of latitude a driver's own deferred
+upload takes, and still nothing after a lock that claimed them. A batch holding a lend is sent at
+the end of the record that follows it rather than at the end of the turn, at most every quarter
+of a millisecond, and any batch goes once a turn has kept it past the batch gap, so a long turn
+does not leave the worker idle. Measured on a node harness of a Direct3D 8 program that locks a
+256x256 texture once a frame and runs guest code after its present, none of 50 lends needed the
+stash and the engine thread's host time fell from 41 ms to 31–38 ms for 13 MB lent; where the
+program locks the same texture again before the worker has played the last draw, the claim
+copies what the batch would have, and nothing is gained. `graphics.lendMemory: false` turns it
+off. *2026-10-04, 1.9.*
 
 ## C. Process model and porting
 

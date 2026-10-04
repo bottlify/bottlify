@@ -37,7 +37,7 @@ publishing). The tables list only the settings that are data. `memory` and `load
 | `sampling` | `true` | Sample the guest's instruction pointer at every turn. |
 | `noExecuteBelow` | 0 (`createApp`: `0x10000`) | Code below this address faults when run. |
 | `closedBelow` | 0 | Memory below this address faults when read or written. |
-| `cork.config` | | cork's settings: `precise` (`false`; keep the x87 flags and undefined flags exact), `store` (`'local'`: translations in OPFS; `null`: none), `worker` (translate in a worker where one exists), `batchRegions` (32), `maxBatchRegions` (256), `hotThreshold` (2000), `wasmInterpreter` (`true`), `timings` (`false`). The full list is `EngineConfig` in `src/layers/cpu/engine.js`. |
+| `cork.config` | | cork's settings: `precise` (`false`; keep the x87 flags and undefined flags exact), `store` (`'local'`: translations in OPFS; `null`: none), `worker` (translate in a worker where one exists), `batchRegions` (32), `maxBatchRegions` (256), `hotThreshold` (2000), `wasmInterpreter` (`true`), `sharedMemory` (`true`: guest memory is a `SharedArrayBuffer` wherever the page is cross-origin isolated; `false` keeps it unshared), `timings` (`false`). The full list is `EngineConfig` in `src/layers/cpu/engine.js`. |
 | `jit` | — | The emulator's compiler budgets, by index. |
 
 ## kernel
@@ -89,6 +89,7 @@ publishing). The tables list only the settings that are data. `memory` and `load
 | `maxFps` | 60 | Passed to the presenter; not applied yet ([limits.md](limits.md#graphics)). |
 | `choice` | every API | `createApp`'s `graphicsApi`: which roots are built ([api.md](api.md)). |
 | `raster` | `true` | `false` leaves OpenGL primitives drawn without a GPU unrasterised, for measurement. |
+| `lendMemory` | `true` | With a graphics worker and shared guest memory: what a Direct3D 8 or 9 program unlocks is read by the worker in place instead of copied to it. `false` copies it, for measurement. |
 
 ## audio
 

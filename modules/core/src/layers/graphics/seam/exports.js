@@ -26,7 +26,7 @@
 import { ARGUMENT_WORDS } from '../opengl/exports.js';
 import { createGlu } from '../glu/exports.js';
 import { createComObject } from '../../win32/ole32/objects.js';
-import { createPublisher } from './com.js';
+import { createCountCells, createPublisher } from './com.js';
 import { createDirect3D8Seam } from './d3d8.js';
 import { createDirect3D9Seam } from './d3d9.js';
 import { createDirect3D10Seam } from './d3d10.js';
@@ -36,6 +36,8 @@ import { createDirect3D7Seam } from './d3d7.js';
 import { createLegacyDirect3DSeam } from './d3dlegacy.js';
 import { IID_IDirectDraw7, IID_IDirectDrawClipper } from './iids.js';
 import { createFields, D3DCAPS8 } from './structs.js';
+import { GL_COMMANDS } from '../opengl/commands.js';
+import { commandCode } from './shadow.js';
 
 const DD_OK = 0;
 /** DDERR_INVALIDPARAMS. */
@@ -166,7 +168,11 @@ export function createGraphicsLibraries(
         } },
 )
 {
-    const publisher = shared ?? createPublisher({ publishInterface, unpublishInterface });
+    const publisher = shared ?? createPublisher({
+        publishInterface, unpublishInterface,
+        cells: allocate && memory?.readU32 && memory.writeU32
+            ? createCountCells({ allocate, memory }) : undefined,
+    });
     const fields = createFields(memory);
 
     /**
@@ -394,6 +400,26 @@ export function createGraphicsLibraries(
                 handler: args=>(resolved ??= openglRuntime().table[name].handler)(args),
             };
         }
+    }
+    // The calls the command ring carries are routines that write them into
+    // the ring of the calling thread's context (`opengl/commands.js`),
+    // falling back on the same handler when it has none or no room. They run
+    // unbroken: another thread's entry into the host may read what they write.
+    for (const [name, shape] of Object.entries(GL_COMMANDS.COMMANDS))
+    {
+        const entry = openglTable[name];
+        Object.assign(entry, {
+            unbroken: true,
+            /** @param {import('../../win32/msvcrt/guest-code.js').CodeBuilder} builder */
+            code: builder=>{
+                const trap = builder.register({ convention: 'stdcall', argBytes: entry.argBytes,
+                    lastError: false, handler: entry.handler });
+                const code = commandCode(0, 0,
+                    { ...shape, slot: GL_COMMANDS.commandSlot(name), thread: true });
+                builder.jump(code.length - 4, trap);
+                return code;
+            },
+        });
     }
 
     const table = {
@@ -700,6 +726,8 @@ export function createGraphicsLibraries(
             imageDigests: opengl ? opengl.diagnostics().images : [],
             keptImages: opengl ? opengl.diagnostics().kept : [],
             imageTimes: opengl ? opengl.diagnostics().imageTimes : [],
+            // OpenGL calls the command ring carried past the bridge.
+            openglCommandCalls: opengl ? opengl.diagnostics().commandCalls : 0,
             vulkan: vulkan?.diagnostics() ?? null,
         }),
 

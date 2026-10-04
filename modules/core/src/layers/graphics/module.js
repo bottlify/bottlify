@@ -343,6 +343,11 @@ export function createGraphicsModule(){
                     device: device.device,
                     presentTo: device.presentTo,
                     writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+                    // Where the memory is shared the worker writes what it reads
+                    // back in place, and says only where.
+                    sharedMemory: ()=>memory.shared?.() ?? null,
+                    adoptMemory: (address, length)=>memory.adopt?.(address, length),
+                    lendMemory: config?.lendMemory !== false,
                     divergence: config?.divergence,
                     lost: lose,
                     failed: message=>config?.divergence?.('graphics',
@@ -560,6 +565,9 @@ export function createGraphicsModule(){
                     // A context is current on one thread at a time, and another
                     // thread's MakeCurrent or DeleteContext of it is ERROR_BUSY.
                     currentThread: ()=>bridge.callerThread?.()?.id ?? 0,
+                    // Where the routines of a context's command ring find its
+                    // block: the calling thread's TEB.
+                    currentTeb: ()=>bridge.callerThread?.()?.tebAddress ?? 0,
                     // On the configuration rather than the device handle: it
                     // concerns the build that has no device.
                     raster: config?.raster,

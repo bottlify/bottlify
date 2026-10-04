@@ -111,6 +111,7 @@ export function recordedDirect3D(factory, services, transport){
             services.free?.(address);
         },
         writeMemory: write && ((/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>{
+            recording?.writing(address, bytes.length);
             write(address, bytes);
             recording?.wrote(address, bytes);
         }),
@@ -126,6 +127,7 @@ export function recordedDirect3D(factory, services, transport){
         root: recorded,
         readMemory: services.readMemory ?? ((/** @type {number} */ address,
             /** @type {number} */ length)=>new Uint8Array(length)),
+        windowMemory: services.windowMemory,
         transport,
         answered: answeredByRenderer,
         answers: CANDIDATES,
@@ -140,7 +142,8 @@ export function recordedDirect3D(factory, services, transport){
  * @param {any} services  what the factory is given, but for memory: `readMemory`
  *     says only whether the program has any, and `writeMemory` is where what
  *     the played device writes outside a call goes -- a render target's pixels
- *     read back, which the program waits for
+ *     read back, which the program waits for; `borrow`, where guest memory is
+ *     shared, reads what the recording lent (`lending.js`)
  * @returns {{ root: any, play: (call: import('./wire.js').ReadCall) => any,
  *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void)
  *         => void }}
@@ -174,7 +177,7 @@ export function playedDirect3D(factory, services){
         // the program sets it on; this one only has to know whether it does.
         gamma: services.gamma && { applies: ()=>services.gamma.applies(), set: ()=>{} },
     });
-    player = createPlayer({ root, ship: mirror.write, read: mirror.read });
+    player = createPlayer({ root, ship: mirror.write, read: mirror.read, borrow: services.borrow });
     const live = player;
     return {
         root,

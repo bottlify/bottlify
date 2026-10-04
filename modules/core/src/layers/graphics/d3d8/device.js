@@ -1177,6 +1177,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             get refCount(){
                 return bufferCount.value;
             },
+            // Where guest code may count its references (`ReferenceCount.place`).
+            counter: bufferCount,
             addRef: ()=>bufferCount.addRef(),
             release: ()=>bufferCount.release(),
             get destroyed(){

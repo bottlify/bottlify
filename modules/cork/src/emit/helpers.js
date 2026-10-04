@@ -63,11 +63,12 @@ export function defineHelpers(m, layout){
  * The shared helpers module: an imported memory and the exports.
  *
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ * @param {{ shared?: boolean, maxPages?: number }} [memory]  how the memory is imported
  * @returns {Uint8Array}
  */
-export function buildHelpersModule(layout){
+export function buildHelpersModule(layout, memory = {}){
     const m = new ModuleBuilder();
-    m.importMemory('env', 'memory', { min: 1 });
+    m.importMemory('env', 'memory', { min: 1, max: memory.maxPages, shared: memory.shared });
     const helpers = defineHelpers(m, layout);
     for (const name of HELPER_NAMES)
     {

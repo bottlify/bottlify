@@ -18,13 +18,12 @@
  * from the pointer the program passed.
  *
  * Between two entries into the host every setter and draw a program makes
- * most is here or in the host, never in the shadow block's marks: the ring
- * keeps their order, which a block of the latest values cannot, and a draw
- * that waits needs it.
+ * most is here: the ring keeps their order, which a draw that waits needs.
  */
 
 import { IDIRECT3DDEVICE8_SLOTS } from '../seam/vtables.js';
 import { lightFromDwords } from '../seam/structs.js';
+import { vertexCountOf } from './render.js';
 
 /** Where a record's arguments start, in dwords. */
 const ARGS = 2;
@@ -51,6 +50,10 @@ const ints = new Int32Array(scratch);
  * @property {Uint32Array} words
  * @property {Float32Array} floats
  * @property {Int32Array} ints
+ * @property {(bytes: number) => Uint8Array} copy  the first `bytes` of the copy, as a copy
+ *     of its own, for a method that keeps them or reads more than the scratch holds
+ * @property {(bytes: number) => Uint8Array} view  the same bytes in place, for a method
+ *     that copies what it reads before it returns
  */
 
 /**
@@ -66,6 +69,15 @@ const ints = new Int32Array(scratch);
  * @property {number} [pointer]
  * @property {number} [bytes]
  * @property {{ arg: number, shift: number, most: number }} [count]
+ * @property {{ arg: number, cases: readonly [number, number][], otherwise: number }} [choose]
+ *     or a size chosen by an argument's value: the bytes of the case it equals, or `otherwise`
+ * @property {{ type: number, count: number, stride: number, most: number }} [vertices]
+ *     or the vertices a draw's primitives span, `stride` bytes each (`commandCode`)
+ * @property {boolean} [kept]  its copy is taken with `copy` alone, not through the scratch
+ * @property {boolean} [self]  the first argument is the object the method is of, not the device
+ * @property {boolean} [stale]  it may change state the device's block mirrors
+ * @property {'empty' | 'any'} [nullable]  its pointer may be null: with a count of zero
+ *     alone, or whatever the count
  * @property {boolean} [draws]
  * @property {(device: any, call: CommandArgs) => number} make
  */
@@ -81,9 +93,12 @@ const ints = new Int32Array(scratch);
 export function commandSet(slots, table){
     /** @param {string} name */
     const commandSlot = name=>3 + slots.findIndex(([entry])=>entry === name);
-    /** @type {Map<number, CommandEntry>} */
-    const bySlot = new Map(Object.entries(table)
-        .map(([name, entry])=>[commandSlot(name), entry]));
+    /** @type {(CommandEntry | undefined)[]} */
+    const bySlot = [];
+    for (const [name, entry] of Object.entries(table))
+    {
+        bySlot[commandSlot(name)] = entry;
+    }
     /** @type {Map<CommandEntry, string>} */
     const names = new Map(Object.entries(table).map(([name, entry])=>[entry, name]));
 
@@ -102,7 +117,7 @@ export function commandSet(slots, table){
         let at = 0;
         while (at < all.length)
         {
-            const entry = bySlot.get(all[at]);
+            const entry = bySlot[all[at]];
             const length = all[at + 1] >>> 2;
             if (entry === undefined || length === 0)
             {
@@ -141,10 +156,20 @@ export function commandSet(slots, table){
             words,
             floats,
             ints,
+            view: bytes=>{
+                const from = records.byteOffset
+                    + (at + ARGS + (bySlot[all[at]]?.args ?? 0)) * 4;
+                return new Uint8Array(records.buffer, from, bytes);
+            },
+            copy: bytes=>{
+                const from = records.byteOffset
+                    + (at + ARGS + (bySlot[all[at]]?.args ?? 0)) * 4;
+                return new Uint8Array(records.buffer.slice(from, from + bytes));
+            },
         };
         while (at < all.length)
         {
-            const entry = bySlot.get(all[at]);
+            const entry = bySlot[all[at]];
             const length = all[at + 1] >>> 2;
             if (entry === undefined || length < ARGS + entry.args || at + length > all.length)
             {
@@ -153,9 +178,11 @@ export function commandSet(slots, table){
             }
             const data = at + ARGS + entry.args;
             const copied = length - ARGS - entry.args;
-            if (copied > 0)
+            // Word by word: a view of the run made per record costs more than
+            // the copy.
+            for (let i = 0, end = entry.kept ? 0 : Math.min(copied, words.length); i < end; i++)
             {
-                words.set(all.subarray(data, data + Math.min(copied, words.length)));
+                words[i] = all[data + i];
             }
             const hr = entry.make(device, call);
             made++;
@@ -183,6 +210,28 @@ export function materialOf(f){
         Power: f[16] };
 }
 
+const bits = new DataView(new ArrayBuffer(4));
+/** A float's bits as the float. @param {number} word */
+const floatOf = word=>{
+    bits.setUint32(0, word >>> 0, true);
+    return bits.getFloat32(0, true);
+};
+
+/**
+ * Clear's rectangles, four integers each, as the device takes them.
+ *
+ * @param {Int32Array} copy @param {number} count
+ */
+const rectsOf = (copy, count)=>Array.from({ length: count }, (unused, i)=>({
+    x1: copy[i * 4], y1: copy[i * 4 + 1], x2: copy[i * 4 + 2], y2: copy[i * 4 + 3],
+}));
+
+/**
+ * The most a draw from the program's own memory copies into a record: past
+ * it the host reads the vertices itself, as it does without a ring.
+ */
+const UP_BYTES = 16 * 1024;
+
 /**
  * The calls both versions' rings carry the same way.
  *
@@ -207,6 +256,16 @@ export const SHARED_COMMANDS = {
         make: (d, c)=>d.SetClipPlane(c.arg(0), c.floats.slice(0, 4)) },
     DrawPrimitive: { args: 3, draws: true,
         make: (d, c)=>d.DrawPrimitive(c.arg(0), c.arg(1), c.arg(2)) },
+    BeginScene: { args: 0, make: d=>d.BeginScene() },
+    EndScene: { args: 0, make: d=>d.EndScene() },
+    // No rectangles is the whole target; Z comes as a float in a dword.
+    Clear: { args: 6, pointer: 1, nullable: 'empty', count: { arg: 0, shift: 4, most: 64 },
+        make: (d, c)=>d.Clear(c.arg(0), c.arg(1) === 0 ? null : rectsOf(c.ints, c.arg(0)),
+            c.arg(2), c.arg(3), floatOf(c.arg(4)), c.arg(5)) },
+    DrawPrimitiveUP: { args: 4, pointer: 2, kept: true, draws: true,
+        vertices: { type: 0, count: 1, stride: 3, most: UP_BYTES },
+        make: (d, c)=>d.DrawPrimitiveUP(c.arg(0), c.arg(1),
+            c.copy(vertexCountOf(c.arg(0), c.arg(1)) * c.arg(3)), c.arg(3)) },
 };
 
 /**
@@ -216,6 +275,9 @@ export const SHARED_COMMANDS = {
  */
 export const D3D8_COMMANDS = commandSet(IDIRECT3DDEVICE8_SLOTS, {
     ...SHARED_COMMANDS,
+    // A new target is a new viewport, which the guest's getter reads.
+    SetRenderTarget: { args: 2, objects: [0, 1], stale: true,
+        make: (d, c)=>d.SetRenderTarget(c.object(), c.object()) },
     SetStreamSource: { args: 3, objects: [1],
         make: (d, c)=>d.SetStreamSource(c.arg(0), c.object(), c.arg(2)) },
     SetIndices: { args: 2, objects: [0], make: (d, c)=>d.SetIndices(c.object(), c.arg(1)) },
