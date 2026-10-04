@@ -891,3 +891,64 @@ test('random programs with calls and turns inside device blocks keep the voice c
             assert.equal(failure, null);
         }
     });
+
+test('a stream fed behind its cursor and counted by its moves plays to its end', async()=>{
+    // A sound longer than its buffer, the way a program streams one: the
+    // buffer filled with the first lap, played round, and each poll refills
+    // what the cursor has just left with the next bytes of the sound. The
+    // program counts what has played by how far the cursor moved since the
+    // last poll, round the circle, and stops the buffer once that count is
+    // the sound's length. A cursor that ever steps back reads as a whole lap
+    // played, and the sound is stopped a lap early.
+    const BUFFER = { rate: 22050, channels: 2, bits: 16, bytes: 0x40980 };
+    for (let seed = 1; seed <= 12; seed++)
+    {
+        const next = random(seed);
+        const m = await machine();
+        const stream = m.create(BUFFER);
+        const total = BUFFER.bytes * 3 + Math.floor(next() * BUFFER.bytes / 4) * 4;
+        m.fill(stream, 0, BUFFER.bytes, 0);
+        let given = BUFFER.bytes;
+        assert.equal(m.call(stream, 'Play', [0, 0, DSBPLAY_LOOPING]), DS_OK);
+        let last = 0;
+        let counted = 0;
+        /** @type {string[]} */
+        const backwards = [];
+        let at = 0;
+        while (at < 30000 && counted < total)
+        {
+            const step = 8 + Math.floor(next() * 6);
+            at += step;
+            if (next() < 0.3)
+            {
+                m.blockAround(Math.floor(next() * 40), ()=>m.api.pump());
+                m.pass(Math.max(0, step - BLOCK_MS));
+            }
+            else
+            {
+                m.pass(step);
+                m.api.pump();
+            }
+            const now = m.cursor(stream);
+            const moved = (now - last + BUFFER.bytes) % BUFFER.bytes;
+            if (moved > BUFFER.bytes / 2)
+            {
+                backwards.push(`${at} ms: ${last} -> ${now}`);
+            }
+            counted += moved;
+            if (moved > 0 && given < total)
+            {
+                const length = Math.min(moved, total - given);
+                m.fill(stream, last, length, 0);
+                given += length;
+            }
+            last = now;
+        }
+        const device = m.bufferAt(stream).device;
+        const mixed = device ? device.laps * BUFFER.bytes + device.position : -1;
+        assert.equal(m.call(stream, 'Stop', []), DS_OK);
+        assert.deepEqual(backwards, [], `seed ${seed}: the cursor stepped back`);
+        assert.ok(mixed >= total - 4 * BLOCK_FRAMES * 4,
+            `seed ${seed}: stopped after ${counted} counted, ${mixed} played of ${total}`);
+    }
+});
