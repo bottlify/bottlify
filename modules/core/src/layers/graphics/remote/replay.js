@@ -70,11 +70,11 @@ const UNLOCKS = new Set(['Unlock', 'UnlockRect', 'UnlockCubeRect', 'UnlockBox', 
 
 /**
  * Whether a call reads no resource's bytes on the played side -- a state set,
- * a lock -- so that a texture's bytes unlocked before it may wait for the
- * next call that does: a renderer takes a texture's bytes at the first draw
- * that samples it after the unlock, not at the unlock, and the program's
- * writes between the two are in what it draws. A buffer's are taken at the
- * unlock, there and here.
+ * a lock -- so that bytes unlocked before it wait for one that may (`readBy`
+ * says which): a renderer takes a texture's bytes at the first draw that
+ * samples it after the unlock, not at the unlock, and the program's writes
+ * between the two are in what it draws. A buffer's are taken at the unlock,
+ * there and here.
  *
  * @param {string} name
  */
@@ -360,6 +360,8 @@ export function createRecording(options){
      * @type {WeakMap<object, Map<string, object>>}
      */
     const levelsOf = new WeakMap();
+    /** And the other way: the texture a level, a face or a volume is part of. @type {WeakMap<object, object>} */
+    const containerOf = new WeakMap();
     /** The stand-ins of the caller's services, passed where the services were. @type {WeakSet<object>} */
     const services = new WeakSet();
     /** The functions the caller put on the device's objects, its own. @type {WeakMap<object, Set<string>>} */
@@ -482,31 +484,103 @@ export function createRecording(options){
 
     /**
      * Textures' and surfaces' bytes unlocked and not yet sent, by where they
-     * begin, and the objects they belong to: sent with the next call that may
-     * read them, or that is made on one of those objects.
+     * begin, and what each waits on: the texture, for a level's bytes as for
+     * its own, or the surface. Sent with the next call that may read them, or
+     * that is made on what they belong to.
      */
     const pending = { addresses: /** @type {Map<number, number | null>} */ (new Map()),
-        objects: /** @type {Set<object>} */ (new Set()) };
+        owners: /** @type {Map<number, object>} */ (new Map()) };
 
-    /** @param {Locked} locked */
-    const pend = ({ address, length })=>{
+    /** What an object's unlocked bytes wait on. @param {object} object */
+    const keyOf = object=>containerOf.get(object) ?? object;
+
+    /**
+     * Whether bytes waiting on this are a texture's, which the device that
+     * draws itself reads at the first draw that samples the texture -- the
+     * program's writes up to there are in what it draws -- rather than at the
+     * next call that may read anything, as it does a surface's.
+     *
+     * @param {object} key
+     */
+    const isTexture = key=>typeof (/** @type {any} */ (key).base) !== 'number';
+
+    /** @param {object} key @returns {(locked: Locked) => void} */
+    const pendFor = key=>({ address, length })=>{
         const held = pending.addresses.get(address);
         pending.addresses.set(address, held === undefined ? length
             : held === null || length === null ? null : Math.max(held, length));
+        pending.owners.set(address, key);
     };
 
     /**
-     * The pending bytes, as a record of their own ahead of the call that
-     * needs them: copied into the batch now, out of the guest's memory in
-     * place, before the call can write over them. None are pending after.
+     * Which pending bytes a call may read before it answers: a surface's
+     * always; a texture's when the call names it, or one of its levels; when
+     * it draws, those of the textures bound to the device then; when it is a
+     * run of the command ring, those bound before it and those its records
+     * name -- all of them when a record applies a state block, whose bindings
+     * the run does not name.
+     *
+     * @param {any} target @param {string} name @param {any[]} args
+     * @returns {(key: object) => boolean}
      */
-    const shipPending = ()=>{
+    const readBy = (target, name, args)=>{
+        /** @type {Set<object>} */
+        const named = new Set([keyOf(target)]);
+        let applies = false;
+        /** @param {any} value */
+        const note = value=>{
+            const raw = raws.get(value) ?? value;
+            if (raw !== null && typeof raw === 'object')
+            {
+                named.add(keyOf(raw));
+                applies ||= typeof raw.Apply === 'function';
+            }
+        };
+        for (const arg of args)
+        {
+            if (Array.isArray(arg))
+            {
+                arg.forEach(note);
+            }
+            else
+            {
+                note(arg);
+            }
+        }
+        const run = name === 'commands';
+        if (!run && !name.startsWith('Draw'))
+        {
+            return key=>!isTexture(key) || named.has(key);
+        }
+        const bound = target.boundTextures;
+        if (!bound || (run && applies))
+        {
+            return ()=>true;
+        }
+        const sampled = new Set(bound);
+        return key=>!isTexture(key) || named.has(key) || sampled.has(key);
+    };
+
+    /**
+     * The pending bytes a call may read, as a record of their own ahead of
+     * it: copied into the batch now, out of the guest's memory in place,
+     * before the call can write over them. The rest wait on.
+     *
+     * @param {(key: object) => boolean} [which]
+     */
+    const shipPending = (which = ()=>true)=>{
         /** @type {{ address: number, length: number, slot: number }[]} */
         const lent = [];
         /** @type {{ address: number, bytes: Uint8Array }[]} */
         const taken = [];
         for (const [address, length] of pending.addresses)
         {
+            if (!which(/** @type {object} */ (pending.owners.get(address))))
+            {
+                continue;
+            }
+            pending.addresses.delete(address);
+            pending.owners.delete(address);
             const extent = extentOf(address, length);
             const slot = extent > 0 && lender ? lender.lend(address, extent) : -1;
             if (slot >= 0)
@@ -518,8 +592,6 @@ export function createRecording(options){
                 taken.push(...rangeFrom({ address, length }, windowMemory));
             }
         }
-        pending.addresses.clear();
-        pending.objects.clear();
         if (lent.length > 0)
         {
             writer.u8(OP.LENT);
@@ -844,8 +916,12 @@ export function createRecording(options){
                 }
                 return method.apply(target, applied);
             }
-            if (pending.addresses.size > 0
-                && (!quiet || (!unlocking && pending.objects.has(target))))
+            if (pending.addresses.size > 0 && !quiet)
+            {
+                shipPending(readBy(target, name, args));
+            }
+            else if (pending.addresses.size > 0 && !unlocking
+                && [...pending.owners.values()].includes(keyOf(target)))
             {
                 shipPending();
             }
@@ -890,8 +966,7 @@ export function createRecording(options){
                     .filter(range=>!range.readOnly);
                 if (deferring)
                 {
-                    ranges.forEach(pend);
-                    pending.objects.add(target);
+                    ranges.forEach(pendFor(keyOf(target)));
                 }
                 else
                 {
@@ -975,6 +1050,7 @@ export function createRecording(options){
                     const levels = levelsOf.get(target) ?? new Map();
                     levels.set(partOf(args), raws.get(level) ?? level);
                     levelsOf.set(target, levels);
+                    containerOf.set(raws.get(level) ?? level, target);
                 }
             }
             // A lock taken to read is marked so whatever the answer: a render

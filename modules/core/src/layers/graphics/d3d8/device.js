@@ -2488,6 +2488,15 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         },
 
         /**
+         * The textures bound to the stages, without the reference GetTexture
+         * hands out: what a draw made now samples, for a recording that sends
+         * a texture's bytes before the first draw that reads them.
+         */
+        get boundTextures(){
+            return textures.values();
+        },
+
+        /**
          * The paired value itself, for whoever is about to record a draw. It is
          * exposed instead of the rectangle precisely so that no consumer has to
          * derive the vertex-stage constants and get them subtly wrong.

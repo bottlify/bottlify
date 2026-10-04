@@ -1740,11 +1740,6 @@ test('outside the contract: a texture written after its unlock, before the draw 
 
 test('outside the contract: a texture written after its unlock and after a call that reads no'
     + ' texture of its own, before the draw that first samples it, is drawn as written',
-{ todo: 'the recording sends a texture\'s unlocked bytes ahead of the next call that may read'
-    + ' anything (replay.js readsNothing); the device that draws itself reads them at the draw'
-    + ' that samples the texture. Sending them later needs to know which objects each call'
-    + ' reads -- a Clear reads a render target\'s pending bytes -- and is not worth it for'
-    + ' writes the contract does not allow' },
 async()=>{
     await same(9, run=>keptFrame(run, async({ device, tex, texBits })=>{
         await fillLevel(run, tex, 'tex again', 0, 153);
@@ -2104,4 +2099,85 @@ test('Direct3D 8: a vertex shader by its handle, its constants set between the d
         }
         await run.look('end');
     });
+});
+
+test('Direct3D 9: a texture unlocked, then bound by a state block\'s Apply and drawn, is drawn as'
+    + ' written', async()=>{
+    // The bytes wait for the first draw that samples the texture; Apply binds
+    // it without naming it, and the draw after must still find them sent.
+    await same(9, run=>keptFrame(run, async({ device, tex })=>{
+        const other = await makeTexture(run, device, 'other', { levels: 1, seed: 160 });
+        await run.call('BeginStateBlock', ()=>device.BeginStateBlock());
+        await run.call('SetTexture other in block', ()=>device.SetTexture(0, other));
+        /** @type {{ block?: any }} */
+        const recorded = {};
+        await run.call('EndStateBlock', ()=>device.EndStateBlock(recorded), [recorded]);
+        await drawQuad9(run, device, 'tex', tex, 0);
+        await fillLevel(run, other, 'other again', 0, 161);
+        await run.call('Clear again', ()=>device.Clear(0, null, D3DCLEAR.TARGET, 0xff000002, 1,
+            0));
+        await run.call('Apply', ()=>recorded.block.Apply());
+        await run.call('DrawIndexedPrimitive other', ()=>device.DrawIndexedPrimitive(
+            D3DPT.TRIANGLELIST, 0, 0, 4, 0, 2));
+        await run.call('Release block', ()=>recorded.block.release());
+        await run.call('Release other', ()=>other.release());
+    }));
+});
+
+test('Direct3D 9: a texture unlocked and copied from through its level is copied as written',
+    async()=>{
+        // A copy names the level, not the texture the bytes wait on.
+        await same(9, run=>keptFrame(run, async({ device, tex })=>{
+            const source = await makeTexture(run, device, 'source', { levels: 1, seed: 170,
+                pool: D3DPOOL.SYSTEMMEM });
+            /** @type {{ surface?: any }} */
+            const level = {};
+            await run.call('GetSurfaceLevel source', ()=>source.GetSurfaceLevel(0, level),
+                [level]);
+            await fillLevel(run, source, 'source again', 0, 171);
+            await run.call('Clear again', ()=>device.Clear(0, null, D3DCLEAR.TARGET, 0xff000003,
+                1, 0));
+            /** @type {{ surface?: any }} */
+            const into = {};
+            await run.call('GetSurfaceLevel tex', ()=>tex.GetSurfaceLevel(0, into), [into]);
+            await run.call('UpdateSurface', ()=>device.UpdateSurface(level.surface, null,
+                into.surface, null));
+            await drawQuad9(run, device, 'tex', tex, 0);
+            await run.call('Release into', ()=>into.surface.release());
+            await run.call('Release level', ()=>level.surface.release());
+            await run.call('Release source', ()=>source.release());
+        }));
+    });
+
+test('outside the contract: a texture written after its unlock and after a draw that does not'
+    + ' sample it, before the draw that does, is drawn as written', async()=>{
+    await same(9, run=>keptFrame(run, async({ device, tex, texBits })=>{
+        await fillLevel(run, tex, 'tex again', 0, 180);
+        await run.call('SetTexture none', ()=>device.SetTexture(0, null));
+        await run.call('DrawIndexedPrimitive untextured', ()=>device.DrawIndexedPrimitive(
+            D3DPT.TRIANGLELIST, 0, 0, 4, 0, 2));
+        fillRows(run, texBits, 32, 8, 32, 181);
+        await drawQuad9(run, device, 'tex', tex, 0);
+    }));
+});
+
+test('outside the contract: a level written after its surface\'s unlock and after a call that'
+    + ' reads no texture, before the draw that samples it, is drawn as written', async()=>{
+    // Unlocked through its own surface, the level's bytes are the texture's
+    // all the same, and wait for the draw as the texture's do.
+    await same(9, run=>keptFrame(run, async({ device, tex, texBits })=>{
+        /** @type {{ surface?: any }} */
+        const level = {};
+        await run.call('GetSurfaceLevel', ()=>tex.GetSurfaceLevel(0, level), [level]);
+        /** @type {{ pBits?: number, Pitch?: number }} */
+        const rect = {};
+        await run.call('LockRect level', ()=>level.surface.LockRect(rect, null, 0), [rect]);
+        fillRows(run, texBits, 32, 8, 32, 190);
+        await run.call('UnlockRect level', ()=>level.surface.UnlockRect());
+        await run.call('Clear again', ()=>device.Clear(0, null, D3DCLEAR.TARGET, 0xff000004, 1,
+            0));
+        fillRows(run, texBits, 32, 8, 32, 191);
+        await drawQuad9(run, device, 'tex', tex, 0);
+        await run.call('Release level', ()=>level.surface.release());
+    }));
 });
