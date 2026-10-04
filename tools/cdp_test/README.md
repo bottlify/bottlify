@@ -132,6 +132,14 @@ calls every few seconds (`app.standing()`), and with `--journal S` the last
 cross-process COM calls S seconds in. `--bundle ID` runs an installed
 program's launcher or entry the same way, with `--click`, `--key`, `--shots`
 and, with `--attended`, its message boxes left on the desktop to answer.
+`--copy DIR TO` writes a directory of the volume out once the run is over:
+what a setup unpacked, for the audit below.
+
+`tools/import-audit.mjs <file|directory|bundle.btl|disc.iso>...` reads the
+import table of every PE image under the paths and lists what this build does
+not export: each missing function or ordinal with the images that import it,
+each library nobody provides, and each image that looks packed (its imports
+are looked up at run time). Run it before a title's or a setup's first run.
 
 `tools/arg-bytes-audit.mjs <spec directory>` checks the bytes every stdcall
 entry of the win32 layer pops against Wine's export spec files kept locally:

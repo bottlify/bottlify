@@ -246,6 +246,13 @@ npm run build            # esbuild → modules/core/dist/, plus dist/checksums.j
 npm run cdp:probe        # tools/cdp_test — browser → worker → ping → screenshot, the Phase 0 acceptance test
 ```
 
+**Audit before the first run.** Before installing a program or bringing up a title, run
+`node tools/import-audit.mjs` over its files (an exe, a directory, a `.btl` bundle or an `.iso`) and
+implement every missing function it lists in one pass, instead of meeting them one crash at a time.
+A setup unpacks its payload as it runs: run it once with `tools/install-watch.mjs --copy` and audit
+what it unpacked. The audit sees missing entry points only; a packed image, a payload still
+compressed and what a program asks GetProcAddress for at run time are found by running it.
+
 `eslint.config.mjs` turns `no-undef` off deliberately: `tsc --checkJs` already knows the real global
 set for each file (Node script vs. Worker vs. browser page) and checks it more precisely than a
 single ESLint environment could without per-file overrides duplicating that config. Everything else

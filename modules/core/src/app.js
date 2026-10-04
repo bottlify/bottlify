@@ -6215,6 +6215,23 @@ async function buildApp(options){
             /** @param {number} address @param {number} length */
             read: (address, length)=>memory.readBytes(address >>> 0, length),
             /**
+             * Whether a system library this build makes exports a name, or a
+             * number when there is no name: what an import table is checked
+             * against without running the program (tools/import-audit.mjs).
+             * Null for a library this build does not make.
+             *
+             * @param {string} dll @param {string | null} name @param {number | null} [ordinal]
+             */
+            exported: (dll, name, ordinal = null)=>{
+                const module = systemLibraries.has(moduleKeyOf(dll)) ? findModule(dll) : null;
+                if (!module)
+                {
+                    return null;
+                }
+                return (name !== null ? module.addressOf(name)
+                    : module.addressOfOrdinal(ordinal ?? -1)) !== null;
+            },
+            /**
              * The desktop the window manager paints into, or null before any
              * window has drawn: for a tool that writes the screen to a file.
              *
