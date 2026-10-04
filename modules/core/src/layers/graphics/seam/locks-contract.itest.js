@@ -26,9 +26,12 @@ import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { commandCode, createShadow, lockCode, settledAfter, unlockCode } from './shadow.js';
-import { COMMAND_MIRRORS } from './d3d8.js';
+import { COMMAND_MIRRORS as MIRRORS_8 } from './d3d8.js';
+import { COMMAND_MIRRORS as MIRRORS_9 } from './d3d9.js';
 import { D3D8_COMMANDS } from '../d3d8/commands.js';
+import * as D3D9_COMMANDS from '../d3d9/commands.js';
 import { createDirect3D8 } from '../d3d8/device.js';
+import { createDirect3D9 } from '../d3d9/device.js';
 
 const PROGRAM = 0x8000;
 const LOCK = 0x9000;
@@ -146,11 +149,46 @@ function generate(seed, count){
 }
 
 /**
+ * What tells the two versions apart here: how a device is made, how its
+ * stream and format are set, and its ring's commands and mirrors.
+ *
+ * @typedef {{ name: string, create: (services: object) => any,
+ *     bind: (device: any, buffer: any) => void, commands: any,
+ *     mirrors: Record<string, any[]> }} Version
+ */
+
+/** @type {Version[]} */
+const VERSIONS = [
+    {
+        name: 'Direct3D 8',
+        create: services=>createDirect3D8(services),
+        bind: (device, buffer)=>{
+            assert.equal(device.SetStreamSource(0, buffer, STRIDE), D3D_OK);
+            assert.equal(device.SetVertexShader(FVF), D3D_OK);
+        },
+        commands: D3D8_COMMANDS,
+        mirrors: MIRRORS_8,
+    },
+    {
+        name: 'Direct3D 9',
+        create: services=>createDirect3D9(services),
+        bind: (device, buffer)=>{
+            assert.equal(device.SetStreamSource(0, buffer, 0, STRIDE), D3D_OK);
+            assert.equal(device.SetFVF(FVF), D3D_OK);
+        },
+        commands: D3D9_COMMANDS,
+        mirrors: MIRRORS_9,
+    },
+];
+
+/**
  * A device over the processor's memory, its buffer, and what each draw read:
  * the bytes of its vertices as the renderer would have them -- the buffer's
  * unlocked ranges, copied out of guest memory at each unlock.
+ *
+ * @param {Version} version
  */
-function machine(){
+function machine(version){
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: {},
@@ -170,7 +208,7 @@ function machine(){
     const writeMemory = (at, bytes)=>host.writePhysical(at, bytes);
     /** @param {number} at */
     const readU32 = at=>new DataView(host.readPhysical(at, 4).slice().buffer).getUint32(0, true);
-    const d3d = createDirect3D8({ allocate, free: ()=>{}, readMemory, writeMemory,
+    const d3d = version.create({ allocate, free: ()=>{}, readMemory, writeMemory,
         windowMemory: readMemory });
     /** @type {{ device?: any }} */
     const made = {};
@@ -223,8 +261,7 @@ function machine(){
         }
         return hr;
     };
-    assert.equal(device.SetStreamSource(0, buffer, STRIDE), D3D_OK);
-    assert.equal(device.SetVertexShader(FVF), D3D_OK);
+    version.bind(device, buffer);
     assert.equal(device.BeginScene(), D3D_OK);
     return { host, allocate, readMemory, writeMemory, readU32, device, buffer, reads };
 }
@@ -239,9 +276,9 @@ function machine(){
 const write = (writeMemory, at, length, fill)=>writeMemory(at,
     Uint8Array.from({ length }, (unused, i)=>(fill + i * 7) & 0xff));
 
-/** Every call made on the device as it comes. @param {Step[]} steps */
-function direct(steps){
-    const { writeMemory, device, buffer, reads } = machine();
+/** Every call made on the device as it comes. @param {Version} version @param {Step[]} steps */
+function direct(version, steps){
+    const { writeMemory, device, buffer, reads } = machine(version);
     for (const step of steps)
     {
         if (step.kind === 'lock')
@@ -268,22 +305,24 @@ function direct(steps){
  * gives back the lock and says so in the block; a device call plays it all
  * and brings the block to the device after (`settledAfter`).
  *
- * @param {Step[]} steps
+ * @param {Version} version @param {Step[]} steps
  */
-function guest(steps){
-    const { host, allocate, readMemory, writeMemory, readU32, device, buffer, reads } = machine();
+function guest(version, steps){
+    const { host, allocate, readMemory, writeMemory, readU32, device, buffer, reads } =
+        machine(version);
     const shadow = createShadow({
         allocate, readMemory, readU32, writeMemory, device,
         commands: { take: records=>device.commands(records,
-            D3D8_COMMANDS.commandObjects(records, ()=>null)) },
+            version.commands.commandObjects(records, ()=>null)) },
     });
     host.writePhysical(DEVICE + 4, new Uint8Array(u32(shadow.address())));
     host.writePhysical(BUFFER_IF + 4, new Uint8Array(u32(shadow.attachBuffer(buffer))));
     host.writePhysical(LOCK, lockCode(LOCK, LOCK_TRAP));
     host.writePhysical(UNLOCK, unlockCode(UNLOCK, UNLOCK_TRAP));
     host.writePhysical(DRAW, commandCode(DRAW, DRAW_TRAP, {
-        ...D3D8_COMMANDS.COMMANDS.DrawPrimitive, slot: D3D8_COMMANDS.commandSlot('DrawPrimitive'),
-        mirror: COMMAND_MIRRORS.DrawPrimitive,
+        ...version.commands.COMMANDS.DrawPrimitive,
+        slot: version.commands.commandSlot('DrawPrimitive'),
+        mirror: version.mirrors.DrawPrimitive,
     }));
     for (const trap of [LOCK_TRAP, UNLOCK_TRAP, DRAW_TRAP])
     {
@@ -400,14 +439,18 @@ function guest(steps){
 
 test('a draw reads the vertices its buffer held when the program made it, however the locks'
     + ' around it were taken', ()=>{
-    for (let seed = 1; seed <= 40; seed++)
+    for (const version of VERSIONS)
     {
-        const steps = generate(seed, 300);
-        const expected = direct(steps);
-        const actual = guest(steps);
-        assert.equal(actual.length, expected.length, `seed ${seed}: every draw is made`);
-        const first = expected.findIndex((bytes, i)=>
-            bytes.some((byte, j)=>byte !== actual[i][j]));
-        assert.equal(first, -1, `seed ${seed}: draw ${first} reads what it would on the host`);
+        for (let seed = 1; seed <= 40; seed++)
+        {
+            const steps = generate(seed, 300);
+            const expected = direct(version, steps);
+            const actual = guest(version, steps);
+            const label = `${version.name}, seed ${seed}`;
+            assert.equal(actual.length, expected.length, `${label}: every draw is made`);
+            const first = expected.findIndex((bytes, i)=>
+                bytes.some((byte, j)=>byte !== actual[i][j]));
+            assert.equal(first, -1, `${label}: draw ${first} reads what it would on the host`);
+        }
     }
 });
