@@ -43,6 +43,9 @@ import {
 /** The prefix, in bytes, and where the caller's pointer sits relative to it. */
 const PREFIX_BYTES = 4;
 
+/** A marshaled BSTR's element count, byte count and element count again. */
+const WIRE_BSTR_HEADER = 12;
+
 /** TYPEFLAG_* bits that make an interface one the universal marshaler carries. */
 const TYPEFLAG_FDUAL = 0x40;
 const TYPEFLAG_FOLEAUTOMATION = 0x100;
@@ -1205,7 +1208,26 @@ export function createAutomationFunctions(host){
         },
     };
 
-    return {
+    /**
+     * An NDR user-marshal routine for a type whose wire form is not
+     * implemented -- nor is the NDR engine that would call it (rpcrt4's
+     * NdrClientCall2), so nothing here marshals across apartments. A proxy a
+     * program registers binds it all the same; called, it says so, and the
+     * value goes as nothing and comes back empty.
+     *
+     * @param {string} name @param {(args: number[]) => number | Promise<number>} answer
+     */
+    const noWireForm = (name, answer)=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: args=>{
+            report('OLE Automation', `${name}: the wire form of this type is not implemented,`
+                + ' so it is marshaled as nothing');
+            return answer(args);
+        },
+    });
+
+    const table = {
         /** BSTR SysAllocString(const OLECHAR *psz) */
         SysAllocString: {
             argBytes: 4,
@@ -1317,6 +1339,132 @@ export function createAutomationFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([bstr])=>byteLengthOf(bstr >>> 0),
+        },
+
+        /**
+         * ULONG BSTR_UserSize(ULONG *pFlags, ULONG StartingSize, BSTR *pBstr)
+         *
+         * A BSTR on the wire is MS-OAUT's FLAGGED_WORD_BLOB as NDR lays a
+         * conformant structure down, from a four-byte boundary: the element
+         * count, the byte count, the element count again, then the elements --
+         * an odd byte count rounded up to whole characters.
+         */
+        BSTR_UserSize: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, start, pbstr])=>{
+                const units = (byteLengthOf(readU32(pbstr >>> 0)) + 1) >>> 1;
+                return ((((start >>> 0) + 3) & ~3) + WIRE_BSTR_HEADER + units * 2) >>> 0;
+            },
+        },
+
+        /**
+         * unsigned char *BSTR_UserMarshal(ULONG *pFlags, unsigned char *pBuffer,
+         *   BSTR *pBstr)
+         *
+         * A NULL BSTR goes as no elements and a byte count of all ones, which
+         * is how the other side tells it from an empty one.
+         */
+        BSTR_UserMarshal: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, buffer, pbstr])=>{
+                const from = buffer >>> 0;
+                const pad = (4 - (from & 3)) & 3;
+                const bstr = readU32(pbstr >>> 0);
+                const bytes = byteLengthOf(bstr);
+                const units = (bytes + 1) >>> 1;
+                const wire = new Uint8Array(pad + WIRE_BSTR_HEADER + units * 2);
+                const view = new DataView(wire.buffer);
+                view.setUint32(pad, units, true);
+                view.setUint32(pad + 4, bstr === 0 ? 0xffffffff : bytes, true);
+                view.setUint32(pad + 8, units, true);
+                if (units > 0)
+                {
+                    wire.set(host.readMemory(bstr, units * 2), pad + WIRE_BSTR_HEADER);
+                }
+                host.writeMemory(from, wire);
+                return (from + wire.length) >>> 0;
+            },
+        },
+
+        /**
+         * unsigned char *BSTR_UserUnmarshal(ULONG *pFlags, unsigned char *pBuffer,
+         *   BSTR *pBstr)
+         *
+         * The string the slot held is freed and a new one made from the wire.
+         */
+        BSTR_UserUnmarshal: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, buffer, pbstr])=>{
+                const at = (((buffer >>> 0) + 3) & ~3) >>> 0;
+                const bytes = readU32(at + 4);
+                const units = readU32(at + 8);
+                const slot = pbstr >>> 0;
+                freeBstr(readU32(slot));
+                writeU32(slot, bytes === 0xffffffff ? 0 : allocateBstr(host.readMemory(
+                    at + WIRE_BSTR_HEADER, Math.min(bytes, units * 2)).slice()));
+                return (at + WIRE_BSTR_HEADER + units * 2) >>> 0;
+            },
+        },
+
+        /** void BSTR_UserFree(ULONG *pFlags, BSTR *pBstr) */
+        BSTR_UserFree: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, pbstr])=>{
+                const slot = pbstr >>> 0;
+                freeBstr(readU32(slot));
+                writeU32(slot, 0);
+                return 0;
+            },
+        },
+
+        /** ULONG VARIANT_UserSize(ULONG *pFlags, ULONG StartingSize, VARIANT *pVar) */
+        VARIANT_UserSize: noWireForm('VARIANT_UserSize', ([, start])=>start >>> 0),
+
+        /** unsigned char *VARIANT_UserMarshal(ULONG *pFlags, unsigned char *pBuffer, VARIANT *pVar) */
+        VARIANT_UserMarshal: noWireForm('VARIANT_UserMarshal', ([, buffer])=>buffer >>> 0),
+
+        /** unsigned char *VARIANT_UserUnmarshal(ULONG *pFlags, unsigned char *pBuffer, VARIANT *pVar) */
+        VARIANT_UserUnmarshal: noWireForm('VARIANT_UserUnmarshal', ([, buffer, pvar])=>{
+            const owed = nothingOwed();
+            clear(pvar >>> 0, owed);
+            return settle(owed, host.callerThread?.(), buffer >>> 0);
+        }),
+
+        /** void VARIANT_UserFree(ULONG *pFlags, VARIANT *pVar) -- its contents, as VariantClear */
+        VARIANT_UserFree: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, pvar])=>{
+                const owed = nothingOwed();
+                clear(pvar >>> 0, owed);
+                return settle(owed, host.callerThread?.(), 0);
+            },
+        },
+
+        /** ULONG LPSAFEARRAY_UserSize(ULONG *pFlags, ULONG StartingSize, LPSAFEARRAY *ppsa) */
+        LPSAFEARRAY_UserSize: noWireForm('LPSAFEARRAY_UserSize', ([, start])=>start >>> 0),
+
+        /** unsigned char *LPSAFEARRAY_UserMarshal(ULONG *pFlags, unsigned char *pBuffer, LPSAFEARRAY *ppsa) */
+        LPSAFEARRAY_UserMarshal: noWireForm('LPSAFEARRAY_UserMarshal', ([, buffer])=>buffer >>> 0),
+
+        /** unsigned char *LPSAFEARRAY_UserUnmarshal(ULONG *pFlags, unsigned char *pBuffer, LPSAFEARRAY *ppsa) */
+        LPSAFEARRAY_UserUnmarshal: noWireForm('LPSAFEARRAY_UserUnmarshal', ([, buffer, ppsa])=>{
+            writeU32(ppsa >>> 0, 0);
+            return buffer >>> 0;
+        }),
+
+        /** void LPSAFEARRAY_UserFree(ULONG *pFlags, LPSAFEARRAY *ppsa) -- the array, as SafeArrayDestroy */
+        LPSAFEARRAY_UserFree: {
+            argBytes: 8,
+            /**
+             * @param {number[]} args
+             * @returns {number | Promise<number>}
+             */
+            handler: ([, ppsa])=>table.SafeArrayDestroy.handler([readU32(ppsa >>> 0)]),
         },
 
         /** void VariantInit(VARIANTARG *pvarg) */
@@ -2640,6 +2788,7 @@ export function createAutomationFunctions(host){
             },
         },
     };
+    return table;
 }
 
 /** @param {string} char */
@@ -2867,6 +3016,8 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     10: 'VariantCopy',
     11: 'VariantCopyInd',
     12: 'VariantChangeType',
+    13: 'VariantTimeToDosDateTime',
+    14: 'DosDateTimeToVariantTime',
     147: 'VariantChangeTypeEx',
     149: 'SysStringByteLen',
     150: 'SysAllocStringByteLen',
@@ -2886,13 +3037,41 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     28: 'DispGetParam',
     29: 'DispGetIDsOfNames',
     40: 'SafeArrayRedim',
+    46: 'VarParseNumFromStr',
+    47: 'VarNumFromParseNum',
+    82: 'VarR8FromCy',
+    84: 'VarR8FromStr',
+    100: 'VarCyFromI4',
+    116: 'VarBstrFromBool',
     161: 'LoadTypeLib',
     162: 'LoadRegTypeLib',
     163: 'RegisterTypeLib',
+    175: 'VarRound',
+    176: 'VarCmp',
     183: 'LoadTypeLibEx',
+    184: 'SystemTimeToVariantTime',
+    185: 'VariantTimeToSystemTime',
     186: 'UnRegisterTypeLib',
+    192: 'VarDecFromI4',
+    194: 'VarDecFromR8',
     200: 'GetErrorInfo',
     201: 'SetErrorInfo',
     202: 'CreateErrorInfo',
+    220: 'VarR8FromDec',
+    283: 'BSTR_UserSize',
+    284: 'BSTR_UserMarshal',
+    285: 'BSTR_UserUnmarshal',
+    286: 'BSTR_UserFree',
+    287: 'VARIANT_UserSize',
+    288: 'VARIANT_UserMarshal',
+    289: 'VARIANT_UserUnmarshal',
+    290: 'VARIANT_UserFree',
+    291: 'LPSAFEARRAY_UserSize',
+    292: 'LPSAFEARRAY_UserMarshal',
+    293: 'LPSAFEARRAY_UserUnmarshal',
+    294: 'LPSAFEARRAY_UserFree',
+    318: 'VarCat',
+    330: 'VarDateFromUdate',
+    331: 'VarUdateFromDate',
     417: 'OleCreatePropertyFrame',
 });

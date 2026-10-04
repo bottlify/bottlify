@@ -206,6 +206,78 @@ test('SysAllocStringByteLen counts bytes, so an odd length is possible', ()=>{
         'the bytes are copied as they are, not interpreted as characters');
 });
 
+test('a BSTR goes on the wire as a counted blob and comes back the same, odd and NULL too', ()=>{
+    setUp();
+    const FLAGS = 0x3000;
+    const WIRE = 0x3101;
+    const ALIGNED = 0x3104;
+    const COPY = SLOT + 4;
+    host.putU32(FLAGS, 0x00100002);
+    host.putWide(TEXT, 'abc');
+    host.putU32(SLOT, call('SysAllocString', [TEXT]));
+    host.putU32(COPY, 0);
+
+    assert.equal(call('BSTR_UserSize', [FLAGS, 1, SLOT]), 4 + 12 + 6, 'from a four-byte boundary');
+    const end = call('BSTR_UserMarshal', [FLAGS, WIRE, SLOT]);
+    assert.equal(end, ALIGNED + 12 + 6);
+    assert.deepEqual([host.u32(ALIGNED), host.u32(ALIGNED + 4), host.u32(ALIGNED + 8)], [3, 6, 3],
+        'the element count, the byte count, the element count');
+    assert.equal(host.u16(ALIGNED + 12), 'a'.charCodeAt(0));
+    assert.equal(call('BSTR_UserUnmarshal', [FLAGS, WIRE, COPY]), end);
+    const copy = host.u32(COPY);
+    assert.notEqual(copy, host.u32(SLOT), 'a string of its own');
+    assert.equal(call('SysStringByteLen', [copy]), 6);
+    assert.equal(host.u16(copy + 4), 'c'.charCodeAt(0));
+
+    // An odd byte count is rounded up to whole characters on the wire and
+    // kept on the way back; the string the slot held is freed.
+    host.bytes.set([0x41, 0x42, 0x43], TEXT);
+    host.putU32(SLOT, call('SysAllocStringByteLen', [TEXT, 3]));
+    assert.equal(call('BSTR_UserSize', [FLAGS, 0, SLOT]), 12 + 4);
+    call('BSTR_UserMarshal', [FLAGS, ALIGNED, SLOT]);
+    assert.deepEqual([host.u32(ALIGNED), host.u32(ALIGNED + 4), host.u32(ALIGNED + 8)], [2, 3, 2]);
+    call('BSTR_UserUnmarshal', [FLAGS, ALIGNED, COPY]);
+    assert.ok(!host.live.has(copy - 4), 'the old copy is freed');
+    assert.equal(call('SysStringByteLen', [host.u32(COPY)]), 3);
+
+    // NULL: no elements and a byte count of all ones, and NULL again after.
+    host.putU32(SLOT, 0);
+    assert.equal(call('BSTR_UserSize', [FLAGS, 0, SLOT]), 12);
+    assert.equal(call('BSTR_UserMarshal', [FLAGS, ALIGNED, SLOT]), ALIGNED + 12);
+    assert.deepEqual([host.u32(ALIGNED), host.u32(ALIGNED + 4), host.u32(ALIGNED + 8)],
+        [0, 0xffffffff, 0]);
+    assert.equal(call('BSTR_UserUnmarshal', [FLAGS, ALIGNED, COPY]), ALIGNED + 12);
+    assert.equal(host.u32(COPY), 0);
+
+    host.putU32(COPY, call('SysAllocString', [TEXT]));
+    const live = host.live.size;
+    call('BSTR_UserFree', [FLAGS, COPY]);
+    assert.equal(host.live.size, live - 1, 'freed');
+    assert.equal(host.u32(COPY), 0);
+});
+
+test('a VARIANT or a SAFEARRAY is freed as the stubs ask, and marshaled as nothing out loud', ()=>{
+    setUp();
+    const FLAGS = 0x3000;
+    const BOUNDS = 0x3010;
+    host.putWide(TEXT, 'abc');
+    host.putVariant(VARIANT_A, VT_BSTR, call('SysAllocString', [TEXT]));
+    call('VARIANT_UserFree', [FLAGS, VARIANT_A]);
+    assert.equal(host.u16(VARIANT_A), VT_EMPTY);
+    assert.equal(host.live.size, 0, 'the string is freed');
+
+    host.putU32(BOUNDS, 2);
+    host.putU32(BOUNDS + 4, 0);
+    host.putU32(SLOT, call('SafeArrayCreate', [VT_I4, 1, BOUNDS]));
+    call('LPSAFEARRAY_UserFree', [FLAGS, SLOT]);
+    assert.equal(host.live.size, 0, 'the array is destroyed');
+
+    assert.equal(call('VARIANT_UserSize', [FLAGS, 8, VARIANT_A]), 8);
+    assert.equal(call('LPSAFEARRAY_UserMarshal', [FLAGS, 0x3100, SLOT]), 0x3100);
+    assert.ok(host.said.some(line=>line.includes('VARIANT_UserSize')), JSON.stringify(host.said));
+    assert.ok(host.said.some(line=>line.includes('LPSAFEARRAY_UserMarshal')));
+});
+
 test('SysReAllocString replaces the string in the slot and frees the old one', ()=>{
     setUp();
     host.putWide(TEXT, 'old');
@@ -658,6 +730,13 @@ test('the ordinals are the ones a real oleaut32 exports', ()=>{
     assert.equal(OLEAUT32_ORDINALS[40], 'SafeArrayRedim');
     assert.equal(OLEAUT32_ORDINALS[147], 'VariantChangeTypeEx');
     assert.equal(OLEAUT32_ORDINALS[149], 'SysStringByteLen');
+    // The user marshal routines a MIDL-made proxy imports by number.
+    assert.equal(OLEAUT32_ORDINALS[283], 'BSTR_UserSize');
+    assert.equal(OLEAUT32_ORDINALS[286], 'BSTR_UserFree');
+    assert.equal(OLEAUT32_ORDINALS[290], 'VARIANT_UserFree');
+    assert.equal(OLEAUT32_ORDINALS[294], 'LPSAFEARRAY_UserFree');
+    assert.equal(OLEAUT32_ORDINALS[184], 'SystemTimeToVariantTime');
+    assert.equal(OLEAUT32_ORDINALS[318], 'VarCat');
     assert.equal(OLEAUT32_ORDINALS[150], 'SysAllocStringByteLen');
     assert.equal(OLEAUT32_ORDINALS[161], 'LoadTypeLib');
     assert.equal(OLEAUT32_ORDINALS[163], 'RegisterTypeLib');
@@ -1076,6 +1155,11 @@ test('the argument list of each entry is the one the guest pushed', ()=>{
         SysAllocString: 4, SysAllocStringLen: 8, SysAllocStringByteLen: 8,
         SysReAllocString: 8, SysReAllocStringLen: 12, SysFreeString: 4,
         SysStringLen: 4, SysStringByteLen: 4,
+        BSTR_UserSize: 12, BSTR_UserMarshal: 12, BSTR_UserUnmarshal: 12, BSTR_UserFree: 8,
+        VARIANT_UserSize: 12, VARIANT_UserMarshal: 12, VARIANT_UserUnmarshal: 12,
+        VARIANT_UserFree: 8,
+        LPSAFEARRAY_UserSize: 12, LPSAFEARRAY_UserMarshal: 12, LPSAFEARRAY_UserUnmarshal: 12,
+        LPSAFEARRAY_UserFree: 8,
         VariantInit: 4, VariantClear: 4, VariantCopy: 8, VariantCopyInd: 8,
         VariantChangeType: 16, VariantChangeTypeEx: 20,
         SafeArrayGetDim: 4, SafeArrayGetElemsize: 4, SafeArrayGetUBound: 12,
