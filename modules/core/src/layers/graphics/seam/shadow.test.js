@@ -159,10 +159,6 @@ function machine(options = {}){
         u32: at=>view.getUint32(at, true),
         /** @param {number} at @param {number} value */
         put32: (at, value)=>view.setUint32(at, value >>> 0, true),
-        /** A counter a guest routine would have raised. @param {number} at */
-        bump(at){
-            view.setUint32(at, view.getUint32(at, true) + 1, true);
-        },
     };
 }
 
@@ -663,34 +659,19 @@ test('the buffers the guest let go of are settled before the ring\'s calls are m
 });
 
 
-/**
- * A texture and its levels, sharing one count as the device's do: what makes
- * a reference taken in the guest and given back through a level's surface the
- * same reference.
- *
- * @param {number} levels
- */
-function fakeTexture(levels){
-    let count = 1;
-    return {
-        levels,
-        get refCount(){
-            return count;
-        },
-        addRef: ()=>++count,
-        release: ()=>--count,
-    };
-}
+/** @param {number} levels */
+const fakeTexture = levels=>({ levels });
 
-test('a texture block says how many levels it has and holds a pointer for each', ()=>{
+test('a texture block says how many levels it has, where its count is, and holds a pointer'
+    + ' for each', ()=>{
     const m = machine();
     const texture = fakeTexture(3);
-    const block = m.shadow.attachTexture(texture);
+    const block = m.shadow.attachTexture(texture, 0x7000);
 
     assert.notEqual(block, 0);
-    assert.equal(m.shadow.attachTexture(texture), block, 'once');
+    assert.equal(m.shadow.attachTexture(texture, 0x7000), block, 'once');
     assert.equal(m.u32(block + TEXTURE.LEVEL_COUNT), 3);
-    assert.equal(m.u32(block + TEXTURE.REFS), 0);
+    assert.equal(m.u32(block + TEXTURE.COUNT), 0x7000);
     for (let level = 0; level < TEXTURE.LEVEL_SLOTS; level++)
     {
         assert.equal(m.u32(block + TEXTURE.LEVELS + level * 4), 0,
@@ -703,35 +684,9 @@ test('a texture block says how many levels it has and holds a pointer for each',
     // A level past the table leaves the table alone rather than writing past it.
     m.shadow.noteLevel(texture, TEXTURE.LEVEL_SLOTS, 0x7200);
     assert.equal(m.u32(block + TEXTURE.SIZE), 0);
-});
 
-test('the references the guest took on levels are charged before any is given back', ()=>{
-    const m = machine();
-    const texture = fakeTexture(2);
-    const block = m.shadow.attachTexture(texture);
-    m.shadow.noteLevel(texture, 0, 0x7100);
-
-    // What the guest routine does: hand the pointer back, count the reference.
-    m.bump(block + TEXTURE.REFS);
-    m.bump(block + TEXTURE.REFS);
-    assert.equal(texture.refCount, 1, 'the host has not been told yet');
-
-    m.shadow.settleTexture(texture);
-    assert.equal(texture.refCount, 3, 'two references the program owns');
-    assert.equal(m.shadow.diagnostics().surfaceLevelCalls, 2);
-
-    // Settling again charges nothing: the count is the one already charged.
-    m.shadow.settleTexture(texture);
-    assert.equal(texture.refCount, 3);
-    m.bump(block + TEXTURE.REFS);
-    m.shadow.settleTexture(texture);
-    assert.equal(texture.refCount, 4);
-    assert.equal(m.shadow.diagnostics().surfaceLevelCalls, 3);
-
-    // A texture nobody attached a block to is not an error: a build with no
-    // block at all still has a working GetSurfaceLevel through the host.
-    m.shadow.settleTexture(fakeTexture(1));
-    assert.equal(m.shadow.diagnostics().surfaceLevelCalls, 3);
+    // A texture whose count the host keeps has no word for the routine.
+    assert.equal(m.u32(m.shadow.attachTexture(fakeTexture(1)) + TEXTURE.COUNT), 0);
 });
 
 test('a Direct3D 9 device\'s render states, stage states and transforms are mirrored for its'

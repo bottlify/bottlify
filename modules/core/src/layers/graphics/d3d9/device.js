@@ -1218,6 +1218,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 return bufferCount.destroyed;
             },
             reachable: ()=>!bufferCount.destroyed,
+            // Where guest code may count its references (`ReferenceCount.place`).
+            counter: bufferCount,
             addRef: ()=>bufferCount.addRef(),
             release: ()=>bufferCount.release(),
             /** The device binds it (see `createReferenceCount`). */

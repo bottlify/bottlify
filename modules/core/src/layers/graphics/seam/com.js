@@ -91,16 +91,16 @@ function methodsFor(descriptor){
  *        Called when a reference is taken through an interface.
  * @param {(adapter: any, pointer: number) => void} onForgotten
  *        Called when the bridge forgets one of the object's pointers.
+ * @param {CountCells | null} cells
  * @returns {any} something the bridge's publisher will accept
  */
-function adapt(api, interfaces, onGone, onReferenced, onForgotten){
+function adapt(api, interfaces, onGone, onReferenced, onForgotten, cells){
     const declared = new Map(interfaces.map(entry=>[entry.id, entry]));
 
     /**
-     * References a program took without crossing into the host -- a texture
-     * level handed back by guest code -- are charged before the count is read
-     * or lowered. Without it a Release for such a reference takes the count
-     * one past what the program owes, and the object dies while it is held.
+     * What the guest did that the object's count has to meet before it is
+     * read or lowered here -- a binding it made in a command ring that holds
+     * the object -- is made first.
      */
     const settle = ()=>api.settleGuestRefs?.();
     /** Whether the latest release ended the object, which the bridge asks next. */
@@ -122,6 +122,9 @@ function adapt(api, interfaces, onGone, onReferenced, onForgotten){
         // Where a method that runs in the guest finds the object's memory:
         // the object's own answer, or nothing for an object that keeps none.
         guestState: ()=>(typeof api.guestState === 'function' ? api.guestState() : 0),
+        // Where the guest's AddRef and Release find the object's count, or
+        // nothing for an object that keeps it on the host.
+        countCell: ()=>(cells ? cells.of(api.counter) : 0),
         /**
          * Every pointer this object has been published as, so the map back can
          * be given up all at once when the object dies.
@@ -192,6 +195,10 @@ function adapt(api, interfaces, onGone, onReferenced, onForgotten){
             }
             settle();
             const left = api.release(id);
+            if (api.counter?.destroyed)
+            {
+                cells?.giveBack(api.counter);
+            }
             gone = left === 0 && api.destroyed !== false;
             if (gone)
             {
@@ -208,6 +215,95 @@ function adapt(api, interfaces, onGone, onReferenced, onForgotten){
 }
 
 /**
+ * What an object counts its references with, which can keep the count in a
+ * word of guest memory (`d3d9/resources.js`, `ReferenceCount`).
+ *
+ * @typedef {Object} Counter
+ * @property {(cell: import('../d3d9/resources.js').CountCell | null) => void} place
+ * @property {number} placed
+ * @property {boolean} [destroyed]
+ */
+
+/**
+ * @typedef {Object} CountCells
+ * @property {(counter: Counter | undefined) => number} of  The address of the
+ *           word the counter keeps its count in, placing it there first; 0 for
+ *           none.
+ * @property {(counter: Counter) => void} giveBack  The counter keeps its count on
+ *           the host again, and its word goes back.
+ */
+
+/**
+ * Words of guest memory for objects' reference counts, so that the guest's
+ * AddRef and Release (`bridge/internal/vtable.js`) can answer one that is
+ * not a zero crossing without coming into the host. They come out of pages
+ * of the guest's heap, a word at a time: a heap block per object would cost
+ * the arena a block's overhead for every texture a program makes.
+ *
+ * @param {{ allocate: (bytes: number) => number,
+ *           memory: { readU32: (address: number) => number,
+ *                     writeU32: (address: number, value: number) => void } }} deps
+ * @returns {CountCells}
+ */
+export function createCountCells({ allocate, memory }){
+    const PAGE = 4096;
+    /** @type {number[]} */
+    const spare = [];
+    let next = 0;
+    let end = 0;
+    const take = ()=>{
+        const reused = spare.pop();
+        if (reused !== undefined)
+        {
+            return reused;
+        }
+        if (next === end)
+        {
+            const page = allocate(PAGE);
+            if (page === 0)
+            {
+                return 0;
+            }
+            next = page;
+            end = page + PAGE;
+        }
+        const at = next;
+        next += 4;
+        return at;
+    };
+    return {
+        of(counter){
+            if (!counter || typeof counter.place !== 'function' || counter.destroyed)
+            {
+                return 0;
+            }
+            if (counter.placed === 0)
+            {
+                const address = take();
+                if (address === 0)
+                {
+                    return 0;
+                }
+                counter.place({
+                    address,
+                    read: ()=>memory.readU32(address),
+                    write: value=>memory.writeU32(address, value >>> 0),
+                });
+            }
+            return counter.placed;
+        },
+        giveBack(counter){
+            const address = counter.placed;
+            if (address !== 0)
+            {
+                counter.place(null);
+                spare.push(address);
+            }
+        },
+    };
+}
+
+/**
  * Publishes API objects as COM interfaces, keeping one adapter per object.
  *
  * @param {Object} deps
@@ -216,12 +312,15 @@ function adapt(api, interfaces, onGone, onReferenced, onForgotten){
  * @param {(object: any, interfaceId: string) => boolean} [deps.unpublishInterface]
  *        The bridge's, which gives an interface back; without it an object
  *        given back leaves only this file's way back to it.
+ * @param {CountCells} [deps.cells]  Where objects that can keep their count in
+ *        the guest keep it; on the host, without.
  * @returns {{ publish: (api: any, interfaces: InterfaceDescriptor[], id: string) => number,
  *             unpublish: (api: any) => void,
  *             objectAt: (pointer: number) => any,
- *             adapterFor: (api: any) => any, count: () => number }}
+ *             adapterFor: (api: any) => any, count: () => number,
+ *             countCell: (api: any) => number }}
  */
-export function createPublisher({ publishInterface, unpublishInterface }){
+export function createPublisher({ publishInterface, unpublishInterface, cells }){
     /** Keyed by the API object, so one object is one identity. */
     const adapters = new WeakMap();
 
@@ -233,7 +332,7 @@ export function createPublisher({ publishInterface, unpublishInterface }){
         let adapter = adapters.get(api);
         if (!adapter)
         {
-            adapter = adapt(api, interfaces, forget, remember, forgetPointer);
+            adapter = adapt(api, interfaces, forget, remember, forgetPointer, cells ?? null);
             adapters.set(api, adapter);
         }
         return adapter;
@@ -359,6 +458,14 @@ export function createPublisher({ publishInterface, unpublishInterface }){
 
         /** @param {any} api */
         adapterFor: api=>adapters.get(api) ?? null,
+
+        /**
+         * The word of guest memory an object's count is kept in, placed there
+         * now if it is not yet; 0 for an object that keeps it on the host.
+         *
+         * @param {any} api
+         */
+        countCell: api=>(cells ? cells.of(api.counter) : 0),
 
         /**
          * Interface pointers a program can still call through. It falls as

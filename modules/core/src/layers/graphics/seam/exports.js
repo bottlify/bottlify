@@ -26,7 +26,7 @@
 import { ARGUMENT_WORDS } from '../opengl/exports.js';
 import { createGlu } from '../glu/exports.js';
 import { createComObject } from '../../win32/ole32/objects.js';
-import { createPublisher } from './com.js';
+import { createCountCells, createPublisher } from './com.js';
 import { createDirect3D8Seam } from './d3d8.js';
 import { createDirect3D9Seam } from './d3d9.js';
 import { createDirect3D10Seam } from './d3d10.js';
@@ -168,7 +168,11 @@ export function createGraphicsLibraries(
         } },
 )
 {
-    const publisher = shared ?? createPublisher({ publishInterface, unpublishInterface });
+    const publisher = shared ?? createPublisher({
+        publishInterface, unpublishInterface,
+        cells: allocate && memory?.readU32 && memory.writeU32
+            ? createCountCells({ allocate, memory }) : undefined,
+    });
     const fields = createFields(memory);
 
     /**

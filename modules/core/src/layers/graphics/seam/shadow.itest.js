@@ -51,6 +51,8 @@ const OUT = 0xc800;
 /** A texture object and its block: three levels, the middle one published. */
 const TEX = 0x9c00;
 const TBLOCK = 0xd400;
+/** Where the texture's count is kept, at one: the program holds it. */
+const TCOUNT = 0xd500;
 const LEVEL1 = 0x4711;
 const STACK = 0x300000;
 
@@ -182,6 +184,8 @@ async function routines(){
     host.writePhysical(TBLOCK, new Uint8Array(TEXTURE.SIZE));
     host.writePhysical(TBLOCK + TEXTURE.LEVEL_COUNT, new Uint8Array(u32(3)));
     host.writePhysical(TBLOCK + TEXTURE.LEVELS + 4, new Uint8Array(u32(LEVEL1)));
+    host.writePhysical(TBLOCK + TEXTURE.COUNT, new Uint8Array(u32(TCOUNT)));
+    host.writePhysical(TCOUNT, new Uint8Array(u32(1)));
     host.writePhysical(OBJECT + 4, new Uint8Array(u32(BLOCK)));
     host.writePhysical(VBUF + 4, new Uint8Array(u32(VBLOCK)));
     host.writePhysical(BARE, new Uint8Array(8));
@@ -278,17 +282,17 @@ async function routines(){
     write(OUT, 0);
     assert.equal(run(8), 'ok');
     assert.equal(read(OUT), LEVEL1, 'the pointer the host published for that level');
-    assert.equal(read(TBLOCK + TEXTURE.REFS), 1, 'and the reference it owes is counted');
+    assert.equal(read(TCOUNT), 2, 'and the reference it owes is taken');
 
     write(OUT, 0);
     assert.equal(run(9), 'trap', 'a level the host has not published yet');
-    assert.equal(read(TBLOCK + TEXTURE.REFS), 1, 'and nothing owed for it');
+    assert.equal(read(TCOUNT), 2, 'and none taken for it');
     assert.equal(read(OUT), 0);
 
     assert.equal(run(10), 'invalid', 'a level the texture has not got, refused without the trap');
-    assert.equal(read(TBLOCK + TEXTURE.REFS), 1);
+    assert.equal(read(TCOUNT), 2);
     assert.equal(run(11), 'trap', 'a null out-pointer is refused by the host');
-    assert.equal(read(TBLOCK + TEXTURE.REFS), 1);
+    assert.equal(read(TCOUNT), 2);
 
     // The getter answers from the block for a state the host marked as one
     // the device answers for.

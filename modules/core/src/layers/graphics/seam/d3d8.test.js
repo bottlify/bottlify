@@ -23,7 +23,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
-import { createPublisher } from './com.js';
+import { createCountCells, createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { BUFFER, SHADOW, TEXTURE } from './shadow.js';
@@ -223,7 +223,12 @@ function seamed({ shadow = false, windowClientSize, allocateCode, caps } = {}){
     const measureWindow = window=>{
         return window === HWND ? { width: 640, height: 480 } : null;
     };
-    const publisher = createPublisher({ publishInterface: box.publishInterface });
+    const publisher = createPublisher({
+        publishInterface: box.publishInterface,
+        cells: shadow
+            ? createCountCells({ allocate: box.allocate, memory: box.memory })
+            : undefined,
+    });
     const libraries = createGraphicsLibraries({
         graphics: {
             /** @param {string} name */
@@ -1973,11 +1978,10 @@ test('a device is handed out with its block already in place, and reads what the
 
 test('a level obtained in the guest leaves the count where the host path leaves it', ()=>{
     // GetSurfaceLevel takes a reference on the surface it hands back, and a
-    // level's surface shares its texture's count. The guest routine cannot
-    // take one, so it counts what it owes and the host charges the count
-    // before any reference is read or given back -- and if that is wrong in
-    // either direction, a program that asks for a level every frame either
-    // leaks its texture or loses it while it is still drawing with it.
+    // level's surface shares its texture's count. The guest routine takes it
+    // in the word the count is kept in -- and if that is wrong in either
+    // direction, a program that asks for a level every frame either leaks
+    // its texture or loses it while it is still drawing with it.
     const h = seamed({ shadow: true });
     const device = h.createDevice(h.create());
     const out = 0xe500;
@@ -1990,6 +1994,10 @@ test('a level obtained in the guest leaves the count where the host path leaves 
     assert.equal(h.box.memory.readU32(block + TEXTURE.LEVELS), 0, 'nothing published yet');
     const object = h.object(texture);
     const held = object.refCount;
+    const count = h.box.memory.readU32(block + TEXTURE.COUNT);
+    assert.notEqual(count, 0, 'the texture\'s count is kept in the guest');
+    assert.equal(h.box.memory.readU32(count), held);
+    assert.equal(h.box.memory.readU32(texture + 8), count, 'where its AddRef finds it too');
 
     // The host's path, which is what the routine falls back to: it publishes
     // the level and fills its slot in.
@@ -1998,19 +2006,19 @@ test('a level obtained in the guest leaves the count where the host path leaves 
     assert.notEqual(level, 0);
     assert.equal(h.box.memory.readU32(block + TEXTURE.LEVELS), level);
     assert.equal(object.refCount, held + 1, 'the reference the call owes');
+    assert.equal(h.box.memory.readU32(level + 8), count, 'the level shares the word');
     assert.equal(h.release(level), held, 'and the program gives it back');
     assert.equal(object.refCount, held);
 
     // What the guest routine does with the slot now filled: the pointer, and
-    // the reference counted rather than taken.
-    h.box.memory.writeU32(block + TEXTURE.REFS, 1);
-    assert.equal(h.release(level), held, 'charged, then given back');
-    assert.equal(object.refCount, held, 'the same count the host path left');
-    assert.equal(h.libraries.shadow().surfaceLevelCalls, 1);
+    // the reference taken in the word.
+    h.box.memory.writeU32(count, held + 1);
+    assert.equal(object.refCount, held + 1, 'the object reads its count there');
+    assert.equal(h.release(level), held, 'and the reference is given back');
 
     // And the count is honest while the program still holds such a level: a
     // Release of the texture cannot take it to zero under the program.
-    h.box.memory.writeU32(block + TEXTURE.REFS, 2);
+    h.box.memory.writeU32(count, held + 1);
     assert.equal(h.release(texture), 1, 'the level the guest took keeps it alive');
     assert.equal(object.refCount, 1);
     assert.equal(h.release(level), 0);

@@ -14,6 +14,7 @@ import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK } from '../d3d9/constants.js';
 import { D3DCLEAR, D3DFMT_INDEX, D3DPT, D3DRS, D3DTS } from '../d3d8/constants.js';
 import { D3DQUERYTYPE, createDirect3D9 } from '../d3d9/device.js';
 import { commandSlot } from '../d3d9/commands.js';
+import { createReferenceCount } from '../d3d9/resources.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
@@ -50,6 +51,19 @@ function toy(sides){
                         side.seen.push(gdi.create());
                         return D3D_OK;
                     },
+                };
+                return D3D_OK;
+            },
+            /** @param {{ thing?: any }} out */
+            CreateCounted(out){
+                const count = createReferenceCount({ onLastRef: ()=>side.seen.push('gone') });
+                out.thing = {
+                    counter: count,
+                    get refCount(){
+                        return count.value;
+                    },
+                    addRef: ()=>count.addRef(),
+                    release: ()=>count.release(),
                 };
                 return D3D_OK;
             },
@@ -156,6 +170,27 @@ test('what the recorded device copies in guest memory is the played device\'s to
     out.thing.Lock(locked);
     out.thing.Unlock();
     assert.deepEqual(played.seen, [[9, 8, 7, 6]]);
+});
+
+test('references the guest took and gave back unseen leave the played count where the'
+    + ' recorded one is', ()=>{
+    const { root, recorded, played } = toyLoop();
+    /** @type {{ thing?: any }} */
+    const out = {};
+    root.CreateCounted(out);
+    const thing = out.thing;
+    // The recorded object's count kept in a word the guest moves itself, as
+    // the guest's AddRef and Release do, never across zero.
+    let word = 0;
+    thing.counter.place({ address: 4, read: ()=>word, write: (/** @type {number} */ value)=>{
+        word = value;
+    } });
+    word += 3;
+    assert.equal(thing.addRef(), 5, 'a reference taken through the host');
+    word -= 4;
+    assert.equal(thing.release(), 0, 'the last one, given back through the host');
+    assert.deepEqual(recorded.seen, ['gone']);
+    assert.deepEqual(played.seen, ['gone'], 'the played object ended with it');
 });
 
 test('a present the played device holds is held for the caller too', async()=>{

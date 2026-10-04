@@ -128,6 +128,31 @@ function lockedLength(name, args, out){
     return null;
 }
 
+/**
+ * The call a recording sends for a reference taken or given back: the count
+ * the object was left with (`countTo` in `createRecording`).
+ */
+const REFS_TO = '#refsTo';
+
+/**
+ * Takes or gives back references on a played object until its count is the
+ * recorded one's, through its own AddRef and Release, so that a crossing of
+ * zero does here what it did there.
+ *
+ * @param {any} target @param {number} count
+ */
+function refsTo(target, count){
+    for (let guard = 0; target.refCount < count && guard < 0x10000; guard++)
+    {
+        target.addRef();
+    }
+    for (let guard = 0; target.refCount > count && guard < 0x10000; guard++)
+    {
+        target.release();
+    }
+    return count;
+}
+
 /** No arguments to look through. */
 const NOTHING = /** @type {readonly unknown[]} */ (Object.freeze([]));
 
@@ -616,6 +641,49 @@ export function createRecording(options){
         }
     };
 
+    /** The number `refsTo` has in the writer's table, once it has one. */
+    let refsToId = -1;
+    const countSite = createSite();
+
+    /**
+     * A reference taken or given back here, sent as the count it left. The
+     * guest takes and gives back references the host never sees -- every one
+     * that is not a zero crossing (`bridge/internal/vtable.js`) -- so the
+     * played object's count follows them only by being told what this one's
+     * is whenever it comes through here; a last Release then ends it there
+     * too, however many references the guest took and gave back on the way.
+     *
+     * @param {object} target @param {number} number @param {Function} method
+     * @param {any[]} applied
+     */
+    const countTo = (target, number, method, applied)=>{
+        depth++;
+        let result;
+        try
+        {
+            result = method.apply(target, applied);
+        }
+        finally
+        {
+            depth--;
+        }
+        if (refsToId < 0)
+        {
+            writer.u8(OP.CALL);
+            writer.u32(number);
+            refsToId = writer.string(REFS_TO);
+            writer.u8(1);
+        }
+        else
+        {
+            writer.call(number, refsToId, 1);
+        }
+        writer.value(result >>> 0, refOf, 0, countSite);
+        writer.u8(0);
+        transport.called(WAIT.NONE, REFS_TO);
+        return result;
+    };
+
     /**
      * A method of one of the device's objects as the caller calls it: made on
      * the object, recorded and sent.
@@ -634,6 +702,7 @@ export function createRecording(options){
         const mayAnswer = answers.has(name);
         const making = handsOut(name);
         const pure = PURE_GETTERS.has(name);
+        const counting = name === 'addRef' || name === 'release';
         /** The method's number in the writer's table, once it has one. */
         let nameId = -1;
         /** @type {number | undefined} */
@@ -658,9 +727,13 @@ export function createRecording(options){
             {
                 shipPending();
             }
+            number ??= /** @type {number} */ (numbers.get(target));
+            if (counting && typeof (/** @type {any} */ (target)).refCount === 'number')
+            {
+                return countTo(target, number, method, applied);
+            }
             /** @type {any[] | null} */
             let replies = null;
-            number ??= /** @type {number} */ (numbers.get(target));
             if (nameId < 0)
             {
                 writer.u8(OP.CALL);
@@ -859,7 +932,9 @@ export function createRecording(options){
      * @param {object} target @param {string} key @param {any} value
      */
     const reached = (target, key, value)=>{
-        if (!isDeviceObject(value))
+        // An object's count is this side's bookkeeping, kept where the guest
+        // moves it: the played object is told what it comes to (`countTo`).
+        if (key === 'counter' || !isDeviceObject(value))
         {
             return value;
         }
@@ -1068,6 +1143,10 @@ export function createPlayer({ root, ship, read }){
             replies = call.replies ?? [];
             playing = /** @type {string} */ (call.m);
             const args = /** @type {any[]} */ (call.a);
+            if (playing === REFS_TO)
+            {
+                return refsTo(target, args[0]);
+            }
             const answer = target[playing](...args);
             bindAll(answer, handsOut(playing) ? args : NOTHING, bind);
             if (allocs.length > 0)

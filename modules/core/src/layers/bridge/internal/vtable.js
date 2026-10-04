@@ -63,10 +63,48 @@ const WORD = 4;
  */
 
 /**
+ * IUnknown's AddRef and Release in the guest, for an object whose count is
+ * kept in a word of guest memory -- the third word of the interface's block,
+ * zero for one whose count is the host's. A reference taken or given back
+ * that is not a zero crossing changes only the word: the first reference and
+ * the last are the object's own business (what it holds, what it gives back),
+ * and those come to the host through the method's trap, as everything does
+ * when there is no word. The word is changed with `lock cmpxchg`, so a slice
+ * that ends inside the routine leaves nothing half-done for another thread.
+ *
+ *     AddRef(this)                       Release(this)
+ *     mov ecx, [esp+4]                   mov ecx, [esp+4]
+ *     mov ecx, [ecx+8]                   mov ecx, [ecx+8]
+ *     test ecx, ecx                      test ecx, ecx
+ *     jz host                            jz host
+ *   again:                             again:
+ *     mov eax, [ecx]                     mov eax, [ecx]
+ *     test eax, eax                      cmp eax, 2
+ *     jz host                            jb host
+ *     lea edx, [eax+1]                   lea edx, [eax-1]
+ *     lock cmpxchg [ecx], edx            lock cmpxchg [ecx], edx
+ *     jne again                          jne again
+ *     mov eax, edx                       mov eax, edx
+ *     ret 4                              ret 4
+ *   host:                              host:
+ *     jmp trap                           jmp trap
+ */
+const COUNT_CODE = {
+    addRef: [0x8b, 0x4c, 0x24, 0x04, 0x8b, 0x49, 0x08, 0x85, 0xc9, 0x74, 0x14,
+        0x8b, 0x01, 0x85, 0xc0, 0x74, 0x0e, 0x8d, 0x50, 0x01, 0xf0, 0x0f, 0xb1, 0x11, 0x75, 0xf1,
+        0x89, 0xd0, 0xc2, 0x04, 0x00],
+    release: [0x8b, 0x4c, 0x24, 0x04, 0x8b, 0x49, 0x08, 0x85, 0xc9, 0x74, 0x15,
+        0x8b, 0x01, 0x83, 0xf8, 0x02, 0x72, 0x0e, 0x8d, 0x50, 0xff, 0xf0, 0x0f, 0xb1, 0x11,
+        0x75, 0xf0, 0x89, 0xd0, 0xc2, 0x04, 0x00],
+};
+
+/**
  * @param {Object} deps
  * @param {any} deps.memory
  * @param {(name: string, fn: any) => number} deps.register  Bridge registration.
- * @param {{ allocate: (bytes: number) => number, free?: (address: number) => void }} deps.heap
+ * @param {{ allocate: (bytes: number) => number, free?: (address: number) => void,
+ *           allocateCode?: (bytes: number) => number }} deps.heap
+ *        `allocateCode`, where it is given, places IUnknown's count routines.
  */
 export function createVtables({ memory, register, heap }){
     /** One entry per object; inside it, one interface pointer per interface. */
@@ -137,6 +175,25 @@ export function createVtables({ memory, register, heap }){
     let refusedBecause = null;
 
     /**
+     * AddRef or Release in the guest (`COUNT_CODE`), falling back on `trap`;
+     * the trap itself where there is nowhere to put code.
+     *
+     * @param {'addRef' | 'release'} which @param {number} trap
+     */
+    function countRoutine(which, trap){
+        const code = COUNT_CODE[which];
+        const at = heap.allocateCode?.(code.length + 5) ?? 0;
+        if (at === 0)
+        {
+            return trap;
+        }
+        const end = at + code.length + 5;
+        memory.writeBytes(at, Uint8Array.of(...code, 0xe9, 0, 0, 0, 0));
+        memory.writeU32(end - 4, (trap - end) >>> 0);
+        return at;
+    }
+
+    /**
      * The shared table for one interface description, built on first use.
      *
      * @param {string} interfaceId
@@ -203,7 +260,13 @@ export function createVtables({ memory, register, heap }){
                 });
                 // A method that runs in the guest keeps its trap: that is
                 // what its code falls back to for the cases it does not take.
-                return method.guest ? method.guest({ trap, register }) : trap;
+                if (method.guest)
+                {
+                    return method.guest({ trap, register });
+                }
+                return method.builtin === 'addRef' || method.builtin === 'release'
+                    ? countRoutine(method.builtin, trap)
+                    : trap;
             });
         }
         catch (e){
@@ -258,12 +321,14 @@ export function createVtables({ memory, register, heap }){
             return 0;
         }
 
-        // The word pointing at the table and the object's state word,
-        // allocated together: they have the same lifetime and nothing else
-        // may sit between them. The state word is where a method that runs
-        // in the guest finds the memory it works on, one word past `this`;
-        // a program sees only the vtable pointer and assumes nothing after it.
-        const block = heap.allocate(2 * WORD);
+        // The word pointing at the table, the object's state word and where
+        // its count is kept, allocated together: they have the same lifetime
+        // and nothing else may sit between them. The state word is where a
+        // method that runs in the guest finds the memory it works on, one
+        // word past `this`, and the count's the guest's AddRef and Release
+        // (`COUNT_CODE`); a program sees only the vtable pointer and assumes
+        // nothing after it.
+        const block = heap.allocate(3 * WORD);
         if (block === 0)
         {
             // Nothing left in the arena. Carrying on writes the pointer over
@@ -277,6 +342,7 @@ export function createVtables({ memory, register, heap }){
         }
         memory.writeU32(block, vtable);
         memory.writeU32(block + WORD, (object.guestState?.() ?? 0) >>> 0);
+        memory.writeU32(block + 2 * WORD, (object.countCell?.() ?? 0) >>> 0);
         owners.set(block, { object, interfaceId, methods: table });
         byInterface.set(interfaceId, block);
         interfaces++;

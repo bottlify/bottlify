@@ -325,15 +325,12 @@ export function createDirect3D8Seam(
             return;
         }
         resourceShadows.set(texture, shadow);
-        texture.guestState = ()=>shadow.attachTexture(texture);
-        texture.settleGuestRefs = ()=>shadow.settleTexture(texture);
+        texture.guestState = ()=>shadow.attachTexture(texture, publisher.countCell?.(texture) ?? 0);
     };
 
     /**
      * A level's surface has been published, so the guest may answer with its
-     * pointer from now on. The surface charges the texture's guest-side
-     * references too: the two share one count, so a Release through either
-     * has to meet what the program owes.
+     * pointer from now on.
      *
      * @param {any} texture @param {number} level @param {any} surface
      */
@@ -343,7 +340,6 @@ export function createDirect3D8Seam(
         {
             return;
         }
-        surface.settleGuestRefs = ()=>shadow.settleTexture(texture);
         // Publishing is memoised, so this is the pointer the program now holds.
         shadow.noteLevel(texture, level,
             publisher.publish(surface, surfaceInterfaces, IID_IDirect3DSurface8));
