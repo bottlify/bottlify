@@ -60,6 +60,8 @@ The tracked part:
 
 - `roadmap/README.md` — the index, and the first thing to read.
 - `roadmap/v2/` — the plan: the target architecture, its stages and their acceptance.
+- `roadmap/bottles/` and `roadmap/steam/` — bottles kept and edited on the device, and Steam in a
+  bottle: what exists, what is missing, the stages and their acceptance.
 - `roadmap/decisions.md` — behaviour this project chose rather than derived from a specification,
   each defended on its merits and recorded as reconsidered when it is.
 

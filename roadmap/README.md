@@ -3,6 +3,12 @@
 - **[`v2/`](v2/README.md)** — the plan: the engine becomes a multi-worker platform whose capacity
   follows the load, single-thread mode first and exactly as today; then x86-64 on that platform,
   Direct3D 11, and ARM and ARM64. Start there; in Russian, [`v2/README.ru.md`](v2/README.ru.md).
+- **[`bottles/`](bottles/README.md)** — bottles made, kept, changed and started on the device, and
+  the bottle editor: entries, arguments, mode and network; the server is where a bottle is shared.
+  In Russian, [`bottles/README.ru.md`](bottles/README.ru.md).
+- **[`steam/`](steam/README.md)** — Steam in a bottle: SteamCMD signs in and downloads on the
+  person's own account, the download becomes a bottle, and titles that need the client wait on v2.
+  In Russian, [`steam/README.ru.md`](steam/README.ru.md).
 - **[`decisions.md`](decisions.md)** — behaviour this project chose rather than derived from a
   specification, each entry dated and defended on its merits; the ones v2 will replace say so.
 

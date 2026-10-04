@@ -14,11 +14,12 @@
  * direction is the point: nothing is pulled in behind a running program's
  * back, which is what makes a save the program wrote the save that is kept.
  *
- * A session is packed as one compressed stream rather than the per-block
- * arrangement a bundle uses, and the difference is the access pattern. A bundle
- * is read at random offsets forever, so it is cut into blocks that can be
- * fetched alone. A session travels whole and is unpacked whole, so blocks would
- * only cost ratio. Same data, opposite answer, for a reason that is visible in
+ * A session that travels -- to localStorage, out of the device -- is packed
+ * as one compressed stream rather than the per-block arrangement a bundle
+ * uses, and the difference is the access pattern. A bundle is read at random
+ * offsets forever, so it is cut into blocks that can be fetched alone. A
+ * session travels whole and is unpacked whole, so blocks would only cost
+ * ratio. Same data, opposite answer, for a reason that is visible in
  * the question rather than in the numbers.
  */
 

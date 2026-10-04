@@ -690,7 +690,7 @@ address: from another machine, without a secure context, there is neither OPFS n
 | --- | --- | --- | --- |
 | Block cache | OPFS: `<id>.blocks`, `<id>.present`, `<id>.order` | bundle blocks already fetched from the server | Block N sits at offset N × the block size (taken from the bundle's header, 256 KiB by default). `.present` is a bitmap of the fetched blocks, `.order` the order they were first asked for in (up to 4096). Access goes through synchronous handles: at most 16 are open, and the one unused the longest closes first |
 | cork translations | OPFS: `cork/<id>.v3/` | translated regions | `records` holds the records one after another, `index` a log of where each one is. The index is read once, a miss touches no disk, a hit is one read at an offset. New records are appended in batches; the file is compacted, with a 1 GiB cap |
-| Session | OPFS: `<id>.session` | the files the program wrote, and its registry | All in one deflate-raw stream. Applied before the first instruction, saved 250 ms after the program stops writing. The bundle itself never changes |
+| Session | OPFS: `<id>.files/` | the files the program wrote, and its registry | One entry per file, named by a hash of its path, which it holds inside; the registry is an entry of its own. Applied before the first instruction; 250 ms after the program stops writing, only the files it changed are written or removed. An older `<id>.session` (one deflate-raw stream) is read once and replaced. The bundle itself never changes |
 | Settings | localStorage | the launcher's settings, time to first frame | — |
 
 How the program reads a file:
