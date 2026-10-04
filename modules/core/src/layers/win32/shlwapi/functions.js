@@ -313,6 +313,51 @@ export function createShlwapiFunctions(host){
         },
     });
 
+    /**
+     * PathFindExtension for either width: the last dot of the last
+     * component, or the terminator when there is none -- a dot in a
+     * directory's name is not an extension of the file inside it. `unit` is
+     * the bytes a character takes, which is how far the answer moves.
+     *
+     * @param {(address: number) => string | null} read @param {number} unit
+     */
+    const pathFindExtension = (read, unit)=>({
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([pointer])=>{
+            const path = read(pointer);
+            return path === null ? 0 : (pointer >>> 0) + extensionIndex(path) * unit;
+        },
+    });
+
+    /**
+     * PathFindFileName for either width: what follows the last separator that
+     * has something after it, so a path ending in a separator names its last
+     * directory, slash and all.
+     *
+     * @param {(address: number) => string | null} read @param {number} unit
+     */
+    const pathFindFileName = (read, unit)=>({
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([pointer])=>{
+            const path = read(pointer);
+            if (path === null)
+            {
+                return 0;
+            }
+            let start = 0;
+            for (let at = 0; at + 1 < path.length; at++)
+            {
+                if (isSeparator(path[at]) || path[at] === ':')
+                {
+                    start = at + 1;
+                }
+            }
+            return (pointer >>> 0) + start * unit;
+        },
+    });
+
     /** @param {(address: number) => string | null} read */
     const pathMatchSpec = read=>({
         argBytes: 8,
@@ -361,48 +406,17 @@ export function createShlwapiFunctions(host){
     };
 
     return {
-        /**
-         * LPSTR PathFindExtensionA(LPCSTR pszPath)
-         *
-         * The last dot of the last component, or the terminator when there is
-         * none: a dot in a directory's name is not an extension of the file
-         * inside it.
-         */
-        PathFindExtensionA: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([pointer])=>{
-                const path = pathAt(pointer);
-                return path === null ? 0 : (pointer >>> 0) + extensionIndex(path);
-            },
-        },
+        /** LPSTR PathFindExtensionA(LPCSTR pszPath) */
+        PathFindExtensionA: pathFindExtension(pathAt, 1),
 
-        /**
-         * LPSTR PathFindFileNameA(LPCSTR pszPath)
-         *
-         * What follows the last separator that has something after it, so a
-         * path ending in a separator names its last directory, slash and all.
-         */
-        PathFindFileNameA: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([pointer])=>{
-                const path = pathAt(pointer);
-                if (path === null)
-                {
-                    return 0;
-                }
-                let start = 0;
-                for (let at = 0; at + 1 < path.length; at++)
-                {
-                    if (isSeparator(path[at]) || path[at] === ':')
-                    {
-                        start = at + 1;
-                    }
-                }
-                return (pointer >>> 0) + start;
-            },
-        },
+        /** LPWSTR PathFindExtensionW(LPCWSTR pszPath) */
+        PathFindExtensionW: pathFindExtension(widePathAt, 2),
+
+        /** LPSTR PathFindFileNameA(LPCSTR pszPath) */
+        PathFindFileNameA: pathFindFileName(pathAt, 1),
+
+        /** LPWSTR PathFindFileNameW(LPCWSTR pszPath) */
+        PathFindFileNameW: pathFindFileName(widePathAt, 2),
 
         /**
          * BOOL PathStripToRootA(LPSTR pszPath)

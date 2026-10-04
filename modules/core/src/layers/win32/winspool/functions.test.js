@@ -22,3 +22,12 @@ test('with no printer installed, opening one fails by name and properties are re
     assert.equal(fns.ClosePrinter.argBytes, 4);
     assert.equal(fns.DocumentPropertiesA.argBytes, 24);
 });
+
+test('there is no port to list', ()=>{
+    const bytes = new Uint8Array(16).fill(0xcc);
+    const fns = createSpoolerFunctions({ writeMemory: (at, data)=>bytes.set(data, at) });
+    assert.equal(fns.EnumPortsA.handler([0, 1, 0, 0, 4, 8]), 1);
+    assert.deepEqual([...bytes.subarray(4, 8)], [0, 0, 0, 0], 'none needed');
+    assert.deepEqual([...bytes.subarray(8, 12)], [0, 0, 0, 0], 'none returned');
+    assert.equal(fns.EnumPortsA.argBytes, 24);
+});

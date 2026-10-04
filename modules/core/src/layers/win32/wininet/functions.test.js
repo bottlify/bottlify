@@ -152,3 +152,66 @@ test('a missing string or length is refused, and browser mode is said to be igno
     assert.equal(fx.divergences.length, 1, 'still answered, and reported once');
     assert.equal(fx.out(), 'http://host/');
 });
+
+test('the wide entry points open a URL in one call and answer its status in UTF-16', async()=>{
+    const bytes = new Uint8Array(0x1000);
+    const view = new DataView(bytes.buffer);
+    /** @type {number[]} */
+    const errors = [];
+    /** @type {any[]} */
+    const sent = [];
+    const host = {
+        /** @param {number} address @param {number} length */
+        readMemory: (address, length)=>bytes.slice(address, address + length),
+        /** @param {number} address @param {Uint8Array} data */
+        writeMemory: (address, data)=>bytes.set(data, address),
+        readCString: ()=>'',
+        /** @param {number} code */
+        setLastError: code=>errors.push(code),
+        /** @param {any} request */
+        request: async request=>{
+            sent.push(request);
+            return { status: 200, statusText: 'OK', headers: {}, body: new Uint8Array(0) };
+        },
+    };
+    /** @param {number} at @param {string} text */
+    const wide = (at, text)=>{
+        bytes.fill(0, at, at + text.length * 2 + 2);
+        [...text].forEach((unit, index)=>{
+            bytes[at + index * 2] = unit.charCodeAt(0);
+        });
+    };
+    const fns = createWininetFunctions(host);
+    wide(0x100, 'Checker');
+    const session = fns.InternetOpenW.handler([0x100, 0, 0, 0, 0]);
+    assert.ok(Number(session) > 0);
+    wide(0x200, 'http://example.com/offer?x=1');
+    const request = await fns.InternetOpenUrlW.handler([Number(session), 0x200, 0, 0, 0, 0]);
+    assert.ok(Number(request) > 0, 'a request handle, its GET already sent');
+    assert.equal(sent[0].method, 'GET');
+    assert.match(sent[0].url, /^http:\/\/example\.com(:80)?\/offer\?x=1$/);
+
+    const HTTP_QUERY_STATUS_CODE = 19;
+    view.setUint32(0x500, 64, true);
+    assert.equal(fns.HttpQueryInfoW.handler([Number(request), HTTP_QUERY_STATUS_CODE, 0x400,
+        0x500, 0]), 1);
+    assert.equal(view.getUint32(0x500, true), 6, 'three characters, counted in bytes');
+    assert.deepEqual([...bytes.subarray(0x400, 0x408)], [0x32, 0, 0x30, 0, 0x30, 0, 0, 0]);
+    view.setUint32(0x500, 4, true);
+    assert.equal(fns.HttpQueryInfoW.handler([Number(request), HTTP_QUERY_STATUS_CODE, 0x400,
+        0x500, 0]), 0);
+    assert.equal(view.getUint32(0x500, true), 8, 'the room asked for has the terminator');
+
+    wide(0x200, 'ftp://example.com/');
+    assert.equal(await fns.InternetOpenUrlW.handler([Number(session), 0x200, 0, 0, 0, 0]), 0);
+    assert.equal(errors.at(-1), 12006, 'ERROR_INTERNET_UNRECOGNIZED_SCHEME');
+
+    const offline = createWininetFunctions({ ...host, request: null });
+    const alone = offline.InternetOpenW.handler([0x100, 0, 0, 0, 0]);
+    wide(0x200, 'http://example.com/');
+    assert.equal(await offline.InternetOpenUrlW.handler([Number(alone), 0x200, 0, 0, 0, 0]), 0);
+    assert.equal(errors.at(-1), 12029, 'ERROR_INTERNET_CANNOT_CONNECT, with no network');
+    assert.equal(fns.InternetOpenW.argBytes, 20);
+    assert.equal(fns.InternetOpenUrlW.argBytes, 24);
+    assert.equal(fns.HttpQueryInfoW.argBytes, 20);
+});

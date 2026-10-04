@@ -320,6 +320,21 @@ export function createWininetFunctions(host){
     const readText = (pointer, limit = MAX_TEXT)=>
         pointer === 0 ? '' : host.readCString(pointer >>> 0, limit);
 
+    /** readText for the wide entry points. @param {number} pointer @param {number} [limit] */
+    const readWide = (pointer, limit = MAX_TEXT)=>{
+        let text = '';
+        for (let at = pointer >>> 0; at !== 0 && text.length < limit; at += 2)
+        {
+            const [low, high] = host.readMemory(at, 2);
+            if ((low | high) === 0)
+            {
+                break;
+            }
+            text += String.fromCharCode(low | high << 8);
+        }
+        return text;
+    };
+
     /**
      * Writes a string and its terminator. Latin-1 rather than UTF-8, because
      * what goes back has to be the same number of bytes the length reported.
@@ -368,6 +383,31 @@ export function createWininetFunctions(host){
         }
         writeText(buffer, text);
         writeDwordIf(lengthPointer >>> 0, text.length);
+        return TRUE;
+    };
+
+    /**
+     * answerText for the wide entry points: the same protocol, counted in
+     * bytes of UTF-16.
+     *
+     * @param {number} buffer @param {number} lengthPointer @param {string} text
+     * @returns {number} TRUE or FALSE
+     */
+    const answerWide = (buffer, lengthPointer, text)=>{
+        const capacity = lengthPointer === 0 ? 0 : readDword(lengthPointer >>> 0);
+        if (buffer === 0 || capacity < (text.length + 1) * 2)
+        {
+            writeDwordIf(lengthPointer >>> 0, (text.length + 1) * 2);
+            return fail(ERROR_INSUFFICIENT_BUFFER);
+        }
+        const bytes = new Uint8Array((text.length + 1) * 2);
+        for (let at = 0; at < text.length; at++)
+        {
+            bytes[at * 2] = text.charCodeAt(at) & 0xff;
+            bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
+        }
+        host.writeMemory(buffer >>> 0, bytes);
+        writeDwordIf(lengthPointer >>> 0, text.length * 2);
         return TRUE;
     };
 
@@ -449,6 +489,214 @@ export function createWininetFunctions(host){
         return taken;
     };
 
+    /**
+     * Sends a request and keeps what came back, answering TRUE once it is
+     * in -- a promise, which is what parks the calling thread.
+     *
+     * @param {number} handle @param {WininetHandle} request
+     * @param {string} headerText @param {Uint8Array | null} body
+     * @returns {number | Promise<number>}
+     */
+    const send = (handle, request, headerText, body)=>{
+        const url = requestUrl(request);
+        if (!url)
+        {
+            return fail(ERROR_INVALID_HANDLE);
+        }
+        if (!host.request)
+        {
+            return fail(ERROR_INTERNET_CANNOT_CONNECT);
+        }
+        const sending = {
+            method: request.state.verb,
+            url,
+            headers: parseHeaders(headerText),
+            body,
+        };
+        return host.request(sending).then(response=>{
+            // The handle may have been closed while this was in flight,
+            // in which case there is nothing left to deliver it to.
+            if (!handles.has(handle >>> 0))
+            {
+                return fail(ERROR_INVALID_HANDLE);
+            }
+            /** @type {Record<string, string>} */
+            const received = {};
+            for (const [name, value] of Object.entries(response.headers ?? {}))
+            {
+                received[name.toLowerCase()] = value;
+            }
+            request.state.response = {
+                status: response.status >>> 0,
+                statusText: response.statusText ?? '',
+                headers: received,
+                body: response.body ?? new Uint8Array(0),
+            };
+            request.state.readOffset = 0;
+            return TRUE;
+        }, ()=>fail(ERROR_INTERNET_CANNOT_CONNECT));
+    };
+
+    /**
+     * InternetOpen, reading its text with `read`.
+     *
+     * @param {(pointer: number) => string} read
+     */
+    const openSession = read=>(/** @type {number[]} */ args)=>{
+        const [agent, accessType, proxy, , flags] = args;
+        return allocate('session', 0, {
+            agent: read(agent),
+            accessType: accessType >>> 0,
+            proxy: read(proxy),
+            flags: flags >>> 0,
+            callback: 0,
+        });
+    };
+
+    /**
+     * InternetOpenUrl: a connection and a GET of the URL under the session in
+     * one call, sent before it answers with the request; HTTP and HTTPS only.
+     * A request that could not be sent takes its connection with it.
+     *
+     * @param {boolean} wide
+     */
+    const openUrl = wide=>(/** @type {number[]} */ args)=>{
+        const [session, url, headers, headersLength, flags, context] = args;
+        if (!resolve(session, 'session'))
+        {
+            return failHandle(ERROR_INVALID_HANDLE);
+        }
+        const read = wide ? readWide : readText;
+        const cracked = crackUrl(read(url));
+        const scheme = cracked?.scheme.text.toLowerCase();
+        if (!cracked || (scheme !== 'http' && scheme !== 'https'))
+        {
+            return failHandle(ERROR_INTERNET_UNRECOGNIZED_SCHEME);
+        }
+        const count = headersLength >>> 0;
+        const headerText = (headers >>> 0) === 0 ? ''
+            : count === 0xffffffff ? read(headers)
+                : wide ? readWide(headers, count)
+                    : decodeAnsi(host.readMemory(headers >>> 0, count));
+        const connection = allocate('connect', session >>> 0, {
+            host: cracked.host.text,
+            port: cracked.port,
+            secure: scheme === 'https',
+            user: cracked.user.text,
+            password: cracked.password.text,
+            context: context >>> 0,
+        });
+        const handle = allocate('request', connection, {
+            verb: 'GET',
+            objectName: (cracked.path.text || '/') + cracked.extra.text,
+            referrer: '',
+            flags: flags >>> 0,
+            context: context >>> 0,
+            response: null,
+            readOffset: 0,
+        });
+        /** @param {number} sent */
+        const answer = sent=>{
+            if (sent === TRUE)
+            {
+                return handle;
+            }
+            handles.delete(handle);
+            handles.delete(connection);
+            return 0;
+        };
+        const sent = send(handle, /** @type {WininetHandle} */ (resolve(handle, 'request')),
+            headerText, null);
+        return sent instanceof Promise ? sent.then(answer) : answer(sent);
+    };
+
+    /**
+     * HttpQueryInfo, answering text with `answer`.
+     *
+     * @param {(buffer: number, lengthPointer: number, text: string) => number} answer
+     */
+    const queryInfo = answer=>(/** @type {number[]} */ args)=>{
+        const [handle, infoLevel, buffer, lengthPointer] = args;
+        const request = resolve(handle, 'request');
+        if (!request)
+        {
+            return fail(ERROR_INVALID_HANDLE);
+        }
+        const response = request.state.response;
+        if (!response)
+        {
+            // Nothing has been sent, so there are no response headers to
+            // read -- distinct from a header that is simply absent.
+            return fail(ERROR_INTERNET_INCORRECT_HANDLE_TYPE);
+        }
+        const level = infoLevel >>> 0;
+        if ((level & HTTP_QUERY_FLAG_REQUEST_HEADERS) !== 0)
+        {
+            // Request headers are not kept after sending; saying so is
+            // better than answering with the response's.
+            return fail(ERROR_HTTP_HEADER_NOT_FOUND);
+        }
+
+        const query = level & 0xffff;
+        const raw = [...Object.entries(response.headers)]
+            .map(([name, value])=>`${name}: ${value}`);
+
+        // Every branch below either assigns this or returns, so it is
+        // a string by the time anything reads it.
+        /** @type {string} */
+        let text;
+        if (query === HTTP_QUERY_STATUS_CODE)
+        {
+            text = String(response.status);
+        }
+        else if (query === HTTP_QUERY_STATUS_TEXT)
+        {
+            text = response.statusText;
+        }
+        else if (query === HTTP_QUERY_VERSION)
+        {
+            text = 'HTTP/1.1';
+        }
+        else if (query === HTTP_QUERY_RAW_HEADERS)
+        {
+            // NUL between headers and two at the end, which is what the
+            // name distinguishes from the CRLF form below.
+            text = `${raw.join('\0')}\0`;
+        }
+        else if (query === HTTP_QUERY_RAW_HEADERS_CRLF)
+        {
+            text = `${raw.join('\r\n')}\r\n\r\n`;
+        }
+        else
+        {
+            const name = QUERY_HEADERS.get(query);
+            const found = name === undefined ? undefined : response.headers[name];
+            if (found === undefined)
+            {
+                return fail(ERROR_HTTP_HEADER_NOT_FOUND);
+            }
+            text = found;
+        }
+
+        if ((level & HTTP_QUERY_FLAG_NUMBER) !== 0)
+        {
+            const value = Number.parseInt(text, 10);
+            if (!Number.isFinite(value))
+            {
+                return fail(ERROR_HTTP_HEADER_NOT_FOUND);
+            }
+            if (buffer === 0 || readDword(lengthPointer >>> 0) < 4)
+            {
+                writeDwordIf(lengthPointer >>> 0, 4);
+                return fail(ERROR_INSUFFICIENT_BUFFER);
+            }
+            writeDword(buffer >>> 0, value >>> 0);
+            writeDwordIf(lengthPointer >>> 0, 4);
+            return TRUE;
+        }
+        return answer(buffer >>> 0, lengthPointer >>> 0, text);
+    };
+
     return {
         /**
          * HINTERNET InternetOpenA(LPCSTR lpszAgent, DWORD dwAccessType,
@@ -460,14 +708,29 @@ export function createWininetFunctions(host){
          */
         InternetOpenA: {
             argBytes: 20,
-            /** @param {number[]} args */
-            handler: ([agent, accessType, proxy, , flags])=>allocate('session', 0, {
-                agent: readText(agent),
-                accessType: accessType >>> 0,
-                proxy: readText(proxy),
-                flags: flags >>> 0,
-                callback: 0,
-            }),
+            handler: openSession(readText),
+        },
+
+        /** HINTERNET InternetOpenW(LPCWSTR, DWORD, LPCWSTR, LPCWSTR, DWORD): InternetOpenA in UTF-16 */
+        InternetOpenW: {
+            argBytes: 20,
+            handler: openSession(readWide),
+        },
+
+        /**
+         * HINTERNET InternetOpenUrlA(HINTERNET hInternet, LPCSTR lpszUrl,
+         *                            LPCSTR lpszHeaders, DWORD dwHeadersLength,
+         *                            DWORD dwFlags, DWORD_PTR dwContext)
+         */
+        InternetOpenUrlA: {
+            argBytes: 24,
+            handler: openUrl(false),
+        },
+
+        /** HINTERNET InternetOpenUrlW(...): InternetOpenUrlA in UTF-16 */
+        InternetOpenUrlW: {
+            argBytes: 24,
+            handler: openUrl(true),
         },
 
         /**
@@ -567,16 +830,6 @@ export function createWininetFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                const url = requestUrl(request);
-                if (!url)
-                {
-                    return fail(ERROR_INVALID_HANDLE);
-                }
-                if (!host.request)
-                {
-                    return fail(ERROR_INTERNET_CANNOT_CONNECT);
-                }
-
                 // -1 means "the block is null-terminated, measure it yourself",
                 // which is what a client that has a string rather than a buffer
                 // passes.
@@ -595,35 +848,7 @@ export function createWininetFunctions(host){
                 // Read before the promise is made, not inside it. What the
                 // arguments point at belongs to the caller's frame, and by the
                 // time this settles the frame is somewhere else entirely.
-                const sending = {
-                    method: request.state.verb,
-                    url,
-                    headers: parseHeaders(text),
-                    body,
-                };
-
-                return host.request(sending).then(response=>{
-                    // The handle may have been closed while this was in flight,
-                    // in which case there is nothing left to deliver it to.
-                    if (!handles.has(handle >>> 0))
-                    {
-                        return fail(ERROR_INVALID_HANDLE);
-                    }
-                    /** @type {Record<string, string>} */
-                    const received = {};
-                    for (const [name, value] of Object.entries(response.headers ?? {}))
-                    {
-                        received[name.toLowerCase()] = value;
-                    }
-                    request.state.response = {
-                        status: response.status >>> 0,
-                        statusText: response.statusText ?? '',
-                        headers: received,
-                        body: response.body ?? new Uint8Array(0),
-                    };
-                    request.state.readOffset = 0;
-                    return TRUE;
-                }, ()=>fail(ERROR_INTERNET_CANNOT_CONNECT));
+                return send(handle, request, text, body);
             },
         },
 
@@ -637,87 +862,13 @@ export function createWininetFunctions(host){
          */
         HttpQueryInfoA: {
             argBytes: 20,
-            /** @param {number[]} args */
-            handler: ([handle, infoLevel, buffer, lengthPointer])=>{
-                const request = resolve(handle, 'request');
-                if (!request)
-                {
-                    return fail(ERROR_INVALID_HANDLE);
-                }
-                const response = request.state.response;
-                if (!response)
-                {
-                    // Nothing has been sent, so there are no response headers to
-                    // read -- distinct from a header that is simply absent.
-                    return fail(ERROR_INTERNET_INCORRECT_HANDLE_TYPE);
-                }
-                const level = infoLevel >>> 0;
-                if ((level & HTTP_QUERY_FLAG_REQUEST_HEADERS) !== 0)
-                {
-                    // Request headers are not kept after sending; saying so is
-                    // better than answering with the response's.
-                    return fail(ERROR_HTTP_HEADER_NOT_FOUND);
-                }
+            handler: queryInfo(answerText),
+        },
 
-                const query = level & 0xffff;
-                const raw = [...Object.entries(response.headers)]
-                    .map(([name, value])=>`${name}: ${value}`);
-
-                // Every branch below either assigns this or returns, so it is
-                // a string by the time anything reads it.
-                /** @type {string} */
-                let text;
-                if (query === HTTP_QUERY_STATUS_CODE)
-                {
-                    text = String(response.status);
-                }
-                else if (query === HTTP_QUERY_STATUS_TEXT)
-                {
-                    text = response.statusText;
-                }
-                else if (query === HTTP_QUERY_VERSION)
-                {
-                    text = 'HTTP/1.1';
-                }
-                else if (query === HTTP_QUERY_RAW_HEADERS)
-                {
-                    // NUL between headers and two at the end, which is what the
-                    // name distinguishes from the CRLF form below.
-                    text = `${raw.join('\0')}\0`;
-                }
-                else if (query === HTTP_QUERY_RAW_HEADERS_CRLF)
-                {
-                    text = `${raw.join('\r\n')}\r\n\r\n`;
-                }
-                else
-                {
-                    const name = QUERY_HEADERS.get(query);
-                    const found = name === undefined ? undefined : response.headers[name];
-                    if (found === undefined)
-                    {
-                        return fail(ERROR_HTTP_HEADER_NOT_FOUND);
-                    }
-                    text = found;
-                }
-
-                if ((level & HTTP_QUERY_FLAG_NUMBER) !== 0)
-                {
-                    const value = Number.parseInt(text, 10);
-                    if (!Number.isFinite(value))
-                    {
-                        return fail(ERROR_HTTP_HEADER_NOT_FOUND);
-                    }
-                    if (buffer === 0 || readDword(lengthPointer >>> 0) < 4)
-                    {
-                        writeDwordIf(lengthPointer >>> 0, 4);
-                        return fail(ERROR_INSUFFICIENT_BUFFER);
-                    }
-                    writeDword(buffer >>> 0, value >>> 0);
-                    writeDwordIf(lengthPointer >>> 0, 4);
-                    return TRUE;
-                }
-                return answerText(buffer >>> 0, lengthPointer >>> 0, text);
-            },
+        /** BOOL HttpQueryInfoW(...): HttpQueryInfoA, its text in UTF-16 */
+        HttpQueryInfoW: {
+            argBytes: 20,
+            handler: queryInfo(answerWide),
         },
 
         /**

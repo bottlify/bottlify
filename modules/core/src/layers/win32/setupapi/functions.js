@@ -1182,6 +1182,23 @@ export function createSetupapiFunctions(host){
          * arguments checked as Windows checks them, then the end of the
          * enumeration.
          */
+        /**
+         * BOOL SetupDiGetDeviceInterfaceDetailA(HDEVINFO DeviceInfoSet,
+         *     PSP_DEVICE_INTERFACE_DATA DeviceInterfaceData,
+         *     PSP_DEVICE_INTERFACE_DETAIL_DATA_A DeviceInterfaceDetailData,
+         *     DWORD DeviceInterfaceDetailDataSize, PDWORD RequiredSize,
+         *     PSP_DEVINFO_DATA DeviceInfoData)
+         *
+         * No set holds an interface, so none named here was handed out by an
+         * enumeration: the set checked, then the interface refused.
+         */
+        SetupDiGetDeviceInterfaceDetailA: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([set])=>(deviceSet(set) ? fail(ERROR_INVALID_PARAMETER)
+                : fail(ERROR_INVALID_HANDLE)),
+        },
+
         SetupDiEnumDeviceInterfaces: {
             argBytes: 20,
             /** @param {number[]} args */

@@ -335,6 +335,17 @@ test('CreateDCA opens the display and nothing else, and DeleteDC closes it', ()=
     assert.equal(fns.CreateDCA.handler([FACE_NAME, 0, 0, 0]), 0, 'there is no printer');
     assert.equal(fns.CreateDCA.handler([0, 0, 0, 0]), 0);
     assert.equal(fns.CreateDCA.argBytes, 16);
+
+    // An information context is the same display, asked about.
+    assert.equal(fns.CreateICA.handler([FACE_NAME, 0, 0, 0]), 0, 'no printer either');
+    memory.putString(FACE_NAME, 'DISPLAY');
+    const information = fns.CreateICA.handler([FACE_NAME, 0, 0, 0]);
+    assert.equal(fns.GetDeviceCaps.handler([information, BITSPIXEL]), 32);
+    assert.equal(fns.DeleteDC.handler([information]), 1);
+    assert.equal(fns.CreateICA.argBytes, 16);
+    assert.equal(fns.CreateICW.argBytes, 16);
+    assert.equal(fns.ExtEscape.handler(), 0, 'no escape is implemented');
+    assert.equal(fns.ExtEscape.argBytes, 24);
 });
 
 test('CreateDCW opens the display from a wide name', ()=>{

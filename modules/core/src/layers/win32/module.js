@@ -1869,7 +1869,7 @@ export function createWin32Module(){
                 // since d3dx9 exports them undecorated though they are stdcall.
                 ...d3dxLibraries(createD3dxFunctions({ readMemory, writeMemory })),
 
-                'WINSPOOL.DRV': createSpoolerFunctions({ setLastError: setError }),
+                'WINSPOOL.DRV': createSpoolerFunctions({ setLastError: setError, writeMemory }),
 
                 'MPR.dll': createNetworkFunctions({ setLastError: setError }),
 

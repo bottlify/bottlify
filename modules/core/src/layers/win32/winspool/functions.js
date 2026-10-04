@@ -20,6 +20,7 @@ const ERROR_INVALID_PRINTER_NAME = 1801;
 /**
  * @typedef {Object} SpoolerHost
  * @property {(code: number) => void} [setLastError]
+ * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
  */
 
 /**
@@ -29,6 +30,15 @@ export function createSpoolerFunctions(host){
     return {
         /** BOOL OpenPrinterA(LPSTR pPrinterName, LPHANDLE phPrinter, LPPRINTER_DEFAULTSA) */
         OpenPrinterA: {
+            argBytes: 12,
+            handler: ()=>{
+                host.setLastError?.(ERROR_INVALID_PRINTER_NAME);
+                return 0;
+            },
+        },
+
+        /** BOOL OpenPrinterW(LPWSTR, LPHANDLE, LPPRINTER_DEFAULTSW): OpenPrinterA */
+        OpenPrinterW: {
             argBytes: 12,
             handler: ()=>{
                 host.setLastError?.(ERROR_INVALID_PRINTER_NAME);
@@ -51,6 +61,28 @@ export function createSpoolerFunctions(host){
         DocumentPropertiesA: {
             argBytes: 24,
             handler: ()=>-1,
+        },
+        DocumentPropertiesW: {
+            argBytes: 24,
+            handler: ()=>-1,
+        },
+
+        /**
+         * BOOL EnumPortsA(LPSTR pName, DWORD Level, LPBYTE pPort, DWORD cbBuf,
+         *                 LPDWORD pcbNeeded, LPDWORD pcReturned)
+         *
+         * Nothing to print to, so no port to list: none needed, none returned.
+         */
+        EnumPortsA: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([, , , , needed, returned])=>{
+                for (const slot of [needed >>> 0, returned >>> 0].filter(at=>at !== 0))
+                {
+                    host.writeMemory?.(slot, new Uint8Array(4));
+                }
+                return 1;
+            },
         },
     };
 }

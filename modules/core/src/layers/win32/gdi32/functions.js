@@ -1821,6 +1821,34 @@ export function createGdiFunctions(host){
         },
 
         /**
+         * HDC CreateICA(LPCSTR pszDriver, LPCSTR pszDevice, LPCSTR pszPort,
+         *               const DEVMODEA *pdm)
+         *
+         * An information context: a DC a program asks about rather than draws
+         * on, so the display's as CreateDCA makes it, and DeleteDC takes it back.
+         */
+        CreateICA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([driver, device])=>{
+                const named = (driver >>> 0) !== 0 ? host.readCString(driver >>> 0, 32)
+                    : (device >>> 0) !== 0 ? host.readCString(device >>> 0, 32) : '';
+                return named.toUpperCase() === 'DISPLAY' ? createContext(0, 'display').hdc : 0;
+            },
+        },
+
+        /** HDC CreateICW(LPCWSTR, LPCWSTR, LPCWSTR, const DEVMODEW *): CreateICA in wide text */
+        CreateICW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([driver, device])=>{
+                const named = (driver >>> 0) !== 0 ? wideText(driver >>> 0, 32)
+                    : (device >>> 0) !== 0 ? wideText(device >>> 0, 32) : '';
+                return named.toUpperCase() === 'DISPLAY' ? createContext(0, 'display').hdc : 0;
+            },
+        },
+
+        /**
          * NTSTATUS D3DKMTCreateDCFromMemory(D3DKMT_CREATEDCFROMMEMORY *desc)
          *
          * A memory DC with a DIB section over pixels the program already has,
@@ -3395,6 +3423,16 @@ export function createGdiFunctions(host){
         Escape: { argBytes: 20, handler: ()=>0 },
 
         /** int GetDeviceCaps(HDC hdc, int index) */
+        /**
+         * int ExtEscape(HDC hdc, int iEscape, int cjInput, LPCSTR lpInData,
+         *               int cjOutput, LPSTR lpOutData)
+         *
+         * No driver escape is implemented, QUERYESCSUPPORT included: zero is
+         * the documented answer for one that is not, and a program probing
+         * its graphics driver takes it as one.
+         */
+        ExtEscape: { argBytes: 24, handler: ()=>0 },
+
         GetDeviceCaps: {
             argBytes: 8,
             /** @param {number[]} args */

@@ -93,6 +93,9 @@ test('a directory is answered with its attribute, a file and nothing with 0', ()
     assert.equal(fns.PathIsDirectoryA.handler([0]), 0, 'no path');
     assert.equal(fns.PathIsDirectoryW.handler([putWide('C:\\App\\Data\\')]), 0x10,
         'the wide spelling, a trailing separator and all');
+    assert.equal(fns.PathFindExtensionW.handler([putWide('C:\\dir.d\\file.txt')]), AT + 13 * 2,
+        'a wide extension is two bytes a character in');
+    assert.equal(fns.PathFindFileNameW.handler([putWide('C:\\dir\\file.exe')]), AT + 7 * 2);
     assert.equal(machine().fns.PathIsDirectoryA.handler([put('C:\\App')]), 0,
         'with no volume, nothing is there');
 });
