@@ -314,6 +314,36 @@ test('with shared memory, a buffer\'s pan reaches its voice', async()=>{
     assert.ok(block[1] > 0);
 });
 
+test('with shared memory, a volume or a pan changed while the buffer plays reaches its voice at'
+    + ' the next turn, and only what changed is given again', async()=>{
+    const f = await playing({ shared: true });
+    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.api.pump();
+    const table = f.api.output().table;
+    const header = new Int32Array(table, slotHeaderOffset(0), SLOT_HEADER_INT32);
+    const pcm = new Uint8Array(table, slotPcmOffset(0), SLOT_BYTES);
+    const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+    const heard = ()=>{
+        const block = new Float32Array(2 * 2);
+        resampleInto({ block, blockFrames: 2, header, pcm, arena, outputRate: 48000,
+            seam: createSeam() });
+        return [...block.subarray(0, 2)];
+    };
+    const [left, right] = heard();
+    assert.ok(left > 0 && right > 0);
+    f.api.pump();
+    assert.deepEqual(heard(), [left, right], 'a turn with nothing changed changes nothing');
+    f.call(f.buffer, 'SetVolume', [-10000]);
+    f.api.pump();
+    assert.deepEqual(heard(), [0, 0], 'DSBVOLUME_MIN silences it');
+    f.call(f.buffer, 'SetVolume', [0]);
+    f.call(f.buffer, 'SetPan', [-10000]);
+    f.api.pump();
+    const [panned, silent] = heard();
+    assert.ok(panned > 0, 'its volume back');
+    assert.equal(silent, 0, 'DSBPAN_LEFT leaves the right silent');
+});
+
 test('a buffer retuned while it plays is heard at the rate its cursor moves', async()=>{
     // The cursor drains bytes at the new frequency from the moment it is set; a
     // track still reading them at the first one plays them at the wrong pitch

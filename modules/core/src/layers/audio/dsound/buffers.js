@@ -190,8 +190,12 @@ export function createSoundBuffer({
      * cursor keeps moving and the bytes it passes are handed to the mixer as
      * usual. What a listener hears is the previous lap again, and this map is
      * the only thing that tells a lap replayed from a lap refilled.
+     *
+     * A measurement, not behaviour: a production bundle keeps no map, marks
+     * nothing at an unlock and walks nothing at a drain -- a walk over every
+     * byte played, every turn, was most of the sound pump's time.
      */
-    const written = new Uint8Array(bytes);
+    const written = import.meta.BOTTLIFY_DIAGNOSTICS !== false ? new Uint8Array(bytes) : null;
     let staleBytes = 0;
     let staleDrains = 0;
     /**
@@ -239,7 +243,7 @@ export function createSoundBuffer({
     let heldFrames = 0;
 
     /** @param {number} from @param {number} count */
-    const markWritten = (from, count)=>written.fill(1, from, from + count);
+    const markWritten = (from, count)=>written?.fill(1, from, from + count);
 
     /**
      * Clears what a drain hands over and counts what was already clear.
@@ -252,6 +256,10 @@ export function createSoundBuffer({
      * @param {{ from: number, bytes: number }[]} ranges
      */
     const takeWritten = ranges=>{
+        if (!written)
+        {
+            return;
+        }
         let stale = 0;
         for (const range of ranges)
         {
@@ -683,6 +691,33 @@ export function createSoundBuffer({
                     ? notifications.filter(entry=>(entry.offset >>> 0) === DSBPN_OFFSETSTOP)
                     : [])
                 .map(entry=>entry.event);
+        },
+
+        /**
+         * Whether a look now -- `drainNotifications`, then `drainPlayed` --
+         * would hand out nothing and change nothing: a buffer that is not
+         * playing, has no voice, owes no stop, end or lap, and whose cursor
+         * stands where the last look left it. A stopped buffer's cursor does
+         * not move with time, so it stays idle until the program does
+         * something to it; the pump passes it over until then rather than
+         * looking at every buffer the program ever made on every turn.
+         */
+        idle(){
+            if (playing || device || stopOwed || ranOut || reachedEnd)
+            {
+                return false;
+            }
+            const play = alignDown(anchorByte % bytes);
+            if (play !== lastNotified)
+            {
+                return false;
+            }
+            if (!looping)
+            {
+                return play <= fedByte;
+            }
+            const covered = (play - fedByte + bytes) % bytes;
+            return covered === 0 || covered >= bytes - fedLead;
         },
 
         /**

@@ -306,6 +306,15 @@ export function createAudioModule(){
              * @type {WeakMap<any, any>}
              */
             const tracks = new WeakMap();
+            /**
+             * The volume and pan each voice was last given, so that it is
+             * given them again only when the program changes them: a voice's
+             * gain and balance are three stores into the shared table, and
+             * the pump looks at every playing buffer every turn.
+             *
+             * @type {WeakMap<any, { volume: number, pan: number }>}
+             */
+            const mixed = new WeakMap();
 
             /**
              * Times a track's backlog was thrown away for being past its moment.
@@ -348,6 +357,12 @@ export function createAudioModule(){
                 // device must still not hang the program that asked for one.
                 for (const buffer of dsound.buffers())
                 {
+                    // A stopped buffer nothing has touched since the last look
+                    // has nothing to say, and a program makes dozens of them.
+                    if (buffer.idle())
+                    {
+                        continue;
+                    }
                     for (const event of buffer.drainNotifications())
                     {
                         notified++;
@@ -390,6 +405,10 @@ export function createAudioModule(){
                         buffer.device?.close();
                         continue;
                     }
+                    if (buffer.idle())
+                    {
+                        continue;
+                    }
                     // The sound device plays it, as a sound card does: a voice with
                     // a mirror of the whole buffer, read on the device's own clock,
                     // so what the engine thread is doing is not heard. Given once;
@@ -424,8 +443,13 @@ export function createAudioModule(){
                     const voice = buffer.device;
                     if (voice)
                     {
-                        voice.gain = buffer.gain;
-                        voice.balance = buffer.balance;
+                        const given = mixed.get(voice);
+                        if (given?.volume !== buffer.volume || given?.pan !== buffer.pan)
+                        {
+                            voice.gain = buffer.gain;
+                            voice.balance = buffer.balance;
+                            mixed.set(voice, { volume: buffer.volume, pan: buffer.pan });
+                        }
                         // Nothing to hand over; what the device passed is still
                         // checked against what the program wrote (stale).
                         buffer.drainPlayed();

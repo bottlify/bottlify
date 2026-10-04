@@ -680,3 +680,87 @@ test('a lock from the write cursor or over the whole buffer is not a skip', ()=>
     sound.unlock();
     assert.deepEqual(sound.skipped, { bytes: 512, count: 1 });
 });
+
+/**
+ * A pump that skips the buffers that say they are idle, beside one that
+ * visits every buffer every turn: whatever a program does with a buffer --
+ * plays it once or round, stops it, moves its cursor or its rate, sets
+ * positions to be woken at, locks and unlocks it, and lets time pass between
+ * -- the two hand out the same wakes and the same bytes, and the program sees
+ * the same cursors and status.
+ */
+test('a buffer that says it is idle gives a visit nothing, whatever a program did with it', ()=>{
+    const BYTES = 4096;
+    let checked = 0;
+    for (let seed = 1; seed <= 200; seed++)
+    {
+        let state = seed;
+        const below = (/** @type {number} */ n)=>{
+            state = (state * 1103515245 + 12345) >>> 0;
+            return (state >>> 8) % n;
+        };
+        const twins = [buffer({ bytes: BYTES }), buffer({ bytes: BYTES })];
+        /** @type {string[][]} */
+        const seen = [[], []];
+        let idle = 0;
+        for (let step = 0; step < 300; step++)
+        {
+            const roll = below(10);
+            const at = below(BYTES / 4) * 4;
+            const looping = below(2) === 1;
+            const wait = below(30);
+            for (const { sound, time } of twins)
+            {
+                if (roll === 0)
+                {
+                    sound.play(looping ? DSBPLAY_LOOPING : 0);
+                }
+                else if (roll === 1)
+                {
+                    sound.stop();
+                }
+                else if (roll === 2)
+                {
+                    sound.setCurrentPosition(at);
+                }
+                else if (roll === 3)
+                {
+                    sound.setFrequency(11025 + at);
+                }
+                else if (roll === 4)
+                {
+                    sound.setNotifications([{ offset: at, event: 1 },
+                        { offset: (at + 1024) % BYTES, event: 2 },
+                        { offset: DSBPN_OFFSETSTOP, event: 3 }]);
+                }
+                else if (roll === 5)
+                {
+                    sound.lockRange(at, 256, 0);
+                    sound.unlock();
+                }
+                else
+                {
+                    time.advance(wait);
+                }
+            }
+            twins.forEach(({ sound }, which)=>{
+                const skipped = which === 1 && sound.idle();
+                if (skipped)
+                {
+                    idle++;
+                    return;
+                }
+                seen[which].push(`${step} wake ${sound.drainNotifications().join(',')} play ${
+                    JSON.stringify(sound.drainPlayed())}`);
+            });
+            const [one, other] = twins.map(({ sound })=>JSON.stringify({ ...sound.cursors(),
+                status: sound.status() }));
+            assert.equal(other, one, `seed ${seed} step ${step}: what the program reads`);
+        }
+        // A visit that hands nothing out is what a skipped one is.
+        const handed = seen.map(lines=>lines.filter(line=>!line.endsWith('wake  play []')));
+        assert.deepEqual(handed[1], handed[0], `seed ${seed}: what the visits handed out`);
+        checked += idle;
+    }
+    assert.ok(checked > 10000, `buffers skipped as idle: ${checked}`);
+});
