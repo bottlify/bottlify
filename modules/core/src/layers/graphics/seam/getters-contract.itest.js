@@ -1067,29 +1067,18 @@ test('a call the device refuses is not answered D3D_OK by the ring', ()=>{
     ]), [], D3D8.dll);
 });
 
-test('a signalling NaN set in a matrix reads back as it was set, in the guest and on the host',
-    ()=>{
-        const get = getters(D3D9);
-        for (const version of [D3D9, D3D8])
-        {
-            const words = [...SCALE];
-            words[5] = SIGNALLING;
-            assert.deepEqual(scripted(version, { guestCode: true }, [
-                step('SetTransform(VIEW, a signalling NaN in it)', m=>{
-                    m.put(words);
-                    return m.call('device', 'SetTransform', [D3DTS_VIEW, DATA]);
-                }),
-                get.transform(D3DTS_VIEW),
-            ]), [], version.dll);
-        }
-    });
-
-test('a signalling NaN set in a viewport reads back as it was set, in the guest and on the host',
-    ()=>{
+test('a signalling NaN set reads back as it was set, in the guest and on the host', ()=>{
     const get = getters(D3D9);
     for (const version of [D3D9, D3D8])
     {
+        const words = [...SCALE];
+        words[5] = SIGNALLING;
         assert.deepEqual(scripted(version, { guestCode: true }, [
+            step('SetTransform(VIEW, a signalling NaN in it)', m=>{
+                m.put(words);
+                return m.call('device', 'SetTransform', [D3DTS_VIEW, DATA]);
+            }),
+            get.transform(D3DTS_VIEW),
             step('SetViewport(0, 0, 32, 32, a signalling NaN, 1)', m=>{
                 m.put([0, 0, 32, 32, SIGNALLING, floats([1])[0]]);
                 return m.call('device', 'SetViewport', [DATA]);
