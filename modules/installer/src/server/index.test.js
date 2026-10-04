@@ -307,3 +307,28 @@ test('a cover and a wallpaper go beside the manifest, and a new one replaces the
         await host.stop();
     }
 });
+
+test('a bottle is removed whole, and only a bottle is', async()=>{
+    const host = await serving();
+    try
+    {
+        const prefix = collectFrom(finishedApp([
+            { path: 'C:\\Games\\Title\\game.exe', bytes: bytes('MZ program') },
+        ]), { name: 'Setup.exe', bytes: bytes('the distribution') });
+        await publish({ prefix, endpoint: host.endpoint, id: 'unwanted',
+            manifest: { title: 'Old', entry: 'game.exe' } });
+        const remove = (/** @type {string} */ id, token = TOKEN)=>fetch(
+            `${host.endpoint.url}/bottles/${id}`, {
+                method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+
+        assert.equal((await remove('unwanted', 'wrong')).status, 401);
+        assert.equal((await remove('unwanted')).status, 200);
+        assert.deepEqual(await readdir(host.root), [], 'nothing of it is left');
+        assert.equal((await remove('unwanted')).status, 404, 'a second time there is nothing');
+        assert.equal((await remove('.hidden')).status, 400, 'a name that is not an id is refused');
+    }
+    finally
+    {
+        await host.stop();
+    }
+});

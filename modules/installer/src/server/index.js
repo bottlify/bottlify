@@ -213,6 +213,12 @@ export function createBottleServer({ root, token, port = 8788, host = '127.0.0.1
         }
 
         const url = new URL(request.url ?? '/', 'http://bottles');
+        const removal = /^\/bottles\/([^/]+)$/.exec(url.pathname);
+        if (removal && request.method === 'DELETE')
+        {
+            await removeBottle(decodeURIComponent(removal[1]), answer);
+            return;
+        }
         const route = /^\/bottles\/([^/]+)\/(blocks|finish|manifest|art\/(cover|wallpaper))$/
             .exec(url.pathname);
         if (!route || request.method !== 'POST')
@@ -314,6 +320,35 @@ export function createBottleServer({ root, token, port = 8788, host = '127.0.0.1
         await writeFile(join(directory, 'manifest.json'),
             `${JSON.stringify(manifest, null, 4)}\n`);
         answer(200, { id, manifest });
+    }
+
+    /**
+     * Removes a bottle whole -- its bundle, its manifest, its pictures -- for
+     * whoever opens the library after. Only a directory that holds a manifest
+     * is a bottle, and one still arriving is left to finish or fail first.
+     *
+     * @param {string} id
+     * @param {(status: number, body: any) => void} answer
+     */
+    async function removeBottle(id, answer){
+        if (!SAFE_ID.test(id))
+        {
+            answer(400, `"${id}" is not a usable bottle id`);
+            return;
+        }
+        if (uploads.has(id))
+        {
+            answer(409, `"${id}" is being uploaded`);
+            return;
+        }
+        const directory = directoryFor(id);
+        if (await readFile(join(directory, 'manifest.json'), 'utf8').catch(()=>null) === null)
+        {
+            answer(404, `there is no bottle "${id}"`);
+            return;
+        }
+        await rm(directory, { recursive: true, force: true });
+        answer(200, { id, removed: true });
     }
 
     /**

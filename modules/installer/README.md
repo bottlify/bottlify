@@ -152,6 +152,8 @@ Three routes, all `POST` and all authenticated:
   name taken from its bytes and named there as `./<name>`: `coverLarge` and
   `coverSmall` for the cover, `wallpaper` for the stage. The one it replaces is
   removed.
+- `DELETE /bottles/<id>` — the bottle removed whole, for everyone: its bundle,
+  its manifest and its pictures. Refused while it is still being uploaded.
 
 `publish()`'s own `manifest` option passes straight through to that file, field
 for field, so a title's own launch arguments travel with it: `commandLine` is
