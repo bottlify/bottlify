@@ -39,6 +39,7 @@
  *     --fetch             download winetest.exe first (again, if one is there)
  *     --winetest-url <u>  where --fetch takes it from (WINETEST_URL by default)
  *     --preset games      the libraries games lean on (PRESETS below)
+ *     --preset installers the libraries installers lean on
  *     --timeout <s>       wall seconds per test (default 120)
  *     --jobs <n>          tests run at once (default half the processors)
  *     --failures <n>      failed checks listed per test in the markdown (default 20)
@@ -62,7 +63,9 @@ export const WINETEST_URL = 'https://gitlab.winehq.org/wine/wine/-/jobs/artifact
 
 /**
  * The libraries games call into, and the tests of each that exercise what they
- * call. `null` is every test the library's program lists.
+ * call; and those an installer leans on, from its packages and cabinets to the
+ * shell's file operations, the registry and its security. `null` is every
+ * test the library's program lists.
  *
  * @type {Record<string, [string, string[] | null][]>}
  */
@@ -81,6 +84,22 @@ export const PRESETS = {
         ['advapi32', ['registry', 'security']],
         ['ole32', null],
         ['oleaut32', ['typelib', 'vartest']],
+    ],
+    installers: [
+        ['kernel32', null],
+        ['advapi32', null],
+        ['user32', null],
+        ['ole32', null],
+        ['oleaut32', null],
+        ['msi', null],
+        ['setupapi', null],
+        ['cabinet', null],
+        ['version', null],
+        ['shlwapi', null],
+        ['shell32', ['shlfileop', 'shellpath', 'shlexec', 'shelllink', 'shlfolder', 'shellole']],
+        ['comctl32', ['propsheet', 'progress', 'listview', 'treeview', 'imagelist', 'status',
+            'toolbar', 'animate', 'updown', 'tab']],
+        ['comdlg32', ['filedlg']],
     ],
 };
 
