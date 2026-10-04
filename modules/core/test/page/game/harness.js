@@ -1761,11 +1761,21 @@ export function createHarness(canvas, how = {}){
         // Guest memory as the run left it, where `--peek` asked: a flag or a
         // counter a program decides on without calling anything is otherwise
         // invisible from outside it.
-        result.peeks = (request.peeks ?? []).map((/** @type {any} */ peek)=>({
-            address: peek.address,
-            bytes: [...app.debug.read(peek.address, peek.length)]
-                .map(byte=>byte.toString(16).padStart(2, '0')).join(' '),
-        }));
+        // One that reaches past what is mapped says so in its own line
+        // rather than costing the run its report.
+        result.peeks = (request.peeks ?? []).map((/** @type {any} */ peek)=>{
+            try
+            {
+                return {
+                    address: peek.address,
+                    bytes: [...app.debug.read(peek.address, peek.length)]
+                        .map(byte=>byte.toString(16).padStart(2, '0')).join(' '),
+                };
+            }
+            catch (e){
+                return { address: peek.address, bytes: `unreadable: ${/** @type {any} */ (e).message}` };
+            }
+        });
 
         await app.dispose();
         // Nothing is running any more, and a report asked for now must say
