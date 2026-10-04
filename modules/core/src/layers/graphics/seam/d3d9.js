@@ -71,10 +71,10 @@ import { createRaster, rasterStatus } from './raster.js';
 import { queryAs, readGuid } from './guid.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import {
-    RENDER_STATE_MIRROR, SAMPLER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_MIRROR, commandCode,
-    createShadow, getRenderStateCode, getSamplerStateCode, getSurfaceDescCode,
-    getSurfaceLevelCode,
-    getTextureStageStateCode, getTransformCode, getViewportCode, lockCode, stageStateMirror,
+    DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, SAMPLER_STATE_MIRROR, TRANSFORM_MIRROR,
+    VIEWPORT_GUARD_9, VIEWPORT_MIRROR, commandCode, createShadow, getRenderStateCode,
+    getSamplerStateCode, getSurfaceDescCode, getSurfaceLevelCode, getTextureStageStateCode,
+    getTransformCode, getViewportCode, lockCode, settledAfter, stageStateMirror,
     unlockCode,
 } from './shadow.js';
 import { D3DTSS9 } from '../d3d9/samplerstates.js';
@@ -85,17 +85,25 @@ const STAGE_STATE_TYPES_9 = Object.values(D3DTSS9)
     .reduce((mask, type)=>(type < 32 ? mask | (1 << type) : mask), 0) >>> 0;
 
 /**
- * What the command routines of the setters whose getters run in the guest
- * keep in the block for them (`shadow.js`).
+ * What the command routines keep in the block beside the record (`shadow.js`):
+ * the values the getters in the guest read, and the state the routines of
+ * later calls check theirs against -- a viewport's own checks first.
  *
  * @type {Record<string, any[]>}
  */
-const GETTER_MIRRORS = {
+export const COMMAND_MIRRORS = {
     SetRenderState: [...RENDER_STATE_MIRROR],
     SetTransform: [...TRANSFORM_MIRROR],
     SetTextureStageState: stageStateMirror(STAGE_STATE_TYPES_9),
-    SetViewport: [...VIEWPORT_MIRROR],
+    SetViewport: [...VIEWPORT_GUARD_9, ...VIEWPORT_MIRROR],
     SetSamplerState: [...SAMPLER_STATE_MIRROR],
+    BeginScene: [...DRAWABLE_MIRRORS.BeginScene],
+    EndScene: [...DRAWABLE_MIRRORS.EndScene],
+    SetFVF: [...DRAWABLE_MIRRORS.SetFVF],
+    SetVertexDeclaration: [...DRAWABLE_MIRRORS.SetVertexDeclaration],
+    SetStreamSource: [...DRAWABLE_MIRRORS.SetStreamSource9],
+    SetIndices: [...DRAWABLE_MIRRORS.SetIndices],
+    DrawPrimitiveUP: [...DRAWABLE_MIRRORS.DrawPrimitiveUP],
 };
 
 const D3D_OK = 0;
@@ -2556,16 +2564,15 @@ export function createDirect3D9Seam(
      * Every method first makes what the guest did since the host last looked
      * -- the buffers it let go of, then the calls in the command ring -- so a
      * read, a draw or a present sees the state the program set last, through
-     * the same methods a trap would have called.
+     * the same methods a trap would have called; and after it, what the
+     * guest's routines check a call against is the device's again.
      *
      * @param {Record<string, any>} methods
      * @returns {Record<string, any>}
      */
     const synced = methods=>Object.fromEntries(Object.entries(methods)
-        .map(([name, method])=>[name, (/** @type {any} */ device, /** @type {number[]} */ args)=>{
-            shadowOf(device)?.sync();
-            return method(device, args);
-        }]));
+        .map(([name, method])=>[name, (/** @type {any} */ device, /** @type {number[]} */ args)=>
+            settledAfter(shadowOf(device), ()=>method(device, args))]));
     /** @type {Record<string, (builder: { trap: number }) => number>} */
     const deviceGuests = guestsBut(deviceGroup, allocate
         ? {
@@ -2577,7 +2584,7 @@ export function createDirect3D9Seam(
             GetSamplerState: ({ trap })=>placeCode(at=>getSamplerStateCode(at, trap)),
             ...Object.fromEntries(Object.entries(COMMANDS).map(([name, shape])=>[name,
                 (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>commandCode(at, trap,
-                    { ...shape, slot: commandSlot(name), mirror: GETTER_MIRRORS[name] }))])),
+                    { ...shape, slot: commandSlot(name), mirror: COMMAND_MIRRORS[name] }))])),
         }
         : {});
     const deviceInterfaces = [

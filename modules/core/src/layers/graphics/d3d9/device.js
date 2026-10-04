@@ -2115,6 +2115,27 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         },
 
         /**
+         * What the command ring's routines check a call against in the guest
+         * (`seam/shadow.js`): what a draw needs that this device has -- the
+         * conditions `drawPreconditions`, `streamBias` and the indexed draw
+         * refuse without -- the target's size, the clip planes, and the format
+         * just set, which the device takes or not for its value alone.
+         */
+        ringState(){
+            const declared = vertexDeclaration.declaration !== null
+                && (vertexDeclaration.fvf === 0 || (vertexDeclaration.fvf & 0xe) !== 0);
+            const target = renderTargets.get(0);
+            return {
+                drawable: (inScene ? 1 : 0) | (declared ? 2 : 0)
+                    | (streamBias() !== null ? 4 : 0) | (indices ? 8 : 0),
+                targetWidth: target ? describe(target).Width : 0,
+                targetHeight: target ? describe(target).Height : 0,
+                clipPlanes: caps.maxUserClipPlanes,
+                taken: [vertexDeclaration.fvf >>> 0],
+            };
+        },
+
+        /**
          * Reset puts the device back to what it was created as: no scene open,
          * default state, implicit surfaces at the new size, usable again.
          *

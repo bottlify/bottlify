@@ -94,6 +94,8 @@ test('a command routine writes the call into the ring and leaves the rest to the
     host.writePhysical(VBUF + 4, new Uint8Array(u32(VBLOCK)));
     host.writePhysical(BLOCK, new Uint8Array(SHADOW.SIZE));
     host.writePhysical(BLOCK + SHADOW.COMMANDS, new Uint8Array([...u32(RING), ...u32(RING_BYTES)]));
+    // A scene open and something to draw from: what a draw's routine checks first.
+    host.writePhysical(BLOCK + SHADOW.DRAWABLE, new Uint8Array(u32(0xf)));
     host.writePhysical(VBLOCK, new Uint8Array([...u32(0), ...u32(DATA + 0x800), ...u32(0x100),
         ...u32(0), ...u32(0), ...u32(0), ...u32(0), ...u32(BLOCK)]));
     host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
@@ -225,6 +227,8 @@ test('a draw from the program\'s memory copies the vertices its primitives span'
     host.writePhysical(OBJECT + 4, new Uint8Array(u32(BLOCK)));
     host.writePhysical(BLOCK, new Uint8Array(SHADOW.SIZE));
     host.writePhysical(BLOCK + SHADOW.COMMANDS, new Uint8Array([...u32(RING), ...u32(RING_BYTES)]));
+    // A scene open and something to draw from: what a draw's routine checks first.
+    host.writePhysical(BLOCK + SHADOW.DRAWABLE, new Uint8Array(u32(0xf)));
     host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
     const vertices = new Uint8Array(0x400).map((unused, i)=>i * 7);
     host.writePhysical(DATA, vertices);
@@ -432,16 +436,13 @@ test('a state block\'s Apply in the ring names the block and sends the getters t
     assert.equal(run(APPLY, []), 'trap', 'the host\'s flag');
 });
 
-test('a clear copies its rectangles, or none for the whole target, and a target set in the'
-    + ' ring sends the getters to the host', ()=>{
+test('a clear copies its rectangles, or none for the whole target', ()=>{
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: {},
     });
     const CLEAR = VIEWPORT;
-    const TARGET = CONSTANTS;
     host.writePhysical(CLEAR, commandCode(CLEAR, TRAP, shape('Clear')));
-    host.writePhysical(TARGET, commandCode(TARGET, TRAP, shape('SetRenderTarget')));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
     host.writePhysical(OBJECT + 4, new Uint8Array(u32(BLOCK)));
     host.writePhysical(BLOCK, new Uint8Array(SHADOW.SIZE));
@@ -500,11 +501,6 @@ test('a clear copies its rectangles, or none for the whole target, and a target 
         [0, null, 1, 0xff00ff00, 1, 0],
         [2, [{ x1: 1, y1: 2, x2: 3, y2: 4 }, { x1: 10, y1: 20, x2: 30, y2: 40 }], 1, 7, 1, 5],
     ]);
-
-    assert.equal(read(BLOCK + SHADOW.FLAGS), 0);
-    assert.equal(run(TARGET, [0, 0x7700]), 'ok');
-    assert.equal(read(BLOCK + SHADOW.FLAGS), FLAG_STALE,
-        'the viewport the getters read may be gone');
 });
 
 test('a surface\'s GetDesc copies the description out of its block', ()=>{

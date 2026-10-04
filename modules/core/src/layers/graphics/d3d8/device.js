@@ -111,6 +111,9 @@ export const DEFAULT_CAPS = Object.freeze({
 /** Direct3D 8's pixel shader constant registers, c0 to c7. */
 const PIXEL_CONSTANTS = 8;
 
+/** The user clip planes the device keeps. */
+const CLIP_PLANES = 32;
+
 /**
  * @typedef {Object} VertexShader8
  *     What a vertex shader handle names.
@@ -1755,6 +1758,28 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         },
 
         /**
+         * What the command ring's routines check a call against in the guest
+         * (`seam/shadow.js`): what a draw needs that this device has, the
+         * target's size a viewport must lie within, the clip planes, and the
+         * shaders bound, each taken for its handle alone while it lives.
+         */
+        ringState(){
+            const declared = isShaderHandle(boundVertexShader) || (boundVertexShader & 0xe) !== 0;
+            const target = renderTarget ? describe(renderTarget) : null;
+            return {
+                drawable: (inScene ? 1 : 0) | (declared ? 2 : 0)
+                    | (stream(0).buffer ? 4 : 0) | (indices ? 8 : 0),
+                targetWidth: target?.Width ?? 0,
+                targetHeight: target?.Height ?? 0,
+                clipPlanes: CLIP_PLANES,
+                taken: [isShaderHandle(boundVertexShader) ? boundVertexShader >>> 0 : 0,
+                    boundPixelShader >>> 0],
+                takes: [(/** @type {number} */ handle)=>vertexShaders.has(handle),
+                    (/** @type {number} */ handle)=>pixelShaders.has(handle)],
+            };
+        },
+
+        /**
          * Reset puts the device back to what it was created as, against new
          * presentation parameters: implicit resources rebuilt, the back buffer
          * bound again, no scene open, default state, usable.
@@ -2267,7 +2292,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {ArrayLike<number>} plane
          */
         SetClipPlane(index, plane){
-            if (index < 0 || index >= 32 || !plane || plane.length !== 4)
+            if (index < 0 || index >= CLIP_PLANES || !plane || plane.length !== 4)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -2282,7 +2307,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          *        holds -- a plane of no coefficients clips nothing.
          */
         GetClipPlane(index, out){
-            if (index < 0 || index >= 32)
+            if (index < 0 || index >= CLIP_PLANES)
             {
                 return D3DERR_INVALIDCALL;
             }

@@ -22,6 +22,8 @@
  */
 
 import { IDIRECT3DDEVICE8_SLOTS } from '../seam/vtables.js';
+import { DRAW, SHADOW } from '../seam/shadow.js';
+import { D3DFVF_RESERVED0 } from './constants.js';
 import { lightFromDwords } from '../seam/structs.js';
 import { vertexCountOf } from './render.js';
 
@@ -71,8 +73,12 @@ const ints = new Int32Array(scratch);
  * @property {{ arg: number, shift: number, most: number }} [count]
  * @property {{ arg: number, cases: readonly [number, number][], otherwise: number }} [choose]
  *     or a size chosen by an argument's value: the bytes of the case it equals, or `otherwise`
- * @property {{ arg: number, allowed: number }} [bits]  flags outside `allowed` are the
- *     host's: the call with them is valid or not by state the guest does not see
+ * @property {{ arg: number, ranges: readonly [number, number][] }[]} [within]
+ * @property {number} [span] @property {{ arg: number, word: number }} [below]
+ * @property {{ arg: number, when: number, table?: number }} [validated]
+ * @property {number} [needs] @property {number} [refuses] @property {boolean} [fresh]
+ *     what the routine checks before it answers for the call, so that the
+ *     device takes every call it answered for (`commandChecks`)
  * @property {{ type: number, count: number, stride: number, most: number }} [vertices]
  *     or the vertices a draw's primitives span, `stride` bytes each (`commandCode`)
  * @property {boolean} [kept]  its copy is taken with `copy` alone, not through the scratch
@@ -237,6 +243,22 @@ const UP_BYTES = 16 * 1024;
 /** D3DCLEAR_TARGET, the same in both versions. */
 const D3DCLEAR_TARGET = 1;
 
+/** D3DPT_POINTLIST to D3DPT_TRIANGLEFAN, a primitive type a draw takes. */
+const PRIMITIVE_TYPES = /** @type {[number, number][]} */ ([[1, 6]]);
+/** At least one primitive. */
+const SOME = /** @type {[number, number][]} */ ([[1, 0xffffffff]]);
+/**
+ * What a draw from the device's streams checks in the guest: a type, some
+ * primitives, a scene, something to read the vertices with and stream zero.
+ * A state block applied in the ring may have changed the last two.
+ *
+ * @param {number} type @param {number} count  the arguments that carry them
+ */
+const drawChecks = (type, count)=>({
+    within: [{ arg: type, ranges: PRIMITIVE_TYPES }, { arg: count, ranges: SOME }],
+    needs: DRAW.SCENE | DRAW.DECLARED | DRAW.STREAM, fresh: true,
+});
+
 /**
  * The calls both versions' rings carry the same way.
  *
@@ -250,7 +272,6 @@ export const SHARED_COMMANDS = {
         make: (d, c)=>d.SetTextureStageState(c.arg(0), c.arg(1), c.arg(2)) },
     SetMaterial: { args: 1, pointer: 0, bytes: 68,
         make: (d, c)=>d.SetMaterial(materialOf(c.floats)) },
-    SetTexture: { args: 2, objects: [1], make: (d, c)=>d.SetTexture(c.arg(0), c.object()) },
     SetViewport: { args: 1, pointer: 0, bytes: 24,
         make: (d, c)=>d.SetViewport({ X: c.words[0], Y: c.words[1], Width: c.words[2],
             Height: c.words[3], MinZ: c.floats[4], MaxZ: c.floats[5] }) },
@@ -258,21 +279,23 @@ export const SHARED_COMMANDS = {
         make: (d, c)=>d.SetLight(c.arg(0), lightFromDwords(c.floats, c.words)) },
     LightEnable: { args: 2, make: (d, c)=>d.LightEnable(c.arg(0), c.arg(1) !== 0) },
     SetClipPlane: { args: 2, pointer: 1, bytes: 16,
+        below: { arg: 0, word: SHADOW.CLIP_PLANES },
         make: (d, c)=>d.SetClipPlane(c.arg(0), c.floats.slice(0, 4)) },
-    DrawPrimitive: { args: 3, draws: true,
+    DrawPrimitive: { args: 3, draws: true, ...drawChecks(0, 2),
         make: (d, c)=>d.DrawPrimitive(c.arg(0), c.arg(1), c.arg(2)) },
-    BeginScene: { args: 0, make: d=>d.BeginScene() },
-    EndScene: { args: 0, make: d=>d.EndScene() },
+    BeginScene: { args: 0, refuses: DRAW.SCENE, make: d=>d.BeginScene() },
+    EndScene: { args: 0, needs: DRAW.SCENE, make: d=>d.EndScene() },
     // No rectangles is the whole target; Z comes as a float in a dword. Only
     // the target is cleared here: a depth or stencil clear is refused for a
     // depth surface without one, and a program that is told so clears again
     // with less, so the answer must be the device's.
     Clear: { args: 6, pointer: 1, nullable: 'empty', count: { arg: 0, shift: 4, most: 64 },
-        bits: { arg: 2, allowed: D3DCLEAR_TARGET },
+        within: [{ arg: 2, ranges: [[D3DCLEAR_TARGET, D3DCLEAR_TARGET]] }],
         make: (d, c)=>d.Clear(c.arg(0), c.arg(1) === 0 ? null : rectsOf(c.ints, c.arg(0)),
             c.arg(2), c.arg(3), floatOf(c.arg(4)), c.arg(5)) },
     DrawPrimitiveUP: { args: 4, pointer: 2, kept: true, draws: true,
         vertices: { type: 0, count: 1, stride: 3, most: UP_BYTES },
+        needs: DRAW.SCENE | DRAW.DECLARED, fresh: true,
         make: (d, c)=>d.DrawPrimitiveUP(c.arg(0), c.arg(1),
             c.copy(vertexCountOf(c.arg(0), c.arg(1)) * c.arg(3)), c.arg(3)) },
 };
@@ -284,20 +307,24 @@ export const SHARED_COMMANDS = {
  */
 export const D3D8_COMMANDS = commandSet(IDIRECT3DDEVICE8_SLOTS, {
     ...SHARED_COMMANDS,
-    // A new target is a new viewport, which the guest's getter reads.
-    SetRenderTarget: { args: 2, objects: [0, 1], stale: true,
-        make: (d, c)=>d.SetRenderTarget(c.object(), c.object()) },
+    SetTexture: { args: 2, objects: [1], within: [{ arg: 0, ranges: [[0, 7]] }],
+        make: (d, c)=>d.SetTexture(c.arg(0), c.object()) },
     SetStreamSource: { args: 3, objects: [1],
         make: (d, c)=>d.SetStreamSource(c.arg(0), c.object(), c.arg(2)) },
     SetIndices: { args: 2, objects: [0], make: (d, c)=>d.SetIndices(c.object(), c.arg(1)) },
-    SetVertexShader: { args: 1, make: (d, c)=>d.SetVertexShader(c.arg(0)) },
-    SetPixelShader: { args: 1, make: (d, c)=>d.SetPixelShader(c.arg(0)) },
+    // A format is always taken; a shader's handle only while the shader lives.
+    SetVertexShader: { args: 1, validated: { arg: 0, when: D3DFVF_RESERVED0 },
+        make: (d, c)=>d.SetVertexShader(c.arg(0)) },
+    SetPixelShader: { args: 1, validated: { arg: 0, when: 0xffffffff, table: 1 },
+        make: (d, c)=>d.SetPixelShader(c.arg(0)) },
     SetVertexShaderConstant: { args: 3, pointer: 1, count: { arg: 2, shift: 4, most: 256 },
-        make: (d, c)=>d.SetVertexShaderConstant(c.arg(0), c.floats.slice(0, c.arg(2) * 4),
-            c.arg(2)) },
+        span: 0, make: (d, c)=>d.SetVertexShaderConstant(c.arg(0),
+            c.floats.slice(0, c.arg(2) * 4), c.arg(2)) },
     SetPixelShaderConstant: { args: 3, pointer: 1, count: { arg: 2, shift: 4, most: 8 },
-        make: (d, c)=>d.SetPixelShaderConstant(c.arg(0), c.floats.slice(0, c.arg(2) * 4),
-            c.arg(2)) },
-    DrawIndexedPrimitive: { args: 5, draws: true,
+        span: 0, make: (d, c)=>d.SetPixelShaderConstant(c.arg(0),
+            c.floats.slice(0, c.arg(2) * 4), c.arg(2)) },
+    // Without a stream or indices this version draws nothing and says D3D_OK.
+    DrawIndexedPrimitive: { args: 5, draws: true, ...drawChecks(0, 4),
+        needs: DRAW.SCENE | DRAW.DECLARED,
         make: (d, c)=>d.DrawIndexedPrimitive(c.arg(0), c.arg(1), c.arg(2), c.arg(3), c.arg(4)) },
 });

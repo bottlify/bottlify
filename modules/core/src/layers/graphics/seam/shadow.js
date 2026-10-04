@@ -51,7 +51,7 @@
  * flag every routine checks first, and leaves to the trap.
  */
 
-import { D3DERR_INVALIDCALL } from '../d3d8/constants.js';
+import { D3DERR_INVALIDCALL, D3DFVF_RESERVED0 } from '../d3d8/constants.js';
 
 /**
  * The block takes pages of its own. The routines that write it are guest
@@ -112,8 +112,38 @@ export const SHADOW = {
     SAMPLER_STATES: 4160 + 6 * 4,
     SAMPLER_COUNT: 16,
     SAMPLER_STATE_STRIDE: 16,
-    SIZE: 4184 + 16 * 16 * 4,
+    /**
+     * What a draw needs of the device's state (`DRAW`), kept by the routines
+     * that change it and written by the host after each of its own entries.
+     */
+    DRAWABLE: 5208,
+    /** The render target's size, for a viewport that must lie within it. */
+    TARGET_WIDTH: 5212,
+    TARGET_HEIGHT: 5216,
+    /** How many user clip planes the device has. */
+    CLIP_PLANES: 5220,
+    /**
+     * Values the host has seen the device take where whether it takes one
+     * is a matter of the value alone (`validated`): a vertex format, a
+     * shader's handle. Two tables, one per kind of value; zero is an empty slot.
+     */
+    VALIDATED: 5224,
+    VALIDATED_TABLES: 2,
+    VALIDATED_SLOTS: 8,
+    SIZE: 5224 + 2 * 8 * 4,
 };
+
+/** The bits of `SHADOW.DRAWABLE`. */
+export const DRAW = Object.freeze({
+    /** Between BeginScene and EndScene. */
+    SCENE: 1,
+    /** A vertex format or declaration a draw can read. */
+    DECLARED: 2,
+    /** Stream zero holds a buffer a draw can read from. */
+    STREAM: 4,
+    /** An index buffer is set. */
+    INDEXED: 8,
+});
 
 /** A command's head: the method's slot, and the record's length in bytes, its own included. */
 export const COMMAND = { SLOT: 0, BYTES: 4, ARGS: 8 };
@@ -1026,6 +1056,85 @@ export function getSurfaceLevelCode(at, trap){
 }
 
 /**
+ * What a command routine checks before it takes a call, so that a call it
+ * answers D3D_OK for is one the device takes: the arguments the device
+ * refuses by their value, and the state it refuses a call in that the block
+ * keeps. Whatever fails leaves for the host through `out`; nothing is
+ * written before.
+ *
+ * @param {CommandShape} shape
+ * @param {(argument: number) => number} at  where an argument is on entry
+ * @returns {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]}
+ */
+function commandChecks(shape, at){
+    /** @type {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]} */
+    const parts = [];
+    if (shape.needs)
+    {
+        parts.push(
+            [0x8b, 0x81, ...dword(SHADOW.DRAWABLE)],             // mov eax, [ecx+DRAWABLE]
+            [0x25, ...dword(shape.needs)],                       // and eax, needs
+            [0x3d, ...dword(shape.needs)],                       // cmp eax, needs
+            { jcc: 0x75, to: 'out', near: true });               // jne out
+    }
+    if (shape.refuses)
+    {
+        parts.push(
+            [0xf7, 0x81, ...dword(SHADOW.DRAWABLE), ...dword(shape.refuses)], // test [..], m
+            { jcc: 0x75, to: 'out', near: true });               // jnz out
+    }
+    (shape.within ?? []).forEach(({ arg, ranges }, index)=>{
+        parts.push([0x8b, 0x44, 0x24, at(arg)]);                 // mov eax, [esp+arg]
+        for (const [low, high] of ranges)
+        {
+            parts.push(
+                [0x89, 0xc2],                                    // mov edx, eax
+                [0x81, 0xea, ...dword(low)],                     // sub edx, low
+                [0x81, 0xfa, ...dword((high - low) >>> 0)],      // cmp edx, high-low
+                { jcc: 0x76, to: `within${index}` });            // jbe within
+        }
+        parts.push(
+            { jcc: 0xeb, to: 'out', near: true },                // jmp out
+            { label: `within${index}` });
+    });
+    if (shape.span !== undefined && shape.count)
+    {
+        parts.push(
+            [0x8b, 0x44, 0x24, at(shape.span)],                  // mov eax, [esp+start]
+            [0x03, 0x44, 0x24, at(shape.count.arg)],             // add eax, [esp+count]
+            { jcc: 0x72, to: 'out', near: true },                // jc out
+            [0x3d, ...dword(shape.count.most)],                  // cmp eax, most
+            { jcc: 0x77, to: 'out', near: true });               // ja out
+    }
+    if (shape.below)
+    {
+        parts.push(
+            [0x8b, 0x44, 0x24, at(shape.below.arg)],             // mov eax, [esp+arg]
+            [0x3b, 0x81, ...dword(shape.below.word)],            // cmp eax, [ecx+word]
+            { jcc: 0x73, to: 'out', near: true });               // jae out
+    }
+    if (shape.validated)
+    {
+        parts.push(
+            [0x8b, 0x44, 0x24, at(shape.validated.arg)],         // mov eax, [esp+arg]
+            [0xa9, ...dword(shape.validated.when)],              // test eax, when
+            { jcc: 0x74, to: 'validated', near: true });         // jz validated
+        const table = SHADOW.VALIDATED
+            + (shape.validated.table ?? 0) * SHADOW.VALIDATED_SLOTS * 4;
+        for (let index = 0; index < SHADOW.VALIDATED_SLOTS; index++)
+        {
+            parts.push(
+                [0x3b, 0x81, ...dword(table + 4 * index)],       // cmp eax, [ecx+slot]
+                { jcc: 0x74, to: 'validated', near: true });     // je validated
+        }
+        parts.push(
+            { jcc: 0xeb, to: 'out', near: true },                // jmp out
+            { label: 'validated' });
+    }
+    return parts;
+}
+
+/**
  * A method a command routine takes: what the record holds, how much of what
  * the method reads through a pointer is copied with it, and what else the
  * routine does in the guest.
@@ -1053,9 +1162,20 @@ export function getSurfaceLevelCode(at, trap){
  *     `out`, and leaves ECX and the stack as it found them
  * @property {{ arg: number, cases: readonly [number, number][], otherwise: number }} [choose]
  *     or else the bytes chosen by an argument's value: its case's, or `otherwise`
- * @property {{ arg: number, allowed: number }} [bits]  an argument of flags whose
- *     bits outside `allowed` are the host's: what the device makes of them
- *     depends on what the guest cannot see
+ * @property {{ arg: number, ranges: readonly [number, number][] }[]} [within]  arguments
+ *     the device takes only within ranges, inclusive and unsigned; any other is the host's
+ * @property {number} [span]  the argument that starts what `count` counts: the
+ *     two together may not reach past `count.most`
+ * @property {{ arg: number, word: number }} [below]  an argument the device takes
+ *     only below a word of the block the host keeps
+ * @property {{ arg: number, when: number, table?: number }} [validated]  an argument
+ *     the device takes or not by its value alone: one with a bit of `when` is
+ *     taken here only if the host has seen the device take it, in that table
+ *     of `SHADOW.VALIDATED`
+ * @property {number} [needs]  the `DRAW` bits the device must have for the call
+ * @property {number} [refuses]  and those it must not
+ * @property {boolean} [fresh]  the call reads what a state block applied in the
+ *     ring may have changed (`FLAG_STALE`), and waits for the host when it may have
  * @property {boolean} [draws]  a draw: a lock in the guest that may overwrite
  *     what it reads waits for the host to make it
  * @property {boolean} [thread]  a function rather than a method: no `this`, and
@@ -1105,8 +1225,9 @@ export function getSurfaceLevelCode(at, trap){
  * @returns {Uint8Array}
  */
 export function commandCode(at, trap, shape){
-    const { slot, args, pointer = -1, bytes = 0, count, choose, vertices, bits, mirror = [],
-        draws = false, thread = false, self = false, stale = false, nullable = false } = shape;
+    const { slot, args, pointer = -1, bytes = 0, count, choose, vertices, mirror = [],
+        draws = false, thread = false, self = false, stale = false, nullable = false,
+        fresh = false } = shape;
     if (nullable && !count)
     {
         throw new Error('shadow: a pointer that may be null is counted by an argument');
@@ -1136,18 +1257,15 @@ export function commandCode(at, trap, shape){
     const pushed = entry + 12;
     /** @type {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]} */
     const parts = [
-        ...(thread ? threadPrologue('early') : prologue('early')),
+        ...(thread ? threadPrologue('early')
+            : prologue('early', fresh ? FLAG_SLOW_PATH | FLAG_STALE : FLAG_SLOW_PATH)),
         [0x83, 0xb9, ...dword(SHADOW.COMMANDS), 0x00],           // cmp dword [ecx+disp], 0
         { jcc: 0x74, to: 'early' },                              // je early
         { jcc: 0xeb, to: 'body' },                               // jmp body
         { label: 'early' },
         { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
         { label: 'body' },
-        ...bits ? [
-            // test dword [esp+entry+4a], ~allowed; jnz out
-            [0xf7, 0x44, 0x24, entry + 4 * bits.arg, ...dword(~bits.allowed >>> 0)],
-            { jcc: 0x75, to: 'out', near: true },
-        ] : [],
+        ...commandChecks(shape, argument=>entry + 4 * (argument - (self ? 1 : 0))),
         ...mirror,
     ];
     if (pointer >= 0)
@@ -1386,6 +1504,134 @@ export const SAMPLER_STATE_MIRROR = Object.freeze([
 ]);
 
 /**
+ * What a viewport must be for Direct3D 9 to take it: a width and a height, and
+ * a corner that is not negative. It may reach past the target.
+ */
+export const VIEWPORT_GUARD_9 = Object.freeze([
+    [0x8b, 0x54, 0x24, 0x08],                                    // mov edx, [esp+8]
+    [0x85, 0xd2],                                                // test edx, edx
+    { jcc: 0x74, to: 'out', near: true },                        // jz out
+    [0x83, 0x3a, 0x00],                                          // cmp dword [edx], 0
+    { jcc: 0x7c, to: 'out', near: true },                        // jl out
+    [0x83, 0x7a, 0x04, 0x00],                                    // cmp dword [edx+4], 0
+    { jcc: 0x7c, to: 'out', near: true },                        // jl out
+    [0x83, 0x7a, 0x08, 0x00],                                    // cmp dword [edx+8], 0
+    { jcc: 0x74, to: 'out', near: true },                        // je out
+    [0x83, 0x7a, 0x0c, 0x00],                                    // cmp dword [edx+12], 0
+    { jcc: 0x74, to: 'out', near: true },                        // je out
+]);
+
+/** And for Direct3D 8, which takes only a viewport within the render target. */
+export const VIEWPORT_GUARD_8 = Object.freeze([
+    ...VIEWPORT_GUARD_9,
+    [0x8b, 0x42, 0x08],                                          // mov eax, [edx+8]
+    [0x03, 0x02],                                                // add eax, [edx]
+    { jcc: 0x72, to: 'out', near: true },                        // jc out
+    [0x3b, 0x81, ...dword(SHADOW.TARGET_WIDTH)],                 // cmp eax, [ecx+disp]
+    { jcc: 0x77, to: 'out', near: true },                        // ja out
+    [0x8b, 0x42, 0x0c],                                          // mov eax, [edx+12]
+    [0x03, 0x42, 0x04],                                          // add eax, [edx+4]
+    { jcc: 0x72, to: 'out', near: true },                        // jc out
+    [0x3b, 0x81, ...dword(SHADOW.TARGET_HEIGHT)],                // cmp eax, [ecx+disp]
+    { jcc: 0x77, to: 'out', near: true },                        // ja out
+]);
+
+/** `or dword [ecx+DRAWABLE], bits`. @param {number} bits */
+const markDrawable = bits=>[0x83, 0x89, ...dword(SHADOW.DRAWABLE), bits];
+/** `and dword [ecx+DRAWABLE], ~bits`. @param {number} bits */
+const unmarkDrawable = bits=>[0x83, 0xa1, ...dword(SHADOW.DRAWABLE), ~bits & 0xff];
+
+/**
+ * What the routines that change the state a draw needs keep in the block for
+ * the draws' routines (`SHADOW.DRAWABLE`): the same answer the device would
+ * give, from the arguments the call carries. The host writes what the device
+ * holds after each of its own entries, so a call it made is accounted for too.
+ */
+export const DRAWABLE_MIRRORS = Object.freeze({
+    /** BeginScene: in a scene. */
+    BeginScene: Object.freeze([markDrawable(DRAW.SCENE)]),
+    /** EndScene: out of it. */
+    EndScene: Object.freeze([unmarkDrawable(DRAW.SCENE)]),
+    /**
+     * Direct3D 9's SetFVF: no format changes nothing; any other is a format a
+     * draw reads if it has a position.
+     */
+    SetFVF: Object.freeze([
+        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        [0x85, 0xc0],                                            // test eax, eax
+        { jcc: 0x74, to: 'drawn' },                              // jz drawn
+        unmarkDrawable(DRAW.DECLARED),
+        [0xa8, 0x0e],                                            // test al, XYZ|XYZRHW|...
+        { jcc: 0x74, to: 'drawn' },                              // jz drawn
+        markDrawable(DRAW.DECLARED),
+        { label: 'drawn' },
+    ]),
+    /** SetVertexDeclaration: a declaration is one a draw reads, none is none. */
+    SetVertexDeclaration: Object.freeze([
+        unmarkDrawable(DRAW.DECLARED),
+        [0x83, 0x7c, 0x24, 0x08, 0x00],                          // cmp dword [esp+8], 0
+        { jcc: 0x74, to: 'drawn' },                              // je drawn
+        markDrawable(DRAW.DECLARED),
+        { label: 'drawn' },
+    ]),
+    /**
+     * Direct3D 8's SetVertexShader: a shader's handle, or a format with a
+     * position, is something a draw reads.
+     */
+    SetVertexShader8: Object.freeze([
+        unmarkDrawable(DRAW.DECLARED),
+        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        [0xa9, ...dword(D3DFVF_RESERVED0)],                      // test eax, RESERVED0
+        { jcc: 0x75, to: 'declared' },                           // jnz declared
+        [0xa8, 0x0e],                                            // test al, 0x0e
+        { jcc: 0x74, to: 'drawn' },                              // jz drawn
+        { label: 'declared' },
+        markDrawable(DRAW.DECLARED),
+        { label: 'drawn' },
+    ]),
+    /**
+     * Direct3D 9's SetStreamSource: stream zero is drawn from when it has a
+     * buffer, a stride and an offset that is a whole number of strides.
+     */
+    SetStreamSource9: Object.freeze([
+        [0x83, 0x7c, 0x24, 0x08, 0x00],                          // cmp dword [esp+8], 0
+        { jcc: 0x75, to: 'drawn' },                              // jne drawn
+        unmarkDrawable(DRAW.STREAM),
+        [0x83, 0x7c, 0x24, 0x0c, 0x00],                          // cmp dword [esp+12], 0
+        { jcc: 0x74, to: 'drawn' },                              // je drawn
+        [0x83, 0x7c, 0x24, 0x14, 0x00],                          // cmp dword [esp+20], 0
+        { jcc: 0x74, to: 'drawn' },                              // je drawn
+        [0x8b, 0x44, 0x24, 0x10],                                // mov eax, [esp+16]
+        [0x31, 0xd2],                                            // xor edx, edx
+        [0xf7, 0x74, 0x24, 0x14],                                // div dword [esp+20]
+        [0x85, 0xd2],                                            // test edx, edx
+        { jcc: 0x75, to: 'drawn' },                              // jnz drawn
+        markDrawable(DRAW.STREAM),
+        { label: 'drawn' },
+    ]),
+    /** Direct3D 8's: stream zero is drawn from when it has a buffer. */
+    SetStreamSource8: Object.freeze([
+        [0x83, 0x7c, 0x24, 0x08, 0x00],                          // cmp dword [esp+8], 0
+        { jcc: 0x75, to: 'drawn' },                              // jne drawn
+        unmarkDrawable(DRAW.STREAM),
+        [0x83, 0x7c, 0x24, 0x0c, 0x00],                          // cmp dword [esp+12], 0
+        { jcc: 0x74, to: 'drawn' },                              // je drawn
+        markDrawable(DRAW.STREAM),
+        { label: 'drawn' },
+    ]),
+    /** SetIndices: an index buffer, or none. */
+    SetIndices: Object.freeze([
+        unmarkDrawable(DRAW.INDEXED),
+        [0x83, 0x7c, 0x24, 0x08, 0x00],                          // cmp dword [esp+8], 0
+        { jcc: 0x74, to: 'drawn' },                              // je drawn
+        markDrawable(DRAW.INDEXED),
+        { label: 'drawn' },
+    ]),
+    /** A draw from the program's memory leaves stream zero and the indices unset. */
+    DrawPrimitiveUP: Object.freeze([unmarkDrawable(DRAW.STREAM | DRAW.INDEXED)]),
+});
+
+/**
  * The same for SetTextureStageState, given the types the version has: the
  * value into its stage's slot. A stage past the block, or a type it does not
  * hold, is the host's.
@@ -1421,6 +1667,34 @@ export const stageStateMirror = types=>[
  */
 
 /**
+ * A call of the device's the host makes: what the guest did first, then the
+ * call, then what the guest's routines check theirs against brought to the
+ * device -- once the answer is there, for a call that answers late.
+ *
+ * @template T
+ * @param {{ sync: () => void, settled: () => void } | null | undefined} shadow
+ * @param {() => T} call
+ * @returns {T}
+ */
+export function settledAfter(shadow, call){
+    if (!shadow)
+    {
+        return call();
+    }
+    shadow.sync();
+    const result = call();
+    if (result instanceof Promise)
+    {
+        return /** @type {T} */ (/** @type {unknown} */ (result.then(value=>{
+            shadow.settled();
+            return value;
+        })));
+    }
+    shadow.settled();
+    return result;
+}
+
+/**
  * @typedef {Object} ShadowTexture
  * @property {number} levels
  *
@@ -1432,6 +1706,16 @@ export const stageStateMirror = types=>[
  * @property {(out: { viewport?: any }) => number} [GetViewport]
  * @property {(sampler: number, type: number, out: { value?: number }) => number
  *     } [GetSamplerState]
+ * @property {() => ShadowRingState} [ringState]
+ *
+ * @typedef {Object} ShadowRingState  What the command routines check a call against.
+ * @property {number} drawable  the `DRAW` bits the device has
+ * @property {number} targetWidth @property {number} targetHeight
+ * @property {number} clipPlanes
+ * @property {readonly number[]} taken  per table of `SHADOW.VALIDATED`, a value the
+ *     device holds that it takes for its value alone, zero for none
+ * @property {readonly ((value: number) => boolean)[]} [takes]  per table, whether it
+ *     still takes one
  */
 
 /**
@@ -1655,12 +1939,64 @@ export function createShadow(deps){
         deps.writeMemory(address + SHADOW.SAMPLER_STATES, new Uint8Array(values.buffer));
     };
 
+    /**
+     * The values the host has seen the device take that the guest may take
+     * on its own (`SHADOW.VALIDATED`), a list per table, newest last; the
+     * oldest goes when there is no room.
+     *
+     * @type {number[][]}
+     */
+    const validated = Array.from({ length: SHADOW.VALIDATED_TABLES }, ()=>[]);
+
+    /**
+     * What the command routines check a call against (`commandChecks`):
+     * whether a draw would be taken, the target's size, the clip planes,
+     * and the values the device has taken that are taken for their value.
+     */
+    const mirrorCommandState = ()=>{
+        const state = device.ringState?.();
+        if (!state)
+        {
+            return;
+        }
+        const words = new Uint32Array((SHADOW.SIZE - SHADOW.DRAWABLE) / 4);
+        words[0] = state.drawable;
+        words[1] = state.targetWidth;
+        words[2] = state.targetHeight;
+        words[3] = state.clipPlanes;
+        validated.forEach((list, table)=>{
+            const taken = state.taken[table] ?? 0;
+            if (taken !== 0 && !list.includes(taken))
+            {
+                list.push(taken);
+                if (list.length > SHADOW.VALIDATED_SLOTS)
+                {
+                    list.shift();
+                }
+            }
+            // A value the device no longer takes -- a shader since deleted --
+            // is not one to take again.
+            const takes = state.takes?.[table];
+            for (let index = list.length - 1; index >= 0; index--)
+            {
+                if (takes && !takes(list[index]))
+                {
+                    list.splice(index, 1);
+                }
+            }
+            words.set(list, (SHADOW.VALIDATED - SHADOW.DRAWABLE) / 4
+                + table * SHADOW.VALIDATED_SLOTS);
+        });
+        deps.writeMemory(address + SHADOW.DRAWABLE, new Uint8Array(words.buffer));
+    };
+
     const mirror = ()=>{
         mirrorRenderStates();
         mirrorTransforms();
         mirrorStageStates();
         mirrorViewport();
         mirrorSamplerStates();
+        mirrorCommandState();
     };
 
     /**
@@ -1877,6 +2213,17 @@ export function createShadow(deps){
          * @param {number} type
          */
         refreshTransform,
+
+        /**
+         * After the host made a call of the device's itself: what the command
+         * routines check a call against is the device's again.
+         */
+        settled(){
+            if (address !== 0)
+            {
+                mirrorCommandState();
+            }
+        },
 
         /**
          * Makes what the guest did since the last entry reach the device: the

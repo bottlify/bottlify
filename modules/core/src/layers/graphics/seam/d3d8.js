@@ -60,7 +60,8 @@ import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import { declarationLength } from '../d3d8/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
 import {
-    RENDER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_MIRROR, commandCode, createShadow,
+    DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_GUARD_8, VIEWPORT_MIRROR,
+    commandCode, createShadow, settledAfter,
     getRenderStateCode, getSurfaceLevelCode, getTextureStageStateCode, getTransformCode,
     getViewportCode, lockCode, stageStateMirror, unlockCode,
 } from './shadow.js';
@@ -72,16 +73,23 @@ const STAGE_STATE_TYPES_8 = Object.values(D3DTSS)
     .reduce((mask, type)=>(type < 32 ? mask | (1 << type) : mask), 0) >>> 0;
 
 /**
- * What the command routines of the setters keep in the block for the getter
- * that runs in the guest, and for the host's mirroring (`shadow.js`).
+ * What the command routines keep in the block beside the record (`shadow.js`):
+ * the values the getters in the guest read, and the state the routines of
+ * later calls check theirs against -- a viewport's own checks first.
  *
  * @type {Record<string, any[]>}
  */
-const GETTER_MIRRORS = {
+export const COMMAND_MIRRORS = {
     SetRenderState: [...RENDER_STATE_MIRROR],
     SetTransform: [...TRANSFORM_MIRROR],
     SetTextureStageState: stageStateMirror(STAGE_STATE_TYPES_8),
-    SetViewport: [...VIEWPORT_MIRROR],
+    SetViewport: [...VIEWPORT_GUARD_8, ...VIEWPORT_MIRROR],
+    BeginScene: [...DRAWABLE_MIRRORS.BeginScene],
+    EndScene: [...DRAWABLE_MIRRORS.EndScene],
+    SetVertexShader: [...DRAWABLE_MIRRORS.SetVertexShader8],
+    SetStreamSource: [...DRAWABLE_MIRRORS.SetStreamSource8],
+    SetIndices: [...DRAWABLE_MIRRORS.SetIndices],
+    DrawPrimitiveUP: [...DRAWABLE_MIRRORS.DrawPrimitiveUP],
 };
 
 /**
@@ -2198,13 +2206,12 @@ export function createDirect3D8Seam(
     // host last looked -- the buffers it let go of, then the calls in the
     // command ring -- so a read, a draw or a present sees the state the
     // program set last, through the same methods a trap would have called,
-    // which is where validation and invalidation live.
+    // which is where validation and invalidation live; and after it, what
+    // the guest's routines check a call against is the device's again.
     /** @type {Record<string, (device: any, args: number[]) => number | Promise<number>>} */
     const syncedMethods = Object.fromEntries(Object.entries(deviceMethods)
-        .map(([name, method])=>[name, (/** @type {any} */ device, /** @type {number[]} */ args)=>{
-            shadowOf(device)?.sync();
-            return method(device, args);
-        }]));
+        .map(([name, method])=>[name, (/** @type {any} */ device, /** @type {number[]} */ args)=>
+            settledAfter(shadowOf(device), ()=>method(device, args))]));
     /** @type {Record<string, (builder: { trap: number }) => number>} */
     const deviceGuests = guestsBut(deviceGroup, allocate
         ? {
@@ -2216,7 +2223,7 @@ export function createDirect3D8Seam(
             ...Object.fromEntries(Object.entries(D3D8_COMMANDS.COMMANDS).map(([name, shape])=>[
                 name, (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>commandCode(at,
                     trap, { ...shape, slot: D3D8_COMMANDS.commandSlot(name),
-                        mirror: GETTER_MIRRORS[name] }))])),
+                        mirror: COMMAND_MIRRORS[name] }))])),
         }
         : {});
     const deviceInterfaces = [
