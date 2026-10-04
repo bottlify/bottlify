@@ -286,10 +286,15 @@ test('OpenGL frames whose calls cross a port draw as the contexts themselves dre
         played.frames.forEach((frame, index)=>assert.ok(frame === direct.frames[index],
             `frame ${index} asked the same`));
         // The account is the one the played renderer gave when last asked:
-        // asked once, it is there a turn later.
-        played.opengl.diagnostics();
-        await new Promise(resolve=>setTimeout(resolve, 10));
-        assert.equal(played.opengl.diagnostics().gpu?.frames, 3);
+        // it comes back once the question has crossed the port and the answer
+        // crossed back, however long a loaded machine takes to carry them.
+        let account = played.opengl.diagnostics();
+        for (let turn = 0; turn < 500 && account.gpu?.frames !== 3; turn++)
+        {
+            await new Promise(resolve=>setTimeout(resolve, 2));
+            account = played.opengl.diagnostics();
+        }
+        assert.equal(account.gpu?.frames, 3);
     }
     finally
     {
