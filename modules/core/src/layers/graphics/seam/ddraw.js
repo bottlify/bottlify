@@ -869,14 +869,21 @@ export function createDirectDrawSeam(
                 return held ? held.then(()=>hr) : hr;
             },
 
-            /** @param {any} surface @param {number[]} args */
+            /**
+             * Before the seventh generation only dwCaps is matched: a program
+             * of that era fills it alone and leaves the rest of its DDSCAPS2
+             * as the stack had it, and the runtime looks no further.
+             *
+             * @param {any} surface @param {number[]} args
+             */
             GetAttachedSurface: (surface, [caps, out])=>{
                 if ((caps >>> 0) === 0 || (out >>> 0) === 0)
                 {
                     return DDERR_INVALIDPARAMS;
                 }
                 const found = surface.getAttachedSurface(readCaps(caps),
-                    wide ? fields.readU32((caps >>> 0) + DDSCAPS2.dwCaps2) : 0);
+                    generation.id === IID_IDirectDrawSurface7
+                        ? fields.readU32((caps >>> 0) + DDSCAPS2.dwCaps2) : 0);
                 if (found.hr === DD_OK)
                 {
                     handBack(found.surface, surfaceInterfaces, generation.id, out >>> 0);

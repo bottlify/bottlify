@@ -22,11 +22,12 @@ import { createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
 import { createDirectDrawSeam } from './ddraw.js';
 import {
-    IDIRECTDRAW7_SLOTS, IDIRECTDRAW_SLOTS, IDIRECTDRAWSURFACE7_SLOTS, IDIRECTDRAWSURFACE_SLOTS,
-    IDIRECTDRAWPALETTE_SLOTS, IDIRECTDRAWCLIPPER_SLOTS,
+    IDIRECTDRAW7_SLOTS, IDIRECTDRAW_SLOTS, IDIRECTDRAWSURFACE4_SLOTS, IDIRECTDRAWSURFACE7_SLOTS,
+    IDIRECTDRAWSURFACE_SLOTS, IDIRECTDRAWPALETTE_SLOTS, IDIRECTDRAWCLIPPER_SLOTS,
 } from './vtables.js';
 import {
-    IID_IDirectDraw4, IID_IDirectDraw7, IID_IDirectDrawGammaControl, IID_IDirectDrawSurface7,
+    IID_IDirectDraw4, IID_IDirectDraw7, IID_IDirectDrawGammaControl, IID_IDirectDrawSurface4,
+    IID_IDirectDrawSurface7,
 } from './iids.js';
 import { IDIRECTDRAWGAMMACONTROL_SLOTS } from './vtables-ddraw.js';
 import { DDBLTFX, DDCAPS, DDCOLORKEY, RECT, createFields } from './structs.js';
@@ -654,6 +655,37 @@ test('a mip chain reports its levels through the descriptor and is walked level 
     assert.equal(h.release(levels[2]), 1);
     assert.equal(h.release(levels[1]), 1);
     assert.equal(h.release(top), 0);
+    assert.equal(h.release(ddraw), 0);
+    h.assertAllReleased();
+});
+
+test('before the seventh generation GetAttachedSurface matches dwCaps alone, whatever the rest '
+    + 'of the DDSCAPS2 holds', ()=>{
+    // A DirectX 6 program fills dwCaps and leaves dwCaps2 as its stack had
+    // it: 3DMark99 MAX walks a texture's mip levels with DDSCAPS_TEXTURE |
+    // DDSCAPS_MIPMAP over garbage, and stops with "texture:GetAttachedSurface
+    // : DDERR_NOTFOUND" when the garbage is matched too.
+    const h = seamed();
+    const ddraw = h.create7();
+    const top7 = h.createSurface7(ddraw, {
+        caps: DDSCAPS_TEXTURE | DDSCAPS_COMPLEX | DDSCAPS_MIPMAP,
+        width: 64, height: 64, mipMapCount: 2,
+    });
+    const riid = h.box.putGuid(0x4000, IID_IDirectDrawSurface4);
+    assert.equal(h.box.call(top7, 0, [riid, 0x5800]), DD_OK);
+    const top4 = h.box.memory.readU32(0x5800);
+    const caps = 0x5500;
+    const out = 0x5600;
+    h.box.bytes.fill(0xcc, caps, caps + 16);
+    h.box.memory.writeU32(caps, DDSCAPS_TEXTURE | DDSCAPS_MIPMAP);
+    assert.equal(h.box.call(top4, slot(IDIRECTDRAWSURFACE4_SLOTS, 'GetAttachedSurface'),
+        [caps, out]), DD_OK, 'the level below, found by dwCaps');
+    assert.equal(h.release(h.box.memory.readU32(out)), 1);
+    assert.equal(h.surface7(top7, 'GetAttachedSurface', [caps, out]), DDERR_NOTFOUND,
+        'the seventh generation wants every bit of dwCaps2 as well');
+
+    assert.equal(h.release(top4), 1);
+    assert.equal(h.release(top7), 0);
     assert.equal(h.release(ddraw), 0);
     h.assertAllReleased();
 });
