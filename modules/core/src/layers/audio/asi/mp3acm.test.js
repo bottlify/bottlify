@@ -82,3 +82,44 @@ test('fed in pieces that cut frames, a stream gives every frame once', ()=>{
     }
     assert.equal(produced, frames * FRAME_PCM);
 });
+
+/** MPEG-1 layer III, 64 kbit/s, 44.1 kHz, mono, no padding: the 208 bytes every frame of it is. */
+const MONO_FRAME = new Uint8Array(208);
+MONO_FRAME.set([0xff, 0xfb, 0x50, 0xc0]);
+const MONO_FRAME_PCM = 1152 * 2;
+
+test('the source a destination is asked for decodes into it, so a caller that feeds that much '
+    + 'each time and never drains the stream is given every frame', ()=>{
+    // SndDrv's voice lines: acmStreamSize from 0x2000 destination bytes once,
+    // then that many source bytes into each acmStreamConvert, reading back
+    // only cbDstLengthUsed -- and nothing more is asked once the file ends.
+    const extra = new Uint8Array(12);
+    const view = new DataView(extra.buffer);
+    view.setUint16(0, 1, true);
+    view.setUint32(2, 2, true);
+    view.setUint16(6, MONO_FRAME.length, true);
+    view.setUint16(8, 1, true);
+    for (const [from, frame, pcm] of /** @type {[any, Uint8Array, number][]} */ ([
+        [{ ...format(44100, 1), averageBytes: 8000, extra }, MONO_FRAME, MONO_FRAME_PCM],
+        [format(44100, 2), FRAME, FRAME_PCM],
+    ]))
+    {
+        const stream = createMp3AcmCodec().open(from, format(44100, from.channels, 1));
+        const chunk = stream.size(0x2000, false);
+        assert.ok(chunk >= frame.length, 'a frame at least');
+        const frames = 40;
+        const source = new Uint8Array(frame.length * frames);
+        for (let index = 0; index < frames; index++)
+        {
+            source.set(frame, index * frame.length);
+        }
+        let produced = 0;
+        for (let at = 0; at < source.length; at += chunk)
+        {
+            const { output } = stream.convert(source.subarray(at, at + chunk), 0x2000);
+            assert.ok(output.length <= 0x2000);
+            produced += output.length;
+        }
+        assert.equal(produced, frames * pcm, `every frame of ${from.channels} channels`);
+    }
+});

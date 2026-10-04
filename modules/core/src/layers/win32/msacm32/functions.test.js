@@ -255,3 +255,37 @@ test('a codec another layer installs is a driver like Windows\' own', async()=>{
     assert.equal(fns.acmStreamOpen.handler([HANDLE, 0, SOURCE, DESTINATION, 0, 0, 0, 1]), 0x203,
         'what the codec cannot do is ACMERR_NOTPOSSIBLE');
 });
+
+test('the source a destination is asked for converts into it, and a destination too small for '
+    + 'any of it is refused', ()=>{
+    // ACM_STREAMSIZEF_DESTINATION: a caller sizes its source from the room it
+    // has and feeds that much each time; what it is told must fit.
+    const f = fixture();
+    writeFormat(f.view, 0x2000, { tag: 0x11, channels: 1, rate: 22050, blockAlign: 12,
+        bits: 4, samplesPerBlock: 17 });
+    writeFormat(f.view, 0x2100, { tag: 1, channels: 1, rate: 22050, blockAlign: 2, bits: 16 });
+    assert.equal(f.call('acmStreamOpen', [0x2200, 0, 0x2000, 0x2100, 0, 0, 0, 0]), 0);
+    const adpcm = f.view.getUint32(0x2200, true);
+    assert.equal(f.call('acmStreamSize', [adpcm, 100, 0x2204, 1]), 0);
+    assert.equal(f.view.getUint32(0x2204, true), 2 * 12, 'two blocks of 34 bytes fit in 100');
+    assert.equal(f.call('acmStreamSize', [adpcm, 20, 0x2204, 1]), 0x203,
+        'ACMERR_NOTPOSSIBLE: not one block fits');
+
+    writeFormat(f.view, 0x2000, { tag: 1, channels: 1, rate: 8000, blockAlign: 2, bits: 16 });
+    writeFormat(f.view, 0x2100, { tag: 1, channels: 2, rate: 16000, blockAlign: 4, bits: 16 });
+    assert.equal(f.call('acmStreamOpen', [0x2200, 0, 0x2000, 0x2100, 0, 0, 0, 0]), 0);
+    const pcm = f.view.getUint32(0x2200, true);
+    assert.equal(f.call('acmStreamSize', [pcm, 30, 0x2204, 1]), 0);
+    const source = f.view.getUint32(0x2204, true);
+    assert.equal(source, 3 * 2, 'three frames become six, of the seven 30 bytes hold');
+    const HEADER = 0x3000;
+    f.view.setUint32(HEADER, 84, true);
+    f.view.setUint32(HEADER + 12, 0x3100, true);
+    f.view.setUint32(HEADER + 16, source, true);
+    f.view.setUint32(HEADER + 28, 0x3200, true);
+    f.view.setUint32(HEADER + 32, 30, true);
+    assert.equal(f.call('acmStreamPrepareHeader', [pcm, HEADER, 0]), 0);
+    assert.equal(f.call('acmStreamConvert', [pcm, HEADER, 0]), 0);
+    assert.equal(f.view.getUint32(HEADER + 20, true), source, 'all of the source used');
+    assert.ok(f.view.getUint32(HEADER + 36, true) <= 30, 'into the room there was');
+});

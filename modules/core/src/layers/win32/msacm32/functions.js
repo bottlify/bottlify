@@ -968,6 +968,10 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                 }
                 const { from, to } = stream;
                 const toDestination = (flags & ACM_STREAMSIZEF_DESTINATION) === 0;
+                // From the destination, a source that converts into it: a
+                // caller sizes its reads by it and feeds that much each time,
+                // and one that never reads back cbSrcLengthUsed loses whatever
+                // did not fit.
                 let size;
                 if (stream.codec)
                 {
@@ -979,12 +983,18 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                     const outFrame = to.channels * (to.bits / 8);
                     size = toDestination
                         ? Math.floor(Math.floor(input / inFrame) * to.rate / from.rate) * outFrame
-                        : Math.ceil(Math.ceil(input / outFrame) * from.rate / to.rate) * inFrame;
+                        : Math.floor(Math.floor(input / outFrame) * from.rate / to.rate) * inFrame;
                 }
                 else
                 {
                     size = toDestination ? Math.floor(input / from.blockAlign) * blockOutput(from)
-                        : Math.ceil(input / blockOutput(from)) * from.blockAlign;
+                        : Math.floor(input / blockOutput(from)) * from.blockAlign;
+                }
+                if (size === 0 && !toDestination && from.tag !== WAVE_FORMAT_PCM)
+                {
+                    // Not one block or frame fits: Windows' codecs say so
+                    // rather than hand back a source of nothing.
+                    return ACMERR_NOTPOSSIBLE;
                 }
                 put32(out, size);
                 return MMSYSERR_NOERROR;

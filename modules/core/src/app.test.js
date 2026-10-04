@@ -1364,16 +1364,19 @@ test('a call area is memoised by name, computed once for every call site', ()=>{
     const cache = new Map();
     assert.equal(areaOf({ name: 'D3D8.dll!Present' }, cache), 'call.gpu');
     assert.equal(areaOf({ name: 'WSOCK32.dll!send' }, cache), 'call.net');
+    // A codec's conversions are sound: a line cut short is found beside the
+    // buffer it was written into.
+    assert.equal(areaOf({ name: 'MSACM32.dll!acmStreamConvert' }, cache), 'call.audio');
     // A COM method arrives named by its interface, with no library to split off.
     assert.equal(areaOf({ name: 'DrawPrimitive' }, cache), 'call.com');
-    assert.equal(cache.size, 3);
+    assert.equal(cache.size, 4);
 
     // A second call under an already-seen name answers from the cache: the
     // cached value is what comes back even if it could no longer be recomputed
     // correctly, which is the only way to tell a hit from a fresh split.
     cache.set('D3D8.dll!Present', 'call.stale');
     assert.equal(areaOf({ name: 'D3D8.dll!Present' }, cache), 'call.stale');
-    assert.equal(cache.size, 3, 'no new entry was made for a name already cached');
+    assert.equal(cache.size, 4, 'no new entry was made for a name already cached');
 });
 
 /** The real region-checked accessors over a plain byte array, so the view's aliasing is real. */

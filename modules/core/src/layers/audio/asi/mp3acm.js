@@ -147,9 +147,15 @@ export function createMp3AcmCodec(){
                     owed = all.slice(output.length);
                     return { consumed: source.length, output };
                 },
+                // From the source, room for every frame it can start; from the
+                // destination, the whole frames that fit in it. A caller that
+                // feeds the source it was told every time decodes no more than
+                // its room, so nothing waits here for a call that never comes:
+                // rounded up, each call left part of a frame behind and a line
+                // lost its last tenth.
                 size: (bytes, toDestination)=>(toDestination
                     ? Math.ceil(bytes / frameBytes) * frameOutput
-                    : Math.ceil(bytes / frameOutput) * (frameBytes + 1)),
+                    : Math.floor(bytes / frameOutput) * frameBytes),
             };
         },
     };

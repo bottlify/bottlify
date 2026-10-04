@@ -2548,6 +2548,7 @@ export const CALL_AREAS = {
     'D3D8.dll': 'gpu', 'D3D9.dll': 'gpu', 'DDRAW.dll': 'gpu',
     'OPENGL32.dll': 'gpu', 'GDI32.dll': 'gpu',
     'DSOUND.dll': 'audio', 'WINMM.dll': 'audio', 'mss32.dll': 'audio', 'Mp3dec.asi': 'audio',
+    'MSACM32.dll': 'audio',
     'quartz.dll': 'video', 'blizzard.ax': 'video', 'ijl15.dll': 'video',
     'DINPUT.dll': 'input', 'DINPUT8.dll': 'input', 'USER32.dll': 'input',
     'WSOCK32.dll': 'net', 'WS2_32.dll': 'net', 'MSWSOCK.dll': 'net',
