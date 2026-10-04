@@ -148,6 +148,10 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  *        Whether Direct3D 8 and 9 answer and record in the guest -- the state
  *        block, the command ring, the getters and the counts -- or trap every
  *        call; on unless false.
+ * @param {string[]} [deps.guestTraps]
+ *        With guest code on, the parts of it kept as traps all the same: methods
+ *        by name, or the groups `getters`, `ring`, `locks`, `levels` and
+ *        `counts` -- for finding which part a fault is in.
  * @returns {{ libraries: Record<string, Record<string, any>>,
  *             opengl: { pixelFormat: { size: () => number, count: () => number,
  *                                      choose: (bytes: Uint8Array) => number,
@@ -167,6 +171,7 @@ export function createGraphicsLibraries(
         currentThread,
         scratch, render, allocate, allocateCode, divergence, cursor, resolution, windowClientSize,
         gamma, deactivated, deactivations, now = ()=>performance.now(), guestCode = true,
+        guestTraps = [],
         schedule = (ms, run)=>{
             setTimeout(run, ms);
         } },
@@ -174,7 +179,8 @@ export function createGraphicsLibraries(
 {
     const publisher = shared ?? createPublisher({
         publishInterface, unpublishInterface,
-        cells: guestCode && allocate && memory?.readU32 && memory.writeU32
+        cells: guestCode && !guestTraps.includes('counts') && allocate && memory?.readU32
+            && memory.writeU32
             ? createCountCells({ allocate, memory }) : undefined,
     });
     const fields = createFields(memory);
@@ -306,13 +312,13 @@ export function createGraphicsLibraries(
     const guestAllocateCode = guestCode ? allocateCode : undefined;
     const d3d8 = built('D3D8.dll', ()=>createDirect3D8Seam({
         publisher, memory, screen, allocate: guestAllocate, allocateCode: guestAllocateCode,
-        divergence, cursor, resolution,
+        traps: new Set(guestTraps), divergence, cursor, resolution,
         windowClientSize, now,
         identity: ()=>graphics.adapter?.() ?? null,
     }));
     const d3d9 = built('D3D9.dll', ()=>createDirect3D9Seam({
         publisher, memory, screen, divergence, cursor, resolution, windowClientSize, gdi, now,
-        allocate: guestAllocate, allocateCode: guestAllocateCode,
+        allocate: guestAllocate, allocateCode: guestAllocateCode, traps: new Set(guestTraps),
         identity: ()=>graphics.adapter?.() ?? null,
     }));
     const d3d10 = built('D3D10.dll', ()=>createDirect3D10Seam({

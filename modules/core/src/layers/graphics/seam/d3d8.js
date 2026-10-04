@@ -253,12 +253,31 @@ const S_FALSE = 1;
  *        for as zero by zero takes. Without it the configured display is the
  *        nearest size this layer knows.
  * @param {() => number} [deps.now]  The clock the display's raster runs on, in milliseconds.
+ * @param {Set<string>} [deps.traps]  Guest routines kept as traps, by name or group
+ *     (`guestsBut`).
  */
 export function createDirect3D8Seam(
     { publisher, memory, screen, allocate, allocateCode, divergence, cursor, resolution, identity,
-        windowClientSize, now = ()=>performance.now() },
+        windowClientSize, now = ()=>performance.now(), traps = new Set() },
 )
 {
+    /** The getters a device answers in the guest, as against the calls its ring carries. */
+    const GUEST_GETTERS = new Set(['GetRenderState', 'GetTransform', 'GetTextureStageState',
+        'GetViewport', 'GetSamplerState']);
+    /**
+     * The guest routines a table offers, less those `traps` keeps as traps: by
+     * method name, or by the group a routine belongs to -- `getters`, `ring`,
+     * `locks`, `levels`.
+     *
+     * @param {string | ((name: string) => string)} group
+     * @param {Record<string, (builder: { trap: number }) => number>} guests
+     * @returns {Record<string, (builder: { trap: number }) => number>}
+     */
+    const guestsBut = (group, guests)=>(traps.size === 0 ? guests
+        : Object.fromEntries(Object.entries(guests).filter(([name])=>!traps.has(name)
+            && !traps.has(typeof group === 'string' ? group : group(name)))));
+    /** @param {string} name */
+    const deviceGroup = name=>(GUEST_GETTERS.has(name) ? 'getters' : 'ring');
     const fields = createFields(memory);
     const raster = createRaster({
         now, refresh: ()=>REFRESH_HZ, height: ()=>screen().height,
@@ -325,9 +344,9 @@ export function createDirect3D8Seam(
     };
 
     /** @type {Record<string, (builder: { trap: number }) => number>} */
-    const textureGuests = allocate
+    const textureGuests = guestsBut('levels', allocate
         ? { GetSurfaceLevel: ({ trap })=>placeCode(at=>getSurfaceLevelCode(at, trap)) }
-        : {};
+        : {});
 
     /**
      * A texture gets its block before it is handed out, for the same reason a
@@ -887,12 +906,12 @@ export function createDirect3D8Seam(
         },
     };
     /** @type {Record<string, (builder: { trap: number }) => number>} */
-    const bufferGuests = allocate
+    const bufferGuests = guestsBut('locks', allocate
         ? {
             Lock: ({ trap })=>placeCode(at=>lockCode(at, trap)),
             Unlock: ({ trap })=>placeCode(at=>unlockCode(at, trap)),
         }
-        : {};
+        : {});
 
     /**
      * The one method the two buffers' layouts differ in: an index buffer's
@@ -2187,7 +2206,7 @@ export function createDirect3D8Seam(
             return method(device, args);
         }]));
     /** @type {Record<string, (builder: { trap: number }) => number>} */
-    const deviceGuests = allocate
+    const deviceGuests = guestsBut(deviceGroup, allocate
         ? {
             GetRenderState: ({ trap })=>placeCode(at=>getRenderStateCode(at, trap)),
             GetTransform: ({ trap })=>placeCode(at=>getTransformCode(at, trap)),
@@ -2199,7 +2218,7 @@ export function createDirect3D8Seam(
                     trap, { ...shape, slot: D3D8_COMMANDS.commandSlot(name),
                         mirror: GETTER_MIRRORS[name] }))])),
         }
-        : {};
+        : {});
     const deviceInterfaces = [
         describe(IID_IDirect3DDevice8, IDIRECT3DDEVICE8_SLOTS, syncedMethods, deviceGuests),
     ];

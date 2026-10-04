@@ -910,6 +910,7 @@ export function createGraphicsModule(){
                 allocate: config?.allocate,
                 allocateCode: config?.allocateCode,
                 guestCode: config?.guestCode !== false,
+                guestTraps: config?.guestTraps,
                 free: config?.free,
                 // What a program is handed to free with HeapFree itself.
                 processHeapAllocate: (/** @type {number} */ bytes)=>

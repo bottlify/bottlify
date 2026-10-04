@@ -146,6 +146,8 @@ const MAX_SHADER_DWORDS = 1 << 16;
  * @param {import('../d3d9/resources.js').SurfaceGdi} [deps.gdi]
  *     Device contexts over a surface's pixels, for GetDC; absent, none is handed out.
  * @param {() => number} [deps.now]  The clock the display's raster runs on, in milliseconds.
+ * @param {Set<string>} [deps.traps]  Guest routines kept as traps, by name or group
+ *     (`guestsBut`).
  * @param {(bytes: number) => number} [deps.allocate]  Guest memory, for a device's
  *     block of the state its setters write without leaving the guest.
  * @param {(bytes: number) => number} [deps.allocateCode]  Pages of their own for
@@ -153,9 +155,27 @@ const MAX_SHADER_DWORDS = 1 << 16;
  */
 export function createDirect3D9Seam(
     { publisher, memory, screen, divergence, cursor, resolution, identity,
-        windowClientSize, gdi, now = ()=>performance.now(), allocate, allocateCode },
+        windowClientSize, gdi, now = ()=>performance.now(), allocate, allocateCode,
+        traps = new Set() },
 )
 {
+    /** The getters a device answers in the guest, as against the calls its ring carries. */
+    const GUEST_GETTERS = new Set(['GetRenderState', 'GetTransform', 'GetTextureStageState',
+        'GetViewport', 'GetSamplerState']);
+    /**
+     * The guest routines a table offers, less those `traps` keeps as traps: by
+     * method name, or by the group a routine belongs to -- `getters`, `ring`,
+     * `locks`, `levels`.
+     *
+     * @param {string | ((name: string) => string)} group
+     * @param {Record<string, (builder: { trap: number }) => number>} guests
+     * @returns {Record<string, (builder: { trap: number }) => number>}
+     */
+    const guestsBut = (group, guests)=>(traps.size === 0 ? guests
+        : Object.fromEntries(Object.entries(guests).filter(([name])=>!traps.has(name)
+            && !traps.has(typeof group === 'string' ? group : group(name)))));
+    /** @param {string} name */
+    const deviceGroup = name=>(GUEST_GETTERS.has(name) ? 'getters' : 'ring');
     const fields = createFields(memory);
     const privateData = createPrivateData({ memory, publisher, rules: D3D_PRIVATE_DATA });
     const raster = createRaster({
@@ -598,10 +618,10 @@ export function createDirect3D9Seam(
             }
             return queryAs(publisher, fields, device, deviceInterfacesOf(device), id, out);
         },
-    }, allocate
+    }, guestsBut('levels', allocate
         ? { GetDesc: (/** @type {{ trap: number }} */ { trap })=>
             placeCode(at=>getSurfaceDescCode(at, trap)) }
-        : {}, privateData.released)];
+        : {}), privateData.released)];
 
     /**
      * The six every texture kind shares, over the resource eight.
@@ -749,10 +769,10 @@ export function createDirect3D9Seam(
         describeResource(IID_IDirect3DResource9, IDIRECT3DRESOURCE9_SLOTS, methods),
     ];
     const textureInterfaces = textureFamily(IID_IDirect3DTexture9, IDIRECT3DTEXTURE9_SLOTS,
-        textureMethods, allocate
+        textureMethods, guestsBut('levels', allocate
             ? { GetSurfaceLevel: (/** @type {{ trap: number }} */ { trap })=>
                 placeCode(at=>getSurfaceLevelCode(at, trap)) }
-            : {});
+            : {}));
     const cubeTextureInterfaces = textureFamily(IID_IDirect3DCubeTexture9,
         IDIRECT3DCUBETEXTURE9_SLOTS, cubeTextureMethods);
 
@@ -917,12 +937,12 @@ export function createDirect3D9Seam(
         },
     };
     /** @type {Record<string, (builder: { trap: number }) => number>} */
-    const bufferGuests = allocate
+    const bufferGuests = guestsBut('locks', allocate
         ? {
             Lock: ({ trap })=>placeCode(at=>lockCode(at, trap)),
             Unlock: ({ trap })=>placeCode(at=>unlockCode(at, trap)),
         }
-        : {};
+        : {});
     /**
      * A buffer the device just made gets its block before it is handed out:
      * the block's address is written when the interface is published.
@@ -2547,7 +2567,7 @@ export function createDirect3D9Seam(
             return method(device, args);
         }]));
     /** @type {Record<string, (builder: { trap: number }) => number>} */
-    const deviceGuests = allocate
+    const deviceGuests = guestsBut(deviceGroup, allocate
         ? {
             GetRenderState: ({ trap })=>placeCode(at=>getRenderStateCode(at, trap)),
             GetTransform: ({ trap })=>placeCode(at=>getTransformCode(at, trap)),
@@ -2559,7 +2579,7 @@ export function createDirect3D9Seam(
                 (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>commandCode(at, trap,
                     { ...shape, slot: commandSlot(name), mirror: GETTER_MIRRORS[name] }))])),
         }
-        : {};
+        : {});
     const deviceInterfaces = [
         describe(IID_IDirect3DDevice9, IDIRECT3DDEVICE9_SLOTS, synced(deviceMethods), deviceGuests),
     ];
