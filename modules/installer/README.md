@@ -143,9 +143,15 @@ Three routes, all `POST` and all authenticated:
   writes them where they belong, computes the block region's digest, and writes
   `manifest.json` beside `bundle.btl`.
 - `/bottles/<id>/manifest` — a bottle's settings changed in its `manifest.json`
-  without sending it again: `title`, `version`, `labels` (`demo`, `benchmark`,
-  `test`), `kind` (`game`, `application`), `windows`, `graphics`. Any other
-  field is refused; the entry and the bundle record are the upload's.
+  without sending it again: `title`, `description`, `version`, `labels`
+  (`demo`, `benchmark`, `test`), `kind` (`game`, `application`), `windows`,
+  `graphics`. Any other field is refused; the entry and the bundle record are
+  the upload's.
+- `/bottles/<id>/art/cover`, `/bottles/<id>/art/wallpaper` — a picture (PNG,
+  JPEG, WebP or GIF, by its `Content-Type`) kept beside the manifest under a
+  name taken from its bytes and named there as `./<name>`: `coverLarge` and
+  `coverSmall` for the cover, `wallpaper` for the stage. The one it replaces is
+  removed.
 
 `publish()`'s own `manifest` option passes straight through to that file, field
 for field, so a title's own launch arguments travel with it: `commandLine` is

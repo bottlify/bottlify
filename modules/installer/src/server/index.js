@@ -31,7 +31,7 @@
 
 import { createServer } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 // The one thing this side knows about the container: where the block region
 // starts, so it can leave room for a header it writes last and never reads.
@@ -46,6 +46,21 @@ const SAFE_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
 /** What a person may say a bottle is, beside its version. */
 const LABELS = new Set(['demo', 'benchmark', 'test']);
 const KINDS = new Set(['game', 'application']);
+
+/** The pictures a bottle may carry, by the type a browser sends them as. */
+const ART_TYPES = new Map([
+    ['image/png', 'png'], ['image/jpeg', 'jpg'], ['image/webp', 'webp'], ['image/gif', 'gif'],
+]);
+
+/** No picture is larger. */
+const MAX_ART = 16 << 20;
+
+/**
+ * Which fields of the manifest show a picture in each place: the cover is the
+ * library's card and the details panel alike, the wallpaper the stage before
+ * the first frame.
+ */
+const ART_FIELDS = { cover: ['coverLarge', 'coverSmall'], wallpaper: ['wallpaper'] };
 
 /**
  * The fields of a manifest a bottle's settings may change, each checked: the
@@ -66,7 +81,8 @@ export function manifestChanges(asked){
     {
         const text = typeof value === 'string' ? value.trim() : null;
         if ((key === 'title' && text && text.length <= 200)
-            || (key === 'version' && text !== null && text.length <= 40))
+            || (key === 'version' && text !== null && text.length <= 40)
+            || (key === 'description' && text !== null && text.length <= 2000))
         {
             fields[key] = text;
         }
@@ -197,7 +213,8 @@ export function createBottleServer({ root, token, port = 8788, host = '127.0.0.1
         }
 
         const url = new URL(request.url ?? '/', 'http://bottles');
-        const route = /^\/bottles\/([^/]+)\/(blocks|finish|manifest)$/.exec(url.pathname);
+        const route = /^\/bottles\/([^/]+)\/(blocks|finish|manifest|art\/(cover|wallpaper))$/
+            .exec(url.pathname);
         if (!route || request.method !== 'POST')
         {
             answer(404, `no route for ${request.method} ${url.pathname}`);
@@ -208,6 +225,12 @@ export function createBottleServer({ root, token, port = 8788, host = '127.0.0.1
         if (!SAFE_ID.test(id))
         {
             answer(400, `"${id}" is not a usable bottle id`);
+            return;
+        }
+
+        if (route[3])
+        {
+            await setArt(id, /** @type {'cover' | 'wallpaper'} */ (route[3]), request, answer);
             return;
         }
 
@@ -290,6 +313,60 @@ export function createBottleServer({ root, token, port = 8788, host = '127.0.0.1
         };
         await writeFile(join(directory, 'manifest.json'),
             `${JSON.stringify(manifest, null, 4)}\n`);
+        answer(200, { id, manifest });
+    }
+
+    /**
+     * A picture for a bottle that exists: kept beside its manifest under a
+     * name its bytes give, so a browser that cached the last one asks again,
+     * and named in the manifest as `./name` -- the bottle's own directory,
+     * wherever that is served from. The picture it replaces is removed.
+     *
+     * @param {string} id
+     * @param {'cover' | 'wallpaper'} slot
+     * @param {import('node:http').IncomingMessage} request
+     * @param {(status: number, body: any) => void} answer
+     */
+    async function setArt(id, slot, request, answer){
+        const directory = directoryFor(id);
+        const path = join(directory, 'manifest.json');
+        const held = await readFile(path, 'utf8').catch(()=>null);
+        if (held === null)
+        {
+            answer(404, `there is no bottle "${id}"`);
+            return;
+        }
+        const type = String(request.headers['content-type'] ?? '').split(';')[0].trim();
+        const extension = ART_TYPES.get(type);
+        if (!extension)
+        {
+            answer(400, `a ${slot} is a PNG, JPEG, WebP or GIF picture, not "${type}"`);
+            return;
+        }
+        const body = await readBody(request, MAX_ART);
+        if (body.length === 0)
+        {
+            answer(400, `the ${slot} is empty`);
+            return;
+        }
+        const hash = createHash('sha256').update(body).digest('hex').slice(0, 12);
+        const name = `${slot}-${hash}.${extension}`;
+        await writeFile(join(directory, `${name}.part`), body);
+        await rename(join(directory, `${name}.part`), join(directory, name));
+        const earlier = new RegExp(`^${slot}-[0-9a-f]{12}\\.(png|jpg|webp|gif)$`);
+        for (const file of await readdir(directory))
+        {
+            if (file !== name && earlier.test(file))
+            {
+                await rm(join(directory, file), { force: true });
+            }
+        }
+        const manifest = { ...JSON.parse(held), id };
+        for (const field of ART_FIELDS[slot])
+        {
+            manifest[field] = `./${name}`;
+        }
+        await writeFile(path, `${JSON.stringify(manifest, null, 4)}\n`);
         answer(200, { id, manifest });
     }
 

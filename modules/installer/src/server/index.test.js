@@ -16,7 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
-import { mkdtemp, open, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, open, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 // The engine's own reader, which is not published.
@@ -253,7 +253,57 @@ test('a bottle\'s settings change in its manifest, and nothing its upload made d
 test('only the settings of a bottle are taken, each checked', ()=>{
     assert.deepEqual(manifestChanges({ version: ' 1.2 ', kind: 'game', labels: ['test', 'test'] }),
         { fields: { version: '1.2', kind: 'game', labels: ['test'] } });
+    assert.deepEqual(manifestChanges({ description: ' What it is. ' }),
+        { fields: { description: 'What it is.' } });
+    assert.ok('refused' in manifestChanges({ description: 'x'.repeat(2001) }));
     assert.ok('refused' in manifestChanges({ kind: 'movie' }));
     assert.ok('refused' in manifestChanges({ windows: '../etc' }));
     assert.ok('refused' in manifestChanges(['title']));
+});
+
+test('a cover and a wallpaper go beside the manifest, and a new one replaces the old', async()=>{
+    const host = await serving();
+    try
+    {
+        const prefix = collectFrom(finishedApp([
+            { path: 'C:\\Games\\Title\\game.exe', bytes: bytes('MZ program') },
+        ]), { name: 'Setup.exe', bytes: bytes('the distribution') });
+        await publish({ prefix, endpoint: host.endpoint, id: 'pictured',
+            manifest: { title: 'Game', entry: 'game.exe' } });
+        const send = (/** @type {string} */ slot, /** @type {string} */ type,
+            /** @type {Uint8Array} */ body, id = 'pictured')=>fetch(
+            `${host.endpoint.url}/bottles/${id}/art/${slot}`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': type },
+                body,
+            });
+        const directory = join(host.root, 'pictured');
+
+        const first = await send('cover', 'image/png', bytes('first cover'));
+        assert.equal(first.status, 200);
+        const named = (await first.json()).manifest.coverLarge;
+        assert.match(named, /^\.\/cover-[0-9a-f]{12}\.png$/);
+        assert.equal(await readFile(join(directory, named.slice(2)), 'utf8'), 'first cover');
+
+        assert.equal((await send('cover', 'image/webp', bytes('second cover'))).status, 200);
+        assert.equal((await send('wallpaper', 'image/jpeg', bytes('a wallpaper'))).status, 200);
+        const written = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'));
+        assert.match(written.coverLarge, /^\.\/cover-[0-9a-f]{12}\.webp$/);
+        assert.equal(written.coverSmall, written.coverLarge, 'the card shows the same cover');
+        assert.match(written.wallpaper, /^\.\/wallpaper-[0-9a-f]{12}\.jpg$/);
+        assert.equal(written.entry, 'game.exe', 'nothing else in the manifest moves');
+        const pictures = (await readdir(directory)).filter(file=>/^(cover|wallpaper)-/.test(file));
+        assert.deepEqual(pictures.sort(),
+            [written.coverLarge.slice(2), written.wallpaper.slice(2)].sort(),
+            'the first cover is gone, and nothing half-written is left');
+
+        assert.equal((await send('cover', 'text/html', bytes('<p>'))).status, 400, 'not a picture');
+        assert.equal((await send('cover', 'image/png', new Uint8Array(0))).status, 400, 'empty');
+        assert.equal((await send('icon', 'image/png', bytes('x'))).status, 404, 'not a place');
+        assert.equal((await send('cover', 'image/png', bytes('x'), 'nowhere')).status, 404);
+    }
+    finally
+    {
+        await host.stop();
+    }
 });
