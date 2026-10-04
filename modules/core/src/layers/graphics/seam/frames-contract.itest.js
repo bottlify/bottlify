@@ -18,14 +18,23 @@
  * bindings, states, transforms and draws in the command ring (ring), and the
  * state read back (getters). Two vertex buffers of different formats are
  * switched between, an index buffer is read from a base vertex, and runs of
- * the ring are as long as a frame makes them.
+ * the ring are as long as a frame makes them. The program also draws into a
+ * texture and samples it, copies into it and out of it, and polls an event
+ * query.
  *
- * What is compared: every call's answer and what a getter wrote; and every
- * draw the GPU is given, as it would read it -- the indices, the vertices
- * they name in every buffer bound, the bytes of the uniform ranges bound and
- * the texels of the textures bound -- taken at each submit in queue order.
- * The guest code must have taken each part of the program in the guest, or
- * the gate would compare nothing.
+ * Each program also runs with its device recording for a twin that draws, as
+ * in a graphics worker, against the device drawing itself: what the recording
+ * device answers on its own -- an event query, a copy between two surfaces
+ * whose pixels are on the GPU -- must be what the drawing one answers, and
+ * leave the program's memory as that one leaves it.
+ *
+ * What is compared: every call's answer, what a getter wrote and what the
+ * program read back of a surface; and every draw the GPU is given, as it
+ * would read it -- the indices, the vertices they name in every buffer bound,
+ * the bytes of the uniform ranges bound and the texels of the textures bound
+ * -- taken at each submit in queue order. The guest code must have taken each
+ * part of the program in the guest, and each copy, target and query must have
+ * been made, or the gate would compare nothing.
  */
 
 import { test } from 'node:test';
@@ -38,11 +47,13 @@ import {
 /** @typedef {import('./guest-machine.itest.js').Version} Version */
 /** @typedef {import('./guest-machine.itest.js').Call} Call */
 
+const D3DUSAGE_RENDERTARGET = 0x1;
 const D3DUSAGE_WRITEONLY = 0x8;
 const D3DUSAGE_DYNAMIC = 0x200;
 const D3DPOOL_DEFAULT = 0;
 const D3DPOOL_MANAGED = 1;
 const D3DFMT_A8R8G8B8 = 21;
+const D3DFMT_X8R8G8B8 = 22;
 const D3DFMT_INDEX16 = 101;
 const D3DLOCK_READONLY = 0x10;
 const D3DLOCK_NOOVERWRITE = 0x1000;
@@ -62,6 +73,10 @@ const D3DRS_TEXTUREFACTOR = 60;
 const D3DPOOL_SYSTEMMEM = 2;
 const D3DSBT_ALL = 1;
 const D3DCLEAR_TARGET = 1;
+const D3DQUERYTYPE_EVENT = 8;
+const D3DISSUE_END = 1;
+const D3DGETDATA_FLUSH = 1;
+const D3DTEXF_NONE = 0;
 const ONE = 0x3f800000;
 /** Where the program keeps the indices it draws from its own memory. */
 const USER_INDICES = 0x20400;
@@ -91,11 +106,18 @@ const TEXTURES = ['#5', '#6'];
 /** A system-memory texture the program fills, and one in the default pool it copies it to. */
 const SOURCE = '#7';
 const COPY = '#8';
-/** What a draw may sample: the textures it fills, and the one it copies into. */
-const SAMPLED = [...TEXTURES, COPY];
+/** A texture the program draws into and copies into, and samples like the rest. */
+const TARGET = '#9';
+/** A surface off any texture the program fills and copies to the target (`stretch`). */
+const PLAIN = '#10';
+/** Direct3D 9's event query. */
+const QUERY = '#11';
+/** What a draw may sample: the textures it fills, the one it copies into, and the target. */
+const SAMPLED = [...TEXTURES, COPY, TARGET];
 
 /** @param {string} on */
-const kindOf = on=>(on === IB ? 'indices' : STREAMS.includes(on) ? 'vertices' : 'texture');
+const kindOf = on=>(on === IB ? 'indices' : STREAMS.includes(on) ? 'vertices'
+    : on === PLAIN ? 'surface' : on === QUERY ? 'query' : 'texture');
 /** @param {string} on */
 const bytesOfBuffer = on=>(on === IB ? INDEX_BYTES
     : VERTICES * FORMATS[STREAMS.indexOf(on)].stride);
@@ -123,6 +145,12 @@ const callsOf = version=>{
             ...[...TEXTURES.map(()=>D3DPOOL_MANAGED), D3DPOOL_SYSTEMMEM, D3DPOOL_DEFAULT]
                 .map(pool=>device('CreateTexture', [TEXELS, TEXELS, 1, 0, D3DFMT_A8R8G8B8, pool,
                     'out', ...tail])),
+            device('CreateTexture', [TEXELS, TEXELS, 1, D3DUSAGE_RENDERTARGET, D3DFMT_X8R8G8B8,
+                D3DPOOL_DEFAULT, 'out', ...tail]),
+            nine ? device('CreateOffscreenPlainSurface', [TEXELS, TEXELS, D3DFMT_X8R8G8B8,
+                D3DPOOL_DEFAULT, 'out', 0])
+                : device('CreateImageSurface', [TEXELS, TEXELS, D3DFMT_X8R8G8B8, 'out']),
+            ...nine ? [device('CreateQuery', [D3DQUERYTYPE_EVENT, 'out'])] : [],
             device('SetRenderState', [D3DRS_LIGHTING, 0]),
         ],
         device,
@@ -147,6 +175,24 @@ const callsOf = version=>{
         /** @param {string} on */
         unlock: on=>/** @type {Call} */ ({ on, kind: kindOf(on), method: 'Unlock', args: [] }),
         present: device('Present', [0, 0, 0, 0]),
+        /**
+         * @param {string} surface @param {string | number} depth  the depth surface Direct3D 8
+         *     sets with it
+         */
+        target: (surface, depth)=>device('SetRenderTarget', nine ? [0, surface]
+            : [surface, depth]),
+        /**
+         * The target's level given what it holds of a surface: from a surface
+         * off any texture, or the corner of the back buffer -- a copy between
+         * two surfaces whose pixels are on the GPU.
+         *
+         * @param {string} from @param {string} to @param {boolean} corner
+         */
+        stretch: (from, to, corner)=>{
+            const rect = corner ? { words: [0, 0, TEXELS, TEXELS] } : 0;
+            return nine ? device('StretchRect', [from, rect, to, 0, D3DTEXF_NONE])
+                : device('CopyRects', [from, rect, corner ? 1 : 0, to, 0]);
+        },
         /** Whether a draw from user memory unbinds the stream and the indices. */
         upUnbinds: !nine,
     };
@@ -345,6 +391,9 @@ const bytesFor = (indices, length, fill)=>(indices
  *     | { kind: 'recapture', block: number }
  *     | { kind: 'clear', color: number, viewport: number[] | null }
  *     | { kind: 'indexedUser' }
+ *     | { kind: 'target', on: boolean }
+ *     | { kind: 'stretch', from: 'plain' | 'back' | 'target', fill: number }
+ *     | { kind: 'query', issue: boolean, flush: boolean }
  *     | { kind: 'present' }} Step
  */
 
@@ -354,9 +403,10 @@ const bytesFor = (indices, length, fill)=>(indices
  * draw reads only what was written since that buffer's last DISCARD.
  *
  * @param {number} seed @param {number} steps  how many @param {boolean} upUnbinds
+ * @param {boolean} nine  whether the device is Direct3D 9's, which has event queries
  * @returns {Step[]}
  */
-function generate(seed, steps, upUnbinds){
+function generate(seed, steps, upUnbinds, nine){
     const { below, pick } = random(seed);
     /** @type {Record<string, { read: Uint8Array, defined: Uint8Array, unit: number }>} */
     const book = Object.fromEntries([...STREAMS, IB].map(on=>[on, {
@@ -367,6 +417,7 @@ function generate(seed, steps, upUnbinds){
     let stream = 0;
     let base = 0;
     let bound = true;
+    let onTarget = false;
     /**
      * The state blocks made so far, by the order they were made in: what one
      * of everything holds of the stream and its base, none for one recorded.
@@ -376,7 +427,7 @@ function generate(seed, steps, upUnbinds){
     const blocks = [];
     while (program.length < steps)
     {
-        const roll = below(52);
+        const roll = below(58);
         if (roll < 12)
         {
             const on = pick([...STREAMS, IB]);
@@ -535,6 +586,22 @@ function generate(seed, steps, upUnbinds){
             program.push({ kind: 'indexedUser' });
             bound = !upUnbinds;
         }
+        else if (roll < 51)
+        {
+            onTarget = !onTarget;
+            program.push({ kind: 'target', on: onTarget });
+        }
+        else if (roll < 53)
+        {
+            // Direct3D 8's copy out of a target waits for the pixels the
+            // device in a graphics worker draws, which this machine cannot.
+            program.push({ kind: 'stretch', from: pick(nine ? ['plain', 'back', 'target']
+                : ['plain', 'back']), fill: below(256) });
+        }
+        else if (roll < 55 && nine)
+        {
+            program.push({ kind: 'query', issue: below(4) !== 0, flush: below(2) === 0 });
+        }
         else
         {
             program.push({ kind: 'present' });
@@ -559,6 +626,9 @@ async function play(version, guestCode, steps, worker = false){
     const answers = [];
     /** @type {Map<string, number>} */
     const inGuest = new Map();
+    /** How many times each call was answered D3D_OK, so the gate knows it took the path. */
+    /** @type {Map<string, number>} */
+    const done = new Map();
     /** @param {Call} call @param {number} [readBack]  bytes of an answer to keep */
     const run = (call, readBack = 0)=>{
         const answer = m.run(call);
@@ -567,6 +637,10 @@ async function play(version, guestCode, steps, worker = false){
         if (answer.traps.length === 0)
         {
             inGuest.set(call.method, (inGuest.get(call.method) ?? 0) + 1);
+        }
+        if (answer.eax === 0)
+        {
+            done.set(call.method, (done.get(call.method) ?? 0) + 1);
         }
         return answer;
     };
@@ -648,6 +722,62 @@ async function play(version, guestCode, steps, worker = false){
     {
         run(call);
     }
+    // What the program keeps to draw into and copy between: the target's
+    // level, the back buffer, and the depth surface Direct3D 8 sets with them.
+    const targetLevel = levelOf(TARGET);
+    const back = /** @type {string} */ (run(calls.device('GetBackBuffer',
+        version.getBackBuffer)).out);
+    const depth = calls.nine ? 0
+        : /** @type {string} */ (run(calls.device('GetDepthStencilSurface', ['out'])).out);
+    /** @param {boolean} on */
+    const target = on=>run(calls.target(on ? targetLevel : back, depth));
+    /** @param {number} seed */
+    const fillPlain = seed=>{
+        if (run({ on: PLAIN, kind: 'surface', method: 'LockRect', args: ['out', 0, 0] }).eax
+            === 0)
+        {
+            write(m.memory.readU32(OUT + 4), Uint8Array.from({ length: TEXELS * TEXELS * 4 },
+                (unused, i)=>(seed + i * 3) & 0xff));
+        }
+        run({ on: PLAIN, kind: 'surface', method: 'UnlockRect', args: [] });
+    };
+    /**
+     * A copy into the target, from the plain surface the program fills first
+     * or from the back buffer; or out of the target into the plain surface,
+     * filled first with what the copy must overwrite, which the program then
+     * reads.
+     *
+     * @param {'plain' | 'back' | 'target'} from @param {number} seed
+     */
+    const stretch = (from, seed)=>{
+        if (from === 'target')
+        {
+            fillPlain(seed);
+            run(calls.stretch(targetLevel, PLAIN, false));
+            if (run({ on: PLAIN, kind: 'surface', method: 'LockRect',
+                args: ['out', 0, D3DLOCK_READONLY] }).eax === 0)
+            {
+                answers.push(`read ${createHash('sha1').update(m.memory.readBytes(
+                    m.memory.readU32(OUT + 4), TEXELS * TEXELS * 4)).digest('hex')}`);
+            }
+            run({ on: PLAIN, kind: 'surface', method: 'UnlockRect', args: [] });
+            return;
+        }
+        if (from === 'plain')
+        {
+            fillPlain(seed);
+        }
+        run(calls.stretch(from === 'plain' ? PLAIN : back, targetLevel, from === 'back'));
+    };
+    /** @param {boolean} issue @param {boolean} flush */
+    const query = (issue, flush)=>{
+        if (issue)
+        {
+            run({ on: QUERY, kind: 'query', method: 'Issue', args: [D3DISSUE_END] });
+        }
+        run({ on: QUERY, kind: 'query', method: 'GetData',
+            args: ['out', 4, flush ? D3DGETDATA_FLUSH : 0] }, 4);
+    };
     m.memory.writeBytes(USER, bytesFor(false, 3 * FORMATS[0].stride, 99));
     m.memory.writeBytes(USER_INDICES, new Uint8Array(new Uint16Array([0, 1, 2]).buffer));
     // A frame of every kind of draw, from either buffer, with a texture and
@@ -657,10 +787,12 @@ async function play(version, guestCode, steps, worker = false){
     [...STREAMS, IB].forEach((on, i)=>fill(on, 1 + i));
     [...TEXTURES, SOURCE].forEach((on, i)=>texels(on, 'texture', 7 + i));
     copy('texture');
-    for (let pass = 0; pass < 2; pass++)
+    stretch('plain', 3);
+    for (let pass = 0; pass < 4; pass++)
     {
+        target(pass % 2 === 1);
         run(calls.device('BeginScene'));
-        for (const texture of [TEXTURES[0], 0])
+        for (const texture of [TEXTURES[0], TARGET, 0])
         {
             run(calls.device('SetTexture', [0, texture]));
             for (let which = 0; which < STREAMS.length; which++)
@@ -685,12 +817,19 @@ async function play(version, guestCode, steps, worker = false){
         calls.stream(0).forEach(call=>run(call));
         run(calls.indices(0));
         run(calls.device('EndScene'));
+        stretch('back', 5);
+        if (calls.nine)
+        {
+            query(true, true);
+        }
         run(calls.present);
         await idle(m.gpu);
     }
+    target(false);
     answers.length = 0;
     gpu.length = 0;
     inGuest.clear();
+    done.clear();
 
     run(calls.device('BeginScene'));
     let stream = 0;
@@ -818,6 +957,18 @@ async function play(version, guestCode, steps, worker = false){
                 USER_INDICES, D3DFMT_INDEX16, USER, FORMATS[0].stride]));
             calls.stream(stream).forEach(call=>run(call));
         }
+        else if (step.kind === 'target')
+        {
+            target(step.on);
+        }
+        else if (step.kind === 'stretch')
+        {
+            stretch(step.from, step.fill);
+        }
+        else if (step.kind === 'query')
+        {
+            query(step.issue, step.flush);
+        }
         else if (step.kind === 'reference')
         {
             run({ on: step.on, kind: kindOf(step.on), method: 'AddRef', args: [] });
@@ -835,24 +986,27 @@ async function play(version, guestCode, steps, worker = false){
     run(calls.device('EndScene'));
     run(calls.present);
     await idle(m.gpu);
-    return { answers, gpu, inGuest };
+    return { answers, gpu, inGuest, done };
 }
+
+/** @typedef {Awaited<ReturnType<typeof play>>} Played */
 
 /**
  * Where two runs part: the first line that differs.
  *
- * @param {string[]} trap @param {string[]} guest @param {string} what
+ * @param {[string, string[]]} one @param {[string, string[]]} other  each run's name and lines
+ * @param {string} what
  */
-const parting = (trap, guest, what)=>{
-    const at = trap.findIndex((line, i)=>line !== guest[i]);
-    if (at < 0 && trap.length === guest.length)
+const parting = ([oneName, one], [otherName, other], what)=>{
+    const at = one.findIndex((line, i)=>line !== other[i]);
+    if (at < 0 && one.length === other.length)
     {
         return null;
     }
-    const index = at < 0 ? Math.min(trap.length, guest.length) : at;
-    return `${what} ${index} of ${trap.length}/${guest.length}: every call a trap gives `
-        + `${(trap[index] ?? 'nothing').slice(0, 400)}, the guest code `
-        + `${(guest[index] ?? 'nothing').slice(0, 400)}`;
+    const index = at < 0 ? Math.min(one.length, other.length) : at;
+    return `${what} ${index} of ${one.length}/${other.length}: ${oneName} gives `
+        + `${(one[index] ?? 'nothing').slice(0, 400)}, ${otherName} `
+        + `${(other[index] ?? 'nothing').slice(0, 400)}`;
 };
 
 /** The calls each part of the guest code takes, which a run must have taken in the guest. */
@@ -862,38 +1016,64 @@ const COVERED = ['Lock', 'Unlock', 'GetSurfaceLevel', 'AddRef', 'Release', 'SetT
 /** And those only Direct3D 9's ring carries: a state block's own Capture and Apply. */
 const COVERED_9 = ['Apply', 'Capture'];
 
-for (const [version, worker] of /** @type {[Version, boolean][]} */ ([[D3D8, false],
-    [D3D9, false], [D3D8, true], [D3D9, true]]))
+/** The calls whose path is the device's own, which each run must have had answered D3D_OK. */
+const DONE = ['SetRenderTarget', 'LockRect'];
+/** And each version's copy into the target, and Direct3D 9's event query. */
+const DONE_8 = ['CopyRects'];
+const DONE_9 = ['StretchRect', 'Issue', 'GetData'];
+
+for (const version of [D3D8, D3D9])
 {
-    const name = `${version === D3D9 ? 'Direct3D 9' : 'Direct3D 8'}${worker
-        ? ', in a graphics worker' : ''}`;
-    test(`${name}: the GPU is given what it would be with every call a trap, whatever a frame`
-        + ' locked, uploaded, bound, referenced and drew', async()=>{
+    const nine = version === D3D9;
+    test(`${nine ? 'Direct3D 9' : 'Direct3D 8'}: the GPU is given what it would be with every`
+        + ' call a trap and with the device drawing on the program\'s thread, whatever a frame'
+        + ' locked, uploaded, bound, referenced, drew and copied', async()=>{
         /** @type {string[]} */
         const wrong = [];
         /** @type {Map<string, number>} */
         const taken = new Map();
+        /** @type {Map<string, number>} */
+        const answered = new Map();
         for (let seed = 1; seed <= 40 && wrong.length === 0; seed++)
         {
-            const steps = generate(seed, 200, callsOf(version).upUnbinds);
-            const trap = await play(version, false, steps, worker);
-            const guest = await play(version, true, steps, worker);
-            for (const [method, times] of guest.inGuest)
+            const steps = generate(seed, 200, callsOf(version).upUnbinds, nine);
+            const trap = await play(version, false, steps);
+            const guest = await play(version, true, steps);
+            // The device in a graphics worker: the one the program holds
+            // records and answers what it can without the one that draws.
+            const recordedTrap = await play(version, false, steps, true);
+            const recorded = await play(version, true, steps, true);
+            for (const [method, times] of [...guest.inGuest, ...recorded.inGuest])
             {
                 taken.set(method, (taken.get(method) ?? 0) + times);
             }
-            for (const found of [parting(trap.answers, guest.answers, 'answer'),
-                parting(trap.gpu, guest.gpu, 'GPU draw')])
+            for (const [method, times] of trap.done)
             {
-                if (found)
+                answered.set(method, (answered.get(method) ?? 0) + times);
+            }
+            for (const [one, other] of /** @type {[[string, Played], [string, Played]][]} */ ([
+                [['every call a trap', trap], ['the guest code', guest]],
+                [['every call a trap recorded', recordedTrap], ['the guest code recorded',
+                    recorded]],
+                [['the device drawing itself', trap], ['the device recording', recordedTrap]]]))
+            {
+                for (const found of [
+                    parting([one[0], one[1].answers], [other[0], other[1].answers], 'answer'),
+                    parting([one[0], one[1].gpu], [other[0], other[1].gpu], 'GPU draw')])
                 {
-                    wrong.push(`seed ${seed}: ${found}`);
+                    if (found)
+                    {
+                        wrong.push(`seed ${seed}: ${found}`);
+                    }
                 }
             }
         }
         assert.deepEqual(wrong, []);
-        const covered = [...COVERED, ...version === D3D9 ? COVERED_9 : []];
+        const covered = [...COVERED, ...nine ? COVERED_9 : []];
         assert.deepEqual(covered.filter(method=>!((taken.get(method) ?? 0) > 20)), [],
             `each part of the guest code took calls: ${JSON.stringify([...taken])}`);
+        const done = [...DONE, ...nine ? DONE_9 : DONE_8];
+        assert.deepEqual(done.filter(method=>!((answered.get(method) ?? 0) > 20)), [],
+            `each copy, target and query was made: ${JSON.stringify([...answered])}`);
     });
 }
