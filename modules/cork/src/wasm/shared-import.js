@@ -48,73 +48,96 @@ const leb = value=>{
 };
 
 /**
+ * The import section's body with every imported memory declared shared, up
+ * to `maxPages`; the rest of its entries as they are.
+ *
+ * @param {Uint8Array} bytes @param {number} start @param {number} maxPages
+ * @returns {number[]}
+ */
+const sharedImports = (bytes, start, maxPages)=>{
+    /** @type {number[]} */
+    const section = [];
+    /** @param {number} from @param {number} to */
+    const copy = (from, to)=>{
+        for (let index = from; index < to; index++)
+        {
+            section.push(bytes[index]);
+        }
+    };
+    let [count, cursor] = readLeb(bytes, start);
+    section.push(...leb(count));
+    for (; count > 0; count--)
+    {
+        const from = cursor;
+        for (let name = 0; name < 2; name++)
+        {
+            const [length, next] = readLeb(bytes, cursor);
+            cursor = next + length;
+        }
+        const kind = bytes[cursor++];
+        copy(from, cursor);
+        if (kind !== 2)
+        {
+            // A function's type index, a table's type and limits, a global's
+            // type and mutability: copied as they are.
+            const descriptor = cursor;
+            if (kind === 0)
+            {
+                cursor = readLeb(bytes, cursor)[1];
+            }
+            else if (kind === 1)
+            {
+                const flags = bytes[cursor + 1];
+                cursor = readLeb(bytes, cursor + 2)[1];
+                if (flags & 1)
+                {
+                    cursor = readLeb(bytes, cursor)[1];
+                }
+            }
+            else
+            {
+                cursor += 2;
+            }
+            copy(descriptor, cursor);
+            continue;
+        }
+        const flags = bytes[cursor];
+        const [min, afterMin] = readLeb(bytes, cursor + 1);
+        cursor = (flags & 1) ? readLeb(bytes, afterMin)[1] : afterMin;
+        section.push(3, ...leb(min), ...leb(maxPages));
+    }
+    return section;
+};
+
+/**
  * The module's bytes with every imported memory shared, up to `maxPages`;
- * the bytes as they are when it imports none.
+ * a copy of them as they are when it imports none. Only the import section
+ * is rebuilt; every other section is copied in one piece, never spread into
+ * arguments, which a module's code section is too large for on a worker's
+ * stack.
  *
  * @param {Uint8Array} bytes @param {number} [maxPages]
  * @returns {Uint8Array}
  */
 export function withSharedMemoryImport(bytes, maxPages = SHARED_MAX_PAGES){
-    /** @type {number[]} */
-    const out = [...bytes.subarray(0, 8)];
     let at = 8;
     while (at < bytes.length)
     {
         const id = bytes[at];
         const [size, start] = readLeb(bytes, at + 1);
         const end = start + size;
-        if (id !== 2)
+        if (id === 2)
         {
-            out.push(...bytes.subarray(at, end));
-            at = end;
-            continue;
+            const section = sharedImports(bytes, start, maxPages);
+            const head = [2, ...leb(section.length)];
+            const out = new Uint8Array(at + head.length + section.length + bytes.length - end);
+            out.set(bytes.subarray(0, at), 0);
+            out.set(head, at);
+            out.set(section, at + head.length);
+            out.set(bytes.subarray(end), at + head.length + section.length);
+            return out;
         }
-        /** @type {number[]} */
-        const section = [];
-        let [count, cursor] = readLeb(bytes, start);
-        section.push(...leb(count));
-        for (; count > 0; count--)
-        {
-            const from = cursor;
-            for (let name = 0; name < 2; name++)
-            {
-                const [length, next] = readLeb(bytes, cursor);
-                cursor = next + length;
-            }
-            const kind = bytes[cursor++];
-            section.push(...bytes.subarray(from, cursor));
-            if (kind !== 2)
-            {
-                // A function's type index, a table's type and limits, a global's
-                // type and mutability: copied as they are.
-                const descriptor = cursor;
-                if (kind === 0)
-                {
-                    cursor = readLeb(bytes, cursor)[1];
-                }
-                else if (kind === 1)
-                {
-                    const flags = bytes[cursor + 1];
-                    cursor = readLeb(bytes, cursor + 2)[1];
-                    if (flags & 1)
-                    {
-                        cursor = readLeb(bytes, cursor)[1];
-                    }
-                }
-                else
-                {
-                    cursor += 2;
-                }
-                section.push(...bytes.subarray(descriptor, cursor));
-                continue;
-            }
-            const flags = bytes[cursor];
-            const [min, afterMin] = readLeb(bytes, cursor + 1);
-            cursor = (flags & 1) ? readLeb(bytes, afterMin)[1] : afterMin;
-            section.push(3, ...leb(min), ...leb(maxPages));
-        }
-        out.push(2, ...leb(section.length), ...section);
         at = end;
     }
-    return new Uint8Array(out);
+    return bytes.slice();
 }

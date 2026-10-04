@@ -103,8 +103,8 @@ function program(){
     });
 }
 
-/** @param {boolean} shared @param {boolean} lend */
-async function run(shared, lend){
+/** @param {boolean} shared @param {boolean} lend @param {any} [mode] */
+async function run(shared, lend, mode){
     const gpu = createFakeDevice();
     const gpuDevice = /** @type {any} */ (gpu.device);
     gpuDevice.features = new Set();
@@ -131,6 +131,7 @@ async function run(shared, lend){
             executable: program(),
             cork: /** @type {any} */ ({ config: { sharedMemory: shared } }),
             graphics: /** @type {any} */ ({ lendMemory: lend }),
+            ...mode ? { mode } : {},
             device: {
                 device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
                 adapter: { vendor: 'fake', architecture: '', description: 'a stand-in' },
@@ -141,9 +142,10 @@ async function run(shared, lend){
         const divergences = [];
         app.on('divergence', (/** @type {any} */ seen)=>divergences.push(seen.detail));
         const code = await app.run({ timeoutMs: 50000 });
-        const metrics = app.diagnostics().find((/** @type {any} */ layer)=>
-            layer.name === 'graphics')?.metrics;
-        const result = { code, divergences, lent: metrics?.worker?.lent };
+        const layers = app.diagnostics();
+        const metrics = layers.find((/** @type {any} */ layer)=>layer.name === 'graphics')?.metrics;
+        const result = { code, divergences, lent: metrics?.worker?.lent,
+            mode: layers.find((/** @type {any} */ layer)=>layer.name === 'app')?.metrics?.mode };
         await app.dispose();
         return result;
     }
@@ -156,19 +158,25 @@ async function run(shared, lend){
 test('a texture unlocked each frame is lent to the graphics worker where memory is shared',
     { timeout: 60000 }, async()=>{
         const result = await run(true, true);
+        assert.equal(result.mode, 'full', 'auto, where memory can be shared');
         assert.equal(result.code, 0);
         assert.deepEqual(result.divergences, []);
         assert.equal(result.lent.lent, FRAMES, JSON.stringify(result.lent));
         assert.equal(result.lent.lentBytes, FRAMES * 64 * 64 * 4);
     });
 
-test('a texture unlocked each frame is copied where memory is not shared, or lending is off',
-    { timeout: 60000 }, async()=>{
-        for (const [shared, lend] of [[false, true], [true, false]])
+test('a texture unlocked each frame is copied where memory is not shared, lending is off, or'
+    + ' the run is in safe mode', { timeout: 90000 }, async()=>{
+    for (const [shared, lend, mode] of [[false, true], [true, false], [true, true, 'safe']])
+    {
+        const result = await run(/** @type {boolean} */ (shared), /** @type {boolean} */ (lend),
+            mode);
+        assert.equal(result.code, 0);
+        assert.deepEqual(result.divergences, []);
+        assert.deepEqual(result.lent, {}, `shared ${shared}, lend ${lend}, mode ${mode}`);
+        if (mode)
         {
-            const result = await run(shared, lend);
-            assert.equal(result.code, 0);
-            assert.deepEqual(result.divergences, []);
-            assert.deepEqual(result.lent, {}, `shared ${shared}, lend ${lend}`);
+            assert.equal(result.mode, 'safe');
         }
-    });
+    }
+});

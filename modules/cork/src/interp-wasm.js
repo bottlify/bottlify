@@ -188,7 +188,7 @@ export function createWasmInterpreter({ memory, layout, area, hotThreshold, trap
         setStartIndex(value){
             view.setUint32(index, value >>> 0, true);
         },
-        started: ()=>compiled !== null,
+        started: ()=>compiled !== null || compiledShared !== null,
         stretch,
     };
 }
