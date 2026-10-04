@@ -639,6 +639,12 @@ export function createDirect3D8Seam(
         GetLevelCount: texture=>texture.levels ?? 1,
         /** @param {any} texture @param {number[]} args */
         GetSurfaceLevel: (texture, [level, out])=>{
+            // Refused before the level is taken: a reference taken for nowhere
+            // to go would keep the texture alive after its last Release.
+            if ((out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             /** @type {{ surface?: any }} */
             const held = {};
             const hr = texture.GetSurfaceLevel(level >>> 0, held);
@@ -703,6 +709,10 @@ export function createDirect3D8Seam(
             held=>texture.GetCubeMapSurface(0, level >>> 0, held), out),
         /** @param {any} texture @param {number[]} args */
         GetCubeMapSurface: (texture, [face, level, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             /** @type {{ surface?: any }} */
             const held = {};
             const hr = texture.GetCubeMapSurface(face >>> 0, level >>> 0, held);
@@ -836,6 +846,10 @@ export function createDirect3D8Seam(
         },
         /** @param {any} texture @param {number[]} args @returns {number} */
         GetVolumeLevel: (texture, [level, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             /** @type {{ volume?: any }} */
             const held = {};
             const hr = texture.GetVolumeLevel(level >>> 0, held);

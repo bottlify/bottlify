@@ -2108,3 +2108,18 @@ test('with guest memory, the calls the command ring carried are made at the next
         assert.equal(h.release(device), 0);
         h.release(root);
     });
+
+test('a level asked for with no pointer to put it in is refused and takes no reference', ()=>{
+    const h = seamed();
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const out = 0x3000;
+    assert.equal(h.device(device, 'CreateTexture',
+        [16, 16, 1, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED, out, 0]), D3D_OK);
+    const texture = h.box.memory.readU32(out);
+    assert.equal(h.box.call(texture, slot(IDIRECT3DTEXTURE9_SLOTS, 'GetSurfaceLevel'), [0, 0]),
+        D3DERR_INVALIDCALL);
+    assert.equal(h.release(texture), 0, 'the texture\'s last Release is its last');
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
