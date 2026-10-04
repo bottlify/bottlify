@@ -36,6 +36,21 @@ The page needs:
   it the log is read by asking the engine instead of from shared memory, and guest memory is
   the engine's alone rather than shared with the workers beside it.
 
+## Which mode, and why
+
+`createApp({ mode })` decides how much of the engine rides on shared memory, and through it what the
+page has to allow.
+
+| Mode | Choose it when | What it gives | What it costs |
+| --- | --- | --- | --- |
+| `isolated` | The page can be cross-origin isolated: your own origin serves the player and everything it loads, and nothing on it has to come from a site that does not opt in | The guest's memory is shared with the workers beside the engine: the graphics worker reads what a program unlocked straight out of it rather than from a copy made per unlock, and sound plays from shared memory | The page is isolated: an iframe, image or script from another origin loads only if it sends `Cross-Origin-Resource-Policy` or CORS headers, and a sign-in pop-up from another origin cannot reach back to the page through `window.opener` |
+| `compatible` | The page cannot be isolated — the player sits in another site's iframe, or next to third-party content or sign-in pop-ups — or the program draws little and gains nothing from sharing: an installer, a console tool such as SteamCMD | Runs on any page | What crosses to another thread is copied; no sound yet (see [limits.md](limits.md)) |
+| `auto` | You want what the page allows: the default | `isolated` on an isolated page, `compatible` elsewhere | — |
+
+The network does not depend on the mode: the relay is a WebSocket to the page's own origin, which
+isolation does not touch. `isolated` on a page that cannot share memory is refused by `createApp`
+rather than run as something else.
+
 ## Sound
 
 Sound is mixed on the browser's audio thread from a table the engine writes into shared memory:

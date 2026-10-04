@@ -192,6 +192,8 @@ in the `app` layer's diagnostics (`core/src/mode.js`):
 | `auto` (the default) | — | `isolated` where the page is cross-origin isolated, `compatible` elsewhere |
 
 The launcher takes `auto` unless `?mode=compatible` or `?mode=isolated` asks for one.
+Which to choose, and what each costs the page, is in
+[`core/README.md`](core/README.md#which-mode-and-why).
 
 ## 4. Startup: from createApp to the first instruction
 

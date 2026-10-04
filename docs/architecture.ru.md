@@ -191,6 +191,8 @@ flowchart LR
 | `auto` (по умолчанию) | — | `isolated` там, где страница изолирована, иначе `compatible` |
 
 Лаунчер берёт `auto`, если `?mode=compatible` или `?mode=isolated` не просят другого.
+Какой выбрать и чего каждый стоит странице — в
+[`core/README.md`](core/README.md#which-mode-and-why).
 
 ## 4. Запуск: от createApp до первой инструкции
 
