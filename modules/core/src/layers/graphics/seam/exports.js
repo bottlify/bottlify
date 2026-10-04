@@ -353,6 +353,9 @@ export function createGraphicsLibraries(
     /** @type {string[]} */
     const created = [];
 
+    /** How deep the profiler events D3DPERF_BeginEvent opened are nested. */
+    let perfLevel = 0;
+
     /**
      * A DirectDraw object of one generation, published as that generation.
      *
@@ -550,6 +553,47 @@ export function createGraphicsLibraries(
                     }],
                 }), SHADER_VALIDATOR),
             },
+
+            /**
+             * void DebugSetMute(void)
+             *
+             * Silences the debug runtime's output, which this build does not
+             * print: D3DX asks for it by name around its locks.
+             */
+            DebugSetMute: { argBytes: 0, handler: ()=>0 },
+
+            /**
+             * int D3DPERF_BeginEvent(D3DCOLOR col, LPCWSTR wszName)
+             * int D3DPERF_EndEvent(void)
+             *
+             * The profiler's nested events, which a program built with PIX
+             * markers imports and calls whether a profiler is attached or not:
+             * BeginEvent answers the zero-based level the event starts at,
+             * EndEvent the level it ends, negative for one never begun.
+             */
+            D3DPERF_BeginEvent: {
+                argBytes: 8,
+                handler: ()=>perfLevel++,
+            },
+            D3DPERF_EndEvent: {
+                argBytes: 0,
+                handler: ()=>(perfLevel > 0 ? --perfLevel : -1),
+            },
+
+            /**
+             * DWORD D3DPERF_GetStatus(void)
+             * BOOL D3DPERF_QueryRepeatFrame(void)
+             * void D3DPERF_SetMarker(D3DCOLOR col, LPCWSTR wszName)
+             * void D3DPERF_SetOptions(DWORD dwOptions)
+             * void D3DPERF_SetRegion(D3DCOLOR col, LPCWSTR wszName)
+             *
+             * No profiler is attached, and none asks for a frame again.
+             */
+            D3DPERF_GetStatus: { argBytes: 0, handler: ()=>0 },
+            D3DPERF_QueryRepeatFrame: { argBytes: 0, handler: ()=>0 },
+            D3DPERF_SetMarker: { argBytes: 8, handler: ()=>0 },
+            D3DPERF_SetOptions: { argBytes: 4, handler: ()=>0 },
+            D3DPERF_SetRegion: { argBytes: 8, handler: ()=>0 },
 
             /** HRESULT Direct3DCreate9Ex(UINT SDKVersion, IDirect3D9Ex **out) */
             Direct3DCreate9Ex: {

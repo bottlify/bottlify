@@ -807,3 +807,18 @@ test('Direct3DShaderValidatorCreate9 hands out a validator that answers the stre
     assert.equal(box.call(validator, 5), 0);
     assert.equal(box.call(validator, 2), 0, 'the last reference released');
 });
+
+test('D3D9.dll\'s profiler markers and DebugSetMute are there for a program built with them', ()=>{
+    const { libraries } = seamed();
+    const d3d9 = libraries.libraries['D3D9.dll'];
+    assert.equal(d3d9.D3DPERF_BeginEvent.handler([0xff0000, 0]), 0, 'the outermost level');
+    assert.equal(d3d9.D3DPERF_BeginEvent.handler([0xff0000, 0]), 1);
+    assert.equal(d3d9.D3DPERF_EndEvent.handler([]), 1);
+    assert.equal(d3d9.D3DPERF_EndEvent.handler([]), 0);
+    assert.equal(d3d9.D3DPERF_EndEvent.handler([]), -1, 'one never begun');
+    assert.equal(d3d9.D3DPERF_GetStatus.handler([]), 0, 'no profiler attached');
+    assert.equal(d3d9.D3DPERF_QueryRepeatFrame.handler([]), 0);
+    assert.deepEqual(['D3DPERF_BeginEvent', 'D3DPERF_EndEvent', 'D3DPERF_SetMarker',
+        'D3DPERF_SetRegion', 'D3DPERF_SetOptions', 'DebugSetMute']
+        .map(name=>d3d9[name].argBytes), [8, 0, 8, 8, 4, 0]);
+});
