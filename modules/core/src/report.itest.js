@@ -32,7 +32,7 @@ test('a report carries every layer, the profile and the code the guest spent its
         t.after(()=>app.dispose());
         assert.equal(await app.run(), 0);
 
-        const report = app.report();
+        const report = await app.report();
         const names = report.diagnostics.map((/** @type {{ name: string }} */ table)=>table.name);
         for (const layer of ['cpu', 'kernel', 'bridge', 'graphics', 'log', 'app'])
         {
@@ -53,4 +53,29 @@ test('a report carries every layer, the profile and the code the guest spent its
         const near = [...bytes.subarray(Math.max(0, at - 64), at + 64)];
         const text = near.map(b=>b.toString(16).padStart(2, '0')).join('');
         assert.ok(text.includes('404975fc'), 'with the loop\'s own bytes in it');
+    });
+
+test('a report lists what was said as a divergence, which nothing else keeps',
+    { timeout: 60000 }, async t=>{
+        // RegSaveKeyA(HKEY_CURRENT_USER, "C:\\saved.key", NULL); ExitProcess(0)
+        const executable = buildExe({
+            imports: { 'ADVAPI32.dll': ['RegSaveKeyA'], 'KERNEL32.dll': ['ExitProcess'] },
+            codeSize: 0x40,
+            data: { file: [...Buffer.from('C:\\saved.key'), 0] },
+            code: ({ iat, at })=>[
+                0x6a, 0x00, 0x68, ...u32(at('file')), 0x68, ...u32(0x80000001),
+                0xff, 0x15, ...u32(iat('RegSaveKeyA')),
+                0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess')),
+            ],
+        });
+        const app = await createApp({ executable, engine: 'cork' });
+        t.after(()=>app.dispose());
+        assert.equal(await app.run(), 0);
+
+        const report = await app.report();
+        const table = report.diagnostics.find((/** @type {{ name: string }} */ one)=>
+            one.name === 'app');
+        assert.equal(table.metrics.emitted.divergence, 1);
+        assert.deepEqual(table.metrics.divergences.length, 1);
+        assert.match(table.metrics.divergences[0], /^RegSaveKey: a saved key is this engine's own/);
     });

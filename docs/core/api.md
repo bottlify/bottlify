@@ -106,7 +106,7 @@ Everything below crosses to the engine's worker by `postMessage`, so every value
 | `session.export()`, `registry().toJSON()` | After the exit: the files the program wrote (with `collectOnExit`) and its registry. |
 | `attachLog(sink)`, `detachLog(sink)` | What the program writes to its standard handles, as `(handle, text)`. |
 | `diagnostics(layer?)` | Every layer's diagnostics, or one layer's. A request to the engine thread, not for polling. |
-| `report()` | Everything the engine can say about the run in one answer: every layer's diagnostics, the phase profile and recent frames, `trace()`, the threads, the guest's time by module, and the guest's code (`hotCode`, 4 KiB pages as base64) around its most-sampled addresses. A request, not for polling. |
+| `report()` | Everything the engine can say about the run in one answer: every layer's diagnostics, the phase profile and recent frames, `trace()`, the threads, the guest's time by module, and the guest's code (`hotCode`, 4 KiB pages as base64) around its most-sampled addresses. The app layer's table lists the divergences said so far (`divergences`, the first 128); the devices drawing in the graphics worker are asked for their own counters and waited for, up to a second, so the graphics table carries them. A request, not for polling. |
 | `trace()`, `traffic()` | The last host calls as text; messages counted by kind. |
 | `log.*` | The journal and counters: `recent`, `drain`, `setLevel`, `setDefaultLevel`, `areas`, `profile`, `frames`, `counters`, `table`, `threads`, `guestByModule`, `stats`, `memory`. |
 | `guestProfile.*` | Where the guest ran, by address (`available`, `start`, `read`, `stop`). |

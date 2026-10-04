@@ -144,8 +144,13 @@ async function run(shared, lend, mode){
         const code = await app.run({ timeoutMs: 50000 });
         const layers = app.diagnostics();
         const metrics = layers.find((/** @type {any} */ layer)=>layer.name === 'graphics')?.metrics;
+        // A report is the first ask of the run for the played device's own
+        // account, and waits for it rather than saying nothing.
+        const reported = (await app.report()).diagnostics;
         const result = { code, divergences, lent: metrics?.worker?.lent,
-            mode: layers.find((/** @type {any} */ layer)=>layer.name === 'app')?.metrics?.mode };
+            mode: layers.find((/** @type {any} */ layer)=>layer.name === 'app')?.metrics?.mode,
+            device: reported.find((/** @type {any} */ layer)=>layer.name === 'graphics')
+                ?.metrics?.seam?.device };
         await app.dispose();
         return result;
     }
@@ -163,6 +168,8 @@ test('a texture unlocked each frame is lent to the graphics worker where memory 
         assert.deepEqual(result.divergences, []);
         assert.equal(result.lent.lent, FRAMES, JSON.stringify(result.lent));
         assert.equal(result.lent.lentBytes, FRAMES * 64 * 64 * 4);
+        assert.ok(result.device, 'the report carries what the played device counted');
+        assert.equal(result.device.frames, FRAMES + 0, JSON.stringify(result.device).slice(0, 200));
     });
 
 test('a texture unlocked each frame is copied where memory is not shared, lending is off, or'

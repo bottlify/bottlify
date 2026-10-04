@@ -144,6 +144,22 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
     /** What the played side's diagnostics said last. @type {any} */
     let diagnostics = null;
     let failure = /** @type {string | null} */ (null);
+    /** The diagnostics asked for, and those the played side has answered. */
+    let asked = 0;
+    let told = 0;
+    /** Who waits for an answer to every ask made before they came. */
+    /** @type {{ until: number, resolve: () => void }[]} */
+    const listening = [];
+    const hear = ()=>{
+        for (let at = listening.length - 1; at >= 0; at--)
+        {
+            if (failure || told >= listening[at].until)
+            {
+                listening[at].resolve();
+                listening.splice(at, 1);
+            }
+        }
+    };
 
     // A turn of the engine's loop ends in a microtask checkpoint, and a
     // program whose threads hand a lock back and forth takes thousands of
@@ -227,6 +243,7 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
             if (wait === WAIT.ANSWER && name === 'diagnostics')
             {
                 writer.u8(WAIT.NONE);
+                asked++;
                 soon();
                 return { answer: diagnostics, outs: [] };
             }
@@ -285,6 +302,23 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
 
         recorded: soon,
 
+        /**
+         * Settles once the played side has answered every diagnostics ask
+         * made so far, or has stopped: a reader that asked once and waits
+         * for this reads what the device said of that moment rather than
+         * of the ask before -- the first of which has nothing to say.
+         *
+         * @returns {Promise<void>}
+         */
+        answered(){
+            if (failure || told >= asked)
+            {
+                return Promise.resolve();
+            }
+            flush();
+            return new Promise(resolve=>listening.push({ until: asked, resolve }));
+        },
+
         /** @param {any} message  what the receiver posted */
         receive(message){
             switch (message?.type)
@@ -298,6 +332,8 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                 }
                 case 'diagnostics':
                     diagnostics = message.diagnostics;
+                    told++;
+                    hear();
                     break;
                 case 'presented':
                     presented = message.count;
@@ -327,6 +363,7 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                     break;
                 case 'failed':
                     failure = String(message.message);
+                    hear();
                     on.failed?.(failure);
                     break;
                 default:

@@ -796,8 +796,8 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
         trace: ()=>app.trace(),
         // The engine's whole account in one answer, with what only this side
         // reads: the threads and the guest's time by module.
-        report: ()=>plain({
-            ...app.report(),
+        report: async()=>plain({
+            ...await app.report(),
             presented: { count: frames, history: presented.slice() },
             threads: reading?.threads() ?? [],
             guestByModule: reading?.guestByModule() ?? {},

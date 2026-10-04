@@ -658,6 +658,16 @@ export function createGraphicsModule(){
                 available: ()=>device !== null,
 
                 /**
+                 * Settles once the devices drawing in the graphics worker have
+                 * answered the diagnostics asked of them so far: what they say
+                 * comes back a message later, and a reader that asks once and
+                 * reads at once reads nothing.
+                 *
+                 * @returns {Promise<void>}
+                 */
+                answered: ()=>state.remote?.answered() ?? Promise.resolve(),
+
+                /**
                  * The hardware behind the device, as the assembling caller knows
                  * it: vendor, architecture and description as WebGPU reports them.
                  * A program asks who made its adapter before deciding how much to
@@ -1147,6 +1157,9 @@ export function createGraphicsModule(){
                 screen: guarded('screen', api.screen),
                 create: guarded('create', api.create),
                 apis: guarded('apis', api.apis),
+                // A report may come after the machine went: nothing is asked
+                // of a disposed worker end, so there is nothing to wait for.
+                answered: ()=>(live() ? api.answered() : Promise.resolve()),
 
                 /**
                  * The libraries, keyed as an import descriptor names them. The

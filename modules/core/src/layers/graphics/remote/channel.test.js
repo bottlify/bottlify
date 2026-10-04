@@ -96,3 +96,33 @@ test('a call that waits for its answer goes at once, with what the turns before 
     s.pass(1);
     assert.equal(s.batches.length, 2, 'and the timer finds nothing left to send');
 });
+
+test('a diagnostics ask settles once the played side has answered it, the first one too', async()=>{
+    const s = sender(1);
+    /** @type {string[]} */
+    const seen = [];
+    const settled = (/** @type {string} */ label)=>s.made.answered().then(()=>seen.push(label));
+    await settled('nothing asked');
+    assert.deepEqual(seen, ['nothing asked'],
+        'with no ask outstanding there is nothing to wait for');
+    s.made.writer.u8(0x55);
+    const first = s.made.called(WAIT.ANSWER, 'diagnostics');
+    assert.equal(first.answer, null, 'the first ask has nothing to say yet');
+    const waiting = settled('first');
+    assert.equal(s.batches.length, 1, 'waiting sends the ask rather than leave it for the gap');
+    s.made.writer.u8(0x55);
+    s.made.called(WAIT.ANSWER, 'diagnostics');
+    const both = settled('second');
+    s.made.receive({ type: 'diagnostics', diagnostics: { frames: 1 } });
+    await waiting;
+    assert.deepEqual(seen, ['nothing asked', 'first'], 'the second ask is not answered yet');
+    s.made.receive({ type: 'diagnostics', diagnostics: { frames: 2 } });
+    await both;
+    assert.deepEqual(seen, ['nothing asked', 'first', 'second']);
+    s.made.writer.u8(0x55);
+    assert.deepEqual(s.made.called(WAIT.ANSWER, 'diagnostics').answer, { frames: 2 });
+    const stopped = settled('stopped');
+    s.made.receive({ type: 'failed', message: 'gone' });
+    await stopped;
+    assert.equal(seen.at(-1), 'stopped', 'a played side that stopped answers nothing more');
+});

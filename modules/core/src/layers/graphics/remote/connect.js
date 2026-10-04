@@ -74,6 +74,9 @@ function plainOf(services){
  *     `shipped`: that guest memory by what copied it -- buffers' unlocks, surfaces' (lent ones
  *     aside), what calls read out of guest memory and what they wrote into it; `calls`: the
  *     methods whose records fill the batches, the heaviest first
+ * @property {() => Promise<void>} answered
+ *     settles once every root's played device has answered the diagnostics asked of it so
+ *     far, or stopped
  * @property {() => void} dispose
  */
 
@@ -251,6 +254,7 @@ export function connectGraphicsWorker(options){
                     return recordedDirect3D(factory, services, sender);
             }
         },
+        answered: ()=>Promise.all(senders.map(sender=>sender.answered())).then(()=>{}),
         diagnostics: ()=>{
             /** @type {Record<string, { count: number, ms: number, maxMs: number }>} */
             const waits = {};

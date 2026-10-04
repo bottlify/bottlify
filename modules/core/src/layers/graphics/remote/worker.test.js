@@ -133,3 +133,47 @@ test('told to, the worker sends its frames as bytes from then on', async()=>{
         port2.close();
     }
 });
+
+test('asked for its diagnostics, the played device answers, and the asker can wait for it',
+    async()=>{
+        const gpu = createFakeDevice();
+        Object.assign(gpu.device, { queue: gpu.queue });
+        /** @type {any} */
+        const scope = { postMessage: ()=>{}, onmessage: null };
+        serveGraphics(scope, {
+            gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
+                requestDevice: async()=>gpu.device }) },
+            canvas: (width, height)=>Object.assign(gpu.canvas, { width, height,
+                transferToImageBitmap: ()=>({ width, height, close: ()=>{} }) }),
+        });
+        scope.onmessage({ data: { type: 'open', frames: 'bitmap' } });
+        await settle();
+        const { port1, port2 } = new MessageChannel();
+        scope.onmessage({ data: { type: 'root', api: 'd3d9', options: {}, port: port2 } });
+        const sender = createSender({ post: (message, transfer)=>port1.postMessage(message,
+            transfer), framesAhead: 100 });
+        port1.onmessage = event=>sender.receive(event.data);
+        const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+        /** @type {{ device?: any }} */
+        const out = {};
+        d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+            backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out);
+        try
+        {
+            for (let frame = 0; frame < 2; frame++)
+            {
+                out.device.BeginScene();
+                out.device.Clear(0, null, D3DCLEAR.TARGET, 0xff000000 + frame, 1, 0);
+                out.device.EndScene();
+                await out.device.Present();
+            }
+            assert.equal(out.device.diagnostics(), null, 'the first ask has nothing to say yet');
+            await sender.answered();
+            assert.equal(out.device.diagnostics()?.frames, 2, 'once answered, the frames played');
+        }
+        finally
+        {
+            port1.close();
+            port2.close();
+        }
+    });

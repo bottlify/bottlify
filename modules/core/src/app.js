@@ -3139,7 +3139,7 @@ async function buildApp(options){
             writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
                 core.api('memory').writeBytes(address, bytes),
             allocate: (/** @type {number} */ bytes)=>core.api('win32').heap().allocate(bytes),
-            warn: (/** @type {string} */ message)=>events.emit('divergence', { api: 'ijl15', detail: message }),
+            warn: (/** @type {string} */ message)=>reportDivergence('ijl15', message),
         },
         log: {
             // Every call area starts switched off. A short run makes tens of
@@ -6533,6 +6533,11 @@ async function buildApp(options){
                     // sorts on their own thread. A table computed on this one
                     // is a reader's work done by the program.
                     unimplementedCalls: Object.fromEntries(missingCalls),
+                    // What was said as a divergence, the first of them: a
+                    // consumer that listened for none has no other record of
+                    // what this build accepted and did not do, and the journal
+                    // has long since let go of a line said once.
+                    divergences: [...divergences].slice(0, DIVERGENCES_KEPT),
                     // The guest-to-guest calls a watch was put in front of, by label.
                     watches: [...watches.keys()],
                     // How many calls a site kernel issued through `frame.gl`,
@@ -6567,8 +6572,34 @@ async function buildApp(options){
          * a question about the translator's code for them is answered from.
          * A request, not for polling: it reads guest memory and describes
          * every layer.
+         *
+         * The devices drawing in the graphics worker answer what they are
+         * asked a message later, so they are asked once and waited for --
+         * no longer than `REPORT_WAIT_MS` -- before the tables are read: read
+         * at once, the first report of a run would say nothing of them.
          */
-        report(){
+        async report(){
+            // A build without the graphics layer, or with its stub, has no
+            // worker to wait for.
+            const answeredByGraphics = async()=>{
+                try
+                {
+                    await core.api('graphics').answered();
+                }
+                catch {
+                    // Nothing was asked of anything that could answer.
+                }
+            };
+            this.diagnostics();
+            /** @type {ReturnType<typeof setTimeout> | undefined} */
+            let timer;
+            await Promise.race([
+                answeredByGraphics(),
+                new Promise(resolve=>{
+                    timer = setTimeout(resolve, REPORT_WAIT_MS);
+                }),
+            ]);
+            clearTimeout(timer);
             const diagnostics = this.diagnostics();
             const cpuTable = diagnostics.find((/** @type {any} */ table)=>table.name === 'cpu');
             /** @type {{ address: number, instructions: number }[]} */
@@ -6627,6 +6658,16 @@ async function buildApp(options){
         },
     };
 }
+
+/**
+ * How long a report waits for the graphics worker's devices to say what they
+ * counted: a worker that is far behind, or gone, leaves their tables as they
+ * were rather than holding the report.
+ */
+const REPORT_WAIT_MS = 1000;
+
+/** How many divergences a run's diagnostics list, in the order they were said. */
+const DIVERGENCES_KEPT = 128;
 
 /**
  * How many replacement requests are remembered.
