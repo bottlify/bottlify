@@ -613,14 +613,7 @@ export function createDrawingFunctions(
             dc.boundSurface = surface;
             // A clip set before the pixels were bound, or before they were
             // bound again, still holds.
-            if (dc.clipRects)
-            {
-                interfaces.setClipRegion(handle >>> 0, dc.clipRects);
-            }
-            else if (dc.clip)
-            {
-                interfaces.setClipRect(handle >>> 0, dc.clip);
-            }
+            pushClip(handle, dc, interfaces);
             // So does a brush origin; the drawing context starts at zero.
             if (dc.brushOrg)
             {
@@ -790,7 +783,7 @@ export function createDrawingFunctions(
         dc.clip = { ...rect };
         dc.clipRects = null;
         dc.clipSelected = true;
-        bound(handle)?.setClipRect(handle >>> 0, rect);
+        pushClip(handle, dc, bound(handle));
     };
 
     /**
@@ -801,6 +794,53 @@ export function createDrawingFunctions(
      * @returns {import('./rects.js').Rect[]}
      */
     const clipAreaOf = dc=>dc.clipRects ?? [clipOf(dc)];
+
+    /**
+     * What a DC draws in: its clip, cut to the part of its window the window
+     * manager leaves it -- on the screen, under no other window, inside a
+     * paint's update area -- which no clip the program selects can widen.
+     *
+     * @param {any} dc
+     * @returns {import('./rects.js').Rect[]}
+     */
+    const drawnAreaOf = dc=>(dc.visible
+        ? dc.visible.flatMap((/** @type {import('./rects.js').Rect} */ piece)=>
+            intersectArea(clipAreaOf(dc), piece))
+        : clipAreaOf(dc));
+
+    /**
+     * Gives the drawing layer what a DC draws in.
+     *
+     * @param {number} handle @param {any} dc @param {any} interfaces  The bound drawing layer.
+     * @returns {boolean} whether the drawing layer took it
+     */
+    const pushClip = (handle, dc, interfaces)=>{
+        if (!interfaces)
+        {
+            return false;
+        }
+        const area = simplifyArea(drawnAreaOf(dc));
+        return (area.length > 1
+            ? interfaces.setClipRegion(handle >>> 0, area)
+            : interfaces.setClipRect(handle >>> 0,
+                area[0] ?? { left: 0, top: 0, right: 0, bottom: 0 })) !== false;
+    };
+
+    /**
+     * The part of its window a DC may draw in, in its own coordinates, as
+     * the window manager works it out; null for no limit.
+     *
+     * @param {number} handle @param {import('./rects.js').Rect[] | null} area
+     */
+    const setVisible = (handle, area)=>{
+        const dc = dcOf(handle);
+        if (!dc)
+        {
+            return false;
+        }
+        dc.visible = area ? area.map(piece=>({ ...piece })) : null;
+        return pushClip(handle, dc, bound(handle));
+    };
 
     /**
      * Clips to an area, and answers what kind of region it is.
@@ -818,7 +858,7 @@ export function createDrawingFunctions(
         dc.clip = boundsOf(area);
         dc.clipRects = area;
         dc.clipSelected = true;
-        bound(handle)?.setClipRegion(handle >>> 0, area);
+        pushClip(handle, dc, bound(handle));
         return COMPLEXREGION;
     };
 
@@ -1887,7 +1927,7 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const origin = dc.bounds ?? null;
-                const clip = clipOf(dc);
+                const clip = dc.visible ? boundsOf(dc.visible) : clipOf(dc);
                 const x = origin?.left ?? 0;
                 const y = origin?.top ?? 0;
                 const placed = { left: clip.left + x, top: clip.top + y, right: clip.right + x,
@@ -1957,7 +1997,7 @@ export function createDrawingFunctions(
                     dc.clip = null;
                     dc.clipRects = null;
                     dc.clipSelected = false;
-                    bound(handle)?.setClipRect(handle >>> 0, clipOf(dc));
+                    pushClip(handle, dc, bound(handle));
                     return SIMPLEREGION;
                 }
                 const rect = regionOf(region);
@@ -2745,14 +2785,7 @@ export function createDrawingFunctions(
         {
             return;
         }
-        if (dc.clipRects)
-        {
-            interfaces.setClipRegion(handle >>> 0, dc.clipRects);
-        }
-        else
-        {
-            interfaces.setClipRect(handle >>> 0, clipOf(dc));
-        }
+        pushClip(handle, dc, interfaces);
     };
 
     /**
@@ -2768,7 +2801,7 @@ export function createDrawingFunctions(
         }
     };
 
-    return { functions, bound, setDIBits, restoreClip, restoreBrushOrigin };
+    return { functions, bound, setDIBits, restoreClip, restoreBrushOrigin, setVisible };
 }
 
 /**

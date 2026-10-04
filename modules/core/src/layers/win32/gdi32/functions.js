@@ -4452,22 +4452,15 @@ export function createGdiFunctions(host){
             },
 
             /**
-             * Narrows what a context draws in to a rectangle, in its own
-             * coordinates: the update area a paint is limited to.
+             * The part of its window a context may draw in, in its own
+             * coordinates: what is on the screen and under no other window,
+             * cut to a paint's update area. A clip the program selects is
+             * drawn under it, and selecting none does not widen it.
              *
              * @param {number} hdc
-             * @param {{ left: number, top: number, right: number, bottom: number }} rect
+             * @param {{ left: number, top: number, right: number, bottom: number }[]} area
              */
-            clip(hdc, rect){
-                const dc = dcOf(hdc);
-                if (!dc)
-                {
-                    return false;
-                }
-                dc.clip = { ...rect };
-                dc.clipRects = null;
-                return drawing.bound(hdc)?.setClipRect(hdc >>> 0, rect) === true;
-            },
+            clip: (hdc, area)=>drawing.setVisible(hdc, area),
 
             /** The colour a context draws text in. @param {number} hdc */
             textColor: hdc=>(dcOf(hdc)?.textColor ?? 0) >>> 0,

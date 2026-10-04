@@ -1743,3 +1743,43 @@ test('the brush origin is the DC\'s, answered back, saved, and given to the draw
     assert.equal(setup().fns.SetBrushOrgEx.handler([setup().hdc, 1, 2, 0]), 1,
         'kept without anything to draw with');
 });
+
+test('the part of its window a DC may draw in holds under any clip the program selects', ()=>{
+    // On Windows a context's system region -- its window's visible part --
+    // is not the program's to widen: SelectClipRgn(NULL) or a region the size
+    // of the screen still draws nothing over the window in front.
+    const graphics = fakeDrawing();
+    const memory = fakeMemory();
+    const gdi = createGdiFunctions({
+        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
+        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
+            memory.writeMemory(a, d),
+        readCString: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readCString(a, n),
+        handles: fakeHandles(),
+        surfaces: fakeSurfaces(),
+        graphics: graphics.services,
+    });
+    const fns = /** @type {any} */ (gdi.table);
+    const hdc = fns.GetDC.handler([HWND]);
+    const last = ()=>graphics.calls.filter(call=>call[0] === 'setClipRect'
+        || call[0] === 'setClipRegion').at(-1);
+    const visible = { left: 10, top: 10, right: 50, bottom: 40 };
+
+    assert.equal(gdi.draw.clip(hdc, [visible]), true);
+    assert.deepEqual(last(), ['setClipRect', hdc, visible]);
+    fns.SelectClipRgn.handler([hdc, 0]);
+    assert.deepEqual(last(), ['setClipRect', hdc, visible], 'dropping the clip does not widen it');
+    fns.IntersectClipRect.handler([hdc, 0, 0, 20, 20]);
+    assert.deepEqual(last(), ['setClipRect', hdc, { left: 10, top: 10, right: 20, bottom: 20 }],
+        'a clip the program narrows is narrowed inside it');
+    fns.SelectClipRgn.handler([hdc, fns.CreateRectRgn.handler([0, 0, 640, 480])]);
+    assert.deepEqual(last(), ['setClipRect', hdc, visible], 'nor does the whole screen widen it');
+
+    const around = [{ left: 0, top: 0, right: 10, bottom: 10 },
+        { left: 20, top: 20, right: 30, bottom: 30 }];
+    gdi.draw.clip(hdc, around);
+    assert.deepEqual(last(), ['setClipRegion', hdc, around], 'pieces left around a window over it');
+    gdi.draw.clip(hdc, []);
+    assert.deepEqual(last(), ['setClipRect', hdc, { left: 0, top: 0, right: 0, bottom: 0 }],
+        'a window off the screen draws nowhere');
+});

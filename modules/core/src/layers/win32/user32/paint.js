@@ -30,6 +30,7 @@
 import { PAINTSTRUCT, RECT, readRect, writeRect, writeU32s } from './structs.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { readText } from './unicode.js';
+import { intersectArea, subtractFromArea } from '../gdi32/rects.js';
 
 /** DrawText's flags. */
 const DT_CENTER = 0x0001;
@@ -387,12 +388,13 @@ export function tabbedWidth(text, widthOf, stops, interval){
  * @param {() => number} [options.desktop]
  *        The desktop window, which the screen's context GetDC(NULL) answers
  *        belongs to.
+ * @param {(record: any) => Rect[]} [options.covering]
+ *        The rectangles, in screen coordinates, of the windows over a window:
+ *        what its visible region leaves out.
  */
 export function createPaintFunctions(options){
     const { host, live, WM_PAINT, geometry, send, invalidated, painted, descendants } = options;
     const shown = options.shown ?? (()=>true);
-    /** Where a window that is not on the screen draws: nowhere. */
-    const NOWHERE = { left: 0, top: 0, right: 0, bottom: 0 };
     let iconDivergenceSaid = false;
     /** @type {Set<string>} what a drawing call has said it leaves out */
     const toldOnce = new Set();
@@ -530,17 +532,34 @@ export function createPaintFunctions(options){
         const hdc = contexts()?.get(record.hwnd, area) ?? 0;
         if (hdc !== 0)
         {
-            // A window that is hidden, or inside one that is, has no part on
-            // the screen, and what it draws reaches none: its visible region
-            // is empty, not the rectangle it would have if it were shown.
-            const visible = whole
-                ? geometry.visibleWindowRect(record) : geometry.visibleClientRect(record);
-            host.draw?.clip?.(hdc, shown(record) ? {
-                left: visible.left - area.left, top: visible.top - area.top,
-                right: visible.right - area.left, bottom: visible.bottom - area.top,
-            } : NOWHERE);
+            host.draw?.clip?.(hdc, visibleArea(record, whole, area));
         }
         return hdc;
+    };
+
+    /**
+     * A window's visible region, in the coordinates of a context whose
+     * origin is `origin`'s corner: the part of its client area, or of its
+     * whole rectangle, that is on the screen, inside every ancestor and under
+     * no other window. A window that is hidden, or inside one that is, has
+     * none, and what it draws reaches nothing -- not the rectangle it would
+     * have if it were shown.
+     *
+     * @param {any} record @param {boolean} whole @param {Rect} origin
+     * @returns {Rect[]}
+     */
+    const visibleArea = (record, whole, origin)=>{
+        if (!shown(record))
+        {
+            return [];
+        }
+        const visible = whole
+            ? geometry.visibleWindowRect(record) : geometry.visibleClientRect(record);
+        const covers = options.covering?.(record) ?? [];
+        return covers.reduce((area, cover)=>subtractFromArea(area, cover),
+            isEmpty(visible) ? [] : [visible])
+            .map(piece=>({ left: piece.left - origin.left, top: piece.top - origin.top,
+                right: piece.right - origin.left, bottom: piece.bottom - origin.top }));
     };
 
     /** @param {any} value @param {(answer: any) => any} then */
@@ -575,14 +594,8 @@ export function createPaintFunctions(options){
         record.ncDirty = false;
         if (hdc !== 0)
         {
-            const visible = geometry.visibleClientRect(record);
-            const origin = geometry.clientRect(record);
-            host.draw?.clip?.(hdc, shown(record) ? {
-                left: Math.max(dirty.left, visible.left - origin.left),
-                top: Math.max(dirty.top, visible.top - origin.top),
-                right: Math.min(dirty.right, visible.right - origin.left),
-                bottom: Math.min(dirty.bottom, visible.bottom - origin.top),
-            } : NOWHERE);
+            host.draw?.clip?.(hdc,
+                intersectArea(visibleArea(record, false, geometry.clientRect(record)), dirty));
         }
         const result = { hdc, rect: dirty };
         if (hdc === 0)

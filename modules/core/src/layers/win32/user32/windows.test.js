@@ -1638,17 +1638,16 @@ test('a window that is not on the screen draws nowhere, and a child of one neith
     // moved into place and shown -- must not be left on the desktop where
     // the window stood, to show beside it once it has moved.
     const { fns, hwnd, clips } = withWindow({ paint: true });
-    const EMPTY = { left: 0, top: 0, right: 0, bottom: 0 };
     fns.ReleaseDC.handler([hwnd, fns.GetDC.handler([hwnd])]);
-    assert.deepEqual(clips.at(-1), EMPTY, 'hidden, its context covers nothing');
+    assert.deepEqual(clips.at(-1), [], 'hidden, its context covers nothing');
     const child = fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE, WS_CHILD | WS_VISIBLE,
         0, 0, 20, 10, hwnd, 1, HINSTANCE, 0]);
     fns.ReleaseDC.handler([child, fns.GetDC.handler([child])]);
-    assert.deepEqual(clips.at(-1), EMPTY, 'nor does a visible child\'s inside it');
+    assert.deepEqual(clips.at(-1), [], 'nor does a visible child\'s inside it');
 
     fns.ShowWindow.handler([hwnd, SW_SHOW]);
     fns.ReleaseDC.handler([child, fns.GetDC.handler([child])]);
-    assert.deepEqual(clips.at(-1), { left: 0, top: 0, right: 20, bottom: 10 },
+    assert.deepEqual(clips.at(-1), [{ left: 0, top: 0, right: 20, bottom: 10 }],
         'shown, the child draws in its own area');
 });
 
@@ -4275,4 +4274,56 @@ test('an MDI child brought to the top is told WM_CHILDACTIVATE and becomes the a
     assert.equal(await active(), hidden);
     await fns.SetWindowPos.handler([hidden, 0, 1, 1, 0, 0, 0x0001 | 0x0004 | 0x0010]);
     assert.deepEqual(told, [], 'SWP_NOACTIVATE: nothing said');
+});
+
+test('a window draws around the windows over it: a top-level window above its own, a sibling '
+    + 'over a child that clips its siblings, and its children under WS_CLIPCHILDREN', ()=>{
+    // A dialog in front of a program's main window while the main window's
+    // controls repaint: on Windows their visible region leaves the dialog
+    // out, and nothing they draw lands on it.
+    const WS_POPUP = 0x80000000;
+    const WS_CLIPSIBLINGS = 0x04000000;
+    const WS_CLIPCHILDREN = 0x02000000;
+    const { fns, memory, hwnd, clips } = withWindow({ paint: true,
+        style: WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN, x: 0, y: 0, width: 200, height: 100 });
+    const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: hwnd,
+        x: 0, y: 0, width: 100, height: 50 });
+    /** @param {number} window */
+    const clipOf = window=>{
+        fns.ReleaseDC.handler([window, fns.GetDC.handler([window])]);
+        return clips.at(-1);
+    };
+    assert.deepEqual(clipOf(child), [{ left: 0, top: 0, right: 100, bottom: 50 }],
+        'nothing over it yet');
+
+    const dialog = { left: 50, top: 25, right: 150, bottom: 125 };
+    createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE, parent: hwnd,
+        x: dialog.left, y: dialog.top, width: 100, height: 100 });
+    assert.deepEqual(clipOf(child), [
+        { left: 0, top: 0, right: 100, bottom: 25 },
+        { left: 0, top: 25, right: 50, bottom: 50 },
+    ], 'the owned dialog over its corner is left out');
+
+    // Created after it, so beneath it: one that clips its siblings is cut
+    // where the first child lies over it, one that does not is not.
+    const clipping = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+        parent: hwnd, x: 80, y: 0, width: 40, height: 20 });
+    assert.deepEqual(clipOf(clipping), [{ left: 20, top: 0, right: 40, bottom: 20 }]);
+    const plain = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: hwnd,
+        x: 80, y: 0, width: 40, height: 20 });
+    assert.deepEqual(clipOf(plain), [{ left: 0, top: 0, right: 40, bottom: 20 }]);
+
+    /** @param {any} a @param {any} b */
+    const overlaps = (a, b)=>a.left < b.right && b.left < a.right && a.top < b.bottom
+        && b.top < a.bottom;
+    const main = clipOf(hwnd);
+    const covered = [dialog, { left: 0, top: 0, right: 100, bottom: 50 },
+        { left: 80, top: 0, right: 120, bottom: 20 }];
+    assert.ok(main.length > 0, 'the main window still draws somewhere');
+    assert.ok(main.every((/** @type {any} */ piece)=>covered.every(cover=>!overlaps(piece, cover))),
+        'but not over its children, nor the dialog');
+    const area = main.reduce((/** @type {number} */ sum, /** @type {any} */ piece)=>
+        sum + (piece.right - piece.left) * (piece.bottom - piece.top), 0);
+    assert.equal(area, 200 * 100 - 100 * 50 - 20 * 20 - 100 * 75 + 50 * 25,
+        'and everywhere else in its client area');
 });

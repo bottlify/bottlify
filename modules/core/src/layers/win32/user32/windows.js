@@ -300,6 +300,7 @@ const SIMPLEREGION = 2;
 const MDICREATESTRUCT_SIZE = 36;
 /** Painted only once the siblings beneath it have been: a label over a picture. */
 const WS_EX_TRANSPARENT = 0x20;
+const WS_CLIPCHILDREN = 0x02000000;
 /** A layered window is one only once CreateWindowEx has shown the CBT hook the window. */
 const WS_EX_LAYERED = 0x00080000;
 /** The ShowWindow commands that leave activation where it is. */
@@ -1331,6 +1332,68 @@ export function createWindowFunctions(host){
             }
         }
         return listed;
+    };
+
+    /**
+     * The rectangles, in screen coordinates, of the windows over a window:
+     * every shown top-level window stacked above its own; each shown sibling
+     * above it, or above an ancestor, that clips its siblings -- as every
+     * top-level window does; and with WS_CLIPCHILDREN its own shown
+     * children. What its visible region leaves out, so that a window
+     * repainting itself does not draw over the dialog in front of it. A
+     * transparent window paints after what is beneath it and covers nothing.
+     *
+     * @param {any} record
+     * @returns {import('../gdi32/rects.js').Rect[]}
+     */
+    const coveringOf = record=>{
+        /** @type {import('../gdi32/rects.js').Rect[]} */
+        const covers = [];
+        /** @param {any} each */
+        const covering = each=>shown(each) && (each.exStyle & WS_EX_TRANSPARENT) === 0;
+        const top = topLevelOf(record);
+        let above = false;
+        for (const each of windows.values())
+        {
+            if (each === top)
+            {
+                above = true;
+            }
+            else if (above && !each.destroyed && !isChild(each) && covering(each))
+            {
+                covers.push(geometry.windowRect(each));
+            }
+        }
+        for (let at = record; at && isChild(at); at = windows.get(at.parent))
+        {
+            if ((at.style & WS_CLIPSIBLINGS) === 0)
+            {
+                continue;
+            }
+            // Siblings are kept topmost first: those before it are over it.
+            for (const sibling of childrenOf({ hwnd: at.parent }))
+            {
+                if (sibling === at)
+                {
+                    break;
+                }
+                if (covering(sibling))
+                {
+                    covers.push(geometry.windowRect(sibling));
+                }
+            }
+        }
+        if ((record.style & WS_CLIPCHILDREN) !== 0)
+        {
+            for (const child of childrenOf(record))
+            {
+                if (shown(child))
+                {
+                    covers.push(geometry.windowRect(child));
+                }
+            }
+        }
+        return covers;
     };
 
     /**
@@ -3728,6 +3791,7 @@ export function createWindowFunctions(host){
         live, WM_PAINT, geometry, send, invalidated, painted, shown,
         descendants: (/** @type {any} */ record)=>paintedDescendantsOf(record),
         desktop: ()=>desktopWindow().hwnd,
+        covering: coveringOf,
     });
 
     /**
