@@ -107,3 +107,129 @@ test('DrawIcon puts the icon\'s picture down at its size, DrawIconEx at the size
     assert.deepEqual(said, ['DrawIcon'], 'and is said');
     assert.equal(drawn.length, 0);
 });
+
+/**
+ * A paint table over a byte array, its drawing recorded: each fill as
+ * [rectangle, colour], each text as [x, y, text, colour]. A system colour is
+ * 0x100 plus its index, so a fill names the colour it was drawn in.
+ */
+const recording = ()=>{
+    const memory = new Uint8Array(0x1000);
+    /** @type {any[]} */
+    const fills = [];
+    /** @type {any[]} */
+    const texts = [];
+    /** @type {string[]} */
+    const said = [];
+    const { table } = createPaintFunctions({
+        host: /** @type {any} */ ({
+            readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+                memory.slice(at, at + length),
+            writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
+                memory.set(bytes, at),
+            readCString: (/** @type {number} */ at)=>new TextDecoder()
+                .decode(memory.subarray(at, memory.indexOf(0, at))),
+            draw: {
+                sysColor: (/** @type {number} */ index)=>0x100 + index,
+                fill: (/** @type {number} */ hdc, /** @type {any} */ rect, /** @type {number} */ color)=>
+                    fills.push([rect, color]) > 0,
+                text: (/** @type {number} */ hdc, /** @type {number} */ x, /** @type {number} */ y,
+                    /** @type {string} */ text, /** @type {any} */ options)=>
+                    texts.push([x, y, text, options.color]) > 0,
+                measure: (/** @type {number} */ hdc, /** @type {string} */ text)=>
+                    ({ width: text.length * 8, height: 16, ascent: 12 }),
+            },
+            divergence: (/** @type {string} */ api)=>said.push(api),
+        }),
+        live: ()=>null,
+        WM_PAINT: 0x000f,
+        geometry: /** @type {any} */ ({}),
+        send: ()=>0,
+        invalidated: ()=>{},
+        painted: ()=>{},
+    });
+    const view = new DataView(memory.buffer);
+    /** @param {number} at @param {number[]} sides */
+    const setRect = (at, sides)=>sides.forEach((side, i)=>view.setInt32(at + i * 4, side, true));
+    /** @param {number} at */
+    const rectAt = at=>({ left: view.getInt32(at, true), top: view.getInt32(at + 4, true),
+        right: view.getInt32(at + 8, true), bottom: view.getInt32(at + 12, true) });
+    return { table, memory, fills, texts, said, setRect, rectAt };
+};
+
+const HDC = 0x44;
+const RECT = 0x100;
+const DFC_MENU = 2;
+const DFC_BUTTON = 4;
+
+test('DrawFrameControl draws a check box as a sunken square, centred, with its mark', ()=>{
+    const { table, fills, setRect } = recording();
+    const DFCS_CHECKED = 0x400;
+    const WINDOW = 0x100 + 5;
+    const WINDOW_TEXT = 0x100 + 8;
+    setRect(RECT, [10, 20, 30, 33]);
+    assert.equal(table.DrawFrameControl.argBytes, 16);
+    assert.equal(table.DrawFrameControl.handler([HDC, RECT, DFC_BUTTON, DFCS_CHECKED]), 1);
+    // Thirteen pixels square, three in from the left of a rectangle twenty
+    // wide; the face is inside two rings of edge.
+    assert.deepEqual(fills.filter(([, color])=>color === WINDOW).map(([rect])=>rect),
+        [{ left: 15, top: 22, right: 24, bottom: 31 }]);
+    const mark = fills.filter(([, color])=>color === WINDOW_TEXT);
+    assert.equal(mark.length, 21, 'the check mark, a pixel at a time');
+    assert.deepEqual(mark[0][0], { left: 22, top: 23, right: 23, bottom: 24 },
+        'its first pixel, three in from the square\'s corner and six along');
+
+    fills.length = 0;
+    table.DrawFrameControl.handler([HDC, RECT, DFC_BUTTON, 0]);
+    assert.equal(fills.filter(([, color])=>color === WINDOW_TEXT).length, 0, 'no mark unchecked');
+});
+
+test('DrawFrameControl sinks a pushed button; DFCS_ADJUSTRECT leaves what is inside', ()=>{
+    const { table, fills, setRect, rectAt } = recording();
+    const DFCS_BUTTONPUSH = 0x10;
+    const DFCS_PUSHED = 0x200;
+    const DFCS_ADJUSTRECT = 0x2000;
+    setRect(RECT, [0, 0, 40, 20]);
+    assert.equal(table.DrawFrameControl.handler([HDC, RECT, DFC_BUTTON,
+        DFCS_BUTTONPUSH | DFCS_PUSHED | DFCS_ADJUSTRECT]), 1);
+    assert.deepEqual(fills[0], [{ left: 0, top: 0, right: 40, bottom: 20 }, 0x100 + 15],
+        'the face first');
+    assert.equal(fills[1][1], 0x100 + 16, 'then the edge, its top in the shadow colour');
+    assert.deepEqual(rectAt(RECT), { left: 2, top: 2, right: 38, bottom: 18 });
+
+    fills.length = 0;
+    table.DrawFrameControl.handler([HDC, RECT, DFC_BUTTON, DFCS_BUTTONPUSH]);
+    assert.equal(fills[1][1], 0x100 + 20, 'raised, its top in the highlight colour');
+});
+
+test('DrawFrameControl draws a menu check black on white and refuses an unknown type', ()=>{
+    const { table, fills, setRect } = recording();
+    const DFCS_MENUCHECK = 1;
+    setRect(RECT, [0, 0, 16, 16]);
+    assert.equal(table.DrawFrameControl.handler([HDC, RECT, DFC_MENU, DFCS_MENUCHECK]), 1);
+    assert.deepEqual(fills[0], [{ left: 0, top: 0, right: 16, bottom: 16 }, 0xffffff]);
+    assert.equal(fills.filter(([, color])=>color === 0).length, 21);
+    assert.equal(table.DrawFrameControl.handler([HDC, RECT, 0, 0]), 0);
+    assert.equal(table.DrawFrameControl.handler([HDC, RECT, 6, 0]), 0);
+});
+
+test('DrawState embosses disabled text and takes the mnemonic out of prefix text', ()=>{
+    const { table, memory, texts, said } = recording();
+    const TEXT = 0x200;
+    const DST_TEXT = 1;
+    const DST_PREFIXTEXT = 2;
+    const DSS_DISABLED = 0x20;
+    memory.set(new TextEncoder().encode('&Run'), TEXT);
+    assert.equal(table.DrawStateA.argBytes, 40);
+    assert.equal(table.DrawStateA.handler([HDC, 0, 0, TEXT, 0, 5, 6, 0, 0,
+        DST_PREFIXTEXT | DSS_DISABLED]), 1);
+    assert.deepEqual(texts.splice(0), [[6, 7, 'Run', 0x100 + 20], [5, 6, 'Run', 0x100 + 16]],
+        'the highlight a pixel down and right, the shadow over it');
+    assert.equal(table.DrawStateA.handler([HDC, 0, 0, TEXT, 2, 5, 6, 0, 0, DST_TEXT]), 1);
+    assert.deepEqual(texts.splice(0), [[5, 6, '&R', undefined]],
+        'two characters as counted, the ampersand kept, in the context\'s own colour');
+    const DST_COMPLEX = 0;
+    assert.equal(table.DrawStateA.handler([HDC, 0, 0x401000, 0, 0, 0, 0, 8, 8, DST_COMPLEX]), 1,
+        'a procedure\'s drawing is left out and the call succeeds');
+    assert.deepEqual(said, ['DrawState']);
+});

@@ -53,6 +53,77 @@ const RDW_FRAME = 0x0400;
 const WM_NCPAINT = 0x0085;
 const WM_ERASEBKGND = 0x0014;
 
+/** DrawEdge's edges and borders, and the system colours they are drawn in. */
+const BDR_RAISEDOUTER = 0x1;
+const BDR_SUNKENOUTER = 0x2;
+const BDR_RAISEDINNER = 0x4;
+const BDR_SUNKENINNER = 0x8;
+const EDGE_RAISED = BDR_RAISEDOUTER | BDR_RAISEDINNER;
+const EDGE_SUNKEN = BDR_SUNKENOUTER | BDR_SUNKENINNER;
+const BF_LEFT = 0x1;
+const BF_TOP = 0x2;
+const BF_RIGHT = 0x4;
+const BF_BOTTOM = 0x8;
+const BF_RECT = BF_LEFT | BF_TOP | BF_RIGHT | BF_BOTTOM;
+const BF_MIDDLE = 0x800;
+const BF_ADJUST = 0x2000;
+const COLOR_WINDOW = 5;
+const COLOR_WINDOWTEXT = 8;
+const COLOR_3DFACE = 15;
+const COLOR_3DSHADOW = 16;
+const COLOR_GRAYTEXT = 17;
+const COLOR_3DHILIGHT = 20;
+const COLOR_3DDKSHADOW = 21;
+
+/**
+ * The check mark, the radio dot and the radio ring as pixel rows: what the
+ * classic controls draw, at the size they draw it. Data rather than geometry
+ * because a thirteen-pixel circle is not a circle by any formula.
+ */
+export const CHECK_MARK = [
+    '......#',
+    '.....##',
+    '#...###',
+    '##.###.',
+    '#####..',
+    '.###...',
+    '..#....',
+];
+export const RADIO_RING_DARK = [
+    '....####....',
+    '..##....##..',
+    '.#........#.',
+    '.#..........',
+    '#...........',
+    '#...........',
+    '#...........',
+    '#...........',
+    '.#..........',
+    '.#..........',
+    '............',
+    '............',
+];
+export const RADIO_RING_LIGHT = [
+    '............',
+    '............',
+    '..........#.',
+    '..........#.',
+    '...........#',
+    '...........#',
+    '...........#',
+    '...........#',
+    '..........#.',
+    '.#........#.',
+    '..##....##..',
+    '....####....',
+];
+export const RADIO_DOT = [
+    '.##.',
+    '####',
+    '####',
+    '.##.',
+];
+
 /** What a character cell measures when nothing better is known. */
 const ESTIMATED_CHAR_WIDTH = 8;
 const ESTIMATED_LINE_HEIGHT = 16;
@@ -276,6 +347,16 @@ export function createPaintFunctions(options){
     /** Where a window that is not on the screen draws: nowhere. */
     const NOWHERE = { left: 0, top: 0, right: 0, bottom: 0 };
     let iconDivergenceSaid = false;
+    /** @type {Set<string>} what a drawing call has said it leaves out */
+    const toldOnce = new Set();
+    /** @param {string} api @param {string} detail */
+    const tellOnce = (api, detail)=>{
+        if (!toldOnce.has(detail))
+        {
+            toldOnce.add(detail);
+            host.divergence?.(api, detail);
+        }
+    };
 
     /** @param {any} record @returns {Rect} */
     const clientArea = record=>{
@@ -485,6 +566,166 @@ export function createPaintFunctions(options){
     };
 
     /**
+     * The rings DrawEdge draws, outer then inner, on the sides `flags` names;
+     * answers the rectangle left inside them.
+     *
+     * @param {number} hdc @param {Rect} rect @param {number} edge @param {number} flags
+     * @returns {Rect}
+     */
+    const drawEdges = (hdc, rect, edge, flags)=>{
+        const draw = host.draw;
+        let area = rect;
+        /** @param {number} topLeft @param {number} bottomRight */
+        const ring = (topLeft, bottomRight)=>{
+            if ((flags & BF_TOP) !== 0)
+            {
+                draw.fill(hdc, { ...area, bottom: area.top + 1, right: area.right - 1 },
+                    draw.sysColor(topLeft));
+            }
+            if ((flags & BF_LEFT) !== 0)
+            {
+                draw.fill(hdc, { ...area, right: area.left + 1, bottom: area.bottom - 1 },
+                    draw.sysColor(topLeft));
+            }
+            if ((flags & BF_BOTTOM) !== 0)
+            {
+                draw.fill(hdc, { ...area, top: area.bottom - 1 }, draw.sysColor(bottomRight));
+            }
+            if ((flags & BF_RIGHT) !== 0)
+            {
+                draw.fill(hdc, { ...area, left: area.right - 1 }, draw.sysColor(bottomRight));
+            }
+            area = {
+                left: area.left + ((flags & BF_LEFT) !== 0 ? 1 : 0),
+                top: area.top + ((flags & BF_TOP) !== 0 ? 1 : 0),
+                right: area.right - ((flags & BF_RIGHT) !== 0 ? 1 : 0),
+                bottom: area.bottom - ((flags & BF_BOTTOM) !== 0 ? 1 : 0),
+            };
+        };
+        if ((edge & BDR_RAISEDOUTER) !== 0)
+        {
+            ring(COLOR_3DHILIGHT, COLOR_3DDKSHADOW);
+        }
+        else if ((edge & BDR_SUNKENOUTER) !== 0)
+        {
+            ring(COLOR_3DSHADOW, COLOR_3DHILIGHT);
+        }
+        if ((edge & BDR_RAISEDINNER) !== 0)
+        {
+            ring(COLOR_3DFACE, COLOR_3DSHADOW);
+        }
+        else if ((edge & BDR_SUNKENINNER) !== 0)
+        {
+            ring(COLOR_3DDKSHADOW, COLOR_3DFACE);
+        }
+        return area;
+    };
+
+    /**
+     * A pixel-row picture put down in a colour, centred in a rectangle.
+     *
+     * @param {number} hdc @param {string[]} rows @param {Rect} box @param {number} rgb
+     */
+    const glyph = (hdc, rows, box, rgb)=>{
+        const x = box.left + ((box.right - box.left - rows[0].length) >> 1);
+        const y = box.top + ((box.bottom - box.top - rows.length) >> 1);
+        rows.forEach((row, dy)=>{
+            for (let dx = 0; dx < row.length; dx++)
+            {
+                if (row[dx] === '#')
+                {
+                    host.draw.fill(hdc, { left: x + dx, top: y + dy, right: x + dx + 1,
+                        bottom: y + dy + 1 }, rgb);
+                }
+            }
+        });
+    };
+
+    /**
+     * `count` characters of either kind at an address, terminated or not.
+     *
+     * @param {number} address @param {number} count @param {boolean} wide
+     */
+    const readCounted = (address, count, wide)=>(wide
+        ? String.fromCharCode(...new Uint16Array(
+            host.readMemory(address >>> 0, count * 2).slice().buffer))
+        : decodeAnsi(host.readMemory(address >>> 0, count)));
+
+    /**
+     * DrawState of either kind of text: text, an icon or a bitmap at a
+     * point. Disabled text is embossed -- the highlight colour a pixel down
+     * and to the right, the shadow colour over it -- and DSS_UNION text is
+     * grey rather than dithered. An icon or a bitmap keeps its own colours in
+     * either state, and what a program's own procedure would draw
+     * (DST_COMPLEX, into a memory context this layer cannot make) is left
+     * out; each is said once and the call succeeds.
+     *
+     * @param {number[]} args @param {boolean} wide
+     */
+    const drawState = ([hdc, brush, proc, data, length, x, y, cx, cy, flags], wide)=>{
+        void brush;
+        void proc;
+        const DST_TEXT = 1;
+        const DST_PREFIXTEXT = 2;
+        const DST_ICON = 3;
+        const DST_BITMAP = 4;
+        const DSS_UNION = 0x10;
+        const DSS_DISABLED = 0x20;
+        const draw = host.draw;
+        const h = hdc >>> 0;
+        const kind = flags & 0xf;
+        if (!draw || h === 0)
+        {
+            return 0;
+        }
+        if (kind === DST_TEXT || kind === DST_PREFIXTEXT)
+        {
+            // A length of 0 is a terminated string.
+            const string = (length | 0) > 0
+                ? readCounted(data, length | 0, wide)
+                : readText(host, data >>> 0, wide, 0x10000);
+            const sized = (cx | 0) > 0 && (cy | 0) > 0;
+            const bounds = { left: x | 0, top: y | 0,
+                right: sized ? (x | 0) + (cx | 0) : 0x7fff,
+                bottom: sized ? (y | 0) + (cy | 0) : 0x7fff };
+            const lines = layoutText(string, bounds,
+                DT_SINGLELINE | (kind === DST_TEXT ? DT_NOPREFIX : 0), cellOf(h));
+            /** @param {number} by @param {number | undefined} color */
+            const put = (by, color)=>lines.every(line=>draw.text(h, line.x + by, line.y + by,
+                line.text, { color, clip: sized ? bounds : null, transparent: true }));
+            if ((flags & DSS_DISABLED) !== 0)
+            {
+                return put(1, draw.sysColor(COLOR_3DHILIGHT))
+                    && put(0, draw.sysColor(COLOR_3DSHADOW)) ? 1 : 0;
+            }
+            if ((flags & DSS_UNION) !== 0)
+            {
+                tellOnce('DrawState', 'DSS_UNION text is grey rather than dithered');
+            }
+            return put(0, (flags & DSS_UNION) !== 0 ? draw.sysColor(COLOR_GRAYTEXT) : undefined)
+                ? 1 : 0;
+        }
+        if (kind === DST_ICON)
+        {
+            drawIcon(h, x, y, data, cx | 0, cy | 0);
+        }
+        else if (kind === DST_BITMAP)
+        {
+            draw.bitmap(h, x | 0, y | 0, data >>> 0);
+        }
+        else
+        {
+            tellOnce('DrawState', 'what a DST_COMPLEX procedure would draw is left out');
+        }
+        if ((kind === DST_ICON || kind === DST_BITMAP)
+            && (flags & (DSS_UNION | DSS_DISABLED)) !== 0)
+        {
+            tellOnce('DrawState', 'a disabled icon or bitmap keeps its own colours');
+        }
+        return 1;
+    };
+
+    /**
      * The character cell of a context's font, for laying text out, and the
      * measure of a string in it; the estimate when the build cannot measure.
      *
@@ -517,10 +758,7 @@ export function createPaintFunctions(options){
             ? ''
             : (count | 0) < 0
                 ? readText(host, text >>> 0, wide, 0x10000)
-                : wide
-                    ? String.fromCharCode(...new Uint16Array(
-                        host.readMemory(text >>> 0, (count | 0) * 2).slice().buffer))
-                    : decodeAnsi(host.readMemory(text >>> 0, count | 0));
+                : readCounted(text, count | 0, wide);
         const bounds = (rect >>> 0) === 0
             ? { left: 0, top: 0, right: 0x7fff, bottom: 0x7fff }
             : readRect(host, rect);
@@ -938,65 +1176,7 @@ export function createPaintFunctions(options){
                 {
                     return 0;
                 }
-                const BDR_RAISEDOUTER = 0x1;
-                const BDR_SUNKENOUTER = 0x2;
-                const BDR_RAISEDINNER = 0x4;
-                const BDR_SUNKENINNER = 0x8;
-                const BF_LEFT = 0x1;
-                const BF_TOP = 0x2;
-                const BF_RIGHT = 0x4;
-                const BF_BOTTOM = 0x8;
-                const BF_MIDDLE = 0x800;
-                const BF_ADJUST = 0x2000;
-                const COLOR_3DFACE = 15;
-                const COLOR_3DSHADOW = 16;
-                const COLOR_3DHILIGHT = 20;
-                const COLOR_3DDKSHADOW = 21;
-                let area = readRect(host, rect);
-                /** @param {number} topLeft @param {number} bottomRight */
-                const ring = (topLeft, bottomRight)=>{
-                    const h = hdc >>> 0;
-                    if ((flags & BF_TOP) !== 0)
-                    {
-                        draw.fill(h, { ...area, bottom: area.top + 1, right: area.right - 1 },
-                            draw.sysColor(topLeft));
-                    }
-                    if ((flags & BF_LEFT) !== 0)
-                    {
-                        draw.fill(h, { ...area, right: area.left + 1, bottom: area.bottom - 1 },
-                            draw.sysColor(topLeft));
-                    }
-                    if ((flags & BF_BOTTOM) !== 0)
-                    {
-                        draw.fill(h, { ...area, top: area.bottom - 1 }, draw.sysColor(bottomRight));
-                    }
-                    if ((flags & BF_RIGHT) !== 0)
-                    {
-                        draw.fill(h, { ...area, left: area.right - 1 }, draw.sysColor(bottomRight));
-                    }
-                    area = {
-                        left: area.left + ((flags & BF_LEFT) !== 0 ? 1 : 0),
-                        top: area.top + ((flags & BF_TOP) !== 0 ? 1 : 0),
-                        right: area.right - ((flags & BF_RIGHT) !== 0 ? 1 : 0),
-                        bottom: area.bottom - ((flags & BF_BOTTOM) !== 0 ? 1 : 0),
-                    };
-                };
-                if ((edge & BDR_RAISEDOUTER) !== 0)
-                {
-                    ring(COLOR_3DHILIGHT, COLOR_3DDKSHADOW);
-                }
-                else if ((edge & BDR_SUNKENOUTER) !== 0)
-                {
-                    ring(COLOR_3DSHADOW, COLOR_3DHILIGHT);
-                }
-                if ((edge & BDR_RAISEDINNER) !== 0)
-                {
-                    ring(COLOR_3DFACE, COLOR_3DSHADOW);
-                }
-                else if ((edge & BDR_SUNKENINNER) !== 0)
-                {
-                    ring(COLOR_3DDKSHADOW, COLOR_3DFACE);
-                }
+                const area = drawEdges(hdc >>> 0, readRect(host, rect), edge, flags);
                 if ((flags & BF_MIDDLE) !== 0)
                 {
                     draw.fill(hdc >>> 0, area, draw.sysColor(COLOR_3DFACE));
@@ -1007,6 +1187,130 @@ export function createPaintFunctions(options){
                 }
                 return 1;
             },
+        },
+
+        /**
+         * BOOL DrawFrameControl(HDC hdc, LPRECT lprc, UINT uType, UINT uState)
+         *
+         * A button drawn the way the button control draws its own: a push
+         * button raised, or sunken when pushed, DFCS_ADJUSTRECT leaving the
+         * rectangle as what is inside its edge; a check box's sunken square
+         * or a radio button's ring, centred in the rectangle, with the mark
+         * when checked. A menu's check mark or bullet is black on white, the
+         * way a program takes it for a mask. A caption or scroll button, or a
+         * menu's arrow, is drawn without its picture, said once.
+         */
+        DrawFrameControl: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hdc, rect, type, state])=>{
+                const DFC_CAPTION = 1;
+                const DFC_MENU = 2;
+                const DFC_BUTTON = 4;
+                const DFC_POPUPMENU = 5;
+                const DFCS_MENUCHECK = 0x1;
+                const DFCS_MENUBULLET = 0x2;
+                const DFCS_BUTTONRADIOIMAGE = 0x1;
+                const DFCS_BUTTONRADIOMASK = 0x2;
+                const DFCS_BUTTONRADIO = 0x4;
+                const DFCS_BUTTON3STATE = 0x8;
+                const DFCS_BUTTONPUSH = 0x10;
+                const DFCS_INACTIVE = 0x100;
+                const DFCS_PUSHED = 0x200;
+                const DFCS_CHECKED = 0x400;
+                const DFCS_ADJUSTRECT = 0x2000;
+                const DFCS_FLAT = 0x4000;
+                const draw = host.draw;
+                if (!draw || (rect >>> 0) === 0 || type < DFC_CAPTION || type > DFC_POPUPMENU)
+                {
+                    return 0;
+                }
+                const h = hdc >>> 0;
+                const area = readRect(host, rect);
+                const pushed = (state & DFCS_PUSHED) !== 0;
+                const flat = (state & DFCS_FLAT) !== 0;
+                if (type === DFC_MENU || type === DFC_POPUPMENU)
+                {
+                    const kind = state & 0xff;
+                    const picture = kind === DFCS_MENUCHECK ? CHECK_MARK
+                        : kind === DFCS_MENUBULLET ? RADIO_DOT : null;
+                    draw.fill(h, area, 0xffffff);
+                    if (picture)
+                    {
+                        glyph(h, picture, area, 0);
+                    }
+                    else
+                    {
+                        tellOnce('DrawFrameControl', 'a menu arrow is left out');
+                    }
+                    return 1;
+                }
+                if (type === DFC_BUTTON && (state & DFCS_BUTTONPUSH) === 0)
+                {
+                    const side = Math.max(0,
+                        Math.min(area.right - area.left, area.bottom - area.top));
+                    const left = area.left + ((area.right - area.left - side) >> 1);
+                    const top = area.top + ((area.bottom - area.top - side) >> 1);
+                    const box = { left, top, right: left + side, bottom: top + side };
+                    const checked = (state & DFCS_CHECKED) !== 0;
+                    const radio = (state & (DFCS_BUTTONRADIO | DFCS_BUTTONRADIOIMAGE
+                        | DFCS_BUTTONRADIOMASK)) !== 0;
+                    const grey = (state & DFCS_INACTIVE) !== 0 || pushed
+                        || (checked && (state & DFCS_BUTTON3STATE) !== 0);
+                    const face = draw.sysColor(grey ? COLOR_3DFACE : COLOR_WINDOW);
+                    const ink = draw.sysColor((state & DFCS_INACTIVE) !== 0
+                        ? COLOR_GRAYTEXT : COLOR_WINDOWTEXT);
+                    if (radio)
+                    {
+                        glyph(h, RADIO_RING_DARK, box, draw.sysColor(COLOR_3DSHADOW));
+                        glyph(h, RADIO_RING_LIGHT, box, draw.sysColor(COLOR_3DHILIGHT));
+                        const ring = (side - RADIO_RING_DARK.length) >> 1;
+                        draw.fill(h, { left: left + ring + 2, top: top + ring + 2,
+                            right: left + ring + 10, bottom: top + ring + 10 }, face);
+                    }
+                    else
+                    {
+                        draw.fill(h,
+                            drawEdges(h, box, flat ? BDR_SUNKENOUTER : EDGE_SUNKEN, BF_RECT), face);
+                    }
+                    if (checked)
+                    {
+                        glyph(h, radio ? RADIO_DOT : CHECK_MARK, box, ink);
+                    }
+                    return 1;
+                }
+                draw.fill(h, area, draw.sysColor(COLOR_3DFACE));
+                const inside = drawEdges(h, area, flat
+                    ? (pushed ? BDR_SUNKENOUTER : BDR_RAISEDOUTER)
+                    : (pushed ? EDGE_SUNKEN : EDGE_RAISED), BF_RECT);
+                if (type !== DFC_BUTTON)
+                {
+                    tellOnce('DrawFrameControl', 'a caption or scroll button is drawn without its'
+                        + ' picture');
+                }
+                if ((state & DFCS_ADJUSTRECT) !== 0)
+                {
+                    writeRect(host, rect, inside);
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL DrawState(HDC hdc, HBRUSH hbrFore, DRAWSTATEPROC qfnCallBack,
+         *   LPARAM lData, WPARAM wData, int x, int y, int cx, int cy, UINT uFlags)
+         */
+        DrawStateA: {
+            argBytes: 40,
+            /** @param {number[]} args */
+            handler: args=>drawState(args, false),
+        },
+
+        /** DrawStateA with UTF-16 text. */
+        DrawStateW: {
+            argBytes: 40,
+            /** @param {number[]} args */
+            handler: args=>drawState(args, true),
         },
 
         /**

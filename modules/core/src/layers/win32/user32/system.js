@@ -2772,6 +2772,21 @@ export function createSystemFunctions({ host, live, windows, classes }){
             },
         },
 
+        /** LPWSTR CharNextW(LPCWSTR lpsz): CharNextA, a character being two bytes */
+        CharNextW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([text])=>{
+                const at = text >>> 0;
+                if (at === 0)
+                {
+                    return 0;
+                }
+                const [low, high] = host.readMemory(at, 2);
+                return (low | high) === 0 ? at : at + 2;
+            },
+        },
+
         /**
          * BOOL OemToCharBuffA(LPCSTR lpszSrc, LPSTR lpszDst, DWORD cchDstLength)
          *
@@ -3081,6 +3096,11 @@ export function createSystemFunctions({ host, live, windows, classes }){
         GrayStringA: { argBytes: 36, handler: ()=>0 },
         TabbedTextOutA: { argBytes: 32, handler: ()=>0 },
         WinHelpA: { argBytes: 16, handler: ()=>0 },
+        /** void NotifyWinEvent(DWORD event, HWND hwnd, LONG idObject, LONG idChild): nobody listens */
+        NotifyWinEvent: { argBytes: 16, handler: ()=>0 },
+        GrayStringW: { argBytes: 36, handler: ()=>0 },
+        TabbedTextOutW: { argBytes: 32, handler: ()=>0 },
+        WinHelpW: { argBytes: 16, handler: ()=>0 },
         ExitWindowsEx: {
             argBytes: 8,
             handler: ()=>{

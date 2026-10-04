@@ -29,7 +29,7 @@
  * parent whose procedure is the program's own is answered.
  */
 
-import { layoutText } from './paint.js';
+import { CHECK_MARK, RADIO_DOT, RADIO_RING_DARK, RADIO_RING_LIGHT, layoutText } from './paint.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { createTabWalk } from './tabwalk.js';
 
@@ -409,55 +409,6 @@ export const COLOR_3DDKSHADOW = 21;
 
 /** Nothing bounds a string a program sets on a control, so something has to. */
 const MAX_TEXT = 1 << 16;
-
-/**
- * The check mark, the radio dot and the radio ring as pixel rows: what the
- * classic controls draw, at the size they draw it. Data rather than geometry
- * because a thirteen-pixel circle is not a circle by any formula.
- */
-const CHECK_MARK = [
-    '......#',
-    '.....##',
-    '#...###',
-    '##.###.',
-    '#####..',
-    '.###...',
-    '..#....',
-];
-const RADIO_RING_DARK = [
-    '....####....',
-    '..##....##..',
-    '.#........#.',
-    '.#..........',
-    '#...........',
-    '#...........',
-    '#...........',
-    '#...........',
-    '.#..........',
-    '.#..........',
-    '............',
-    '............',
-];
-const RADIO_RING_LIGHT = [
-    '............',
-    '............',
-    '..........#.',
-    '..........#.',
-    '...........#',
-    '...........#',
-    '...........#',
-    '...........#',
-    '..........#.',
-    '.#........#.',
-    '..##....##..',
-    '....####....',
-];
-const RADIO_DOT = [
-    '.##.',
-    '####',
-    '####',
-    '.##.',
-];
 
 /**
  * @typedef {Object} Rect

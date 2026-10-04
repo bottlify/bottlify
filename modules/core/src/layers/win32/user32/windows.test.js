@@ -1358,6 +1358,27 @@ test('messages for a window are taken only by the thread that made it', ()=>{
     assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_USER);
 });
 
+test('another thread\'s window is read from its caption, not sent WM_GETTEXT', ()=>{
+    // The owner may be waiting on the very thread that asks -- a collector
+    // thread enumerating windows while the thread that made them waits for
+    // it -- and a sent message would wait for a look at the queue that never
+    // comes.
+    const maker = { id: 1, name: 'maker' };
+    const another = { id: 2, name: 'another' };
+    const caller = { current: /** @type {unknown} */ (maker) };
+    const { fns, memory, dispatched, divergences } = setup({ caller });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+
+    caller.current = another;
+    const before = dispatched.length;
+    assert.equal(fns.GetWindowTextA.handler([hwnd, TEXT_BUFFER, 64]), 4);
+    assert.equal(memory.readCString(TEXT_BUFFER, 64), 'Main', 'the caption it was made with');
+    assert.equal(dispatched.length, before, 'no message reached the procedure');
+    assert.ok(divergences.some(text=>text.startsWith('GetWindowText')));
+});
+
 test('a message loop runs until PostQuitMessage ends it', ()=>{
     const { fns, memory, queue, hwnd } = withWindow();
     queue.post({ hwnd, message: WM_USER, wParam: 0, lParam: 0 });

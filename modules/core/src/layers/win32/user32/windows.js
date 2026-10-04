@@ -774,6 +774,30 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * Whether a window is another thread's than the caller's: GetWindowText
+     * reads such a window's caption rather than wait on its thread, and says
+     * so once.
+     *
+     * @param {any} record
+     */
+    const ownedElsewhere = record=>{
+        const owner = creatorOf(record);
+        const asking = threadIdOf(host.callerThread?.());
+        if (owner === null || asking === null || owner === asking)
+        {
+            return false;
+        }
+        if (!toldCaption)
+        {
+            toldCaption = true;
+            host.divergence?.('GetWindowText', 'another thread\'s window is read from its caption,'
+                + ' not sent WM_GETTEXT');
+        }
+        return true;
+    };
+    let toldCaption = false;
+
+    /**
      * SendMessage, to a live window: its procedure runs before this returns,
      * or the answer is a promise of when it will have.
      *
@@ -4894,7 +4918,10 @@ export function createWindowFunctions(host){
          * a procedure that keeps its own text answers with it, and what the
          * procedure answers is the length, terminated or not. The buffer is
          * emptied first, for a procedure that writes nothing; one that cannot
-         * be written is no text, not a fault.
+         * be written is no text, not a fault. A window of another thread is
+         * read from its caption instead, and said: the message would wait for
+         * that thread to look at its queue, and a thread that is waiting on
+         * this one never does.
          */
         GetWindowTextA: {
             argBytes: 12,
@@ -4906,6 +4933,10 @@ export function createWindowFunctions(host){
                 if (!record || room <= 0 || !emptied(out, 1))
                 {
                     return 0;
+                }
+                if (ownedElsewhere(record))
+                {
+                    return writeText(host, out, record.title, room, false);
                 }
                 return (/** @type {any} */ (table)).SendMessageA.handler([record.hwnd, WM_GETTEXT,
                     room, out >>> 0]);
@@ -4922,6 +4953,10 @@ export function createWindowFunctions(host){
                 if (!record || room <= 0 || !emptied(out, 2))
                 {
                     return 0;
+                }
+                if (ownedElsewhere(record))
+                {
+                    return writeText(host, out, record.title, room, true);
                 }
                 return (/** @type {any} */ (table)).SendMessageW.handler([record.hwnd, WM_GETTEXT,
                     room, out >>> 0]);

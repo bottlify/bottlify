@@ -1082,6 +1082,13 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                 return 1;
             },
         },
+        ModifyMenuW: {
+            argBytes: 20,
+            handler: ()=>{
+                host.divergence?.('ModifyMenuW', 'the item is left as it was');
+                return 1;
+            },
+        },
 
         SetMenuItemBitmaps: {
             argBytes: 20,
