@@ -64,6 +64,11 @@ const set = commandSet([...IDIRECT3DDEVICE9_SLOTS, ...STATE_BLOCK_SLOTS], {
     DrawIndexedPrimitive: { args: 6, draws: true,
         make: (d, c)=>d.DrawIndexedPrimitive(c.arg(0), c.arg(1) | 0, c.arg(2), c.arg(3),
             c.arg(4), c.arg(5)) },
+    // A new target is a new viewport, which the guest's getter reads.
+    SetRenderTarget: { args: 2, objects: [1], stale: true,
+        make: (d, c)=>d.SetRenderTarget(c.arg(0), c.object()) },
+    SetDepthStencilSurface: { args: 1, objects: [0],
+        make: (d, c)=>d.SetDepthStencilSurface(c.object()) },
     'StateBlock.Capture': { args: 1, self: true, objects: [0],
         make: (d, c)=>c.object()?.Capture() ?? D3DERR_INVALIDCALL },
     // What the block applies is the device's state, which the guest's getters

@@ -200,6 +200,10 @@ export function createDirect3D9Seam(
         if (owner)
         {
             owners.set(object, owner);
+            // A record in the device's ring may name it: the ring is played
+            // before its count is touched on the host, which the last
+            // reference's Release always is.
+            object.settleGuestRefs ??= ()=>shadowOf(owner)?.sync();
         }
         const pointer = publisher.publish(object, interfaces, id);
         fields.writeU32(out, pointer);
@@ -1051,9 +1055,6 @@ export function createDirect3D9Seam(
     const handBackStateBlock = (block, device, out)=>{
         stateBlocks.add(block);
         block.guestState = ()=>shadowOf(device)?.address() ?? 0;
-        // A record in the ring may name it: the ring is played before the
-        // block's last reference can go.
-        block.settleGuestRefs = ()=>shadowOf(device)?.sync();
         return handBack(block, stateBlockInterfaces, IID_IDirect3DStateBlock9, out,
             E_OUTOFMEMORY, device);
     };
@@ -2968,9 +2969,10 @@ export function createDirect3D9Seam(
                     const made = held.device.commands(records, objects);
                     if (shadow.stale())
                     {
-                        // A state block applied in the ring: the block is
-                        // brought to what those the run names hold, and the
-                        // getters may read it again.
+                        // A state block applied or a target set in the ring:
+                        // the block is brought to what the blocks the run
+                        // names hold and to the viewport, and the getters may
+                        // read it again.
                         for (const object of objects)
                         {
                             if (stateBlocks.has(object))
@@ -2978,6 +2980,7 @@ export function createDirect3D9Seam(
                                 shadow.remirror(touchedBy(object.record));
                             }
                         }
+                        shadow.remirror({ viewport: true });
                         shadow.fresh();
                     }
                     return made;

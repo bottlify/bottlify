@@ -993,6 +993,8 @@ export function getSurfaceLevelCode(at, trap){
  *     pointer -- a method of an object of the device's that is not the device
  * @property {boolean} [stale]  the call may change what the block mirrors
  *     (`FLAG_STALE`)
+ * @property {boolean} [nullable]  the pointer may be null with a count of
+ *     zero, and is then recorded as null with nothing copied
  * @property {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]
  *     } [mirror]  guest code run first, with the block in ECX, that keeps what
  *     a getter in the guest reads current; it may leave for the host through
@@ -1049,7 +1051,11 @@ export function getSurfaceLevelCode(at, trap){
  */
 export function commandCode(at, trap, shape){
     const { slot, args, pointer = -1, bytes = 0, count, choose, vertices, mirror = [],
-        draws = false, thread = false, self = false, stale = false } = shape;
+        draws = false, thread = false, self = false, stale = false, nullable = false } = shape;
+    if (nullable && !count)
+    {
+        throw new Error('shadow: a pointer that may be null is counted by an argument');
+    }
     const header = COMMAND.ARGS + 4 * args;
     if (self && (thread || pointer >= 0 || count || choose || vertices))
     {
@@ -1082,7 +1088,7 @@ export function commandCode(at, trap, shape){
         parts.push(
             [0x8b, 0x44, 0x24, entry + 4 * pointer],             // mov eax, [esp+entry+4p]
             [0x85, 0xc0],                                        // test eax, eax
-            { jcc: 0x74, to: 'out', near: vertices !== undefined }); // jz out
+            { jcc: 0x74, to: nullable ? 'none' : 'out', near: true }); // jz out
     }
     if (choose)
     {
@@ -1150,6 +1156,16 @@ export function commandCode(at, trap, shape){
     {
         parts.push([0xba, ...dword(pointer >= 0 ? bytes : 0)]);  // mov edx, bytes
     }
+    if (nullable && count)
+    {
+        // No pointer is no elements: a count with it is the host's to refuse.
+        parts.push(
+            { jcc: 0xeb, to: 'take' },                           // jmp take
+            { label: 'none' },
+            [0x8b, 0x54, 0x24, entry + 4 * count.arg],           // mov edx, [esp+entry+4c]
+            [0x85, 0xd2],                                        // test edx, edx
+            { jcc: 0x75, to: 'out' });                           // jnz out
+    }
     parts.push(
         { jcc: 0xeb, to: 'take' },                               // jmp take
         { label: 'out' },
@@ -1170,10 +1186,22 @@ export function commandCode(at, trap, shape){
         [0xc7, 0x07, ...dword(slot)]);                           // mov dword [edi], slot
     for (let arg = 0; arg < args; arg++)
     {
-        parts.push(arg === pointer
-            ? [0x8d, 0x87, ...dword(header)]                     // lea eax, [edi+header]
-            : [0x8b, 0x44, 0x24, pushed + 4 * (arg - (self ? 1 : 0))], // mov eax, [esp+...]
-        [0x89, 0x47, COMMAND.ARGS + 4 * arg]);                   // mov [edi+8+4i], eax
+        if (arg === pointer && nullable)
+        {
+            parts.push(
+                [0x8b, 0x44, 0x24, pushed + 4 * arg],            // mov eax, [esp+pushed+4p]
+                [0x85, 0xc0],                                    // test eax, eax
+                { jcc: 0x74, to: 'null' },                       // jz null: it stays 0
+                [0x8d, 0x87, ...dword(header)],                  // lea eax, [edi+header]
+                { label: 'null' });
+        }
+        else
+        {
+            parts.push(arg === pointer
+                ? [0x8d, 0x87, ...dword(header)]                 // lea eax, [edi+header]
+                : [0x8b, 0x44, 0x24, pushed + 4 * (arg - (self ? 1 : 0))]); // mov eax, [esp+..]
+        }
+        parts.push([0x89, 0x47, COMMAND.ARGS + 4 * arg]);        // mov [edi+8+4i], eax
     }
     if (pointer >= 0)
     {

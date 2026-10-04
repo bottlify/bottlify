@@ -1720,7 +1720,12 @@ test('with guest memory, a device\'s setters and draws run in the guest, and its
     {
         assert.ok(guest(name), `${name} runs in the guest`);
     }
-    assert.ok(!guest('Clear') && !guest('Present'));
+    for (const name of ['Clear', 'BeginScene', 'EndScene', 'SetRenderTarget',
+        'SetDepthStencilSurface'])
+    {
+        assert.ok(guest(name), `${name} runs in the guest`);
+    }
+    assert.ok(!guest('Present'), 'the frame is paced on the host');
 
     const block = h.box.memory.readU32(device + 4);
     assert.notEqual(block, 0, 'the block is one word past the interface pointer');
@@ -1881,6 +1886,34 @@ test('a state block applied through the ring is made in order, and its states ar
     assert.equal(h.box.memory.readU32(owner + SHADOW.FLAGS), 0, 'which may read it again');
     assert.equal(h.device(device, 'GetRenderState', [D3DRS.FILLMODE, out]), D3D_OK);
     assert.equal(h.box.memory.readU32(out), 2, 'and what was set after it, after it');
+    assert.deepEqual(h.divergences, []);
+});
+
+test('a render target set through the ring is a new viewport before a getter reads it', ()=>{
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const owner = h.box.memory.readU32(device + 4);
+    const ring = h.box.memory.readU32(owner + SHADOW.COMMANDS);
+    const out = 0x3200;
+    assert.equal(h.device(device, 'CreateRenderTarget',
+        [32, 16, D3DFMT.A8R8G8B8, 0, 0, 0, out, 0]), D3D_OK);
+    const target = h.box.memory.readU32(out);
+    const words = [commandSlot('SetRenderTarget'), 16, 0, target];
+    h.box.memory.writeBytes(ring, new Uint8Array(new Uint32Array(words).buffer));
+    h.box.memory.writeU32(owner + SHADOW.COMMAND_HEAD, words.length * 4);
+    h.box.memory.writeU32(owner + SHADOW.FLAGS, FLAG_STALE);
+
+    assert.equal(h.device(device, 'GetViewport', [out]), D3D_OK);
+    assert.deepEqual(Array.from({ length: 4 }, (unused, i)=>h.box.memory.readU32(out + i * 4)),
+        [0, 0, 32, 16], 'the target\'s whole');
+    assert.deepEqual(Array.from({ length: 4 },
+        (unused, i)=>h.box.memory.readU32(owner + SHADOW.VIEWPORT + i * 4)), [0, 0, 32, 16],
+    'and the block\'s');
+    assert.equal(h.box.memory.readU32(owner + SHADOW.FLAGS), 0);
+    // The program lets go of the target while the device holds it: the
+    // device keeps it, and nothing in the ring names a surface that is gone.
+    assert.equal(h.release(target), 0);
     assert.deepEqual(h.divergences, []);
 });
 

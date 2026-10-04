@@ -431,3 +431,74 @@ test('a state block\'s Apply in the ring names the block and sends the getters t
     host.writePhysical(BLOCK, new Uint8Array(u32(FLAG_SLOW_PATH)));
     assert.equal(run(APPLY, []), 'trap', 'the host\'s flag');
 });
+
+test('a clear copies its rectangles, or none for the whole target, and a target set in the'
+    + ' ring sends the getters to the host', ()=>{
+    const host = createCorkHost({
+        memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
+        initialStack: STACK, engine: cork, cork: {},
+    });
+    const CLEAR = VIEWPORT;
+    const TARGET = CONSTANTS;
+    host.writePhysical(CLEAR, commandCode(CLEAR, TRAP, shape('Clear')));
+    host.writePhysical(TARGET, commandCode(TARGET, TRAP, shape('SetRenderTarget')));
+    host.writePhysical(TRAP, new Uint8Array([0xf4]));
+    host.writePhysical(OBJECT + 4, new Uint8Array(u32(BLOCK)));
+    host.writePhysical(BLOCK, new Uint8Array(SHADOW.SIZE));
+    host.writePhysical(BLOCK + SHADOW.COMMANDS, new Uint8Array([...u32(RING), ...u32(RING_BYTES)]));
+    host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
+    const rects = [1, 2, 3, 4, 10, 20, 30, 40];
+    host.writePhysical(DATA, new Uint8Array(new Uint32Array(rects).buffer));
+    const one = new Uint32Array(new Float32Array([1]).buffer)[0];
+
+    /** @param {number} at */
+    const read = at=>{
+        const bytes = host.readPhysical(at, 4);
+        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+    };
+    /** @param {number} target @param {number[]} args @returns {'ok' | 'trap'} */
+    const run = (target, args)=>{
+        const code = call(PROGRAM, target, OBJECT, args);
+        host.writePhysical(PROGRAM, new Uint8Array(code));
+        host.writeReg32('eip', PROGRAM);
+        host.writeReg32('esp', STACK);
+        host.runSlice(1000);
+        if (host.readReg32('eip') === TRAP + 1)
+        {
+            assert.equal(host.readReg32('esp'), STACK - 4 * (args.length + 2));
+            return 'trap';
+        }
+        assert.equal(host.readReg32('eip'), PROGRAM + code.length);
+        assert.equal(host.readReg32('esp'), STACK);
+        return 'ok';
+    };
+
+    assert.equal(run(CLEAR, [0, 0, 3, 0xff00ff00, one, 0]), 'ok', 'the whole target');
+    assert.deepEqual(Array.from({ length: 8 }, (unused, i)=>read(RING + i * 4)),
+        [commandSlot('Clear'), 32, 0, 0, 3, 0xff00ff00, one, 0], 'no pointer, nothing copied');
+    assert.equal(run(CLEAR, [2, DATA, 1, 7, one, 5]), 'ok', 'two rectangles');
+    assert.equal(read(RING + 32 + COMMAND.BYTES), 32 + 32);
+    assert.equal(read(RING + 32 + COMMAND.ARGS + 4), RING + 64, 'the pointer names the copy');
+    assert.equal(run(CLEAR, [1, 0, 1, 7, one, 5]), 'trap', 'a count with no rectangles');
+    assert.equal(run(CLEAR, [0, DATA, 1, 7, one, 5]), 'trap', 'rectangles with no count');
+    assert.equal(run(CLEAR, [65, DATA, 1, 7, one, 5]), 'trap', 'more than a record copies');
+
+    /** @type {any[]} */
+    const made = [];
+    const device = {
+        /** @param {any[]} args */
+        Clear: (...args)=>made.push(args) && 0,
+    };
+    assert.equal(runCommands(device, host.readPhysical(RING, 96).slice(), [], ()=>{
+        assert.fail('nothing refused');
+    }), 2);
+    assert.deepEqual(made, [
+        [0, null, 3, 0xff00ff00, 1, 0],
+        [2, [{ x1: 1, y1: 2, x2: 3, y2: 4 }, { x1: 10, y1: 20, x2: 30, y2: 40 }], 1, 7, 1, 5],
+    ]);
+
+    assert.equal(read(BLOCK + SHADOW.FLAGS), 0);
+    assert.equal(run(TARGET, [0, 0x7700]), 'ok');
+    assert.equal(read(BLOCK + SHADOW.FLAGS), FLAG_STALE,
+        'the viewport the getters read may be gone');
+});

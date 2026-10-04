@@ -74,6 +74,7 @@ const ints = new Int32Array(scratch);
  * @property {boolean} [kept]  its copy is taken with `copy` alone, not through the scratch
  * @property {boolean} [self]  the first argument is the object the method is of, not the device
  * @property {boolean} [stale]  it may change state the device's block mirrors
+ * @property {boolean} [nullable]  its pointer may be null with a count of zero
  * @property {boolean} [draws]
  * @property {(device: any, call: CommandArgs) => number} make
  */
@@ -201,6 +202,22 @@ export function materialOf(f){
         Power: f[16] };
 }
 
+const bits = new DataView(new ArrayBuffer(4));
+/** A float's bits as the float. @param {number} word */
+const floatOf = word=>{
+    bits.setUint32(0, word >>> 0, true);
+    return bits.getFloat32(0, true);
+};
+
+/**
+ * Clear's rectangles, four integers each, as the device takes them.
+ *
+ * @param {Int32Array} ints @param {number} count
+ */
+const rectsOf = (ints, count)=>Array.from({ length: count }, (unused, i)=>({
+    x1: ints[i * 4], y1: ints[i * 4 + 1], x2: ints[i * 4 + 2], y2: ints[i * 4 + 3],
+}));
+
 /**
  * The most a draw from the program's own memory copies into a record: past
  * it the host reads the vertices itself, as it does without a ring.
@@ -231,6 +248,12 @@ export const SHARED_COMMANDS = {
         make: (d, c)=>d.SetClipPlane(c.arg(0), c.floats.slice(0, 4)) },
     DrawPrimitive: { args: 3, draws: true,
         make: (d, c)=>d.DrawPrimitive(c.arg(0), c.arg(1), c.arg(2)) },
+    BeginScene: { args: 0, make: d=>d.BeginScene() },
+    EndScene: { args: 0, make: d=>d.EndScene() },
+    // No rectangles is the whole target; Z comes as a float in a dword.
+    Clear: { args: 6, pointer: 1, nullable: true, count: { arg: 0, shift: 4, most: 64 },
+        make: (d, c)=>d.Clear(c.arg(0), c.arg(1) === 0 ? null : rectsOf(c.ints, c.arg(0)),
+            c.arg(2), c.arg(3), floatOf(c.arg(4)), c.arg(5)) },
     DrawPrimitiveUP: { args: 4, pointer: 2, kept: true, draws: true,
         vertices: { type: 0, count: 1, stride: 3, most: UP_BYTES },
         make: (d, c)=>d.DrawPrimitiveUP(c.arg(0), c.arg(1),
@@ -244,6 +267,9 @@ export const SHARED_COMMANDS = {
  */
 export const D3D8_COMMANDS = commandSet(IDIRECT3DDEVICE8_SLOTS, {
     ...SHARED_COMMANDS,
+    // A new target is a new viewport, which the guest's getter reads.
+    SetRenderTarget: { args: 2, objects: [0, 1], stale: true,
+        make: (d, c)=>d.SetRenderTarget(c.object(), c.object()) },
     SetStreamSource: { args: 3, objects: [1],
         make: (d, c)=>d.SetStreamSource(c.arg(0), c.object(), c.arg(2)) },
     SetIndices: { args: 2, objects: [0], make: (d, c)=>d.SetIndices(c.object(), c.arg(1)) },

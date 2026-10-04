@@ -373,6 +373,10 @@ export function createDirect3D8Seam(
         if (owner)
         {
             owners.set(object, owner);
+            // A record in the device's ring may name it: the ring is played
+            // before its count is touched on the host, which the last
+            // reference's Release always is.
+            object.settleGuestRefs ??= ()=>shadowOf(owner)?.sync();
         }
         const pointer = publisher.publish(object, interfaces, id);
         fields.writeU32(out, pointer);
@@ -2571,6 +2575,7 @@ export function createDirect3D8Seam(
                 // a device given out first would carry a zero there, and the
                 // guest methods would keep the program's state at address
                 // zero, out of the host's sight.
+                /** @type {ReturnType<typeof createShadow>} */
                 const shadow = createShadow({
                     allocate,
                     // The block is read on every device call and compared
@@ -2580,8 +2585,17 @@ export function createDirect3D8Seam(
                     writeMemory: memory.writeMemory,
                     device: held.device,
                     divergence,
-                    commands: { take: records=>held.device.commands(records,
-                        D3D8_COMMANDS.commandObjects(records, publisher.objectAt)) },
+                    commands: { take: records=>{
+                        const made = held.device.commands(records,
+                            D3D8_COMMANDS.commandObjects(records, publisher.objectAt));
+                        // A target set in the ring is a new viewport.
+                        if (shadow.stale())
+                        {
+                            shadow.remirror({ viewport: true });
+                            shadow.fresh();
+                        }
+                        return made;
+                    } },
                 });
                 shadows.set(held.device, shadow);
                 held.device.guestState = ()=>shadow.address();
