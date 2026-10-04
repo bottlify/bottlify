@@ -49,7 +49,8 @@ const BUFFER_BYTES = RATE * CHANNELS * (BITS / 8); // one second
  * the guest calls it by index.
  */
 function fixture(){
-    const bytes = new Uint8Array(0x200000);
+    // Room for forty one-second buffers side by side: a session's worth.
+    const bytes = new Uint8Array(0x800000);
     const view = new DataView(bytes.buffer);
     let ms = 1000;
     let nextAddress = 0x40000;

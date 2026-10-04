@@ -1793,3 +1793,21 @@ test('there is no capture device, as Windows says of a machine without one', ()=
     assert.equal(/** @type {any} */ (dll.DirectSoundCaptureEnumerateA).handler([0x7000, 0]),
         DS_OK);
 });
+
+test('a new buffer holds silence, whatever the memory under it held', ()=>{
+    // What a heap block handed out again still holds: a mixer that starts its
+    // buffer looping and writes only once something plays would loop it.
+    const f = createRoot();
+    f.memory.bytes.fill(0x55, 0x50000, 0x60000);
+    const p1 = 0x1900;
+    const n1 = 0x1904;
+    for (const [bits, silence] of [[16, 0x00], [8, 0x80]])
+    {
+        const buffer = createBuffer(f, { bytes: 4096, channels: 1, bits });
+        assert.equal(f.bridge.call(buffer, 'Lock', [0, 4096, p1, n1, 0, 0, 0]), DS_OK);
+        const held = f.memory.bytes.subarray(f.memory.u32(p1), f.memory.u32(p1) + f.memory.u32(n1));
+        assert.equal(held.length, 4096);
+        assert.ok(held.every(byte=>byte === silence), `${bits}-bit silence is ${silence}`);
+        assert.equal(f.bridge.call(buffer, 'Unlock', [f.memory.u32(p1), 4096, 0, 0]), DS_OK);
+    }
+});

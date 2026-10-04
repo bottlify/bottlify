@@ -1216,6 +1216,16 @@ export function createDirectSound({
                 writeU32(out, 0);
                 return DSERR_OUTOFMEMORY;
             }
+            // A new buffer holds silence, as DirectSound's does. A program may
+            // start one looping before it has written a byte -- a mixer that
+            // fills it from a timer only once something plays -- and a block a
+            // heap hands out again still holds whatever was there, which the
+            // loop would play over and over.
+            if (!primary)
+            {
+                memory.writeMemory(address, new Uint8Array(bytes)
+                    .fill(resolved.bitsPerSample === 8 ? 0x80 : 0));
+            }
 
             const buffer = createSoundBuffer({
                 bytes, address, format: resolved, now, primary, capabilities: flags,
