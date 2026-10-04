@@ -25,7 +25,8 @@
  * Everything in `AppOptions` that is data crosses as it is. What does not
  * cross -- a fetch function, a GPU device, a storage provider, a watch
  * predicate -- is named here by what it is built from, and the worker builds
- * it: a bundle by its URL, a device from the worker's own `navigator.gpu`, a
+ * it: a bundle by its URL -- or, kept on this device, by the `Blob` of its
+ * file, read a range at a time -- a device from the worker's own `navigator.gpu`, a
  * seeded volume by its files, a watch by the libraries and ordinals it covers.
  * A disc crosses as the `Blob` the person chose, which is cloned by reference
  * rather than copied, and the worker reads it a range at a time.
@@ -35,7 +36,7 @@
  *     | 'sample' | 'onCall' | 'pageHidden' | 'pacing' | 'discs'> & {
  *     executable: Uint8Array,
  *     v86?: { moduleUrl: string, wasmBytes: ArrayBuffer },
- *     bundle?: { url: string, store?: string | null, id?: string, prefix?: string,
+ *     bundle?: { url?: string, file?: Blob, store?: string | null, id?: string, prefix?: string,
  *         prefetch?: boolean, indexSha256?: string,
  *         retry?: { attempts?: number, baseDelayMs?: number, maxDelayMs?: number } },
  *     storage?: 'opfs' | 'local' | { files: { path: string, bytes: Uint8Array }[] } | null,

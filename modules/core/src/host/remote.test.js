@@ -360,6 +360,17 @@ async function connect(options = {}, { journal, audioShared, duringBuild, ...dep
         requested };
 }
 
+test('a bundle kept on this device crosses as its file and is read from it a range at a time',
+    async()=>{
+        const bytes = Uint8Array.from({ length: 4096 }, (_, index)=>index & 0xff);
+        const { built } = await connect({
+            bundle: { file: new Blob([bytes]), id: 'local', store: null },
+        });
+        const { bundle } = built();
+        assert.deepEqual([...await bundle.fetch(1000, 4)], [232, 233, 234, 235]);
+        await assert.rejects(()=>bundle.fetch(4090, 10), /past the bundle's end/);
+    });
+
 test('start rebuilds on the worker what could not cross: fetch, device, watch, storage', async()=>{
     const { remote, built } = await connect({
         watch: { libraries: { 'storm.dll': null, 'game.dll': [268] }, strings: [0] },

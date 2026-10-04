@@ -126,6 +126,24 @@ export function rangeFetcher(url){
 }
 
 /**
+ * A bundle's bytes out of a file the page already holds -- one kept in the
+ * origin's file system, one a person chose -- a range at a time: the `Blob`
+ * crossed by reference, and each range is read from it as it is asked for.
+ *
+ * @param {Blob} file
+ * @returns {(offset: number, length: number) => Promise<Uint8Array>}
+ */
+export function blobFetcher(file){
+    return async(offset, length)=>{
+        if (offset + length > file.size)
+        {
+            throw new Error(`range ${offset}+${length} is past the bundle's end at ${file.size}`);
+        }
+        return new Uint8Array(await file.slice(offset, offset + length).arrayBuffer());
+    };
+}
+
+/**
  * The watch predicate a `watch` option describes.
  *
  * `lib.dll` watches every import from it; `lib.dll#268+279` only those
@@ -590,7 +608,8 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                     }),
                 bundle: bundle ? {
                     ...bundle,
-                    fetch: rangeFetcher(bundle.url),
+                    fetch: bundle.file ? blobFetcher(bundle.file)
+                        : rangeFetcher(/** @type {string} */ (bundle.url)),
                 } : undefined,
                 storage: storage && typeof storage === 'object'
                     ? { load: async()=>storage.files }

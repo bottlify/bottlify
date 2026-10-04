@@ -57,7 +57,7 @@ Everything below crosses to the engine's worker by `postMessage`, so every value
 
 | Option | Type | Default | What it does |
 | --- | --- | --- | --- |
-| `bundle` | `{ url, id?, prefix?, store?, prefetch?, indexSha256?, retry? }` | — | A `.btl` mounted read-only on `C:`, under `prefix` (`App`, so `C:\App`). Read a block at a time with HTTP `Range`; fetched blocks are kept in OPFS under `id`. `prefetch` (on) fills the cache when nothing is read; `indexSha256` (from the manifest) is checked against the bundle's index; `retry` is `{ attempts: 6, baseDelayMs: 250, maxDelayMs: 10000 }`. |
+| `bundle` | `{ url \| file, id?, prefix?, store?, prefetch?, indexSha256?, retry? }` | — | A `.btl` mounted read-only on `C:`, under `prefix` (`App`, so `C:\App`). Read a block at a time with HTTP `Range` from `url`, or as a slice of `file` -- a `Blob`, such as a bundle kept in OPFS on this device; fetched blocks are kept in OPFS under `id` (`store: null` keeps none, which a bundle already on the device needs). `prefetch` (on) fills the cache when nothing is read; `indexSha256` (from the manifest) is checked against the bundle's index; `retry` is `{ attempts: 6, baseDelayMs: 250, maxDelayMs: 10000 }`. |
 | `storage` | `'opfs'` \| `'local'` \| `{ files }` \| `null` | `null` | Where the session lives: the files the program wrote and its registry. `opfs` keeps it in the origin's file system, `local` in `localStorage`, `{ files }` seeds it for this run only. `null` keeps nothing. |
 | `id` | string | — | Names the session (and the bundle cache when `bundle.id` is absent). |
 | `files` | `{ path, bytes }[]` | — | Edits laid over the session at every start; they win over what the program last saved. The bundle never changes. |
