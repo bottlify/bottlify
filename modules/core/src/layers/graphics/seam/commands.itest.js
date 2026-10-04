@@ -19,8 +19,8 @@ import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
 import {
-    BUFFER, COMMAND, FLAG_SLOW_PATH, RENDER_STATE_MIRROR, SHADOW, TRANSFORM_MIRROR, commandCode,
-    lockCode,
+    BUFFER, COMMAND, FLAG_SLOW_PATH, RENDER_STATE_MIRROR, SAMPLER_STATE_MIRROR, SHADOW,
+    TRANSFORM_MIRROR, VIEWPORT_MIRROR, commandCode, getSamplerStateCode, getViewportCode, lockCode,
 } from './shadow.js';
 import { COMMANDS, commandSlot, runCommands } from '../d3d9/commands.js';
 
@@ -297,3 +297,81 @@ test('a draw from the program\'s memory copies the vertices its primitives span'
     assert.equal(run([4, 0xffffffff, DATA, 32]), 'trap', 'a count past any');
     assert.equal(head(), at);
 });
+
+test('the viewport and the sampler states a program sets in the guest are what its getters read',
+    ()=>{
+        const host = createCorkHost({
+            memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
+            initialStack: STACK, engine: cork, cork: {},
+        });
+        const SET_VIEWPORT = VIEWPORT;
+        const GET_VIEWPORT = VIEWPORT + 0x100;
+        const SET_SAMPLER = CONSTANTS;
+        const GET_SAMPLER = CONSTANTS + 0x100;
+        for (const [at, code] of /** @type {[number, Uint8Array][]} */ ([
+            [SET_VIEWPORT, commandCode(SET_VIEWPORT, TRAP,
+                shape('SetViewport', { mirror: VIEWPORT_MIRROR }))],
+            [GET_VIEWPORT, getViewportCode(GET_VIEWPORT, TRAP)],
+            [SET_SAMPLER, commandCode(SET_SAMPLER, TRAP,
+                shape('SetSamplerState', { mirror: SAMPLER_STATE_MIRROR }))],
+            [GET_SAMPLER, getSamplerStateCode(GET_SAMPLER, TRAP)],
+        ]))
+        {
+            host.writePhysical(at, code);
+        }
+        host.writePhysical(TRAP, new Uint8Array([0xf4]));
+        host.writePhysical(OBJECT + 4, new Uint8Array(u32(BLOCK)));
+        host.writePhysical(BLOCK, new Uint8Array(SHADOW.SIZE));
+        host.writePhysical(BLOCK + SHADOW.COMMANDS,
+            new Uint8Array([...u32(RING), ...u32(RING_BYTES)]));
+        host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
+        const depths = new Uint32Array(new Float32Array([0.25, 0.75]).buffer);
+        const viewport = [3, 4, 320, 200, ...depths];
+        host.writePhysical(DATA, new Uint8Array(new Uint32Array(viewport).buffer));
+
+        /** @param {number} at */
+        const read = at=>{
+            const bytes = host.readPhysical(at, 4);
+            return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+        };
+        /** @param {number} target @param {number[]} args @returns {'ok' | 'trap'} */
+        const run = (target, args)=>{
+            const code = call(PROGRAM, target, OBJECT, args);
+            host.writePhysical(PROGRAM, new Uint8Array(code));
+            host.writeReg32('eip', PROGRAM);
+            host.writeReg32('esp', STACK);
+            host.runSlice(1000);
+            if (host.readReg32('eip') === TRAP + 1)
+            {
+                assert.equal(host.readReg32('esp'), STACK - 4 * (args.length + 2));
+                return 'trap';
+            }
+            assert.equal(host.readReg32('eip'), PROGRAM + code.length);
+            assert.equal(host.readReg32('esp'), STACK);
+            assert.equal(host.readReg32('eax'), 0);
+            return 'ok';
+        };
+
+        assert.equal(run(SET_VIEWPORT, [DATA]), 'ok');
+        host.writePhysical(OUT, new Uint8Array(24));
+        assert.equal(run(GET_VIEWPORT, [OUT]), 'ok');
+        assert.deepEqual(Array.from({ length: 6 }, (unused, i)=>read(OUT + i * 4)), viewport);
+        assert.equal(run(GET_VIEWPORT, [0]), 'trap', 'a null pointer');
+
+        assert.equal(run(SET_SAMPLER, [2, 5, 3]), 'ok', 'MAGFILTER of sampler 2');
+        assert.equal(run(SET_SAMPLER, [15, 13, 9]), 'ok', 'DMAPOFFSET of the last');
+        assert.equal(run(GET_SAMPLER, [2, 5, OUT]), 'ok');
+        assert.equal(read(OUT), 3);
+        assert.equal(run(GET_SAMPLER, [15, 13, OUT]), 'ok');
+        assert.equal(read(OUT), 9);
+        assert.equal(run(GET_SAMPLER, [16, 5, OUT]), 'trap', 'a sampler past the block');
+        assert.equal(run(GET_SAMPLER, [256, 5, OUT]), 'trap', 'the displacement sampler');
+        assert.equal(run(GET_SAMPLER, [2, 0, OUT]), 'trap', 'type zero');
+        assert.equal(run(GET_SAMPLER, [2, 14, OUT]), 'trap', 'a type past DMAPOFFSET');
+        assert.equal(run(GET_SAMPLER, [2, 5, 0]), 'trap', 'a null pointer');
+        assert.equal(run(SET_SAMPLER, [256, 5, 1]), 'trap',
+            'a sampler past the block is set by the host, which mirrors what it keeps');
+        host.writePhysical(BLOCK, new Uint8Array(u32(FLAG_SLOW_PATH)));
+        assert.equal(run(GET_VIEWPORT, [OUT]), 'trap', 'the host\'s flag');
+        assert.equal(run(GET_SAMPLER, [2, 5, OUT]), 'trap');
+    });

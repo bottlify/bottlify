@@ -106,7 +106,13 @@ export const SHADOW = {
     STAGE_STATES: 1344 + 28 * 64,
     STAGE_COUNT: 8,
     STAGE_STATE_STRIDE: 32,
-    SIZE: 3136 + 8 * 32 * 4,
+    /** The viewport, as D3DVIEWPORT8 and 9 both lay it out: six dwords. */
+    VIEWPORT: 3136 + 8 * 32 * 4,
+    /** 16 samplers of 16 dwords, one per D3DSAMPLERSTATETYPE below 16. */
+    SAMPLER_STATES: 4160 + 6 * 4,
+    SAMPLER_COUNT: 16,
+    SAMPLER_STATE_STRIDE: 16,
+    SIZE: 4184 + 16 * 16 * 4,
 };
 
 /** A command's head: the method's slot, and the record's length in bytes, its own included. */
@@ -797,6 +803,103 @@ export function getTextureStageStateCode(at, trap, types){
 }
 
 /**
+ * HRESULT GetViewport(this, D3DVIEWPORT *out), as guest code: the block
+ * holds the device's viewport, which SetViewport's routine keeps and the
+ * host mirrors whenever it changes it itself (a render target, a reset, a
+ * state block). A null pointer and the host's flag go to the host.
+ *
+ *     (prologue)
+ *     mov edx, [esp+8]            ; out
+ *     test edx, edx
+ *     jz slow
+ *     push esi
+ *     push edi
+ *     lea esi, [ecx + VIEWPORT]
+ *     mov edi, edx
+ *     mov ecx, 6
+ *     rep movsd
+ *     pop edi
+ *     pop esi
+ *     xor eax, eax                ; D3D_OK
+ *     ret 8
+ *
+ * @param {number} at @param {number} trap
+ * @returns {Uint8Array}
+ */
+export function getViewportCode(at, trap){
+    return routine(at, trap, [
+        ...prologue(),
+        [0x8b, 0x54, 0x24, 0x08],                                // mov edx, [esp+8]
+        [0x85, 0xd2],                                            // test edx, edx
+        { jcc: 0x74, to: 'slow' },                               // jz slow
+        [0x56, 0x57],                                            // push esi; push edi
+        [0x8d, 0xb1, ...dword(SHADOW.VIEWPORT)],                 // lea esi, [ecx+disp]
+        [0x89, 0xd7],                                            // mov edi, edx
+        [0xb9, ...dword(6)],                                     // mov ecx, 6
+        [0xf3, 0xa5],                                            // rep movsd
+        [0x5f, 0x5e],                                            // pop edi; pop esi
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, 0x08, 0x00],                                      // ret 8
+    ]);
+}
+
+/** The sampler state types a device answers for: D3DSAMP_ADDRESSU (1) to DMAPOFFSET (13). */
+const SAMPLER_STATE_TYPES = 0x3ffe;
+
+/**
+ * HRESULT GetSamplerState(this, DWORD sampler, D3DSAMPLERSTATETYPE type,
+ * DWORD *value), as guest code: the value, for one of the sixteen pixel
+ * samplers and a type the device answers for. A displacement or vertex
+ * sampler, a type it refuses and a null pointer go to the host.
+ *
+ *     (prologue)
+ *     mov eax, [esp+12]           ; type
+ *     cmp eax, 16
+ *     jae slow
+ *     mov edx, SAMPLER_STATE_TYPES
+ *     bt edx, eax
+ *     jnc slow
+ *     mov eax, [esp+8]            ; sampler
+ *     cmp eax, 16
+ *     jae slow
+ *     shl eax, 4
+ *     add eax, [esp+12]
+ *     mov edx, [esp+16]           ; value
+ *     test edx, edx
+ *     jz slow
+ *     mov eax, [ecx + eax*4 + SAMPLER_STATES]
+ *     mov [edx], eax
+ *     xor eax, eax
+ *     ret 16
+ *
+ * @param {number} at @param {number} trap
+ * @returns {Uint8Array}
+ */
+export function getSamplerStateCode(at, trap){
+    return routine(at, trap, [
+        ...prologue(),
+        [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
+        [0x3d, ...dword(SHADOW.SAMPLER_STATE_STRIDE)],           // cmp eax, 16
+        { jcc: 0x73, to: 'slow' },                               // jae slow
+        [0xba, ...dword(SAMPLER_STATE_TYPES)],                   // mov edx, imm32
+        [0x0f, 0xa3, 0xc2],                                      // bt edx, eax
+        { jcc: 0x73, to: 'slow' },                               // jnc slow
+        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        [0x3d, ...dword(SHADOW.SAMPLER_COUNT)],                  // cmp eax, 16
+        { jcc: 0x73, to: 'slow' },                               // jae slow
+        [0xc1, 0xe0, 0x04],                                      // shl eax, 4
+        [0x03, 0x44, 0x24, 0x0c],                                // add eax, [esp+12]
+        [0x8b, 0x54, 0x24, 0x10],                                // mov edx, [esp+16]
+        [0x85, 0xd2],                                            // test edx, edx
+        { jcc: 0x74, to: 'slow' },                               // jz slow
+        [0x8b, 0x84, 0x81, ...dword(SHADOW.SAMPLER_STATES)],     // mov eax, [ecx+eax*4+disp]
+        [0x89, 0x02],                                            // mov [edx], eax
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, 0x10, 0x00],                                      // ret 16
+    ]);
+}
+
+/**
  * HRESULT GetSurfaceLevel(this, UINT level, IDirect3DSurface8** out), as
  * guest code for a texture. The pointer is the one the host published for
  * that level, out of the texture's own block; a level the texture has not
@@ -1117,6 +1220,38 @@ export const TRANSFORM_MIRROR = Object.freeze([
     [0x5f, 0x5e],                                                // pop edi; pop esi
 ]);
 
+/** The same for SetViewport: the six dwords into the block. */
+export const VIEWPORT_MIRROR = Object.freeze([
+    [0x8b, 0x54, 0x24, 0x08],                                    // mov edx, [esp+8]
+    [0x85, 0xd2],                                                // test edx, edx
+    { jcc: 0x74, to: 'out', near: true },                        // jz out
+    [0x56, 0x57],                                                // push esi; push edi
+    [0x89, 0xd6],                                                // mov esi, edx
+    [0x8d, 0xb9, ...dword(SHADOW.VIEWPORT)],                     // lea edi, [ecx+disp]
+    [0x89, 0xca],                                                // mov edx, ecx
+    [0xb9, ...dword(6)],                                         // mov ecx, 6
+    [0xf3, 0xa5],                                                // rep movsd
+    [0x89, 0xd1],                                                // mov ecx, edx
+    [0x5f, 0x5e],                                                // pop edi; pop esi
+]);
+
+/**
+ * The same for SetSamplerState: the value into its sampler's slot. A sampler
+ * or a type past the block is the host's.
+ */
+export const SAMPLER_STATE_MIRROR = Object.freeze([
+    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
+    [0x3d, ...dword(SHADOW.SAMPLER_COUNT)],                      // cmp eax, 16
+    { jcc: 0x73, to: 'out', near: true },                        // jae out
+    [0x8b, 0x54, 0x24, 0x0c],                                    // mov edx, [esp+12]
+    [0x81, 0xfa, ...dword(SHADOW.SAMPLER_STATE_STRIDE)],         // cmp edx, 16
+    { jcc: 0x73, to: 'out', near: true },                        // jae out
+    [0xc1, 0xe0, 0x04],                                          // shl eax, 4
+    [0x01, 0xd0],                                                // add eax, edx
+    [0x8b, 0x54, 0x24, 0x10],                                    // mov edx, [esp+16]
+    [0x89, 0x94, 0x81, ...dword(SHADOW.SAMPLER_STATES)],         // mov [ecx+eax*4+disp], edx
+]);
+
 /**
  * The same for SetTextureStageState, given the types the version has: the
  * value into its stage's slot. A stage past the block, or a type it does not
@@ -1161,6 +1296,9 @@ export const stageStateMirror = types=>[
  * @property {(type: number, out: { matrix?: ArrayLike<number> }) => number} GetTransform
  * @property {(stage: number, type: number, out: { value?: number }) => number
  *     } GetTextureStageState
+ * @property {(out: { viewport?: any }) => number} [GetViewport]
+ * @property {(sampler: number, type: number, out: { value?: number }) => number
+ *     } [GetSamplerState]
  */
 
 /**
@@ -1343,10 +1481,51 @@ export function createShadow(deps){
             new Uint8Array(new Float32Array(out.matrix).buffer));
     };
 
+    const mirrorViewport = ()=>{
+        /** @type {{ viewport?: { X: number, Y: number, Width: number, Height: number,
+         *     MinZ: number, MaxZ: number } }} */
+        const out = {};
+        if (typeof device.GetViewport !== 'function' || device.GetViewport(out) !== 0
+            || !out.viewport)
+        {
+            return;
+        }
+        const { X, Y, Width, Height, MinZ, MaxZ } = out.viewport;
+        const words = new Uint32Array([X, Y, Width, Height, 0, 0]);
+        new Float32Array(words.buffer, 16, 2).set([MinZ, MaxZ]);
+        deps.writeMemory(address + SHADOW.VIEWPORT, new Uint8Array(words.buffer));
+    };
+
+    /** @param {number} sampler @param {number} type */
+    const samplerStateOf = (sampler, type)=>{
+        /** @type {{ value?: number }} */
+        const out = {};
+        return device.GetSamplerState?.(sampler, type, out) === 0 ? (out.value ?? 0) >>> 0 : 0;
+    };
+
+    const mirrorSamplerStates = ()=>{
+        if (typeof device.GetSamplerState !== 'function')
+        {
+            return;
+        }
+        const values = new Uint32Array(SHADOW.SAMPLER_COUNT * SHADOW.SAMPLER_STATE_STRIDE);
+        for (let sampler = 0; sampler < SHADOW.SAMPLER_COUNT; sampler++)
+        {
+            for (let type = 0; type < SHADOW.SAMPLER_STATE_STRIDE; type++)
+            {
+                values[sampler * SHADOW.SAMPLER_STATE_STRIDE + type] =
+                    samplerStateOf(sampler, type);
+            }
+        }
+        deps.writeMemory(address + SHADOW.SAMPLER_STATES, new Uint8Array(values.buffer));
+    };
+
     const mirror = ()=>{
         mirrorRenderStates();
         mirrorTransforms();
         mirrorStageStates();
+        mirrorViewport();
+        mirrorSamplerStates();
     };
 
     /**
@@ -1479,8 +1658,10 @@ export function createShadow(deps){
          * each Apply hundreds of calls into the device.
          *
          * @param {{ renderStates?: Iterable<number>, transforms?: Iterable<number>,
-         *     stageStates?: true | Iterable<number> }} [touched]  stage states by
-         *     (stage << 8) | type, or every one of them (true)
+         *     stageStates?: true | Iterable<number>, viewport?: boolean,
+         *     samplerStates?: Iterable<number> }} [touched]  stage states by
+         *     (stage << 8) | type, or every one of them (true); sampler states
+         *     by (sampler << 8) | type
          */
         remirror(touched){
             if (address === 0)
@@ -1503,6 +1684,21 @@ export function createShadow(deps){
             for (const type of touched.transforms ?? [])
             {
                 refreshTransform(type);
+            }
+            if (touched.viewport)
+            {
+                mirrorViewport();
+            }
+            for (const key of touched.samplerStates ?? [])
+            {
+                const sampler = key >>> 8;
+                const type = key & 0xff;
+                if (sampler < SHADOW.SAMPLER_COUNT && type < SHADOW.SAMPLER_STATE_STRIDE)
+                {
+                    deps.writeMemory(address + SHADOW.SAMPLER_STATES
+                        + (sampler * SHADOW.SAMPLER_STATE_STRIDE + type) * 4,
+                    dwordBytes(samplerStateOf(sampler, type)));
+                }
             }
             if (touched.stageStates === true)
             {

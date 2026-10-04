@@ -1798,6 +1798,52 @@ test('a state block applied mirrors into the block only the states it holds', ()
         + (SHADOW.STAGE_STATE_STRIDE + 1) * 4), 2);
 });
 
+test('the viewport and the sampler states the guest\'s getters read follow the device', ()=>{
+    // GetViewport and GetSamplerState answer from the block in the guest:
+    // whatever changes them on the host -- a host-made setter, a new render
+    // target, a state block -- has to land there too.
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const block = h.box.memory.readU32(device + 4);
+    const viewport = ()=>Array.from({ length: 4 },
+        (unused, i)=>h.box.memory.readU32(block + SHADOW.VIEWPORT + i * 4));
+    const sampler = (/** @type {number} */ index, /** @type {number} */ type)=>
+        h.box.memory.readU32(block + SHADOW.SAMPLER_STATES
+            + (index * SHADOW.SAMPLER_STATE_STRIDE + type) * 4);
+    const D3DSAMP_ADDRESSU = 1;
+    const D3DSAMP_MAGFILTER = 5;
+
+    const held = 0x3500;
+    assert.equal(h.device(device, 'GetViewport', [held]), D3D_OK);
+    assert.deepEqual(viewport(), Array.from({ length: 4 },
+        (unused, i)=>h.box.memory.readU32(held + i * 4)), 'mirrored as the device was made');
+    assert.equal(sampler(0, D3DSAMP_ADDRESSU), 1, 'WRAP, the default');
+
+    assert.equal(h.device(device, 'SetSamplerState', [3, D3DSAMP_MAGFILTER, 2]), D3D_OK);
+    assert.equal(sampler(3, D3DSAMP_MAGFILTER), 2, 'a setter the host made');
+
+    const out = 0x3200;
+    assert.equal(h.device(device, 'CreateRenderTarget',
+        [32, 16, D3DFMT.A8R8G8B8, 0, 0, 0, out, 0]), D3D_OK);
+    assert.equal(h.device(device, 'SetRenderTarget', [0, h.box.memory.readU32(out)]), D3D_OK);
+    assert.deepEqual(viewport(), [0, 0, 32, 16], 'a new target is a new viewport');
+
+    const rect = 0x3600;
+    [1, 2, 8, 4].forEach((value, i)=>h.box.memory.writeU32(rect + i * 4, value));
+    h.box.memory.writeU32(rect + 16, 0);
+    h.box.memory.writeU32(rect + 20, 0x3f800000);
+    assert.equal(h.device(device, 'BeginStateBlock'), D3D_OK);
+    assert.equal(h.device(device, 'SetViewport', [rect]), D3D_OK);
+    assert.equal(h.device(device, 'SetSamplerState', [1, D3DSAMP_ADDRESSU, 3]), D3D_OK);
+    assert.equal(h.device(device, 'EndStateBlock', [out]), D3D_OK);
+    assert.deepEqual(viewport(), [0, 0, 32, 16], 'recording sets nothing');
+    assert.equal(sampler(1, D3DSAMP_ADDRESSU), 1);
+    assert.equal(h.box.call(h.box.memory.readU32(out), 5, []), D3D_OK, 'Apply');
+    assert.deepEqual(viewport(), [1, 2, 8, 4], 'the state block\'s viewport');
+    assert.equal(sampler(1, D3DSAMP_ADDRESSU), 3, 'and its sampler state');
+});
+
 test('a create refused for its shared handle leaves no pointer behind', ()=>{
     // d3d9ex.c test_user_memory goes on to use what a refused create left in
     // its out-parameter: a pointer from an earlier call there is a call into

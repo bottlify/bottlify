@@ -60,8 +60,9 @@ import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import { declarationLength } from '../d3d8/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
 import {
-    RENDER_STATE_MIRROR, TRANSFORM_MIRROR, commandCode, createShadow, getRenderStateCode,
-    getSurfaceLevelCode, lockCode, stageStateMirror, unlockCode,
+    RENDER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_MIRROR, commandCode, createShadow,
+    getRenderStateCode, getSurfaceLevelCode, getViewportCode, lockCode, stageStateMirror,
+    unlockCode,
 } from './shadow.js';
 import { D3D8_COMMANDS, materialOf } from '../d3d8/commands.js';
 import { D3DTSS } from '../d3d8/constants.js';
@@ -80,6 +81,7 @@ const GETTER_MIRRORS = {
     SetRenderState: [...RENDER_STATE_MIRROR],
     SetTransform: [...TRANSFORM_MIRROR],
     SetTextureStageState: stageStateMirror(STAGE_STATE_TYPES_8),
+    SetViewport: [...VIEWPORT_MIRROR],
 };
 
 /**
@@ -1172,8 +1174,10 @@ export function createDirect3D8Seam(
             {
                 return D3DERR_INVALIDCALL;
             }
-            return device.SetViewport(
+            const hr = device.SetViewport(
                 fields.readStruct(pointer >>> 0, D3DVIEWPORT8, ['MinZ', 'MaxZ']));
+            shadowOf(device)?.remirror({ viewport: true });
+            return hr;
         },
 
         /** @param {any} device @param {number[]} args */
@@ -1336,8 +1340,13 @@ export function createDirect3D8Seam(
                 stride >>> 0),
 
         /** @param {any} device @param {number[]} args */
-        SetRenderTarget: (device, [target, depth])=>
-            device.SetRenderTarget(publisher.objectAt(target), publisher.objectAt(depth)),
+        SetRenderTarget: (device, [target, depth])=>{
+            const hr = device.SetRenderTarget(publisher.objectAt(target),
+                publisher.objectAt(depth));
+            // A new target is a new viewport, which the guest's GetViewport reads.
+            shadowOf(device)?.remirror({ viewport: true });
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         GetRenderTarget: (device, [out])=>{
@@ -1871,6 +1880,7 @@ export function createDirect3D8Seam(
                 renderStates: block.renderStates.keys(),
                 transforms: block.transforms.keys(),
                 stageStates: block.stageStates.keys(),
+                viewport: block.viewport !== undefined,
             });
             return hr;
         },
@@ -2157,6 +2167,7 @@ export function createDirect3D8Seam(
     const deviceGuests = allocate
         ? {
             GetRenderState: ({ trap })=>placeCode(at=>getRenderStateCode(at, trap)),
+            GetViewport: ({ trap })=>placeCode(at=>getViewportCode(at, trap)),
             ...Object.fromEntries(Object.entries(D3D8_COMMANDS.COMMANDS).map(([name, shape])=>[
                 name, (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>commandCode(at,
                     trap, { ...shape, slot: D3D8_COMMANDS.commandSlot(name),

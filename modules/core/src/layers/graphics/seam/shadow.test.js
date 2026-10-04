@@ -195,7 +195,10 @@ test('the block fits its two pages and its regions follow one another', ()=>{
     assert.equal(SHADOW.RENDER_STATE_VALID + SHADOW.RENDER_STATE_COUNT / 8, SHADOW.TRANSFORMS);
     assert.equal(SHADOW.TRANSFORMS + SHADOW.TRANSFORM_SLOTS * 64, SHADOW.STAGE_STATES);
     assert.equal(SHADOW.STAGE_STATES + SHADOW.STAGE_COUNT * SHADOW.STAGE_STATE_STRIDE * 4,
-        SHADOW.SIZE);
+        SHADOW.VIEWPORT);
+    assert.equal(SHADOW.VIEWPORT + 6 * 4, SHADOW.SAMPLER_STATES);
+    assert.equal(SHADOW.SAMPLER_STATES
+        + SHADOW.SAMPLER_COUNT * SHADOW.SAMPLER_STATE_STRIDE * 4, SHADOW.SIZE);
     assert.equal(BUFFER.SIZE, 32);
     assert.equal(TEXTURE.LEVELS + TEXTURE.LEVEL_SLOTS * 4, TEXTURE.SIZE);
     // Enough for the longest chain a texture of this era can have: a 32768

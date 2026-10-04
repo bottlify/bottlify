@@ -71,8 +71,9 @@ import { createRaster, rasterStatus } from './raster.js';
 import { queryAs, readGuid } from './guid.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import {
-    RENDER_STATE_MIRROR, TRANSFORM_MIRROR, commandCode, createShadow, getRenderStateCode,
-    getTextureStageStateCode, getTransformCode, lockCode, stageStateMirror, unlockCode,
+    RENDER_STATE_MIRROR, SAMPLER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_MIRROR, commandCode,
+    createShadow, getRenderStateCode, getSamplerStateCode, getTextureStageStateCode,
+    getTransformCode, getViewportCode, lockCode, stageStateMirror, unlockCode,
 } from './shadow.js';
 import { D3DTSS9 } from '../d3d9/samplerstates.js';
 import { COMMANDS, commandObjects, commandSlot } from '../d3d9/commands.js';
@@ -91,6 +92,8 @@ const GETTER_MIRRORS = {
     SetRenderState: [...RENDER_STATE_MIRROR],
     SetTransform: [...TRANSFORM_MIRROR],
     SetTextureStageState: stageStateMirror(STAGE_STATE_TYPES_9),
+    SetViewport: [...VIEWPORT_MIRROR],
+    SetSamplerState: [...SAMPLER_STATE_MIRROR],
 };
 
 const D3D_OK = 0;
@@ -1008,6 +1011,8 @@ export function createDirect3D9Seam(
                     renderStates: record.renderStates.keys(),
                     transforms: record.transforms.keys(),
                     stageStates: record.stageStates.keys(),
+                    viewport: Boolean(record.viewport),
+                    samplerStates: record.samplerStates.keys(),
                 });
                 return hr;
             },
@@ -1701,8 +1706,12 @@ export function createDirect3D9Seam(
         // --- targets ---
 
         /** @param {any} device @param {number[]} args */
-        SetRenderTarget: (device, [index, surface])=>
-            device.SetRenderTarget(index >>> 0, publisher.objectAt(surface)),
+        SetRenderTarget: (device, [index, surface])=>{
+            const hr = device.SetRenderTarget(index >>> 0, publisher.objectAt(surface));
+            // A new target is a new viewport, which the guest's GetViewport reads.
+            shadowOf(device)?.remirror({ viewport: true });
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         GetRenderTarget: (device, [index, out])=>{
@@ -1796,10 +1805,16 @@ export function createDirect3D9Seam(
         },
 
         /** @param {any} device @param {number[]} args */
-        SetViewport: (device, [pointer])=>((pointer >>> 0) === 0
-            ? D3DERR_INVALIDCALL
-            : device.SetViewport(
-                fields.readStruct(pointer >>> 0, D3DVIEWPORT9, ['MinZ', 'MaxZ']))),
+        SetViewport: (device, [pointer])=>{
+            if ((pointer >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const hr = device.SetViewport(
+                fields.readStruct(pointer >>> 0, D3DVIEWPORT9, ['MinZ', 'MaxZ']));
+            shadowOf(device)?.remirror({ viewport: true });
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         GetViewport: (device, [out])=>{
@@ -2033,8 +2048,13 @@ export function createDirect3D9Seam(
             return hr;
         },
         /** @param {any} device @param {number[]} args */
-        SetSamplerState: (device, [sampler, type, value])=>
-            device.SetSamplerState(sampler >>> 0, type >>> 0, value >>> 0),
+        SetSamplerState: (device, [sampler, type, value])=>{
+            const hr = device.SetSamplerState(sampler >>> 0, type >>> 0, value >>> 0);
+            shadowOf(device)?.remirror({
+                samplerStates: [(sampler & 0xffffff) << 8 | type & 0xff],
+            });
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         ValidateDevice: (device, [out])=>{
@@ -2451,6 +2471,8 @@ export function createDirect3D9Seam(
             GetTransform: ({ trap })=>placeCode(at=>getTransformCode(at, trap)),
             GetTextureStageState: ({ trap })=>placeCode(at=>getTextureStageStateCode(at, trap,
                 STAGE_STATE_TYPES_9)),
+            GetViewport: ({ trap })=>placeCode(at=>getViewportCode(at, trap)),
+            GetSamplerState: ({ trap })=>placeCode(at=>getSamplerStateCode(at, trap)),
             ...Object.fromEntries(Object.entries(COMMANDS).map(([name, shape])=>[name,
                 (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>commandCode(at, trap,
                     { ...shape, slot: commandSlot(name), mirror: GETTER_MIRRORS[name] }))])),
