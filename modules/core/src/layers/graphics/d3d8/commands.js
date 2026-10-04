@@ -23,6 +23,7 @@
 
 import { IDIRECT3DDEVICE8_SLOTS } from '../seam/vtables.js';
 import { lightFromDwords } from '../seam/structs.js';
+import { vertexCountOf } from './render.js';
 
 /** Where a record's arguments start, in dwords. */
 const ARGS = 2;
@@ -49,6 +50,8 @@ const ints = new Int32Array(scratch);
  * @property {Uint32Array} words
  * @property {Float32Array} floats
  * @property {Int32Array} ints
+ * @property {(bytes: number) => Uint8Array} copy  the first `bytes` of the copy, as a copy
+ *     of its own, for a method that keeps them or reads more than the scratch holds
  */
 
 /**
@@ -66,6 +69,9 @@ const ints = new Int32Array(scratch);
  * @property {{ arg: number, shift: number, most: number }} [count]
  * @property {{ arg: number, cases: readonly [number, number][], otherwise: number }} [choose]
  *     or a size chosen by an argument's value: the bytes of the case it equals, or `otherwise`
+ * @property {{ type: number, count: number, stride: number, most: number }} [vertices]
+ *     or the vertices a draw's primitives span, `stride` bytes each (`commandCode`)
+ * @property {boolean} [kept]  its copy is taken with `copy` alone, not through the scratch
  * @property {boolean} [draws]
  * @property {(device: any, call: CommandArgs) => number} make
  */
@@ -144,6 +150,11 @@ export function commandSet(slots, table){
             words,
             floats,
             ints,
+            copy: bytes=>{
+                const from = records.byteOffset
+                    + (at + ARGS + (bySlot[all[at]]?.args ?? 0)) * 4;
+                return new Uint8Array(records.buffer.slice(from, from + bytes));
+            },
         };
         while (at < all.length)
         {
@@ -158,7 +169,7 @@ export function commandSet(slots, table){
             const copied = length - ARGS - entry.args;
             // Word by word: a view of the run made per record costs more than
             // the copy.
-            for (let i = 0, end = Math.min(copied, words.length); i < end; i++)
+            for (let i = 0, end = entry.kept ? 0 : Math.min(copied, words.length); i < end; i++)
             {
                 words[i] = all[data + i];
             }
@@ -189,6 +200,12 @@ export function materialOf(f){
 }
 
 /**
+ * The most a draw from the program's own memory copies into a record: past
+ * it the host reads the vertices itself, as it does without a ring.
+ */
+const UP_BYTES = 16 * 1024;
+
+/**
  * The calls both versions' rings carry the same way.
  *
  * @type {Record<string, CommandEntry>}
@@ -212,6 +229,10 @@ export const SHARED_COMMANDS = {
         make: (d, c)=>d.SetClipPlane(c.arg(0), c.floats.slice(0, 4)) },
     DrawPrimitive: { args: 3, draws: true,
         make: (d, c)=>d.DrawPrimitive(c.arg(0), c.arg(1), c.arg(2)) },
+    DrawPrimitiveUP: { args: 4, pointer: 2, kept: true, draws: true,
+        vertices: { type: 0, count: 1, stride: 3, most: UP_BYTES },
+        make: (d, c)=>d.DrawPrimitiveUP(c.arg(0), c.arg(1),
+            c.copy(vertexCountOf(c.arg(0), c.arg(1)) * c.arg(3)), c.arg(3)) },
 };
 
 /**

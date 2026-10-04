@@ -213,3 +213,87 @@ test('a command routine writes the call into the ring and leaves the rest to the
     assert.equal(run(ENABLE, [0, 1]), 'trap', 'a device with no ring');
     assert.equal(head(), before + 16);
 });
+
+test('a draw from the program\'s memory copies the vertices its primitives span', ()=>{
+    const host = createCorkHost({
+        memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
+        initialStack: STACK, engine: cork, cork: {},
+    });
+    host.writePhysical(DRAW, commandCode(DRAW, TRAP, shape('DrawPrimitiveUP')));
+    host.writePhysical(TRAP, new Uint8Array([0xf4]));
+    host.writePhysical(OBJECT + 4, new Uint8Array(u32(BLOCK)));
+    host.writePhysical(BLOCK, new Uint8Array(SHADOW.SIZE));
+    host.writePhysical(BLOCK + SHADOW.COMMANDS, new Uint8Array([...u32(RING), ...u32(RING_BYTES)]));
+    host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
+    const vertices = new Uint8Array(0x400).map((unused, i)=>i * 7);
+    host.writePhysical(DATA, vertices);
+
+    /** @param {number} at */
+    const read = at=>{
+        const bytes = host.readPhysical(at, 4);
+        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+    };
+    const head = ()=>read(BLOCK + SHADOW.COMMAND_HEAD);
+    /** @param {number[]} args @returns {'ok' | 'trap'} */
+    const run = args=>{
+        const code = call(PROGRAM, DRAW, OBJECT, args);
+        host.writePhysical(PROGRAM, new Uint8Array(code));
+        host.writeReg32('eip', PROGRAM);
+        host.writeReg32('esp', STACK);
+        host.runSlice(1000);
+        if (host.readReg32('eip') === TRAP + 1)
+        {
+            assert.equal(host.readReg32('esp'), STACK - 4 * (args.length + 2));
+            return 'trap';
+        }
+        assert.equal(host.readReg32('eip'), PROGRAM + code.length);
+        assert.equal(host.readReg32('esp'), STACK);
+        assert.equal(host.readReg32('eax'), 0);
+        return 'ok';
+    };
+
+    // Each type with three primitives, twelve bytes a vertex: the vertices
+    // spanned are 3, 6, 4, 9, 5 and 5.
+    const spans = [3, 6, 4, 9, 5, 5];
+    let at = 0;
+    for (let type = 1; type <= 6; type++)
+    {
+        assert.equal(run([type, 3, DATA, 12]), 'ok', `type ${type}`);
+        const bytes = spans[type - 1] * 12;
+        assert.equal(read(RING + at + COMMAND.BYTES), COMMAND.ARGS + 16 + bytes);
+        assert.equal(read(RING + at + COMMAND.ARGS + 8), RING + at + COMMAND.ARGS + 16,
+            'the pointer names the copy');
+        assert.deepEqual([...host.readPhysical(RING + at + COMMAND.ARGS + 16, bytes)],
+            [...vertices.subarray(0, bytes)]);
+        at += COMMAND.ARGS + 16 + bytes;
+    }
+    assert.equal(head(), at);
+    assert.equal(read(BLOCK + SHADOW.DRAWS_PENDING), 1, 'a draw is waiting');
+
+    /** @type {any[]} */
+    const made = [];
+    const device = {
+        /**
+         * @param {number} type @param {number} count @param {Uint8Array} data
+         * @param {number} stride
+         */
+        DrawPrimitiveUP: (type, count, data, stride)=>made.push([type, count, [...data], stride])
+            && 0,
+    };
+    assert.equal(runCommands(device, host.readPhysical(RING, head()).slice(), [], ()=>{
+        assert.fail('nothing refused');
+    }), 6);
+    assert.deepEqual(made, spans.map((span, i)=>[i + 1, 3, [...vertices.subarray(0, span * 12)],
+        12]));
+
+    // The draws the routine leaves to the host, the ring as it was.
+    assert.equal(run([7, 3, DATA, 12]), 'trap', 'a type there is not');
+    assert.equal(run([0, 3, DATA, 12]), 'trap', 'nor type zero');
+    assert.equal(run([4, 0, DATA, 12]), 'trap', 'no primitives');
+    assert.equal(run([4, 3, 0, 12]), 'trap', 'a null pointer');
+    assert.equal(run([4, 3, DATA, 10]), 'trap', 'a stride that is not whole dwords');
+    assert.equal(run([4, 3, DATA, 0]), 'trap', 'no stride');
+    assert.equal(run([4, 2000, DATA, 32]), 'trap', 'more than a record copies');
+    assert.equal(run([4, 0xffffffff, DATA, 32]), 'trap', 'a count past any');
+    assert.equal(head(), at);
+});

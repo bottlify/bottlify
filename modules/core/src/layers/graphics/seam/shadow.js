@@ -873,6 +873,9 @@ export function getSurfaceLevelCode(at, trap){
  * @property {number} [bytes]  how many bytes that is, or else
  * @property {{ arg: number, shift: number, most: number }} [count]  the argument
  *     counting its elements, `1 << shift` bytes each, at most `most` of them
+ * @property {{ type: number, count: number, stride: number, most: number }} [vertices]
+ *     or the vertices a draw's primitives span, of the type and count those
+ *     arguments give, `stride` bytes each: at most `most` bytes
  * @property {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]
  *     } [mirror]  guest code run first, with the block in ECX, that keeps what
  *     a getter in the guest reads current; it may leave for the host through
@@ -928,10 +931,10 @@ export function getSurfaceLevelCode(at, trap){
  * @returns {Uint8Array}
  */
 export function commandCode(at, trap, shape){
-    const { slot, args, pointer = -1, bytes = 0, count, choose, mirror = [], draws = false,
-        thread = false } = shape;
+    const { slot, args, pointer = -1, bytes = 0, count, choose, vertices, mirror = [],
+        draws = false, thread = false } = shape;
     const header = COMMAND.ARGS + 4 * args;
-    if (pointer >= 0 && !count && !choose && (bytes <= 0 || (bytes & 3) !== 0))
+    if (pointer >= 0 && !count && !choose && !vertices && (bytes <= 0 || (bytes & 3) !== 0))
     {
         throw new Error(`shadow: a command copies whole dwords, not ${bytes} bytes`);
     }
@@ -955,7 +958,7 @@ export function commandCode(at, trap, shape){
         parts.push(
             [0x8b, 0x44, 0x24, entry + 4 * pointer],             // mov eax, [esp+entry+4p]
             [0x85, 0xc0],                                        // test eax, eax
-            { jcc: 0x74, to: 'out' });                           // jz out
+            { jcc: 0x74, to: 'out', near: vertices !== undefined }); // jz out
     }
     if (choose)
     {
@@ -967,6 +970,47 @@ export function commandCode(at, trap, shape){
             { jcc: 0x75, to: `case${index}` },                   // jne next
             [0xba, ...dword(size)],                              // mov edx, size
             { label: `case${index}` }));
+    }
+    else if (vertices)
+    {
+        // How many vertices the primitives span, by type (`vertexCountOf`),
+        // times the stride: an unknown type, no primitives, a stride that is
+        // not whole dwords or a copy past `most` bytes is the host's.
+        /** @type {[number, number[][]][]} */
+        const steps = [
+            [1, []],                                             // POINTLIST: n
+            [2, [[0x01, 0xd2]]],                                 // LINELIST: add edx, edx
+            [3, [[0x42]]],                                       // LINESTRIP: inc edx
+            [4, [[0x8d, 0x14, 0x52]]],                           // TRIANGLELIST: lea edx, [edx*3]
+            [5, [[0x83, 0xc2, 0x02]]],                           // TRIANGLESTRIP: add edx, 2
+            [6, [[0x83, 0xc2, 0x02]]],                           // TRIANGLEFAN: add edx, 2
+        ];
+        parts.push(
+            [0x8b, 0x44, 0x24, entry + 4 * vertices.type],       // mov eax, [esp+entry+4t]
+            [0x8b, 0x54, 0x24, entry + 4 * vertices.count],      // mov edx, [esp+entry+4c]
+            [0x85, 0xd2],                                        // test edx, edx
+            { jcc: 0x74, to: 'out', near: true },                // jz out
+            [0x81, 0xfa, ...dword(vertices.most)],               // cmp edx, most
+            { jcc: 0x77, to: 'out', near: true },                // ja out
+            ...steps.flatMap(([type], index)=>[
+                [0x83, 0xf8, type],                              // cmp eax, type
+                { jcc: 0x74, to: `type${index}` }]),             // je typeN
+            { jcc: 0xeb, to: 'out', near: true },                // jmp out
+            ...steps.flatMap(([, step], index)=>[
+                { label: `type${index}` },
+                ...step,
+                { jcc: 0xeb, to: 'stride', near: true }]),       // jmp stride
+            { label: 'stride' },
+            [0x8b, 0x44, 0x24, entry + 4 * vertices.stride],     // mov eax, [esp+entry+4s]
+            [0xa8, 0x03],                                        // test al, 3
+            { jcc: 0x75, to: 'out', near: true },                // jnz out
+            [0x3d, ...dword(vertices.most)],                     // cmp eax, most
+            { jcc: 0x77, to: 'out', near: true },                // ja out
+            [0x0f, 0xaf, 0xd0],                                  // imul edx, eax
+            [0x85, 0xd2],                                        // test edx, edx
+            { jcc: 0x74, to: 'out', near: true },                // jz out
+            [0x81, 0xfa, ...dword(vertices.most)],               // cmp edx, most
+            { jcc: 0x77, to: 'out', near: true });               // ja out
     }
     else if (count)
     {

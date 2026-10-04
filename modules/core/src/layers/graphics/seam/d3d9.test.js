@@ -1715,11 +1715,11 @@ test('with guest memory, a device\'s setters and draws run in the guest, and its
         'SetTextureStageState', 'GetTextureStageState', 'SetMaterial', 'SetSamplerState',
         'SetTexture', 'SetStreamSource', 'SetVertexDeclaration', 'SetIndices', 'SetVertexShader',
         'SetPixelShader', 'SetFVF', 'SetVertexShaderConstantF', 'DrawPrimitive',
-        'DrawIndexedPrimitive'])
+        'DrawIndexedPrimitive', 'DrawPrimitiveUP'])
     {
         assert.ok(guest(name), `${name} runs in the guest`);
     }
-    assert.ok(!guest('DrawPrimitiveUP') && !guest('Clear') && !guest('Present'));
+    assert.ok(!guest('Clear') && !guest('Present'));
 
     const block = h.box.memory.readU32(device + 4);
     assert.notEqual(block, 0, 'the block is one word past the interface pointer');
