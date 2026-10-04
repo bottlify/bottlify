@@ -289,6 +289,14 @@ test('a stubless proxy table is refused, and said to be', async()=>{
     assert.match(g.said[0], /stubless/);
 });
 
+test('a call forwarded to a base stub that was never built is raised, and said to be', ()=>{
+    const g = guest();
+    assert.equal(g.runtime.NdrStubForwardingFunction.argBytes, 16);
+    g.runtime.NdrStubForwardingFunction.handler();
+    assert.deepEqual(g.raised.map(one=>one.code), [1764], 'RPC_S_CANNOT_SUPPORT');
+    assert.match(g.said[0], /NdrStubForwardingFunction/);
+});
+
 test('a stub holds the server object and dispatches by method number', async()=>{
     const g = guest();
     const dll = proxyDll(g);
@@ -331,6 +339,14 @@ test('a stub holds the server object and dispatches by method number', async()=>
     assert.equal(await g.runtime.NdrCStdStubBuffer_Release.handler([stub, dll.factory]), 0);
     assert.equal(serverRefs, 1, 'the last release lets go of the server');
     assert.ok(g.freed.includes(stub));
+
+    // A delegating interface's stub goes through the second entry the same way.
+    assert.equal(await callSlot(g, factory, 4, [dll.iid, server, slot]), 0);
+    const second = g.u32(slot);
+    assert.equal(await g.runtime.NdrCStdStubBuffer2_Release.handler([second, dll.factory]), 0);
+    assert.equal(serverRefs, 1);
+    assert.ok(g.freed.includes(second));
+    assert.equal(g.runtime.NdrCStdStubBuffer2_Release.argBytes, 8);
 });
 
 test('a proxy call takes its buffer from the channel, sends it, and gives it back', async()=>{

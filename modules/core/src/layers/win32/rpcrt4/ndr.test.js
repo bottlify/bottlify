@@ -618,6 +618,10 @@ test('what is not implemented says so and fails as RPC_S_CANNOT_SUPPORT', async(
         0, 0, FC.BYTE, FC.END]);
     await raises(h.marshalled(DATA, callback), RPC_STATUS.S_CANNOT_SUPPORT);
     assert.equal(h.said.length, 2);
+
+    const userMarshal = h.place(FORMAT + 0x20, [0xb4, 0x83, 0, 0, 4, 0, 0, 0, 0, 0]);
+    await raises(h.marshalled(DATA, userMarshal), RPC_STATUS.S_CANNOT_SUPPORT);
+    assert.match(h.said[2], /0xb4/);
 });
 
 test('an unmarshal that runs past the buffer fails as bad stub data', async()=>{

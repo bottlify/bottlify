@@ -885,6 +885,12 @@ export function createRuntime(host){
         NdrInterfacePointerMarshall: family.Marshall,
         NdrInterfacePointerUnmarshall: family.Unmarshall,
         NdrInterfacePointerFree: family.Free,
+        // A [user_marshal] type is not walked yet: its format character is
+        // refused out loud, as any the walker does not know.
+        NdrUserMarshalBufferSize: family.BufferSize,
+        NdrUserMarshalMarshall: family.Marshall,
+        NdrUserMarshalUnmarshall: family.Unmarshall,
+        NdrUserMarshalFree: family.Free,
 
         /**
          * void NdrSimpleTypeMarshall(PMIDL_STUB_MESSAGE pStubMsg,
@@ -913,6 +919,22 @@ export function createRuntime(host){
             argBytes: 16,
             handler: ()=>{
                 report('NdrStubCall2: the -Oi/-Oif NDR interpreter is not implemented');
+                return host.raise(RPC_STATUS.S_CANNOT_SUPPORT);
+            },
+        },
+        /**
+         * void NdrStubForwardingFunction(IRpcStubBuffer *This,
+         *   IRpcChannelBuffer *pChannel, PRPC_MESSAGE pmsg, DWORD *pdwStubPhase)
+         *
+         * A delegating stub's entry for a method of its base interface, which
+         * passes the call on to the base interface's stub. CreateStub here
+         * builds no base stub, so there is nowhere to pass it: said, and raised.
+         */
+        NdrStubForwardingFunction: {
+            argBytes: 16,
+            handler: ()=>{
+                report('NdrStubForwardingFunction: a delegating stub has no base stub to pass'
+                    + ' the call to');
                 return host.raise(RPC_STATUS.S_CANNOT_SUPPORT);
             },
         },
@@ -984,6 +1006,19 @@ export function createRuntime(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([stub])=>releaseStub(stub >>> 0, u32(stub + STUB.FACTORY),
+                host.callerThread()),
+        },
+        /**
+         * ULONG NdrCStdStubBuffer2_Release(IRpcStubBuffer *This, IPSFactoryBuffer *pPSF)
+         *
+         * What the DLL's CStdStubBuffer2_Release calls for an interface whose
+         * stub delegates to its base interface's. CreateStub here builds no
+         * base stub to delegate to, so the stub is released as any other.
+         */
+        NdrCStdStubBuffer2_Release: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([stub, factory])=>releaseStub(stub >>> 0, factory >>> 0,
                 host.callerThread()),
         },
         /** HRESULT CStdStubBuffer_Connect(IRpcStubBuffer *This, IUnknown *pUnkServer) */
