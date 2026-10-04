@@ -140,6 +140,12 @@ import table of every PE image under the paths and lists what this build does
 not export: each missing function or ordinal with the images that import it,
 each library nobody provides, and each image that looks packed (its imports
 are looked up at run time). Run it before a title's or a setup's first run.
+`--used` lists every function of this build's libraries the images import;
+`--dynamic --specs DIR` adds what the images name in their strings for
+LoadLibrary and GetProcAddress, checked against the real libraries' export
+lists (Wine's spec files, fetched once into DIR by `--fetch-specs DIR` and not
+kept in the repository): a function a program looks up by name that this
+build does not export is a NULL it may call.
 
 `tools/arg-bytes-audit.mjs <spec directory>` checks the bytes every stdcall
 entry of the win32 layer pops against Wine's export spec files kept locally:

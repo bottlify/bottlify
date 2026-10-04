@@ -8,7 +8,8 @@
  * What a title's programs import that this build does not export, found by
  * reading their import tables rather than by running them.
  *
- *   node tools/import-audit.mjs <path>... [--all] [--used] [--dynamic]
+ *   node tools/import-audit.mjs <path>... [--all] [--used] [--dynamic [--specs DIR]]
+ *   node tools/import-audit.mjs --fetch-specs DIR
  *
  * A path is a file, a directory (walked), a bundle (`.btl`) or a disc image
  * (`.iso`, ISO 9660). Every PE image found is read: its imports are checked
@@ -20,7 +21,13 @@
  * function of this build's libraries the images import, the missing ones
  * marked; `--dynamic` what the images name in their strings rather than their
  * import tables -- a library this build does not make, named for LoadLibrary,
- * and a function of one it does make, named for GetProcAddress.
+ * and a function of one it does make, named for GetProcAddress. With `--specs
+ * DIR`, the export lists of the real libraries (Wine's `<dll>.spec` files,
+ * knowledge of the ABI kept locally, not code), a name a real library exports
+ * and this build does not is listed too: what GetProcAddress will be asked for
+ * and answer NULL to, which a program that does not check calls.
+ * `--fetch-specs DIR` downloads those lists into DIR once; they are Wine's
+ * files and are not kept in this repository.
  *
  * What this cannot see: an image packed so its real import table only exists
  * once its own code has run (it is named as packed), a payload still inside a
@@ -28,7 +35,7 @@
  * install-watch `--copy` and audit what it unpacked), and a name a program
  * builds at run time rather than keeps as a string.
  */
-import { open, readdir, readFile, stat } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
 import { openBundle } from './btl.mjs';
 import { buildExe } from './make-pe.mjs';
@@ -36,11 +43,38 @@ import { createApp } from '../modules/core/src/app.js';
 import { parsePe, readExports, readImports } from '../modules/core/src/layers/loader/internal/pe.js';
 
 const argv = process.argv.slice(2);
-const paths = argv.filter(arg=>!arg.startsWith('--'));
+/** The libraries whose export lists `--fetch-specs` downloads. */
+const SPEC_LIBRARIES = ['kernel32', 'ntdll', 'user32', 'gdi32', 'advapi32', 'ole32', 'oleaut32',
+    'shell32', 'shlwapi', 'comctl32', 'comdlg32', 'winmm', 'version', 'wininet', 'ws2_32',
+    'wsock32', 'setupapi', 'rpcrt4', 'imm32', 'msvcrt', 'd3d9', 'd3d8', 'ddraw', 'dsound',
+    'dinput', 'dinput8', 'dxgi', 'd3d10', 'd3d10_1', 'd3d11', 'opengl32', 'glu32', 'psapi',
+    'powrprof', 'iphlpapi', 'crypt32', 'wintrust', 'secur32', 'netapi32', 'userenv', 'uxtheme',
+    'dwmapi', 'msacm32', 'avifil32', 'msvfw32', 'quartz', 'mscoree', 'oleacc', 'hhctrl.ocx',
+    'riched20', 'riched32', 'mapi32', 'oledlg', 'urlmon', 'odbc32', 'winspool.drv', 'mpr', 'msi',
+    'cabinet', 'lz32', 'dbghelp', 'imagehlp', 'gdiplus', 'd3dx9_43', 'xinput1_3', 'dplayx'];
+if (argv.includes('--fetch-specs'))
+{
+    const into = argv[argv.indexOf('--fetch-specs') + 1];
+    await mkdir(into, { recursive: true });
+    for (const library of SPEC_LIBRARIES)
+    {
+        const file = `${library}.spec`;
+        const url = `https://raw.githubusercontent.com/wine-mirror/wine/master/dlls/${library}/${file}`;
+        const answer = await fetch(url);
+        if (answer.ok)
+        {
+            await writeFile(join(into, file), await answer.text());
+        }
+        console.log(answer.ok ? 'fetched' : `not fetched (${answer.status})`, library);
+    }
+    process.exit(0);
+}
+const specsAt = argv.includes('--specs') ? argv[argv.indexOf('--specs') + 1] : null;
+const paths = argv.filter((arg, index)=>!arg.startsWith('--') && argv[index - 1] !== '--specs');
 if (paths.length === 0)
 {
     console.log('usage: node tools/import-audit.mjs'
-        + ' <file|directory|bundle.btl|disc.iso>... [--all] [--used] [--dynamic]');
+        + ' <file|directory|bundle.btl|disc.iso>... [--all] [--used] [--dynamic [--specs DIR]]');
     process.exit(2);
 }
 
@@ -303,6 +337,41 @@ const stringsOf = bytes=>{
     return found;
 };
 
+/** @param {string} name  A library as a program names it, folded, with its extension. */
+const libraryKey = name=>{
+    const folded = name.toLowerCase().replace(/^.*[\\/]/, '');
+    return /\.[a-z0-9]+$/.test(folded) ? folded : `${folded}.dll`;
+};
+
+/**
+ * The names each real library exports, read from Wine's spec files: the token
+ * after the calling convention and its flags on every line that is not a
+ * comment.
+ *
+ * @type {Map<string, Set<string>>}
+ */
+const realExports = new Map();
+if (specsAt)
+{
+    for (const file of (await readdir(specsAt)).filter(name=>name.endsWith('.spec')))
+    {
+        /** @type {Set<string>} */
+        const names = new Set();
+        for (const line of (await readFile(join(specsAt, file), 'utf8')).split(/\r?\n/))
+        {
+            const tokens = line.replace(/#.*/, '').trim().split(/\s+/);
+            const name = tokens.slice(2).find(token=>!token.startsWith('-'));
+            if (tokens.length >= 3 && name)
+            {
+                names.add(name.replace(/\(.*$/, ''));
+            }
+        }
+        realExports.set(libraryKey(file.slice(0, -'.spec'.length)), names);
+    }
+}
+
+/** @type {Map<string, Map<string, Set<string>>>} a real export named in strings, not made */
+const missingByName = new Map();
 /** @type {Map<string, Set<string>>} a library named in strings that nothing provides */
 const unnamed = new Map();
 /** @type {Map<string, Map<string, Set<string>>>} a function named in strings, by library */
@@ -312,16 +381,22 @@ if (argv.includes('--dynamic'))
     for (const image of /** @type {any[]} */ (images))
     {
         const strings = stringsOf(image.bytes);
-        const imported = new Set(image.imports.flatMap((/** @type {any} */ library)=>
-            library.entries.map((/** @type {any} */ entry)=>
-                `${String(library.dll).toLowerCase()}!${entry.name}`)));
+        // A name the image imports from any library is in its strings because
+        // of its import table, and one a title's own image exports is that
+        // image's -- neither is a lookup by name.
+        const named = new Set(image.imports.flatMap((/** @type {any} */ library)=>
+            library.entries.map((/** @type {any} */ entry)=>entry.name)));
+        for (const exports of own.values())
+        {
+            exports.names.forEach(name=>named.add(name));
+        }
         /** @type {Set<string>} */
         const libraries = new Set(image.imports.map((/** @type {any} */ library)=>
-            String(library.dll)));
+            libraryKey(String(library.dll))));
         for (const text of strings)
         {
-            const named = /^[A-Za-z0-9_.-]+\.(dll|drv|ocx)$/i.exec(text);
-            if (!named || own.has(text.toLowerCase()))
+            const library = /^[A-Za-z0-9_.-]+\.(dll|drv|ocx)$/i.exec(text);
+            if (!library || own.has(text.toLowerCase()))
             {
                 continue;
             }
@@ -330,21 +405,28 @@ if (argv.includes('--dynamic'))
                 unnamed.set(text, (unnamed.get(text) ?? new Set()).add(image.name));
                 continue;
             }
-            libraries.add(text);
+            libraries.add(libraryKey(text));
         }
         for (const text of strings)
         {
-            if (!/^[A-Za-z_][A-Za-z0-9_]{3,}$/.test(text))
+            if (!/^[A-Za-z_][A-Za-z0-9_]{4,}$/.test(text))
             {
                 continue;
             }
             for (const library of libraries)
             {
-                if (!own.has(library.toLowerCase())
-                    && !imported.has(`${library.toLowerCase()}!${text}`)
-                    && app.debug.exported(library, text) === true)
+                if (own.has(library.toLowerCase()) || named.has(text))
                 {
-                    note(dynamic, library, text, image.name);
+                    continue;
+                }
+                const made = app.debug.exported(library, text);
+                if (made === true)
+                {
+                    note(dynamic, libraryKey(library), text, image.name);
+                }
+                else if (made === false && realExports.get(libraryKey(library))?.has(text))
+                {
+                    note(missingByName, libraryKey(library), text, image.name);
                 }
             }
         }
@@ -384,6 +466,14 @@ if (argv.includes('--used'))
 for (const [library, importers] of unnamed)
 {
     console.log(`NAMED, NO LIBRARY ${library}  <- ${[...importers].join(', ')}`);
+}
+for (const [library, names] of [...missingByName].sort(([a], [b])=>a.localeCompare(b)))
+{
+    console.log(`MISSING BY NAME ${library} (${names.size})`);
+    for (const [name, importers] of [...names].sort(([a], [b])=>a.localeCompare(b)))
+    {
+        console.log(`  ${name}  <- ${[...importers].join(', ')}`);
+    }
 }
 for (const [library, names] of [...dynamic].sort(([a], [b])=>a.localeCompare(b)))
 {
