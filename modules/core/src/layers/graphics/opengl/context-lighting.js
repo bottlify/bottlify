@@ -26,13 +26,33 @@ const CLIP_PLANES = 6;
 const FOG_MODES = new Set([GL.LINEAR, GL.EXP, GL.EXP2]);
 
 /**
- * The four components a vector parameter sets, zero for any the caller's
- * array does not have.
- *
  * @param {ArrayLike<number>} values
  * @returns {number[]}
  */
-const fourOf = values=>[values[0] ?? 0, values[1] ?? 0, values[2] ?? 0, values[3] ?? 0];
+const fourOf = values=>[values[0], values[1], values[2], values[3]];
+
+/**
+ * How many values each vector-only parameter takes. A scalar form passes one
+ * value, and GL refuses such a parameter from it with GL_INVALID_ENUM.
+ *
+ * @type {Map<number, number>}
+ */
+const LIGHT_VECTORS = new Map([
+    [GL.AMBIENT, 4], [GL.DIFFUSE, 4], [GL.SPECULAR, 4], [GL.POSITION, 4], [GL.SPOT_DIRECTION, 3],
+]);
+/** @type {Map<number, number>} */
+const MATERIAL_VECTORS = new Map([
+    [GL.AMBIENT, 4], [GL.DIFFUSE, 4], [GL.SPECULAR, 4], [GL.EMISSION, 4],
+    [GL.AMBIENT_AND_DIFFUSE, 4], [GL.COLOR_INDEXES, 3],
+]);
+
+/**
+ * @param {Map<number, number>} sizes
+ * @param {number} parameter
+ * @param {ArrayLike<number>} values
+ * @returns {boolean}
+ */
+const tooShort = (sizes, parameter, values)=>values.length < (sizes.get(parameter) ?? 1);
 
 /**
  * @param {any} context
@@ -96,6 +116,11 @@ export function installLightingCalls(context, kernel){
             setError(GL.INVALID_ENUM);
             return;
         }
+        if (tooShort(LIGHT_VECTORS, parameter, values))
+        {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
         const target = lights[index];
         const four = ()=>fourOf(values);
         switch (parameter)
@@ -115,7 +140,7 @@ export function installLightingCalls(context, kernel){
             case GL.SPOT_DIRECTION:
             {
                 const m = kernel.stacks.modelview.current;
-                const [x, y, z] = [values[0] ?? 0, values[1] ?? 0, values[2] ?? 0];
+                const [x, y, z] = [values[0], values[1], values[2]];
                 // A direction goes through the upper 3x3 only: it has no
                 // position to translate.
                 target.spotDirection = [
@@ -170,6 +195,11 @@ export function installLightingCalls(context, kernel){
             return;
         }
         if (face !== GL.FRONT && face !== GL.BACK && face !== GL.FRONT_AND_BACK)
+        {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
+        if (tooShort(MATERIAL_VECTORS, parameter, values))
         {
             setError(GL.INVALID_ENUM);
             return;
@@ -249,8 +279,13 @@ export function installLightingCalls(context, kernel){
                 setState(parameter, [value]);
                 return;
             case GL.FOG_COLOR:
+                if (values.length < 4)
+                {
+                    setError(GL.INVALID_ENUM);
+                    return;
+                }
                 setState(GL.FOG_COLOR,
-                    [0, 1, 2, 3].map(k=>Math.min(1, Math.max(0, values[k] ?? 0))));
+                    [0, 1, 2, 3].map(k=>Math.min(1, Math.max(0, values[k]))));
                 return;
             case GL.FOG_COORDINATE_SOURCE:
                 if (value !== GL.FOG_COORDINATE && value !== GL.FRAGMENT_DEPTH)
@@ -329,6 +364,11 @@ export function installLightingCalls(context, kernel){
             switch (parameter)
             {
                 case GL.LIGHT_MODEL_AMBIENT:
+                    if (values.length < 4)
+                    {
+                        setError(GL.INVALID_ENUM);
+                        return;
+                    }
                     setState(GL.LIGHT_MODEL_AMBIENT, fourOf(values));
                     return;
                 case GL.LIGHT_MODEL_LOCAL_VIEWER:

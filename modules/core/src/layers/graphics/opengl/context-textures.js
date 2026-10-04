@@ -745,7 +745,12 @@ export function installTextureCalls(context, kernel){
         const value = values[0];
         if (parameter === GL.TEXTURE_BORDER_COLOR)
         {
-            texture.borderColour = [0, 1, 2, 3].map(k=>Math.min(1, Math.max(0, values[k] ?? 0)));
+            if (values.length < 4)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            texture.borderColour = [0, 1, 2, 3].map(k=>Math.min(1, Math.max(0, values[k])));
             return;
         }
         if (!texture.parameters.has(parameter))
@@ -835,7 +840,12 @@ export function installTextureCalls(context, kernel){
                 env.mode = value;
                 return;
             case GL.TEXTURE_ENV_COLOR:
-                env.colour = [0, 1, 2, 3].map(k=>Math.min(1, Math.max(0, values[k] ?? 0)));
+                if (values.length < 4)
+                {
+                    setError(GL.INVALID_ENUM);
+                    return;
+                }
+                env.colour = [0, 1, 2, 3].map(k=>Math.min(1, Math.max(0, values[k])));
                 return;
             case GL.COMBINE_RGB:
             case GL.COMBINE_ALPHA:
@@ -948,16 +958,21 @@ export function installTextureCalls(context, kernel){
             unit.genModes[k] = values[0];
             return;
         }
+        if ((parameter === GL.OBJECT_PLANE || parameter === GL.EYE_PLANE) && values.length < 4)
+        {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
         if (parameter === GL.OBJECT_PLANE)
         {
-            unit.objectPlanes[k] = [values[0] ?? 0, values[1] ?? 0, values[2] ?? 0, values[3] ?? 0];
+            unit.objectPlanes[k] = [values[0], values[1], values[2], values[3]];
             return;
         }
         if (parameter === GL.EYE_PLANE)
         {
             // Fixed in eye space by the modelview current now, like a light.
             const inverse = inverseTransposeOf(kernel.stacks.modelview.current);
-            const plane = [values[0] ?? 0, values[1] ?? 0, values[2] ?? 0, values[3] ?? 0];
+            const plane = [values[0], values[1], values[2], values[3]];
             unit.eyePlanes[k] = [0, 1, 2, 3].map(row=>plane[0] * inverse[row]
                 + plane[1] * inverse[4 + row] + plane[2] * inverse[8 + row]
                 + plane[3] * inverse[12 + row]);

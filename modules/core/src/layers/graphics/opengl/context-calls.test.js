@@ -847,3 +847,34 @@ test('a program\'s texture units reach the eighth, and the limits say so', ()=>{
     context.glActiveTextureARB(GL.TEXTURE0 + 5);
     assert.deepEqual(context.glGetFloatv(GL.CURRENT_TEXTURE_COORDS), [0.5, 0.25, 0.125, 1]);
 });
+
+test('a scalar form refuses a parameter only the vector form takes, and changes nothing', ()=>{
+    const { context } = drawing();
+    const before = {
+        light: context.glGetLightfv(GL.LIGHT0, GL.POSITION),
+        spot: context.glGetLightfv(GL.LIGHT0, GL.SPOT_DIRECTION),
+        material: context.glGetMaterialfv(GL.FRONT, GL.EMISSION),
+        fog: context.glGetFloatv(GL.FOG_COLOR),
+        ambient: context.glGetFloatv(GL.LIGHT_MODEL_AMBIENT),
+    };
+    for (const make of [
+        ()=>context.glLightf(GL.LIGHT0, GL.POSITION, 7),
+        ()=>context.glLightf(GL.LIGHT0, GL.SPOT_DIRECTION, 7),
+        ()=>context.glLightf(GL.LIGHT0, GL.DIFFUSE, 0.5),
+        ()=>context.glMaterialf(GL.FRONT, GL.EMISSION, 0.5),
+        ()=>context.glMaterialf(GL.FRONT, GL.COLOR_INDEXES, 1),
+        ()=>context.glFogf(GL.FOG_COLOR, 0.5),
+        ()=>context.glLightModelf(GL.LIGHT_MODEL_AMBIENT, 0.5),
+    ])
+    {
+        make();
+        assert.equal(context.glGetError(), GL.INVALID_ENUM, make.toString());
+    }
+    assert.deepEqual({
+        light: context.glGetLightfv(GL.LIGHT0, GL.POSITION),
+        spot: context.glGetLightfv(GL.LIGHT0, GL.SPOT_DIRECTION),
+        material: context.glGetMaterialfv(GL.FRONT, GL.EMISSION),
+        fog: context.glGetFloatv(GL.FOG_COLOR),
+        ambient: context.glGetFloatv(GL.LIGHT_MODEL_AMBIENT),
+    }, before);
+});
