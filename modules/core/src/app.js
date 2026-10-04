@@ -15,7 +15,9 @@ import { createPresenter } from './layers/graphics/webgpu/internal/presenter.js'
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
 import { parsePe, readExports, readImports, rvaToFileOffset } from './layers/loader/internal/pe.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
-import { findResource, listResources, loadString } from './layers/loader/internal/resources.js';
+import {
+    findResource, listResources, loadString, RT_STRING, stringInBundle,
+} from './layers/loader/internal/resources.js';
 import { readTls } from './layers/loader/internal/tls.js';
 import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js';
 import { mangledCall } from './layers/loader/internal/mangling.js';
@@ -1453,11 +1455,16 @@ export async function inParallel(items, limit, work){
  * offset from the base rather than at its RVA -- so that is the `rva` a data
  * file's lookup answers, since every caller adds it to the base.
  *
+ * A mapped module's strings are read where it lies in memory, as Windows
+ * reads them: a packed image's file names its string tables at addresses
+ * that hold them only once its own code has unpacked them there.
+ *
  * @param {() => any} main       The running program's module, once loaded.
  * @param {Map<number, any>} byBase  Every mapped module by its base.
  * @param {Map<number, any>} [dataFiles]  Libraries mapped as data, by handle.
+ * @param {(address: number, length: number) => Uint8Array} [readMemory]
  */
-export function resourceLookup(main, byBase, dataFiles = new Map()){
+export function resourceLookup(main, byBase, dataFiles = new Map(), readMemory){
     /** @param {number} instance */
     const moduleOf = instance=>{
         if (instance === 0)
@@ -1472,7 +1479,15 @@ export function resourceLookup(main, byBase, dataFiles = new Map()){
         /** @param {number} instance @param {number} id */
         loadString: (instance, id)=>{
             const module = moduleOf(instance);
-            return module?.file ? loadString(module.file, module.image, id) : null;
+            if (!module?.file || module.flat || !readMemory)
+            {
+                return module?.file ? loadString(module.file, module.image, id) : null;
+            }
+            const found = findResource(module.file, module.image, RT_STRING,
+                ((id >>> 0) >> 4) + 1);
+            return found
+                ? stringInBundle(readMemory(module.base + found.rva, found.size), id & 15)
+                : null;
         },
         /**
          * Whether a module carries a resource, and where: what a cursor or
@@ -3058,10 +3073,11 @@ async function buildApp(options){
         },
         cpu: {
             jit: options.jit, sampling: options.sampling, memorySize,
-            // Open, where Windows never maps the first 64 KiB: TRON 2.0 reads
-            // through a null pointer somewhere our libraries hand it one that
-            // Windows would not, and reads zero there; closed, it faults.
-            // Closed again once that is found (roadmap/00-cork-defects.md).
+            // ponytail: open, where Windows never maps the first 64 KiB, until
+            // a store alone can fault there. Closed, FMOD's mixer thread reads
+            // NULL+0x54 before its creator has set the pointer and faults; open,
+            // PECompact2's deliberate store through NULL goes through instead of
+            // reaching the handler it installed, so a packed setup cannot run.
             closedBelow: 0,
             // Nothing runs there all the same: a call through a null pointer
             // faults, as on Windows, rather than sliding through the zeroes.
@@ -3655,6 +3671,23 @@ async function buildApp(options){
                 },
                 /** @param {number} base */
                 byBase: base=>byBase.get(base >>> 0) ?? null,
+                /**
+                 * The module an address lies in, or null: what a program asks
+                 * GetModuleHandleEx of an address in its own code.
+                 *
+                 * @param {number} address
+                 */
+                containing: address=>{
+                    const at = address >>> 0;
+                    for (const module of byBase.values())
+                    {
+                        if (at >= module.base && at < module.base + (module.size ?? 0))
+                        {
+                            return module;
+                        }
+                    }
+                    return null;
+                },
                 imagePath: ()=>options.imagePath ?? 'C:\\app.exe',
                 /** @param {string} name */
                 /** @param {string} name @param {number} [flags] */
@@ -3668,7 +3701,8 @@ async function buildApp(options){
                     .map(held=>({ name: held.name, base: held.base, entryPoint: held.entryPoint })),
                 /** @param {any} asked */
                 resolved: asked=>events.emit('resolved', asked),
-                ...resourceLookup(()=>mainModule, byBase, dataFiles),
+                ...resourceLookup(()=>mainModule, byBase, dataFiles,
+                    (address, length)=>core.api('memory').readBytes(address, length)),
                 /**
                  * The version resource of a file on the volume, by path: what
                  * an installer compares before it replaces a shared component.

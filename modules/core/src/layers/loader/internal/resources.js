@@ -176,15 +176,33 @@ export function loadString(bytes, image, id, language = null){
     {
         return null;
     }
+    /** @type {number} */
+    let at;
+    try
+    {
+        at = rvaToFileOffset(image, found.rva);
+    }
+    catch {
+        // Data outside every section: a file that describes a table it does
+        // not hold, as a packed image does until its own code unpacks it.
+        return null;
+    }
+    return stringInBundle(bytes.subarray(at, at + found.size), wanted & STRINGS_PER_BUNDLE - 1);
+}
 
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    let at = rvaToFileOffset(image, found.rva);
-    const end = at + found.size;
-    const slot = wanted & STRINGS_PER_BUNDLE - 1;
-
+/**
+ * The string in one slot of a string bundle's bytes; null for an empty slot,
+ * and for one the bytes end before.
+ *
+ * @param {Uint8Array} bundle @param {number} slot
+ * @returns {string | null}
+ */
+export function stringInBundle(bundle, slot){
+    const view = new DataView(bundle.buffer, bundle.byteOffset, bundle.byteLength);
+    let at = 0;
     for (let index = 0; index < STRINGS_PER_BUNDLE; index++)
     {
-        if (at + 2 > end)
+        if (at + 2 > bundle.length)
         {
             return null;
         }
@@ -192,7 +210,7 @@ export function loadString(bytes, image, id, language = null){
         at += 2;
         if (index === slot)
         {
-            if (length === 0 || at + length * 2 > end)
+            if (length === 0 || at + length * 2 > bundle.length)
             {
                 return null;
             }

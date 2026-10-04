@@ -508,7 +508,11 @@ export function createSeh(host){
         }
 
         const { frames, damaged } = chain();
-        host.trace?.(`exception ${hex(what.code)} at ${hex(what.address)}, `
+        // A jump into the first page is a call through a null pointer, whose
+        // return address -- the call's own place -- is the only lead.
+        const caller = (what.address >>> 0) < 0x10000 && host.isMapped(registers.esp >>> 0)
+            ? `, called from ${hex(readU32(registers.esp >>> 0))}` : '';
+        host.trace?.(`exception ${hex(what.code)} at ${hex(what.address)}${caller}, `
             + `${frames.length} frame(s)${damaged ? ', chain damaged' : ''}`);
 
         for (const { frame, handler } of frames)

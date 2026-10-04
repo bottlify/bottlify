@@ -46,6 +46,8 @@ import { decompressZstd } from './zstd.js';
 import { createAccessors } from './layers/memory/internal/accessors.js';
 import { Access, RegionKind, createRegionMap } from './layers/memory/internal/regions.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
+import { findResource, RT_STRING } from './layers/loader/internal/resources.js';
+import { buildImage, buildResources } from './layers/loader/internal/resources.test.js';
 
 /** Fast enough that a test does not pay for the backoff it is checking. */
 const QUICK = { attempts: 4, baseDelayMs: 1, maxDelayMs: 4 };
@@ -341,6 +343,25 @@ test('a resource is addressed relative to the module its instance names', ()=>{
     assert.equal(lookup.moduleBase(0x12345678), 0, 'an instance that names nothing');
     assert.equal(lookup.findResource(0x12345678, 5, 107), null);
     assert.equal(lookup.loadString(0, 1), null, 'a module without its file has no resources');
+});
+
+test('a mapped module\'s strings are read where it lies, as its own code left them', ()=>{
+    /** @param {string} text */
+    const bundle = text=>Uint8Array.from([text.length, 0,
+        ...[...text].flatMap(unit=>[unit.charCodeAt(0), 0]), ...new Array(30).fill(0)]);
+    const { bytes, image } = buildImage(buildResources([{ type: RT_STRING,
+        names: [{ name: 1, langs: [{ lang: 0x409, data: [...bundle('on disk!')] }] }] }]));
+    const found = /** @type {{ rva: number, size: number }} */ (
+        findResource(bytes, image, RT_STRING, 1));
+    const library = { base: 0x10000000, file: bytes, image };
+    const unpacked = bundle('unpacked');
+    const lookup = resourceLookup(()=>null, new Map([[library.base, library]]), new Map(),
+        (address, length)=>(address === library.base + found.rva
+            ? unpacked.subarray(0, length) : new Uint8Array(length)));
+    assert.equal(lookup.loadString(library.base, 0), 'unpacked', 'memory, not the file');
+    assert.equal(lookup.loadString(library.base, 1), null, 'an empty slot is absent');
+    assert.equal(resourceLookup(()=>null, new Map([[library.base, library]]))
+        .loadString(library.base, 0), 'on disk!', 'with no memory to read, the file');
 });
 
 /**

@@ -256,3 +256,71 @@ test('a vectored handler takes an exception before any frame and goes on from it
         assert.equal(code, 0, '1: the handler ran other than once; 2: it saw another code;'
             + ' 3: it could not be removed');
     });
+
+/**
+ * A store through NULL right after a frame is pushed, as a packer's entry
+ * point makes one to reach its own handler: the store faults where it
+ * stands, the handler is given that frame and a context whose Esp is the
+ * faulting instruction's, and the program goes on where the handler put it,
+ * on that stack.
+ *
+ * Exits 0, or with a bit per property that failed: 1 the context's Esp was
+ * another, 2 the frame handed over was another, 4 the program went on on
+ * another stack; 0x77 the store went through.
+ */
+function buildNullStoreExe(){
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        data: { savedEsp: [0, 0, 0, 0], contextEsp: [0, 0, 0, 0], frame: [0, 0, 0, 0],
+            resumedEsp: [0, 0, 0, 0] },
+        codeSize: 0x180,
+        code: ({ iat, at, code })=>{
+            const handler = code(0x100);
+            const resume = code(0x80);
+            const main = [
+                0x68, ...u32(handler),                           // push handler
+                0x64, 0xff, 0x35, 0, 0, 0, 0,                    // push dword fs:[0]
+                0x64, 0x89, 0x25, 0, 0, 0, 0,                    // mov fs:[0], esp
+                0x89, 0x25, ...u32(at('savedEsp')),              // mov [savedEsp], esp
+                0x33, 0xc0,                                      // xor eax, eax
+                0x89, 0x08,                                      // mov [eax], ecx
+                0x6a, 0x77, 0xff, 0x15, ...u32(iat('ExitProcess')), // the store went through
+            ];
+            const block = [
+                0x89, 0x25, ...u32(at('resumedEsp')),            // mov [resumedEsp], esp
+                0x31, 0xc0,                                      // xor eax, eax
+                0x8b, 0x0d, ...u32(at('savedEsp')),              // mov ecx, [savedEsp]
+                0x3b, 0x0d, ...u32(at('contextEsp')),            // cmp ecx, [contextEsp]
+                0x74, 0x03, 0x83, 0xc8, 0x01,                    // je +3; or eax, 1
+                0x3b, 0x0d, ...u32(at('frame')),                 // cmp ecx, [frame]
+                0x74, 0x03, 0x83, 0xc8, 0x02,                    // je +3; or eax, 2
+                0x3b, 0x0d, ...u32(at('resumedEsp')),            // cmp ecx, [resumedEsp]
+                0x74, 0x03, 0x83, 0xc8, 0x04,                    // je +3; or eax, 4
+                0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),    // exit eax
+            ];
+            const handle = [
+                0x8b, 0x4c, 0x24, 0x0c,                          // mov ecx, [esp+12]: CONTEXT
+                0x8b, 0x81, ...u32(0xc4),                        // mov eax, [ecx+Esp]
+                0xa3, ...u32(at('contextEsp')),                  // mov [contextEsp], eax
+                0x8b, 0x44, 0x24, 0x08,                          // mov eax, [esp+8]: the frame
+                0xa3, ...u32(at('frame')),                       // mov [frame], eax
+                0xc7, 0x81, ...u32(0xb8), ...u32(resume),        // context.Eip = block
+                0x31, 0xc0,                                      // xor eax, eax: continue
+                0xc3,                                            // ret
+            ];
+            const bytes = new Array(0x180).fill(0xcc);
+            bytes.splice(0, main.length, ...main);
+            bytes.splice(0x80, block.length, ...block);
+            bytes.splice(0x100, handle.length, ...handle);
+            return bytes;
+        },
+    });
+}
+
+test('a store through NULL faults where it stands, with the stack and frame of the store',
+    { timeout: 60000, todo: 'the first 64 KiB stay open until a store alone can fault there' },
+    async t=>{
+        const { code } = await runExecutable(t, buildNullStoreExe());
+        assert.equal(code, 0, '1: the context\'s Esp was another; 2: the frame was another;'
+            + ' 4: it went on on another stack; 0x77: the store went through');
+    });
