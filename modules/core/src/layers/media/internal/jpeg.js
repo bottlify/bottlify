@@ -5,12 +5,12 @@
  */
 
 /**
- * A baseline JPEG decoder: what a texture library of this era hands its
- * decoder, and nothing more.
+ * A JPEG decoder for what a texture library of this era hands its decoder.
  *
- * Sequential Huffman coding (SOF0/SOF1), one to four components, any
- * sampling factors, restart intervals, 8-bit samples. Progressive and
- * arithmetic coding are refused rather than guessed at. The components come
+ * Sequential and progressive Huffman coding (SOF0/SOF1/SOF2), one to four
+ * components, any sampling factors, restart intervals, 8-bit samples.
+ * Arithmetic, lossless and hierarchical coding are refused rather than
+ * guessed at, the refusal naming the frame. The components come
  * out as they were coded, interleaved and in the frame's order: a texture
  * stored as four components is four channels the caller already knows the
  * meaning of, and a colour conversion here would be a guess about a file the
@@ -342,6 +342,7 @@ function parse(bytes, headerOnly){
     let transform = 0;
     let mcusPerLine = 0;
     let mcusPerColumn = 0;
+    let progressive = false;
     let hmax = 1;
     let vmax = 1;
     let at = 2;
@@ -416,7 +417,9 @@ function parse(bytes, headerOnly){
                     transform = bytes[segment + 11];
                 }
                 break;
-            case 0xc0: case 0xc1: { // SOF0 baseline, SOF1 extended sequential
+            // SOF0 baseline, SOF1 extended sequential, SOF2 progressive
+            case 0xc0: case 0xc1: case 0xc2: {
+                progressive = marker === 0xc2;
                 if (bytes[segment] !== 8)
                 {
                     throw new Error('jpeg: only 8-bit samples');
@@ -454,9 +457,10 @@ function parse(bytes, headerOnly){
                 }
                 break;
             }
-            case 0xc2: case 0xc3: case 0xc5: case 0xc6: case 0xc7:
+            case 0xc3: case 0xc5: case 0xc6: case 0xc7:
             case 0xc9: case 0xca: case 0xcb: case 0xcd: case 0xce: case 0xcf:
-                throw new Error('jpeg: only sequential Huffman coding');
+                throw new Error(`jpeg: SOF${marker - 0xc0} is not decoded, only sequential and`
+                    + ' progressive Huffman coding');
             case 0xda: { // SOS
                 if (components.length === 0)
                 {
@@ -480,8 +484,18 @@ function parse(bytes, headerOnly){
                     scan.push(c);
                 }
                 const reader = new BitReader(bytes, end);
-                decodeScan(reader, scan, components.length === scan.length && scan.length > 1,
-                    { mcusPerLine, mcusPerColumn, restartInterval, dcTables, acTables });
+                const frame = { mcusPerLine, mcusPerColumn, restartInterval, dcTables, acTables };
+                if (progressive)
+                {
+                    const band = segment + 1 + count * 2;
+                    decodeProgressiveScan(reader, scan, { ...frame, ss: bytes[band],
+                        se: bytes[band + 1], ah: bytes[band + 2] >> 4, al: bytes[band + 2] & 15 });
+                }
+                else
+                {
+                    decodeScan(reader, scan, components.length === scan.length && scan.length > 1,
+                        frame);
+                }
                 at = reader.at;
                 continue;
             }
@@ -550,11 +564,32 @@ function decodeScan(reader, scan, interleaved, frame){
         }
     };
 
-    let mcu = 0;
-    const total = mcusPerLine * mcusPerColumn;
+    walkScan(reader, scan, interleaved, { mcusPerLine, mcusPerColumn, restartInterval },
+        decodeBlock, ()=>{
+            for (const c of scan)
+            {
+                c.pred = 0;
+            }
+        });
+}
+
+/**
+ * Visits a scan's blocks in the order they are coded: MCU by MCU for an
+ * interleaved scan, block by block over its one component's own extent --
+ * not the MCU grid -- otherwise. Every `restartInterval` units it steps over
+ * the restart marker and calls `reset`.
+ *
+ * @param {BitReader} reader @param {any[]} scan @param {boolean} interleaved
+ * @param {{ mcusPerLine: number, mcusPerColumn: number, restartInterval: number }} frame
+ * @param {(c: any, row: number, column: number) => void} visit
+ * @param {() => void} reset
+ */
+function walkScan(reader, scan, interleaved, frame, visit, reset){
+    const { mcusPerLine, mcusPerColumn, restartInterval } = frame;
     if (interleaved)
     {
-        while (mcu < total)
+        const total = mcusPerLine * mcusPerColumn;
+        for (let mcu = 0; mcu < total;)
         {
             const row = Math.floor(mcu / mcusPerLine);
             const column = mcu % mcusPerLine;
@@ -564,7 +599,7 @@ function decodeScan(reader, scan, interleaved, frame){
                 {
                     for (let h = 0; h < c.h; h++)
                     {
-                        decodeBlock(c, row * c.v + v, column * c.h + h);
+                        visit(c, row * c.v + v, column * c.h + h);
                     }
                 }
             }
@@ -572,16 +607,11 @@ function decodeScan(reader, scan, interleaved, frame){
             if (restartInterval && mcu % restartInterval === 0 && mcu < total)
             {
                 reader.restart();
-                for (const c of scan)
-                {
-                    c.pred = 0;
-                }
+                reset();
             }
         }
         return;
     }
-    // A non-interleaved scan covers one component, block by block over its
-    // own dimensions rather than the MCU grid.
     const c = scan[0];
     const rows = Math.ceil(c.scanHeight / 8);
     const columns = Math.ceil(c.scanWidth / 8);
@@ -590,15 +620,177 @@ function decodeScan(reader, scan, interleaved, frame){
     {
         for (let column = 0; column < columns; column++)
         {
-            decodeBlock(c, row, column);
+            visit(c, row, column);
             n++;
             if (restartInterval && n % restartInterval === 0 && n < rows * columns)
             {
                 reader.restart();
-                c.pred = 0;
+                reset();
             }
         }
     }
+}
+
+/**
+ * One scan of a progressive frame into the coefficient blocks (T.81, G.1.2):
+ * a spectral band, Ss to Se, of every block the scan covers -- its first
+ * pass, the coefficients shifted up by Al, or one more bit of each, Ah being
+ * the bit the last pass left off at. Only a DC scan may interleave
+ * components; an AC scan holds one. An end-of-band run carries over blocks,
+ * and a restart ends it.
+ *
+ * @param {BitReader} reader @param {any[]} scan
+ * @param {{ mcusPerLine: number, mcusPerColumn: number, restartInterval: number,
+ *           dcTables: any[], acTables: any[], ss: number, se: number, ah: number,
+ *           al: number }} frame
+ */
+function decodeProgressiveScan(reader, scan, frame){
+    const { dcTables, acTables, ss, se, ah, al } = frame;
+    if (ss > se || se > 63 || (ss === 0) !== (se === 0) || (ss > 0 && scan.length !== 1))
+    {
+        throw new Error('jpeg: a progressive scan of a band no scan can hold');
+    }
+    const one = 1 << al;
+    const minusOne = -1 << al;
+    let eobrun = 0;
+
+    /** @param {any[]} tables @param {number} id */
+    const tableOf = (tables, id)=>{
+        const table = tables[id];
+        if (!table)
+        {
+            throw new Error('jpeg: a scan without its tables');
+        }
+        return table;
+    };
+
+    /** The first pass of the DC coefficient: its difference, shifted up. */
+    const dcFirst = (/** @type {any} */ c, /** @type {number} */ offset)=>{
+        c.pred += reader.receiveExtend(reader.decode(tableOf(dcTables, c.td)));
+        c.blocks[offset] = c.pred << al;
+    };
+
+    /** One more bit of the DC coefficient. */
+    const dcRefine = (/** @type {any} */ c, /** @type {number} */ offset)=>{
+        if (reader.bit())
+        {
+            c.blocks[offset] |= one;
+        }
+    };
+
+    /** The first pass of a band: values shifted up, or a run of bands with none. */
+    const acFirst = (/** @type {any} */ c, /** @type {number} */ offset)=>{
+        if (eobrun > 0)
+        {
+            eobrun--;
+            return;
+        }
+        const table = tableOf(acTables, c.ta);
+        for (let k = ss; k <= se;)
+        {
+            const rs = reader.decode(table);
+            const size = rs & 15;
+            const run = rs >> 4;
+            if (size === 0)
+            {
+                if (run < 15)
+                {
+                    // EOBn: this band and the next 2^n - 1 + bits are done.
+                    eobrun = (1 << run) - 1 + (run > 0 ? reader.receive(run) : 0);
+                    return;
+                }
+                k += 16;
+                continue;
+            }
+            k += run;
+            if (k > se)
+            {
+                return;
+            }
+            c.blocks[offset + ZIGZAG[k]] = reader.receiveExtend(size) * one;
+            k++;
+        }
+    };
+
+    /**
+     * One more bit of a band. A coefficient already nonzero takes a
+     * correction bit wherever the coder passes it; a newly nonzero one is
+     * +1 or -1 at this bit, after a run of coefficients still zero.
+     *
+     * @param {any} c @param {number} offset
+     */
+    const acRefine = (c, offset)=>{
+        const blocks = c.blocks;
+        /** @param {number} at */
+        const correct = at=>{
+            if (reader.bit() && (blocks[at] & one) === 0)
+            {
+                blocks[at] += blocks[at] >= 0 ? one : minusOne;
+            }
+        };
+        let k = ss;
+        if (eobrun === 0)
+        {
+            const table = tableOf(acTables, c.ta);
+            for (; k <= se; k++)
+            {
+                const rs = reader.decode(table);
+                let run = rs >> 4;
+                let value = 0;
+                if ((rs & 15) !== 0)
+                {
+                    value = reader.bit() ? one : minusOne;
+                }
+                else if (run < 15)
+                {
+                    eobrun = (1 << run) + (run > 0 ? reader.receive(run) : 0);
+                    break;
+                }
+                // Past the coefficients already nonzero, each with its bit, and
+                // `run` still zero, to the one this symbol is about.
+                for (; k <= se; k++)
+                {
+                    const at = offset + ZIGZAG[k];
+                    if (blocks[at] !== 0)
+                    {
+                        correct(at);
+                    }
+                    else if (--run < 0)
+                    {
+                        break;
+                    }
+                }
+                if (value !== 0 && k <= se)
+                {
+                    blocks[offset + ZIGZAG[k]] = value;
+                }
+            }
+        }
+        if (eobrun > 0)
+        {
+            for (; k <= se; k++)
+            {
+                const at = offset + ZIGZAG[k];
+                if (blocks[at] !== 0)
+                {
+                    correct(at);
+                }
+            }
+            eobrun--;
+        }
+    };
+
+    const decode = ss === 0
+        ? (ah === 0 ? dcFirst : dcRefine)
+        : (ah === 0 ? acFirst : acRefine);
+    walkScan(reader, scan, scan.length > 1, frame,
+        (c, row, column)=>decode(c, (row * c.blocksPerLine + column) * 64), ()=>{
+            for (const c of scan)
+            {
+                c.pred = 0;
+            }
+            eobrun = 0;
+        });
 }
 
 /**

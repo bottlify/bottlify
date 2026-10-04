@@ -14,7 +14,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { decodeJpeg, readJpegHeader } from './jpeg.js';
-import { FLAT, block, encode, reference } from './jpeg.fixture.js';
+import { FLAT, block, encode, encodeProgressive, reference } from './jpeg.fixture.js';
 
 test('a flat block decodes to its DC level', ()=>{
     // DC 40 with a quantiser of 1: every sample is 40 / 8 + 128 = 133.
@@ -160,12 +160,133 @@ test('a restart interval resets the predictors and skips the marker', ()=>{
         [134, 134, 122, 122]);
 });
 
-test('the header can be read without decoding, and progressive coding is refused', ()=>{
+test('the header can be read without decoding, and arithmetic coding is refused by name', ()=>{
     const bytes = encode({ width: 24, height: 8, quant: FLAT,
         components: [{ h: 1, v: 1, blocks: [block(0), block(0), block(0)] }] });
     assert.deepEqual(readJpegHeader(bytes), { width: 24, height: 8, components: 1 });
-    const progressive = encode({ width: 8, height: 8, quant: FLAT, sof: 0xc2,
+    const arithmetic = encode({ width: 8, height: 8, quant: FLAT, sof: 0xc9,
         components: [{ h: 1, v: 1, blocks: [block(0)] }] });
-    assert.throws(()=>decodeJpeg(progressive), /sequential/);
+    assert.throws(()=>decodeJpeg(arithmetic), /SOF9/);
     assert.throws(()=>decodeJpeg(Uint8Array.of(1, 2, 3, 4)), /not a JPEG/);
+});
+
+/**
+ * Blocks with something in every band: a DC level, scattered low and high
+ * frequencies, now and then a band left empty -- end-of-band runs across
+ * blocks -- and a lone high coefficient after a long run of zeros.
+ *
+ * @param {number} count @param {number} seed
+ */
+function busyBlocks(count, seed){
+    let state = seed;
+    const next = (/** @type {number} */ range)=>{
+        state = (state * 1103515245 + 12345) >>> 0;
+        return (state >>> 16) % range;
+    };
+    return Array.from({ length: count }, (_, index)=>{
+        const b = new Array(64).fill(0);
+        b[0] = next(121) - 60;
+        if (index % 5 === 3)
+        {
+            return b;
+        }
+        for (let k = 1; k < 64; k++)
+        {
+            if (next(64) > 40 + k / 2)
+            {
+                b[k] = next(41) - 20;
+            }
+        }
+        if (index % 7 === 2)
+        {
+            b.fill(0, 1);
+            b[62] = 9;
+        }
+        return b;
+    });
+}
+
+test('a progressive stream decodes to exactly the picture the same blocks make sequentially', ()=>{
+    // libjpeg's script for three components: the DC of all of them first,
+    // then bands of each, then one bit more of everything, twice.
+    const components = [
+        { h: 2, v: 2, blocks: busyBlocks(16, 1) },
+        { h: 1, v: 1, blocks: busyBlocks(4, 2) },
+        { h: 1, v: 1, blocks: busyBlocks(4, 3) },
+    ];
+    const spec = { width: 32, height: 32, quant: FLAT, components };
+    const scans = [
+        { components: [0, 1, 2], ss: 0, se: 0, ah: 0, al: 1 },
+        { components: [0], ss: 1, se: 5, ah: 0, al: 2 },
+        { components: [2], ss: 1, se: 63, ah: 0, al: 1 },
+        { components: [1], ss: 1, se: 63, ah: 0, al: 1 },
+        { components: [0], ss: 6, se: 63, ah: 0, al: 2 },
+        { components: [0], ss: 1, se: 63, ah: 2, al: 1 },
+        { components: [0, 1, 2], ss: 0, se: 0, ah: 1, al: 0 },
+        { components: [2], ss: 1, se: 63, ah: 1, al: 0 },
+        { components: [1], ss: 1, se: 63, ah: 1, al: 0 },
+        { components: [0], ss: 1, se: 63, ah: 1, al: 0 },
+    ];
+    const sequential = decodeJpeg(encode(spec));
+    const progressive = decodeJpeg(encodeProgressive({ ...spec, scans }));
+    assert.deepEqual(progressive.samples, sequential.samples);
+    assert.equal(progressive.components, 3);
+
+    // A band in one pass, with no bits held back, is the same again.
+    const plain = decodeJpeg(encodeProgressive({ ...spec, scans: [
+        { components: [0, 1, 2], ss: 0, se: 0, ah: 0, al: 0 },
+        { components: [0], ss: 1, se: 63, ah: 0, al: 0 },
+        { components: [1], ss: 1, se: 63, ah: 0, al: 0 },
+        { components: [2], ss: 1, se: 63, ah: 0, al: 0 },
+    ] }));
+    assert.deepEqual(plain.samples, sequential.samples);
+});
+
+/**
+ * A 32-by-16 picture of gradients and a checker edge, made for this test and
+ * written by libjpeg (through Pillow) at quality 90 with 4:2:0 chroma: once
+ * baseline, once progressive with libjpeg's own ten-scan script. The same
+ * picture with the same tables is the same quantised coefficients, so the
+ * two decode to the same bytes -- and an encoder other than this file's own
+ * checks the passes are read as a real one writes them.
+ */
+const LIBJPEG_BASELINE = [
+    '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4R',
+    'DgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU',
+    'FBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAAQACADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAA',
+    'AAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAk',
+    'M2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKT',
+    'lJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QA',
+    'HwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdh',
+    'cRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hp',
+    'anN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk',
+    '5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD450H4TxQOG06M3E+MFZBgBfXoO+K7PTPhRE1wsk0ZTUMgiJR8',
+    'u7+Efjx3r6X0n4WeftX7H/ZeOfO27c/7PQfX8K7PSfhXs2x/Y/P7fbtucZ/izjt9e1ejjOL4eyUU4+zTulaSp83e',
+    'NN/vYz/6eT/d733R+Y8N8eu8ff19dfv2t5bnzVZfCnz/AC/7Sh+z4/1fljO71z19q7TTPhXK1usc1uE0/AAlA+bb',
+    '/Cfx47V9KaT8Kfs+P3P9q59t3l/z6/0rs9J+E+3bJ/r+/wBh64/2ce307V8VjeMZOdRym+Zr37tOTVtqsl7tWNvs',
+    'UbT5fd+I/qrhrj34ff8A68u3z0P/2Q==',
+].join('');
+const LIBJPEG_PROGRESSIVE = [
+    '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4R',
+    'DgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU',
+    'FBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wgARCAAQACADASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAA',
+    'BQf/xAAXAQADAQAAAAAAAAAAAAAAAAAEBQYH/9oADAMBAAIQAxAAAAGOM0xkiYmrVKZS6r//xAAaEAACAwEBAAAA',
+    'AAAAAAAAAAADBQABEhEC/9oACAEBAAEFAgKaqDVVrwq7BqryJX2CVQSrMEpn/8QAFxEBAAMAAAAAAAAAAAAAAAAA',
+    'BQAhMf/aAAgBAwEBPwE17Lhr2XP/xAAkEQABAgUCBwAAAAAAAAAAAAABAhEAAwUSITFhIjJBUWKBgv/aAAgBAgEB',
+    'PwGdVxa2Lfdr7J5gfI8MTqwXU5z17/R0UNkZbGsf/8QAIBAAAQIGAwEAAAAAAAAAAAAAAAEREhMjMVFhAjJiwf/a',
+    'AAgBAQAGPwKmkS7HVKmBJiQ4YZeNPJ0lbGgf2Wm/B7+D/8QAIBAAAgEDBAMAAAAAAAAAAAAAABEBQVGRITFh8IGh',
+    '4f/aAAgBAQABPyGZfA2E6CVjZ0PrYJkEsioaeMFeBSwfs7qQpddj/9oADAMBAAIAAwAAABBYT//EACARAAAEBgMA',
+    'AAAAAAAAAAAAAAARITEBQVFhcYGRsfD/2gAIAQMBAT8QinNyvLFZx7eqbQf/xAAaEQEBAQEAAwAAAAAAAAAAAAAB',
+    'ETEAUWHR/9oACAECAQE/EI4YNCD2J9qunOZaNoomFi8XR//EACAQAAEDBAMBAQAAAAAAAAAAAAEAEUEhMVFxYYGR',
+    'wdH/2gAIAQEAAT8QBymWIGAysJZHgPAgWh3SVihA/J78IUBoACNjukLDCsjwN9LojcZ8mjcKgl4/S/xegybTjUL/',
+    '2Q==',
+].join('');
+
+test('libjpeg\'s progressive stream decodes to exactly what its baseline one does', ()=>{
+    const bytes = (/** @type {string} */ text)=>Uint8Array.from(Buffer.from(text, 'base64'));
+    const baseline = decodeJpeg(bytes(LIBJPEG_BASELINE));
+    const progressive = decodeJpeg(bytes(LIBJPEG_PROGRESSIVE));
+    assert.deepEqual([progressive.width, progressive.height, progressive.components],
+        [32, 16, 3]);
+    assert.deepEqual(progressive.samples, baseline.samples);
 });
