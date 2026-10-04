@@ -23,7 +23,8 @@ const RAM_BASE = 0x40000000;
 
 /**
  * A root of a device's shape, small enough to see through: each side's
- * services and what its objects saw are kept in `sides`, the recorded first.
+ * services and what its objects saw are kept in `sides`, which side each is
+ * by `played` (the played one is made first).
  *
  * @param {any[]} sides
  */
@@ -44,6 +45,32 @@ function toy(sides){
                     },
                     Unlock(){
                         side.seen.push([...services.readMemory(base, 4)]);
+                        return D3D_OK;
+                    },
+                    /** @param {{ pBits?: number }} locked @param {any} rect @param {number} flags */
+                    LockRect(locked, rect, flags){
+                        void rect;
+                        void flags;
+                        locked.pBits = base;
+                        return D3D_OK;
+                    },
+                    UnlockRect: ()=>D3D_OK,
+                    // A lock whose address the played device answers later, as
+                    // a render target's does: none is known when it is recorded.
+                    /** @param {{ pBits?: number }} locked @param {any} rect @param {number} flags */
+                    LockRectAnswered(locked, rect, flags){
+                        void locked;
+                        void rect;
+                        void flags;
+                        return D3D_OK;
+                    },
+                    // What the played device holds there; the recorded one
+                    // reads nothing, which would send the bytes itself.
+                    Peek(){
+                        if (side.played)
+                        {
+                            side.seen.push([...services.readMemory(base, 4)]);
+                        }
                         return D3D_OK;
                     },
                     /** @param {{ create: () => number }} gdi */
@@ -101,7 +128,8 @@ function toyLoop(){
             at + length),
         writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>ram.set(bytes, at),
     });
-    return { root, ram, recorded: sides[0], played: sides[1] };
+    return { root, ram, recorded: sides.find(side=>!side.played),
+        played: sides.find(side=>side.played) };
 }
 
 test('what a lock let the program write is the played device\'s at the unlock', ()=>{
@@ -115,6 +143,33 @@ test('what a lock let the program write is the played device\'s at the unlock', 
     ram.set([1, 2, 3, 4], /** @type {number} */ (locked.pBits));
     assert.equal(out.thing.Unlock(), D3D_OK);
     assert.deepEqual(played.seen, [[1, 2, 3, 4]]);
+});
+
+test('a lock taken to read sends nothing back at its unlock; one taken to write does', ()=>{
+    const { root, ram, played } = toyLoop();
+    /** @type {{ thing?: any }} */
+    const out = {};
+    root.CreateThing(out);
+    const thing = out.thing;
+    /** @type {{ pBits?: number }} */
+    const locked = {};
+    const D3DLOCK_READONLY = 0x10;
+    assert.equal(thing.LockRect(locked, null, D3DLOCK_READONLY | 0x800), D3D_OK);
+    ram.set([5, 6, 7, 8], /** @type {number} */ (locked.pBits));
+    assert.equal(thing.UnlockRect(), D3D_OK);
+    thing.Peek();
+    assert.deepEqual(played.seen, [[0, 0, 0, 0]], 'read, not written: nothing went');
+    assert.equal(thing.LockRect(locked, null, 0), D3D_OK);
+    assert.equal(thing.UnlockRect(), D3D_OK);
+    thing.Peek();
+    assert.deepEqual(played.seen[1], [5, 6, 7, 8], 'written: the bytes went');
+
+    ram.set([9, 9, 9, 9], /** @type {number} */ (locked.pBits));
+    assert.equal(thing.LockRectAnswered(locked, null, D3DLOCK_READONLY), D3D_OK);
+    assert.equal(thing.UnlockRect(), D3D_OK);
+    thing.Peek();
+    assert.deepEqual(played.seen[2], [5, 6, 7, 8],
+        'read, with no address on record: still nothing went');
 });
 
 test('a method the caller wraps is its own: what it calls through is played once', ()=>{

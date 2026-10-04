@@ -100,10 +100,24 @@ function partOf(args){
 
 /**
  * A lock's address and the bytes from it the program may write, null for the
- * rest of the block it lies in.
+ * rest of the block it lies in; none for a lock taken to read.
  *
- * @typedef {{ address: number, length: number | null }} Locked
+ * @typedef {{ address: number, length: number | null, readOnly?: boolean }} Locked
  */
+
+/** D3DLOCK_READONLY, the same number in both versions of the API. */
+const LOCK_READ_ONLY = 0x10;
+
+/**
+ * Whether a lock was taken to read only: its flags are its last argument, in
+ * every lock of both versions.
+ *
+ * @param {any[]} args
+ */
+const readOnlyLock = args=>{
+    const flags = args[args.length - 1];
+    return typeof flags === 'number' && (flags & LOCK_READ_ONLY) !== 0;
+};
 
 /**
  * How many bytes from the address a lock handed out it covers, where its
@@ -761,7 +775,11 @@ export function createRecording(options){
             let shipped = null;
             if (unlocking)
             {
-                const ranges = lockedRanges(target, name === 'ReleaseDC' ? '' : partOf(args));
+                // What a lock taken to read let the program see is the device's
+                // own, and goes nowhere: a program that reads its back buffer
+                // every frame would otherwise send the whole frame back.
+                const ranges = lockedRanges(target, name === 'ReleaseDC' ? '' : partOf(args))
+                    .filter(range=>!range.readOnly);
                 if (deferring)
                 {
                     ranges.forEach(pend);
@@ -840,7 +858,17 @@ export function createRecording(options){
                 }
             }
             bindAll(result, making ? args : NOTHING, bind);
-            if (making || locking)
+            // A lock taken to read is marked so whatever the answer: a render
+            // target's comes from the played device later, and an unlock with
+            // no lock on record sends the whole surface.
+            const readOnly = locking && readOnlyLock(args);
+            if (readOnly)
+            {
+                const locks = lockedAt.get(target) ?? new Map();
+                locks.set(partOf(args), { address: 0, length: 0, readOnly });
+                lockedAt.set(target, locks);
+            }
+            if (making || (locking && !readOnly))
             {
                 for (let index = 0; index < count; index++)
                 {
