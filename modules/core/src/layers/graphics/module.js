@@ -343,6 +343,10 @@ export function createGraphicsModule(){
                     device: device.device,
                     presentTo: device.presentTo,
                     writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+                    // Where the memory is shared the worker writes what it reads
+                    // back in place, and says only where.
+                    sharedMemory: ()=>memory.shared?.() ?? null,
+                    adoptMemory: (address, length)=>memory.adopt?.(address, length),
                     divergence: config?.divergence,
                     lost: lose,
                     failed: message=>config?.divergence?.('graphics',

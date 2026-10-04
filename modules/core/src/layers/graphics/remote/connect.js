@@ -61,8 +61,11 @@ function plainOf(services){
  *     services: any) => any} root
  *     a root the program is given, whose twin the worker plays
  * @property {() => { roots: number, frames: number, dropped: number,
- *     waits: Record<string, { count: number, ms: number, maxMs: number }>, behind: number[] }}
- *     diagnostics  `waits`: what the program's thread waited on the worker for, by call
+ *     waits: Record<string, { count: number, ms: number, maxMs: number }>, behind: number[],
+ *     readBack: { sent: number, shared: number } }}
+ *     diagnostics  `waits`: what the program's thread waited on the worker for, by call;
+ *     `readBack`: the bytes the worker wrote into guest memory, sent here to be written or
+ *     written in shared memory in place
  * @property {() => void} dispose
  */
 
@@ -77,13 +80,19 @@ function plainOf(services){
  *     where a frame goes, as the backend of this thread hands its own on
  * @param {(address: number, bytes: Uint8Array) => void} [options.writeMemory]
  *     guest memory the worker wrote for a call the program waited on: pixels read back
+ * @param {() => Uint8Array | null} [options.sharedMemory]  the guest's RAM over a
+ *     SharedArrayBuffer, which the worker then writes such pixels into itself; asked
+ *     when a root is made, once the machine has memory
+ * @param {(address: number, length: number) => void} [options.adoptMemory]
+ *     told where the worker wrote the shared RAM, which this thread takes as its own write
  * @param {(api: string, detail: string) => void} [options.divergence]
  * @param {() => void} [options.lost]    the worker's GPU went away
  * @param {(message: string) => void} [options.failed]  a root's calls could not be played
  * @returns {GraphicsWorkerEnd}
  */
 export function connectGraphicsWorker(options){
-    const { worker, device, presentTo, writeMemory, divergence, lost, failed } = options;
+    const { worker, device, presentTo, writeMemory, sharedMemory, adoptMemory, divergence, lost,
+        failed } = options;
     /** @type {{ texture: any, view: any, width: number, height: number, format: string } | null} */
     let surface = null;
     /** @type {MessagePort[]} */
@@ -91,6 +100,7 @@ export function connectGraphicsWorker(options){
     /** @type {ReturnType<typeof createSender>[]} */
     const senders = [];
     let frames = 0;
+    const readBack = { sent: 0, shared: 0 };
 
     /**
      * @param {{ bitmap?: any, pixels?: Uint8Array, bytesPerRow?: number, width?: number,
@@ -176,11 +186,21 @@ export function connectGraphicsWorker(options){
         root(api, factory, services){
             const { port1, port2 } = new MessageChannel();
             ports.push(port1);
-            worker.postMessage({ type: 'root', api, options: plainOf(services), port: port2 },
-                [port2]);
+            worker.postMessage({ type: 'root', api, options: plainOf(services), port: port2,
+                memory: sharedMemory?.() ?? null }, [port2]);
             const sender = createSender({
                 post: (message, transfer)=>port1.postMessage(message, transfer),
-                on: { wrote: writeMemory, divergence, lost, failed },
+                on: {
+                    wrote: (address, bytes)=>{
+                        readBack.sent += bytes.length;
+                        writeMemory?.(address, bytes);
+                    },
+                    adopted: (address, length)=>{
+                        readBack.shared += length;
+                        adoptMemory?.(address, length);
+                    },
+                    divergence, lost, failed,
+                },
                 gapMs: BATCH_GAP_MS,
             });
             port1.onmessage = event=>sender.receive(event.data);
@@ -209,7 +229,7 @@ export function connectGraphicsWorker(options){
                 }
             }
             return { roots: ports.length, frames, dropped, waits,
-                behind: senders.map(sender=>sender.behind()) };
+                behind: senders.map(sender=>sender.behind()), readBack: { ...readBack } };
         },
         dispose(){
             worker.removeEventListener('message', listener);

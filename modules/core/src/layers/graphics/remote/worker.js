@@ -22,7 +22,7 @@
  *                                    frame back as a picture, 'pixels' as its
  *                                    bytes read back; anything else keeps them.
  *                                    Answered every time it is asked.
- *   { type: 'root', api, options, port }
+ *   { type: 'root', api, options, port, memory }
  *                                    `api` 'd3d7', 'd3d8', 'd3d9' or 'opengl', `options` the
  *                                    plain part of what the root was made with;
  *                                    `{ type: 'close' }` on the port ends it
@@ -236,14 +236,28 @@ export function serveGraphics(scope, deps){
 
     /**
      * @param {string} api @param {any} options @param {MessagePort} port
+     * @param {Uint8Array | null} memory  the guest's RAM, where it is shared
      */
-    const root = async(api, options, port)=>{
+    const root = async(api, options, port, memory)=>{
         const { device, backend, latency } = await /** @type {Promise<any>} */ (opened);
         /** @type {(message: any, transfer?: Transferable[]) => void} */
         const post = (message, transfer)=>port.postMessage(message, transfer ?? []);
-        /** @param {number} address @param {Uint8Array} bytes */
-        const wrote = (address, bytes)=>
+        /**
+         * What the played device wrote outside a call -- a read-back the
+         * program waits on -- into guest memory: in place where it is shared,
+         * the engine told only where; otherwise the bytes, for it to write.
+         *
+         * @param {number} address @param {Uint8Array} bytes
+         */
+        const wrote = (address, bytes)=>{
+            if (memory && address + bytes.length <= memory.length)
+            {
+                memory.set(bytes, address);
+                post({ type: 'wrote', writes: [{ address, length: bytes.length }] });
+                return;
+            }
             post({ type: 'wrote', writes: [{ address, bytes: bytes.slice() }] });
+        };
         /** @param {any} submitted */
         const frameQueued = submitted=>latency.queued(submitted);
         /** @type {any} */
@@ -327,7 +341,7 @@ export function serveGraphics(scope, deps){
                 opened?.then(({ device })=>send(device), ()=>{});
                 break;
             case 'root':
-                root(data.api, data.options ?? {}, data.port).catch(e=>
+                root(data.api, data.options ?? {}, data.port, data.memory ?? null).catch(e=>
                     data.port.postMessage({ type: 'failed', message: String(e?.message ?? e) }));
                 break;
             default:

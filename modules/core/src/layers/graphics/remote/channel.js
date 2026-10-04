@@ -21,7 +21,8 @@
  *                      { type: 'presented', count }
  *                      { type: 'diagnostics', diagnostics }
  *                                                      what a device said of itself when asked
- *                      { type: 'wrote', writes }       guest memory the played side wrote later
+ *                      { type: 'wrote', writes }       guest memory the played side wrote later:
+ *                                                      the bytes, or where it wrote shared memory
  *                      { type: 'divergence', api, detail }
  *                      { type: 'lost' }                its GPU went away
  *                      { type: 'failed', message }     a call could not be played
@@ -78,6 +79,8 @@ export function crossable(value, depth = 0){
  * @typedef {Object} SenderEvents
  * @property {(address: number, bytes: Uint8Array) => void} [wrote]
  *     guest memory the played side wrote outside a call: a read-back's pixels
+ * @property {(address: number, length: number) => void} [adopted]
+ *     the same, written by the played side into shared guest memory itself
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {() => void} [lost]
  * @property {(message: string) => void} [failed]
@@ -254,9 +257,16 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                     }
                     break;
                 case 'wrote':
-                    for (const { address, bytes } of message.writes)
+                    for (const { address, bytes, length } of message.writes)
                     {
-                        on.wrote?.(address, bytes);
+                        if (bytes)
+                        {
+                            on.wrote?.(address, bytes);
+                        }
+                        else
+                        {
+                            on.adopted?.(address, length);
+                        }
                     }
                     break;
                 case 'divergence':
