@@ -81,9 +81,12 @@ const ints = new Int32Array(scratch);
 export function commandSet(slots, table){
     /** @param {string} name */
     const commandSlot = name=>3 + slots.findIndex(([entry])=>entry === name);
-    /** @type {Map<number, CommandEntry>} */
-    const bySlot = new Map(Object.entries(table)
-        .map(([name, entry])=>[commandSlot(name), entry]));
+    /** @type {(CommandEntry | undefined)[]} */
+    const bySlot = [];
+    for (const [name, entry] of Object.entries(table))
+    {
+        bySlot[commandSlot(name)] = entry;
+    }
     /** @type {Map<CommandEntry, string>} */
     const names = new Map(Object.entries(table).map(([name, entry])=>[entry, name]));
 
@@ -102,7 +105,7 @@ export function commandSet(slots, table){
         let at = 0;
         while (at < all.length)
         {
-            const entry = bySlot.get(all[at]);
+            const entry = bySlot[all[at]];
             const length = all[at + 1] >>> 2;
             if (entry === undefined || length === 0)
             {
@@ -144,7 +147,7 @@ export function commandSet(slots, table){
         };
         while (at < all.length)
         {
-            const entry = bySlot.get(all[at]);
+            const entry = bySlot[all[at]];
             const length = all[at + 1] >>> 2;
             if (entry === undefined || length < ARGS + entry.args || at + length > all.length)
             {
@@ -153,9 +156,11 @@ export function commandSet(slots, table){
             }
             const data = at + ARGS + entry.args;
             const copied = length - ARGS - entry.args;
-            if (copied > 0)
+            // Word by word: a view of the run made per record costs more than
+            // the copy.
+            for (let i = 0, end = Math.min(copied, words.length); i < end; i++)
             {
-                words.set(all.subarray(data, data + Math.min(copied, words.length)));
+                words[i] = all[data + i];
             }
             const hr = entry.make(device, call);
             made++;

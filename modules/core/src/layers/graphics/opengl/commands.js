@@ -81,16 +81,41 @@ const decode = (c, kinds)=>{
     return out;
 };
 
+/** How each one-word kind is decoded. @type {Record<string, (word: number) => number>} */
+const DECODERS = {
+    u: word=>word >>> 0,
+    i: word=>word | 0,
+    f: asFloat,
+    b: asBoolean,
+    n: word=>(word & 0xff) / 255,
+};
+
 /**
  * A call whose arguments go to the context method of the same name, decoded.
+ * Up to four one-word arguments are passed one by one: an array and a spread
+ * per call cost more than most of the calls do.
  *
- * @param {string} kinds @param {string} [method]
+ * @param {string} kinds @param {string} method
  * @returns {import('../d3d8/commands.js').CommandEntry}
  */
-const same = (kinds, method)=>({
-    args: wordsOf(kinds),
-    make: (context, c)=>context[/** @type {string} */ (method)](...decode(c, kinds)),
-});
+const same = (kinds, method)=>{
+    const args = wordsOf(kinds);
+    const [a, b, c, d] = [...kinds].map(kind=>DECODERS[kind]);
+    if (args !== kinds.length || args > 4)
+    {
+        return { args, make: (context, call)=>context[method](...decode(call, kinds)) };
+    }
+    /** @type {((context: any, call: import('../d3d8/commands.js').CommandArgs) => any)[]} */
+    const byCount = [
+        context=>context[method](),
+        (context, call)=>context[method](a(call.arg(0))),
+        (context, call)=>context[method](a(call.arg(0)), b(call.arg(1))),
+        (context, call)=>context[method](a(call.arg(0)), b(call.arg(1)), c(call.arg(2))),
+        (context, call)=>context[method](a(call.arg(0)), b(call.arg(1)), c(call.arg(2)),
+            d(call.arg(3))),
+    ];
+    return { args, make: byCount[args] };
+};
 
 /**
  * One of a typed family -- `glColor3f`, `glVertex2f` -- made as the four-
@@ -100,13 +125,14 @@ const same = (kinds, method)=>({
  * @param {string} kinds @param {string} method @param {readonly number[]} defaults
  * @returns {import('../d3d8/commands.js').CommandEntry}
  */
-const widened = (kinds, method, defaults)=>({
-    args: wordsOf(kinds),
-    make: (context, c)=>{
-        const values = decode(c, kinds);
-        return context[method](...values, ...defaults.slice(values.length));
-    },
-});
+const widened = (kinds, method, defaults)=>{
+    const [a, b, c = ()=>defaults[2], d = ()=>defaults[3]] = [...kinds].map(kind=>DECODERS[kind]);
+    return {
+        args: kinds.length,
+        make: (context, call)=>context[method](a(call.arg(0)), b(call.arg(1)), c(call.arg(2)),
+            d(call.arg(3))),
+    };
+};
 
 /**
  * The vector form of a typed family: `count` floats copied from the pointer.
@@ -114,11 +140,17 @@ const widened = (kinds, method, defaults)=>({
  * @param {number} count @param {string} method @param {readonly number[]} defaults
  * @returns {import('../d3d8/commands.js').CommandEntry}
  */
-const vectored = (count, method, defaults)=>({
-    args: 1, pointer: 0, bytes: count * 4,
-    make: (context, c)=>context[method](...[...c.floats.subarray(0, count)],
-        ...defaults.slice(count)),
-});
+const vectored = (count, method, defaults)=>{
+    /** @param {Float32Array} f @param {number} i */
+    const at = (f, i)=>(i < count ? f[i] : defaults[i]);
+    return {
+        args: 1, pointer: 0, bytes: count * 4,
+        make: defaults.length === 3
+            ? (context, c)=>context[method](at(c.floats, 0), at(c.floats, 1), at(c.floats, 2))
+            : (context, c)=>context[method](at(c.floats, 0), at(c.floats, 1), at(c.floats, 2),
+                at(c.floats, 3)),
+    };
+};
 
 /**
  * A parameter call's scalar form, made as the vector form with one value;
@@ -152,16 +184,33 @@ const parameterVector = (method, fours)=>({
         [...c.floats.subarray(0, fours.includes(c.arg(1) >>> 0) ? 4 : 1)]),
 });
 
+/**
+ * The vector and the matrix a call is given, made once: the context copies
+ * what it keeps of either, as it must of the program's own memory, and a
+ * typed array made per call is an allocation outside the heap.
+ */
+const VECTOR = new Float32Array(4);
+const MATRIX = new Float32Array(16);
+
+/** @param {Float32Array} to @param {Float32Array} from */
+const filled = (to, from)=>{
+    for (let i = 0; i < to.length; i++)
+    {
+        to[i] = from[i];
+    }
+    return to;
+};
+
 /** @param {string} method @returns {import('../d3d8/commands.js').CommandEntry} */
 const programParameterVector = method=>({
     args: 3, pointer: 2, bytes: 16,
-    make: (context, c)=>context[method](c.arg(0) >>> 0, c.arg(1) >>> 0, c.floats.slice(0, 4)),
+    make: (context, c)=>context[method](c.arg(0) >>> 0, c.arg(1) >>> 0, filled(VECTOR, c.floats)),
 });
 
 /** @param {string} method @returns {import('../d3d8/commands.js').CommandEntry} */
 const matrix = method=>({
     args: 1, pointer: 0, bytes: 64,
-    make: (context, c)=>context[method](c.floats.slice(0, 16)),
+    make: (context, c)=>context[method](filled(MATRIX, c.floats)),
 });
 
 const NONE = new Set();
