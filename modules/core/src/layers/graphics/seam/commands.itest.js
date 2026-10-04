@@ -20,8 +20,8 @@ import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
 import {
     BUFFER, COMMAND, FLAG_SLOW_PATH, FLAG_STALE, RENDER_STATE_MIRROR, SAMPLER_STATE_MIRROR, SHADOW,
-    TRANSFORM_MIRROR, VIEWPORT_MIRROR, commandCode, getRenderStateCode, getSamplerStateCode,
-    getViewportCode, lockCode,
+    SURFACE, TRANSFORM_MIRROR, VIEWPORT_MIRROR, commandCode, getRenderStateCode,
+    getSamplerStateCode, getSurfaceDescCode, getViewportCode, lockCode,
 } from './shadow.js';
 import { COMMANDS, commandSlot, runCommands } from '../d3d9/commands.js';
 
@@ -501,4 +501,33 @@ test('a clear copies its rectangles, or none for the whole target, and a target 
     assert.equal(run(TARGET, [0, 0x7700]), 'ok');
     assert.equal(read(BLOCK + SHADOW.FLAGS), FLAG_STALE,
         'the viewport the getters read may be gone');
+});
+
+test('a surface\'s GetDesc copies the description out of its block', ()=>{
+    const host = createCorkHost({
+        memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
+        initialStack: STACK, engine: cork, cork: {},
+    });
+    host.writePhysical(VIEWPORT, getSurfaceDescCode(VIEWPORT, TRAP));
+    host.writePhysical(TRAP, new Uint8Array([0xf4]));
+    host.writePhysical(OBJECT + 4, new Uint8Array(u32(BLOCK)));
+    const desc = [21, 1, 1, 0, 0, 0, 640, 480];
+    host.writePhysical(BLOCK, new Uint8Array(SURFACE.SIZE));
+    host.writePhysical(BLOCK + SURFACE.DESC, new Uint8Array(new Uint32Array(desc).buffer));
+    host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
+    /** @param {number[]} args */
+    const run = args=>{
+        const code = call(PROGRAM, VIEWPORT, OBJECT, args);
+        host.writePhysical(PROGRAM, new Uint8Array(code));
+        host.writeReg32('eip', PROGRAM);
+        host.writeReg32('esp', STACK);
+        host.runSlice(1000);
+        return host.readReg32('eip') === TRAP + 1 ? 'trap'
+            : host.readReg32('esp') === STACK && host.readReg32('eax') === 0 ? 'ok' : 'wrong';
+    };
+    assert.equal(run([OUT]), 'ok');
+    assert.deepEqual([...new Uint32Array(host.readPhysical(OUT, 32).slice().buffer)], desc);
+    assert.equal(run([0]), 'trap', 'a null pointer');
+    host.writePhysical(BLOCK, new Uint8Array(u32(FLAG_SLOW_PATH)));
+    assert.equal(run([OUT]), 'trap', 'the host\'s flag');
 });

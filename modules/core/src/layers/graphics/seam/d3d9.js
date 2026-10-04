@@ -72,7 +72,8 @@ import { queryAs, readGuid } from './guid.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import {
     RENDER_STATE_MIRROR, SAMPLER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_MIRROR, commandCode,
-    createShadow, getRenderStateCode, getSamplerStateCode, getSurfaceLevelCode,
+    createShadow, getRenderStateCode, getSamplerStateCode, getSurfaceDescCode,
+    getSurfaceLevelCode,
     getTextureStageStateCode, getTransformCode, getViewportCode, lockCode, stageStateMirror,
     unlockCode,
 } from './shadow.js';
@@ -204,6 +205,20 @@ export function createDirect3D9Seam(
             // before its count is touched on the host, which the last
             // reference's Release always is.
             object.settleGuestRefs ??= ()=>shadowOf(owner)?.sync();
+            if (interfaces === surfaceInterfaces)
+            {
+                // Its description in a block of its own, for the guest's
+                // GetDesc: nothing changes it while the surface lives.
+                object.guestState ??= ()=>shadowOf(owner)?.attachSurface(object, at=>{
+                    /** @type {{ desc?: any }} */
+                    const held = {};
+                    if (object.GetDesc(held) === D3D_OK && held.desc)
+                    {
+                        fields.writeStruct(at, D3DSURFACE_DESC9,
+                            { ...held.desc, MultiSampleType: 0, MultiSampleQuality: 0 });
+                    }
+                }) ?? 0;
+            }
         }
         const pointer = publisher.publish(object, interfaces, id);
         fields.writeU32(out, pointer);
@@ -566,7 +581,10 @@ export function createDirect3D9Seam(
             }
             return queryAs(publisher, fields, device, deviceInterfacesOf(device), id, out);
         },
-    }, {}, privateData.released)];
+    }, allocate
+        ? { GetDesc: (/** @type {{ trap: number }} */ { trap })=>
+            placeCode(at=>getSurfaceDescCode(at, trap)) }
+        : {}, privateData.released)];
 
     /**
      * The six every texture kind shares, over the resource eight.

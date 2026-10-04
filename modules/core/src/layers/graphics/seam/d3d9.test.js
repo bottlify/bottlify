@@ -22,7 +22,7 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createDirect3D9Seam } from './d3d9.js';
-import { BUFFER, FLAG_STALE, SHADOW, transformSlot } from './shadow.js';
+import { BUFFER, FLAG_STALE, SHADOW, SURFACE, transformSlot } from './shadow.js';
 import { commandSlot } from '../d3d9/commands.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { IDIRECT3D9_SLOTS } from './vtables.js';
@@ -1915,6 +1915,26 @@ test('a render target set through the ring is a new viewport before a getter rea
     // device keeps it, and nothing in the ring names a surface that is gone.
     assert.equal(h.release(target), 0);
     assert.deepEqual(h.divergences, []);
+});
+
+test('a surface\'s description is in its block, which the guest\'s GetDesc answers from', ()=>{
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const out = 0x3200;
+    assert.equal(h.device(device, 'CreateRenderTarget',
+        [32, 16, D3DFMT.A8R8G8B8, 0, 0, 0, out, 0]), D3D_OK);
+    const surface = h.box.memory.readU32(out);
+    assert.ok(h.box.isGuest(surface, slot(IDIRECT3DSURFACE9_SLOTS, 'GetDesc')));
+    const block = h.box.memory.readU32(surface + 4);
+    assert.notEqual(block, 0);
+    const desc = 0x3300;
+    assert.equal(h.box.trap(surface, 'GetDesc', [desc]), D3D_OK, 'the host\'s answer');
+    assert.deepEqual(Array.from({ length: 8 },
+        (unused, i)=>h.box.memory.readU32(block + SURFACE.DESC + i * 4)),
+    Array.from({ length: 8 }, (unused, i)=>h.box.memory.readU32(desc + i * 4)), 'is the block\'s');
+    assert.equal(h.box.memory.readU32(block + SURFACE.DESC + 24), 32, 'Width');
+    assert.equal(h.box.memory.readU32(block + SURFACE.DESC + 28), 16, 'Height');
 });
 
 test('a create refused for its shared handle leaves no pointer behind', ()=>{

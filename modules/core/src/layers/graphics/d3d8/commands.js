@@ -220,10 +220,10 @@ const floatOf = word=>{
 /**
  * Clear's rectangles, four integers each, as the device takes them.
  *
- * @param {Int32Array} ints @param {number} count
+ * @param {Int32Array} copy @param {number} count
  */
-const rectsOf = (ints, count)=>Array.from({ length: count }, (unused, i)=>({
-    x1: ints[i * 4], y1: ints[i * 4 + 1], x2: ints[i * 4 + 2], y2: ints[i * 4 + 3],
+const rectsOf = (copy, count)=>Array.from({ length: count }, (unused, i)=>({
+    x1: copy[i * 4], y1: copy[i * 4 + 1], x2: copy[i * 4 + 2], y2: copy[i * 4 + 3],
 }));
 
 /**

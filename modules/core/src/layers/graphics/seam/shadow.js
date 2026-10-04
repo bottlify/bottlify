@@ -164,6 +164,18 @@ export const TEXTURE = {
     SIZE: 12 + 16 * 4,
 };
 
+/**
+ * Byte offsets within a surface's block: its description, which nothing
+ * changes while the surface lives, so GetDesc is answered from it.
+ */
+export const SURFACE = {
+    /** Bit 0 set by the host: take the slow path. */
+    FLAGS: 0,
+    /** D3DSURFACE_DESC, as the version lays it out. */
+    DESC: 4,
+    SIZE: 4 + 8 * 4,
+};
+
 export const FLAG_SLOW_PATH = 1;
 /**
  * Bit 1, set by a state block's Apply in the ring: what the block mirrors may
@@ -853,6 +865,45 @@ export function getViewportCode(at, trap){
     ]);
 }
 
+/**
+ * HRESULT GetDesc(this, D3DSURFACE_DESC *out), as guest code for a surface:
+ * the description out of the surface's block. A null pointer is the host's.
+ *
+ *     (prologue)
+ *     mov edx, [esp+8]            ; out
+ *     test edx, edx
+ *     jz slow
+ *     push esi
+ *     push edi
+ *     lea esi, [ecx + DESC]
+ *     mov edi, edx
+ *     mov ecx, 8
+ *     rep movsd
+ *     pop edi
+ *     pop esi
+ *     xor eax, eax                ; D3D_OK
+ *     ret 8
+ *
+ * @param {number} at @param {number} trap
+ * @returns {Uint8Array}
+ */
+export function getSurfaceDescCode(at, trap){
+    return routine(at, trap, [
+        ...prologue(),
+        [0x8b, 0x54, 0x24, 0x08],                                // mov edx, [esp+8]
+        [0x85, 0xd2],                                            // test edx, edx
+        { jcc: 0x74, to: 'slow' },                               // jz slow
+        [0x56, 0x57],                                            // push esi; push edi
+        [0x8d, 0x71, SURFACE.DESC],                              // lea esi, [ecx+4]
+        [0x89, 0xd7],                                            // mov edi, edx
+        [0xb9, ...dword((SURFACE.SIZE - SURFACE.DESC) / 4)],     // mov ecx, 8
+        [0xf3, 0xa5],                                            // rep movsd
+        [0x5f, 0x5e],                                            // pop edi; pop esi
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, 0x08, 0x00],                                      // ret 8
+    ]);
+}
+
 /** The sampler state types a device answers for: D3DSAMP_ADDRESSU (1) to DMAPOFFSET (13). */
 const SAMPLER_STATE_TYPES = 0x3ffe;
 
@@ -1424,6 +1475,8 @@ export function createShadow(deps){
     const blockOf = new WeakMap();
     /** The textures with a block. @type {WeakMap<object, { block: number }>} */
     const textureBlocks = new WeakMap();
+    /** The surfaces with a block. @type {WeakMap<object, number>} */
+    const surfaceBlocks = new WeakMap();
     /** Resource blocks are carved from pages of their own, for the same reason as the device's. */
     const pool = { at: 0, left: 0 };
     /** The command ring's bytes in guest memory, 0 for none, and how far the host has read it. */
@@ -1893,6 +1946,30 @@ export function createShadow(deps){
             zeroed.set(dwordBytes(count), TEXTURE.COUNT);
             deps.writeMemory(block, zeroed);
             textureBlocks.set(texture, { block });
+            return block;
+        },
+
+        /**
+         * A surface's block, made on first use, with its description, which
+         * `describe` writes at the address it is given.
+         *
+         * @param {object} surface @param {(at: number) => void} describe
+         * @returns {number} the block, or 0 when there is no memory for one
+         */
+        attachSurface(surface, describe){
+            const existing = surfaceBlocks.get(surface);
+            if (existing !== undefined)
+            {
+                return existing;
+            }
+            const block = carve(SURFACE.SIZE);
+            if (block === 0)
+            {
+                return 0;
+            }
+            deps.writeMemory(block, new Uint8Array(SURFACE.SIZE));
+            describe(block + SURFACE.DESC);
+            surfaceBlocks.set(surface, block);
             return block;
         },
 
