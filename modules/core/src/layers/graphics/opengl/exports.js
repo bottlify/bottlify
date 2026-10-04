@@ -506,13 +506,29 @@ export function createOpengl(services){
      * Makes the calls the calling thread's context has waiting in its ring,
      * before any other call reaches it: every entry point that is not a
      * routine, a swap, and whoever draws through the context directly.
+     *
+     * The rings of the contexts that share its objects and are current on
+     * other threads are played first. A change one of those threads made to
+     * a texture or a buffer object was made before this call, and a program
+     * that hands the objects over by its own means -- an event, a flag --
+     * with no glFlush between reads it here as it would have read it made at
+     * once. A record another thread has not finished writing is not whole,
+     * and its reader stops before it.
      */
     const drain = ()=>{
         const context = current();
-        if (context)
+        if (!context)
         {
-            rings.get(context)?.reader.take();
+            return;
         }
+        for (const other of tebsOf.keys())
+        {
+            if (other !== context && other.shareGroup === context.shareGroup)
+            {
+                rings.get(other)?.reader.take();
+            }
+        }
+        rings.get(context)?.reader.take();
     };
     /**
      * Tells the calling thread's routines which block to write: the one of

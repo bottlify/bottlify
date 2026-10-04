@@ -1978,8 +1978,13 @@ export function createGpuRenderer(services){
         {
             return;
         }
-        const packed = scratchVertices.write(packVertices(vertices));
         const expanded = expandIndices(mode, null, vertices.length);
+        if (expanded?.length === 0)
+        {
+            // A fan, a strip or a polygon too short for a triangle draws nothing.
+            return;
+        }
+        const packed = scratchVertices.write(packVertices(vertices));
         const indices = expanded
             ? { ...scratchIndices.write(expanded), format: 'uint32', count: expanded.length }
             : null;
@@ -2055,6 +2060,14 @@ export function createGpuRenderer(services){
         {
             return false;
         }
+        const list = isList(request.mode);
+        const expanded = list ? null : /** @type {Uint32Array} */ (expandIndices(request.mode,
+            scanned ? scanned.indices : null, request.count));
+        if (expanded?.length === 0)
+        {
+            // Too few vertices for one of its primitives: nothing is drawn.
+            return true;
+        }
         const min = scanned ? scanned.min : request.first;
         const max = scanned ? scanned.max : request.first + request.count - 1;
         const { from, reads } = clientReads(layout.slots, min, max);
@@ -2070,7 +2083,6 @@ export function createGpuRenderer(services){
                 slot.base + (max + 1) * slot.stride);
             return { gpu: gpuBuffer.gpu.gpu, offset: slot.base };
         });
-        const list = isList(request.mode);
         /** @type {{ gpu: any, offset: number, format: string, count: number } | null} */
         let indices = null;
         if (scanned && list)
@@ -2078,10 +2090,8 @@ export function createGpuRenderer(services){
             indices = { ...scratchIndices.write(scanned.indices), format: scanned.format,
                 count: scanned.indices.length };
         }
-        else if (!list)
+        else if (expanded)
         {
-            const expanded = /** @type {Uint32Array} */ (expandIndices(request.mode,
-                scanned ? scanned.indices : null, request.count));
             if (!scanned)
             {
                 for (let i = 0; i < expanded.length; i++)

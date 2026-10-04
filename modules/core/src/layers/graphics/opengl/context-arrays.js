@@ -248,7 +248,18 @@ export function installArrayCalls(context, kernel){
             {
                 return null;
             }
-            return (at, length)=>buffer.data.subarray(at, at + length);
+            return (at, length)=>{
+                const bytes = buffer.data.subarray(at, at + length);
+                if (bytes.length === length)
+                {
+                    return bytes;
+                }
+                // Past the store's end GL leaves what a draw reads undefined:
+                // zeros, rather than a call that throws out of the program's.
+                const whole = new Uint8Array(length);
+                whole.set(bytes);
+                return whole;
+            };
         }
         const memory = kernel.memory();
         // A window: whatever reads an array copies what it keeps before the
