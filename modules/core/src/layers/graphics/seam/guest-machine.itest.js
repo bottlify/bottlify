@@ -281,11 +281,13 @@ export const D3D8 = {
  *
  * @param {Version} version
  * @param {boolean} guestCode
- * @param {{ onDevice?: (device: any) => void, gpu?: boolean, worker?: boolean }} [options]
+ * @param {{ onDevice?: (device: any) => void, gpu?: boolean, worker?: boolean,
+ *     caps?: object }} [options]
  *     `onDevice` is told of each device made; `gpu` has the devices draw
  *     through a backend over a recording GPU, the machine's `gpu`; `worker`
  *     has them record what they are asked, as in a graphics worker, for a
- *     twin that plays each call at once to draw
+ *     twin that plays each call at once to draw; `caps` is what the root is
+ *     told its devices can do, past what every device of the version can
  */
 export function machine(version, guestCode, options = {}){
     /** @type {(device: any) => void} */
@@ -384,8 +386,8 @@ export function machine(version, guestCode, options = {}){
                 // The device keeps its resources in this machine's memory, as
                 // the graphics layer has it keep them in the guest's, and
                 // draws through a backend over the recording GPU when asked.
-                const services = { allocate, free: ()=>{}, readMemory: readBytes,
-                    writeMemory: writeBytes, windowMemory: readBytes };
+                const services = { ...options.caps, allocate, free: ()=>{},
+                    readMemory: readBytes, writeMemory: writeBytes, windowMemory: readBytes };
                 const drawing = gpu ? {
                     backend: createBackend({ device: gpu.device, queue: gpu.queue,
                         presentTo: ()=>{}, now: ()=>0 }),
@@ -396,7 +398,7 @@ export function machine(version, guestCode, options = {}){
                 // twin plays what it recorded and draws.
                 const root = options.worker
                     ? recordedDirect3D(version.root, services, playedAtOnce(playedDirect3D(
-                        version.root, { ...drawing, readMemory: true,
+                        version.root, { ...options.caps, ...drawing, readMemory: true,
                             writeMemory: writeBytes })))
                     : version.root({ ...services, ...drawing });
                 const make = root.CreateDevice;

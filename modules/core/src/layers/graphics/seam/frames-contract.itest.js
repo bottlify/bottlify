@@ -70,6 +70,26 @@ const VERTICES_FOR = /** @type {Record<number, (triangles: number) => number>} *
 const D3DTS_WORLD = 256;
 const D3DRS_LIGHTING = 137;
 const D3DRS_TEXTUREFACTOR = 60;
+const D3DRS_SCISSORTESTENABLE = 174;
+const D3DTSS_COLOROP = 1;
+/** The colour operations a stage is set to: MODULATE, its first, SELECTARG1 and ADD. */
+const COLOROPS = [4, 2, 7];
+/**
+ * The sampler states a program sets -- Direct3D 9's own, and the texture
+ * stage states Direct3D 8 has for them -- and the values each takes:
+ * ADDRESSU, ADDRESSV, MAGFILTER, MINFILTER, MIPFILTER.
+ */
+const SAMPLER_STATES = [
+    { nine: 1, eight: 13, values: [1, 2, 3] },
+    { nine: 2, eight: 14, values: [1, 2, 3] },
+    { nine: 5, eight: 16, values: [1, 2] },
+    { nine: 6, eight: 17, values: [1, 2] },
+    { nine: 7, eight: 18, values: [0, 1, 2] },
+];
+/** D3DLIGHT_DIRECTIONAL. */
+const DIRECTIONAL = 3;
+/** @param {number} value @returns {number} the float's bits */
+const floatWord = value=>new Uint32Array(new Float32Array([value]).buffer)[0];
 const D3DPOOL_SYSTEMMEM = 2;
 const D3DSBT_ALL = 1;
 const D3DCLEAR_TARGET = 1;
@@ -201,10 +221,11 @@ const callsOf = version=>{
 /**
  * What each draw the GPU is given reads, as it would read it: at each submit,
  * the buffers as the queue's writes left them, the copies and the passes
- * encoded since the last one made in order, and every draw's indices, the
- * vertices they name in every buffer bound by the strides its pipeline gives,
- * the uniform ranges bound and -- once the submit has made its copies -- the
- * texels of the textures bound.
+ * encoded since the last one made in order, and every draw's pipeline, the
+ * pass's viewport and scissor, its indices, the vertices they name in every
+ * buffer bound by the strides its pipeline gives, the uniform ranges and the
+ * samplers bound and -- once the submit has made its copies -- the texels of
+ * the textures bound.
  *
  * @param {any} gpu  a recording GPU (`createFakeDevice`)
  * @returns {string[]}
@@ -214,6 +235,28 @@ function gpuReads(gpu){
     const reads = [];
     /** @type {Map<any, any>} */
     const pipelines = new Map();
+    /**
+     * A pipeline by what it is made of: its shaders' code and its states,
+     * and of every other object it names only the kind, which a machine
+     * numbers in its own order.
+     *
+     * @type {Map<any, string>}
+     */
+    const pipelineKeys = new Map();
+    /** @param {any} pipeline */
+    const keyOf = pipeline=>{
+        let key = pipelineKeys.get(pipeline);
+        if (key === undefined)
+        {
+            const descriptor = pipelines.get(pipeline);
+            key = descriptor === undefined ? '-' : createHash('sha1').update(JSON.stringify(
+                descriptor, (name, value)=>(value?.kind === 'shaderModule'
+                    ? value.descriptor.code : value?.kind && value.id ? value.kind : value)))
+                .digest('hex').slice(0, 12);
+            pipelineKeys.set(pipeline, key);
+        }
+        return key;
+    };
     let from = 0;
     const submit = gpu.queue.submit.bind(gpu.queue);
     gpu.queue.submit = (/** @type {any[]} */ buffers)=>{
@@ -231,11 +274,14 @@ function gpuReads(gpu){
         };
         /** @type {any} */
         let pipeline = null;
+        /** The pass's viewport and scissor as last set; the whole target until then. */
+        let viewport = 'whole';
+        let scissor = 'whole';
         /** @type {any[]} */
         const vertexBuffers = [];
         /** @type {any} */
         let indexBuffer = null;
-        /** @type {Map<number, { uniforms: string, textures: any[] }>} */
+        /** @type {Map<number, { uniforms: string, samplers: string, textures: any[] }>} */
         const groups = new Map();
         /** The draws of this submit, their texels read once its copies are made. */
         /** @type {{ line: string, textures: any[] }[]} */
@@ -254,14 +300,16 @@ function gpuReads(gpu){
             return [...bytesOf(bound.buffer).subarray(at, at + layout.arrayStride)].join('.');
         };
         /** One vertex out of every buffer the pipeline reads. @param {number} vertex */
-        const vertexAt = vertex=>(pipeline?.vertex?.buffers ?? [])
+        const vertexAt = vertex=>(pipelines.get(pipeline)?.vertex?.buffers ?? [])
             .map((/** @type {any} */ layout, /** @type {number} */ slot)=>vertexIn(layout, slot,
                 vertex)).join('|');
         /** @param {string} line */
         const draw = line=>{
             const bound = [...groups.entries()].sort(([a], [b])=>a - b);
             drawn.push({
-                line: `${line} uniforms ${bound.map(([, group])=>group.uniforms).join('/')}`,
+                line: `pipeline ${keyOf(pipeline)} viewport ${viewport} scissor ${scissor} ${line}`
+                    + ` uniforms ${bound.map(([, group])=>group.uniforms).join('/')}`
+                    + ` samplers ${bound.map(([, group])=>group.samplers).join('/')}`,
                 textures: bound.flatMap(([, group])=>group.textures),
             });
         };
@@ -271,6 +319,8 @@ function gpuReads(gpu){
             const call = calls[i];
             if (call.op === 'beginRenderPass')
             {
+                viewport = 'whole';
+                scissor = 'whole';
                 const clears = (call.descriptor.colorAttachments ?? [])
                     .filter((/** @type {any} */ each)=>each?.loadOp === 'clear')
                     .map((/** @type {any} */ each)=>JSON.stringify(each.clearValue));
@@ -290,7 +340,15 @@ function gpuReads(gpu){
             }
             else if (call.op === 'setPipeline')
             {
-                pipeline = pipelines.get(call.pipeline) ?? null;
+                pipeline = call.pipeline;
+            }
+            else if (call.op === 'setViewport')
+            {
+                viewport = call.rect.join(',');
+            }
+            else if (call.op === 'setScissorRect')
+            {
+                scissor = call.rect.join(',');
             }
             else if (call.op === 'setVertexBuffer')
             {
@@ -306,6 +364,10 @@ function gpuReads(gpu){
                     uniforms: call.resolved.map((/** @type {any} */ range)=>createHash('sha1')
                         .update(bytesOf(range.buffer).subarray(range.offset,
                             range.offset + range.size)).digest('hex').slice(0, 12)).join(','),
+                    samplers: (call.group?.entries ?? [])
+                        .filter((/** @type {any} */ entry)=>entry.resource?.kind === 'sampler')
+                        .map((/** @type {any} */ entry)=>JSON.stringify(entry.resource.descriptor))
+                        .join(','),
                     textures: (call.group?.entries ?? [])
                         .map((/** @type {any} */ entry)=>entry.resource?.texture)
                         .filter((/** @type {any} */ texture)=>texture?.bytes),
@@ -394,6 +456,11 @@ const bytesFor = (indices, length, fill)=>(indices
  *     | { kind: 'target', on: boolean }
  *     | { kind: 'stretch', from: 'plain' | 'back' | 'target', fill: number }
  *     | { kind: 'query', issue: boolean, flush: boolean }
+ *     | { kind: 'sampler', state: number, value: number } | { kind: 'stage', op: number }
+ *     | { kind: 'scissor', rect: number[], on: boolean }
+ *     | { kind: 'light', seed: number, on: boolean }
+ *     | { kind: 'clip', index: number, seed: number }
+ *     | { kind: 'viewport', rect: number[] }
  *     | { kind: 'present' }} Step
  */
 
@@ -427,7 +494,7 @@ function generate(seed, steps, upUnbinds, nine){
     const blocks = [];
     while (program.length < steps)
     {
-        const roll = below(58);
+        const roll = below(66);
         if (roll < 12)
         {
             const on = pick([...STREAMS, IB]);
@@ -602,6 +669,36 @@ function generate(seed, steps, upUnbinds, nine){
         {
             program.push({ kind: 'query', issue: below(4) !== 0, flush: below(2) === 0 });
         }
+        else if (roll < 57)
+        {
+            const state = below(SAMPLER_STATES.length);
+            program.push({ kind: 'sampler', state, value: pick(SAMPLER_STATES[state].values) });
+        }
+        else if (roll < 58)
+        {
+            program.push({ kind: 'stage', op: pick(COLOROPS) });
+        }
+        else if (roll < 59 && nine)
+        {
+            const left = below(32);
+            const top = below(32);
+            program.push({ kind: 'scissor', rect: [left, top, left + 1 + below(32),
+                top + 1 + below(32)], on: below(3) !== 0 });
+        }
+        else if (roll < 60)
+        {
+            program.push({ kind: 'light', seed: below(1000), on: below(2) === 0 });
+        }
+        else if (roll < 61)
+        {
+            program.push({ kind: 'clip', index: below(6), seed: below(1000) });
+        }
+        else if (roll < 62)
+        {
+            const x = below(32);
+            const y = below(32);
+            program.push({ kind: 'viewport', rect: [x, y, 1 + below(64 - x), 1 + below(64 - y)] });
+        }
         else
         {
             program.push({ kind: 'present' });
@@ -620,7 +717,9 @@ function generate(seed, steps, upUnbinds, nine){
  */
 async function play(version, guestCode, steps, worker = false){
     const calls = callsOf(version);
-    const m = machine(version, guestCode, { gpu: true, worker });
+    // Clip planes, which a Direct3D 9 device has none of until it is told it
+    // has: its guest code takes a plane only below the count.
+    const m = machine(version, guestCode, { gpu: true, worker, caps: { maxUserClipPlanes: 6 } });
     const gpu = gpuReads(m.gpu);
     /** @type {string[]} */
     const answers = [];
@@ -769,6 +868,11 @@ async function play(version, guestCode, steps, worker = false){
         }
         run(calls.stretch(from === 'plain' ? PLAIN : back, targetLevel, from === 'back'));
     };
+    /** @param {number} op */
+    const stage = op=>{
+        run(calls.device('SetTextureStageState', [0, D3DTSS_COLOROP, op]));
+        run(calls.device('GetTextureStageState', [0, D3DTSS_COLOROP, 'out']), 4);
+    };
     /** @param {boolean} issue @param {boolean} flush */
     const query = (issue, flush)=>{
         if (issue)
@@ -799,10 +903,15 @@ async function play(version, guestCode, steps, worker = false){
             {
                 calls.stream(which).forEach(call=>run(call));
                 run(calls.indices(0));
-                for (const type of [D3DPT_TRIANGLELIST, D3DPT_TRIANGLESTRIP, D3DPT_TRIANGLEFAN])
+                for (const op of COLOROPS)
                 {
-                    run(calls.device('DrawPrimitive', [type, 0, 1]));
-                    run(calls.indexed(type, 0, 0, 1));
+                    stage(op);
+                    for (const type of [D3DPT_TRIANGLELIST, D3DPT_TRIANGLESTRIP,
+                        D3DPT_TRIANGLEFAN])
+                    {
+                        run(calls.device('DrawPrimitive', [type, 0, 1]));
+                        run(calls.indexed(type, 0, 0, 1));
+                    }
                 }
                 run(calls.device('DrawPrimitiveUP', [D3DPT_TRIANGLELIST, 1, USER,
                     FORMATS[0].stride]));
@@ -969,6 +1078,51 @@ async function play(version, guestCode, steps, worker = false){
         {
             query(step.issue, step.flush);
         }
+        else if (step.kind === 'sampler')
+        {
+            const { nine: type, eight } = SAMPLER_STATES[step.state];
+            if (calls.nine)
+            {
+                run(calls.device('SetSamplerState', [0, type, step.value]));
+                run(calls.device('GetSamplerState', [0, type, 'out']), 4);
+            }
+            else
+            {
+                run(calls.device('SetTextureStageState', [0, eight, step.value]));
+                run(calls.device('GetTextureStageState', [0, eight, 'out']), 4);
+            }
+        }
+        else if (step.kind === 'stage')
+        {
+            stage(step.op);
+        }
+        else if (step.kind === 'scissor')
+        {
+            run(calls.device('SetScissorRect', [{ words: step.rect }]));
+            run(calls.device('SetRenderState', [D3DRS_SCISSORTESTENABLE, step.on ? 1 : 0]));
+        }
+        else if (step.kind === 'light')
+        {
+            /** @param {number} i */
+            const part = i=>floatWord(((step.seed * (i + 7)) % 97) / 97);
+            run(calls.device('SetMaterial', [{ words: Array.from({ length: 17 },
+                (unused, i)=>part(i)) }]));
+            // Directional, its colours from the seed, pointing down the z axis.
+            run(calls.device('SetLight', [0, { words: [DIRECTIONAL,
+                ...Array.from({ length: 12 }, (unused, i)=>part(i)), 0, 0, 0,
+                0, 0, floatWord(1), floatWord(100), 0, floatWord(1), 0, 0, 0, 0] }]));
+            run(calls.device('LightEnable', [0, step.on ? 1 : 0]));
+        }
+        else if (step.kind === 'clip')
+        {
+            run(calls.device('SetClipPlane', [step.index, { words: [0, 1, 2, 3].map(i=>floatWord(
+                ((step.seed * (i + 3)) % 11) - 5)) }]));
+        }
+        else if (step.kind === 'viewport')
+        {
+            run(calls.device('SetViewport', [{ words: [...step.rect, 0, ONE] }]));
+            run(calls.device('GetViewport', ['out']), 24);
+        }
         else if (step.kind === 'reference')
         {
             run({ on: step.on, kind: kindOf(step.on), method: 'AddRef', args: [] });
@@ -1012,9 +1166,14 @@ const parting = ([oneName, one], [otherName, other], what)=>{
 /** The calls each part of the guest code takes, which a run must have taken in the guest. */
 const COVERED = ['Lock', 'Unlock', 'GetSurfaceLevel', 'AddRef', 'Release', 'SetTexture',
     'SetStreamSource', 'SetIndices', 'DrawPrimitive', 'DrawIndexedPrimitive', 'DrawPrimitiveUP',
-    'SetTransform', 'GetTransform', 'SetRenderState', 'GetRenderState', 'Clear', 'SetViewport'];
-/** And those only Direct3D 9's ring carries: a state block's own Capture and Apply. */
-const COVERED_9 = ['Apply', 'Capture'];
+    'SetTransform', 'GetTransform', 'SetRenderState', 'GetRenderState', 'Clear', 'SetViewport',
+    'GetViewport', 'SetTextureStageState', 'GetTextureStageState', 'SetMaterial', 'SetLight',
+    'LightEnable', 'SetClipPlane'];
+/**
+ * And those only Direct3D 9's guest code takes: a state block's own Capture
+ * and Apply, the sampler states and the scissor.
+ */
+const COVERED_9 = ['Apply', 'Capture', 'SetSamplerState', 'GetSamplerState', 'SetScissorRect'];
 
 /** The calls whose path is the device's own, which each run must have had answered D3D_OK. */
 const DONE = ['SetRenderTarget', 'LockRect'];
