@@ -21,7 +21,7 @@ publishing). The tables list only the settings that are data. `memory` and `load
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `categories` | `{}` | Level per call area: `call.cpu`, `call.gpu`, `call.audio`, `call.video`, `call.input`, `call.net`, `call.com`, `input.press`, `input.message`. |
+| `categories` | `{}` | Level per call area: `call.cpu`, `call.gpu`, `call.audio`, `call.video`, `call.input`, `call.net`, `call.com`, `input.press`, `input.message`. A thread's calls that repeat in a loop of up to 8 (name, arguments and answer) are written until the loop has gone round twice, then counted, and the count is written when the loop ends and every 65,536 calls while it runs. |
 | `level` | — | The default level: `off`, `error`, `warn`, `info`, `debug`, `trace`. |
 | `capacity` | — | Records the journal's index holds. |
 | `bytes` | 1 MiB | The record ring's size. |

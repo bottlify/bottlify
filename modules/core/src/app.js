@@ -38,6 +38,7 @@ import { mountDiscs } from './discs.js';
 import { loadZstdWasm } from './zstd-wasm.js';
 import { createClassTable } from './layers/win32/ole32/remote.js';
 import { createReplicas } from './replicas.js';
+import { createCallRepeats } from './call-repeats.js';
 import { withRunMode } from './mode.js';
 
 /**
@@ -3037,14 +3038,30 @@ async function buildApp(options){
         // ones that have not.
         // An argument whose text was kept (traceStrings) is shown as that
         // text: a path is what a question about a failed open needs.
-        journal.write('trace', category, '[{3}] {0}({1}) = {2}',
-            call.name, (call.args ?? []).slice(0, 4)
-                .map((/** @type {number} */ value, /** @type {number} */ at)=>(
-                    call.strings?.[at] ? JSON.stringify(String(call.strings[at]).slice(0, 160))
-                        : `0x${(value >>> 0).toString(16)}`))
-                .join(', '), call.result,
-            callerTag + (core.api('kernel').currentThread()?.name ?? '?'));
+        const args = (call.args ?? []).slice(0, 4)
+            .map((/** @type {number} */ value, /** @type {number} */ at)=>(
+                call.strings?.[at] ? JSON.stringify(String(call.strings[at]).slice(0, 160))
+                    : `0x${(value >>> 0).toString(16)}`))
+            .join(', ');
+        const thread = callerTag + (core.api('kernel').currentThread()?.name ?? '?');
+        // A thread polling for something is a loop of the same few calls,
+        // written twice and then counted (`call-repeats.js`): written each
+        // time, it would push out of the ring the moment it began waiting.
+        const { write, said } = callRepeats.note(thread, `${call.name}(${args}) = ${call.result}`);
+        if (said)
+        {
+            journal.write('trace', category, said.ended
+                ? '[{0}] the {1} calls before went round again: {2} calls not written'
+                : '[{0}] the last {1} calls still go round: {2} calls not written so far',
+            thread, said.period, said.calls);
+        }
+        if (write)
+        {
+            journal.write('trace', category, '[{3}] {0}({1}) = {2}', call.name, args, call.result,
+                thread);
+        }
     };
+    const callRepeats = createCallRepeats();
 
     // The translator's cache goes with the bundle's blocks: local by default,
     // the bundle's name its namespace, resolved here in the engine's own

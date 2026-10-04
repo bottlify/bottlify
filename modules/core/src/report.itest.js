@@ -79,3 +79,33 @@ test('a report lists what was said as a divergence, which nothing else keeps',
         assert.deepEqual(table.metrics.divergences.length, 1);
         assert.match(table.metrics.divergences[0], /^RegSaveKey: a saved key is this engine's own/);
     });
+
+test('a polling loop is written twice and counted, so the journal still holds what came before',
+    { timeout: 60000 }, async t=>{
+        // GetCurrentThreadId; mov ecx, 50000; L: push ecx; push 0; call [Sleep]; pop ecx;
+        // dec ecx; jnz L; GetCurrentThreadId; push 0; call [ExitProcess]
+        const executable = buildExe({
+            imports: { 'KERNEL32.dll': ['GetCurrentThreadId', 'Sleep', 'ExitProcess'] },
+            codeSize: 0x40,
+            code: ({ iat })=>[
+                0xff, 0x15, ...u32(iat('GetCurrentThreadId')),
+                0xb9, ...u32(50000),
+                0x51, 0x6a, 0x00, 0xff, 0x15, ...u32(iat('Sleep')), 0x59, 0x49, 0x75, 0xf3,
+                0xff, 0x15, ...u32(iat('GetCurrentThreadId')),
+                0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess')),
+            ],
+        });
+        const app = await createApp({ executable, engine: 'cork' });
+        t.after(()=>app.dispose());
+        app.log.setLevel('call.cpu', 'trace');
+        assert.equal(await app.run(), 0);
+        const lines = app.log.recent(4096).map((/** @type {any} */ record)=>record.text ?? '')
+            .filter((/** @type {string} */ text)=>/\[main\]/.test(text));
+        const sleeps = lines.filter((/** @type {string} */ text)=>/Sleep\(0x0\)/.test(text));
+        assert.equal(sleeps.length, 8, 'the loop, written until it has gone round in full twice');
+        const said = lines.find((/** @type {string} */ text)=>/went round again/.test(text));
+        assert.ok(said, lines.slice(-12).join('\n'));
+        assert.match(said, /the 1 calls before went round again: 49992 calls not written/);
+        assert.equal(lines.filter((/** @type {string} */ text)=>/GetCurrentThreadId/.test(text)).length,
+            2, 'what came before the loop and after it both stay');
+    });
