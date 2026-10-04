@@ -46,45 +46,136 @@ test('the registry travels with the files and never becomes one of them', async(
     assert.deepEqual(normaliseSession(null), { files: [], registry: null });
 });
 
-test('a session in the origin file system is written whole and read back', async()=>{
-    // The directory handle's interface, and nothing more of it: a file that is
-    // not there is an error on open, a write is a stream that is closed.
-    /** @type {Map<string, Uint8Array>} */
-    const disk = new Map();
-    const directory = async()=>({
-        /** @param {string} name @param {{ create?: boolean }} [options] */
-        async getFileHandle(name, options){
-            if (!disk.has(name) && !options?.create)
-            {
-                throw new Error('NotFoundError');
-            }
-            return {
-                getFile: async()=>({
-                    arrayBuffer: async()=>(disk.get(name) ?? new Uint8Array(0)).buffer,
-                }),
-                createWritable: async()=>{
-                    /** @type {Uint8Array} */
-                    let written = new Uint8Array(0);
-                    return {
-                        /** @param {Uint8Array} chunk */
-                        write: async chunk=>{ written = chunk; },
-                        close: async()=>{ disk.set(name, written); },
-                    };
-                },
-            };
-        },
-    });
-    const store = opfsSession('a game/with:odd chars', directory);
+/**
+ * A directory handle's interface, and nothing more of it: a name that is not
+ * there is an error on open, a write is a stream replaced on close, and every
+ * entry written is counted.
+ */
+function fakeDirectory(){
+    /** @type {Map<string, any>} */
+    const entries = new Map();
+    let writes = 0;
+    /** @returns {any} */
+    const folder = ()=>{
+        /** @type {Map<string, any>} */
+        const here = new Map();
+        return {
+            here,
+            /** @param {string} name @param {{ create?: boolean }} [options] */
+            async getFileHandle(name, options){
+                if (!here.has(name))
+                {
+                    if (!options?.create)
+                    {
+                        throw new Error('NotFoundError');
+                    }
+                    here.set(name, new Uint8Array(0));
+                }
+                return {
+                    getFile: async()=>({ arrayBuffer: async()=>here.get(name).slice().buffer }),
+                    createWritable: async()=>{
+                        let written = new Uint8Array(0);
+                        return {
+                            /** @param {Uint8Array} chunk */
+                            write: async chunk=>{
+                                written = chunk.slice();
+                            },
+                            close: async()=>{
+                                writes++;
+                                here.set(name, written);
+                            },
+                        };
+                    },
+                };
+            },
+            /** @param {string} name @param {{ create?: boolean }} [options] */
+            async getDirectoryHandle(name, options){
+                if (!entries.has(name))
+                {
+                    if (!options?.create)
+                    {
+                        throw new Error('NotFoundError');
+                    }
+                    entries.set(name, folder());
+                }
+                return entries.get(name);
+            },
+            /** @param {string} name */
+            async removeEntry(name){
+                if (!here.delete(name) && !entries.delete(name))
+                {
+                    throw new Error('NotFoundError');
+                }
+            },
+            async* entries(){
+                for (const name of [...here.keys()])
+                {
+                    yield [name, await this.getFileHandle(name)];
+                }
+            },
+        };
+    };
+    return { root: folder(), entries, writes: ()=>writes };
+}
+
+test('a session in the origin file system is kept a file to each file and read back', async()=>{
+    const disk = fakeDirectory();
+    const store = opfsSession('a game/with:odd chars', async()=>disk.root);
     assert.deepEqual(await store.load(), { files: [], registry: null },
         'nothing yet, not an error');
 
-    const session = { files: [{ path: 'C:\\save.dat', bytes: new Uint8Array([7, 7]) }],
-        registry: { roots: [] } };
+    const session = { files: [{ path: 'C:\\save.dat', bytes: new Uint8Array([7, 7]) },
+        { path: 'C:\\Dir\\Ünïcode.cfg', bytes: new Uint8Array([1]) }],
+    registry: { roots: [] } };
     await store.save(session);
-    assert.deepEqual([...disk.keys()], ['a_game_with_odd_chars.session'], 'one file, a safe name');
+    assert.deepEqual([...disk.entries.keys()], ['a_game_with_odd_chars.files'], 'a safe name');
+    assert.equal(disk.entries.get('a_game_with_odd_chars.files').here.size, 3,
+        'two files and the registry');
     const back = await store.load();
     assert.deepEqual(back.registry, { roots: [] });
-    assert.deepEqual([...back.files[0].bytes], [7, 7]);
+    assert.deepEqual(back.files.map(file=>[file.path, [...file.bytes]]).sort(),
+        [['C:\\Dir\\Ünïcode.cfg', [1]], ['C:\\save.dat', [7, 7]]]);
+});
+
+test('a save after the first writes only what changed, and drops what was removed', async()=>{
+    const disk = fakeDirectory();
+    const store = opfsSession('game', async()=>disk.root);
+    const big = { path: 'C:\\big.save', bytes: bytes(1 << 20, 3) };
+    const config = { path: 'C:\\config.cfg', bytes: new Uint8Array([1]) };
+    await store.save({ files: [big, config], registry: { a: 1 } }, [{ kind: 'written',
+        path: config.path }]);
+    assert.equal(disk.writes(), 3, 'the first save of a run writes everything');
+
+    const config2 = { path: config.path, bytes: new Uint8Array([2]) };
+    await store.save({ files: [big, config2], registry: { a: 1 } },
+        [{ kind: 'written', path: config.path }]);
+    assert.equal(disk.writes(), 4, 'the next writes the one file that changed');
+
+    await store.save({ files: [config2], registry: { a: 2 } },
+        [{ kind: 'removed', path: big.path }, { kind: 'registry' }]);
+    assert.equal(disk.writes(), 5, 'a removal writes nothing; the registry is one entry');
+    const back = await store.load();
+    assert.deepEqual(back.files.map(file=>[file.path, [...file.bytes]]),
+        [[config.path, [2]]]);
+    assert.deepEqual(back.registry, { a: 2 });
+});
+
+test('a session left as one packed file is read, and gone after the first save', async()=>{
+    const disk = fakeDirectory();
+    const old = await packSession({ files: [{ path: 'C:\\old.sav', bytes: new Uint8Array([9]) }],
+        registry: { r: 1 } });
+    const handle = await disk.root.getFileHandle('game.session', { create: true });
+    const stream = await handle.createWritable();
+    await stream.write(old);
+    await stream.close();
+    const store = opfsSession('game', async()=>disk.root);
+    const loaded = await store.load();
+    assert.deepEqual(loaded.files.map(file=>file.path), ['C:\\old.sav']);
+    await store.save(loaded, [{ kind: 'registry' }]);
+    assert.equal(disk.root.here.has('game.session'), false, 'the packed file is gone');
+    const back = await store.load();
+    assert.deepEqual(back.files.map(file=>[file.path, [...file.bytes]]), [['C:\\old.sav', [9]]]);
+    assert.deepEqual(back.registry, { r: 1 });
 });
 
 test('a session is compressed, and as one stream', async()=>{

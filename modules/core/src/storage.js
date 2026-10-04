@@ -233,23 +233,59 @@ export function localStorageSession(key){
     };
 }
 
+/** The head of one entry of a session kept in the origin's file system: "BTE", version 1. */
+const ENTRY_MAGIC = 0x45544201;
+
 /**
- * A session kept in the origin's private file system.
+ * The name an entry of a session is kept under in the origin's file system:
+ * a digest of its path, which is short and safe whatever the path holds, and
+ * the path itself is kept inside the entry.
+ *
+ * @param {string} path
+ */
+const entryName = async path=>{
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256',
+        new TextEncoder().encode(path)));
+    return [...digest.subarray(0, 16)].map(byte=>byte.toString(16).padStart(2, '0')).join('');
+};
+
+/** @param {string} path @param {Uint8Array} bytes */
+const entryOf = (path, bytes)=>{
+    const name = new TextEncoder().encode(path);
+    const out = new Uint8Array(8 + name.length + bytes.length);
+    const view = new DataView(out.buffer);
+    view.setUint32(0, ENTRY_MAGIC, true);
+    view.setUint32(4, name.length, true);
+    out.set(name, 8);
+    out.set(bytes, 8 + name.length);
+    return out;
+};
+
+/**
+ * A session kept in the origin's private file system, a file to each of its
+ * files and one to its registry.
  *
  * The right place for one on a single machine: it is not capped at a few
- * megabytes, it holds bytes rather than strings, and it survives the tab. The
- * whole session is written each time, as one file; a program's own saves are
- * small next to its game and a partial write is a session nobody can load.
- * Saves are serialised, and one asked for while another is in flight waits
- * for it and then writes the latest.
+ * megabytes, it holds bytes rather than strings, and it survives the tab. A
+ * save writes what changed and nothing else -- a program that rewrites its
+ * configuration in the middle of play must not pay for its saved games,
+ * which a session written whole, packed and compressed on the thread the
+ * program runs on made it do every time. Each entry is replaced whole when
+ * its writer closes, so an entry is the old one or the new one. The first
+ * save of a run writes everything, as does a change that names no path;
+ * a session left in the earlier one-file form is read, and gone after the
+ * first save. Saves are serialised, and one asked for while another is in
+ * flight waits for it and then writes the latest.
  *
  * @param {string} key
  * @param {() => Promise<any>} [directory]
- *     Where the file lives; defaults to the origin's own root. Takes the
+ *     Where the session lives; defaults to the origin's own root. Takes the
  *     directory handle's interface, so a test can hand in one of its own.
  */
 export function opfsSession(key, directory){
-    const name = `${key.replace(/[^A-Za-z0-9._-]/g, '_')}.session`;
+    const base = key.replace(/[^A-Za-z0-9._-]/g, '_');
+    const legacy = `${base}.session`;
+    const folderName = `${base}.files`;
     const open = directory ?? (async()=>{
         const storage = globalThis.navigator?.storage;
         if (!storage?.getDirectory)
@@ -261,30 +297,135 @@ export function opfsSession(key, directory){
     });
     /** @type {Promise<void>} */
     let writing = Promise.resolve();
+    /** Whether the folder holds this run's whole session, so a change is all a save needs. */
+    let whole = false;
+
+    /** @param {any} folder @param {string} path @param {Uint8Array} bytes */
+    const put = async(folder, path, bytes)=>{
+        const handle = await folder.getFileHandle(await entryName(path), { create: true });
+        const stream = await handle.createWritable();
+        await stream.write(entryOf(path, bytes));
+        await stream.close();
+    };
+    /** @param {any} folder @param {string} name */
+    const drop = async(folder, name)=>{
+        try
+        {
+            await folder.removeEntry(name);
+        }
+        catch {
+            // Not there: nothing to drop.
+        }
+    };
+    /** @param {any} session */
+    const registryBytes = session=>new TextEncoder().encode(JSON.stringify(session.registry));
 
     return {
         async load(){
             const dir = await open();
-            let handle;
-            try
+            const folder = await dir.getDirectoryHandle(folderName).catch(()=>null);
+            if (!folder)
             {
-                handle = await dir.getFileHandle(name);
+                let handle;
+                try
+                {
+                    handle = await dir.getFileHandle(legacy);
+                }
+                catch {
+                    return normaliseSession(null);
+                }
+                const file = await handle.getFile();
+                return unpackSession(new Uint8Array(await file.arrayBuffer()));
             }
-            catch {
-                return normaliseSession(null);
+            const decoder = new TextDecoder();
+            /** @type {SessionFile[]} */
+            const files = [];
+            let registry = null;
+            for await (const [, handle] of folder.entries())
+            {
+                const raw = new Uint8Array(await (await handle.getFile()).arrayBuffer());
+                const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+                if (raw.length < 8 || view.getUint32(0, true) !== ENTRY_MAGIC)
+                {
+                    continue;
+                }
+                const start = 8 + view.getUint32(4, true);
+                const path = decoder.decode(raw.subarray(8, start));
+                if (path === REGISTRY_ENTRY)
+                {
+                    registry = JSON.parse(decoder.decode(raw.subarray(start)));
+                }
+                else
+                {
+                    files.push({ path, bytes: raw.slice(start) });
+                }
             }
-            const file = await handle.getFile();
-            return unpackSession(new Uint8Array(await file.arrayBuffer()));
+            return { files, registry };
         },
-        /** @param {Session} session */
-        save(session){
-            const packed = packSession(session);
+        /**
+         * @param {Session} session
+         * @param {SessionChange[]} [changes]  what changed since the last save; none for all
+         */
+        save(session, changes){
+            const { files, registry } = normaliseSession(session);
             writing = writing.then(async()=>{
                 const dir = await open();
-                const handle = await dir.getFileHandle(name, { create: true });
-                const stream = await handle.createWritable();
-                await stream.write(await packed);
-                await stream.close();
+                const folder = await dir.getDirectoryHandle(folderName, { create: true });
+                const full = !whole || !changes
+                    || changes.some(change=>change.kind !== 'registry'
+                        && typeof change.path !== 'string');
+                if (full)
+                {
+                    const keep = new Set();
+                    for (const file of files)
+                    {
+                        keep.add(await entryName(file.path));
+                        await put(folder, file.path, file.bytes);
+                    }
+                    if (registry)
+                    {
+                        keep.add(await entryName(REGISTRY_ENTRY));
+                        await put(folder, REGISTRY_ENTRY, registryBytes({ registry }));
+                    }
+                    /** @type {string[]} */
+                    const stale = [];
+                    for await (const [name] of folder.entries())
+                    {
+                        if (!keep.has(name))
+                        {
+                            stale.push(name);
+                        }
+                    }
+                    for (const name of stale)
+                    {
+                        await drop(folder, name);
+                    }
+                    await drop(dir, legacy);
+                    whole = true;
+                    return;
+                }
+                const byPath = new Map(files.map(file=>[file.path, file]));
+                for (const change of /** @type {SessionChange[]} */ (changes))
+                {
+                    if (change.kind === 'registry')
+                    {
+                        if (registry)
+                        {
+                            await put(folder, REGISTRY_ENTRY, registryBytes({ registry }));
+                        }
+                        continue;
+                    }
+                    const path = /** @type {string} */ (change.path);
+                    const file = byPath.get(path);
+                    if (file)
+                    {
+                        await put(folder, path, file.bytes);
+                    }
+                    else
+                    {
+                        await drop(folder, await entryName(path));
+                    }
+                }
             });
             return writing;
         },
