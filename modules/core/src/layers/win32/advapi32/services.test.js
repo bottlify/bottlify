@@ -42,6 +42,7 @@ function setup(){
             }
             return decodeAnsi(bytes.subarray(address, end));
         },
+        writeMemory: (address, data)=>bytes.set(data, address),
         hive,
         setLastError: code=>{
             lastError = code;
@@ -65,7 +66,7 @@ function setup(){
     const serviceKey = name=>hive.open(
         /** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)),
         `SYSTEM\\CurrentControlSet\\Services\\${name}`);
-    return { fns, hive, put, serviceKey, lastError: ()=>lastError, diverged };
+    return { fns, hive, put, serviceKey, lastError: ()=>lastError, diverged, bytes };
 }
 
 /** @param {Uint8Array} data */
@@ -143,7 +144,7 @@ test('changing the configuration rewrites only what was given', ()=>{
 });
 
 test('nothing runs a service here: a start times out and says so, a control finds it stopped', ()=>{
-    const { fns, put, lastError, diverged } = setup();
+    const { fns, put, lastError, diverged, bytes } = setup();
     const manager = fns.OpenSCManagerA.handler([0, 0, 2]);
     const service = fns.CreateServiceA.handler([
         manager, put(NAME, 'Example'), 0, 0, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START,
@@ -156,6 +157,13 @@ test('nothing runs a service here: a start times out and says so, a control find
     assert.match(diverged[0], /StartServiceA: Example/);
     assert.equal(fns.ControlService.handler([service, 1, 0]), 0);
     assert.equal(lastError(), ERROR_SERVICE_NOT_ACTIVE);
+    const STATUS = 0x900;
+    assert.equal(fns.QueryServiceStatus.handler([service, STATUS]), 1);
+    const status = new DataView(bytes.buffer, STATUS, 28);
+    assert.deepEqual([status.getUint32(0, true), status.getUint32(4, true),
+        status.getUint32(12, true)], [SERVICE_WIN32_OWN_PROCESS, 1, 1077],
+    'its type, SERVICE_STOPPED, ERROR_SERVICE_NEVER_STARTED');
+    assert.equal(fns.QueryServiceStatus.handler([manager, STATUS]), 0, 'not a service');
 
     const lock = fns.LockServiceDatabase.handler([manager]);
     assert.notEqual(lock, 0);

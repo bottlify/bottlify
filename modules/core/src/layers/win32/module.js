@@ -2107,6 +2107,7 @@ export function createWin32Module(){
                     }),
                     ...createServiceFunctions({
                         readCString,
+                        writeMemory,
                         hive,
                         setLastError: setError,
                         divergence: config?.divergence,

@@ -55,6 +55,7 @@ const HANDLE_STRIDE = 4;
 /**
  * @typedef {Object} ServiceHost
  * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
  * @property {ReturnType<typeof import('./registry.js').createHive>} hive
  * @property {(code: number) => void} [setLastError]
  * @property {(api: string, detail: string) => void} [divergence]
@@ -313,6 +314,39 @@ export function createServiceFunctions(host){
             handler: ([service])=>(held(service, 'service')
                 ? fail(ERROR_SERVICE_NOT_ACTIVE)
                 : fail(ERROR_INVALID_HANDLE)),
+        },
+
+        /**
+         * BOOL QueryServiceStatus(SC_HANDLE hService, LPSERVICE_STATUS lpServiceStatus)
+         *
+         * Stopped, never having started -- no service runs here -- with the
+         * type its key was created with.
+         */
+        QueryServiceStatus: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([service, status])=>{
+                const SERVICE_WIN32_OWN_PROCESS = 0x10;
+                const SERVICE_STOPPED = 1;
+                const ERROR_SERVICE_NEVER_STARTED = 1077;
+                const object = held(service, 'service');
+                if (!object)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const key = serviceKey(/** @type {string} */ (object.name));
+                const typed = key ? hive.getValue(key, 'Type') : null;
+                const type = typed && typed.data.length >= 4
+                    ? new DataView(typed.data.buffer, typed.data.byteOffset).getUint32(0, true)
+                    : SERVICE_WIN32_OWN_PROCESS;
+                const bytes = new Uint8Array(28);
+                const view = new DataView(bytes.buffer);
+                view.setUint32(0, type, true);
+                view.setUint32(4, SERVICE_STOPPED, true);
+                view.setUint32(12, ERROR_SERVICE_NEVER_STARTED, true);
+                host.writeMemory?.(status >>> 0, bytes);
+                return 1;
+            },
         },
 
         /** SC_LOCK LockServiceDatabase(SC_HANDLE hSCManager) */
