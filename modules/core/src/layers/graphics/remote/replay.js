@@ -62,6 +62,9 @@ function handsOut(name){
         || name === 'EndStateBlock';
 }
 
+/** The calls that hand out one of a texture's levels as an object of its own. */
+const LEVELS = new Set(['GetSurfaceLevel', 'GetCubeMapSurface', 'GetVolumeLevel']);
+
 /** The calls after which the bytes a lock let the program write are sent. */
 const UNLOCKS = new Set(['Unlock', 'UnlockRect', 'UnlockCubeRect', 'UnlockBox', 'ReleaseDC']);
 
@@ -349,6 +352,14 @@ export function createRecording(options){
      * @type {WeakMap<object, Map<string, Locked>>}
      */
     const lockedAt = new WeakMap();
+    /**
+     * A texture's levels handed out as surfaces or volumes, by the part a
+     * lock on the texture names: a level is one lock, whichever of the two
+     * takes it and whichever gives it back.
+     *
+     * @type {WeakMap<object, Map<string, object>>}
+     */
+    const levelsOf = new WeakMap();
     /** The stand-ins of the caller's services, passed where the services were. @type {WeakSet<object>} */
     const services = new WeakSet();
     /** The functions the caller put on the device's objects, its own. @type {WeakMap<object, Set<string>>} */
@@ -449,6 +460,17 @@ export function createRecording(options){
             {
                 ranges.push(locked);
                 locks?.delete(named);
+            }
+        }
+        if (ranges.length === 0)
+        {
+            for (const [named, level] of levelsOf.get(object) ?? [])
+            {
+                if (part === '' || named === part)
+                {
+                    ranges.push(...lockedAt.get(level)?.values() ?? []);
+                    lockedAt.delete(level);
+                }
             }
         }
         if (ranges.length === 0 && typeof (/** @type {any} */ (object).base) === 'number')
@@ -944,6 +966,17 @@ export function createRecording(options){
                 }
             }
             bindAll(result, making ? args : NOTHING, bind);
+            if (LEVELS.has(name))
+            {
+                const out = args[count - 1];
+                const level = out?.surface ?? out?.volume;
+                if (level)
+                {
+                    const levels = levelsOf.get(target) ?? new Map();
+                    levels.set(partOf(args), raws.get(level) ?? level);
+                    levelsOf.set(target, levels);
+                }
+            }
             // A lock taken to read is marked so whatever the answer: a render
             // target's comes from the played device later, and an unlock with
             // no lock on record sends the whole surface.

@@ -391,6 +391,18 @@ export function createDynamicBuffer(options){
         flush,
 
         /**
+         * The bytes as the buffer's draws read them: what the unlocks put
+         * in, not whatever the program wrote since. A draw the GPU cannot
+         * take as it is, rewritten on the CPU, reads them here.
+         *
+         * @param {number} offset @param {number} length
+         * @returns {Uint8Array}
+         */
+        bytes(offset, length){
+            return shadow.subarray(offset, offset + length);
+        },
+
+        /**
          * A draw of the frame being recorded reads the live backing. A later
          * lock with neither flag then has to rename instead of writing in
          * place, because the bytes it overwrites are still observed by that

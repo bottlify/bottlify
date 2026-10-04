@@ -7514,13 +7514,13 @@ export function createRenderer(options){
                     skip('stream');
                     return;
                 }
-                const order = indicesFrom(readMemory(model.indices.base + byteOffset,
+                const order = indicesFrom(bufferFor(model.indices).gpu.bytes(byteOffset,
                     count * format.bytes), format.bytes);
-                const base = stream.buffer.base + (stream.offset ?? 0)
-                    + model.baseVertexIndex * stream.stride;
+                const vertexBytes = bufferFor(stream.buffer).gpu;
+                const base = (stream.offset ?? 0) + model.baseVertexIndex * stream.stride;
                 record(model, prepared, {
                     vertices: scratchVertices.write(gatheredPoints((first, many)=>
-                        readMemory(base + first * stream.stride, many * stream.stride),
+                        vertexBytes.bytes(base + first * stream.stride, many * stream.stride),
                     order, stream.stride)),
                     indices: null,
                     count,
@@ -7562,9 +7562,10 @@ export function createRenderer(options){
                 }
                 return;
             }
-            // The strip's order is in guest memory, where the program left it.
-            const order = indicesFrom(
-                readMemory(model.indices.base + byteOffset, count * format.bytes), format.bytes);
+            // Out of the bytes the list path binds, so that a program's writes
+            // after its unlock reach neither.
+            const order = indicesFrom(indexBuffer.bytes(byteOffset, count * format.bytes),
+                format.bytes);
             record(model, prepared, {
                 vertices,
                 ...expandedGeometry(type, order, model.baseVertexIndex, fill),
