@@ -157,6 +157,11 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
     let unchecked = 0;
     /** The batches posted, and their bytes. */
     const sent = { batches: 0, bytes: 0 };
+    /**
+     * Of those bytes, the guest memory copied into them, by what copied it --
+     * what a lend of buffers, or of anything else, would have left in place.
+     */
+    const shipped = { buffers: 0, surfaces: 0, reads: 0, writes: 0 };
     const flush = ()=>{
         pending = false;
         if (writer.empty())
@@ -334,6 +339,18 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
 
         /** The batches posted so far, and their bytes. */
         sent: ()=>({ ...sent }),
+
+        /**
+         * A recording copied guest bytes into the batch.
+         *
+         * @param {import('./replay.js').ShippedKind} kind @param {number} bytes
+         */
+        shipped(kind, bytes){
+            shipped[kind] += bytes;
+        },
+
+        /** The guest bytes copied into the batches so far, by what copied them. */
+        shippedBytes: ()=>({ ...shipped }),
 
         /** The calls waited on, by name, with the milliseconds they took. */
         waits: ()=>Object.fromEntries([...waits].map(([name, sum])=>[name, {

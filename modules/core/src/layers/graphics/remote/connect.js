@@ -64,12 +64,14 @@ function plainOf(services){
  * @property {() => { roots: number, frames: number, dropped: number,
  *     waits: Record<string, { count: number, ms: number, maxMs: number }>, behind: number[],
  *     readBack: { sent: number, shared: number }, lent: Record<string, number>,
- *     sent: { batches: number, bytes: number } }}
+ *     sent: { batches: number, bytes: number }, shipped: Record<string, number> }}
  *     diagnostics  `waits`: what the program's thread waited on the worker for, by call;
  *     `readBack`: the bytes the worker wrote into guest memory, sent here to be written or
  *     written in shared memory in place; `lent`: the unlocked bytes lent to the worker rather
  *     than copied, those taken into the stash first, and the claims that waited; `sent`: the
- *     batches of calls posted to the worker and their bytes, copied guest memory included
+ *     batches of calls posted to the worker and their bytes, copied guest memory included;
+ *     `shipped`: that guest memory by what copied it -- buffers' unlocks, surfaces' (lent ones
+ *     aside), what calls read out of guest memory and what they wrote into it
  * @property {() => void} dispose
  */
 
@@ -266,6 +268,15 @@ export function connectGraphicsWorker(options){
                     const { batches, bytes } = sender.sent();
                     return { batches: sum.batches + batches, bytes: sum.bytes + bytes };
                 }, { batches: 0, bytes: 0 }),
+                // The guest bytes copied into those batches, by what copied
+                // them: what lending buffers would have left in place.
+                shipped: senders.reduce((sum, sender)=>{
+                    for (const [kind, bytes] of Object.entries(sender.shippedBytes()))
+                    {
+                        sum[kind] = (sum[kind] ?? 0) + bytes;
+                    }
+                    return sum;
+                }, /** @type {Record<string, number>} */ ({})),
                 lent: lentOf(senders) };
         },
         dispose(){

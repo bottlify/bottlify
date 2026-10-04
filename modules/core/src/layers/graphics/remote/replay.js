@@ -291,9 +291,19 @@ function visit(value, bind){
  *     writes: what it gives back is a waited call's `PlayedAnswer` (or a
  *     promise of one), and for a paced call a promise when the caller is held
  * @property {() => void} recorded  a record that is not a call was written
+ * @property {(kind: ShippedKind, bytes: number) => void} [shipped]
+ *     bytes of guest memory just copied into the record, by what copied them
  * @property {import('./lending.js').Lender | null} [lender]
  *     where the played side reads guest memory in place: what an unlock let
  *     the program write is lent rather than copied
+ */
+
+/**
+ * What copied guest bytes into a record: a buffer's unlock, a texture's or a
+ * surface's (a lent one is the lender's to count), what a call read out of
+ * the program's memory, or what one wrote into it here.
+ *
+ * @typedef {'buffers' | 'surfaces' | 'reads' | 'writes'} ShippedKind
  */
 
 /**
@@ -336,6 +346,13 @@ export function createRecording(options){
     const windowMemory = options.windowMemory ?? readMemory;
     const { writer } = transport;
     const lender = transport.lender ?? null;
+    /** @param {ShippedKind} kind @param {{ bytes: Uint8Array }[]} ranges */
+    const shippedAs = (kind, ranges)=>{
+        if (transport.shipped && ranges.length > 0)
+        {
+            transport.shipped(kind, ranges.reduce((sum, range)=>sum + range.bytes.length, 0));
+        }
+    };
     /** @type {WeakMap<object, number>} */
     const numbers = new WeakMap([[root, 0]]);
     let next = 1;
@@ -607,6 +624,7 @@ export function createRecording(options){
         {
             writer.u8(OP.WROTE);
             writeMemory(taken);
+            shippedAs('surfaces', taken);
         }
         if (lent.length > 0 || taken.length > 0)
         {
@@ -970,7 +988,9 @@ export function createRecording(options){
                 }
                 else
                 {
-                    shipped = [...shipped ?? [], ...ranges.flatMap(range=>rangeFrom(range))];
+                    const unlocked = ranges.flatMap(range=>rangeFrom(range));
+                    shippedAs('buffers', unlocked);
+                    shipped = [...shipped ?? [], ...unlocked];
                 }
             }
             allocs = null;
@@ -996,6 +1016,7 @@ export function createRecording(options){
                 reads = null;
                 if (read)
                 {
+                    shippedAs('reads', read);
                     shipped = shipped ? [...shipped, ...read] : read;
                 }
                 // Whatever the call did, the record is finished, so the next
@@ -1026,6 +1047,7 @@ export function createRecording(options){
                 if (wrote)
                 {
                     writeMemory(wrote);
+                    shippedAs('writes', wrote);
                 }
                 if (failed)
                 {
@@ -1251,6 +1273,7 @@ export function createRecording(options){
             writer.u8(OP.WROTE);
             writer.u32(1);
             writer.memory(address, bytes);
+            shippedAs('writes', [{ bytes }]);
             transport.recorded();
         },
         adopt(object){
@@ -1269,6 +1292,7 @@ export function createRecording(options){
             writer.u8(OP.WROTE);
             writer.u32(1);
             writer.memory(address, bytes);
+            shippedAs('reads', [{ bytes }]);
             transport.recorded();
         },
     };

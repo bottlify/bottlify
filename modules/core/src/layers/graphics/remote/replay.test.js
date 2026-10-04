@@ -206,6 +206,34 @@ test('bytes lent to the played side are what the program wrote before the unlock
     }
 });
 
+test('the bytes sent to the played side are counted by what sent them: a buffer\'s unlock, a'
+    + ' surface\'s, what the device wrote in guest memory', ()=>{
+    for (const lend of [false, true])
+    {
+        const { root, ram, sender, play } = toyAcross(lend);
+        /** @type {{ thing?: any }} */
+        const out = {};
+        root.CreateThing(out);
+        /** @type {{ thing?: any }} */
+        const source = {};
+        root.CreateThing(source);
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        out.thing.Lock(locked);
+        ram.set([1, 2, 3, 4], /** @type {number} */ (locked.pBits));
+        out.thing.Unlock();
+        source.thing.LockRect(locked, null, 0);
+        ram.set([5, 6, 7, 8], /** @type {number} */ (locked.pBits));
+        source.thing.UnlockRect();
+        source.thing.Peek();
+        root.Copy(source.thing.base, out.thing.base);
+        play();
+        // A lent surface goes as its address; its bytes are the lender's count.
+        assert.deepEqual(sender.shippedBytes(), { buffers: 16, surfaces: lend ? 0 : 16, reads: 0,
+            writes: 4 }, `lent: ${lend}`);
+    }
+});
+
 test('a lend the played side read before the program locks again is not stashed', ()=>{
     const { root, ram, sender, played, play } = toyAcross(true);
     /** @type {{ thing?: any }} */
