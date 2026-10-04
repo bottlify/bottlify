@@ -1628,3 +1628,29 @@ test('a dialog made through the wide call is a Unicode window, its procedure rea
     assert.equal(fns.SendDlgItemMessageW.argBytes, 20);
     assert.equal(fns.DialogBoxParamW.argBytes, 20);
 });
+
+test('IsDlgButtonChecked asks the one button, and answers what it says', ()=>{
+    const BM_GETCHECK = 0x00f0;
+    /** @type {number[]} */
+    const asked = [];
+    const { memory, fns } = setup({
+        dispatch: (wndProc, message)=>{
+            if (message.message === BM_GETCHECK)
+            {
+                asked.push(message.hwnd);
+                return 2;
+            }
+            return 0;
+        },
+    });
+    putTemplate(memory, [{ id: 10, x: 0, y: 0, cx: 4, cy: 4 }]);
+    const dialog = fns.CreateDialogIndirectParamA.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    const button = fns.GetDlgItem.handler([dialog, 10]);
+    fns.SetWindowLongA.handler([button, -4, 0x403000]);
+
+    assert.equal(fns.IsDlgButtonChecked.argBytes, 8);
+    assert.equal(fns.IsDlgButtonChecked.handler([dialog, 10]), 2, 'BST_INDETERMINATE as it is');
+    assert.deepEqual(asked, [button]);
+    assert.equal(fns.IsDlgButtonChecked.handler([dialog, 99]), 0, 'no such control');
+});

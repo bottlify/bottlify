@@ -380,3 +380,28 @@ test('a file\'s upper-half bytes are the ANSI page, as a program\'s own strings 
     assert.deepEqual([.../** @type {Uint8Array} */ (files.nodes.get('C:\\WINDOWS\\TEMP\\page.ini'))],
         [0x5b, 0x53, 0x99, 0x5d, 0x0d, 0x0a, 0x4b, 0x80, 0x3d, 0x99, 0x80, 0x0d, 0x0a]);
 });
+
+test('a section written whole replaces every line it had, is added when missing, NULL removes it',
+    ()=>{
+        const { memory, files, fns } = setup();
+        files.put('C:\\WINDOWS\\TEMP\\setup.ini', INI);
+        memory.put(FILE, 'C:\\WINDOWS\\TEMP\\setup.ini');
+        memory.put(SECTION, 'Other');
+        memory.put(VALUE, 'First=1\0Second=2\0plain line\0');
+        assert.equal(fns.WritePrivateProfileSectionA.handler([SECTION, VALUE, FILE]), 1);
+        assert.equal(fns.GetPrivateProfileSectionA.handler([SECTION, OUT, 64, FILE]),
+            'First=1\0Second=2\0plain line\0'.length);
+        assert.equal(memory.readCString(OUT, 64), 'First=1');
+        memory.put(KEY, 'Key');
+        assert.equal(fns.GetPrivateProfileStringA.handler([SECTION, KEY, 0, OUT, 64, FILE]), 0,
+            'the key it had is gone');
+
+        memory.put(SECTION, 'Added');
+        memory.put(VALUE, 'A=b\0');
+        assert.equal(fns.WritePrivateProfileSectionA.handler([SECTION, VALUE, FILE]), 1);
+        assert.ok(files.text('C:\\WINDOWS\\TEMP\\setup.ini').endsWith('[Added]\r\nA=b\r\n'));
+
+        assert.equal(fns.WritePrivateProfileSectionA.handler([SECTION, 0, FILE]), 1);
+        assert.ok(!files.text('C:\\WINDOWS\\TEMP\\setup.ini').includes('[Added]'));
+        assert.equal(fns.WritePrivateProfileSectionA.argBytes, 12);
+    });

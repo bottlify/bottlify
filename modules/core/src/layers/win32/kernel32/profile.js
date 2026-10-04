@@ -512,6 +512,60 @@ export function createProfileFunctions(host){
         },
 
         /**
+         * BOOL WritePrivateProfileSectionA(LPCSTR lpAppName, LPCSTR lpString,
+         *   LPCSTR lpFileName)
+         *
+         * The section's lines replaced by the list given, NUL-separated and
+         * ended by an empty string, in the order given; a section not there is
+         * added at the end, and a NULL list removes it.
+         */
+        WritePrivateProfileSectionA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([section, list, file])=>{
+                const path = pathOf(file);
+                const name = text(section, MAX_NAME);
+                if (path === null || name === null)
+                {
+                    return 0;
+                }
+                /** @type {string[] | null} */
+                let entries = null;
+                if ((list >>> 0) !== 0)
+                {
+                    entries = [];
+                    for (let at = list >>> 0; ;)
+                    {
+                        const entry = host.readCString(at, MAX_VALUE);
+                        if (entry === '')
+                        {
+                            break;
+                        }
+                        entries.push(entry);
+                        at += encodeAnsi(entry).length + 1;
+                    }
+                }
+                /** @param {ProfileLine[]} lines */
+                const answer = lines=>{
+                    const span = sectionSpan(lines, name);
+                    const body = entries === null
+                        ? []
+                        : [parseLine(`[${name}]`), ...entries.map(parseLine)];
+                    if (span === null && entries === null)
+                    {
+                        return 1;
+                    }
+                    const next = span === null
+                        ? [...lines, ...body]
+                        : [...lines.slice(0, span.start), ...body, ...lines.slice(span.end)];
+                    return store(path, next) ? 1 : 0;
+                };
+                const loaded = load(path);
+                return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+            },
+        },
+
+        /**
          * BOOL GetPrivateProfileStructA(LPCSTR lpszSection, LPCSTR lpszKey,
          *   LPVOID lpStruct, UINT uSizeStruct, LPCSTR szFile)
          *

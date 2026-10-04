@@ -199,6 +199,7 @@ const DLU_PER_CHAR_X = 4;
 const DLU_PER_CHAR_Y = 8;
 
 /** How a button is told its check state, and the two states a radio has. */
+const BM_GETCHECK = 0x00f0;
 const BM_SETCHECK = 0x00f1;
 const BST_UNCHECKED = 0;
 const BST_CHECKED = 1;
@@ -1278,6 +1279,27 @@ export function createDialogFunctions(options){
                 const told = host.send(control.hwnd, BM_SETCHECK, check >>> 0, 0,
                     host.callerThread?.());
                 return typeof told === 'number' ? 1 : Promise.resolve(told).then(()=>1);
+            },
+        },
+
+        /**
+         * UINT IsDlgButtonChecked(HWND hDlg, int nIDButton)
+         *
+         * BM_GETCHECK to the one control, its answer as it is: a three-state
+         * button's third state is a value of its own.
+         */
+        IsDlgButtonChecked: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, id])=>{
+                const control = controlOf(hwnd, id);
+                if (!control)
+                {
+                    return 0;
+                }
+                const told = host.send(control.hwnd, BM_GETCHECK, 0, 0, host.callerThread?.());
+                return typeof told === 'number'
+                    ? told >>> 0 : Promise.resolve(told).then(state=>Number(state) >>> 0);
             },
         },
 
