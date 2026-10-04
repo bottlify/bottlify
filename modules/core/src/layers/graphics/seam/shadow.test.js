@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    BUFFER, COMMAND, FLAG_SLOW_PATH, SHADOW, TEXTURE, createShadow, getRenderStateCode,
+    BUFFER, COMMAND, FLAG_SLOW_PATH, FLAG_STALE, SHADOW, TEXTURE, createShadow, getRenderStateCode,
     getSurfaceLevelCode, getTextureStageStateCode, getTransformCode, lockCode, transformSlot,
     transformType, unlockCode,
 } from './shadow.js';
@@ -213,7 +213,8 @@ test('the routines end in a jump to their own trap, and check the flag first', (
         'this, then the block one word past it');
     assert.deepEqual([...rs.slice(7, 9)], [0x85, 0xc9], 'a block at all');
     assert.equal(rs[9], 0x74, 'jz to the slow path');
-    assert.deepEqual([...rs.slice(11, 17)], [0xf7, 0x01, FLAG_SLOW_PATH, 0, 0, 0], 'the flag');
+    assert.deepEqual([...rs.slice(11, 17)], [0xf7, 0x01, FLAG_SLOW_PATH | FLAG_STALE, 0, 0, 0],
+        'the flags: a getter waits for the host while what it reads may be stale');
     assert.equal(rs[17], 0x75, 'jnz to the slow path');
     assert.equal(rs[rs.length - 5], 0xe9);
     const rel = new DataView(rs.buffer).getInt32(rs.length - 4, true);

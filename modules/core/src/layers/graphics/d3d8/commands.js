@@ -72,6 +72,8 @@ const ints = new Int32Array(scratch);
  * @property {{ type: number, count: number, stride: number, most: number }} [vertices]
  *     or the vertices a draw's primitives span, `stride` bytes each (`commandCode`)
  * @property {boolean} [kept]  its copy is taken with `copy` alone, not through the scratch
+ * @property {boolean} [self]  the first argument is the object the method is of, not the device
+ * @property {boolean} [stale]  it may change state the device's block mirrors
  * @property {boolean} [draws]
  * @property {(device: any, call: CommandArgs) => number} make
  */

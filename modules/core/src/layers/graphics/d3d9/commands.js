@@ -14,6 +14,7 @@
 
 import { IDIRECT3DDEVICE9_SLOTS } from './interfaces.js';
 import { SHARED_COMMANDS, commandSet } from '../d3d8/commands.js';
+import { D3DERR_INVALIDCALL } from './constants.js';
 
 /**
  * A constant setter: `count` registers of four floats or integers, or of one
@@ -28,7 +29,17 @@ const constants = (name, kind, width, most)=>({
     make: (d, c)=>d[name](c.arg(0), c[kind].slice(0, c.arg(2) * width), c.arg(2)),
 });
 
-const set = commandSet(IDIRECT3DDEVICE9_SLOTS, {
+/**
+ * A state block's own methods, which the device's ring carries with the
+ * block beside the record: numbered past the device's own, so a record
+ * names them as it names the device's.
+ */
+const STATE_BLOCK_SLOTS = /** @type {[string, number][]} */ ([
+    ['StateBlock.Capture', 0],
+    ['StateBlock.Apply', 0],
+]);
+
+const set = commandSet([...IDIRECT3DDEVICE9_SLOTS, ...STATE_BLOCK_SLOTS], {
     ...SHARED_COMMANDS,
     SetSamplerState: { args: 3, make: (d, c)=>d.SetSamplerState(c.arg(0), c.arg(1), c.arg(2)) },
     SetStreamSource: { args: 4, objects: [1],
@@ -53,6 +64,12 @@ const set = commandSet(IDIRECT3DDEVICE9_SLOTS, {
     DrawIndexedPrimitive: { args: 6, draws: true,
         make: (d, c)=>d.DrawIndexedPrimitive(c.arg(0), c.arg(1) | 0, c.arg(2), c.arg(3),
             c.arg(4), c.arg(5)) },
+    'StateBlock.Capture': { args: 1, self: true, objects: [0],
+        make: (d, c)=>c.object()?.Capture() ?? D3DERR_INVALIDCALL },
+    // What the block applies is the device's state, which the guest's getters
+    // read from the device's block: they wait for the host (`FLAG_STALE`).
+    'StateBlock.Apply': { args: 1, self: true, stale: true, objects: [0],
+        make: (d, c)=>c.object()?.Apply() ?? D3DERR_INVALIDCALL },
 });
 
 export const { COMMANDS, commandSlot, commandObjects, runCommands } = set;

@@ -989,6 +989,25 @@ export function createDirect3D9Seam(
         describe(IID_IDirect3DPixelShader9, IDIRECT3DSHADER9_SLOTS, shaderMethods, {}, retire),
     ];
 
+    /**
+     * What a state block's apply changed of what the device's block mirrors:
+     * what the state block holds, and nothing else.
+     *
+     * @param {any} record
+     */
+    const touchedBy = record=>({
+        renderStates: record.renderStates.keys(),
+        transforms: record.transforms.keys(),
+        stageStates: record.stageStates.keys(),
+        viewport: Boolean(record.viewport),
+        samplerStates: record.samplerStates.keys(),
+    });
+    /** The state blocks this seam handed out, which a run of records may name. */
+    const stateBlocks = new WeakSet();
+    /** @param {string} name */
+    const stateBlockGuest = name=>(/** @type {{ trap: number }} */ { trap })=>placeCode(at=>
+        commandCode(at, trap, { ...COMMANDS[`StateBlock.${name}`],
+            slot: commandSlot(`StateBlock.${name}`) }));
     const stateBlockInterfaces = [
         describe(IID_IDirect3DStateBlock9, IDIRECT3DSTATEBLOCK9_SLOTS, {
             GetDevice: getDevice,
@@ -1006,18 +1025,29 @@ export function createDirect3D9Seam(
                 const hr = block.Apply();
                 // What the block holds is all it changed, and the getters in
                 // the guest read only these of it.
-                const record = block.record;
-                shadow?.remirror({
-                    renderStates: record.renderStates.keys(),
-                    transforms: record.transforms.keys(),
-                    stageStates: record.stageStates.keys(),
-                    viewport: Boolean(record.viewport),
-                    samplerStates: record.samplerStates.keys(),
-                });
+                shadow?.remirror(touchedBy(block.record));
                 return hr;
             },
-        }),
+        }, allocate
+            ? { Capture: stateBlockGuest('Capture'), Apply: stateBlockGuest('Apply') }
+            : {}),
     ];
+
+    /**
+     * A state block, handed out as its interface: its methods in the guest
+     * write into its device's ring, found through the device's block.
+     *
+     * @param {any} block @param {any} device @param {number} out
+     */
+    const handBackStateBlock = (block, device, out)=>{
+        stateBlocks.add(block);
+        block.guestState = ()=>shadowOf(device)?.address() ?? 0;
+        // A record in the ring may name it: the ring is played before the
+        // block's last reference can go.
+        block.settleGuestRefs = ()=>shadowOf(device)?.sync();
+        return handBack(block, stateBlockInterfaces, IID_IDirect3DStateBlock9, out,
+            E_OUTOFMEMORY, device);
+    };
 
     const queryInterfaces = [describe(IID_IDirect3DQuery9, IDIRECT3DQUERY9_SLOTS, {
         GetDevice: getDevice,
@@ -1938,8 +1968,7 @@ export function createDirect3D9Seam(
             const hr = device.CreateStateBlock(type >>> 0, held);
             if (hr === D3D_OK && held.block)
             {
-                return handBack(held.block, stateBlockInterfaces, IID_IDirect3DStateBlock9,
-                    out >>> 0, E_OUTOFMEMORY, device);
+                return handBackStateBlock(held.block, device, out >>> 0);
             }
             return hr;
         },
@@ -1966,8 +1995,7 @@ export function createDirect3D9Seam(
             shadowOf(device)?.slowPath(false);
             if (hr === D3D_OK && held.block)
             {
-                return handBack(held.block, stateBlockInterfaces, IID_IDirect3DStateBlock9,
-                    out >>> 0, E_OUTOFMEMORY, device);
+                return handBackStateBlock(held.block, device, out >>> 0);
             }
             return hr;
         },
@@ -2908,6 +2936,7 @@ export function createDirect3D9Seam(
         {
             // Made before the interface is published, because publishing is
             // when the block's address is written one word past `this`.
+            /** @type {ReturnType<typeof createShadow>} */
             const shadow = createShadow({
                 allocate,
                 readMemory: memory.windowMemory ?? memory.readMemory,
@@ -2916,8 +2945,25 @@ export function createDirect3D9Seam(
                 device: held.device,
                 divergence,
                 name: 'IDirect3DDevice9',
-                commands: { take: records=>held.device.commands(records,
-                    commandObjects(records, publisher.objectAt)) },
+                commands: { take: records=>{
+                    const objects = commandObjects(records, publisher.objectAt);
+                    const made = held.device.commands(records, objects);
+                    if (shadow.stale())
+                    {
+                        // A state block applied in the ring: the block is
+                        // brought to what those the run names hold, and the
+                        // getters may read it again.
+                        for (const object of objects)
+                        {
+                            if (stateBlocks.has(object))
+                            {
+                                shadow.remirror(touchedBy(object.record));
+                            }
+                        }
+                        shadow.fresh();
+                    }
+                    return made;
+                } },
             });
             shadows.set(held.device, shadow);
             held.device.guestState = ()=>shadow.address();

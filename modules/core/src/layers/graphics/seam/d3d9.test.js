@@ -22,7 +22,8 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createDirect3D9Seam } from './d3d9.js';
-import { BUFFER, SHADOW, transformSlot } from './shadow.js';
+import { BUFFER, FLAG_STALE, SHADOW, transformSlot } from './shadow.js';
+import { commandSlot } from '../d3d9/commands.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { IDIRECT3D9_SLOTS } from './vtables.js';
 import {
@@ -1187,7 +1188,7 @@ test('a state block applied brings the stage states it holds into the guest\'s b
     // Words the block does not hold, left as nothing on the device would leave
     // them: an Apply that read every stage state back would overwrite them.
     h.box.memory.writeU32(word(4, D3DTSS.COLOROP), 0xabcd);
-    assert.equal(h.box.call(stateBlock, slot(IDIRECT3DSTATEBLOCK9_SLOTS, 'Apply'), []), D3D_OK);
+    assert.equal(h.box.trap(stateBlock, 'Apply'), D3D_OK);
     assert.equal(h.box.memory.readU32(word(2, D3DTSS.COLOROP)), 7);
     assert.equal(h.box.memory.readU32(word(4, D3DTSS.COLOROP)), 0xabcd);
     assert.equal(h.release(stateBlock), 0);
@@ -1759,7 +1760,7 @@ test('a state block applied mirrors into the block only the states it holds', ()
             return original.apply(object, args);
         };
     }
-    const apply = (/** @type {number} */ stateBlock)=>h.box.call(stateBlock, 5, []);
+    const apply = (/** @type {number} */ stateBlock)=>h.box.trap(stateBlock, 'Apply');
 
     // Shaders and a declaration are not in the block: nothing is read back.
     const shaders = record([['SetVertexShader', [0]], ['SetPixelShader', [0]]]);
@@ -1839,9 +1840,48 @@ test('the viewport and the sampler states the guest\'s getters read follow the d
     assert.equal(h.device(device, 'EndStateBlock', [out]), D3D_OK);
     assert.deepEqual(viewport(), [0, 0, 32, 16], 'recording sets nothing');
     assert.equal(sampler(1, D3DSAMP_ADDRESSU), 1);
-    assert.equal(h.box.call(h.box.memory.readU32(out), 5, []), D3D_OK, 'Apply');
+    assert.equal(h.box.trap(h.box.memory.readU32(out), 'Apply'), D3D_OK);
     assert.deepEqual(viewport(), [1, 2, 8, 4], 'the state block\'s viewport');
     assert.equal(sampler(1, D3DSAMP_ADDRESSU), 3, 'and its sampler state');
+});
+
+test('a state block applied through the ring is made in order, and its states are mirrored'
+    + ' before a getter reads them', ()=>{
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const owner = h.box.memory.readU32(device + 4);
+    const ring = h.box.memory.readU32(owner + SHADOW.COMMANDS);
+    const out = 0x3200;
+    assert.equal(h.device(device, 'BeginStateBlock'), D3D_OK);
+    assert.equal(h.device(device, 'SetRenderState', [D3DRS.CULLMODE, 2]), D3D_OK);
+    assert.equal(h.device(device, 'EndStateBlock', [out]), D3D_OK);
+    const block = h.box.memory.readU32(out);
+    assert.equal(h.box.memory.readU32(block + 4), owner, 'the state block finds the device\'s');
+    for (const name of ['Capture', 'Apply'])
+    {
+        assert.ok(h.box.isGuest(block, slot(IDIRECT3DSTATEBLOCK9_SLOTS, name)),
+            `${name} in the guest`);
+    }
+    assert.equal(h.device(device, 'SetRenderState', [D3DRS.CULLMODE, 3]), D3D_OK);
+
+    // What the routines leave: the block applied, then a state set after it.
+    const words = [
+        commandSlot('StateBlock.Apply'), 12, block,
+        commandSlot('SetRenderState'), 16, D3DRS.FILLMODE, 2,
+    ];
+    h.box.memory.writeBytes(ring, new Uint8Array(new Uint32Array(words).buffer));
+    h.box.memory.writeU32(owner + SHADOW.COMMAND_HEAD, words.length * 4);
+    h.box.memory.writeU32(owner + SHADOW.FLAGS, FLAG_STALE);
+
+    assert.equal(h.device(device, 'GetRenderState', [D3DRS.CULLMODE, out]), D3D_OK);
+    assert.equal(h.box.memory.readU32(out), 2, 'the state the block holds');
+    assert.equal(h.box.memory.readU32(owner + SHADOW.RENDER_STATES + D3DRS.CULLMODE * 4), 2,
+        'mirrored for the guest\'s getter');
+    assert.equal(h.box.memory.readU32(owner + SHADOW.FLAGS), 0, 'which may read it again');
+    assert.equal(h.device(device, 'GetRenderState', [D3DRS.FILLMODE, out]), D3D_OK);
+    assert.equal(h.box.memory.readU32(out), 2, 'and what was set after it, after it');
+    assert.deepEqual(h.divergences, []);
 });
 
 test('a create refused for its shared handle leaves no pointer behind', ()=>{

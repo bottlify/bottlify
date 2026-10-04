@@ -19,8 +19,9 @@ import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
 import {
-    BUFFER, COMMAND, FLAG_SLOW_PATH, RENDER_STATE_MIRROR, SAMPLER_STATE_MIRROR, SHADOW,
-    TRANSFORM_MIRROR, VIEWPORT_MIRROR, commandCode, getSamplerStateCode, getViewportCode, lockCode,
+    BUFFER, COMMAND, FLAG_SLOW_PATH, FLAG_STALE, RENDER_STATE_MIRROR, SAMPLER_STATE_MIRROR, SHADOW,
+    TRANSFORM_MIRROR, VIEWPORT_MIRROR, commandCode, getRenderStateCode, getSamplerStateCode,
+    getViewportCode, lockCode,
 } from './shadow.js';
 import { COMMANDS, commandSlot, runCommands } from '../d3d9/commands.js';
 
@@ -375,3 +376,58 @@ test('the viewport and the sampler states a program sets in the guest are what i
         assert.equal(run(GET_VIEWPORT, [OUT]), 'trap', 'the host\'s flag');
         assert.equal(run(GET_SAMPLER, [2, 5, OUT]), 'trap');
     });
+
+test('a state block\'s Apply in the ring names the block and sends the getters to the host', ()=>{
+    const host = createCorkHost({
+        memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
+        initialStack: STACK, engine: cork, cork: {},
+    });
+    const APPLY = VIEWPORT;
+    const CAPTURE = VIEWPORT + 0x100;
+    const GET = CONSTANTS;
+    host.writePhysical(APPLY, commandCode(APPLY, TRAP, shape('StateBlock.Apply')));
+    host.writePhysical(CAPTURE, commandCode(CAPTURE, TRAP, shape('StateBlock.Capture')));
+    host.writePhysical(GET, getRenderStateCode(GET, TRAP));
+    host.writePhysical(TRAP, new Uint8Array([0xf4]));
+    // The state block's interface, whose state word is its device's block.
+    host.writePhysical(OBJECT + 4, new Uint8Array(u32(BLOCK)));
+    host.writePhysical(BLOCK, new Uint8Array(SHADOW.SIZE));
+    host.writePhysical(BLOCK + SHADOW.COMMANDS, new Uint8Array([...u32(RING), ...u32(RING_BYTES)]));
+    host.writePhysical(BLOCK + SHADOW.RENDER_STATE_VALID, new Uint8Array([0xff]));
+    host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
+
+    /** @param {number} at */
+    const read = at=>{
+        const bytes = host.readPhysical(at, 4);
+        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+    };
+    /** @param {number} target @param {number[]} args @returns {'ok' | 'trap'} */
+    const run = (target, args)=>{
+        const code = call(PROGRAM, target, OBJECT, args);
+        host.writePhysical(PROGRAM, new Uint8Array(code));
+        host.writeReg32('eip', PROGRAM);
+        host.writeReg32('esp', STACK);
+        host.runSlice(1000);
+        if (host.readReg32('eip') === TRAP + 1)
+        {
+            return 'trap';
+        }
+        assert.equal(host.readReg32('eip'), PROGRAM + code.length);
+        assert.equal(host.readReg32('esp'), STACK, 'the routine popped `this` alone');
+        return 'ok';
+    };
+
+    assert.equal(run(GET, [3, OUT]), 'ok', 'a getter reads the block');
+    assert.equal(run(CAPTURE, []), 'ok');
+    assert.deepEqual([read(RING), read(RING + 4), read(RING + 8)],
+        [commandSlot('StateBlock.Capture'), 12, OBJECT], 'the record names the state block');
+    assert.equal(read(BLOCK + SHADOW.FLAGS), 0, 'a capture changes nothing the block mirrors');
+    assert.equal(run(APPLY, []), 'ok');
+    assert.deepEqual([read(RING + 12), read(RING + 16), read(RING + 20)],
+        [commandSlot('StateBlock.Apply'), 12, OBJECT]);
+    assert.equal(read(BLOCK + SHADOW.FLAGS), FLAG_STALE, 'an apply may');
+    assert.equal(run(GET, [3, OUT]), 'trap', 'so the getter goes to the host');
+    assert.equal(run(APPLY, []), 'ok', 'while setters and applies go on in the ring');
+    host.writePhysical(BLOCK, new Uint8Array(u32(FLAG_SLOW_PATH)));
+    assert.equal(run(APPLY, []), 'trap', 'the host\'s flag');
+});

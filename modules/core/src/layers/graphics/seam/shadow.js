@@ -165,6 +165,13 @@ export const TEXTURE = {
 };
 
 export const FLAG_SLOW_PATH = 1;
+/**
+ * Bit 1, set by a state block's Apply in the ring: what the block mirrors may
+ * be what the device held before it, so the getters go to the host, which
+ * plays the ring, mirrors what the applied blocks hold and clears the bit.
+ * The setters and draws go on through the ring.
+ */
+export const FLAG_STALE = 2;
 
 /**
  * The command ring's size, and how near its end the host starts it over:
@@ -383,14 +390,17 @@ const jump = (from, to)=>[0xe9, ...dword((to - (from + 5)) | 0)];
  * @param {string} [slow]  The label those two cases go to.
  * @returns {(number[] | { jcc: number, to: string })[]}
  */
-const prologue = (slow = 'slow')=>[
+const prologue = (slow = 'slow', flags = FLAG_SLOW_PATH)=>[
     [0x8b, 0x4c, 0x24, 0x04],                                // mov ecx, [esp+4]
     [0x8b, 0x49, 0x04],                                      // mov ecx, [ecx+4]
     [0x85, 0xc9],                                            // test ecx, ecx
     { jcc: 0x74, to: slow },                                 // jz slow
-    [0xf7, 0x01, ...dword(FLAG_SLOW_PATH)],                  // test dword [ecx], 1
+    [0xf7, 0x01, ...dword(flags)],                           // test dword [ecx], flags
     { jcc: 0x75, to: slow },                                 // jnz slow
 ];
+
+/** A getter's prologue: a block the ring may have made stale is the host's too. */
+const getterPrologue = ()=>prologue('slow', FLAG_SLOW_PATH | FLAG_STALE);
 
 /**
  * The prologue of a function rather than a method: the block is the calling
@@ -457,7 +467,7 @@ const routine = (at, trap, parts)=>{
  */
 export function getRenderStateCode(at, trap){
     return routine(at, trap, [
-        ...prologue(),
+        ...getterPrologue(),
         [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
         [0x3d, ...dword(SHADOW.RENDER_STATE_COUNT)],             // cmp eax, 256
         { jcc: 0x73, to: 'slow' },                               // jae slow
@@ -711,7 +721,7 @@ const ANSWERED_TRANSFORMS = (1 << 2 | 1 << 3 | 0xff << 16) >>> 0;
  */
 export function getTransformCode(at, trap){
     return routine(at, trap, [
-        ...prologue(),
+        ...getterPrologue(),
         [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
         [0x3d, ...dword(WORLD_SLOT)],                            // cmp eax, 24
         { jcc: 0x72, to: 'low' },                                // jb low
@@ -780,7 +790,7 @@ export function getTransformCode(at, trap){
  */
 export function getTextureStageStateCode(at, trap, types){
     return routine(at, trap, [
-        ...prologue(),
+        ...getterPrologue(),
         [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
         [0x3d, ...dword(SHADOW.STAGE_STATE_STRIDE)],             // cmp eax, 32
         { jcc: 0x73, to: 'slow' },                               // jae slow
@@ -828,7 +838,7 @@ export function getTextureStageStateCode(at, trap, types){
  */
 export function getViewportCode(at, trap){
     return routine(at, trap, [
-        ...prologue(),
+        ...getterPrologue(),
         [0x8b, 0x54, 0x24, 0x08],                                // mov edx, [esp+8]
         [0x85, 0xd2],                                            // test edx, edx
         { jcc: 0x74, to: 'slow' },                               // jz slow
@@ -877,7 +887,7 @@ const SAMPLER_STATE_TYPES = 0x3ffe;
  */
 export function getSamplerStateCode(at, trap){
     return routine(at, trap, [
-        ...prologue(),
+        ...getterPrologue(),
         [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
         [0x3d, ...dword(SHADOW.SAMPLER_STATE_STRIDE)],           // cmp eax, 16
         { jcc: 0x73, to: 'slow' },                               // jae slow
@@ -979,6 +989,10 @@ export function getSurfaceLevelCode(at, trap){
  * @property {{ type: number, count: number, stride: number, most: number }} [vertices]
  *     or the vertices a draw's primitives span, of the type and count those
  *     arguments give, `stride` bytes each: at most `most` bytes
+ * @property {boolean} [self]  the record's first argument is the object's own
+ *     pointer -- a method of an object of the device's that is not the device
+ * @property {boolean} [stale]  the call may change what the block mirrors
+ *     (`FLAG_STALE`)
  * @property {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]
  *     } [mirror]  guest code run first, with the block in ECX, that keeps what
  *     a getter in the guest reads current; it may leave for the host through
@@ -1035,8 +1049,15 @@ export function getSurfaceLevelCode(at, trap){
  */
 export function commandCode(at, trap, shape){
     const { slot, args, pointer = -1, bytes = 0, count, choose, vertices, mirror = [],
-        draws = false, thread = false } = shape;
+        draws = false, thread = false, self = false, stale = false } = shape;
     const header = COMMAND.ARGS + 4 * args;
+    if (self && (thread || pointer >= 0 || count || choose || vertices))
+    {
+        throw new Error('shadow: a record of the object itself copies nothing');
+    }
+    // What the routine pops: the record's arguments, the object's own pointer
+    // among them when it is the first.
+    const popped = self ? args - 1 : args;
     if (pointer >= 0 && !count && !choose && !vertices && (bytes <= 0 || (bytes & 3) !== 0))
     {
         throw new Error(`shadow: a command copies whole dwords, not ${bytes} bytes`);
@@ -1151,7 +1172,7 @@ export function commandCode(at, trap, shape){
     {
         parts.push(arg === pointer
             ? [0x8d, 0x87, ...dword(header)]                     // lea eax, [edi+header]
-            : [0x8b, 0x44, 0x24, pushed + 4 * arg],              // mov eax, [esp+pushed+4i]
+            : [0x8b, 0x44, 0x24, pushed + 4 * (arg - (self ? 1 : 0))], // mov eax, [esp+...]
         [0x89, 0x47, COMMAND.ARGS + 4 * arg]);                   // mov [edi+8+4i], eax
     }
     if (pointer >= 0)
@@ -1171,10 +1192,14 @@ export function commandCode(at, trap, shape){
     {
         parts.push([0xc7, 0x83, ...dword(SHADOW.DRAWS_PENDING), ...dword(1)]); // mov [ebx+disp], 1
     }
+    if (stale)
+    {
+        parts.push([0xf0, 0x83, 0x0b, FLAG_STALE]);              // lock or dword [ebx], 2
+    }
     parts.push(
         [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
         [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, entry - 4 + 4 * args, 0x00],                      // ret 4*args (+4 for this)
+        [0xc2, entry - 4 + 4 * popped, 0x00],                    // ret 4*args (+4 for this)
         { label: 'full' },
         [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
         { jcc: 0xeb, to: 'slow', near: true });                  // jmp slow
@@ -1646,7 +1671,24 @@ export function createShadow(deps){
             slow = on;
             if (address !== 0)
             {
-                deps.writeMemory(address + SHADOW.FLAGS, dwordBytes(on ? FLAG_SLOW_PATH : 0));
+                const flags = readWord(address + SHADOW.FLAGS) & ~FLAG_SLOW_PATH;
+                deps.writeMemory(address + SHADOW.FLAGS,
+                    dwordBytes(flags | (on ? FLAG_SLOW_PATH : 0)));
+            }
+        },
+
+        /**
+         * Whether a state block applied in the ring may have left what the
+         * block mirrors behind the device (`FLAG_STALE`).
+         */
+        stale: ()=>address !== 0 && (readWord(address + SHADOW.FLAGS) & FLAG_STALE) !== 0,
+
+        /** What the block mirrors is the device's again. */
+        fresh(){
+            if (address !== 0)
+            {
+                deps.writeMemory(address + SHADOW.FLAGS,
+                    dwordBytes(readWord(address + SHADOW.FLAGS) & ~FLAG_STALE));
             }
         },
 
