@@ -1921,6 +1921,9 @@ export function createWin32Module(){
                     // program picks its mode from this and would otherwise be
                     // offered one the device it then creates does not have.
                     screen: config?.screen,
+                    // The desktop's background where no window is, when the
+                    // embedder gave it a picture rather than its colour.
+                    desktopPicture: config?.desktop?.picture ?? null,
                     dispatching,
                     // One line per message a window procedure receives, under
                     // its own category and nothing at all when nobody asked: a

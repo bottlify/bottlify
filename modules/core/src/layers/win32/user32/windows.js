@@ -457,6 +457,9 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           GetWindowThreadProcessId reports for this process's windows.
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
  *           The display every system metric is derived from.
+ * @property {{ width: number, height: number, bits: Uint8Array } | null} [desktopPicture]
+ *           What the desktop shows where no window is, in place of its colour:
+ *           32 bits a pixel, top row first, scaled to the screen.
  * @property {() => any} [dc]
  *           The device-context service painting takes its DCs from.
  * @property {any} [draw]
@@ -2715,6 +2718,28 @@ export function createWindowFunctions(host){
      * it painted below -- so nothing legitimate is lost.
      */
     let desktopPainted = false;
+
+    /**
+     * The desktop's own background over `area`: its picture when the host
+     * gave it one, else the desktop colour.
+     *
+     * @param {number} hdc
+     * @param {{ left: number, top: number, right: number, bottom: number }[]} area
+     * @param {boolean} seen  Whether this is a repaint the screen should see.
+     */
+    const desktopBackground = (hdc, area, seen)=>{
+        if (host.desktopPicture && host.screen
+            && draw?.wallpaper?.(hdc, area, host.desktopPicture, host.screen))
+        {
+            return;
+        }
+        for (const piece of area)
+        {
+            (seen ? draw?.fill : draw?.fillBackground ?? draw?.fill)?.call(draw, hdc, piece,
+                sysColor(COLOR_BACKGROUND));
+        }
+    };
+
     const paintDesktop = ()=>{
         if (desktopPainted || !host.screen)
         {
@@ -2726,9 +2751,8 @@ export function createWindowFunctions(host){
             return;
         }
         desktopPainted = true;
-        (draw?.fillBackground ?? draw?.fill)?.call(draw, hdc,
-            { left: 0, top: 0, right: host.screen.width, bottom: host.screen.height },
-            sysColor(COLOR_BACKGROUND));
+        desktopBackground(hdc,
+            [{ left: 0, top: 0, right: host.screen.width, bottom: host.screen.height }], false);
         host.dc?.()?.release(0, hdc);
     };
 
@@ -2778,10 +2802,7 @@ export function createWindowFunctions(host){
         const hdc = bare.length > 0 ? host.dc?.()?.get(0, null) ?? 0 : 0;
         if (hdc !== 0)
         {
-            for (const piece of bare)
-            {
-                draw?.fill(hdc, piece, sysColor(COLOR_BACKGROUND));
-            }
+            desktopBackground(hdc, bare, true);
             host.dc?.()?.release(0, hdc);
             painted();
         }

@@ -271,8 +271,10 @@ const textWidth = (text, average)=>[...text]
  *     a smaller font lays out smaller, and the face asked for is recorded.
  *     Its glyphs are proportional -- a pixel either side of the average by
  *     the character code -- and average out exactly over the alphabet.
+ * @param {{ width: number, height: number, bits: Uint8Array } | null} [options.desktopPicture]
+ *     What the desktop shows in place of its colour.
  */
-function setup({ reply = ()=>0, engine = false } = {}){
+function setup({ reply = ()=>0, engine = false, desktopPicture = null } = {}){
     const memory = fakeMemory();
     const handles = fakeHandles();
     /** The queue's clock, which a test moves on to have what is due later happen. */
@@ -335,6 +337,7 @@ function setup({ reply = ()=>0, engine = false } = {}){
         handles,
         queue,
         screen: SCREEN,
+        desktopPicture,
         dispatch: (wndProc, message)=>{
             dispatched.push({ wndProc, ...message });
             return reply(message);
@@ -1744,4 +1747,30 @@ test('a multi-line radio\'s label is centred down it, as its ring is, unless BS_
         `the block's middle is the button's: ${JSON.stringify(centred)}`);
     assert.equal(topped.last - topped.first, centred.last - centred.first, 'the same block');
     assert.ok(topped.first < centred.first - 10, `BS_TOP at the top: ${JSON.stringify(topped)}`);
+});
+
+test('a desktop given a picture shows it where no window is, its colour without one', async()=>{
+    // Two by two, scaled to the screen: each quarter of the desktop one colour.
+    const desktopPicture = { width: 2, height: 2, bits: new Uint8Array([
+        0x10, 0x20, 0x30, 0, 0x40, 0x50, 0x60, 0,
+        0x70, 0x80, 0x90, 0, 0xa0, 0xb0, 0xc0, 0,
+    ]) };
+    const context = setup({ desktopPicture });
+    const dialog = await openDialog(context);
+    assert.equal(context.desktop.read(4, 150), 0x00302010, 'the top left quarter, under it');
+    assert.equal(context.desktop.read(SCREEN.width - 4, 4), 0x00605040, 'the top right');
+    assert.equal(context.desktop.read(4, SCREEN.height - 4), 0x00908070, 'the bottom left');
+    assert.equal(context.desktop.read(SCREEN.width - 4, SCREEN.height - 4), 0x00c0b0a0,
+        'and the bottom right');
+
+    // Where a window was, the picture comes back, not the colour.
+    context.fns.MoveWindow.handler([dialog, 30, 10, 206, 145, 1]);
+    context.clock.now += 1000;
+    await context.pump(dialog);
+    assert.equal(context.desktop.read(8, 8), 0x00302010, 'uncovered, the picture shows there');
+    assert.equal(context.desktop.read(181, 130), 0x00c0c0c0, 'and the window is where it moved to');
+
+    const plain = setup();
+    await openDialog(plain);
+    assert.equal(plain.desktop.read(4, 150), 0x00808080, 'with no picture, the desktop colour');
 });

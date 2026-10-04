@@ -233,6 +233,11 @@ import { withRunMode } from './mode.js';
  *           rebuilt machine and not something a caller supplies.
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
  *           What the program is told its display is.
+ * @property {{ picture?: { width: number, height: number, bits: Uint8Array } }} [desktop]
+ *           What the desktop shows where no window is: `picture`, 32 bits a
+ *           pixel, top row first, each B, G, R and a byte unused, scaled to the
+ *           screen -- a wallpaper, or a loading screen of the embedder's own.
+ *           Absent, the desktop colour.
  * @property {any} [storage]
  *           Where the session comes from and goes: a provider with `load` and
  *           `save`, a function that only loads, or the string `local` or
@@ -3507,6 +3512,7 @@ async function buildApp(options){
             // What the program is told its display is, handed to the libraries
             // that answer for one as well as to the layer that draws on it.
             screen: display,
+            desktop: options.desktop,
             // The cursor the program asks the page to show, from user32's own
             // state -- ShowCursor's count and a null SetCursor -- the same event
             // the Direct3D device methods emit above. Two producers, one

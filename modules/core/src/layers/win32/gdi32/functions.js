@@ -4395,6 +4395,42 @@ export function createGdiFunctions(host){
                 drawing.bound(hdc, false)?.fillRect(hdc >>> 0, rect, solidBrush(color)) === true,
 
             /**
+             * The desktop's picture where `area` is, the whole picture scaled
+             * to the screen: the background a wallpaper gives the desktop,
+             * laid down as the desktop colour is -- painted and not shown by
+             * itself. Drawn whole under a clip to the area, so the pieces of a
+             * desktop uncovered at different times meet without a seam.
+             *
+             * @param {number} hdc
+             * @param {{ left: number, top: number, right: number, bottom: number }[]} area
+             * @param {{ width: number, height: number, bits: Uint8Array }} picture
+             *        32 bits a pixel, top row first, each B, G, R and a byte unused.
+             * @param {{ width: number, height: number }} display  The screen's size.
+             */
+            wallpaper: (hdc, area, picture, display)=>{
+                const interfaces = drawing.bound(hdc, false);
+                const bytes = picture.width * picture.height * 4;
+                if (!interfaces?.stretchDIBits || picture.bits.length < bytes)
+                {
+                    return false;
+                }
+                drawing.setVisible(hdc, area);
+                interfaces.stretchDIBits(hdc >>> 0, {
+                    xDest: 0, yDest: 0, destWidth: display.width, destHeight: display.height,
+                    xSrc: 0, ySrc: 0, srcWidth: picture.width, srcHeight: picture.height,
+                    image: {
+                        header: {
+                            size: 40, width: picture.width, height: -picture.height, planes: 1,
+                            bitCount: 32, compression: 0, sizeImage: bytes, clrUsed: 0,
+                        },
+                        bits: picture.bits,
+                    },
+                    rop: 0x00cc0020,
+                });
+                return true;
+            },
+
+            /**
              * @param {number} hdc
              * @param {{ left: number, top: number, right: number, bottom: number }} rect
              * @param {number} brush  A brush handle the program owns.

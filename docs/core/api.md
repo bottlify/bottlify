@@ -48,6 +48,7 @@ Everything below crosses to the engine's worker by `postMessage`, so every value
 | `workerUrl` | string \| `URL` | beside the module | Where `engine.worker.js` is loaded from, for a bundler that moves it. |
 | `transfer` | `Transferable[]` | — | Buffers in the options to hand over instead of copying (the wasm binaries). |
 | `screen` | `{ width, height, bitsPerPixel }` | 640 × 480, 32 | The display the program is told it has. |
+| `desktop` | `{ picture? }` | — | What the desktop shows where no window is: `picture` is `{ width, height, bits }`, 32 bits a pixel (B, G, R, unused), top row first, scaled to the screen. Absent, the desktop colour. |
 | `maxFps` | number | 60 | Accepted, not applied yet ([limits.md](limits.md#graphics)). |
 | `graphics` | `{ compressedTextures?, maxFrameLatency?, lendMemory?, guestCode? }` | `false`, 3, `true`, `true` | BC-compressed texture upload where the GPU has `texture-compression-bc`; how many frames the GPU may still be drawing when `Present` returns (0: no bound); the last two as [configuration.md](configuration.md#graphics) says. |
 | `device.graphicsWorker` | `true` \| `'pixels'` \| `false` | `true` | Draw Direct3D 7–9 and OpenGL in a graphics worker that sends each frame back as an `ImageBitmap`; `'pixels'` sends the frame's bytes instead; `false` draws on the engine thread. |
