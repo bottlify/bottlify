@@ -347,6 +347,7 @@ export function createGraphicsModule(){
                     // back in place, and says only where.
                     sharedMemory: ()=>memory.shared?.() ?? null,
                     adoptMemory: (address, length)=>memory.adopt?.(address, length),
+                    lendMemory: config?.lendMemory !== false,
                     divergence: config?.divergence,
                     lost: lose,
                     failed: message=>config?.divergence?.('graphics',

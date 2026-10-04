@@ -89,6 +89,7 @@ publishing). The tables list only the settings that are data. `memory` and `load
 | `maxFps` | 60 | Passed to the presenter; not applied yet ([limits.md](limits.md#graphics)). |
 | `choice` | every API | `createApp`'s `graphicsApi`: which roots are built ([api.md](api.md)). |
 | `raster` | `true` | `false` leaves OpenGL primitives drawn without a GPU unrasterised, for measurement. |
+| `lendMemory` | `true` | With a graphics worker and shared guest memory: what a Direct3D 8 or 9 program unlocks is read by the worker in place instead of copied to it. `false` copies it, for measurement. |
 
 ## audio
 

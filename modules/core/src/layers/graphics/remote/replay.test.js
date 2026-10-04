@@ -10,6 +10,7 @@ import { loopbackDirect3D } from './loopback.js';
 import { createMirror } from './replay.js';
 import { answeredByRenderer, playedDirect3D, recordedDirect3D } from './direct3d.js';
 import { createReceiver, createSender } from './channel.js';
+import { createBorrower, createLendingBuffers } from './lending.js';
 import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK } from '../d3d9/constants.js';
 import { D3DCLEAR, D3DFMT_INDEX, D3DPT, D3DRS, D3DTS } from '../d3d8/constants.js';
 import { D3DQUERYTYPE, createDirect3D9 } from '../d3d9/device.js';
@@ -131,6 +132,121 @@ function toyLoop(){
     return { root, ram, recorded: sides.find(side=>!side.played),
         played: sides.find(side=>side.played) };
 }
+
+/**
+ * A toy root whose calls cross a port the test empties itself, over a shared
+ * guest memory: with `lend`, what its unlocks let the program write is lent
+ * to the played side rather than copied.
+ *
+ * @param {boolean} lend
+ */
+function toyAcross(lend){
+    /** @type {any[]} */
+    const sides = [];
+    const ram = new Uint8Array(new SharedArrayBuffer(1 << 16));
+    let next = 0x100;
+    const services = {
+        backend: {},
+        allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += bytes;
+            return at;
+        },
+        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>ram.slice(at,
+            at + length),
+        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>ram.set(bytes, at),
+    };
+    const buffers = createLendingBuffers();
+    const played = playedDirect3D(toy(sides), { ...services,
+        borrow: createBorrower({ ...buffers, memory: ram }) });
+    const receiver = createReceiver({ played, post: ()=>{} });
+    /** @type {any[]} */
+    const sent = [];
+    const sender = createSender({ post: message=>sent.push(message), later: ()=>{},
+        lending: lend ? { ...buffers, memory: ram } : null });
+    const root = recordedDirect3D(toy(sides), services, sender);
+    return {
+        root, ram, sender,
+        played: sides.find(side=>side.played),
+        /** The played side plays what was sent. */
+        play(){
+            sender.flush();
+            for (const message of sent.splice(0))
+            {
+                receiver.receive(message);
+            }
+        },
+    };
+}
+
+test('bytes lent to the played side are what the program wrote before the unlock, though it'
+    + ' locks and writes them again before they are played', ()=>{
+    for (const lend of [false, true])
+    {
+        const { root, ram, sender, played, play } = toyAcross(lend);
+        /** @type {{ thing?: any }} */
+        const out = {};
+        root.CreateThing(out);
+        const thing = out.thing;
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        thing.LockRect(locked, null, 0);
+        const at = /** @type {number} */ (locked.pBits);
+        ram.set([1, 2, 3, 4], at);
+        thing.UnlockRect();
+        thing.Peek();
+        thing.LockRect(locked, null, 0);
+        ram.set([5, 6, 7, 8], at);
+        thing.UnlockRect();
+        thing.Peek();
+        play();
+        assert.deepEqual(played.seen, [[1, 2, 3, 4], [5, 6, 7, 8]], `lent: ${lend}`);
+        assert.deepEqual(sender.lender?.diagnostics() ?? null, lend ? { lent: 2, lentBytes: 32,
+            stashed: 1, stashedBytes: 16, waited: 0, waitedMs: 0 } : null);
+    }
+});
+
+test('a lend the played side read before the program locks again is not stashed', ()=>{
+    const { root, ram, sender, played, play } = toyAcross(true);
+    /** @type {{ thing?: any }} */
+    const out = {};
+    root.CreateThing(out);
+    /** @type {{ pBits?: number }} */
+    const locked = {};
+    out.thing.LockRect(locked, null, 0);
+    ram.set([1, 2, 3, 4], /** @type {number} */ (locked.pBits));
+    out.thing.UnlockRect();
+    out.thing.Peek();
+    play();
+    out.thing.LockRect(locked, null, 0);
+    assert.deepEqual(played.seen, [[1, 2, 3, 4]]);
+    assert.equal(sender.lender?.diagnostics().stashed, 0);
+    assert.equal(sender.lender?.diagnostics().lent, 1);
+});
+
+test('what the recorded device writes over lent bytes waits until the played side has them',
+    ()=>{
+        const { root, ram, sender, played, play } = toyAcross(true);
+        /** @type {{ thing?: any }} */
+        const out = {};
+        root.CreateThing(out);
+        /** @type {{ thing?: any }} */
+        const source = {};
+        root.CreateThing(source);
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        out.thing.LockRect(locked, null, 0);
+        const at = /** @type {number} */ (locked.pBits);
+        ram.set([1, 2, 3, 4], at);
+        out.thing.UnlockRect();
+        out.thing.Peek();
+        ram.set([6, 6, 6, 6], source.thing.base);
+        root.Copy(source.thing.base, at);
+        out.thing.Peek();
+        play();
+        assert.deepEqual(played.seen, [[1, 2, 3, 4], [6, 6, 6, 6]]);
+        assert.equal(sender.lender?.diagnostics().stashed, 1);
+    });
 
 test('what a lock let the program write is the played device\'s at the unlock', ()=>{
     const { root, ram, played } = toyLoop();

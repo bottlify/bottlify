@@ -288,6 +288,9 @@ function visit(value, bind){
  *     writes: what it gives back is a waited call's `PlayedAnswer` (or a
  *     promise of one), and for a paced call a promise when the caller is held
  * @property {() => void} recorded  a record that is not a call was written
+ * @property {import('./lending.js').Lender | null} [lender]
+ *     where the played side reads guest memory in place: what an unlock let
+ *     the program write is lent rather than copied
  */
 
 /**
@@ -311,11 +314,13 @@ function visit(value, bind){
  * @param {ReadonlySet<string>} [options.answers]  the only methods `answered` is asked about
  * @returns {{ root: any, allocated: (address: number, bytes: number) => void,
  *     freed: (address: number) => void,
+ *     writing: (address: number, length: number) => void,
  *     wrote: (address: number, bytes: Uint8Array) => void,
  *     read: (address: number, bytes: Uint8Array) => void, outward: (value: any) => any,
  *     adopt: (object: object) => void }}
  *     `allocated` and `freed` are told every allocation the recorded device
- *     makes and gives back, `wrote` every write it makes into guest memory,
+ *     makes and gives back, `writing` every write it is about to make into guest
+ *     memory and `wrote` every one it made,
  *     and `read` -- by a device that reads the program's memory at the call
  *     rather than through its locks -- every read, whose bytes the played
  *     device is sent ahead of the call; `outward` is a value of the device's
@@ -327,6 +332,7 @@ export function createRecording(options){
     const { root, readMemory, transport, answered = ()=>false, answers = new Set() } = options;
     const windowMemory = options.windowMemory ?? readMemory;
     const { writer } = transport;
+    const lender = transport.lender ?? null;
     /** @type {WeakMap<object, number>} */
     const numbers = new WeakMap([[root, 0]]);
     let next = 1;
@@ -473,16 +479,102 @@ export function createRecording(options){
      * place, before the call can write over them. None are pending after.
      */
     const shipPending = ()=>{
-        const taken = [...pending.addresses].flatMap(([address, length])=>
-            rangeFrom({ address, length }, windowMemory));
+        /** @type {{ address: number, length: number, slot: number }[]} */
+        const lent = [];
+        /** @type {{ address: number, bytes: Uint8Array }[]} */
+        const taken = [];
+        for (const [address, length] of pending.addresses)
+        {
+            const extent = extentOf(address, length);
+            const slot = extent > 0 && lender ? lender.lend(address, extent) : -1;
+            if (slot >= 0)
+            {
+                lent.push({ address, length: extent, slot });
+            }
+            else
+            {
+                taken.push(...rangeFrom({ address, length }, windowMemory));
+            }
+        }
         pending.addresses.clear();
         pending.objects.clear();
+        if (lent.length > 0)
+        {
+            writer.u8(OP.LENT);
+            writer.u32(lent.length);
+            for (const { address, length, slot } of lent)
+            {
+                writer.u32(address);
+                writer.u32(length);
+                writer.u32(slot);
+            }
+        }
         if (taken.length > 0)
         {
             writer.u8(OP.WROTE);
             writeMemory(taken);
+        }
+        if (lent.length > 0 || taken.length > 0)
+        {
             transport.recorded();
         }
+    };
+
+    /**
+     * Before something on this side lets the program, or the device, write a
+     * range: a lend of it the played side has not read yet keeps its bytes.
+     *
+     * @param {number} address @param {number | null} length  null to its block's end
+     */
+    const claim = (address, length)=>{
+        if (lender)
+        {
+            const extent = extentOf(address, length);
+            if (extent > 0)
+            {
+                lender.claim(address, extent);
+            }
+        }
+    };
+
+    /**
+     * What a call let be written that is not a lock's: a surface's bytes a
+     * context draws on until it is released, and the copies the caller makes
+     * in guest memory after a call that described them.
+     *
+     * @param {any} target @param {string} name @param {any[]} args
+     */
+    const claimWritten = (target, name, args)=>{
+        if (name === 'GetDC' && typeof target.base === 'number')
+        {
+            claim(target.base, null);
+        }
+        for (const arg of args)
+        {
+            for (const move of Array.isArray(arg?.moves) ? arg.moves : [])
+            {
+                if (move.rows > 0)
+                {
+                    claim(move.to, (move.rows - 1) * move.toPitch + move.rowBytes);
+                }
+            }
+        }
+    };
+
+    /**
+     * How many bytes from an address a range covers: to the end of the
+     * allocation it lies in, and never past that; none outside every one.
+     *
+     * @param {number} address @param {number | null} length
+     */
+    const extentOf = (address, length)=>{
+        const found = blockAt(address);
+        if (found < 0)
+        {
+            return 0;
+        }
+        const rest = blocks.ends[found] - address;
+        return length === null ? rest : Math.min(length, rest);
     };
 
     /**
@@ -519,14 +611,8 @@ export function createRecording(options){
      * @returns {{ address: number, bytes: Uint8Array }[]}
      */
     const rangeFrom = ({ address, length }, read = readMemory)=>{
-        const found = blockAt(address);
-        if (found < 0)
-        {
-            return [];
-        }
-        const rest = blocks.ends[found] - address;
-        return [{ address,
-            bytes: read(address, length === null ? rest : Math.min(length, rest)) }];
+        const extent = extentOf(address, length);
+        return extent > 0 ? [{ address, bytes: read(address, extent) }] : [];
     };
 
     /**
@@ -884,12 +970,17 @@ export function createRecording(options){
                     const bits = arg.pBits;
                     if (locking && typeof bits === 'number')
                     {
+                        const length = lockedLength(name, args, arg);
                         const locks = lockedAt.get(target) ?? new Map();
-                        locks.set(partOf(args),
-                            { address: bits, length: lockedLength(name, args, arg) });
+                        locks.set(partOf(args), { address: bits, length });
                         lockedAt.set(target, locks);
+                        claim(bits, length);
                     }
                 }
+            }
+            if (lender)
+            {
+                claimWritten(target, name, args);
             }
             if (paced)
             {
@@ -1036,10 +1127,12 @@ export function createRecording(options){
             const found = blockAt(address);
             if (found >= 0 && blocks.starts[found] === address)
             {
+                claim(address, null);
                 blocks.starts.splice(found, 1);
                 blocks.ends.splice(found, 1);
             }
         },
+        writing: (address, length)=>claim(address, length),
         wrote(address, bytes){
             if (depth > 0)
             {
@@ -1083,6 +1176,8 @@ export function createRecording(options){
  *     this side reads
  * @param {(address: number, length: number) => Uint8Array} options.read
  *     that memory read, for the copies a call describes and its caller makes
+ * @param {ReturnType<typeof import('./lending.js').createBorrower>} [options.borrow]
+ *     the guest memory a recording lent, read in place
  * @returns {{ play: (call: import('./wire.js').ReadCall) => any, allocate: () => number,
  *     object: (number: number) => any,
  *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void)
@@ -1093,7 +1188,7 @@ export function createRecording(options){
  *     `allocate` is the played device's, the next address its recorded call
  *     was given; `read` reads a batch of calls
  */
-export function createPlayer({ root, ship, read }){
+export function createPlayer({ root, ship, read, borrow }){
     /** @type {object[]} */
     const objects = [root];
     /** @type {WeakSet<object>} */
@@ -1153,6 +1248,18 @@ export function createPlayer({ root, ship, read }){
             if (call.op === OP.SET)
             {
                 target[/** @type {string} */ (call.m)] = call.v;
+                return undefined;
+            }
+            if (call.op === OP.LENT)
+            {
+                if (!borrow)
+                {
+                    throw new Error('remote: guest memory lent to a side that cannot read it');
+                }
+                for (const { address, length, slot } of call.lent ?? [])
+                {
+                    borrow(slot, address, length, bytes=>ship(address, bytes));
+                }
                 return undefined;
             }
             if (call.op !== OP.CALL)

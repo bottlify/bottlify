@@ -22,9 +22,12 @@
  *                                    frame back as a picture, 'pixels' as its
  *                                    bytes read back; anything else keeps them.
  *                                    Answered every time it is asked.
- *   { type: 'root', api, options, port, memory }
+ *   { type: 'root', api, options, port, memory, lending }
  *                                    `api` 'd3d7', 'd3d8', 'd3d9' or 'opengl', `options` the
  *                                    plain part of what the root was made with;
+ *                                    `memory` the guest's RAM where it is shared, and
+ *                                    `lending` the slots and stash a Direct3D 8 or 9
+ *                                    root lends guest memory through (`lending.js`);
  *                                    `{ type: 'close' }` on the port ends it
  * Messages from it:
  *   { type: 'opened', adapter } | { type: 'failed', message }
@@ -41,6 +44,7 @@ import { createOpenglRoot } from '../opengl/root.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFrameLatency } from '../webgpu/internal/latency.js';
 import { createReceiver } from './channel.js';
+import { createBorrower } from './lending.js';
 import { playedDirect3D } from './direct3d.js';
 import { playedOpengl } from './opengl.js';
 import { playedDirect3D7 } from './d3d7.js';
@@ -237,8 +241,10 @@ export function serveGraphics(scope, deps){
     /**
      * @param {string} api @param {any} options @param {MessagePort} port
      * @param {Uint8Array | null} memory  the guest's RAM, where it is shared
+     * @param {{ slots: SharedArrayBuffer, stash: SharedArrayBuffer } | null} lending
+     *     the parts of a lending, where the engine lends guest memory rather than copying it
      */
-    const root = async(api, options, port, memory)=>{
+    const root = async(api, options, port, memory, lending)=>{
         const { device, backend, latency } = await /** @type {Promise<any>} */ (opened);
         /** @type {(message: any, transfer?: Transferable[]) => void} */
         const post = (message, transfer)=>port.postMessage(message, transfer ?? []);
@@ -294,6 +300,7 @@ export function serveGraphics(scope, deps){
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
                 // The program has memory; what of it this side reads is what it is sent.
                 readMemory: true,
+                borrow: memory && lending ? createBorrower({ ...lending, memory }) : undefined,
                 writeMemory: wrote,
                 divergence: (/** @type {string} */ name, /** @type {string} */ detail)=>
                     post({ type: 'divergence', api: name, detail }),
@@ -341,7 +348,8 @@ export function serveGraphics(scope, deps){
                 opened?.then(({ device })=>send(device), ()=>{});
                 break;
             case 'root':
-                root(data.api, data.options ?? {}, data.port, data.memory ?? null).catch(e=>
+                root(data.api, data.options ?? {}, data.port, data.memory ?? null,
+                    data.lending ?? null).catch(e=>
                     data.port.postMessage({ type: 'failed', message: String(e?.message ?? e) }));
                 break;
             default:

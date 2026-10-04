@@ -480,6 +480,27 @@ Measured on a node harness of a GL title's per-draw pattern (sixteen ring calls 
 engine thread's host time fell from 1091–1144 ms to 627–650 ms per 80 000 draws.
 *2026-10-04, 1.8.*
 
+**Where guest memory is shared, what a Direct3D 8 or 9 program unlocks is lent to the graphics
+worker, not copied to it.** The record says only where the bytes lie (`remote/lending.js`), and
+the worker copies them out of guest memory when it plays the record. Until then the bytes must
+stay as they were, so everything on the engine's side that lets the range be written -- a lock,
+a `GetDC`, a copy the device or its caller makes, the block given back -- claims it first: a lend
+the worker has not begun is copied into a stash both threads see and pointed there, one it is
+reading waits out the copy, one it has read costs nothing. Each lend's room in the stash is taken
+when it is lent, so a claim never waits for room or for a record still unsent; a range with no
+slot or room left is copied into the batch as before. What the program writes through a pointer
+it kept past the unlock now reaches the played device up to when the worker reads the bytes,
+not up to the next call that reads them -- the same kind of latitude a driver's own deferred
+upload takes, and still nothing after a lock that claimed them. A batch holding a lend is sent at
+the end of the record that follows it rather than at the end of the turn, at most every quarter
+of a millisecond, and any batch goes once a turn has kept it past the batch gap, so a long turn
+does not leave the worker idle. Measured on a node harness of a Direct3D 8 program that locks a
+256x256 texture once a frame and runs guest code after its present, none of 50 lends needed the
+stash and the engine thread's host time fell from 41 ms to 31–38 ms for 13 MB lent; where the
+program locks the same texture again before the worker has played the last draw, the claim
+copies what the batch would have, and nothing is gained. `graphics.lendMemory: false` turns it
+off. *2026-10-04, 1.9.*
+
 ## C. Process model and porting
 
 **Process replacement, not two processes in one address space or two machines.** `CreateProcess`

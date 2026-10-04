@@ -13,6 +13,7 @@
  */
 
 import { createSender } from './channel.js';
+import { createLendingBuffers, mayWait } from './lending.js';
 import { recordedDirect3D } from './direct3d.js';
 import { recordedDirect3D7 } from './d3d7.js';
 import { recordedOpengl } from './opengl.js';
@@ -62,12 +63,32 @@ function plainOf(services){
  *     a root the program is given, whose twin the worker plays
  * @property {() => { roots: number, frames: number, dropped: number,
  *     waits: Record<string, { count: number, ms: number, maxMs: number }>, behind: number[],
- *     readBack: { sent: number, shared: number } }}
+ *     readBack: { sent: number, shared: number }, lent: Record<string, number> }}
  *     diagnostics  `waits`: what the program's thread waited on the worker for, by call;
  *     `readBack`: the bytes the worker wrote into guest memory, sent here to be written or
- *     written in shared memory in place
+ *     written in shared memory in place; `lent`: the unlocked bytes lent to the worker rather
+ *     than copied, those taken into the stash first, and the claims that waited
  * @property {() => void} dispose
  */
+
+/**
+ * What every root's lender lent, summed.
+ *
+ * @param {{ lender: import('./lending.js').Lender | null }[]} senders
+ * @returns {Record<string, number>}
+ */
+const lentOf = senders=>{
+    /** @type {Record<string, number>} */
+    const sum = {};
+    for (const { lender } of senders)
+    {
+        for (const [key, value] of Object.entries(lender?.diagnostics() ?? {}))
+        {
+            sum[key] = (sum[key] ?? 0) + value;
+        }
+    }
+    return sum;
+};
 
 /**
  * @param {Object} options
@@ -85,6 +106,9 @@ function plainOf(services){
  *     when a root is made, once the machine has memory
  * @param {(address: number, length: number) => void} [options.adoptMemory]
  *     told where the worker wrote the shared RAM, which this thread takes as its own write
+ * @param {boolean} [options.lendMemory]  where the RAM is shared, whether what a Direct3D 8
+ *     or 9 program unlocks is lent to the worker to read in place (`lending.js`) rather
+ *     than copied to it; on unless false
  * @param {(api: string, detail: string) => void} [options.divergence]
  * @param {() => void} [options.lost]    the worker's GPU went away
  * @param {(message: string) => void} [options.failed]  a root's calls could not be played
@@ -92,7 +116,9 @@ function plainOf(services){
  */
 export function connectGraphicsWorker(options){
     const { worker, device, presentTo, writeMemory, sharedMemory, adoptMemory, divergence, lost,
-        failed } = options;
+        failed, lendMemory = true } = options;
+    /** Whether this thread may wait on the worker, which a lend's claim may have to. */
+    let mayBlock = /** @type {boolean | null} */ (null);
     /** @type {{ texture: any, view: any, width: number, height: number, format: string } | null} */
     let surface = null;
     /** @type {MessagePort[]} */
@@ -186,8 +212,11 @@ export function connectGraphicsWorker(options){
         root(api, factory, services){
             const { port1, port2 } = new MessageChannel();
             ports.push(port1);
+            const memory = sharedMemory?.() ?? null;
+            const lending = memory && lendMemory && (api === 'd3d8' || api === 'd3d9')
+                && (mayBlock ??= mayWait()) ? createLendingBuffers() : null;
             worker.postMessage({ type: 'root', api, options: plainOf(services), port: port2,
-                memory: sharedMemory?.() ?? null }, [port2]);
+                memory, lending }, [port2]);
             const sender = createSender({
                 post: (message, transfer)=>port1.postMessage(message, transfer),
                 on: {
@@ -202,6 +231,7 @@ export function connectGraphicsWorker(options){
                     divergence, lost, failed,
                 },
                 gapMs: BATCH_GAP_MS,
+                lending: lending && memory && { ...lending, memory },
             });
             port1.onmessage = event=>sender.receive(event.data);
             senders.push(sender);
@@ -229,7 +259,8 @@ export function connectGraphicsWorker(options){
                 }
             }
             return { roots: ports.length, frames, dropped, waits,
-                behind: senders.map(sender=>sender.behind()), readBack: { ...readBack } };
+                behind: senders.map(sender=>sender.behind()), readBack: { ...readBack },
+                lent: lentOf(senders) };
         },
         dispose(){
             worker.removeEventListener('message', listener);

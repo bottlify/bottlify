@@ -23,7 +23,7 @@
  */
 
 /** What a record is. */
-export const OP = { CALL: 1, GET: 2, SET: 3, WROTE: 4 };
+export const OP = { CALL: 1, GET: 2, SET: 3, WROTE: 4, LENT: 5 };
 
 /** A string's number when it is sent for the first time, its text following. */
 const NEW_STRING = 0xffffffff;
@@ -457,6 +457,8 @@ export function createWriter(){
  * @property {any[]} [replies]
  * @property {{ address: number, bytes: Uint8Array }[]} [ship]
  * @property {{ address: number, bytes: Uint8Array }[]} [wrote]
+ * @property {{ address: number, length: number, slot: number }[]} [lent]
+ *     guest memory the played side reads in place, by its lend's slot (`lending.js`)
  * @property {number} [wait]       one of `WAIT`
  * @property {number} [serial]     a waited call's number, which its answer comes back under
  */
@@ -637,7 +639,16 @@ export function createReader({ ref, service }){
                 const op = u8();
                 /** @type {ReadCall} */
                 const call = { op, t: 0 };
-                if (op === OP.WROTE)
+                if (op === OP.LENT)
+                {
+                    const count = u32();
+                    call.lent = [];
+                    for (let index = 0; index < count; index++)
+                    {
+                        call.lent.push({ address: u32(), length: u32(), slot: u32() });
+                    }
+                }
+                else if (op === OP.WROTE)
                 {
                     const count = u32();
                     call.wrote = [];
