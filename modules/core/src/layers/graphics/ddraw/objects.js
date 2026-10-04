@@ -750,7 +750,8 @@ export function createDirectDraw(options = {}){
                 release(owner);
             }
         });
-        return {
+        /** @type {Palette} */
+        const palette = {
             get refCount(){
                 return life.count;
             },
@@ -786,6 +787,19 @@ export function createDirectDraw(options = {}){
                     held[start + index] = value >>> 0;
                     pixels[start + index] = paletteEntryToPixel(value >>> 0);
                 });
+                // The screen shows the primary through its palette, and on the
+                // hardware a new entry is on it at once, with no blit: that is
+                // how a program fades its picture in and out.
+                if ((caps & DDPCAPS_PRIMARYSURFACE) !== 0)
+                {
+                    for (const surface of surfaces)
+                    {
+                        if (surface.palette === palette)
+                        {
+                            surface.present();
+                        }
+                    }
+                }
                 return DD_OK;
             },
 
@@ -802,6 +816,7 @@ export function createDirectDraw(options = {}){
                 return { hr: DD_OK, entries: held.slice(start, start + count) };
             },
         };
+        return palette;
     }
 
     /** @returns {Clipper} */
@@ -1218,6 +1233,7 @@ export function createDirectDraw(options = {}){
                     {
                         next.markPrimary(true);
                     }
+                    surface.present();
                 }
                 return DD_OK;
             },

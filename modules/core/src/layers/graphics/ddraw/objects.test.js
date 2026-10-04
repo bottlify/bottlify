@@ -1547,3 +1547,38 @@ test('a surface whose descriptor names no pixel format is in the display mode\'s
     assert.equal(made.hr, DD_OK);
     assert.equal(made.surface?.bytesPerPixel, 2, 'the 16-bit mode\'s');
 });
+
+test('a new palette on the primary, or a new entry in it, is on the screen at once', ()=>{
+    /** @type {any[]} */
+    const presented = [];
+    const ddraw = createDirectDraw({ version: 7, onPresent: surface=>presented.push(surface) });
+    ddraw.setCooperativeLevel(HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+    const created = ddraw.createSurface({ flags: DDSD_CAPS, caps: DDSCAPS_PRIMARYSURFACE });
+    const primary = /** @type {NonNullable<typeof created.surface>} */ (created.surface);
+    const made = ddraw.createPalette(DDPCAPS_8BIT | DDPCAPS_ALLOW256, []);
+    const palette = /** @type {NonNullable<typeof made.palette>} */ (made.palette);
+    const spare = /** @type {NonNullable<typeof made.palette>} */ (
+        ddraw.createPalette(DDPCAPS_8BIT | DDPCAPS_ALLOW256, []).palette);
+
+    assert.equal(primary.setPalette(palette), DD_OK);
+    assert.deepEqual(presented, [primary], 'a palette set on the primary shows');
+    assert.equal(palette.setEntries(1, [0x00102030]), DD_OK);
+    assert.deepEqual(presented, [primary, primary], 'and so does a fade step in it');
+    assert.equal(spare.setEntries(1, [0x00102030]), DD_OK);
+    assert.equal(presented.length, 2, 'a palette on no primary changes nothing on the screen');
+
+    const offscreen = makeOffscreen(ddraw);
+    assert.equal(offscreen.setPalette(spare), DD_OK);
+    assert.equal(spare.setEntries(2, [0x00405060]), DD_OK);
+    assert.equal(presented.length, 2, 'nor does one on a surface off the screen');
+
+    assert.equal(primary.setPalette(null), DD_OK);
+    assert.equal(palette.setEntries(3, [0x00708090]), DD_OK);
+    assert.equal(presented.length, 2, 'nor one taken off the primary');
+
+    assert.equal(offscreen.release(), 0);
+    assert.equal(primary.release(), 0);
+    assert.equal(palette.release(), 0);
+    assert.equal(spare.release(), 0);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+});
