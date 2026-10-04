@@ -20,9 +20,14 @@
  * is. A noisy list containing the answer beats a clean list without it.
  */
 
-/** How far up the stack to look, and how many frames to report. */
-const SCAN_BYTES = 0x400;
+/**
+ * How far up the stack to look, and how many frames to report. Four pages: a
+ * routine that keeps a kilobyte of text on its stack -- a message formatted
+ * for a log -- hides its caller from anything shorter.
+ */
+const SCAN_BYTES = 0x1000;
 const MAX_FRAMES = 24;
+const MAX_SCANNED = 48;
 
 /**
  * How much of what a register points at to show.
@@ -153,9 +158,10 @@ function isCode({ memory, bridge }, address){
  * @param {TraceSources} sources
  * @param {number} esp
  * @param {number} ebp
+ * @param {number} [top]  Where the thread's stack ends, when known.
  * @returns {{ frames: string[], truncated: boolean }}
  */
-function walkStack(sources, esp, ebp){
+function walkStack(sources, esp, ebp, top = Infinity){
     const { memory } = sources;
     /** @type {string[]} */
     const frames = [];
@@ -191,7 +197,10 @@ function walkStack(sources, esp, ebp){
     // why it is a separate, labelled section rather than more frames.
     /** @type {string[]} */
     const scanned = [];
-    for (let at = esp >>> 0; at < (esp >>> 0) + SCAN_BYTES; at += 4)
+    // A run of one stale pointer -- a table a routine filled on its stack --
+    // is one entry, or it fills the list before the frames above it.
+    let repeated = null;
+    for (let at = esp >>> 0; at < Math.min((esp >>> 0) + SCAN_BYTES, top); at += 4)
     {
         let value;
         try
@@ -202,11 +211,12 @@ function walkStack(sources, esp, ebp){
             void e;
             break;
         }
-        if (isCode(sources, value))
+        if (value !== repeated && isCode(sources, value))
         {
             scanned.push(`  ${hex(at)}: ${describeAddress(sources, value)}`);
         }
-        if (scanned.length >= MAX_FRAMES)
+        repeated = value;
+        if (scanned.length >= MAX_SCANNED)
         {
             break;
         }
@@ -217,7 +227,7 @@ function walkStack(sources, esp, ebp){
             ...frames.length > 0 ? ['frame chain:', ...frames] : [],
             ...scanned.length > 0 ? ['stack (may include stale entries):', ...scanned] : [],
         ],
-        truncated: scanned.length >= MAX_FRAMES,
+        truncated: scanned.length >= MAX_SCANNED,
     };
 }
 
@@ -303,6 +313,29 @@ export function captureTrace(sources){
             sources, trace.registers.esp, trace.registers.ebp);
         trace.stack = frames;
         trace.stackTruncated = truncated;
+    }
+    catch (e){
+        void e;
+    }
+
+    try
+    {
+        // Every other thread's stack too, from where it stopped: a machine
+        // stalled between threads -- a lock passed back and forth, a wait on
+        // what another owes -- is explained by both stacks, and the
+        // processor holds only one of them.
+        const current = kernel.currentThread();
+        trace.otherStacks = (kernel.threads?.() ?? [])
+            .filter((/** @type {any} */ thread)=>thread !== current
+                && thread.state !== 'terminated' && thread.context?.reg32)
+            .map((/** @type {any} */ thread)=>({
+                name: thread.name,
+                state: thread.state,
+                // Parked in a call, a thread resumes on the stack the call
+                // left; its saved registers are the trap's.
+                stack: walkStack(sources, thread.resumeStack ?? thread.context.reg32[4],
+                    thread.context.reg32[5], thread.stackTop ?? Infinity).frames,
+            }));
     }
     catch (e){
         void e;
@@ -415,6 +448,13 @@ export function formatTrace(trace){
     if (trace.stack?.length > 0)
     {
         lines.push(...trace.stack);
+    }
+    for (const other of trace.otherStacks ?? [])
+    {
+        if (other.stack.length > 0)
+        {
+            lines.push(`thread ${other.name} (${other.state}):`, ...other.stack);
+        }
     }
     return lines.join('\n');
 }
