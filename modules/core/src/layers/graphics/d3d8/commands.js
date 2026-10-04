@@ -71,6 +71,8 @@ const ints = new Int32Array(scratch);
  * @property {{ arg: number, shift: number, most: number }} [count]
  * @property {{ arg: number, cases: readonly [number, number][], otherwise: number }} [choose]
  *     or a size chosen by an argument's value: the bytes of the case it equals, or `otherwise`
+ * @property {{ arg: number, allowed: number }} [bits]  flags outside `allowed` are the
+ *     host's: the call with them is valid or not by state the guest does not see
  * @property {{ type: number, count: number, stride: number, most: number }} [vertices]
  *     or the vertices a draw's primitives span, `stride` bytes each (`commandCode`)
  * @property {boolean} [kept]  its copy is taken with `copy` alone, not through the scratch
@@ -232,6 +234,9 @@ const rectsOf = (copy, count)=>Array.from({ length: count }, (unused, i)=>({
  */
 const UP_BYTES = 16 * 1024;
 
+/** D3DCLEAR_TARGET, the same in both versions. */
+const D3DCLEAR_TARGET = 1;
+
 /**
  * The calls both versions' rings carry the same way.
  *
@@ -258,8 +263,12 @@ export const SHARED_COMMANDS = {
         make: (d, c)=>d.DrawPrimitive(c.arg(0), c.arg(1), c.arg(2)) },
     BeginScene: { args: 0, make: d=>d.BeginScene() },
     EndScene: { args: 0, make: d=>d.EndScene() },
-    // No rectangles is the whole target; Z comes as a float in a dword.
+    // No rectangles is the whole target; Z comes as a float in a dword. Only
+    // the target is cleared here: a depth or stencil clear is refused for a
+    // depth surface without one, and a program that is told so clears again
+    // with less, so the answer must be the device's.
     Clear: { args: 6, pointer: 1, nullable: 'empty', count: { arg: 0, shift: 4, most: 64 },
+        bits: { arg: 2, allowed: D3DCLEAR_TARGET },
         make: (d, c)=>d.Clear(c.arg(0), c.arg(1) === 0 ? null : rectsOf(c.ints, c.arg(0)),
             c.arg(2), c.arg(3), floatOf(c.arg(4)), c.arg(5)) },
     DrawPrimitiveUP: { args: 4, pointer: 2, kept: true, draws: true,

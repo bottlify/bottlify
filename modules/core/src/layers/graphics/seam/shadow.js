@@ -1053,6 +1053,9 @@ export function getSurfaceLevelCode(at, trap){
  *     `out`, and leaves ECX and the stack as it found them
  * @property {{ arg: number, cases: readonly [number, number][], otherwise: number }} [choose]
  *     or else the bytes chosen by an argument's value: its case's, or `otherwise`
+ * @property {{ arg: number, allowed: number }} [bits]  an argument of flags whose
+ *     bits outside `allowed` are the host's: what the device makes of them
+ *     depends on what the guest cannot see
  * @property {boolean} [draws]  a draw: a lock in the guest that may overwrite
  *     what it reads waits for the host to make it
  * @property {boolean} [thread]  a function rather than a method: no `this`, and
@@ -1072,7 +1075,7 @@ export function getSurfaceLevelCode(at, trap){
  * there: a host entry between any two instructions of a routine reads the
  * records before it and stops at one not yet whole.
  *
- *     (prologue; no ring: early)  ...  mirror  ...  pointer and count checks
+ *     (prologue; no ring: early)  ...  bits  ...  mirror  ...  pointer and count checks
  *     push ebx; push esi; push edi
  *     mov ebx, ecx                ; the block
  *     lea esi, [edx + ARGS + 4*args]   ; the record's length; EDX the copy's
@@ -1102,7 +1105,7 @@ export function getSurfaceLevelCode(at, trap){
  * @returns {Uint8Array}
  */
 export function commandCode(at, trap, shape){
-    const { slot, args, pointer = -1, bytes = 0, count, choose, vertices, mirror = [],
+    const { slot, args, pointer = -1, bytes = 0, count, choose, vertices, bits, mirror = [],
         draws = false, thread = false, self = false, stale = false, nullable = false } = shape;
     if (nullable && !count)
     {
@@ -1140,6 +1143,11 @@ export function commandCode(at, trap, shape){
         { label: 'early' },
         { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
         { label: 'body' },
+        ...bits ? [
+            // test dword [esp+entry+4a], ~allowed; jnz out
+            [0xf7, 0x44, 0x24, entry + 4 * bits.arg, ...dword(~bits.allowed >>> 0)],
+            { jcc: 0x75, to: 'out', near: true },
+        ] : [],
         ...mirror,
     ];
     if (pointer >= 0)

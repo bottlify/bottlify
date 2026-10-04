@@ -473,15 +473,19 @@ test('a clear copies its rectangles, or none for the whole target, and a target 
         return 'ok';
     };
 
-    assert.equal(run(CLEAR, [0, 0, 3, 0xff00ff00, one, 0]), 'ok', 'the whole target');
+    assert.equal(run(CLEAR, [0, 0, 1, 0xff00ff00, one, 0]), 'ok', 'the whole target');
     assert.deepEqual(Array.from({ length: 8 }, (unused, i)=>read(RING + i * 4)),
-        [commandSlot('Clear'), 32, 0, 0, 3, 0xff00ff00, one, 0], 'no pointer, nothing copied');
+        [commandSlot('Clear'), 32, 0, 0, 1, 0xff00ff00, one, 0], 'no pointer, nothing copied');
     assert.equal(run(CLEAR, [2, DATA, 1, 7, one, 5]), 'ok', 'two rectangles');
     assert.equal(read(RING + 32 + COMMAND.BYTES), 32 + 32);
     assert.equal(read(RING + 32 + COMMAND.ARGS + 4), RING + 64, 'the pointer names the copy');
     assert.equal(run(CLEAR, [1, 0, 1, 7, one, 5]), 'trap', 'a count with no rectangles');
     assert.equal(run(CLEAR, [0, DATA, 1, 7, one, 5]), 'trap', 'rectangles with no count');
     assert.equal(run(CLEAR, [65, DATA, 1, 7, one, 5]), 'trap', 'more than a record copies');
+    // Whether a depth or a stencil clear is valid is the depth surface's to say.
+    assert.equal(run(CLEAR, [0, 0, 3, 0, one, 0]), 'trap', 'the target and depth');
+    assert.equal(run(CLEAR, [0, 0, 7, 0, one, 0]), 'trap', 'and stencil');
+    assert.equal(run(CLEAR, [0, 0, 2, 0, one, 0]), 'trap', 'depth alone');
 
     /** @type {any[]} */
     const made = [];
@@ -493,7 +497,7 @@ test('a clear copies its rectangles, or none for the whole target, and a target 
         assert.fail('nothing refused');
     }), 2);
     assert.deepEqual(made, [
-        [0, null, 3, 0xff00ff00, 1, 0],
+        [0, null, 1, 0xff00ff00, 1, 0],
         [2, [{ x1: 1, y1: 2, x2: 3, y2: 4 }, { x1: 10, y1: 20, x2: 30, y2: 40 }], 1, 7, 1, 5],
     ]);
 
