@@ -132,13 +132,26 @@ export function createAtomFunctions(host){
         return 0;
     };
 
+    /** @param {string} text @returns {Uint8Array} UTF-16LE */
+    const encodeWide = text=>{
+        const out = new Uint8Array(text.length * 2);
+        for (let at = 0; at < text.length; at++)
+        {
+            out[at * 2] = text.charCodeAt(at) & 0xff;
+            out[at * 2 + 1] = text.charCodeAt(at) >>> 8;
+        }
+        return out;
+    };
+
     /**
-     * The name, in the ANSI page it was read in.
+     * The name, in the ANSI page it was read in or in UTF-16; the size is in
+     * characters of the form asked for.
      *
      * @param {number} atom @param {number} buffer @param {number} size
+     * @param {boolean} [wide]
      * @returns {number} the length written, without the terminator
      */
-    const name = (atom, buffer, size)=>{
+    const name = (atom, buffer, size, wide = false)=>{
         const value = atom >>> 0;
         const text = value < FIRST_ATOM ? `#${value}` : byAtom.get(value);
         if (text === undefined || (size >>> 0) === 0)
@@ -146,7 +159,7 @@ export function createAtomFunctions(host){
             return 0;
         }
         const kept = text.slice(0, (size >>> 0) - 1);
-        host.writeMemory(buffer >>> 0, encodeAnsi(`${kept}\0`));
+        host.writeMemory(buffer >>> 0, wide ? encodeWide(`${kept}\0`) : encodeAnsi(`${kept}\0`));
         return kept.length;
     };
 
@@ -177,6 +190,16 @@ export function createAtomFunctions(host){
         GlobalGetAtomNameA: {
             argBytes: 12,
             handler: (/** @type {number[]} */ [atom, buffer, size])=>name(atom, buffer, size),
+        },
+
+        /** UINT GetAtomNameW(ATOM nAtom, LPWSTR lpBuffer, int nSize) -- the same table */
+        GetAtomNameW: {
+            argBytes: 12,
+            handler: (/** @type {number[]} */ [atom, buffer, size])=>name(atom, buffer, size, true),
+        },
+        GlobalGetAtomNameW: {
+            argBytes: 12,
+            handler: (/** @type {number[]} */ [atom, buffer, size])=>name(atom, buffer, size, true),
         },
     };
 }

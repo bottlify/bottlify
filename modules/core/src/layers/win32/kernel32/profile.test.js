@@ -442,3 +442,69 @@ test('WritePrivateProfileStringW writes what the A call writes, read from UTF-16
     assert.equal(fns.WritePrivateProfileStringW.handler([0, wide(KEY, 'Path'), 0, FILE]), 0,
         'a NULL section is refused');
 });
+
+test('the wide reads answer what the A reads answer, in UTF-16 and counted in characters', ()=>{
+    const memory = fakeMemory();
+    const files = fakeFiles();
+    /** @param {number} at @param {string} text */
+    const wide = (at, text)=>{
+        [...text, '\0'].forEach((unit, index)=>{
+            memory.bytes[at + index * 2] = unit.charCodeAt(0) & 0xff;
+            memory.bytes[at + index * 2 + 1] = unit.charCodeAt(0) >> 8;
+        });
+        return at;
+    };
+    /** @param {number} at @param {number} units */
+    const readBack = (at, units)=>String.fromCharCode(
+        ...new Uint16Array(memory.bytes.slice(at, at + units * 2).buffer));
+    const fns = createProfileFunctions({
+        writeMemory: memory.writeMemory,
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        readWideString: (address, maxLength)=>{
+            let text = '';
+            for (let at = address; text.length < maxLength; at += 2)
+            {
+                const unit = memory.bytes[at] | memory.bytes[at + 1] << 8;
+                if (unit === 0)
+                {
+                    break;
+                }
+                text += String.fromCharCode(unit);
+            }
+            return text;
+        },
+        files,
+    });
+    files.put('C:\\WINDOWS\\TEMP\\setup.ini', INI);
+    files.put('C:\\WINDOWS\\win.ini', '[Fonts]\r\nSize=11\r\n');
+    wide(FILE, 'C:\\WINDOWS\\TEMP\\setup.ini');
+    wide(SECTION, 'startup');
+
+    assert.equal(fns.GetPrivateProfileStringW.argBytes, 24);
+    wide(KEY, 'EngineDir');
+    assert.equal(fns.GetPrivateProfileStringW.handler([SECTION, KEY, 0, OUT, 64, FILE]), 13);
+    assert.equal(readBack(OUT, 14), 'C:\\Temp\\_is12\0');
+    assert.equal(fns.GetPrivateProfileStringW.handler([SECTION, KEY, 0, OUT, 4, FILE]), 3,
+        'the size is in characters');
+    assert.equal(readBack(OUT, 4), 'C:\\\0');
+
+    wide(KEY, 'Missing');
+    wide(DEFAULT, 'dflt ');
+    assert.equal(fns.GetPrivateProfileStringW.handler([SECTION, KEY, DEFAULT, OUT, 64, FILE]), 4);
+    assert.equal(readBack(OUT, 5), 'dflt\0');
+
+    assert.equal(fns.GetPrivateProfileStringW.handler([0, 0, 0, OUT, 64, FILE]),
+        'Startup\0Other\0'.length);
+    assert.equal(readBack(OUT, 15), 'Startup\0Other\0\0');
+
+    assert.equal(fns.GetPrivateProfileIntW.argBytes, 16);
+    wide(KEY, 'FolderCount');
+    assert.equal(fns.GetPrivateProfileIntW.handler([SECTION, KEY, 7, FILE]), 2);
+    wide(KEY, 'Missing');
+    assert.equal(fns.GetPrivateProfileIntW.handler([SECTION, KEY, 7, FILE]), 7);
+
+    assert.equal(fns.GetProfileIntW.argBytes, 12);
+    wide(SECTION, 'Fonts');
+    wide(KEY, 'size');
+    assert.equal(fns.GetProfileIntW.handler([SECTION, KEY, 9]), 11, 'win.ini, by a fixed name');
+});

@@ -253,6 +253,16 @@ export function createStartupFunctions(host){
         return address;
     };
 
+    const buildWideMainArgs = ()=>{
+        if (!wideMainArgs)
+        {
+            const words = splitCommandLine(host.commandLine());
+            wideMainArgs = { argc: words.length,
+                argv: publishVector(words.map(word=>publishWide(word))) };
+        }
+        return wideMainArgs;
+    };
+
     /** @param {number} value @returns {Uint8Array} a dword, as a data export holds one */
     const dword = value=>{
         const bytes = new Uint8Array(4);
@@ -327,14 +337,9 @@ export function createStartupFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([argc, argv, env])=>{
-                if (!wideMainArgs)
-                {
-                    const words = splitCommandLine(host.commandLine());
-                    wideMainArgs = { argc: words.length,
-                        argv: publishVector(words.map(word=>publishWide(word))) };
-                }
-                writeU32(argc, wideMainArgs.argc);
-                writeU32(argv, wideMainArgs.argv);
+                const built = buildWideMainArgs();
+                writeU32(argc, built.argc);
+                writeU32(argv, built.argv);
                 writeU32(env, host.environment?.wide() ?? buildMainArgs().env);
                 return 0;
             },
@@ -486,6 +491,19 @@ export function createStartupFunctions(host){
                 const built = buildMainArgs();
                 return cell('argv', built.argv);
             },
+        },
+
+        /**
+         * wchar_t ***__p___wargv(void)
+         *
+         * The wide vector `__wgetmainargs` hands out, made here if nothing
+         * has made it yet: a library built for UTF-16 reads the arguments
+         * this way whichever start-up the program ran.
+         */
+        __p___wargv: {
+            convention: 'cdecl',
+            argBytes: 0,
+            handler: ()=>cell('wargv', buildWideMainArgs().argv),
         },
 
         /**

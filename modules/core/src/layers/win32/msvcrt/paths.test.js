@@ -571,3 +571,27 @@ test('_wsearchenv_s answers as _searchenv_s does, in wide characters', ()=>{
     assert.equal(search('b.dat', 32), 2);
     assert.equal(table._wsearchenv_s.handler([0, memory.putWide('LIST'), out, 32]), 22);
 });
+
+test('_wsplitpath splits as _splitpath does, in UTF-16, every unit a character', ()=>{
+    const { memory, table } = build();
+    const [drive, directory, name, extension] = [0, 1, 2, 3].map(()=>memory.allocate(128));
+    table._wsplitpath.handler([memory.putWide('C:\\\u30b2\u30fc\u30e0\\war.\u6587'),
+        drive, directory, name, extension]);
+    assert.deepEqual([drive, directory, name, extension].map(at=>memory.wide(at)),
+        ['C:', '\\\u30b2\u30fc\u30e0\\', 'war', '.\u6587']);
+    // A unit whose low byte is a backslash's is no separator in UTF-16.
+    table._wsplitpath.handler([memory.putWide('a\u015cb.txt'), 0, directory, name, 0]);
+    assert.equal(memory.wide(directory), '');
+    assert.equal(memory.wide(name), 'a\u015cb');
+});
+
+test('_wfullpath resolves as _fullpath does, its size in characters', ()=>{
+    const { memory, table } = build();
+    const allocated = table._wfullpath.handler([0, memory.putWide('data\\..\\\u3042'), 0]);
+    assert.equal(memory.wide(allocated), 'C:\\game\\\u3042');
+    const buffer = memory.allocate(64);
+    assert.equal(table._wfullpath.handler([buffer, memory.putWide('x'), 10]), buffer,
+        'C:\\game\\x and its terminator are ten characters');
+    assert.equal(memory.wide(buffer), 'C:\\game\\x');
+    assert.equal(table._wfullpath.handler([buffer, memory.putWide('x'), 9]), 0);
+});

@@ -274,3 +274,27 @@ test('a disc is full, sized as the disc, and keeps its own label', ()=>{
     assert.equal(fns.SetVolumeLabelA.handler([0x100, 0x160]), 0);
     assert.equal(errors.at(-1), 19, 'ERROR_WRITE_PROTECT');
 });
+
+test('the wide free-space calls answer what the A calls answer', ()=>{
+    const { fns, bytes } = setup(['C']);
+    plant(bytes, 0x200, 'C:' + String.fromCharCode(92));
+    for (const [at, character] of [...'C:' + String.fromCharCode(92)].entries())
+    {
+        bytes[0x300 + at * 2] = character.charCodeAt(0);
+        bytes[0x300 + at * 2 + 1] = 0;
+    }
+    bytes[0x306] = 0;
+    bytes[0x307] = 0;
+
+    assert.equal(fns.GetDiskFreeSpaceW.argBytes, 20);
+    assert.equal(fns.GetDiskFreeSpaceA.handler([0x200, 0x100, 0x104, 0x108, 0x10c]), 1);
+    const narrow = [0x100, 0x104, 0x108, 0x10c].map(at=>dword(bytes, at));
+    bytes.fill(0, 0x100, 0x110);
+    assert.equal(fns.GetDiskFreeSpaceW.handler([0x300, 0x100, 0x104, 0x108, 0x10c]), 1);
+    assert.deepEqual([0x100, 0x104, 0x108, 0x10c].map(at=>dword(bytes, at)), narrow);
+
+    assert.equal(fns.GetDiskFreeSpaceExW.argBytes, 16);
+    assert.equal(fns.GetDiskFreeSpaceExW.handler([0x300, 0, 0x118, 0]), 1);
+    assert.equal(dword(bytes, 0x118) + dword(bytes, 0x11c) * 0x1_0000_0000,
+        32 * 1024 * 1024 * 1024);
+});

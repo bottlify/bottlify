@@ -45,6 +45,7 @@ import { createGlobals, EINVAL, ERANGE } from './globals.js';
 import { createDescriptors, createIoFunctions } from './io.js';
 import { createEnvironment } from './environ.js';
 import { createMultiBytePage } from './mbcs.js';
+import { createLocaleFunctions } from './locale.js';
 import { bytesOfUnits, unitsOfText, wideStringAt } from './widetext.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
@@ -652,6 +653,23 @@ export function createMsvcrtFunctions(host){
         _swprintf: uncountedWide,
 
         /**
+         * int vswprintf(wchar_t *buffer, const wchar_t *format, va_list args)
+         *
+         * swprintf with its arguments in memory: msvcrt's own, with no count,
+         * the text and its terminator however long.
+         */
+        vswprintf: {
+            convention: 'cdecl',
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([buffer, format, list])=>{
+                const text = wideText(format, varargsAt(list));
+                host.writeMemory(buffer, bytesOfUnits([...unitsOfText(text), 0]));
+                return text.length;
+            },
+        },
+
+        /**
          * int sprintf_s(char *buffer, size_t size, const char *format, ...)
          *
          * sprintf with the buffer's size: text that does not fit with its
@@ -853,6 +871,14 @@ export function createMsvcrtFunctions(host){
         }),
         ...createScanFunctions(host),
         ...createCxxFunctions(host),
+        ...createLocaleFunctions({
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            readCString: host.readCString,
+            allocate,
+            ...host.currentThread ? { currentThread: host.currentThread } : {},
+            ...host.divergence ? { divergence: host.divergence } : {},
+        }),
         // The exception classes own their messages on the heap.
         ...(host.allocate && host.free
             ? createClassFunctions({
@@ -906,6 +932,8 @@ export function createMsvcrtFunctions(host){
                 writeMemory: host.writeMemory,
                 fillMemory: host.fillMemory,
                 errno,
+                callGuest: host.callGuest,
+                ...host.currentThread ? { currentThread: host.currentThread } : {},
                 ...(host.guestHeap && host.heapHandle && host.allocateCode
                     ? { guestHeap: host.guestHeap, heapHandle: host.heapHandle,
                         allocateCode: host.allocateCode }

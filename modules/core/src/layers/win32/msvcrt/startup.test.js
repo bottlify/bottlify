@@ -159,6 +159,18 @@ test('__wgetmainargs hands back the same arguments in UTF-16', ()=>{
     assert.notEqual(machine.u32(0x1020), 0, 'an environment, empty without one given');
 });
 
+test('__p___wargv points at __wgetmainargs\'s vector, made by whichever asks first', ()=>{
+    const { machine, fns } = fakeMachine('"C:\\App\\Setup.exe" /S');
+    assert.equal(fns.__p___wargv.argBytes, 0);
+    const cell = fns.__p___wargv.handler([]);
+    const vector = machine.u32(cell);
+    assert.notEqual(vector, 0);
+    const second = machine.u32(vector + 4);
+    assert.deepEqual([...machine.bytes.subarray(second, second + 6)], [0x2f, 0, 0x53, 0, 0, 0]);
+    fns.__wgetmainargs.handler([0x1000, 0x1010, 0x1020, 0, 0]);
+    assert.equal(machine.u32(0x1010), vector, 'one vector');
+});
+
 test('asking twice gets the same vector, not a second one', ()=>{
     // Some start-up paths ask more than once, and two vectors leave a program
     // comparing pointers that are both its own and never equal.

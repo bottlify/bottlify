@@ -646,3 +646,61 @@ test('a wide string near the end of its region is read to its terminator, not pa
     assert.equal(table.wcschr.handler([at, 'S'.charCodeAt(0)]), at + text.indexOf('S') * 2);
     assert.equal(table.wcslen.handler([at]), text.length);
 });
+
+test('_wcslwr and _wcsupr fold ASCII in place, as the C locale does, and answer the string', ()=>{
+    const { memory, table } = build();
+    const string = memory.putWide('MiXeD Éé 1');
+    assert.equal(table._wcslwr.handler([string]), string);
+    assert.equal(memory.wide(string), 'mixed Éé 1', 'nothing past ASCII changes');
+    assert.equal(table._wcsupr.handler([string]), string);
+    assert.equal(memory.wide(string), 'MIXED Éé 1');
+});
+
+test('_wcsrev reverses the units in place', ()=>{
+    const { memory, table } = build();
+    const string = memory.putWide('abcあ');
+    assert.equal(table._wcsrev.handler([string]), string);
+    assert.equal(memory.wide(string), 'あcba');
+    const empty = memory.putWide('');
+    assert.equal(table._wcsrev.handler([empty]), empty);
+    assert.equal(memory.wide(empty), '');
+});
+
+test('_wcsnicmp compares at most the count, ASCII folded, and stops at the terminator', ()=>{
+    const { memory, table } = build();
+    const upper = memory.putWide('HELLO world');
+    const lower = memory.putWide('hello WORLD');
+    assert.equal(table._wcsnicmp.handler([upper, lower, 11]), 0);
+    assert.equal(table._wcsnicmp.handler([memory.putWide('abcX'), memory.putWide('ABCy'), 3]), 0);
+    assert.ok(table._wcsnicmp.handler([memory.putWide('abcX'), memory.putWide('ABCy'), 4]) < 0);
+    assert.ok(table._wcsnicmp.handler([memory.putWide('ab'), memory.putWide('a'), 5]) > 0);
+    assert.equal(table._wcsnicmp.handler([memory.putWide('ab'), memory.putWide('AB'), 9]), 0);
+    assert.equal(table._wcsnicmp.handler([upper, memory.putWide('z'), 0]), 0, 'none compared');
+});
+
+test('wcsspn, wcscspn and wcspbrk measure and find by a set of units', ()=>{
+    const { memory, table } = build();
+    const string = memory.putWide('  \tあx=1');
+    assert.equal(table.wcsspn.handler([string, memory.putWide(' \t')]), 3);
+    assert.equal(table.wcscspn.handler([string, memory.putWide('=あ')]), 3);
+    assert.equal(table.wcscspn.handler([string, memory.putWide('#')]), 7, 'none is the length');
+    assert.equal(table.wcspbrk.handler([string, memory.putWide('x=')]), string + 4 * 2);
+    assert.equal(table.wcspbrk.handler([string, memory.putWide('#')]), 0);
+    assert.equal(table.wcspbrk.handler([string, memory.putWide('')]), 0);
+});
+
+test('wcstok splits a wide string in place and carries on when handed null', ()=>{
+    const { memory, table } = build();
+    const string = memory.putWide(',,a.ocx, bあ.dll,,');
+    const delimiters = memory.putWide(', ');
+    const first = table.wcstok.handler([string, delimiters]);
+    assert.equal(first, string + 4);
+    assert.equal(memory.wide(first), 'a.ocx');
+    const second = table.wcstok.handler([0, delimiters]);
+    assert.equal(memory.wide(second), 'bあ.dll');
+    assert.equal(table.wcstok.handler([0, delimiters]), 0, 'only delimiters left');
+    assert.equal(table.wcstok.handler([0, delimiters]), 0, 'and still nothing');
+    const last = memory.putWide('tail');
+    assert.equal(table.wcstok.handler([last, delimiters]), last);
+    assert.equal(table.wcstok.handler([0, delimiters]), 0);
+});

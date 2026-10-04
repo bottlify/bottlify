@@ -21,8 +21,8 @@ import { encodeAnsi } from '../kernel32/locale.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import {
-    W_ALPHA, W_BLANK, W_CNTRL, W_DIGIT, W_LOWER, W_PUNCT, W_SPACE, W_UPPER, W_XDIGIT, WEOF,
-    WIDE_CLASSES,
+    LOWER, UPPER, W_ALPHA, W_BLANK, W_CNTRL, W_DIGIT, W_LOWER, W_PUNCT, W_SPACE, W_UPPER,
+    W_XDIGIT, WEOF, WIDE_CLASSES,
 } from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import { wideStringAt } from './widetext.js';
@@ -109,6 +109,59 @@ export function createWideFunctions(host){
 
     /** @param {string} text */
     const foldCase = text=>text.replace(/[A-Z]/g, letter=>letter.toLowerCase());
+
+    /**
+     * wcstok's saved position: one stream for the runtime, apart from
+     * strtok's, kept as strtok keeps its own (`strings.js`).
+     */
+    let wideTokenAt = 0;
+
+    /**
+     * A unit through a byte table of the C locale's, which folds ASCII alone:
+     * the table `_strlwr` and `_wcslwr_s` fold by.
+     *
+     * @param {Uint8Array} table @param {number} unit
+     */
+    const folded = (table, unit)=>(unit < 0x80 ? table[unit] : unit);
+
+    /**
+     * `_wcslwr` and `_wcsupr`: the string folded in place and handed back.
+     *
+     * @param {Uint8Array} table
+     */
+    const foldInPlace = table=>({
+        convention: 'cdecl',
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([string])=>{
+            if ((string >>> 0) === 0)
+            {
+                host.errno?.(EINVAL);
+                return 0;
+            }
+            const text = readWide(string);
+            writeWide(string, String.fromCharCode(
+                ...Array.from(text, unit=>folded(table, unit.charCodeAt(0)))), false);
+            return string;
+        },
+    });
+
+    /**
+     * Where the first unit a set covers -- or, `inSet` false, the first it
+     * does not -- stands in a string: its length when there is none.
+     *
+     * @param {number} string @param {number} set @param {boolean} inSet
+     */
+    const spanOf = (string, set, inSet)=>{
+        const text = readWide(string);
+        const members = new Set(readWide(set));
+        let at = 0;
+        while (at < text.length && members.has(text[at]) !== inSet)
+        {
+            at++;
+        }
+        return { at, found: at < text.length };
+    };
 
     return {
         /** size_t wcslen(const wchar_t *) -- in the guest */
@@ -220,6 +273,137 @@ export function createWideFunctions(host){
                 const text = readWide(string);
                 const index = text.lastIndexOf(String.fromCharCode(unit & 0xffff));
                 return index === -1 ? 0 : string + index * 2;
+            },
+        },
+
+        /**
+         * int _wcsnicmp(const wchar_t *left, const wchar_t *right, size_t count)
+         *
+         * At most `count` units compared with ASCII folded to lower case, as
+         * `_wcsicmp` folds; the answer is the difference of the first two
+         * that differ, the terminator ending both.
+         */
+        _wcsnicmp: {
+            convention: 'cdecl',
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([left, right, count])=>{
+                const limit = count >>> 0;
+                if (limit === 0)
+                {
+                    return 0;
+                }
+                const a = readWide(left).slice(0, limit);
+                const b = readWide(right).slice(0, limit);
+                for (let at = 0; at < limit; at++)
+                {
+                    const x = folded(LOWER, a.charCodeAt(at) || 0);
+                    const y = folded(LOWER, b.charCodeAt(at) || 0);
+                    if (x !== y || x === 0)
+                    {
+                        return x - y;
+                    }
+                }
+                return 0;
+            },
+        },
+
+        /** wchar_t *_wcslwr(wchar_t *text) -- ASCII lowered in place, as the C locale has it */
+        _wcslwr: foldInPlace(LOWER),
+
+        /** wchar_t *_wcsupr(wchar_t *text) -- ASCII raised in place */
+        _wcsupr: foldInPlace(UPPER),
+
+        /** wchar_t *_wcsrev(wchar_t *text) -- the units reversed in place, as `_strrev` reverses bytes */
+        _wcsrev: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([string])=>{
+                writeWide(string, readWide(string).split('').reverse().join(''), false);
+                return string;
+            },
+        },
+
+        /**
+         * wchar_t *wcstok(wchar_t *text, const wchar_t *delimiters)
+         *
+         * strtok over units: a terminator written over the delimiter that
+         * ends each token, and null for the text carries on from there.
+         */
+        wcstok: {
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([string, delimiters])=>{
+                if ((string >>> 0) !== 0)
+                {
+                    wideTokenAt = string >>> 0;
+                }
+                if (wideTokenAt === 0)
+                {
+                    return 0;
+                }
+                const separators = new Set(readWide(delimiters));
+                const rest = readWide(wideTokenAt);
+                let start = 0;
+                while (start < rest.length && separators.has(rest[start]))
+                {
+                    start++;
+                }
+                if (start === rest.length)
+                {
+                    wideTokenAt = 0;
+                    return 0;
+                }
+                let end = start;
+                while (end < rest.length && !separators.has(rest[end]))
+                {
+                    end++;
+                }
+                const token = wideTokenAt + start * 2;
+                if (end < rest.length)
+                {
+                    host.writeMemory(wideTokenAt + end * 2, new Uint8Array(2));
+                    wideTokenAt += (end + 1) * 2;
+                }
+                else
+                {
+                    wideTokenAt = 0;
+                }
+                return token;
+            },
+        },
+
+        /** size_t wcsspn(const wchar_t *text, const wchar_t *accept) */
+        wcsspn: {
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([string, accept])=>spanOf(string, accept, false).at,
+        },
+
+        /** size_t wcscspn(const wchar_t *text, const wchar_t *reject) */
+        wcscspn: {
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([string, reject])=>spanOf(string, reject, true).at,
+        },
+
+        /**
+         * wchar_t *wcspbrk(const wchar_t *text, const wchar_t *accept)
+         *
+         * A pointer into the caller's string at the first unit the set has,
+         * or null; the terminator is never one of the set.
+         */
+        wcspbrk: {
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([string, accept])=>{
+                const { at, found } = spanOf(string, accept, true);
+                return found ? string + at * 2 : 0;
             },
         },
 

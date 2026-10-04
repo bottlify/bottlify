@@ -340,3 +340,42 @@ test('wcstol and wcstoul read any script\'s decimal digits, and Unicode\'s separ
         assert.deepEqual(errno, [34, 34]);
         assert.equal(convert('wcstoul', [...'-1234'].map(c=>c.charCodeAt(0)))[0] | 0, -1234);
     });
+
+test('the _*tow family writes _*toa\'s text in UTF-16', ()=>{
+    const { memory, table } = build();
+    const buffer = memory.allocate(80);
+    assert.equal(table._itow.handler([-42, buffer, 10]), buffer);
+    assert.equal(memory.wide(buffer), '-42');
+    assert.equal(table._ltow.handler([-1, buffer, 16]), buffer);
+    assert.equal(memory.wide(buffer), 'ffffffff', 'only base ten is signed');
+    assert.equal(table._ultow.handler([-1, buffer, 10]), buffer);
+    assert.equal(memory.wide(buffer), '4294967295');
+    assert.equal(table._itow.handler([5, buffer, 2]), buffer);
+    assert.equal(memory.wide(buffer), '101');
+    assert.equal(table._itow.handler([5, buffer, 1]), 0, 'a radix with no digits is refused');
+    assert.equal(table._itow.argBytes, 12);
+});
+
+test('_wtoi and _wtol read as atoi reads, wrapping in 32 bits', ()=>{
+    const { memory, table } = build();
+    assert.equal(table._wtoi.handler([memory.putWide('  -123abc')]), -123);
+    assert.equal(table._wtol.handler([memory.putWide('+77')]), 77);
+    assert.equal(table._wtoi.handler([memory.putWide('x1')]), 0);
+    assert.equal(table._wtoi.handler([memory.putWide('4294967297')]), 1, 'wraps, as atoi does');
+    assert.equal(table._wtoi.handler([memory.putWide('١')]), 0, 'only ASCII digits');
+});
+
+test('wcstod reads strtod\'s number from a wide string, its end two bytes a character', ()=>{
+    const fpu = fakeFpu();
+    const { memory, table } = build(fpu);
+    const end = memory.allocate(4);
+    const string = memory.putWide(' -1.25e1あ');
+    table.wcstod.handler([string, end]);
+    assert.equal(fpu.result, -12.5);
+    assert.equal(memory.u32(end), string + 8 * 2);
+    const none = memory.putWide('abc');
+    table.wcstod.handler([none, end]);
+    assert.equal(fpu.result, 0);
+    assert.equal(memory.u32(end), none, 'nothing read leaves the end at the start');
+    assert.equal(build().table.wcstod, undefined, 'no FPU, no export');
+});

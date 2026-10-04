@@ -445,6 +445,20 @@ test('the wide form of GetStringType has no locale argument', ()=>{
     assert.equal(new DataView(host.bytes.buffer).getUint16(0x200, true) & C1_UPPER, C1_UPPER);
 });
 
+test('the wide Ex form of GetStringType keeps the locale argument', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    assert.equal(fns.GetStringTypeExW.argBytes, 20);
+
+    host.plantWide(0x100, 'q7');
+    assert.equal(fns.GetStringTypeExW.handler([0x0409, CT_CTYPE1, 0x100, 2, 0x200]), 1);
+    const view = new DataView(host.bytes.buffer);
+    assert.equal(view.getUint16(0x200, true) & C1_LOWER, C1_LOWER);
+    assert.equal(view.getUint16(0x202, true) & C1_DIGIT, C1_DIGIT);
+    assert.equal(fns.GetStringTypeExW.handler([0x0409, CT_CTYPE1, 0, 2, 0x200]), 0);
+    assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER]);
+});
+
 test('LCMapString changes case and measures like everything else here', ()=>{
     const host = fakeHost();
     const fns = createLocaleFunctions(host);

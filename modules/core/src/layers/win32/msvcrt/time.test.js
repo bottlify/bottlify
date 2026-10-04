@@ -6,7 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createTimeFunctions, strftime, asctime, parseTz, TM } from './time.js';
+import {
+    createTimeFunctions, strftime, asctime, parseTz, TM, C_TIME_NAMES, LC_TIME_DATA,
+} from './time.js';
 import { fakeMemory, fakeFpu } from './harness.test.js';
 
 /** 2003-07-03T12:34:56Z, a Thursday. */
@@ -252,4 +254,78 @@ test('_mkgmtime normalises in UTC whatever tm_isdst says, and mktime refuses bef
         memory.i32(block + TM.YDAY)], [5, 1, 4]);
     view.setInt32(block + TM.YEAR, 69, true);
     assert.equal(table.mktime.handler([block]), -1);
+});
+
+/** A struct tm in guest memory. @param {any} memory @param {number[]} fields sec..isdst */
+const putTm = (memory, fields)=>{
+    const block = memory.allocate(TM.SIZE);
+    fields.forEach((value, at)=>memory.setU32(block + at * 4, value));
+    return block;
+};
+
+test('strftime\'s # flag gives the long date and drops a number\'s leading zeros', ()=>{
+    const when = new Date(Date.UTC(2005, 2, 4, 7, 8, 9));
+    assert.equal(strftime('%x|%X|%c', when), '03/04/05|07:08:09|03/04/05 07:08:09');
+    assert.equal(strftime('%#x', when), 'Friday, March 04, 2005');
+    assert.equal(strftime('%#c', when), 'Friday, March 04, 2005 07:08:09');
+    assert.equal(strftime('%#d/%#m/%#y %#H:%#M %#j', when), '4/3/5 7:8 63');
+});
+
+test('strftime takes a locale\'s names and pictures in place of the C locale\'s', ()=>{
+    const when = new Date(Date.UTC(2005, 2, 4, 15, 8, 9));
+    const names = { ...C_TIME_NAMES, shortDays: C_TIME_NAMES.shortDays.map(d=>d.toUpperCase()),
+        am: 'vm', pm: 'nm', shortDate: "d.M.yyyy 'r.'", time: 'h:mm tt' };
+    assert.equal(strftime('%a %p %x %X', when, names), 'FRI nm 4.3.2005 r. 3:08 nm');
+});
+
+test('wcsftime writes strftime\'s text in UTF-16, counted in characters', ()=>{
+    const { memory, table } = build();
+    const block = putTm(memory, [9, 8, 7, 4, 2, 105, 5, 62, 0]);
+    const buffer = memory.allocate(64);
+    assert.equal(table.wcsftime.argBytes, 16);
+    assert.equal(table.wcsftime.handler([buffer, 32, memory.putWide('%A \u3042 %H:%M'), block]),
+        'Friday \u3042 07:08'.length);
+    assert.equal(memory.wide(buffer), 'Friday \u3042 07:08');
+    assert.equal(table.wcsftime.handler([buffer, 5, memory.putWide('%A'), block]), 0,
+        'six characters do not fit in five');
+});
+
+test('_Getdays and _Getmonths hand out the names the runtime\'s way, on the heap', ()=>{
+    const { memory, table } = build();
+    const days = memory.text(table._Getdays.handler([]));
+    assert.ok(days.startsWith(':Sun:Sunday:Mon:Monday:'));
+    assert.ok(days.endsWith(':Sat:Saturday'));
+    const months = memory.text(table._Getmonths.handler([]));
+    assert.ok(months.startsWith(':Jan:January:Feb:February:'));
+    assert.ok(months.endsWith(':Dec:December'));
+});
+
+test('_Gettnames copies __lc_time_data whole, and _Strftime formats with what it holds', ()=>{
+    const { memory, table } = build();
+    const names = table._Gettnames.handler([]);
+    assert.notEqual(names, 0);
+    const string = (/** @type {number} */ index)=>memory.text(memory.u32(names + index * 4));
+    assert.equal(string(0), 'Sun');
+    assert.equal(string(7), 'Sunday');
+    assert.equal(string(14), 'Jan');
+    assert.equal(string(26), 'January');
+    assert.deepEqual([38, 39, 40, 41, 42].map(string),
+        ['AM', 'PM', 'MM/dd/yy', 'dddd, MMMM dd, yyyy', 'HH:mm:ss']);
+    assert.ok(memory.u32(names) > names + LC_TIME_DATA.SIZE - 1, 'the strings follow it');
+
+    const block = putTm(memory, [9, 8, 15, 4, 2, 105, 5, 62, 0]);
+    const buffer = memory.allocate(64);
+    assert.equal(table._Strftime.argBytes, 20);
+    // A locale's names, written where the copy's first pointer points.
+    memory.setU32(names, memory.put('Vr'));
+    memory.setU32(names + 38 * 4, memory.put('vm'));
+    memory.setU32(names + 39 * 4, memory.put('nm'));
+    assert.equal(table._Strftime.handler([buffer, 64, memory.put('%a %p %c'), block, names]),
+        'Fri nm 03/04/05 15:08:09'.length);
+    assert.equal(memory.text(buffer), 'Fri nm 03/04/05 15:08:09');
+    table._Strftime.handler([buffer, 64, memory.put('%a'), putTm(memory,
+        [0, 0, 0, 6, 2, 105, 0, 64, 0]), names]);
+    assert.equal(memory.text(buffer), 'Vr', 'Sunday is the first of them');
+    assert.equal(table._Strftime.handler([buffer, 64, memory.put('%p'), block, 0]), 2);
+    assert.equal(memory.text(buffer), 'PM', 'no names: the current locale\'s');
 });

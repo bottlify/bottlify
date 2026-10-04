@@ -79,6 +79,102 @@ export const TIME_ZONE_INFORMATION = Object.freeze({
     SIZE: 172,
 });
 
+/** SYSTEMTIME: eight WORDs, the day of the week third. */
+const SYSTEMTIME_SIZE = 16;
+
+/**
+ * A SYSTEMTIME's eight words as milliseconds since the Unix epoch, or null
+ * when they do not name a moment -- a month or day out of range, an hour past
+ * 23 -- which is what SystemTimeToFileTime refuses too.
+ *
+ * @param {Uint8Array} bytes
+ * @returns {number | null}
+ */
+function systemTimeToMs(bytes){
+    const view = new DataView(bytes.buffer, bytes.byteOffset, SYSTEMTIME_SIZE);
+    const [year, month, , day, hour, minute, second, millisecond] =
+        Array.from({ length: 8 }, (_, at)=>view.getUint16(at * 2, true));
+    if (year < 1601 || month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59
+        || second > 59 || millisecond > 999)
+    {
+        return null;
+    }
+    const ms = Date.UTC(year, month - 1, day, hour, minute, second, millisecond);
+    return new Date(ms).getUTCDate() === day ? ms : null;
+}
+
+/** @param {number} ms @returns {Uint8Array} the SYSTEMTIME, day of the week filled in */
+function msToSystemTime(ms){
+    const at = new Date(ms);
+    const bytes = new Uint8Array(SYSTEMTIME_SIZE);
+    const view = new DataView(bytes.buffer);
+    [at.getUTCFullYear(), at.getUTCMonth() + 1, at.getUTCDay(), at.getUTCDate(), at.getUTCHours(),
+        at.getUTCMinutes(), at.getUTCSeconds(), at.getUTCMilliseconds()]
+        .forEach((value, index)=>view.setUint16(index * 2, value, true));
+    return bytes;
+}
+
+/**
+ * When in a year a zone's transition falls, as milliseconds of its local
+ * clock. A SYSTEMTIME with a year is that date; without one it is a rule:
+ * wDay is which wDayOfWeek of wMonth, the first to the fourth, and 5 the
+ * last one the month has.
+ *
+ * @param {DataView} rule @param {number} year
+ */
+function transitionIn(rule, year){
+    const word = (/** @type {number} */ index)=>rule.getUint16(index * 2, true);
+    const [ruleYear, month, weekday, week, hour, minute, second, millisecond] =
+        Array.from({ length: 8 }, (_, at)=>word(at));
+    if (ruleYear !== 0)
+    {
+        return Date.UTC(year, month - 1, week, hour, minute, second, millisecond);
+    }
+    const first = new Date(Date.UTC(year, month - 1, 1)).getUTCDay();
+    const length = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    let day = 1 + (weekday - first + 7) % 7 + (Math.min(week, 5) - 1) * 7;
+    while (day > length)
+    {
+        day -= 7;
+    }
+    return Date.UTC(year, month - 1, day, hour, minute, second, millisecond);
+}
+
+/**
+ * The minutes a zone's local clock is behind UTC at a moment -- Bias, plus
+ * DaylightBias inside daylight time and StandardBias outside it. A zone whose
+ * transition months are zero has no daylight time, and then Bias alone is
+ * the answer.
+ *
+ * The daylight transition is written in standard local time and the
+ * standard one in daylight local time, the clocks each is read on when it
+ * happens; a southern zone's daylight time runs across the new year, and is
+ * then the part of the year outside the two.
+ *
+ * @param {DataView} zone TIME_ZONE_INFORMATION @param {number} utc
+ */
+function biasAt(zone, utc){
+    const bias = zone.getInt32(TIME_ZONE_INFORMATION.Bias, true);
+    const standardBias = zone.getInt32(TIME_ZONE_INFORMATION.StandardBias, true);
+    const daylightBias = zone.getInt32(TIME_ZONE_INFORMATION.DaylightBias, true);
+    const standardRule = new DataView(zone.buffer,
+        zone.byteOffset + TIME_ZONE_INFORMATION.StandardDate, SYSTEMTIME_SIZE);
+    const daylightRule = new DataView(zone.buffer,
+        zone.byteOffset + TIME_ZONE_INFORMATION.DaylightDate, SYSTEMTIME_SIZE);
+    if (standardRule.getUint16(2, true) === 0 || daylightRule.getUint16(2, true) === 0)
+    {
+        return bias;
+    }
+    const minute = 60_000;
+    const year = new Date(utc - (bias + standardBias) * minute).getUTCFullYear();
+    const daylightStarts = transitionIn(daylightRule, year) + (bias + standardBias) * minute;
+    const daylightEnds = transitionIn(standardRule, year) + (bias + daylightBias) * minute;
+    const daylight = daylightStarts < daylightEnds
+        ? utc >= daylightStarts && utc < daylightEnds
+        : !(utc >= daylightEnds && utc < daylightStarts);
+    return bias + (daylight ? daylightBias : standardBias);
+}
+
 /** The volume every file here reports belonging to. */
 const VOLUME_SERIAL = 0xb0771f42;
 
@@ -221,6 +317,14 @@ const wide = text=>{
         bytes[at * 2 + 1] = code >> 8;
     }
     return bytes;
+};
+
+/** The TIME_ZONE_INFORMATION this machine answers with: UTC, no transitions. */
+const currentZone = ()=>{
+    const data = new Uint8Array(TIME_ZONE_INFORMATION.SIZE);
+    data.set(wide('UTC'), TIME_ZONE_INFORMATION.StandardName);
+    data.set(wide('UTC'), TIME_ZONE_INFORMATION.DaylightName);
+    return data;
 };
 
 /**
@@ -568,11 +672,40 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER, 0xffffffff);
                 }
-                const data = new Uint8Array(TIME_ZONE_INFORMATION.SIZE);
-                data.set(wide('UTC'), TIME_ZONE_INFORMATION.StandardName);
-                data.set(wide('UTC'), TIME_ZONE_INFORMATION.DaylightName);
-                host.writeMemory(information >>> 0, data);
+                host.writeMemory(information >>> 0, currentZone());
                 return TIME_ZONE_ID_UNKNOWN;
+            },
+        },
+
+        /**
+         * BOOL SystemTimeToTzSpecificLocalTime(
+         *   const TIME_ZONE_INFORMATION *lpTimeZoneInformation,
+         *   const SYSTEMTIME *lpUniversalTime, LPSYSTEMTIME lpLocalTime)
+         *
+         * A NULL zone is this machine's, the one GetTimeZoneInformation
+         * reports -- UTC, so the time comes back as it went in. A zone the caller
+         * describes is applied with its own daylight rules. The day of the
+         * week is computed afresh, as the conversion through a FILETIME does.
+         */
+        SystemTimeToTzSpecificLocalTime: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([zone, universal, local])=>{
+                if (universal === 0 || local === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const utc = systemTimeToMs(host.readMemory(universal >>> 0, SYSTEMTIME_SIZE));
+                if (utc === null)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const data = zone === 0
+                    ? currentZone()
+                    : host.readMemory(zone >>> 0, TIME_ZONE_INFORMATION.SIZE).slice();
+                const bias = biasAt(new DataView(data.buffer), utc);
+                host.writeMemory(local >>> 0, msToSystemTime(utc - bias * 60_000));
+                return 1;
             },
         },
     };

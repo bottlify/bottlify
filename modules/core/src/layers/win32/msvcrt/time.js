@@ -28,6 +28,7 @@
 
 import { encodeAnsi } from '../kernel32/locale.js';
 import { EINVAL, ERANGE } from './globals.js';
+import { wideStringAt } from './widetext.js';
 
 const MAX_STRING = 1 << 20;
 
@@ -55,6 +56,127 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
 
 /** @param {number} value @param {number} width */
 const pad = (value, width = 2)=>String(value).padStart(width, '0');
+
+/**
+ * The names a time is written with: what msvcrt keeps in its
+ * `__lc_time_data`, here as strings. The three pictures are in the notation
+ * GetDateFormat reads -- `dddd`, `MMM`, `yy`, `HH`, quoted text -- and are
+ * what %x, %#x and %X expand.
+ *
+ * @typedef {Object} TimeNames
+ * @property {string[]} shortDays  Seven, Sunday first.
+ * @property {string[]} days
+ * @property {string[]} shortMonths  Twelve.
+ * @property {string[]} months
+ * @property {string} am
+ * @property {string} pm
+ * @property {string} shortDate
+ * @property {string} longDate
+ * @property {string} time
+ */
+
+/** @type {TimeNames} The C locale's. */
+export const C_TIME_NAMES = Object.freeze({
+    shortDays: DAYS.map(day=>day.slice(0, 3)),
+    days: DAYS,
+    shortMonths: MONTHS.map(month=>month.slice(0, 3)),
+    months: MONTHS,
+    am: 'AM',
+    pm: 'PM',
+    shortDate: 'MM/dd/yy',
+    longDate: 'dddd, MMMM dd, yyyy',
+    time: 'HH:mm:ss',
+});
+
+/**
+ * `__lc_time_data` as msvcrt.dll's callers compiled it: the 43 name
+ * pointers in TimeNames' order, then the locale, the calendar and a
+ * reference count.
+ */
+export const LC_TIME_DATA = Object.freeze({ POINTERS: 43, LCID: 172, CALTYPE: 176,
+    REFCOUNT: 180, SIZE: 184 });
+
+/** @param {TimeNames} names @returns {string[]} the 43 strings, in the structure's order */
+export const timeNameList = names=>[...names.shortDays, ...names.days, ...names.shortMonths,
+    ...names.months, names.am, names.pm, names.shortDate, names.longDate, names.time];
+
+/** @param {string[]} list @returns {TimeNames} */
+export const timeNamesOf = list=>({
+    shortDays: list.slice(0, 7), days: list.slice(7, 14), shortMonths: list.slice(14, 26),
+    months: list.slice(26, 38), am: list[38], pm: list[39], shortDate: list[40],
+    longDate: list[41], time: list[42],
+});
+
+/**
+ * A GetDateFormat picture expanded for a moment: `d`..`dddd`, `M`..`MMMM`,
+ * `y`, `yy`, `yyyy`, `h`/`hh`, `H`/`HH`, `m`/`mm`, `s`/`ss`, `t`/`tt`, text
+ * in single quotes as itself (`''` a quote), and anything else as itself.
+ * `noZeros` drops the leading zeros, as strftime's `#` flag asks.
+ *
+ * @param {string} picture @param {Date} when @param {TimeNames} names
+ * @param {boolean} [noZeros]
+ */
+function expandPicture(picture, when, names, noZeros = false){
+    /** @param {number} value @param {number} width */
+    const number = (value, width)=>(noZeros ? String(value) : pad(value, width));
+    const hours = when.getUTCHours();
+    let text = '';
+    for (let at = 0; at < picture.length;)
+    {
+        const letter = picture[at];
+        if (letter === '\'')
+        {
+            const close = picture.indexOf('\'', at + 1);
+            const end = close < 0 ? picture.length : close;
+            text += at + 1 === end && close >= 0 ? '\'' : picture.slice(at + 1, end);
+            at = end + 1;
+            continue;
+        }
+        let run = 1;
+        while (picture[at + run] === letter)
+        {
+            run++;
+        }
+        at += run;
+        switch (letter)
+        {
+            case 'd':
+                text += run >= 4 ? names.days[when.getUTCDay()]
+                    : run === 3 ? names.shortDays[when.getUTCDay()]
+                        : number(when.getUTCDate(), run);
+                break;
+            case 'M':
+                text += run >= 4 ? names.months[when.getUTCMonth()]
+                    : run === 3 ? names.shortMonths[when.getUTCMonth()]
+                        : number(when.getUTCMonth() + 1, run);
+                break;
+            case 'y':
+                text += run >= 3 ? String(when.getUTCFullYear())
+                    : number(when.getUTCFullYear() % 100, run);
+                break;
+            case 'h':
+                text += number(hours % 12 === 0 ? 12 : hours % 12, Math.min(run, 2));
+                break;
+            case 'H':
+                text += number(hours, Math.min(run, 2));
+                break;
+            case 'm':
+                text += number(when.getUTCMinutes(), Math.min(run, 2));
+                break;
+            case 's':
+                text += number(when.getUTCSeconds(), Math.min(run, 2));
+                break;
+            case 't': {
+                const marker = hours < 12 ? names.am : names.pm;
+                text += run === 1 ? marker.slice(0, 1) : marker;
+                break;
+            }
+            default:
+                text += letter.repeat(run);
+        }
+    }
+    return text;
+}
 
 /**
  * A struct tm's fields.
@@ -143,23 +265,30 @@ export function asctime(tm){
 }
 
 /**
+ * strftime's text, with the names and pictures of a locale -- the C
+ * locale's unless others are given, as `_Strftime` gives them. The `#`
+ * flag is msvcrt's: `%#c` and `%#x` are the long date, and on a number it
+ * drops the leading zeros.
+ *
  * @param {string} format
  * @param {Date} when
+ * @param {TimeNames} [names]
  */
-export function strftime(format, when){
+export function strftime(format, when, names = C_TIME_NAMES){
     const dayOfYear = Math.floor(
         (Date.UTC(when.getUTCFullYear(), when.getUTCMonth(), when.getUTCDate())
             - Date.UTC(when.getUTCFullYear(), 0, 1)) / 86400000);
     /** @param {number} firstDay */
     const weekOfYear = firstDay=>pad(Math.floor(
         (dayOfYear + 7 - (when.getUTCDay() - firstDay + 7) % 7) / 7));
+    let alternate = false;
 
     /** @type {Record<string, () => string>} */
     const fields = {
-        a: ()=>DAYS[when.getUTCDay()].slice(0, 3),
-        A: ()=>DAYS[when.getUTCDay()],
-        b: ()=>MONTHS[when.getUTCMonth()].slice(0, 3),
-        B: ()=>MONTHS[when.getUTCMonth()],
+        a: ()=>names.shortDays[when.getUTCDay()],
+        A: ()=>names.days[when.getUTCDay()],
+        b: ()=>names.shortMonths[when.getUTCMonth()],
+        B: ()=>names.months[when.getUTCMonth()],
         c: ()=>`${fields.x()} ${fields.X()}`,
         d: ()=>pad(when.getUTCDate()),
         H: ()=>pad(when.getUTCHours()),
@@ -167,15 +296,13 @@ export function strftime(format, when){
         j: ()=>pad(dayOfYear + 1, 3),
         m: ()=>pad(when.getUTCMonth() + 1),
         M: ()=>pad(when.getUTCMinutes()),
-        p: ()=>(when.getUTCHours() < 12 ? 'AM' : 'PM'),
+        p: ()=>(when.getUTCHours() < 12 ? names.am : names.pm),
         S: ()=>pad(when.getUTCSeconds()),
         U: ()=>weekOfYear(0),
         w: ()=>String(when.getUTCDay()),
         W: ()=>weekOfYear(1),
-        x: ()=>`${pad(when.getUTCMonth() + 1)}/${pad(when.getUTCDate())}`
-            + `/${pad(when.getUTCFullYear() % 100)}`,
-        X: ()=>`${pad(when.getUTCHours())}:${pad(when.getUTCMinutes())}`
-            + `:${pad(when.getUTCSeconds())}`,
+        x: ()=>expandPicture(alternate ? names.longDate : names.shortDate, when, names),
+        X: ()=>expandPicture(names.time, when, names),
         y: ()=>pad(when.getUTCFullYear() % 100),
         Y: ()=>String(when.getUTCFullYear()),
         Z: ()=>'UTC',
@@ -190,11 +317,20 @@ export function strftime(format, when){
             text += format[at];
             continue;
         }
-        const field = fields[format[++at]];
+        alternate = format[at + 1] === '#';
+        if (alternate)
+        {
+            at++;
+        }
+        const letter = format[++at];
+        const field = fields[letter];
         // An unknown specifier is undefined behaviour; msvcrt drops it, and
         // dropping keeps the rest of the string in the positions the caller
         // laid out.
-        text += field ? field() : '';
+        const value = field ? field() : '';
+        text += alternate && 'dHIjmMSUWyY'.includes(letter)
+            ? value.replace(/^0+(?=\d)/, '')
+            : value;
     }
     return text;
 }
@@ -349,6 +485,48 @@ export function createTimeFunctions(host){
         return { sec: at(TM.SEC), min: at(TM.MIN), hour: at(TM.HOUR), mday: at(TM.MDAY),
             mon: at(TM.MON), year: at(TM.YEAR), wday: at(TM.WDAY), yday: at(TM.YDAY),
             isdst: at(TM.ISDST) };
+    };
+
+    /**
+     * The moment a struct tm names, its fields carried as mktime carries
+     * them: what the strftime family formats.
+     *
+     * @param {number} block
+     */
+    const momentOf = block=>{
+        const tm = readTm(block);
+        return new Date(utcSeconds(tm.year + 1900, tm.mon, tm.mday, tm.hour, tm.min, tm.sec)
+            * 1000);
+    };
+
+    /**
+     * The names an `__lc_time_data` in guest memory points at.
+     *
+     * @param {number} block
+     * @returns {TimeNames}
+     */
+    const readTimeNames = block=>{
+        const view = new DataView(host.readMemory(block, LC_TIME_DATA.POINTERS * 4).slice().buffer);
+        return timeNamesOf(Array.from({ length: LC_TIME_DATA.POINTERS }, (_, at)=>{
+            const pointer = view.getUint32(at * 4, true);
+            return pointer === 0 ? '' : host.readCString(pointer, 256);
+        }));
+    };
+
+    /**
+     * Text on the heap for the caller to free, in the ANSI page; null when
+     * there is no room.
+     *
+     * @param {string} text
+     */
+    const publishText = text=>{
+        const bytes = encodeAnsi(`${text}\0`);
+        const address = host.allocate(bytes.length);
+        if (address !== 0)
+        {
+            host.writeMemory(address, bytes);
+        }
+        return address;
     };
 
     /** What a secure call leaves in a struct tm it refuses: every field -1. */
@@ -898,16 +1076,115 @@ export function createTimeFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([destination, max, format, block])=>{
-                const tm = readTm(block);
-                const when = new Date(utcSeconds(tm.year + 1900, tm.mon, tm.mday, tm.hour,
-                    tm.min, tm.sec) * 1000);
-                const text = strftime(host.readCString(format, MAX_STRING), when);
+                const text = strftime(host.readCString(format, MAX_STRING), momentOf(block));
                 if (text.length + 1 > (max >>> 0))
                 {
                     return 0;
                 }
                 writeString(destination, text);
                 return text.length;
+            },
+        },
+
+        /**
+         * size_t wcsftime(wchar_t *dest, size_t max, const wchar_t *format,
+         *                 const struct tm *broken)
+         *
+         * strftime's text in UTF-16, `max` in characters, and nothing written
+         * when it does not fit.
+         */
+        wcsftime: {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([destination, max, format, block])=>{
+                const text = strftime(wideStringAt(host.readMemory, format), momentOf(block));
+                if (text.length + 1 > (max >>> 0))
+                {
+                    return 0;
+                }
+                writeWide(destination, text);
+                return text.length;
+            },
+        },
+
+        /**
+         * size_t _Strftime(char *dest, size_t max, const char *format,
+         *                  const struct tm *broken, void *timeNames)
+         *
+         * strftime with the names of an `__lc_time_data` -- one `_Gettnames`
+         * made, say -- in place of the current locale's; null is the current
+         * locale's.
+         */
+        _Strftime: {
+            convention: 'cdecl',
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([destination, max, format, block, timeNames])=>{
+                const text = strftime(host.readCString(format, MAX_STRING), momentOf(block),
+                    (timeNames >>> 0) === 0 ? C_TIME_NAMES : readTimeNames(timeNames >>> 0));
+                if (text.length + 1 > (max >>> 0))
+                {
+                    return 0;
+                }
+                writeString(destination, text);
+                return text.length;
+            },
+        },
+
+        /**
+         * char *_Getdays(void) and char *_Getmonths(void)
+         *
+         * The current locale's names on the heap, for the caller to free, as
+         * the runtime spells them: each short name and its long one after a
+         * colon -- ":Sun:Sunday:Mon:Monday..." -- null when there is no room.
+         */
+        _Getdays: {
+            convention: 'cdecl',
+            argBytes: 0,
+            handler: ()=>publishText(C_TIME_NAMES.shortDays
+                .map((name, at)=>`:${name}:${C_TIME_NAMES.days[at]}`).join('')),
+        },
+        _Getmonths: {
+            convention: 'cdecl',
+            argBytes: 0,
+            handler: ()=>publishText(C_TIME_NAMES.shortMonths
+                .map((name, at)=>`:${name}:${C_TIME_NAMES.months[at]}`).join('')),
+        },
+
+        /**
+         * void *_Gettnames(void)
+         *
+         * A copy of the current locale's `__lc_time_data` on the heap, its
+         * strings in the same block after it, so the one free the caller
+         * makes releases it all.
+         */
+        _Gettnames: {
+            convention: 'cdecl',
+            argBytes: 0,
+            handler: ()=>{
+                const strings = timeNameList(C_TIME_NAMES).map(name=>encodeAnsi(`${name}\0`));
+                const size = LC_TIME_DATA.SIZE
+                    + strings.reduce((total, bytes)=>total + bytes.length, 0);
+                const block = host.allocate(size);
+                if (block === 0)
+                {
+                    return 0;
+                }
+                const bytes = new Uint8Array(size);
+                const view = new DataView(bytes.buffer);
+                let at = LC_TIME_DATA.SIZE;
+                strings.forEach((text, index)=>{
+                    view.setUint32(index * 4, block + at, true);
+                    bytes.set(text, at);
+                    at += text.length;
+                });
+                // The C locale is LCID zero, its calendar the Gregorian (1).
+                view.setUint32(LC_TIME_DATA.LCID, 0, true);
+                view.setUint32(LC_TIME_DATA.CALTYPE, 1, true);
+                view.setUint32(LC_TIME_DATA.REFCOUNT, 0, true);
+                host.writeMemory(block, bytes);
+                return block;
             },
         },
 

@@ -183,3 +183,87 @@ test('GetFileInformationByHandleEx answers the four classes and refuses the rest
     assert.equal(errors.at(-1), 6);
     assert.equal(fns.GetFileInformationByHandleEx.argBytes, 16);
 });
+
+/**
+ * A SYSTEMTIME's eight words.
+ *
+ * @param {Uint8Array} bytes @param {number} at @param {number[]} words
+ */
+const putWords = (bytes, at, words)=>{
+    const view = new DataView(bytes.buffer);
+    words.forEach((word, index)=>view.setUint16(at + index * 2, word, true));
+};
+/** @param {Uint8Array} bytes @param {number} at */
+const words = (bytes, at)=>{
+    const view = new DataView(bytes.buffer);
+    return Array.from({ length: 8 }, (_, index)=>view.getUint16(at + index * 2, true));
+};
+
+test('SystemTimeToTzSpecificLocalTime with no zone is this machine\'s, which is UTC', ()=>{
+    const { fns, bytes } = setup();
+    putWords(bytes, 0x100, [2026, 10, 0, 4, 13, 45, 30, 250]);
+    assert.equal(fns.SystemTimeToTzSpecificLocalTime.argBytes, 12);
+    assert.equal(fns.SystemTimeToTzSpecificLocalTime.handler([0, 0x100, 0x120]), 1);
+    assert.deepEqual(words(bytes, 0x120), [2026, 10, 0, 4, 13, 45, 30, 250],
+        'unchanged, the day of the week (Sunday) computed');
+
+    // The same as the zone GetTimeZoneInformation hands out, passed back in.
+    assert.equal(fns.GetTimeZoneInformation.handler([0x600]), 0);
+    assert.equal(fns.SystemTimeToTzSpecificLocalTime.handler([0x600, 0x100, 0x140]), 1);
+    assert.deepEqual(words(bytes, 0x140), words(bytes, 0x120));
+});
+
+test('SystemTimeToTzSpecificLocalTime applies a zone\'s bias and its daylight rules', ()=>{
+    const { fns, bytes } = setup();
+    const ZONE = 0x600;
+    const view = new DataView(bytes.buffer);
+    // UTC+1, daylight from the last Sunday of March at 02:00 to the last
+    // Sunday of October at 03:00, an hour more.
+    view.setInt32(ZONE + TIME_ZONE_INFORMATION.Bias, -60, true);
+    view.setInt32(ZONE + TIME_ZONE_INFORMATION.StandardBias, 0, true);
+    view.setInt32(ZONE + TIME_ZONE_INFORMATION.DaylightBias, -60, true);
+    putWords(bytes, ZONE + TIME_ZONE_INFORMATION.StandardDate, [0, 10, 0, 5, 3, 0, 0, 0]);
+    putWords(bytes, ZONE + TIME_ZONE_INFORMATION.DaylightDate, [0, 3, 0, 5, 2, 0, 0, 0]);
+
+    /** @param {number[]} utc */
+    const convert = utc=>{
+        putWords(bytes, 0x100, utc);
+        assert.equal(fns.SystemTimeToTzSpecificLocalTime.handler([ZONE, 0x100, 0x120]), 1);
+        return words(bytes, 0x120);
+    };
+    assert.deepEqual(convert([2026, 1, 0, 15, 12, 0, 0, 0]), [2026, 1, 4, 15, 13, 0, 0, 0]);
+    assert.deepEqual(convert([2026, 7, 0, 1, 12, 0, 0, 0]), [2026, 7, 3, 1, 14, 0, 0, 0]);
+    // 2026's last Sunday of March is the 29th: 01:00 UTC is 02:00 standard.
+    assert.deepEqual(convert([2026, 3, 0, 29, 0, 59, 0, 0]), [2026, 3, 0, 29, 1, 59, 0, 0]);
+    assert.deepEqual(convert([2026, 3, 0, 29, 1, 0, 0, 0]), [2026, 3, 0, 29, 3, 0, 0, 0]);
+    // And of October the 25th: 01:00 UTC is 03:00 daylight.
+    assert.deepEqual(convert([2026, 10, 0, 25, 0, 59, 0, 0]), [2026, 10, 0, 25, 2, 59, 0, 0]);
+    assert.deepEqual(convert([2026, 10, 0, 25, 1, 0, 0, 0]), [2026, 10, 0, 25, 2, 0, 0, 0]);
+    // Across midnight and the year.
+    assert.deepEqual(convert([2026, 12, 0, 31, 23, 30, 0, 0]), [2027, 1, 5, 1, 0, 30, 0, 0]);
+});
+
+test('SystemTimeToTzSpecificLocalTime runs a southern zone\'s daylight across the new year', ()=>{
+    const { fns, bytes } = setup();
+    const ZONE = 0x600;
+    const view = new DataView(bytes.buffer);
+    // UTC+10, daylight from the first Sunday of October to the first of April.
+    view.setInt32(ZONE + TIME_ZONE_INFORMATION.Bias, -600, true);
+    view.setInt32(ZONE + TIME_ZONE_INFORMATION.DaylightBias, -60, true);
+    putWords(bytes, ZONE + TIME_ZONE_INFORMATION.StandardDate, [0, 4, 0, 1, 3, 0, 0, 0]);
+    putWords(bytes, ZONE + TIME_ZONE_INFORMATION.DaylightDate, [0, 10, 0, 1, 2, 0, 0, 0]);
+    putWords(bytes, 0x100, [2026, 1, 0, 10, 0, 0, 0, 0]);
+    assert.equal(fns.SystemTimeToTzSpecificLocalTime.handler([ZONE, 0x100, 0x120]), 1);
+    assert.deepEqual(words(bytes, 0x120).slice(4, 6), [11, 0], 'January is daylight there');
+    putWords(bytes, 0x100, [2026, 6, 0, 10, 0, 0, 0, 0]);
+    fns.SystemTimeToTzSpecificLocalTime.handler([ZONE, 0x100, 0x120]);
+    assert.deepEqual(words(bytes, 0x120).slice(4, 6), [10, 0], 'June is not');
+});
+
+test('SystemTimeToTzSpecificLocalTime refuses a time that names no moment', ()=>{
+    const { fns, bytes, errors } = setup();
+    putWords(bytes, 0x100, [2026, 2, 0, 30, 0, 0, 0, 0]);
+    assert.equal(fns.SystemTimeToTzSpecificLocalTime.handler([0, 0x100, 0x120]), 0);
+    assert.equal(fns.SystemTimeToTzSpecificLocalTime.handler([0, 0, 0x120]), 0);
+    assert.deepEqual(errors, [87, 87]);
+});

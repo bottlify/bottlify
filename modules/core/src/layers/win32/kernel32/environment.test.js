@@ -362,3 +362,32 @@ test('text in the upper half of the ANSI page goes back as the bytes it was read
 
     assert.deepEqual(bytesAt(fns.GetCommandLineA.handler() + 3, 2), [0x80, 0x5c]);
 });
+
+test('the wide forms answer the windows directory and expand as the A forms do', ()=>{
+    const host = fakeHost();
+    const fns = createEnvironmentFunctions(host);
+    /** @param {number} address @param {string} text */
+    const plantWide = (address, text)=>{
+        [...text, '\0'].forEach((unit, at)=>{
+            host.bytes[address + at * 2] = unit.charCodeAt(0) & 0xff;
+            host.bytes[address + at * 2 + 1] = unit.charCodeAt(0) >> 8;
+        });
+    };
+
+    assert.equal(fns.GetWindowsDirectoryW.argBytes, 8);
+    assert.equal(fns.GetWindowsDirectoryW.handler([0x200, 64]), 10);
+    assert.equal(host.readWideString(0x200, 64), 'C:\\WINDOWS');
+    assert.equal(host.bytes[0x200 + 20] | host.bytes[0x200 + 21], 0, 'terminated');
+    assert.equal(fns.GetWindowsDirectoryW.handler([0x200, 10]), 11, 'too small: what is needed');
+
+    plantWide(0x100, '%TEMP%\\\u3042 %NOSUCH%');
+    assert.equal(fns.ExpandEnvironmentStringsW.argBytes, 12);
+    const expanded = 'C:\\TEMP\\\u3042 %NOSUCH%';
+    assert.equal(fns.ExpandEnvironmentStringsW.handler([0x100, 0, 0]), expanded.length + 1);
+    host.bytes.fill(0xaa, 0x300, 0x380);
+    assert.equal(fns.ExpandEnvironmentStringsW.handler([0x100, 0x300, expanded.length]),
+        expanded.length + 1);
+    assert.equal(host.bytes[0x300], 0xaa, 'a buffer too small gets nothing');
+    assert.equal(fns.ExpandEnvironmentStringsW.handler([0x100, 0x300, 64]), expanded.length + 1);
+    assert.equal(host.readWideString(0x300, 64), expanded);
+});

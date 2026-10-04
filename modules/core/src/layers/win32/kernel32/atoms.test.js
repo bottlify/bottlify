@@ -119,3 +119,30 @@ test('the wide spellings add and find in the same table', ()=>{
     assert.equal(fns.AddAtomW.handler([WIDE_NAME]), atom, 'one table for both spellings');
     assert.equal(fns.FindAtomW.handler([0x1234]), 0x1234, 'an integer atom is itself');
 });
+
+test('the wide name reads back in UTF-16, cut to the characters asked for', ()=>{
+    const bytes = new Uint8Array(0x10400);
+    const fns = createAtomFunctions({
+        writeMemory: (address, data)=>bytes.set(data, address),
+        readCString(address){
+            let end = address;
+            while (bytes[end] !== 0)
+            {
+                end++;
+            }
+            return decodeAnsi(bytes.subarray(address, end));
+        },
+    });
+    bytes.set([...'Caf\u00e9'].map(c=>c.charCodeAt(0)), NAME);
+    const atom = fns.GlobalAddAtomA.handler([NAME]);
+    /** @param {number} at @param {number} units */
+    const wide = (at, units)=>String.fromCharCode(
+        ...new Uint16Array(bytes.slice(at, at + units * 2).buffer));
+
+    assert.equal(fns.GlobalGetAtomNameW.handler([atom, OUT, 64]), 4);
+    assert.equal(wide(OUT, 5), 'Caf\u00e9\0');
+    assert.equal(fns.GetAtomNameW.handler([atom, OUT, 3]), 2);
+    assert.equal(wide(OUT, 3), 'Ca\0');
+    assert.equal(fns.GlobalGetAtomNameW.handler([0x2a, OUT, 64]), 3);
+    assert.equal(wide(OUT, 4), '#42\0');
+});

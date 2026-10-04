@@ -301,6 +301,17 @@ export function createConversionFunctions(host){
         host.writeMemory(pointer, bytes);
     };
 
+    /** @param {number} pointer @param {string} text */
+    const writeWideString = (pointer, text)=>{
+        const bytes = new Uint8Array((text.length + 1) * 2);
+        const view = new DataView(bytes.buffer);
+        for (let at = 0; at < text.length; at++)
+        {
+            view.setUint16(at * 2, text.charCodeAt(at), true);
+        }
+        host.writeMemory(pointer, bytes);
+    };
+
     /** @param {number} pointer @param {number} value */
     const writeInt = (pointer, value)=>{
         if ((pointer >>> 0) === 0)
@@ -373,8 +384,9 @@ export function createConversionFunctions(host){
      *
      * @param {number} valueSlots
      * @param {boolean} signed
+     * @param {boolean} [wide]  The text in UTF-16, for the `_*tow` family.
      */
-    const toText = (valueSlots, signed)=>({
+    const toText = (valueSlots, signed, wide = false)=>({
         convention: 'cdecl',
         argBytes: (valueSlots + 2) * 4,
         /** @param {number[]} args */
@@ -391,12 +403,34 @@ export function createConversionFunctions(host){
             {
                 pattern = (pattern << 32n) | BigInt(args[slot] >>> 0);
             }
-            writeString(buffer, signed && radix === 10
+            (wide ? writeWideString : writeString)(buffer, signed && radix === 10
                 ? BigInt.asIntN(width, pattern).toString(10)
                 : pattern.toString(radix));
             return buffer;
         },
     });
+
+    /**
+     * int _wtoi(const wchar_t *str) and long _wtol: atoi's reading over a
+     * wide string -- white space, a sign, ASCII digits -- and atoi's
+     * overflow, which wraps in 32 bits rather than clamping.
+     */
+    const wideAtoi = {
+        convention: 'cdecl',
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([string])=>{
+            const text = wideStringAt(/** @type {(address: number, length: number)
+                => Uint8Array} */ (host.readMemory), string);
+            const match = /^[ \t\n\v\f\r]*([+-]?)([0-9]*)/.exec(text);
+            let total = 0;
+            for (const digit of match?.[2] ?? '')
+            {
+                total = (Math.imul(total, 10) + digit.charCodeAt(0) - 0x30) | 0;
+            }
+            return match?.[1] === '-' ? (0 - total) | 0 : total;
+        },
+    };
 
     /** long strtol(const char *str, char **end, int base) */
     /** @param {bigint} magnitude @param {boolean} negative */
@@ -473,7 +507,19 @@ export function createConversionFunctions(host){
              */
             wcstol: strtoInteger(12, toLong, longLimit, true),
             wcstoul: strtoInteger(12, toUnsignedLong, unsignedLongLimit, true),
+
+            _wtoi: wideAtoi,
+            _wtol: wideAtoi,
         } : {},
+
+        /** wchar_t *_itow(int value, wchar_t *buffer, int radix) -- _ltoa's text, wide */
+        _itow: toText(1, true, true),
+
+        /** wchar_t *_ltow(long value, wchar_t *buffer, int radix) */
+        _ltow: toText(1, true, true),
+
+        /** wchar_t *_ultow(unsigned long value, wchar_t *buffer, int radix) */
+        _ultow: toText(1, false, true),
 
         /** char *_ltoa(long value, char *buffer, int radix) */
         _ltoa: toText(1, true),
@@ -602,6 +648,20 @@ export function createConversionFunctions(host){
         return decimal(scanned);
     };
 
+    /**
+     * double wcstod(const wchar_t *str, wchar_t **end): strtod's reading of
+     * a wide string, the end two bytes a character.
+     *
+     * @param {number[]} args
+     */
+    const wcstod = args=>{
+        const text = wideStringAt(/** @type {(address: number, length: number)
+            => Uint8Array} */ (readMemory), args[0]);
+        const scanned = scanDecimal(text);
+        writeInt(args[1], scanned ? args[0] + scanned.end * 2 : args[0]);
+        return decimal(scanned);
+    };
+
     const handlers = {
         /** double atof(const char *str) */
         atof: returningDouble(host.fpu, 4, args=>decimal(scanDecimal(decimalText(args[0])))),
@@ -616,6 +676,7 @@ export function createConversionFunctions(host){
     const guest = { readMemory, writeMemory, fpu: host.fpu };
     return {
         ...table,
+        ...readMemory ? { wcstod: returningDouble(host.fpu, 8, wcstod) } : {},
         atof: readMemory
             ? guestEntry(inGuestFloat.atof, FLOAT_CODE.atof, guest, handlers.atof)
             : handlers.atof,

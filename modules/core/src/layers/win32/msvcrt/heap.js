@@ -44,6 +44,10 @@ import {
  *     falling back to its handler here.
  * @property {() => number} [heapHandle]
  * @property {(bytes: number) => number} [allocateCode]
+ * @property {(entry: number, args: number[], thread?: any) => Promise<number>} [callGuest]
+ *     How the program's new handler is run when an allocation fails. Absent,
+ *     a handler can be set but is never called.
+ * @property {() => any} [currentThread]
  */
 
 /** A pointer's size: what an aligned block keeps below itself, and its least alignment. */
@@ -56,8 +60,53 @@ export function createHeapFunctions(host){
     /** @param {number} bytes */
     const malloc = bytes=>host.allocate(bytes >>> 0);
 
-    /** @type {(args: number[]) => number} */
-    const mallocHandler = ([bytes])=>malloc(bytes);
+    /**
+     * The program's new handler, `int (__cdecl *)(size_t)`, and whether
+     * malloc calls it too (`_set_new_mode(1)`) or only operator new does.
+     */
+    let newHandler = 0;
+    let newMode = 0;
+
+    /**
+     * An allocation that failed, retried for as long as the new handler says
+     * it freed something: zero from the handler, or no handler, is the null
+     * the caller gets. The handler is guest code, so this answers late.
+     *
+     * @param {number} bytes
+     * @returns {number | Promise<number>}
+     */
+    const rescue = bytes=>{
+        if (newHandler === 0 || !host.callGuest)
+        {
+            return 0;
+        }
+        const callGuest = host.callGuest;
+        const thread = host.currentThread?.();
+        /** @returns {Promise<number>} */
+        const attempt = ()=>(newHandler === 0
+            ? Promise.resolve(0)
+            : callGuest(newHandler, [bytes >>> 0], thread).then(answer=>{
+                if ((answer | 0) === 0)
+                {
+                    return 0;
+                }
+                const address = malloc(bytes);
+                return address !== 0 ? address : attempt();
+            }));
+        return attempt();
+    };
+
+    /** @type {(args: number[]) => number | Promise<number>} */
+    const mallocHandler = ([bytes])=>{
+        const address = malloc(bytes);
+        return address === 0 && newMode !== 0 ? rescue(bytes) : address;
+    };
+
+    /** @type {(args: number[]) => number | Promise<number>} */
+    const newHandlerCall = ([bytes])=>{
+        const address = malloc(bytes);
+        return address === 0 ? rescue(bytes) : address;
+    };
 
     /** @type {(args: number[]) => number} */
     const freeHandler = ([address])=>{
@@ -74,7 +123,7 @@ export function createHeapFunctions(host){
      * The guest's routines, placed once on the first bind of any of them,
      * each falling back to its handler through a trap of its own.
      *
-     * @type {Record<'malloc' | 'free' | 'calloc' | 'realloc' | 'msize', number> | null}
+     * @type {Record<'malloc' | 'new' | 'free' | 'calloc' | 'realloc' | 'msize', number> | null}
      */
     let routines = null;
     /** @param {{ register: (label: string, trap: any) => number }} builder */
@@ -107,6 +156,8 @@ export function createHeapFunctions(host){
         routines = {
             malloc: place('<malloc>', allocator,
                 (p, at, trap)=>mallocCode(p, at, trap, heap)),
+            new: place('<new>', newAllocator,
+                (p, at, trap)=>mallocCode(p, at, trap, heap)),
             free: place('<free>', deallocator, freeCode),
             calloc: place('<calloc>', table.calloc, (p, at, trap)=>callocCode(p, at, trap, heap)),
             realloc: place('<realloc>', table.realloc, reallocCode),
@@ -114,7 +165,7 @@ export function createHeapFunctions(host){
         };
         return routines;
     };
-    /** @param {'malloc' | 'free' | 'calloc' | 'realloc' | 'msize'} which */
+    /** @param {'malloc' | 'new' | 'free' | 'calloc' | 'realloc' | 'msize'} which */
     const routine = which=>(host.guestHeap && host.heapHandle && host.allocateCode
         ? {
             /** @param {{ register: (label: string, trap: any) => number }} builder */
@@ -129,11 +180,35 @@ export function createHeapFunctions(host){
         ...routine('malloc'),
     };
 
+    /**
+     * operator new: malloc, but a failure is the new handler's to answer
+     * whatever the new mode -- a routine of its own for that, the guest's
+     * fast path the same as malloc's.
+     */
+    const newAllocator = {
+        convention: 'cdecl',
+        argBytes: 4,
+        handler: newHandlerCall,
+        ...routine('new'),
+    };
+
     const deallocator = {
         convention: 'cdecl',
         argBytes: 4,
         handler: freeHandler,
         ...routine('free'),
+    };
+
+    /** _PNH _set_new_handler(_PNH handler): the previous handler back. */
+    const setNewHandler = {
+        convention: 'cdecl',
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([handler])=>{
+            const previous = newHandler;
+            newHandler = handler >>> 0;
+            return previous;
+        },
     };
 
     const table = {
@@ -287,10 +362,63 @@ export function createHeapFunctions(host){
         // compiled object actually imports. Failure is a null return: this
         // runtime has no way to throw std::bad_alloc into guest code, and code
         // built against the older runtime checked for null anyway.
-        '??2@YAPAXI@Z': allocator,   // operator new(unsigned int)
-        '??_U@YAPAXI@Z': allocator,  // operator new[](unsigned int)
+        '??2@YAPAXI@Z': newAllocator,   // operator new(unsigned int)
+        '??_U@YAPAXI@Z': newAllocator,  // operator new[](unsigned int)
         '??3@YAXPAX@Z': deallocator, // operator delete(void *)
         '??_V@YAXPAX@Z': deallocator, // operator delete[](void *)
+
+        /**
+         * _PNH _set_new_handler(_PNH handler), by its C++ name, and
+         * _PNH _query_new_handler(void). Zero is no handler.
+         */
+        '?_set_new_handler@@YAP6AHI@ZP6AHI@Z@Z': setNewHandler,
+        '?_query_new_handler@@YAP6AHI@ZXZ': {
+            convention: 'cdecl',
+            argBytes: 0,
+            handler: ()=>newHandler,
+        },
+
+        /**
+         * int _set_new_mode(int mode) and int _query_new_mode(void): with 1,
+         * a failed malloc calls the new handler as operator new does. Only 0
+         * and 1 are modes; anything else is -1 and EINVAL, the mode kept.
+         */
+        '?_set_new_mode@@YAHH@Z': {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([mode])=>{
+                if ((mode >>> 0) > 1)
+                {
+                    host.errno?.(EINVAL);
+                    return -1;
+                }
+                const previous = newMode;
+                newMode = mode >>> 0;
+                return previous;
+            },
+        },
+        '?_query_new_mode@@YAHXZ': {
+            convention: 'cdecl',
+            argBytes: 0,
+            handler: ()=>newMode,
+        },
+
+        /**
+         * int _callnewh(size_t size)
+         *
+         * The new handler called once for `size`: 1 when it answered that it
+         * freed something, 0 when it did not or there is none.
+         */
+        _callnewh: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([size])=>(newHandler === 0 || !host.callGuest
+                ? 0
+                : host.callGuest(newHandler, [size >>> 0], host.currentThread?.())
+                    .then(answer=>((answer | 0) === 0 ? 0 : 1))),
+        },
     };
     return table;
 }

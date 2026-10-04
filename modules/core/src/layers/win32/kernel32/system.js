@@ -404,16 +404,18 @@ export function createSystemFunctions(host){
      * `w` asks for a wide argument and `h` for a narrow one, and a capital
      * `S` or `C` is the other width to the family, as it is in printf. A
      * conversion this surface does not format produces nothing rather than a
-     * reading of the slot that would be a different type's.
+     * reading of the slot that would be a different type's. The family's own
+     * width is the caller's: FormatMessageW reads a bare `s` as wide and `S`
+     * as narrow.
      *
-     * @param {number} value @param {string} conversion
+     * @param {number} value @param {string} conversion @param {boolean} wideCaller
      * @returns {string}
      */
-    const insertValue = (value, conversion)=>{
+    const insertValue = (value, conversion, wideCaller)=>{
         const shape = conversion.toLowerCase();
         const last = conversion === '' ? 's' : conversion[conversion.length - 1];
-        const wide = shape.includes('w') || (!shape.includes('h')
-            && (last === 'S' || last === 'C'));
+        const other = last === 'S' || last === 'C';
+        const wide = shape.includes('w') || (!shape.includes('h') && wideCaller !== other);
         switch (last.toLowerCase())
         {
             case 's':
@@ -453,9 +455,10 @@ export function createSystemFunctions(host){
      * pointer *is* the array, and then it is indexed directly.
      *
      * @param {string} text @param {number} argumentsPtr @param {boolean} array
+     * @param {boolean} [wideCaller]
      * @returns {string}
      */
-    const insertArguments = (text, argumentsPtr, array)=>{
+    const insertArguments = (text, argumentsPtr, array, wideCaller = false)=>{
         const base = array ? argumentsPtr : readDword(argumentsPtr);
         /** @param {number} index */
         const valueAt = index=>readDword(base + index * 4);
@@ -492,10 +495,86 @@ export function createSystemFunctions(host){
                     at = close;
                 }
             }
-            out += insertValue(valueAt(index), conversion);
+            out += insertValue(valueAt(index), conversion, wideCaller);
         }
         return out;
     };
+
+    /** @param {number} address @param {string} text  UTF-16, written with a terminator. */
+    const writeWide = (address, text)=>{
+        const units = new Uint16Array(text.length + 1);
+        for (let at = 0; at < text.length; at++)
+        {
+            units[at] = text.charCodeAt(at);
+        }
+        host.writeMemory(address, new Uint8Array(units.buffer));
+    };
+
+    /**
+     * FormatMessageA and FormatMessageW: one body, the width of the source,
+     * the inserts and the buffer the only difference.
+     *
+     * @param {boolean} wide
+     */
+    const formatMessage = wide=>({
+        argBytes: 28,
+        /** @param {number[]} args */
+        handler: survivesFault(([flags, source, messageId, , buffer, size,
+            argumentsPtr])=>{
+            const asked = flags >>> 0;
+            /** @type {string} */
+            let text;
+            if ((asked & FORMAT_MESSAGE_FROM_STRING) !== 0)
+            {
+                text = (wide ? readWide : readAnsi)(source >>> 0, MAX_STRING);
+                if ((asked & FORMAT_MESSAGE_IGNORE_INSERTS) === 0
+                    && (argumentsPtr >>> 0) !== 0)
+                {
+                    text = insertArguments(text, argumentsPtr >>> 0,
+                        (asked & FORMAT_MESSAGE_ARGUMENT_ARRAY) !== 0, wide);
+                }
+            }
+            else if ((asked & FORMAT_MESSAGE_FROM_SYSTEM) !== 0)
+            {
+                const code = messageId >>> 0;
+                text = /** @type {Record<number, string>} */ (SYSTEM_MESSAGES)[code]
+                    ?? `Error ${code}.`;
+            }
+            else
+            {
+                // FROM_HMODULE needs a message table in a module, which no
+                // caller in this build asks this surface for.
+                host.setLastError(ERROR_CALL_NOT_IMPLEMENTED);
+                return 0;
+            }
+
+            const unit = wide ? 2 : 1;
+            const write = wide ? writeWide : writeAnsi;
+            if ((asked & FORMAT_MESSAGE_ALLOCATE_BUFFER) !== 0)
+            {
+                if (!host.allocate || buffer === 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const address = host.allocate((text.length + 1) * unit);
+                if (address === 0)
+                {
+                    host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
+                    return 0;
+                }
+                write(address, text);
+                writeDword(buffer >>> 0, address);
+                return text.length;
+            }
+            if (buffer === 0 || text.length + 1 > (size >>> 0))
+            {
+                return 0;
+            }
+            write(buffer >>> 0, text);
+            return text.length;
+        }),
+    });
 
     /** @param {number} address @param {number} length */
     const readable = (address, length)=>{
@@ -1147,58 +1226,17 @@ export function createSystemFunctions(host){
          * longer the buffer but a pointer to where the address of one goes, and
          * a caller that passes it will call LocalFree on what it finds there.
          */
-        FormatMessageA: {
-            argBytes: 28,
-            /** @param {number[]} args */
-            handler: survivesFault(([flags, source, messageId, , buffer, size,
-                argumentsPtr])=>{
-                const asked = flags >>> 0;
-                /** @type {string} */
-                let text;
-                if ((asked & FORMAT_MESSAGE_FROM_STRING) !== 0)
-                {
-                    text = readAnsi(source >>> 0, MAX_STRING);
-                    if ((asked & FORMAT_MESSAGE_IGNORE_INSERTS) === 0
-                        && (argumentsPtr >>> 0) !== 0)
-                    {
-                        text = insertArguments(text, argumentsPtr >>> 0,
-                            (asked & FORMAT_MESSAGE_ARGUMENT_ARRAY) !== 0);
-                    }
-                }
-                else if ((asked & FORMAT_MESSAGE_FROM_SYSTEM) !== 0)
-                {
-                    const code = messageId >>> 0;
-                    text = /** @type {Record<number, string>} */ (SYSTEM_MESSAGES)[code]
-                        ?? `Error ${code}.`;
-                }
-                else
-                {
-                    // FROM_HMODULE needs a message table in a module, which no
-                    // caller in this build asks this surface for.
-                    host.setLastError(ERROR_CALL_NOT_IMPLEMENTED);
-                    return 0;
-                }
+        FormatMessageA: formatMessage(false),
 
-                if ((asked & FORMAT_MESSAGE_ALLOCATE_BUFFER) !== 0)
-                {
-                    if (!host.allocate || buffer === 0)
-                    {
-                        host.setLastError(ERROR_INVALID_PARAMETER);
-                        return 0;
-                    }
-                    const address = host.allocate(text.length + 1);
-                    if (address === 0)
-                    {
-                        host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
-                        return 0;
-                    }
-                    writeAnsi(address, text);
-                    writeDword(buffer >>> 0, address);
-                    return text.length;
-                }
-                return writeAnsiTo(buffer >>> 0, size >>> 0, text);
-            }),
-        },
+        /**
+         * DWORD FormatMessageW(DWORD dwFlags, LPCVOID lpSource, DWORD dwMessageId,
+         *   DWORD dwLanguageId, LPWSTR lpBuffer, DWORD nSize, va_list *Arguments)
+         *
+         * The A form in UTF-16: the source string and a bare `%n` insert are
+         * wide, nSize and the answer count characters, and an allocated
+         * buffer is sized for them.
+         */
+        FormatMessageW: formatMessage(true),
 
         /**
          * LPSTR lstrcatA(LPSTR lpString1, LPCSTR lpString2)

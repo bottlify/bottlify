@@ -74,11 +74,13 @@ const TMPNAM_BUFFER = 260;
  * character, whatever byte it is: the second byte of a Shift-JIS character
  * may be a backslash's, and is no separator.
  *
- * @param {string} path  Read in the ANSI page, a character a byte.
+ * @param {string} path  Read in the ANSI page, a character a byte -- or, `wide`,
+ *     in UTF-16, where every unit is a character and none is a lead byte.
  * @param {(byte: number) => boolean} [isLead]  The multibyte page's lead bytes.
+ * @param {boolean} [wide]
  * @returns {{ drive: string, directory: string, name: string, extension: string }}
  */
-export function splitPath(path, isLead = ()=>false){
+export function splitPath(path, isLead = ()=>false, wide = false){
     let rest = path;
     let drive = '';
     if (/^[A-Za-z]:/.test(rest))
@@ -89,11 +91,11 @@ export function splitPath(path, isLead = ()=>false){
 
     // Both separators count: a path assembled from a configuration file and a
     // constant usually contains one of each.
-    const bytes = encodeAnsi(rest);
+    const bytes = wide ? Array.from(rest, unit=>unit.charCodeAt(0)) : encodeAnsi(rest);
     let lastSeparator = -1;
     for (let at = 0; at < bytes.length; at++)
     {
-        if (isLead(bytes[at]) && at + 1 < bytes.length)
+        if (!wide && isLead(bytes[at]) && at + 1 < bytes.length)
         {
             at++;
         }
@@ -613,6 +615,53 @@ export function createPathFunctions(host){
                     writeWide(path, makePath(read(drive), read(directory), read(name),
                         read(extension)));
                     return 0;
+                },
+            },
+
+            /**
+             * void _wsplitpath(const wchar_t *path, wchar_t *drive, wchar_t *dir,
+             *                  wchar_t *fname, wchar_t *ext)
+             *
+             * _splitpath's parts in UTF-16; a null part is not written.
+             */
+            _wsplitpath: {
+                convention: 'cdecl',
+                argBytes: 20,
+                /** @param {number[]} args */
+                handler: ([path, drive, directory, name, extension])=>{
+                    const parts = splitPath(readWide(path), undefined, true);
+                    writeWide(drive, parts.drive);
+                    writeWide(directory, parts.directory);
+                    writeWide(name, parts.name);
+                    writeWide(extension, parts.extension);
+                    return 0;
+                },
+            },
+
+            /**
+             * wchar_t *_wfullpath(wchar_t *absolute, const wchar_t *relative, size_t max)
+             *
+             * _fullpath in UTF-16, `max` counted in characters; a null
+             * destination is one allocated for the caller to free.
+             */
+            _wfullpath: {
+                convention: 'cdecl',
+                argBytes: 12,
+                /** @param {number[]} args */
+                handler: ([destination, relative, max])=>{
+                    const text = fullPath(readWide(relative), host.files.currentDirectory());
+                    if ((destination >>> 0) === 0)
+                    {
+                        const allocated = host.allocate((text.length + 1) * 2);
+                        writeWide(allocated, text);
+                        return allocated;
+                    }
+                    if (text.length + 1 > (max >>> 0))
+                    {
+                        return 0;
+                    }
+                    writeWide(destination, text);
+                    return destination;
                 },
             },
 

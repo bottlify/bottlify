@@ -208,6 +208,70 @@ export function createDriveFunctions(host){
     };
 
     /**
+     * GetDiskFreeSpace in either spelling: the volume in clusters, clamped so
+     * that the four figures multiplied stay under 2^32.
+     *
+     * @param {(address: number) => string} readPath
+     */
+    const diskFreeSpace = readPath=>({
+        argBytes: 20,
+        /** @param {number[]} args */
+        handler: ([path, sectorsPerCluster, bytesPerSector, freeClusters, totalClusters])=>{
+            const root = path === 0 ? '' : readPath(path >>> 0);
+            if (!known(root))
+            {
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            const disc = discAt(root);
+            if (disc)
+            {
+                writeDwordIf(sectorsPerCluster >>> 0, 1);
+                writeDwordIf(bytesPerSector >>> 0, DISC_SECTOR);
+                writeDwordIf(freeClusters >>> 0, 0);
+                writeDwordIf(totalClusters >>> 0, Math.ceil((disc.size ?? 0) / DISC_SECTOR));
+                return 1;
+            }
+            writeDwordIf(sectorsPerCluster >>> 0, SECTORS_PER_CLUSTER);
+            writeDwordIf(bytesPerSector >>> 0, BYTES_PER_SECTOR);
+            writeDwordIf(freeClusters >>> 0, FREE_CLUSTERS);
+            writeDwordIf(totalClusters >>> 0, TOTAL_CLUSTERS);
+            return 1;
+        },
+    });
+
+    /**
+     * GetDiskFreeSpaceEx in either spelling.
+     *
+     * @param {(address: number) => string} readPath
+     */
+    const diskFreeSpaceEx = readPath=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([path, available, total, free])=>{
+            const root = path === 0 ? '' : readPath(path >>> 0);
+            if (!known(root))
+            {
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            /** @param {number} address @param {number} value */
+            const writeQwordIf = (address, value)=>{
+                if (address !== 0)
+                {
+                    writeDword(address, value >>> 0);
+                    writeDword(address + 4, Math.floor(value / 0x1_0000_0000));
+                }
+            };
+            const disc = discAt(root);
+            writeQwordIf(available >>> 0, disc ? 0 : FREE_BYTES);
+            writeQwordIf(total >>> 0, disc ? disc.size ?? 0 : VOLUME_BYTES);
+            writeQwordIf(free >>> 0, disc ? 0 : FREE_BYTES);
+            return 1;
+        },
+    });
+
+    /**
      * GetVolumeInformation in either width; only the text differs.
      *
      * @param {(address: number, maxLength: number) => string} readPath
@@ -355,32 +419,10 @@ export function createDriveFunctions(host){
          *                        LPDWORD lpBytesPerSector, LPDWORD lpNumberOfFreeClusters,
          *                        LPDWORD lpTotalNumberOfClusters)
          */
-        GetDiskFreeSpaceA: {
-            argBytes: 20,
-            /** @param {number[]} args */
-            handler: ([path, sectorsPerCluster, bytesPerSector, freeClusters, totalClusters])=>{
-                const root = path === 0 ? '' : host.readCString(path >>> 0, MAX_PATH);
-                if (!known(root))
-                {
-                    host.setLastError(ERROR_INVALID_PARAMETER);
-                    return 0;
-                }
-                const disc = discAt(root);
-                if (disc)
-                {
-                    writeDwordIf(sectorsPerCluster >>> 0, 1);
-                    writeDwordIf(bytesPerSector >>> 0, DISC_SECTOR);
-                    writeDwordIf(freeClusters >>> 0, 0);
-                    writeDwordIf(totalClusters >>> 0, Math.ceil((disc.size ?? 0) / DISC_SECTOR));
-                    return 1;
-                }
-                writeDwordIf(sectorsPerCluster >>> 0, SECTORS_PER_CLUSTER);
-                writeDwordIf(bytesPerSector >>> 0, BYTES_PER_SECTOR);
-                writeDwordIf(freeClusters >>> 0, FREE_CLUSTERS);
-                writeDwordIf(totalClusters >>> 0, TOTAL_CLUSTERS);
-                return 1;
-            },
-        },
+        GetDiskFreeSpaceA: diskFreeSpace(address=>host.readCString(address, MAX_PATH)),
+
+        /** GetDiskFreeSpaceW: the same answers, the root read in UTF-16. */
+        GetDiskFreeSpaceW: diskFreeSpace(address=>host.readWideString(address, MAX_PATH * 2)),
 
         /**
          * BOOL GetDiskFreeSpaceExA(LPCSTR lpDirectoryName,
@@ -391,31 +433,10 @@ export function createDriveFunctions(host){
          * volume clamped. There is one user and no quota, so what is free is
          * what the caller may have.
          */
-        GetDiskFreeSpaceExA: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([path, available, total, free])=>{
-                const root = path === 0 ? '' : host.readCString(path >>> 0, MAX_PATH);
-                if (!known(root))
-                {
-                    host.setLastError(ERROR_INVALID_PARAMETER);
-                    return 0;
-                }
-                /** @param {number} address @param {number} value */
-                const writeQwordIf = (address, value)=>{
-                    if (address !== 0)
-                    {
-                        writeDword(address, value >>> 0);
-                        writeDword(address + 4, Math.floor(value / 0x1_0000_0000));
-                    }
-                };
-                const disc = discAt(root);
-                writeQwordIf(available >>> 0, disc ? 0 : FREE_BYTES);
-                writeQwordIf(total >>> 0, disc ? disc.size ?? 0 : VOLUME_BYTES);
-                writeQwordIf(free >>> 0, disc ? 0 : FREE_BYTES);
-                return 1;
-            },
-        },
+        GetDiskFreeSpaceExA: diskFreeSpaceEx(address=>host.readCString(address, MAX_PATH)),
+
+        /** GetDiskFreeSpaceExW: the same answers, the directory read in UTF-16. */
+        GetDiskFreeSpaceExW: diskFreeSpaceEx(address=>host.readWideString(address, MAX_PATH * 2)),
 
         /**
          * BOOL GetVolumeInformationA(LPCSTR lpRootPathName, LPSTR lpVolumeNameBuffer,

@@ -2257,5 +2257,22 @@ export function createLocaleFunctions(host){
 
     // GetStringTypeExA is GetStringTypeA with the locale made explicit in the
     // name: same five arguments, same answer.
-    return { ...table, GetStringTypeExA: table.GetStringTypeA };
+    return {
+        ...table,
+        GetStringTypeExA: table.GetStringTypeA,
+
+        /**
+         * BOOL GetStringTypeExW(LCID Locale, DWORD dwInfoType, LPCWSTR lpSrcStr,
+         *                       int cchSrc, LPWORD lpCharType)
+         *
+         * The Ex form keeps the locale in the W form too, so it has the A
+         * form's five arguments; a wide character's type does not depend on
+         * it, and the rest is GetStringTypeW.
+         */
+        GetStringTypeExW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([, ...rest])=>table.GetStringTypeW.handler(rest),
+        },
+    };
 }

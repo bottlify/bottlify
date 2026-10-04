@@ -169,6 +169,14 @@ export function createEnvironmentFunctions(host){
     };
 
     /**
+     * `%NAME%` replaced by the variable's value where there is one; the
+     * expansion both forms of ExpandEnvironmentStrings answer with.
+     *
+     * @param {string} text
+     */
+    const expand = text=>text.replace(/%([^%]*)%/g, (whole, name)=>variables.get(name) ?? whole);
+
+    /**
      * The wide twin of reportPath. Counted in characters in both forms, so only
      * the writing differs.
      *
@@ -333,11 +341,29 @@ export function createEnvironmentFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([source, destination, size])=>{
-                const text = host.readCString(source >>> 0, 0x8000);
-                const expanded = text.replace(/%([^%]*)%/g, (whole, name)=>variables.get(name) ?? whole);
+                const expanded = expand(host.readCString(source >>> 0, 0x8000));
                 if ((size >>> 0) >= expanded.length + 1 && (destination >>> 0) !== 0)
                 {
                     reportPath(expanded, destination, size);
+                }
+                return expanded.length + 1;
+            },
+        },
+
+        /**
+         * DWORD ExpandEnvironmentStringsW(LPCWSTR lpSrc, LPWSTR lpDst, DWORD nSize)
+         *
+         * The A form's expansion, from the same variables, in UTF-16; nSize and
+         * the count are in characters.
+         */
+        ExpandEnvironmentStringsW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([source, destination, size])=>{
+                const expanded = expand(host.readWideString(source >>> 0, 0x8000));
+                if ((size >>> 0) >= expanded.length + 1 && (destination >>> 0) !== 0)
+                {
+                    reportWidePath(expanded, destination, size);
                 }
                 return expanded.length + 1;
             },
@@ -396,6 +422,13 @@ export function createEnvironmentFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([buffer, size])=>reportPath(WINDOWS_DIRECTORY, buffer, size),
+        },
+
+        /** UINT GetWindowsDirectoryW(LPWSTR lpBuffer, UINT uSize) */
+        GetWindowsDirectoryW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([buffer, size])=>reportWidePath(WINDOWS_DIRECTORY, buffer, size),
         },
     };
 }

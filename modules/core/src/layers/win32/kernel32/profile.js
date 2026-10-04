@@ -215,14 +215,28 @@ export function createProfileFunctions(host){
         return { start, end };
     };
 
+    /** @param {string} value @returns {Uint8Array} UTF-16LE */
+    const encodeWide = value=>{
+        const out = new Uint8Array(value.length * 2);
+        for (let at = 0; at < value.length; at++)
+        {
+            out[at * 2] = value.charCodeAt(at) & 0xff;
+            out[at * 2 + 1] = value.charCodeAt(at) >>> 8;
+        }
+        return out;
+    };
+
     /**
      * Writes a list of names, NUL-separated and NUL-ended, into a buffer that
-     * may be too small for it.
+     * may be too small for it. Sizes and counts are in characters of the form
+     * asked for.
      *
      * @param {number} buffer @param {number} size @param {string[]} names
+     * @param {boolean} [wide]
      * @returns {number} what the call answers
      */
-    const writeList = (buffer, size, names)=>{
+    const writeList = (buffer, size, names, wide = false)=>{
+        const encode = wide ? encodeWide : encodeAnsi;
         const room = size >>> 0;
         if (room === 0)
         {
@@ -231,27 +245,28 @@ export function createProfileFunctions(host){
         const whole = names.map(name=>`${name}\0`).join('');
         if (whole.length + 1 <= room)
         {
-            host.writeMemory(buffer >>> 0, encodeAnsi(`${whole}\0`));
+            host.writeMemory(buffer >>> 0, encode(`${whole}\0`));
             return whole.length;
         }
         // Cut two short: one NUL to end the name it cut, one to end the list.
         const kept = room >= 2 ? whole.slice(0, room - 2) : '';
-        host.writeMemory(buffer >>> 0, encodeAnsi(`${kept}\0\0`.slice(0, room)));
+        host.writeMemory(buffer >>> 0, encode(`${kept}\0\0`.slice(0, room)));
         return Math.max(room - 2, 0);
     };
 
     /**
      * @param {number} buffer @param {number} size @param {string} value
+     * @param {boolean} [wide]
      * @returns {number} what the call answers
      */
-    const writeValue = (buffer, size, value)=>{
+    const writeValue = (buffer, size, value, wide = false)=>{
         const room = size >>> 0;
         if (room === 0)
         {
             return 0;
         }
         const kept = value.slice(0, room - 1);
-        host.writeMemory(buffer >>> 0, encodeAnsi(`${kept}\0`));
+        host.writeMemory(buffer >>> 0, (wide ? encodeWide : encodeAnsi)(`${kept}\0`));
         return kept.length;
     };
 
@@ -286,10 +301,11 @@ export function createProfileFunctions(host){
     /**
      * @param {number} buffer @param {number} size
      * @param {{ names: string[] } | { value: string }} answer
+     * @param {boolean} [wide]
      */
-    const deliver = (buffer, size, answer)=>('names' in answer
-        ? writeList(buffer, size, answer.names)
-        : writeValue(buffer, size, answer.value));
+    const deliver = (buffer, size, answer, wide = false)=>('names' in answer
+        ? writeList(buffer, size, answer.names, wide)
+        : writeValue(buffer, size, answer.value, wide));
 
     /**
      * The integer at the front of a value, the way the C runtime reads one:
@@ -347,28 +363,28 @@ export function createProfileFunctions(host){
      */
 
     /**
-     * @param {string | null} path @param {number} section @param {number} key
-     * @param {number} fallback @param {number} buffer @param {number} size
+     * The names and default as read, in whichever form the caller passed
+     * them; the file is the same either way.
+     *
+     * @param {string | null} path @param {string | null} section @param {string | null} key
+     * @param {string | null} fallback @param {number} buffer @param {number} size
+     * @param {boolean} [wide]
      */
-    const getString = (path, section, key, fallback, buffer, size)=>{
-        const wanted = {
-            section: text(section, MAX_NAME),
-            key: text(key, MAX_NAME),
-            fallback: (text(fallback, MAX_VALUE) ?? '').replace(/\s+$/, ''),
-        };
+    const getString = (path, section, key, fallback, buffer, size, wide = false)=>{
+        const wanted = { section, key, fallback: (fallback ?? '').replace(/\s+$/, '') };
         /** @param {ProfileLine[]} lines */
         const answer = lines=>deliver(buffer, size,
-            lookUp(lines, wanted.section, wanted.key, wanted.fallback));
+            lookUp(lines, wanted.section, wanted.key, wanted.fallback), wide);
         const loaded = path === null ? [] : load(path);
         return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
     };
 
     /**
-     * @param {string | null} path @param {number} section @param {number} key
+     * @param {string | null} path @param {string | null} section @param {string | null} key
      * @param {number} fallback
      */
     const getInt = (path, section, key, fallback)=>{
-        const wanted = { section: text(section, MAX_NAME), key: text(key, MAX_NAME) };
+        const wanted = { section, key };
         /** @param {ProfileLine[]} lines */
         const answer = lines=>{
             // Neither name may be NULL here: there is no list to
@@ -430,6 +446,12 @@ export function createProfileFunctions(host){
         return name === null ? null : resolve(name);
     };
 
+    /** @param {number} file @returns {string | null} */
+    const widePathOf = file=>{
+        const name = wideText(file, MAX_VALUE);
+        return name === null ? null : resolve(name);
+    };
+
     const WIN_INI = `${WINDOWS_DIRECTORY}\\win.ini`;
 
     return {
@@ -441,7 +463,22 @@ export function createProfileFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([section, key, fallback, buffer, size, file])=>
-                getString(pathOf(file), section, key, fallback, buffer, size),
+                getString(pathOf(file), text(section, MAX_NAME), text(key, MAX_NAME),
+                    text(fallback, MAX_VALUE), buffer, size),
+        },
+
+        /**
+         * DWORD GetPrivateProfileStringW(LPCWSTR lpAppName, LPCWSTR lpKeyName,
+         *   LPCWSTR lpDefault, LPWSTR lpReturnedString, DWORD nSize, LPCWSTR lpFileName)
+         *
+         * The A form in UTF-16, nSize and the answer counted in characters.
+         */
+        GetPrivateProfileStringW: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([section, key, fallback, buffer, size, file])=>
+                getString(widePathOf(file), wideText(section, MAX_NAME), wideText(key, MAX_NAME),
+                    wideText(fallback, MAX_VALUE), buffer, size, true),
         },
 
         /**
@@ -451,7 +488,19 @@ export function createProfileFunctions(host){
         GetPrivateProfileIntA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([section, key, fallback, file])=>getInt(pathOf(file), section, key, fallback),
+            handler: ([section, key, fallback, file])=>
+                getInt(pathOf(file), text(section, MAX_NAME), text(key, MAX_NAME), fallback),
+        },
+
+        /**
+         * UINT GetPrivateProfileIntW(LPCWSTR lpAppName, LPCWSTR lpKeyName,
+         *   INT nDefault, LPCWSTR lpFileName)
+         */
+        GetPrivateProfileIntW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([section, key, fallback, file])=>getInt(widePathOf(file),
+                wideText(section, MAX_NAME), wideText(key, MAX_NAME), fallback),
         },
 
         /**
@@ -518,11 +567,8 @@ export function createProfileFunctions(host){
         WritePrivateProfileStringW: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([section, key, value, file])=>{
-                const name = wideText(file, MAX_VALUE);
-                return putText(name === null ? null : resolve(name), wideText(section, MAX_NAME),
-                    wideText(key, MAX_NAME), wideText(value, MAX_VALUE));
-            },
+            handler: ([section, key, value, file])=>putText(widePathOf(file),
+                wideText(section, MAX_NAME), wideText(key, MAX_NAME), wideText(value, MAX_VALUE)),
         },
 
         /**
@@ -661,13 +707,22 @@ export function createProfileFunctions(host){
         GetProfileStringA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([section, key, fallback, buffer, size])=>
-                getString(WIN_INI, section, key, fallback, buffer, size),
+            handler: ([section, key, fallback, buffer, size])=>getString(WIN_INI,
+                text(section, MAX_NAME), text(key, MAX_NAME), text(fallback, MAX_VALUE),
+                buffer, size),
         },
         GetProfileIntA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([section, key, fallback])=>getInt(WIN_INI, section, key, fallback),
+            handler: ([section, key, fallback])=>
+                getInt(WIN_INI, text(section, MAX_NAME), text(key, MAX_NAME), fallback),
+        },
+        /** UINT GetProfileIntW(LPCWSTR lpAppName, LPCWSTR lpKeyName, INT nDefault) */
+        GetProfileIntW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([section, key, fallback])=>
+                getInt(WIN_INI, wideText(section, MAX_NAME), wideText(key, MAX_NAME), fallback),
         },
         WriteProfileStringA: {
             argBytes: 12,

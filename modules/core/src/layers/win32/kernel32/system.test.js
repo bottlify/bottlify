@@ -636,6 +636,34 @@ test('FormatMessageA allocates the buffer when asked, for a caller\'s string too
     assert.equal(host.bytes[0x400 + 10], 0, 'terminated');
 });
 
+test('FormatMessageW formats in UTF-16, a bare insert wide and a capital S narrow', ()=>{
+    const host = { ...fakeHost(), allocate: ()=>0x400 };
+    const fns = createSystemFunctions(host);
+    /** @param {number} at @param {string} text */
+    const wide = (at, text)=>host.writeMemory(at,
+        new Uint8Array(Uint16Array.from([...text, '\0'].map(c=>c.charCodeAt(0))).buffer));
+    /** @param {number} at @param {number} units */
+    const readBack = (at, units)=>String.fromCharCode(
+        ...new Uint16Array(host.bytes.slice(at, at + units * 2).buffer));
+    wide(0x200, '%1 %2!S! %3!d!');
+    wide(0x240, 'W\u00e9');
+    host.writeMemory(0x250, Uint8Array.from([...'narrow', '\0'].map(c=>c.charCodeAt(0))));
+    host.writeMemory(0x280, new Uint8Array(Uint32Array.from([0x240, 0x250, -7]).buffer));
+
+    assert.equal(fns.FormatMessageW.argBytes, 28);
+    assert.equal(fns.FormatMessageW.handler([0x400 | 0x2000, 0x200, 0, 0, 0x300, 0x40, 0x280]), 12);
+    assert.equal(readBack(0x300, 13), 'W\u00e9 narrow -7\0');
+    assert.equal(fns.FormatMessageW.handler([0x400 | 0x2000, 0x200, 0, 0, 0x300, 12, 0x280]), 0,
+        'nSize counts characters, the terminator among them');
+
+    const length = fns.FormatMessageA.handler([0x1000, 0, 2, 0, 0x500, 0x80, 0]);
+    assert.ok(length > 0);
+    assert.equal(fns.FormatMessageW.handler([0x1000 | 0x100, 0, 2, 0, 0x2f0, 0, 0]), length);
+    assert.equal(host.view.getUint32(0x2f0, true), 0x400, 'the allocated buffer');
+    assert.equal(readBack(0x400, length),
+        String.fromCharCode(...host.bytes.slice(0x500, 0x500 + length)), 'the same system text');
+});
+
 test('CreateActCtx fails as for an unusable manifest, and says it diverged', ()=>{
     // A caller that meets INVALID_HANDLE_VALUE takes its no-context path; a
     // handle that resolved to nothing would be activated and then misbehave.

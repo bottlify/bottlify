@@ -556,6 +556,26 @@ test('_vsnwprintf formats wide text from a list, terminated only when there is r
     assert.equal(fns._vsnwprintf.argBytes, 16);
 });
 
+test('vswprintf is swprintf from a list: no count, the text and its terminator', ()=>{
+    const { fns, host, put } = setup();
+    const view = new DataView(host.bytes.buffer);
+    /** @param {number} address @param {string} text */
+    const wide = (address, text)=>{
+        [...text, '\0'].forEach((c, at)=>view.setUint16(address + at * 2, c.charCodeAt(0), true));
+        return address;
+    };
+    /** @param {number} address @param {number} count */
+    const units = (address, count)=>String.fromCharCode(
+        ...Array.from({ length: count }, (_, at)=>view.getUint16(address + at * 2, true)));
+    const list = 0x180;
+    [wide(0x100, 'w\u3042'), put(0x120, 'n'), -5].forEach(
+        (value, at)=>view.setUint32(list + at * 4, value, true));
+
+    assert.equal(fns.vswprintf.argBytes, 12);
+    assert.equal(fns.vswprintf.handler([0x200, wide(0x140, '%s|%S|%d'), list]), 7);
+    assert.equal(units(0x200, 8), 'w\u3042|n|-5\0');
+});
+
 test('_snprintf and _vsnprintf terminate only when the text is shorter than the count', ()=>{
     // Wine's ntdll test__snprintf, whose _snprintf is this one: "hello world"
     // into 11 leaves the X after it, "test" into 4 leaves the byte after it

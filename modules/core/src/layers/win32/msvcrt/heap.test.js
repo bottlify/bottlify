@@ -192,3 +192,92 @@ test('an allocation this heap cannot make is null, not an exception', ()=>{
     assert.equal(table.malloc.handler([16]), 0);
     assert.equal(table['??2@YAPAXI@Z'].handler([16]), 0);
 });
+
+test('a failed operator new calls the new handler until it gives up or memory is found', async()=>{
+    const memory = fakeMemory();
+    const allocator = fakeAllocator(memory);
+    allocator.exhaust();
+    /** @type {number[][]} */
+    const calls = [];
+    let answers = [1, 1, 0];
+    const table = /** @type {Record<string, any>} */ (createHeapFunctions({
+        allocate: bytes=>allocator.allocate(bytes),
+        free: address=>allocator.free(address),
+        block: address=>allocator.block(address),
+        resize: (address, bytes)=>allocator.resize(address, bytes),
+        readMemory: memory.readMemory,
+        writeMemory: memory.writeMemory,
+        fillMemory: memory.fillMemory,
+        callGuest: async(entry, args)=>{
+            calls.push([entry, ...args]);
+            return /** @type {number} */ (answers.shift());
+        },
+    }));
+    const SET = '?_set_new_handler@@YAP6AHI@ZP6AHI@Z@Z';
+
+    assert.equal(table['??2@YAPAXI@Z'].handler([16]), 0, 'no handler: null at once');
+    assert.equal(table[SET].handler([0x401000]), 0, 'the previous handler, none');
+    assert.equal(table['?_query_new_handler@@YAP6AHI@ZXZ'].handler([]), 0x401000);
+
+    assert.equal(await table['??2@YAPAXI@Z'].handler([16]), 0);
+    assert.deepEqual(calls, [[0x401000, 16], [0x401000, 16], [0x401000, 16]],
+        'called again while it answers nonzero, null when it answers zero');
+
+    // A handler that frees something: the retry finds memory.
+    calls.length = 0;
+    answers = [1];
+    const real = fakeAllocator(memory);
+    let failOnce = true;
+    allocator.allocate = bytes=>{
+        if (failOnce)
+        {
+            failOnce = false;
+            return 0;
+        }
+        return real.allocate(bytes);
+    };
+    const address = await table['??_U@YAPAXI@Z'].handler([24]);
+    assert.notEqual(address, 0);
+    assert.equal(calls.length, 1);
+
+    assert.equal(table[SET].handler([0]), 0x401000);
+});
+
+test('malloc calls the new handler only in new mode 1, and _callnewh calls it once', async()=>{
+    const memory = fakeMemory();
+    const allocator = fakeAllocator(memory);
+    /** @type {number[]} */
+    const errno = [];
+    let called = 0;
+    const table = /** @type {Record<string, any>} */ (createHeapFunctions({
+        allocate: bytes=>allocator.allocate(bytes),
+        free: address=>allocator.free(address),
+        block: address=>allocator.block(address),
+        resize: (address, bytes)=>allocator.resize(address, bytes),
+        readMemory: memory.readMemory,
+        writeMemory: memory.writeMemory,
+        fillMemory: memory.fillMemory,
+        errno: code=>errno.push(code),
+        callGuest: async()=>{
+            called++;
+            return 0;
+        },
+    }));
+    const SET_MODE = '?_set_new_mode@@YAHH@Z';
+    assert.equal(table._callnewh.handler([8]), 0, 'no handler to call');
+    table['?_set_new_handler@@YAP6AHI@ZP6AHI@Z@Z'].handler([0x402000]);
+    allocator.exhaust();
+
+    assert.equal(table.malloc.handler([8]), 0, 'mode 0: malloc does not call it');
+    assert.equal(called, 0);
+    assert.equal(table[SET_MODE].handler([1]), 0);
+    assert.equal(table['?_query_new_mode@@YAHXZ'].handler([]), 1);
+    assert.equal(await table.malloc.handler([8]), 0);
+    assert.equal(called, 1);
+    assert.equal(await table._callnewh.handler([8]), 0, 'it freed nothing');
+    assert.equal(called, 2);
+
+    assert.equal(table[SET_MODE].handler([2]), -1);
+    assert.deepEqual(errno, [22]);
+    assert.equal(table['?_query_new_mode@@YAHXZ'].handler([]), 1, 'the mode kept');
+});
