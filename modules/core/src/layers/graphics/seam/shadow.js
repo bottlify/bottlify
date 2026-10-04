@@ -191,7 +191,7 @@ export const FLAG_STALE = 2;
  * found no room is always followed by a start over.
  */
 export const COMMAND_RING_BYTES = 64 * 1024;
-const COMMAND_SLACK = 8 * 1024;
+const COMMAND_SLACK = 20 * 1024;
 
 /**
  * Writes an empty command ring into a block: `ring` is pages of its own,

@@ -61,8 +61,8 @@ import { declarationLength } from '../d3d8/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
 import {
     RENDER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_MIRROR, commandCode, createShadow,
-    getRenderStateCode, getSurfaceLevelCode, getViewportCode, lockCode, stageStateMirror,
-    unlockCode,
+    getRenderStateCode, getSurfaceLevelCode, getTextureStageStateCode, getTransformCode,
+    getViewportCode, lockCode, stageStateMirror, unlockCode,
 } from './shadow.js';
 import { D3D8_COMMANDS, materialOf } from '../d3d8/commands.js';
 import { D3DTSS } from '../d3d8/constants.js';
@@ -2171,6 +2171,9 @@ export function createDirect3D8Seam(
     const deviceGuests = allocate
         ? {
             GetRenderState: ({ trap })=>placeCode(at=>getRenderStateCode(at, trap)),
+            GetTransform: ({ trap })=>placeCode(at=>getTransformCode(at, trap)),
+            GetTextureStageState: ({ trap })=>placeCode(at=>getTextureStageStateCode(at, trap,
+                STAGE_STATE_TYPES_8)),
             GetViewport: ({ trap })=>placeCode(at=>getViewportCode(at, trap)),
             ...Object.fromEntries(Object.entries(D3D8_COMMANDS.COMMANDS).map(([name, shape])=>[
                 name, (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>commandCode(at,
