@@ -24,6 +24,7 @@
  */
 
 import { createApp } from '../../../src/app.js';
+import { placeHooks } from '../../../src/host/serve.js';
 import {
     SLOTS, GLOBAL_HEADER_INT32, SLOT_HEADER_INT32, SLOT_BYTES, ARENA_OFFSET, ARENA_BYTES,
     slotHeaderOffset, slotPcmOffset, createSeam, mixBlock,
@@ -1506,8 +1507,9 @@ export function createHarness(canvas, how = {}){
             audio: { drained: true, ...request.audio ?? {} },
         });
         // Watches in front of routines inside a program's own modules, as
-        // `--hook` named them, put in place as each module is loaded -- the
-        // launcher's `?hook=` for a scenario run.
+        // `--hook` named them, put in place where the launcher's `?hook=`
+        // puts them: in each module as it is mapped, in this process and in
+        // one that replaces it.
         // What a watched routine was handed and what it answered, in the log
         // beside the calls around it.
         if ((request.hooks ?? []).length > 0 && request.log)
@@ -1522,23 +1524,14 @@ export function createHarness(canvas, how = {}){
                 }
             });
         }
-        for (const spec of request.hooks ?? [])
+        if ((request.hooks ?? []).length > 0)
         {
-            app.on('library-loaded', (/** @type {{ name: string, base: number }} */ { name, base })=>{
-                if (String(name).toLowerCase().endsWith(spec.module))
+            placeHooks(app, request.hooks, (type, line)=>{
+                if (collected.events.length < LIMITS.events)
                 {
-                    app.debug.hook(base + spec.offset, spec);
+                    collected.events.push(`[${type}] ${JSON.stringify(line).slice(0, 300)}`);
                 }
             });
-            // The program's own image, and every library it imports, is
-            // mapped before the run, with no library-loaded of its own.
-            for (const module of app.debug.modules?.() ?? [])
-            {
-                if (String(module.name).toLowerCase().endsWith(spec.module))
-                {
-                    app.debug.hook(module.base + spec.offset, spec);
-                }
-            }
         }
 
         // What the device mixed, between two moments of the run, when asked.
