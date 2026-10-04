@@ -132,6 +132,16 @@ const GROUP_SIDS = [
     { authority: 5, subAuthorities: [11] },
 ];
 
+/** The local system, whom an object's default DACL lets in beside the administrators. */
+const SYSTEM_SID = { authority: 5, subAuthorities: [18] };
+
+/** SECURITY_INFORMATION bits GetKernelObjectSecurity is asked for. */
+const OWNER_SECURITY_INFORMATION = 0x1;
+const GROUP_SECURITY_INFORMATION = 0x2;
+const DACL_SECURITY_INFORMATION = 0x4;
+/** Every standard and specific right: what GENERIC_ALL comes to on any object. */
+const ALL_RIGHTS = 0x001fffff;
+
 /** @param {Sid} sid @returns {Uint8Array} the SID, laid out */
 const sidBytes = sid=>{
     const bytes = new Uint8Array(8 + 4 * sid.subAuthorities.length);
@@ -500,6 +510,95 @@ export function createTokenFunctions(host){
         SetSecurityInfo: {
             argBytes: 28,
             handler: ()=>0,
+        },
+
+        /**
+         * BOOL GetKernelObjectSecurity(HANDLE Handle, SECURITY_INFORMATION
+         *   RequestedInformation, PSECURITY_DESCRIPTOR pSecurityDescriptor,
+         *   DWORD nLength, LPDWORD lpnLengthNeeded)
+         *
+         * The object's descriptor, self-relative, with the parts asked for:
+         * an object the one account made is owned by BUILTIN\Administrators,
+         * as an elevated administrator's objects are, its group the account's
+         * primary one, and its DACL the token's default -- everything to the
+         * administrators and to the system. Too small a buffer is the
+         * documented ERROR_INSUFFICIENT_BUFFER with the size needed, which is
+         * how a caller learns it.
+         */
+        GetKernelObjectSecurity: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, requested, descriptor, length, needed])=>{
+                const PSEUDO_HANDLES = new Set([0xffffffff, 0xfffffffe, 0xfffffffd]);
+                let known = PSEUDO_HANDLES.has(handle >>> 0);
+                try
+                {
+                    known = known || host.handles.resolve(handle >>> 0) != null;
+                }
+                catch (e){
+                    void e;
+                }
+                if (!known)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const owner = (requested & OWNER_SECURITY_INFORMATION) !== 0
+                    ? sidBytes(GROUP_SIDS[2]) : null;
+                const group = (requested & GROUP_SECURITY_INFORMATION) !== 0
+                    ? sidBytes(GROUP_SIDS[0]) : null;
+                /** @type {Uint8Array | null} */
+                let dacl = null;
+                if ((requested & DACL_SECURITY_INFORMATION) !== 0)
+                {
+                    const aces = [GROUP_SIDS[2], SYSTEM_SID].map(sid=>{
+                        const bytes = sidBytes(sid);
+                        const ace = new Uint8Array(8 + bytes.length);
+                        ace[0] = ACCESS_ALLOWED_ACE_TYPE;
+                        ace[2] = ace.length;
+                        new DataView(ace.buffer).setUint32(4, ALL_RIGHTS, true);
+                        ace.set(bytes, 8);
+                        return ace;
+                    });
+                    const acesSize = aces.reduce((sum, ace)=>sum + ace.length, 0);
+                    dacl = new Uint8Array(ACL.HEADER + acesSize);
+                    dacl[ACL.REVISION] = 2;
+                    new DataView(dacl.buffer).setUint16(ACL.SIZE, dacl.length, true);
+                    new DataView(dacl.buffer).setUint16(ACL.COUNT, aces.length, true);
+                    let at = ACL.HEADER;
+                    for (const ace of aces)
+                    {
+                        dacl.set(ace, at);
+                        at += ace.length;
+                    }
+                }
+                const parts = [owner, group, dacl];
+                const size = SD.SIZE + parts.reduce((sum, part)=>sum + (part?.length ?? 0), 0);
+                if ((needed >>> 0) !== 0)
+                {
+                    writeDword(needed >>> 0, size);
+                }
+                if ((length >>> 0) < size || (descriptor >>> 0) === 0)
+                {
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                const bytes = new Uint8Array(size);
+                const view = new DataView(bytes.buffer);
+                bytes[SD.REVISION] = SECURITY_DESCRIPTOR_REVISION;
+                view.setUint16(SD.CONTROL, SE_SELF_RELATIVE | (dacl ? SE_DACL_PRESENT : 0), true);
+                let at = SD.SIZE;
+                // The owner, the group and the DACL follow the header, each
+                // named by its offset from the start; one not asked for is 0.
+                [[SD.OWNER, owner], [SD.GROUP, group], [SD.DACL, dacl]].forEach(([slot, part])=>{
+                    if (part)
+                    {
+                        view.setUint32(/** @type {number} */ (slot), at, true);
+                        bytes.set(/** @type {Uint8Array} */ (part), at);
+                        at += /** @type {Uint8Array} */ (part).length;
+                    }
+                });
+                host.writeMemory(descriptor >>> 0, bytes);
+                return 1;
+            },
         },
 
         /**

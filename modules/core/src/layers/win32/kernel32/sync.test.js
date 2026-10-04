@@ -632,6 +632,18 @@ test('GetThreadTimes fills a FILETIME per slot, zero exit for a running thread',
     assert.deepEqual(host.errors, [6], 'ERROR_INVALID_HANDLE');
 });
 
+test('GetProcessTimes fills the same four FILETIMEs for this process', ()=>{
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    const read64 = (/** @type {number} */ at)=>new DataView(host.bytes.buffer).getBigInt64(at, true);
+    assert.equal(fns.GetProcessTimes.handler([0xffffffff, 0x300, 0x308, 0x310, 0x318]), 1);
+    assert.notEqual(read64(0x300), 0n, 'a creation time');
+    assert.deepEqual([read64(0x308), read64(0x310), read64(0x318)], [0n, 0n, 0n],
+        'running: no exit time');
+    assert.equal(fns.GetProcessTimes.handler([0x1234, 0x300, 0x308, 0x310, 0x318]), 0);
+    assert.deepEqual(host.errors, [6], 'ERROR_INVALID_HANDLE');
+});
+
 test('SetThreadAffinityMask records the mask and answers the one before', ()=>{
     const host = fakeHost();
     const fns = createSyncFunctions(host);

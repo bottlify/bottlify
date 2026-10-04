@@ -279,3 +279,35 @@ test('a denied ACE ahead of an allowed one keeps its rights from the account', (
     assert.equal(fns.SetSecurityInfo.argBytes, 28);
     assert.equal(fns.SetKernelObjectSecurity.handler(), 1);
 });
+
+test('GetKernelObjectSecurity sizes, then writes a self-relative descriptor of the parts asked '
+    + 'for', ()=>{
+    // advapi32's security tests (test_get_security_descriptor): asked with
+    // no buffer it fails with ERROR_INSUFFICIENT_BUFFER and the size; asked
+    // again with that much it succeeds, owner, group and DACL in place.
+    const { fns, bytes, errors, table, dword } = setup();
+    const event = 0x40;
+    table.set(event, { type: 'event', object: {} });
+    const ALL = 0x1 | 0x2 | 0x4;
+    assert.equal(fns.GetKernelObjectSecurity.handler([event, ALL, 0, 0, OUT]), 0);
+    assert.deepEqual(errors.splice(0), [122], 'ERROR_INSUFFICIENT_BUFFER');
+    const size = dword(OUT);
+    assert.ok(size > 20);
+    assert.equal(fns.GetKernelObjectSecurity.handler([event, ALL, BUFFER, size, OUT]), 1);
+    assert.equal(dword(OUT), size);
+    const control = bytes[BUFFER + 2] | bytes[BUFFER + 3] << 8;
+    assert.equal(control & 0x8004, 0x8004, 'self-relative, with a DACL');
+    const owner = BUFFER + dword(BUFFER + 4);
+    assert.deepEqual([...bytes.subarray(owner, owner + 16)],
+        [1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 2, 0, 0], 'BUILTIN Administrators');
+    assert.notEqual(dword(BUFFER + 8), 0, 'a group');
+    assert.equal(dword(BUFFER + 12), 0, 'no SACL');
+    const dacl = BUFFER + dword(BUFFER + 16);
+    assert.deepEqual([bytes[dacl], bytes[dacl + 4]], [2, 2], 'two ACEs');
+
+    assert.equal(fns.GetKernelObjectSecurity.handler([event, 0x1, BUFFER, size, OUT]), 1);
+    assert.deepEqual([dword(BUFFER + 8), dword(BUFFER + 16)], [0, 0],
+        'only the owner, when only it is asked for');
+    assert.equal(fns.GetKernelObjectSecurity.handler([0x9999, ALL, BUFFER, size, OUT]), 0);
+    assert.deepEqual(errors, [6], 'ERROR_INVALID_HANDLE');
+});

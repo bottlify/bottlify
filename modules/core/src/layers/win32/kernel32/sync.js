@@ -319,6 +319,34 @@ export function createSyncFunctions(host){
         host.writeMemory(at, bytes);
     };
 
+    /**
+     * The four FILETIMEs GetThreadTimes and GetProcessTimes write, a slot of
+     * zero left alone. The clock this build keeps is one wall clock, so the
+     * creation time is now, the exit time now for one that has ended and
+     * zero otherwise, and the processor times zero -- a plausible FILETIME
+     * rather than a pointer left unwritten.
+     *
+     * @param {number[]} slots  creation, exit, kernel, user
+     * @param {boolean} ended
+     */
+    const writeTimes = ([creation, exit, kernelTime, userTime], ended)=>{
+        const now = BigInt(Math.floor(kernel.clock.wallClock() + FILETIME_EPOCH_MS)) * 10000n;
+        /** @param {number} address @param {bigint} value */
+        const write = (address, value)=>{
+            if ((address >>> 0) !== 0)
+            {
+                const bytes = new Uint8Array(8);
+                new DataView(bytes.buffer).setBigInt64(0, value, true);
+                host.writeMemory(address >>> 0, bytes);
+            }
+        };
+        write(creation, now);
+        write(exit, ended ? now : 0n);
+        write(kernelTime, 0n);
+        write(userTime, 0n);
+        return 1;
+    };
+
     /** @param {number} handle */
     const threadOf = handle=>(handle >>> 0) === CURRENT_THREAD
         ? host.currentThread()
@@ -713,23 +741,31 @@ export function createSyncFunctions(host){
                     host.setLastError?.(ERROR_INVALID_HANDLE);
                     return 0;
                 }
-                const now = BigInt(Math.floor(
-                    kernel.clock.wallClock() + FILETIME_EPOCH_MS)) * 10000n;
-                /** @param {number} address @param {bigint} value */
-                const write = (address, value)=>{
-                    if ((address >>> 0) !== 0)
-                    {
-                        const bytes = new Uint8Array(8);
-                        new DataView(bytes.buffer).setBigInt64(0, value, true);
-                        host.writeMemory(address >>> 0, bytes);
-                    }
-                };
-                const ended = (thread.exitCode ?? null) !== null;
-                write(creation, now);
-                write(exit, ended ? now : 0n);
-                write(kernelTime, 0n);
-                write(userTime, 0n);
-                return 1;
+                return writeTimes([creation, exit, kernelTime, userTime],
+                    (thread.exitCode ?? null) !== null);
+            },
+        },
+
+        /**
+         * BOOL GetProcessTimes(HANDLE hProcess, LPFILETIME lpCreationTime,
+         *     LPFILETIME lpExitTime, LPFILETIME lpKernelTime, LPFILETIME lpUserTime)
+         *
+         * The same four times for a process -- this one, or a child it holds
+         * a handle to -- on the same one clock.
+         */
+        GetProcessTimes: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, creation, exit, kernelTime, userTime])=>{
+                const CURRENT_PROCESS = 0xffffffff;
+                const child = (handle >>> 0) === CURRENT_PROCESS ? null : object(handle, 'process');
+                if ((handle >>> 0) !== CURRENT_PROCESS && !child)
+                {
+                    host.setLastError?.(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                return writeTimes([creation, exit, kernelTime, userTime], child !== null
+                    && (child.completed || child.exitCode !== kernel.processes?.STILL_ACTIVE));
             },
         },
 
