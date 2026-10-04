@@ -848,6 +848,11 @@ test('SearchPathA walks the documented order, adds an extension, and reports the
             0x80, OUT_TEXT, 0]), 'C:\\WINDOWS\\system32\\cabinet.dll'.length,
     'a list given is searched in order');
     assert.equal(fns.SearchPathA.handler([0, at(NAME, 'absent.dll'), 0, 0x80, OUT_TEXT, 0]), 0);
+    files.nodes.set('C:\\TEMP\\{A}\\Disk1', { data: new Uint8Array(0), directory: true });
+    assert.equal(fns.SearchPathA.handler([at(NAME + 0x80, 'C:\\TEMP\\{A}'), at(NAME, 'Disk1'), 0,
+        0x80, OUT_TEXT, 0]), 'C:\\TEMP\\{A}\\Disk1'.length,
+    'a directory is found as a file is: an InstallShield setup looks for its Disk1 so');
+    assert.equal(memory.string(OUT_TEXT), 'C:\\TEMP\\{A}\\Disk1');
     assert.equal(fns.SearchPathA.handler([0, at(NAME, 'local.dat'), 0, 4, OUT_TEXT, 0]),
         'C:\\GAME\\local.dat'.length + 1, 'too small: the size needed, terminator included');
     assert.equal(fns.SearchPathA.argBytes, 24);

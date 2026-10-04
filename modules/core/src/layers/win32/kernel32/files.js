@@ -1194,8 +1194,10 @@ export function createFileFunctions(host){
             const candidate = fullPath(directory === ''
                 ? name
                 : `${directory.replace(/[\\/]$/, '')}${SEPARATOR}${name}`);
+            // A directory is found as a file is: the search asks whether the
+            // name exists, and an installer looks for its own Disk1 folder so.
             const entry = files.stat(candidate);
-            if (!entry?.exists || entry.isDirectory)
+            if (!entry?.exists)
             {
                 continue;
             }
