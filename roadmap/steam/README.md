@@ -70,14 +70,14 @@ the relay's, in Node, where no browser policy reaches. So:
 
 | Step | Network | Needs isolation |
 | --- | --- | --- |
-| SteamCMD signs in, downloads | through the relay, in either mode | no: `safe` is enough |
+| SteamCMD signs in, downloads | through the relay, in either mode | no: `compatible` is enough |
 | Packing the bottle | none | no |
-| The game | none, or the relay for multiplayer | no; `full` is faster where the page is isolated, and sound needs it today |
+| The game | none, or the relay for multiplayer | no; `isolated` is faster where the page allows it, and sound needs it today |
 
 Isolation never blocks the network; the browser blocks something else: a page cannot open TCP or
 UDP at all, isolated or not, and it cannot `fetch` Steam's content servers, which send no CORS
-headers. That is why the relay exists. Running an installer, or SteamCMD, in `safe` mode is
-reasonable: it draws little and loses nothing. What `safe` loses today is sound, because the
+headers. That is why the relay exists. Running an installer, or SteamCMD, in `compatible` mode is
+reasonable: it draws little and loses nothing. What `compatible` loses today is sound, because the
 AudioWorklet reads a `SharedArrayBuffer` ring; a message-port path for sound is open work in the
 audio area.
 
@@ -125,7 +125,7 @@ it needed written down.
   standard input. The launcher shows the console and sends what is typed to the program's input;
   nothing typed is stored by the launcher.
 
-**Accepted when** in the browser, in `safe` mode, `+login anonymous +app_update <appid> +quit`
+**Accepted when** in the browser, in `compatible` mode, `+login anonymous +app_update <appid> +quit`
 downloads an app Steam lets anyone download (a dedicated server), and `+login <account>` signs in
 with a Steam Guard code typed by the person.
 

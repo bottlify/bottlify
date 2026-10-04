@@ -158,7 +158,7 @@ async function run(shared, lend, mode){
 test('a texture unlocked each frame is lent to the graphics worker where memory is shared',
     { timeout: 60000 }, async()=>{
         const result = await run(true, true);
-        assert.equal(result.mode, 'full', 'auto, where memory can be shared');
+        assert.equal(result.mode, 'isolated', 'auto, where memory can be shared');
         assert.equal(result.code, 0);
         assert.deepEqual(result.divergences, []);
         assert.equal(result.lent.lent, FRAMES, JSON.stringify(result.lent));
@@ -166,8 +166,8 @@ test('a texture unlocked each frame is lent to the graphics worker where memory 
     });
 
 test('a texture unlocked each frame is copied where memory is not shared, lending is off, or'
-    + ' the run is in safe mode', { timeout: 90000 }, async()=>{
-    for (const [shared, lend, mode] of [[false, true], [true, false], [true, true, 'safe']])
+    + ' the run is in compatible mode', { timeout: 90000 }, async()=>{
+    for (const [shared, lend, mode] of [[false, true], [true, false], [true, true, 'compatible']])
     {
         const result = await run(/** @type {boolean} */ (shared), /** @type {boolean} */ (lend),
             mode);
@@ -176,7 +176,7 @@ test('a texture unlocked each frame is copied where memory is not shared, lendin
         assert.deepEqual(result.lent, {}, `shared ${shared}, lend ${lend}, mode ${mode}`);
         if (mode)
         {
-            assert.equal(result.mode, 'safe');
+            assert.equal(result.mode, 'compatible');
         }
     }
 });

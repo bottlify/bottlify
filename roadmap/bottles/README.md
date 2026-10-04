@@ -31,7 +31,7 @@ arguments, in which mode, is fixed when it is packed.
 | **The manifest** | Its name, its entries and how each starts | beside the bundle |
 
 **An entry** is one way of starting the bottle: an exe inside it, the arguments, the working
-directory, the mode (`auto`, `safe`, `full`) and the network it may reach. A bottle has one or more,
+directory, the mode (`auto`, `compatible`, `isolated`) and the network it may reach. A bottle has one or more,
 and one is the default. Today a bottle has exactly one, `entry` with `commandLine`, and the mode and
 network belong to the launcher's settings or the server's environment rather than to the entry.
 

@@ -182,6 +182,17 @@ flowchart LR
 - **Engine → AudioWorklet.** No messages at all. The voice table lives in shared memory: the page
   gets it in the answer to the start request and hands it to the `AudioWorkletNode`.
 
+**Modes.** `createApp({ mode })` says how much of this rides on shared memory, and the run's mode is
+in the `app` layer's diagnostics (`core/src/mode.js`):
+
+| Mode | Needs | What it does |
+| --- | --- | --- |
+| `isolated` | a cross-origin isolated page | The program's memory is a `SharedArrayBuffer`. The graphics thread reads the bytes an unlock let the program write straight out of it, and writes read-backs into it in place. Refused at `createApp` on a page that cannot share memory |
+| `compatible` | nothing | The program's memory is the engine thread's own, and whatever crosses to another thread is copied. Runs on any page |
+| `auto` (the default) | — | `isolated` where the page is cross-origin isolated, `compatible` elsewhere |
+
+The launcher takes `auto` unless `?mode=compatible` or `?mode=isolated` asks for one.
+
 ## 4. Startup: from createApp to the first instruction
 
 ```mermaid
@@ -258,8 +269,8 @@ into the bridge fires instead (section 6).
 | OPFS | The translation store, `cork/<id>.v3/` |
 | Server | The code of cork and its worker (`/engine/cork/`). A bundle may bring translations ready-made |
 
-**Memory.** All of the program's memory is one `WebAssembly.Memory` of fixed size: 1 GiB for the
-program by default, plus cork's tables. Program address `a` sits at `0x10000 + a`, so an ordinary
+**Memory.** All of the program's memory is one `WebAssembly.Memory` of fixed size, shared in the
+`isolated` mode: 1 GiB for the program by default, plus cork's tables. Program address `a` sits at `0x10000 + a`, so an ordinary
 x86 read or write becomes an equally ordinary `i32.load` or `i32.store` with an offset. The first
 64 KiB hold the state block with the registers (512 bytes), and cork's tables follow right after the
 program's memory. There are no page tables: each 4 KiB page has one byte of flags — `INACCESSIBLE`,

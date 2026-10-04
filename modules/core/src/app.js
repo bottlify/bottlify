@@ -145,10 +145,10 @@ import { withRunMode } from './mode.js';
  *     Windows 10 tells a program whose manifest does not declare it 6.2, as
  *     the real one does. Default `winxp`; any other name is refused.
  * @property {import('./mode.js').RunMode} [mode]
- *     How much rides on shared memory: `full` shares the guest's memory with the
- *     graphics worker, `safe` keeps it the engine thread's own and copies what
- *     crosses, `auto` (the default) is `full` on a cross-origin isolated page and
- *     `safe` elsewhere. `full` where memory cannot be shared is refused.
+ *     How much rides on shared memory: `isolated` shares the guest's memory with the
+ *     graphics worker, `compatible` keeps it the engine thread's own and copies what
+ *     crosses, `auto` (the default) is `isolated` on a cross-origin isolated page and
+ *     `compatible` elsewhere. `isolated` where memory cannot be shared is refused.
  * @property {'directx7' | 'directx8' | 'directx9' | 'directx10' | 'opengl'} [graphicsApi]
  *     The graphics a bottle prefers: every DirectX up to the one named --
  *     DirectX 9 has DirectDraw and Direct3D 8 as well -- or OpenGL alone. Only
