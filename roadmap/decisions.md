@@ -451,6 +451,21 @@ once its length, written last, is there; and no scheduler slice ends inside a ro
 placed (`kernel.atomicCode`), so a thread switched away mid-record never leaves another thread's
 entry stopped short of its own calls -- a device shared between threads keeps the ring. Direct3D
 8's ring carries the same calls in its own shapes (`d3d8/commands.js`). *2026-10-03, 1.8.*
+Later in 1.8 the ring took Clear, BeginScene, EndScene, SetRenderTarget, SetDepthStencilSurface,
+DrawPrimitiveUP (its vertices copied) and a Direct3D 9 state block's Capture and Apply, on the
+same terms: a nested BeginScene or a draw outside a scene is answered D3D_OK and reported once.
+While an Apply or a new target waits in the ring the guest's getters go to the host, which plays
+the ring before it answers; the setters and draws do not wait. *2026-10-04, 1.8.*
+
+**A reference count is kept in guest memory, and the guest answers every AddRef and Release
+that does not cross zero.** The count of a Direct3D resource lives in a word the bridge's
+IUnknown routines change with `lock cmpxchg`; the first reference and the last come to the host,
+which is where an object's life is decided. Each answer is the count the object holds, so a
+program reading counts back (Wine's `get_refcount`) sees what it would on Windows. The played
+copy behind the graphics worker never sees the references the guest moved, so the host sends
+it the count each host-side AddRef or Release left, not the call: a last Release ends both.
+Measured on a node harness of the real engine path: 400 000 AddRef and Release calls took the
+engine thread's host time from 293-311 ms to 38-48 ms. *2026-10-04, 1.8.*
 
 **OpenGL's state calls go through a command ring in the guest too, and every other entry plays
 it first.** The calls that answer nothing -- states, bindings, array pointers, matrices, program
