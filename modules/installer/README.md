@@ -134,7 +134,7 @@ publishing it is a separate act; a server with no token refuses to start.
 BOTTLIFY_UPLOAD_TOKEN=... node src/server/cli.js --root bundles --port 8788
 ```
 
-Two routes, both `POST` and both authenticated:
+Three routes, all `POST` and all authenticated:
 
 - `/bottles/<id>/blocks?at=<offset>` — packed block bytes, in order. A part out
   of order is refused rather than leaving a hole the digest never saw.
@@ -142,6 +142,10 @@ Two routes, both `POST` and both authenticated:
   last block has been packed and so cannot travel in the stream. The server
   writes them where they belong, computes the block region's digest, and writes
   `manifest.json` beside `bundle.btl`.
+- `/bottles/<id>/manifest` — a bottle's settings changed in its `manifest.json`
+  without sending it again: `title`, `version`, `labels` (`demo`, `benchmark`,
+  `test`), `kind` (`game`, `application`), `windows`, `graphics`. Any other
+  field is refused; the entry and the bundle record are the upload's.
 
 `publish()`'s own `manifest` option passes straight through to that file, field
 for field, so a title's own launch arguments travel with it: `commandLine` is

@@ -23,7 +23,7 @@ import { join } from 'node:path';
 import { openBundle } from '../../../core/src/layers/filesystem/internal/bundle/format.js';
 import { Codec } from '@bottlify/core/bundle';
 import { collectFrom, publish } from '../index.js';
-import { createBottleServer } from './index.js';
+import { createBottleServer, manifestChanges } from './index.js';
 
 const TOKEN = 'a-secret-nobody-else-has';
 
@@ -208,4 +208,52 @@ test('an install that produced nothing is refused before anything is uploaded', 
     {
         await host.stop();
     }
+});
+
+test('a bottle\'s settings change in its manifest, and nothing its upload made does', async()=>{
+    const host = await serving();
+    try
+    {
+        const prefix = collectFrom(finishedApp([
+            { path: 'C:\\Install\\Setup.exe', bytes: bytes('the distribution') },
+            { path: 'C:\\Games\\Title\\game.exe', bytes: bytes('MZ program') },
+        ]), { name: 'Setup.exe', bytes: bytes('the distribution') });
+        await publish({ prefix, endpoint: host.endpoint, id: 'settled',
+            manifest: { title: 'Game', entry: 'game.exe' } });
+        const send = (/** @type {any} */ body, token = TOKEN)=>fetch(
+            `${host.endpoint.url}/bottles/settled/manifest`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${token}` },
+                body: JSON.stringify(body),
+            });
+        const response = await send({ title: 'Renamed', labels: ['demo', 'benchmark'],
+            kind: 'application', windows: 'win7', graphics: 'directx9' });
+        assert.equal(response.status, 200);
+        const written = JSON.parse(
+            await readFile(join(host.root, 'settled', 'manifest.json'), 'utf8'));
+        assert.deepEqual(
+            [written.title, written.labels, written.kind, written.windows, written.graphics],
+            ['Renamed', ['demo', 'benchmark'], 'application', 'win7', 'directx9']);
+        assert.equal(written.entry, 'game.exe', 'the entry is the upload\'s');
+        assert.ok(written.bundle.sha256, 'and so is the bundle record');
+
+        assert.equal((await send({ entry: 'other.exe' })).status, 400, 'not a setting');
+        assert.equal((await send({ labels: ['retail'] })).status, 400, 'not a label');
+        assert.equal((await send({ title: 'x' }, 'wrong')).status, 401);
+        const nowhere = await fetch(`${host.endpoint.url}/bottles/nowhere/manifest`, {
+            method: 'POST', headers: { Authorization: `Bearer ${TOKEN}` }, body: '{}' });
+        assert.equal(nowhere.status, 404);
+    }
+    finally
+    {
+        await host.stop();
+    }
+});
+
+test('only the settings of a bottle are taken, each checked', ()=>{
+    assert.deepEqual(manifestChanges({ version: ' 1.2 ', kind: 'game', labels: ['test', 'test'] }),
+        { fields: { version: '1.2', kind: 'game', labels: ['test'] } });
+    assert.ok('refused' in manifestChanges({ kind: 'movie' }));
+    assert.ok('refused' in manifestChanges({ windows: '../etc' }));
+    assert.ok('refused' in manifestChanges(['title']));
 });

@@ -18,6 +18,11 @@
  * region as it passes through, because a browser cannot hash incrementally and
  * this side can.
  *
+ * A bottle already here can have what describes it changed -- its title, the
+ * labels and kind the library shows, the Windows and graphics it starts with --
+ * without its bytes being sent again: those fields of its manifest, and no
+ * others.
+ *
  * Private from the start. An upload belongs to whoever owns the bottle;
  * publishing is a separate act, and an endpoint accepting arbitrary game data
  * from anyone is both a storage bill and a legal surface. A server started
@@ -26,7 +31,7 @@
 
 import { createServer } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { mkdir, open, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 // The one thing this side knows about the container: where the block region
 // starts, so it can leave room for a header it writes last and never reads.
@@ -37,6 +42,53 @@ const MAX_PART = 64 << 20;
 
 /** An id names a directory, so it may not name a path. */
 const SAFE_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
+
+/** What a person may say a bottle is, beside its version. */
+const LABELS = new Set(['demo', 'benchmark', 'test']);
+const KINDS = new Set(['game', 'application']);
+
+/**
+ * The fields of a manifest a bottle's settings may change, each checked: the
+ * rest -- its entry, its bundle record, its digest -- belong to the upload
+ * that made it. Answers the fields to merge, or a reason to refuse.
+ *
+ * @param {any} asked
+ * @returns {{ fields: Record<string, unknown> } | { refused: string }}
+ */
+export function manifestChanges(asked){
+    if (!asked || typeof asked !== 'object' || Array.isArray(asked))
+    {
+        return { refused: 'the changes are not an object' };
+    }
+    /** @type {Record<string, unknown>} */
+    const fields = {};
+    for (const [key, value] of Object.entries(asked))
+    {
+        const text = typeof value === 'string' ? value.trim() : null;
+        if ((key === 'title' && text && text.length <= 200)
+            || (key === 'version' && text !== null && text.length <= 40))
+        {
+            fields[key] = text;
+        }
+        else if (key === 'labels' && Array.isArray(value) && value.every(one=>LABELS.has(one)))
+        {
+            fields.labels = [...new Set(value)];
+        }
+        else if (key === 'kind' && KINDS.has(value))
+        {
+            fields.kind = value;
+        }
+        else if ((key === 'windows' || key === 'graphics') && text && /^[a-z0-9]{1,32}$/.test(text))
+        {
+            fields[key] = text;
+        }
+        else
+        {
+            return { refused: `${key} cannot be set to ${JSON.stringify(value)}` };
+        }
+    }
+    return { fields };
+}
 
 /**
  * @typedef {Object} BottleUpload
@@ -145,7 +197,7 @@ export function createBottleServer({ root, token, port = 8788, host = '127.0.0.1
         }
 
         const url = new URL(request.url ?? '/', 'http://bottles');
-        const route = /^\/bottles\/([^/]+)\/(blocks|finish)$/.exec(url.pathname);
+        const route = /^\/bottles\/([^/]+)\/(blocks|finish|manifest)$/.exec(url.pathname);
         if (!route || request.method !== 'POST')
         {
             answer(404, `no route for ${request.method} ${url.pathname}`);
@@ -156,6 +208,28 @@ export function createBottleServer({ root, token, port = 8788, host = '127.0.0.1
         if (!SAFE_ID.test(id))
         {
             answer(400, `"${id}" is not a usable bottle id`);
+            return;
+        }
+
+        if (route[2] === 'manifest')
+        {
+            const path = join(directoryFor(id), 'manifest.json');
+            const held = await readFile(path, 'utf8').catch(()=>null);
+            if (held === null)
+            {
+                answer(404, `there is no bottle "${id}"`);
+                return;
+            }
+            const changes = manifestChanges(
+                JSON.parse((await readBody(request, 1 << 16)).toString('utf8')));
+            if ('refused' in changes)
+            {
+                answer(400, changes.refused);
+                return;
+            }
+            const manifest = { ...JSON.parse(held), ...changes.fields, id };
+            await writeFile(path, `${JSON.stringify(manifest, null, 4)}\n`);
+            answer(200, { id, manifest });
             return;
         }
 
