@@ -16,12 +16,14 @@
  *       [--journal SECONDS] [--memory MB] [--key Code@S]... [--click X,Y@S]...
  *       [--shots DIR] [--list 'C:\Program Files'] [--collect]
  *       [--screen 1024x768] [--cat 'C:\WINDOWS\DirectX.log']... [--siblings]
+ *       [--copy 'C:\WINDOWS\TEMP' temp]...
  *
  * `--journal S` prints, S seconds in, the last cross-process COM calls and
  * message waits from the call journal (every call area on); `--trace S` prints
  * the last three thousand calls of every kind instead, with their first
  * arguments -- what a process that loops without waiting keeps calling. A run
- * that ends sooner prints either when it ends.
+ * that ends sooner prints either when it ends. `--strings` peeks every pointer
+ * argument for a string, so those lines name the paths and texts themselves.
  *
  * A wizard waits in its own message loop rather than in a modal dialog an
  * unattended run answers, so a route through one is given as input: `--key
@@ -35,8 +37,12 @@
  * files under a directory of the volume once the run is over -- what an
  * install left behind, which is what a bottle is made of. `--cat FILE` prints
  * a text file of the volume once the run is over -- the log a setup keeps of
- * what it decided. `--collect` takes that prefix off the finished run as the
- * installer's own wizard does (`collectFrom`) and says which root, entry and
+ * what it decided. `--copy DIR TO` writes a directory of the volume out to TO
+ * on this machine -- what a setup unpacked, for the PE tools to read. `--peek
+ * ADDRESS LENGTH` prints guest memory there once the run is over, and `--args
+ * '...'` is what follows the program's own path on its command line.
+ * `--collect` takes that prefix off the finished run as the installer's own
+ * wizard does (`collectFrom`) and says which root, entry and
  * files a bottle would get;
  * `--collect-to DIR` also writes it there, a directory make-btl packs.
  *
@@ -178,6 +184,9 @@ const seconds = ()=>((Date.now() - started) / 1000).toFixed(1);
 const app = await createApp({
     executable: prefix.executable,
     imagePath: prefix.imagePath,
+    // `--args '...'`: what follows the program's own path on its command line.
+    ...argv.includes('--args')
+        ? { commandLine: `"${prefix.imagePath}" ${argv[argv.indexOf('--args') + 1]}` } : {},
     storage: prefix.storage,
     ...'bundle' in prefix ? { bundle: prefix.bundle } : {},
     engine: 'cork',
@@ -196,6 +205,9 @@ const app = await createApp({
     ...memory > 0 ? { memorySize: memory * 1048576 } : {},
     ...screenWidth > 0
         ? { screen: { width: screenWidth, height: screenHeight, bitsPerPixel: 32 } } : {},
+    // Every pointer argument peeked for a string, so a journal line names
+    // the path or the text a call was given: costly, and off unless asked.
+    ...argv.includes('--strings') ? { traceStrings: true } : {},
     ...journalAt > 0 ? { log: { capacity: 100000, categories: {
         'call.cpu': 'trace', 'call.com': 'trace', 'call.gpu': 'trace', 'call.input': 'trace',
     } } } : {},
@@ -460,6 +472,44 @@ for (const path of all('--cat'))
     }
     catch (e){
         console.log('cat failed:', path, e instanceof Error ? e.message : e);
+    }
+}
+for (let at = argv.indexOf('--peek'); at >= 0; at = argv.indexOf('--peek', at + 1))
+{
+    const address = Number(argv[at + 1]);
+    const bytes = app.debug.read(address, Number(argv[at + 2]));
+    for (let row = 0; row < bytes.length; row += 16)
+    {
+        const line = [...bytes.subarray(row, row + 16)];
+        console.log('PEEK', (address + row).toString(16).padStart(8, '0'),
+            line.map(byte=>byte.toString(16).padStart(2, '0')).join(' '),
+            line.map(byte=>(byte >= 32 && byte < 127 ? String.fromCharCode(byte) : '.')).join(''));
+    }
+}
+/** @param {string} from @param {string} to */
+const copyOut = (from, to)=>{
+    mkdirSync(to, { recursive: true });
+    for (const entry of app.files.list(from))
+    {
+        const name = join(to, entry.path.slice(entry.path.lastIndexOf('\\') + 1));
+        if (entry.directory)
+        {
+            copyOut(entry.path, name);
+        }
+        else
+        {
+            writeFileSync(name, app.files.read(entry.path));
+        }
+    }
+};
+for (let at = argv.indexOf('--copy'); at >= 0; at = argv.indexOf('--copy', at + 1))
+{
+    try
+    {
+        copyOut(argv[at + 1], argv[at + 2]);
+    }
+    catch (e){
+        console.log('copy failed:', argv[at + 1], e instanceof Error ? e.message : e);
     }
 }
 const collectTo = argv.includes('--collect-to') ? argv[argv.indexOf('--collect-to') + 1] : null;
