@@ -1530,11 +1530,14 @@ export function createHarness(canvas, how = {}){
                     app.debug.hook(base + spec.offset, spec);
                 }
             });
-            // The program's own image is mapped before the run, with no
-            // library-loaded of its own.
-            if (String(request.imagePath).toLowerCase().endsWith(spec.module) && app.image?.base)
+            // The program's own image, and every library it imports, is
+            // mapped before the run, with no library-loaded of its own.
+            for (const module of app.debug.modules?.() ?? [])
             {
-                app.debug.hook(app.image.base + spec.offset, spec);
+                if (String(module.name).toLowerCase().endsWith(spec.module))
+                {
+                    app.debug.hook(module.base + spec.offset, spec);
+                }
             }
         }
 
@@ -1755,6 +1758,14 @@ export function createHarness(canvas, how = {}){
         result.presentTimes = presentState.times.slice();
         result.steady = presentState.steady ?? null;
         result.series = presentState.series ?? [];
+        // Guest memory as the run left it, where `--peek` asked: a flag or a
+        // counter a program decides on without calling anything is otherwise
+        // invisible from outside it.
+        result.peeks = (request.peeks ?? []).map((/** @type {any} */ peek)=>({
+            address: peek.address,
+            bytes: [...app.debug.read(peek.address, peek.length)]
+                .map(byte=>byte.toString(16).padStart(2, '0')).join(' '),
+        }));
 
         await app.dispose();
         // Nothing is running any more, and a report asked for now must say

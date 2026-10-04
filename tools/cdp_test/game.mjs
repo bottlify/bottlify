@@ -351,6 +351,16 @@ function parse(argv){
             const [code, after, frames] = argv[index + 1].split(',');
             return [{ code, ...afterOf(after), frames: frames ? Number(frames) : 1 }];
         }),
+        // Guest memory to read when the run ends, `address:length` (hex or
+        // decimal), into the report.
+        peeks: argv.flatMap((flag, index)=>{
+            if (flag !== '--peek')
+            {
+                return [];
+            }
+            const [address, length] = argv[index + 1].split(':');
+            return [{ address: Number(address), length: Number(length) }];
+        }),
         // A watch in front of a routine inside one of the program's own
         // modules, `module:offset:label:argBytes:len,len[:strings]` as the
         // launcher's `?hook=` takes it: its calls and answers join the log.
@@ -793,6 +803,10 @@ function describe(result, context, calls, symbols){
     }
     say('');
 
+    for (const peek of result.peeks ?? [])
+    {
+        say(`peek 0x${(peek.address >>> 0).toString(16)}: ${peek.bytes}`);
+    }
     const unresolved = byLibrary(result.unresolved ?? []);
     if (unresolved.length === 0)
     {
@@ -1357,6 +1371,7 @@ export async function game(options){
             windows,
             sidecarHooks,
             hooks: options.watches,
+            peeks: options.peeks,
             maxTurns: options.turns,
             maxMs: options.runSeconds > 0 ? options.runSeconds * 1000 : null,
             // A harness run is a diagnostic one: the translator's timings and its

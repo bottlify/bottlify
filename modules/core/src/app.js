@@ -6294,6 +6294,16 @@ async function buildApp(options){
             register: name=>cpu.readReg32(name),
             eip: ()=>cpu.eip(),
             /**
+             * Every image mapped so far and where: for a tool that watches a
+             * routine in a library the program imported, which was mapped
+             * before the run and so never announced itself as loaded.
+             *
+             * @returns {{ name: string, base: number, size: number }[]}
+             */
+            modules: ()=>[...byName.values()].map(module=>({
+                name: module.name, base: module.base, size: module.size ?? 0,
+            })),
+            /**
              * Which image an address belongs to, or null: a stack of return
              * addresses is a list of numbers until each is given its module.
              *
