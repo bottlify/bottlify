@@ -52,6 +52,8 @@ const ints = new Int32Array(scratch);
  * @property {Int32Array} ints
  * @property {(bytes: number) => Uint8Array} copy  the first `bytes` of the copy, as a copy
  *     of its own, for a method that keeps them or reads more than the scratch holds
+ * @property {(bytes: number) => Uint8Array} view  the same bytes in place, for a method
+ *     that copies what it reads before it returns
  */
 
 /**
@@ -74,7 +76,8 @@ const ints = new Int32Array(scratch);
  * @property {boolean} [kept]  its copy is taken with `copy` alone, not through the scratch
  * @property {boolean} [self]  the first argument is the object the method is of, not the device
  * @property {boolean} [stale]  it may change state the device's block mirrors
- * @property {boolean} [nullable]  its pointer may be null with a count of zero
+ * @property {'empty' | 'any'} [nullable]  its pointer may be null: with a count of zero
+ *     alone, or whatever the count
  * @property {boolean} [draws]
  * @property {(device: any, call: CommandArgs) => number} make
  */
@@ -153,6 +156,11 @@ export function commandSet(slots, table){
             words,
             floats,
             ints,
+            view: bytes=>{
+                const from = records.byteOffset
+                    + (at + ARGS + (bySlot[all[at]]?.args ?? 0)) * 4;
+                return new Uint8Array(records.buffer, from, bytes);
+            },
             copy: bytes=>{
                 const from = records.byteOffset
                     + (at + ARGS + (bySlot[all[at]]?.args ?? 0)) * 4;
@@ -251,7 +259,7 @@ export const SHARED_COMMANDS = {
     BeginScene: { args: 0, make: d=>d.BeginScene() },
     EndScene: { args: 0, make: d=>d.EndScene() },
     // No rectangles is the whole target; Z comes as a float in a dword.
-    Clear: { args: 6, pointer: 1, nullable: true, count: { arg: 0, shift: 4, most: 64 },
+    Clear: { args: 6, pointer: 1, nullable: 'empty', count: { arg: 0, shift: 4, most: 64 },
         make: (d, c)=>d.Clear(c.arg(0), c.arg(1) === 0 ? null : rectsOf(c.ints, c.arg(0)),
             c.arg(2), c.arg(3), floatOf(c.arg(4)), c.arg(5)) },
     DrawPrimitiveUP: { args: 4, pointer: 2, kept: true, draws: true,

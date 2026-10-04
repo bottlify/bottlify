@@ -10,8 +10,9 @@
  * program made them.
  *
  * Every call here returns nothing and reads nothing of the program's memory
- * but a vector of fixed size, copied into the record: state, bindings, the
- * pointers an array is drawn from (kept, not read), immediate-mode vertices.
+ * but what is copied into the record -- a vector of fixed size, a buffer's
+ * data: state, bindings, the pointers an array is drawn from (kept, not
+ * read), immediate-mode vertices, what a buffer object holds.
  * An error one raises is the context's error flag, which `glGetError` -- a
  * call into the host, which plays the ring first -- reads in order, so a
  * deferred call answers exactly what one made at once would. A call that
@@ -213,6 +214,12 @@ const matrix = method=>({
     make: (context, c)=>context[method](filled(MATRIX, c.floats)),
 });
 
+/**
+ * The most a buffer's data copies into a record; past it the host reads the
+ * program's memory itself, as it does without a ring.
+ */
+const BUFFER_BYTES = 16 * 1024;
+
 const NONE = new Set();
 const VERTEX = [0, 0, 0, 1];
 const COLOUR = [0, 0, 0, 1];
@@ -264,6 +271,15 @@ const TABLE = {
     glColorPointer: same('iuiu', 'glColorPointer'),
     glNormalPointer: same('uiu', 'glNormalPointer'),
     glVertexAttribPointerARB: same('uiubiu', 'glVertexAttribPointerARB'),
+    // --- buffer data: the bytes copied, up to what a record holds ---
+    glBufferDataARB: { args: 4, pointer: 2, nullable: 'any', kept: true,
+        count: { arg: 1, shift: 0, most: BUFFER_BYTES },
+        make: (context, c)=>context.glBufferDataARB(c.arg(0) >>> 0, c.arg(1) | 0,
+            c.arg(2) === 0 ? null : c.view(c.arg(1)), c.arg(3) >>> 0) },
+    glBufferSubDataARB: { args: 4, pointer: 3, kept: true,
+        count: { arg: 2, shift: 0, most: BUFFER_BYTES },
+        make: (context, c)=>context.glBufferSubDataARB(c.arg(0) >>> 0, c.arg(1) | 0,
+            c.arg(2) | 0, c.view(c.arg(2))) },
     // --- matrices ---
     glLoadIdentity: same('', 'glLoadIdentity'),
     glPushMatrix: same('', 'glPushMatrix'),

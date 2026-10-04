@@ -87,27 +87,35 @@ test('every call the ring carries is made as its entry point makes it', ()=>{
     {
         assert.ok(table[name], `${name} is an export`);
         assert.equal(table[name].argBytes, entry.args * 4, `${name} pops what its record holds`);
-        // A parameter vector is tried with a parameter of each size it takes.
-        const { choose } = entry;
+        // A parameter vector is tried with a parameter of each size it takes,
+        // and data counted in bytes with a count that is not whole dwords --
+        // and, where the pointer may be null, with none.
+        const { choose, count } = entry;
         const choices = choose
             ? [...choose.cases.map(([value])=>value), GL.OBJECT_PLANE]
-            : [undefined];
+            : entry.nullable ? [DATA, 0] : [undefined];
         for (const choice of choices)
         {
             const args = Array.from({ length: entry.args }, (unused, i)=>(i === entry.pointer
-                ? DATA
+                ? (entry.nullable ? /** @type {number} */ (choice) : DATA)
                 : choose && i === choose.arg ? /** @type {number} */ (choice)
-                    : word(i)));
-            log.length = 0;
-            table[name].handler(args);
-            const direct = log.splice(0);
-
+                    : count && i === count.arg ? 10 : word(i)));
             const copied = choose
                 ? choose.cases.find(([value])=>value === choice)?.[1] ?? choose.otherwise
-                : entry.bytes ?? 0;
-            const record = new Uint32Array(2 + entry.args + copied / 4);
+                : count ? (args[entry.pointer ?? 0] === 0 ? 0 : args[count.arg] << count.shift)
+                    : entry.bytes ?? 0;
+            log.length = 0;
+            table[name].handler(args);
+            // The entry point hands the context the program's address, the
+            // record its bytes: the same bytes.
+            const direct = log.splice(0).map(made=>(count
+                ? made.map(arg=>(arg === DATA ? [...bytes.subarray(DATA, DATA + copied)] : arg))
+                : made));
+
+            const record = new Uint32Array(2 + entry.args + Math.ceil(copied / 4));
             record.set([GL_COMMANDS.commandSlot(name), record.byteLength, ...args]);
-            record.set(new Uint32Array(bytes.slice(DATA, DATA + copied).buffer), 2 + entry.args);
+            new Uint8Array(record.buffer).set(bytes.subarray(DATA, DATA + copied),
+                (2 + entry.args) * 4);
             assert.equal(GL_COMMANDS.runCommands(context(), new Uint8Array(record.buffer), [],
                 ()=>{}), 1);
             assert.deepEqual(log.splice(0), direct, `${name}${choice ? ` (${choice})` : ''}`);

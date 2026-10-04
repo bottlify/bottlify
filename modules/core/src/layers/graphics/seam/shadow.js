@@ -993,8 +993,9 @@ export function getSurfaceLevelCode(at, trap){
  *     pointer -- a method of an object of the device's that is not the device
  * @property {boolean} [stale]  the call may change what the block mirrors
  *     (`FLAG_STALE`)
- * @property {boolean} [nullable]  the pointer may be null with a count of
- *     zero, and is then recorded as null with nothing copied
+ * @property {'empty' | 'any'} [nullable]  the pointer may be null, and is
+ *     then recorded as null with nothing copied: with a count of zero alone
+ *     ('empty'), or whatever the count ('any')
  * @property {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]
  *     } [mirror]  guest code run first, with the block in ECX, that keeps what
  *     a getter in the guest reads current; it may leave for the host through
@@ -1057,6 +1058,13 @@ export function commandCode(at, trap, shape){
         throw new Error('shadow: a pointer that may be null is counted by an argument');
     }
     const header = COMMAND.ARGS + 4 * args;
+    // A copy counted in bytes need not be whole dwords: the record is rounded
+    // up and the tail copied a byte at a time, never read past.
+    const ragged = count !== undefined && count.shift < 2;
+    /** ESI = the record's length, the copy's bytes in EDX: whole dwords, or rounded up. */
+    const recordLength = ragged
+        ? [[0x8d, 0xb2, ...dword(header + 3)], [0x83, 0xe6, 0xfc]] // lea esi, [edx+h+3]; and -4
+        : [[0x8d, 0xb2, ...dword(header)]];                    // lea esi, [edx+header]
     if (self && (thread || pointer >= 0 || count || choose || vertices))
     {
         throw new Error('shadow: a record of the object itself copies nothing');
@@ -1156,7 +1164,7 @@ export function commandCode(at, trap, shape){
     {
         parts.push([0xba, ...dword(pointer >= 0 ? bytes : 0)]);  // mov edx, bytes
     }
-    if (nullable && count)
+    if (nullable === 'empty' && count)
     {
         // No pointer is no elements: a count with it is the host's to refuse.
         parts.push(
@@ -1166,6 +1174,14 @@ export function commandCode(at, trap, shape){
             [0x85, 0xd2],                                        // test edx, edx
             { jcc: 0x75, to: 'out' });                           // jnz out
     }
+    else if (nullable)
+    {
+        // No pointer copies nothing, whatever the count says.
+        parts.push(
+            { jcc: 0xeb, to: 'take' },                           // jmp take
+            { label: 'none' },
+            [0x31, 0xd2]);                                       // xor edx, edx
+    }
     parts.push(
         { jcc: 0xeb, to: 'take' },                               // jmp take
         { label: 'out' },
@@ -1173,7 +1189,7 @@ export function commandCode(at, trap, shape){
         { label: 'take' },
         [0x53, 0x56, 0x57],                                      // push ebx; push esi; push edi
         [0x89, 0xcb],                                            // mov ebx, ecx
-        [0x8d, 0xb2, ...dword(header)],                          // lea esi, [edx+header]
+        ...recordLength,
         { label: 'reserve' },
         [0x8b, 0x83, ...dword(SHADOW.COMMAND_HEAD)],             // mov eax, [ebx+disp]
         [0x8d, 0x3c, 0x30],                                      // lea edi, [eax+esi]
@@ -1212,8 +1228,13 @@ export function commandCode(at, trap, shape){
             [0x89, 0xd1],                                        // mov ecx, edx
             [0xc1, 0xe9, 0x02],                                  // shr ecx, 2
             [0xf3, 0xa5],                                        // rep movsd
+            ...(ragged ? [
+                [0x89, 0xd1],                                    // mov ecx, edx
+                [0x83, 0xe1, 0x03],                              // and ecx, 3
+                [0xf3, 0xa4],                                    // rep movsb
+            ] : []),
             [0x89, 0xc7],                                        // mov edi, eax
-            [0x8d, 0xb2, ...dword(header)]);                     // lea esi, [edx+header]
+            ...recordLength);
     }
     parts.push([0x89, 0x77, COMMAND.BYTES]);                     // mov [edi+4], esi
     if (draws)
