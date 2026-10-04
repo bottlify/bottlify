@@ -1448,6 +1448,8 @@ export const RENDER_STATE_MIRROR = Object.freeze([
     [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
     [0x3d, ...dword(SHADOW.RENDER_STATE_COUNT)],                 // cmp eax, 256
     { jcc: 0x73, to: 'out', near: true },                        // jae out
+    [0x0f, 0xa3, 0x81, ...dword(SHADOW.RENDER_STATE_VALID)],     // bt [ecx+disp], eax
+    { jcc: 0x73, to: 'out', near: true },                        // jnc out: one the device refuses
     [0x8b, 0x54, 0x24, 0x0c],                                    // mov edx, [esp+12]
     [0x89, 0x94, 0x81, ...dword(SHADOW.RENDER_STATES)],          // mov [ecx+eax*4+disp], edx
 ]);
@@ -1456,12 +1458,18 @@ export const RENDER_STATE_MIRROR = Object.freeze([
 export const TRANSFORM_MIRROR = Object.freeze([
     [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
     [0x3d, ...dword(WORLD_SLOT)],                                // cmp eax, 24
-    { jcc: 0x72, to: 'slot' },                                   // jb slot
+    { jcc: 0x72, to: 'low' },                                    // jb low
     [0x2d, ...dword(WORLD_TYPE - WORLD_SLOT)],                   // sub eax, 232
     [0x3d, ...dword(WORLD_SLOT)],                                // cmp eax, 24
     { jcc: 0x72, to: 'out', near: true },                        // jb out
     [0x3d, ...dword(SHADOW.TRANSFORM_SLOTS)],                    // cmp eax, 28
     { jcc: 0x73, to: 'out', near: true },                        // jae out
+    { jcc: 0xeb, to: 'slot' },                                   // jmp slot
+    { label: 'low' },
+    // A type below WORLD that Direct3D 8 refuses is the host's to refuse.
+    [0xba, ...dword(ANSWERED_TRANSFORMS)],                       // mov edx, imm32
+    [0x0f, 0xa3, 0xc2],                                          // bt edx, eax
+    { jcc: 0x73, to: 'out', near: true },                        // jnc out
     { label: 'slot' },
     [0x8b, 0x54, 0x24, 0x0c],                                    // mov edx, [esp+12]
     [0x85, 0xd2],                                                // test edx, edx

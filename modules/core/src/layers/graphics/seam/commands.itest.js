@@ -96,6 +96,8 @@ test('a command routine writes the call into the ring and leaves the rest to the
     host.writePhysical(BLOCK + SHADOW.COMMANDS, new Uint8Array([...u32(RING), ...u32(RING_BYTES)]));
     // A scene open and something to draw from: what a draw's routine checks first.
     host.writePhysical(BLOCK + SHADOW.DRAWABLE, new Uint8Array(u32(0xf)));
+    // Render state 7 as one the device answers for, as the host mirrors it.
+    host.writePhysical(BLOCK + SHADOW.RENDER_STATE_VALID, new Uint8Array([0x80]));
     host.writePhysical(VBLOCK, new Uint8Array([...u32(0), ...u32(DATA + 0x800), ...u32(0x100),
         ...u32(0), ...u32(0), ...u32(0), ...u32(0), ...u32(BLOCK)]));
     host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
@@ -160,6 +162,7 @@ test('a command routine writes the call into the ring and leaves the rest to the
     assert.deepEqual([read(RING + 104), read(RING + 112), read(RING + 116)],
         [commandSlot('SetRenderState'), 7, 0x1234]);
     assert.equal(run(STATE, [300, 1]), 'trap', 'a state past the block');
+    assert.equal(run(STATE, [5, 1]), 'trap', 'a state the device refuses');
     assert.equal(run(TRANSFORM, [257, DATA + 0x100]), 'ok', 'WORLD1');
     assert.deepEqual(new Float32Array(host.readPhysical(BLOCK + SHADOW.TRANSFORMS + 25 * 64, 64)
         .slice().buffer), floats.slice(0, 16));

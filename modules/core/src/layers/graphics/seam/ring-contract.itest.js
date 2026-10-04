@@ -95,18 +95,19 @@ const machine = ()=>{
      * @param {Uint8Array} routine @param {number} object @param {number[]} args
      * @param {import('./shadow.js').ShadowRingState} state  the device's, as the host
      *     writes it into the block after each of its own calls
+     * @param {Uint8Array} valid  the render states it answers for (`renderStatesOf`)
      */
-    const run = (routine, object, args, state)=>{
-        start(state);
+    const run = (routine, object, args, state, valid)=>{
+        start(state, valid);
         return call(routine, object, args);
     };
     /**
      * A fresh block and ring, holding what the host writes of the device's
      * state after each of its own calls.
      *
-     * @param {import('./shadow.js').ShadowRingState} state
+     * @param {import('./shadow.js').ShadowRingState} state @param {Uint8Array} valid
      */
-    const start = state=>{
+    const start = (state, valid)=>{
         host.writePhysical(BLOCK, new Uint8Array(SHADOW.SIZE));
         host.writePhysical(BLOCK + SHADOW.COMMANDS,
             new Uint8Array([...u32(RING), ...u32(RING_BYTES)]));
@@ -117,6 +118,7 @@ const machine = ()=>{
                 value;
         });
         host.writePhysical(BLOCK + SHADOW.DRAWABLE, new Uint8Array(words.buffer));
+        host.writePhysical(BLOCK + SHADOW.RENDER_STATE_VALID, valid);
         host.writePhysical(RING, new Uint8Array(RING_BYTES));
     };
     /**
@@ -151,6 +153,24 @@ const machine = ()=>{
         return host.readPhysical(RING, read(BLOCK + SHADOW.COMMAND_HEAD)).slice();
     };
     return { host, run, start, call };
+};
+
+/**
+ * The render states a device answers for, a bit each, as the host mirrors
+ * them into the block (`SHADOW.RENDER_STATE_VALID`).
+ *
+ * @param {any} device
+ */
+const renderStatesOf = device=>{
+    const bits = new Uint8Array(SHADOW.RENDER_STATE_COUNT / 8);
+    for (let state = 0; state < SHADOW.RENDER_STATE_COUNT; state++)
+    {
+        if (device.GetRenderState(state, {}) === D3D_OK)
+        {
+            bits[state >>> 3] |= 1 << (state & 7);
+        }
+    }
+    return bits;
 };
 
 /**
@@ -208,9 +228,10 @@ function gate(api, table){
             host.writePhysical(DATA, new Uint8Array(new Uint32Array(data).buffer));
             const values = args.map(value);
             const state = device.ringState();
+            const valid = renderStatesOf(device);
             const record = shape.self
-                ? run(routine, values[0], values.slice(1), state)
-                : run(routine, DEVICE, values, state);
+                ? run(routine, values[0], values.slice(1), state, valid)
+                : run(routine, DEVICE, values, state, valid);
             if (record === null)
             {
                 continue;
@@ -338,10 +359,12 @@ const shared = drawable=>({
     SetRenderState: [
         { label: 'a state the device has', args: [7, 1] },
         { label: 'a state past the block', args: [300, 1] },
+        { label: 'a state the device refuses', args: [5, 1] },
     ],
     SetTransform: [
         { label: 'VIEW', args: [2, 'data'], data: IDENTITY },
         { label: 'WORLD1', args: [257, 'data'], data: IDENTITY },
+        { label: 'a type below WORLD Direct3D 8 refuses', args: [0, 'data'], data: IDENTITY },
         { label: 'a type there is not', args: [24, 'data'], data: IDENTITY },
     ],
     SetTextureStageState: [
@@ -456,6 +479,8 @@ test('Direct3D 9: every call the command ring answers for in the guest is one th
                 { label: 'a vertex sampler', args: [257, 5, 2] },
                 { label: 'a sampler past the last', args: [16, 5, 2] },
                 { label: 'a type there is not', args: [0, 20, 0] },
+                { label: 'a type below the first', args: [0, 0, 0] },
+                { label: 'a type past DMAPOFFSET', args: [0, 14, 0] },
             ],
             SetStreamSource: [
                 { label: 'stream 0', args: [0, 'vertices', 0, 16], setup: vertices9 },
@@ -603,7 +628,7 @@ function sequence(api, setup, steps){
         host.writePhysical(OBJECTS + i * 16 + 4, new Uint8Array(u32(BLOCK)));
         pointers.set(OBJECTS + i * 16, made[key]);
     });
-    start(device.ringState());
+    start(device.ringState(), renderStatesOf(device));
     /** @type {Uint8Array | null} */
     let ring = null;
     steps.forEach(([name, args, expected, data = []], step)=>{

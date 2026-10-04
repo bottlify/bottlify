@@ -45,7 +45,9 @@ const set = commandSet([...IDIRECT3DDEVICE9_SLOTS, ...STATE_BLOCK_SLOTS], {
     // The stages, the displacement map's sampler and the vertex shader's four.
     SetTexture: { args: 2, objects: [1], within: [{ arg: 0, ranges: [[0, 15], [256, 260]] }],
         make: (d, c)=>d.SetTexture(c.arg(0), c.object()) },
-    SetSamplerState: { args: 3, make: (d, c)=>d.SetSamplerState(c.arg(0), c.arg(1), c.arg(2)) },
+    // D3DSAMP_ADDRESSU to D3DSAMP_DMAPOFFSET: any other type is refused.
+    SetSamplerState: { args: 3, within: [{ arg: 1, ranges: [[1, 13]] }],
+        make: (d, c)=>d.SetSamplerState(c.arg(0), c.arg(1), c.arg(2)) },
     SetStreamSource: { args: 4, objects: [1], within: [{ arg: 0, ranges: [[0, 15]] }],
         make: (d, c)=>d.SetStreamSource(c.arg(0), c.object(), c.arg(2), c.arg(3)) },
     SetIndices: { args: 1, objects: [0], make: (d, c)=>d.SetIndices(c.object()) },

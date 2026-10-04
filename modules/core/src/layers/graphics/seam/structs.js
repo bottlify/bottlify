@@ -740,9 +740,18 @@ export function createFields(memory){
          */
         writeFloats(address, values){
             const { floats } = staged(values.length);
-            for (let index = 0; index < values.length; index++)
+            if (values instanceof Float32Array)
             {
-                floats[index] = values[index];
+                // Copied as the bits they are: a signalling NaN taken through
+                // a number comes out quiet, and the program set it as it was.
+                floats.set(values);
+            }
+            else
+            {
+                for (let index = 0; index < values.length; index++)
+                {
+                    floats[index] = values[index];
+                }
             }
             writeStaged(address, values.length);
         },

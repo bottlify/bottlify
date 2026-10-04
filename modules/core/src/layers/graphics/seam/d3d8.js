@@ -1204,7 +1204,11 @@ export function createDirect3D8Seam(
         },
 
         /** @param {any} device @param {number[]} args */
-        SetRenderState: (device, [state, value])=>device.SetRenderState(state >>> 0, value >>> 0),
+        SetRenderState: (device, [state, value])=>{
+            const hr = device.SetRenderState(state >>> 0, value >>> 0);
+            shadowOf(device)?.remirror({ renderStates: [state >>> 0] });
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         GetRenderState: (device, [state, out])=>{
@@ -1329,16 +1333,27 @@ export function createDirect3D8Seam(
             device.SetIndices(publisher.objectAt(buffer), base >>> 0),
 
         /** @param {any} device @param {number[]} args */
-        SetTextureStageState: (device, [stage, type, value])=>
-            device.SetTextureStageState(stage >>> 0, type >>> 0, value >>> 0),
+        SetTextureStageState: (device, [stage, type, value])=>{
+            const hr = device.SetTextureStageState(stage >>> 0, type >>> 0, value >>> 0);
+            shadowOf(device)?.remirror({ stageStates: [(stage & 0xffffff) << 8 | type & 0xff] });
+            return hr;
+        },
 
         // Sixteen floats, in the order D3DMATRIX lays them out. Read here
         // rather than passed as an address because everything past this point
         // works in numbers.
         /** @param {any} device @param {number[]} args */
-        SetTransform: (device, [type, matrix])=>((matrix >>> 0) === 0
-            ? D3DERR_INVALIDCALL
-            : device.SetTransform(type >>> 0, readFloats(matrix, 16))),
+        SetTransform: (device, [type, matrix])=>{
+            if ((matrix >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const hr = device.SetTransform(type >>> 0, readFloats(matrix, 16));
+            // A set the host makes -- the routine kept as a trap, or the slow
+            // path up -- is one the guest's GetTransform reads too.
+            shadowOf(device)?.refreshTransform(type >>> 0);
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         SetMaterial: (device, [pointer])=>((pointer >>> 0) === 0
