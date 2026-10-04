@@ -877,6 +877,7 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         CoUnmarshalInterface: 12,
         CoGetMarshalSizeMax: 24,
         CoGetPSClsid: 8,
+        CoRegisterPSClsid: 8,
         GetRunningObjectTable: 8,
         CreateItemMoniker: 12,
         StringFromCLSID: 8,
@@ -1308,4 +1309,12 @@ test('CoGetPSClsid reads the proxy/stub class the registry names for an interfac
     assert.equal(formatGuid(host.bytes.subarray(OUT, OUT + GUID_SIZE)), proxyStub);
     assert.equal(fns.CoGetMarshalSizeMax.handler([OUT, IID_ARG, 0, 0, 0, 0]), S_OK);
     assert.equal(host.u32(OUT), 72, 'a standard OBJREF');
+
+    // One the process registered for itself is answered ahead of the registry.
+    const own = '{0A0B0C0D-0000-0000-0000-000000000002}';
+    host.bytes.set(/** @type {Uint8Array} */ (parseGuid(own)), CLSID_ARG);
+    assert.equal(fns.CoRegisterPSClsid.handler([IID_ARG, CLSID_ARG]), S_OK);
+    assert.equal(fns.CoGetPSClsid.handler([IID_ARG, OUT]), S_OK);
+    assert.equal(formatGuid(host.bytes.subarray(OUT, OUT + GUID_SIZE)), own);
+    assert.equal(fns.CoRegisterPSClsid.handler([IID_ARG, 0]) >>> 0, 0x80070057, 'E_INVALIDARG');
 });

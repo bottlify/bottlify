@@ -994,6 +994,9 @@ export function createOleFunctions(host){
         return address === 0 ? null : readGuid(host, address);
     };
 
+    /** The proxy/stub classes this process registered for itself, by interface. */
+    const ownProxyStubs = new Map();
+
     /**
      * @param {string} api @param {number} out  Where the object would go, or 0.
      * @returns {number} E_OUTOFMEMORY
@@ -2061,9 +2064,31 @@ export function createOleFunctions(host){
         },
 
         /**
+         * HRESULT CoRegisterPSClsid(REFIID riid, REFCLSID rclsid)
+         *
+         * The proxy/stub class for an interface, for this process alone:
+         * what CoGetPSClsid answers ahead of the registry.
+         */
+        CoRegisterPSClsid: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([riid, rclsid])=>{
+                const iid = guidAt(riid);
+                const clsid = guidAt(rclsid);
+                if (iid === null || clsid === null)
+                {
+                    return E_INVALIDARG;
+                }
+                ownProxyStubs.set(canonicalGuid(iid), canonicalGuid(clsid));
+                return S_OK;
+            },
+        },
+
+        /**
          * HRESULT CoGetPSClsid(REFIID riid, CLSID *pClsid)
          *
-         * The proxy/stub class the registry names for an interface.
+         * The proxy/stub class the process registered for an interface, or
+         * else the one the registry names.
          */
         CoGetPSClsid: {
             argBytes: 8,
@@ -2071,7 +2096,8 @@ export function createOleFunctions(host){
             handler: ([riid, pclsid])=>{
                 const iid = guidAt(riid);
                 const clsid = iid === null ? null
-                    : canonicalGuid(interfaceKeyValue(iid, 'ProxyStubClsid32') ?? '');
+                    : ownProxyStubs.get(canonicalGuid(iid))
+                        ?? canonicalGuid(interfaceKeyValue(iid, 'ProxyStubClsid32') ?? '');
                 if ((pclsid >>> 0) === 0)
                 {
                     return E_INVALIDARG;
