@@ -382,7 +382,9 @@ export function createWin32Module(){
             const sink = (handle, text)=>{
                 const file = handle === HANDLE_STDOUT ? standardFiles?.output
                     : handle === HANDLE_STDERR ? standardFiles?.error : undefined;
-                const node = file && volume.open(file.path, { write: true });
+                // The parent's own open file, handed on: written on the terms
+                // it was opened with, whatever another open would be refused.
+                const node = file && volume.open(file.path, { write: true, inherited: true });
                 if (!file || !node)
                 {
                     toConsole(handle, text);

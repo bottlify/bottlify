@@ -210,6 +210,7 @@ export function createVolume(fs, fetchBlocks = null){
                 write: Boolean(mode.write),
                 shareWrite: mode.shareWrite === true,
                 disposition: dispositionOf(mode),
+                inherited: mode.inherited === true,
             }), null);
         },
 

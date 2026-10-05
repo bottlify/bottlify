@@ -66,9 +66,13 @@ export const SeekFrom = {
  *
  * @param {Object} [options]
  * @param {number} [options.limit]  Most files open at once.
+ * @param {Set<FileHandle>} [options.everyone]
+ *     Every file open on the volume, by every process that shares it: what
+ *     sharing is settled against, since CreateFile's terms are the system's.
+ *     A table with no one to share the volume with keeps its own.
  */
-export function createFileTable({ limit = 4096 } = {}){
-    /** @type {Set<FileHandle>} */
+export function createFileTable({ limit = 4096, everyone = new Set() } = {}){
+    /** This process's own. @type {Set<FileHandle>} */
     const open = new Set();
     let nextId = 1;
     let opened = 0;
@@ -109,7 +113,7 @@ export function createFileTable({ limit = 4096 } = {}){
      * @param {AccessFlags} share
      */
     const checkSharing = (key, access, share)=>{
-        for (const handle of open)
+        for (const handle of everyone)
         {
             if (handle.key !== key)
             {
@@ -150,6 +154,9 @@ export function createFileTable({ limit = 4096 } = {}){
          * @param {AccessFlags} request.access
          * @param {AccessFlags} [request.share]
          * @param {string} [request.disposition]
+         * @param {boolean} [request.inherited]  The open is one a process was
+         *     handed by another, the same file it already holds: no new terms
+         *     are agreed, so none are checked.
          * @returns {FileHandle}
          */
         open(request){
@@ -174,7 +181,10 @@ export function createFileTable({ limit = 4096 } = {}){
                 // directory; the caller decides which Win32 error says so.
                 throw fsError(ErrorCode.IS_A_DIRECTORY, `"${existing.path}" is a directory`);
             }
-            checkSharing(key, access, share);
+            if (!request.inherited)
+            {
+                checkSharing(key, access, share);
+            }
 
             if (existing && disposition === Disposition.CREATE_NEW)
             {
@@ -204,6 +214,7 @@ export function createFileTable({ limit = 4096 } = {}){
                 closed: false,
             };
             open.add(handle);
+            everyone.add(handle);
             opened++;
             track(entry.path).opens++;
             return handle;
@@ -314,8 +325,27 @@ export function createFileTable({ limit = 4096 } = {}){
             live(handle);
             handle.closed = true;
             open.delete(handle);
+            everyone.delete(handle);
             closed++;
         },
+
+        /** Closes everything this process holds: it has ended. */
+        closeAll(){
+            for (const handle of open)
+            {
+                handle.closed = true;
+                everyone.delete(handle);
+                closed++;
+            }
+            open.clear();
+        },
+
+        /**
+         * Whether any process sharing the volume holds the file open.
+         *
+         * @param {string} key
+         */
+        isOpen: key=>[...everyone].some(handle=>handle.key === key),
 
         /** @returns {FileHandle[]} */
         list(){

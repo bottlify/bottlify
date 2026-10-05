@@ -111,9 +111,17 @@ export function createFilesystemModule(){
              *
              * @type {{ drives: Map<string, any>, volumes: Map<string, any>,
              *     writables: Map<string, any>,
-             *     watchers: Set<(key: string, change: any) => void> } | null}
+             *     watchers: Set<(key: string, change: any) => void>,
+             *     open?: Set<any> } | null}
              */
             const shared = config?.volume ?? null;
+            // Every process's open files, which sharing is settled against:
+            // a file one process holds on terms that share nothing is refused
+            // to every other, as CreateFile's terms are the system's.
+            if (shared && !shared.open)
+            {
+                shared.open = new Set();
+            }
             const inherited = (shared?.drives.size ?? 0) > 0;
             /**
              * Everything this instance owns, and whether it is still open.
@@ -140,7 +148,8 @@ export function createFilesystemModule(){
                 // was mounted -- rather than giving the drive a blank disk.
                 writables: shared?.writables ?? new Map(),
                 directories: null,
-                files: createFileTable({ limit: config?.openFileLimit }),
+                files: createFileTable({ limit: config?.openFileLimit,
+                    everyone: shared?.open }),
                 disposed: false,
                 unwatch: ()=>{},
             };
@@ -362,12 +371,10 @@ export function createFilesystemModule(){
                     quiet = options?.quiet === true;
                     try
                     {
-                        const open = new Set(state.files.list().map((/** @type {any} */ file)=>
-                            foldName(file.path)));
                         for (const entry of batch)
                         {
-                            const { components, drive } = locate(entry.path);
-                            if (open.has(foldName(formatPath(drive, components))))
+                            // Held open by this process or any other on the volume.
+                            if (state.files.isOpen(locate(entry.path).key))
                             {
                                 throw fsError(ErrorCode.SHARING_VIOLATION,
                                     `"${entry.path}" is open; the batch was not applied`);
@@ -644,6 +651,8 @@ export function createFilesystemModule(){
                  * @param {boolean} [options.shareRead]
                  * @param {boolean} [options.shareWrite]
                  * @param {string} [options.disposition]  One of Disposition.
+                 * @param {boolean} [options.inherited]  A handle another process
+                 *     opened and handed on: the same open file, its terms agreed.
                  */
                 open(path, options = {}){
                     if (!live())
@@ -661,6 +670,7 @@ export function createFilesystemModule(){
                             write: options.shareWrite === true,
                         },
                         disposition: options.disposition ?? Disposition.OPEN_EXISTING,
+                        inherited: options.inherited === true,
                     });
                 },
 
@@ -814,7 +824,9 @@ export function createFilesystemModule(){
             if (current)
             {
                 current.disposed = true;
-                // The drives outlive this process when they are the run's.
+                // The drives outlive this process when they are the run's;
+                // what it held open does not.
+                current.files.closeAll();
                 current.unwatch();
             }
             current = null;
