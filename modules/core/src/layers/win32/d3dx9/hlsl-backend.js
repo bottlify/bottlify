@@ -65,7 +65,8 @@ const SLOT_COST = { sincos: 8, lrp: 2, pow: 3, dsx: 2, dsy: 2 };
 const TEXTURE_OPS = new Set(['texld', 'texldl', 'texldd', 'texkill']);
 
 /** @param {Src} src */
-const laneCount = src=>('values' in src ? src.values.length : 'swz' in src ? src.swz.length : 0);
+export const laneCount = src=>('values' in src ? src.values.length
+    : 'swz' in src ? src.swz.length : 0);
 
 /**
  * The lanes of source `k` an instruction reads, which is what decides the
@@ -74,7 +75,7 @@ const laneCount = src=>('values' in src ? src.values.length : 'swz' in src ? src
  * @param {Instr} instr @param {number} k
  * @returns {number[]}
  */
-function lanesRead(instr, k){
+export function lanesRead(instr, k){
     const src = instr.srcs[k];
     const cls = /** @type {Record<string, { cls: string }>} */ (OPCODES)[instr.op].cls;
     const count = laneCount(src);
@@ -101,7 +102,7 @@ function lanesRead(instr, k){
  * @param {Instr[]} instrs
  * @returns {Instr[]}
  */
-function prune(instrs){
+export function prune(instrs){
     /** @type {Set<number>} */
     const live = new Set();
     let addressNeeded = false;
@@ -148,7 +149,7 @@ function prune(instrs){
  * @param {Instr[]} instrs
  * @returns {{ writers: Map<VReg, number[]>, reads: Map<VReg, number> }}
  */
-function usage(instrs){
+export function usage(instrs){
     /** @type {Map<VReg, number[]>} */
     const writers = new Map();
     /** @type {Map<VReg, number>} */
@@ -176,7 +177,7 @@ function usage(instrs){
  * @param {Src} src @param {number[]} lanes @param {boolean} negate
  * @returns {Src}
  */
-function reselect(src, lanes, negate){
+export function reselect(src, lanes, negate){
     if (src.kind === 'imm')
     {
         const values = lanes.map(l=>src.values[Math.min(l, src.values.length - 1)]);
@@ -199,7 +200,7 @@ function reselect(src, lanes, negate){
  * @param {Instr[]} instrs @param {Profile} profile
  * @returns {Instr[]}
  */
-function fuseMultiplyAdd(instrs, profile){
+export function fuseMultiplyAdd(instrs, profile){
     const { writers, reads } = usage(instrs);
     /** @type {Set<number>} */
     const removed = new Set();
@@ -252,7 +253,7 @@ function fuseMultiplyAdd(instrs, profile){
 }
 
 /** @param {Src} src @returns {Src} */
-function negated(src){
+export function negated(src){
     if (src.kind === 'imm')
     {
         return { kind: 'imm', values: src.values.map(v=>-v) };
@@ -271,7 +272,7 @@ function negated(src){
  * @param {Instr[]} instrs
  * @returns {Instr[]}
  */
-function coalesceMoves(instrs){
+export function coalesceMoves(instrs){
     const { writers, reads } = usage(instrs);
     /** @type {Map<number, Instr>} */
     const replaced = new Map();
@@ -331,7 +332,7 @@ function coalesceMoves(instrs){
  * @param {Instr[]} instrs
  * @returns {Instr[]}
  */
-function forwardOutputs(instrs){
+export function forwardOutputs(instrs){
     const { writers, reads } = usage(instrs);
     /** @type {Map<number, Instr>} */
     const replaced = new Map();
@@ -381,7 +382,7 @@ function forwardOutputs(instrs){
  * @param {Const[]} constants @param {Diagnostic[]} diagnostics
  * @returns {Set<number>}   The float registers in use.
  */
-function assignConstants(constants, diagnostics){
+export function assignConstants(constants, diagnostics){
     /** @type {Record<string, Set<number>>} */
     const taken = { f: new Set(), i: new Set(), b: new Set(), s: new Set() };
     /** @param {Const} c */
@@ -531,7 +532,7 @@ function packLiterals(instrs, reserved){
  * @param {Src} src
  * @returns {string | null}
  */
-function constKey(src){
+export function constKey(src){
     if (src.kind === 'creg')
     {
         return `${src.file}${src.index}${src.relative ? 'r' : ''}`;
@@ -809,7 +810,7 @@ function inputRegister(profile, input, position){
     return null;
 }
 
-const USAGE_NAMES = Object.fromEntries(Object.entries(USAGE).map(([k, v])=>[v, k]));
+export const USAGE_NAMES = Object.fromEntries(Object.entries(USAGE).map(([k, v])=>[v, k]));
 
 /**
  * The shader, as tokens.
