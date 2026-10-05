@@ -187,6 +187,36 @@ export function createWindowDirectory(){
         foreground: ()=>manager.foreground(),
 
         /**
+         * A process's window took the keyboard focus, or the process let it
+         * go: the focus is the run's, one for every program, and a window
+         * taking it makes its top-level window the foreground one -- the
+         * process whose window that was is told so, as `setForeground` tells
+         * it. One process letting go does not take another's.
+         *
+         * @param {number} hwnd  the window, zero to let it go
+         * @param {number} processId  the process it is told by
+         */
+        noteFocus(hwnd, processId){
+            if (hwnd !== 0 && !manager.get(hwnd >>> 0))
+            {
+                // A window the run does not list -- the desktop -- is no
+                // program's to hold the run's focus with.
+                return;
+            }
+            if (hwnd !== 0)
+            {
+                this.setForeground(hwnd);
+                manager.setFocus(hwnd >>> 0);
+                return;
+            }
+            const holder = manager.focus();
+            if (holder !== 0 && manager.get(holder)?.processId === processId)
+            {
+                manager.setFocus(0);
+            }
+        },
+
+        /**
          * A process's window took the mouse, or the process let it go: one
          * process releasing its capture does not take another's.
          *

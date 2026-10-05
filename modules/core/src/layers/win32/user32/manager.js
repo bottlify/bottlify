@@ -50,8 +50,8 @@
  * A change, as a subscriber is told it: what happened, to which window, the
  * window as it now is (none once it is gone), and the revision it made.
  *
- * @typedef {{ kind: 'created' | 'changed' | 'removed' | 'stacked' | 'foreground' | 'capture',
- *     hwnd: number, state: WindowState | null, revision: number }} WindowEvent
+ * @typedef {{ kind: 'created' | 'changed' | 'removed' | 'stacked' | 'foreground' | 'focus'
+ *     | 'capture', hwnd: number, state: WindowState | null, revision: number }} WindowEvent
  */
 
 /** The fields whose change is a change of the window, in the order they are compared. */
@@ -83,6 +83,12 @@ export function createWindowManager(){
     /** The top-level windows, bottom to top. @type {number[]} */
     let order = [];
     let foreground = 0;
+    /**
+     * The window the keyboard goes to: the foreground window or one inside
+     * it, or none. One for the run, as Windows has one: a window that takes
+     * it takes it from every other.
+     */
+    let focused = 0;
     let captured = 0;
     /** Where the page's pointer was last, on the screen. */
     const pointer = { x: 0, y: 0 };
@@ -223,6 +229,10 @@ export function createWindowManager(){
             {
                 foreground = 0;
             }
+            if (focused === hwnd || (focused !== 0 && topLevelOf(focused) === 0))
+            {
+                focused = 0;
+            }
             if (captured === hwnd)
             {
                 captured = 0;
@@ -255,9 +265,25 @@ export function createWindowManager(){
             return at < 0 ? rest.length : at;
         }),
 
-        /** @param {number} hwnd */
+        /**
+         * A window is made the foreground one: one that was not comes to the
+         * top of its band, as an activated window does, and a focus in
+         * another window goes -- the new one's process places it in its
+         * window.
+         *
+         * @param {number} hwnd
+         */
         setForeground(hwnd){
             const top = hwnd === 0 ? 0 : topLevelOf(hwnd);
+            if (top !== 0 && top !== foreground)
+            {
+                manager.raise(top);
+            }
+            if (focused !== 0 && topLevelOf(focused) !== top)
+            {
+                focused = 0;
+                emit('focus', 0);
+            }
             if (top !== foreground)
             {
                 foreground = top;
@@ -265,6 +291,31 @@ export function createWindowManager(){
             }
         },
         foreground: ()=>foreground,
+
+        /**
+         * A window takes the keyboard: its top-level window becomes the
+         * foreground one -- coming up, if it was not -- and every other
+         * window has lost it.
+         * Zero takes it from every window, the foreground one staying so.
+         *
+         * @param {number} hwnd
+         */
+        setFocus(hwnd){
+            if (hwnd !== 0 && !windows.has(hwnd))
+            {
+                return;
+            }
+            if (hwnd !== 0)
+            {
+                manager.setForeground(hwnd);
+            }
+            if (hwnd !== focused)
+            {
+                focused = hwnd;
+                emit('focus', hwnd);
+            }
+        },
+        focus: ()=>focused,
 
         /** @param {number} hwnd */
         setCapture(hwnd){
@@ -314,11 +365,12 @@ export function createWindowManager(){
         /**
          * The process an input event of the page goes to, as Windows sends
          * it: a pointer's to the window that captured the mouse, else the one
-         * under it; the keyboard's, and anything else, to the foreground
-         * window's. Null where no window answers -- the caller's own choice
-         * then. The pointer's last place is the run's, as the cursor is one
-         * for the whole desktop: a button or a wheel with no place of its own
-         * happens where the pointer last was.
+         * under it; the keyboard's, and anything else, to the window with the
+         * focus, else the foreground one. Null where no window has it -- the
+         * desktop under the pointer, no window in the foreground -- and then,
+         * as on Windows, no program is sent it. The pointer's last place is
+         * the run's, as the cursor is one for the whole desktop: a button or a
+         * wheel with no place of its own happens where the pointer last was.
          *
          * @param {{ kind: string, x?: number, y?: number }} event
          * @returns {number | null}
@@ -331,8 +383,8 @@ export function createWindowManager(){
                 pointer.x = event.x;
                 pointer.y = event.y;
             }
-            const hwnd = !pointed ? foreground
-                : captured || manager.fromPoint(pointer.x, pointer.y) || foreground;
+            const hwnd = !pointed ? focused || foreground
+                : captured || manager.fromPoint(pointer.x, pointer.y);
             return hwnd !== 0 ? windows.get(hwnd)?.processId ?? null : null;
         },
 
@@ -354,6 +406,7 @@ export function createWindowManager(){
             windows: windows.size,
             revision,
             foreground: `0x${foreground.toString(16)}`,
+            focus: `0x${focused.toString(16)}`,
             capture: `0x${captured.toString(16)}`,
             topLevel: manager.topLevel().map(state=>({
                 hwnd: `0x${state.hwnd.toString(16)}`, process: state.processId,
