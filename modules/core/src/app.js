@@ -2758,7 +2758,7 @@ export function createKernelGl(opengl, journalCall, traced, counters){
  *     patches?: { address: number, bytes: Uint8Array }[],
  *     spawned?: (request: any) => void,
  *     logSinks?: Map<Function, (payload: any) => void>,
- *     system?: { namedObjects: Map<string, any>, hive: any, bundle: any,
+ *     system?: { namedObjects: Map<string, any>, registry: any, bundle: any,
  *         ids: { thread: number, process: number }, volume: any },
  *     mainThreadId?: number,
  *     com?: { table: any, process: unknown },
@@ -6807,12 +6807,12 @@ export async function createApp(options){
      * objects, and the registry -- the first process's hive, the one each
      * later process is handed rather than a copy of it.
      *
-     * @type {{ namedObjects: Map<string, any>, hive: any, bundle: any,
+     * @type {{ namedObjects: Map<string, any>, registry: any, bundle: any,
      *     ids: { thread: number, process: number },
      *     volume: { drives: Map<string, any>, volumes: Map<string, any>,
      *         writables: Map<string, any>, watchers: Set<Function> } }}
      */
-    const system = { namedObjects, hive: null, bundle: null,
+    const system = { namedObjects, registry: null, bundle: null,
         ids: { thread: 1, process: 0x2000 },
         volume: { drives: new Map(), volumes: new Map(), writables: new Map(),
             watchers: new Set() } };

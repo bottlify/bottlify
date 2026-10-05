@@ -10,6 +10,7 @@ import { createShlwapiFunctions } from './functions.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { createRegistryFunctions } from '../advapi32/functions.js';
 import { createHive } from '../advapi32/registry.js';
+import { createRegistryService } from '../advapi32/registry-service.js';
 
 const AT = 0x100;
 
@@ -473,7 +474,8 @@ function registryMachine(){
         },
         free: ()=>{},
     };
-    const registry = createRegistryFunctions({ ...base, hive: createHive() });
+    const registry = createRegistryFunctions({
+        ...base, hive: createRegistryService(createHive()) });
     const fns = createShlwapiFunctions({ ...base, advapi32: ()=>registry });
     let argAt = 0x10100;
     /** @param {string} text */

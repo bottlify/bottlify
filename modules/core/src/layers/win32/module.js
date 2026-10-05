@@ -7,6 +7,7 @@
 import { createConsoleFunctions, HANDLE_STDOUT, HANDLE_STDERR } from './kernel32/console.js';
 import { createThreadingFunctions } from './kernel32/threading.js';
 import { createNamedObjects } from './kernel32/named-objects.js';
+import { createRegistryService } from './advapi32/registry-service.js';
 import { createDebugFunctions } from './kernel32/debug.js';
 import { createHeapAllocator, createHeapFunctions } from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState } from './kernel32/process.js';
@@ -230,7 +231,7 @@ export function createWin32Module(){
             // to share it with; a caller with nothing to share it with gets
             // its own. The one namespace a mutex, event, semaphore, timer and
             // file mapping all share is part of it.
-            /** @type {{ namedObjects: Map<string, any>, hive: any } | null} */
+            /** @type {{ namedObjects: Map<string, any>, registry: any } | null} */
             const system = config?.system ?? null;
             const namedObjects = createNamedObjects({ table: system?.namedObjects });
             // What GetCurrentProcessId answers: a child is the process its parent
@@ -387,17 +388,19 @@ export function createWin32Module(){
                 file.position += volume.write(node, file.position, encodeAnsi(text));
                 volume.close(node);
             };
-            // The registry is the run's: the first process's hive, handed to
-            // every process after it rather than copied into each, so a key a
-            // parent writes is there for its child the moment it is written,
-            // and the child's writes are the parent's without being carried
-            // back when it exits.
-            const inheritedHive = system?.hive ?? null;
-            const hive = inheritedHive
-                ?? createHive({ processorMhz: config?.processorMhz, windows, directx });
+            // The registry is the run's: the first process's, handed to every
+            // process after it rather than copied into each, so a key a parent
+            // writes is there for its child the moment it is written, and the
+            // child's writes are the parent's without being carried back when
+            // it exits. Reached through the system half's interface, which
+            // names keys by number (`registry-service.js`): what a process in
+            // a worker of its own will be able to call across a ring.
+            const inheritedHive = system?.registry ?? null;
+            const hive = inheritedHive ?? createRegistryService(
+                createHive({ processorMhz: config?.processorMhz, windows, directx }));
             if (system)
             {
-                system.hive = hive;
+                system.registry = hive;
             }
             // The guest's clock, because a timer is due against the clock the
             // program itself reads, and the input layer's key state, because a

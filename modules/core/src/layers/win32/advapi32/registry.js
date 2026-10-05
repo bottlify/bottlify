@@ -990,6 +990,41 @@ export function createHive(
             return 'renamed';
         },
 
+        /**
+         * Where a key hangs: its parent and its name there, looked for from
+         * the roots, as a handle holds only the key. Null for a root, a key
+         * outside every root, and one deleted since.
+         *
+         * @param {RegistryKey} key @returns {{ parent: RegistryKey, name: string } | null}
+         */
+        placeOf(key){
+            if (isClasses(key))
+            {
+                return key.path.length === 0 ? null
+                    : { parent: CLASSES_ROOT, name: key.path.join('\\') };
+            }
+            const pending = [...roots.values()];
+            const seen = new Set();
+            while (pending.length > 0)
+            {
+                const node = /** @type {RegistryNode} */ (pending.pop());
+                if (seen.has(node))
+                {
+                    continue;
+                }
+                seen.add(node);
+                for (const child of node.keys.values())
+                {
+                    if (child === key)
+                    {
+                        return { parent: node, name: child.name };
+                    }
+                    pending.push(child);
+                }
+            }
+            return null;
+        },
+
         /** @param {RegistryKey} key @param {string} name @returns {boolean} */
         deleteValue(key, name){
             const deleted = writable(key)?.values.delete(fold(name)) ?? false;

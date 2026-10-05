@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { createRegistryService } from './registry-service.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServiceFunctions } from './services.js';
@@ -27,7 +28,7 @@ const SERVICE_NO_CHANGE = 0xffffffff;
 
 function setup(){
     const bytes = new Uint8Array(0x1000);
-    const hive = createHive();
+    const hive = createRegistryService(createHive());
     let lastError = 0;
     /** @type {string[]} */
     const diverged = [];
@@ -66,7 +67,7 @@ function setup(){
     const serviceKey = name=>hive.open(
         /** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)),
         `SYSTEM\\CurrentControlSet\\Services\\${name}`);
-    return { fns, hive, put, serviceKey, lastError: ()=>lastError, diverged, bytes };
+    return { fns, hive: /** @type {any} */ (hive), put, serviceKey, lastError: ()=>lastError, diverged, bytes };
 }
 
 /** @param {Uint8Array} data */
@@ -88,7 +89,7 @@ test('the manager opens for the one user, and a service that was never made is n
 });
 
 test('a created service is the registry key the real manager writes', ()=>{
-    const { fns, put, serviceKey, lastError } = setup();
+    const { fns, hive, put, serviceKey, lastError } = setup();
     const manager = fns.OpenSCManagerA.handler([0, 0, 2]);
     const service = fns.CreateServiceA.handler([
         manager, put(NAME, 'Example'), put(DISPLAY, 'Example Service'), 0xf01ff,
@@ -101,7 +102,7 @@ test('a created service is the registry key the real manager writes', ()=>{
     assert.ok(key, 'HKLM\\SYSTEM\\CurrentControlSet\\Services\\Example exists');
     const held = /** @type {any} */ (key);
     /** @param {string} name */
-    const value = name=>held.values.get(name.toLowerCase());
+    const value = name=>hive.getValue(held, name.toLowerCase());
     assert.equal(value('Type').type, REG_DWORD);
     assert.equal(dwordOf(value('Type').data), SERVICE_WIN32_OWN_PROCESS);
     assert.equal(dwordOf(value('Start').data), SERVICE_AUTO_START);
@@ -122,7 +123,7 @@ test('a created service is the registry key the real manager writes', ()=>{
 });
 
 test('changing the configuration rewrites only what was given', ()=>{
-    const { fns, put, serviceKey } = setup();
+    const { fns, hive, put, serviceKey } = setup();
     const manager = fns.OpenSCManagerA.handler([0, 0, 2]);
     const service = fns.CreateServiceA.handler([
         manager, put(NAME, 'Example'), put(DISPLAY, 'Example Service'), 0,
@@ -135,10 +136,10 @@ test('changing the configuration rewrites only what was given', ()=>{
         0, 0, 0, 0, 0, 0,
     ]), 1);
     const key = /** @type {any} */ (serviceKey('Example'));
-    assert.equal(dwordOf(key.values.get('type').data), SERVICE_WIN32_OWN_PROCESS, 'left alone');
-    assert.equal(dwordOf(key.values.get('start').data), 3);
-    assert.equal(textOf(key.values.get('imagepath').data), 'C:\\new.exe');
-    assert.equal(textOf(key.values.get('displayname').data), 'Example Service', 'left alone');
+    assert.equal(dwordOf(hive.getValue(key, 'type').data), SERVICE_WIN32_OWN_PROCESS, 'left alone');
+    assert.equal(dwordOf(hive.getValue(key, 'start').data), 3);
+    assert.equal(textOf(hive.getValue(key, 'imagepath').data), 'C:\\new.exe');
+    assert.equal(textOf(hive.getValue(key, 'displayname').data), 'Example Service', 'left alone');
     assert.equal(fns.ChangeServiceConfigA.handler([manager, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), 0,
         'the manager is not a service');
 });
@@ -175,7 +176,7 @@ test('a service\'s names are kept in the bytes the program gave them', ()=>{
     // The memory layer reads them as Windows-1252, where 0x80 is the euro
     // sign, 0x99 the trade mark and 0x97 an em dash, and the registry keeps a
     // string in that page, so RegQueryValueExA hands the same bytes back.
-    const { fns, put, serviceKey } = setup();
+    const { fns, hive, put, serviceKey } = setup();
     const manager = fns.OpenSCManagerA.handler([0, 0, 2]);
     assert.notEqual(fns.CreateServiceA.handler([
         manager, put(NAME, 'Example'), put(DISPLAY, '\x80\x99\x97\xe9'), 0,
@@ -183,8 +184,8 @@ test('a service\'s names are kept in the bytes the program gave them', ()=>{
         put(PATH, 'C:\\\x80\\s.exe'), 0, 0, 0, 0, 0,
     ]), 0);
     const held = /** @type {any} */ (serviceKey('Example'));
-    assert.deepEqual([...held.values.get('displayname').data], [0x80, 0x99, 0x97, 0xe9, 0]);
-    assert.deepEqual([...held.values.get('imagepath').data.subarray(3, 5)], [0x80, 0x5c]);
+    assert.deepEqual([...hive.getValue(held, 'displayname').data], [0x80, 0x99, 0x97, 0xe9, 0]);
+    assert.deepEqual([...hive.getValue(held, 'imagepath').data.subarray(3, 5)], [0x80, 0x5c]);
 });
 
 test('DeleteService marks a service, whose key goes with the last handle open on it', ()=>{
