@@ -659,3 +659,80 @@ void main(float4 p : POSITION, float4 uv : TEXCOORD0, out float4 pos : POSITION,
     pos = mul(p, M);
     o = uv + pos.xxyy * 0.5;
 }`, ['vs_1_1', 'vs_2_0', 'vs_3_0'], { ulp: 5 });
+
+whole('depth and a second render target', `
+struct Out { float4 c0 : COLOR0; float4 c1 : COLOR1; float d : DEPTH; };
+Out main(float4 a : TEXCOORD0, float4 b : TEXCOORD1)
+{
+    Out o; o.c0 = a * b; o.c1 = a - b; o.d = saturate(a.x * 0.5 + 0.5);
+    return o;
+}`, ['ps_2_0', 'ps_3_0']);
+
+whole('integer arithmetic on uniforms', `
+int n; int m;
+float4 main(float4 a : TEXCOORD0) : COLOR0
+{
+    float4 r = a;
+    r.x += n % 3 + m / 2;
+    r.y += (n * m) % 4 - n;
+    r.z += (float)(n + m) / 2;
+    r.w += (n > m ? n : m);
+    return r;
+}`, ['ps_2_0', 'ps_3_0'], { ulp: 2 });
+
+whole('out parameters bound to swizzles and elements', `
+void split(float4 v, out float2 lo, out float hi) { lo = v.xy * 2; hi = v.z + v.w; }
+float4 main(float4 a : TEXCOORD0, float4 b : TEXCOORD1) : COLOR0
+{
+    float4 r = b; float4 t[2] = { a, b };
+    split(a, r.zw, r.x);
+    split(b, t[1].yz, t[0].w);
+    return r + t[0] + t[1];
+}`, ['ps_2_0', 'ps_3_0']);
+
+whole('a local matrix written element by element', `
+float4 main(float4 a : TEXCOORD0, float4 b : TEXCOORD1) : COLOR0
+{
+    float2x2 m = 0;
+    m._m00 = a.x; m._m11 = a.y; m[0][1] = b.x; m[1].x = b.y;
+    float2 v = mul(m, b.zw) + mul(b.zw, m);
+    return float4(v, m._12 + m._21, determinant(m));
+}`, ['ps_2_0', 'ps_3_0'], { ulp: 3 });
+
+whole('an array of structures indexed by a computed value', `
+struct Tap { float2 offset; float weight; };
+float4 main(float4 a : TEXCOORD0, float4 b : TEXCOORD1) : COLOR0
+{
+    Tap taps[3];
+    taps[0].offset = a.xy; taps[0].weight = b.x;
+    taps[1].offset = a.zw; taps[1].weight = b.y;
+    taps[2].offset = b.zw; taps[2].weight = a.x;
+    int k = (int)(abs(b.w) * 2.9);
+    return float4(taps[k].offset, taps[k].weight, taps[2 - k].weight);
+}`, ['ps_2_0', 'ps_3_0'], { range: { lo: -1, hi: 1 } });
+
+whole('discard in one arm of a branch', `
+float4 main(float4 a : TEXCOORD0, float4 b : TEXCOORD1) : COLOR0
+{
+    float4 r = a;
+    if (b.x > 0) { r = b; } else { if (a.y > 0.5) discard; r = a * 2; }
+    return r;
+}`, ['ps_2_0', 'ps_3_0'], { trials: 40 });
+
+whole('a pixel shader that reads a sampler through a function', `
+sampler2D S;
+float4 fetch(sampler2D s, float2 uv, float bias) { return tex2D(s, uv + bias) * 0.5; }
+float4 main(float4 a : TEXCOORD0) : COLOR0 { return fetch(S, a.xy, 0.25) + fetch(S, a.zw, -0.5); }`,
+['ps_2_0', 'ps_3_0']);
+
+whole('an array and a vector written at a computed index', `
+float4 main(float4 a : TEXCOORD0, float4 b : TEXCOORD1) : COLOR0
+{
+    float4 t[3] = { a, b, a + b };
+    float4 v = a;
+    int k = (int)(abs(b.x) * 2.9);
+    int j = (int)(abs(b.y) * 3.9);
+    t[k] = b * 2;
+    v[j] = 7;
+    return t[0] + t[1] * 2 + t[2] * 3 + v;
+}`, ['ps_2_0', 'ps_3_0'], { range: { lo: -1, hi: 1 }, ulp: 3 });

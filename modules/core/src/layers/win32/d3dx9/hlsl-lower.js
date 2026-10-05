@@ -783,26 +783,26 @@ export function lower(module, entry, profile){
                 {
                     fail('X3500', 'invalid index', target.pos);
                 }
-                /** @param {number} i @param {Value} replacement @returns {Value} */
-                const replaceAt = (i, replacement)=>{
-                    if (object.k === 'arr')
+                /** @param {Value} base @param {number} i @param {Value} replacement @returns {Value} */
+                const replaceAt = (base, i, replacement)=>{
+                    if (base.k === 'arr')
                     {
-                        const elems = object.elems.slice();
+                        const elems = base.elems.slice();
                         elems[i] = replacement;
                         return { k: 'arr', elems };
                     }
-                    if (object.k === 'mat')
+                    if (base.k === 'mat')
                     {
-                        const rows = rowsOf(object).slice();
+                        const rows = rowsOf(base).slice();
                         rows[i] = vecOf(replacement);
-                        return { k: 'mat', rows: object.rows, cols: object.cols, rowV: rows,
+                        return { k: 'mat', rows: base.rows, cols: base.cols, rowV: rows,
                             colV: null };
                     }
-                    return vec(withLanes(vecOf(object), [i], vecOf(replacement)));
+                    return vec(withLanes(vecOf(base), [i], vecOf(replacement)));
                 };
                 if (at)
                 {
-                    store(target.object, replaceAt(Math.max(0, Math.min(count - 1,
+                    store(target.object, replaceAt(object, Math.max(0, Math.min(count - 1,
                         Math.trunc(at[0]))), value), st);
                     return;
                 }
@@ -812,13 +812,7 @@ export function lower(module, entry, profile){
                 for (let i = 0; i < count; i++)
                 {
                     const current = pick(object, target.object.type, b.num(i));
-                    updated = replaceAt(i, choose(b.eq(index, b.num(i)), value, current));
-                    // Each element is compared against the original, not the updated array.
-                    if (i + 1 < count)
-                    {
-                        const next = updated;
-                        updated = next;
-                    }
+                    updated = replaceAt(updated, i, choose(b.eq(index, b.num(i)), value, current));
                 }
                 store(target.object, updated, st);
                 return;
