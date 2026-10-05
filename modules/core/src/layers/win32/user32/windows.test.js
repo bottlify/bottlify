@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createMessageQueue } from './messages.js';
 import { MSG, RECT, WNDCLASSA, WNDCLASSEXA } from './structs.js';
 import { createWindowFunctions, watchDispatch } from './windows.js';
+import { createWindowDirectory } from './directory.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 
 /**
@@ -248,10 +249,12 @@ function paintedHost(fills, presents, clips, scrolls = []){
  * @param {(region: number) => any} [options.regionBox] gdi32's rectangle of a region.
  * @param {(delay: number, fire: () => void) => boolean} [options.later] The system's clock.
  * @param {any[]} [options.scrolls] Where the screen's moved pixels are told, with `paint`.
+ * @param {any} [options.directory] The run's window directory, for a test that reads what
+ *        the run is told.
  */
 function setup({
     heap = false, reply, waitForObjects, now, hookReply, threadExists, trace, paint = false,
-    caller = { current: THREAD }, queueNow, regionBox, later, scrolls = [],
+    caller = { current: THREAD }, queueNow, regionBox, later, scrolls = [], directory,
 } = {})
 {
     const memory = fakeMemory();
@@ -332,6 +335,7 @@ function setup({
         release: heap ? (/** @type {number} */ at)=>released.push(at) : undefined,
         regionBox,
         later,
+        directory,
         ...(paint ? paintedHost(fills, presents, clips, scrolls) : {}),
     });
 
@@ -4741,3 +4745,125 @@ test('SetWindowPos asks the window first, applies what it answers, and tells it 
             ['move', 35, 40],
         ], 'a move alone is no size');
     });
+
+// --- what the run's window manager is told ---
+
+/**
+ * The gate of what a process tells the run (roadmap/v2/windows.md): seeded
+ * sequences of the calls that change a window, and after each the run's
+ * manager holds every window of the process as its user32 does -- rectangle,
+ * client area, visibility, title, styles, parent and owner -- and the
+ * process's top-level windows in its order, and nothing it does not hold.
+ */
+for (const seed of [1, 2, 3, 4, 5, 6, 7, 8])
+{
+    test(`the run's window manager holds every window as its process does (seed ${seed})`,
+        async()=>{
+            let state = seed;
+            /** @param {number} below */
+            const next = below=>{
+                state ^= state << 13;
+                state ^= state >>> 17;
+                state ^= state << 5;
+                return (state >>> 0) % below;
+            };
+            const directory = createWindowDirectory();
+            const { memory, fns, service } = setup({ directory });
+            putClass(memory);
+            fns.RegisterClassA.handler([CLASS_STRUCT]);
+            const WS_POPUP = 0x80000000 | 0;
+            const WS_DISABLED = 0x08000000;
+            const WS_OVERLAPPEDWINDOW = 0x00cf0000;
+            const WS_EX_TOPMOST = 0x8;
+            const GWL_EXSTYLE = -20;
+            const PLACEMENT = 0x13000;
+            /** @type {number[]} */
+            let alive = [];
+            /** @param {number} hwnd */
+            const isChildWindow = hwnd=>(fns.GetWindowLongA.handler([hwnd, GWL_STYLE]) & WS_CHILD)
+                !== 0;
+            const any = ()=>alive[next(alive.length)];
+            const operations = [
+                ()=>{
+                    const owner = alive.length > 0 && next(3) === 0 ? any() : 0;
+                    const style = (next(2) ? WS_OVERLAPPEDWINDOW : WS_POPUP)
+                        | (next(3) ? WS_VISIBLE : 0);
+                    return createWindow(fns, memory, { style, parent: owner, x: next(400),
+                        y: next(300), width: 50 + next(300), height: 40 + next(200) });
+                },
+                ()=>(alive.length === 0 ? 0 : createWindow(fns, memory, {
+                    style: WS_CHILD | (next(3) ? WS_VISIBLE : 0), parent: any(), x: next(100),
+                    y: next(80), width: 10 + next(100), height: 10 + next(80) })),
+                ()=>{
+                    const hwnd = any();
+                    const after = [0, 1, any() ?? 0, 0xffffffff, 0xfffffffe][next(5)];
+                    const flags = [0x1, 0x2, 0x4, 0x10, 0x40, 0x80].filter(()=>next(3) === 0)
+                        .reduce((sum, flag)=>sum | flag, 0);
+                    return fns.SetWindowPos.handler([hwnd, after, next(500) - 50, next(400) - 50,
+                        20 + next(300), 20 + next(200), flags]);
+                },
+                ()=>fns.ShowWindow.handler([any(), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9][next(10)]]),
+                ()=>fns.MoveWindow.handler([any(), next(300), next(300), 30 + next(200),
+                    30 + next(200), next(2)]),
+                ()=>{
+                    memory.putString(TEXT_BUFFER, `title ${next(1000)}`);
+                    return fns.SetWindowTextA.handler([any(), TEXT_BUFFER]);
+                },
+                ()=>{
+                    const hwnd = any();
+                    const style = fns.GetWindowLongA.handler([hwnd, GWL_STYLE]);
+                    const flip = [WS_VISIBLE, WS_DISABLED][next(2)];
+                    return fns.SetWindowLongA.handler([hwnd, GWL_STYLE, style ^ flip]);
+                },
+                ()=>{
+                    const hwnd = any();
+                    const exStyle = fns.GetWindowLongA.handler([hwnd, GWL_EXSTYLE]);
+                    return isChildWindow(hwnd) ? 0
+                        : fns.SetWindowLongA.handler([hwnd, GWL_EXSTYLE, exStyle ^ WS_EX_TOPMOST]);
+                },
+                ()=>{
+                    const left = next(300);
+                    const top = next(300);
+                    memory.putU32s(PLACEMENT, [44, 0, 1, 0, 0, 0, 0, left, top,
+                        left + 20 + next(200), top + 20 + next(200)]);
+                    return fns.SetWindowPlacement.handler([any(), PLACEMENT]);
+                },
+                ()=>fns.BringWindowToTop.handler([any()]),
+                ()=>(next(4) === 0 ? fns.DestroyWindow.handler([any()]) : 0),
+            ];
+            for (let step = 0; step < 120; step++)
+            {
+                const which = alive.length === 0 ? 0 : next(operations.length);
+                const made = await operations[which]();
+                if (which <= 1 && made)
+                {
+                    alive.push(made >>> 0);
+                }
+                const listed = service.list();
+                alive = listed.map(each=>Number(each.hwnd));
+                const manager = directory.manager;
+                for (const each of listed)
+                {
+                    const held = manager.get(Number(each.hwnd));
+                    const where = `step ${step}, operation ${which}, window ${each.hwnd}`;
+                    assert.ok(held, `${where}: the run has it`);
+                    assert.deepEqual(held.rect, each.rect, `${where}: its rectangle`);
+                    assert.deepEqual(held.client, each.client, `${where}: its client area`);
+                    assert.equal(held.title, each.title, `${where}: its title`);
+                    assert.equal(`0x${held.style.toString(16)}`, each.style, `${where}: style`);
+                    assert.equal(`0x${held.exStyle.toString(16)}`, each.exStyle,
+                        `${where}: its extended style`);
+                    assert.equal(held.parent !== 0, each.child, `${where}: whether it is a child`);
+                }
+                const own = new Set(listed.map(each=>Number(each.hwnd)));
+                const heldHere = [...manager.topLevel(), ...listed.flatMap(each=>
+                    manager.children(Number(each.hwnd)))];
+                assert.ok(heldHere.every(each=>own.has(each.hwnd)),
+                    `step ${step}: the run holds no window the process does not`);
+                const order = listed.filter(each=>!each.child).map(each=>Number(each.hwnd))
+                    .reverse();
+                assert.deepEqual(manager.topLevel().map(each=>each.hwnd), order,
+                    `step ${step}, operation ${which}: the top-level windows in the run's order`);
+            }
+        });
+}

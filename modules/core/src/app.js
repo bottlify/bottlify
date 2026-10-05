@@ -6774,6 +6774,9 @@ async function buildApp(options){
 
         diagnostics: ()=>[
             ...core.diagnostics(),
+            // The run's windows, where this thread keeps them (`manager.js`).
+            ...options.system?.windows?.manager ? [{ name: 'windows', status: 'ready',
+                metrics: options.system.windows.manager.diagnostics() }] : [],
             {
                 name: 'app',
                 version: '0.1.0',
@@ -7100,7 +7103,7 @@ async function buildSystemHost(deps){
      */
     let programTables = [];
     /** The tables this thread keeps for the run: its journal and its sound output. */
-    const ownTables = new Set(['log', 'audio']);
+    const ownTables = new Set(['log', 'audio', 'windows']);
 
     return {
         log: {
@@ -7229,7 +7232,9 @@ async function buildSystemHost(deps){
                 }
             }, ()=>{});
             const own = [...core.diagnostics(),
-                { name: 'audio', status: 'ready', metrics: output.diagnostics() }];
+                { name: 'audio', status: 'ready', metrics: output.diagnostics() },
+                { name: 'windows', status: 'ready',
+                    metrics: system.windows.manager.diagnostics() }];
             const theirs = programTables.filter(table=>!ownTables.has(table.name));
             const named = new Set(theirs.map(table=>table.name));
             return [...own.filter(table=>!named.has(table.name)), ...theirs];

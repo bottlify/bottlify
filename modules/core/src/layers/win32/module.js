@@ -447,6 +447,8 @@ export function createWin32Module(){
                 system.windows = windowDirectory;
             }
             leaveWindows = ()=>windowDirectory.detach(processId);
+            // A process's windows end with it, for every other process too.
+            endTasks.push(()=>leaveWindows());
             // The guest's clock, because a timer is due against the clock the
             // program itself reads, and the input layer's key state, because a
             // hot key fires on a combination and only the layer that sees the

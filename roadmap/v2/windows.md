@@ -33,10 +33,7 @@ know; views show the windows from what the run keeps.
 
 ### 1. What a process tells the run
 
-At the places where user32 already changes a window -- `makeWindow`, `forget`, `place`
-(SetWindowPos, MoveWindow, BringWindowToTop, DeferWindowPos), `showNow` (ShowWindow), `raise`,
-`restack`, `activateNow`, SetWindowText -- it publishes the window's state to the run's manager, a
-call that does not block:
+user32 tells the run's manager what each of its windows is now, a state in values:
 
 ```js
 // WindowState: what the run knows of a window
@@ -46,10 +43,18 @@ call that does not block:
   enabled, minimized, maximized, topmost, region }
 ```
 
-A child window's state is published too, so that a view has the whole tree. The three places that
-change a window today without going through any of these -- `SetWindowPlacement`,
-`SetWindowLong(GWL_STYLE)` flipping WS_VISIBLE, `windowService.place` -- go through `place`, which
-also gives them the repaint they lack.
+It hears of a change wherever user32 makes one: the fields a state is read from (`x`, `y`,
+`width`, `height`, `style`, `exStyle`, `parent`, `owner`, `title`, `frameless`, `regionBox`,
+`menu`) are watched on each record, and an assignment to one, anywhere in user32, marks the window;
+the window and the others in its top-level window are told once that call is over, only what
+changed crossing. The places that change a window as a whole (`makeWindow`, `raise`, `restack`,
+`showNow`, SetWindowPos's `place`) tell it at once as well. A child window's state is told too, so
+that a view has the whole tree.
+
+The order of top-level windows is the run's: a raise is told to the manager, and after a raise, a
+new window, or a change of band or owner, the process takes its windows' order from the manager,
+which keeps Windows' rules for it (topmost band, owned above owner) across processes. A process's
+windows go from the run when the process ends.
 
 ### 2. The run's window manager (`user32/manager.js`)
 
@@ -100,10 +105,11 @@ would make of it.
 Each step lands with its tests; the full suite runs before it goes to `cork2`.
 
 1. **The manager, and what processes tell it.** `manager.js` with its state, the run-wide z-order
-   (topmost band, owned above owner), `subscribe`, a diagnostics table; the publication from
-   user32's places of change, the three direct changes moved onto `place`. Gate: seeded sequences
-   of window calls in one and in two processes, and after each the manager's state of every window
-   equals what its process's user32 holds (`list()`), at concurrency 1, 2 and 4.
+   (topmost band, owned above owner), `subscribe`, a `windows` diagnostics table; user32's watched
+   fields and the order taken from the run. Gate: seeded sequences of window calls, and after each
+   the manager holds every window of the process as its user32 does (`list()`) and its top-level
+   windows in the same order; the window-across itest sees both processes' windows in the run at
+   concurrency 1 and 2, and none after they end.
 2. **Activation and the questions across processes.** Foreground and capture are the manager's;
    a process losing or gaining the foreground is told (WM_ACTIVATE, WM_ACTIVATEAPP with the other
    program's thread); `GetForegroundWindow`, `WindowFromPoint`, `EnumWindows` and `GetWindow`

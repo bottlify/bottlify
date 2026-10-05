@@ -22,6 +22,8 @@
  * hand out a number the other already did, in any process.
  */
 
+import { createWindowManager } from './manager.js';
+
 /**
  * The first number a name registered with RegisterWindowMessage or
  * RegisterClipboardFormat is given: the range Windows keeps for them.
@@ -94,6 +96,8 @@ const WINDOW_STRIDE = 4;
 
 export function createWindowDirectory(){
     let next = FIRST_WINDOW;
+    /** The run's windows as their processes tell them, and their order (`manager.js`). */
+    const manager = createWindowManager();
     /** Each window's process, by handle. @type {Map<number, number>} */
     const owners = new Map();
     /** Each process that can have windows, in the order it started. @type {Map<number, WindowEndpoint>} */
@@ -136,6 +140,7 @@ export function createWindowDirectory(){
                     owners.delete(hwnd);
                 }
             }
+            manager.removeProcess(processId >>> 0);
         },
 
         /**
@@ -153,7 +158,25 @@ export function createWindowDirectory(){
         /** @param {number} hwnd */
         close(hwnd){
             owners.delete(hwnd >>> 0);
+            manager.remove(hwnd >>> 0);
         },
+
+        // What a process tells the run of its windows, and what only the run
+        // knows of them (`manager.js`); a view reads `manager` itself.
+        manager,
+        /** @param {import('./manager.js').WindowState} state */
+        publish: state=>manager.publish(state),
+        /** @param {number} hwnd */
+        raise: hwnd=>manager.raise(hwnd >>> 0),
+        /** @param {number} hwnd */
+        lower: hwnd=>manager.lower(hwnd >>> 0),
+        /** @param {number} hwnd @param {number} after */
+        insertAfter: (hwnd, after)=>manager.insertAfter(hwnd >>> 0, after >>> 0),
+        /** @param {number} hwnd */
+        stateOf: hwnd=>manager.get(hwnd >>> 0),
+        topLevel: ()=>manager.topLevel(),
+        /** @param {number} x @param {number} y */
+        fromPoint: (x, y)=>manager.fromPoint(x, y),
 
         /**
          * The process a window belongs to, or null for a handle that names

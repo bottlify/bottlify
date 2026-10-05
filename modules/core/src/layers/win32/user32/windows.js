@@ -297,6 +297,14 @@ const MINIMISING = new Set([2, SW_MINIMIZE, 7]);
 const RESTORING = new Set([1, 9, 10]);
 const WS_MINIMIZE = 0x20000000;
 const WS_MAXIMIZE = 0x01000000;
+const WS_EX_TOPMOST = 0x00000008;
+
+/**
+ * The fields of a window's record its state on the screen is read from
+ * (`stateOf`): a change to any of them is told to the run.
+ */
+const TRACKED_FIELDS = ['x', 'y', 'width', 'height', 'style', 'exStyle', 'parent', 'owner',
+    'title', 'frameless', 'regionBox', 'menu'];
 const WS_POPUP = 0x80000000;
 const WS_EX_MDICHILD = 0x00000040;
 const ERROR_INVALID_MENU_HANDLE = 1401;
@@ -1765,10 +1773,13 @@ export function createWindowFunctions(host){
         {
             windows.set(each.hwnd, each);
         }
+        directory.raise?.(top.hwnd);
         if (shown(top))
         {
             appear(top);
         }
+        tell(top);
+        adoptOrder();
     };
 
     /**
@@ -1810,6 +1821,7 @@ export function createWindowFunctions(host){
         {
             appear(record);
         }
+        tell(record);
     };
 
     /** @param {any} record  Whether it and every ancestor is shown. */
@@ -2234,6 +2246,7 @@ export function createWindowFunctions(host){
             draw?.deleteFont?.(record.dialogFont);
         }
         directory.close(record.hwnd);
+        toldRun.delete(record.hwnd);
         if (active === record.hwnd)
         {
             active = 0;
@@ -2307,6 +2320,7 @@ export function createWindowFunctions(host){
                 {
                     record.parent = value >>> 0;
                 }
+                tell(record);
                 return;
             case GWL_ID:
                 record.id = value >>> 0;
@@ -2316,9 +2330,11 @@ export function createWindowFunctions(host){
                 // and the window edge follows the frame it now has.
                 record.style = (record.parent === 0 ? value | WS_CLIPSIBLINGS : value) >>> 0;
                 record.exStyle = edgeFor(record.style, record.exStyle);
+                tell(record);
                 return;
             case GWL_EXSTYLE:
                 record.exStyle = edgeFor(record.style, value);
+                tell(record);
                 return;
             case GWL_USERDATA:
                 record.userData = value >>> 0;
@@ -2548,12 +2564,13 @@ export function createWindowFunctions(host){
             }
         }
         record.hwnd = directory.open(processId);
-        windows.set(record.hwnd, record);
+        windows.set(record.hwnd, watchFields(record));
         hasQueue(record.thread);
         if ((record.style & WS_VISIBLE) !== 0)
         {
             appear(record);
         }
+        tell(record);
         return record;
     };
 
@@ -3169,6 +3186,7 @@ export function createWindowFunctions(host){
      * @param {any} record
      */
     const appear = record=>{
+        tell(record);
         paintDesktop();
         for (const each of [record, ...descendantsOf(record)])
         {
@@ -3221,6 +3239,166 @@ export function createWindowFunctions(host){
     /** @param {any} record @returns {any[]} every live descendant, in paint order */
     const descendantsOf = record=>childrenOf(record)
         .flatMap(child=>[child, ...descendantsOf(child)]);
+
+    /** @param {{ left: number, top: number, right: number, bottom: number }} rect */
+    const rectOf = rect=>({ left: rect.left, top: rect.top, right: rect.right,
+        bottom: rect.bottom });
+
+    /**
+     * What the run knows of a window (`manager.js`), as its record has it.
+     *
+     * @param {any} record @returns {import('./manager.js').WindowState}
+     */
+    const stateOf = record=>({
+        hwnd: record.hwnd >>> 0,
+        processId,
+        threadId: creatorOf(record) ?? 0,
+        parent: isChild(record) ? record.parent >>> 0 : 0,
+        owner: (record.owner ?? 0) >>> 0,
+        className: String(record.className),
+        title: String(record.title),
+        style: record.style >>> 0,
+        exStyle: record.exStyle >>> 0,
+        rect: rectOf(geometry.windowRect(record)),
+        client: rectOf(geometry.clientRect(record)),
+        visible: shown(record),
+        enabled: (record.style & WS_DISABLED) === 0,
+        minimized: (record.style & WS_MINIMIZE) !== 0,
+        maximized: (record.style & WS_MAXIMIZE) !== 0,
+        topmost: (record.exStyle & WS_EX_TOPMOST) !== 0,
+        region: record.regionBox ? rectOf(record.regionBox) : null,
+    });
+
+    /** What the run was last told of each window, as it compares. @type {Map<number, string>} */
+    const toldRun = new Map();
+
+    /** Windows changed since the run was last told of them. @type {Set<any>} */
+    const unsaid = new Set();
+
+    /**
+     * Makes the fields a window's state is read from tell the run when they
+     * change: whichever of user32's calls assigns one, the run hears of the
+     * window once that call is over, in a microtask.
+     *
+     * @param {any} record
+     */
+    const watchFields = record=>{
+        for (const field of TRACKED_FIELDS)
+        {
+            let value = record[field];
+            Object.defineProperty(record, field, {
+                enumerable: true,
+                get: ()=>value,
+                set: changed=>{
+                    if (changed !== value)
+                    {
+                        value = changed;
+                        if (unsaid.size === 0)
+                        {
+                            queueMicrotask(()=>{
+                                const pending = [...unsaid];
+                                unsaid.clear();
+                                for (const each of pending)
+                                {
+                                    tell(each);
+                                }
+                            });
+                        }
+                        unsaid.add(record);
+                    }
+                },
+            });
+        }
+        return record;
+    };
+
+    /**
+     * Tells the run what a window is now, and the windows inside its
+     * top-level one: a parent that moved moved them on the screen. Only a
+     * window that changed since it was last told crosses.
+     *
+     * @param {any} record
+     */
+    const tell = record=>{
+        if (!record || record.destroyed || record.hwnd === 0 || record === desktop
+            || windows.get(record.hwnd) !== record)
+        {
+            return;
+        }
+        const top = topLevelOf(record);
+        if (top.parent === HWND_MESSAGE)
+        {
+            return;
+        }
+        let reordered = false;
+        for (const each of [top, ...descendantsOf(top)])
+        {
+            const state = stateOf(each);
+            const said = JSON.stringify(state);
+            const before = toldRun.get(state.hwnd);
+            if (before !== said)
+            {
+                toldRun.set(state.hwnd, said);
+                directory.publish?.(state);
+                // A new top-level window, or one whose band or owner changed,
+                // may have moved in the run's order.
+                const was = before === undefined ? null : JSON.parse(before);
+                reordered ||= state.parent === 0 && (was === null || was.parent !== 0
+                    || was.topmost !== state.topmost || was.owner !== state.owner);
+            }
+        }
+        if (reordered)
+        {
+            adoptOrder();
+        }
+    };
+
+    /**
+     * Takes the order of this process's top-level windows from the run's,
+     * which keeps Windows' rules for it -- the topmost band above the rest,
+     * an owned window above its owner -- and is the order across processes
+     * too. A window's descendants follow it; a window that came up is shown
+     * again where it now overlaps another.
+     */
+    const adoptOrder = ()=>{
+        const run = directory.topLevel?.();
+        if (!run)
+        {
+            return;
+        }
+        const wanted = run.filter(state=>state.processId === processId)
+            .map(state=>state.hwnd).reverse();
+        const placed = new Set(wanted);
+        const current = [...windows.values()]
+            .filter(each=>!each.destroyed && !isChild(each) && placed.has(each.hwnd))
+            .map(each=>each.hwnd);
+        if (current.join() === wanted.join())
+        {
+            return;
+        }
+        /** @type {Map<number, any[]>} */
+        const groups = new Map(wanted.map(hwnd=>[hwnd, []]));
+        /** @type {any[]} */
+        const rest = [];
+        for (const each of windows.values())
+        {
+            const top = each.destroyed ? each : topLevelOf(each);
+            (groups.get(top.hwnd) ?? rest).push(each);
+        }
+        windows.clear();
+        for (const each of [...rest, ...wanted.flatMap(hwnd=>groups.get(hwnd) ?? [])])
+        {
+            windows.set(each.hwnd, each);
+        }
+        for (const [index, hwnd] of wanted.entries())
+        {
+            const record = windows.get(hwnd);
+            if (index !== current.indexOf(hwnd) && record && shown(record))
+            {
+                appear(record);
+            }
+        }
+    };
 
     /**
      * The parts of the screen windows have left that the desktop has not
@@ -4316,6 +4494,7 @@ export function createWindowFunctions(host){
             case WM_SETTEXT: {
                 const address = message.lParam >>> 0;
                 record.title = address === 0 ? '' : host.readCString(address, MAX_WINDOW_TEXT);
+                tell(record);
                 if (geometry.frame(record).caption > 0 && shown(record))
                 {
                     record.ncDirty = true;
@@ -4848,6 +5027,7 @@ export function createWindowFunctions(host){
             // its style describes takes no room, so the client area is the
             // whole mode and a program's cursor arithmetic sees the picture.
             record.frameless = true;
+            tell(record);
             const after = geometry.clientRect(record);
             if (moved)
             {
@@ -4952,6 +5132,7 @@ export function createWindowFunctions(host){
                     | ((client.right - client.left) & 0xffff)) >>> 0,
                 thread));
         }
+        tell(record);
         if (covered)
         {
             uncover(covered);
@@ -5199,7 +5380,7 @@ export function createWindowFunctions(host){
                 positions: place=>{
                     placeWindow = place;
                 },
-                shown, raise, restack, desktop: desktopWindow,
+                shown, raise, restack, tell, desktop: desktopWindow,
                 isDesktop: (/** @type {any} */ record)=>record !== null && record === desktop,
                 sysColorBrush: (/** @type {number} */ index)=>(draw
                     ? draw.solidBrush(sysColor(index)) : 0),

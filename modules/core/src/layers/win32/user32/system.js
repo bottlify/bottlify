@@ -921,6 +921,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         {
             host.raise(record);
         }
+        host.tell?.(record);
         const isShown = host.shown(record);
         if (dragged && isShown)
         {
@@ -2755,6 +2756,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 record.y = bounds.top;
                 record.width = bounds.right - bounds.left;
                 record.height = bounds.bottom - bounds.top;
+                host.tell?.(record);
                 return 1;
             },
         },
