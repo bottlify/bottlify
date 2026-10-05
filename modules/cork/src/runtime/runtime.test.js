@@ -1442,8 +1442,9 @@ test('the worker rings the engine\'s doorbell after each answer it posts, its re
         const count = ()=>Atomics.load(new Int32Array(posted.buffer), 0);
         try
         {
-            // Ready first: until then a batch is emitted here, and nothing rings.
-            for (let i = 0; i < 200 && count() === 0; i++)
+            // Ready first, as the runtime has heard it: until then a batch is
+            // emitted here, and nothing rings.
+            for (let i = 0; i < 200 && m.runtime.diagnostics().worker !== 'ready'; i++)
             {
                 await new Promise(resolve=>setTimeout(resolve, 10));
             }
