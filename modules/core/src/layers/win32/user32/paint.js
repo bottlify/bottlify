@@ -376,9 +376,12 @@ export function tabbedWidth(text, widthOf, stops, interval){
  *     visibleWindowRect: (record: any) => Rect }} options.geometry
  * @param {(hwnd: number, message: number, wParam: number, lParam: number,
  *     thread?: unknown) => number | Promise<number>} options.send
- * @param {(record: any) => void} options.invalidated
- *        A window's update area grew. Whoever keeps the others in order
- *        marks the ones that now have to repaint after it.
+ * @param {(record: any, erase: boolean) => void} options.invalidated
+ *        A window's update area grew, to be erased or not. Whoever keeps the
+ *        others in order marks the ones that now have to repaint with it.
+ * @param {(record: any) => any} [options.paintsFirst]
+ *        The window an update of this one starts from: an ancestor that still
+ *        has to paint the area under it, or the window itself.
  * @param {() => void} options.painted   Something reached the screen.
  * @param {(record: any) => any[]} [options.descendants]
  *        A window's descendants, parents before their children: the order
@@ -424,7 +427,7 @@ export function createPaintFunctions(options){
         }
         record.updateRect = record.updateRect ? union(record.updateRect, rect) : rect;
         record.erase = record.erase || erase;
-        invalidated(record);
+        invalidated(record, erase);
     };
 
     /**
@@ -507,7 +510,11 @@ export function createPaintFunctions(options){
      * @returns {number | Promise<number>}
      */
     const updateNow = (record, children)=>{
-        const order = children ? [record, ...(descendants?.(record) ?? [])] : [record];
+        // Under an area an ancestor still has to paint, a window paints after
+        // it: painted first, it would be painted over.
+        const from = options.paintsFirst?.(record) ?? record;
+        const order = children || from !== record
+            ? [from, ...(descendants?.(from) ?? [])] : [record];
         /** @param {number} index @returns {number | Promise<number>} */
         const next = index=>(index >= order.length
             ? 1
@@ -646,6 +653,9 @@ export function createPaintFunctions(options){
         // survive, and clearing afterwards would swallow it.
         record.updateRect = null;
         record.painting = hdc;
+        // Between BeginPaint and EndPaint, whatever context it has: an area
+        // a child is to erase does not bubble up into it then.
+        record.inPaint = true;
         const erase = record.erase === true;
         record.erase = false;
         const frame = record.ncDirty === true;
@@ -669,6 +679,7 @@ export function createPaintFunctions(options){
 
     /** @param {any} record @param {number} hdc */
     const endPaint = (record, hdc)=>{
+        record.inPaint = false;
         if (hdc !== 0)
         {
             contexts()?.release(record.hwnd, hdc);

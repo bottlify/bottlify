@@ -2666,29 +2666,87 @@ export function createWindowFunctions(host){
             true);
     };
 
+    /** A window's update area on the screen. @param {any} record */
+    const dirtyOnScreen = record=>{
+        const origin = geometry.clientRect(record);
+        return {
+            left: origin.left + record.updateRect.left,
+            top: origin.top + record.updateRect.top,
+            right: origin.left + record.updateRect.right,
+            bottom: origin.top + record.updateRect.bottom,
+        };
+    };
+
+    /**
+     * The windows a child is inside that its area to erase bubbles up to,
+     * innermost first: up to one that clips its children, whose painting
+     * cannot reach under them, and short of one in the middle of painting,
+     * which paints the area now and has the child paint after it.
+     *
+     * @param {any} record
+     * @returns {any[]}
+     */
+    const bubbledTo = record=>{
+        const found = [];
+        for (let up = isChild(record) ? live(record.parent) : null;
+            up && shown(up) && (up.style & WS_CLIPCHILDREN) === 0 && !up.inPaint;
+            up = isChild(up) ? live(up.parent) : null)
+        {
+            found.push(up);
+        }
+        return found;
+    };
+
     /**
      * A window's update area grew: every window painted after it that
      * overlaps it on the screen has to repaint too, or the one below would
      * come out on top. The whole overlapping window is marked rather than
      * the overlap, which is the one-rectangle ceiling of the update area.
      *
-     * @param {any} record
+     * An area a child is to erase bubbles up first, the way a browser
+     * repaints a dirty rectangle from the bottom layer up: each window it is
+     * inside (`bubbledTo`) repaints the same area under it, and the repaint
+     * starts from the outermost. A child whose background is a hollow brush
+     * -- a skinned dialog's owner-drawn label -- is then drawn on its
+     * parent's picture rather than over its own last frame. Windows XP leaves
+     * that to the program; the engine can afford the repaint.
+     *
+     * @param {any} record @param {boolean} [erase]  Whether the area is to be erased.
      */
-    const invalidated = record=>{
+    const invalidated = (record, erase = false)=>{
         if (!shown(record) || !record.updateRect)
         {
             return;
         }
         host.queue.dirtied?.(creatorOf(record));
-        const origin = geometry.clientRect(record);
-        const dirty = {
-            left: origin.left + record.updateRect.left,
-            top: origin.top + record.updateRect.top,
-            right: origin.left + record.updateRect.right,
-            bottom: origin.top + record.updateRect.bottom,
-        };
+        let base = record;
+        if (erase)
+        {
+            const under = dirtyOnScreen(record);
+            for (const up of bubbledTo(record))
+            {
+                const client = geometry.clientRect(up);
+                const area = intersect(under, client);
+                if (isEmpty(area))
+                {
+                    break;
+                }
+                const local = { left: area.left - client.left, top: area.top - client.top,
+                    right: area.right - client.left, bottom: area.bottom - client.top };
+                up.updateRect = up.updateRect ? {
+                    left: Math.min(up.updateRect.left, local.left),
+                    top: Math.min(up.updateRect.top, local.top),
+                    right: Math.max(up.updateRect.right, local.right),
+                    bottom: Math.max(up.updateRect.bottom, local.bottom),
+                } : local;
+                up.erase = true;
+                host.queue.dirtied?.(creatorOf(up));
+                base = up;
+            }
+        }
+        const dirty = dirtyOnScreen(base);
         const order = paintOrder();
-        for (const other of order.slice(order.indexOf(record) + 1))
+        for (const other of order.slice(order.indexOf(base) + 1))
         {
             if (shown(other) && !isEmpty(intersect(dirty, geometry.shapedRect(other))))
             {
@@ -3868,6 +3926,8 @@ export function createWindowFunctions(host){
         }),
         live, WM_PAINT, geometry, send, invalidated, painted, shown,
         descendants: (/** @type {any} */ record)=>paintedDescendantsOf(record),
+        paintsFirst: (/** @type {any} */ record)=>bubbledTo(record)
+            .reduce((first, up)=>(up.updateRect ? up : first), record),
         desktop: ()=>desktopWindow().hwnd,
         covering: coveringOf,
     });

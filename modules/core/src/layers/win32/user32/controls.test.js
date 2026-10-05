@@ -889,8 +889,10 @@ test('an owner-drawn button is drawn by its parent, told what changed', async()=
         WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_NOTIFY, 150, 110, 50, 14, dialog, 0xe,
         HINSTANCE, 0]);
     await context.pump(dialog);
-    assert.deepEqual(seen.map(one=>one.message), ['ctlcolor 0x135', 'draw']);
-    const [, painted] = seen;
+    // The dialog paints under the new button first (WM_CTLCOLORDLG for its
+    // background): the engine repaints a child's area from its parent up.
+    assert.deepEqual(seen.map(one=>one.message), ['ctlcolor 0x136', 'ctlcolor 0x135', 'draw']);
+    const [, , painted] = seen;
     assert.deepEqual([painted.wParam, painted.type, painted.id, painted.item, painted.action,
         painted.state, painted.hwnd], [0xe, ODT_BUTTON, 0xe, 0, ODA_DRAWENTIRE, 0, button]);
     assert.notEqual(painted.hdc, 0, 'a context to draw in');
@@ -923,10 +925,11 @@ test('an owner-drawn static is drawn by its parent', async()=>{
     const shown = context.fns.CreateWindowExA.handler([0, TEXT, 0,
         WS_CHILD | WS_VISIBLE | SS_OWNERDRAW, 150, 110, 40, 20, dialog, 7, HINSTANCE, 0]);
     await context.pump(dialog);
-    assert.deepEqual(seen.map(one=>one.message), ['ctlcolor 0x138', 'draw']);
-    assert.deepEqual([seen[1].wParam, seen[1].type, seen[1].id, seen[1].action, seen[1].state,
-        seen[1].hwnd], [7, ODT_STATIC, 7, ODA_DRAWENTIRE, 0, shown]);
-    assert.deepEqual(seen[1].rect, [0, 0, 40, 20]);
+    assert.deepEqual(seen.map(one=>one.message), ['ctlcolor 0x136', 'ctlcolor 0x138', 'draw'],
+        'the dialog paints under it first');
+    assert.deepEqual([seen[2].wParam, seen[2].type, seen[2].id, seen[2].action, seen[2].state,
+        seen[2].hwnd], [7, ODT_STATIC, 7, ODA_DRAWENTIRE, 0, shown]);
+    assert.deepEqual(seen[2].rect, [0, 0, 40, 20]);
 });
 
 test('statics and check boxes write their text in the colour WM_CTLCOLORSTATIC set',

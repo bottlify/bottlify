@@ -1753,6 +1753,107 @@ test('a window that goes shows the desktop only where no other window is', ()=>{
         'and all of the last one');
 });
 
+/**
+ * Takes every paint the queue hands out, validating each, and answers the
+ * windows in the order they were handed out.
+ *
+ * @param {any} fns @param {any} memory
+ */
+function paintsInOrder(fns, memory){
+    /** @type {number[]} */
+    const order = [];
+    for (let guard = 0; guard < 32; guard++)
+    {
+        if (fns.PeekMessageA.handler([MSG_BUFFER, 0, WM_PAINT, WM_PAINT, PM_REMOVE]) === 0)
+        {
+            return order;
+        }
+        const hwnd = memory.u32(MSG_BUFFER + MSG.hwnd);
+        order.push(hwnd);
+        fns.ValidateRect.handler([hwnd, 0]);
+    }
+    throw new Error('the paints never ran out');
+}
+
+test('an area a child is to erase is repainted from its parent up, as a browser repaints', ()=>{
+    // A skinned dialog's owner-drawn label erases with a hollow brush and
+    // draws its text over whatever is there: repainted alone, its text went
+    // bold on every hover. The parent paints the area under it first.
+    const { fns, memory } = setup();
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const parent = createWindow(fns, memory, { style: WS_VISIBLE });
+    const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent,
+        x: 40, y: 30, width: 20, height: 10 });
+    paintsInOrder(fns, memory);
+
+    fns.InvalidateRect.handler([child, 0, 1]);
+    assert.equal(fns.GetUpdateRect.handler([parent, RECT_BUFFER, 0]), 1,
+        'the parent has the area under the child to paint');
+    const [left, top, right, bottom] = [0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at));
+    assert.deepEqual([left, top, right, bottom], [40, 30, 60, 40], 'and only that area');
+    assert.deepEqual(paintsInOrder(fns, memory), [parent, child], 'the parent first');
+
+    fns.InvalidateRect.handler([child, 0, 0]);
+    assert.equal(fns.GetUpdateRect.handler([parent, 0, 0]), 0,
+        'an area the child paints over without erasing stays its own');
+    paintsInOrder(fns, memory);
+});
+
+test('a parent that clips its children, or one in the middle of painting, is not asked', ()=>{
+    const WS_CLIPCHILDREN = 0x02000000;
+    const PAINT = 0x11800;
+    /** @type {{ parent: number, child: number }} */
+    const handles = { parent: 0, child: 0 };
+    const { fns, memory } = setup({ reply: message=>{
+        // The parent's procedure invalidates its child while it paints, as
+        // a program updating a label from WM_PAINT does.
+        if (message.message === WM_PAINT && message.hwnd === handles.parent)
+        {
+            fns.BeginPaint.handler([handles.parent, PAINT]);
+            fns.InvalidateRect.handler([handles.child, 0, 1]);
+            fns.EndPaint.handler([handles.parent, PAINT]);
+        }
+        return 0;
+    } });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    handles.parent = createWindow(fns, memory, { style: WS_VISIBLE });
+    handles.child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE,
+        parent: handles.parent, x: 40, y: 30, width: 20, height: 10 });
+    fns.PeekMessageA.handler([MSG_BUFFER, handles.parent, WM_PAINT, WM_PAINT, PM_REMOVE]);
+    fns.DispatchMessageA.handler([MSG_BUFFER]);
+    assert.equal(fns.GetUpdateRect.handler([handles.parent, 0, 0]), 0,
+        'a parent that was painting is not asked again: no repaint for ever');
+    assert.equal(fns.GetUpdateRect.handler([handles.child, 0, 0]), 1, 'the child paints after it');
+    paintsInOrder(fns, memory);
+
+    const clipping = createWindow(fns, memory, { style: WS_VISIBLE | WS_CLIPCHILDREN });
+    const inside = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: clipping,
+        x: 0, y: 0, width: 20, height: 10 });
+    paintsInOrder(fns, memory);
+    fns.InvalidateRect.handler([inside, 0, 1]);
+    assert.equal(fns.GetUpdateRect.handler([clipping, 0, 0]), 0,
+        'its painting cannot reach under the child');
+});
+
+test('UpdateWindow on a child starts from the parent that has the area under it to paint',
+    ()=>{
+        const { fns, memory, dispatched } = setup();
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const parent = createWindow(fns, memory, { style: WS_VISIBLE });
+        const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent,
+            x: 0, y: 0, width: 20, height: 10 });
+        paintsInOrder(fns, memory);
+        fns.InvalidateRect.handler([child, 0, 1]);
+        dispatched.length = 0;
+        assert.equal(fns.UpdateWindow.handler([child]), 1);
+        assert.deepEqual(dispatched.filter(message=>message.message === WM_PAINT)
+            .map(message=>message.hwnd), [parent, child], 'painted first, the child would be'
+            + ' painted over');
+    });
+
 test('UpdateWindow paints the window and then its children, as RDW_UPDATENOW | RDW_ALLCHILDREN',
     ()=>{
         // A dialog shown and updated before a job that never pumps has its
