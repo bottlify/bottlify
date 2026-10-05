@@ -16,6 +16,11 @@ import { fileURLToPath } from 'node:url';
  * corpus-lock.json. Test data for the translator's differential suites;
  * nothing in the product reads it.
  *
+ * The cases are v86's `tests/nasm` (BSD-2-Clause, Copyright (c) 2012, The v86
+ * contributors). They are fetched, never committed and never packaged, so the
+ * licence text stays with the fork they are published from rather than in
+ * THIRD-PARTY-NOTICES.md, which lists what is distributed with the product.
+ *
  * Usage:
  *   node scripts/fetch-corpus.mjs              download + verify against the lock
  *   node scripts/fetch-corpus.mjs --update TAG  re-pin the lock to a release tag
