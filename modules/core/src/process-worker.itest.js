@@ -212,3 +212,97 @@ test('a child in a worker of its own draws on the run\'s graphics worker, and th
         assert.ok(shown.count >= frames.length,
             `and the run showed what came back: ${shown.count} of ${frames.length}`);
     });
+
+test('a child in a worker of its own is sent the page\'s input while it stands',
+    { timeout: 120000 }, async t=>{
+        // A window, then GetMessageA until a WM_KEYDOWN; ExitProcess(its virtual key).
+        const child = buildExe({
+            imports: {
+                'USER32.dll': ['RegisterClassA', 'CreateWindowExA', 'DefWindowProcA',
+                    'GetMessageA'],
+                'KERNEL32.dll': ['ExitProcess'],
+            },
+            data: {
+                className: [...Buffer.from('BottlifyKeys'), 0],
+                wndclass: new Array(40).fill(0),
+                msg: new Array(28).fill(0),
+            },
+            codeSize: 0x100,
+            code: ({ iat, at })=>{
+                /** @param {number} value */
+                const push = value=>[0x68, ...u32(value)];
+                const wait = [
+                    0x6a, 0, 0x6a, 0, 0x6a, 0, ...push(at('msg')),
+                    0xff, 0x15, ...u32(iat('GetMessageA')),
+                    // cmp dword [msg.message], WM_KEYDOWN
+                    0x81, 0x3d, ...u32(at('msg') + 4), ...u32(0x100),
+                ];
+                return [
+                    0xa1, ...u32(iat('DefWindowProcA')), 0xa3, ...u32(at('wndclass') + 4),
+                    0xc7, 0x05, ...u32(at('wndclass') + 36), ...u32(at('className')),
+                    ...push(at('wndclass')), 0xff, 0x15, ...u32(iat('RegisterClassA')),
+                    0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, ...push(32), ...push(64), 0x6a, 0, 0x6a, 0,
+                    ...push(0x10cf0000), ...push(at('className')), ...push(at('className')),
+                    0x6a, 0, 0xff, 0x15, ...u32(iat('CreateWindowExA')),
+                    ...wait,
+                    0x0f, 0x85, ...u32(-(wait.length + 6)), //   jne wait
+                    0xff, 0x35, ...u32(at('msg') + 8), //        push [msg.wParam]
+                    0xff, 0x15, ...u32(iat('ExitProcess')),
+                ];
+            },
+        });
+        const app = await createApp({
+            executable: waitingParent(),
+            imagePath: 'C:\\parent.exe',
+            engine: 'cork',
+            mode: 'workers',
+            processWorkers: true,
+            storage: { load: async()=>({ files: [{ path: 'C:\\a.exe', bytes: child }] }) },
+        });
+        t.after(()=>app.dispose());
+        /** @type {ReturnType<typeof setInterval> | null} */
+        let pressing = null;
+        app.on('process-started', (/** @type {any} */ event)=>{
+            if (event.worker)
+            {
+                pressing = setInterval(()=>{
+                    app.input.send({ kind: 'key', code: 'KeyA', down: true });
+                    app.input.send({ kind: 'key', code: 'KeyA', down: false });
+                }, 50);
+            }
+        });
+        t.after(()=>clearInterval(/** @type {any} */ (pressing)));
+        assert.equal(await app.run({ timeoutMs: 60000 }), 0x41,
+            'the child read the A its window was sent');
+        assert.ok(pressing, 'it ran in a worker of its own');
+    });
+
+test('a child in a worker of its own mixes on the run\'s table in a span its parent lent it, which'
+    + ' comes back when it ends', { timeout: 120000 }, async t=>{
+    const child = buildExe({
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        code: ({ iat })=>[0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+    });
+    const app = await createApp({
+        executable: waitingParent(),
+        imagePath: 'C:\\parent.exe',
+        engine: 'cork',
+        mode: 'workers',
+        processWorkers: true,
+        storage: { load: async()=>({ files: [{ path: 'C:\\a.exe', bytes: child }] }) },
+    });
+    t.after(()=>app.dispose());
+    const arenaFree = ()=>app.diagnostics().find((/** @type {any} */ layer)=>
+        layer.name === 'audio').metrics.arenaFree;
+    /** @type {number[]} */
+    const parentFree = [];
+    /** @type {any[]} */
+    const childLayers = [];
+    app.on('process-started', ()=>parentFree.push(arenaFree()));
+    app.on('process-resumed', (/** @type {any} */ event)=>childLayers.push(event.diagnostics));
+    assert.equal(await app.run({ timeoutMs: 60000 }), 0);
+    assert.deepEqual(parentFree, [12 << 20], 'the parent lent four of its sixteen MiB');
+    assert.equal(childLayers[0]?.find((/** @type {any} */ layer)=>layer.name === 'audio')
+        ?.metrics.arenaFree, 4 << 20, 'and the child mixed in that span, on the run\'s table');
+    assert.equal(arenaFree(), 16 << 20, 'given back once the child was gone');
+});

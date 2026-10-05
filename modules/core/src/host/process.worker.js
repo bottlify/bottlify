@@ -18,7 +18,7 @@
  * is told `{ type: 'start', end, graphics, options, run }` -- its side of the
  * link, its way in to the run's graphics worker or null, the process as
  * `createApp` takes it, how long it may run -- and answers
- * `{ type: 'exited', code }`, or `{ type: 'failed', message }`.
+ * `{ type: 'exited', code, diagnostics }`, or `{ type: 'failed', message }`.
  */
 
 import { createApp, createMacrotask } from '../app.js';
@@ -49,11 +49,28 @@ const graphicsEnd = port=>{
 };
 
 /**
+ * What a report reads, as data that crosses to another thread: null where it
+ * holds something that does not.
+ *
+ * @param {() => any} read
+ */
+const plainOf = read=>{
+    try
+    {
+        return JSON.parse(JSON.stringify(read()));
+    }
+    catch {
+        return null;
+    }
+};
+
+/**
  * Runs one process to its end.
  *
  * @param {{ end: import('../system/link.js').LinkEnd, graphics?: MessagePort | null,
  *     options: any, run?: any }} start
- * @returns {Promise<number>} its exit code
+ * @returns {Promise<{ code: number, diagnostics: any }>} its exit code, and its
+ *     layers' diagnostics as it ended, as plain data, or null
  */
 export async function serveProcess({ end, graphics, options, run }){
     /** @type {Record<string, Record<string, (...args: any[]) => any>>} */
@@ -67,7 +84,11 @@ export async function serveProcess({ end, graphics, options, run }){
     // with whatever else the link carries, at a turn's end or while idle.
     handlers.kernel = { wake: (/** @type {number} */ token, /** @type {number} */ result)=>
         system.objects.deliver(token, result) };
-    const app = await createApp({
+    /** @type {any} */
+    let app = null;
+    // The page's input, while this process stands.
+    handlers.input = { send: (/** @type {any} */ event)=>app?.input.send(event) };
+    app = await createApp({
         ...options,
         graphics: { ...options.graphics, worker: graphics ? graphicsEnd(graphics) : undefined },
         system,
@@ -78,7 +99,8 @@ export async function serveProcess({ end, graphics, options, run }){
         ask('process', 'output', [handle, text]));
     try
     {
-        return await app.run(run ?? {});
+        const code = await app.run(run ?? {});
+        return { code, diagnostics: plainOf(()=>app.diagnostics()) };
     }
     finally
     {
@@ -97,7 +119,7 @@ const bind = (listen, send)=>listen(data=>{
     {
         return;
     }
-    serveProcess(data).then(code=>send({ type: 'exited', code }),
+    serveProcess(data).then(({ code, diagnostics })=>send({ type: 'exited', code, diagnostics }),
         (/** @type {any} */ e)=>send({ type: 'failed', message: String(e?.stack ?? e) }));
 });
 

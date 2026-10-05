@@ -7395,7 +7395,8 @@ export async function createApp(options){
      * output the run's. Its exit code is the answer.
      *
      * @param {any} parent @param {any} request
-     * @returns {Promise<number>}
+     * @returns {Promise<{ code: number, diagnostics?: any }>}  its exit code, and
+     *     its layers' diagnostics as it ended
      */
     const runAcross = async(parent, request)=>{
         const image = await parent.readImage(request.imagePath);
@@ -7403,7 +7404,7 @@ export async function createApp(options){
         {
             events.emit('divergence', { api: 'process',
                 detail: `${request.imagePath} is not on the volume, and did not start` });
-            return 2;
+            return { code: 2 };
         }
         const memory = createLinkMemory();
         const { dispose: forgetObjects, ...objects } = objectHandlers({
@@ -7428,7 +7429,20 @@ export async function createApp(options){
         {
             graphicsWorker.postMessage({ type: 'client', port: graphics.port2 }, [graphics.port2]);
         }
+        // Its sound goes onto the run's table, in a span its parent lends it,
+        // where the table is shared memory a worker can be handed; elsewhere
+        // the run's sound is mixed on this thread, and the child has none.
+        const sound = audioMemory && 'table' in audioMemory
+            && audioMemory.table instanceof SharedArrayBuffer ? lendSound(parent) : null;
         const worker = await openProcessWorker();
+        // The page's input goes to the child while it stands, as it goes to a
+        // child on this thread; its next look at the link takes it.
+        const forwarding = { ...facade.input,
+            send: (/** @type {any} */ event)=>{
+                link.call('input', 'send', [event]).catch(()=>{});
+                return true;
+            } };
+        facade.input = forwarding;
         events.emit('process-started', { image: request.imagePath, sequenceBase: logSequence,
             worker: true });
         try
@@ -7437,7 +7451,7 @@ export async function createApp(options){
                 worker.onMessage(data=>{
                     if (data?.type === 'exited')
                     {
-                        resolve(data.code);
+                        resolve({ code: data.code, diagnostics: data.diagnostics });
                     }
                     else if (data?.type === 'failed')
                     {
@@ -7471,6 +7485,8 @@ export async function createApp(options){
                         graphicsApi: options.graphicsApi,
                         maxFps: options.maxFps,
                         graphics: knobs,
+                        audio: sound ? Object.fromEntries(Object.entries(sound.options)
+                            .filter(([, value])=>typeof value !== 'function')) : undefined,
                         // The translator's store and the doorbell are this
                         // thread's: the child's translator keeps none.
                         cork: { config: { ...options.cork?.config, store: null,
@@ -7482,10 +7498,15 @@ export async function createApp(options){
         }
         finally
         {
+            if (facade.input === forwarding)
+            {
+                facade.input = mainLine.current.input;
+            }
             forgetObjects();
             link.close();
             await answering;
             worker.terminate();
+            sound?.giveBack();
         }
     };
     /** The code the last of the run's processes beside another exited with. */
@@ -7515,10 +7536,11 @@ export async function createApp(options){
         {
             across++;
             const running = (async()=>{
-                let code = -1;
+                /** @type {{ code: number, diagnostics?: any }} */
+                let ended = { code: -1 };
                 try
                 {
-                    code = await runAcross(parent, request);
+                    ended = await runAcross(parent, request);
                 }
                 catch (e){
                     events.emit('error', { reason: 'process', error: e });
@@ -7527,9 +7549,10 @@ export async function createApp(options){
                 {
                     across--;
                 }
+                const { code, diagnostics } = ended;
                 parent.childExited(request, code);
                 lastBesideCode = code;
-                events.emit('process-resumed', { image: request.imagePath, code });
+                events.emit('process-resumed', { image: request.imagePath, code, diagnostics });
                 return code;
             })();
             besides.add(running);
