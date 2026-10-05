@@ -6,7 +6,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { NONANTIALIASED_QUALITY, createFontEngine, familyOf } from './fonts.js';
+import { NONANTIALIASED_QUALITY, createFontEngine, familyOf, smoothed } from './fonts.js';
+
+/** lfQuality: "Font is antialiased, or smoothed, if the font supports it." */
+const ANTIALIASED_QUALITY = 4;
 import { extTextOut, textExtent } from './text.js';
 import { createGdiDrawing } from './context.js';
 import { TRANSPARENT } from './brush.js';
@@ -144,7 +147,7 @@ test('a negative height is the character height and a positive one the cell', ()
 test('a glyph is the canvas coverage, placed against the pen and the cell top', ()=>{
     const fake = fakeCanvas();
     const engine = createFontEngine({ canvas: fake.canvas });
-    const glyph = engine.glyph(0x41, font({ height: -10 }));
+    const glyph = engine.glyph(0x41, font({ height: -10, quality: ANTIALIASED_QUALITY }));
     assert.ok(glyph);
     assert.equal(glyph.advance, 5);
     assert.equal(glyph.left, 0);
@@ -165,7 +168,7 @@ test('a font asked for with NONANTIALIASED_QUALITY has no partly covered pixel',
     // glyph's first column half covered, which a smoothed glyph keeps.
     const fake = fakeCanvas();
     const engine = createFontEngine({ canvas: fake.canvas });
-    const smooth = engine.glyph(0x41, font({ height: -10 }));
+    const smooth = engine.glyph(0x41, font({ height: -10, quality: ANTIALIASED_QUALITY }));
     const sharp = engine.glyph(0x41, font({ height: -10, quality: NONANTIALIASED_QUALITY }));
     assert.ok(smooth && sharp);
     assert.equal(smooth.coverage[0], 128);
@@ -173,7 +176,7 @@ test('a font asked for with NONANTIALIASED_QUALITY has no partly covered pixel',
     assert.deepEqual([...new Set(sharp.coverage)].sort((a, b)=>a - b), [255],
         'nothing in between');
     assert.equal(fake.calls.fillText, 2, 'the two are different glyphs');
-    engine.glyph(0x41, font({ height: -10, quality: 4 }));
+    engine.glyph(0x41, font({ height: -10, quality: 5 }));
     assert.equal(fake.calls.fillText, 2, 'every smoothed quality shares one');
 });
 
@@ -209,7 +212,7 @@ const INK = colorToPixel(INK_COLOR);
 
 test('text is composited from the glyph coverage in the text colour', ()=>{
     const engine = createFontEngine({ canvas: fakeCanvas().canvas });
-    const request = font({ height: -10 });
+    const request = font({ height: -10, quality: ANTIALIASED_QUALITY });
     const measured = engine.metrics(request);
     assert.ok(measured);
     const metrics = {
@@ -271,4 +274,54 @@ test('a drawing with an engine draws its glyphs for the selected font', ()=>{
     drawing.textOutA(1, 0, 0, 'AB');
     assert.equal(fake.calls.fillText, 2);
     assert.equal(surface.read(1, 5), INK);
+});
+
+test('fonts are smoothed as on Windows XP: dialog text not, headings yes, bitmaps never', ()=>{
+    // XP's standard font smoothing, on out of the box, follows the classic
+    // faces' size tables: grey to 8 pixels, none from 9 to 16, grey from 17.
+    const fake = fakeCanvas();
+    const engine = createFontEngine({ canvas: fake.canvas });
+    const label = engine.glyph(0x41, font({ height: -11, weight: 600 }));
+    assert.deepEqual([...new Set(label?.coverage)].sort((a, b)=>a - b), [255],
+        'an 11-pixel dialog font has no partly covered pixel');
+    const heading = engine.glyph(0x41, font({ height: -24 }));
+    assert.equal(heading?.coverage[0], 128, 'a 24-pixel one is smoothed');
+
+    const deferring = font({});
+    assert.deepEqual([8, 9, 16, 17].map(em=>smoothed(deferring, em)), [true, false, false, true]);
+    assert.equal(smoothed(font({ quality: ANTIALIASED_QUALITY }), 11), true,
+        'ANTIALIASED_QUALITY asks for it');
+    assert.equal(smoothed(font({ quality: NONANTIALIASED_QUALITY }), 40), false);
+    const bitmap = font({ faceName: 'MS Sans Serif', quality: ANTIALIASED_QUALITY });
+    assert.equal(smoothed(bitmap, 24), false, 'a bitmap face is smoothed at no size, no quality');
+    assert.equal(smoothed(font({ faceName: 'system' }), 6), false,
+        'compared without regard to case');
+});
+
+test('a label drawn again over itself with a transparent background is the same pixels', ()=>{
+    // What a launcher does on every hover. Smoothed edges would add up pass
+    // after pass, until the label is bold.
+    const engine = createFontEngine({ canvas: fakeCanvas().canvas });
+    const request = font({ faceName: 'MS Shell Dlg', height: -11, weight: 600 });
+    const measured = engine.metrics(request);
+    assert.ok(measured);
+    const metrics = {
+        cellWidth: measured.aveCharWidth, cellHeight: measured.height, ascent: measured.ascent,
+        glyphs: (/** @type {number} */ code)=>engine.glyph(code, request),
+    };
+    const surface = createSurface({ width: 20, height: 14 });
+    clearSurface(surface, BACKGROUND);
+    const pixels = ()=>Array.from({ length: 20 * 14 },
+        (_, i)=>surface.read(i % 20, Math.floor(i / 20)));
+    const draw = ()=>extTextOut(createPainter(surface), {
+        x: 2, y: 1, text: 'AB', metrics, textColor: INK_COLOR, bkColor: 0, bkMode: TRANSPARENT,
+    });
+    draw();
+    const once = pixels();
+    assert.ok(once.includes(INK), 'the label is drawn');
+    for (let pass = 0; pass < 30; pass++)
+    {
+        draw();
+    }
+    assert.deepEqual(pixels(), once);
 });
