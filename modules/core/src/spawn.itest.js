@@ -848,7 +848,8 @@ test('a child in a worker of its own sets the event its parent named, and the pa
  * and its parent, which polls for the name until the child has made it, sets
  * it, waits for the child and exits with 0x100 + the child's code.
  */
-function buildWaitingChild(){
+/** @param {number} [delay]  milliseconds the parent sleeps before it looks for the event */
+function buildWaitingChild(delay = 0){
     const parent = buildExe({
         imports: { 'KERNEL32.dll': ['CreateProcessA', 'OpenEventA', 'Sleep', 'SetEvent',
             'WaitForSingleObject', 'GetExitCodeProcess', 'ExitProcess'] },
@@ -859,12 +860,14 @@ function buildWaitingChild(){
             info: new Array(16).fill(0),
             code: u32(0),
         },
-        codeSize: 0x80,
+        codeSize: 0x100,
         code: ({ iat, at })=>[
             0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
             0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
             0x68, ...u32(at('command')), 0x6a, 0,
             0xff, 0x15, ...u32(iat('CreateProcessA')),
+            // Sleep(delay): the child is waiting by the time the parent looks
+            0x68, ...u32(delay), 0xff, 0x15, ...u32(iat('Sleep')),
             // until OpenEventA(EVENT_ALL_ACCESS, FALSE, "Go") finds it: Sleep(1)
             0x68, ...u32(at('name')), 0x6a, 0, 0x68, ...u32(0x1f0003),
             0xff, 0x15, ...u32(iat('OpenEventA')),
@@ -895,20 +898,23 @@ function buildWaitingChild(){
     return { parent, child };
 }
 
-test('a child in a worker of its own waits on the event it named until its parent finds and'
-    + ' sets it', { timeout: 60000 }, async t=>{
-    const { parent, child } = buildWaitingChild();
-    const app = await createApp({
-        executable: parent,
-        imagePath: 'C:\\App\\parent.exe',
-        engine: 'cork',
-        concurrency: 2,
-        storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
+for (const delay of [0, 1000])
+{
+    test(`a child in a worker of its own waits on the event it named until its parent finds and`
+        + ` sets it${delay ? ', however long that takes' : ''}`, { timeout: 60000 }, async t=>{
+        const { parent, child } = buildWaitingChild(delay);
+        const app = await createApp({
+            executable: parent,
+            imagePath: 'C:\\App\\parent.exe',
+            engine: 'cork',
+            concurrency: 2,
+            storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
+        });
+        t.after(()=>app.dispose());
+        assert.equal((await app.run({ timeoutMs: 30000 })) >>> 0, 0x107,
+            'the child woke on its parent\'s SetEvent and exited with 7');
     });
-    t.after(()=>app.dispose());
-    assert.equal((await app.run({ timeoutMs: 30000 })) >>> 0, 0x107,
-        'the child woke on its parent\'s SetEvent and exited with 7');
-});
+}
 
 /**
  * A parent that starts C:\\App\\a.exe and C:\\App\\b.exe one after the other and

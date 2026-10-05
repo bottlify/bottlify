@@ -414,3 +414,29 @@ test('a named object another process made wakes a waiter through the waiter\'s o
             'and the parent\'s, which does not hold it, is not asked to');
         assert.equal(waiter.waitResult, WaitResult.OBJECT_0);
     });
+
+test('a wait on another process\'s object that ends while it is being asked for is not lost',
+    ()=>{
+        // The link answers what it is asked while it waits for an answer of
+        // its own, so the word that the wait ended can come in before the
+        // wait's own answer -- that it was queued -- has been taken.
+        const scheduler = fakeScheduler();
+        /** @type {ReturnType<typeof createSyncObjects>} */
+        let sync;
+        /** @param {number} _id @param {number} _thread @param {number} token */
+        const wait = (_id, _thread, token)=>{
+            sync.wakeRemote(token, WaitResult.OBJECT_0);
+            return null;
+        };
+        const remote = /** @type {any} */ ({
+            wait,
+            cancel: ()=>null,
+        });
+        sync = createSyncObjects({ scheduler, remote });
+        const event = sync.createEvent({ manualReset: false, signalled: false, name: 'Go' });
+        /** @type {any} */ (event).remote = 1;
+        const waiter = /** @type {any} */ ({ ...thread('child'), id: 2 });
+        assert.equal(sync.wait(event, waiter), WaitResult.OBJECT_0,
+            'answered at once: the object is the thread\'s');
+        assert.deepEqual(scheduler.log, [], 'never blocked, so nothing to wake');
+    });

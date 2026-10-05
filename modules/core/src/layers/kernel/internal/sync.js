@@ -102,6 +102,15 @@ export function createSyncObjects({ scheduler, remote = null }){
     /** Waits on another process's object, queued there, by their token. @type {Map<number, any>} */
     const remoteWaits = new Map();
     let nextToken = 1;
+    /**
+     * The wait being asked for across the link now, and the word that it
+     * ended if that came first: the link answers what it is asked while it
+     * waits for an answer of its own, so the wake can arrive before the
+     * answer that the wait was queued.
+     *
+     * @type {{ token: number, result: number | null } | null}
+     */
+    let asking = null;
     /** @param {any} thread */
     const stopWaiting = thread=>{
         if (thread.remoteWait && remote)
@@ -322,6 +331,10 @@ export function createSyncObjects({ scheduler, remote = null }){
             const thread = remoteWaits.get(token);
             if (!thread)
             {
+                if (asking?.token === token)
+                {
+                    asking.result = result;
+                }
                 return;
             }
             remoteWaits.delete(token);
@@ -536,7 +549,16 @@ export function createSyncObjects({ scheduler, remote = null }){
             if (object.remote && remote)
             {
                 const token = nextToken++;
-                const now = remote.wait(object.remote, thread.id, token);
+                asking = { token, result: null };
+                let now;
+                try
+                {
+                    now = remote.wait(object.remote, thread.id, token) ?? asking.result;
+                }
+                finally
+                {
+                    asking = null;
+                }
                 if (now !== null)
                 {
                     return now;

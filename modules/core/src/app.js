@@ -7061,9 +7061,13 @@ export async function createApp(options){
             beside: processesAtOnce
                 ? (/** @type {any} */ request)=>startBeside(self, request) : undefined,
             // Only where processes run at once: one run in its parent's place
-            // has the parent paused, which wakes nothing.
+            // has the parent paused, which wakes nothing. A process that joined
+            // the run's system from a worker of its own is never the run's only
+            // one -- its parent at least stands -- so what it waits on is
+            // another's to answer, and the run, not it, says when it is over.
             othersRunning: processesAtOnce
-                ? ()=>starting > 0 || across > 0 || [...standing].some(other=>other !== self)
+                ? ()=>Boolean(options.system) || starting > 0 || across > 0
+                    || [...standing].some(other=>other !== self)
                 : undefined }));
         self = built;
         standing.add(built);
