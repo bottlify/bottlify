@@ -165,6 +165,9 @@ off the thread that runs the program, not from running the program's threads at 
 
 - **Split the engine worker** into the coordinator (event loop, I/O, network, system-wide Win32,
   pools, driver) and process workers (cork, per-process Win32).
+- **One window state for the run** ([windows.md](windows.md)): top-level windows' placement,
+  z-order, foreground and capture kept by the system, which the screen is composed from and input
+  routed by. It comes before the translation pools.
 - **Processes side by side.** Each process runs in its own worker with its own memory, sized per
   process (`memorySize`). This replaces process replacement (`roadmap/decisions.md`, C) and the
   copy-back after a child exits: the registry and files are the system's, so what one process
