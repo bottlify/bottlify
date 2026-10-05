@@ -1925,6 +1925,9 @@ export function createWin32Module(){
                     /** @param {string} path */
                     versionInfo: path=>modules.versionInfo?.(path) ?? null,
                     divergence: config?.divergence,
+                    // The installer's own log, where a failed installation says why.
+                    /** @param {string} text */
+                    log: text=>config?.divergence?.('MSI', text),
                 }),
 
                 // Authenticode: whether a signed file is intact and its publisher
