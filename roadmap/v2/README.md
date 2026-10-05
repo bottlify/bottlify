@@ -165,10 +165,10 @@ off the thread that runs the program, not from running the program's threads at 
 
 - **Split the engine worker** into the coordinator (event loop, I/O, network, system-wide Win32,
   pools, driver) and process workers (cork, per-process Win32).
-- **A window manager for the run** ([windows.md](windows.md)): a window model every change goes
-  through, the run's manager of every process's windows with their order, foreground and capture,
-  and views -- the GDI compositor, input, later a JS view -- that subscribe to it. It comes before
-  the translation pools.
+- **A window manager for the run** ([windows.md](windows.md)): every process's windows, as its
+  user32 tells it, with their order across processes, foreground and capture, and views -- the
+  GDI compositor, input, later a JS view -- that subscribe to it, in place of the rules that ignore
+  other processes' windows. It comes before the translation pools.
 - **Processes side by side.** Each process runs in its own worker with its own memory, sized per
   process (`memorySize`). This replaces process replacement (`roadmap/decisions.md`, C) and the
   copy-back after a child exits: the registry and files are the system's, so what one process
