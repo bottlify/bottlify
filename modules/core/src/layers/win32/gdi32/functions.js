@@ -4488,6 +4488,59 @@ export function createGdiFunctions(host){
             },
 
             /**
+             * A copy of a rectangle of the context's pixels, kept for `paste`
+             * until `drop`: a dragged window's picture.
+             *
+             * @param {number} hdc
+             * @param {{ left: number, top: number, right: number, bottom: number }} rect
+             * @returns {{ memory: number, bitmap: number, previous: number, width: number,
+             *     height: number } | null}
+             */
+            snapshot: (hdc, rect)=>{
+                const width = rect.right - rect.left;
+                const height = rect.bottom - rect.top;
+                if (width <= 0 || height <= 0 || !drawing.bound(hdc))
+                {
+                    return null;
+                }
+                /** @param {string} name @param {...number} args */
+                const call = (name, ...args)=>(/** @type {any} */ (aliased))[name].handler(args);
+                const memory = call('CreateCompatibleDC', hdc);
+                const bitmap = call('CreateCompatibleBitmap', hdc, width, height);
+                const previous = call('SelectObject', memory, bitmap);
+                call('BitBlt', memory, 0, 0, width, height, hdc, rect.left, rect.top, SRCCOPY);
+                return { memory, bitmap, previous, width, height };
+            },
+
+            /**
+             * A snapshot drawn with its corner at x, y, inside the context's clip.
+             *
+             * @param {number} hdc @param {any} shot @param {number} x @param {number} y
+             */
+            paste: (hdc, shot, x, y)=>{
+                if (!shot || !drawing.bound(hdc))
+                {
+                    return false;
+                }
+                (/** @type {any} */ (aliased)).BitBlt.handler([hdc, x, y, shot.width, shot.height,
+                    shot.memory, 0, 0, SRCCOPY]);
+                return true;
+            },
+
+            /** A snapshot let go. @param {any} shot */
+            drop: shot=>{
+                if (!shot)
+                {
+                    return;
+                }
+                /** @param {string} name @param {...number} args */
+                const call = (name, ...args)=>(/** @type {any} */ (aliased))[name].handler(args);
+                call('SelectObject', shot.memory, shot.previous);
+                call('DeleteObject', shot.bitmap);
+                call('DeleteDC', shot.memory);
+            },
+
+            /**
              * The part of its window a context may draw in, in its own
              * coordinates: what is on the screen and under no other window,
              * cut to a paint's update area. A clip the program selects is

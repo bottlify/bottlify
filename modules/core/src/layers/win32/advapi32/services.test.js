@@ -209,3 +209,22 @@ test('DeleteService marks a service, whose key goes with the last handle open on
     assert.equal(fns.DeleteService.handler([manager]), 0, 'the manager is no service');
     assert.equal(lastError(), ERROR_INVALID_HANDLE);
 });
+
+test('a process the manager did not start has no manager to connect to', ()=>{
+    const { fns, lastError } = setup();
+    const ERROR_FAILED_SERVICE_CONTROLLER_CONNECT = 1063;
+    const ERROR_SERVICE_NOT_IN_EXE = 1083;
+
+    assert.equal(fns.StartServiceCtrlDispatcherA.argBytes, 4);
+    assert.equal(fns.StartServiceCtrlDispatcherA.handler([0x400]), 0);
+    assert.equal(lastError(), ERROR_FAILED_SERVICE_CONTROLLER_CONNECT);
+
+    assert.equal(fns.RegisterServiceCtrlHandlerA.argBytes, 8);
+    assert.equal(fns.RegisterServiceCtrlHandlerA.handler([NAME, 0x401000]), 0,
+        'no handle, as the process runs none of its services');
+    assert.equal(lastError(), ERROR_SERVICE_NOT_IN_EXE);
+
+    assert.equal(fns.SetServiceStatus.argBytes, 8);
+    assert.equal(fns.SetServiceStatus.handler([0x1234, 0x500]), 0);
+    assert.equal(lastError(), ERROR_INVALID_HANDLE);
+});

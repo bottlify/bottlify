@@ -376,9 +376,12 @@ export function tabbedWidth(text, widthOf, stops, interval){
  *     visibleWindowRect: (record: any) => Rect }} options.geometry
  * @param {(hwnd: number, message: number, wParam: number, lParam: number,
  *     thread?: unknown) => number | Promise<number>} options.send
- * @param {(record: any) => void} options.invalidated
- *        A window's update area grew. Whoever keeps the others in order
- *        marks the ones that now have to repaint after it.
+ * @param {(record: any, erase: boolean) => void} options.invalidated
+ *        A window's update area grew, to be erased or not. Whoever keeps the
+ *        others in order marks the ones that now have to repaint with it.
+ * @param {(record: any) => any} [options.paintsFirst]
+ *        The window an update of this one starts from: an ancestor that still
+ *        has to paint the area under it, or the window itself.
  * @param {() => void} options.painted   Something reached the screen.
  * @param {(record: any) => any[]} [options.descendants]
  *        A window's descendants, parents before their children: the order
@@ -391,6 +394,8 @@ export function tabbedWidth(text, widthOf, stops, interval){
  * @param {(record: any) => Rect[]} [options.covering]
  *        The rectangles, in screen coordinates, of the windows over a window:
  *        what its visible region leaves out.
+ * @param {(record: any) => boolean} [options.frozen]
+ *        Whether a window is held as it is, being dragged: it draws nowhere.
  */
 export function createPaintFunctions(options){
     const { host, live, WM_PAINT, geometry, send, invalidated, painted, descendants } = options;
@@ -424,7 +429,7 @@ export function createPaintFunctions(options){
         }
         record.updateRect = record.updateRect ? union(record.updateRect, rect) : rect;
         record.erase = record.erase || erase;
-        invalidated(record);
+        invalidated(record, erase);
     };
 
     /**
@@ -507,12 +512,56 @@ export function createPaintFunctions(options){
      * @returns {number | Promise<number>}
      */
     const updateNow = (record, children)=>{
-        const order = children ? [record, ...(descendants?.(record) ?? [])] : [record];
+        // Under an area an ancestor still has to paint, a window paints after
+        // it: painted first, it would be painted over.
+        const from = options.paintsFirst?.(record) ?? record;
+        const order = children || from !== record
+            ? [from, ...(descendants?.(from) ?? [])] : [record];
         /** @param {number} index @returns {number | Promise<number>} */
         const next = index=>(index >= order.length
             ? 1
             : after(paintNow(order[index]), ()=>next(index + 1)));
         return next(0);
+    };
+
+    /**
+     * A window's frame and background painted now, its client left to its
+     * WM_PAINT: what RDW_ERASENOW does, and what Windows XP's SetWindowPos
+     * does for a window it shows. A program that shows a window and goes on
+     * without looking at its queue has it framed and erased on the screen,
+     * not the pixels of whatever was there before.
+     *
+     * @param {any} record
+     * @param {unknown} thread  Whose call showed it, named by the caller: after
+     *        an await the thread on the processor may be another.
+     * @returns {number | Promise<number>}
+     */
+    const eraseNow = (record, thread)=>{
+        const frame = record.ncDirty === true;
+        const erase = record.erase === true && Boolean(record.updateRect);
+        record.ncDirty = false;
+        record.erase = false;
+        return after(frame ? send(record.hwnd, WM_NCPAINT, 1, 0, thread) : 0, ()=>{
+            const hdc = erase ? contextOn(record) : 0;
+            if (hdc === 0)
+            {
+                return 1;
+            }
+            host.draw?.clip?.(hdc, intersectArea(
+                visibleArea(record, false, geometry.clientRect(record)),
+                record.updateRect ?? clientArea(record)));
+            // Shown only when it erased, which the answer says: a window
+            // with no background leaves the screen as it was, and that is
+            // not a picture to present.
+            return after(send(record.hwnd, WM_ERASEBKGND, hdc, 0, thread), erased=>{
+                contexts()?.release(record.hwnd, hdc);
+                if ((erased | 0) !== 0)
+                {
+                    painted();
+                }
+                return 1;
+            });
+        });
     };
 
     /** The DC service, or null in a build that cannot make one. */
@@ -567,7 +616,7 @@ export function createPaintFunctions(options){
      * @returns {Rect[]}
      */
     const visibleArea = (record, whole, origin)=>{
-        if (!shown(record))
+        if (!shown(record) || options.frozen?.(record))
         {
             return [];
         }
@@ -606,6 +655,9 @@ export function createPaintFunctions(options){
         // survive, and clearing afterwards would swallow it.
         record.updateRect = null;
         record.painting = hdc;
+        // Between BeginPaint and EndPaint, whatever context it has: an area
+        // a child is to erase does not bubble up into it then.
+        record.inPaint = true;
         const erase = record.erase === true;
         record.erase = false;
         const frame = record.ncDirty === true;
@@ -629,6 +681,7 @@ export function createPaintFunctions(options){
 
     /** @param {any} record @param {number} hdc */
     const endPaint = (record, hdc)=>{
+        record.inPaint = false;
         if (hdc !== 0)
         {
             contexts()?.release(record.hwnd, hdc);
@@ -1618,7 +1671,8 @@ export function createPaintFunctions(options){
         },
     };
 
-    return { table, beginPaint, endPaint, invalidate, updateNow, clientArea, cellOf, contextOn };
+    return { table, beginPaint, endPaint, invalidate, updateNow, eraseNow, clientArea, cellOf,
+        contextOn };
 }
 
 /** A brush argument up to this is a system colour index plus one. */

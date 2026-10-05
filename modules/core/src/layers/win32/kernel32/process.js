@@ -94,7 +94,11 @@ export const CLOCK = {
     COUNTER: 0,
     /** Milliseconds since boot, as GetTickCount and timeGetTime answer it. */
     TICKS: 8,
-    SIZE: 12,
+    /** The counter's last answer, 64-bit: the next is always later. */
+    LAST: 12,
+    /** What the engine writes when the clock moves: the counter and the ticks. */
+    WRITTEN: 12,
+    SIZE: 20,
 };
 
 /**
@@ -300,19 +304,37 @@ export function tlsSetValueCode(at, trap){
 }
 
 /**
- * QueryPerformanceCounter as guest code: the two words of the block, copied
- * into the caller's LARGE_INTEGER.
+ * QueryPerformanceCounter as guest code: the counter of the block when it is
+ * later than the last answer, else the last answer and one tick more, copied
+ * into the caller's LARGE_INTEGER and kept as the last answer.
  *
- * The answer is the one the host would have given, not an approximation of
- * it: the guest's clock does not move while the guest is running -- it is
- * credited between slices -- so the block holds exactly what a trap taken
- * here would have read.
+ * The guest's clock does not move while the guest is running -- it is
+ * credited between slices -- so two reads inside one slice found the same
+ * counter. On a real machine the counter always moves between two reads, and
+ * a program that times a stretch of its own code by two of them counts on
+ * it: Diablo II's single-player server times each tick so and takes a zero
+ * for a tick that did not happen, and once its tick ran inside one slice its
+ * client never drew again. The answers stay what a trap would give, which
+ * keeps the same last answer (`nextCount`).
  *
  *     mov ecx, [esp+4]
  *     test ecx, ecx
  *     jz slow                     ; a null pointer is the host's, as before
  *     mov eax, [block]
  *     mov edx, [block+4]
+ *     cmp edx, [last+4]
+ *     ja take
+ *     jb bump
+ *     cmp eax, [last]
+ *     ja take
+ *   bump:
+ *     mov eax, [last]
+ *     mov edx, [last+4]
+ *     add eax, 1
+ *     adc edx, 0
+ *   take:
+ *     mov [last], eax
+ *     mov [last+4], edx
  *     mov [ecx], eax
  *     mov [ecx+4], edx
  *     mov eax, 1
@@ -325,13 +347,27 @@ export function tlsSetValueCode(at, trap){
  * @param {number} block  The clock block.
  */
 export function queryPerformanceCounterCode(at, trap, block){
-    const slow = 32;
+    const slow = 78;
+    const last = block + CLOCK.LAST;
     return new Uint8Array([
         0x8b, 0x4c, 0x24, 0x04,                                      // mov ecx, [esp+4]
         0x85, 0xc9,                                                  // test ecx, ecx
         0x74, slow - 8,                                              // jz slow
         0xa1, ...dword(block + CLOCK.COUNTER),                       // mov eax, [block]
         0x8b, 0x15, ...dword(block + CLOCK.COUNTER + 4),             // mov edx, [block+4]
+        0x3b, 0x15, ...dword(last + 4),                              // cmp edx, [last+4]
+        0x77, 54 - 27,                                               // ja take
+        0x72, 37 - 29,                                               // jb bump
+        0x3b, 0x05, ...dword(last),                                  // cmp eax, [last]
+        0x77, 54 - 37,                                               // ja take
+        // bump:
+        0xa1, ...dword(last),                                        // mov eax, [last]
+        0x8b, 0x15, ...dword(last + 4),                              // mov edx, [last+4]
+        0x83, 0xc0, 0x01,                                            // add eax, 1
+        0x83, 0xd2, 0x00,                                            // adc edx, 0
+        // take:
+        0xa3, ...dword(last),                                        // mov [last], eax
+        0x89, 0x15, ...dword(last + 4),                              // mov [last+4], edx
         0x89, 0x01,                                                  // mov [ecx], eax
         0x89, 0x51, 0x04,                                            // mov [ecx+4], edx
         0xb8, ...dword(1),                                           // mov eax, 1
@@ -516,11 +552,35 @@ export function createProcessFunctions(host){
      */
     let clockAt = 0;
     /** One buffer, because this is written every time the clock moves. */
-    const clockBytes = new Uint8Array(CLOCK.SIZE);
+    const clockBytes = new Uint8Array(CLOCK.WRITTEN);
     const clockView = new DataView(clockBytes.buffer);
     /** @param {number} milliseconds */
     const ticksOf = milliseconds=>BigInt(
         Math.round(milliseconds * Number(PERFORMANCE_FREQUENCY) / 1000));
+    /** The counter's last answer, where there is no block to keep it in. */
+    let lastCount = 0n;
+    /**
+     * The counter's next answer, the host's as the guest routine's: the
+     * clock's when it is later than the last answer, else the last answer and
+     * one tick more (`queryPerformanceCounterCode`), kept as the last answer
+     * where the routine keeps it too.
+     */
+    const nextCount = ()=>{
+        const clock = ticksOf(host.now());
+        const last = clockAt === 0 ? lastCount
+            : BigInt(memory.readU32(clockAt + CLOCK.LAST))
+                | BigInt(memory.readU32(clockAt + CLOCK.LAST + 4)) << 32n;
+        const answer = clock > last ? clock : last + 1n;
+        if (clockAt === 0)
+        {
+            lastCount = answer;
+        }
+        else
+        {
+            writeU64(clockAt + CLOCK.LAST, answer);
+        }
+        return answer;
+    };
     const refreshClock = ()=>{
         if (clockAt === 0)
         {
@@ -963,7 +1023,7 @@ export function createProcessFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                writeU64(pointer >>> 0, ticksOf(host.now()));
+                writeU64(pointer >>> 0, nextCount());
                 return 1;
             },
             ...clockGuest('counter'),

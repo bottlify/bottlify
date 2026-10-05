@@ -21,6 +21,8 @@
  *   /shot?file=PATH      the picture, cut to the canvas, as a PNG; answers the path
  *   /click?x=&y=         a left click at the program's own pixels
  *   /move?x=&y=          the pointer moved there, no button
+ *   /drag?x=&y=&to=X,Y&steps=N   the left button held from one point to another,
+ *                        through N moves (10 by default) -- a window dragged
  *   /key?code=Enter      a key press, by KeyboardEvent.code
  *   /type?text=123       characters typed one after another
  *   /eval?js=EXPR        the value of an expression in the launcher tab, as JSON
@@ -146,6 +148,28 @@ createServer(async(request, answer)=>{
             const at = await canvas();
             await send('Input.dispatchMouseEvent', { type: 'mouseMoved',
                 x: at.x + Number(arg('x')) * at.w / at.cw, y: at.y + Number(arg('y')) * at.h / at.ch });
+        }
+        else if (url.pathname === '/drag')
+        {
+            const at = await canvas();
+            /** @param {number} x @param {number} y */
+            const page = (x, y)=>({ x: at.x + x * at.w / at.cw, y: at.y + y * at.h / at.ch });
+            const from = page(Number(arg('x')), Number(arg('y')));
+            const [toX, toY] = arg('to').split(',').map(Number);
+            const to = page(toX, toY);
+            const steps = Math.max(1, Number(arg('steps')) || 10);
+            await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...from });
+            await send('Input.dispatchMouseEvent',
+                { type: 'mousePressed', ...from, button: 'left', clickCount: 1 });
+            for (let step = 1; step <= steps; step++)
+            {
+                await sleep(30);
+                await send('Input.dispatchMouseEvent', { type: 'mouseMoved', button: 'left',
+                    buttons: 1, x: from.x + (to.x - from.x) * step / steps,
+                    y: from.y + (to.y - from.y) * step / steps });
+            }
+            await send('Input.dispatchMouseEvent',
+                { type: 'mouseReleased', ...to, button: 'left', clickCount: 1 });
         }
         else if (url.pathname === '/key')
         {

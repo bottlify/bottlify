@@ -488,6 +488,10 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           Makes a GDI region hold a rectangle, for GetUpdateRgn.
  * @property {() => void} [present]
  *           Shows the desktop. Called once a paint pass has finished.
+ * @property {(delay: number, fire: () => void) => boolean} [later]
+ *           Runs `fire` once `delay` milliseconds of the guest's clock have
+ *           passed, whatever the program's threads are doing; false when
+ *           there is no such clock.
  * @property {(name: string, handler: (message: DispatchedMessage) => number | Promise<number>)
  *     => number} [registerProcedure]
  *           An address a program can call a host-side window procedure
@@ -1676,9 +1680,11 @@ export function createWindowFunctions(host){
      * transparent window paints after what is beneath it and covers nothing.
      *
      * @param {any} record
+     * @param {boolean} [withChildren]  Whether its own children count; a move
+     *        that takes them along leaves them out.
      * @returns {import('../gdi32/rects.js').Rect[]}
      */
-    const coveringOf = record=>{
+    const coveringOf = (record, withChildren = true)=>{
         /** @type {import('../gdi32/rects.js').Rect[]} */
         const covers = [];
         /** @param {any} each */
@@ -1715,7 +1721,7 @@ export function createWindowFunctions(host){
                 }
             }
         }
-        if ((record.style & WS_CLIPCHILDREN) !== 0)
+        if (withChildren && (record.style & WS_CLIPCHILDREN) !== 0)
         {
             for (const child of childrenOf(record))
             {
@@ -2038,11 +2044,16 @@ export function createWindowFunctions(host){
     const setCapture = hwnd=>{
         const previous = captured;
         captured = live(hwnd) ? hwnd >>> 0 : 0;
+        if (dragged && !insideOf(live(captured), dragged.record))
+        {
+            endDrag();
+        }
         return previous;
     };
     const releaseCapture = ()=>{
         const previous = captured;
         captured = 0;
+        endDrag();
         if (previous !== 0 && live(previous))
         {
             host.queue.post({ hwnd: previous, message: WM_CAPTURECHANGED, wParam: 0, lParam: 0 });
@@ -2804,7 +2815,8 @@ export function createWindowFunctions(host){
         /** The window, shown and then activated when it was created visible. */
         const activated = ()=>{
             reveal();
-            return andThen(activateCreated(record, thread), ()=>record.hwnd);
+            return andThen(activateCreated(record, thread),
+                ()=>andThen(eraseShown(thread), ()=>record.hwnd));
         };
         // A procedure on this side reads no CREATESTRUCT: what it needs of one
         // is on the record.
@@ -2932,7 +2944,7 @@ export function createWindowFunctions(host){
                         ()=>{
                             reveal();
                             return andThen(activateCreated(record, thread),
-                                ()=>done(record.hwnd));
+                                ()=>andThen(eraseShown(thread), ()=>done(record.hwnd)));
                         })));
                 })));
         });
@@ -2990,29 +3002,87 @@ export function createWindowFunctions(host){
             true);
     };
 
+    /** A window's update area on the screen. @param {any} record */
+    const dirtyOnScreen = record=>{
+        const origin = geometry.clientRect(record);
+        return {
+            left: origin.left + record.updateRect.left,
+            top: origin.top + record.updateRect.top,
+            right: origin.left + record.updateRect.right,
+            bottom: origin.top + record.updateRect.bottom,
+        };
+    };
+
+    /**
+     * The windows a child is inside that its area to erase bubbles up to,
+     * innermost first: up to one that clips its children, whose painting
+     * cannot reach under them, and short of one in the middle of painting,
+     * which paints the area now and has the child paint after it.
+     *
+     * @param {any} record
+     * @returns {any[]}
+     */
+    const bubbledTo = record=>{
+        const found = [];
+        for (let up = isChild(record) ? live(record.parent) : null;
+            up && shown(up) && (up.style & WS_CLIPCHILDREN) === 0 && !up.inPaint;
+            up = isChild(up) ? live(up.parent) : null)
+        {
+            found.push(up);
+        }
+        return found;
+    };
+
     /**
      * A window's update area grew: every window painted after it that
      * overlaps it on the screen has to repaint too, or the one below would
      * come out on top. The whole overlapping window is marked rather than
      * the overlap, which is the one-rectangle ceiling of the update area.
      *
-     * @param {any} record
+     * An area a child is to erase bubbles up first, the way a browser
+     * repaints a dirty rectangle from the bottom layer up: each window it is
+     * inside (`bubbledTo`) repaints the same area under it, and the repaint
+     * starts from the outermost. A child whose background is a hollow brush
+     * -- a skinned dialog's owner-drawn label -- is then drawn on its
+     * parent's picture rather than over its own last frame. Windows XP leaves
+     * that to the program; the engine can afford the repaint.
+     *
+     * @param {any} record @param {boolean} [erase]  Whether the area is to be erased.
      */
-    const invalidated = record=>{
+    const invalidated = (record, erase = false)=>{
         if (!shown(record) || !record.updateRect)
         {
             return;
         }
         host.queue.dirtied?.(creatorOf(record));
-        const origin = geometry.clientRect(record);
-        const dirty = {
-            left: origin.left + record.updateRect.left,
-            top: origin.top + record.updateRect.top,
-            right: origin.left + record.updateRect.right,
-            bottom: origin.top + record.updateRect.bottom,
-        };
+        let base = record;
+        if (erase)
+        {
+            const under = dirtyOnScreen(record);
+            for (const up of bubbledTo(record))
+            {
+                const client = geometry.clientRect(up);
+                const area = intersect(under, client);
+                if (isEmpty(area))
+                {
+                    break;
+                }
+                const local = { left: area.left - client.left, top: area.top - client.top,
+                    right: area.right - client.left, bottom: area.bottom - client.top };
+                up.updateRect = up.updateRect ? {
+                    left: Math.min(up.updateRect.left, local.left),
+                    top: Math.min(up.updateRect.top, local.top),
+                    right: Math.max(up.updateRect.right, local.right),
+                    bottom: Math.max(up.updateRect.bottom, local.bottom),
+                } : local;
+                up.erase = true;
+                host.queue.dirtied?.(creatorOf(up));
+                base = up;
+            }
+        }
+        const dirty = dirtyOnScreen(base);
         const order = paintOrder();
-        for (const other of order.slice(order.indexOf(record) + 1))
+        for (const other of order.slice(order.indexOf(base) + 1))
         {
             if (shown(other) && !isEmpty(intersect(dirty, geometry.shapedRect(other))))
             {
@@ -3097,8 +3167,47 @@ export function createWindowFunctions(host){
             if (shown(each))
             {
                 repaint(each);
+                unerased.add(each);
             }
         }
+    };
+
+    /**
+     * Windows that appeared since their frames and backgrounds were last
+     * painted at once, parents before their children.
+     *
+     * @type {Set<any>}
+     */
+    const unerased = new Set();
+
+    /**
+     * The frames and backgrounds of the windows that appeared, painted now --
+     * WM_NCPAINT and WM_ERASEBKGND sent, parents first -- as Windows XP's
+     * SetWindowPos paints a window it shows before it returns; the client
+     * waits for its WM_PAINT, as it does there. Asked for by the calls that
+     * show a window. Only the calling thread's windows: another thread's are
+     * its own to paint when it next looks at its queue.
+     *
+     * @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const eraseShown = thread=>{
+        const asking = threadIdOf(thread);
+        /** @returns {number | Promise<number>} */
+        const next = ()=>{
+            const first = unerased.values().next();
+            if (first.done)
+            {
+                return 1;
+            }
+            const record = first.value;
+            unerased.delete(record);
+            const owner = threadIdOf(record.thread);
+            return live(record.hwnd) && shown(record)
+                && (owner === null || asking === null || owner === asking)
+                ? andThen(paint.eraseNow(record, thread), next) : next();
+        };
+        return next();
     };
 
     /** @param {any} record @returns {any[]} every live descendant, in paint order */
@@ -3148,35 +3257,200 @@ export function createWindowFunctions(host){
      * that replaces its window between two pages destroys one and shows the
      * next in the same place a few milliseconds apart, pumping messages in
      * between; painted at once, the desktop was shown in that gap, the whole
-     * window gone for a frame at every page.
+     * window gone for a frame at every page. A window that moved left no
+     * such gap -- it is on the screen still -- and its trail is painted at
+     * once; it and its children took their pixels along and are left alone.
      *
      * @param {{ left: number, top: number, right: number, bottom: number }} rect
+     * @param {any} [moving]  The window whose move left it.
      */
-    const uncover = rect=>{
+    const uncover = (rect, moving = null)=>{
         paintDesktop();
-        if (!host.queue.postLater)
+        const waiting = moving === null && (exposed.length > 0 || scheduleDesktop());
+        exposed.push(rect);
+        if (!waiting)
         {
-            exposed.push(rect);
             repaintDesktop();
-        }
-        else
-        {
-            if (exposed.length === 0)
-            {
-                host.queue.postLater(DESKTOP_REPAINT_KEY, DESKTOP_REPAINT_MS, ()=>{
-                    repaintDesktop();
-                    return null;
-                });
-            }
-            exposed.push(rect);
         }
         for (const other of paintOrder())
         {
-            if (shown(other) && !isEmpty(intersect(rect, geometry.shapedRect(other))))
+            if (shown(other) && !insideOf(other, moving)
+                && !isEmpty(intersect(rect, geometry.shapedRect(other))))
             {
                 repaint(other);
             }
         }
+    };
+
+    /** Whether a window is `outer` or inside it. @param {any} record @param {any} outer */
+    const insideOf = (record, outer)=>{
+        if (!outer)
+        {
+            return false;
+        }
+        for (let at = record; at; at = isChild(at) ? live(at.parent) : null)
+        {
+            if (at === outer)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    /**
+     * Whether all of a window is on the screen and under no other: then its
+     * pixels there are its own, and a move can take them along.
+     *
+     * @param {any} record
+     */
+    const wholeOnScreen = record=>{
+        const rect = geometry.shapedRect(record);
+        const screen = host.screen;
+        return Boolean(screen) && !isEmpty(rect) && rect.left >= 0 && rect.top >= 0
+            && rect.right <= (screen?.width ?? 0) && rect.bottom <= (screen?.height ?? 0)
+            && sameRect(geometry.visibleWindowRect(record), rect)
+            && coveringOf(record, false).every(cover=>isEmpty(intersect(cover, rect)));
+    };
+
+    /**
+     * The window a program is dragging -- moving it while it, or a window in
+     * it, holds the mouse -- held as it is until the mouse is let go, with
+     * its picture, which is all that moves: it paints nothing and is handed
+     * nothing to paint meanwhile, and only what it leaves is rendered, by
+     * what is under it. Painting itself at every step of a drag, it showed
+     * half-drawn frames for nothing.
+     *
+     * @type {{ record: any, shot: any } | null}
+     */
+    let dragged = null;
+
+    /** Whether a window is the dragged one or inside it. @param {any} record */
+    const frozen = record=>dragged !== null && insideOf(record, dragged.record);
+
+    /**
+     * Asked before a window moves: whether it is being dragged, its picture
+     * taken where it still is the first time.
+     *
+     * @param {any} record
+     */
+    const dragging = record=>{
+        if (dragged?.record === record)
+        {
+            return true;
+        }
+        const holder = live(captured);
+        if (!holder || !insideOf(holder, record) || !shown(record) || !draw?.snapshot)
+        {
+            return false;
+        }
+        const hdc = host.dc?.()?.get(0, null) ?? 0;
+        const shot = hdc !== 0 ? draw.snapshot(hdc, geometry.shapedRect(record)) : null;
+        host.dc?.()?.release(0, hdc);
+        if (!shot)
+        {
+            return false;
+        }
+        endDrag();
+        dragged = { record, shot };
+        return true;
+    };
+
+    /**
+     * A dragged window moved: its picture drawn where it now is and seen,
+     * and what it left rendered by the windows under it and the desktop.
+     *
+     * @param {any} record
+     * @param {{ left: number, top: number, right: number, bottom: number }} before
+     */
+    const dragMove = (record, before)=>{
+        const hdc = dragged ? host.dc?.()?.get(0, null) ?? 0 : 0;
+        if (hdc === 0 || !dragged)
+        {
+            return;
+        }
+        const after = geometry.shapedRect(record);
+        draw.clip?.(hdc, coveringOf(record, false).reduce(
+            (area, cover)=>subtractFromArea(area, cover), [geometry.visibleWindowRect(record)]));
+        draw.paste(hdc, dragged.shot, after.left, after.top);
+        host.dc?.()?.release(0, hdc);
+        painted();
+        for (const piece of subtractFromArea([before], after))
+        {
+            uncover(piece, record);
+        }
+    };
+
+    /** The mouse let go: the dragged window is itself again, and paints where it now is. */
+    const endDrag = ()=>{
+        if (!dragged)
+        {
+            return;
+        }
+        const { record, shot } = dragged;
+        dragged = null;
+        draw?.drop?.(shot);
+        if (live(record.hwnd) && shown(record))
+        {
+            appear(record);
+        }
+    };
+
+    /**
+     * A window moved, its size the same: its pixels go with it, as Windows'
+     * SetWindowPos copies a window's bits, and only what it left of the
+     * screen is painted -- by the windows under it and the desktop, which is
+     * what a move renders. Repainted instead, the window and every control
+     * in it ran the program's painting again at every step of a drag. Asked
+     * only for a window that was all on the screen and under no other
+     * (`wholeOnScreen`), whose pixels were all its own. Answers whether they
+     * moved.
+     *
+     * @param {any} record
+     * @param {{ left: number, top: number, right: number, bottom: number }} before
+     *        Its rectangle on the screen before the move.
+     */
+    const moveBits = (record, before)=>{
+        const hdc = draw?.scroll ? host.dc?.()?.get(0, null) ?? 0 : 0;
+        if (hdc === 0)
+        {
+            return false;
+        }
+        const after = geometry.shapedRect(record);
+        // Drawn only where it is seen now: inside its parents, under no window above.
+        draw.clip?.(hdc, coveringOf(record, false).reduce(
+            (area, cover)=>subtractFromArea(area, cover), [geometry.visibleWindowRect(record)]));
+        draw.scroll(hdc, before, after.left - before.left, after.top - before.top, after);
+        host.dc?.()?.release(0, hdc);
+        painted();
+        for (const piece of subtractFromArea([before], after))
+        {
+            uncover(piece, record);
+        }
+        return true;
+    };
+
+    /**
+     * Has the desktop paint what windows left DESKTOP_REPAINT_MS from now: on
+     * the system's own clock when the host has one -- the desktop is no
+     * thread of the program's, and on Windows its own thread paints whatever
+     * the program's are doing -- else when the queue is next looked at.
+     * False when nothing can wait.
+     */
+    const scheduleDesktop = ()=>{
+        if (host.later?.(DESKTOP_REPAINT_MS, repaintDesktop))
+        {
+            return true;
+        }
+        if (!host.queue.postLater)
+        {
+            return false;
+        }
+        host.queue.postLater(DESKTOP_REPAINT_KEY, DESKTOP_REPAINT_MS, ()=>{
+            repaintDesktop();
+            return null;
+        });
+        return true;
     };
 
     /**
@@ -4140,6 +4414,9 @@ export function createWindowFunctions(host){
         }),
         live, WM_PAINT, geometry, send, invalidated, painted, shown,
         descendants: (/** @type {any} */ record)=>paintedDescendantsOf(record),
+        paintsFirst: (/** @type {any} */ record)=>bubbledTo(record)
+            .reduce((first, up)=>(up.updateRect ? up : first), record),
+        frozen: (/** @type {any} */ record)=>frozen(record),
         desktop: ()=>desktopWindow().hwnd,
         covering: coveringOf,
     });
@@ -4388,7 +4665,7 @@ export function createWindowFunctions(host){
         }
         for (const record of waiting ? paintOrder() : [])
         {
-            if (record.updateRect && shown(record)
+            if (record.updateRect && shown(record) && !frozen(record)
                 && (filter.hwnd === ANY_WINDOW || filter.hwnd === record.hwnd)
                 && (asking === null || creatorOf(record) === null || creatorOf(record) === asking))
             {
@@ -4434,7 +4711,7 @@ export function createWindowFunctions(host){
         painting(){
             for (const record of windows.values())
             {
-                if (record.updateRect && !record.destroyed && shown(record))
+                if (record.updateRect && !record.destroyed && shown(record) && !frozen(record))
                 {
                     const at = host.now?.() ?? 0;
                     paintingSince ??= at;
@@ -4628,6 +4905,7 @@ export function createWindowFunctions(host){
         if (!wasVisible && !hide)
         {
             appear(record);
+            told = andThen(told, ()=>eraseShown(thread));
             // A window that becomes visible hears its own size, as the real
             // ShowWindow sends it: the message a program lays itself out by
             // and rasterises every glyph of its text for. Without it a program
@@ -4879,7 +5157,7 @@ export function createWindowFunctions(host){
                 capture: ()=>captured, setCapture, releaseCapture,
                 send, sendAcross, callProcedure, geometry, windowFromPoint, askedFromPoint,
                 isChild, repaint,
-                appear, uncover,
+                appear, uncover, eraseShown, wholeOnScreen, moveBits, dragging, dragMove,
                 /** @param {(handle: number) => any} decode */
                 pictures: decode=>{
                     pictureOf = decode;

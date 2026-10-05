@@ -2070,14 +2070,22 @@ test('the cursor a program sets reaches whoever shows the frame, bitmap and hot 
     assert.deepEqual([...h.cursors[3].bgra.slice(0, 4)], [9, 9, 9, 255]);
 });
 
-test('creating a device reports its resolution as the screen the program now has', ()=>{
-    const h = seamed();
-    const device = h.createDevice(h.create());
-    assert.notEqual(device, 0);
-    // createDevice builds present parameters at 64x64 (see the fixture).
-    assert.deepEqual(h.resolutions.at(-1), [64, 64, HWND, false],
-        'the back buffer size a device was created at is reported, with its window, windowed');
-});
+test('a windowed device takes the screen at its first frame, and one that shows none never does',
+    ()=>{
+        // A windowed device sets no display mode; here its window is the
+        // screen once it has a frame to show. One made only to convert
+        // textures, on a window nobody sees, never presents and leaves it.
+        const h = seamed();
+        const device = h.createDevice(h.create());
+        assert.notEqual(device, 0);
+        assert.deepEqual(h.resolutions, [], 'created, it has shown nothing');
+        assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+        // createDevice builds present parameters at 64x64 (see the fixture).
+        assert.deepEqual(h.resolutions, [[64, 64, HWND, false]],
+            'its first frame takes the screen at its back buffer\'s size, as a window');
+        assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+        assert.equal(h.resolutions.length, 1, 'once');
+    });
 
 test('a fullscreen device names the window it takes with it', ()=>{
     // The real device places its window at the mode's size; the window is
@@ -2116,8 +2124,11 @@ test('a reset that changes the mode names the window it presents into', ()=>{
 
     write({});
     assert.equal(h.device(device, 'Reset', [at]), D3D_OK);
+    assert.deepEqual(h.resolutions.at(-1), [320, 240, HWND, true],
+        'back to windowed, the screen waits for a frame');
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
     assert.deepEqual(h.resolutions.at(-1), [64, 64, HWND, false],
-        'and so does the reset back to windowed');
+        'and the frame names the window');
 });
 
 test('a surface description fills every field, leaving no stack of the caller to be read',

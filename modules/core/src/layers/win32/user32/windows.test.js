@@ -51,6 +51,8 @@ const WM_CHAR = 0x0102;
 const WM_PAINT = 0x000f;
 const WM_MOVE = 0x0003;
 const WM_SIZE = 0x0005;
+/** The frame painted before a call that shows a window returns, as Windows XP paints it. */
+const WM_NCPAINT = 0x0085;
 const WM_SHOWWINDOW = 0x0018;
 const WM_NCACTIVATE = 0x0086;
 const WM_USER = 0x0400;
@@ -194,12 +196,23 @@ const PARKED = Object.freeze({ parked: true });
  * @param {{ rect: any, color: number, quiet: boolean }[]} fills
  * @param {number[]} presents
  * @param {any[]} clips  The area each context was cut down to, last one last.
+ * @param {any[]} [scrolls]  The screen's pixels moved, by draw.scroll.
  */
-function paintedHost(fills, presents, clips){
+function paintedHost(fills, presents, clips, scrolls = []){
     return {
         screen: { width: 640, height: 480, bitsPerPixel: 32 },
         dc: ()=>({ get: ()=>1, release: ()=>{} }),
         draw: {
+            snapshot: (/** @type {any} */ hdc, /** @type {any} */ rect)=>{
+                scrolls.push({ snapshot: rect });
+                return { rect };
+            },
+            paste: (/** @type {any} */ hdc, /** @type {any} */ shot, /** @type {number} */ x,
+                /** @type {number} */ y)=>scrolls.push({ paste: [x, y] }),
+            drop: (/** @type {any} */ shot)=>scrolls.push({ drop: shot.rect }),
+            scroll: (/** @type {any} */ hdc, /** @type {any} */ rect, /** @type {number} */ dx,
+                /** @type {number} */ dy, /** @type {any} */ clip)=>
+                scrolls.push({ rect, dx, dy, clip }),
             fill: (/** @type {any} */ hdc, /** @type {any} */ rect,
                 /** @type {number} */ color)=>fills.push({ rect, color, quiet: false }),
             // The manager's own screen background: painted, not shown.
@@ -233,10 +246,12 @@ function paintedHost(fills, presents, clips){
  * @param {() => number} [options.queueNow] The message queue's clock, for a test
  *        that waits for something the queue does later.
  * @param {(region: number) => any} [options.regionBox] gdi32's rectangle of a region.
+ * @param {(delay: number, fire: () => void) => boolean} [options.later] The system's clock.
+ * @param {any[]} [options.scrolls] Where the screen's moved pixels are told, with `paint`.
  */
 function setup({
     heap = false, reply, waitForObjects, now, hookReply, threadExists, trace, paint = false,
-    caller = { current: THREAD }, queueNow, regionBox,
+    caller = { current: THREAD }, queueNow, regionBox, later, scrolls = [],
 } = {})
 {
     const memory = fakeMemory();
@@ -316,7 +331,8 @@ function setup({
         } : undefined,
         release: heap ? (/** @type {number} */ at)=>released.push(at) : undefined,
         regionBox,
-        ...(paint ? paintedHost(fills, presents, clips) : {}),
+        later,
+        ...(paint ? paintedHost(fills, presents, clips, scrolls) : {}),
     });
 
     /** Lets every waiting call look at the queue once more. */
@@ -957,8 +973,9 @@ test('the first window shown makes the application active before the call return
         [shown, WM_NCCREATE, 0], [shown, WM_CREATE, 0], [shown, WM_SIZE, 0], [shown, WM_MOVE, 0],
         [shown, WM_SHOWWINDOW, 1], [shown, WM_ACTIVATEAPP, 1], [hidden, WM_ACTIVATEAPP, 1],
         [shown, WM_NCACTIVATE, 1], [shown, WM_ACTIVATE, 1], [shown, WM_SETFOCUS, 0],
+        [shown, WM_NCPAINT, 1],
     ]);
-    assert.deepEqual(dispatched.slice(5).map(entry=>entry.lParam), [0, 0, 0, 0, 0],
+    assert.deepEqual(dispatched.slice(5, 10).map(entry=>entry.lParam), [0, 0, 0, 0, 0],
         'no thread of this program had the activation, and no window');
     assert.equal(queue.depth(), 0, 'nothing of it was posted');
     assert.equal(fns.GetActiveWindow.handler(), shown);
@@ -971,7 +988,8 @@ test('the first window shown makes the application active before the call return
     fns.ShowWindow.handler([hidden, SW_SHOW]);
     assert.deepEqual(dispatched.map(({ hwnd, message, wParam })=>[hwnd, message, wParam]), [
         [hidden, WM_SHOWWINDOW, 1], [hidden, WM_ACTIVATEAPP, 1], [hidden, WM_NCACTIVATE, 1],
-        [hidden, WM_ACTIVATE, 1], [hidden, WM_SETFOCUS, 0], [hidden, WM_SIZE, 0],
+        [hidden, WM_ACTIVATE, 1], [hidden, WM_SETFOCUS, 0], [hidden, WM_NCPAINT, 1],
+        [hidden, WM_SIZE, 0],
     ], 'with no window active, the application is activated again');
 });
 
@@ -1001,6 +1019,7 @@ test('a window that takes the activation is told, and the one it replaced is tol
         [first, WM_NCACTIVATE, 0, 0], [first, WM_ACTIVATE, WA_INACTIVE, second],
         [second, WM_NCACTIVATE, 1, 0], [second, WM_ACTIVATE, WA_ACTIVE, first],
         [first, WM_KILLFOCUS, second, 0], [second, WM_SETFOCUS, first, 0],
+        [second, WM_NCPAINT, 1, 0],
     ]);
     assert.equal(context.queue.depth(), 0, 'sent before the call returns, none of it posted');
 });
@@ -1625,7 +1644,11 @@ test('a window appearing paints the desktop but does not present it as a frame',
     // screen as the first frame -- the frame a launcher hides its loading
     // screen on -- before the program had presented anything. The colour is
     // still painted underneath, so whatever the program draws shows over it.
-    const { fns, hwnd, fills, presents } = withWindow({ paint: true });
+    // The window has no background of its own: its WM_ERASEBKGND answers that
+    // nothing was erased, as DefWindowProc does for a class with no brush.
+    const WM_ERASEBKGND = 0x0014;
+    const { fns, hwnd, fills, presents } = withWindow({ paint: true,
+        reply: message=>(message.message === WM_ERASEBKGND ? 0 : 0x1234) });
     fns.ShowWindow.handler([hwnd, SW_SHOW]);
     pump(fns, hwnd);
 
@@ -1633,6 +1656,25 @@ test('a window appearing paints the desktop but does not present it as a frame',
     assert.equal(fills[0].color, 0x808080, 'in the desktop colour');
     assert.equal(fills[0].quiet, true, 'through the paint that does not present');
     assert.deepEqual(presents, [], 'and was not presented as a frame');
+});
+
+test('ShowWindow frames and erases the window and its children before it returns', ()=>{
+    // Windows XP's SetWindowPos paints a window it shows -- WM_NCPAINT, then
+    // WM_ERASEBKGND, its children's after its own -- before it
+    // returns, and the client waits for WM_PAINT. A setup that shows a dialog
+    // and goes to work without looking at its queue has the dialog on the
+    // screen rather than the page that was there before it.
+    const WM_ERASEBKGND = 0x0014;
+    const { fns, memory, hwnd, dispatched } = withWindow({ paint: true, reply: ()=>1 });
+    const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: hwnd,
+        x: 0, y: 0, width: 20, height: 10 });
+    dispatched.length = 0;
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    const painting = dispatched.filter(entry=>[WM_NCPAINT, WM_ERASEBKGND, WM_PAINT]
+        .includes(entry.message)).map(entry=>[entry.hwnd, entry.message]);
+    assert.deepEqual(painting, [[hwnd, WM_NCPAINT], [hwnd, WM_ERASEBKGND],
+        [child, WM_NCPAINT], [child, WM_ERASEBKGND]]);
+    assert.equal(fns.GetUpdateRect.handler([hwnd, 0, 0]), 1, 'its client is still to paint');
 });
 
 test('a window that is not on the screen draws nowhere, and a child of one neither', ()=>{
@@ -1724,6 +1766,107 @@ test('a window that goes shows the desktop only where no other window is', ()=>{
         'and all of the last one');
 });
 
+/**
+ * Takes every paint the queue hands out, validating each, and answers the
+ * windows in the order they were handed out.
+ *
+ * @param {any} fns @param {any} memory
+ */
+function paintsInOrder(fns, memory){
+    /** @type {number[]} */
+    const order = [];
+    for (let guard = 0; guard < 32; guard++)
+    {
+        if (fns.PeekMessageA.handler([MSG_BUFFER, 0, WM_PAINT, WM_PAINT, PM_REMOVE]) === 0)
+        {
+            return order;
+        }
+        const hwnd = memory.u32(MSG_BUFFER + MSG.hwnd);
+        order.push(hwnd);
+        fns.ValidateRect.handler([hwnd, 0]);
+    }
+    throw new Error('the paints never ran out');
+}
+
+test('an area a child is to erase is repainted from its parent up, as a browser repaints', ()=>{
+    // A skinned dialog's owner-drawn label erases with a hollow brush and
+    // draws its text over whatever is there: repainted alone, its text went
+    // bold on every hover. The parent paints the area under it first.
+    const { fns, memory } = setup();
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const parent = createWindow(fns, memory, { style: WS_VISIBLE });
+    const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent,
+        x: 40, y: 30, width: 20, height: 10 });
+    paintsInOrder(fns, memory);
+
+    fns.InvalidateRect.handler([child, 0, 1]);
+    assert.equal(fns.GetUpdateRect.handler([parent, RECT_BUFFER, 0]), 1,
+        'the parent has the area under the child to paint');
+    const [left, top, right, bottom] = [0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at));
+    assert.deepEqual([left, top, right, bottom], [40, 30, 60, 40], 'and only that area');
+    assert.deepEqual(paintsInOrder(fns, memory), [parent, child], 'the parent first');
+
+    fns.InvalidateRect.handler([child, 0, 0]);
+    assert.equal(fns.GetUpdateRect.handler([parent, 0, 0]), 0,
+        'an area the child paints over without erasing stays its own');
+    paintsInOrder(fns, memory);
+});
+
+test('a parent that clips its children, or one in the middle of painting, is not asked', ()=>{
+    const WS_CLIPCHILDREN = 0x02000000;
+    const PAINT = 0x11800;
+    /** @type {{ parent: number, child: number }} */
+    const handles = { parent: 0, child: 0 };
+    const { fns, memory } = setup({ reply: message=>{
+        // The parent's procedure invalidates its child while it paints, as
+        // a program updating a label from WM_PAINT does.
+        if (message.message === WM_PAINT && message.hwnd === handles.parent)
+        {
+            fns.BeginPaint.handler([handles.parent, PAINT]);
+            fns.InvalidateRect.handler([handles.child, 0, 1]);
+            fns.EndPaint.handler([handles.parent, PAINT]);
+        }
+        return 0;
+    } });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    handles.parent = createWindow(fns, memory, { style: WS_VISIBLE });
+    handles.child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE,
+        parent: handles.parent, x: 40, y: 30, width: 20, height: 10 });
+    fns.PeekMessageA.handler([MSG_BUFFER, handles.parent, WM_PAINT, WM_PAINT, PM_REMOVE]);
+    fns.DispatchMessageA.handler([MSG_BUFFER]);
+    assert.equal(fns.GetUpdateRect.handler([handles.parent, 0, 0]), 0,
+        'a parent that was painting is not asked again: no repaint for ever');
+    assert.equal(fns.GetUpdateRect.handler([handles.child, 0, 0]), 1, 'the child paints after it');
+    paintsInOrder(fns, memory);
+
+    const clipping = createWindow(fns, memory, { style: WS_VISIBLE | WS_CLIPCHILDREN });
+    const inside = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: clipping,
+        x: 0, y: 0, width: 20, height: 10 });
+    paintsInOrder(fns, memory);
+    fns.InvalidateRect.handler([inside, 0, 1]);
+    assert.equal(fns.GetUpdateRect.handler([clipping, 0, 0]), 0,
+        'its painting cannot reach under the child');
+});
+
+test('UpdateWindow on a child starts from the parent that has the area under it to paint',
+    ()=>{
+        const { fns, memory, dispatched } = setup();
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const parent = createWindow(fns, memory, { style: WS_VISIBLE });
+        const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent,
+            x: 0, y: 0, width: 20, height: 10 });
+        paintsInOrder(fns, memory);
+        fns.InvalidateRect.handler([child, 0, 1]);
+        dispatched.length = 0;
+        assert.equal(fns.UpdateWindow.handler([child]), 1);
+        assert.deepEqual(dispatched.filter(message=>message.message === WM_PAINT)
+            .map(message=>message.hwnd), [parent, child], 'painted first, the child would be'
+            + ' painted over');
+    });
+
 test('UpdateWindow paints the window and then its children, as RDW_UPDATENOW | RDW_ALLCHILDREN',
     ()=>{
         // A dialog shown and updated before a job that never pumps has its
@@ -1799,6 +1942,127 @@ test('a window shaped to an empty region takes none of the screen, and the deskt
         assert.deepEqual(desktop(), [], 'not redrawn, the screen is left until something paints');
     });
 
+test('the desktop paints what a window left on the system\'s clock, with no queue looked at',
+    ()=>{
+        // The desktop is no thread of the program's: on Windows its own thread
+        // paints what a window left a moment later, whatever the program does.
+        // Waiting for the program to look at its queue left a closed window on
+        // the screen for as long as it worked without looking.
+        /** @type {{ delay: number, fire: () => void }[]} */
+        const timers = [];
+        const { fns, memory, fills } = setup({ paint: true, later: (delay, fire)=>{
+            timers.push({ delay, fire });
+            return true;
+        } });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const hwnd = createWindow(fns, memory, { style: WS_VISIBLE });
+        const desktop = ()=>fills.filter(fill=>fill.color === 0x808080 && !fill.quiet)
+            .map(fill=>fill.rect);
+        fills.length = 0;
+        fns.ShowWindow.handler([hwnd, SW_HIDE]);
+        assert.deepEqual(timers.map(timer=>timer.delay), [100], 'a moment later');
+        assert.deepEqual(desktop(), [], 'not at once');
+        timers[0].fire();
+        assert.deepEqual(desktop(), [{ left: 10, top: 20, right: 310, bottom: 220 }],
+            'then, with no message looked at');
+    });
+
+test('a window that moves takes its pixels with it, and only what it left is painted', ()=>{
+    // As SetWindowPos copies a window's bits. A launcher that moves itself on
+    // every mouse move of a drag had itself and every control repainted, by
+    // its own code, at every step.
+    const SWP_NOSIZE = 0x0001;
+    const SWP_NOZORDER = 0x0004;
+    const SWP_NOACTIVATE = 0x0010;
+    const WM_ERASEBKGND = 0x0014;
+    const WS_POPUP = 0x80000000;
+    /** @type {any[]} */
+    const scrolls = [];
+    const { fns, memory, fills, dispatched } = setup({ paint: true, scrolls });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const drain = ()=>{
+        while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) !== 0)
+        {
+            fns.ValidateRect.handler([memory.u32(MSG_BUFFER + MSG.hwnd), 0]);
+        }
+    };
+    const desktop = ()=>fills.filter(fill=>fill.color === 0x808080 && !fill.quiet)
+        .map(fill=>fill.rect);
+    const hwnd = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+        x: 10, y: 20, width: 300, height: 200 });
+    drain();
+    fills.length = 0;
+    dispatched.length = 0;
+
+    fns.SetWindowPos.handler([hwnd, 0, 50, 20, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]);
+    assert.deepEqual(scrolls, [{ rect: { left: 10, top: 20, right: 310, bottom: 220 }, dx: 40,
+        dy: 0, clip: { left: 50, top: 20, right: 350, bottom: 220 } }], 'its pixels moved');
+    assert.equal(fns.GetUpdateRect.handler([hwnd, 0, 0]), 0, 'nothing of it is left to paint');
+    assert.deepEqual(dispatched.filter(message=>[WM_NCPAINT, WM_ERASEBKGND, WM_PAINT]
+        .includes(message.message)), [], 'nothing was asked of its procedure');
+    assert.deepEqual(desktop(), [{ left: 10, top: 20, right: 50, bottom: 220 }],
+        'the strip it left is the desktop\'s, at once');
+
+    // Partly under another window, its pixels are not all its own.
+    createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE, x: 300, y: 100,
+        width: 100, height: 50 });
+    drain();
+    scrolls.length = 0;
+    fns.SetWindowPos.handler([hwnd, 0, 60, 20, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]);
+    assert.deepEqual(scrolls, [], 'a window partly covered is painted instead');
+    assert.equal(fns.GetUpdateRect.handler([hwnd, 0, 0]), 1);
+});
+
+test('a window dragged -- moved while it holds the mouse -- is held as it is until let go', ()=>{
+    // Only its picture moves; it paints nothing and is handed nothing to
+    // paint until the mouse is let go, and then it paints where it is.
+    const SWP_NOSIZE = 0x0001;
+    const SWP_NOZORDER = 0x0004;
+    const SWP_NOACTIVATE = 0x0010;
+    const WM_ERASEBKGND = 0x0014;
+    const WS_POPUP = 0x80000000;
+    /** @type {any[]} */
+    const scrolls = [];
+    const { fns, memory, fills, dispatched, clips, service } = setup({ paint: true, scrolls });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const drain = ()=>{
+        while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) !== 0)
+        {
+            fns.ValidateRect.handler([memory.u32(MSG_BUFFER + MSG.hwnd), 0]);
+        }
+    };
+    const hwnd = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+        x: 10, y: 20, width: 300, height: 200 });
+    drain();
+    fills.length = 0;
+    dispatched.length = 0;
+    const move = (/** @type {number} */ x)=>fns.SetWindowPos.handler([hwnd, 0, x, 20, 0, 0,
+        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]);
+
+    fns.SetCapture.handler([hwnd]);
+    move(50);
+    move(90);
+    assert.deepEqual(scrolls, [{ snapshot: { left: 10, top: 20, right: 310, bottom: 220 } },
+        { paste: [50, 20] }, { paste: [90, 20] }], 'taken once, drawn at every step');
+    fns.InvalidateRect.handler([hwnd, 0, 1]);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, WM_PAINT, WM_PAINT, PM_REMOVE]), 0,
+        'asked to repaint while dragged, it is handed nothing to paint');
+    assert.equal(service.painting(), false, 'nor does it hold the screen back');
+    fns.ReleaseDC.handler([hwnd, fns.GetDC.handler([hwnd])]);
+    assert.deepEqual(clips.at(-1), [], 'what it draws meanwhile reaches nothing');
+    assert.deepEqual(dispatched.filter(message=>[WM_NCPAINT, WM_ERASEBKGND, WM_PAINT]
+        .includes(message.message)), [], 'nothing was asked of its procedure');
+
+    fns.ReleaseCapture.handler();
+    assert.deepEqual(scrolls.at(-1), { drop: { left: 10, top: 20, right: 310, bottom: 220 } });
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, WM_PAINT, WM_PAINT, PM_REMOVE]), 1,
+        'let go, it paints where it is');
+    assert.equal(memory.u32(MSG_BUFFER + MSG.hwnd), hwnd);
+});
+
 test('the desktop paints where a window went a moment later, under whatever came there', ()=>{
     // A wizard that replaces its window between pages destroys one, pumps
     // its messages and shows the next in the same place: the desktop shown
@@ -1865,7 +2129,7 @@ test('a window with an area to paint is handed WM_PAINT when nothing else is que
     // the window in the code that follows it. Posting either one leaves the
     // text rasterised for whatever default the program started with.
     assert.deepEqual(dispatched.slice(announced).map(entry=>entry.message),
-        [WM_SHOWWINDOW, 0x001c, WM_NCACTIVATE, 0x0006, 0x0007, WM_SIZE],
+        [WM_SHOWWINDOW, 0x001c, WM_NCACTIVATE, 0x0006, 0x0007, WM_NCPAINT, WM_SIZE],
         'shown: the show message, the activation, then the size');
     assert.equal(dispatched[announced].wParam, 1, 'TRUE: the window is being shown');
     // Showing a window is the first thing that paints it.
@@ -1975,7 +2239,7 @@ test('ShowWindow answers only after the procedures it sent to have run', async()
     answer(0);
     assert.equal(await result, 0, 'SW_SHOW on a hidden window answers the state it found');
     assert.deepEqual(dispatched.map(entry=>entry.message),
-        [WM_SHOWWINDOW, 0x001c, WM_NCACTIVATE, 0x0006, 0x0007, WM_SIZE],
+        [WM_SHOWWINDOW, 0x001c, WM_NCACTIVATE, 0x0006, 0x0007, WM_NCPAINT, WM_SIZE],
         'the activation and the size went once the show message was answered');
 });
 
@@ -2001,7 +2265,7 @@ test('past the show message\'s answer, the activation and the size run on the th
     const shown = dispatched.findIndex(entry=>entry.message === WM_SHOWWINDOW);
     const later = dispatched.slice(shown + 1).map(entry=>[entry.message, entry.thread?.name]);
     assert.deepEqual(later, [[0x001c, 'main'], [WM_NCACTIVATE, 'main'], [0x0006, 'main'],
-        [0x0007, 'main'], [WM_SIZE, 'main']]);
+        [0x0007, 'main'], [WM_NCPAINT, 'main'], [WM_SIZE, 'main']]);
 });
 
 test('WaitMessage yields until there is something to retrieve, and takes nothing', async()=>{
@@ -2374,7 +2638,7 @@ test('a new window is announced to its procedure with a CREATESTRUCT', ()=>{
     // the active one: WM_ACTIVATEAPP, WM_NCACTIVATE, WM_ACTIVATE, WM_SETFOCUS.
     assert.deepEqual(dispatched.map(entry=>entry.message),
         [WM_NCCREATE, WM_CREATE, WM_SIZE, WM_MOVE, WM_SHOWWINDOW, 0x001c, WM_NCACTIVATE, 0x0006,
-            0x0007]);
+            0x0007, WM_NCPAINT]);
     assert.equal(dispatched[0].lParam, dispatched[1].lParam,
         'WM_NCCREATE carries the same structure');
     const message = dispatched[1];
@@ -2461,7 +2725,7 @@ test('CreateWindowEx tells the hook, then the procedure, in the order user32\'s 
     createWindow(fns, memory, { style: 0x80000000 | WS_VISIBLE });
     assert.deepEqual(log, [`hook:${HCBT_CREATEWND}`, '0x81:0', '0x1:0', '0x5:0', '0x3:0',
         '0x18:1', `hook:${HCBT_ACTIVATE}`, '0x1c:1', '0x1c:1', '0x86:1', '0x6:1',
-        `hook:${HCBT_SETFOCUS}`, '0x7:0'], 'visible');
+        `hook:${HCBT_SETFOCUS}`, '0x7:0', '0x85:1'], 'visible');
 });
 
 test('WM_NCCREATE answered FALSE refuses the window, which hears WM_NCDESTROY alone', ()=>{

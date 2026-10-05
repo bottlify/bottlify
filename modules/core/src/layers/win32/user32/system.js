@@ -765,6 +765,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * @param {number[]} args  hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags.
      */
     const setWindowPos = ([hwnd, after, x, y, cx, cy, flags])=>{
+        const SWP_NOREDRAW = 0x0008;
+        const SWP_NOCOPYBITS = 0x0100;
         const SWP_SHOWWINDOW = 0x0040;
         const SWP_HIDEWINDOW = 0x0080;
         const HWND_BOTTOM = 1;
@@ -775,9 +777,14 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         }
         const wasShown = host.shown(record);
         const covered = wasShown ? host.geometry.shapedRect(record) : null;
+        // Read before it moves: whether its pixels on the screen are all its own.
+        const whole = wasShown && host.wholeOnScreen?.(record) === true;
         const moved = (flags & SWP_NOMOVE) === 0 && (record.x !== (x | 0) || record.y !== (y | 0));
         const sized = (flags & SWP_NOSIZE) === 0
             && (record.width !== (cx | 0) || record.height !== (cy | 0));
+        // Moved while it holds the mouse, it is being dragged: held as it is,
+        // its picture taken before it moves.
+        const dragged = wasShown && moved && !sized && host.dragging?.(record) === true;
         if ((flags & SWP_NOMOVE) === 0)
         {
             record.x = x | 0;
@@ -805,14 +812,27 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             host.raise(record);
         }
         const isShown = host.shown(record);
-        if (covered && (!isShown || moved || sized))
+        if (dragged && isShown)
+        {
+            host.dragMove(record, covered);
+        }
+        // A window that only moved takes its pixels with it, as SetWindowPos
+        // copies a window's bits unless told not to.
+        const copied = (dragged && isShown) || whole && isShown && moved && !sized
+            && (flags & (SWP_NOCOPYBITS | SWP_NOREDRAW)) === 0
+            && host.moveBits?.(record, covered) === true;
+        if (!copied && covered && (!isShown || moved || sized))
         {
             host.uncover(covered);
         }
-        if (isShown && (!wasShown || moved || sized))
+        if (!copied && isShown && (!wasShown || moved || sized))
         {
             host.appear(record);
         }
+        // What it showed is framed and erased before it returns, as Windows
+        // XP's SetWindowPos does it; SWP_NOREDRAW asks for no painting at all.
+        const erased = (flags & SWP_NOREDRAW) === 0
+            ? host.eraseShown?.(host.callerThread?.()) ?? 1 : 1;
         // A child placed without SWP_NOACTIVATE is told it is the active
         // child, shown or not (user32's message tests, WmShowChildSeq_2 and
         // _4): an MDI child becomes the client's active one this way when its
@@ -820,10 +840,10 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         if ((flags & (SWP_NOACTIVATE | SWP_HIDEWINDOW)) === 0
             && (record.style & (WS_CHILD | WS_POPUP)) === WS_CHILD)
         {
-            return andThen(host.send(record.hwnd, WM_CHILDACTIVATE, 0, 0, host.callerThread?.()),
-                ()=>1);
+            return andThen(erased, ()=>andThen(host.send(record.hwnd, WM_CHILDACTIVATE, 0, 0,
+                host.callerThread?.()), ()=>1));
         }
-        return 1;
+        return andThen(erased, ()=>1);
     };
 
     /**

@@ -57,3 +57,30 @@ test('turning the input method off succeeds, for a thread or the whole process',
     assert.equal(m.imm.ImmDisableIME.handler([0xffffffff]), 1);
     assert.equal(m.imm.ImmDisableIME.handler([0]), 1);
 });
+
+test('there is no input method editor, no candidate list and nothing to open or simulate', ()=>{
+    const m = machine();
+    assert.equal(m.imm.ImmIsIME.argBytes, 4);
+    assert.equal(m.imm.ImmIsIME.handler([0x04090409]), 0);
+    assert.equal(m.imm.ImmSetOpenStatus.argBytes, 8);
+    assert.equal(m.imm.ImmSetOpenStatus.handler([0, 1]), 0, 'there is no context to open one on');
+    assert.equal(m.imm.ImmSimulateHotKey.argBytes, 8);
+    assert.equal(m.imm.ImmSimulateHotKey.handler([0x40, 1]), 0);
+});
+
+test('the candidate list count is zero and written, for a caller reads it whatever the size', ()=>{
+    const m = machine();
+    assert.equal(m.imm.ImmGetCandidateListCountA.argBytes, 8);
+    assert.equal(m.imm.ImmGetCandidateListCountA.handler([0, 0x30]), 0);
+    assert.deepEqual([...m.memory.slice(0x30, 0x34)], [0, 0, 0, 0]);
+    // A null pointer is legal and must not be written through.
+    assert.equal(m.imm.ImmGetCandidateListCountA.handler([0, 0]), 0);
+});
+
+test('a context cannot be made, and so none can be destroyed', ()=>{
+    const m = machine();
+    assert.equal(m.imm.ImmCreateContext.argBytes, 0);
+    assert.equal(m.imm.ImmCreateContext.handler([]), 0);
+    assert.equal(m.imm.ImmDestroyContext.argBytes, 4);
+    assert.equal(m.imm.ImmDestroyContext.handler([0x1234]), 0);
+});

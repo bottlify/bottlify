@@ -1188,7 +1188,10 @@ export function createDirect3D9Seam(
         // the chain's own or the override, decides whether the display
         // shows the picture.
         /** @param {any} chain @param {number[]} args */
-        Present: (chain, [, , window])=>chain.Present(shownIn(chain, window)),
+        Present: (chain, [, , window])=>{
+            showScreen(chainOwners.get(chain));
+            return chain.Present(shownIn(chain, window));
+        },
         // The caller waits while the picture comes back from the GPU.
         /** @param {any} chain @param {number[]} args */
         GetFrontBufferData: (chain, [destination])=>
@@ -1521,6 +1524,7 @@ export function createDirect3D9Seam(
             const hr = device.GetSwapChain(index >>> 0, held);
             if (hr === D3D_OK && held.swapChain)
             {
+                chainOwners.set(held.swapChain, device);
                 return handBack(held.swapChain, chainInterfacesOf(device), IID_IDirect3DSwapChain9,
                     out >>> 0, E_OUTOFMEMORY, device);
             }
@@ -1546,10 +1550,7 @@ export function createDirect3D9Seam(
                 // to take it with it the way a created one does; a window left
                 // at the old size has the program clipping its cursor to a
                 // rectangle the picture no longer fills.
-                resolution?.(next.backBufferWidth >>> 0, next.backBufferHeight >>> 0, {
-                    window: (next.hDeviceWindow >>> 0) || deviceWindow,
-                    fullscreen: !next.windowed,
-                });
+                takeScreen(device, next, (next.hDeviceWindow >>> 0) || deviceWindow);
             }
             // A reset puts the state back to its defaults, which the block
             // has to say before the guest reads or writes it again.
@@ -1561,6 +1562,7 @@ export function createDirect3D9Seam(
         // are no rectangles to honour, and the window is the browser's.
         /** @param {any} device */
         Present: (/** @type {any} */ device)=>{
+            showScreen(device);
             // A mode switch resizes the window a fullscreen device presents
             // into, and the program hears WM_SIZE for it after its device
             // exists, since the switch is the device's creation. A program
@@ -3100,10 +3102,7 @@ export function createDirect3D9Seam(
         // window is kept for a later Reset, whose present parameters need
         // not repeat it.
         deviceWindow = (wanted.hDeviceWindow >>> 0) || (focus >>> 0);
-        resolution?.(wanted.backBufferWidth >>> 0, wanted.backBufferHeight >>> 0, {
-            window: deviceWindow,
-            fullscreen: !wanted.windowed,
-        });
+        takeScreen(held.device, wanted, deviceWindow);
         const result = handBack(held.device, deviceInterfacesOf(held.device), id,
             out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
         if (result === D3D_OK)
@@ -3220,6 +3219,56 @@ export function createDirect3D9Seam(
     // and the window a reset leaves at the wrong size is one the program then
     // clips its cursor to.
     let deviceWindow = 0;
+
+    /**
+     * The screen a windowed device takes, kept until it shows its first frame
+     * (`showScreen`). A windowed device sets no display mode: it shows its
+     * frames in its window, and here its window is the screen -- once it has
+     * a frame to show. One made to convert textures or to read what the card
+     * can do, on a window nobody sees, shows none and leaves the screen as it
+     * was; taken at its creation, an 8 by 8 back buffer was the screen every
+     * window after it was centred on.
+     *
+     * @type {WeakMap<any, { width: number, height: number, window: number }>}
+     */
+    const unshown = new WeakMap();
+
+    /**
+     * What a created or reset device does to the screen: a fullscreen one
+     * takes it now, at its mode, with its window; a windowed one at its first
+     * frame.
+     *
+     * @param {any} device @param {any} parameters @param {number} window
+     */
+    const takeScreen = (device, parameters, window)=>{
+        const width = parameters.backBufferWidth >>> 0;
+        const height = parameters.backBufferHeight >>> 0;
+        if (parameters.windowed)
+        {
+            unshown.set(device, { width, height, window });
+            return;
+        }
+        unshown.delete(device);
+        resolution?.(width, height, { window, fullscreen: true });
+    };
+
+    /**
+     * A windowed device's first frame: its window is the screen from now on.
+     *
+     * @param {any} device
+     */
+    const showScreen = device=>{
+        const pending = device ? unshown.get(device) : undefined;
+        if (pending)
+        {
+            unshown.delete(device);
+            resolution?.(pending.width, pending.height,
+                { window: pending.window, fullscreen: false });
+        }
+    };
+
+    /** The device an implicit swap chain GetSwapChain handed out belongs to. @type {WeakMap<any, any>} */
+    const chainOwners = new WeakMap();
 
     return {
         /**
