@@ -147,6 +147,10 @@ export async function serveProcess({ end, graphics, display, options, run }){
             return plainEvent(await owner[method](...args));
         },
     };
+    // While the machine is built nothing runs turns to look at the link, and
+    // a block of the bundle a library is read from is answered there: the
+    // link is served on the event loop until the program's turns take over.
+    const building = link.serve();
     app = await createApp({
         ...options,
         standardFiles: standardFilesOf(options.standardFiles, ask),
@@ -170,6 +174,8 @@ export async function serveProcess({ end, graphics, display, options, run }){
             macrotask: createMacrotask(), now: ()=>performance.now(), intervalMs: YIELD_MS,
             posted }),
     });
+    link.close();
+    await building;
     app.attachLog((/** @type {number} */ handle, /** @type {string} */ text)=>
         ask('process', 'output', [handle, text]));
     try

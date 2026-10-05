@@ -457,3 +457,87 @@ test('where processes run at once, the run\'s own program runs in a worker of it
     assert.ok(cpu?.metrics.instructions > 0,
         'the run\'s processor table is the program\'s, as it ended in its worker');
 });
+
+test('a program in a worker of its own is built from a library of the bundle no block of which'
+    + ' was fetched yet', { timeout: 120000 }, async t=>{
+    // Seven: mov eax, 7; ret. DllMain: mov eax, TRUE; ret 12.
+    const library = buildExe({
+        dll: true,
+        imageBase: 0x01000000,
+        imports: { 'KERNEL32.dll': ['GetStdHandle'] },
+        exports: [{ name: 'Seven', offset: 8 }],
+        code: ()=>[0xb8, ...u32(1), 0xc2, 0x0c, 0x00, 0x90, 0xb8, ...u32(7), 0xc3],
+    });
+    const program = buildExe({
+        imports: { 'probe.dll': ['Seven'], 'KERNEL32.dll': ['ExitProcess'] },
+        code: ({ iat })=>[0xff, 0x15, ...u32(iat('Seven')), 0x50,
+            0xff, 0x15, ...u32(iat('ExitProcess'))],
+    });
+    const root = await mkdtemp(join(tmpdir(), 'btl-src-'));
+    const out = await mkdtemp(join(tmpdir(), 'btl-out-'));
+    t.after(()=>rm(root, { recursive: true, force: true }));
+    t.after(()=>rm(out, { recursive: true, force: true }));
+    await mkdir(join(root, 'm'));
+    await writeFile(join(root, 'm', 'big.bin'), randomBytes(4 * READ_AHEAD_BYTES));
+    await mkdir(join(root, 'z'));
+    await writeFile(join(root, 'z', 'probe.dll'), library);
+    const path = join(out, 'bundle.btl');
+    await writeBundle({ root, output: path, blockSize: 64 * 1024 });
+    const handle = await open(path, 'r');
+    t.after(()=>handle.close());
+    const app = await createApp({
+        executable: program,
+        imagePath: 'C:\\z\\program.exe',
+        engine: 'cork',
+        concurrency: 2,
+        bundle: { prefix: '', store: null, fetch: async(offset, length)=>{
+            const buffer = Buffer.alloc(length);
+            await handle.read(buffer, 0, length, offset);
+            return new Uint8Array(buffer);
+        } },
+    });
+    t.after(()=>app.dispose());
+    assert.equal(await app.run({ timeoutMs: 60000 }), 7,
+        'the library was read across the link while the program\'s machine was built');
+});
+
+test('a launcher in a worker of its own that starts its game and exits leaves the game running',
+    { timeout: 120000 }, async t=>{
+    // CreateProcessA(NULL, "C:\\game.exe", ...); ExitProcess(0)
+        const launcher = buildExe({
+            imports: { 'KERNEL32.dll': ['CreateProcessA', 'ExitProcess'] },
+            data: {
+                command: [...Buffer.from('C:\\game.exe'), 0],
+                startup: [...u32(68), ...new Array(64).fill(0)],
+                info: new Array(16).fill(0),
+            },
+            codeSize: 0x60,
+            code: ({ iat, at })=>[
+                0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+                0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+                0x68, ...u32(at('command')), 0x6a, 0,
+                0xff, 0x15, ...u32(iat('CreateProcessA')),
+                0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess')),
+            ],
+        });
+        // Sleep(300); ExitProcess(9)
+        const game = buildExe({
+            imports: { 'KERNEL32.dll': ['Sleep', 'ExitProcess'] },
+            code: ({ iat })=>[0x68, ...u32(300), 0xff, 0x15, ...u32(iat('Sleep')),
+                0x6a, 9, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+        });
+        const app = await createApp({
+            executable: launcher,
+            imagePath: 'C:\\launcher.exe',
+            engine: 'cork',
+            concurrency: 2,
+            storage: { load: async()=>({ files: [{ path: 'C:\\game.exe', bytes: game }] }) },
+        });
+        t.after(()=>app.dispose());
+        /** @type {[string, boolean][]} */
+        const started = [];
+        app.on('process-started', (/** @type {any} */ event)=>
+            started.push([event.image, event.worker === true]));
+        assert.equal(await app.run({ timeoutMs: 60000 }), 9, 'the run\'s code is the game\'s');
+        assert.deepEqual(started, [['C:\\launcher.exe', true], ['C:\\game.exe', true]]);
+    });

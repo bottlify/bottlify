@@ -8021,8 +8021,8 @@ export async function createApp(options){
     /**
      * A child a process in a worker of its own asked for, started in a worker
      * of its own while the run has room for one; its parent is asked across
-     * its link for the image, for the position of the files it handed on, and
-     * told when it is gone. False when there is no room: the parent runs it
+     * its link for the position of the files it handed on, and told when it
+     * is gone. False when there is no room: the parent runs it
      * beside itself, in its own worker.
      *
      * @param {ReturnType<typeof openLink>} link  the parent's
@@ -8047,7 +8047,10 @@ export async function createApp(options){
         const request = { ...asked, standardFiles: asked.standardFiles && Object.fromEntries(
             Object.keys(asked.standardFiles).map(which=>[which, handedOn(which)])) };
         startAcross({
-            readImage: path=>link.call('parent', 'readImage', [asked.id, path]),
+            // Read from the run's volume, where the parent found it: a launcher
+            // that starts its game and exits is gone before the game's image
+            // would come back from it.
+            readImage: path=>current.readImage(path),
             // Lent by the parent, and taken back there when it hears the
             // child is gone.
             sound: ()=>(asked.arena ? { options: { ...options.audio, memory: audioMemory,
@@ -8070,8 +8073,6 @@ export async function createApp(options){
      */
     const childrenAcross = new Map();
     options.system?.processes?.answer({
-        /** @param {number} id @param {string} path */
-        readImage: (id, path)=>childrenAcross.get(id)?.parent.readImage(path) ?? null,
         /** @param {number} id @param {'output' | 'error'} which */
         position: (id, which)=>childrenAcross.get(id)?.request.standardFiles?.[which]
             ?.position ?? 0,
@@ -8126,8 +8127,8 @@ export async function createApp(options){
         if (processesAcross)
         {
             const sound = shared ? lendSound(parent) : null;
-            // Known before it is asked for: the run reads its image back from
-            // here before the call that starts it returns.
+            // Known before it is asked for: the run may ask for the position of
+            // a file it was handed before the call that starts it returns.
             childrenAcross.set(request.id, { parent, request, sound });
             const placed = processesAcross.start({
                 imagePath: request.imagePath,
