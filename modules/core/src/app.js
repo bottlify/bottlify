@@ -7354,7 +7354,8 @@ export async function createApp(options){
             return 2;
         }
         const memory = createLinkMemory();
-        const objects = objectHandlers({ table: system.namedObjects,
+        const { dispose: forgetObjects, ...objects } = objectHandlers({
+            table: system.namedObjects,
             wake: (token, result)=>link.call('kernel', 'wake', [token, result]) });
         const link = openLink(memory.a, {
             ...systemHandlers(/** @type {any} */ (system)),
@@ -7407,6 +7408,7 @@ export async function createApp(options){
         }
         finally
         {
+            forgetObjects();
             link.close();
             await answering;
             worker.terminate();

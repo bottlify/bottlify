@@ -109,6 +109,34 @@ export function objectHandlers({ table, wake }){
     };
 
     return {
+        /**
+         * The process across the link has ended: what it waited on forgets it,
+         * and a mutex one of its threads held is abandoned, as Windows
+         * abandons a dead thread's -- the next waiter takes it and is told.
+         */
+        dispose(){
+            for (const { standIn, object } of queued.values())
+            {
+                const at = object.waiters.indexOf(standIn);
+                if (at >= 0)
+                {
+                    object.waiters.splice(at, 1);
+                }
+            }
+            queued.clear();
+            for (const object of byId.values())
+            {
+                for (const standIn of standIns.values())
+                {
+                    if (object.kind === 'mutex' && object.owner === standIn)
+                    {
+                        object.abandoned = true;
+                        object.recursion = 1;
+                        sync.releaseMutex(object, standIn);
+                    }
+                }
+            }
+        },
         objects: {
             /**
              * The object a name stands for, without taking a reference: what a

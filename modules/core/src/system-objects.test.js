@@ -15,11 +15,11 @@ const OBJECT_0 = 0;
 const service = (table = new Map())=>{
     /** @type {[number, number][]} */
     const woken = [];
-    const { objects } = objectHandlers({ table, wake: (token, result)=>{
+    const { objects, dispose } = objectHandlers({ table, wake: (token, result)=>{
         woken.push([token, result]);
         return Promise.resolve();
     } });
-    return { objects, woken, table };
+    return { objects, woken, table, dispose };
 };
 
 test('a wait across the link is answered now, queued, or given up -- and a wait already handed'
@@ -76,3 +76,25 @@ test('the last close frees the name; a semaphore and a mutex keep their counts a
     assert.equal(objects.releaseMutex(mutex.id, 3), true);
     assert.equal(objects.poll(mutex.id, 4), OBJECT_0);
 });
+
+test('a process across the link that ends leaves no wait behind, and abandons the mutex it held',
+    ()=>{
+        const table = new Map();
+        const scheduler = { block(){}, wake(){}, onTimeout(){} };
+        const here = createSyncObjects({ scheduler });
+        const event = here.createEvent({ manualReset: true, signalled: false, name: 'E' });
+        table.set('E', { kind: 'event', object: event, refs: 1 });
+        const { objects, dispose } = service(table);
+        const found = /** @type {any} */ (objects.peek('event', 'E'));
+        assert.equal(objects.wait(found.id, 1, 1), null);
+        assert.equal(/** @type {any} */ (objects.create('mutex', 'M', { owner: 1 })).reused,
+            false);
+        const object = table.get('M').object;
+        const local = { id: 99, suspendCount: 0, waitSet: null, queuedOn: null, state: 'running',
+            scheduler: { wake(){} } };
+        assert.equal(here.wait(object, local), null, 'a thread here waits on it');
+        dispose();
+        assert.deepEqual(event.waiters, [], 'the ended process waits on nothing');
+        assert.equal(object.owner, local, 'its mutex went to the next waiter');
+        assert.equal(/** @type {any} */ (local).waitResult, 0x80, 'told it was abandoned');
+    });
