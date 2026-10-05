@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHandleTable } from './handles.js';
+import { FIRST_HANDLE, createHandleTable } from './handles.js';
 
 test('handles are opaque, distinct and aligned', ()=>{
     const table = createHandleTable();
@@ -17,6 +17,13 @@ test('handles are opaque, distinct and aligned', ()=>{
     assert.equal(a % 4, 0, 'a guest treating a handle as an index or pointer breaks loudly');
     assert.equal(b % 4, 0);
     assert.notEqual(a, 0, 'zero is not a handle');
+});
+
+test('no handle is a value a brush argument means as a system colour plus one', ()=>{
+    // COLOR_* + 1, up to 31: user32 reads a class background or a FillRect
+    // brush at or below it as a colour, and a brush is a handle of this table.
+    const table = createHandleTable();
+    assert.ok(table.open('gdi', {}) > 31);
 });
 
 test('resolving returns the object, and the type can be asserted', ()=>{
@@ -62,9 +69,9 @@ test('closing twice is an error the caller can turn into a failure code', ()=>{
 
 test('a freed handle is reused only once the fresh range runs out', ()=>{
     // A deliberately tiny range, so exhaustion is reachable in a test.
-    const table = createHandleTable({ limit: 12 });
+    const table = createHandleTable({ limit: FIRST_HANDLE + 8 });
     const handles = [table.open('event', 1), table.open('event', 2), table.open('event', 3)];
-    assert.deepEqual(handles, [4, 8, 12]);
+    assert.deepEqual(handles, [FIRST_HANDLE, FIRST_HANDLE + 4, FIRST_HANDLE + 8]);
 
     table.close(handles[0]);
     table.close(handles[1]);
