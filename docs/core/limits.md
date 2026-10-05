@@ -26,9 +26,11 @@ differently raises a `divergence` event naming the API.
   (`hooks`, `watchImport`), and reaches no network transport the page handed in (`win32.network`).
   The run's diagnostics are the program's tables as it last answered, with the journal and the
   sound output the engine's thread keeps.
-- Only the process of an out-of-process COM server runs alongside the program that uses it, outside
-  `concurrency`, beside it on the engine thread; a process in a worker of its own -- with
-  `concurrency` 2 or 4, every process -- has no COM server.
+- With `concurrency` 1 the process of an out-of-process COM server runs alongside the program that
+  uses it, outside `concurrency`, beside it on the engine thread. With 2 or 4 the class table is
+  the run's, kept on the engine thread: a server COM starts runs in a worker of its own while the
+  run has room for one, and beside the process that asked, in its worker, otherwise; a call from
+  one worker to another goes through the engine thread and back.
 - A child in a worker of its own shares the run's registry, files, window
   directory -- its windows found, read, posted and sent to by every other process, and theirs by
   it -- ids, the run's bundle (a block it misses is fetched for it), named events, semaphores
@@ -39,7 +41,8 @@ differently raises a `divergence` event naming the API.
   run's track table in a span its parent lends it, where that table is shared memory (none
   otherwise); the page's input goes to it while it stands. Its DirectDraw primary and the desktop
   its windows are drawn on are sent to the engine as bytes and shown there; they are not composed
-  with its parent's, and whichever process showed last is on the screen. It has no COM server.
+  with its parent's, and whichever process showed last is on the screen. Its COM classes are the
+  run's: it serves them to every other process and calls theirs.
 - Windows are the run's: a process finds another's window (`FindWindow`), reads who made it, its
   caption and class, and posts to it. A message sent to another process's window is answered in the
   with `concurrency`; its pointers cross only for `WM_COPYDATA`, `WM_SETTEXT` and `WM_GETTEXT`. Where

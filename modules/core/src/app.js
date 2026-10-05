@@ -40,6 +40,7 @@ import { decompressZstd } from './zstd.js';
 import { mountDiscs } from './discs.js';
 import { loadZstdWasm } from './zstd-wasm.js';
 import { createClassTable } from './layers/win32/ole32/remote.js';
+import { comHandlers, remoteClassTable } from './com-link.js';
 import { createCallRepeats } from './call-repeats.js';
 import { withRunMode } from './mode.js';
 import { createLinkMemory, openLink } from './system/link.js';
@@ -7475,7 +7476,8 @@ export async function createApp(options){
      */
     const rootAcross = processesAtOnce && !options.system
         && (options.engine ?? DEFAULT_ENGINE) === 'cork';
-    const classTable = createClassTable({
+    /** @type {import('./layers/win32/ole32/remote.js').ClassTableHooks} */
+    const serveHere = {
         launch: (request, process)=>{
             const parent = processes.get(process);
             if (!parent)
@@ -7487,7 +7489,13 @@ export async function createApp(options){
             exited.finally(()=>servers.delete(exited));
             return { exited };
         },
-    });
+    };
+    // A process in a worker of its own uses the run's table, the system's,
+    // across its link (`com-link.js`); a server it starts runs in a worker of
+    // its own while the run has room, and beside it here otherwise.
+    const classTable = options.system?.com
+        ? remoteClassTable(options.system.com, serveHere)
+        : createClassTable(serveHere);
 
     /**
      * A machine for a process, named to the class table.
@@ -7914,6 +7922,11 @@ export async function createApp(options){
             return { code: 2 };
         }
         const memory = createLinkMemory();
+        // Its classes, served to and from every other process of the run.
+        const com = comHandlers(/** @type {any} */ (classTable), {
+            call: (method, args)=>link.call('com', method, args),
+            launch: serverAcross,
+        });
         const { dispose: forgetObjects, ...objects } = objectHandlers({
             table: system.namedObjects,
             wake: (token, result)=>link.call('kernel', 'wake', [token, result]) });
@@ -7921,6 +7934,7 @@ export async function createApp(options){
             ...systemHandlers(/** @type {any} */ (system),
                 (target, method, args)=>link.callWaiting(target, method, args)),
             ...objects,
+            com: com.handlers,
             process: {
                 output: (/** @type {number} */ handle, /** @type {string} */ text)=>
                     events.emit('output', { handle, text }),
@@ -8047,6 +8061,7 @@ export async function createApp(options){
             }
             standingAcross.delete(asked);
             forgetObjects();
+            await com.gone();
             link.close();
             await answering;
             worker.terminate();
@@ -8074,7 +8089,8 @@ export async function createApp(options){
      * @param {((code: number, ended: { systemLibraries?: string[] }) => void) | null}
      *     exited  its parent's; null for the run's own program, which resumes
      *     nothing
-     * @param {(ended: { diagnostics?: any, systemLibraries?: string[] }) => void} [over]
+     * @param {(ended: { code: number, diagnostics?: any, systemLibraries?: string[] })
+     *     => void} [over]
      *     told as it ends, whoever it was
      */
     const startAcross = (from, request, exited, over)=>{
@@ -8110,6 +8126,44 @@ export async function createApp(options){
             besides.delete(running);
             noteMachines();
         });
+    };
+
+    /**
+     * A class's server a process in a worker of its own asked COM for,
+     * started in a worker of its own while the run has room for one, with
+     * `-Embedding` as COM starts one; null when there is no room, and the
+     * process starts it beside itself.
+     *
+     * @param {{ command: string, clsid: string }} request
+     * @returns {{ exited: Promise<number> } | null}
+     */
+    const serverAcross = request=>{
+        if (!inWorker())
+        {
+            return null;
+        }
+        const exited = (async()=>{
+            const found = await serverImage(current, request.command);
+            if (!found)
+            {
+                events.emit('divergence', { api: 'COM',
+                    detail: `the server ${request.command} of ${request.clsid}`
+                        + ' is not on the volume' });
+                return -1;
+            }
+            const { processId, mainThreadId } = newProcessIds();
+            events.emit('process-server', { image: found.path, clsid: request.clsid });
+            return new Promise(resolve=>{
+                startAcross({ readImage: path=>current.readImage(path),
+                    sound: ()=>lendSound(current) },
+                { imagePath: found.path, commandLine: `${request.command.trim()} -Embedding`,
+                    id: processId, threadId: mainThreadId }, null, ended=>{
+                    events.emit('process-server-exit', { image: found.path, code: ended.code });
+                    resolve(ended.code);
+                });
+            });
+        })();
+        return { exited };
     };
 
     /**

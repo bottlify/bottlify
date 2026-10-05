@@ -12,7 +12,8 @@
  * -Embedding as the server, which registers its class object and serves the
  * call from its message loop. The client checks what it was handed and what
  * the call wrote back, one property per line, and the server leaves once the
- * client let go.
+ * client let go. With processes at once each is in a worker of its own, and
+ * the class table is the run's (`com-link.js`).
  */
 
 import { test } from 'node:test';
@@ -20,7 +21,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 
-for (const concurrency of /** @type {const} */ ([1, 2]))
+for (const concurrency of /** @type {const} */ ([1, 2, 4]))
 {
     test(`a client's call reaches the server COM started for it, and comes back answered`
         + ` (concurrency ${concurrency})`, { timeout: 120000 }, async t=>{
@@ -43,6 +44,9 @@ for (const concurrency of /** @type {const} */ ([1, 2]))
         /** @type {any[]} */
         const servers = [];
         app.on('process-server', (/** @type {any} */ event)=>servers.push(event));
+        /** @type {any[]} */
+        const started = [];
+        app.on('process-started', (/** @type {any} */ event)=>started.push(event));
         assert.equal(await app.run({ timeoutMs: 60000 }), 0, output.join(''));
         const lines = output.join('');
         assert.match(lines, /ok {3}server: class object registered/);
@@ -51,5 +55,8 @@ for (const concurrency of /** @type {const} */ ([1, 2]))
         assert.doesNotMatch(lines, /FAIL/);
         assert.equal(servers.length, 1, 'one server started');
         assert.match(servers[0].clsid, /6B2F0C1E-3D4A-4E8B-9A51-2C7D10E348B6/i);
+        // With room for it, the server is a process in a worker of its own,
+        // its client in another, and the call between them crosses the run.
+        assert.equal(started.filter(event=>event.worker).length, concurrency > 1 ? 2 : 0);
     });
 }

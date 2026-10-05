@@ -114,6 +114,15 @@ export function remoteSystem(ask, handlers = {}, call, volume = null){
             },
         },
         objects: remoteObjects(ask),
+        // The run's class table (`com-link.js`): what the process exports
+        // is delivered to it in its handlers, and what it calls in another
+        // process is waited on as the network is.
+        com: call ? {
+            ask: (/** @type {string} */ method, /** @type {any[]} */ args)=>ask('com', method, args),
+            call: (/** @type {string} */ method, /** @type {any[]} */ args)=>
+                call('com', method, args),
+            handlers,
+        } : undefined,
         // Its children, which the run starts in workers of their own while it
         // has room, asking back here for what only their parent has.
         processes: {

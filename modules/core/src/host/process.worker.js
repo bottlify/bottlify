@@ -153,35 +153,44 @@ export async function serveProcess({ end, volume, graphics, display, options, ru
             return plainEvent(await owner[method](...args));
         },
     };
-    // While the machine is built nothing runs turns to look at the link, and
-    // a block of the bundle a library is read from is answered there: the
-    // link is served on the event loop until the program's turns take over.
-    const building = link.serve();
-    app = await createApp({
-        ...options,
-        standardFiles: standardFilesOf(options.standardFiles, ask),
-        graphics: { ...options.graphics, worker: graphics ? portEnd(graphics) : undefined,
-            display: display ? sendFrames(display) : undefined },
-        system,
-        // Its output is written in order with its calls, below; the rest is
-        // told as it happens, and not waited on.
-        relay: (/** @type {string} */ name, /** @type {any} */ payload)=>{
-            if (name !== 'output')
-            {
-                link.call('events', 'emit', [name, plainEvent(payload)]).catch(()=>{});
-            }
-        },
-        // The translator rings the link's bell after each batch it posts, so
-        // the batch is taken at the next turn rather than at the next timed
-        // yield, as the engine's thread takes its own.
-        cork: { ...options.cork, config: { ...options.cork?.config,
-            doorbell: { posted, bell: link.bell } } },
-        pacing: ringPacing({ inbound: { bell: link.bell, drain: link.pump },
-            macrotask: createMacrotask(), now: ()=>performance.now(), intervalMs: YIELD_MS,
-            posted }),
-    });
-    link.close();
-    await building;
+    // The link is served on the event loop for as long as the process
+    // stands, beside the program's turns, which look at it too: while the
+    // machine is built nothing runs turns, and a block of the bundle a
+    // library is read from is answered there; and once the program is over,
+    // what it waits on as it ends -- a class it served taken out of the run's
+    // table, a release sent to another process's object -- is answered there.
+    const serving = link.serve();
+    try
+    {
+        app = await createApp({
+            ...options,
+            standardFiles: standardFilesOf(options.standardFiles, ask),
+            graphics: { ...options.graphics, worker: graphics ? portEnd(graphics) : undefined,
+                display: display ? sendFrames(display) : undefined },
+            system,
+            // Its output is written in order with its calls, below; the rest is
+            // told as it happens, and not waited on.
+            relay: (/** @type {string} */ name, /** @type {any} */ payload)=>{
+                if (name !== 'output')
+                {
+                    link.call('events', 'emit', [name, plainEvent(payload)]).catch(()=>{});
+                }
+            },
+            // The translator rings the link's bell after each batch it posts, so
+            // the batch is taken at the next turn rather than at the next timed
+            // yield, as the engine's thread takes its own.
+            cork: { ...options.cork, config: { ...options.cork?.config,
+                doorbell: { posted, bell: link.bell } } },
+            pacing: ringPacing({ inbound: { bell: link.bell, drain: link.pump },
+                macrotask: createMacrotask(), now: ()=>performance.now(), intervalMs: YIELD_MS,
+                posted }),
+        });
+    }
+    catch (e){
+        link.close();
+        await serving;
+        throw e;
+    }
     app.attachLog((/** @type {number} */ handle, /** @type {string} */ text)=>
         ask('process', 'output', [handle, text]));
     try
@@ -205,6 +214,8 @@ export async function serveProcess({ end, volume, graphics, display, options, ru
     finally
     {
         await app.dispose();
+        link.close();
+        await serving;
         graphics?.postMessage({ type: 'close' });
         graphics?.close();
         display?.close();
