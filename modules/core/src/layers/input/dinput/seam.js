@@ -772,10 +772,13 @@ export function createPublisher({ publishInterface }){
  *        What a handle names: a top-level window, a child one, nothing -- or
  *        undefined when there are no windows to ask about, in which case any
  *        handle is taken as a window. SetCooperativeLevel wants a top-level one.
+ * @param {(held: boolean) => void} [deps.mouseHeld]
+ *        Told whenever the system mouse becomes or stops being held
+ *        exclusively: Windows hides the cursor while a program holds it so.
  */
 export function createDirectInput(
     { memory, now, publishInterface, signal, allocate, callGuest, callerThread, windowKind,
-        foreground,
+        foreground, mouseHeld,
         divergence },
 )
 {
@@ -981,6 +984,10 @@ export function createDirectInput(
                 return DIERR_OTHERAPPHASPRIO;
             }
             device.acquire();
+            if (device.kind === MOUSE && device.exclusive)
+            {
+                mouseHeld?.(true);
+            }
             return DI_OK;
         },
         /** HRESULT Unacquire(void) */
@@ -990,6 +997,10 @@ export function createDirectInput(
                 return DI_NOEFFECT;
             }
             device.unacquire();
+            if (device.kind === MOUSE && device.exclusive)
+            {
+                mouseHeld?.(false);
+            }
             return DI_OK;
         },
 

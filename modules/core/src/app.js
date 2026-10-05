@@ -3011,6 +3011,17 @@ async function buildApp(options){
     // journal a later process's threads carry its image name as well.
     const callerTag = options.log?.journal
         ? `${String(options.imagePath ?? '').split(/[\\/]/).pop()}:` : '';
+    // The cursor the page shows: what the program last said of it -- user32's
+    // count and SetCursor, or a device cursor; the last report wins -- hidden
+    // while it holds the mouse exclusively through DirectInput, as Windows does.
+    /** @type {any} */
+    let programCursor = { shown: true };
+    let mouseHeld = false;
+    const showCursor = ()=>{
+        const cursor = mouseHeld ? { ...programCursor, shown: false } : programCursor;
+        core.api('input')?.cursorShown?.(cursor.shown !== false);
+        events.emit('cursor', cursor);
+    };
     /** @type {any} */
     let win32Api = null;
 
@@ -3299,6 +3310,11 @@ async function buildApp(options){
         input: {
             publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
                 core.api('bridge').publishInterface(object, iid),
+            /** @param {boolean} held */
+            mouseHeld: held=>{
+                mouseHeld = held;
+                showCursor();
+            },
             divergence: reportDivergence,
             // The event SetEventNotification names, set when the device takes
             // input -- the kernel's, handed down as the sound layer's is.
@@ -3504,8 +3520,8 @@ async function buildApp(options){
             // bitmap and the hot spot, and shows it the way its screen can.
             /** @param {any} cursor */
             cursor: cursor=>{
-                core.api('input')?.cursorShown?.(cursor.shown !== false);
-                events.emit('cursor', cursor);
+                programCursor = cursor;
+                showCursor();
             },
         },
         win32: {
@@ -3550,8 +3566,8 @@ async function buildApp(options){
             // consumer, and the last report wins.
             /** @param {any} cursor */
             reportCursor: cursor=>{
-                core.api('input')?.cursorShown?.(cursor.shown !== false);
-                events.emit('cursor', cursor);
+                programCursor = cursor;
+                showCursor();
             },
             // Sound leaves through the audio layer's mixer, and win32 sits
             // below it. Handed down as a thunk and asked for only when a
