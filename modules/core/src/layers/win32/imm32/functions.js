@@ -101,5 +101,64 @@ export function createImmFunctions(host){
          * for the process (-1) or for the caller (0) is already done.
          */
         ImmDisableIME: { argBytes: 4, handler: ()=>1 },
+
+        /**
+         * BOOL ImmIsIME(HKL hKL)
+         *
+         * Whether a keyboard layout is an input method editor. None is: every
+         * layout here is a plain keyboard.
+         */
+        ImmIsIME: { argBytes: 4, handler: ()=>0 },
+
+        /**
+         * DWORD ImmGetCandidateListCountA(HIMC hIMC, LPDWORD lpdwListCount)
+         *
+         * The bytes the candidate lists take, and through the pointer how many
+         * there are: none of either, with nothing composing. The count is written
+         * rather than left, as a caller reads it whatever the size says.
+         */
+        ImmGetCandidateListCountA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, count])=>{
+                if ((count >>> 0) !== 0)
+                {
+                    host.writeMemory(count >>> 0, new Uint8Array(4));
+                }
+                return 0;
+            },
+        },
+
+        /**
+         * BOOL ImmSetOpenStatus(HIMC hIMC, BOOL fOpen)
+         *
+         * Opening or closing a context's input method. There is no context to
+         * open one on -- ImmGetContext is null -- so, as on Windows for a null or
+         * foreign handle, it fails.
+         */
+        ImmSetOpenStatus: { argBytes: 8, handler: ()=>0 },
+
+        /**
+         * BOOL ImmSimulateHotKey(HWND hWnd, DWORD dwHotKeyID)
+         *
+         * Runs an input method's hot key, of which there are none.
+         */
+        ImmSimulateHotKey: { argBytes: 8, handler: ()=>0 },
+
+        /**
+         * HIMC ImmCreateContext(void)
+         *
+         * A new input context, which needs an input method to own it. Without
+         * one Windows answers NULL, and a program that asked for its own context
+         * -- a window driver that wants composition of its own -- goes on without.
+         */
+        ImmCreateContext: { argBytes: 0, handler: ()=>0 },
+
+        /**
+         * BOOL ImmDestroyContext(HIMC hIMC)
+         *
+         * No context was ever handed out, so any handle given is not one.
+         */
+        ImmDestroyContext: { argBytes: 4, handler: ()=>0 },
     };
 }

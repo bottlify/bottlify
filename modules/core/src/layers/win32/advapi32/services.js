@@ -32,6 +32,8 @@ const ERROR_SERVICE_DOES_NOT_EXIST = 1060;
 const ERROR_SERVICE_NOT_ACTIVE = 1062;
 const ERROR_SERVICE_MARKED_FOR_DELETE = 1072;
 const ERROR_SERVICE_EXISTS = 1073;
+const ERROR_FAILED_SERVICE_CONTROLLER_CONNECT = 1063;
+const ERROR_SERVICE_NOT_IN_EXE = 1083;
 
 /** Where the manager keeps every service it knows. */
 const SERVICES_PATH = 'SYSTEM\\CurrentControlSet\\Services';
@@ -413,6 +415,48 @@ export function createServiceFunctions(host){
                 }
                 return 1;
             },
+        },
+
+        // The other side of the manager: what a program calls to run as a
+        // service. None here is started by one, so these answer as they do to
+        // any program that was started from a shell -- which is what a game
+        // that carries a service mode finds when it tries it and falls back to
+        // running as an ordinary program.
+
+        /**
+         * BOOL StartServiceCtrlDispatcherA(const SERVICE_TABLE_ENTRYA *lpServiceStartTable)
+         *
+         * Connects the process to the manager that started it. A process the
+         * manager did not start has nothing to connect to: FALSE, and
+         * ERROR_FAILED_SERVICE_CONTROLLER_CONNECT.
+         */
+        StartServiceCtrlDispatcherA: {
+            argBytes: 4,
+            handler: ()=>fail(ERROR_FAILED_SERVICE_CONTROLLER_CONNECT),
+        },
+
+        /**
+         * SERVICE_STATUS_HANDLE RegisterServiceCtrlHandlerA(LPCSTR lpServiceName,
+         *                                                   LPHANDLER_FUNCTION lpHandlerProc)
+         *
+         * Names a handler for a service of this process. The process runs none,
+         * so the name is not one of its services: NULL, ERROR_SERVICE_NOT_IN_EXE.
+         */
+        RegisterServiceCtrlHandlerA: {
+            argBytes: 8,
+            handler: ()=>fail(ERROR_SERVICE_NOT_IN_EXE),
+        },
+
+        /**
+         * BOOL SetServiceStatus(SERVICE_STATUS_HANDLE hServiceStatus,
+         *                       LPSERVICE_STATUS lpServiceStatus)
+         *
+         * Reports a state to the manager through the handle the registration
+         * gave. None was given, so whatever is passed is not one.
+         */
+        SetServiceStatus: {
+            argBytes: 8,
+            handler: ()=>fail(ERROR_INVALID_HANDLE),
         },
     };
 }
