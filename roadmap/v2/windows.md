@@ -1,128 +1,154 @@
-# One window state for the run
+# A window manager for the run
 
 Русская версия: [windows.ru.md](windows.ru.md).
 
-**Status:** plan, no code. 2026-10-05, against `cork2` 1ad2506c. Part of v2 stage 2; it comes
-before the translation pools. File references are to `modules/core/src/` unless said otherwise.
+**Status:** plan, no code. 2026-10-05, against `cork2` 1ad2506c; supersedes the first draft of the
+same day (a run-wide mirror of each process's windows). Part of v2 stage 2; it comes before the
+translation pools. File references are to `modules/core/src/` unless said otherwise.
 
 ## Why
 
-A window exists today only inside the process that made it. The run knows its handle, its owner,
-its class and its title (`layers/win32/user32/directory.js`), and nothing else: no rectangle, no
-visibility, no place among the other processes' windows, no foreground window. Everything that
-involves two processes' windows is therefore decided by a rule that ignores them:
+A window exists today only as a record inside the process that made it
+(`layers/win32/user32/windows.js`, `windows` Map), changed in place wherever a call needs to: about
+130 places in `windows.js`, `system.js` and `frame.js` assign `x`, `y`, `width`, `height`, `style`,
+`parent` or `owner` directly. There is no window state anyone else can read, no operation that
+changes it as a whole, and no notice when it changes. The run knows a window's handle, owner, class
+and title (`user32/directory.js`), nothing more. So:
 
-- **The screen.** Each process paints its own full-screen desktop (`layers/graphics/module.js`,
-  `desktopSurface`), and its frames carry no source. The presenter shows whichever frame came last
-  (`webgpu/internal/presenter.js`, `show`), and the canvas takes that frame's size. Two processes
-  that both draw overwrite each other's whole picture. The graphics worker keeps one `newest` slot
-  for every client's Direct3D frames (`layers/graphics/remote/worker.js`), so one device's frame
-  replaces another's. When a child exits, its parent repaints everything (`app.js`,
-  `refreshWindows`) to get its picture back.
-- **Input.** It goes to the process that started last (`app.js`, `facade.input`, `forwarding`,
-  `across().at(-1)`), not to the window under the cursor or the active one.
-- **Activation.** Each process has its own active window (`user32/windows.js`, `activeWindow`)
-  and believes no other program has one (WM_ACTIVATEAPP). `GetForegroundWindow`, `WindowFromPoint`
-  and `EnumWindows` answer for one process.
-- **Z-order.** It is the insertion order of one process's `Map` of windows. `HWND_TOPMOST` raises
-  and nothing keeps a topmost band. `HWND_BOTTOM` does not move a top-level window.
+- **The screen** is whichever process's frame came last (`webgpu/internal/presenter.js`, `show`);
+  each process paints its own full-screen desktop and its frames carry no source. The graphics
+  worker keeps one `newest` slot for every client's Direct3D frames. A parent repaints everything
+  when its child exits (`app.js`, `refreshWindows`).
+- **Input** goes to the process started last (`app.js`, `facade.input`).
+- **Activation** is per process; each believes no other program is active (WM_ACTIVATEAPP).
+  `GetForegroundWindow`, `WindowFromPoint` and `EnumWindows` answer for one process.
+- **Z-order** is one process's Map insertion order; there is no topmost band, and `HWND_BOTTOM`
+  does not move a top-level window.
+- **Changes nobody hears of:** `SetWindowPlacement`, `SetWindowLong(GWL_STYLE)` flipping
+  WS_VISIBLE and `windowService.place` mutate a record and repaint nothing.
 
-On Windows this state is win32k's, one per session; a process changes it by calling, and every
-process sees the same answer. That is the model here.
+And nothing but GDI can show a window: a view of the windows other than the guest's own pixels --
+a page that draws a dialog's controls itself, a window per window -- has no state to read and no
+way to be told.
 
-## Target
+## The design
 
-### The window station
+Three parts, each with one job.
 
-The system half of user32 keeps, beside the directory, one record per top-level window of the run:
+### 1. The window model (`user32/model.js`)
 
-| Field | Meaning |
-| --- | --- |
-| `hwnd`, `processId`, `threadId` | whose it is |
-| `rect`, `client` | window and client rectangles, screen coordinates |
-| `visible`, `minimized`, `maximized` | WS_VISIBLE, WS_MINIMIZE, WS_MAXIMIZE as the window has them |
-| `topmost` | WS_EX_TOPMOST: the band it is ordered in |
-| `owner` | an owned window stays above its owner |
-| `region` | a window region's bounding box, or none |
+A pure JavaScript model of a tree of windows with Win32's semantics, no guest memory, no messages.
+Every change to a window is one of its operations, and every operation answers with the changes it
+made. It is what a process holds its own windows in.
 
-And for the run: one z-order of top-level windows (the topmost band above the rest; an owned window
-above its owner), one foreground window, and the window that has captured the mouse.
+```js
+const model = createWindowModel({ screen: () => ({ width, height }) });
 
-A process keeps everything else of its windows: class, procedure, children, painting. Its top-level
-placement it writes through to the station at the few places where it changes:
+// operations: each returns the changes it made, [] for none
+model.create({ hwnd, parent, owner, className, title, style, exStyle, rect, thread }) // Change[]
+model.place(hwnd, { rect?, insertAfter?, flags })   // SetWindowPos: SWP_* flags, HWND_* sentinels
+model.show(hwnd, command)                           // ShowWindow: SW_* commands
+model.setStyle(hwnd, style, exStyle?)               // GWL_STYLE / GWL_EXSTYLE, WS_VISIBLE included
+model.setText(hwnd, text)
+model.setParent(hwnd, parent) / model.setOwner(hwnd, owner)
+model.enable(hwnd, enabled)
+model.destroy(hwnd)                                 // the window and its descendants
 
-- `makeWindow`, `forget`;
-- `place` (SetWindowPos, MoveWindow, BringWindowToTop, DeferWindowPos), `showNow` (ShowWindow);
-- `raise`, `activateNow`.
+// questions
+model.get(hwnd)            // WindowState, frozen: hwnd, parent, owner, className, title, style,
+                           // exStyle, rect (parent's client coordinates), screenRect, clientRect,
+                           // visible (it and its ancestors), enabled, minimized, maximized, topmost
+model.children(hwnd)       // in z-order, topmost first; hwnd 0: the top-level windows
+model.fromPoint(x, y)      // the deepest visible, enabled-or-not window under a point
+model.uncovered(hwnd)      // its visible region on the screen, as rectangles
+```
 
-The changes that today mutate a record directly and repaint nothing go through `place` first:
-`SetWindowPlacement`, `SetWindowLong(GWL_STYLE/GWL_EXSTYLE)` flipping WS_VISIBLE, and
-`windowService.place`. That is a fix on its own: the window did not repaint either.
+A `Change` is `{ kind: 'created' | 'placed' | 'shown' | 'hidden' | 'stacked' | 'styled' |
+'retitled' | 'reparented' | 'enabled' | 'destroyed', hwnd, before, after }`. Activation, focus
+and capture are not the model's: they are per thread and per run (below).
 
-A write is a link call that does not block; the process does not wait for the station. What the
-station answers that the process asks (foreground, z-order across processes, the window at a
-point) is a blocking ask, as the directory's are now.
+user32 stops assigning to records. Its API functions call the model's operations, and what a
+program is told -- WM_WINDOWPOSCHANGING and CHANGED, WM_MOVE, WM_SIZE, WM_SHOWWINDOW,
+WM_STYLECHANGING and CHANGED, WM_SETTEXT's effects, the repaint of what was uncovered -- is made
+from the changes the operation returned, in one place. The record keeps what is the process's
+alone: the procedure, the class, the extra bytes, the properties, the update region.
 
-### Activation across processes
+### 2. The run's window manager (`user32/manager.js`)
 
-`SetForegroundWindow`, a click, a `ShowWindow` that activates: the station moves the foreground.
-The process losing it gets WM_ACTIVATE (WA_INACTIVE) and WM_ACTIVATEAPP (FALSE, with the other
-thread's id), and the process gaining it gets them with TRUE, through the directory's endpoint as a
-sent message is delivered today. `GetForegroundWindow` answers the run's foreground window, and
-`GetActiveWindow` the thread's own, which is the foreground only when it is that thread's.
-DirectDraw's lost exclusive mode reads the station's foreground.
+On the system's thread, one per run, beside the directory. It holds:
 
-### The screen
+- every window of every process, as each process's model publishes its changes: a process sends
+  its `Change[]` after each operation, a call that does not block;
+- the z-order of top-level windows across processes: a topmost band above the rest, an owned
+  window above its owner;
+- the foreground window, and the window that has the mouse captured;
+- a revision that moves with every change.
 
-Every frame says whose it is. A process's display port is already one per process (`app.js`,
-`display`), and the graphics worker's client port too; the graphics worker keeps one `newest` slot
-per client instead of one for all.
+```js
+manager.apply(processId, changes)        // what a process's model did
+manager.raise(hwnd) / manager.lower(hwnd) / manager.insertAfter(hwnd, after)
+manager.setForeground(hwnd)              // → notices to the processes losing and gaining it
+manager.setCapture(hwnd) / manager.releaseCapture()
+manager.get(hwnd) / manager.topLevel()   // top-level windows of the run in z-order
+manager.fromPoint(x, y)                  // across processes
+manager.foreground() / manager.capture()
+manager.subscribe(listener)              // every change, in order: (event) => void
+manager.command(hwnd, request)           // a view's request, carried to the window's process
+```
 
-The presenter keeps the newest frame of each source as a layer (a texture) and composes the screen
-from the station: bottom to top, each visible top-level window is drawn from its process's layer,
-scissored to its rectangle minus everything above it, and what no window covers is the desktop
-background. The canvas is the screen's size. A layer is uploaded only when its process sends a new
-frame. A frame of a size other than the screen's (a DirectDraw primary in exclusive mode, a
-Direct3D back buffer) is its window's whole rectangle, as it is today for one process.
+A process asks the manager what only the run knows (foreground, the window at a point, the order of
+other processes' windows) with a blocking ask, as the directory is asked now. A change to another
+process's window -- SetWindowPos or ShowWindow on a handle it does not own -- is carried to the
+owning process and made there by its model, as Windows sends it to the owning thread.
 
-The same holds with `concurrency` 1: the processes beside each other on the engine thread present
-to the run's presenter through attachments of their own (`presenter.attach`), each a source.
-`refreshWindows` on a child's exit goes.
+### 3. Views
 
-### Input
+A view is anything that shows the windows: it subscribes to the manager and never reaches into a
+process. It can send requests back (`manager.command`): a window dragged, a close button pressed,
+a click -- which the manager carries to the owning process as the input or the message Windows
+would make of it.
 
-The page's mouse goes to the process whose window is under the cursor (the station's z-order and
-rectangles), or the one that captured it; the keyboard goes to the foreground window's process.
-`facade.input` stops being "the newest process".
+- **The GDI compositor**, first: each process's frames are a layer, tagged with its source; the
+  screen is composed from the layers by the manager's top-level windows, bottom to top, each
+  scissored to its rectangle minus what is above it, the rest the desktop background. The canvas
+  is the screen's size. The graphics worker keeps a `newest` slot per client.
+- **Input routing**: the mouse to the window under the cursor or the captured one, the keyboard to
+  the foreground window's process.
+- **A JS view**, later: the same events give it the whole tree -- classes, titles, styles,
+  rectangles, order -- to show a window or a standard control as the page's own element, the
+  guest's pixels used only where the guest draws them.
 
 ## Steps
 
-Each step lands with its tests, the full suite run before it goes to `cork2`.
+Each step lands with its tests; the full suite runs before it goes to `cork2`.
 
-1. **The station, written through.** The record table, the z-order with its topmost band and
-   owners, foreground and capture, at the system; the write-through from the choke points above,
-   with the direct mutations moved to `place`; a diagnostics table of it. Tests: the station's own
-   unit tests (order, bands, owners, foreground); a gate that runs seeded sequences of window calls
-   in a process and checks after each that the station's records equal what the process holds
-   (rectangle, visibility, order of its own windows); the window-across itest at every concurrency.
-2. **Activation and the questions across processes.** Foreground moves through the station, with
-   the activation messages delivered to both processes; `GetForegroundWindow`, `WindowFromPoint`,
-   `EnumWindows`, `GetWindow(GW_HWNDNEXT)` answer for the run. Tests: a fixture of two processes
-   that activate each other's windows and check the messages, at concurrency 1, 2 and 4.
-3. **Layers and composition.** Sources on frames, a slot per client in the graphics worker, the
-   presenter's layers and the composition by the station, the canvas at the screen's size. Gate: a
-   CPU reference composer and the GPU composition, given seeded random layouts of two and three
-   processes' windows over random layers, give the same pixels. An itest of two processes whose
-   windows overlap, the screen read back and compared with the reference.
-4. **Input.** Mouse by the window under the cursor or capture, keyboard by the foreground. Tests:
-   input routed to the right process in the two-process fixture.
-5. **What it replaces goes.** `refreshWindows` on exit, last-frame-wins, the newest-process input
-   rule, the per-process "no other program is active" answers. `docs/core/limits.md` and
-   `docs/architecture.md` updated.
+1. **The model.** `model.js` with its operations and questions, the contract taken from Windows'
+   documented behaviour and Wine's user32 conformance tests (`dlls/user32/tests/win.c`:
+   SetWindowPos, ShowWindow, z-order, styles). Unit tests per operation, and a validator in
+   `tools/` that no file of user32 assigns a window's geometry, style, parent or owner outside
+   the model.
+2. **user32 onto the model.** The records' geometry, style, parent, owner, visibility and order
+   become the model's; the ~130 assignments become operations; the messages are made from the
+   changes. This lands in slices (placement, then show, then styles, then parent and owner), each
+   behind a gate: seeded sequences of window calls run through the old path and the model path
+   compare everything a program can observe -- answers, messages and their parameters in order,
+   the window list, the desktop's pixels -- and the old path goes when its slice is gated.
+3. **The manager.** `manager.js`, the publication from each process, the run-wide z-order with
+   its bands, foreground and capture with activation notices to both processes, the questions
+   across processes, and `subscribe`. Tests: the manager's own unit tests, and a fixture of two
+   processes that raise and activate each other's windows and check the messages, at
+   concurrency 1, 2 and 4.
+4. **The compositor and input.** Frames with sources, a slot per client in the graphics worker,
+   layers composed by the manager; input routed by it. Gate: a CPU reference composer and the GPU
+   composition give the same pixels on seeded random layouts of two and three processes' windows.
+   An itest of two processes with overlapping windows, read back and compared.
+5. **What it replaces goes.** `refreshWindows` on exit, the last frame winning, the newest process
+   taking input, per-process activation. `docs/core/` and `docs/architecture.md` describe the
+   manager and the view API.
 
 ## Done when
 
-The steps' tests pass at concurrency 1, 2 and 4, and in a browser a launcher and the game it starts,
-and an installer with its child processes, show every process's windows at once in their order,
-with no picture of one process replacing another's. The browser check is the person's: it is not
-measured here.
+The steps' tests pass at concurrency 1, 2 and 4, no window state is assigned outside the model
+(the validator), and in a browser a launcher and the game it starts, and an installer with its
+child processes, show every process's windows at once in their order. The browser check is the
+person's; it is not measured here.
