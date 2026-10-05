@@ -50,9 +50,12 @@ for (const [mode, flag, sends, processWorkers] of /** @type {const} */ ([
             output.push(text));
         assert.equal(await app.run({ timeoutMs: 60000 }), 0, output.join(''));
         const lines = output.join('');
+        // Each process writes a check's verdict and its name apart, and two
+        // that run at once interleave their writes: no check failed, and each
+        // was reached, read from the names rather than from whole lines.
         assert.doesNotMatch(lines, /FAIL/);
-        assert.equal(lines.match(/^ok {3}child: /gm)?.length, 9 + sends, lines);
-        assert.equal(lines.match(/^ok {3}parent: /gm)?.length, 7 + (flag === '-send' ? 2 : 0),
+        assert.equal(lines.match(/child: [a-zA-Z]/g)?.length, 9 + sends, lines);
+        assert.equal(lines.match(/parent: [a-zA-Z]/g)?.length, 7 + (flag === '-send' ? 2 : 0),
             lines);
     });
 }
