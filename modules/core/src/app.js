@@ -39,6 +39,9 @@ import { loadZstdWasm } from './zstd-wasm.js';
 import { createClassTable } from './layers/win32/ole32/remote.js';
 import { createCallRepeats } from './call-repeats.js';
 import { withRunMode } from './mode.js';
+import { createLinkMemory, openLink } from './system/link.js';
+import { systemHandlers } from './system-link.js';
+import { openProcessWorker } from './host/process-worker.js';
 
 /**
  * createApp — the consumer-facing entry point: run a Win32 application.
@@ -201,6 +204,12 @@ import { withRunMode } from './mode.js';
  *           quote it. Defaults to the image path, quoted.
  * @property {number} [processId]    What GetCurrentProcessId answers: for a child, the
  *           identifier its parent was handed when it started it.
+ * @property {any} [system]  The run's system half -- registry, volume, windows, ids, named
+ *           objects -- for a process that joins another run's rather than making one: a
+ *           process in a worker of its own is handed it across a link (`system-link.js`).
+ * @property {boolean} [processWorkers]  In the `workers` mode, a child runs in a worker of
+ *           its own (`host/process.worker.js`) rather than on this thread: its named objects
+ *           are its own, and its windows are not found by another process yet.
  * @property {{ output?: StandardFile, error?: StandardFile }} [standardFiles]
  *           The files a child's parent handed it as its output and error,
  *           each the parent's own open file, whose position the child's
@@ -6855,7 +6864,9 @@ export async function createApp(options){
      *     volume: { drives: Map<string, any>, volumes: Map<string, any>,
      *         writables: Map<string, any>, watchers: Set<Function> } }}
      */
-    const system = { namedObjects, registry: null, bundle: null, windows: null,
+    // A process in a worker of its own is handed the run's across a link
+    // (`system-link.js`), and joins it rather than making one.
+    const system = options.system ?? { namedObjects, registry: null, bundle: null, windows: null,
         ids: { thread: 1, process: 0x2000 },
         volume: { drives: new Map(), volumes: new Map(), writables: new Map(),
             watchers: new Set() } };
@@ -7011,7 +7022,8 @@ export async function createApp(options){
             // Only where processes run at once: one run in its parent's place
             // has the parent paused, which wakes nothing.
             othersRunning: processesAtOnce
-                ? ()=>starting > 0 || [...standing].some(other=>other !== self) : undefined }));
+                ? ()=>starting > 0 || across > 0 || [...standing].some(other=>other !== self)
+                : undefined }));
         self = built;
         standing.add(built);
         processes.set(process, built);
@@ -7317,6 +7329,83 @@ export async function createApp(options){
     const besides = new Set();
     /** Children asked for whose machines are not built yet. */
     let starting = 0;
+    /** Children running in workers of their own. */
+    let across = 0;
+    /** Whether a child runs in a worker of its own rather than on this thread. */
+    const processWorkers = processesAtOnce && options.processWorkers === true;
+
+    /**
+     * Runs a child in a worker of its own: its machine there, the run's
+     * system half answered from here across a link (`system-link.js`), its
+     * output the run's. Its exit code is the answer.
+     *
+     * @param {any} parent @param {any} request
+     * @returns {Promise<number>}
+     */
+    const runAcross = async(parent, request)=>{
+        const image = await parent.readImage(request.imagePath);
+        if (!image)
+        {
+            events.emit('divergence', { api: 'process',
+                detail: `${request.imagePath} is not on the volume, and did not start` });
+            return 2;
+        }
+        const memory = createLinkMemory();
+        const link = openLink(memory.a, {
+            ...systemHandlers(/** @type {any} */ (system)),
+            process: {
+                output: (/** @type {number} */ handle, /** @type {string} */ text)=>
+                    events.emit('output', { handle, text }),
+            },
+        });
+        const answering = link.serve();
+        const worker = await openProcessWorker(new URL('./host/process.worker.js', import.meta.url));
+        events.emit('process-started', { image: request.imagePath, sequenceBase: logSequence,
+            worker: true });
+        try
+        {
+            return await new Promise((resolve, reject)=>{
+                worker.onMessage(data=>{
+                    if (data?.type === 'exited')
+                    {
+                        resolve(data.code);
+                    }
+                    else if (data?.type === 'failed')
+                    {
+                        reject(new Error(data.message));
+                    }
+                });
+                worker.onLost(reason=>reject(new Error(reason)));
+                worker.post({
+                    type: 'start',
+                    end: memory.b,
+                    options: {
+                        executable: image,
+                        imagePath: request.imagePath,
+                        commandLine: request.commandLine,
+                        patches: request.patches,
+                        processId: request.id,
+                        mainThreadId: request.threadId,
+                        standardFiles: request.standardFiles,
+                        engine: options.engine,
+                        mode: options.mode,
+                        windows: options.windows,
+                        // The translator's store and the doorbell are this
+                        // thread's: the child's translator keeps none.
+                        cork: { config: { ...options.cork?.config, store: null,
+                            doorbell: undefined } },
+                    },
+                    run: { maxTurns: runOptionsNow?.maxTurns, timeoutMs: runOptionsNow?.timeoutMs },
+                });
+            });
+        }
+        finally
+        {
+            link.close();
+            await answering;
+            worker.terminate();
+        }
+    };
     /** The code the last of the run's processes beside another exited with. */
     let lastBesideCode = 0;
     /**
@@ -7340,6 +7429,35 @@ export async function createApp(options){
      * @param {any} parent @param {any} request
      */
     const startBeside = (parent, request)=>{
+        if (processWorkers)
+        {
+            across++;
+            const running = (async()=>{
+                let code = -1;
+                try
+                {
+                    code = await runAcross(parent, request);
+                }
+                catch (e){
+                    events.emit('error', { reason: 'process', error: e });
+                }
+                finally
+                {
+                    across--;
+                }
+                parent.childExited(request, code);
+                lastBesideCode = code;
+                events.emit('process-resumed', { image: request.imagePath, code });
+                return code;
+            })();
+            besides.add(running);
+            noteMachines();
+            running.finally(()=>{
+                besides.delete(running);
+                noteMachines();
+            });
+            return;
+        }
         // Running from the moment it is asked for, not from when its machine
         // is built: a parent that waits on it at once is waiting on something
         // that will answer, not stuck.

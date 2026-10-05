@@ -21,6 +21,10 @@ differently raises a `divergence` event naming the API.
   both taking turns on the engine thread.
 - Only the process of an out-of-process COM server runs alongside the program that uses it, outside
   the `workers` mode.
+- With `processWorkers`, a child in a worker of its own shares the run's registry, files, window
+  directory and ids, but not its named kernel objects (a named event it sets does not wake its
+  parent), its windows (another process does not find them), a COM server, graphics or sound;
+  a redirected standard output is written there, but the parent's position does not move with it.
 - Windows are the run's: a process finds another's window (`FindWindow`), reads who made it, its
   caption and class, and posts to it. A message sent to another process's window is answered in the
   `workers` mode; its pointers cross only for `WM_COPYDATA`, `WM_SETTEXT` and `WM_GETTEXT`. Where
