@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openIso } from '@bottlify/core/iso';
-import { buildIso } from '../../core/src/layers/filesystem/internal/iso/iso.fixture.js';
+import { buildIso } from '../../core/src/layers/filesystem/internal/iso/build.js';
 import {
     autorunText, discEntry, discOptions, isDiscImage, isDiscMedia, readAutorun, splitCommand,
 } from './disc.js';

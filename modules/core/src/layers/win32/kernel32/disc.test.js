@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { filesystemModule } from '../../filesystem/module.js';
-import { buildIso } from '../../filesystem/internal/iso/iso.fixture.js';
+import { buildIso } from '../../filesystem/internal/iso/build.js';
 import { openIso } from '../../filesystem/internal/iso/iso9660.js';
 import { createIsoSource } from '../../filesystem/internal/iso/source.js';
 import { createVolume } from './vfs.js';

@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildIso } from './iso.fixture.js';
+import { buildIso } from './build.js';
 import { discSerial, isIsoImage, openIso, rangesOf, recordingTime, SECTOR_SIZE }
     from './iso9660.js';
 import { chunkedReads, createIsoSource } from './source.js';

@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import { createApp } from './app.js';
 import { createApp as createHostedApp } from './index.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
-import { buildIso } from './layers/filesystem/internal/iso/iso.fixture.js';
+import { buildIso } from './layers/filesystem/internal/iso/build.js';
 import { openIso } from './layers/filesystem/internal/iso/iso9660.js';
 
 /** @param {number} value @returns {number[]} */

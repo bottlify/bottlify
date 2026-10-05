@@ -45,6 +45,7 @@ export {
     MEDIA_DIRECTORY, REGISTRY_PATH, SYSTEM_PATH, chooseRoot, collect, guessEntry, placementOf,
     prefixOptions,
 } from './prefix.js';
+export { archiveDisc, isZipArchive, readZip } from './archive.js';
 export { DEFAULT_BLOCK_SIZE, packBundle, packBlock, sha256 } from './pack.js';
 export {
     DISC_LETTER, autorunText, discEntry, discOptions, isDiscImage, isDiscMedia, readAutorun,

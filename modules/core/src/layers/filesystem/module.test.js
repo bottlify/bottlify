@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { filesystemModule } from './module.js';
 import { createMemoryStore } from './internal/memory-store.js';
-import { buildIso } from './internal/iso/iso.fixture.js';
+import { buildIso } from './internal/iso/build.js';
 import { openIso } from './internal/iso/iso9660.js';
 import { createIsoSource } from './internal/iso/source.js';
 
