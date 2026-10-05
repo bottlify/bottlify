@@ -63,7 +63,12 @@ const IMPORTS = {
     'ole32.dll': {
         undecorated: [
             'CoInitialize@4', 'CoUninitialize@0', 'CoRegisterClassObject@20',
-            'CoRevokeClassObject@4', 'CoCreateInstance@20',
+            'CoRevokeClassObject@4', 'CoCreateInstance@20', 'CoGetCallContext@8',
+            'CoImpersonateClient@0', 'CoRevertToSelf@0', 'CoQueryClientBlanket@28',
+            'CoQueryProxyBlanket@32', 'CoCopyProxy@8', 'CoDisconnectObject@8',
+            'CoAddRefServerProcess@0', 'CoReleaseServerProcess@0', 'CoGetCurrentProcess@0',
+            'CoWaitForMultipleHandles@20', 'CoMarshalHresult@8', 'CoUnmarshalHresult@8',
+            'CreateStreamOnHGlobal@12',
         ],
     },
     'USER32.dll': {
@@ -72,7 +77,7 @@ const IMPORTS = {
             'RegisterClassA@4', 'CreateWindowExA@48', 'DefWindowProcA@16', 'FindWindowA@8',
             'IsWindow@4', 'GetWindowThreadProcessId@8', 'GetWindowTextA@12', 'GetClassNameA@12',
             'PostMessageA@16', 'SendMessageA@16', 'SendMessageTimeoutA@28',
-            'RegisterWindowMessageA@4',
+            'RegisterWindowMessageA@4', 'PostThreadMessageA@16', 'PeekMessageA@20',
         ],
     },
     'msvcrt.dll': {
@@ -99,6 +104,7 @@ const PROGRAMS = [
     { name: 'spawn_child', source: 'spawn_child.c', cxx: false },
     { name: 'fpuenv', source: 'fpuenv.c', cxx: false },
     { name: 'com', source: 'com.c', cxx: false },
+    { name: 'comlife', source: 'comlife.c', cxx: false },
     { name: 'windows', source: 'windows.c', cxx: false },
 ];
 

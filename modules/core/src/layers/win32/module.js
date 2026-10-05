@@ -2308,6 +2308,29 @@ export function createWin32Module(){
                     offerMarshaler: marshaler=>{
                         objrefMarshaler = marshaler;
                     },
+                    // A wait that serves the apartment while it waits: user32's
+                    // and kernel32's own calls, read when made.
+                    waits: {
+                        messages: (thread, count, list, timeout, wakeMask, waitAll)=>
+                            bridge.answering(thread, ()=>libraries['USER32.dll']
+                                .MsgWaitForMultipleObjects.handler(
+                                    [count, list, waitAll, timeout, wakeMask])),
+                        objects: (thread, count, list, waitAll, timeout)=>
+                            bridge.answering(thread, ()=>libraries['KERNEL32.dll']
+                                .WaitForMultipleObjects.handler(
+                                    [count, list, waitAll, timeout])),
+                        peek: (thread, message)=>bridge.answering(thread, ()=>
+                            libraries['USER32.dll'].PeekMessageW.handler([message, 0, 0, 0, 1])),
+                        translate: (thread, message)=>bridge.answering(thread, ()=>
+                            libraries['USER32.dll'].TranslateMessage.handler([message])),
+                        dispatch: (thread, message)=>bridge.answering(thread, ()=>
+                            libraries['USER32.dll'].DispatchMessageW.handler([message])),
+                        postQuit: (thread, code)=>bridge.answering(thread, ()=>
+                            libraries['USER32.dll'].PostQuitMessage.handler([code])),
+                        tickCount: ()=>libraries['KERNEL32.dll'].GetTickCount.handler([]),
+                        lastError: thread=>bridge.answering(thread, ()=>
+                            libraries['KERNEL32.dll'].GetLastError.handler([])),
+                    },
                     strings: {
                         allocate: bytes=>/** @type {number} */ (lent(bytes, at=>
                             libraries['OLEAUT32.dll'].SysAllocStringByteLen.handler(
@@ -2389,6 +2412,14 @@ export function createWin32Module(){
             // as one that linked against shell32 directly.
             libraries['USER32.dll'].MsgWaitForMultipleObjectsEx =
                 apcs.user32.MsgWaitForMultipleObjectsEx;
+
+            // ole32 answers the error-information calls oleaut32 does, the
+            // same calls on the same per-thread state: either library's
+            // SetErrorInfo is the other's GetErrorInfo.
+            for (const name of ['CreateErrorInfo', 'GetErrorInfo', 'SetErrorInfo'])
+            {
+                libraries['ole32.dll'][name] = libraries['OLEAUT32.dll'][name];
+            }
 
             libraries['SHFOLDER.dll'] = {
                 SHGetFolderPathA: libraries['SHELL32.dll'].SHGetFolderPathA,

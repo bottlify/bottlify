@@ -64,6 +64,10 @@ const REGDB_E_WRITEREGDB = 0x80040151;
 /** A registry string value's type. */
 const REG_SZ = 1;
 const CO_E_NOTINITIALIZED = 0x800401f0;
+const RPC_E_CALL_COMPLETE = 0x80010117 | 0;
+const RPC_E_NO_SYNC = 0x80010120 | 0;
+const RPC_S_CALLPENDING = 0x80010115 | 0;
+const CO_E_CANCEL_DISABLED = 0x80010140 | 0;
 const CO_E_CLASSSTRING = 0x800401f3;
 const CO_E_OBJNOTREG = 0x800401fb;
 const CO_E_DLLNOTFOUND = 0x800401f8;
@@ -78,6 +82,37 @@ const CLSCTX_LOCAL_SERVER = 0x4;
 
 /** IID_IClassFactory: what a class object answers to. */
 const IID_ICLASSFACTORY = '{00000001-0000-0000-C000-000000000046}';
+const IID_IMARSHAL = '{00000003-0000-0000-C000-000000000046}';
+const IID_ISERVERSECURITY = '{0000013E-0000-0000-C000-000000000046}';
+/** The class of the call context CoGetCallContext hands out: this layer's own. */
+const CLSID_CALL_CONTEXT = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0002}';
+
+/** IMarshal::DisconnectObject. */
+const SLOT_MARSHAL_DISCONNECT = 8;
+
+/** The blanket of a call between two processes of one user. */
+const RPC_C_AUTHN_WINNT = 10;
+const RPC_C_AUTHZ_NONE = 0;
+const RPC_C_AUTHN_LEVEL_CONNECT = 2;
+const RPC_C_IMP_LEVEL_IDENTIFY = 2;
+const EOAC_NONE = 0;
+
+/** CoWaitForMultipleHandles' flags, and what it waits for. */
+const COWAIT_WAITALL = 1;
+const COWAIT_ALERTABLE = 2;
+const QS_PAINT = 0x20;
+const QS_SENDMESSAGE = 0x40;
+const QS_ALLPOSTMESSAGE = 0x100;
+const WAIT_OBJECT_0 = 0;
+const WAIT_TIMEOUT = 0x102;
+const WAIT_FAILED = 0xffffffff;
+const INFINITE = 0xffffffff;
+const WM_QUIT = 0x12;
+const MSG_SIZE = 28;
+
+/** @param {number} code */
+const hresultFromWin32 = code=>((code >>> 0) === 0 ? 0
+    : (((code & 0xffff) | 0x80070000) | 0));
 
 /** What a proxy/stub DLL's class object is asked for. */
 const IID_IPSFACTORYBUFFER = '{D5F569D0-593B-101A-B569-08002B2DBF7A}';
@@ -208,6 +243,18 @@ const MAX_PROGID = 255;
  *           IUnknown it got through two interfaces to decide whether they belong
  *           to one object, and two addresses for one interface fails that test
  *           however correct the object model underneath is.
+ * @property {{ messages: (thread: unknown, count: number, handles: number, timeout: number,
+ *         wakeMask: number, waitAll: number) => number | Promise<number>,
+ *     objects: (thread: unknown, count: number, handles: number, waitAll: number,
+ *         timeout: number) => number | Promise<number>,
+ *     peek: (thread: unknown, message: number) => number | Promise<number>,
+ *     translate: (thread: unknown, message: number) => unknown,
+ *     dispatch: (thread: unknown, message: number) => unknown,
+ *     postQuit: (thread: unknown, code: number) => unknown, tickCount: () => number,
+ *     lastError: (thread: unknown) => number }} [waits]
+ *           user32's and kernel32's waits and message calls, made as the call
+ *           of the thread named, for a wait that goes on serving the thread's
+ *           apartment (CoWaitForMultipleHandles) after it awaited.
  * @property {{ table: ReturnType<typeof createClassTable>, process: unknown }} [com]
  *           The run's table of class objects served out of process, and what
  *           names this process to it. Absent, this process has a table of its
@@ -485,6 +532,127 @@ export function createOleFunctions(host){
         classObjects.delete(cookie);
         return andThen(remoting?.revokeClass(cookie),
             ()=>callMethod(entry.object, SLOT_RELEASE, [], thread));
+    };
+
+    /** What CoAddRefServerProcess counted, less what CoReleaseServerProcess gave back. */
+    let serverProcessRefs = 0;
+    /** CoGetCurrentProcess's numbers, one per thread as each first asks. */
+    let nextSequence = 1;
+
+    /**
+     * QueryInterface on a guest object, the IID lent for the call: the
+     * pointer it answered, which the caller releases, or 0.
+     *
+     * @param {number} object @param {string} iid @param {unknown} thread
+     * @returns {Promise<number>}
+     */
+    const queryPointer = async(object, iid, thread)=>{
+        const block = host.heap.allocate(4 + GUID_SIZE);
+        const bytes = parseGuid(iid);
+        if (block === 0 || !bytes)
+        {
+            return 0;
+        }
+        writeU32(block, 0);
+        host.writeMemory(block + 4, bytes);
+        const hr = (await callMethod(object, SLOT_QUERY_INTERFACE, [block + 4, block], thread)) | 0;
+        const found = readU32(block);
+        host.heap.free(block);
+        return hr < 0 ? 0 : found;
+    };
+
+    /**
+     * The authentication every call between processes here has: Windows'
+     * own between two processes of one user, connect-level, identifying,
+     * no principal, no privileges, no capabilities. Writes it where each
+     * non-null pointer asks: the service, the authorisation service, the
+     * principal's name, the level, the impersonation level, the privileges
+     * or identity, the capabilities.
+     *
+     * @param {number[]} outs
+     */
+    const writeBlanket = outs=>{
+        const values = [RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, 0, RPC_C_AUTHN_LEVEL_CONNECT,
+            RPC_C_IMP_LEVEL_IDENTIFY, 0, EOAC_NONE];
+        outs.forEach((out, index)=>{
+            if ((out >>> 0) !== 0)
+            {
+                writeU32(out >>> 0, values[index]);
+            }
+        });
+    };
+
+    /**
+     * IServerSecurity, as CoGetCallContext hands it inside a call another
+     * process made.
+     *
+     * @returns {import('./objects.js').ComClassDefinition}
+     */
+    const serverSecurity = ()=>{
+        let impersonating = false;
+        return {
+            interfaces: [{
+                id: IID_ISERVERSECURITY,
+                methods: [
+                    { name: 'QueryBlanket', argBytes: 32,
+                        invoke: (_object, outs)=>{
+                            writeBlanket(outs);
+                            return S_OK;
+                        } },
+                    { name: 'ImpersonateClient', argBytes: 4,
+                        invoke: ()=>{
+                            impersonating = true;
+                            return S_OK;
+                        } },
+                    { name: 'RevertToSelf', argBytes: 4,
+                        invoke: ()=>{
+                            impersonating = false;
+                            return S_OK;
+                        } },
+                    { name: 'IsImpersonating', argBytes: 4, invoke: ()=>(impersonating ? 1 : 0) },
+                ],
+            }],
+        };
+    };
+
+    /** The object `publishHostObject` is making, for the class it registered. @type {import('./objects.js').ComClassDefinition | null} */
+    let making = null;
+    /** The classes of this layer's own objects, registered once each. @type {Set<string>} */
+    const madeClasses = new Set();
+    /**
+     * One of this layer's own objects, handed out through `out` as `iid`:
+     * E_NOINTERFACE for an interface it has not, with nothing written.
+     *
+     * @param {string} clsid @param {import('./objects.js').ComClassDefinition} definition
+     * @param {string} iid @param {number} out
+     * @returns {number}
+     */
+    const publishHostObject = (clsid, definition, iid, out)=>{
+        if (!madeClasses.has(clsid))
+        {
+            madeClasses.add(clsid);
+            host.registry.registerClass(clsid, ()=>making);
+        }
+        making = definition;
+        const object = host.registry.create(clsid);
+        making = null;
+        if (!object)
+        {
+            return E_OUTOFMEMORY;
+        }
+        if (!object.interfaceFor(iid))
+        {
+            object.release();
+            return E_NOINTERFACE;
+        }
+        const pointer = host.vtables.publish(object, iid) >>> 0;
+        if (pointer === 0)
+        {
+            object.release();
+            return E_OUTOFMEMORY;
+        }
+        writeU32(out, pointer);
+        return S_OK;
     };
 
     /**
@@ -1748,6 +1916,472 @@ export function createOleFunctions(host){
             handler: ()=>{
                 remote()?.resume();
                 return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT CoSuspendClassObjects(void)
+         *
+         * This process's registrations stay, and no new client is handed one
+         * until CoResumeClassObjects: what a server does as it starts to shut
+         * down, so a client arriving late starts another.
+         */
+        CoSuspendClassObjects: {
+            argBytes: 0,
+            handler: ()=>{
+                remote()?.suspend();
+                return S_OK;
+            },
+        },
+
+        /**
+         * ULONG CoAddRefServerProcess(void)
+         * ULONG CoReleaseServerProcess(void)
+         *
+         * The server's own count of what keeps it running, across its
+         * objects and locks; the release that brings it to zero suspends its
+         * class objects, as the documentation says COM does, so no client is
+         * handed one while the server goes.
+         */
+        CoAddRefServerProcess: {
+            argBytes: 0,
+            handler: ()=>++serverProcessRefs >>> 0,
+        },
+        CoReleaseServerProcess: {
+            argBytes: 0,
+            handler: ()=>{
+                serverProcessRefs = Math.max(0, serverProcessRefs - 1);
+                if (serverProcessRefs === 0)
+                {
+                    remote()?.suspend();
+                }
+                return serverProcessRefs;
+            },
+        },
+
+        /**
+         * HRESULT CoLockObjectExternal(LPUNKNOWN pUnk, BOOL fLock, BOOL fLastUnlockReleases)
+         *
+         * A hold on an object as another process's is: it stays exported
+         * while nobody holds it from afar. Unlocking an object that was never
+         * exported does nothing, and says nothing, as Windows does.
+         */
+        CoLockObjectExternal: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([object, lock, lastUnlockReleases])=>{
+                if (!inApartment(host.currentThread()))
+                {
+                    return CO_E_NOTINITIALIZED;
+                }
+                if ((object >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const channel = remote();
+                return channel
+                    ? channel.lockExternal(object >>> 0, lock !== 0, lastUnlockReleases !== 0)
+                        .then(()=>S_OK)
+                    : S_OK;
+            },
+        },
+
+        /**
+         * HRESULT CoDisconnectObject(LPUNKNOWN pUnk, DWORD dwReserved)
+         *
+         * Every other process's hold on the object goes at once, and their
+         * proxies answer RPC_E_DISCONNECTED from then on. An object that
+         * marshals itself is asked to, through IMarshal::DisconnectObject.
+         */
+        CoDisconnectObject: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([object, reserved])=>{
+                if ((object >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const thread = host.callerThread?.();
+                return queryPointer(object >>> 0, IID_IMARSHAL, thread).then(async marshal=>{
+                    if (marshal !== 0)
+                    {
+                        const hr = (await callMethod(marshal, SLOT_MARSHAL_DISCONNECT,
+                            [reserved >>> 0], thread)) | 0;
+                        await callMethod(marshal, SLOT_RELEASE, [], thread);
+                        return hr;
+                    }
+                    if (!inApartment(host.currentThread()))
+                    {
+                        return CO_E_NOTINITIALIZED;
+                    }
+                    await remote()?.disconnect(object >>> 0, thread);
+                    return S_OK;
+                });
+            },
+        },
+
+        /**
+         * BOOL CoIsHandlerConnected(LPUNKNOWN pUnk)
+         *
+         * Whether an in-process handler's object is connected to its server:
+         * no handler is ever made here, and an object that is not one is
+         * taken as connected, as Windows takes it.
+         */
+        CoIsHandlerConnected: {
+            argBytes: 4,
+            handler: ()=>1,
+        },
+
+        /**
+         * DWORD CoGetCurrentProcess(void)
+         *
+         * A number unique to the calling thread among every thread of the
+         * run's processes, which COM numbers on first asking.
+         */
+        CoGetCurrentProcess: {
+            argBytes: 0,
+            handler: ()=>{
+                const thread = /** @type {any} */ (host.currentThread());
+                if (!thread)
+                {
+                    return 0;
+                }
+                thread.comSequence ??= nextSequence++;
+                return thread.comSequence;
+            },
+        },
+
+        /**
+         * HRESULT CoGetCallContext(REFIID riid, void **ppInterface)
+         *
+         * The call another process made that this thread is running, as an
+         * IServerSecurity: outside of one, RPC_E_CALL_COMPLETE.
+         */
+        CoGetCallContext: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([iid, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(out >>> 0, 0);
+                if (!remote()?.serving())
+                {
+                    return RPC_E_CALL_COMPLETE;
+                }
+                const wanted = guidAt(iid);
+                if (wanted === null)
+                {
+                    return E_INVALIDARG;
+                }
+                return publishHostObject(CLSID_CALL_CONTEXT, serverSecurity(), wanted, out >>> 0);
+            },
+        },
+
+        /**
+         * HRESULT CoImpersonateClient(void)
+         * HRESULT CoRevertToSelf(void)
+         * HRESULT CoQueryClientBlanket(DWORD *pAuthnSvc, DWORD *pAuthzSvc,
+         *     OLECHAR **pServerPrincName, DWORD *pAuthnLevel, DWORD *pImpLevel,
+         *     RPC_AUTHZ_HANDLE *pPrivs, DWORD *pCapabilities)
+         *
+         * The calling client's security, inside a call another process made:
+         * one user, so impersonating it changes nothing, and the blanket is
+         * the one every local call has.
+         */
+        CoImpersonateClient: {
+            argBytes: 0,
+            handler: ()=>(remote()?.serving() ? S_OK : RPC_E_CALL_COMPLETE),
+        },
+        CoRevertToSelf: {
+            argBytes: 0,
+            handler: ()=>(remote()?.serving() ? S_OK : RPC_E_CALL_COMPLETE),
+        },
+        CoQueryClientBlanket: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([authn, authz, principal, level, impersonation, privileges, capabilities])=>{
+                if (!remote()?.serving())
+                {
+                    return RPC_E_CALL_COMPLETE;
+                }
+                writeBlanket([authn, authz, principal, level, impersonation, privileges,
+                    capabilities]);
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT CoQueryProxyBlanket(IUnknown *pProxy, DWORD *pwAuthnSvc,
+         *     DWORD *pAuthzSvc, OLECHAR **pServerPrincName, DWORD *pAuthnLevel,
+         *     DWORD *pImpLevel, RPC_AUTH_IDENTITY_HANDLE *pAuthInfo, DWORD *pCapabilites)
+         * HRESULT CoCopyProxy(IUnknown *pProxy, IUnknown **ppCopy)
+         *
+         * What a proxy to another process's object authenticates with, and a
+         * copy of it to set another blanket on: an object that is no proxy has
+         * no blanket, and is E_NOINTERFACE, as its missing IClientSecurity is.
+         * The copy is the proxy itself, counted again: every blanket is the
+         * same one here, so nothing tells the two apart but their address.
+         */
+        CoQueryProxyBlanket: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: ([proxy, ...outs])=>{
+                if (!remote()?.isProxy(proxy >>> 0))
+                {
+                    return E_NOINTERFACE;
+                }
+                writeBlanket(outs);
+                return S_OK;
+            },
+        },
+        CoCopyProxy: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([proxy, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                if (!remote()?.isProxy(proxy >>> 0))
+                {
+                    return E_NOINTERFACE;
+                }
+                return callMethod(proxy >>> 0, SLOT_ADD_REF, [], host.callerThread?.()).then(()=>{
+                    writeU32(out >>> 0, proxy >>> 0);
+                    return S_OK;
+                });
+            },
+        },
+
+        /**
+         * HRESULT CoGetCallerTID(LPDWORD lpdwTID)
+         *
+         * Which thread of which process made the call being run: what crosses
+         * from another process carries no thread, so this is not answered,
+         * as Wine does not answer it either.
+         */
+        CoGetCallerTID: {
+            argBytes: 4,
+            handler: ()=>{
+                host.divergence?.('CoGetCallerTID', 'the calling thread is not known');
+                return E_NOTIMPL;
+            },
+        },
+
+        /**
+         * HRESULT CoEnableCallCancellation(LPVOID pReserved)
+         * HRESULT CoDisableCallCancellation(LPVOID pReserved)
+         *
+         * Counted per thread; a disable with nothing enabled is
+         * CO_E_CANCEL_DISABLED. A call here is never cancelled either way.
+         */
+        CoEnableCallCancellation: {
+            argBytes: 4,
+            handler: ()=>{
+                const thread = /** @type {any} */ (host.currentThread());
+                if (thread)
+                {
+                    thread.comCancel = (thread.comCancel ?? 0) + 1;
+                }
+                return S_OK;
+            },
+        },
+        CoDisableCallCancellation: {
+            argBytes: 4,
+            handler: ()=>{
+                const thread = /** @type {any} */ (host.currentThread());
+                if (!thread?.comCancel)
+                {
+                    return CO_E_CANCEL_DISABLED;
+                }
+                thread.comCancel--;
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT CoRegisterChannelHook(REFGUID ExtensionUuid, IChannelHook *pChannelHook)
+         *
+         * A hook on every call's channel, to carry data of its own with it.
+         * Taken and kept; nothing calls it, since a call between processes
+         * here carries no extensions.
+         */
+        CoRegisterChannelHook: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([extension, hook])=>{
+                if (guidAt(extension) === null || (hook >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                host.divergence?.('CoRegisterChannelHook',
+                    'a channel hook is kept but never called');
+                return andThen(callMethod(hook >>> 0, SLOT_ADD_REF, [], host.callerThread?.()),
+                    ()=>S_OK);
+            },
+        },
+
+        /**
+         * HRESULT CoMarshalHresult(LPSTREAM pstm, HRESULT hresult)
+         * HRESULT CoUnmarshalHresult(LPSTREAM pstm, HRESULT *phresult)
+         *
+         * An HRESULT through a stream: its four bytes, little-endian.
+         */
+        CoMarshalHresult: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([stream, hresult])=>{
+                const thread = host.callerThread?.();
+                const block = host.heap.allocate(4);
+                if (block === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                writeU32(block, hresult >>> 0);
+                return callMethod(stream >>> 0, SLOT_STREAM_WRITE, [block, 4, 0], thread)
+                    .then(hr=>{
+                        host.heap.free(block);
+                        return hr;
+                    });
+            },
+        },
+        CoUnmarshalHresult: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([stream, out])=>{
+                const thread = host.callerThread?.();
+                const block = host.heap.allocate(4);
+                if (block === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                return callMethod(stream >>> 0, SLOT_STREAM_READ, [block, 4, 0], thread)
+                    .then(hr=>{
+                        if ((hr | 0) >= 0 && (out >>> 0) !== 0)
+                        {
+                            writeU32(out >>> 0, readU32(block));
+                        }
+                        host.heap.free(block);
+                        return hr;
+                    });
+            },
+        },
+
+        /**
+         * HRESULT CoWaitForMultipleHandles(DWORD dwFlags, DWORD dwTimeout,
+         *     ULONG cHandles, LPHANDLE pHandles, LPDWORD lpdwindex)
+         *
+         * A wait that goes on serving the thread's apartment: in a
+         * single-threaded one the thread's messages are dispatched while it
+         * waits -- which is how a call from another process reaches an
+         * object of this thread meanwhile -- and a handle already signalled
+         * answers before any is looked at; in the multithreaded apartment, or
+         * none, a plain wait. A WM_QUIT taken on the way is put back. An
+         * alertable wait is not alertable here.
+         */
+        CoWaitForMultipleHandles: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([flags, timeout, count, handles, indexOut])=>{
+                if ((indexOut >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(indexOut >>> 0, 0);
+                if ((handles >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                if ((count >>> 0) === 0)
+                {
+                    return RPC_E_NO_SYNC;
+                }
+                const waits = host.waits;
+                if (!waits)
+                {
+                    return E_NOTIMPL;
+                }
+                if ((flags & COWAIT_ALERTABLE) !== 0)
+                {
+                    host.divergence?.('CoWaitForMultipleHandles',
+                        'COWAIT_ALERTABLE: the wait is not alertable');
+                }
+                const waitAll = (flags & COWAIT_WAITALL) !== 0 ? 1 : 0;
+                const thread = /** @type {any} */ (host.currentThread());
+                // Named on every call below: after the first await the thread
+                // on the processor is another's.
+                const caller = host.callerThread?.() ?? thread;
+                /** @param {number} answer */
+                const settle = answer=>{
+                    if ((answer >>> 0) === WAIT_TIMEOUT)
+                    {
+                        return RPC_S_CALLPENDING;
+                    }
+                    if ((answer >>> 0) === WAIT_FAILED)
+                    {
+                        return hresultFromWin32(waits.lastError(caller));
+                    }
+                    writeU32(indexOut >>> 0, answer >>> 0);
+                    return S_OK;
+                };
+                if (thread?.ole32?.model !== COINIT_APARTMENTTHREADED)
+                {
+                    return andThen(waits.objects(caller, count >>> 0, handles >>> 0, waitAll,
+                        timeout >>> 0), settle);
+                }
+                return (async()=>{
+                    const started = waits.tickCount() >>> 0;
+                    const message = host.heap.allocate(MSG_SIZE);
+                    if (message === 0)
+                    {
+                        return E_OUTOFMEMORY;
+                    }
+                    /** @type {number | null} */
+                    let quit = null;
+                    try
+                    {
+                        for (;;)
+                        {
+                            const elapsed = ((waits.tickCount() >>> 0) - started) >>> 0;
+                            if ((timeout >>> 0) !== INFINITE && elapsed > (timeout >>> 0))
+                            {
+                                return RPC_S_CALLPENDING;
+                            }
+                            const left = (timeout >>> 0) === INFINITE ? INFINITE
+                                : (timeout >>> 0) - elapsed;
+                            const answer = (await waits.messages(caller, count >>> 0,
+                                handles >>> 0, left, QS_SENDMESSAGE | QS_ALLPOSTMESSAGE | QS_PAINT,
+                                waitAll)) >>> 0;
+                            if (answer !== WAIT_OBJECT_0 + (count >>> 0))
+                            {
+                                return settle(answer);
+                            }
+                            // A program that never paints is not waited on for
+                            // ever: a hundred messages, then the handles again.
+                            for (let taken = 0; taken < 100
+                                && await waits.peek(caller, message); taken++)
+                            {
+                                if (readU32(message + 4) === WM_QUIT)
+                                {
+                                    quit = readU32(message + 8);
+                                    continue;
+                                }
+                                await waits.translate(caller, message);
+                                await waits.dispatch(caller, message);
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        host.heap.free(message);
+                        if (quit !== null)
+                        {
+                            await waits.postQuit(caller, quit);
+                        }
+                    }
+                })();
             },
         },
 

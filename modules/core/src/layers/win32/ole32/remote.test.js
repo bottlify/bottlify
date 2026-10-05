@@ -64,3 +64,16 @@ test('an ended process takes its registrations with it and runs its proxies down
     assert.equal(table.endpoint(id), null);
     assert.equal(rundowns, 1);
 });
+
+test('a suspended registration is handed to no new client until resumed again', ()=>{
+    const table = createClassTable();
+    table.register({ clsid: 'A', endpoint: 1, object: 1, flags: REGCLS_MULTIPLEUSE, cookie: 1,
+        suspended: false, used: false });
+    table.register({ clsid: 'B', endpoint: 2, object: 1, flags: REGCLS_MULTIPLEUSE, cookie: 1,
+        suspended: false, used: false });
+    table.suspend(1);
+    assert.equal(table.take('A'), null);
+    assert.equal(table.take('B')?.endpoint, 2, 'another process\'s registration is its own');
+    table.resume(1);
+    assert.equal(table.take('A')?.endpoint, 1);
+});

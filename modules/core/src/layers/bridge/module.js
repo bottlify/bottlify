@@ -94,6 +94,8 @@ export function createBridgeModule(){
              * @type {{ dispatcher: any, parking: any, callbacks: any, vtables: any,
              *          failure: Error | null, disposed: boolean }}
              */
+            /** The thread `answering` names while its function runs, or null. @type {any} */
+            let answeringFor = null;
             const state = {
                 dispatcher: null,
                 parking: null,
@@ -512,7 +514,7 @@ export function createBridgeModule(){
                     // silent where it happened and fatal much later, so a caller in
                     // that position is made to say whose call it is answering
                     // rather than being given a plausible wrong answer.
-                    const runOn = thread ?? frame?.thread ?? null;
+                    const runOn = thread ?? answeringFor ?? frame?.thread ?? null;
                     if (!runOn)
                     {
                         throw new Error('bridge: a guest callback made after an await must name'
@@ -679,8 +681,34 @@ export function createBridgeModule(){
                  * there to take.
                  */
                 callerThread: ()=>live()
-                    ? (state.parking.current()?.thread ?? kernel.currentThread())
+                    ? (answeringFor ?? state.parking.current()?.thread ?? kernel.currentThread())
                     : null,
+
+                /**
+                 * Runs `fn` as the call of `thread` it answers, after an await:
+                 * a handler waiting on behalf of a parked thread that goes on to
+                 * call other handlers -- a wait that dispatches the thread's
+                 * messages -- names the thread once, here, and what those
+                 * handlers read as their caller and what they call back into
+                 * the guest is that thread's. Only `fn`'s own synchronous run is
+                 * covered: whatever it awaits names its thread again.
+                 *
+                 * @template T
+                 * @param {any} thread @param {() => T} fn
+                 * @returns {T}
+                 */
+                answering(thread, fn){
+                    const before = answeringFor;
+                    answeringFor = thread;
+                    try
+                    {
+                        return fn();
+                    }
+                    finally
+                    {
+                        answeringFor = before;
+                    }
+                },
 
                 /** Where the guest was last sent by us, newest last. */
                 recentlyStarted: ()=>live() ? state.callbacks.recentlyStarted() : [],

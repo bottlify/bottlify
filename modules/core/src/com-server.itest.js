@@ -60,3 +60,32 @@ for (const concurrency of /** @type {const} */ ([1, 2, 4]))
         assert.equal(started.filter(event=>event.worker).length, concurrency > 1 ? 2 : 0);
     });
 }
+
+for (const concurrency of /** @type {const} */ ([1, 2, 4]))
+{
+    test(`a server's life and what its calls see: the call context, the client's security, a`
+        + ` proxy's blanket, a wait that serves the apartment, a server process counted down and`
+        + ` an object disconnected (concurrency ${concurrency})`, { timeout: 120000 }, async t=>{
+        const program = new Uint8Array(await readFile(new URL('../test/fixtures/comlife.exe',
+            import.meta.url)));
+        const app = await createApp({
+            executable: program,
+            imagePath: 'C:\\App\\comlife.exe',
+            engine: 'cork',
+            concurrency,
+            storage: { load: async()=>({
+                files: [{ path: 'C:\\App\\comlife.exe', bytes: program }],
+            }) },
+        });
+        t.after(()=>app.dispose());
+        /** @type {string[]} */
+        const output = [];
+        app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>
+            output.push(text));
+        assert.equal(await app.run({ timeoutMs: 60000 }), 0, output.join(''));
+        const lines = output.join('');
+        assert.doesNotMatch(lines, /FAIL/);
+        // Every line the program checks, client and server.
+        assert.equal(lines.match(/^ok {3}/gm)?.length, 16, lines);
+    });
+}

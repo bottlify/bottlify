@@ -94,6 +94,8 @@ export function comHandlers(table, side){
             revoke: (endpoint, cookie)=>table.revoke(endpoint, cookie),
             /** @param {number} endpoint */
             resume: endpoint=>table.resume(endpoint),
+            /** @param {number} endpoint */
+            suspend: endpoint=>table.suspend(endpoint),
             /** @param {string} clsid */
             take: clsid=>table.take(clsid),
             /**
@@ -205,6 +207,8 @@ export function remoteClassTable(link, hooks = {}){
         revoke: (endpoint, cookie)=>link.ask('revoke', [endpoint, cookie]),
         /** @param {number} endpoint */
         resume: endpoint=>link.ask('resume', [endpoint]),
+        /** @param {number} endpoint */
+        suspend: endpoint=>link.ask('suspend', [endpoint]),
         /** @param {string} clsid */
         take: clsid=>link.ask('take', [clsid]),
 

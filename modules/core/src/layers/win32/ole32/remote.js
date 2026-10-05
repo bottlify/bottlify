@@ -178,6 +178,19 @@ export function createClassTable(hooks = {}){
             return entry ?? null;
         },
 
+        /**
+         * CoSuspendClassObjects: this endpoint's registrations stay, and no
+         * new client is handed one until they are resumed.
+         *
+         * @param {number} endpoint
+         */
+        suspend(endpoint){
+            classes.filter(entry=>entry.endpoint === endpoint)
+                .forEach(entry=>{
+                    entry.suspended = true;
+                });
+        },
+
         /** @param {number} endpoint */
         resume(endpoint){
             classes.filter(entry=>entry.endpoint === endpoint)
@@ -602,6 +615,23 @@ export function createRemoting(host){
             await callSlot(pointer, SLOT_RELEASE, [], thread);
         }
         await callSlot(entry.unknown, SLOT_RELEASE, [], thread);
+    };
+
+    /**
+     * The exported entry of the object a pointer is an interface of, if it is
+     * exported: found by its identity, as COM finds a stub manager.
+     *
+     * @param {number} pointer @param {unknown} thread
+     * @returns {Promise<Exported | null>}
+     */
+    const exportedFor = async(pointer, thread)=>{
+        const identity = await queryGuest(pointer, IID_IUNKNOWN, thread);
+        const unknown = identity.hr < 0 ? pointer : identity.pointer;
+        if (identity.hr >= 0)
+        {
+            await callSlot(unknown, SLOT_RELEASE, [], thread);
+        }
+        return exported.get(byIdentity.get(unknown) ?? 0) ?? null;
     };
 
     /**
@@ -1344,6 +1374,64 @@ export function createRemoting(host){
 
         /** CoResumeClassObjects: this process's suspended registrations become visible. */
         resume: ()=>host.table.resume(endpointId),
+
+        /** CoSuspendClassObjects: this process's registrations stop being handed out. */
+        suspend: ()=>host.table.suspend(endpointId),
+
+        /**
+         * CoLockObjectExternal: a count on the object held as another
+         * process's are, so it stays exported while no process holds it; the
+         * last unlock lets it go only when asked to, and otherwise leaves it
+         * to the next count given back.
+         *
+         * @param {number} pointer @param {boolean} lock @param {boolean} lastUnlockReleases
+         * @param {unknown} [thread]
+         */
+        async lockExternal(pointer, lock, lastUnlockReleases, thread = host.callerThread()){
+            if (lock)
+            {
+                await exportInterface(pointer >>> 0, IID_IUNKNOWN, false, thread);
+                return;
+            }
+            const entry = await exportedFor(pointer >>> 0, thread);
+            if (!entry)
+            {
+                return;
+            }
+            if (lastUnlockReleases)
+            {
+                await dropExported(entry, 1, thread);
+            }
+            else
+            {
+                entry.refs--;
+            }
+        },
+
+        /**
+         * CoDisconnectObject: every other process's hold on the object goes at
+         * once; their proxies answer RPC_E_DISCONNECTED from then on.
+         *
+         * @param {number} pointer @param {unknown} [thread]
+         */
+        async disconnect(pointer, thread = host.callerThread()){
+            const entry = await exportedFor(pointer >>> 0, thread);
+            if (entry)
+            {
+                await dropExported(entry, entry.refs, thread);
+            }
+        },
+
+        /**
+         * Whether `thread` is running a call another process made: what
+         * CoGetCallContext answers inside of.
+         *
+         * @param {unknown} [thread]
+         */
+        serving: (thread = host.callerThread())=>(apartments.get(thread)?.running.size ?? 0) > 0,
+
+        /** Whether a pointer is a proxy of this process's for another's object. @param {number} pointer */
+        isProxy: pointer=>proxyAt.has(pointer >>> 0),
 
         /**
          * An object of a class served by another process: registered already,
