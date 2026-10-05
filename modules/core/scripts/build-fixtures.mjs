@@ -51,6 +51,7 @@ const IMPORTS = {
             'VirtualAlloc@16', 'VirtualFree@12', 'GetLastError@0', 'SetLastError@4',
             'CreateProcessA@40', 'GetExitCodeProcess@8', 'CloseHandle@4', 'CreateFileA@28',
             'ReadFile@20', 'GetCommandLineA@0', 'WaitForMultipleObjects@16',
+            'GetModuleHandleA@4', 'GetCurrentProcessId@0',
         ],
     },
     'ADVAPI32.dll': {
@@ -68,6 +69,9 @@ const IMPORTS = {
     'USER32.dll': {
         undecorated: [
             'GetMessageA@16', 'TranslateMessage@4', 'DispatchMessageA@4', 'PostQuitMessage@4',
+            'RegisterClassA@4', 'CreateWindowExA@48', 'DefWindowProcA@16', 'FindWindowA@8',
+            'IsWindow@4', 'GetWindowThreadProcessId@8', 'GetWindowTextA@12', 'GetClassNameA@12',
+            'PostMessageA@16',
         ],
     },
     'msvcrt.dll': {
@@ -94,6 +98,7 @@ const PROGRAMS = [
     { name: 'spawn_child', source: 'spawn_child.c', cxx: false },
     { name: 'fpuenv', source: 'fpuenv.c', cxx: false },
     { name: 'com', source: 'com.c', cxx: false },
+    { name: 'windows', source: 'windows.c', cxx: false },
 ];
 
 /**

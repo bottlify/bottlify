@@ -53,6 +53,7 @@ import {
     writeWindowClassA,
 } from './structs.js';
 import { convertCharacter, readText, translated, writeText } from './unicode.js';
+import { DESKTOP_WINDOW, createWindowDirectory } from './directory.js';
 import { subtractFromArea } from '../gdi32/rects.js';
 
 /** The messages whose wParam is a character code, in the encoding of the procedure. */
@@ -455,6 +456,10 @@ const MAX_WINDOW_TEXT = 1 << 16;
  * @typedef {Object} WindowHost
  * @property {number} [processId]  The running process's identifier, which
  *           GetWindowThreadProcessId reports for this process's windows.
+ * @property {ReturnType<typeof createWindowDirectory>} [directory]
+ *           The run's windows (`directory.js`): where a window handle comes
+ *           from, and how a window of another process is found, described and
+ *           posted to. A host with no other process gets one of its own.
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
  *           The display every system metric is derived from.
  * @property {{ width: number, height: number, bits: Uint8Array } | null} [desktopPicture]
@@ -662,6 +667,8 @@ export function createWindowFunctions(host){
      */
     const windows = new Map();
     let nextAtom = FIRST_ATOM;
+    const processId = host.processId ?? 0x1000;
+    const directory = host.directory ?? createWindowDirectory();
 
     /**
      * Resolves the argument every API takes where a class name is declared. It
@@ -1095,13 +1102,39 @@ export function createWindowFunctions(host){
      */
     const findWindow = (parent, after, classPointer, namePointer, unicode = false)=>{
         const cls = classPointer === 0 ? null : classOf(classPointer, unicode);
-        if (classPointer !== 0 && !cls)
+        // A class this process never registered can still be another's, named
+        // by its string; an atom is only ever this process's to spell out.
+        const className = classPointer === 0 ? null
+            : cls?.name ?? ((classPointer >>> 0) > LAST_ATOM
+                ? readText(host, classPointer >>> 0, unicode, MAX_CLASS_NAME) : null);
+        if (classPointer !== 0 && className === null)
         {
             return 0;
         }
         const title = namePointer === 0
             ? null
-            : readText(host, namePointer, unicode, MAX_WINDOW_TEXT).toLowerCase();
+            : readText(host, namePointer, unicode, MAX_WINDOW_TEXT);
+        // This process's windows first, then every other process's: a walk
+        // that has gone past the last of its own goes on in the next process.
+        if (after !== 0 && !windows.has(after))
+        {
+            return directory.find(processId, parent, after, className, title);
+        }
+        const own = cls || classPointer === 0 ? findOwn(parent, after, className, title) : 0;
+        return own !== 0 ? own : directory.find(processId, parent, 0, className, title);
+    };
+
+    /**
+     * The first of this process's windows under `parent` and after `after`, in
+     * creation order, whose class and title match without regard to case.
+     *
+     * @param {number} parent @param {number} after
+     * @param {string | null} className  Null matches any class.
+     * @param {string | null} title      Null matches any title.
+     */
+    const findOwn = (parent, after, className, title)=>{
+        const cls = className?.toLowerCase() ?? null;
+        const text = title?.toLowerCase() ?? null;
         let reached = after === 0;
         for (const record of windows.values())
         {
@@ -1114,11 +1147,11 @@ export function createWindowFunctions(host){
             {
                 continue;
             }
-            if (cls !== null && record.className !== cls.name)
+            if (cls !== null && String(record.className).toLowerCase() !== cls)
             {
                 continue;
             }
-            if (title !== null && record.title.toLowerCase() !== title)
+            if (text !== null && record.title.toLowerCase() !== text)
             {
                 continue;
             }
@@ -1145,7 +1178,7 @@ export function createWindowFunctions(host){
                 width: 0, height: 0, userData: 0, extra: new DataView(new ArrayBuffer(0)),
                 destroyed: false, updateRect: null, erase: false, ncDirty: false,
             };
-            desktop.hwnd = host.handles.open('window', desktop);
+            desktop.hwnd = DESKTOP_WINDOW;
         }
         return desktop;
     };
@@ -1885,7 +1918,7 @@ export function createWindowFunctions(host){
         {
             draw?.deleteFont?.(record.dialogFont);
         }
-        host.handles.close(record.hwnd);
+        directory.close(record.hwnd);
         if (active === record.hwnd)
         {
             active = 0;
@@ -2199,7 +2232,7 @@ export function createWindowFunctions(host){
                 record.extra = new DataView(new ArrayBuffer(system.windowExtra));
             }
         }
-        record.hwnd = host.handles.open('window', record);
+        record.hwnd = directory.open(processId);
         windows.set(record.hwnd, record);
         hasQueue(record.thread);
         if ((record.style & WS_VISIBLE) !== 0)
@@ -4340,7 +4373,9 @@ export function createWindowFunctions(host){
         // when it dispatches.
         if (target !== 0 && !live(target))
         {
-            return 0;
+            // Or it is another process's, which takes it into the queue of
+            // the thread that made it.
+            return directory.post(processId, target, message, wParam, lParam) ? 1 : 0;
         }
         // No window is a message for the poster's own thread, as
         // PostThreadMessage to itself would post it.
@@ -4348,6 +4383,25 @@ export function createWindowFunctions(host){
             ...target === 0 ? { thread: threadIdOf(host.callerThread?.()) } : {} });
         return 1;
     };
+
+    // What this process answers about its windows to every other one, in
+    // values: their windows are theirs to find, describe and post to.
+    directory.attach(processId, {
+        find: findOwn,
+        describe: hwnd=>{
+            const record = live(hwnd);
+            return record ? { threadId: creatorOf(record) ?? 0,
+                className: String(record.className), title: record.title } : null;
+        },
+        post: (hwnd, message, wParam, lParam)=>{
+            if (!live(hwnd))
+            {
+                return false;
+            }
+            host.queue.post({ hwnd, message, wParam, lParam });
+            return true;
+        },
+    });
 
     /**
      * SendNotifyMessage, in either encoding.
@@ -4531,6 +4585,7 @@ export function createWindowFunctions(host){
                 },
             }),
             live, windows, classes,
+            elsewhere: (/** @type {number} */ hwnd)=>directory.describe(hwnd, processId),
         }),
         ...createDesktopFunctions({ host,
             topLevel: ()=>[...windows.values()]
@@ -4916,7 +4971,7 @@ export function createWindowFunctions(host){
         IsWindow: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([hwnd])=>(live(hwnd) ? 1 : 0),
+            handler: ([hwnd])=>(live(hwnd) || directory.describe(hwnd, processId) ? 1 : 0),
         },
 
         /** BOOL GetClientRect(HWND hWnd, LPRECT lpRect) */
@@ -5015,10 +5070,17 @@ export function createWindowFunctions(host){
             handler: ([hwnd, out, maxCount])=>{
                 const record = live(hwnd);
                 const room = maxCount | 0;
+                const elsewhere = record ? null : directory.describe(hwnd, processId);
                 // No buffer is no text, whatever count comes with it.
-                if (!record || room <= 0 || !emptied(out, 1))
+                if (!(record || elsewhere) || room <= 0 || !emptied(out, 1))
                 {
                     return 0;
+                }
+                // Another process's window is read from its caption, as
+                // Windows reads one without sending it anything.
+                if (elsewhere)
+                {
+                    return writeText(host, out, elsewhere.title, room, false);
                 }
                 if (ownedElsewhere(record))
                 {
@@ -5036,9 +5098,14 @@ export function createWindowFunctions(host){
             handler: ([hwnd, out, maxCount])=>{
                 const record = live(hwnd);
                 const room = maxCount | 0;
-                if (!record || room <= 0 || !emptied(out, 2))
+                const elsewhere = record ? null : directory.describe(hwnd, processId);
+                if (!(record || elsewhere) || room <= 0 || !emptied(out, 2))
                 {
                     return 0;
+                }
+                if (elsewhere)
+                {
+                    return writeText(host, out, elsewhere.title, room, true);
                 }
                 if (ownedElsewhere(record))
                 {

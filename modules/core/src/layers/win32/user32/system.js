@@ -469,8 +469,11 @@ const DEFER_TOKEN = 0x4d50;
  * @param {(hwnd: number) => any | null} options.live
  * @param {Map<number, any>} options.windows
  * @param {Map<string, any>} options.classes  Registered classes, by name.
+ * @param {(hwnd: number) => ({ processId: number, threadId: number, className: string,
+ *     title: string } | null)} [options.elsewhere]
+ *     A window of another process, as that process describes it.
  */
-export function createSystemFunctions({ host, live, windows, classes }){
+export function createSystemFunctions({ host, live, windows, classes, elsewhere = ()=>null }){
     /**
      * A window as the program is told of it: the desktop, the one window
      * here that is not the program's, as none.
@@ -1966,7 +1969,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
 
     /** GetClassName in either width. @param {number[]} args @param {boolean} wide */
     const writeClassName = ([hwnd, out, maxCount], wide)=>{
-        const record = live(hwnd);
+        const record = live(hwnd) ?? elsewhere(hwnd);
         const room = maxCount | 0;
         if (!record || (out >>> 0) === 0 || room <= 0)
         {
@@ -4797,14 +4800,14 @@ export function createSystemFunctions({ host, live, windows, classes }){
         GetWindowTextLengthA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([hwnd])=>live(hwnd)?.title.length ?? 0,
+            handler: ([hwnd])=>(live(hwnd) ?? elsewhere(hwnd))?.title.length ?? 0,
         },
 
         /** int GetWindowTextLengthW(HWND hWnd), in UTF-16 units. */
         GetWindowTextLengthW: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([hwnd])=>live(hwnd)?.title.length ?? 0,
+            handler: ([hwnd])=>(live(hwnd) ?? elsewhere(hwnd))?.title.length ?? 0,
         },
 
         /**
@@ -4823,8 +4826,18 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 const record = live(hwnd);
                 if (!record)
                 {
-                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
-                    return 0;
+                    // Another process's, which says who made it.
+                    const other = elsewhere(hwnd);
+                    if (!other)
+                    {
+                        host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+                        return 0;
+                    }
+                    if ((out >>> 0) !== 0)
+                    {
+                        writeU32s(host, out >>> 0, [other.processId]);
+                    }
+                    return other.threadId;
                 }
                 if ((out >>> 0) !== 0)
                 {

@@ -522,11 +522,12 @@ test('a window of a class that was never registered is not created', ()=>{
     assert.equal(handles.entries.size, 0, 'and no handle was spent on it');
 });
 
-test('an HWND is a handle from the table', ()=>{
+test('an HWND is the run\'s, a number no kernel handle is', ()=>{
     const { hwnd, handles } = withWindow();
 
     assert.ok(hwnd > 0);
-    assert.equal(handles.entries.get(hwnd)?.type, 'window');
+    assert.equal(hwnd % 4, 2, 'kernel handles are multiples of four');
+    assert.equal(handles.entries.has(hwnd), false, 'no kernel handle was spent on it');
 });
 
 test('CW_USEDEFAULT is replaced by a real position and size', ()=>{

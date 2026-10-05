@@ -42,6 +42,7 @@ import { createVolume } from './kernel32/vfs.js';
 import { createMsvcrtFunctions } from './msvcrt/functions.js';
 import { createCrtdllFunctions } from './msvcrt/crtdll.js';
 import { createWindowFunctions } from './user32/windows.js';
+import { createWindowDirectory } from './user32/directory.js';
 import { createMessageQueue } from './user32/messages.js';
 import { createRegistryFunctions } from './advapi32/functions.js';
 import { ADMINISTRATORS_SID, createTokenFunctions, isTokenMember } from './advapi32/tokens.js';
@@ -184,6 +185,8 @@ export function createWin32Module(){
      * @type {any}
      */
     let current = null;
+    /** Takes this process's windows out of the run's when it ends. */
+    let leaveWindows = ()=>{};
 
     return {
         name: 'win32',
@@ -231,7 +234,7 @@ export function createWin32Module(){
             // to share it with; a caller with nothing to share it with gets
             // its own. The one namespace a mutex, event, semaphore, timer and
             // file mapping all share is part of it.
-            /** @type {{ namedObjects: Map<string, any>, registry: any } | null} */
+            /** @type {{ namedObjects: Map<string, any>, registry: any, windows?: any } | null} */
             const system = config?.system ?? null;
             const namedObjects = createNamedObjects({ table: system?.namedObjects });
             // What GetCurrentProcessId answers: a child is the process its parent
@@ -402,6 +405,14 @@ export function createWin32Module(){
             {
                 system.registry = hive;
             }
+            // A window handle is the run's, and a window of another process is
+            // found and posted to through it (`user32/directory.js`).
+            const windowDirectory = system?.windows ?? createWindowDirectory();
+            if (system)
+            {
+                system.windows = windowDirectory;
+            }
+            leaveWindows = ()=>windowDirectory.detach(processId);
             // The guest's clock, because a timer is due against the clock the
             // program itself reads, and the input layer's key state, because a
             // hot key fires on a combination and only the layer that sees the
@@ -1924,6 +1935,7 @@ export function createWin32Module(){
                 'USER32.dll': createWindowFunctions({
                     readMemory,
                     processId,
+                    directory: windowDirectory,
                     writeMemory,
                     readCString,
                     // wvsprintfA reads a `va_list` window too, clamped the same way.
@@ -2796,6 +2808,8 @@ export function createWin32Module(){
         },
 
         async dispose(){
+            leaveWindows();
+            leaveWindows = ()=>{};
             current = null;
         },
     };
