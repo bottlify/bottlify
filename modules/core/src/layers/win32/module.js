@@ -2308,6 +2308,10 @@ export function createWin32Module(){
                     offerMarshaler: marshaler=>{
                         objrefMarshaler = marshaler;
                     },
+                    // A user-marshal routine that cannot carry what it is handed
+                    // raises the way the generated code it is called from expects.
+                    raise: code=>raiseRpc(code),
+                    raiseLater: (code, thread)=>raiseRpcLater(code, thread),
                     // A wait that serves the apartment while it waits: user32's
                     // and kernel32's own calls, read when made.
                     waits: {

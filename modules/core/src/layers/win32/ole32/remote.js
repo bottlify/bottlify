@@ -125,6 +125,22 @@ const MSHCTX_LOCAL = 0;
  */
 
 /**
+ * An object in the running object table: what its moniker compares as, the
+ * reference the table holds on it, and what a process that enumerates the
+ * table makes the moniker again from.
+ *
+ * @typedef {Object} RunningEntry
+ * @property {number} cookie
+ * @property {string} key        The moniker's comparison data, in hex.
+ * @property {Reference} reference
+ * @property {number} flags      ROTFLAGS_*.
+ * @property {number[]} time     The last change, a FILETIME's two words.
+ * @property {{ clsid: string, bytes: Uint8Array } | null} moniker
+ *     Its class and what IPersistStream::Save wrote of it, if it says.
+ * @property {number} endpoint   The process that registered it.
+ */
+
+/**
  * The service control manager's table: every class object registered for
  * other processes to use, and the endpoints that serve them.
  *
@@ -138,6 +154,14 @@ export function createClassTable(hooks = {}){
     let classes = [];
     /** @type {{ clsid: string, wake: () => void }[]} */
     let waiting = [];
+    /**
+     * The running object table: one for the run, as Windows keeps one for a
+     * machine's processes in its service control manager.
+     *
+     * @type {Map<number, RunningEntry>}
+     */
+    const running = new Map();
+    let nextRunning = 1;
 
     const wake = ()=>{
         const woken = waiting;
@@ -239,6 +263,53 @@ export function createClassTable(hooks = {}){
         },
 
         /**
+         * Puts an object in the running object table under its moniker's
+         * comparison data; a second object under the same data is put there
+         * too, and told so.
+         *
+         * @param {Omit<RunningEntry, 'cookie'>} entry
+         * @returns {{ cookie: number, duplicate: boolean }}
+         */
+        rotRegister(entry){
+            const duplicate = [...running.values()].some(other=>other.key === entry.key);
+            const cookie = nextRunning++;
+            running.set(cookie, { ...entry, cookie });
+            return { cookie, duplicate };
+        },
+
+        /**
+         * Takes an object out of the table: the entry, whose reference the
+         * caller gives back, or null for a cookie it does not hold.
+         *
+         * @param {number} cookie @returns {RunningEntry | null}
+         */
+        rotRevoke(cookie){
+            const entry = running.get(cookie) ?? null;
+            running.delete(cookie);
+            return entry;
+        },
+
+        /**
+         * The object registered first under a moniker's comparison data.
+         *
+         * @param {string} key @returns {RunningEntry | null}
+         */
+        rotFind: key=>[...running.values()].find(entry=>entry.key === key) ?? null,
+
+        /** @param {number} cookie @param {number[]} time @returns {boolean} */
+        rotNoteChange(cookie, time){
+            const entry = running.get(cookie);
+            if (entry)
+            {
+                entry.time = time;
+            }
+            return Boolean(entry);
+        },
+
+        /** Every entry, in the order they were registered. @returns {RunningEntry[]} */
+        rotEntries: ()=>[...running.values()],
+
+        /**
          * A process has ended: what it registered goes, and so does every
          * reference its proxies held.
          *
@@ -253,6 +324,14 @@ export function createClassTable(hooks = {}){
                 }
                 endpoint.alive = false;
                 classes = classes.filter(entry=>entry.endpoint !== id);
+                // What it registered, and what it held no longer has a server.
+                for (const [cookie, entry] of running)
+                {
+                    if (entry.endpoint === id || entry.reference.endpoint === id)
+                    {
+                        running.delete(cookie);
+                    }
+                }
                 await endpoint.rundown();
                 endpoints.delete(id);
             }
@@ -1512,6 +1591,30 @@ export function createRemoting(host){
          */
         importReference: (reference, iid, thread = host.callerThread())=>
             importInterface(reference, iid, thread),
+
+        /**
+         * One more count on what a reference names, for a reference handed on
+         * while the holder keeps its own: what the running object table does
+         * for each process that asks it for an object.
+         *
+         * @param {Reference} reference @param {unknown} [thread]
+         */
+        async addReference(reference, thread = host.callerThread()){
+            if (reference.endpoint !== endpointId)
+            {
+                await send(reference.endpoint, { kind: 'addref', object: reference.object });
+                return;
+            }
+            const entry = exported.get(reference.object);
+            if (entry)
+            {
+                entry.refs++;
+            }
+            void thread;
+        },
+
+        /** This process's endpoint in the run's table. */
+        endpoint: ()=>endpointId,
 
         /**
          * Gives back the reference a reference carries, unused: what

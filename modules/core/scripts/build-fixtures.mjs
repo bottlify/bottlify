@@ -68,7 +68,9 @@ const IMPORTS = {
             'CoQueryProxyBlanket@32', 'CoCopyProxy@8', 'CoDisconnectObject@8',
             'CoAddRefServerProcess@0', 'CoReleaseServerProcess@0', 'CoGetCurrentProcess@0',
             'CoWaitForMultipleHandles@20', 'CoMarshalHresult@8', 'CoUnmarshalHresult@8',
-            'CreateStreamOnHGlobal@12',
+            'CreateStreamOnHGlobal@12', 'CoMarshalInterface@24', 'CoUnmarshalInterface@12',
+            'CoReleaseMarshalData@4', 'CoGetMarshalSizeMax@24', 'CoCreateFreeThreadedMarshaler@8',
+            'CoGetStandardMarshal@24',
         ],
     },
     'USER32.dll': {
@@ -105,6 +107,7 @@ const PROGRAMS = [
     { name: 'fpuenv', source: 'fpuenv.c', cxx: false },
     { name: 'com', source: 'com.c', cxx: false },
     { name: 'comlife', source: 'comlife.c', cxx: false },
+    { name: 'marshal', source: 'marshal.c', cxx: false },
     { name: 'windows', source: 'windows.c', cxx: false },
 ];
 

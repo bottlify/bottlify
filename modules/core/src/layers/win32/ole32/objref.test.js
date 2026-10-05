@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { OBJREF_BYTES, decodeObjref, encodeObjref } from './objref.js';
+import { OBJREF_BYTES, OBJREF_CUSTOM_BYTES, decodeObjref, encodeCustomHeader, encodeObjref }
+    from './objref.js';
 import { parseGuid } from './guid.js';
 
 const IID = /** @type {Uint8Array} */ (parseGuid('{8C5E2F10-4B1D-4E7A-9A61-3D2F0C9B7E01}'));
@@ -24,7 +25,8 @@ test('an OBJREF is DCOM\'s standard packet, naming the exporter and the object',
     assert.deepEqual([view.getUint16(64, true), view.getUint16(66, true)], [2, 1],
         'a binding array of two empty lists');
 
-    assert.deepEqual(decodeObjref(bytes), { iid: IID, reference: { endpoint: 3, object: 0x11 } });
+    assert.deepEqual(decodeObjref(bytes), { iid: IID, reference: { endpoint: 3, object: 0x11 },
+        publicRefs: 1 });
 });
 
 test('bytes that are not a standard OBJREF are not read as one', ()=>{
@@ -36,4 +38,25 @@ test('bytes that are not a standard OBJREF are not read as one', ()=>{
     const signed = bytes.slice();
     signed[0] = 0;
     assert.equal(decodeObjref(signed), null);
+});
+
+test('a packet marshaled into a table carries no reference of its own', ()=>{
+    const bytes = encodeObjref(IID, { endpoint: 2, object: 5 }, 0);
+    assert.equal(new DataView(bytes.buffer).getUint32(28, true), 0);
+    assert.equal(decodeObjref(bytes)?.publicRefs, 0);
+});
+
+test('a custom OBJREF names the class that unmarshals it and the size of what follows', ()=>{
+    const clsid = Uint8Array.from({ length: 16 }, (_, index)=>0xa0 + index);
+    const bytes = encodeCustomHeader(IID, clsid, 28);
+    const view = new DataView(bytes.buffer);
+    assert.equal(bytes.length, OBJREF_CUSTOM_BYTES);
+    assert.equal(view.getUint32(0, true), 0x574f454d, 'MEOW');
+    assert.equal(view.getUint32(4, true), 4, 'OBJREF_CUSTOM');
+    assert.deepEqual(bytes.subarray(8, 24), IID);
+    assert.deepEqual(bytes.subarray(24, 40), clsid);
+    assert.equal(view.getUint32(40, true), 0, 'no extension');
+    assert.equal(view.getUint32(44, true), 28);
+    assert.equal(decodeObjref(new Uint8Array([...bytes, ...new Uint8Array(28)])), null,
+        'which is no standard one');
 });

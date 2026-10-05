@@ -96,6 +96,16 @@ export function comHandlers(table, side){
             resume: endpoint=>table.resume(endpoint),
             /** @param {number} endpoint */
             suspend: endpoint=>table.suspend(endpoint),
+            // The running object table, the run's: entries are values.
+            /** @param {any} entry */
+            rotRegister: entry=>table.rotRegister(entry),
+            /** @param {number} cookie */
+            rotRevoke: cookie=>table.rotRevoke(cookie),
+            /** @param {string} key */
+            rotFind: key=>table.rotFind(key),
+            /** @param {number} cookie @param {number[]} time */
+            rotNoteChange: (cookie, time)=>table.rotNoteChange(cookie, time),
+            rotEntries: ()=>table.rotEntries(),
             /** @param {string} clsid */
             take: clsid=>table.take(clsid),
             /**
@@ -209,6 +219,15 @@ export function remoteClassTable(link, hooks = {}){
         resume: endpoint=>link.ask('resume', [endpoint]),
         /** @param {number} endpoint */
         suspend: endpoint=>link.ask('suspend', [endpoint]),
+        /** @param {any} entry */
+        rotRegister: entry=>link.ask('rotRegister', [entry]),
+        /** @param {number} cookie */
+        rotRevoke: cookie=>link.ask('rotRevoke', [cookie]),
+        /** @param {string} key */
+        rotFind: key=>link.ask('rotFind', [key]),
+        /** @param {number} cookie @param {number[]} time */
+        rotNoteChange: (cookie, time)=>link.ask('rotNoteChange', [cookie, time]),
+        rotEntries: ()=>link.ask('rotEntries', []),
         /** @param {string} clsid */
         take: clsid=>link.ask('take', [clsid]),
 

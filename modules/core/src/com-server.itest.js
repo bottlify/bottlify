@@ -89,3 +89,22 @@ for (const concurrency of /** @type {const} */ ([1, 2, 4]))
         assert.equal(lines.match(/^ok {3}/gm)?.length, 16, lines);
     });
 }
+
+test('marshaling within a process: a table\'s packet read twice and released, the free-threaded'
+    + ' marshaler for its process and for another, an object that aggregates it marshaled in a'
+    + ' custom OBJREF, the standard marshaler; every count given back', { timeout: 60000 },
+async t=>{
+    const program = new Uint8Array(await readFile(new URL('../test/fixtures/marshal.exe',
+        import.meta.url)));
+    const app = await createApp({ executable: program, imagePath: 'C:\\App\\marshal.exe',
+        engine: 'cork' });
+    t.after(()=>app.dispose());
+    /** @type {string[]} */
+    const output = [];
+    app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>
+        output.push(text));
+    assert.equal(await app.run({ timeoutMs: 30000 }), 0, output.join(''));
+    const lines = output.join('');
+    assert.doesNotMatch(lines, /FAIL/);
+    assert.equal(lines.match(/^ok {3}/gm)?.length, 22, lines);
+});
