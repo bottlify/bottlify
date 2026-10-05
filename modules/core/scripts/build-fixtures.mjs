@@ -59,6 +59,17 @@ const IMPORTS = {
             'RegCloseKey@4',
         ],
     },
+    'ole32.dll': {
+        undecorated: [
+            'CoInitialize@4', 'CoUninitialize@0', 'CoRegisterClassObject@20',
+            'CoRevokeClassObject@4', 'CoCreateInstance@20',
+        ],
+    },
+    'USER32.dll': {
+        undecorated: [
+            'GetMessageA@16', 'TranslateMessage@4', 'DispatchMessageA@4', 'PostQuitMessage@4',
+        ],
+    },
     'msvcrt.dll': {
         undecorated: [
             '__CxxFrameHandler3', '_CxxThrowException@8', '_except_handler3', 'qsort',
@@ -82,6 +93,7 @@ const PROGRAMS = [
     { name: 'spawn', source: 'spawn.c', cxx: false },
     { name: 'spawn_child', source: 'spawn_child.c', cxx: false },
     { name: 'fpuenv', source: 'fpuenv.c', cxx: false },
+    { name: 'com', source: 'com.c', cxx: false },
 ];
 
 /**
