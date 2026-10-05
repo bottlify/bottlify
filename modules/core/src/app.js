@@ -2760,7 +2760,7 @@ export function createKernelGl(opengl, journalCall, traced, counters){
  *     spawned?: (request: any) => void,
  *     logSinks?: Map<Function, (payload: any) => void>,
  *     system?: { namedObjects: Map<string, any>, hive: any, bundle: any,
- *         ids: { thread: number, process: number } },
+ *         ids: { thread: number, process: number }, volume: any },
  *     mainThreadId?: number,
  *     com?: { table: any, process: unknown },
  * }} options
@@ -3143,6 +3143,12 @@ async function buildApp(options){
             // those alone.
             wantsCall: (/** @type {string} */ name)=>options.onCall !== undefined
                 || journal.enabled(areaOfCall({ name }), journal.Level.TRACE),
+        },
+        filesystem: {
+            // The run's drives, as one Windows has one volume: a process after
+            // the first stands on the first one's, its writes and all, rather
+            // than on a copy of it.
+            volume: options.system?.volume,
         },
         media: {
             // The decoder, handed down the same way the emulator's binary is:
@@ -3999,7 +4005,12 @@ async function buildApp(options){
     {
         options.system.bundle = blocks;
     }
-    if (blocks)
+    // A process that stands on the run's drives finds the bundle under C:
+    // already, and its discs, the session and the files the page laid over
+    // it; mounting or applying any of them again would put older bytes over
+    // what the processes before it wrote.
+    const volumeInherited = filesystem.inherited?.() ?? false;
+    if (blocks && !volumeInherited)
     {
         filesystem.mount('C', { source: blocks.source });
     }
@@ -4015,18 +4026,21 @@ async function buildApp(options){
     }
     // A disc is a drive of its own, and takes D: or the first letter nothing
     // holds once the machine's own disk is mounted.
-    await mountDiscs({ discs: options.discs, filesystem, events });
+    if (!volumeInherited)
+    {
+        await mountDiscs({ discs: options.discs, filesystem, events });
+    }
 
     // The session's files go onto the volume once the bundle is under it, so
     // that a saved file the bundle also carries is the one the program sees.
-    if (seeded.files.length > 0)
+    if (seeded.files.length > 0 && !volumeInherited)
     {
         filesystem.apply(seeded.files);
     }
     // The person's own edits to the title's files -- a realm list, a config
     // line -- laid over the session's, so they win over what the program
     // last saved and never touch the bundle itself.
-    if (options.files && options.files.length > 0)
+    if (options.files && options.files.length > 0 && !volumeInherited)
     {
         filesystem.apply(options.files);
     }
@@ -6468,6 +6482,16 @@ async function buildApp(options){
             generation: ()=>filesystem.generation(),
             /** @param {number} mark */
             changesSince: mark=>filesystem.changesSince(mark),
+            /**
+             * Whether another process's session is on the same drives as this
+             * one's: the run's, where what one writes the other reads.
+             *
+             * @param {any} other
+             */
+            shares: other=>filesystem.runVolume() !== null
+                && other?.runVolume?.() === filesystem.runVolume(),
+            /** The run's drives this session is on, or null for this process's own. */
+            runVolume: ()=>filesystem.runVolume(),
         },
 
         /**
@@ -6785,10 +6809,14 @@ export async function createApp(options){
      * later process is handed rather than a copy of it.
      *
      * @type {{ namedObjects: Map<string, any>, hive: any, bundle: any,
-     *     ids: { thread: number, process: number } }}
+     *     ids: { thread: number, process: number },
+     *     volume: { drives: Map<string, any>, volumes: Map<string, any>,
+     *         writables: Map<string, any>, watchers: Set<Function> } }}
      */
     const system = { namedObjects, hive: null, bundle: null,
-        ids: { thread: 1, process: 0x2000 } };
+        ids: { thread: 1, process: 0x2000 },
+        volume: { drives: new Map(), volumes: new Map(), writables: new Map(),
+            watchers: new Set() } };
     /**
      * A process id and its first thread's, from the run's, for a process no
      * parent was told of: a class's server, which COM starts.
@@ -7139,7 +7167,6 @@ export async function createApp(options){
             imagePath: found.path,
             commandLine: `${request.command.trim()} -Embedding`,
             ...newProcessIds(),
-            seed: parent.session.export(),
         });
         replicas.track(server);
         // A line of processes of its own: a server that starts a child and
@@ -7202,7 +7229,6 @@ export async function createApp(options){
             processId: request.id,
             mainThreadId: request.threadId,
             standardFiles: request.standardFiles,
-            seed: parent.session.export(),
         });
         replayLogLevels();
         Object.assign(facade, line.current, own);
@@ -7217,19 +7243,16 @@ export async function createApp(options){
         const code = await runProcesses(runOptions, line, true);
         imagePath = parentImage;
 
-        // Read while the child's machine stands, and put back into the
-        // parent's: what an installer's second stage laid down is what the
-        // first stage goes on to find. Its registry is the parent's own
-        // hive, the run's one, so what it wrote there is there already.
+        // What an installer's second stage laid down is what the first stage
+        // goes on to find: its drives and its registry are the parent's own,
+        // the run's, so what it wrote is there already.
         const child = line.current;
         await retire(child);
-        const files = child.session.export();
         noteLogSequence();
         mediaInstance = child.media.instance() ?? mediaInstance;
         await child.dispose();
 
         line.current = parent;
-        parent.session.apply(files);
         // Brought up to date wholesale, so what it holds now is its own
         // starting point again.
         if (replicas.tracked(parent))
@@ -7283,13 +7306,11 @@ export async function createApp(options){
                 continue;
             }
 
-            // Read before the tear-down, because the volume it comes off
-            // belongs to the process being torn down. So does everything
-            // that process wrote: an extractor that unpacked its payload
-            // and then started it has to hand that payload across, or the
-            // child is launched against files that no longer exist.
+            // Read before the tear-down. What the process wrote stays on the
+            // run's drives when it goes: an extractor that unpacked its
+            // payload and then started it leaves the payload where the child
+            // finds it.
             const child = await line.current.readImage(request.imagePath);
-            const carried = line.current.session.export();
             // The sequence the journal reached, read while the machine that
             // wrote it still stands. The child's journal continues from
             // here, so the cursor a reader is holding points into it rather
@@ -7321,7 +7342,6 @@ export async function createApp(options){
                 patches: request.patches,
                 processId: request.id,
                 mainThreadId: request.threadId,
-                seed: carried,
             });
             if (line.main)
             {

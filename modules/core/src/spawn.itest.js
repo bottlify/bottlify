@@ -104,8 +104,12 @@ test('a child starts from its parent\'s registry, and the parent keeps its own a
         const seenByChild = [];
         /** @type {any[]} */
         const childHives = [];
+        /** @type {any[]} */
+        const childDrives = [];
+        const drives = app.session.runVolume();
         app.on('process-started', ()=>{
             childHives.push(app.registry());
+            childDrives.push(app.session.runVolume());
             seenByChild.push(readDword(
                 app.registry(), HKEY_LOCAL_MACHINE, 'SOFTWARE\\Vendor\\Game', 'InstallDone'));
         });
@@ -115,6 +119,8 @@ test('a child starts from its parent\'s registry, and the parent keeps its own a
         assert.deepEqual(seenByChild, [1, 1], 'each child started with what the parent wrote');
         assert.ok(childHives.every(each=>each === hive) && app.registry() === hive,
             'one hive for the run: each child is handed the parent\'s, not a copy');
+        assert.ok(drives && childDrives.length === 2 && childDrives.every(each=>each === drives),
+            'and one volume: each child stands on the parent\'s drives');
         assert.equal(readDword(app.registry(), HKEY_LOCAL_MACHINE, 'SOFTWARE\\Vendor\\Game',
             'InstallDone'), 1, 'and the parent still has it');
         assert.notEqual(readDword(app.registry(), HKEY_CURRENT_USER, 'Software\\Bottlify\\Spawn',

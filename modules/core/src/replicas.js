@@ -332,7 +332,8 @@ export function createReplicas(report){
                 {
                     continue;
                 }
-                for (const file of changes.files)
+                // Processes on the run's drives share them; nothing to carry.
+                for (const file of other.session.shares?.(process.session) ? [] : changes.files)
                 {
                     try
                     {

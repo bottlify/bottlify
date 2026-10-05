@@ -104,31 +104,45 @@ export function createFilesystemModule(){
          */
         async create(config){
             /**
+             * The drives every process of a run shares, where this one was
+             * handed them: one volume, as one Windows has. What each drive
+             * changes is told to every process standing on it; the open
+             * files and the current directory stay this process's.
+             *
+             * @type {{ drives: Map<string, any>, volumes: Map<string, any>,
+             *     writables: Map<string, any>,
+             *     watchers: Set<(key: string, change: any) => void> } | null}
+             */
+            const shared = config?.volume ?? null;
+            const inherited = (shared?.drives.size ?? 0) > 0;
+            /**
              * Everything this instance owns, and whether it is still open.
              *
              * The calls an api hands out close over this object rather than over
              * module-level bindings, because `create()` may run more than once in
              * one realm -- a process replacement does, and the plan for more than
              * one machine in a worker needs two at once -- so each run keeps its
-             * own drives and open files.
+             * own open files, and its own drives unless it was handed the run's.
              *
              * @type {{ drives: Map<string, any>, writables: Map<string, any>,
-             *     volumes: Map<string, any>, directories: any, files: any, disposed: boolean }}
+             *     volumes: Map<string, any>, directories: any, files: any, disposed: boolean,
+             *     unwatch: () => void }}
              */
             const state = {
-                drives: new Map(),
+                drives: shared?.drives ?? new Map(),
                 // What each drive says of itself as a volume: a disc names its
                 // kind, its label and its serial; a drive that says nothing is
                 // the machine's own disk.
-                volumes: new Map(),
+                volumes: shared?.volumes ?? new Map(),
                 // Each drive's writable layer, kept across a remount: mounting a
                 // bundle on a drive puts its files under what is already written
                 // there -- the machine's own directories, made before the game
                 // was mounted -- rather than giving the drive a blank disk.
-                writables: new Map(),
+                writables: shared?.writables ?? new Map(),
                 directories: null,
                 files: createFileTable({ limit: config?.openFileLimit }),
                 disposed: false,
+                unwatch: ()=>{},
             };
 
             // What has changed since anyone last asked. Kept as a set of paths
@@ -196,20 +210,36 @@ export function createFilesystemModule(){
                     writable,
                     readOnly,
                     now: config?.now,
-                    onChanged: (/** @type {any} */ change)=>{
-                        if (!quiet)
-                        {
-                            touched.set(`${key}:${change.path}`,
-                                { key, path: change.path, generation: ++generation });
+                    onChanged: shared
+                        ? (/** @type {any} */ change)=>{
+                            for (const watcher of shared.watchers)
+                            {
+                                watcher(key, change);
+                            }
                         }
-                        changes.set(`${key}:${change.path}`, {
-                            path: formatPath(key, splitComponents(change.path)),
-                            kind: change.kind,
-                        });
-                        notify();
-                    },
+                        : (/** @type {any} */ change)=>changed(key, change),
                 }));
             };
+            /**
+             * A write to a drive this process stands on, whichever process
+             * made it.
+             *
+             * @param {string} key @param {any} change
+             */
+            const changed = (key, change)=>{
+                if (!quiet)
+                {
+                    touched.set(`${key}:${change.path}`,
+                        { key, path: change.path, generation: ++generation });
+                }
+                changes.set(`${key}:${change.path}`, {
+                    path: formatPath(key, splitComponents(change.path)),
+                    kind: change.kind,
+                });
+                notify();
+            };
+            shared?.watchers.add(changed);
+            state.unwatch = ()=>shared?.watchers.delete(changed);
 
             for (const [letter, stores] of Object.entries(config?.drives ?? {}))
             {
@@ -271,6 +301,16 @@ export function createFilesystemModule(){
                 ErrorCode,
                 Disposition,
                 SeekFrom,
+
+                /**
+                 * Whether the drives came from a process before this one,
+                 * mounted and written already: what a mount, a save or a seed
+                 * would put on a fresh volume is on it, and newer.
+                 */
+                inherited: ()=>inherited,
+
+                /** The run's drives this process stands on, or null for drives of its own. */
+                runVolume: ()=>shared,
 
                 /** @param {string} letter @param {any} stores */
                 mount: (letter, stores)=>{
@@ -774,6 +814,8 @@ export function createFilesystemModule(){
             if (current)
             {
                 current.disposed = true;
+                // The drives outlive this process when they are the run's.
+                current.unwatch();
             }
             current = null;
         },
