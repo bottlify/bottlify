@@ -6317,8 +6317,14 @@ async function buildApp(options){
              *
              * @returns {{ name: string, base: number, size: number }[]}
              */
-            modules: ()=>[...byName.values()].map(module=>({
-                name: module.name, base: module.base, size: module.size ?? 0,
+            modules: ()=>[...new Set(byName.values())].map(module=>({
+                // The program's own image by its file, which is the name a
+                // tool asks for it by; its record's own name is a stand-in.
+                name: module === mainModule
+                    ? String(mainModule.path).split(/[\\/]/).pop() ?? module.name
+                    : module.name,
+                base: module.base,
+                size: module.size ?? 0,
             })),
             /**
              * Which image an address belongs to, or null: a stack of return
