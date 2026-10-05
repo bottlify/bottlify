@@ -258,6 +258,8 @@ export function createScheduler(options){
     const threads = [];
     /** @type {any} */
     let current = null;
+    /** This scheduler, as its threads hold it. @type {any} */
+    let self = null;
     // Thread ids are the run's, as a machine's are: a process started beside
     // or after this one numbers its threads on from where this one got to,
     // so no two threads of the run answer GetCurrentThreadId alike.
@@ -476,7 +478,7 @@ export function createScheduler(options){
         noDeadlineBefore = soonest();
     };
 
-    return {
+    const api = {
         /**
          * Creates a thread. It does not run yet, and creating it does not move
          * the CPU: the creator has not necessarily finished setting up whatever
@@ -497,6 +499,10 @@ export function createScheduler(options){
             const thread = {
                 id: made,
                 name: name ?? `thread-${made}`,
+                // What wakes it: a named object another process of the run
+                // shares is signalled by that process, whose scheduler is not
+                // this one (`sync.js`).
+                scheduler: self,
                 state: ThreadState.READY,
                 tebAddress,
                 stackTop,
@@ -1205,4 +1211,6 @@ export function createScheduler(options){
             };
         },
     };
+    self = api;
+    return api;
 }

@@ -246,7 +246,10 @@ export function createSyncObjects({ scheduler }){
             const index = set ? set.objects.indexOf(object) : 0;
             thread.waitResult = (acquire(object, thread) + index) >>> 0;
         }
-        scheduler.wake(thread);
+        // The thread's own scheduler, which is not this one's when the
+        // object is a named one another process of the run made: a process
+        // that signals it wakes a thread its own scheduler does not hold.
+        (thread.scheduler ?? scheduler).wake(thread);
     };
 
     /** @param {any[]} objects_ */

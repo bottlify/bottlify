@@ -396,3 +396,21 @@ test('a wait that ran out of time leaves only the queues it stood in', ()=>{
     assert.deepEqual(other.waiters.map((/** @type {any} */ t)=>t.name), ['c'],
         'a queue nobody timed out of is untouched');
 });
+
+test('a named object another process made wakes a waiter through the waiter\'s own scheduler',
+    ()=>{
+        // Two processes of a run share a named event: the parent made it, the
+        // child waits on it through its own kernel, and the parent sets it.
+        const parent = setup();
+        const child = setup();
+        const event = parent.sync.createEvent({ name: 'Global\\ready' });
+        const waiter = { ...thread('child-main'), scheduler: child.scheduler };
+        assert.equal(child.sync.wait(event, waiter), null,
+            'the child blocks on the parent\'s event');
+        parent.sync.setEvent(event);
+        assert.ok(child.scheduler.log.includes('wake child-main'),
+            'its own scheduler wakes it');
+        assert.ok(!parent.scheduler.log.includes('wake child-main'),
+            'and the parent\'s, which does not hold it, is not asked to');
+        assert.equal(waiter.waitResult, WaitResult.OBJECT_0);
+    });
