@@ -89,3 +89,14 @@ numbers: arithmetic and texture slots, temporaries, constants.
 - Errors: the codes and texts that are certain are listed in `hlsl-check.js`'s
   tests; the rest are best-known. The location of an error in a source passed in
   memory is printed as `memory(line,col)`.
+
+## Assembly
+
+`D3DXAssembleShader` and `D3DXDisassembleShader` are `shader-asm.js`, one table of
+instruction forms read in both directions; the program's macros and includes go through
+the preprocessor first. `shader-asm.test.js` holds the token layouts by hand, a round
+trip over random programs of thirteen versions, and a gate against the reference
+assembler of the machine fixture. Not known without a real D3DX: the wording of its
+errors, the rounding of a float literal, the order of `_sat` and `_pp` in a listing, and
+which versions accept which modifiers; the structure of a program (unbalanced `if`,
+texture ops after arithmetic in ps_1_x) is not checked.
