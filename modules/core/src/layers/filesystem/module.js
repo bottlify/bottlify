@@ -5,7 +5,7 @@
  */
 
 import { ErrorCode, fsError } from './internal/errors.js';
-import { Disposition, SeekFrom, createFileTable } from './internal/handles.js';
+import { Disposition, SeekFrom, createFileTable, createSharing } from './internal/handles.js';
 import { bytesOf, createMemoryStore } from './internal/memory-store.js';
 import { createOverlay } from './internal/tree.js';
 import {
@@ -112,15 +112,15 @@ export function createFilesystemModule(){
              * @type {{ drives: Map<string, any>, volumes: Map<string, any>,
              *     writables: Map<string, any>,
              *     watchers: Set<(key: string, change: any) => void>,
-             *     open?: Set<any> } | null}
+             *     sharing?: import('./internal/handles.js').Sharing } | null}
              */
             const shared = config?.volume ?? null;
             // Every process's open files, which sharing is settled against:
             // a file one process holds on terms that share nothing is refused
             // to every other, as CreateFile's terms are the system's.
-            if (shared && !shared.open)
+            if (shared && !shared.sharing)
             {
-                shared.open = new Set();
+                shared.sharing = createSharing();
             }
             const inherited = (shared?.drives.size ?? 0) > 0;
             /**
@@ -149,7 +149,7 @@ export function createFilesystemModule(){
                 writables: shared?.writables ?? new Map(),
                 directories: null,
                 files: createFileTable({ limit: config?.openFileLimit,
-                    everyone: shared?.open }),
+                    sharing: shared?.sharing }),
                 disposed: false,
                 unwatch: ()=>{},
             };
