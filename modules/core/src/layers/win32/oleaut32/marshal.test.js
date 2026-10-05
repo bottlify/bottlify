@@ -238,3 +238,45 @@ test('the catalog finds an interface through the registry and the library a file
         assert.equal(await catalog.describe('{AA7E2069-CB55-11D2-8094-00104B1F9838}'), null,
             'an interface nobody registered has no proxy');
     });
+
+test('GetIDsOfNames: the names cross whole though their count comes after them, and the ids'
+    + ' come back', async()=>{
+    const method = /** @type {any} */ ((await createInterfaceCatalog({ readFile: ()=>null })
+        .describe(IID_IDISPATCH))?.methods[5]);
+    const caller = side('caller');
+    const callee = side('callee');
+    const riid = caller.allocate(16);
+    caller.writeMemory(riid, new Uint8Array(16));
+    const names = caller.allocate(8);
+    for (const [index, name] of ['Quit', 'Run'].entries())
+    {
+        const at = caller.allocate(name.length * 2 + 2);
+        caller.writeMemory(at, Uint8Array.from([...caller.wide(name), 0, 0]));
+        caller.put(names + index * 4, at);
+    }
+    const ids = caller.allocate(8);
+    const args = [riid, names, 2, 0x409, ids];
+
+    const request = await marshalRequest(caller, method, args);
+    const call = await unmarshalRequest(callee, method, request);
+    const theirs = call.words[1];
+    /** @param {number} at */
+    const wideAt = at=>{
+        let end = at;
+        while (callee.u32(end) & 0xffff)
+        {
+            end += 2;
+        }
+        return text(callee.readMemory(at, end - at));
+    };
+    assert.deepEqual([wideAt(callee.u32(theirs)), wideAt(callee.u32(theirs + 4))],
+        ['Quit', 'Run']);
+    assert.equal(call.words[2], 2);
+    const slots = call.words[4];
+    callee.put(slots, 11);
+    callee.put(slots + 4, 12);
+    const reply = await marshalReply(callee, method, request, call);
+    assert.equal(callee.live.size, 0, 'the names and the ids are the stub\'s to free');
+    await unmarshalReply(caller, method, args, request, reply);
+    assert.deepEqual([caller.u32(ids), caller.u32(ids + 4)], [11, 12]);
+});
