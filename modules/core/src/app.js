@@ -7359,7 +7359,7 @@ export async function createApp(options){
             },
         });
         const answering = link.serve();
-        const worker = await openProcessWorker(new URL('./host/process.worker.js', import.meta.url));
+        const worker = await openProcessWorker();
         events.emit('process-started', { image: request.imagePath, sequenceBase: logSequence,
             worker: true });
         try

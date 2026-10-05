@@ -17,10 +17,11 @@
  */
 
 /**
- * @param {URL | string} url  the `process.worker.js` URL
+ * @param {URL | string} [url]  the `process.worker.js` URL: the one beside
+ *     this file, which a bundle keeps beside it too
  * @returns {Promise<ProcessWorker>}
  */
-export async function openProcessWorker(url){
+export async function openProcessWorker(url = new URL('./process.worker.js', import.meta.url)){
     if (typeof globalThis.Worker === 'function')
     {
         const worker = new globalThis.Worker(url, { type: 'module' });
