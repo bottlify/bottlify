@@ -87,7 +87,10 @@ export function remoteVolume(ask){
     for (const { letter, readOnly, volume } of ask('drives', []))
     {
         /** @type {Record<string, any>} */
-        const drive = { readOnly };
+        const drive = { readOnly,
+            // The run's report counts what is on its volume; a process
+            // standing on it from afar says only that it does.
+            diagnostics: ()=>({ across: true }) };
         for (const operation of OPERATIONS)
         {
             drive[operation] = (/** @type {any[]} */ ...args)=>

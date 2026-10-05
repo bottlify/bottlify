@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { createFilesystemModule } from '../module.js';
 import { createLinkMemory, openLink } from '../../../system/link.js';
-import { volumeHandlers } from './volume-link.js';
+import { remoteVolume, volumeHandlers } from './volume-link.js';
 
 const here = (/** @type {string} */ path)=>new URL(path, import.meta.url).href;
 
@@ -76,5 +76,22 @@ test('a process in another thread stands on the run\'s volume: it reads and writ
     here_.close(kept);
     system.close();
     await serving;
+    await layer.dispose();
+});
+
+test('a process on the run\'s volume from afar reports its drives as the run\'s, not by walking'
+    + ' them', async()=>{
+    /** @type {string[]} */
+    const asked = [];
+    const volume = remoteVolume((method, args)=>{
+        asked.push(method === 'call' ? args[1] : method);
+        return method === 'drives' ? [{ letter: 'C', readOnly: false, volume: null }] : null;
+    });
+    const layer = createFilesystemModule();
+    await layer.create({ volume });
+    asked.length = 0;
+    const { metrics } = layer.diagnostics();
+    assert.deepEqual(metrics?.volumes['C:'], { across: true });
+    assert.deepEqual(asked, [], 'nothing is asked of the run for it');
     await layer.dispose();
 });
