@@ -770,7 +770,7 @@ export function createWindowFunctions(host){
             const on = thread ?? host.callerThread?.();
             // The procedures on this side read the ANSI page.
             return record ? translated(host, message, false,
-                ansi=>watchDispatch(host, ansi, procedure(record, ansi, on))) : 0;
+                ansi=>watchDispatch(host, ansi, procedure(record, ansi, on)), record.style) : 0;
         }
         // A window's own procedure reads text in the encoding it was set in; a
         // procedure named by its address, as CallWindowProc names one, is
@@ -778,7 +778,8 @@ export function createWindowFunctions(host){
         const reads = unicode ?? (record && (address >>> 0) === record.wndProc
             ? record.unicode === true : message.unicode === true);
         return translated(host, message, reads,
-            text=>watchDispatch(host, text, host.dispatch(address >>> 0, text, thread)));
+            text=>watchDispatch(host, text, host.dispatch(address >>> 0, text, thread)),
+            record?.style);
     };
 
     /**
