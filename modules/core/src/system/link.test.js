@@ -150,3 +150,30 @@ test('calls that together overflow the ring all cross, the writer waiting for ro
         system.close();
         await serving;
     });
+
+test('a failure crosses with what it says of itself, not only its message', { timeout: 20000 },
+    async()=>{
+        const { a, b } = createLinkMemory();
+        const system = openLink(a, { volume: {
+            read: ()=>{
+                throw Object.assign(new Error('blocks are missing'),
+                    { code: 'BLOCK_MISS', blocks: [{ index: 3, offset: 0, packed: 7 }] });
+            },
+        } });
+        const serving = system.serve();
+        const answer = await processThread(b, `
+            try { link.callWaiting('volume', 'read'); return null; }
+            catch (e) { return { message: e.message, code: e.code, blocks: e.blocks }; }`);
+        assert.deepEqual(answer, { message: 'blocks are missing', code: 'BLOCK_MISS',
+            blocks: [{ index: 3, offset: 0, packed: 7 }] });
+        // And the other way, to a promise.
+        const back = openLink(b, { endpoint: { fail: ()=>{
+            throw Object.assign(new Error('no window'), { code: 1400 });
+        } } });
+        const asked = system.call('endpoint', 'fail');
+        back.pump();
+        await assert.rejects(asked, (/** @type {any} */ e)=>e.code === 1400
+            && e.message === 'no window');
+        system.close();
+        await serving;
+    });

@@ -32,6 +32,39 @@ import { createRingMemory, doorbellOf, openRing, waitDoorbell } from './ring.js'
 const CALL = 0;
 const ANSWER = 1;
 
+/**
+ * A failure as a value: its message and whatever it says of itself -- a code
+ * the caller tells failures apart by, the blocks a bundle read was missing --
+ * so the side that called throws what the other side threw, not only its text.
+ *
+ * @param {unknown} e
+ */
+const failureOf = e=>{
+    if (!(e instanceof Error))
+    {
+        return { message: String(e) };
+    }
+    /** @type {Record<string, unknown>} */
+    const told = { message: e.message };
+    for (const [name, value] of Object.entries(e))
+    {
+        try
+        {
+            encodeValue(value);
+            told[name] = value;
+        }
+        catch {
+            // What cannot cross is left behind: the message still does.
+        }
+    }
+    return told;
+};
+
+/** @param {any} failure */
+const errorOf = failure=>(typeof failure === 'string' ? new Error(failure)
+    : Object.assign(new Error(failure?.message ?? 'link: the call failed'),
+        { ...failure, message: undefined }, { message: failure?.message }));
+
 /** A link's rings, each way: what a call and its arguments fit in, many times over. */
 export const LINK_BYTES = 1 << 20;
 
@@ -118,13 +151,13 @@ export function openLink(end, handlers){
             result = handler(...args);
         }
         catch (e){
-            answer(id, false, e instanceof Error ? e.message : String(e));
+            answer(id, false, failureOf(e));
             return;
         }
         if (typeof result?.then === 'function')
         {
             result.then((/** @type {any} */ value)=>answer(id, true, value),
-                (/** @type {any} */ e)=>answer(id, false, e instanceof Error ? e.message : String(e)));
+                (/** @type {any} */ e)=>answer(id, false, failureOf(e)));
             return;
         }
         answer(id, true, result);
@@ -154,7 +187,7 @@ export function openLink(end, handlers){
                 }
                 else
                 {
-                    waiting.reject(new Error(value));
+                    waiting.reject(errorOf(value));
                 }
                 return;
             }
@@ -211,7 +244,7 @@ export function openLink(end, handlers){
                     arrived.delete(id);
                     if (!got.ok)
                     {
-                        throw new Error(got.value);
+                        throw errorOf(got.value);
                     }
                     return got.value;
                 }
