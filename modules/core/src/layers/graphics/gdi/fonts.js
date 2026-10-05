@@ -37,51 +37,13 @@ import { FACES, FF_MODERN, FF_ROMAN } from '../../win32/gdi32/faces.js';
  * @property {number} strikeOut
  * @property {string} faceName
  * @property {number} [quality]  NONANTIALIASED_QUALITY asks for glyphs with
- *                               no partly covered pixel, ANTIALIASED_QUALITY
- *                               and the ClearType ones for smoothed ones, and
- *                               anything else is what Windows XP's own
- *                               setting gives (`smoothed`).
+ *                               no partly covered pixel; any other value is
+ *                               drawn smoothed, as the user setting that
+ *                               DEFAULT_QUALITY defers to would have it.
  */
 
 /** lfQuality: "Font is never antialiased." */
 export const NONANTIALIASED_QUALITY = 3;
-
-/** lfQuality values smoothed whatever the system's setting: ANTIALIASED, CLEARTYPE, CLEARTYPE_NATURAL. */
-const SMOOTHED_QUALITIES = new Set([4, 5, 6]);
-
-/**
- * The faces Windows XP has only as bitmaps -- its .fon files, and Helv, which
- * its FontSubstitutes sends to one -- and smooths at no size and no quality.
- */
-const BITMAP_FACES = new Set(['ms sans serif', 'helv', 'ms serif', 'courier', 'small fonts',
-    'system', 'fixedsys', 'terminal']);
-
-/**
- * The ems, in pixels, Windows XP draws unsmoothed in a TrueType face that
- * defers to the system. Its standard font smoothing, on out of the box, greys
- * a face where the face's size table (`gasp`) asks for grey, and the classic
- * faces carry the table's textbook ranges: grey up to 8 pixels, none from 9
- * to 16, grey from 17. The text of an XP dialog is pixels; a heading is
- * smoothed. A program that draws a label again over itself with a
- * transparent background -- on hover, with nothing painted under it -- gets
- * the same pixels from unsmoothed glyphs; from smoothed ones every pass adds
- * to the edges, and the label turns bold.
- */
-const UNSMOOTHED_EMS = Object.freeze({ from: 9, to: 16 });
-
-/**
- * Whether a font's glyphs are drawn smoothed, as Windows XP draws them.
- *
- * @param {FontRequest} font @param {number} em  Its em, in pixels.
- */
-export function smoothed(font, em){
-    if (font.quality === NONANTIALIASED_QUALITY || BITMAP_FACES.has(font.faceName.toLowerCase()))
-    {
-        return false;
-    }
-    return SMOOTHED_QUALITIES.has(font.quality ?? 0) || em < UNSMOOTHED_EMS.from
-        || em > UNSMOOTHED_EMS.to;
-}
 
 /**
  * @typedef {Object} FontMetrics
@@ -255,8 +217,7 @@ export function createFontEngine(options = {}){
     /** @param {FontRequest} font */
     const keyOf = font=>[font.faceName, font.height | 0, font.weight | 0, font.italic ? 1 : 0,
         font.underline ? 1 : 0, font.strikeOut ? 1 : 0,
-        font.quality === NONANTIALIASED_QUALITY ? 1 : SMOOTHED_QUALITIES.has(font.quality ?? 0) ? 2
-            : 0].join('|');
+        font.quality === NONANTIALIASED_QUALITY ? 1 : 0].join('|');
 
     /**
      * @param {FontRequest} font
@@ -350,7 +311,7 @@ export function createFontEngine(options = {}){
             const pixels = ctx.getImageData(0, 0, width, height).data;
             // The canvas always smooths; a font that must not be smoothed
             // keeps a pixel that is at least half covered and drops the rest.
-            const aliased = !smoothed(font, face.em);
+            const aliased = font.quality === NONANTIALIASED_QUALITY;
             for (let index = 0; index < coverage.length; index++)
             {
                 const alpha = pixels[index * 4 + 3];
