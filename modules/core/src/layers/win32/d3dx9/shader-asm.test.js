@@ -60,8 +60,10 @@ test('the version tokens', ()=>{
     ];
     for (const [name, token] of versions)
     {
-        expectTokens(`${name}\nnop`, [token, 0, 0xffff]);
-        expectTokens(`${name.toUpperCase()}\n`, [token, 0xffff]);
+        // D3DX writes a 1_0 source as 1_1; the listing of a 1_0 stream still names 1_0.
+        const written = token === 0xfffe0100 || token === 0xffff0100 ? token + 1 : token;
+        expectTokens(`${name}\nnop`, [written, 0, 0xffff]);
+        expectTokens(`${name.toUpperCase()}\n`, [written, 0xffff]);
     }
     expectTokens('vs.1.1\nnop', [0xfffe0101, 0, 0xffff]);
 });
@@ -1193,10 +1195,8 @@ function reference(text){
     {
         return referenceAssemble(bars, { validate: false });
     }
-    const tokens = referenceAssemble(`${m[1]}_1_1\n${bars.slice(m[0].length)}`,
-        { validate: false });
-    tokens[0] -= 1;
-    return tokens;
+    // The upgrade to 1_1 is what D3DX does with the text.
+    return referenceAssemble(`${m[1]}_1_1\n${bars.slice(m[0].length)}`, { validate: false });
 }
 
 /**

@@ -1447,7 +1447,10 @@ export function assembleShader(text){
             if (!version)
             {
                 version = parseVersionLine(line);
-                out.push(version.token);
+                // D3DX writes a vs_1_0 or ps_1_0 source as 1_1: only bytecode that
+                // came from a Direct3D 8 program carries the older version.
+                out.push(version.major === 1 && version.minor === 0 ? version.token + 1
+                    : version.token);
             }
             else if (/^(vs|ps)[_.]\d[_.](\d|x|sw)$/i.test(line))
             {
