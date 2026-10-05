@@ -168,3 +168,16 @@ test('a template with no initialised bytes is still a block to allocate', ()=>{
     assert.equal(tls.zeroFillSize, 64);
     assert.equal(tls.indexRva, SECTION_RVA + 0x200);
 });
+
+test('a template past its section\'s raw data is zeroes, whatever the file holds there', ()=>{
+    // A .tls section with no raw data shares its file pointer with the next
+    // section; the bytes there are that section's, and a mapped image has
+    // zeroes in their place, which is what each thread's block starts as.
+    const { bytes } = withTls({ templateSize: 8, callbacks: [0x400], zeroFill: 32 });
+    const header = 0x80 + 24 + 0xe0;
+    new DataView(bytes.buffer).setUint32(header + 16, 0x100, true); // rawSize: up to the template
+    const tls = /** @type {import('./tls.js').TlsDirectory} */ (readTls(bytes, parsePe(bytes)));
+    assert.deepEqual([...tls.template], new Array(8).fill(0), 'the block starts as zeroes');
+    assert.deepEqual(tls.callbackRvas, [], 'and a table past the raw data is empty');
+    assert.equal(tls.indexRva, SECTION_RVA + 0x200, 'the directory itself is read as it was');
+});
