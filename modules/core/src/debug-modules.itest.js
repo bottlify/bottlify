@@ -24,6 +24,7 @@ test('the images mapped are listed once each, the program by its own file name',
     });
     try
     {
+        /** @type {{ name: string, base: number, size: number }[]} */
         const modules = app.debug.modules();
         const own = modules.filter(module=>module.base === 0x400000);
         assert.deepEqual(own.map(module=>module.name), ['SORT.EXE'],
