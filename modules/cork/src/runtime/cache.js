@@ -21,7 +21,7 @@
  * Bumped whenever the emitter changes what it emits for the same bytes, or
  * the record's format changes: a record of another version is a miss.
  */
-export const CACHE_VERSION = 80;
+export const CACHE_VERSION = 81;
 
 const MAGIC = 0x4b524f43; // 'CORK'
 
@@ -87,7 +87,7 @@ export function moduleKey({ version, features, variant = '', layoutId, bundleId 
  */
 
 /** @param {CachedRegion} region @returns {Uint8Array} */
-export function packRegion(region){
+export function packRegion(region, version = CACHE_VERSION){
     const header = new TextEncoder().encode(JSON.stringify({
         labels: region.labels, cut: region.cut, entryTop: region.entryTop,
         instructions: region.instructions,
@@ -99,7 +99,7 @@ export function packRegion(region){
     const out = new Uint8Array(12 + header.length + region.module.length);
     const view = new DataView(out.buffer);
     view.setUint32(0, MAGIC, true);
-    view.setUint32(4, CACHE_VERSION, true);
+    view.setUint32(4, version, true);
     view.setUint32(8, header.length, true);
     out.set(header, 12);
     out.set(region.module, 12 + header.length);
@@ -111,13 +111,13 @@ export function packRegion(region){
  *
  * @param {Uint8Array} bytes @returns {CachedRegion | null}
  */
-export function unpackRegion(bytes){
+export function unpackRegion(bytes, version = CACHE_VERSION){
     if (bytes.length < 12)
     {
         return null;
     }
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    if (view.getUint32(0, true) !== MAGIC || view.getUint32(4, true) !== CACHE_VERSION)
+    if (view.getUint32(0, true) !== MAGIC || view.getUint32(4, true) !== version)
     {
         return null;
     }

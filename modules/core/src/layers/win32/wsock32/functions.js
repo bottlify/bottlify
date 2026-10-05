@@ -36,7 +36,8 @@ import {
     FIONBIO, FIONREAD, HOSTENT, INADDR_LOOPBACK, INADDR_NONE, INVALID_SOCKET,
     SOCKET_ERROR, SOCK_STREAM, SOL_SOCKET, SO_TYPE, WSADATA, WSADESCRIPTION, WSASYSSTATUS,
     WSAEAFNOSUPPORT, WSAEFAULT, WSAEINVAL, WSAENOTSOCK, WSAEMSGSIZE, WSAEOPNOTSUPP, WSAEWOULDBLOCK,
-    WSAHOST_NOT_FOUND, WSANOTINITIALISED, WSA_IO_PENDING, WSOCK32_ORDINALS, WS2_32_ORDINALS,
+    WSAHOST_NOT_FOUND, WSANOTINITIALISED, WSANO_DATA, WSA_IO_PENDING, WSOCK32_ORDINALS,
+    WS2_32_ORDINALS,
 } from './constants.js';
 import {
     SOCKADDR_IN_SIZE, formatAddress, parseAddress, readSockaddr, swap16, swap32, writeSockaddr,
@@ -45,6 +46,25 @@ import { encodeAnsi } from '../kernel32/locale.js';
 
 /** The name this host answers to, and the only one it can resolve to itself. */
 const HOSTNAME = 'bottlify';
+
+/**
+ * The services of the services file Windows ships that a program may ask for
+ * by name: each with its port and the protocols it is listed for.
+ *
+ * @type {[string, number, string[]][]}
+ */
+const SERVICES = [
+    ['echo', 7, ['tcp', 'udp']], ['discard', 9, ['tcp', 'udp']], ['daytime', 13, ['tcp', 'udp']],
+    ['ftp-data', 20, ['tcp']], ['ftp', 21, ['tcp']], ['telnet', 23, ['tcp']],
+    ['smtp', 25, ['tcp']], ['time', 37, ['tcp', 'udp']], ['domain', 53, ['tcp', 'udp']],
+    ['tftp', 69, ['udp']], ['gopher', 70, ['tcp']], ['finger', 79, ['tcp']],
+    ['http', 80, ['tcp']], ['pop3', 110, ['tcp']], ['nntp', 119, ['tcp']], ['ntp', 123, ['udp']],
+    ['imap', 143, ['tcp']], ['snmp', 161, ['udp']], ['irc', 194, ['tcp']],
+    ['https', 443, ['tcp', 'udp']],
+];
+
+/** struct servent on 32-bit Windows: the name, the aliases, the port, then the protocol. */
+const SERVENT = { s_name: 0, s_aliases: 4, s_port: 8, s_proto: 12, SIZE: 16 };
 
 /** The one extension lookup a program makes before it settles for the plain calls. */
 const SIO_GET_EXTENSION_FUNCTION_POINTER = 0xc8000006;
@@ -1242,6 +1262,73 @@ export function createWinsockFunctions(host){
                 return asked.then((/** @type {number[]} */ found)=>found.length === 0
                     ? fail(WSAHOST_NOT_FOUND, 0)
                     : writeHostent(name, found[0]));
+            },
+        },
+
+        /**
+         * struct hostent* gethostbyaddr(const char *addr, int len, int type)
+         *
+         * The reverse of gethostbyname for the one address this host answers
+         * for without a resolver: the loopback, which Windows names with the
+         * machine's own name. Any other address is not found.
+         */
+        gethostbyaddr: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([pointer, length, type])=>{
+                if (pointer === 0 || (length | 0) < 4)
+                {
+                    return fail(WSAEFAULT, 0);
+                }
+                if ((type | 0) !== AF_INET)
+                {
+                    return fail(WSAEAFNOSUPPORT, 0);
+                }
+                const bytes = host.readMemory(pointer >>> 0, 4);
+                const address = (bytes[0] << 24 | bytes[1] << 16 | bytes[2] << 8 | bytes[3]) >>> 0;
+                return address === INADDR_LOOPBACK
+                    ? writeHostent(HOSTNAME, address) : fail(WSAHOST_NOT_FOUND, 0);
+            },
+        },
+
+        /**
+         * struct servent* getservbyname(const char *name, const char *proto)
+         *
+         * A service `SERVICES` lists, its port in network order, in the one
+         * buffer this library keeps for it, valid until the next call. A name
+         * it does not list, or a protocol it is not listed for, is not found.
+         */
+        getservbyname: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([namePointer, protoPointer])=>{
+                if (namePointer === 0)
+                {
+                    return fail(WSAEFAULT, 0);
+                }
+                const name = host.readCString(namePointer >>> 0, 64).toLowerCase();
+                const proto = protoPointer === 0
+                    ? null : host.readCString(protoPointer >>> 0, 16).toLowerCase();
+                const found = SERVICES.find(([service, , protocols])=>service === name
+                    && (proto === null || protocols.includes(proto)));
+                if (!found)
+                {
+                    return fail(WSANO_DATA, 0);
+                }
+                const block = staticBuffer('servent', SERVENT.SIZE + 48);
+                const nameAt = block + SERVENT.SIZE;
+                const aliasesAt = nameAt + 32;
+                const protoAt = aliasesAt + 4;
+                host.writeMemory(nameAt, sz(found[0]));
+                writeDword(aliasesAt, 0);
+                host.writeMemory(protoAt, sz(proto ?? found[2][0]));
+                const record = new DataView(new ArrayBuffer(SERVENT.SIZE));
+                record.setUint32(SERVENT.s_name, nameAt, true);
+                record.setUint32(SERVENT.s_aliases, aliasesAt, true);
+                record.setUint16(SERVENT.s_port, found[1], false);
+                record.setUint32(SERVENT.s_proto, protoAt, true);
+                host.writeMemory(block, new Uint8Array(record.buffer));
+                return block >>> 0;
             },
         },
 

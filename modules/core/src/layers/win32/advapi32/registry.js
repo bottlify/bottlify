@@ -24,7 +24,7 @@
  * code that only ever reads the classes root.
  */
 
-import { PROCESSOR, PROCESSOR_IDENTIFIER } from '../kernel32/processor.js';
+import { PROCESSOR, PROCESSOR_IDENTIFIER, PROCESSOR_NAME } from '../kernel32/processor.js';
 import { windowsVersion } from '../kernel32/versions.js';
 
 /** The predefined roots. A guest names these by constant; it never opens them. */
@@ -465,13 +465,15 @@ const machineKeys = (windows, directx)=>{
         { root: HKEY_LOCAL_MACHINE, path: 'SYSTEM\\CurrentControlSet\\Control\\Session Manager' },
         // What the kernel wrote about the processor it found: the identifier is
         // the emulated CPUID's family, model and stepping, and the speed the
-        // emulated counter's rate (`createHive`'s `processorMhz`). A program reads
+        // emulated counter's rate (`createHive`'s `processorMhz`), and the name
+        // the engine gives itself (`processorName`). A program reads
         // the speed from here before it measures anything, and one that finds no
         // key reports a 0 MHz machine.
         { root: HKEY_LOCAL_MACHINE, path: PROCESSOR_KEY,
             values: {
                 Identifier: PROCESSOR_IDENTIFIER,
                 VendorIdentifier: PROCESSOR.vendor,
+                ProcessorNameString: PROCESSOR_NAME,
                 '~MHz': PROCESSOR.mhz,
             } },
         // The DirectX this machine has, in the two forms its own setup library
@@ -576,7 +578,7 @@ const classesKey = path=>({
  * index-based enumeration answer the same thing twice. Overwriting a value
  * leaves it where it was; only deleting and re-adding moves it to the end.
  *
- * @param {{ processorMhz?: number, windows?: WindowsVersion,
+ * @param {{ processorMhz?: number, processorName?: string, windows?: WindowsVersion,
  *     directx?: DirectXRelease }} [options]
  *        `processorMhz` is the speed the processor key reports: the rate the
  *        engine's rdtsc advances at, which is the engine's to say. `windows` is
@@ -584,7 +586,8 @@ const classesKey = path=>({
  *        the defaults.
  */
 export function createHive(
-    { processorMhz = PROCESSOR.mhz, windows = windowsVersion(), directx } = {},
+    { processorMhz = PROCESSOR.mhz, processorName = PROCESSOR_NAME, windows = windowsVersion(),
+        directx } = {},
 )
 {
     const furnishings = machineKeys(windows, directx);
@@ -636,7 +639,8 @@ export function createHive(
             // restored from a run on another engine reports this one's speed.
             const volatile = entry.path.startsWith('HARDWARE\\');
             const values = entry.path === PROCESSOR_KEY
-                ? { ...entry.values, '~MHz': processorMhz } : entry.values ?? {};
+                ? { ...entry.values, '~MHz': processorMhz, ProcessorNameString: processorName }
+                : entry.values ?? {};
             let node = /** @type {RegistryNode} */ (roots.get(entry.root));
             for (const part of segments(entry.path))
             {

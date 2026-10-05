@@ -156,8 +156,9 @@ function clock(){
  *     The windows a SetCooperativeLevel may name, by handle. Without it the
  *     seam is told nothing and takes any handle as a window.
  */
-/** @param {{ windows?: Record<number, 'top' | 'child'>, foreground?: () => number }} [options] */
-function fixture({ windows, foreground } = {}){
+/** @param {{ windows?: Record<number, 'top' | 'child'>, foreground?: () => number,
+ *     mouseHeld?: (held: boolean) => void }} [options] */
+function fixture({ windows, foreground, mouseHeld } = {}){
     const memory = guestMemory();
     const bridge = fakeBridge();
     const time = clock();
@@ -199,6 +200,7 @@ function fixture({ windows, foreground } = {}){
         callerThread: ()=>`thread-token-${++threadRequests}`,
         windowKind: windows && (hwnd=>windows[hwnd] ?? null),
         foreground,
+        mouseHeld,
     });
     const root = (()=>{
         const result = dinput.libraries['DINPUT.dll']
@@ -766,6 +768,30 @@ test('a foreground device is acquired only while its window is the foreground on
     front = 0x200;
     assert.equal(f.bridge.call(device, 'Acquire', []), DI_OK);
 });
+
+test('the mouse held exclusively is reported; a nonexclusive one and the keyboard are not',
+    ()=>{
+        // Windows hides the cursor while a program holds the mouse exclusively.
+        /** @type {boolean[]} */
+        const held = [];
+        const f = fixture({ windows: { 0x100: 'top' }, mouseHeld: value=>held.push(value) });
+        const held8 = device8(f, GUID_SysMouse, false);
+        assert.equal(f.bridge.call(held8, 'SetDataFormat', [dataFormat(f.memory, 16)]), DI_OK);
+        assert.equal(f.bridge.call(held8, 'SetCooperativeLevel', [0x100, 0x4 | 0x2]), DI_OK);
+        f.bridge.call(held8, 'Acquire', []);
+        f.bridge.call(held8, 'Unacquire', []);
+        assert.deepEqual(held, [], 'nonexclusive');
+        assert.equal(f.bridge.call(held8, 'SetCooperativeLevel', [0x100, 0x4 | 0x1]), DI_OK);
+        assert.equal(f.bridge.call(held8, 'Acquire', []), DI_OK);
+        assert.equal(f.bridge.call(held8, 'Acquire', []), 1, 'DI_NOEFFECT, no second report');
+        assert.equal(f.bridge.call(held8, 'Unacquire', []), DI_OK);
+        assert.deepEqual(held, [true, false]);
+        const keys = device8(f, GUID_SysKeyboard, false);
+        assert.equal(f.bridge.call(keys, 'SetDataFormat', [dataFormat(f.memory, 256)]), DI_OK);
+        assert.equal(f.bridge.call(keys, 'SetCooperativeLevel', [0x100, 0x4 | 0x1]), DI_OK);
+        f.bridge.call(keys, 'Acquire', []);
+        assert.deepEqual(held, [true, false], 'the keyboard hides nothing');
+    });
 
 test('an overflowed buffer answers DI_BUFFEROVERFLOW from DirectInput 8, a success', ()=>{
     // Before 8 the oldest events are dropped quietly (Wine's device8.c

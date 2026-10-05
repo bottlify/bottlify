@@ -541,3 +541,20 @@ test('a saved tree fills in what the hive lacks and leaves what it has as it is'
     assert.equal(valueOf(hive, HKEY_CLASSES_ROOT, '.rez', ''), 'TronData',
         'and a class registration is found where classes are');
 });
+
+test('the processor key names the processor the engine gives', ()=>{
+    const nameOf = (/** @type {any} */ hive)=>{
+        const local = /** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE));
+        const processor = hive.open(local, 'HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0');
+        const value = hive.getValue(processor, 'ProcessorNameString');
+        assert.equal(value.type, REG_SZ);
+        return new TextDecoder('latin1').decode(value.data).replace(/\0$/, '');
+    };
+    assert.equal(nameOf(createHive()), 'Bottlify x86');
+    const named = createHive({ processorName: 'Bottlify Cork x86 v1.2.3' });
+    assert.equal(nameOf(named), 'Bottlify Cork x86 v1.2.3');
+    // HARDWARE is the kernel's, written at every boot: a restored hive takes
+    // this engine's name rather than keeping the last run's.
+    named.fromJSON(createHive({ processorName: 'Other' }).toJSON());
+    assert.equal(nameOf(named), 'Bottlify Cork x86 v1.2.3');
+});

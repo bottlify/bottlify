@@ -66,6 +66,12 @@ const WM_MOVE = 0x0003;
 const WM_SIZE = 0x0005;
 /** WM_SIZE's wParam for a plain resize: not minimised, not maximised. */
 const SIZE_RESTORED = 0;
+const SIZE_MINIMIZED = 1;
+const SIZE_MAXIMIZED = 2;
+const WM_WINDOWPOSCHANGED = 0x0047;
+/** In WM_WINDOWPOSCHANGED's flags: the client area kept its size, its place. */
+const SWP_NOCLIENTSIZE = 0x0800;
+const SWP_NOCLIENTMOVE = 0x1000;
 const WM_NCCREATE = 0x0081;
 const WM_CREATE = 0x0001;
 const WM_CLOSE = 0x0010;
@@ -290,6 +296,7 @@ const MINIMISING = new Set([2, SW_MINIMIZE, 7]);
 /** The show commands that bring a minimised window back: SW_SHOWNORMAL, SW_RESTORE, SW_SHOWDEFAULT. */
 const RESTORING = new Set([1, 9, 10]);
 const WS_MINIMIZE = 0x20000000;
+const WS_MAXIMIZE = 0x01000000;
 const WS_POPUP = 0x80000000;
 const WS_EX_MDICHILD = 0x00000040;
 const ERROR_INVALID_MENU_HANDLE = 1401;
@@ -787,7 +794,7 @@ export function createWindowFunctions(host){
             const on = thread ?? host.callerThread?.();
             // The procedures on this side read the ANSI page.
             return record ? translated(host, message, false,
-                ansi=>watchDispatch(host, ansi, procedure(record, ansi, on))) : 0;
+                ansi=>watchDispatch(host, ansi, procedure(record, ansi, on)), record.style) : 0;
         }
         // A window's own procedure reads text in the encoding it was set in; a
         // procedure named by its address, as CallWindowProc names one, is
@@ -795,7 +802,8 @@ export function createWindowFunctions(host){
         const reads = unicode ?? (record && (address >>> 0) === record.wndProc
             ? record.unicode === true : message.unicode === true);
         return translated(host, message, reads,
-            text=>watchDispatch(host, text, host.dispatch(address >>> 0, text, thread)));
+            text=>watchDispatch(host, text, host.dispatch(address >>> 0, text, thread)),
+            record?.style);
     };
 
     /**
@@ -4198,6 +4206,27 @@ export function createWindowFunctions(host){
                 return 1;
             case WM_NCCALCSIZE:
                 return 0;
+            case WM_WINDOWPOSCHANGED: {
+                // What SetWindowPos did, told as the two messages a program
+                // lays itself out by: the client area's corner -- on the
+                // screen, or in the parent's client area for a child -- if it
+                // moved, and its size if that changed.
+                const word = (message.lParam >>> 0) === 0 ? null
+                    : host.readMemory((message.lParam >>> 0) + 24, 4);
+                const flags = word ? (word[0] | word[1] << 8 | word[2] << 16 | word[3] << 24) : 0;
+                const client = geometry.clientRect(record);
+                const parent = isChild(record) ? live(record.parent) : null;
+                const base = parent ? geometry.clientRect(parent) : { left: 0, top: 0 };
+                const x = client.left - base.left;
+                const y = client.top - base.top;
+                const moved = (flags & SWP_NOCLIENTMOVE) !== 0 ? 0 : send(record.hwnd, WM_MOVE, 0,
+                    ((y & 0xffff) << 16 | x & 0xffff) >>> 0, thread);
+                return andThen(moved, ()=>andThen((flags & SWP_NOCLIENTSIZE) !== 0 ? 0
+                    : send(record.hwnd, WM_SIZE, (record.style & WS_MINIMIZE) !== 0 ? SIZE_MINIMIZED
+                        : (record.style & WS_MAXIMIZE) !== 0 ? SIZE_MAXIMIZED : SIZE_RESTORED,
+                    (((client.bottom - client.top) & 0xffff) << 16
+                        | (client.right - client.left) & 0xffff) >>> 0, thread), ()=>0));
+            }
             case WM_NCPAINT:
                 paintFrame(record);
                 return 0;
@@ -4404,6 +4433,9 @@ export function createWindowFunctions(host){
      * @type {(handle: number) => import('./cursors.js').CursorPicture | null}
      */
     let pictureOf = ()=>null;
+    /** SetWindowPos as system.js places a window, for a caller on this side naming its thread.
+     * @type {(args: number[], thread?: unknown) => any} */
+    let placeWindow = ()=>0;
 
     const paint = createPaintFunctions({
         // The drawing with the system colours on it, which FillRect needs
@@ -4590,6 +4622,7 @@ export function createWindowFunctions(host){
     const mdi = createMdi({
         host,
         call: (name, args)=>/** @type {any} */ (table)[name].handler(args),
+        position: (args, thread)=>placeWindow(args, thread),
         send,
         create: (args, thread, unicode)=>createWindow(args, unicode === true, thread),
         show: (hwnd, cmdShow, thread)=>{
@@ -5161,6 +5194,10 @@ export function createWindowFunctions(host){
                 /** @param {(handle: number) => any} decode */
                 pictures: decode=>{
                     pictureOf = decode;
+                },
+                /** @param {(args: number[], thread?: unknown) => any} place */
+                positions: place=>{
+                    placeWindow = place;
                 },
                 shown, raise, restack, desktop: desktopWindow,
                 isDesktop: (/** @type {any} */ record)=>record !== null && record === desktop,

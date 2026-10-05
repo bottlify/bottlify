@@ -52,6 +52,30 @@ const MAX_CALLBACKS = 64;
  */
 
 /**
+ * `length` bytes from `rva` as the mapped image holds them: what the file
+ * has behind a section, and zeroes past its raw data or past its end.
+ *
+ * @param {Uint8Array} bytes @param {import('./pe.js').PeImage} image
+ * @param {number} rva @param {number} length
+ */
+function mappedBytes(bytes, image, rva, length){
+    const out = new Uint8Array(length);
+    const section = image.sections.find(each=>rva >= each.virtualAddress
+        && rva < each.virtualAddress + Math.max(each.virtualSize, each.rawSize));
+    if (!section)
+    {
+        // The headers, mapped as the file has them.
+        out.set(bytes.subarray(rva, Math.min(rva + length, image.sizeOfHeaders, bytes.length)));
+        return out;
+    }
+    const within = rva - section.virtualAddress;
+    const backed = section.rawOffset === 0 ? 0 : Math.max(0, section.rawSize - within);
+    const from = section.rawOffset + within;
+    out.set(bytes.subarray(from, Math.min(from + Math.min(length, backed), bytes.length)));
+    return out;
+}
+
+/**
  * Reads the TLS directory, or answers null when the image declares none.
  *
  * @param {Uint8Array} bytes  The raw file (not the mapped image).
@@ -80,24 +104,21 @@ export function readTls(bytes, image){
 
     const templateSize = endRva > startRva ? endRva - startRva : 0;
 
-    // Built zero-filled and copied into, rather than sliced out of the file: a
-    // template may reach into the tail of a section that has no bytes behind it,
-    // and those bytes are zeroes in a mapped image rather than absent.
-    const template = new Uint8Array(templateSize);
-    if (templateSize > 0)
-    {
-        const from = fileOffset(startRva);
-        template.set(bytes.subarray(from, Math.min(from + templateSize, bytes.length)));
-    }
+    // As the mapped image has them, not as the file does past them: a
+    // template may lie in the tail of a section that has no bytes behind it --
+    // a .tls of no raw data whatever, its file pointer the next section's --
+    // and those bytes are zeroes in a mapped image, not the next section's.
+    const template = mappedBytes(bytes, image, startRva, templateSize);
 
     /** @type {number[]} */
     const callbackRvas = [];
     if (callbacksRva !== 0)
     {
-        const table = fileOffset(callbacksRva);
+        const table = mappedBytes(bytes, image, callbacksRva, MAX_CALLBACKS * 4);
+        const entries = new DataView(table.buffer);
         for (let index = 0; index < MAX_CALLBACKS; index++)
         {
-            const callback = view.getUint32(table + index * 4, true);
+            const callback = entries.getUint32(index * 4, true);
             if (callback === 0)
             {
                 break;

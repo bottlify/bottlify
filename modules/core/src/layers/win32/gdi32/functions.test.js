@@ -2667,3 +2667,22 @@ test('EnumFontFamiliesW names a family in UTF-16 and hands back wide names', asy
         [{ face: 'Lucida Console', fullName: 'Lucida Console' }]);
     assert.equal(await fns.EnumFontFamiliesW.handler([0x9999, 0, ENUMPROC, 0]), 0, 'not a DC');
 });
+
+test('EnumFonts names a face as EnumFontFamilies names a family, in either width', async()=>{
+    const { fns, memory, seen, hdc } = withEnumeration(true);
+    assert.equal(fns.EnumFontsW.argBytes, 16);
+    const name = 'lucida console';
+    for (let index = 0; index <= name.length; index++)
+    {
+        memory.putU16(STRUCT + index * 2, index < name.length ? name.charCodeAt(index) : 0);
+    }
+    await fns.EnumFontsW.handler([hdc, STRUCT, ENUMPROC, 0x77]);
+    assert.deepEqual(seen.map(({ face, lParam })=>({ face, lParam })),
+        [{ face: 'Lucida Console', lParam: 0x77 }]);
+    assert.equal(await fns.EnumFontsW.handler([0x9999, 0, ENUMPROC, 0]), 0, 'not a DC');
+
+    const narrow = withEnumeration(false);
+    assert.equal(narrow.fns.EnumFontsA.argBytes, 16);
+    assert.equal(await narrow.fns.EnumFontsA.handler([narrow.hdc, 0, ENUMPROC, 0]), 1);
+    assert.ok(narrow.seen.map(one=>one.face).includes('Times New Roman'), 'no name: every face');
+});

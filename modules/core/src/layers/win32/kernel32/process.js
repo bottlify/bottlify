@@ -75,11 +75,16 @@ const CSD_VERSION = 20;
 const CURRENT_PROCESS = 0xffffffff;
 
 /**
- * Ticks per second for the performance counter. One megahertz: fine enough to
- * time a frame, coarse enough that the counter stays exact in a double for
- * longer than any process runs.
+ * Ticks per second for the performance counter unless `config.json` says another: a
+ * gigahertz, a tick a nanosecond. Every answer is later than the last by a tick at least, so the
+ * counter runs ahead of the clock by the reads a program makes between two
+ * moves of it; a tick coarser than a read -- a microsecond is -- lets a spin
+ * on the counter outrun time several times over. A guest does not make a
+ * thousand million reads a second, so at this rate the counter cannot get
+ * ahead by more than a read's worth. It stays exact in a double for about a
+ * hundred days of a process's life.
  */
-const PERFORMANCE_FREQUENCY = 1_000_000n;
+const PERFORMANCE_FREQUENCY = 1_000_000_000n;
 
 /**
  * Byte offsets within the block the clock routines read.
@@ -90,7 +95,7 @@ const PERFORMANCE_FREQUENCY = 1_000_000n;
  * where the guest can read it, and reading it is what the clock exports do.
  */
 export const CLOCK = {
-    /** The performance counter, 64-bit, in PERFORMANCE_FREQUENCY ticks. */
+    /** The performance counter, 64-bit, in performance-frequency ticks. */
     COUNTER: 0,
     /** Milliseconds since boot, as GetTickCount and timeGetTime answer it. */
     TICKS: 8,
@@ -120,6 +125,8 @@ const NORMAL_PRIORITY_CLASS = 0x20;
 
 /**
  * @typedef {Object} ProcessHost
+ * @property {number} [performanceFrequency]  Ticks a second of the performance counter
+ *     (`PERFORMANCE_FREQUENCY` by default); a whole number a 32-bit immediate holds.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
@@ -382,14 +389,15 @@ export function queryPerformanceCounterCode(at, trap, block){
  * this machine, so it is an immediate rather than a word of the block.
  *
  * @param {number} at @param {number} trap
+ * @param {number} [frequency]
  */
-export function queryPerformanceFrequencyCode(at, trap){
+export function queryPerformanceFrequencyCode(at, trap, frequency = Number(PERFORMANCE_FREQUENCY)){
     const slow = 29;
     return new Uint8Array([
         0x8b, 0x4c, 0x24, 0x04,                                      // mov ecx, [esp+4]
         0x85, 0xc9,                                                  // test ecx, ecx
         0x74, slow - 8,                                              // jz slow
-        0xc7, 0x01, ...dword(Number(PERFORMANCE_FREQUENCY)),         // mov dword [ecx], 1000000
+        0xc7, 0x01, ...dword(frequency),                             // mov dword [ecx], frequency
         0xc7, 0x41, 0x04, ...dword(0),                               // mov dword [ecx+4], 0
         0xb8, ...dword(1),                                           // mov eax, 1
         0xc2, 0x04, 0x00,                                            // ret 4
@@ -422,6 +430,13 @@ export function tickCountCode(block){
  * @param {ProcessHost} host
  */
 export function createProcessFunctions(host){
+    const performanceFrequency = host.performanceFrequency ?? Number(PERFORMANCE_FREQUENCY);
+    if (!Number.isInteger(performanceFrequency) || performanceFrequency < 1
+        || performanceFrequency > 0xffffffff)
+    {
+        throw new Error(`kernel32: the performance frequency is a whole number of ticks `
+            + `from 1 to 4294967295 a second, not ${performanceFrequency}`);
+    }
     /**
      * Slot bookkeeping is process-wide, the values in them are not.
      *
@@ -556,7 +571,7 @@ export function createProcessFunctions(host){
     const clockView = new DataView(clockBytes.buffer);
     /** @param {number} milliseconds */
     const ticksOf = milliseconds=>BigInt(
-        Math.round(milliseconds * Number(PERFORMANCE_FREQUENCY) / 1000));
+        Math.round(milliseconds * performanceFrequency / 1000));
     /** The counter's last answer, where there is no block to keep it in. */
     let lastCount = 0n;
     /**
@@ -656,7 +671,7 @@ export function createProcessFunctions(host){
             counter: place('<performance-counter>', 'QueryPerformanceCounter',
                 (at, trap)=>queryPerformanceCounterCode(at, trap, block)),
             frequency: place('<performance-frequency>', 'QueryPerformanceFrequency',
-                queryPerformanceFrequencyCode),
+                (at, trap)=>queryPerformanceFrequencyCode(at, trap, performanceFrequency)),
             ticks: place('<tick-count>', 'GetTickCount', ()=>tickCountCode(block)),
         };
         return clocks;
@@ -1018,6 +1033,32 @@ export function createProcessFunctions(host){
             },
         },
 
+        /**
+         * BOOL GetSystemTimeAdjustment(PDWORD lpTimeAdjustment, PDWORD lpTimeIncrement,
+         *     PBOOL lpTimeAdjustmentDisabled)
+         *
+         * The system clock here moves a millisecond at a time and nothing
+         * adjusts it: an increment of 10 000 hundreds of nanoseconds, the
+         * same added at each, and adjustment disabled.
+         */
+        GetSystemTimeAdjustment: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([adjustment, increment, disabled])=>{
+                // Each is a DWORD or a BOOL: four bytes, no more.
+                for (const [pointer, value] of [[adjustment, 10000], [increment, 10000],
+                    [disabled, 1]])
+                {
+                    if ((pointer >>> 0) !== 0)
+                    {
+                        host.writeMemory(pointer >>> 0, Uint8Array.of(value & 0xff,
+                            value >> 8 & 0xff, value >> 16 & 0xff, value >>> 24));
+                    }
+                }
+                return 1;
+            },
+        },
+
         /** BOOL QueryPerformanceCounter(LARGE_INTEGER *lpPerformanceCount) */
         QueryPerformanceCounter: {
             argBytes: 4,
@@ -1034,7 +1075,7 @@ export function createProcessFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                writeU64(pointer >>> 0, PERFORMANCE_FREQUENCY);
+                writeU64(pointer >>> 0, BigInt(performanceFrequency));
                 return 1;
             },
             ...clockGuest('frequency'),

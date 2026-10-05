@@ -1091,6 +1091,14 @@ export function createCorkHost(config){
         return ran;
     };
 
+    /** Takes the exact-quadword marks (`x87Exact`) off registers the host wrote. @param {number} mask */
+    const dropExact = mask=>{
+        if (layout.x87Exact !== undefined && layout.x87Exact >= 0)
+        {
+            block[layout.x87Exact] &= ~mask;
+        }
+    };
+
     const fpu = {
         /** @param {number} value */
         setResult(value){
@@ -1105,6 +1113,7 @@ export function createCorkHost(config){
                 blockView.setUint16(layout.x87Status, status | 0x201, true);
             }
             blockView.setFloat64(x87At(top), held ? -Infinity : value, true);
+            dropExact(1 << top);
         },
         /** @param {number} index */
         get(index){
@@ -1345,6 +1354,7 @@ export function createCorkHost(config){
          */
         restoreX87State(state){
             block.set(state.raw, layout.x87);
+            dropExact(0xff);
             block[layout.x87Top] = state.top & 7;
             block[layout.x87Empty] = state.empty & 0xff;
             blockView.setUint16(layout.x87Control, state.control, true);

@@ -5,10 +5,11 @@
  */
 
 /**
- * comctl32 — image lists (imagelist.js), the mouse-tracking request and
- * property sheets (propsheet.js).
+ * comctl32 — image lists (imagelist.js), the mouse-tracking request,
+ * property sheets (propsheet.js) and flat scroll bars (flatsb.js).
  */
 
+import { createFlatScrollBarFunctions } from './flatsb.js';
 import { createImageListFunctions } from './imagelist.js';
 import { createPropertySheetFunctions } from './propsheet.js';
 
@@ -120,5 +121,6 @@ export function createComctlFunctions(host){
 
         ...createImageListFunctions(host),
         ...createPropertySheetFunctions(host),
+        ...createFlatScrollBarFunctions(host),
     };
 }

@@ -34,6 +34,56 @@ const WM_DEADCHAR = 0x0103;
 const WM_SYSCHAR = 0x0106;
 const WM_SYSDEADCHAR = 0x0107;
 
+// The list box's and the combo box's messages that hand over a string, and
+// the two that fill a buffer with an item's: a string only where the control
+// keeps strings (`keepsStrings`), its items' data otherwise.
+const LB_ADDSTRING = 0x0180;
+const LB_INSERTSTRING = 0x0181;
+const LB_GETTEXT = 0x0189;
+const LB_GETTEXTLEN = 0x018a;
+const LB_SELECTSTRING = 0x018c;
+const LB_DIR = 0x018d;
+const LB_FINDSTRING = 0x018f;
+const LB_FINDSTRINGEXACT = 0x01a2;
+const CB_ADDSTRING = 0x0143;
+const CB_DIR = 0x0145;
+const CB_GETLBTEXT = 0x0148;
+const CB_GETLBTEXTLEN = 0x0149;
+const CB_INSERTSTRING = 0x014a;
+const CB_FINDSTRING = 0x014c;
+const CB_SELECTSTRING = 0x014d;
+const CB_FINDSTRINGEXACT = 0x0158;
+/** The messages a list or combo box takes an item's string in, where it keeps strings. */
+const ITEM_STRING_IN = new Set([LB_ADDSTRING, LB_INSERTSTRING, LB_SELECTSTRING, LB_FINDSTRING,
+    LB_FINDSTRINGEXACT, CB_ADDSTRING, CB_INSERTSTRING, CB_FINDSTRING, CB_SELECTSTRING,
+    CB_FINDSTRINGEXACT]);
+/** The messages whose string is a path, whatever the box keeps. */
+const PATH_IN = new Set([LB_DIR, CB_DIR]);
+/** The messages that fill a buffer with an item's string, and the length each is asked. */
+const ITEM_STRING_OUT = new Map([[LB_GETTEXT, LB_GETTEXTLEN], [CB_GETLBTEXT, CB_GETLBTEXTLEN]]);
+const LBS_OWNERDRAW = 0x0030;
+const LBS_HASSTRINGS = 0x0040;
+const CBS_OWNERDRAW = 0x0030;
+const CBS_HASSTRINGS = 0x0200;
+
+/**
+ * Whether a list or combo box keeps strings, so that its item messages carry
+ * one: it draws its items itself, or it is owner-drawn and asked to keep them.
+ * The message says which kind of box it is; an unknown style keeps none, and
+ * the pointer crosses as it came.
+ *
+ * @param {number} message @param {number | undefined} style
+ */
+const keepsStrings = (message, style)=>{
+    if (style === undefined)
+    {
+        return false;
+    }
+    return message < LB_ADDSTRING
+        ? (style & CBS_OWNERDRAW) === 0 || (style & CBS_HASSTRINGS) !== 0
+        : (style & LBS_OWNERDRAW) === 0 || (style & LBS_HASSTRINGS) !== 0;
+};
+
 /** CREATESTRUCT: the two string pointers in it, and its size. */
 const CREATESTRUCT_NAME = 36;
 const CREATESTRUCT_CLASS = 40;
@@ -188,9 +238,10 @@ const andThen = (value, then)=>(typeof value?.then === 'function'
  * @param {M} message
  * @param {boolean} toUnicode  the encoding of the procedure called
  * @param {(message: M) => number | Promise<number>} call
+ * @param {number} [style]  the window's, for whether a list or combo box keeps strings
  * @returns {number | Promise<number>}
  */
-export function translated(memory, message, toUnicode, call){
+export function translated(memory, message, toUnicode, call, style = undefined){
     const fromUnicode = message.unicode === true;
     /** @type {M} */
     const converted = { ...message, unicode: toUnicode };
@@ -238,6 +289,34 @@ export function translated(memory, message, toUnicode, call){
                 into=>andThen(call({ ...converted, lParam: into }), ()=>writeText(memory,
                     message.lParam, readText(memory, into, toUnicode, room), room, fromUnicode)));
         }
+        case LB_GETTEXT:
+        case CB_GETLBTEXT:
+        {
+            if ((message.lParam >>> 0) === 0 || !keepsStrings(message.message >>> 0, style))
+            {
+                return call(converted);
+            }
+            if (!memory.allocate)
+            {
+                return -1;
+            }
+            // The caller's buffer is as long as the item, as the length message
+            // told it in its own encoding: the item is fetched in the
+            // procedure's into one as long as that one says, and copied over.
+            const length = /** @type {number} */ (ITEM_STRING_OUT.get(message.message >>> 0));
+            return andThen(call({ ...converted, message: length, lParam: 0 }), count=>{
+                if ((count | 0) < 0)
+                {
+                    return count;
+                }
+                const size = ((count | 0) + 1) * 2;
+                return lending(memory, size, ()=>new Uint8Array(size),
+                    into=>andThen(call({ ...converted, lParam: into }), answer=>((answer | 0) < 0
+                        ? answer
+                        : writeText(memory, message.lParam, readText(memory, into, toUnicode),
+                            MAX_TEXT, fromUnicode))));
+            });
+        }
         case WM_NCCREATE:
         case WM_CREATE:
         {
@@ -250,7 +329,21 @@ export function translated(memory, message, toUnicode, call){
                 address=>call({ ...converted, lParam: address }));
         }
         default:
+        {
+            const kind = message.message >>> 0;
+            if ((message.lParam >>> 0) !== 0
+                && (PATH_IN.has(kind) || ITEM_STRING_IN.has(kind) && keepsStrings(kind, style)))
+            {
+                if (!memory.allocate)
+                {
+                    return -1;
+                }
+                const bytes = textBytes(readText(memory, message.lParam, fromUnicode), toUnicode);
+                return lending(memory, bytes.length, ()=>bytes,
+                    text=>call({ ...converted, lParam: text }));
+            }
             return call(converted);
+        }
     }
 }
 

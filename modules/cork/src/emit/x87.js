@@ -866,6 +866,10 @@ export function planStack(region, states, cut, speculate, callReturn = false){
  * @property {number} exactNaN  those of them that may hold the indefinite instead, where the
  *     push or the copy that made them was not known to find its registers as it needed
  * @property {number[]} shadow  the i64 local shadowing each x87 local, -1 until one is needed
+ * @property {number} dyn  in a region that tracks them, the i32 local of the locals that hold
+ *     a quadword `fild`'s integer at run time, whichever block or executor loaded it: taken
+ *     from the state block where the region is entered (`layout.x87Exact`), kept by every
+ *     instruction as `exact` is, and left there at every exit; -1 elsewhere
  */
 
 /**
@@ -979,6 +983,7 @@ export function prepareX87(e, entryTop, checked = false,
             controlWritten: false, checkedPrecision: -1, known: unknown(), shapes: [], needs: [],
             stack: NOTHING,
             guards: 0, relaxedReads: 0, tracksExact: false, exact: 0, exactNaN: 0, shadow: [],
+            dyn: -1,
         };
     }
     const { hasMmx, tracksExact, states, ends, cut, shapes, needs } = analysis;
@@ -994,6 +999,21 @@ export function prepareX87(e, entryTop, checked = false,
         e.localTypes.push(ValType.i32);
         form = base + 13;
     }
+    // A quadword held across a block boundary -- a copy that keeps its first and
+    // last eight bytes on the stack around a loop -- or loaded before the region
+    // was entered is exact only at run time.
+    let dyn = -1;
+    const shadow = new Array(8).fill(-1);
+    if (tracksExact)
+    {
+        dyn = e.localTypes.length + STATE_PARAMS;
+        e.localTypes.push(ValType.i32);
+        for (let k = 0; k < 8; k++)
+        {
+            shadow[k] = e.localTypes.length + STATE_PARAMS;
+            e.localTypes.push(ValType.i64);
+        }
+    }
     // Known before any block is compiled: blocks are compiled in their order,
     // not the order they run in, and a call compiled ahead of the block that
     // loads the word would hand its callee the word the region came in with,
@@ -1004,7 +1024,7 @@ export function prepareX87(e, entryTop, checked = false,
         active: true, hasMmx, base, form, temp: base + 8, temp2: base + 9, temp3: base + 10,
         states, ends, cut, current: null, landed: null, controlWritten, checkedPrecision: -1,
         known: unknown(), shapes, needs, stack: NOTHING, guards: 0, relaxedReads: 0,
-        tracksExact, exact: 0, exactNaN: 0, shadow: new Array(8).fill(-1),
+        tracksExact, exact: 0, exactNaN: 0, shadow, dyn,
     };
 }
 
@@ -1141,7 +1161,29 @@ export function x87LoadRegisters(e, needed){
             e.close();
         }
     }
+    if (x.dyn >= 0)
+    {
+        const exactAt = exactPlace(layout);
+        if (exactAt < 0)
+        {
+            b.i32const(0).localSet(x.dyn);
+            return;
+        }
+        b.i32const(0).load('i32_8u', { offset: exactAt }).localSet(x.dyn);
+        for (let k = 0; k < 8; k++)
+        {
+            b.i32const(0).load('i64', { offset: layout.x87 + k * 16 + 8 }).localSet(x.shadow[k]);
+        }
+    }
 }
+
+/**
+ * Where the state block keeps the exact quadwords' marks, or -1: a layout of
+ * doubles only, the quadword in the eight bytes past each.
+ *
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ */
+const exactPlace = layout=>(layout.x87Format === 'f64' ? layout.x87Exact ?? -1 : -1);
 
 /**
  * The epilogue: top, the masks and words, and every dirty register back
@@ -1194,6 +1236,38 @@ export function x87StoreRegisters(e, written){
         }
         e.close();
     }
+    if (x.dyn >= 0 && exactPlace(layout) >= 0)
+    {
+        // What the region knows at run time, its own quadwords and the ones
+        // it came in with alike.
+        b.i32const(0).localGet(x.dyn).store('i32_8', { offset: exactPlace(layout) });
+        for (let k = 0; k < 8; k++)
+        {
+            b.i32const(0).localGet(x.shadow[k]).store('i64', { offset: layout.x87 + k * 16 + 8 });
+        }
+        return;
+    }
+    x87DropExact(e, ()=>b.localGet(Local.x87Dirty));
+}
+
+/**
+ * Takes the exact-quadword marks (`layout.x87Exact`) off the registers this
+ * exit stores: an interpreter's `fild` before the region left its integer in
+ * the block, and a register the region wrote holds something else now. The
+ * region's own exact quadwords are not left there; it stores them itself.
+ *
+ * @param {E} e @param {() => void} mask  Pushes the registers stored, a bit each.
+ */
+export function x87DropExact(e, mask){
+    const { b, layout } = e;
+    const at = exactPlace(layout);
+    if (at < 0)
+    {
+        return;
+    }
+    b.i32const(0).i32const(0).load('i32_8u', { offset: at });
+    mask();
+    b.i32const(-1).op(I32.xor).op(I32.and).store('i32_8', { offset: at });
 }
 
 /**
@@ -1671,6 +1745,9 @@ export function emitX87(e, instruction, flagsLive){
     // The exact quadwords this instruction makes, from a load or a copy.
     let madeExact = 0;
     let madeNaN = 0;
+    // A copy of a register whose exactness is known only at run time: from, to.
+    /** @type {[number, number] | null} */
+    let copiedDyn = null;
     /** The i64 local beside x87 local k. @param {number} k */
     const shadowOf = k=>{
         if (x.shadow[k] < 0)
@@ -1690,6 +1767,11 @@ export function emitX87(e, instruction, flagsLive){
     const copyExact = (from, to)=>{
         if ((x.exact & 1 << from) === 0)
         {
+            if (x.dyn >= 0 && from !== to)
+            {
+                b.localGet(x.shadow[from]).localSet(x.shadow[to]);
+                copiedDyn = [from, to];
+            }
             return;
         }
         b.localGet(x.shadow[from]).localSet(shadowOf(to));
@@ -1714,6 +1796,23 @@ export function emitX87(e, instruction, flagsLive){
             const popped = writes === null ? 0 : writes.popped;
             x.exact = ((x.exact & kept) | madeExact) & ~popped;
             x.exactNaN = ((x.exactNaN & kept) | madeNaN) & x.exact;
+            if (x.dyn >= 0 && (writes === null || ~kept !== 0 || popped !== 0 || madeExact !== 0
+                || copiedDyn !== null))
+            {
+                // The same at run time, a copy carrying the mark its source has.
+                b.localGet(x.dyn).i32const(kept).op(I32.and);
+                if (copiedDyn !== null)
+                {
+                    const [from, to] = copiedDyn;
+                    b.localGet(x.dyn).i32const(from).op(I32.shrU).i32const(1).op(I32.and)
+                        .i32const(to).op(I32.shl).op(I32.or);
+                }
+                if (madeExact !== 0)
+                {
+                    b.i32const(madeExact).op(I32.or);
+                }
+                b.i32const(~popped).op(I32.and).localSet(x.dyn);
+            }
         }
         return true;
     };
@@ -2170,6 +2269,29 @@ export function emitX87(e, instruction, flagsLive){
                     setStatus(Status.IE);
                     e.close();
                 }
+            }
+            else if (dst.size === 8 && x.dyn >= 0)
+            {
+                // Exact at run time: the mark the run left, a value that is the
+                // quadword's double (an indefinite is not), and no stack fault.
+                b.localGet(x.dyn).i32const(1 << localOf(0)).op(I32.and).i32const(0).op(I32.ne)
+                    .localGet(st(0)).localGet(x.shadow[localOf(0)]).op(F64.convertI64S)
+                    .op(F64.eq).op(I32.and);
+                if (!clear)
+                {
+                    b.localGet(Local.t1).op(I32.eqz).op(I32.and);
+                }
+                e.openIf('exactRun', EMPTY);
+                prepare(e, dst);
+                noteStore(e, 8);
+                b.localGet(Local.addr).localGet(x.shadow[localOf(0)])
+                    .store('i64', { offset: e.layout.ramBase });
+                b.else();
+                b.localGet(st(0));
+                orIndefinite();
+                b.localSet(x.temp2);
+                storeInt(e, dst, x.temp2, op === 'fisttp');
+                e.close();
             }
             else
             {

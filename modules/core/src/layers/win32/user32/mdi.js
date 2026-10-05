@@ -82,6 +82,7 @@ const GWL_STYLE = -16;
 const CW_USEDEFAULT = 0x80000000;
 const SWP_NOSIZE = 0x0001;
 const SWP_NOMOVE = 0x0002;
+const SWP_NOZORDER = 0x0004;
 const SWP_NOACTIVATE = 0x0010;
 const VK_CONTROL = 0x11;
 const VK_F4 = 0x73;
@@ -112,6 +113,7 @@ const inTurn = steps=>steps.reduce((before, step)=>then(before, ()=>step()), 0);
  *             writeMemory: (address: number, data: Uint8Array) => void,
  *             keyState?: (key: number) => number },
  *     call: (name: string, args: number[]) => any,
+ *     position: (args: number[], thread: unknown) => Answer,
  *     send: (hwnd: number, message: number, wParam: number, lParam: number,
  *         thread?: unknown) => Answer,
  *     create: (args: number[], thread: unknown, unicode?: boolean) => Answer,
@@ -121,10 +123,12 @@ const inTurn = steps=>steps.reduce((before, step)=>then(before, ()=>step()), 0);
  *     defWindowProc: (record: any, message: any, thread?: unknown) => Answer,
  *     sizeOf: (hwnd: number) => { width: number, height: number },
  * }} options
- *     `call` is for the calls that reach no procedure; the rest name the thread.
+ *     `call` is for the calls that reach no procedure; the rest name the thread,
+ *     `position` SetWindowPos's arguments placed as it places them.
  */
 export function createMdi(options){
-    const { host, call, send, create, show, focus, destroy, defWindowProc, sizeOf } = options;
+    const { host, call, position, send, create, show, focus, destroy, defWindowProc, sizeOf }
+        = options;
     /**
      * Each client's state, by its window: the Window menu, the first child's
      * id, the children by id, the active one, their stacking order (the
@@ -167,8 +171,8 @@ export function createMdi(options){
                 return 0;
             },
             ()=>(child !== 0
-                ? call('SetWindowPos', [child, 0, 0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE]) : 0),
+                ? position([child, 0, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE], thread) : 0),
             ()=>(child !== 0 ? send(child, WM_NCACTIVATE, 1, 0, thread) : 0),
             ()=>(child !== 0 ? send(child, WM_MDIACTIVATE, old, child, thread) : 0),
             ()=>(child !== 0 ? focus(child, thread) : 0),
@@ -429,8 +433,8 @@ export function createMdi(options){
                     ? then(activate(client, child, thread), ()=>0) : null;
             }
             case WM_SIZE:
-                return then(call('MoveWindow', [client, 0, 0, lParam & 0xffff,
-                    lParam >>> 16 & 0xffff, 1]), ()=>0);
+                return then(position([client, 0, 0, 0, lParam & 0xffff,
+                    lParam >>> 16 & 0xffff, SWP_NOZORDER | SWP_NOACTIVATE], thread), ()=>0);
             case WM_SETFOCUS:
                 return then(focus(client, thread), ()=>0);
             default:

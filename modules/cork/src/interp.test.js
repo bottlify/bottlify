@@ -313,10 +313,10 @@ test('blockState keeps its fields fast and sees code rewritten in place', ()=>{
     assert.equal(state.reg[0], 7);
 });
 
-test('a quadword fild\'s exact value does not outlive a sync, where other code may write it', ()=>{
-    // fild qword [0x2000] of 2^53 + 1 interpreted; then the register rewritten
-    // in the block to 2^53, the double the quadword rounds to, as translated
-    // code may; then fistp qword [0x2008] interpreted: 2^53, not the quadword.
+test('a quadword fild\'s exact value outlives a sync, until a writer takes its mark off', ()=>{
+    // fild qword [0x2000] of 2^53 + 1 interpreted, then fistp qword [0x2008] in
+    // another run: a run, or a thread's slice, may end between the two, and the
+    // processor stores the quadword it loaded.
     const layout = ownLayout({ ramSize: 1 << 20 });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
     const view = new DataView(memory.buffer);
@@ -325,26 +325,35 @@ test('a quadword fild\'s exact value does not outlive a sync, where other code m
     view.setUint16(layout.x87Control, 0x37f, true);
     view.setBigInt64(layout.ramBase + 0x2000, (1n << 53n) + 1n, true);
     ram.set([0xdf, 0x2d, 0x00, 0x20, 0, 0, 0xf4, 0xdf, 0x3d, 0x08, 0x20, 0, 0, 0xf4], 0x1000);
+    const exactAt = /** @type {number} */ (layout.x87Exact);
     const state = blockState({ memory, layout });
-    state.syncIn();
-    state.eip = 0x1000;
-    interpret(state, 10);
-    state.syncOut();
-    view.setFloat64(layout.x87 + 7 * 16, 2 ** 53, true);
-    state.syncIn();
-    state.eip = 0x1007;
-    state.halted = false;
-    interpret(state, 10);
-    state.syncOut();
-    assert.equal(view.getBigInt64(layout.ramBase + 0x2008, true), 1n << 53n);
-    // In one run, the quadword itself.
-    ram.set([0xdf, 0x2d, 0x00, 0x20, 0, 0, 0xdf, 0x3d, 0x08, 0x20, 0, 0, 0xf4], 0x1100);
-    state.syncIn();
-    state.eip = 0x1100;
-    state.halted = false;
-    interpret(state, 20);
-    state.syncOut();
-    assert.equal(view.getBigInt64(layout.ramBase + 0x2008, true), (1n << 53n) + 1n);
+    /** fild, then fistp in a run of its own, `between` done to the block in between. @param {() => void} between */
+    const split = between=>{
+        state.syncIn();
+        state.eip = 0x1000;
+        state.halted = false;
+        interpret(state, 10);
+        state.syncOut();
+        between();
+        state.syncIn();
+        state.eip = 0x1007;
+        state.halted = false;
+        interpret(state, 10);
+        state.syncOut();
+        return view.getBigInt64(layout.ramBase + 0x2008, true);
+    };
+    assert.equal(split(()=>{}), (1n << 53n) + 1n, 'the quadword, across the runs');
+    assert.equal(view.getUint8(exactAt), 0, 'and the fistp popped its mark');
+    assert.equal(split(()=>{
+        assert.equal(view.getUint8(exactAt), 1 << 7, 'the block keeps the mark');
+        assert.equal(view.getBigInt64(layout.x87 + 7 * 16 + 8, true), (1n << 53n) + 1n,
+            'and the quadword past the register\'s double');
+        // A writer of the register -- translated code, the host -- takes its mark off.
+        view.setFloat64(layout.x87 + 7 * 16, 2 ** 53, true);
+        view.setUint8(exactAt, 0);
+    }), 1n << 53n, 'what was written, rounded');
+    assert.equal(split(()=>view.setFloat64(layout.x87 + 7 * 16, 3, true)), 3n,
+        'a value that is not the quadword\'s double is not stored as it, mark or not');
 });
 
 test('fxsave writes the x87 and SSE image and fxrstor reads it back', ()=>{

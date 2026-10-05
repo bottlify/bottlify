@@ -103,6 +103,38 @@ test('a section whose PointerToRawData is zero maps as zeros, whatever its SizeO
         new Array(512).fill(0), 'and not the headers at offset zero');
 });
 
+test('a section maps its virtual size to the section boundary, not raw data past it', ()=>{
+    // A self-extractor keeps its archive in the raw data of a resource
+    // section a few pages long and reads it from the file; the raw size runs
+    // far past the image's end, and none of that is mapped.
+    const header = new DataView(file.buffer, file.byteOffset).getUint32(0x3c, true);
+    const sectionTable = header + 24
+        + new DataView(file.buffer, file.byteOffset).getUint16(header + 20, true);
+    const original = parsePe(file).sections[0];
+    const patched = new Uint8Array(original.rawOffset + 0x5000);
+    patched.set(file);
+    for (let at = file.length; at < patched.length; at++)
+    {
+        patched[at] = at & 0xff;
+    }
+    const view = new DataView(patched.buffer);
+    view.setUint32(sectionTable + 16, 0x5000, true);
+
+    const { bytes, image } = mapImage(patched, 0x400000);
+    assert.equal(bytes.length, image.sizeOfImage, 'the image keeps its own size');
+    const end = original.virtualAddress + 0x1000;
+    assert.deepEqual([...bytes.subarray(end - 4, end)],
+        [...patched.subarray(original.rawOffset + 0x1000 - 4, original.rawOffset + 0x1000)],
+        'the raw data is mapped to the page its virtual size ends in');
+
+    // A virtual size of zero is the raw size, as older linkers wrote it.
+    view.setUint32(sectionTable + 8, 0, true);
+    view.setUint32(sectionTable + 16, 0x200, true);
+    const zero = mapImage(patched, 0x400000).bytes;
+    assert.deepEqual([...zero.subarray(original.virtualAddress, original.virtualAddress + 0x200)],
+        [...patched.subarray(original.rawOffset, original.rawOffset + 0x200)]);
+});
+
 test('an image without relocations refuses to move', ()=>{
     const image = parsePe(file);
     assert.equal(image.relocatable, false,

@@ -810,6 +810,110 @@ test('a snapshot names the image in the ANSI page', ()=>{
         [0x80, 0x99, 0x97, 0xe9, 0x2e, 0x65, 0x78, 0x65, 0]);
 });
 
+test('a snapshot taken with its modules lists them in either width, the image first', ()=>{
+    // What a crash reporter and a debugging library walk to name the
+    // modules of the process: MODULEENTRY32 is 548 bytes, the wide one
+    // 1064, the id always one, the base both the address and the handle.
+    const { fns, host, written, errors } = setup();
+    host.processId = 0x2a4;
+    host.modules = ()=>[
+        { name: 'Game.exe', base: 0x400000, size: 0x3d000, path: 'C:\\Games\\Title\\Game.exe' },
+        { name: 'KERNEL32.dll', base: 0x7c800000, size: 0x10000 },
+    ];
+    const bytes = new Uint8Array(0x1000);
+    const memory = new DataView(bytes.buffer);
+    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    memory.setUint32(0x100, 548, true);
+    memory.setUint32(0x400, 1064, true);
+    const ansi = (/** @type {Uint8Array} */ entry, /** @type {number} */ at)=>
+        new TextDecoder().decode(entry.subarray(at, entry.indexOf(0, at)));
+
+    const snapshot = fns.CreateToolhelp32Snapshot.handler([0x8, 0]);
+    assert.equal(fns.Module32First.handler([snapshot, 0x100]), 1);
+    let entry = /** @type {Uint8Array} */ (written.get(0x100));
+    let view = new DataView(entry.buffer, entry.byteOffset);
+    assert.deepEqual([0, 4, 8, 20, 24, 28].map(at=>view.getUint32(at, true)),
+        [548, 1, 0x2a4, 0x400000, 0x3d000, 0x400000]);
+    assert.equal(ansi(entry, 32), 'Game.exe', 'szModule');
+    assert.equal(ansi(entry, 288), 'C:\\Games\\Title\\Game.exe', 'szExePath');
+
+    assert.equal(fns.Module32Next.handler([snapshot, 0x100]), 1);
+    entry = /** @type {Uint8Array} */ (written.get(0x100));
+    assert.equal(ansi(entry, 32), 'KERNEL32.dll');
+    assert.equal(ansi(entry, 288), 'C:\\WINDOWS\\system32\\KERNEL32.dll',
+        'a module of the system is where the system keeps it');
+    assert.equal(fns.Module32Next.handler([snapshot, 0x100]), 0);
+    assert.equal(errors.at(-1), 18, 'ERROR_NO_MORE_FILES');
+
+    assert.equal(fns.Module32FirstW.handler([snapshot, 0x400]), 1);
+    entry = /** @type {Uint8Array} */ (written.get(0x400));
+    view = new DataView(entry.buffer, entry.byteOffset);
+    assert.equal(view.getUint32(0, true), 1064);
+    const wide = (/** @type {number} */ at, /** @type {number} */ length)=>String.fromCharCode(
+        ...Array.from({ length }, (_, i)=>view.getUint16(at + i * 2, true)));
+    assert.equal(wide(32, 9), 'Game.exe\0');
+    assert.equal(wide(544, 24), 'C:\\Games\\Title\\Game.exe\0');
+    assert.equal(fns.Module32NextW.handler([snapshot, 0x400]), 1);
+
+    memory.setUint32(0x100, 296, true);
+    assert.equal(fns.Module32First.handler([snapshot, 0x100]), 0, 'too small an entry');
+    assert.equal(errors.at(-1), 122, 'ERROR_INSUFFICIENT_BUFFER');
+    memory.setUint32(0x100, 548, true);
+    const processes = fns.CreateToolhelp32Snapshot.handler([0x2, 0]);
+    assert.equal(fns.Module32First.handler([processes, 0x100]), 0, 'taken without modules');
+    assert.equal(errors.at(-1), 18);
+    assert.deepEqual([fns.Module32First, fns.Module32Next, fns.Module32FirstW,
+        fns.Module32NextW].map(fn=>fn.argBytes), [8, 8, 8, 8]);
+});
+
+test('no heap is listed in a snapshot, and one that asked for heaps says so', ()=>{
+    const { fns, host, errors } = setup();
+    /** @type {string[]} */
+    const said = [];
+    host.divergence = api=>said.push(api);
+    const heaps = fns.CreateToolhelp32Snapshot.handler([0x1, 0]);
+    assert.equal(fns.Heap32ListFirst.handler([heaps, 0x100]), 0);
+    assert.equal(errors.at(-1), 18, 'ERROR_NO_MORE_FILES');
+    assert.deepEqual(said, ['Heap32ListFirst']);
+    assert.equal(fns.Heap32ListNext.handler([heaps, 0x100]), 0);
+    assert.equal(fns.Heap32First.handler(), 0);
+    assert.equal(fns.Heap32Next.handler(), 0);
+    assert.equal(errors.at(-1), 18);
+    assert.equal(fns.Heap32ListFirst.handler([0x9999, 0x100]), 0, 'not a snapshot');
+    assert.equal(errors.at(-1), 6, 'ERROR_INVALID_HANDLE');
+    assert.deepEqual([fns.Heap32ListFirst, fns.Heap32ListNext, fns.Heap32First,
+        fns.Heap32Next].map(fn=>fn.argBytes), [8, 8, 12, 4]);
+});
+
+test('PulseEvent releases whom it can and leaves the event unsignalled', ()=>{
+    // synch.c's test_event: every waiter of a manual-reset event, one of an
+    // auto-reset one, and with nobody waiting the event as it was found.
+    const { fns, kernel } = setup();
+    const state = kernel.state;
+    const manual = fns.CreateEventA.handler([0, 1, 0, 0]);
+    const automatic = fns.CreateEventA.handler([0, 0, 0, 0]);
+    assert.equal(fns.PulseEvent.argBytes, 4);
+
+    assert.equal(fns.PulseEvent.handler([manual]), 1);
+    assert.equal(fns.WaitForSingleObject.handler([manual, 0]), 0x102, 'WAIT_TIMEOUT: still unset');
+
+    const woken = ()=>state.woken.map(thread=>thread.name);
+    const manualObject = kernel.handles.resolve(manual, 'event');
+    kernel.wait(manualObject, { name: 'first' });
+    kernel.wait(manualObject, { name: 'second' });
+    assert.equal(fns.PulseEvent.handler([manual]), 1);
+    assert.deepEqual(woken(), ['first', 'second'], 'every waiter');
+    assert.equal(manualObject.signalled, false, 'and unsignalled after');
+
+    const automaticObject = kernel.handles.resolve(automatic, 'event');
+    kernel.wait(automaticObject, { name: 'third' });
+    kernel.wait(automaticObject, { name: 'fourth' });
+    assert.equal(fns.PulseEvent.handler([automatic]), 1);
+    assert.deepEqual(woken(), ['first', 'second', 'third'], 'one waiter');
+    assert.equal(automaticObject.signalled, false);
+    assert.equal(fns.PulseEvent.handler([0x9999]), 0, 'not an event');
+});
+
 test('arming a timer with a waiter already parked releases it at the due time', ()=>{
     // The deadlock in one line: thread B waits before thread A arms. The
     // signal is a property of the object and the clock, so the arm is what

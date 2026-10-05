@@ -18,13 +18,14 @@
  * input layer is a stub in this build, and saying "no key is down" is true.
  */
 
-import { formatToString, varargsSlots } from '../msvcrt/format.js';
+import { varargsSlots } from '../msvcrt/format.js';
+import { formatWsprintf } from './wsprintf.js';
 import {
     ANSI_PAGE, LANGID_EN_US, OEM_PAGE, decodeAnsi, decodeOem, encodeAnsi, encodeOem, mapCaseAnsi,
     transcodeSingleByte,
 } from '../kernel32/locale.js';
 import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js';
-import { dibToBgra, groupImageId } from './cursors.js';
+import { cursorFilePicture, dibToBgra, groupImageId } from './cursors.js';
 import { characterOf, codeForScan, codeForVk, keyFor, keyForCharacter } from './keys.js';
 import { REFRESH_HZ, displayModes } from './display.js';
 import {
@@ -68,6 +69,22 @@ const SWP_NOZORDER = 0x0004;
 const SWP_NOACTIVATE = 0x0010;
 /** What a child window is told when it is brought forward to be the active one. */
 const WM_CHILDACTIVATE = 0x0022;
+const WM_WINDOWPOSCHANGING = 0x0046;
+const WM_WINDOWPOSCHANGED = 0x0047;
+/** WINDOWPOS: hwnd, hwndInsertAfter, x, y, cx, cy, flags. */
+const WINDOWPOS_SIZE = 28;
+const SWP_SHOWWINDOW = 0x0040;
+const SWP_HIDEWINDOW = 0x0080;
+const SWP_FRAMECHANGED = 0x0020;
+const SWP_NOSENDCHANGING = 0x0400;
+const SWP_NOREDRAW = 0x0008;
+/** What WM_WINDOWPOSCHANGED says of the client area: it neither moved nor changed size. */
+const SWP_NOCLIENTSIZE = 0x0800;
+const SWP_NOCLIENTMOVE = 0x1000;
+/** The flags that say what changed, and their value when nothing did. */
+const SWP_NO_CHANGE = SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOCLIENTSIZE
+    | SWP_NOCLIENTMOVE;
+const SWP_STATUS = SWP_NO_CHANGE | SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_HIDEWINDOW;
 
 const SM_CXSCREEN = 0;
 const SM_CYSCREEN = 1;
@@ -230,6 +247,9 @@ const KEYEVENTF_KEYUP = 0x0002;
 const KEYEVENTF_UNICODE = 0x0004;
 const KEYEVENTF_SCANCODE = 0x0008;
 const ERROR_INVALID_PARAMETER = 87;
+/** The ids of the system's cursors SetSystemCursor replaces (OCR_NORMAL to OCR_APPSTARTING). */
+const SYSTEM_CURSOR_IDS = Object.freeze([32512, 32513, 32514, 32515, 32516, 32640, 32641, 32642,
+    32643, 32644, 32645, 32646, 32648, 32649, 32650]);
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_WINDOW_HANDLE = 1400;
 const ERROR_NOACCESS = 998;
@@ -244,6 +264,8 @@ const HKL_EN_US = (LANGID_EN_US << 16 | LANGID_EN_US) >>> 0;
 
 /** The double-click time Windows starts with, in milliseconds. */
 const DOUBLE_CLICK_TIME = 500;
+/** How long a caret shows and then hides, in milliseconds: Windows XP's default. */
+const CARET_BLINK_TIME = 530;
 
 /**
  * The modifiers a 256-byte key state holds: shift and control down, caps lock
@@ -534,6 +556,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
     let cursorShown = true;
     /** @type {import('./cursors.js').CursorPicture | null} */
     let cursorShape = null;
+    /**
+     * The pictures SetSystemCursor put in place of the system's own cursors,
+     * by the id LoadCursor(NULL, id) names them with.
+     *
+     * @type {Map<number, import('./cursors.js').CursorPicture>}
+     */
+    const systemCursors = new Map();
     /** What SetMessageExtraInfo last set, for GetMessageExtraInfo. */
     let messageExtraInfo = 0;
 
@@ -548,6 +577,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * @returns {import('./cursors.js').CursorPicture | null}
      */
     const cursorPicture = handle=>{
+        const replaced = systemCursors.get(handle);
+        if (replaced)
+        {
+            return replaced;
+        }
         const kind = host.handles.typeOf?.(handle) ?? null;
         if (kind !== 'cursor' && kind !== 'icon')
         {
@@ -569,6 +603,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         return object.picture;
     };
     host.pictures?.(cursorPicture);
+    const SM_CXCURSOR = 13;
 
     /**
      * A cursor's or icon's picture out of a module: the image of the standard
@@ -582,7 +617,6 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
     const resourcePicture = (instance, name, cursor)=>{
         const RT_CURSOR = 1;
         const RT_ICON = 3;
-        const SM_CXCURSOR = 13;
         const base = instance === undefined ? 0 : host.moduleBase?.(instance) ?? 0;
         /** @param {number} type @param {number | string} key */
         const read = (type, key)=>{
@@ -763,12 +797,88 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * it never asked for.
      *
      * @param {number[]} args  hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags.
+     * @param {unknown} [caller]  the thread whose call this answers, when a
+     *     procedure on this side places a window past an await
      */
-    const setWindowPos = ([hwnd, after, x, y, cx, cy, flags])=>{
-        const SWP_NOREDRAW = 0x0008;
+    const setWindowPos = (args, caller = undefined)=>{
+        const record = live(args[0]);
+        if (!record)
+        {
+            return 0;
+        }
+        const thread = caller ?? host.callerThread?.();
+        const pos = host.send && host.allocate ? host.allocate(WINDOWPOS_SIZE) : 0;
+        if (!pos)
+        {
+            return place(args, thread);
+        }
+        // The window hears what is asked before anything moves, in a WINDOWPOS
+        // it may change -- a framework keeps its own copy of its bounds and
+        // enforces its constraints there -- and what became of it after, with
+        // the client area's moving and sizing told apart, from which
+        // DefWindowProc tells it WM_MOVE and WM_SIZE.
+        const struct = new Uint8Array(WINDOWPOS_SIZE);
+        const view = new DataView(struct.buffer);
+        args.slice(0, 7).forEach((value, index)=>view.setUint32(index * 4, value >>> 0, true));
+        host.writeMemory(pos, struct);
+        const asked = (args[6] >>> 0 & SWP_NOSENDCHANGING) !== 0 ? 0
+            : host.send(record.hwnd, WM_WINDOWPOSCHANGING, 0, pos, thread);
+        return andThen(asked, ()=>{
+            const given = host.readMemory(pos, WINDOWPOS_SIZE);
+            const read = new DataView(given.buffer, given.byteOffset, WINDOWPOS_SIZE);
+            const [, after, x, y, cx, cy, flags] = [0, 1, 2, 3, 4, 5, 6]
+                .map(index=>read.getInt32(index * 4, true));
+            const before = { window: host.geometry.windowRect(record),
+                client: host.geometry.clientRect(record), visible: host.shown(record) };
+            return andThen(place([record.hwnd, after, x, y, cx, cy, flags], thread, ()=>{
+                const window = host.geometry.windowRect(record);
+                const client = host.geometry.clientRect(record);
+                const same = (/** @type {any} */ a, /** @type {any} */ b)=>a.left === b.left
+                    && a.top === b.top;
+                const sameSize = (/** @type {any} */ a, /** @type {any} */ b)=>
+                    a.right - a.left === b.right - b.left && a.bottom - a.top === b.bottom - b.top;
+                let final = flags >>> 0;
+                final |= same(window, before.window) ? SWP_NOMOVE : 0;
+                final |= sameSize(window, before.window) ? SWP_NOSIZE : 0;
+                final |= same(client, before.client) ? SWP_NOCLIENTMOVE : 0;
+                final |= sameSize(client, before.client) ? SWP_NOCLIENTSIZE : 0;
+                if (host.shown(record) === before.visible)
+                {
+                    final &= ~(SWP_SHOWWINDOW | SWP_HIDEWINDOW);
+                }
+                if ((final & SWP_STATUS) === SWP_NO_CHANGE)
+                {
+                    return 0;
+                }
+                const told = new DataView(new ArrayBuffer(WINDOWPOS_SIZE));
+                [record.hwnd, after, record.x, record.y, record.width, record.height, final]
+                    .forEach((value, index)=>told.setUint32(index * 4, value >>> 0, true));
+                host.writeMemory(pos, new Uint8Array(told.buffer));
+                return host.send(record.hwnd, WM_WINDOWPOSCHANGED, 0, pos, thread);
+            }), answer=>{
+                host.release?.(pos);
+                return answer;
+            });
+        });
+    };
+
+    // For a procedure on this side that places a window past an await, and
+    // names the thread whose call it answers.
+    host.positions?.(setWindowPos);
+
+    /**
+     * Where SetWindowPos puts a window, past the procedure's WM_WINDOWPOSCHANGING:
+     * the record moved, sized, restacked and shown or hidden, what it uncovered
+     * and showed painted, and -- between the painting and the activation, as
+     * Windows sends it -- whatever `changed` tells the window.
+     *
+     * @param {number[]} args  hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags.
+     * @param {unknown} [thread]
+     * @param {() => any} [changed]
+     */
+    const place = (args, thread = host.callerThread?.(), changed = ()=>0)=>{
+        const [hwnd, after, x, y, cx, cy, flags] = args;
         const SWP_NOCOPYBITS = 0x0100;
-        const SWP_SHOWWINDOW = 0x0040;
-        const SWP_HIDEWINDOW = 0x0080;
         const HWND_BOTTOM = 1;
         const record = live(hwnd);
         if (!record)
@@ -832,18 +942,19 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         // What it showed is framed and erased before it returns, as Windows
         // XP's SetWindowPos does it; SWP_NOREDRAW asks for no painting at all.
         const erased = (flags & SWP_NOREDRAW) === 0
-            ? host.eraseShown?.(host.callerThread?.()) ?? 1 : 1;
+            ? host.eraseShown?.(thread) ?? 1 : 1;
         // A child placed without SWP_NOACTIVATE is told it is the active
         // child, shown or not (user32's message tests, WmShowChildSeq_2 and
         // _4): an MDI child becomes the client's active one this way when its
         // program brings it to the top.
+        const told = andThen(erased, changed);
         if ((flags & (SWP_NOACTIVATE | SWP_HIDEWINDOW)) === 0
             && (record.style & (WS_CHILD | WS_POPUP)) === WS_CHILD)
         {
-            return andThen(erased, ()=>andThen(host.send(record.hwnd, WM_CHILDACTIVATE, 0, 0,
-                host.callerThread?.()), ()=>1));
+            return andThen(told, ()=>andThen(host.send(record.hwnd, WM_CHILDACTIVATE, 0, 0,
+                thread), ()=>1));
         }
-        return andThen(erased, ()=>1);
+        return andThen(told, ()=>1);
     };
 
     /**
@@ -1142,6 +1253,12 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         return clipped.length;
     };
 
+    /** A wsprintf %S of a null pointer prints as a %s of one. @param {number} address */
+    const wideOrNull = address=>((address >>> 0) === 0 ? '(null)' : readWideString(address >>> 0));
+
+    /** A narrow character's byte, as the ANSI page has it. @param {number} byte */
+    const byteChar = byte=>decodeAnsi(Uint8Array.of(byte));
+
     /** In the ANSI page. @param {number} address @param {string} text @param {number} limit */
     const writeString = (address, text, limit)=>{
         const clipped = limit > 0 ? text.slice(0, limit - 1) : '';
@@ -1217,8 +1334,41 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * @param {string} path
      * @returns {number | Promise<number>}
      */
-    const loadBitmapFile = path=>{
+    const loadBitmapFile = path=>readWhole(path, bytes=>{
         const FILE_HEADER = 14;
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        if (bytes.length <= FILE_HEADER + 12 || view.getUint16(0, true) !== 0x4d42
+            || !host.allocate || !host.bitmapFromDib)
+        {
+            return 0;
+        }
+        const dib = bytes.subarray(FILE_HEADER);
+        const at = host.allocate(dib.length);
+        if (at === 0)
+        {
+            return 0;
+        }
+        try
+        {
+            host.writeMemory(at, dib);
+            const offBits = view.getUint32(10, true);
+            return host.bitmapFromDib(at, offBits > FILE_HEADER
+                ? at + offBits - FILE_HEADER : packedBits(at));
+        }
+        finally
+        {
+            host.release?.(at);
+        }
+    });
+
+    /**
+     * A file's bytes, handed to `make`; 0 for a name that is no file. The
+     * answer waits when the volume's blocks are not resident yet.
+     *
+     * @param {string} path @param {(bytes: Uint8Array) => number} make
+     * @returns {number | Promise<number>}
+     */
+    const readWhole = (path, make)=>{
         const files = host.files;
         const stat = path === '' ? null : files?.stat(path);
         const node = files && stat?.exists && !stat.isDirectory
@@ -1228,35 +1378,28 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             return 0;
         }
         /** @param {Uint8Array} bytes */
-        const make = bytes=>{
+        const done = bytes=>{
             files.close(node);
-            const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-            if (bytes.length <= FILE_HEADER + 12 || view.getUint16(0, true) !== 0x4d42
-                || !host.allocate || !host.bitmapFromDib)
-            {
-                return 0;
-            }
-            const dib = bytes.subarray(FILE_HEADER);
-            const at = host.allocate(dib.length);
-            if (at === 0)
-            {
-                return 0;
-            }
-            try
-            {
-                host.writeMemory(at, dib);
-                const offBits = view.getUint32(10, true);
-                return host.bitmapFromDib(at, offBits > FILE_HEADER
-                    ? at + offBits - FILE_HEADER : packedBits(at));
-            }
-            finally
-            {
-                host.release?.(at);
-            }
+            return make(bytes);
         };
         const read = files.read(node, 0, stat.size);
-        return read instanceof Uint8Array ? make(read) : read.then(make);
+        return read instanceof Uint8Array ? done(read) : read.then(done);
     };
+
+    /**
+     * A cursor out of a .cur or .ani file, as LoadCursorFromFile loads one: a
+     * cursor of its own with the file's picture and hot spot. 0 for a name
+     * that is no file and for one that holds no cursor this can read.
+     *
+     * @param {string} path
+     */
+    const loadCursorFile = path=>readWhole(path, bytes=>{
+        const picture = cursorFilePicture(bytes, metric(SM_CXCURSOR));
+        return picture
+            ? host.handles.open('cursor', { hotSpot: picture.hotSpot, width: picture.width,
+                height: picture.height, picture })
+            : 0;
+    });
 
     /**
      * Where a packed DIB's pixels start: behind its header, the three masks
@@ -2732,8 +2875,9 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         MoveWindow: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([hwnd, x, y, width, height])=>setWindowPos([hwnd, 0, x, y, width, height,
-                SWP_NOZORDER | SWP_NOACTIVATE]),
+            handler: ([hwnd, x, y, width, height, repaint])=>setWindowPos([hwnd, 0, x, y,
+                width, height,
+                SWP_NOZORDER | SWP_NOACTIVATE | ((repaint | 0) === 0 ? SWP_NOREDRAW : 0)]),
         },
 
         /** HWND BringWindowToTop(HWND hWnd) */
@@ -3093,8 +3237,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             handler: args=>{
                 const readString = (/** @type {number} */ address)=>
                     (address >>> 0) === 0 ? '(null)' : host.readCString(address, 0x10000);
-                const text = formatToString(readString(args[1]), args.slice(2), readString,
-                    { decodeBytes: decodeAnsi });
+                const text = formatWsprintf(readString(args[1]), args.slice(2),
+                    { readString, readWideString: wideOrNull, byteChar });
                 return writeString(args[0], text, text.length + 1);
             },
         },
@@ -3112,10 +3256,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             handler: args=>{
                 const readString = (/** @type {number} */ address)=>
                     (address >>> 0) === 0 ? '(null)' : host.readCString(address, 0x10000);
-                const readWide = (/** @type {number} */ address)=>
-                    (address >>> 0) === 0 ? '(null)' : readWideString(address >>> 0);
-                const text = formatToString(readWide(args[1]), args.slice(2), readString,
-                    { readWideString: readWide, wide: true, decodeBytes: decodeAnsi });
+                const text = formatWsprintf(wideOrNull(args[1]), args.slice(2),
+                    { readString, readWideString: wideOrNull, byteChar, wide: true });
                 return writeWideString(args[0], text, text.length + 1);
             },
         },
@@ -3137,8 +3279,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                     (address >>> 0) === 0 ? '(null)' : host.readCString(address, 0x10000);
                 const varargs = varargsSlots(host.readMemory,
                     address=>host.regionAt?.(address) ?? null, list >>> 0, VA_LIST_SLOTS);
-                const text = formatToString(readString(format), varargs, readString,
-                    { decodeBytes: decodeAnsi });
+                const text = formatWsprintf(readString(format), varargs,
+                    { readString, readWideString: wideOrNull, byteChar });
                 return writeString(out, text, text.length + 1);
             },
         },
@@ -3155,12 +3297,10 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             handler: ([out, format, list])=>{
                 const readString = (/** @type {number} */ address)=>
                     (address >>> 0) === 0 ? '(null)' : host.readCString(address, 0x10000);
-                const readWide = (/** @type {number} */ address)=>
-                    (address >>> 0) === 0 ? '(null)' : readWideString(address >>> 0);
                 const varargs = varargsSlots(host.readMemory,
                     address=>host.regionAt?.(address) ?? null, list >>> 0, VA_LIST_SLOTS);
-                const text = formatToString(readWide(format), varargs, readString,
-                    { readWideString: readWide, wide: true, decodeBytes: decodeAnsi });
+                const text = formatWsprintf(wideOrNull(format), varargs,
+                    { readString, readWideString: wideOrNull, byteChar, wide: true });
                 return writeWideString(out, text, text.length + 1);
             },
         },
@@ -3642,6 +3782,48 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 loadResourceObject(host, 'cursor', RT_GROUP_CURSOR, instance, name, true),
         },
 
+        /** HCURSOR LoadCursorFromFileA(LPCSTR lpFileName) */
+        LoadCursorFromFileA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([name])=>loadCursorFile(readText(host, name >>> 0, false, MAX_PATH)),
+        },
+
+        /** HCURSOR LoadCursorFromFileW(LPCWSTR lpFileName) */
+        LoadCursorFromFileW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([name])=>loadCursorFile(readText(host, name >>> 0, true, MAX_PATH)),
+        },
+
+        /**
+         * BOOL SetSystemCursor(HCURSOR hcur, DWORD id)
+         *
+         * One of the system's cursors (OCR_NORMAL and its fellows) replaced
+         * by a copy of this one, which the call destroys. The picture stands
+         * wherever the system's cursor would have been shown, LoadCursor(NULL,
+         * IDC_*) answering the same ids. A handle that is no cursor, and an id
+         * that is no system cursor, fail with ERROR_INVALID_PARAMETER.
+         */
+        SetSystemCursor: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([cursor, id])=>{
+                const wanted = id >>> 0;
+                const picture = host.handles.typeOf?.(cursor >>> 0) === 'cursor'
+                    ? cursorPicture(cursor >>> 0) : null;
+                if (!SYSTEM_CURSOR_IDS.includes(wanted) || !picture)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                systemCursors.set(wanted, picture);
+                host.handles.close(cursor >>> 0);
+                reportCursor();
+                return 1;
+            },
+        },
+
         /**
          * HCURSOR SetCursor(HCURSOR hCursor)
          *
@@ -4093,6 +4275,22 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         GetKeyboardLayout: {
             argBytes: 4,
             handler: ()=>HKL_EN_US,
+        },
+
+        /** UINT GetCaretBlinkTime(void): `CARET_BLINK_TIME`, which nothing here changes. */
+        GetCaretBlinkTime: {
+            argBytes: 0,
+            handler: ()=>CARET_BLINK_TIME,
+        },
+
+        /** void SetLastErrorEx(DWORD dwErrCode, DWORD dwType): the type is ignored, as since XP. */
+        SetLastErrorEx: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([code])=>{
+                host.setLastError?.(code >>> 0);
+                return 0;
+            },
         },
 
         /**

@@ -199,3 +199,48 @@ test('without a heap a text to set fails, and a creation is still told', ()=>{
         });
     assert.equal(called, 1);
 });
+
+test('a list or combo box\'s item string crosses converted where the box keeps strings', ()=>{
+    const CB_ADDSTRING = 0x0143;
+    const LB_FINDSTRING = 0x018f;
+    const CB_GETLBTEXT = 0x0148;
+    const CB_GETLBTEXTLEN = 0x0149;
+    const LBS_OWNERDRAWFIXED = 0x0010;
+    const CBS_DROPDOWNLIST = 0x0003;
+    const m = memory();
+    m.writeMemory(0x100, textBytes('English', true));
+    /** @type {string[]} */
+    const read = [];
+    const add = translated(m, { hwnd: 1, message: CB_ADDSTRING, wParam: 0, lParam: 0x100,
+        unicode: true }, false, ansi=>{
+        read.push(m.readCString(ansi.lParam, 64));
+        return 0;
+    }, CBS_DROPDOWNLIST);
+    assert.equal(add, 0);
+    assert.deepEqual(read, ['English'], 'the ANSI procedure reads the item, not its first letter');
+    assert.equal(m.lent.size, 0, 'and the copy is given back');
+
+    /** @type {number[]} */
+    const data = [];
+    translated(m, { hwnd: 1, message: LB_FINDSTRING, wParam: 0, lParam: 0x1234, unicode: true },
+        false, ansi=>data.push(ansi.lParam), LBS_OWNERDRAWFIXED);
+    assert.deepEqual(data, [0x1234], 'an owner-drawn box keeps data, which crosses as it came');
+
+    // CB_GETLBTEXT from a wide caller: the length asked first, the item fetched
+    // in ANSI into a buffer that long and written back wide.
+    /** @type {number[]} */
+    const asked = [];
+    const got = translated(m, { hwnd: 1, message: CB_GETLBTEXT, wParam: 0, lParam: 0x400,
+        unicode: true }, false, ansi=>{
+        asked.push(ansi.message);
+        if (ansi.message === CB_GETLBTEXTLEN)
+        {
+            return 7;
+        }
+        m.writeMemory(ansi.lParam, textBytes('English', false));
+        return 7;
+    }, CBS_DROPDOWNLIST);
+    assert.equal(got, 7);
+    assert.deepEqual(asked, [CB_GETLBTEXTLEN, CB_GETLBTEXT]);
+    assert.equal(readWideString(m, 0x400), 'English');
+});

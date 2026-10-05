@@ -295,6 +295,19 @@ test('the system directory is inside the windows one, as a program assumes', ()=
     assert.equal(fns.GetSystemDirectoryA.handler([0x280, 4]), 20, 'too small: what is needed');
 });
 
+test('the system Windows directory is the Windows directory: this is no terminal server', ()=>{
+    const host = fakeHost();
+    const fns = createEnvironmentFunctions(host);
+    assert.equal(fns.GetSystemWindowsDirectoryA.handler([0x200, 64]), 10);
+    assert.equal(host.readAnsi(0x200), 'C:\\WINDOWS');
+    assert.equal(fns.GetSystemWindowsDirectoryW.handler([0x300, 64]), 10);
+    assert.equal(host.readWideString(0x300, 64), 'C:\\WINDOWS');
+    assert.equal(fns.GetSystemWindowsDirectoryW.handler([0x300, 10]), 11,
+        'too small: what is needed');
+    assert.deepEqual([fns.GetSystemWindowsDirectoryA.argBytes,
+        fns.GetSystemWindowsDirectoryW.argBytes], [8, 8]);
+});
+
 test('a process starts with the profile variables of the machine\'s layout', ()=>{
     // The same folders the registry and the shell name: a program that joins
     // %APPDATA% and one that asks SHGetFolderPath arrive at one directory.

@@ -363,6 +363,18 @@ test('a generated RC4 key round-trips and CryptGenRandom fills the buffer', ()=>
     assert.notEqual(hex(getBytes(BUFFER, 32)), hex(zeros));
 });
 
+test('SystemFunction036 fills its buffer from the generator CryptGenRandom draws on', ()=>{
+    // RtlGenRandom, which a C runtime's rand_s looks up by this name.
+    const { fns, putBytes, getBytes } = setup();
+    const zeros = new Uint8Array(32);
+    putBytes(BUFFER, zeros);
+    assert.equal(fns.SystemFunction036.argBytes, 8);
+    assert.equal(fns.SystemFunction036.handler([BUFFER, 32]), 1);
+    assert.notEqual(hex(getBytes(BUFFER, 32)), hex(zeros));
+    assert.equal(fns.SystemFunction036.handler([BUFFER, 0]), 1, 'nothing asked for');
+    assert.equal(fns.SystemFunction036.handler([0, 16]), 0, 'and nowhere to put it');
+});
+
 test('a plaintext key blob imports, and an exportable one exports back', ()=>{
     const { fns, acquire, putBytes, putDword, getDword, getBytes } = setup();
     const prov = acquire();

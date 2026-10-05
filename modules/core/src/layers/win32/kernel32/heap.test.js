@@ -775,6 +775,20 @@ test('a global allocation is already the pointer a caller has to lock for', ()=>
     assert.equal(fns.GlobalSize.handler([handle]), 64);
 });
 
+test('GlobalWire and GlobalFix lock a block, GlobalUnWire and GlobalUnfix unlock it', ()=>{
+    // The 16-bit calls a heap library still looks up: each the lock or the
+    // unlock it stood for, and a block here never moves.
+    const { fns } = setup();
+    const handle = fns.GlobalAlloc.handler([GMEM_MOVEABLE, 64]);
+    assert.equal(fns.GlobalWire.handler([handle]), handle);
+    assert.equal(fns.GlobalUnWire.handler([handle]), 1);
+    assert.equal(fns.GlobalFix.handler(), 0);
+    assert.equal(fns.GlobalUnfix.handler(), 0);
+    assert.equal(fns.GlobalWire.handler([handle + 0x10000]), 0, 'no block, no pointer');
+    assert.deepEqual([fns.GlobalWire, fns.GlobalFix, fns.GlobalUnWire, fns.GlobalUnfix]
+        .map(fn=>fn.argBytes), [4, 4, 4, 4]);
+});
+
 test('a zero-initialised global allocation is actually zeroed', ()=>{
     const { host, fns } = setup();
 

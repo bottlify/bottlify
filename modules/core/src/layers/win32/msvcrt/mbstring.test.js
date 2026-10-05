@@ -704,3 +704,18 @@ test('wcstok splits a wide string in place and carries on when handed null', ()=
     assert.equal(table.wcstok.handler([last, delimiters]), last);
     assert.equal(table.wcstok.handler([0, delimiters]), 0);
 });
+
+test('wcsncat appends at most count characters and always terminates', ()=>{
+    const { memory, table } = build();
+    const destination = memory.allocate(64);
+    memory.writeMemory(destination, new Uint8Array(64).fill(0xff));
+    const start = memory.putWide('ab');
+    memory.writeMemory(destination, memory.bytes.slice(start, start + 6));
+    assert.equal(table.wcsncat.handler([destination, memory.putWide('cdef'), 2]), destination);
+    assert.equal(memory.wide(destination), 'abcd');
+    assert.equal(new DataView(memory.bytes.buffer).getUint16(destination + 10, true), 0xffff,
+        'nothing past the terminator is written');
+    table.wcsncat.handler([destination, memory.putWide('x'), 9]);
+    assert.equal(memory.wide(destination), 'abcdx');
+    assert.equal(table.wcsncat.argBytes, 12);
+});

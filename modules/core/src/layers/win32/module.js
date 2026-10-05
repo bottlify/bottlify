@@ -24,7 +24,7 @@ import { createEnvironmentFunctions, defaultEnvironment } from './kernel32/envir
 import { createThreadPool } from './kernel32/pool.js';
 import { reportedVersion, windowsVersion } from './kernel32/versions.js';
 import { createSystemFunctions } from './kernel32/system.js';
-import { createSpawner, createSpawnFunctions } from './kernel32/spawn.js';
+import { createSpawner, createSpawnFunctions, writeThroughProtection } from './kernel32/spawn.js';
 import { createAtomFunctions } from './kernel32/atoms.js';
 import { createSeh } from './kernel32/seh.js';
 import { createEntryPointCaller, createGuardedCaller } from './kernel32/dllentry.js';
@@ -188,14 +188,17 @@ function directxOf(choice){
 /**
  * The registry a run starts from, as its first process makes it: the keys of
  * the Windows and the DirectX the machine is, and the processor at the speed
- * the engine's counter runs. For a run whose processes all stand in workers
- * of their own, which the system makes before any of them.
+ * the engine's counter runs, under the name it is given. For a run whose
+ * processes all stand in workers of their own, which the system makes before
+ * any of them.
  *
- * @param {{ windows?: string, directx?: unknown, processorMhz?: number }} [config]
+ * @param {{ windows?: string, directx?: unknown, processorMhz?: number,
+ *     processorName?: string }} [config]
  */
 export function createRunRegistry(config){
     return createRegistryService(createHive({ processorMhz: config?.processorMhz,
-        windows: windowsVersion(config?.windows), directx: directxOf(config?.directx) }));
+        processorName: config?.processorName, windows: windowsVersion(config?.windows),
+        directx: directxOf(config?.directx) }));
 }
 
 /** The win32 layer's module for one graph; see `defaultModules`. */
@@ -605,14 +608,22 @@ export function createWin32Module(){
             // handed (`code-arena.js`).
             const placeCode = createCodeArena(bytes=>allocator.allocate(bytes));
             const heap = {
-                /** @param {number} bytes */
-                allocate: bytes=>allocator.allocate(bytes),
+                /** @param {number} bytes @param {any} [options] */
+                allocate: (bytes, options)=>allocator.allocate(bytes, options),
                 /** @param {number} bytes */
                 allocateCode: bytes=>placeCode(bytes),
                 /** @param {number} address */
                 free: address=>allocator.free(address),
                 /** @param {number} address */
                 block: address=>allocator.block(address),
+                /**
+                 * A block at exactly that address, when all of it is free: the
+                 * span of a library that cannot move, given up by the arena.
+                 *
+                 * @param {number} address @param {number} bytes @param {any} [options]
+                 */
+                allocateAt: (address, bytes, options)=>
+                    allocator.allocateAt(address, bytes, options),
                 /** @param {number} address @param {number} bytes */
                 resize: (address, bytes)=>allocator.resize(address, bytes),
                 // What is left of it. A program sizes its own caches from this
@@ -1223,6 +1234,9 @@ export function createWin32Module(){
                         },
                         park: ()=>bridge.park(),
                         end: code=>endProcess(code),
+                        // MB_OK | MB_SYSTEMMODAL, the box a hard error raises.
+                        messageBox: text=>libraries['USER32.dll']?.MessageBoxA
+                            ?.handler([0, text, 0, 0x1000]) ?? 0,
                     }),
                     ...createThreadingFunctions({
                         kernel,
@@ -1241,6 +1255,7 @@ export function createWin32Module(){
                         endThread,
                         processId,
                         imagePath: ()=>modules.imagePath(),
+                        modules: ()=>modules.list?.() ?? [],
                         divergence: config?.divergence,
                         // Every thread gets a block of its own, made by whoever
                         // owns the process's, which win32 is only handed.
@@ -1285,6 +1300,7 @@ export function createWin32Module(){
                         nextRegionAfter: address=>memory.nextRegionAfter(address) ?? null,
                     }),
                     ...createProcessFunctions({
+                        performanceFrequency: config?.performanceFrequency,
                         readMemory,
                         processId,
                         writeMemory,
@@ -1412,6 +1428,8 @@ export function createWin32Module(){
                         metrics: mappings,
                         /** @param {number} bytes */
                         allocate: bytes=>allocator.allocate(bytes),
+                        /** @param {number} address @param {number} bytes */
+                        allocateAt: (address, bytes)=>allocator.allocateAt(address, bytes),
                         /** @param {number} address */
                         release: address=>allocator.free(address),
                         handles,
@@ -1510,6 +1528,8 @@ export function createWin32Module(){
                         imagePath: ()=>modules.imagePath(),
                         spawned: request=>config?.spawned?.(request),
                         spawner,
+                        patchMemory: (address, bytes)=>
+                            writeThroughProtection(/** @type {any} */ (memory), address, bytes),
                     }),
                     ...seh.table,
                     ...createModuleFunctions({
@@ -1532,6 +1552,7 @@ export function createWin32Module(){
                         dataFile: handle=>modules.dataFile?.(handle) ?? null,
                         /** @param {any} asked */
                         resolved: asked=>modules.resolved?.(asked),
+                        exitThread: code=>libraries['KERNEL32.dll'].ExitThread.handler([code]),
                     }),
                     // Last, deliberately: writing and closing a handle are the same
                     // entry points for a file as for a console or an event, and the
@@ -1934,7 +1955,10 @@ export function createWin32Module(){
                 // The maths half of the Direct3D helper: pure vector and matrix
                 // functions, here for their stack width as much as their answers,
                 // since d3dx9 exports them undecorated though they are stdcall.
-                ...d3dxLibraries(createD3dxFunctions({ readMemory, writeMemory })),
+                ...d3dxLibraries(createD3dxFunctions({ readMemory, writeMemory,
+                    divergence: config?.divergence, vtables: comVtables, heap,
+                    callGuest: call=>bridge.callGuest(call),
+                    currentThread: ()=>kernel.currentThread() })),
 
                 'WINSPOOL.DRV': createSpoolerFunctions({ setLastError: setError, writeMemory }),
 
@@ -2198,6 +2222,7 @@ export function createWin32Module(){
                         readCString,
                         setLastError: setError,
                         handles,
+                        allocate: bytes=>heap.allocate(bytes),
                     }),
                     ...createServiceFunctions({
                         readCString,

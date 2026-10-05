@@ -161,3 +161,31 @@ test('an interpreted store into a translated page invalidates the region', async
     h.runSlice(100);
     assert.equal(runtime.holdsPage(0x1000 >>> 12), false, 'the region was dropped');
 });
+
+test('eight bytes copied through the x87 arrive whole however the slices cut the copy', ()=>{
+    // A Delphi program's Move copies eight bytes at a time by fild qword and
+    // fistp qword; a quadword is exact on the processor, and a slice -- or a
+    // run of either interpreter -- ending between the load and the store must
+    // not round it through a double. "C:\I" and ".exe" as UTF-16 have more
+    // bits than a double keeps.
+    const words = [0x0049005c003a0043n, 0x006500780065002en];
+    for (const slice of [1, 2, 3, 1000])
+    {
+        const h = host();
+        const data = new Uint8Array(16);
+        words.forEach((word, i)=>new DataView(data.buffer).setBigUint64(i * 8, word, true));
+        h.writePhysical(0x2000, data);
+        // fild qword [0x2000]; fild qword [0x2008]; fistp qword [0x3008];
+        // fistp qword [0x3000]; hlt
+        load(h, 0x1000, [0xdf, 0x2d, 0, 0x20, 0, 0, 0xdf, 0x2d, 8, 0x20, 0, 0,
+            0xdf, 0x3d, 8, 0x30, 0, 0, 0xdf, 0x3d, 0, 0x30, 0, 0, 0xf4]);
+        for (let guard = 0; !h.haltedFlag() && guard < 100; guard++)
+        {
+            h.runSlice(slice);
+        }
+        const read = h.readPhysical(0x3000, 16);
+        const out = new DataView(read.buffer, read.byteOffset, 16);
+        assert.deepEqual([out.getBigUint64(0, true), out.getBigUint64(8, true)], words,
+            `slices of ${slice}`);
+    }
+});

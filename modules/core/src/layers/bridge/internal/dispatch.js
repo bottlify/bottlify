@@ -603,10 +603,17 @@ class Dispatcher {
         }
         const span = Math.min(PEEK_LIMIT, region.base + region.size - address);
         const bytes = this.memory.window(address, span);
+        // A printable character and a zero is how a UTF-16 string starts: the
+        // W functions' paths and messages are read as that.
+        const step = span >= 4 && bytes[1] === 0 && bytes[0] !== 0 ? 2 : 1;
         let text = '';
-        for (let at = 0; at < span; at++)
+        for (let at = 0; at + step <= span; at += step)
         {
             const byte = bytes[at];
+            if (step === 2 && bytes[at + 1] !== 0)
+            {
+                return null;
+            }
             if (byte === 0)
             {
                 return text.length >= 2 ? text : null;

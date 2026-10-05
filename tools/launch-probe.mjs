@@ -22,7 +22,7 @@
  *     node tools/launch-probe.mjs <bundle-id> [--turns 200000]
  */
 
-import { createWriteStream } from 'node:fs';
+import { createWriteStream, mkdirSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { openBundle } from './btl.mjs';
@@ -80,6 +80,10 @@ function parse(argv){
                 return { address: Number(address), length: Number(length ?? 32) };
             })
             : [],
+        // A folder to write the --peek ranges into as raw bytes, with the
+        // registers and the stack, at the first call --grep matches: code a
+        // packer decrypts at run time exists to be disassembled only there.
+        dump: argv.includes('--dump') ? argv[argv.indexOf('--dump') + 1] : null,
         // Which of a game's own libraries to watch calls into, as `Engine.dll`
         // for all of one library's exports or `MSVCR80.dll!toupper` for a
         // single function, comma-separated.
@@ -398,7 +402,7 @@ function seriesRow(app, last, began){
 }
 
 async function main(){
-    const { id, turns, map, grep, calls, heap, profile, log, watch, peek, which,
+    const { id, turns, map, grep, calls, heap, profile, log, watch, peek, dump, which,
         corkConfig, series, raster, concurrency, seconds } = parse(process.argv.slice(2));
     if (!id)
     {
@@ -444,6 +448,7 @@ async function main(){
     const sink = log ? createWriteStream(log) : null;
 
     const placement = placementOf(manifest);
+    let dumped = false;
     const app = await createApp({
         executable: new Uint8Array(executable),
         // Where the bundle is mounted and the program started from: where its
@@ -464,7 +469,7 @@ async function main(){
         sample: profile > 0 ? (/** @type {number} */ eip)=>samples.push(eip) : undefined,
         // A probe is read afterwards, which is exactly when a stack string is gone.
         traceStrings: true,
-        onCall: sink || peek.length > 0
+        onCall: sink || peek.length > 0 || dump !== null
             ? (/** @type {any} */ call)=>{
                 sink?.write(`${formatCall(call)}\n`);
                 if (peek.length === 0 || grep === null || !call.name.includes(grep))
@@ -472,6 +477,30 @@ async function main(){
                     return;
                 }
                 console.log(`  ${formatCall(call)}`);
+                if (dump !== null && !dumped)
+                {
+                    dumped = true;
+                    const esp = app.debug.register('esp') >>> 0;
+                    const registers = Object.fromEntries(
+                        ['eax', 'ebx', 'ecx', 'edx', 'esi', 'edi', 'ebp', 'esp']
+                            .map(name=>[name,
+                                `0x${(app.debug.register(name) >>> 0).toString(16)}`]));
+                    mkdirSync(dump, { recursive: true });
+                    writeFileSync(`${dump}/registers.json`, JSON.stringify(registers, null, 1));
+                    for (const { address, length } of [...peek, { address: esp, length: 0x4000 }])
+                    {
+                        try
+                        {
+                            writeFileSync(`${dump}/${address.toString(16)}.bin`,
+                                app.debug.read(address, length));
+                        }
+                        catch (e){
+                            console.log(`      0x${address.toString(16)}  unreadable: ${e}`);
+                        }
+                    }
+                    console.log(`      dumped to ${dump}, esp 0x${esp.toString(16)}`);
+                    return;
+                }
                 for (const { address, length } of peek)
                 {
                     const rows = peekBytes(
@@ -560,6 +589,13 @@ async function main(){
         app.on(name, (/** @type {any} */ payload)=>
             console.log(`  [${name}] ${JSON.stringify(payload).slice(0, 300)}`));
     }
+
+    // Nobody here can press a message box's button: the program only waits on
+    // it, and the turns left would be spent on that wait.
+    app.on('message-box', (/** @type {any} */ box)=>{
+        console.log(`  [message-box] ${box.caption ?? ''}: ${box.text ?? ''}`);
+        app.stop();
+    });
 
     let stopped;
     const began = performance.now();

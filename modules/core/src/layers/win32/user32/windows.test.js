@@ -4669,3 +4669,75 @@ test('a window draws around the windows over it: a top-level window above its ow
     assert.equal(area, 200 * 100 - 100 * 50 - 20 * 20 - 100 * 75 + 50 * 25,
         'and everywhere else in its client area');
 });
+
+test('SetWindowPos asks the window first, applies what it answers, and tells it what changed',
+    async()=>{
+        // A framework keeps its own copy of a window's bounds and updates it
+        // from WM_WINDOWPOSCHANGED; one whose copy never moves makes the
+        // window again at the size it started with. The sequence is Wine's
+        // message tests' (WmSWP_ResizeSeq): WM_WINDOWPOSCHANGING, which may
+        // change the WINDOWPOS, then WM_WINDOWPOSCHANGED, which DefWindowProc
+        // turns into WM_MOVE and WM_SIZE for what of the client area changed.
+        const WM_WINDOWPOSCHANGING = 0x0046;
+        const WM_WINDOWPOSCHANGED = 0x0047;
+        const SWP_NOSIZE = 0x0001;
+        const SWP_NOZORDER = 0x0004;
+        const SWP_NOACTIVATE = 0x0010;
+        const SWP_NOCLIENTSIZE = 0x0800;
+        const WS_POPUP = 0x80000000;
+        /** @type {any} */
+        let table = null;
+        /** @type {any[]} */
+        const heard = [];
+        const { fns, memory } = setup({ heap: true, reply: message=>{
+            if (message.message === WM_WINDOWPOSCHANGING)
+            {
+                heard.push(['changing',
+                    ...[2, 3, 4, 5].map(at=>memory.u32(message.lParam + at * 4))]);
+                // The window holds its height to 77, as a constraint would.
+                memory.putU32s(message.lParam + 20, [77]);
+                return 0;
+            }
+            if (message.message === WM_WINDOWPOSCHANGED)
+            {
+                heard.push(['changed', ...[2, 3, 4, 5, 6].map(at=>
+                    memory.u32(message.lParam + at * 4))]);
+                return table.DefWindowProcA.handler([message.hwnd, message.message,
+                    message.wParam, message.lParam]);
+            }
+            if (message.message === WM_MOVE || message.message === WM_SIZE)
+            {
+                heard.push([message.message === WM_MOVE ? 'move' : 'size',
+                    message.lParam & 0xffff, message.lParam >>> 16]);
+            }
+            return message.message === WM_NCCREATE ? 1 : 0;
+        } });
+        table = fns;
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const hwnd = await createWindow(fns, memory, { style: WS_POPUP });
+        heard.length = 0;
+
+        await fns.SetWindowPos.handler([hwnd, 0, 30, 40, 100, 50, SWP_NOZORDER | SWP_NOACTIVATE]);
+        assert.deepEqual(heard.splice(0), [
+            ['changing', 30, 40, 100, 50],
+            ['changed', 30, 40, 100, 77, SWP_NOZORDER | SWP_NOACTIVATE],
+            ['move', 30, 40],
+            ['size', 100, 77],
+        ]);
+        await fns.GetWindowRect.handler([hwnd, 0x900]);
+        assert.deepEqual([0, 1, 2, 3].map(at=>memory.u32(0x900 + at * 4)), [30, 40, 130, 117],
+            'the height the window answered');
+
+        await fns.SetWindowPos.handler([hwnd, 0, 30, 40, 100, 50, SWP_NOZORDER | SWP_NOACTIVATE]);
+        assert.deepEqual(heard.splice(0), [['changing', 30, 40, 100, 50]],
+            'asked, and nothing changed: nothing told');
+
+        await fns.MoveWindow.handler([hwnd, 35, 40, 100, 77, 1]);
+        assert.deepEqual(heard.splice(0), [
+            ['changing', 35, 40, 100, 77],
+            ['changed', 35, 40, 100, 77, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE
+                | SWP_NOCLIENTSIZE],
+            ['move', 35, 40],
+        ], 'a move alone is no size');
+    });

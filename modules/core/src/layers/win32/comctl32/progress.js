@@ -88,11 +88,17 @@ export function createProgressProcedure(host, tk){
     /**
      * A new position shown at once: the real control updates its window when
      * the position moves, and a copy loop that never looks at its queue has
-     * a bar that grows. Answers what the message answers.
+     * a bar that grows. A position that did not move paints nothing, as there
+     * -- a setup copying a kilobyte at a time sets the same position after
+     * every one. Answers what the message answers.
      *
      * @param {any} record @param {number} previous
      */
     const moved = (record, previous)=>{
+        if (state(record).pos === previous)
+        {
+            return previous;
+        }
         host.invalidate(record);
         return after(host.update?.(record) ?? 1, ()=>previous);
     };

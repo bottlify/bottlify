@@ -99,6 +99,10 @@ export function ownLayout({ ramSize }){
         x87Empty: 193,
         x87Control: 194,
         x87Status: 196,
+        // The registers holding a quadword `fild`'s integer, the integer in the
+        // eight bytes past each register's double: an interpreter's run, or a
+        // thread's slice, may end between the load and the store.
+        x87Exact: 198,
         xmm: 208,
         mxcsr: 336,
         fsBase: 340,

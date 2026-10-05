@@ -920,6 +920,30 @@ export function createCryptoFunctions(host){
             },
         },
 
+        /**
+         * BOOLEAN SystemFunction036(PVOID RandomBuffer, ULONG RandomBufferLength)
+         *
+         * RtlGenRandom, the generator under CryptGenRandom, which a C runtime's
+         * rand_s looks up by this name: the buffer filled from the same source.
+         */
+        SystemFunction036: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([buffer, length])=>{
+                const len = length >>> 0;
+                if (len === 0)
+                {
+                    return 1;
+                }
+                if ((buffer >>> 0) === 0)
+                {
+                    return 0;
+                }
+                host.writeMemory(buffer >>> 0, randomBytes(len));
+                return 1;
+            },
+        },
+
         /** BOOL CryptGenRandom(HCRYPTPROV hProv, DWORD dwLen, BYTE *pbBuffer) */
         CryptGenRandom: {
             argBytes: 12,

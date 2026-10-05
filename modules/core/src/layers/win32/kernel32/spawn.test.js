@@ -6,7 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createSpawner, createSpawnFunctions, isRedistributableInstaller } from './spawn.js';
+import {
+    createSpawner, createSpawnFunctions, isRedistributableInstaller, writeThroughProtection,
+} from './spawn.js';
 import { createProcessTable } from '../../kernel/internal/processes.js';
 
 const ERROR_SUCCESS = 0;
@@ -348,6 +350,45 @@ test('a write against this process writes memory, as it always did', ()=>{
     assert.equal(fns.WriteProcessMemory.handler(
         [CURRENT_PROCESS, 0x600, 0x400, 4, 0]), 1);
     assert.deepEqual([...host.bytes.slice(0x600, 0x604)], [1, 2, 3, 4]);
+});
+
+test('a write into this process goes through code that only executes, and puts it back', ()=>{
+    // A heap library replacing the C runtime's malloc writes a jump over its
+    // first bytes, which lie in a region that is read and execute only;
+    // Windows lifts the protection for the write. Nowhere mapped is refused.
+    const bytes = new Uint8Array(0x100);
+    /** @type {{ name: string, base: number, size: number, access: string }[]} */
+    const regions = [{ name: 'msvcrt.dll', base: 0x40, size: 0x40, access: 'rx' },
+        { name: 'data', base: 0x80, size: 0x40, access: 'rw' }];
+    /** @type {string[]} */
+    const changes = [];
+    const memory = {
+        find: (/** @type {number} */ address)=>regions.find(region=>address >= region.base
+            && address < region.base + region.size),
+        protect: (/** @type {string} */ name, /** @type {string} */ access)=>{
+            changes.push(`${name} ${access}`);
+            Object.assign(/** @type {any} */ (regions.find(region=>region.name === name)), { access });
+        },
+        writeBytes: (/** @type {number} */ address, /** @type {Uint8Array} */ data)=>{
+            assert.ok(memory.find(address)?.access.includes('w'), 'written only while writable');
+            bytes.set(data, address);
+        },
+    };
+    assert.equal(writeThroughProtection(memory, 0x50, Uint8Array.of(0xe9, 1, 2, 3, 4)), true);
+    assert.deepEqual([...bytes.subarray(0x50, 0x55)], [0xe9, 1, 2, 3, 4]);
+    assert.deepEqual(changes, ['msvcrt.dll rwx', 'msvcrt.dll rx'], 'lifted, then put back');
+    assert.equal(writeThroughProtection(memory, 0x90, Uint8Array.of(7)), true);
+    assert.equal(changes.length, 2, 'a writable page is written as it is');
+    assert.equal(writeThroughProtection(memory, 0x10, Uint8Array.of(7)), false, 'nothing there');
+    assert.equal(writeThroughProtection(memory, 0x7e, Uint8Array.of(1, 2, 3, 4)), false,
+        'running out of the region');
+
+    const host = fakeHost();
+    /** @type {any} */ (host).patchMemory = (/** @type {number} */ address)=>address === 0x600;
+    const fns = createSpawnFunctions(host);
+    assert.equal(fns.WriteProcessMemory.handler([CURRENT_PROCESS, 0x600, 0x400, 4, 0]), 1);
+    assert.equal(fns.WriteProcessMemory.handler([CURRENT_PROCESS, 0x900, 0x400, 4, 0]), 0);
+    assert.equal(host.errors.at(-1), 998, 'ERROR_NOACCESS');
 });
 
 test('a write against a handle that is not a process fails', ()=>{
