@@ -7905,7 +7905,8 @@ export async function createApp(options){
                     }
                     else if (data?.type === 'failed')
                     {
-                        reject(new Error(data.message));
+                        reject(Object.assign(new Error(data.message),
+                            { diagnostics: data.diagnostics }));
                     }
                 });
                 worker.onLost(reason=>reject(new Error(reason)));
@@ -7988,13 +7989,14 @@ export async function createApp(options){
         across++;
         const running = (async()=>{
             /** @type {{ code: number, diagnostics?: any, systemLibraries?: string[] }} */
-            let ended = { code: -1 };
+            let ended;
             try
             {
                 ended = await runAcross(from, request);
             }
             catch (e){
                 events.emit('error', { reason: 'process', error: e });
+                ended = { code: -1, diagnostics: /** @type {any} */ (e)?.diagnostics };
             }
             finally
             {

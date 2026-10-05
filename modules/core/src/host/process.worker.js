@@ -19,7 +19,7 @@
  * of the link, its way in to the run's graphics worker and the port its
  * surfaces' pictures go out on (or null), the process as
  * `createApp` takes it, how long it may run -- and answers
- * `{ type: 'exited', code, diagnostics }`, or `{ type: 'failed', message }`.
+ * `{ type: 'exited', code, diagnostics }`, or `{ type: 'failed', message, diagnostics }`.
  */
 
 import { createApp, createMacrotask } from '../app.js';
@@ -180,7 +180,17 @@ export async function serveProcess({ end, graphics, display, options, run }){
         ask('process', 'output', [handle, text]));
     try
     {
-        const code = await app.run(run ?? {});
+        let code;
+        try
+        {
+            code = await app.run(run ?? {});
+        }
+        catch (e){
+            // A run that failed is read as one that ended: what it did up to
+            // the failure is what is asked of it next.
+            throw Object.assign(e instanceof Error ? e : new Error(String(e)),
+                { diagnostics: plainOf(()=>app.diagnostics()) });
+        }
         return { code, diagnostics: plainOf(()=>app.diagnostics()),
             // What an installer's output is sorted against, read while the
             // machine that knows it still stands.
@@ -207,7 +217,8 @@ const bind = (listen, send)=>listen(data=>{
     serveProcess(data).then(
         ({ code, diagnostics, systemLibraries })=>
             send({ type: 'exited', code, diagnostics, systemLibraries }),
-        (/** @type {any} */ e)=>send({ type: 'failed', message: String(e?.stack ?? e) }));
+        (/** @type {any} */ e)=>send({ type: 'failed', message: String(e?.stack ?? e),
+            diagnostics: e?.diagnostics ?? null }));
 });
 
 if (typeof self !== 'undefined' && typeof (/** @type {any} */ (self)).postMessage === 'function')

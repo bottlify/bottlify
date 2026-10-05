@@ -491,7 +491,7 @@ async function main(){
     // function nobody wrote.
     const loader = app.diagnostics()
         .find((/** @type {any} */ layer)=>layer.name === 'loader');
-    const unresolved = byLibrary(loader?.metrics?.unresolved ?? app.image.unresolved ?? []);
+    const unresolved = byLibrary(loader?.metrics?.unresolved ?? app.image?.unresolved ?? []);
     if (unresolved.length === 0)
     {
         console.log('every import bound.\n');

@@ -541,3 +541,26 @@ test('a launcher in a worker of its own that starts its game and exits leaves th
         assert.equal(await app.run({ timeoutMs: 60000 }), 9, 'the run\'s code is the game\'s');
         assert.deepEqual(started, [['C:\\launcher.exe', true], ['C:\\game.exe', true]]);
     });
+
+test('a program in a worker of its own that is stopped leaves the run its tables as they stood',
+    { timeout: 120000 }, async t=>{
+        // jmp $: it never ends by itself.
+        const program = buildExe({
+            imports: { 'KERNEL32.dll': ['ExitProcess'] },
+            code: ()=>[0xeb, 0xfe],
+        });
+        const app = await createApp({
+            executable: program,
+            imagePath: 'C:\\spin.exe',
+            engine: 'cork',
+            concurrency: 2,
+        });
+        t.after(()=>app.dispose());
+        /** @type {any[]} */
+        const errors = [];
+        app.on('error', (/** @type {any} */ payload)=>errors.push(payload));
+        assert.equal(await app.run({ timeoutMs: 2000 }), -1);
+        assert.ok(errors.some(payload=>payload.reason === 'process'), 'the stop was said');
+        const cpu = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'cpu');
+        assert.ok(cpu?.metrics.instructions > 0, 'what it ran is still read');
+    });
