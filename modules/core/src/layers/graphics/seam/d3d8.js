@@ -1193,7 +1193,10 @@ export function createDirect3D8Seam(
         // object behind this: it has no rectangles to honour until something
         // draws.
         /** @param {any} device */
-        Present: (/** @type {any} */ device)=>device.Present(),
+        Present: (/** @type {any} */ device)=>{
+            showScreen(device);
+            return device.Present();
+        },
 
         /** @param {any} device @param {number[]} args */
         Reset: (device, [parameters])=>{
@@ -1211,10 +1214,7 @@ export function createDirect3D8Seam(
                 // clipping its cursor to a rectangle the picture no longer
                 // fills.
                 deviceWindow = (next.hDeviceWindow >>> 0) || deviceWindow;
-                resolution?.(next.backBufferWidth >>> 0, next.backBufferHeight >>> 0, {
-                    window: deviceWindow,
-                    fullscreen: !next.windowed,
-                });
+                takeScreen(device, next, deviceWindow);
             }
             // The block is brought to what the device now holds, not to what
             // it held before: a reset is the host changing state on its own.
@@ -2644,10 +2644,7 @@ export function createDirect3D8Seam(
                 // The window is kept for a later Reset, whose present
                 // parameters need not repeat it.
                 deviceWindow = (wanted.hDeviceWindow >>> 0) || (focus >>> 0);
-                resolution?.(wanted.backBufferWidth >>> 0, wanted.backBufferHeight >>> 0, {
-                    window: deviceWindow,
-                    fullscreen: !wanted.windowed,
-                });
+                takeScreen(held.device, wanted, deviceWindow);
             }
             if (hr !== D3D_OK || !held.device)
             {
@@ -2722,6 +2719,53 @@ export function createDirect3D8Seam(
     // and the window a reset leaves at the wrong size is one the program then
     // clips its cursor to.
     let deviceWindow = 0;
+
+    /**
+     * The screen a windowed device takes, kept until it shows its first frame
+     * (`showScreen`). A windowed device sets no display mode: it shows its
+     * frames in its window, and here its window is the screen -- once it has
+     * a frame to show. One made to convert textures or to read what the card
+     * can do, on a window nobody sees, shows none and leaves the screen as it
+     * was; taken at its creation, an 8 by 8 back buffer was the screen every
+     * window after it was centred on.
+     *
+     * @type {WeakMap<any, { width: number, height: number, window: number }>}
+     */
+    const unshown = new WeakMap();
+
+    /**
+     * What a created or reset device does to the screen: a fullscreen one
+     * takes it now, at its mode, with its window; a windowed one at its first
+     * frame.
+     *
+     * @param {any} device @param {any} parameters @param {number} window
+     */
+    const takeScreen = (device, parameters, window)=>{
+        const width = parameters.backBufferWidth >>> 0;
+        const height = parameters.backBufferHeight >>> 0;
+        if (parameters.windowed)
+        {
+            unshown.set(device, { width, height, window });
+            return;
+        }
+        unshown.delete(device);
+        resolution?.(width, height, { window, fullscreen: true });
+    };
+
+    /**
+     * A windowed device's first frame: its window is the screen from now on.
+     *
+     * @param {any} device
+     */
+    const showScreen = device=>{
+        const pending = device ? unshown.get(device) : undefined;
+        if (pending)
+        {
+            unshown.delete(device);
+            resolution?.(pending.width, pending.height,
+                { window: pending.window, fullscreen: false });
+        }
+    };
 
     return {
         /**

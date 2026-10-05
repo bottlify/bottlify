@@ -360,7 +360,7 @@ test('the root makes a device and describes itself in the shape the header gives
     const { hr, device, parameters } = h.createDevice(root);
     assert.equal(hr, D3D_OK);
     assert.notEqual(device, 0);
-    assert.deepEqual(h.resolutions, [[64, 64, HWND, false]]);
+    assert.deepEqual(h.resolutions, [], 'a windowed device takes the screen at its first frame');
     // The count a zero stood for is written back, as this version does.
     assert.equal(h.fields.readU32(parameters + D3DPRESENT_PARAMETERS9.BackBufferCount), 1);
 
@@ -459,8 +459,23 @@ test('a fullscreen device tells its window the mode at its first frame, once', (
     const windowed = h.createDevice(h.create()).device;
     const before = h.resolutions.length;
     assert.equal(h.device(windowed, 'Present', [0, 0, 0, 0]), D3D_OK);
-    assert.equal(h.resolutions.length, before, 'a windowed device has no mode to announce');
+    assert.deepEqual(h.resolutions.slice(before), [[64, 64, HWND, false]],
+        'a windowed device has no mode to announce: its first frame takes the screen, as a window');
 });
+
+test('a first frame through the implicit swap chain of a windowed device takes the screen too',
+    ()=>{
+        // A program may present through IDirect3DSwapChain9 rather than the
+        // device; the frame is the device's all the same.
+        const h = seamed();
+        const { device } = h.createDevice(h.create());
+        const out = 0x7040;
+        assert.equal(h.device(device, 'GetSwapChain', [0, out]), D3D_OK);
+        const chain = h.box.memory.readU32(out);
+        assert.deepEqual(h.resolutions, []);
+        assert.equal(h.box.call(chain, 3, [0, 0, 0, 0, 0]), D3D_OK, 'Present');
+        assert.deepEqual(h.resolutions, [[64, 64, HWND, false]]);
+    });
 
 test('a reset that changes the mode names the window it presents into', ()=>{
     // Leaving fullscreen resets to the windowed size, and the window has to be
@@ -485,8 +500,11 @@ test('a reset that changes the mode names the window it presents into', ()=>{
 
     write({});
     assert.equal(h.device(device, 'Reset', [at]), D3D_OK);
+    assert.deepEqual(h.resolutions.at(-1), [320, 240, HWND, true],
+        'back to windowed, the screen waits for a frame');
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
     assert.deepEqual(h.resolutions.at(-1), [64, 64, HWND, false],
-        'and so does the reset back to windowed');
+        'and the frame names the window');
 });
 
 test('a device is refused for the behaviour a program must not ask with', ()=>{
@@ -522,8 +540,9 @@ test('a zero back buffer size windowed is the window\'s client area, written bac
     assert.equal(h.fields.readU32(parameters + D3DPRESENT_PARAMETERS9.BackBufferFormat),
         D3DFMT.X8R8G8B8);
     assert.equal(h.fields.readU32(parameters + D3DPRESENT_PARAMETERS9.BackBufferCount), 1);
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
     assert.deepEqual(h.resolutions.at(-1), [640, 480, HWND, false],
-        'and the screen the program is told it has is its window');
+        'and the screen its first frame takes is its window');
     assert.deepEqual(h.divergences, [], 'a window that was measured is not an assumption');
     h.release(device);
     h.release(root);
