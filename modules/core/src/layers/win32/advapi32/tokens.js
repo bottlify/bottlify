@@ -23,6 +23,14 @@
  * the program compares one it built against one it read, byte for byte.
  */
 
+/** The native calls' table, published by ntdll beside its own. */
+export const TOKEN_NATIVES = Symbol('tokenNatives');
+
+/** Statuses the native calls answer. */
+const STATUS_SUCCESS = 0;
+const STATUS_ACCESS_VIOLATION = 0xc0000005;
+const STATUS_INVALID_HANDLE = 0xc0000008;
+
 /** Codes this surface reports. */
 const ERROR_SUCCESS = 0;
 const ERROR_INVALID_HANDLE = 6;
@@ -427,7 +435,96 @@ export function createTokenFunctions(host){
         return mapped >>> 0;
     };
 
+    /**
+     * OpenProcessToken's body, answering an error code: a process that is no
+     * process is refused, and nowhere to put the handle is the caller's
+     * mistake.
+     *
+     * @param {number} process @param {number} out
+     */
+    const openProcessToken = (process, out)=>{
+        if ((process >>> 0) !== CURRENT_PROCESS)
+        {
+            try
+            {
+                host.handles.resolve(process >>> 0, 'process');
+            }
+            catch (e){
+                void e;
+                return ERROR_INVALID_HANDLE;
+            }
+        }
+        if ((out >>> 0) === 0)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        writeDword(out >>> 0, host.handles.open('token', { process: process >>> 0 }));
+        return ERROR_SUCCESS;
+    };
+
+    /**
+     * AdjustTokenPrivileges' body, answering an error code.
+     *
+     * @param {number} token @param {number} newState @param {number} previous
+     * @param {number} returnLength
+     */
+    const adjustPrivileges = (token, newState, previous, returnLength)=>{
+        if (!isToken(token))
+        {
+            return ERROR_INVALID_HANDLE;
+        }
+        if ((newState >>> 0) === 0 && (previous >>> 0) !== 0)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        if ((returnLength >>> 0) !== 0)
+        {
+            writeDword(returnLength >>> 0, 4);
+        }
+        if ((previous >>> 0) !== 0)
+        {
+            writeDword(previous >>> 0, 0);
+        }
+        return ERROR_SUCCESS;
+    };
+
+    /** @param {number} code @returns {number} the status a native call answers it with */
+    const statusOf = code=>(code === ERROR_SUCCESS ? STATUS_SUCCESS
+        : code === ERROR_INVALID_HANDLE ? STATUS_INVALID_HANDLE : STATUS_ACCESS_VIOLATION);
+
     return {
+        /**
+         * The native calls over the same tokens, for ntdll to publish: a
+         * status rather than a last error, and the last error left alone.
+         * The one failure besides a bad handle is an out-pointer that is
+         * null, which the kernel meets as an access violation.
+         *
+         * NTSTATUS NtOpenProcessToken(HANDLE, ACCESS_MASK, PHANDLE TokenHandle)
+         * NTSTATUS NtOpenProcessTokenEx(HANDLE, ACCESS_MASK, ULONG HandleAttributes,
+         *   PHANDLE TokenHandle)
+         * NTSTATUS NtAdjustPrivilegesToken(HANDLE, BOOLEAN DisableAllPrivileges,
+         *   PTOKEN_PRIVILEGES NewState, ULONG BufferLength,
+         *   PTOKEN_PRIVILEGES PreviousState, PULONG ReturnLength)
+         */
+        [TOKEN_NATIVES]: {
+            NtOpenProcessToken: {
+                argBytes: 12,
+                /** @param {number[]} args */
+                handler: ([process, , out])=>statusOf(openProcessToken(process, out)),
+            },
+            NtOpenProcessTokenEx: {
+                argBytes: 16,
+                /** @param {number[]} args */
+                handler: ([process, , , out])=>statusOf(openProcessToken(process, out)),
+            },
+            NtAdjustPrivilegesToken: {
+                argBytes: 24,
+                /** @param {number[]} args */
+                handler: ([token, , newState, , previous, returnLength])=>
+                    statusOf(adjustPrivileges(token, newState, previous, returnLength)),
+            },
+        },
+
         /**
          * BOOL InitializeSecurityDescriptor(PSECURITY_DESCRIPTOR, DWORD dwRevision)
          *
@@ -826,23 +923,8 @@ export function createTokenFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([process, , out])=>{
-                if ((process >>> 0) !== CURRENT_PROCESS)
-                {
-                    try
-                    {
-                        host.handles.resolve(process >>> 0, 'process');
-                    }
-                    catch (e){
-                        void e;
-                        return fail(ERROR_INVALID_HANDLE);
-                    }
-                }
-                if ((out >>> 0) === 0)
-                {
-                    return fail(ERROR_INVALID_PARAMETER);
-                }
-                writeDword(out >>> 0, host.handles.open('token', { process: process >>> 0 }));
-                return 1;
+                const code = openProcessToken(process, out);
+                return code === ERROR_SUCCESS ? 1 : fail(code);
             },
         },
 
@@ -994,21 +1076,10 @@ export function createTokenFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([token, , newState, , previous, returnLength])=>{
-                if (!isToken(token))
+                const code = adjustPrivileges(token, newState, previous, returnLength);
+                if (code !== ERROR_SUCCESS)
                 {
-                    return fail(ERROR_INVALID_HANDLE);
-                }
-                if ((newState >>> 0) === 0 && (previous >>> 0) !== 0)
-                {
-                    return fail(ERROR_INVALID_PARAMETER);
-                }
-                if ((returnLength >>> 0) !== 0)
-                {
-                    writeDword(returnLength >>> 0, 4);
-                }
-                if ((previous >>> 0) !== 0)
-                {
-                    writeDword(previous >>> 0, 0);
+                    return fail(code);
                 }
                 host.setLastError(ERROR_SUCCESS);
                 return 1;

@@ -1849,6 +1849,26 @@ export function createRegistryFunctions(host){
         ImpersonateSelf: { argBytes: 4, handler: ()=>1 },
         RevertToSelf: { argBytes: 0, handler: ()=>1 },
 
+        /**
+         * BOOL InitiateSystemShutdownA(LPSTR lpMachineName, LPSTR lpMessage,
+         *   DWORD dwTimeout, BOOL bForceAppsClosed, BOOL bRebootAfterShutdown)
+         * BOOL InitiateSystemShutdownExA(..., DWORD dwReason)
+         *
+         * There is no machine to restart, and the call answers as the
+         * consumer line of Windows did, which never had it: not implemented.
+         * A setup asks only when what it replaced needs a restart, and the
+         * user is the one to give it.
+         */
+        ...Object.fromEntries([['InitiateSystemShutdownA', 20], ['InitiateSystemShutdownW', 20],
+            ['InitiateSystemShutdownExA', 24], ['InitiateSystemShutdownExW', 24]]
+            .map(([name, argBytes])=>[name, {
+                argBytes,
+                handler: ()=>{
+                    host.divergence?.(String(name), 'there is no machine to restart');
+                    return notImplemented();
+                },
+            }])),
+
         SetFileSecurityW: {
             argBytes: 12,
             handler: ()=>{

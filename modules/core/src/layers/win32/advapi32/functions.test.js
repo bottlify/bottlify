@@ -778,6 +778,31 @@ test('impersonating oneself succeeds, and the file security calls refuse plainly
     assert.deepEqual(errors, Object.keys(expected).map(()=>ERROR_CALL_NOT_IMPLEMENTED));
 });
 
+test('a restart is not implemented, as the consumer line answered, and says so', ()=>{
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errors = [];
+    /** @type {string[]} */
+    const diverged = [];
+    const fns = /** @type {Record<string, any>} */ (/** @type {unknown} */ (createRegistryFunctions({
+        readMemory: memory.readMemory,
+        writeMemory: memory.writeMemory,
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        hive: createHive(),
+        setLastError: code=>errors.push(code),
+        divergence: api=>diverged.push(api),
+    })));
+    const expected = { InitiateSystemShutdownA: 20, InitiateSystemShutdownW: 20,
+        InitiateSystemShutdownExA: 24, InitiateSystemShutdownExW: 24 };
+    for (const [name, argBytes] of Object.entries(expected))
+    {
+        assert.equal(fns[name].argBytes, argBytes, name);
+        assert.equal(fns[name].handler([0, 0, 0, 1, 1]), 0, name);
+    }
+    assert.deepEqual(errors, [120, 120, 120, 120], 'ERROR_CALL_NOT_IMPLEMENTED');
+    assert.deepEqual(diverged, Object.keys(expected));
+});
+
 test('RegEnumKeyA is the enumeration with a buffer and a size and nothing else', ()=>{
     const { memory, fns, create } = setup();
     create('SOFTWARE\\Vendor\\B');

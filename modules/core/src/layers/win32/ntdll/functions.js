@@ -35,6 +35,7 @@ import { createPathFunctions } from './paths.js';
 import { MEMORY_ENTRIES, createMemoryFunctions } from './memory.js';
 import { STATUS, toDosError } from './status.js';
 import { REGISTRY_NATIVES, UNLOAD_KEY } from '../advapi32/functions.js';
+import { TOKEN_NATIVES } from '../advapi32/tokens.js';
 
 /**
  * The C runtime functions ntdll publishes under its own name.
@@ -283,6 +284,8 @@ export function createNtdllFunctions(host){
         ...alias(kernel32, KERNEL32_ALIASES),
         ...natives,
         ...registry?.entries ?? {},
+        // And the token calls on advapi32's, whose handles they open.
+        ...host.advapi32?.[TOKEN_NATIVES] ?? {},
         ...alias(crt, Object.fromEntries(CRT_EXPORTS.map(name=>[name, name]))),
 
         ...createCountedStringFunctions({
@@ -392,6 +395,20 @@ export function createNtdllFunctions(host){
                 },
             }
             : {}),
+
+        /**
+         * NTSTATUS NtShutdownSystem(SHUTDOWN_ACTION Action)
+         *
+         * No machine to stop or restart: not implemented, as advapi32's
+         * InitiateSystemShutdown answers.
+         */
+        NtShutdownSystem: {
+            argBytes: 4,
+            handler: ()=>{
+                host.divergence?.('NtShutdownSystem', 'there is no machine to restart');
+                return STATUS.NOT_IMPLEMENTED;
+            },
+        },
 
         /**
          * NTSTATUS NtClose(HANDLE Handle)

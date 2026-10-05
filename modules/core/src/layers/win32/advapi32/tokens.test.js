@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ADMINISTRATORS_SID, createTokenFunctions } from './tokens.js';
+import { ADMINISTRATORS_SID, TOKEN_NATIVES, createTokenFunctions } from './tokens.js';
 
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_NO_TOKEN = 1008;
@@ -166,6 +166,31 @@ test('the owner, primary group, type and session of a token', ()=>{
 
     assert.equal(fns.GetTokenInformation.handler([token, 0x7f, BUFFER, 0x100, NEEDED]), 0);
     assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER, 'a class there is none of');
+});
+
+test('the native token calls open and adjust the same tokens, with statuses', ()=>{
+    // An update package opens its token through ntdll to take the shutdown
+    // privilege; the last error is not a native call's to touch.
+    const { errors, fns, dword, table } = setup();
+    const natives = fns[TOKEN_NATIVES];
+    assert.equal(natives.NtOpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]), 0);
+    const token = dword(OUT);
+    assert.equal(table.get(token)?.type, 'token');
+    assert.equal(natives.NtOpenProcessTokenEx.handler([CURRENT_PROCESS, TOKEN_QUERY, 0, NEEDED]),
+        0);
+    assert.notEqual(dword(NEEDED), token, 'a handle of its own');
+    assert.equal(natives.NtOpenProcessToken.handler([0x1234, TOKEN_QUERY, OUT]), 0xc0000008,
+        'STATUS_INVALID_HANDLE');
+    assert.equal(natives.NtOpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, 0]), 0xc0000005,
+        'nowhere to put it: STATUS_ACCESS_VIOLATION');
+
+    assert.equal(natives.NtAdjustPrivilegesToken.handler([token, 0, BUFFER, 0x10, SID, NEEDED]), 0);
+    assert.deepEqual([dword(SID), dword(NEEDED)], [0, 4], 'nothing was enabled before');
+    assert.equal(natives.NtAdjustPrivilegesToken.handler([0x1234, 0, BUFFER, 0, 0, 0]), 0xc0000008);
+    assert.deepEqual(errors, [], 'the last error is left alone');
+    assert.deepEqual(Object.fromEntries(Object.entries(natives)
+        .map(([name, entry])=>[name, entry.argBytes])),
+    { NtOpenProcessToken: 12, NtOpenProcessTokenEx: 16, NtAdjustPrivilegesToken: 24 });
 });
 
 test('a privilege is looked up by its fixed number and granted on the process token', ()=>{

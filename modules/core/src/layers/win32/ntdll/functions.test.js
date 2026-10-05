@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createNtdllFunctions } from './functions.js';
 import { UNLOAD_KEY } from '../advapi32/functions.js';
+import { TOKEN_NATIVES } from '../advapi32/tokens.js';
 
 const PROCESS_HEAP = 0x8;
 
@@ -274,6 +275,19 @@ test('RtlImageNtHeader finds the PE headers an image points at, and nothing in a
     assert.equal(fns.RtlImageNtHeader.handler([image + 4]), 0, 'no DOS stub');
     assert.equal(fns.RtlImageNtHeader.handler([0]), 0);
     assert.equal(fns.RtlImageNtHeader.argBytes, 4);
+});
+
+test('the token calls are advapi32\'s own entries; a shutdown is not implemented', ()=>{
+    const entry = { argBytes: 12, handler: ()=>0 };
+    /** @type {string[]} */
+    const diverged = [];
+    const fns = createNtdllFunctions({ ...fakeHost(), advapi32: {
+        [TOKEN_NATIVES]: { NtOpenProcessToken: entry },
+    }, divergence: api=>diverged.push(api) });
+    assert.equal(fns.NtOpenProcessToken, entry, 'one table of tokens, not a second');
+    assert.equal(fns.NtShutdownSystem.argBytes, 4);
+    assert.equal(fns.NtShutdownSystem.handler([1]), 0xc0000002, 'STATUS_NOT_IMPLEMENTED');
+    assert.deepEqual(diverged, ['NtShutdownSystem']);
 });
 
 test('NtUnloadKey names a hive the native way and unloads it through the registry', ()=>{
