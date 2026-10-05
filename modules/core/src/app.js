@@ -2779,6 +2779,55 @@ export function createKernelGl(opengl, journalCall, traced, counters){
 }
 
 /**
+ * The severity an event is journalled at: its own. A failure the program
+ * cannot see is an error whether or not anybody was listening for it, and a
+ * library that could not be found is the warning that explains a program's
+ * next decision. Everything else is what happened, at info.
+ */
+const SEVERITY = /** @type {Record<string, string>} */ ({
+    error: 'error',
+    'bundle-unavailable': 'error',
+    'library-missing': 'warn',
+    'libraries-missing': 'warn',
+    divergence: 'warn',
+    // The program's own words about why it is stopping. It is not our
+    // failure, but it is never good news.
+    'message-box': 'warn',
+    'bundle-retry': 'warn',
+    'bundle-prefetch-failed': 'warn',
+    'bundle-unbacked': 'warn',
+});
+
+/**
+ * An event whose own source writes the journal keeps a record per call while
+ * the event itself fires once, so the bus must not write the first of those
+ * calls a second time. `unimplemented` is the one: a program that calls a
+ * missing import in a loop would otherwise fill the page's queue with a clone
+ * and a wake-up per call.
+ */
+const SELF_JOURNALLED = new Set(['unimplemented']);
+
+/**
+ * Every event the run reports also goes to its journal, so that one ordered
+ * stream carries the whole story. A consumer that subscribes to a name still
+ * gets it exactly as before -- a watcher never answers, so it cannot take an
+ * event away from a handler that would have.
+ *
+ * @param {{ onAny: (watcher: (name: string, payload: any) => void) => unknown }} events
+ * @param {{ write: (level: string, category: string, template: string,
+ *     ...args: any[]) => any }} into
+ */
+function journalEvents(events, into){
+    events.onAny((/** @type {string} */ name, /** @type {any} */ payload)=>{
+        if (SELF_JOURNALLED.has(name))
+        {
+            return;
+        }
+        into.write(SEVERITY[name] ?? 'info', name, '{0}', describeEvent(payload));
+    });
+}
+
+/**
  * One machine, running one image.
  *
  * `createApp` below is what a caller reaches for; this is what it builds, once
@@ -3949,49 +3998,14 @@ async function buildApp(options){
             ()=>save([{ kind: 'registry' }]));
     }
 
-    // Every event the engine reports also goes to the journal, so that one
-    // ordered stream carries the whole story. A consumer that subscribes to a
-    // name still gets it exactly as before -- a watcher never answers, so it
-    // cannot take an event away from a handler that would have.
-    //
-    // The severity is the event's own: a failure the program cannot see is an
-    // error whether or not anybody was listening for it, and a library that
-    // could not be found is the warning that explains a program's next
-    // decision. Everything else is what happened, at info.
     const journal = core.api('log');
-    const SEVERITY = /** @type {Record<string, string>} */ ({
-        error: 'error',
-        'bundle-unavailable': 'error',
-        'library-missing': 'warn',
-        'libraries-missing': 'warn',
-        divergence: 'warn',
-        // The program's own words about why it is stopping. It is not our
-        // failure, but it is never good news.
-        'message-box': 'warn',
-        'bundle-retry': 'warn',
-        'bundle-prefetch-failed': 'warn',
-        'bundle-unbacked': 'warn',
-    });
-    // An event whose own source writes the journal keeps a record per call
-    // while the event itself fires once, so the generic path below must not
-    // write the first of those calls a second time. `unimplemented` is the one:
-    // a program that calls a missing import in a loop would otherwise fill the
-    // page's queue with a clone and a wake-up per call.
-    const selfJournalled = new Set(['unimplemented']);
     // The run's processes share one event bus and one journal, so only the
     // machine that made the journal writes the bus into it, and straight into
     // the journal rather than through its own view: that view closes with the
     // machine, and a process that replaced it still fires events.
     if (!options.log?.journal)
     {
-        const into = journal.journal?.() ?? journal;
-        events.onAny((/** @type {string} */ name, /** @type {any} */ payload)=>{
-            if (selfJournalled.has(name))
-            {
-                return;
-            }
-            into.write(SEVERITY[name] ?? 'info', name, '{0}', describeEvent(payload));
-        });
+        journalEvents(events, journal.journal?.() ?? journal);
     }
 
     const cpu = core.api('cpu');

@@ -165,6 +165,39 @@ const KNOWN_DLLS = new Set([
     'ws2_32.dll', 'xtajit.dll', 'xtajit64.dll',
 ]);
 
+/**
+ * The DirectX a bottle's graphics choice names, by major version; undefined
+ * for the default 9.0c, which a setup may still overwrite.
+ *
+ * @param {unknown} choice
+ */
+function directxOf(choice){
+    if (choice === undefined)
+    {
+        return undefined;
+    }
+    const release = DIRECTX_RELEASES[/** @type {'7' | '8' | '9'} */ (String(choice))];
+    if (!release)
+    {
+        throw new Error(`unknown DirectX ${JSON.stringify(choice)}: `
+            + `the choices are ${Object.keys(DIRECTX_RELEASES).join(', ')}`);
+    }
+    return release;
+}
+
+/**
+ * The registry a run starts from, as its first process makes it: the keys of
+ * the Windows and the DirectX the machine is, and the processor at the speed
+ * the engine's counter runs. For a run whose processes all stand in workers
+ * of their own, which the system makes before any of them.
+ *
+ * @param {{ windows?: string, directx?: unknown, processorMhz?: number }} [config]
+ */
+export function createRunRegistry(config){
+    return createRegistryService(createHive({ processorMhz: config?.processorMhz,
+        windows: windowsVersion(config?.windows), directx: directxOf(config?.directx) }));
+}
+
 /** The win32 layer's module for one graph; see `defaultModules`. */
 export function createWin32Module(){
     /**
@@ -209,15 +242,7 @@ export function createWin32Module(){
             // Before anything else: a Windows that is not one of the four is a
             // configuration error, not a machine to build.
             const windows = windowsVersion(config?.windows);
-            // The DirectX a bottle's graphics choice names, by major version;
-            // absent, the default 9.0c, which a setup may still overwrite.
-            const directx = config?.directx === undefined ? undefined
-                : DIRECTX_RELEASES[/** @type {'7' | '8' | '9'} */ (String(config.directx))];
-            if (config?.directx !== undefined && !directx)
-            {
-                throw new Error(`unknown DirectX ${JSON.stringify(config.directx)}: `
-                    + `the choices are ${Object.keys(DIRECTX_RELEASES).join(', ')}`);
-            }
+            const directx = directxOf(config?.directx);
             // What the running program is told, which Windows 10 decides from
             // what the program says it knows; everything else keeps the truth.
             const reported = reportedVersion(windows, config?.compatibility);
@@ -406,8 +431,7 @@ export function createWin32Module(){
             // names keys by number (`registry-service.js`): what a process in
             // a worker of its own will be able to call across a ring.
             const inheritedHive = system?.registry ?? null;
-            const hive = inheritedHive ?? createRegistryService(
-                createHive({ processorMhz: config?.processorMhz, windows, directx }));
+            const hive = inheritedHive ?? createRunRegistry(config);
             if (system)
             {
                 system.registry = hive;
