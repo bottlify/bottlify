@@ -177,3 +177,50 @@ test('a failure crosses with what it says of itself, not only its message', { ti
         system.close();
         await serving;
     });
+
+test('a call and an answer larger than a ring holds cross in parts, whole and in order',
+    { timeout: 20000 }, async()=>{
+        // A small ring, so a few hundred KiB are many records of it.
+        const { a, b } = createLinkMemory({ capacity: 64 * 1024 });
+        const big = (/** @type {number} */ size, /** @type {number} */ seed)=>
+            Uint8Array.from({ length: size }, (_, at)=>(at * 31 + seed) & 0xff);
+        const system = openLink(a, { volume: {
+            read: (/** @type {number} */ size)=>big(size, 7),
+            sum: (/** @type {Uint8Array} */ bytes)=>bytes.reduce((sum, byte)=>(sum + byte) >>> 0, 0),
+        } });
+        const serving = system.serve();
+        const answer = await processThread(b, `
+            const read = link.callWaiting('volume', 'read', [300000]);
+            const small = link.callWaiting('volume', 'read', [16]);
+            const sent = Uint8Array.from({ length: 200000 }, (_, at)=>(at * 31 + 3) & 0xff);
+            const sum = link.callWaiting('volume', 'sum', [sent]);
+            return { length: read.length, head: [...read.subarray(0, 4)],
+                tail: [...read.subarray(-4)], small: small.length, sum };`);
+        system.close();
+        await serving;
+        const expected = big(300000, 7);
+        assert.deepEqual(answer, {
+            length: 300000, head: [...expected.subarray(0, 4)], tail: [...expected.subarray(-4)],
+            small: 16,
+            sum: big(200000, 3).reduce((sum, byte)=>(sum + byte) >>> 0, 0),
+        });
+    });
+
+test('an answer that cannot cross reaches the caller as a failure, and the link goes on',
+    { timeout: 20000 }, async()=>{
+        const { a, b } = createLinkMemory();
+        const system = openLink(a, { odd: {
+            handler: ()=>()=>0,
+            plain: ()=>42,
+        } });
+        const serving = system.serve();
+        const answer = await processThread(b, `
+            let failed = null;
+            try { link.callWaiting('odd', 'handler', []); }
+            catch (e) { failed = e.message; }
+            return { failed, after: link.callWaiting('odd', 'plain', []) };`);
+        system.close();
+        await serving;
+        assert.match(answer.failed, /cannot|codec|encode/i);
+        assert.equal(answer.after, 42);
+    });

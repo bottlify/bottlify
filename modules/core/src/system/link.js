@@ -28,9 +28,13 @@
 import { decodeValue, encodeValue } from './codec.js';
 import { createRingMemory, doorbellOf, openRing, waitDoorbell } from './ring.js';
 
-/** The two records on a link. */
+/**
+ * The records on a link: a call, an answer, and a part of one of them too
+ * long for a ring's record, the rest following it in order.
+ */
 const CALL = 0;
 const ANSWER = 1;
+const PART = 2;
 
 /**
  * A failure as a value: its message and whatever it says of itself -- a code
@@ -111,8 +115,30 @@ export function openLink(end, handlers){
     /** Calls answered whose answer did not fit the ring yet. @type {Uint8Array[]} */
     const unsent = [];
 
-    /** @param {Uint8Array} record */
+    /**
+     * A record the ring can hold whole goes as it is; a longer one -- a file
+     * read, a picture -- goes as parts, one after another, and is decoded
+     * once the last is in. Nothing comes between them: a record is sent at
+     * once or queued behind the ones before it, in order.
+     *
+     * @param {Uint8Array} record
+     */
     const send = record=>{
+        if (record.length <= outbound.maxRecord)
+        {
+            sendRecord(record);
+            return;
+        }
+        // Room for the part's own framing.
+        const step = outbound.maxRecord - 64;
+        for (let at = 0; at < record.length; at += step)
+        {
+            sendRecord(encodeValue([PART, at + step >= record.length,
+                record.subarray(at, at + step)]));
+        }
+    };
+    /** @param {Uint8Array} record */
+    const sendRecord = record=>{
         if (unsent.length > 0 || !outbound.write(record))
         {
             // The other side frees room as it reads, and it reads while it
@@ -132,9 +158,23 @@ export function openLink(end, handlers){
         }
     };
 
-    /** @param {number} id @param {boolean} ok @param {any} value */
+    /**
+     * An answer that cannot cross -- a handler that returned what the codec
+     * does not carry -- goes as the failure it is: the caller is told, and the
+     * side answering, which serves every call, goes on.
+     *
+     * @param {number} id @param {boolean} ok @param {any} value
+     */
     const answer = (id, ok, value)=>{
-        send(encodeValue([ANSWER, id, ok, value]));
+        let record;
+        try
+        {
+            record = encodeValue([ANSWER, id, ok, value]);
+        }
+        catch (e){
+            record = encodeValue([ANSWER, id, false, failureOf(e)]);
+        }
+        send(record);
     };
 
     /** @param {number} id @param {string} target @param {string} method @param {any[]} args */
@@ -167,10 +207,28 @@ export function openLink(end, handlers){
      * Handles everything the other side wrote: its calls, and the answers
      * to this side's. Returns how many records there were.
      */
+    /** The parts of a record still coming. @type {Uint8Array[]} */
+    const parts = [];
     const pump = ()=>{
         flush();
         return inbound.drain(bytes=>{
-            const record = decodeValue(bytes);
+            let record = decodeValue(bytes);
+            if (record[0] === PART)
+            {
+                parts.push(record[2].slice());
+                if (!record[1])
+                {
+                    return;
+                }
+                const whole = new Uint8Array(parts.reduce((sum, part)=>sum + part.length, 0));
+                let at = 0;
+                for (const part of parts.splice(0))
+                {
+                    whole.set(part, at);
+                    at += part.length;
+                }
+                record = decodeValue(whole);
+            }
             if (record[0] === CALL)
             {
                 dispatch(record[1], record[2], record[3], record[4]);
