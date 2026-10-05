@@ -91,7 +91,7 @@ function sequenceAnswer(code){
 /**
  * Runs a custom action now, or writes it into the script.
  *
- * @param {import('./actions.js').Engine} engine @param {CustomRow} row
+ * @param {import('./engine.js').Engine} engine @param {CustomRow} row
  * @returns {Promise<number>}
  */
 export async function runCustomAction(engine, row){
@@ -140,7 +140,7 @@ export async function runCustomAction(engine, row){
 }
 
 /**
- * @param {import('./actions.js').Engine} engine @param {CustomRow} row
+ * @param {import('./engine.js').Engine} engine @param {CustomRow} row
  * @param {number} kind @param {number} flags @param {string | null} data
  *        The CustomActionData of a deferred action; null for an immediate one.
  * @returns {Promise<number>}
@@ -299,7 +299,7 @@ async function execute(engine, row, kind, flags, data){
  * rest are stopped if they have not finished, as Windows ends them with the
  * installation.
  *
- * @param {import('./actions.js').Engine} engine
+ * @param {import('./engine.js').Engine} engine
  * @returns {Promise<number>} the failure of one that was waited for, or success
  */
 export async function finishAsync(engine){
@@ -331,7 +331,7 @@ export async function finishAsync(engine){
  * Writes a Binary row's stream to the temporary folder, as Windows does
  * before it loads a library action.
  *
- * @param {import('./actions.js').Engine} engine @param {string} key
+ * @param {import('./engine.js').Engine} engine @param {string} key
  * @param {string} [extension]
  * @returns {Promise<string | null>}
  */

@@ -310,7 +310,7 @@ export function createMsiFunctions(host){
 
     // ----- installing -----------------------------------------------------
 
-    /** @type {Map<import('./session.js').Session, import('./actions.js').Engine>} */
+    /** @type {Map<import('./session.js').Session, import('./engine.js').Engine>} */
     const engines = new Map();
 
     /**

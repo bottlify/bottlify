@@ -13,6 +13,7 @@ import { DEFAULT_ENGINE, DEFAULT_MEMORY_SIZE } from './layers/cpu/module.js';
 import { CORK_TSC_MHZ } from './layers/cpu/internal/cork-host.js';
 import { SETTINGS, processorName } from './settings.js';
 import { createPresenter } from './layers/graphics/webgpu/internal/presenter.js';
+import { baseOf, compositionPlan, needsComposing } from './layers/graphics/webgpu/internal/compose.js';
 import { connectGraphicsWorker, portEnd } from './layers/graphics/remote/connect.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
 import { parsePe, readExports, readImports, rvaToFileOffset } from './layers/loader/internal/pe.js';
@@ -7972,13 +7973,111 @@ export async function createApp(options){
     });
 
     /**
-     * The facade speaks for this process from now on, its input routed.
+     * The run's windows as a tool reads them (`debug.windows`): every
+     * process's, as the run's window manager has them, the topmost top-level
+     * window first and each followed by its children -- where the facade's
+     * one process would show only its own. Null where the run keeps none.
+     */
+    const runWindows = ()=>{
+        const manager = system.windows?.manager;
+        if (!manager)
+        {
+            return null;
+        }
+        /** @param {number} value */
+        const hex = value=>`0x${(value >>> 0).toString(16)}`;
+        /** @type {any[]} */
+        const listed = [];
+        /** @param {any} state */
+        const add = state=>{
+            listed.push({
+                hwnd: hex(state.hwnd), processId: state.processId,
+                x: state.rect.left, y: state.rect.top, width: state.rect.right - state.rect.left,
+                height: state.rect.bottom - state.rect.top,
+                rect: state.rect, client: state.client, region: state.region,
+                visible: state.visible, enabled: state.enabled, className: state.className,
+                title: state.title,
+                parent: state.parent || state.owner ? hex(state.parent || state.owner) : null,
+                child: state.parent !== 0, style: hex(state.style), exStyle: hex(state.exStyle),
+            });
+            manager.children(state.hwnd).forEach(add);
+        };
+        manager.topLevel().forEach(add);
+        return listed;
+    };
+
+    /**
+     * The screen as a tool reads it (`debug.desktop`), as the presenter shows
+     * it: while windows of more than one process show, every process on this
+     * thread's desktop composed by the run's windows (`compose.js`); while one
+     * process's do, that process's desktop. Its own for the facade's process
+     * when the run keeps no windows, or the picture is not on this thread --
+     * a process in a worker of its own sends its picture to the presenter.
+     *
+     * @param {() => any} own  the desktop of the process the facade speaks for
+     */
+    const runDesktop = own=>{
+        const manager = system.windows?.manager;
+        const placed = manager ? manager.topLevel() : [];
+        if (!manager)
+        {
+            return own();
+        }
+        /** @type {Map<number, { width: number, height: number, pitch: number, bytes: Uint8Array }>} */
+        const layers = new Map();
+        for (const built of standing)
+        {
+            const id = processIds.get(built);
+            const picture = id === undefined ? null : built.debug?.desktop?.() ?? null;
+            if (id !== undefined && picture && typeof picture.then !== 'function')
+            {
+                layers.set(id, picture);
+            }
+        }
+        if (!needsComposing(placed))
+        {
+            const showing = placed.find((/** @type {any} */ state)=>state.visible
+                && layers.has(state.processId))?.processId;
+            return (showing === undefined ? null : layers.get(showing)) ?? own();
+        }
+        const foreground = manager.get(manager.foreground() ?? 0)?.processId ?? null;
+        const base = baseOf(placed, layers, foreground);
+        const first = base === null ? null : layers.get(base);
+        if (base === null || !first)
+        {
+            return own();
+        }
+        const screen = { width: first.width, height: first.height, pitch: first.width * 4,
+            bytes: new Uint8Array(first.width * first.height * 4) };
+        for (const copy of compositionPlan({ windows: placed, layers, base, screen }))
+        {
+            const layer = /** @type {{ pitch: number, bytes: Uint8Array }} */ (
+                layers.get(copy.source));
+            for (let row = 0; row < copy.height; row++)
+            {
+                const from = (copy.y + row) * layer.pitch + copy.x * 4;
+                screen.bytes.set(layer.bytes.subarray(from, from + copy.width * 4),
+                    (copy.toY + row) * screen.pitch + copy.toX * 4);
+            }
+        }
+        return screen;
+    };
+
+    /**
+     * The facade speaks for this process from now on, its input routed and a
+     * tool's view of the windows and the screen the run's.
      *
      * @param {any} speaking
      */
     const stand = speaking=>{
         Object.assign(facade, speaking, own);
         facade.input = routedInput(speaking.input);
+        if (speaking.debug)
+        {
+            facade.debug = { ...speaking.debug,
+                windows: ()=>runWindows() ?? speaking.debug.windows(),
+                desktop: ()=>runDesktop(()=>speaking.debug.desktop()) };
+        }
     };
 
     /**
