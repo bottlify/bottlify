@@ -199,11 +199,12 @@ function fakeContexts(){
  * @param {(bytes: number) => number} [options.allocate]
  * @param {(address: number) => void} [options.release]
  * @param {(entry: number, args: number[]) => number} [options.call]
+ * @param {any} [options.draw]  What draws on a context, for a test that reads its clip.
  */
 function setup(
     { cursor, keyState, asyncKeyState, keyboardState, setKeyboardState,
         findResource, loadString, dispatch = ()=>0, screen, regionBox,
-        moduleBase, bitmapFromDib, files, allocate, release, call } = {})
+        moduleBase, bitmapFromDib, files, allocate, release, call, draw } = {})
 {
     screen ??= { ...SCREEN, displayWidth: SCREEN.width, displayHeight: SCREEN.height };
     const memory = fakeMemory();
@@ -254,6 +255,7 @@ function setup(
         call,
         loadString,
         regionBox,
+        draw,
         /** @param {string} text */
         say: text=>said.push(text),
         /** @param {string} api @param {string} detail */
@@ -898,6 +900,7 @@ test('BeginPaint fills the struct the guest allocated', ()=>{
     const { memory, fns } = setup();
     const hwnd = makeWindow(memory, fns);
     memory.fill(PAINT_BUFFER, PAINTSTRUCT.SIZE / 4);
+    fns.InvalidateRect.handler([hwnd, 0, 0]);
 
     const hdc = fns.BeginPaint.handler([hwnd, PAINT_BUFFER]);
     assert.notEqual(hdc, 0, 'a DC was made for the window');
@@ -906,7 +909,7 @@ test('BeginPaint fills the struct the guest allocated', ()=>{
     const painted = [0, 4, 8, 12].map(at=>memory.u32(PAINT_BUFFER + PAINTSTRUCT.rcPaint + at));
     fns.GetClientRect.handler([hwnd, RECT_BUFFER]);
     assert.deepEqual(painted, [0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at)),
-        'a window with no partial damage paints all of its client area');
+        'a window invalidated whole paints all of its client area');
     assert.equal(memory.u32(PAINT_BUFFER + PAINTSTRUCT.fRestore), 0);
 });
 
@@ -930,6 +933,36 @@ test('BeginPaint clears the update region, so the next one has nothing to do', (
     memory.fill(RECT_BUFFER, 4);
     assert.equal(fns.GetUpdateRect.handler([hwnd, RECT_BUFFER, 0]), 0,
         'and afterwards there is nothing left dirty');
+});
+
+test('a BeginPaint with nothing to paint paints nowhere: the second of one WM_PAINT', ()=>{
+    // A skin paints the dialog in its own WM_PAINT, then hands the message to
+    // the procedure it subclassed, whose BeginPaint finds the window clean.
+    // Windows clips that one to the empty update region; one that drew
+    // everywhere filled the dialog grey over the skin.
+    /** @type {[number, any[]][]} */
+    const clips = [];
+    const { memory, fns } = setup({ draw: {
+        clip: (/** @type {number} */ hdc, /** @type {any[]} */ area)=>clips.push([hdc, area]),
+    } });
+    const hwnd = makeWindow(memory, fns, WS_OVERLAPPED | WS_VISIBLE);
+    fns.InvalidateRect.handler([hwnd, 0, 0]);
+    const rcPaint = ()=>[0, 4, 8, 12].map(at=>memory.u32(PAINT_BUFFER + PAINTSTRUCT.rcPaint + at));
+
+    const skin = fns.BeginPaint.handler([hwnd, PAINT_BUFFER]);
+    fns.GetClientRect.handler([hwnd, RECT_BUFFER]);
+    assert.deepEqual(rcPaint(), [0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at)),
+        'the first paints the client area');
+    assert.ok((clips.at(-1)?.[1].length ?? 0) > 0, 'and draws where the window shows');
+    fns.EndPaint.handler([hwnd, PAINT_BUFFER]);
+
+    const behind = fns.BeginPaint.handler([hwnd, PAINT_BUFFER]);
+    assert.notEqual(behind, 0, 'a context all the same');
+    assert.notEqual(skin, 0);
+    assert.deepEqual(rcPaint(), [0, 0, 0, 0], 'with nothing in rcPaint');
+    assert.deepEqual(clips.at(-1), [behind, []], 'and clipped to nothing');
+    assert.equal(memory.u32(PAINT_BUFFER + PAINTSTRUCT.fErase), 0, 'nor anything to erase');
+    fns.EndPaint.handler([hwnd, PAINT_BUFFER]);
 });
 
 test('a DC taken is a DC given back', ()=>{

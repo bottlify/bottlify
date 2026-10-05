@@ -5945,13 +5945,14 @@ export function createWindowFunctions(host){
             handler: ([hwnd, string])=>{
                 // Sent, as Windows sends it: a control keeps its text through
                 // its own procedure, and a program that subclassed one sees
-                // the message.
+                // the message -- on the thread that made the window, which
+                // is where a skin keeps what it paints with.
                 const record = live(hwnd);
                 if (!record)
                 {
                     return 0;
                 }
-                return andThen(send(record.hwnd, WM_SETTEXT, 0, string >>> 0,
+                return andThen(sendAcross(record.hwnd, WM_SETTEXT, 0, string >>> 0,
                     host.callerThread?.()), ()=>1);
             },
         },
@@ -5972,8 +5973,8 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                return andThen(send(record.hwnd, WM_SETTEXT, 0, string >>> 0,
-                    host.callerThread?.(), true), (/** @type {number} */ set)=>(set ? 1 : 0));
+                return andThen(sendAcross(record.hwnd, WM_SETTEXT, 0, string >>> 0,
+                    host.callerThread?.(), true), (/** @type {number | null} */ set)=>(set ? 1 : 0));
             },
         },
 

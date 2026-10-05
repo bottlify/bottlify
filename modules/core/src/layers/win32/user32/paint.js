@@ -649,7 +649,12 @@ export function createPaintFunctions(options){
         {
             return { hdc, rect: clientArea(record) };
         }
-        const dirty = record.updateRect ?? clientArea(record);
+        // With nothing to paint, the paint is of nothing: rcPaint empty and
+        // every pixel clipped, as Windows clips to an empty update region. A
+        // skin that paints in its own WM_PAINT and then hands the message to
+        // the procedure it subclassed has that procedure's BeginPaint find
+        // the window clean; drawing everywhere, it painted over the skin.
+        const dirty = record.updateRect ?? { left: 0, top: 0, right: 0, bottom: 0 };
         // Cleared before the guest paints, not after: a program that
         // invalidates from inside its own WM_PAINT expects that request to
         // survive, and clearing afterwards would swallow it.

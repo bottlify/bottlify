@@ -3387,6 +3387,46 @@ test('a thread inside a modal loop answers what another thread sends its windows
     assert.equal(answered.value, 0x55, 'answered from inside the modal loop');
 });
 
+test('SetWindowText and SetDlgItemText to another thread\'s window wait for that thread to'
+    + ' run its procedure', async()=>{
+    // An installer's worker thread writes the progress text of the wizard its
+    // main thread made. The control is subclassed by a skin that keeps what
+    // it paints with on the thread that made it: run on the worker, it found
+    // nothing and the page was left unpainted.
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (main) };
+    const { fns, memory, dispatched, tick } = setup({ caller });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const dialog = createWindow(fns, memory);
+    const control = createWindow(fns, memory, { style: WS_CHILD, parent: dialog, menu: 0x5aa });
+    memory.putString(TEXT_BUFFER, 'Copying new files');
+    const WM_SETTEXT = 0x000c;
+
+    caller.current = worker;
+    for (const [call, args, target] of /** @type {const} */ ([
+        ['SetWindowTextA', [dialog, TEXT_BUFFER], dialog],
+        ['SetDlgItemTextA', [dialog, 0x5aa, TEXT_BUFFER], control],
+    ]))
+    {
+        const told = dispatched.length;
+        const answer = fns[call].handler([...args]);
+        assert.ok(answer instanceof Promise, `${call}: the worker waits`);
+        assert.equal(dispatched.length, told, `${call}: and nothing has run on it`);
+
+        caller.current = main;
+        fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+        const ran = dispatched.slice(told).find(m=>m.message === WM_SETTEXT);
+        assert.equal(ran?.hwnd, target, `${call}: WM_SETTEXT reached the window`);
+        assert.equal(ran?.thread, main, `${call}: on the thread that made it`);
+        caller.current = worker;
+        await tick();
+        await tick();
+        assert.equal(await answer, 1);
+    }
+});
+
 test('what the window manager sends another thread\'s window runs on the sender, and says so',
     ()=>{
         const main = { id: 1, name: 'main', state: 'running' };

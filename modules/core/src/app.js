@@ -198,7 +198,9 @@ import { openProcessWorker } from './host/process-worker.js';
  * @property {(record: any) => void} [onCall]
  *           Every host call as it returns. The ring kept for a failure holds
  *           the end of a run; this holds all of it, for a tool willing to
- *           write it somewhere.
+ *           write it somewhere. Each of the run's processes calls it, and a
+ *           record names the process's image (`image`) and the calling
+ *           thread (`thread`).
  * @property {Record<string, number>} [jit]
  *     The emulator's compiler budgets, by config index. For measurement.
  * @property {'emulator' | 'cork'} [engine]
@@ -3215,8 +3217,8 @@ async function buildApp(options){
     const tracedCalls = new Map();
     // Every process of a run names its first thread "main", so in the run's one
     // journal a later process's threads carry its image name as well.
-    const callerTag = options.log?.journal
-        ? `${String(options.imagePath ?? '').split(/[\\/]/).pop()}:` : '';
+    const callerImage = String(options.imagePath ?? '').split(/[\\/]/).pop() ?? '';
+    const callerTag = options.log?.journal ? `${callerImage}:` : '';
     // The cursor the page shows: what the program last said of it -- user32's
     // count and SetCursor, or a device cursor; the last report wins -- hidden
     // while it holds the mouse exclusively through DirectInput, as Windows does.
@@ -3362,7 +3364,14 @@ async function buildApp(options){
             record: options.record ?? 0,
             onCall: (/** @type {any} */ call)=>{
                 journalCall(call);
-                options.onCall?.(call);
+                if (options.onCall)
+                {
+                    // Every process of a run hands its calls to the one sink,
+                    // and names its first thread "main": a call says whose
+                    // image made it, beside the thread the bridge names.
+                    call.image = callerImage;
+                    options.onCall(call);
+                }
             },
             // Which calls the sink above keeps: every one for a caller's own
             // sink, the traced ones otherwise. The bridge asks once for each

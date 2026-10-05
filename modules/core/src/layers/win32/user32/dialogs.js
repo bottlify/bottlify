@@ -565,6 +565,19 @@ export function createDialogFunctions(options){
     };
 
     /**
+     * A message a program's own call sends, as SendMessage sends it: to a
+     * control of another thread's dialog it waits for that thread to run the
+     * control's procedure -- a skinned control keeps what it paints with on
+     * the thread that made it.
+     *
+     * @param {number} hwnd @param {number} message @param {number} wParam
+     * @param {number} lParam
+     * @returns {number | Promise<number | null>}
+     */
+    const programSend = (hwnd, message, wParam, lParam)=>(host.sendAcross ?? host.send)(hwnd,
+        message, wParam, lParam, host.callerThread?.());
+
+    /**
      * A control by identifier: an immediate child first, then any deeper
      * one, which is where a control inside a group or a page lives.
      *
@@ -1361,9 +1374,7 @@ export function createDialogFunctions(options){
                 {
                     return 0;
                 }
-                const told = host.send(control.hwnd, BM_SETCHECK, check >>> 0, 0,
-                    host.callerThread?.());
-                return typeof told === 'number' ? 1 : Promise.resolve(told).then(()=>1);
+                return after(programSend(control.hwnd, BM_SETCHECK, check >>> 0, 0), ()=>1);
             },
         },
 
@@ -1382,9 +1393,8 @@ export function createDialogFunctions(options){
                 {
                     return 0;
                 }
-                const told = host.send(control.hwnd, BM_GETCHECK, 0, 0, host.callerThread?.());
-                return typeof told === 'number'
-                    ? told >>> 0 : Promise.resolve(told).then(state=>Number(state) >>> 0);
+                return after(programSend(control.hwnd, BM_GETCHECK, 0, 0),
+                    state=>Number(state) >>> 0);
             },
         },
 
@@ -1405,11 +1415,10 @@ export function createDialogFunctions(options){
                 {
                     return 0;
                 }
-                const thread = host.callerThread?.();
                 const told = host.children(dialog)
                     .filter(record=>(record.id | 0) >= (first | 0) && (record.id | 0) <= (last | 0))
-                    .map(record=>host.send(record.hwnd, BM_SETCHECK,
-                        (record.id | 0) === (check | 0) ? BST_CHECKED : BST_UNCHECKED, 0, thread));
+                    .map(record=>programSend(record.hwnd, BM_SETCHECK,
+                        (record.id | 0) === (check | 0) ? BST_CHECKED : BST_UNCHECKED, 0));
                 return told.some(answer=>typeof answer !== 'number')
                     ? Promise.all(told).then(()=>1)
                     : 1;
@@ -1474,8 +1483,7 @@ export function createDialogFunctions(options){
                 {
                     return 0;
                 }
-                return after(host.send(control.hwnd, WM_SETTEXT, 0, text >>> 0,
-                    host.callerThread?.()), ()=>1);
+                return after(programSend(control.hwnd, WM_SETTEXT, 0, text >>> 0), ()=>1);
             },
         },
 
@@ -1565,8 +1573,7 @@ export function createDialogFunctions(options){
                     return 0;
                 }
                 writeString(address, text, text.length + 1);
-                return after(host.send(control.hwnd, WM_SETTEXT, 0, address,
-                    host.callerThread?.()), ()=>{
+                return after(programSend(control.hwnd, WM_SETTEXT, 0, address), ()=>{
                     host.release?.(address);
                     return 1;
                 });

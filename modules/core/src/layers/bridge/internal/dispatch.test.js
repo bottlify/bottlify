@@ -723,6 +723,32 @@ test('a waiting call is reported to the sink twice: once as asked, once as answe
     assert.deepEqual(seen[1].args, [1, 2], 'the second line carries what was asked');
 });
 
+test('a call reaches the sink with its thread, and a waiting one\'s answer with the thread that'
+    + ' asked, though another runs when it comes', async()=>{
+    const m = machine({ args: [1, 2] });
+    /** @type {any[]} */
+    const seen = [];
+    /** @type {(value: number) => void} */
+    let answer = ()=>{};
+    const dispatcher = createDispatcher({
+        cpu: m.cpu, memory: m.memory, parking: m.parking, suspend: ()=>{},
+        onCall: (/** @type {any} */ call)=>seen.push(`${call.result} on ${call.thread}`),
+    });
+    dispatcher.register(3, {
+        name: 'X.dll!Wait', ...STDCALL, argBytes: 8,
+        handler: ()=>new Promise(resolve=>{
+            answer = resolve;
+        }),
+    });
+    dispatcher.register(4, { name: 'X.dll!F', ...STDCALL, argBytes: 8, handler: ()=>1 });
+    dispatcher.dispatch(3);
+    m.current.name = 'other';
+    dispatcher.dispatch(4);
+    answer(0x40);
+    await Promise.resolve();
+    assert.deepEqual(seen, ['waiting on caller', '0x1 on other', '0x40 (was waiting) on caller']);
+});
+
 test('a waiting call that fails is reported to the sink, not left unhandled', async()=>{
     // The sink's own continuation on the answer had no rejection handler, so
     // a handler that awaited and then threw brought the host process down

@@ -11,7 +11,8 @@
  * process shows as the page does. The fixture's parent shows a red window at
  * the screen's corner, its child a blue one over the parent's lower right
  * quarter; with no GPU, the screen read back is composed on bytes by the same
- * plan the presenter carries out as texture copies.
+ * plan the presenter carries out as texture copies. And a call the tool is
+ * handed says which process's image made it, on which thread.
  */
 
 import { test } from 'node:test';
@@ -44,6 +45,8 @@ test('a tool sees every process\'s windows and the screen they compose', { timeo
     async t=>{
         const program = new Uint8Array(await readFile(new URL('../test/fixtures/overlap.exe',
             import.meta.url)));
+        /** @type {Set<string>} */
+        const callers = new Set();
         const app = await createApp({
             executable: program,
             imagePath: 'C:\\App\\overlap.exe',
@@ -52,6 +55,10 @@ test('a tool sees every process\'s windows and the screen they compose', { timeo
             storage: { load: async()=>({
                 files: [{ path: 'C:\\App\\overlap.exe', bytes: program }],
             }) },
+            // A tool's trace of the calls: each says whose it is.
+            onCall: (/** @type {any} */ call)=>{
+                callers.add(`${call.image} ${typeof call.thread}`);
+            },
         });
         t.after(()=>app.dispose());
         /** @type {string[]} */
@@ -107,6 +114,8 @@ test('a tool sees every process\'s windows and the screen they compose', { timeo
         const top = windows.filter(window=>!window.child);
         assert.ok(top.every(window=>/^0x[0-9a-f]+$/.test(window.hwnd)
             && window.width > 0 && window.height > 0), 'each listed with its place');
+        assert.deepEqual([...callers], ['overlap.exe string'],
+            'a call names the image of the process that made it, and its thread');
         assert.ok(windows.indexOf(top[0]) === 0 && windows.every((window, at)=>!window.child
             || windows.slice(0, at).some(earlier=>earlier.hwnd === window.parent)),
         'the topmost first, each child after its parent');
