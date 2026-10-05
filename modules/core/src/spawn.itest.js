@@ -841,7 +841,8 @@ test('a child in a worker of its own sets the event its parent named, and the pa
         app.on('process-started', (/** @type {any} */ event)=>started.push(event.worker));
         assert.equal((await app.run({ timeoutMs: 30000 })) >>> 0, 0x105,
             'woken by the event the child set across the link, then by its exit with 5');
-        assert.deepEqual(started, [true], 'the child ran in a worker of its own');
+        assert.deepEqual(started, [true, true],
+            'the program and its child ran in workers of their own');
     });
 
 /**
@@ -960,32 +961,28 @@ function buildTwoChildren(){
     return { parent, sleeper, quick };
 }
 
-test('a child past the run\'s concurrency runs beside its parent on the engine\'s thread, its'
-    + ' sound in a span its parent lent it', { timeout: 60000 }, async t=>{
-    const { parent, sleeper, quick } = buildTwoChildren();
-    const app = await createApp({
-        executable: parent,
-        imagePath: 'C:\\App\\parent.exe',
-        engine: 'cork',
-        concurrency: 2,
-        storage: { load: async()=>({ files: [{ path: 'C:\\App\\a.exe', bytes: sleeper },
-            { path: 'C:\\App\\b.exe', bytes: quick }] }) },
+test('a child past the run\'s concurrency runs beside its parent, in its parent\'s worker',
+    { timeout: 60000 }, async t=>{
+        const { parent, sleeper, quick } = buildTwoChildren();
+        const app = await createApp({
+            executable: parent,
+            imagePath: 'C:\\App\\parent.exe',
+            engine: 'cork',
+            concurrency: 2,
+            storage: { load: async()=>({ files: [{ path: 'C:\\App\\a.exe', bytes: sleeper },
+                { path: 'C:\\App\\b.exe', bytes: quick }] }) },
+        });
+        t.after(()=>app.dispose());
+        /** @type {[string, boolean][]} */
+        const started = [];
+        app.on('process-started', (/** @type {any} */ event)=>
+            started.push([event.image, event.worker === true]));
+        assert.equal(await app.run({ timeoutMs: 30000 }), 0);
+        assert.deepEqual(started, [['C:\\App\\parent.exe', true], ['C:\\App\\a.exe', true],
+            ['C:\\App\\b.exe', false]],
+        'two at once: the program and its first child each in a worker, the second child beside'
+        + ' the program, in its worker');
     });
-    t.after(()=>app.dispose());
-    /** @type {[string, boolean, number][]} */
-    const started = [];
-    app.on('process-started', (/** @type {any} */ event)=>{
-        const audio = app.diagnostics().find((/** @type {any} */ layer)=>
-            layer.name === 'audio');
-        started.push([event.image, event.worker === true, audio.metrics.arenaFree]);
-    });
-    assert.equal(await app.run({ timeoutMs: 30000 }), 0);
-    assert.deepEqual(started.map(([image, worker])=>[image, worker]),
-        [['C:\\App\\a.exe', true], ['C:\\App\\b.exe', false]],
-        'two at once: the first child in a worker, the second beside its parent here');
-    assert.equal(started[1][2], 4 << 20,
-        'the one here mixes in the span lent it, not under its parent\'s voices');
-});
 
 for (const [concurrency, across] of /** @type {[2 | 4, boolean][]} */ ([[4, true], [2, false]]))
 {
@@ -1011,10 +1008,10 @@ for (const [concurrency, across] of /** @type {[2 | 4, boolean][]} */ ([[4, true
         app.on('process-started', (/** @type {any} */ event)=>
             started.push([event.image, event.worker === true]));
         assert.equal(await app.run({ timeoutMs: 30000 }), 7);
-        assert.deepEqual(started,
-            [['C:\\App\\middle.exe', true], ['C:\\App\\leaf.exe', across]], across
-                ? 'each in a worker of its own'
-                : 'the second past the run\'s room, beside its parent');
+        assert.deepEqual(started, [['C:\\App\\root.exe', true],
+            ['C:\\App\\middle.exe', true], ['C:\\App\\leaf.exe', across]], across
+            ? 'each in a worker of its own'
+            : 'the second past the run\'s room, beside its parent');
     });
 }
 

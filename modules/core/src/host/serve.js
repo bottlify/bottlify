@@ -809,7 +809,8 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 files: started?.collectOnExit ? app.session.export() : [],
                 // What an installer's output is sorted against: the libraries
                 // a bottle does not carry out of system32.
-                systemLibraries: started?.collectOnExit ? app.systemLibraries?.() ?? [] : [],
+                systemLibraries: started?.collectOnExit
+                    ? await app.systemLibraries?.() ?? [] : [],
             };
         },
         pause: ()=>app.pause(),
@@ -867,8 +868,9 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
         // flag a program waits on without calling anything shows nowhere
         // else, and a running title is the one worth looking at. A copy, so
         // what crosses is what was there.
-        'debug.read': (/** @type {number} */ address, /** @type {number} */ length)=>
-            app.debug.read(address, length).slice(),
+        // Awaited: a program in a worker of its own answers across its link.
+        'debug.read': async(/** @type {number} */ address, /** @type {number} */ length)=>
+            (await app.debug.read(address, length)).slice(),
         'debug.modules': ()=>app.debug.modules(),
         presented: ()=>({ count: frames, history: presented.slice() }),
         /*

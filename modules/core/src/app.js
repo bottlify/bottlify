@@ -43,6 +43,10 @@ import { withRunMode } from './mode.js';
 import { createLinkMemory, openLink } from './system/link.js';
 import { systemHandlers } from './system-link.js';
 import { eventFrom } from './system/events-across.js';
+import { defaultModules } from './layers/index.js';
+import { createRunRegistry } from './layers/win32/module.js';
+import { createWindowDirectory } from './layers/win32/user32/directory.js';
+import { createMixer } from './layers/audio/output/mixer.js';
 import { objectHandlers } from './system-objects.js';
 import { openProcessWorker } from './host/process-worker.js';
 
@@ -6880,6 +6884,300 @@ const REPLACEMENT_HISTORY = 16;
 const EXIT_NOTICE_TYPE = 0x40;
 
 /**
+ * What of a run's options never goes to a process in a worker of its own:
+ * the system's -- its drives, session, bundle, devices and bus -- which the
+ * process reaches across its link, and what a process is handed of its own.
+ */
+const SYSTEM_OPTIONS = new Set(['system', 'relay', 'pacing', 'device', 'bundle', 'storage',
+    'discs', 'files', 'seed', 'events', 'spawned', 'logSinks', 'win32', 'watchImport', 'hooks',
+    'executable', 'standardFiles', 'fallback', 'graphics', 'audio', 'cork', 'log', 'com']);
+
+/**
+ * A value as it crosses to another thread's start: data -- numbers, strings,
+ * bytes, arrays and plain objects of those -- and nothing that is a function
+ * or an object of a class, which a structured clone refuses or empties.
+ *
+ * @param {any} value @param {number} [depth]
+ * @returns {any}
+ */
+function portable(value, depth = 0){
+    if (value === null || typeof value !== 'object')
+    {
+        return typeof value === 'function' || typeof value === 'symbol' ? undefined : value;
+    }
+    if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer
+        || (typeof SharedArrayBuffer === 'function' && value instanceof SharedArrayBuffer))
+    {
+        return value;
+    }
+    if (depth > 8)
+    {
+        return undefined;
+    }
+    if (Array.isArray(value))
+    {
+        return value.map(item=>portable(item, depth + 1) ?? null);
+    }
+    if (Object.getPrototypeOf(value) !== Object.prototype)
+    {
+        return undefined;
+    }
+    return Object.fromEntries(Object.entries(value).map(([key, item])=>
+        [key, portable(item, depth + 1)]).filter(([, item])=>item !== undefined));
+}
+
+/**
+ * The run's options a process in a worker of its own starts with: the
+ * engine, the mode, the Windows, the display, the knobs, the decoders'
+ * binaries.
+ *
+ * @param {AppOptions} options
+ */
+function portableOptions(options){
+    return portable(Object.fromEntries(Object.entries(options)
+        .filter(([key])=>!SYSTEM_OPTIONS.has(key))));
+}
+
+/**
+ * The call areas a run's journal starts with switched off; see `buildApp`.
+ */
+const CALLS_OFF = Object.freeze({
+    'call.cpu': 'off', 'call.gpu': 'off', 'call.audio': 'off', 'call.video': 'off',
+    'call.input': 'off', 'call.net': 'off', 'call.com': 'off', 'call.hook': 'off',
+});
+
+/**
+ * The run's system where every process of it stands in a worker of its own
+ * (`concurrency` above 1): this thread runs no program. What a process's
+ * machine is to the page -- its log, its sound, its input, its files and
+ * registry, the calls that look inside a running program -- this answers in
+ * that shape. The journal, the sound output, the volume, the bundle and the
+ * registry are the system's own, made here before any process; what only a
+ * process has is asked of the run's first process across its link, and the
+ * page's input goes to the process started last of those standing, as it
+ * goes to a child the moment it starts.
+ *
+ * @param {{ options: AppOptions, events: any, system: any, translationStore: any,
+ *     now: () => number,
+ *     across: () => { image: string, link: ReturnType<typeof openLink> }[],
+ *     libraries: () => string[] }} deps
+ *     `across`: the processes standing in workers, oldest first; `libraries`:
+ *     the system libraries the run's own program knew, once it is over
+ */
+async function buildSystemHost(deps){
+    const { options, events, system, translationStore, now, across, libraries } = deps;
+    const core = await assembleModules({
+        ...Object.fromEntries(defaultModules().map(module=>[module.name, false])),
+        log: { categories: { ...CALLS_OFF, ...options.log?.categories },
+            capacity: options.log?.capacity, bytes: options.log?.bytes, now },
+        filesystem: { volume: system.volume },
+    });
+    const filesystem = core.api('filesystem');
+    const journal = core.api('log');
+    journalEvents(events, journal.journal?.() ?? journal);
+    system.registry = createRunRegistry({
+        windows: options.windows,
+        directx: options.graphicsApi
+            ? GRAPHICS_CHOICES[options.graphicsApi].directx ?? undefined : undefined,
+        processorMhz: CORK_TSC_MHZ,
+    });
+    system.windows = createWindowDirectory();
+    const { seeded, saver, stopSavingRegistry } = await openSession({ options, events,
+        filesystem, registry: system.registry, inherited: false });
+    // Cork's own decoder reads the bundle's blocks: no processor is asked.
+    const blocks = await mountBundle({ options, cpu: null, events, translationStore });
+    system.bundle = blocks;
+    await furnishVolume({ options, events, filesystem, blocks, seeded,
+        registry: system.registry });
+    // The output every process plays into, each in a span of its arena lent
+    // it; the page's worklet reads the table.
+    const given = options.audio?.memory;
+    const output = createMixer({ shared: true, sampleRate: options.audio?.sampleRate,
+        memory: given && 'table' in given ? given : undefined });
+
+    /** The run's own program: the first process standing. */
+    const first = ()=>across()[0] ?? null;
+    /**
+     * What only a process has, asked of the run's own program.
+     *
+     * @param {string} path  a member of its machine, `debug.read`
+     * @param {any[]} [args]
+     */
+    const ask = (path, args = [])=>{
+        const process = first();
+        return process
+            ? process.link.call('facade', 'call', [path, args]).then(eventFrom)
+            : Promise.reject(new Error(`${path}: no process of the run stands`));
+    };
+    /** Every process standing, told the same. @param {string} method */
+    const tellAll = method=>{
+        for (const process of across())
+        {
+            process.link.call('control', method, []).catch(()=>{});
+        }
+    };
+    /** The canvas the page's pointer is measured on, once attached. @type {any} */
+    let viewport = null;
+    /**
+     * The run's own program's tables, as it last answered or as it ended:
+     * what a reader of the run's diagnostics wants of its processor, its
+     * pacing and its devices is there, not on this thread.
+     *
+     * @type {any[]}
+     */
+    let programTables = [];
+    /** The tables this thread keeps for the run: its journal and its sound output. */
+    const ownTables = new Set(['log', 'audio']);
+
+    return {
+        log: {
+            /** @param {'error' | 'warn' | 'info'} level @param {string} category @param {string} text */
+            write: (level, category, text)=>journal.write(level, category, '{0}', text),
+            /** @param {number} [since] @param {number} [limit] */
+            drain: (since, limit)=>journal.drain(since, limit),
+            /** @param {number} [count] */
+            recent: count=>journal.recent(count),
+            journal: ()=>journal.journal?.() ?? null,
+            /** @param {string} category @param {string | number} level */
+            setLevel: (category, level)=>journal.setLevel(category, level),
+            /** @param {string | number} level */
+            setDefaultLevel: level=>journal.setDefaultLevel(level),
+            /** @param {number} [worst] */
+            profile: worst=>journal.profile(worst),
+            /** @param {number} [count] */
+            frames: count=>journal.frames(count),
+            memory: ()=>journal.memory(),
+        },
+        audio: {
+            /** @param {number} bytes */
+            lend: bytes=>output.lend(bytes),
+            /** @param {number} offset @param {number} bytes */
+            takeBack: (offset, bytes)=>output.takeBack(offset, bytes),
+            table: ()=>output.table,
+            memory: ()=>output.memory,
+            format: ()=>({ sampleRate: output.sampleRate, channels: output.channels }),
+        },
+        media: { instance: ()=>null },
+        input: {
+            /** @param {any} canvas */
+            attach: canvas=>{
+                viewport = canvas;
+                return null;
+            },
+            detach: ()=>{
+                viewport = null;
+            },
+            /** @param {any} event */
+            send: event=>{
+                const process = across().at(-1);
+                process?.link.call('input', 'send', [event, viewport
+                    ? { width: viewport.width, height: viewport.height } : null]).catch(()=>{});
+                return Boolean(process);
+            },
+            poll: ()=>{},
+        },
+        pause: ()=>tellAll('pause'),
+        resume: ()=>tellAll('resume'),
+        stop: ()=>tellAll('stop'),
+        answerMessageBox: ()=>false,
+        on: (/** @type {string} */ name, /** @type {(payload: any) => any} */ handler)=>
+            events.on(name, handler),
+        off: (/** @type {string} */ name, /** @type {(payload: any) => any} */ handler)=>
+            events.off(name, handler),
+        /** @param {(handle: number, text: string) => void} sink */
+        attachLog(sink){
+            events.on('output', (/** @type {any} */ payload)=>sink(payload.handle, payload.text));
+        },
+        guestProfile: {
+            instructionStats: ()=>ask('guestProfile.instructionStats'),
+            available: ()=>ask('guestProfile.available'),
+            /** @param {any} how */
+            start: how=>ask('guestProfile.start', [how]),
+            stop: ()=>ask('guestProfile.stop'),
+            read: ()=>ask('guestProfile.read'),
+        },
+        debug: {
+            /** @param {number} address @param {number} length */
+            read: (address, length)=>ask('debug.read', [address, length]),
+            modules: ()=>ask('debug.modules'),
+            /** @param {number} address */
+            moduleAt: address=>ask('debug.moduleAt', [address]),
+            windows: ()=>ask('debug.windows'),
+            desktop: ()=>ask('debug.desktop'),
+            /** @param {number} address @param {any} how */
+            hook: (address, how)=>ask('debug.hook', [address, how]),
+        },
+        trace: ()=>ask('trace'),
+        report: ()=>ask('report'),
+        recordedSession: ()=>ask('recordedSession'),
+        registry: ()=>system.registry,
+        // Asked while the program stands; once it is over, what it knew.
+        systemLibraries: ()=>(across().length > 0 ? ask('systemLibraries') : libraries()),
+        session: {
+            export: ()=>filesystem.export(),
+            /** @param {any[]} changes @param {{ quiet?: boolean }} [how] */
+            apply: (changes, how)=>filesystem.apply(changes, how),
+            generation: ()=>filesystem.generation(),
+            /** @param {number} mark */
+            changesSince: mark=>filesystem.changesSince(mark),
+            runVolume: ()=>filesystem.runVolume(),
+        },
+        files: {
+            /** @param {string} path */
+            list: path=>filesystem.list(path).map((/** @type {any} */ entry)=>({
+                name: entry.name, path: entry.path, directory: entry.directory === true,
+                size: entry.size ?? 0, modified: entry.modified ?? 0 })),
+            /** @param {string} path */
+            read: path=>{
+                const handle = filesystem.open(path,
+                    { read: true, shareRead: true, shareWrite: true });
+                try
+                {
+                    return filesystem.read(handle, filesystem.size(handle));
+                }
+                finally
+                {
+                    filesystem.close(handle);
+                }
+            },
+        },
+        /** @param {string} path */
+        readImage: path=>readWholeFile(filesystem, blocks, path),
+        /**
+         * The program's tables as it last answered -- asked again now, for the
+         * next reader -- with the journal and the sound output this thread
+         * keeps for the run.
+         */
+        diagnostics: ()=>{
+            first()?.link.call('report', 'diagnostics', []).then(tables=>{
+                if (Array.isArray(tables))
+                {
+                    programTables = tables;
+                }
+            }, ()=>{});
+            const own = [...core.diagnostics(),
+                { name: 'audio', status: 'ready', metrics: output.diagnostics() }];
+            const theirs = programTables.filter(table=>!ownTables.has(table.name));
+            const named = new Set(theirs.map(table=>table.name));
+            return [...own.filter(table=>!named.has(table.name)), ...theirs];
+        },
+        /** The program's tables as it ended. @param {any[] | undefined} tables */
+        ended: tables=>{
+            if (Array.isArray(tables))
+            {
+                programTables = tables;
+            }
+        },
+        dispose(){
+            tellAll('stop');
+            saver?.flush();
+            stopSavingRegistry();
+            return core.dispose();
+        },
+    };
+}
+
+/**
  * createApp — the consumer-facing entry point.
  *
  * One machine running at a time, and a process lifecycle over the top: when
@@ -7080,6 +7378,13 @@ export async function createApp(options){
     const standing = new Set();
     /** Whether the run's processes run at once, each beside its parent (`mode.js`). */
     const processesAtOnce = (options.concurrency ?? 1) > 1;
+    /**
+     * Whether every process of the run stands in a worker of its own, its
+     * first one too: where processes run at once, on cork, this thread is the
+     * system alone and runs no program (`buildSystemHost`).
+     */
+    const rootAcross = processesAtOnce && !options.system
+        && (options.engine ?? DEFAULT_ENGINE) === 'cork';
     const classTable = createClassTable({
         launch: (request, process)=>{
             const parent = processes.get(process);
@@ -7141,7 +7446,19 @@ export async function createApp(options){
     };
 
     /** @type {any} */
-    let current = await build();
+    /** The system libraries the run's own program knew, once it is over. @type {string[]} */
+    let rootLibraries = [];
+    let current = rootAcross
+        ? await buildSystemHost({ options, events, system, translationStore, now: journalClock,
+            across: ()=>[...standingAcross], libraries: ()=>rootLibraries })
+        : await build();
+    // What every process's devices present comes back from the run's
+    // graphics worker to the machine that opened it; where no process stands
+    // on this thread, the system takes those frames to the run's presenter.
+    const shownHere = rootAcross && presenter && options.device?.worker && options.device.device
+        ? connectGraphicsWorker({ worker: options.device.worker, device: options.device.device,
+            presentTo: frame=>presenter.show(frame) })
+        : null;
     // The first process's journal is the run's: every process built after it,
     // beside it or in its place, writes there, and a reader of the facade's
     // log sees them all in one order on one clock.
@@ -7222,7 +7539,7 @@ export async function createApp(options){
      * @param {number} code
      */
     const noticeExit = code=>{
-        if (options.exitNotice === false || code !== 0 || current.exitCode() !== 0)
+        if (options.exitNotice === false || code !== 0 || (current.exitCode?.() ?? code) !== 0)
         {
             return;
         }
@@ -7299,9 +7616,10 @@ export async function createApp(options){
      * what it held.
      *
      * @param {any} parent
+     * @param {number} [largest]  the most it is lent
      */
-    const lendSound = parent=>{
-        let bytes = 4 << 20;
+    const lendSound = (parent, largest = 4 << 20)=>{
+        let bytes = largest;
         let span = -1;
         for (; bytes >= 512 << 10 && span < 0; bytes /= 2)
         {
@@ -7472,12 +7790,14 @@ export async function createApp(options){
      * that joined another run's system from a worker starts its children
      * beside it, in its worker: the run's processes are counted by the run.
      */
-    const inWorker = ()=>!options.system && across < (options.concurrency ?? 1) - 1;
+    const inWorker = ()=>!options.system
+        && across < (options.concurrency ?? 1) - (rootAcross ? 0 : 1);
     /**
      * The children standing in workers of their own, each with the way its
      * diagnostics are asked for across its link.
      *
-     * @type {Set<{ image: string, diagnostics: () => Promise<any> }>}
+     * @type {Set<{ image: string, link: ReturnType<typeof openLink>,
+     *     diagnostics: () => Promise<any> }>}
      */
     const standingAcross = new Set();
 
@@ -7491,8 +7811,9 @@ export async function createApp(options){
      *     its parent, as the run reaches it: where its image is read, and the
      *     sound it lends
      * @param {any} request
-     * @returns {Promise<{ code: number, diagnostics?: any }>}  its exit code, and
-     *     its layers' diagnostics as it ended
+     * @returns {Promise<{ code: number, diagnostics?: any, systemLibraries?: string[] }>}
+     *     its exit code, its layers' diagnostics as it ended, and the system
+     *     libraries it knew
      */
     const runAcross = async(from, request)=>{
         const image = await from.readImage(request.imagePath).catch(()=>null);
@@ -7564,11 +7885,11 @@ export async function createApp(options){
         // child on this thread; its next look at the link takes it.
         const forwarding = { ...facade.input,
             send: (/** @type {any} */ event)=>{
-                link.call('input', 'send', [event]).catch(()=>{});
+                link.call('input', 'send', [event, null]).catch(()=>{});
                 return true;
             } };
         facade.input = forwarding;
-        const asked = { image: request.imagePath,
+        const asked = { image: request.imagePath, link,
             diagnostics: ()=>link.call('report', 'diagnostics', []) };
         standingAcross.add(asked);
         events.emit('process-started', { image: request.imagePath, sequenceBase: logSequence,
@@ -7579,7 +7900,8 @@ export async function createApp(options){
                 worker.onMessage(data=>{
                     if (data?.type === 'exited')
                     {
-                        resolve({ code: data.code, diagnostics: data.diagnostics });
+                        resolve({ code: data.code, diagnostics: data.diagnostics,
+                            systemLibraries: data.systemLibraries });
                     }
                     else if (data?.type === 'failed')
                     {
@@ -7597,6 +7919,7 @@ export async function createApp(options){
                     graphics: graphics?.port1 ?? null,
                     display: display?.port2 ?? null,
                     options: {
+                        ...portableOptions(options),
                         executable: image,
                         imagePath: request.imagePath,
                         commandLine: request.commandLine,
@@ -7607,16 +7930,10 @@ export async function createApp(options){
                         standardFiles: request.standardFiles && Object.fromEntries(
                             Object.entries(request.standardFiles).filter(([, file])=>file)
                                 .map(([which, file])=>[which, { path: file.path }])),
-                        engine: options.engine,
-                        mode: options.mode,
-                        concurrency: options.concurrency,
-                        windows: options.windows,
-                        // The run's display, which its windows and devices
-                        // are sized against.
-                        screen: options.screen,
-                        desktop: options.desktop,
-                        graphicsApi: options.graphicsApi,
-                        maxFps: options.maxFps,
+                        // The run tells the player the game is over, once.
+                        exitNotice: false,
+                        log: { categories: options.log?.categories,
+                            capacity: options.log?.capacity, bytes: options.log?.bytes },
                         graphics: knobs,
                         audio: sound ? Object.fromEntries(Object.entries(sound.options)
                             .filter(([, value])=>typeof value !== 'function')) : undefined,
@@ -7661,12 +7978,16 @@ export async function createApp(options){
      * `exited` its code when it is gone.
      *
      * @param {Parameters<typeof runAcross>[0]} from @param {any} request
-     * @param {(code: number) => void} exited
+     * @param {((code: number, ended: { systemLibraries?: string[] }) => void) | null}
+     *     exited  its parent's; null for the run's own program, which resumes
+     *     nothing
+     * @param {(ended: { diagnostics?: any, systemLibraries?: string[] }) => void} [over]
+     *     told as it ends, whoever it was
      */
-    const startAcross = (from, request, exited)=>{
+    const startAcross = (from, request, exited, over)=>{
         across++;
         const running = (async()=>{
-            /** @type {{ code: number, diagnostics?: any }} */
+            /** @type {{ code: number, diagnostics?: any, systemLibraries?: string[] }} */
             let ended = { code: -1 };
             try
             {
@@ -7680,9 +8001,13 @@ export async function createApp(options){
                 across--;
             }
             const { code, diagnostics } = ended;
-            exited(code);
             lastBesideCode = code;
-            events.emit('process-resumed', { image: request.imagePath, code, diagnostics });
+            over?.(ended);
+            if (exited)
+            {
+                exited(code, ended);
+                events.emit('process-resumed', { image: request.imagePath, code, diagnostics });
+            }
             return code;
         })();
         besides.add(running);
@@ -8011,6 +8336,33 @@ export async function createApp(options){
         }
     };
 
+    /**
+     * Runs the run's program in a worker of its own, and every process it
+     * starts, until the last of them is gone; the code is the last one's, as
+     * a launcher that started its game and went leaves the game's.
+     */
+    const runRoot = async()=>{
+        rootLibraries = [];
+        startAcross({
+            readImage: async()=>options.executable,
+            // Half the output's arena: the rest is for what it starts.
+            sound: ()=>lendSound(current, 8 << 20),
+        }, {
+            imagePath,
+            commandLine: options.commandLine,
+            id: options.processId,
+        }, null, ended=>{
+            rootLibraries = ended.systemLibraries ?? [];
+            current.ended(ended.diagnostics);
+        });
+        while (besides.size > 0)
+        {
+            await Promise.allSettled([...besides]);
+        }
+        noticeExit(lastBesideCode);
+        return lastBesideCode;
+    };
+
     const own = {
         /**
          * Every process standing, each with its image and its own diagnostics:
@@ -8020,7 +8372,7 @@ export async function createApp(options){
          * @returns {Promise<{ image: string, diagnostics: any }[]>}
          */
         async standing(){
-            const machines = new Set([current, ...processes.values()]);
+            const machines = new Set([...rootAcross ? [] : [current], ...processes.values()]);
             return Promise.all([
                 ...[...machines].map(async made=>({
                     image: images.get(made) || imagePath,
@@ -8044,7 +8396,7 @@ export async function createApp(options){
          */
         async run(runOptions){
             runOptionsNow = runOptions;
-            return runProcesses(runOptions);
+            return rootAcross ? runRoot() : runProcesses(runOptions);
         },
 
         /**
@@ -8064,7 +8416,10 @@ export async function createApp(options){
                     translationStore?.close?.();
                 }
             })
-            .finally(()=>presenter?.dispose?.()),
+            .finally(()=>{
+                shownHere?.dispose();
+                presenter?.dispose?.();
+            }),
 
         /**
          * The presenter this run draws through: the canvas, the format it was

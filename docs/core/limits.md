@@ -17,11 +17,18 @@ differently raises a `divergence` event naming the API.
 ## Processes
 
 - A child started with `CreateProcess` runs while its parent waits; the parent resumes when the
-  child ends. With `concurrency` 2 or 4 a child starts at `CreateProcess` and runs beside its
-  parent, in a worker of its own; one past that many at once runs beside its parent taking turns
-  with it on the engine thread.
+  child ends. With `concurrency` 2 or 4 every process runs in a worker of its own, the program the
+  page started too, and a child starts at `CreateProcess` and runs beside its parent; one past
+  that many at once runs beside its parent taking turns with it in its parent's worker.
+- With `concurrency` 2 or 4 a process's own journal -- its calls, its phase profile, its frames --
+  stays in its worker: the run's log holds the events every process reports and what the engine's
+  thread writes. A process in a worker keeps no translations between runs, places no hooks
+  (`hooks`, `watchImport`), and reaches no network transport the page handed in (`win32.network`).
+  The run's diagnostics are the program's tables as it last answered, with the journal and the
+  sound output the engine's thread keeps.
 - Only the process of an out-of-process COM server runs alongside the program that uses it, outside
-  `concurrency`, beside it on the engine thread.
+  `concurrency`, beside it on the engine thread; a process in a worker of its own -- with
+  `concurrency` 2 or 4, every process -- has no COM server.
 - A child in a worker of its own shares the run's registry, files, window
   directory -- its windows found, read, posted and sent to by every other process, and theirs by
   it -- ids, the run's bundle (a block it misses is fetched for it), named events, semaphores

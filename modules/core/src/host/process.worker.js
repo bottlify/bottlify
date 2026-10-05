@@ -87,8 +87,9 @@ const plainOf = read=>{
  *
  * @param {{ end: import('../system/link.js').LinkEnd, graphics?: MessagePort | null,
  *     display?: MessagePort | null, options: any, run?: any }} start
- * @returns {Promise<{ code: number, diagnostics: any }>} its exit code, and its
- *     layers' diagnostics as it ended, as plain data, or null
+ * @returns {Promise<{ code: number, diagnostics: any, systemLibraries: any }>} its exit
+ *     code, its layers' diagnostics as it ended and the system libraries it knew, as
+ *     plain data, or null
  */
 export async function serveProcess({ end, graphics, display, options, run }){
     /** @type {Record<string, Record<string, (...args: any[]) => any>>} */
@@ -102,11 +103,50 @@ export async function serveProcess({ end, graphics, display, options, run }){
     // with whatever else the link carries, at a turn's end or while idle.
     handlers.kernel = { wake: (/** @type {number} */ token, /** @type {number} */ result)=>
         system.objects.deliver(token, result) };
+    /** What the translator raises with each batch it posts. */
+    const posted = { buffer: new SharedArrayBuffer(4), index: 0 };
     /** @type {any} */
     let app = null;
-    // The page's input, while this process stands, and the run's report.
-    handlers.input = { send: (/** @type {any} */ event)=>app?.input.send(event) };
+    // The page's input, while this process stands, measured on the canvas
+    // the run shows it on when the run says how large that is.
+    const viewport = { width: 0, height: 0 };
+    let measured = false;
+    handlers.input = {
+        send: (/** @type {any} */ event, /** @type {{ width: number, height: number } | null} */ size)=>{
+            if (size && app)
+            {
+                viewport.width = size.width;
+                viewport.height = size.height;
+                if (!measured)
+                {
+                    app.input.attach(viewport, { listen: false });
+                    measured = true;
+                }
+            }
+            return app?.input.send(event);
+        },
+    };
     handlers.report = { diagnostics: ()=>(app ? plainOf(()=>app.diagnostics()) : null) };
+    // What the page asks of the process it drives, as it would of a machine on
+    // its own thread: pausing it, and looking inside it.
+    handlers.control = {
+        pause: ()=>app?.pause(),
+        resume: ()=>app?.resume(),
+        stop: ()=>app?.stop(),
+    };
+    handlers.facade = {
+        /** @param {string} path  a member of the machine, `debug.read` @param {any[]} args */
+        call: async(path, args)=>{
+            const names = path.split('.');
+            const method = /** @type {string} */ (names.pop());
+            const owner = names.reduce((at, name)=>at?.[name], app);
+            if (typeof owner?.[method] !== 'function')
+            {
+                throw new Error(`${path}: no such call on a process`);
+            }
+            return plainEvent(await owner[method](...args));
+        },
+    };
     app = await createApp({
         ...options,
         standardFiles: standardFilesOf(options.standardFiles, ask),
@@ -121,15 +161,24 @@ export async function serveProcess({ end, graphics, display, options, run }){
                 link.call('events', 'emit', [name, plainEvent(payload)]).catch(()=>{});
             }
         },
+        // The translator rings the link's bell after each batch it posts, so
+        // the batch is taken at the next turn rather than at the next timed
+        // yield, as the engine's thread takes its own.
+        cork: { ...options.cork, config: { ...options.cork?.config,
+            doorbell: { posted, bell: link.bell } } },
         pacing: ringPacing({ inbound: { bell: link.bell, drain: link.pump },
-            macrotask: createMacrotask(), now: ()=>performance.now(), intervalMs: YIELD_MS }),
+            macrotask: createMacrotask(), now: ()=>performance.now(), intervalMs: YIELD_MS,
+            posted }),
     });
     app.attachLog((/** @type {number} */ handle, /** @type {string} */ text)=>
         ask('process', 'output', [handle, text]));
     try
     {
         const code = await app.run(run ?? {});
-        return { code, diagnostics: plainOf(()=>app.diagnostics()) };
+        return { code, diagnostics: plainOf(()=>app.diagnostics()),
+            // What an installer's output is sorted against, read while the
+            // machine that knows it still stands.
+            systemLibraries: plainOf(()=>app.systemLibraries?.() ?? []) };
     }
     finally
     {
@@ -149,7 +198,9 @@ const bind = (listen, send)=>listen(data=>{
     {
         return;
     }
-    serveProcess(data).then(({ code, diagnostics })=>send({ type: 'exited', code, diagnostics }),
+    serveProcess(data).then(
+        ({ code, diagnostics, systemLibraries })=>
+            send({ type: 'exited', code, diagnostics, systemLibraries }),
         (/** @type {any} */ e)=>send({ type: 'failed', message: String(e?.stack ?? e) }));
 });
 
