@@ -687,6 +687,13 @@ export function createKernelModule(){
                     all: ()=>live() ? state.processes.all() : [],
                     /** @param {any} record */
                     finished: record=>live() ? state.processes.finished(record) : false,
+                    /**
+                     * A process taken up by a machine of its own while its
+                     * parent goes on: no longer pending.
+                     *
+                     * @param {any} record
+                     */
+                    started: record=>live() ? state.processes.started(record) : undefined,
                 },
 
                 clock: state.clock,

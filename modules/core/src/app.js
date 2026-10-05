@@ -901,6 +901,10 @@ export function timedWait({ hidden, macrotask, timer }){
  *     `timer` is the page's own distinction, between a machine that has
  *     stopped retiring instructions and one still spinning through turns,
  *     which its default wait needs.
+ * @property {(count: number) => void} [machines]
+ *     How many machines take turns on the thread now, told whenever it
+ *     changes: a pacing that may block the thread to wait must not while
+ *     another machine has turns to run.
  */
 
 /**
@@ -2761,6 +2765,8 @@ export function createKernelGl(opengl, journalCall, traced, counters){
  *     system?: { namedObjects: Map<string, any>, registry: any, bundle: any,
  *         ids: { thread: number, process: number }, volume: any },
  *     mainThreadId?: number,
+ *     beside?: (request: any) => void,
+ *     othersRunning?: () => boolean,
  *     com?: { table: any, process: unknown },
  * }} options
  * @returns {Promise<any>} an AppController
@@ -5880,7 +5886,15 @@ async function buildApp(options){
                     // their own rather than an unmeasured constant.
                     journal.begin('poll', journal.PhaseKind.HOST);
                     const failure = bridge.failure();
-                    const replacing = kernel.processes.pending();
+                    let replacing = kernel.processes.pending();
+                    // Where processes run at once, a child starts now, beside
+                    // this one, rather than waiting to take its place.
+                    if (replacing && options.beside)
+                    {
+                        kernel.processes.started(replacing);
+                        options.beside(replacing);
+                        replacing = null;
+                    }
                     const code = win32.exitCode();
                     const fault = cpu.fault();
                     journal.end('poll');
@@ -6030,6 +6044,18 @@ async function buildApp(options){
                                 deadlineMs: nextDeadlineMs(), wakes: [],
                             });
                             journal.end('idle-deadline');
+                            continue;
+                        }
+                        // Or another process of the run is running beside this
+                        // one, and what every thread here waits on -- a child's
+                        // exit, an object it sets -- is its to answer.
+                        if (options.othersRunning?.())
+                        {
+                            journal.begin('idle-host-wait', journal.PhaseKind.HOST);
+                            await pacing.wait({
+                                timer: true, sleep: true, deadlineMs: null, wakes: [],
+                            });
+                            journal.end('idle-host-wait');
                             continue;
                         }
                         // Either everything finished without the program exiting,
@@ -6930,6 +6956,10 @@ export async function createApp(options){
     const serving = new Set();
     /** @type {any} */
     let runOptionsNow;
+    /** The machines of the run not yet retired. @type {Set<any>} */
+    const standing = new Set();
+    /** Whether the run's processes run at once, each beside its parent (`mode.js`). */
+    const processesAtOnce = options.mode === 'workers';
     const classTable = createClassTable({
         launch: (request, process)=>{
             const parent = processes.get(process);
@@ -6951,7 +6981,20 @@ export async function createApp(options){
      */
     const build = async extra=>{
         const process = {};
-        const built = await buildApp(machine({ ...extra, com: { table: classTable, process } }));
+        /** The machine, once built: what its children are started beside. @type {any} */
+        let self = null;
+        const built = await buildApp(machine({ ...extra, com: { table: classTable, process },
+            // In the workers mode a child runs from CreateProcess on, beside
+            // its parent, as on Windows; otherwise it waits for the parent to
+            // have nothing left to run, and runs in its place.
+            beside: processesAtOnce
+                ? (/** @type {any} */ request)=>startBeside(self, request) : undefined,
+            // Only where processes run at once: one run in its parent's place
+            // has the parent paused, which wakes nothing.
+            othersRunning: processesAtOnce
+                ? ()=>starting > 0 || [...standing].some(other=>other !== self) : undefined }));
+        self = built;
+        standing.add(built);
         processes.set(process, built);
         names.set(built, process);
         images.set(built, extra?.imagePath ?? '');
@@ -6965,6 +7008,7 @@ export async function createApp(options){
      * @param {any} ended
      */
     const retire = async ended=>{
+        standing.delete(ended);
         await classTable.ended(names.get(ended));
         processes.delete(names.get(ended));
         names.delete(ended);
@@ -7149,6 +7193,7 @@ export async function createApp(options){
         // program the page started is.
         const line = { current: server, main: false };
         serving.add(line);
+        noteMachines();
         events.emit('process-server', { image: found.path, clsid: request.clsid });
         Object.assign(facade, server, own);
         bindLogLevels();
@@ -7162,6 +7207,7 @@ export async function createApp(options){
         }
         await retire(line.current);
         serving.delete(line);
+        noteMachines();
         await line.current.dispose();
         Object.assign(facade, current, own);
         bindLogLevels();
@@ -7232,6 +7278,116 @@ export async function createApp(options){
     };
 
     /**
+     * The children running beside their parents, in the workers mode: each
+     * one's run, until it exits.
+     *
+     * @type {Set<Promise<number>>}
+     */
+    const besides = new Set();
+    /** Children asked for whose machines are not built yet. */
+    let starting = 0;
+    /** The code the last of the run's processes beside another exited with. */
+    let lastBesideCode = 0;
+    /**
+     * Tells the pacing the run shares how many machines take turns on this
+     * thread: one of several may not block the thread to wait, which would
+     * stop the others with it.
+     */
+    const noteMachines = ()=>{
+        options.pacing?.machines?.(1 + besides.size + serving.size);
+    };
+
+    /**
+     * Starts a child at once, beside the parent that asked for it, and runs
+     * it alongside every other process until it exits: the workers mode's
+     * CreateProcess, as on Windows. The parent goes on running; a thread of
+     * its waiting on the child, polling its exit code, or waiting on an
+     * object the child sets, is answered as the child goes. The page sees
+     * and drives the child while it stands, as it does one run in its
+     * parent's place.
+     *
+     * @param {any} parent @param {any} request
+     */
+    const startBeside = (parent, request)=>{
+        // Running from the moment it is asked for, not from when its machine
+        // is built: a parent that waits on it at once is waiting on something
+        // that will answer, not stuck.
+        starting++;
+        const running = (async()=>{
+            /** @type {any} */
+            let child = null;
+            try
+            {
+                const image = await parent.readImage(request.imagePath);
+                if (!image)
+                {
+                    events.emit('divergence', { api: 'process',
+                        detail: `${request.imagePath} is not on the volume, and did not start` });
+                }
+                else
+                {
+                    noteLogSequence();
+                    mediaInstance = parent.media.instance() ?? mediaInstance;
+                    child = await build({
+                        executable: image,
+                        imagePath: request.imagePath,
+                        commandLine: request.commandLine,
+                        patches: request.patches,
+                        processId: request.id,
+                        mainThreadId: request.threadId,
+                        standardFiles: request.standardFiles,
+                    });
+                }
+            }
+            catch (e){
+                events.emit('error', { reason: 'process', error: e });
+            }
+            finally
+            {
+                starting--;
+            }
+            if (!child)
+            {
+                parent.childExited(request, 2);
+                return 2;
+            }
+            replayLogLevels();
+            Object.assign(facade, child, own);
+            bindLogLevels();
+            events.emit('process-started', { image: request.imagePath,
+                sequenceBase: logSequence });
+            const line = { current: child, main: false };
+            let code = -1;
+            try
+            {
+                code = await runProcesses(runOptionsNow, line, true);
+            }
+            catch (e){
+                events.emit('error', { reason: 'process', error: e });
+            }
+            const ended = line.current;
+            await retire(ended);
+            noteLogSequence();
+            mediaInstance = ended.media.instance() ?? mediaInstance;
+            await ended.dispose();
+            // The page sees whoever stands in the main line again.
+            replayLogLevels();
+            Object.assign(facade, mainLine.current, own);
+            bindLogLevels();
+            parent.childExited(request, code);
+            lastBesideCode = code;
+            events.emit('process-resumed', { image: request.imagePath, code });
+            return code;
+        })();
+        besides.add(running);
+        noteMachines();
+        running.finally(()=>{
+            besides.delete(running);
+            noteMachines();
+        });
+    };
+
+    /**
      * Runs the live process, and each child that takes its place or runs
      * beside it, until one exits with nothing left to run.
      *
@@ -7248,6 +7404,8 @@ export async function createApp(options){
             const request = line.current.replacement();
             if (!request)
             {
+                // Run out: nothing it holds wakes another process now.
+                standing.delete(line.current);
                 if (line.main && !nested)
                 {
                     // Its servers end with it: its references go back, and
@@ -7257,6 +7415,17 @@ export async function createApp(options){
                     while (servers.size > 0)
                     {
                         await Promise.allSettled([...servers]);
+                    }
+                    // A launcher that started its game and went is not the
+                    // end of the run: the game is, and its code is the run's.
+                    if (besides.size > 0)
+                    {
+                        while (besides.size > 0)
+                        {
+                            await Promise.allSettled([...besides]);
+                        }
+                        noticeExit(lastBesideCode);
+                        return lastBesideCode;
                     }
                     noticeExit(code);
                 }

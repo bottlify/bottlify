@@ -711,3 +711,108 @@ test('a child that ran beside its parent is let go once it has exited', { timeou
         assert.deepEqual(children.map(ref=>ref.deref() === undefined), [true, true],
             'neither machine is held once its process is over');
     });
+
+/**
+ * A parent that starts a child and waits for an event the child sets, then
+ * for the child, and exits with 0x100 + the child's code; and the child,
+ * which sets the parent's event by name and exits with 5.
+ */
+function buildEventPair(){
+    const parent = buildExe({
+        imports: { 'KERNEL32.dll': ['CreateEventA', 'CreateProcessA', 'WaitForSingleObject',
+            'GetExitCodeProcess', 'ExitProcess'] },
+        data: {
+            name: ascii('Ready'),
+            command: ascii('C:\\App\\child.exe'),
+            startup: [...u32(68), ...new Array(64).fill(0)],
+            info: new Array(16).fill(0),
+            event: u32(0),
+            code: u32(0),
+        },
+        codeSize: 0x80,
+        code: ({ iat, at })=>[
+            // event = CreateEventA(NULL, TRUE, FALSE, "Ready")
+            0x68, ...u32(at('name')), 0x6a, 0, 0x6a, 1, 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateEventA')), 0xa3, ...u32(at('event')),
+            // CreateProcessA(0, command, ..., &startup, &info)
+            0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+            0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+            0x68, ...u32(at('command')), 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateProcessA')),
+            // WaitForSingleObject(event, INFINITE): the child sets it
+            0x6a, 0xff, 0xff, 0x35, ...u32(at('event')),
+            0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+            // WaitForSingleObject(info.hProcess, INFINITE)
+            0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+            // GetExitCodeProcess(info.hProcess, &code); ExitProcess(code + 0x100)
+            0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
+            0xa1, ...u32(at('code')), 0x05, ...u32(0x100), 0x50,
+            0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    const child = buildExe({
+        imports: { 'KERNEL32.dll': ['OpenEventA', 'SetEvent', 'ExitProcess'] },
+        data: { name: ascii('Ready') },
+        code: ({ iat, at })=>[
+            // SetEvent(OpenEventA(EVENT_ALL_ACCESS, FALSE, "Ready")); ExitProcess(5)
+            0x68, ...u32(at('name')), 0x6a, 0, 0x68, ...u32(0x1f0003),
+            0xff, 0x15, ...u32(iat('OpenEventA')),
+            0x50, 0xff, 0x15, ...u32(iat('SetEvent')),
+            0x6a, 5, 0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    // The same, but polling the child's exit code without ever waiting: it
+    // never stops having something to run, so only a child running beside it
+    // ever answers.
+    const poller = buildExe({
+        imports: { 'KERNEL32.dll': ['CreateProcessA', 'GetExitCodeProcess', 'ExitProcess'] },
+        data: {
+            command: ascii('C:\\App\\child.exe'),
+            startup: [...u32(68), ...new Array(64).fill(0)],
+            info: new Array(16).fill(0),
+            code: u32(0),
+        },
+        codeSize: 0x80,
+        code: ({ iat, at })=>[
+            0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+            0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+            0x68, ...u32(at('command')), 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateProcessA')),
+            // do GetExitCodeProcess(info.hProcess, &code) while code == STILL_ACTIVE
+            0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
+            0x81, 0x3d, ...u32(at('code')), ...u32(0x103),
+            0x74, 0x100 - 29,
+            // ExitProcess(code + 0x100)
+            0xa1, ...u32(at('code')), 0x05, ...u32(0x100), 0x50,
+            0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    return { parent, poller, child };
+}
+
+test('in the workers mode a child runs beside its parent, which goes on: woken by the event the'
+    + ' child sets, then by its exit; or never waiting at all', { timeout: 60000 }, async t=>{
+    const { parent, poller, child } = buildEventPair();
+    /** @param {Uint8Array} executable @param {any} [mode] */
+    const run = async(executable, mode)=>{
+        const app = await createApp({
+            executable,
+            imagePath: 'C:\\App\\parent.exe',
+            engine: 'cork',
+            ...mode ? { mode } : {},
+            storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
+        });
+        t.after(()=>app.dispose());
+        return (await app.run({ timeoutMs: 30000 })) >>> 0;
+    };
+    assert.equal(await run(parent, 'workers'), 0x105,
+        'the parent was there when the child set its event, and saw the child exit with 5');
+    assert.equal(await run(poller, 'workers'), 0x105,
+        'a parent that never waits still sees its child run and exit');
+    assert.equal(await run(parent), 0x105,
+        'where one process runs at a time the child runs while its parent waits, and the'
+        + ' parent goes on after it');
+});

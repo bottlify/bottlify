@@ -40,6 +40,8 @@ export const IDLE_SLEEP_MS = 50;
  */
 export function ringPacing({ inbound, macrotask, now, intervalMs, sleep = waitDoorbell }){
     const counts = { drained: 0, yields: 0, slept: 0, sleptMs: 0, woken: 0 };
+    /** Machines taking turns on this thread: one of several may not block it. */
+    let machines = 1;
     const yieldNow = pacedYield({ macrotask: ()=>{
         counts.yields++;
         return macrotask();
@@ -51,6 +53,10 @@ export function ringPacing({ inbound, macrotask, now, intervalMs, sleep = waitDo
     };
     return {
         counts: ()=>({ ...counts }),
+        /** @param {number} count */
+        machines(count){
+            machines = count;
+        },
         yield(pending){
             drain();
             return yieldNow(pending);
@@ -68,7 +74,10 @@ export function ringPacing({ inbound, macrotask, now, intervalMs, sleep = waitDo
                 counts.yields++;
                 return macrotask();
             }
-            if (wakes.length > 0)
+            // With another machine on the thread, or an answer due on the
+            // event loop, the wait is the event loop's: blocking would stop
+            // the other machine, or the answer, with it.
+            if (wakes.length > 0 || machines > 1)
             {
                 // An answer is due on the event loop: wait there, for it, the
                 // deadline or the doorbell.

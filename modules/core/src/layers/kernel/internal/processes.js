@@ -44,6 +44,8 @@ export const STILL_ACTIVE = 259;
  *           The child already ran and exited: a redistributable installer the
  *           engine itself plays the role of, so the request is answered as
  *           though it had run and left exit code 0. It is never handed over.
+ * @property {boolean} started      Running beside its parent (the `workers` mode), so no
+ *                                  longer waiting to take the parent's place.
  * @property {MemoryPatch[]} patches
  *           Writes made into the child before its image exists, replayed once
  *           the PE is mapped. This is process hollowing implemented as a queue.
@@ -96,6 +98,7 @@ export function createProcessTable(ids = { process: FIRST_ID }){
                 /** @type {MemoryPatch[]} */
                 patches: [],
                 exitCode: completed ? 0 : STILL_ACTIVE,
+                started: false,
                 handle: 0,
                 threadHandle: 0,
             };
@@ -115,7 +118,18 @@ export function createProcessTable(ids = { process: FIRST_ID }){
          * @returns {ProcessRecord | null}
          */
         pending(){
-            return records.find(record=>!record.suspended && !record.completed) ?? null;
+            return records.find(record=>!record.suspended && !record.completed
+                && !record.started) ?? null;
+        },
+
+        /**
+         * The child runs now, beside this process, rather than waiting to take
+         * its place: it is no longer pending.
+         *
+         * @param {ProcessRecord} record
+         */
+        started(record){
+            record.started = true;
         },
 
         /**

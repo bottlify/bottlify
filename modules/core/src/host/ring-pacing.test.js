@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { createRingMemory } from '../system/ring.js';
 import { createInboundReader, createInboundWriter } from './inbound.js';
-import { IDLE_SLEEP_MS, ringPacing } from './ring-pacing.js';
+import { ringPacing } from './ring-pacing.js';
 
 /** @param {any[]} received */
 function pacingOver(/** @type {any[]} */ received, deps = {}){
@@ -39,20 +39,22 @@ test('an idle engine sleeps on the doorbell and a write from another thread wake
             const { workerData } = require('node:worker_threads');
             import(workerData.inbound).then(({ createInboundWriter })=>{
                 const ring = createInboundWriter(workerData.memory);
+                // Long after the engine is asleep, however slowly this thread started.
                 setTimeout(()=>ring.send({ type: 'input', event: { kind: 'key', code: 'KeyQ' } },
-                    ()=>{ throw new Error('posted'); }), 20);
+                    ()=>{ throw new Error('posted'); }), 150);
             });`, { eval: true, workerData: {
             inbound: new URL('./inbound.js', import.meta.url).href, memory } });
-        const started = performance.now();
         let rounds = 0;
         while (received.length === 0 && rounds++ < 1000)
         {
             await pacing.wait(idle);
         }
-        const waited = performance.now() - started;
         assert.deepEqual(received, [{ type: 'input', event: { kind: 'key', code: 'KeyQ' } }]);
-        assert.ok(waited < 20 + IDLE_SLEEP_MS * 2, `woken in ${waited.toFixed(1)} ms`);
+        // What says the doorbell woke it rather than the sleep's own bound
+        // (IDLE_SLEEP_MS): the wait that saw the record ended before its time.
+        // A clock would say the same only on a machine that is not busy.
         assert.ok(pacing.counts().woken >= 1, JSON.stringify(pacing.counts()));
+        assert.ok(pacing.counts().slept > 1, 'it slept, on its bound, until the write');
         assert.equal(macrotasks(), 0, 'the event loop was not asked for anything');
         await writer.terminate();
     });
@@ -65,7 +67,8 @@ test('a sleep ends at the guest\'s own deadline, and a message already written i
     const started = performance.now();
     pacing.wait({ ...idle, deadlineMs: 15 });
     const slept = performance.now() - started;
-    assert.ok(slept >= 14 && slept < IDLE_SLEEP_MS, `${slept.toFixed(1)} ms`);
+    assert.ok(slept >= 14, `${slept.toFixed(1)} ms: to the deadline, not short of it`);
+    assert.equal(pacing.counts().woken, 0, 'the deadline ended it: nothing rang');
     createInboundWriter(memory).send({ type: 'visibility', hidden: true }, ()=>{});
     const again = performance.now();
     pacing.wait({ ...idle, deadlineMs: 1000 });
@@ -111,4 +114,26 @@ test('a thread still running gives the event loop a turn when the interval is up
         assert.equal(macrotasks(), 1);
         await pacing.yield({ ...quiet, fetching: 1 });
         assert.equal(macrotasks(), 2, 'a fetch in flight is answered on the event loop');
+    });
+
+test('with another machine on the thread an idle wait never blocks it: the other goes on',
+    { timeout: 5000 }, async()=>{
+        /** @type {any[]} */
+        const received = [];
+        /** @type {any[]} */
+        const blocked = [];
+        const { pacing } = pacingOver(received, { sleep: (/** @type {any[]} */ ...args)=>{
+            blocked.push(args);
+            return 'timed-out';
+        } });
+        pacing.machines?.(2);
+        let other = 0;
+        const beside = setInterval(()=>other++, 1);
+        await pacing.wait({ ...idle, deadlineMs: 20 });
+        clearInterval(beside);
+        assert.deepEqual(blocked, [], 'the thread was never blocked');
+        assert.ok(other > 0, 'the machine beside it had turns while it waited');
+        pacing.machines?.(1);
+        pacing.wait({ ...idle, deadlineMs: 1 });
+        assert.equal(blocked.length, 1, 'alone again, it sleeps on the doorbell');
     });
