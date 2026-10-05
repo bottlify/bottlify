@@ -788,8 +788,9 @@ float4 main(float2 uv : TEXCOORD0, float4 c : COLOR0) : COLOR0
     return t.a > 0.5 ? t * c : c;
 }`, ['ps_1_2', 'ps_1_3', 'ps_1_4'], UNIT);
 
-whole('ps 1.x: a coordinate set read as a colour', `
-float4 main(float4 t : TEXCOORD0, float4 c : COLOR0) : COLOR0 { return t * c; }`,
+whole('ps 1.x: a coordinate set read as a colour (its w is one before 1.4)', `
+float4 main(float4 t : TEXCOORD0, float4 c : COLOR0) : COLOR0
+{ return float4(t.xyz * c.xyz, c.a); }`,
 ['ps_1_1', 'ps_1_2', 'ps_1_3', 'ps_1_4'], UNIT);
 
 whole('ps 1.4: a texture read at coordinates another read gave', `

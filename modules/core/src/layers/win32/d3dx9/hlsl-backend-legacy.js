@@ -263,9 +263,9 @@ function build(ir, options, diagnostics, stats){
         }
     }
 
-    // A coordinate set read as a number, before 1.4, is `texcoord`: it fills the
-    // texture register of its number with the set clamped to [0, 1].
-    if (!fourth)
+    // A coordinate set read as a number is `texcoord`, which fills the texture register of
+    // its number with the set clamped to [0, 1]; in 1.4 it is `texcrd`, which copies the set
+    // into a temporary, because a texture register is not an operand of arithmetic there.
     {
         const asTexture = new Set();
         for (const instr of instrs)
@@ -280,7 +280,7 @@ function build(ir, options, diagnostics, stats){
         /** @type {Instr[]} */
         const prefix = [];
         instrs = instrs.map(instr=>{
-            if (instr.op === 'tex')
+            if (instr.op === 'tex' || instr.op === 'texld')
             {
                 return instr;
             }
@@ -290,7 +290,7 @@ function build(ir, options, diagnostics, stats){
                     return src;
                 }
                 const input = /** @type {import('./hlsl-ir.js').SrcInput} */ (src).input;
-                if (asTexture.has(input))
+                if (!fourth && asTexture.has(input))
                 {
                     throw new TargetError('X4532', `${profile.name}: TEXCOORD${input.index} is `
                         + 'both a texture\'s coordinates and a number');
@@ -299,9 +299,13 @@ function build(ir, options, diagnostics, stats){
                 if (!reg)
                 {
                     reg = newReg(4);
-                    reg.pin = { file: 't', index: input.index };
+                    if (!fourth)
+                    {
+                        reg.pin = { file: 't', index: input.index };
+                    }
                     filled.set(input, reg);
-                    prefix.push({ op: 'texcoord', dest: { kind: 'reg', reg, mask: 15 },
+                    prefix.push({ op: fourth ? 'texcrd' : 'texcoord',
+                        dest: { kind: 'reg', reg, mask: 15 },
                         srcs: [{ kind: 'input', input, swz: [0, 1, 2, 3] }] });
                 }
                 return /** @type {Src} */ ({ kind: 'reg', reg, swz: /** @type {any} */ (src).swz,
@@ -342,7 +346,7 @@ function build(ir, options, diagnostics, stats){
         }
     }
     const isTextureOp = (/** @type {Instr} */ i)=>i.op === 'tex' || i.op === 'texcoord'
-        || i.op === 'texld';
+        || i.op === 'texld' || i.op === 'texcrd';
     /** @param {Instr[]} list */
     const textureFirst = list=>[...list.filter(isTextureOp), ...list.filter(i=>!isTextureOp(i))];
     /** @type {Instr[]} */
@@ -576,7 +580,8 @@ function build(ir, options, diagnostics, stats){
         }
         if (isTextureOp(instr) && dest)
         {
-            dest.mask = 15;
+            // texcrd copies the three coordinates a set has; the others fill all four.
+            dest.mask = instr.op === 'texcrd' ? 7 : 15;
         }
         const info = /** @type {Record<string, { cls: string }>} */ (OPCODES)[instr.op];
         if (!info)

@@ -153,8 +153,8 @@ test('a loop that cannot be unrolled is reported', async()=>{
     assert.match(result.messages, /error X3511: unable to unroll loop/);
 });
 
-test('a profile the compiler does not target is refused, ps_1_x included', async()=>{
-    for (const profile of ['ps_1_1', 'ps_1_4', 'vs_4_0', 'xx_2_0'])
+test('a profile the compiler does not target is refused', async()=>{
+    for (const profile of ['ps_1_0', 'vs_4_0', 'xx_2_0'])
     {
         const result = await compile('float4 main() : COLOR0 { return 0; }', profile);
         assert.equal(result.ok, false, profile);
@@ -175,4 +175,36 @@ test('the output reads: the program disassembles to what the source says', async
     const lines = disassemble(/** @type {Uint32Array} */ (result.tokens)).trim().split('\n');
     assert.deepEqual(lines, ['ps_2_0', 'def c0, 1, 0, 0, 0', 'dcl t0', 'dcl v0',
         'mad oC0, t0, v0, c0.x']);
+});
+
+test('pixel shader model 1 compiles what it can hold and says why it cannot hold the rest', async()=>{
+    const simple = 'sampler2D S;\nfloat4 main(float2 uv : TEXCOORD0, float4 c : COLOR0) : COLOR0'
+        + '{ return tex2D(S, uv) * c; }';
+    for (const profile of ['ps_1_1', 'ps_1_2', 'ps_1_3', 'ps_1_4'])
+    {
+        const result = await compile(simple, profile);
+        assert.equal(result.ok, true, `${profile}: ${result.messages}`);
+        assert.deepEqual(constants(result).map(c=>[c.name, c.set, c.index]), [['S', 3, 0]]);
+    }
+    /** @type {[string, string, RegExp][]} */
+    const refused = [
+        ['ps_1_1', 'sampler2D S;\nfloat4 main(float2 uv : TEXCOORD0) : COLOR0'
+            + '{ return tex2D(S, uv * 2); }', /X4532.*own stage/],
+        ['ps_1_1', 'float4 main(float4 c : COLOR0) : COLOR0 { return c * 3; }',
+            /X4533: the constant 3 is outside the range -1 to 1/],
+        ['ps_1_1', 'float4 main(float4 c : COLOR0) : COLOR0 { return c.yzwx; }',
+            /X4535.*read as/],
+        ['ps_1_1', 'float4 main(float4 c : COLOR0) : COLOR0 { return sqrt(c); }',
+            /X4531: rcp is not an operation ps_1_1 has|X4531/],
+        ['ps_1_1', 'float4 main(float4 c : COLOR0) : COLOR0 { clip(c.x - 0.5); return c; }',
+            /X4531: discard and clip are not available in ps_1_1/],
+        ['ps_1_1', 'sampler2D A; sampler2D B;\nfloat4 main(float2 t : TEXCOORD0) : COLOR0'
+            + '{ return tex2D(B, tex2D(A, t).xy); }', /X4532/],
+    ];
+    for (const [profile, source, pattern] of refused)
+    {
+        const result = await compile(source, profile);
+        assert.equal(result.ok, false, source);
+        assert.match(result.messages, pattern, source);
+    }
 });
