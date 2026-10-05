@@ -20,6 +20,8 @@
  * and the order in which the two get the machine is what it is asking for.
  */
 
+import { signalledNow } from './sync.js';
+
 /** @enum {string} */
 export const ThreadState = {
     /** Runnable, waiting for a turn. */
@@ -104,6 +106,27 @@ export function absolutePriority(relative){
  */
 const ATOMIC_STEP = 512;
 const ATOMIC_STEPS = 16;
+
+/**
+ * What a blocked thread is queued on that it could take now. Nothing, for a
+ * thread waiting as it should; anything else is a wake that never reached it,
+ * a defect of ours, and the one thing the report of a stalled machine has to
+ * show -- the wait's own words were written when it began.
+ *
+ * @param {any} thread
+ * @returns {string | null}
+ */
+const readyNow = thread=>{
+    if (thread.state !== ThreadState.BLOCKED)
+    {
+        return null;
+    }
+    const ready = (thread.queuedOn ?? []).filter((/** @type {any} */ one)=>
+        one.waiters?.includes(thread) && signalledNow(one));
+    return ready.length > 0
+        ? `yet ${ready.map((/** @type {any} */ one)=>`${one.kind} "${one.name}"`).join(', ')} is ready`
+        : null;
+};
 
 /**
  * @param {Object} options
@@ -1193,6 +1216,7 @@ export function createScheduler(options){
                     .map(thread=>`${thread.name}: ${[
                         thread.state === ThreadState.BLOCKED ? thread.waitingOn ?? 'unknown' : null,
                         thread.suspendCount > 0 ? `suspended ${thread.suspendCount}` : null,
+                        readyNow(thread),
                     ].filter(Boolean).join(', ')}`),
             };
         },

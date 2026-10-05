@@ -11,6 +11,7 @@ import {
     absolutePriority, createScheduler,
 } from './threads.js';
 import { createSwitcher } from './switch.js';
+import { createSyncObjects } from './sync.js';
 
 /**
  * A cpu whose slices retire a fixed number of instructions, so scheduling can
@@ -761,4 +762,21 @@ test('the report says how long a short-period thread went without the processor'
     assert.equal(mixer.worstGap, 54);
     assert.ok(sched.diagnostics().byThread.includes('p15 b0 g54/1'), 'and the report says so');
     assert.ok(sched.diagnostics().lateGaps.startsWith('mixer@60+54 '));
+});
+
+test('a thread queued on an object that is ready now says so', ()=>{
+    // A worker asleep on its "work" event while that event is set: the set
+    // reached nobody, and the report is where that has to show.
+    const { sched } = scheduler();
+    const sync = createSyncObjects({ scheduler: sched });
+    const worker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'worker' });
+    const work = sync.createEvent({ manualReset: true, name: '#20' });
+    const quit = sync.createEvent({ manualReset: true, name: '#24' });
+
+    assert.equal(sync.waitAny([work, quit], worker), null);
+    assert.deepEqual(sched.diagnostics().waiting, ['worker: any of event "#20", event "#24"'],
+        'waiting as it should');
+    work.signalled = true;
+    assert.deepEqual(sched.diagnostics().waiting,
+        ['worker: any of event "#20", event "#24", yet event "#20" is ready']);
 });

@@ -40,6 +40,30 @@ export const SyncKind = {
 };
 
 /**
+ * Whether a wait on the object would be satisfied now.
+ *
+ * @param {any} object
+ * @returns {boolean}
+ */
+export function signalledNow(object){
+    switch (object.kind)
+    {
+        case SyncKind.EVENT:
+            return object.signalled;
+        case SyncKind.MUTEX:
+            return object.owner === null;
+        case SyncKind.SEMAPHORE:
+            return object.count > 0;
+        case SyncKind.THREAD:
+            return object.exitCode !== null;
+        case SyncKind.TIMER:
+            return object.signalled === true;
+        default:
+            throw new Error(`Unknown sync object: ${object.kind}`);
+    }
+}
+
+/**
  * @param {Object} options
  * @param {any} options.scheduler  Used to block and wake threads.
  */
@@ -72,24 +96,7 @@ export function createSyncObjects({ scheduler }){
     };
     scheduler.onTimeout?.(stopWaiting);
 
-    /** @param {any} object */
-    const isSignalled = object=>{
-        switch (object.kind)
-        {
-            case SyncKind.EVENT:
-                return object.signalled;
-            case SyncKind.MUTEX:
-                return object.owner === null;
-            case SyncKind.SEMAPHORE:
-                return object.count > 0;
-            case SyncKind.THREAD:
-                return object.exitCode !== null;
-            case SyncKind.TIMER:
-                return object.signalled === true;
-            default:
-                throw new Error(`Unknown sync object: ${object.kind}`);
-        }
-    };
+    const isSignalled = signalledNow;
 
     /**
      * Takes the object on behalf of a thread. Only called once the object is
