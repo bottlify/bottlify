@@ -221,10 +221,12 @@ export function createCabinetFunctions(host){
                     return 1;
                 }
                 catch (e){
+                    // A file that is not a cabinet is the answer, not an error to
+                    // report: a program probes every file it unpacked with this,
+                    // and keeps its ERF in a frame that is gone by then, so a
+                    // write to it lands on whatever stands there now.
                     if (e instanceof CabinetError)
                     {
-                        fail(context, e.kind === 'format' ? FDIERROR.NOT_A_CABINET
-                            : errorOf(e.kind));
                         return 0;
                     }
                     throw e;

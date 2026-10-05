@@ -219,7 +219,7 @@ test('FDIIsCabinet answers for a cabinet and says what is not one', async()=>{
     assert.equal(view.getUint16(0x406, true), 2, 'files');
     const bad = setup(new Uint8Array(100));
     assert.equal(await bad.fns.FDIIsCabinet.handler([bad.ctx, 1, 0x400]), 0);
-    assert.equal(bad.view.getUint32(bad.erf, true), FDIERROR.NOT_A_CABINET);
+    assert.equal(bad.view.getUint32(bad.erf + 8, true), 0, 'the ERF is left alone');
     void erf;
 });
 
