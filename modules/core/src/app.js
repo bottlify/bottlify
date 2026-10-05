@@ -11,6 +11,7 @@ import { captureTrace, describeAddress, formatTrace } from './trace.js';
 import { coalescedSaver, inflateRaw, normaliseSession, resolveStorage } from './storage.js';
 import { DEFAULT_ENGINE, DEFAULT_MEMORY_SIZE } from './layers/cpu/module.js';
 import { CORK_TSC_MHZ } from './layers/cpu/internal/cork-host.js';
+import { SETTINGS, processorName } from './settings.js';
 import { createPresenter } from './layers/graphics/webgpu/internal/presenter.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
 import { parsePe, readExports, readImports, rvaToFileOffset } from './layers/loader/internal/pe.js';
@@ -3118,6 +3119,7 @@ async function buildApp(options){
             engineUrl: (options.engine ?? DEFAULT_ENGINE) !== 'emulator'
                 ? corkArtifacts(options.cork).moduleUrl : null,
             cork: {
+                cacheVersion: SETTINGS.cork.cacheVersion,
                 ...options.cork?.config,
                 store: translationStore,
                 bundleId: options.bundle?.id ?? options.id ?? 'bundle',
@@ -3373,7 +3375,7 @@ async function buildApp(options){
             // whenever its own loop finishes, which can be far more often than
             // any display shows -- and every one of those costs a read of the
             // surface out of guest memory and an upload.
-            maxFps: options.maxFps,
+            maxFps: options.maxFps ?? SETTINGS.frame.maxFps,
             // The run's presenter, made once above every machine. The layer
             // draws through it without making one of its own, so a replacement
             // does not reconfigure the canvas or clear the last frame.
@@ -3516,6 +3518,9 @@ async function buildApp(options){
             // The speed the registry reports: the rate the engine's rdtsc
             // advances at. The emulator's counter keeps the default.
             processorMhz: (options.engine ?? DEFAULT_ENGINE) === 'cork' ? CORK_TSC_MHZ : undefined,
+            processorName: (options.engine ?? DEFAULT_ENGINE) === 'cork'
+                ? processorName(SETTINGS) : undefined,
+            performanceFrequency: SETTINGS.qpc.frequency,
             // The one namespace a named mutex, event, semaphore, timer and
             // file mapping all share, carried in from outside this build so a
             // name a parent registered is one a child still finds: the table
@@ -6849,7 +6854,7 @@ export async function createApp(options){
             screen: options.device.screen,
             canvas: options.device.canvas,
             now: options.device.now,
-            maxFps: options.maxFps,
+            maxFps: options.maxFps ?? SETTINGS.frame.maxFps,
             // One bound for the run: every machine's frames go onto one queue.
             maxFrameLatency: options.graphics?.maxFrameLatency,
             // A build with no canvas but with a sink of its own -- a test

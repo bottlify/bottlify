@@ -1,0 +1,15 @@
+{
+  "processor": {
+    "name": "Bottlify Cork x86",
+    "version": "1.6.16"
+  },
+  "qpc": {
+    "frequency": 1000000000
+  },
+  "frame": {
+    "maxFps": 60
+  },
+  "cork": {
+    "cacheVersion": 81
+  }
+}

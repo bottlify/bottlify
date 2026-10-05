@@ -384,7 +384,10 @@ export function createWin32Module(){
                 file.position += volume.write(node, file.position, encodeAnsi(text));
                 volume.close(node);
             };
-            const hive = createHive({ processorMhz: config?.processorMhz, windows, directx });
+            const hive = createHive({
+                processorMhz: config?.processorMhz, processorName: config?.processorName,
+                windows, directx,
+            });
             // The guest's clock, because a timer is due against the clock the
             // program itself reads, and the input layer's key state, because a
             // hot key fires on a combination and only the layer that sees the
@@ -1238,6 +1241,7 @@ export function createWin32Module(){
                         nextRegionAfter: address=>memory.nextRegionAfter(address) ?? null,
                     }),
                     ...createProcessFunctions({
+                        performanceFrequency: config?.performanceFrequency,
                         readMemory,
                         processId,
                         writeMemory,

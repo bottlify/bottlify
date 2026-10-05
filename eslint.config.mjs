@@ -35,7 +35,7 @@ export default [
     },
     js.configs.recommended,
     {
-        languageOptions: { ecmaVersion: 2022, sourceType: 'module' },
+        languageOptions: { ecmaVersion: 2025, sourceType: 'module' },
         plugins: { style: houseStyle },
         rules: {
             // ESLint 10 deprecates its formatting rules in favour of @stylistic, but

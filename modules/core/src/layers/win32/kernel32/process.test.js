@@ -131,7 +131,8 @@ const PARKED = Symbol('parked');
 
 /**
  * @param {{ arena?: number,
- *           version?: import('./versions.js').WindowsVersion }} [options]
+ *           version?: import('./versions.js').WindowsVersion,
+ *           performanceFrequency?: number }} [options]
  */
 function setup(options = {}){
     const host = fakeHost(options);
@@ -141,6 +142,8 @@ function setup(options = {}){
     // host after the table is built, and the table has to see it.
     Object.assign(host, {
         ...options.version ? { version: options.version } : {},
+        ...'performanceFrequency' in options
+            ? { performanceFrequency: options.performanceFrequency } : {},
         /** @param {Record<string, number>} values */
         setRegisters: values=>Object.assign(registers, values),
     });
@@ -809,7 +812,7 @@ test('the clock routines read one block, and what they read is what a trap would
     const frequency = queryPerformanceFrequencyCode(at, trap);
     const constant = new DataView(frequency.buffer);
     assert.deepEqual([...frequency.slice(8, 10)], [0xc7, 0x01]);
-    assert.equal(constant.getUint32(10, true), 1_000_000, 'one megahertz');
+    assert.equal(constant.getUint32(10, true), 1_000_000_000, 'one gigahertz');
     assert.deepEqual([...frequency.slice(14, 17)], [0xc7, 0x41, 0x04]);
     assert.equal(constant.getUint32(17, true), 0, 'and nothing in the high word');
     const frequencySlow = 8 + frequency[7];
@@ -874,8 +877,8 @@ test('the clock the guest reads is the one the engine credits', ()=>{
     assert.equal(host.view.getUint32(block + CLOCK.TICKS, true), 1500);
     host.refreshes[0]();
     assert.equal(host.view.getUint32(block + CLOCK.TICKS, true), 2500);
-    assert.equal(host.view.getBigUint64(block + CLOCK.COUNTER, true), 2_500_000n,
-        'one megahertz of ticks for every millisecond credited');
+    assert.equal(host.view.getBigUint64(block + CLOCK.COUNTER, true), 2_500_000_000n,
+        'a gigahertz of ticks: a million for every millisecond credited');
     fns.QueryPerformanceCounter.handler([out]);
     assert.equal(host.view.getBigUint64(block + CLOCK.COUNTER, true), u64(out),
         'and still what a trap would have answered');
@@ -903,14 +906,14 @@ test('the counter answers later each time it is asked, whether the clock moved o
     host.clock.uptimeMs = 1500;
     assert.equal(fns.QueryPerformanceCounter.handler([out]), 1);
     const first = u64(out);
-    assert.equal(first, 1_500_000n, 'the clock, when it is later than any answer');
+    assert.equal(first, 1_500_000_000n, 'the clock, when it is later than any answer');
     fns.QueryPerformanceCounter.handler([out]);
     assert.equal(u64(out), first + 1n, 'asked again before it moved: one tick later');
     fns.QueryPerformanceCounter.handler([out]);
     assert.equal(u64(out), first + 2n);
     host.clock.uptimeMs = 1501;
     fns.QueryPerformanceCounter.handler([out]);
-    assert.equal(u64(out), 1_501_000n, 'and the clock again once it is past them');
+    assert.equal(u64(out), 1_501_000_000n, 'and the clock again once it is past them');
 });
 
 test('the trap and the guest routine keep one last answer, in the block', ()=>{
@@ -997,4 +1000,14 @@ test('the power status is a desktop on mains power, with no battery', ()=>{
     assert.equal(host.view.getUint32(0x804, true), 0xffffffff, 'lifetime unknown');
     assert.equal(host.view.getUint32(0x808, true), 0xffffffff);
     assert.equal(fns.GetSystemPowerStatus.argBytes, 4);
+});
+
+test('the performance frequency is the host\'s to choose, and a bad one is refused', ()=>{
+    const { fns, u64 } = setup({ performanceFrequency: 10_000_000 });
+    fns.QueryPerformanceFrequency.handler([0x400]);
+    assert.equal(u64(0x400), 10_000_000n);
+    for (const bad of [0, 1.5, 2 ** 32])
+    {
+        assert.throws(()=>setup({ performanceFrequency: bad }), /performance frequency/);
+    }
 });

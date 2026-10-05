@@ -128,6 +128,10 @@
  *     phases and the host's slices, for the milliseconds of `EngineDiagnostics` and the record of
  *     long holds. Default false -- a shipped build reads no clock for its own account, and those
  *     figures stay 0.
+ * @property {number} [cacheVersion]    A version to keep translations under when it is higher
+ *     than the translator's own (`CACHE_VERSION`), which leaves every store of a lower one
+ *     as a miss.
+ *     Default: the translator's.
  * @property {boolean} [traceStore]      A diagnostic: every store key put and missed, in the
  *     diagnostics' `storeTrace`.
  * @property {number} [batchRegions]     Regions per wasm module. Default 32.
