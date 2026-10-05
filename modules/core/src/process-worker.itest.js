@@ -57,6 +57,75 @@ function waitingParent(){
     });
 }
 
+/**
+ * A window painted red through its DC (16x16 at its client's corner), then
+ * its messages dispatched -- its WM_PAINT ends the pass the desktop is shown
+ * after -- until a WM_KEYDOWN; ExitProcess(its virtual key).
+ */
+function paintsThenWaits(){
+    return buildExe({
+        imports: {
+            'USER32.dll': ['RegisterClassA', 'CreateWindowExA', 'DefWindowProcA', 'GetMessageA',
+                'DispatchMessageA', 'GetDC', 'ReleaseDC', 'FillRect'],
+            'GDI32.dll': ['CreateSolidBrush'],
+            'KERNEL32.dll': ['ExitProcess'],
+        },
+        data: {
+            className: [...Buffer.from('BottlifyPaint'), 0],
+            wndclass: new Array(40).fill(0),
+            msg: new Array(28).fill(0),
+            rect: [...u32(0), ...u32(0), ...u32(16), ...u32(16)],
+        },
+        codeSize: 0x100,
+        code: ({ iat, at })=>{
+            /** @param {number} value */
+            const push = value=>[0x68, ...u32(value)];
+            /** @param {string} name */
+            const call = name=>[0xff, 0x15, ...u32(iat(name))];
+            const dispatch = [...push(at('msg')), ...call('DispatchMessageA')];
+            const wait = [
+                0x6a, 0, 0x6a, 0, 0x6a, 0, ...push(at('msg')), ...call('GetMessageA'),
+                // cmp dword [msg.message], WM_KEYDOWN
+                0x81, 0x3d, ...u32(at('msg') + 4), ...u32(0x100),
+                0x0f, 0x84, ...u32(dispatch.length + 5), //  je done
+                ...dispatch,
+            ];
+            return [
+                0xa1, ...u32(iat('DefWindowProcA')), 0xa3, ...u32(at('wndclass') + 4),
+                0xc7, 0x05, ...u32(at('wndclass') + 36), ...u32(at('className')),
+                ...push(at('wndclass')), ...call('RegisterClassA'),
+                0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, ...push(64), ...push(96), 0x6a, 0, 0x6a, 0,
+                ...push(0x10cf0000), ...push(at('className')), ...push(at('className')),
+                0x6a, 0, ...call('CreateWindowExA'),
+                0x89, 0xc7, //                               mov edi, eax
+                ...push(0x0000ff), ...call('CreateSolidBrush'),
+                0x89, 0xc3, //                               mov ebx, eax
+                0x57, ...call('GetDC'),
+                0x89, 0xc6, //                               mov esi, eax
+                0x53, ...push(at('rect')), 0x56, ...call('FillRect'),
+                0x56, 0x57, ...call('ReleaseDC'),
+                ...wait,
+                0xe9, ...u32(-(wait.length + 5)), //         jmp wait
+                0xff, 0x35, ...u32(at('msg') + 8), //        done: push [msg.wParam]
+                ...call('ExitProcess'),
+            ];
+        },
+    });
+}
+
+/** Whether any upload the fake device took holds an opaque red pixel. @param {any} gpu */
+const sawRed = gpu=>gpu.of('writeTexture').some((/** @type {any} */ write)=>{
+    const bytes = /** @type {Uint8Array} */ (write.bytes);
+    for (let at = 0; at + 3 < bytes.length; at += 4)
+    {
+        if (bytes[at] === 0 && bytes[at + 1] === 0 && bytes[at + 2] === 0xff)
+        {
+            return true;
+        }
+    }
+    return false;
+});
+
 test('a child in a worker of its own leaves its parent its file, its registry value and its code',
     { timeout: 120000 }, async t=>{
         const [parent, child] = await Promise.all([
@@ -306,3 +375,38 @@ test('a child in a worker of its own mixes on the run\'s table in a span its par
         ?.metrics.arenaFree, 4 << 20, 'and the child mixed in that span, on the run\'s table');
     assert.equal(arenaFree(), 16 << 20, 'given back once the child was gone');
 });
+
+for (const where of ['in its own place', 'in a worker of its own'])
+{
+    test(`a program ${where} paints its window and the run shows it, while it waits idle`,
+        { timeout: 120000 }, async t=>{
+            const gpu = createFakeDevice();
+            Object.assign(gpu.device, { queue: gpu.queue, features: new Set(),
+                createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }) });
+            const across = where !== 'in its own place';
+            const app = await createApp({
+                executable: across ? waitingParent() : paintsThenWaits(),
+                imagePath: 'C:\\parent.exe',
+                engine: 'cork',
+                ...across ? { mode: 'workers', processWorkers: true } : {},
+                device: { device: gpu.device, queue: gpu.queue, screen: gpu.screen,
+                    canvas: gpu.canvas },
+                storage: { load: async()=>({
+                    files: [{ path: 'C:\\a.exe', bytes: paintsThenWaits() }],
+                }) },
+            });
+            t.after(()=>app.dispose());
+            let red = false;
+            const looking = setInterval(()=>{
+                red ||= sawRed(gpu);
+                if (red)
+                {
+                    // Only once its picture is up is it told to go.
+                    app.input.send({ kind: 'key', code: 'KeyA', down: true });
+                }
+            }, 50);
+            t.after(()=>clearInterval(looking));
+            assert.equal(await app.run({ timeoutMs: 60000 }), 0x41);
+            assert.ok(red, 'the red it painted reached the GPU');
+        });
+}

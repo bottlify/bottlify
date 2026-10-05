@@ -15,8 +15,9 @@
  * mode's, read from the link rather than from a page's ring.
  *
  * The same file runs under a page's `Worker` and Node's `worker_threads`. It
- * is told `{ type: 'start', end, graphics, options, run }` -- its side of the
- * link, its way in to the run's graphics worker or null, the process as
+ * is told `{ type: 'start', end, graphics, display, options, run }` -- its side
+ * of the link, its way in to the run's graphics worker and the port its
+ * surfaces' pictures go out on (or null), the process as
  * `createApp` takes it, how long it may run -- and answers
  * `{ type: 'exited', code, diagnostics }`, or `{ type: 'failed', message }`.
  */
@@ -25,27 +26,24 @@ import { createApp, createMacrotask } from '../app.js';
 import { openLink } from '../system/link.js';
 import { remoteSystem } from '../system-link.js';
 import { ringPacing } from './ring-pacing.js';
+import { portEnd } from '../layers/graphics/remote/connect.js';
 
 /** How often a process with work to do gives its event loop a turn, as the engine's worker does. */
 const YIELD_MS = 4;
 
 /**
- * A port onto the graphics worker as the graphics layer takes a worker: what
- * it posts, and where what comes back is listened for.
+ * The pictures of this process's surfaces, sent on `port` as the graphics
+ * worker sends its frames, for the thread with the GPU to show. What it says
+ * back once one is shown is not waited on: this thread blocks while it idles,
+ * and a picture painted just before would wait with it.
  *
  * @param {MessagePort} port
  */
-const graphicsEnd = port=>{
-    // A port listened to through `addEventListener` delivers nothing until started.
-    port.start();
-    return {
-        /** @param {any} message @param {Transferable[]} [transfer] */
-        postMessage: (message, transfer)=>port.postMessage(message, transfer ?? []),
-        /** @param {'message'} type @param {(event: { data: any }) => void} listener */
-        addEventListener: (type, listener)=>port.addEventListener(type, listener),
-        /** @param {'message'} type @param {(event: { data: any }) => void} listener */
-        removeEventListener: (type, listener)=>port.removeEventListener(type, listener),
-    };
+const sendFrames = port=>{
+    port.onmessage = ()=>{};
+    let frameIndex = 0;
+    return (/** @type {{ pixels: Uint8Array }} */ frame)=>port.postMessage(
+        { type: 'frame', ...frame, frameIndex: ++frameIndex }, [frame.pixels.buffer]);
 };
 
 /**
@@ -68,11 +66,11 @@ const plainOf = read=>{
  * Runs one process to its end.
  *
  * @param {{ end: import('../system/link.js').LinkEnd, graphics?: MessagePort | null,
- *     options: any, run?: any }} start
+ *     display?: MessagePort | null, options: any, run?: any }} start
  * @returns {Promise<{ code: number, diagnostics: any }>} its exit code, and its
  *     layers' diagnostics as it ended, as plain data, or null
  */
-export async function serveProcess({ end, graphics, options, run }){
+export async function serveProcess({ end, graphics, display, options, run }){
     /** @type {Record<string, Record<string, (...args: any[]) => any>>} */
     const handlers = {};
     const link = openLink(end, handlers);
@@ -90,7 +88,8 @@ export async function serveProcess({ end, graphics, options, run }){
     handlers.input = { send: (/** @type {any} */ event)=>app?.input.send(event) };
     app = await createApp({
         ...options,
-        graphics: { ...options.graphics, worker: graphics ? graphicsEnd(graphics) : undefined },
+        graphics: { ...options.graphics, worker: graphics ? portEnd(graphics) : undefined,
+            display: display ? sendFrames(display) : undefined },
         system,
         pacing: ringPacing({ inbound: { bell: link.bell, drain: link.pump },
             macrotask: createMacrotask(), now: ()=>performance.now(), intervalMs: YIELD_MS }),
@@ -107,6 +106,7 @@ export async function serveProcess({ end, graphics, options, run }){
         await app.dispose();
         graphics?.postMessage({ type: 'close' });
         graphics?.close();
+        display?.close();
     }
 }
 

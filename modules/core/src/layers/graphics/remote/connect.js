@@ -100,6 +100,25 @@ const lentOf = senders=>{
 };
 
 /**
+ * A message port as `connectGraphicsWorker` takes a worker: a process's way
+ * in to the graphics worker, or the way its own pictures come in.
+ *
+ * @param {MessagePort} port
+ */
+export function portEnd(port){
+    // A port listened to through `addEventListener` delivers nothing until started.
+    port.start();
+    return {
+        /** @param {any} message @param {Transferable[]} [transfer] */
+        postMessage: (message, transfer)=>port.postMessage(message, transfer ?? []),
+        /** @param {'message'} type @param {(event: { data: any }) => void} listener */
+        addEventListener: (type, listener)=>port.addEventListener(type, listener),
+        /** @param {'message'} type @param {(event: { data: any }) => void} listener */
+        removeEventListener: (type, listener)=>port.removeEventListener(type, listener),
+    };
+}
+
+/**
  * @typedef {Object} Connection
  * @property {() => boolean} drew   whether a root of its plays on the worker
  * @property {(data: any) => void} frame

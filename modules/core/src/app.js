@@ -12,6 +12,7 @@ import { coalescedSaver, inflateRaw, normaliseSession, resolveStorage } from './
 import { DEFAULT_ENGINE, DEFAULT_MEMORY_SIZE } from './layers/cpu/module.js';
 import { CORK_TSC_MHZ } from './layers/cpu/internal/cork-host.js';
 import { createPresenter } from './layers/graphics/webgpu/internal/presenter.js';
+import { connectGraphicsWorker, portEnd } from './layers/graphics/remote/connect.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
 import { parsePe, readExports, readImports, rvaToFileOffset } from './layers/loader/internal/pe.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
@@ -230,7 +231,8 @@ import { openProcessWorker } from './host/process-worker.js';
  *           nonzero code is the page's error report instead.
  * @property {any} [device]          The GPU to draw on, when there is one.
  * @property {{ presenter?: any, compressedTextures?: boolean, maxFrameLatency?: number,
- *     lendMemory?: boolean, guestCode?: boolean, guestTraps?: string[], worker?: any }}
+ *     lendMemory?: boolean, guestCode?: boolean, guestTraps?: string[], worker?: any,
+ *     display?: (frame: any) => void }}
  *           [graphics]
  *           The graphics layer's configuration (docs/core/configuration.md,
  *           graphics), forwarded to it as given: `compressedTextures`
@@ -243,8 +245,9 @@ import { openProcessWorker } from './host/process-worker.js';
  *           from `device` and handed to every machine; set by `createApp` on a
  *           rebuilt machine and not something a caller supplies.
  *           `graphics.worker` is a way in to the run's graphics worker for a
- *           process with no GPU of its own: set for a child in a worker of its
- *           own, whose devices draw there.
+ *           process with no GPU of its own, and `graphics.display` where its
+ *           surfaces' pictures go: both set for a child in a worker of its own,
+ *           whose devices draw there and whose pictures the run shows.
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
  *           What the program is told its display is.
  * @property {{ picture?: { width: number, height: number, bits: Uint8Array } }} [desktop]
@@ -6947,7 +6950,10 @@ export async function createApp(options){
             onPresented: options.device.onPresented,
             onPresentFailed: options.device.onPresentFailed,
         })
-        : null);
+        // A process in a worker of its own has no GPU: its surfaces' pictures
+        // go to the thread that has one, as bytes, each burst as it flushes.
+        : options.graphics?.display ? createPresenter({ sendFrame: options.graphics.display })
+            : null);
 
     // The translation store is the run's as well: a child's machine is built
     // beside its paused parent's, and a second store opened on the same
@@ -7429,6 +7435,12 @@ export async function createApp(options){
         {
             graphicsWorker.postMessage({ type: 'client', port: graphics.port2 }, [graphics.port2]);
         }
+        // And the pictures of its own surfaces -- a DirectDraw primary, the
+        // desktop its windows are drawn on -- which come in as the graphics
+        // worker's frames do and are shown by the run's presenter.
+        const display = presenter && options.device?.device ? new MessageChannel() : null;
+        const shown = display ? connectGraphicsWorker({ worker: portEnd(display.port1),
+            device: options.device.device, presentTo: frame=>presenter.show(frame) }) : null;
         // Its sound goes onto the run's table, in a span its parent lends it,
         // where the table is shared memory a worker can be handed; elsewhere
         // the run's sound is mixed on this thread, and the child has none.
@@ -7467,6 +7479,7 @@ export async function createApp(options){
                     type: 'start',
                     end: memory.b,
                     graphics: graphics?.port1 ?? null,
+                    display: display?.port2 ?? null,
                     options: {
                         executable: image,
                         imagePath: request.imagePath,
@@ -7493,7 +7506,7 @@ export async function createApp(options){
                             doorbell: undefined } },
                     },
                     run: { maxTurns: runOptionsNow?.maxTurns, timeoutMs: runOptionsNow?.timeoutMs },
-                }, graphics ? [graphics.port1] : []);
+                }, [...graphics ? [graphics.port1] : [], ...display ? [display.port2] : []]);
             });
         }
         finally
@@ -7507,6 +7520,8 @@ export async function createApp(options){
             await answering;
             worker.terminate();
             sound?.giveBack();
+            shown?.dispose();
+            display?.port1.close();
         }
     };
     /** The code the last of the run's processes beside another exited with. */

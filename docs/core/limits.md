@@ -28,9 +28,10 @@ differently raises a `divergence` event naming the API.
   another process across a worker named is refused. Its Direct3D 8 and 9 devices draw on the run's
   graphics worker and what they present is shown as the run's frames; its sound goes onto the
   run's track table in a span its parent lends it, where that table is shared memory (none
-  otherwise); the page's input goes to it while it stands. It has no DirectDraw or GDI picture
-  and no COM server. A redirected standard output is written there, but the parent's position
-  does not move with it.
+  otherwise); the page's input goes to it while it stands. Its DirectDraw primary and the desktop
+  its windows are drawn on are sent to the engine as bytes and shown there; they are not composed
+  with its parent's, and whichever process showed last is on the screen. It has no COM server. A
+  redirected standard output is written there, but the parent's position does not move with it.
 - Windows are the run's: a process finds another's window (`FindWindow`), reads who made it, its
   caption and class, and posts to it. A message sent to another process's window is answered in the
   `workers` mode; its pointers cross only for `WM_COPYDATA`, `WM_SETTEXT` and `WM_GETTEXT`. Where
