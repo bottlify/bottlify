@@ -141,6 +141,11 @@ export function createNamedObjects({ table = new Map() } = {}){
 export function createRemoteNamedObjects({ objects, kernel }){
     /** One stand-in per object, so two handles onto it are one object here. @type {Map<number, any>} */
     const standIns = new Map();
+    // A file mapping or a waitable timer is not carried across the link yet:
+    // its name is this process's own, as every name was before.
+    const own = createNamedObjects();
+    /** @param {string} kind */
+    const across = kind=>kind === 'event' || kind === 'semaphore' || kind === 'mutex';
     /** @param {string} kind @param {number} id @param {string} name */
     const standInFor = (kind, id, name)=>{
         let made = standIns.get(id);
@@ -157,6 +162,10 @@ export function createRemoteNamedObjects({ objects, kernel }){
     return {
         /** @param {string | null} name @param {string} kind */
         existing(name, kind){
+            if (!across(kind))
+            {
+                return own.existing(name, kind);
+            }
             if (name === null)
             {
                 return null;
@@ -174,6 +183,11 @@ export function createRemoteNamedObjects({ objects, kernel }){
          * @param {(code: number) => void} setLastError
          */
         remember(name, kind, made, reused, setLastError){
+            if (!across(kind))
+            {
+                own.remember(name, kind, made, reused, setLastError);
+                return;
+            }
             if (name !== null)
             {
                 if (reused)
@@ -200,7 +214,9 @@ export function createRemoteNamedObjects({ objects, kernel }){
             if (object.remote)
             {
                 objects.reference(object.remote);
+                return;
             }
+            own.reference(object);
         },
 
         /** @param {any} object */
@@ -208,7 +224,9 @@ export function createRemoteNamedObjects({ objects, kernel }){
             if (object.remote)
             {
                 objects.close(object.remote);
+                return;
             }
+            own.forget(object);
         },
     };
 }

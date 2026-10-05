@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { TAKEN, createNamedObjects } from './named-objects.js';
+import { TAKEN, createNamedObjects, createRemoteNamedObjects } from './named-objects.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_ALREADY_EXISTS = 183;
@@ -113,4 +113,45 @@ test('a table handed in is what makes a name survive a process replacement', ()=
     assert.equal(found, mutex);
     assert.deepEqual(childErrors, [ERROR_ALREADY_EXISTS]);
     assert.deepEqual(parentErrors, [ERROR_SUCCESS]);
+});
+
+test('across a link, events, semaphores and mutexes are the run\'s; a mapping\'s name stays the'
+    + ' process\'s own', ()=>{
+    /** @type {any[]} */
+    const asked = [];
+    const objects = {
+        peek: (/** @type {string} */ kind, /** @type {string} */ name)=>{
+            asked.push(['peek', kind, name]);
+            return name === 'Ready' ? { id: 4 } : null;
+        },
+        create: (/** @type {string} */ kind, /** @type {string} */ name)=>{
+            asked.push(['create', kind, name]);
+            return { id: 5, reused: false };
+        },
+        reference: (/** @type {number} */ id)=>asked.push(['reference', id]),
+        close: (/** @type {number} */ id)=>asked.push(['close', id]),
+    };
+    const kernel = {
+        createEvent: (/** @type {any} */ options)=>({ kind: 'event', ...options }),
+        createSemaphore: (/** @type {any} */ options)=>({ kind: 'semaphore', ...options }),
+        createMutex: (/** @type {any} */ options)=>({ kind: 'mutex', ...options }),
+    };
+    const names = createRemoteNamedObjects({ objects, kernel });
+    const found = names.existing('Ready', 'event');
+    assert.equal(found.remote, 4, 'a stand-in for the run\'s object');
+    assert.equal(names.existing('Ready', 'event'), found, 'one stand-in for it');
+    /** @type {number[]} */
+    const errors = [];
+    const made = { kind: 'event', manualReset: true, signalled: false };
+    names.remember('Go', 'event', made, false, code=>errors.push(code));
+    assert.equal(/** @type {any} */ (made).remote, 5, 'made there, a stand-in here');
+
+    const mapping = { kind: 'mapping' };
+    assert.equal(names.existing('Shared', 'mapping'), null);
+    names.remember('Shared', 'mapping', mapping, false, code=>errors.push(code));
+    assert.equal(names.existing('Shared', 'mapping'), mapping, 'its own table holds it');
+    names.forget(mapping);
+    assert.equal(names.existing('Shared', 'mapping'), null);
+    assert.deepEqual(asked.filter(each=>each[1] === 'mapping'), [], 'never asked across');
+    assert.deepEqual(errors, [0, 0]);
 });
