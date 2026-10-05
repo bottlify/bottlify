@@ -24,6 +24,8 @@
  *   /key?code=Enter      a key press, by KeyboardEvent.code
  *   /type?text=123       characters typed one after another
  *   /eval?js=EXPR        the value of an expression in the launcher tab, as JSON
+ *   /upload?file=PATH    a file handed to the page's file input (`selector`, the
+ *                        first one by default) -- the library's Add, for an installer
  *   /quit                closes the browser and ends
  *
  * `query` is put on the library's URL (`hook=...`, the launcher's knobs).
@@ -160,6 +162,13 @@ createServer(async(request, answer)=>{
         else if (url.pathname === '/eval')
         {
             out = JSON.stringify(await evaluate(arg('js')));
+        }
+        else if (url.pathname === '/upload')
+        {
+            const { root } = await send('DOM.getDocument', { depth: 0 });
+            const { nodeId } = await send('DOM.querySelector',
+                { nodeId: root.nodeId, selector: arg('selector') || 'input[type=file]' });
+            await send('DOM.setFileInputFiles', { nodeId, files: [resolve(arg('file'))] });
         }
         else if (url.pathname === '/quit')
         {
