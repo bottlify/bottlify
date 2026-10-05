@@ -189,6 +189,37 @@ export function createScheduler(options){
     let boosts = 0;
     /** Slices ended early for a thread of higher priority that came due. */
     let preemptions = 0;
+    /** What the last slice retired, for a thread's account of whom it followed. */
+    let lastSlice = 0;
+    /** Whether a slice is running: a wake outside one has no slice to end. */
+    let inSlice = false;
+    /**
+     * The last wakes of a thread that outranks the one that woke it, newest
+     * last, and whether the waker gave way: what a hand-over between threads
+     * of different priority is read by.
+     *
+     * @type {string[]}
+     */
+    const recentWakes = [];
+    /**
+     * What a thread did last, newest last, kept on the thread: a thread that
+     * has stopped for good is read by its own last steps, which a ring shared
+     * with a busy pair of threads loses within a millisecond.
+     *
+     * @param {any} thread @param {string} step
+     */
+    const note = (thread, step)=>{
+        const recent = thread.recent ??= [];
+        if (recent.length > 0 && recent[recent.length - 1] === step)
+        {
+            return;
+        }
+        recent.push(step);
+        if (recent.length > 12)
+        {
+            recent.shift();
+        }
+    };
     /** The last long gaps a short-period thread went without the processor. @type {string[]} */
     const lateGaps = [];
     /**
@@ -766,6 +797,10 @@ export function createScheduler(options){
                     }
                 }
             }
+            if (next !== current)
+            {
+                note(next, `runs after ${current?.name ?? '-'} (${lastSlice})`);
+            }
             const switched = switcher.switchTo(current, next, resume);
 
             if (current && current.state === ThreadState.RUNNING)
@@ -790,7 +825,10 @@ export function createScheduler(options){
                     readyAtSlice.add(thread);
                 }
             }
+            inSlice = true;
             let instructions = cpu.runSlice(quantum);
+            inSlice = false;
+            lastSlice = instructions;
             // A slice that ran out inside a routine the host placed to run
             // unbroken -- one writing a record another thread's entry into the
             // host reads -- runs on to the routine's end: none of them waits,
@@ -902,6 +940,7 @@ export function createScheduler(options){
          * @param {number} [timed.result]    What the call answers when it does.
          */
         block(thread, reason, timed){
+            note(thread, `waits ${reason ?? '?'}`);
             thread.state = ThreadState.BLOCKED;
             thread.waitingOn = reason ?? null;
             // Kept past the wake, so the resume can still say what was waited
@@ -933,6 +972,35 @@ export function createScheduler(options){
             thread.waitingOn = null;
             thread.deadline = null;
             thread.alertable = false;
+            // Woken by the running thread -- an event it set, a mutex or a
+            // semaphore it released -- a thread of higher priority takes the
+            // processor at once on Windows, before the next instruction of the
+            // thread that woke it. A program relies on that: one hands a read
+            // to its I/O worker, takes it back and hands over another, and the
+            // worker it woke has taken the first by then; run on, the waker
+            // takes back a job still queued and the worker, finding it there
+            // first, sleeps on the rest. So the slice ends at the call.
+            const outranks = current !== null && current !== thread
+                && absolutePriority(thread.priority) > absolutePriority(current.priority);
+            const preempts = outranks && inSlice && current.state === ThreadState.RUNNING
+                && !thread.awaitingHost && !(thread.suspendCount > 0);
+            if (preempts)
+            {
+                preemptions++;
+                cpu.stop?.();
+            }
+            note(thread, `woken by ${current?.name ?? '-'}${preempts ? ' at once' : ''}`);
+            if (outranks)
+            {
+                recentWakes.push(`${thread.name} by ${current.name} (${current.state})`
+                    + `${preempts ? ' preempting' : ''}`
+                    + `${thread.awaitingHost ? ' awaitingHost' : ''}`
+                    + `${thread.suspendCount > 0 ? ' suspended' : ''}`);
+                if (recentWakes.length > 32)
+                {
+                    recentWakes.shift();
+                }
+            }
             return true;
         },
 
@@ -1176,6 +1244,9 @@ export function createScheduler(options){
                 // never yields, which a program does not mean to do.
                 boosts,
                 preemptions,
+                recentWakes: recentWakes.slice(),
+                recentByThread: threads.filter(thread=>thread.state !== ThreadState.TERMINATED)
+                    .map(thread=>`${thread.name}: ${(thread.recent ?? []).join(' > ')}`),
                 // The last gaps past LATE_GAP_MS a short-period thread went
                 // without the processor, and what held the machine meanwhile.
                 lateGaps: lateGaps.join(' | '),
