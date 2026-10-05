@@ -774,6 +774,18 @@ test('the clock routines read one block, and what they read is what a trap would
     assert.equal(view.getUint32(9, true), block + CLOCK.COUNTER);
     assert.deepEqual([...counter.slice(13, 15)], [0x8b, 0x15]);
     assert.equal(view.getUint32(15, true), block + CLOCK.COUNTER + 4);
+    // Compared with the last answer, high word first, and kept as it.
+    assert.deepEqual([...counter.slice(19, 21)], [0x3b, 0x15], 'cmp edx, [last+4]');
+    assert.equal(view.getUint32(21, true), block + CLOCK.LAST + 4);
+    assert.deepEqual([...counter.slice(29, 31)], [0x3b, 0x05], 'cmp eax, [last]');
+    assert.equal(view.getUint32(31, true), block + CLOCK.LAST);
+    assert.equal(27 + counter[26], 54, 'ja to the store');
+    assert.equal(29 + counter[28], 37, 'jb to the bump');
+    assert.equal(37 + counter[36], 54, 'ja to the store');
+    assert.deepEqual([...counter.slice(48, 54)], [0x83, 0xc0, 0x01, 0x83, 0xd2, 0x00],
+        'one tick more than the last answer');
+    assert.equal(counter[54], 0xa3);
+    assert.equal(view.getUint32(55, true), block + CLOCK.LAST, 'kept as the last answer');
     assert.deepEqual([...counter.slice(slow - 3, slow)], [0xc2, 0x04, 0x00],
         'the fast path pops its one argument');
     assert.equal(counter[slow], 0xe9);
@@ -870,6 +882,41 @@ test('the clock the guest reads is the one the engine credits', ()=>{
     }
 });
 
+test('the counter answers later each time it is asked, whether the clock moved or not', ()=>{
+    // The guest's clock is credited between slices, so two reads inside one
+    // slice found the same counter; a program timing a stretch of its own code
+    // by two reads took a zero for time that had passed.
+    const { host, fns, u64 } = setup();
+    const out = 0x400;
+    host.clock.uptimeMs = 1500;
+    assert.equal(fns.QueryPerformanceCounter.handler([out]), 1);
+    const first = u64(out);
+    assert.equal(first, 1_500_000n, 'the clock, when it is later than any answer');
+    fns.QueryPerformanceCounter.handler([out]);
+    assert.equal(u64(out), first + 1n, 'asked again before it moved: one tick later');
+    fns.QueryPerformanceCounter.handler([out]);
+    assert.equal(u64(out), first + 2n);
+    host.clock.uptimeMs = 1501;
+    fns.QueryPerformanceCounter.handler([out]);
+    assert.equal(u64(out), 1_501_000n, 'and the clock again once it is past them');
+});
+
+test('the trap and the guest routine keep one last answer, in the block', ()=>{
+    const { host, fns, u64 } = setup({ arena: 0x4000 });
+    const out = 0x400;
+    host.clock.uptimeMs = 1500;
+    const counter = boundTo(fns.QueryPerformanceCounter, { register: ()=>0x7f000010 });
+    const block = host.view.getUint32(counter + 9, true) - CLOCK.COUNTER;
+    fns.QueryPerformanceCounter.handler([out]);
+    fns.QueryPerformanceCounter.handler([out]);
+    assert.equal(host.view.getBigUint64(block + CLOCK.LAST, true), u64(out),
+        'what the routine compares with next');
+    host.clock.uptimeMs = 2500;
+    host.refreshes[0]();
+    assert.equal(host.view.getBigUint64(block + CLOCK.LAST, true), u64(out),
+        'and the clock moving does not write over it');
+});
+
 test('a build with nowhere to publish a clock keeps every clock export a trap', ()=>{
     // The block is the engine's to keep current. Without one, a routine
     // reading it would hand a program a clock that never moves -- so the
@@ -889,9 +936,9 @@ test('the thread-state and clock routines are placed where the host keeps code',
     /** @type {number[]} */
     const placed = [];
     /** @type {any} */ (host).allocateCode = (/** @type {number} */ size)=>{
-        const at = 0x3000 + placed.length * 0x40;
+        const at = 0x3000 + placed.length * 0x80;
         placed.push(at);
-        assert.ok(size <= 0x40);
+        assert.ok(size <= 0x80);
         return at;
     };
     const builder = { register: ()=>0x105000 };
