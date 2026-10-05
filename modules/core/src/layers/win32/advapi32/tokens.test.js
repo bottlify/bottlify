@@ -127,6 +127,47 @@ test('the sequence an installer asks whether it is an administrator with', ()=>{
     assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
 });
 
+test('the owner, primary group, type and session of a token', ()=>{
+    // An update package asks for the owner first and the user after it, and
+    // copies each SID by its length; a class it is refused ends the package
+    // with ERROR_INVALID_PARAMETER as its exit code.
+    const TokenOwner = 4;
+    const TokenPrimaryGroup = 5;
+    const TokenType = 8;
+    const TokenSessionId = 12;
+    const ERROR_INVALID_PARAMETER = 87;
+    const { bytes, errors, fns, dword } = setup();
+    fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]);
+    const token = dword(OUT);
+
+    assert.equal(fns.GetTokenInformation.handler([token, TokenOwner, 0, 0, NEEDED]), 0);
+    assert.equal(errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+    assert.equal(dword(NEEDED), 4 + ADMINISTRATORS_SID.length, 'a pointer, then the SID');
+    assert.equal(fns.GetTokenInformation.handler([token, TokenOwner, BUFFER, 0x100, NEEDED]), 1);
+    assert.equal(dword(BUFFER), BUFFER + 4, 'the owner SID follows its pointer');
+    assert.equal(fns.GetLengthSid.handler([dword(BUFFER)]), ADMINISTRATORS_SID.length);
+    assert.deepEqual([...bytes.subarray(BUFFER + 4, BUFFER + 4 + ADMINISTRATORS_SID.length)],
+        [...ADMINISTRATORS_SID], 'an administrator\'s objects are owned by the Administrators');
+
+    assert.equal(fns.GetTokenInformation.handler([token, TokenPrimaryGroup, BUFFER, 0x100, NEEDED]),
+        1);
+    assert.equal(dword(BUFFER), BUFFER + 4);
+    assert.equal(dword(BUFFER + 4 + 8 + 16), 513, 'the domain\'s users');
+
+    assert.equal(fns.GetTokenInformation.handler([token, TokenType, BUFFER, 4, NEEDED]), 1);
+    assert.deepEqual([dword(BUFFER), dword(NEEDED)], [1, 4], 'TokenPrimary');
+    fns.DuplicateToken.handler([token, 2, OUT]);
+    assert.equal(fns.GetTokenInformation.handler([dword(OUT), TokenType, BUFFER, 4, NEEDED]), 1);
+    assert.equal(dword(BUFFER), 2, 'a duplicate impersonates');
+
+    bytes.fill(0xff, BUFFER, BUFFER + 4);
+    assert.equal(fns.GetTokenInformation.handler([token, TokenSessionId, BUFFER, 4, NEEDED]), 1);
+    assert.equal(dword(BUFFER), 0, 'the console session');
+
+    assert.equal(fns.GetTokenInformation.handler([token, 0x7f, BUFFER, 0x100, NEEDED]), 0);
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER, 'a class there is none of');
+});
+
 test('a privilege is looked up by its fixed number and granted on the process token', ()=>{
     // An archiver enables SeRestorePrivilege before it restores what it
     // unpacks; refused, it takes the path for a user who may not.

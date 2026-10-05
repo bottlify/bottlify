@@ -95,6 +95,14 @@ const MAX_PRIVILEGE_NAME = 64;
 /** TOKEN_INFORMATION_CLASS values this build answers. */
 const TokenUser = 1;
 const TokenGroups = 2;
+const TokenOwner = 4;
+const TokenPrimaryGroup = 5;
+const TokenType = 8;
+const TokenSessionId = 12;
+
+/** TOKEN_TYPE: a process's own token, and one made to impersonate with. */
+const TOKEN_PRIMARY = 1;
+const TOKEN_IMPERSONATION = 2;
 
 /** SID_AND_ATTRIBUTES: a pointer and a DWORD. */
 const SID_AND_ATTRIBUTES_SIZE = 8;
@@ -131,6 +139,15 @@ const GROUP_SIDS = [
     { authority: 5, subAuthorities: [4] },
     { authority: 5, subAuthorities: [11] },
 ];
+
+/**
+ * Who owns what the account creates, and its primary group: an
+ * administrator's token names BUILTIN\Administrators, not the user, as the
+ * owner, and the domain's users as the group. A setup that checks it is an
+ * administrator may read the owner rather than the groups.
+ */
+const DEFAULT_OWNER = GROUP_SIDS[2];
+const PRIMARY_GROUP = GROUP_SIDS[0];
 
 /** The local system, whom an object's default DACL lets in beside the administrators. */
 const SYSTEM_SID = { authority: 5, subAuthorities: [18] };
@@ -200,20 +217,45 @@ export function createTokenFunctions(host){
         }
     };
 
+    /** @param {number} value @returns {Uint8Array} */
+    const dwordBytes = value=>{
+        const bytes = new Uint8Array(4);
+        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
+        return bytes;
+    };
+
     /**
      * What GetTokenInformation writes: the fixed part, then the SIDs the
-     * pointers in it name, all inside the one buffer the caller gave.
+     * pointers in it name, all inside the one buffer the caller gave. The
+     * pointers sit `stride` apart from `slot` on.
      *
-     * @param {number} tokenClass
-     * @returns {{ fixed: Uint8Array, sids: Uint8Array[] } | null}
+     * @param {number} tokenClass @param {any} token
+     * @returns {{ fixed: Uint8Array, sids: Uint8Array[], slot?: number,
+     *             stride?: number } | null}
      */
-    const information = tokenClass=>{
+    const information = (tokenClass, token)=>{
         switch (tokenClass >>> 0)
         {
             case TokenUser:
                 return {
                     fixed: new Uint8Array(SID_AND_ATTRIBUTES_SIZE), sids: [sidBytes(USER_SID)],
                 };
+            // TOKEN_OWNER and TOKEN_PRIMARY_GROUP: one SID pointer each.
+            case TokenOwner:
+                return { fixed: new Uint8Array(4), sids: [sidBytes(DEFAULT_OWNER)] };
+            case TokenPrimaryGroup:
+                return { fixed: new Uint8Array(4), sids: [sidBytes(PRIMARY_GROUP)] };
+            // DuplicateToken makes an impersonation token; what OpenProcessToken
+            // opens is the primary one.
+            case TokenType:
+                return {
+                    fixed: dwordBytes(token?.impersonationLevel === undefined
+                        ? TOKEN_PRIMARY : TOKEN_IMPERSONATION),
+                    sids: [],
+                };
+            // The one interactive session there is: the console's, zero on NT 5.
+            case TokenSessionId:
+                return { fixed: dwordBytes(0), sids: [] };
             case TokenGroups:
             {
                 const fixed = new Uint8Array(4 + SID_AND_ATTRIBUTES_SIZE * GROUP_SIDS.length);
@@ -223,7 +265,8 @@ export function createTokenFunctions(host){
                     new DataView(fixed.buffer).setUint32(
                         4 + at * SID_AND_ATTRIBUTES_SIZE + 4, GROUP_ATTRIBUTES, true);
                 }
-                return { fixed, sids: GROUP_SIDS.map(sidBytes) };
+                return { fixed, sids: GROUP_SIDS.map(sidBytes), slot: 4,
+                    stride: SID_AND_ATTRIBUTES_SIZE };
             }
             default:
                 return null;
@@ -590,9 +633,9 @@ export function createTokenFunctions(host){
                     return fail(ERROR_INVALID_HANDLE);
                 }
                 const owner = (requested & OWNER_SECURITY_INFORMATION) !== 0
-                    ? sidBytes(GROUP_SIDS[2]) : null;
+                    ? sidBytes(DEFAULT_OWNER) : null;
                 const group = (requested & GROUP_SECURITY_INFORMATION) !== 0
-                    ? sidBytes(GROUP_SIDS[0]) : null;
+                    ? sidBytes(PRIMARY_GROUP) : null;
                 /** @type {Uint8Array | null} */
                 let dacl = null;
                 if ((requested & DACL_SECURITY_INFORMATION) !== 0)
@@ -853,7 +896,8 @@ export function createTokenFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                const answer = information(tokenClass);
+                const answer = information(tokenClass,
+                    host.handles.resolve(token >>> 0, 'token'));
                 if (!answer)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
@@ -870,16 +914,13 @@ export function createTokenFunctions(host){
                 }
                 const whole = new Uint8Array(needed);
                 whole.set(answer.fixed);
-                // The first pointer slot is where the class puts its first
-                // SID pointer: TokenUser has it at zero, TokenGroups after
-                // the count.
-                const firstSlot = (tokenClass >>> 0) === TokenGroups ? 4 : 0;
+                const { slot = 0, stride = 0 } = answer;
                 let at = answer.fixed.length;
                 for (let index = 0; index < answer.sids.length; index++)
                 {
                     whole.set(answer.sids[index], at);
                     new DataView(whole.buffer).setUint32(
-                        firstSlot + index * SID_AND_ATTRIBUTES_SIZE, (buffer >>> 0) + at, true);
+                        slot + index * stride, (buffer >>> 0) + at, true);
                     at += answer.sids[index].length;
                 }
                 host.writeMemory(buffer >>> 0, whole);
