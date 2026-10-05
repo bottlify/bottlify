@@ -90,6 +90,8 @@ const IMPORTS = {
             'IsWindow@4', 'GetWindowThreadProcessId@8', 'GetWindowTextA@12', 'GetClassNameA@12',
             'PostMessageA@16', 'SendMessageA@16', 'SendMessageTimeoutA@28',
             'RegisterWindowMessageA@4', 'PostThreadMessageA@16', 'PeekMessageA@20',
+            'MsgWaitForMultipleObjects@20', 'GetForegroundWindow@0', 'GetActiveWindow@0',
+            'SetForegroundWindow@4', 'WindowFromPoint@8', 'EnumWindows@8',
         ],
     },
     'msvcrt.dll': {
@@ -120,6 +122,7 @@ const PROGRAMS = [
     { name: 'marshal', source: 'marshal.c', cxx: false },
     { name: 'contexts', source: 'contexts.c', cxx: false },
     { name: 'rot', source: 'rot.c', cxx: false },
+    { name: 'activate', source: 'activate.c', cxx: false },
     { name: 'windows', source: 'windows.c', cxx: false },
 ];
 

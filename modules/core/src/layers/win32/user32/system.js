@@ -2928,10 +2928,19 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         WindowFromPoint: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([x, y])=>andThen(host.askedFromPoint
-                ? host.askedFromPoint(x | 0, y | 0, host.callerThread?.())
-                : host.windowFromPoint(x | 0, y | 0),
-            (/** @type {{ record: any } | null} */ found)=>found?.record.hwnd ?? 0),
+            handler: ([x, y])=>{
+                // Another program's window over the point is the answer; one
+                // of this program's is asked for its hit test here.
+                const foreign = host.foreignAt?.(x | 0, y | 0) ?? 0;
+                if (foreign !== 0)
+                {
+                    return foreign;
+                }
+                return andThen(host.askedFromPoint
+                    ? host.askedFromPoint(x | 0, y | 0, host.callerThread?.())
+                    : host.windowFromPoint(x | 0, y | 0),
+                (/** @type {{ record: any } | null} */ found)=>found?.record.hwnd ?? 0);
+            },
         },
 
         /**
@@ -4727,10 +4736,17 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             handler: ()=>programs(host.active?.() ?? 0),
         },
 
-        /** HWND GetForegroundWindow(void) */
+        /**
+         * HWND GetForegroundWindow(void)
+         *
+         * The run's: another program's window when another program has it.
+         */
         GetForegroundWindow: {
             argBytes: 0,
-            handler: ()=>programs(host.active?.() ?? 0),
+            handler: ()=>{
+                const run = host.runForeground?.() ?? 0;
+                return run !== 0 ? run : programs(host.active?.() ?? 0);
+            },
         },
 
         /**
@@ -4937,7 +4953,9 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 const record = live(hwnd);
                 if (!record)
                 {
-                    return 0;
+                    // Another program's window: the run's foreground moves
+                    // to it, and that program activates it.
+                    return host.foregroundElsewhere?.(hwnd >>> 0) ? 1 : 0;
                 }
                 host.raise?.(record);
                 return andThen(host.activate?.(hwnd >>> 0,

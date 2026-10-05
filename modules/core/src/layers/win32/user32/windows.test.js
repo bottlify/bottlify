@@ -251,10 +251,13 @@ function paintedHost(fills, presents, clips, scrolls = []){
  * @param {any[]} [options.scrolls] Where the screen's moved pixels are told, with `paint`.
  * @param {any} [options.directory] The run's window directory, for a test that reads what
  *        the run is told.
+ * @param {number} [options.processId] The process this user32 is, beside another on the
+ *        same directory.
  */
 function setup({
     heap = false, reply, waitForObjects, now, hookReply, threadExists, trace, paint = false,
     caller = { current: THREAD }, queueNow, regionBox, later, scrolls = [], directory,
+    processId,
 } = {})
 {
     const memory = fakeMemory();
@@ -336,6 +339,7 @@ function setup({
         regionBox,
         later,
         directory,
+        processId,
         ...(paint ? paintedHost(fills, presents, clips, scrolls) : {}),
     });
 
@@ -4867,3 +4871,82 @@ for (const seed of [1, 2, 3, 4, 5, 6, 7, 8])
             }
         });
 }
+
+test('another program\'s window taking the foreground is the run\'s, and both programs are'
+    + ' told, each naming the other', async()=>{
+    const WM_ACTIVATE = 0x0006;
+    const WM_ACTIVATEAPP = 0x001c;
+    const WA_INACTIVE = 0;
+    const directory = createWindowDirectory();
+    // Threads with identifiers, as the scheduler's are: a message from
+    // another process waits in the queue of the thread it names.
+    const first = setup({ directory, processId: 0x100, hookReply: ()=>1,
+        caller: { current: { name: 'main', id: 0x104 } } });
+    const second = setup({ directory, processId: 0x200,
+        caller: { current: { name: 'other', id: 0x204 } } });
+    for (const each of [first, second])
+    {
+        putClass(each.memory);
+        each.fns.RegisterClassA.handler([CLASS_STRUCT]);
+    }
+    const mine = createWindow(first.fns, first.memory, { style: WS_VISIBLE, x: 0, y: 0,
+        width: 300, height: 300 });
+    await first.fns.SetForegroundWindow.handler([mine]);
+    // A visible top-level window is activated as it is made.
+    second.dispatched.length = 0;
+    const theirs = createWindow(second.fns, second.memory, { style: WS_VISIBLE, x: 200, y: 200,
+        width: 300, height: 300 });
+    await second.fns.SetForegroundWindow.handler([theirs]);
+    await Promise.resolve();
+
+    assert.equal(first.fns.GetForegroundWindow.handler(), theirs, 'the run\'s foreground');
+    assert.equal(second.fns.GetForegroundWindow.handler(), theirs);
+    assert.equal(first.fns.GetActiveWindow.handler(), 0, 'no window of the first is active');
+    assert.equal(first.service.deactivated(), true);
+    const firstThread = directory.stateOf(mine)?.threadId;
+    const secondThread = directory.stateOf(theirs)?.threadId;
+    /** @param {any[]} list @param {number} message */
+    const of = (list, message)=>list.filter(each=>each.message === message)
+        .map(each=>[each.hwnd, each.wParam, each.lParam]);
+    assert.deepEqual(of(second.dispatched, WM_ACTIVATEAPP), [[theirs, 1, firstThread]],
+        'the second is the active program, from the first program\'s thread');
+    assert.deepEqual(of(second.dispatched, WM_ACTIVATE), [[theirs, 1, mine]]);
+
+    // The first hears of it on its own thread, at its next look at its queue.
+    first.dispatched.length = 0;
+    first.fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+    assert.deepEqual(of(first.dispatched, WM_NCACTIVATE), [[mine, 0, 0]]);
+    assert.deepEqual(of(first.dispatched, WM_ACTIVATE), [[mine, WA_INACTIVE, theirs]]);
+    assert.deepEqual(of(first.dispatched, WM_ACTIVATEAPP), [[mine, 0, secondThread]],
+        'it is not the active program, for the second program\'s thread');
+
+    assert.equal(await first.fns.WindowFromPoint.handler([250, 250]), theirs,
+        'the other program\'s window over the point');
+    first.called.length = 0;
+    await first.fns.EnumWindows.handler([0x405000, 7]);
+    assert.deepEqual(first.called.map(each=>each.args[0]), [theirs, mine],
+        'every program\'s top-level window, topmost first');
+
+    // And back.
+    first.dispatched.length = 0;
+    await first.fns.SetForegroundWindow.handler([mine]);
+    assert.equal(second.fns.GetForegroundWindow.handler(), mine);
+    assert.equal(second.fns.GetActiveWindow.handler(), 0);
+    assert.deepEqual(of(first.dispatched, WM_ACTIVATEAPP), [[mine, 1, secondThread]]);
+
+    // The second program gives the foreground to the first program's window:
+    // the run's at once; the first activates it as it looks at its queue.
+    second.fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+    await second.fns.SetForegroundWindow.handler([theirs]);
+    first.fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+    first.dispatched.length = 0;
+    assert.equal(await second.fns.SetForegroundWindow.handler([mine]), 1,
+        'another program\'s window can be made the foreground one');
+    assert.equal(second.fns.GetForegroundWindow.handler(), mine, 'at once');
+    assert.equal(second.fns.GetActiveWindow.handler(), 0);
+    await first.fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+    assert.equal(first.fns.GetActiveWindow.handler(), mine, 'and the first activated it');
+    assert.deepEqual(of(first.dispatched, WM_ACTIVATEAPP), [[mine, 1, secondThread]],
+        'told it came from the second program\'s thread');
+    assert.deepEqual(of(first.dispatched, WM_ACTIVATE), [[mine, 1, theirs]]);
+});

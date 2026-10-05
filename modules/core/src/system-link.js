@@ -32,10 +32,12 @@ const REGISTRY = ['root', 'open', 'create', 'remove', 'subkeys', 'values', 'getV
 /** What a process asks of the window directory. */
 const WINDOWS = ['open', 'close', 'ownerOf', 'describe', 'find', 'register', 'registeredName',
     'hold', 'send', 'answer', 'withdraw', 'post', 'detach', 'publish', 'raise', 'lower',
-    'insertAfter', 'stateOf', 'topLevel', 'fromPoint'];
+    'insertAfter', 'stateOf', 'topLevel', 'fromPoint', 'foreground', 'setForeground',
+    'foregroundElsewhere'];
 
 /** What a process answers about its own windows (`directory.js`'s `WindowEndpoint`). */
-const ENDPOINT = ['find', 'describe', 'post', 'send', 'answer', 'withdraw'];
+const ENDPOINT = ['find', 'describe', 'post', 'send', 'answer', 'withdraw', 'lostForeground',
+    'activate'];
 
 /**
  * @param {Record<string, any>} service @param {string[]} names
