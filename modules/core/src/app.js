@@ -2779,6 +2779,109 @@ export function createKernelGl(opengl, journalCall, traced, counters){
 }
 
 /**
+ * The session storage holds for a run, its registry laid into `registry`
+ * before the program's first instruction, and what saves it from then on.
+ *
+ * @param {{ options: AppOptions, events: any, filesystem: any, registry: any,
+ *     inherited: boolean }} deps
+ *     `inherited`: the registry is the run's already, made by a process before
+ *     this one
+ */
+async function openSession({ options, events, filesystem, registry, inherited }){
+    const storage = resolveStorage(options.storage, options.id ?? 'session');
+
+    // Seeded before the program's first instruction, and awaited: a save that
+    // arrives after the program has looked for it is a save that was not there.
+    const seeded = normaliseSession(await storage.load());
+    // The registry first, and before the program's first instruction: its
+    // settings and its name are here as often as in a file, and a program
+    // that finds the key empty writes its defaults over them. The files wait
+    // for the volume they belong on, which the bundle mount replaces.
+    // A process the run started after the first has the run's registry
+    // already, with what its parent wrote a moment before starting it -- a
+    // write no save may have reached -- and reading the save back over it
+    // would undo that.
+    if (seeded.registry && !inherited)
+    {
+        registry.fromJSON(seeded.registry);
+    }
+
+    // One way out. What the program writes is announced once the writes settle;
+    // nothing is ever pulled back in while it runs.
+    const persist = storage.save;
+    /** @type {ReturnType<typeof coalescedSaver> | null} */
+    let saver = null;
+    let stopSavingRegistry = ()=>{};
+    if (persist)
+    {
+        saver = coalescedSaver({
+            snapshot: ()=>({
+                files: filesystem.export(),
+                registry: registry.toJSON(),
+            }),
+            persist: (session, changes)=>Promise.resolve(persist(session, changes)).catch(
+                (/** @type {Error} */ error)=>{
+                    events.emit('error', { reason: 'session-save', error });
+                }),
+        });
+        const pending = saver;
+        /** @param {any[]} changes */
+        const save = changes=>{
+            events.emit('session', { changes });
+            pending.note(changes);
+        };
+        filesystem.onChanged(save);
+        // A registry write is a change to the session like a file write is,
+        // announced without a path: the whole hive travels with every save.
+        // The hive is the run's and outlives this machine: the subscription
+        // goes with it (`dispose`).
+        stopSavingRegistry = registry.onChanged(()=>save([{ kind: 'registry' }]));
+    }
+    return { seeded, saver, stopSavingRegistry };
+}
+
+/**
+ * Lays down the run's volume before its first instruction: the bundle under
+ * C:, the discs, the session's files and the page's own over them; and the
+ * registry the installation wrote into `registry`, when there is one to fill.
+ *
+ * @param {{ options: AppOptions, events: any, filesystem: any, blocks: any,
+ *     seeded: { files: any[] }, registry: any }} deps
+ */
+async function furnishVolume({ options, events, filesystem, blocks, seeded, registry }){
+    if (blocks)
+    {
+        filesystem.mount('C', { source: blocks.source });
+    }
+    // What the installation wrote to the registry is the machine's before the
+    // program's first instruction, as it was on the machine it was installed
+    // on: a launcher finds its game installed by the key its setup made. What
+    // the session saved since is kept over it.
+    const installedRegistry = await blocks?.registry;
+    if (installedRegistry && registry)
+    {
+        registry.fillFromJSON(installedRegistry);
+    }
+    // A disc is a drive of its own, and takes D: or the first letter nothing
+    // holds once the machine's own disk is mounted.
+    await mountDiscs({ discs: options.discs, filesystem, events });
+
+    // The session's files go onto the volume once the bundle is under it, so
+    // that a saved file the bundle also carries is the one the program sees.
+    if (seeded.files.length > 0)
+    {
+        filesystem.apply(seeded.files);
+    }
+    // The person's own edits to the title's files -- a realm list, a config
+    // line -- laid over the session's, so they win over what the program
+    // last saved and never touch the bundle itself.
+    if (options.files && options.files.length > 0)
+    {
+        filesystem.apply(options.files);
+    }
+}
+
+/**
  * The severity an event is journalled at: its own. A failure the program
  * cannot see is an error whether or not anybody was listening for it, and a
  * library that could not be found is the warning that explains a program's
@@ -3946,57 +4049,9 @@ async function buildApp(options){
     }
 
     const filesystem = core.api('filesystem');
-    const storage = resolveStorage(options.storage, options.id ?? 'session');
-
-    // Seeded before the program's first instruction, and awaited: a save that
-    // arrives after the program has looked for it is a save that was not there.
-    const seeded = normaliseSession(await storage.load());
-    // The registry first, and before the program's first instruction: its
-    // settings and its name are here as often as in a file, and a program
-    // that finds the key empty writes its defaults over them. The files wait
-    // for the volume they belong on, which the bundle mount below replaces.
-    // A process the run started after the first has the run's registry
-    // already, with what its parent wrote a moment before starting it -- a
-    // write no save may have reached -- and reading the save back over it
-    // would undo that.
     const registryInherited = core.api('win32').registryInherited?.() ?? false;
-    if (seeded.registry && !registryInherited)
-    {
-        core.api('win32').registry().fromJSON(seeded.registry);
-    }
-
-    // One way out. What the program writes is announced once the writes settle;
-    // nothing is ever pulled back in while it runs.
-    const persist = storage.save;
-    /** @type {ReturnType<typeof coalescedSaver> | null} */
-    let saver = null;
-    let stopSavingRegistry = ()=>{};
-    if (persist)
-    {
-        saver = coalescedSaver({
-            snapshot: ()=>({
-                files: filesystem.export(),
-                registry: core.api('win32').registry().toJSON(),
-            }),
-            persist: (session, changes)=>Promise.resolve(persist(session, changes)).catch(
-                (/** @type {Error} */ error)=>{
-                    events.emit('error', { reason: 'session-save', error });
-                }),
-        });
-        const pending = saver;
-        /** @param {any[]} changes */
-        const save = changes=>{
-            events.emit('session', { changes });
-            pending.note(changes);
-        };
-        filesystem.onChanged(save);
-        // A registry write is a change to the session like a file write is,
-        // announced without a path: the whole hive travels with every save.
-        // The hive is the run's and outlives this machine: the subscription
-        // goes with it (`dispose`).
-        stopSavingRegistry = core.api('win32').registry().onChanged(
-            ()=>save([{ kind: 'registry' }]));
-    }
+    const { seeded, saver, stopSavingRegistry } = await openSession({ options, events, filesystem,
+        registry: core.api('win32').registry(), inherited: registryInherited });
 
     const journal = core.api('log');
     // The run's processes share one event bus and one journal, so only the
@@ -4064,40 +4119,10 @@ async function buildApp(options){
     // already, and its discs, the session and the files the page laid over
     // it; mounting or applying any of them again would put older bytes over
     // what the processes before it wrote.
-    const volumeInherited = filesystem.inherited?.() ?? false;
-    if (blocks && !volumeInherited)
+    if (!(filesystem.inherited?.() ?? false))
     {
-        filesystem.mount('C', { source: blocks.source });
-    }
-    // What the installation wrote to the registry is the machine's before the
-    // program's first instruction, as it was on the machine it was installed
-    // on: a launcher finds its game installed by the key its setup made. What
-    // the session saved since is kept over it. A process started by another
-    // has that one's registry, which holds it already.
-    const installedRegistry = await blocks?.registry;
-    if (installedRegistry && !registryInherited)
-    {
-        core.api('win32').registry().fillFromJSON(installedRegistry);
-    }
-    // A disc is a drive of its own, and takes D: or the first letter nothing
-    // holds once the machine's own disk is mounted.
-    if (!volumeInherited)
-    {
-        await mountDiscs({ discs: options.discs, filesystem, events });
-    }
-
-    // The session's files go onto the volume once the bundle is under it, so
-    // that a saved file the bundle also carries is the one the program sees.
-    if (seeded.files.length > 0 && !volumeInherited)
-    {
-        filesystem.apply(seeded.files);
-    }
-    // The person's own edits to the title's files -- a realm list, a config
-    // line -- laid over the session's, so they win over what the program
-    // last saved and never touch the bundle itself.
-    if (options.files && options.files.length > 0 && !volumeInherited)
-    {
-        filesystem.apply(options.files);
+        await furnishVolume({ options, events, filesystem, blocks, seeded,
+            registry: registryInherited ? null : core.api('win32').registry() });
     }
     // And what the process this one replaces had written. A self-extracting
     // installer unpacks its payload and then starts it; without this the
