@@ -477,9 +477,9 @@ test('an input event arrives at the router as it left the page', async()=>{
     await remote.dispose();
 });
 
-test('in the workers mode input crosses through the ring, is read at a turn boundary without'
+test('with concurrency input crosses through the ring, is read at a turn boundary without'
     + ' a yield, and keeps its order with what is posted after it', async()=>{
-    const { remote, app } = await connect({ mode: 'workers' });
+    const { remote, app } = await connect({ concurrency: 2 });
     const pacing = app.options.pacing;
     assert.ok(app.options.inbound === undefined, 'the ring is the host\'s, not the app\'s');
     remote.input.send({ kind: 'key', code: 'KeyA', down: true });

@@ -656,8 +656,7 @@ function buildOutputChild(){
 
 for (const [where, options] of /** @type {[string, any][]} */ ([
     ['in its parent\'s place', {}],
-    ['beside its parent', { mode: 'workers', engine: 'cork' }],
-    ['in a worker of its own', { mode: 'workers', engine: 'cork', processWorkers: true }],
+    ['in a worker of its own', { concurrency: 2, engine: 'cork' }],
 ]))
 {
     test(`a child ${where} writes into the file its parent handed it as its output, moving the`
@@ -801,24 +800,24 @@ function buildEventPair(){
     return { parent, poller, child };
 }
 
-test('in the workers mode a child runs beside its parent, which goes on: woken by the event the'
+test('with concurrency a child runs beside its parent, which goes on: woken by the event the'
     + ' child sets, then by its exit; or never waiting at all', { timeout: 60000 }, async t=>{
     const { parent, poller, child } = buildEventPair();
-    /** @param {Uint8Array} executable @param {any} [mode] */
-    const run = async(executable, mode)=>{
+    /** @param {Uint8Array} executable @param {any} [concurrency] */
+    const run = async(executable, concurrency)=>{
         const app = await createApp({
             executable,
             imagePath: 'C:\\App\\parent.exe',
             engine: 'cork',
-            ...mode ? { mode } : {},
+            ...concurrency ? { concurrency } : {},
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
         });
         t.after(()=>app.dispose());
         return (await app.run({ timeoutMs: 30000 })) >>> 0;
     };
-    assert.equal(await run(parent, 'workers'), 0x105,
+    assert.equal(await run(parent, 2), 0x105,
         'the parent was there when the child set its event, and saw the child exit with 5');
-    assert.equal(await run(poller, 'workers'), 0x105,
+    assert.equal(await run(poller, 2), 0x105,
         'a parent that never waits still sees its child run and exit');
     assert.equal(await run(parent), 0x105,
         'where one process runs at a time the child runs while its parent waits, and the'
@@ -832,8 +831,7 @@ test('a child in a worker of its own sets the event its parent named, and the pa
             executable: parent,
             imagePath: 'C:\\App\\parent.exe',
             engine: 'cork',
-            mode: 'workers',
-            processWorkers: true,
+            concurrency: 2,
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
         });
         t.after(()=>app.dispose());
@@ -897,50 +895,113 @@ function buildWaitingChild(){
     return { parent, child };
 }
 
-for (const processWorkers of [false, true])
-{
-    test(`a child${processWorkers ? ' in a worker of its own' : ''} waits on the event it named`
-        + ' until its parent finds and sets it', { timeout: 60000 }, async t=>{
-        const { parent, child } = buildWaitingChild();
-        const app = await createApp({
-            executable: parent,
-            imagePath: 'C:\\App\\parent.exe',
-            engine: 'cork',
-            mode: 'workers',
-            processWorkers,
-            storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
-        });
-        t.after(()=>app.dispose());
-        assert.equal((await app.run({ timeoutMs: 30000 })) >>> 0, 0x107,
-            'the child woke on its parent\'s SetEvent and exited with 7');
+test('a child in a worker of its own waits on the event it named until its parent finds and'
+    + ' sets it', { timeout: 60000 }, async t=>{
+    const { parent, child } = buildWaitingChild();
+    const app = await createApp({
+        executable: parent,
+        imagePath: 'C:\\App\\parent.exe',
+        engine: 'cork',
+        concurrency: 2,
+        storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
     });
+    t.after(()=>app.dispose());
+    assert.equal((await app.run({ timeoutMs: 30000 })) >>> 0, 0x107,
+        'the child woke on its parent\'s SetEvent and exited with 7');
+});
+
+/**
+ * A parent that starts C:\\App\\a.exe and C:\\App\\b.exe one after the other and
+ * waits for both; a.exe sleeps a while, so b.exe starts while it still runs.
+ */
+function buildTwoChildren(){
+    const parent = buildExe({
+        imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject', 'ExitProcess'] },
+        data: {
+            first: ascii('C:\\App\\a.exe'),
+            second: ascii('C:\\App\\b.exe'),
+            startup: [...u32(68), ...new Array(64).fill(0)],
+            infoA: new Array(16).fill(0),
+            infoB: new Array(16).fill(0),
+        },
+        codeSize: 0x80,
+        code: ({ iat, at })=>{
+            /** @param {string} command @param {string} info */
+            const start = (command, info)=>[
+                0x68, ...u32(at(info)), 0x68, ...u32(at('startup')),
+                0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+                0x68, ...u32(at(command)), 0x6a, 0,
+                0xff, 0x15, ...u32(iat('CreateProcessA')),
+            ];
+            /** @param {string} info */
+            const wait = info=>[0x6a, 0xff, 0xff, 0x35, ...u32(at(info)),
+                0xff, 0x15, ...u32(iat('WaitForSingleObject'))];
+            return [...start('first', 'infoA'), ...start('second', 'infoB'),
+                ...wait('infoA'), ...wait('infoB'),
+                0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess'))];
+        },
+    });
+    const sleeper = buildExe({
+        imports: { 'KERNEL32.dll': ['Sleep', 'ExitProcess'] },
+        code: ({ iat })=>[0x68, ...u32(1500), 0xff, 0x15, ...u32(iat('Sleep')),
+            0x6a, 1, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+    });
+    const quick = buildExe({
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        code: ({ iat })=>[0x6a, 2, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+    });
+    return { parent, sleeper, quick };
 }
 
-test('a child beside its parent plays its sound in a span its parent lent it, and leaves the'
-    + ' parent\'s sound as it is', { timeout: 60000 }, async t=>{
+test('a child past the run\'s concurrency runs beside its parent on the engine\'s thread, its'
+    + ' sound in a span its parent lent it', { timeout: 60000 }, async t=>{
+    const { parent, sleeper, quick } = buildTwoChildren();
+    const app = await createApp({
+        executable: parent,
+        imagePath: 'C:\\App\\parent.exe',
+        engine: 'cork',
+        concurrency: 2,
+        storage: { load: async()=>({ files: [{ path: 'C:\\App\\a.exe', bytes: sleeper },
+            { path: 'C:\\App\\b.exe', bytes: quick }] }) },
+    });
+    t.after(()=>app.dispose());
+    /** @type {[string, boolean, number][]} */
+    const started = [];
+    app.on('process-started', (/** @type {any} */ event)=>{
+        const audio = app.diagnostics().find((/** @type {any} */ layer)=>
+            layer.name === 'audio');
+        started.push([event.image, event.worker === true, audio.metrics.arenaFree]);
+    });
+    assert.equal(await app.run({ timeoutMs: 30000 }), 0);
+    assert.deepEqual(started.map(([image, worker])=>[image, worker]),
+        [['C:\\App\\a.exe', true], ['C:\\App\\b.exe', false]],
+        'two at once: the first child in a worker, the second beside its parent here');
+    assert.equal(started[1][2], 4 << 20,
+        'the one here mixes in the span lent it, not under its parent\'s voices');
+});
+
+test('concurrency asked for where memory cannot be shared falls back to one process at a time,'
+    + ' and says so', { timeout: 60000 }, async t=>{
     const { parent, child } = buildEventPair();
-    /** @param {any} [mode] */
-    const arenaOfChild = async mode=>{
-        const app = await createApp({
-            executable: parent,
-            imagePath: 'C:\\App\\parent.exe',
-            engine: 'cork',
-            ...mode ? { mode } : {},
-            storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
-        });
-        t.after(()=>app.dispose());
-        /** @type {number[]} */
-        const free = [];
-        app.on('process-started', ()=>{
-            const audio = app.diagnostics().find((/** @type {any} */ layer)=>
-                layer.name === 'audio');
-            free.push(audio.metrics.arenaFree);
-        });
-        await app.run({ timeoutMs: 30000 });
-        return free;
-    };
-    assert.deepEqual(await arenaOfChild('workers'), [4 << 20],
-        'beside its parent: the span lent, not the whole arena under the parent\'s voices');
-    assert.deepEqual(await arenaOfChild(), [16 << 20],
-        'in its parent\'s place: the whole arena, as before');
+    const app = await createApp({
+        executable: parent,
+        imagePath: 'C:\\App\\parent.exe',
+        engine: 'cork',
+        mode: 'compatible',
+        concurrency: 4,
+        storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
+    });
+    t.after(()=>app.dispose());
+    /** @type {any[]} */
+    const fallbacks = [];
+    app.on('fallback', (/** @type {any} */ said)=>fallbacks.push(said));
+    assert.equal((await app.run({ timeoutMs: 30000 })) >>> 0, 0x105,
+        'the child ran in its parent\'s place');
+    assert.equal(fallbacks.length, 1);
+    assert.deepEqual([fallbacks[0].mode, fallbacks[0].concurrency, fallbacks[0].asked],
+        ['compatible', 1, { mode: 'compatible', concurrency: 4 }]);
+    assert.match(fallbacks[0].detail, /concurrency 4 is not allowed here/);
+    const metrics = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'app')
+        ?.metrics;
+    assert.deepEqual([metrics.mode, metrics.concurrency], ['compatible', 1]);
 });

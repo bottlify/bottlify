@@ -5,7 +5,7 @@
  */
 
 /**
- * The run loop's pacing in the `workers` mode, the engine's side of
+ * The run loop's pacing with `concurrency` above 1, the engine's side of
  * `inbound.js`: kept apart from it because the page loads that one, and this
  * one reaches into the engine.
  */

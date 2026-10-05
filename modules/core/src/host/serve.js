@@ -426,7 +426,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
     /** @type {any} */
     let app = null;
     /**
-     * The `workers` mode's ring from the page, read between turns and before
+     * The ring from the page with `concurrency`, read between turns and before
      * each posted message.
      *
      * @type {ReturnType<typeof createInboundReader> | null}
@@ -635,7 +635,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             }
             const { port: soundPort, ...soundOptions } = rest.audio ?? {};
             /**
-             * The workers mode's ring pacing where the page wrote a ring;
+             * With concurrency, ring pacing where the page wrote a ring;
              * otherwise the page's pacing unless asked, with the signal word
              * in both: a message the page posted is seen between two turns
              * rather than at the next timed yield.

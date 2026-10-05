@@ -6,7 +6,7 @@
 
 /**
  * What the page sends the engine, through a ring rather than the event loop:
- * the `workers` mode's inbound channel (roadmap/v2, stage 1).
+ * the inbound channel with `concurrency` above 1 (roadmap/v2, stage 1).
  *
  * A message posted to a worker is delivered only when the worker returns to
  * its event loop, so a thread running a program has had to give itself away

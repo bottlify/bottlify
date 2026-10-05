@@ -44,7 +44,7 @@ export const STILL_ACTIVE = 259;
  *           The child already ran and exited: a redistributable installer the
  *           engine itself plays the role of, so the request is answered as
  *           though it had run and left exit code 0. It is never handed over.
- * @property {boolean} started      Running beside its parent (the `workers` mode), so no
+ * @property {boolean} started      Running beside its parent (`concurrency` above 1), so no
  *                                  longer waiting to take the parent's place.
  * @property {MemoryPatch[]} patches
  *           Writes made into the child before its image exists, replayed once

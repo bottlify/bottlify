@@ -157,6 +157,18 @@ import { openProcessWorker } from './host/process-worker.js';
  *     graphics worker, `compatible` keeps it the engine thread's own and copies what
  *     crosses, `auto` (the default) is `isolated` on a cross-origin isolated page and
  *     `compatible` elsewhere. `isolated` where memory cannot be shared is refused.
+ * @property {import('./mode.js').Concurrency} [concurrency]
+ *     How many processes run at once: 1 (the default) runs a child in its parent's
+ *     place until it exits; 2 or 4 runs it beside its parent from CreateProcess on,
+ *     each child in a worker of its own (`host/process.worker.js`) with the run's
+ *     system half reached across a link, up to that many at once and the next
+ *     beside its parent on the engine's thread. More than one needs shared memory:
+ *     asked for in `compatible` mode or on a page that is not cross-origin isolated,
+ *     the run falls back to `compatible`, one process at a time, and says so with a
+ *     `fallback` event.
+ * @property {{ asked: any, detail: string } | null} [fallback]
+ *     What a run asked for and fell back from (`mode.js`): set by `createApp`, not
+ *     something a caller supplies.
  * @property {'directx7' | 'directx8' | 'directx9' | 'directx10' | 'opengl'} [graphicsApi]
  *     The graphics a bottle prefers: every DirectX up to the one named --
  *     DirectX 9 has DirectDraw and Direct3D 8 as well -- or OpenGL alone. Only
@@ -210,9 +222,6 @@ import { openProcessWorker } from './host/process-worker.js';
  * @property {any} [system]  The run's system half -- registry, volume, windows, ids, named
  *           objects -- for a process that joins another run's rather than making one: a
  *           process in a worker of its own is handed it across a link (`system-link.js`).
- * @property {boolean} [processWorkers]  In the `workers` mode, a child runs in a worker of
- *           its own (`host/process.worker.js`) rather than on this thread, with the run's
- *           system half reached across a link (docs/core/limits.md says what it has).
  * @property {{ output?: StandardFile, error?: StandardFile }} [standardFiles]
  *           The files a child's parent handed it as its output and error,
  *           each the parent's own open file, whose position the child's
@@ -6677,8 +6686,12 @@ async function buildApp(options){
                     // read beside the bridge's own per-hook rows: these calls
                     // never cross the bridge, so they are not in `hooks` at all.
                     kernelGlCalls: glCounters.calls,
-                    // Whether the guest's memory is shared with other threads (`mode.js`).
+                    // Whether the guest's memory is shared with other threads, and
+                    // how many processes run at once (`mode.js`).
                     mode: options.mode ?? null,
+                    concurrency: options.concurrency ?? 1,
+                    // What was asked for and not had, when the run fell back.
+                    fallback: options.fallback ?? null,
                     // What a pacing that counts said of the run: in the workers
                     // mode, the page's messages read between turns, the yields
                     // to the event loop, and the sleeps on the doorbell.
@@ -6849,6 +6862,13 @@ export async function createApp(options){
     // child existed still have to fire for the last one, and the record of what
     // asked for a replacement is worthless if it dies with the asker.
     const events = createEvents();
+    // A run asked for more than this page allows starts all the same, as
+    // much as it allows, and says so: the first subscriber hears it.
+    if (options.fallback)
+    {
+        events.emit('fallback', { ...options.fallback, mode: options.mode,
+            concurrency: options.concurrency });
+    }
     /** @type {any[]} */
     const requested = [];
 
@@ -7010,7 +7030,7 @@ export async function createApp(options){
     /** The machines of the run not yet retired. @type {Set<any>} */
     const standing = new Set();
     /** Whether the run's processes run at once, each beside its parent (`mode.js`). */
-    const processesAtOnce = options.mode === 'workers';
+    const processesAtOnce = (options.concurrency ?? 1) > 1;
     const classTable = createClassTable({
         launch: (request, process)=>{
             const parent = processes.get(process);
@@ -7035,7 +7055,7 @@ export async function createApp(options){
         /** The machine, once built: what its children are started beside. @type {any} */
         let self = null;
         const built = await buildApp(machine({ ...extra, com: { table: classTable, process },
-            // In the workers mode a child runs from CreateProcess on, beside
+            // With concurrency a child runs from CreateProcess on, beside
             // its parent, as on Windows; otherwise it waits for the parent to
             // have nothing left to run, and runs in its place.
             beside: processesAtOnce
@@ -7382,7 +7402,7 @@ export async function createApp(options){
     };
 
     /**
-     * The children running beside their parents, in the workers mode: each
+     * The children running beside their parents, with concurrency: each
      * one's run, until it exits.
      *
      * @type {Set<Promise<number>>}
@@ -7392,8 +7412,14 @@ export async function createApp(options){
     let starting = 0;
     /** Children running in workers of their own. */
     let across = 0;
-    /** Whether a child runs in a worker of its own rather than on this thread. */
-    const processWorkers = processesAtOnce && options.processWorkers === true;
+    /**
+     * Whether the next child runs in a worker of its own: while fewer than
+     * the run's concurrency run at once, the first on this thread. One past
+     * it takes turns beside its parent here, slower and as correct. A process
+     * that joined another run's system from a worker starts its children
+     * beside it, in its worker: the run's processes are counted by the run.
+     */
+    const inWorker = ()=>!options.system && across < (options.concurrency ?? 1) - 1;
     /**
      * The children standing in workers of their own, each with the way its
      * diagnostics are asked for across its link.
@@ -7517,6 +7543,7 @@ export async function createApp(options){
                                 .map(([which, file])=>[which, { path: file.path }])),
                         engine: options.engine,
                         mode: options.mode,
+                        concurrency: options.concurrency,
                         windows: options.windows,
                         // The run's display, which its windows and devices
                         // are sized against.
@@ -7565,7 +7592,7 @@ export async function createApp(options){
 
     /**
      * Starts a child at once, beside the parent that asked for it, and runs
-     * it alongside every other process until it exits: the workers mode's
+     * it alongside every other process until it exits: concurrency's
      * CreateProcess, as on Windows. The parent goes on running; a thread of
      * its waiting on the child, polling its exit code, or waiting on an
      * object the child sets, is answered as the child goes. The page sees
@@ -7575,7 +7602,7 @@ export async function createApp(options){
      * @param {any} parent @param {any} request
      */
     const startBeside = (parent, request)=>{
-        if (processWorkers)
+        if (inWorker())
         {
             across++;
             const running = (async()=>{

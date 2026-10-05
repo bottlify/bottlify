@@ -153,7 +153,7 @@ flowchart TB
 | Graphics thread | the engine thread, `core/src/host/graphics-worker.js` (called from `serve.js`) | at start, if the engine has a canvas and `device.graphicsWorker: false` is not set (`?graphicsWorker=off` in the launcher). Survives a change of program. If it opens no device within 10 s, everything draws on the engine thread | Its job is to draw all the graphics, so the engine thread only keeps state and answers the program. Today Direct3D 7, 8, 9 and OpenGL are played here on a WebGPU device of its own; Direct3D 10 and Vulkan will move here too. It arrived in cork 1.3. In the `tools/graphics-bench --remote` bench the engine thread spends 0.69 ms a Direct3D frame instead of 2.95 |
 | Translation thread | cork's runtime inside the engine thread, `cork/src/runtime/translator.js` | when the engine is cork. Until it answers `ready`, regions are translated on the engine thread | Emits wasm for regions, builds a module and compiles it. The engine thread does not wait for it: it posts a batch and publishes the result between frames, whenever it arrives |
 | AudioWorklet | the page, `ui/src/engine/session.js` | if the page is cross-origin isolated (`crossOriginIsolated`) and sound is on | The Web Audio real-time thread. It reads the voices from shared memory on its own clock, so sound does not break up even while the engine is busy |
-| Process thread | the engine thread, `core/src/host/process-worker.js` (called from `app.js`) | in the `workers` mode with `processWorkers`, once per process a program starts, for as long as it runs | A child process -- the game a launcher starts -- runs on a thread of its own, beside its parent, with its own memory and translator. It blocks while it waits instead of taking turns with the engine's event loop |
+| Process thread | the engine thread, `core/src/host/process-worker.js` (called from `app.js`) | with `concurrency` 2 or 4, once per process a program starts, for as long as it runs | A child process -- the game a launcher starts -- runs on a thread of its own, beside its parent, with its own memory and translator. It blocks while it waits instead of taking turns with the engine's event loop |
 
 How the threads exchange data. ⇄ means both ways; SAB is `SharedArrayBuffer`, that is, shared
 memory.
@@ -183,10 +183,12 @@ flowchart LR
 - **Engine → AudioWorklet.** No messages at all. The voice table lives in shared memory: the page
   gets it in the answer to the start request and hands it to the `AudioWorkletNode`.
 
-**Processes.** Without the `workers` mode a child process takes its parent's place on the engine
-thread until it exits. In the `workers` mode (`createApp({ mode: 'workers' })`) it starts at
-`CreateProcess` and runs beside its parent, both taking turns on the engine thread; with
-`processWorkers` it runs on a process thread of its own. What the processes of a run share -- the
+**Processes.** With `concurrency` 1, the default, a child process takes its parent's place on the
+engine thread until it exits. With 2 or 4 (`createApp({ concurrency: 2 })`) it starts at
+`CreateProcess` and runs beside its parent on a process thread of its own, up to that many
+processes at once; one more runs beside its parent taking turns with it on the engine thread. It
+needs shared memory: asked for where there is none, the run falls back to `compatible` with one
+process at a time and raises a `fallback` event. What the processes of a run share -- the
 registry, the volume and the sharing of its open files, the window directory, ids, named events,
 semaphores and mutexes, the bundle -- stays on the engine thread, which answers a process thread
 across a link: two rings in shared memory, one each way, with a doorbell word per side
@@ -204,7 +206,6 @@ in the `app` layer's diagnostics (`core/src/mode.js`):
 | --- | --- | --- |
 | `isolated` | a cross-origin isolated page | The program's memory is a `SharedArrayBuffer`. The graphics thread reads the bytes an unlock let the program write straight out of it, and writes read-backs into it in place. Refused at `createApp` on a page that cannot share memory |
 | `compatible` | nothing | The program's memory is the engine thread's own, and whatever crosses to another thread is copied. Runs on any page |
-| `workers` | a cross-origin isolated page | As `isolated`, and a child process runs beside its parent rather than in its place (see *Processes* above) |
 | `auto` (the default) | — | `isolated` where the page is cross-origin isolated, `compatible` elsewhere |
 
 The launcher takes `auto` unless `?mode=compatible` or `?mode=isolated` asks for one.

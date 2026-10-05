@@ -41,12 +41,35 @@ test('full leaves the caller\'s settings as they are', ()=>{
     assert.deepEqual(settled.graphics, { lendMemory: false });
 });
 
-test('workers is isolated fed through shared memory: asked for, never taken by auto, and refused'
-    + ' without shared memory', ()=>{
-    assert.equal(runModeOf('workers', true), 'workers');
-    assert.throws(()=>runModeOf('workers', false), /"workers" needs shared memory/);
-    const options = { mode: /** @type {const} */ ('workers'), graphics: { lendMemory: true } };
-    const settled = withRunMode(options, true);
-    assert.equal(settled.mode, 'workers');
-    assert.deepEqual(settled.graphics, { lendMemory: true }, 'the caller\'s settings stand');
+test('concurrency is 1, 2 or 4 processes at once: 1 unless asked, and more than one where'
+    + ' memory cannot be shared falls back to compatible, one at a time, and says so', ()=>{
+    const one = withRunMode({}, true);
+    assert.deepEqual([one.concurrency, one.fallback], [1, null]);
+    assert.equal(withRunMode({}, false).concurrency, 1);
+    const two = withRunMode({ concurrency: 2, graphics: { lendMemory: true } }, true);
+    assert.deepEqual([two.mode, two.concurrency, two.fallback], ['isolated', 2, null],
+        'auto takes isolated');
+    assert.deepEqual(two.graphics, { lendMemory: true }, 'the caller\'s settings stand');
+    assert.equal(withRunMode({ mode: 'isolated', concurrency: 4 }, true).concurrency, 4);
+    for (const [options, shareable, why] of /** @type {[any, boolean, RegExp][]} */ ([
+        [{ concurrency: 2 }, false, /not cross-origin isolated/],
+        [{ mode: 'compatible', concurrency: 4 }, true, /asked for "compatible"/]]))
+    {
+        const settled = withRunMode({ ...options, cork: { config: { sharedMemory: true } } },
+            shareable);
+        assert.deepEqual([settled.mode, settled.concurrency], ['compatible', 1]);
+        assert.equal(settled.cork.config.sharedMemory, false, 'compatible as if asked for');
+        assert.deepEqual(settled.fallback?.asked,
+            { mode: options.mode, concurrency: options.concurrency });
+        assert.match(settled.fallback?.detail ?? '',
+            new RegExp(`concurrency ${options.concurrency} is not allowed here`));
+        assert.match(settled.fallback?.detail ?? '', why);
+    }
+    for (const asked of [0, 3, 8, '2'])
+    {
+        assert.throws(()=>withRunMode({ concurrency: /** @type {any} */ (asked) }, true),
+            /concurrency is 1, 2 or 4/);
+    }
+    assert.throws(()=>runModeOf(/** @type {any} */ ('workers'), true), /unknown mode/,
+        'the old mode is gone: concurrency says it');
 });

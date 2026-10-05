@@ -54,13 +54,13 @@ test('hello.exe runs through the package entry, headless, on this thread',
         assert.ok((await app.log.recent(10)).length >= 0, 'the keeper answers with a promise');
     });
 
-test('hello.exe runs the same in the workers mode, its engine fed through the inbound ring',
+test('hello.exe runs the same with concurrency, its engine fed through the inbound ring',
     { timeout: 15000 }, async t=>{
         const exe = await readFile(FIXTURE);
         const app = await createApp({
             host: 'thread',
             executable: new Uint8Array(exe),
-            mode: 'workers',
+            concurrency: 2,
         });
         t.after(()=>app.dispose());
         /** @type {string[]} */
@@ -72,13 +72,13 @@ test('hello.exe runs the same in the workers mode, its engine fed through the in
         assert.equal(output.join(''), 'Hello from Bottlify\r\n');
         const layers = await app.diagnostics();
         const metrics = layers.find((/** @type {any} */ layer)=>layer.name === 'app').metrics;
-        assert.equal(metrics.mode, 'workers');
+        assert.deepEqual([metrics.mode, metrics.concurrency], ['isolated', 2]);
         assert.deepEqual(Object.keys(metrics.pacing),
             ['drained', 'yields', 'slept', 'sleptMs', 'woken', 'heard'],
             'the ring pacing counted the run');
     });
 
-test('in the workers mode a translation batch is heard by the doorbell its worker rings',
+test('with concurrency a translation batch is heard by the doorbell its worker rings',
     { timeout: 60000 }, async t=>{
         // A loop hot enough to be translated, then ExitProcess(0).
         const executable = buildExe({
@@ -95,7 +95,7 @@ test('in the workers mode a translation batch is heard by the doorbell its worke
         const app = await createApp({
             host: 'thread',
             executable,
-            mode: 'workers',
+            concurrency: 2,
             cork: { config: { worker: true } },
         });
         t.after(()=>app.dispose());

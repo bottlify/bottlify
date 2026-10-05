@@ -11,8 +11,8 @@
  *
  * The thread is the process's alone, so it waits by blocking: on the link's
  * doorbell when it has nothing to run, and in every call it makes to the
- * system, answering what it is asked meanwhile. Its pacing is the workers
- * mode's, read from the link rather than from a page's ring.
+ * system, answering what it is asked meanwhile. Its pacing is the engine's
+ * ring pacing, read from the link rather than from a page's ring.
  *
  * The same file runs under a page's `Worker` and Node's `worker_threads`. It
  * is told `{ type: 'start', end, graphics, display, options, run }` -- its side

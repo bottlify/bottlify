@@ -46,12 +46,20 @@ page has to allow.
 | --- | --- | --- | --- |
 | `isolated` | The page can be cross-origin isolated: your own origin serves the player and everything it loads, and nothing on it has to come from a site that does not opt in | The guest's memory is shared with the workers beside the engine: the graphics worker reads what a program unlocked straight out of it rather than from a copy made per unlock, and sound plays from shared memory | The page is isolated: an iframe, image or script from another origin loads only if it sends `Cross-Origin-Resource-Policy` or CORS headers, and a sign-in pop-up from another origin cannot reach back to the page through `window.opener` |
 | `compatible` | The page cannot be isolated — the player sits in another site's iframe, or next to third-party content or sign-in pop-ups — or the program draws little and gains nothing from sharing: an installer, a console tool such as SteamCMD | Runs on any page | What crosses to another thread is copied, sound included: it is mixed on the engine's thread and posted to the worklet, and lags further behind the picture (see [limits.md](limits.md)) |
-| `workers` | As `isolated`, and you are trying the next engine (roadmap/v2) | As `isolated`, and the engine reads the page's input between two turns of the program and sleeps on shared memory when idle, instead of giving its thread to the browser to look | As `isolated` |
 | `auto` | You want what the page allows: the default | `isolated` on an isolated page, `compatible` elsewhere | — |
 
 The network does not depend on the mode: the relay is a WebSocket to the page's own origin, which
 isolation does not touch. `isolated` on a page that cannot share memory is refused by `createApp`
 rather than run as something else.
+
+`createApp({ concurrency })` is how many processes run at once: 1, the default, runs a child in
+its parent's place until it exits; 2 or 4 runs it beside its parent from `CreateProcess` on, each
+child in a worker of its own -- a launcher and the game it starts, both running. It takes shared
+memory, so the run is `isolated`; asked for in `compatible` mode or on a page that cannot share
+memory, the run starts `compatible` with one process at a time and says so with a `fallback`
+event. With more than one, the engine also reads the page's input between two turns of the
+program and sleeps on shared memory when idle, instead of giving its thread to the browser to
+look.
 
 ## Sound
 

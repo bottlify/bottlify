@@ -20,17 +20,17 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 
-for (const mode of [undefined, 'workers'])
+for (const concurrency of /** @type {const} */ ([1, 2]))
 {
-    test(`a client's call reaches the server COM started for it, and comes back answered (${
-        mode ?? 'default'} mode)`, { timeout: 120000 }, async t=>{
+    test(`a client's call reaches the server COM started for it, and comes back answered`
+        + ` (concurrency ${concurrency})`, { timeout: 120000 }, async t=>{
         const program = new Uint8Array(await readFile(new URL('../test/fixtures/com.exe',
             import.meta.url)));
         const app = await createApp({
             executable: program,
             imagePath: 'C:\\App\\com.exe',
             engine: 'cork',
-            ...mode ? { mode: /** @type {any} */ (mode) } : {},
+            concurrency,
             storage: { load: async()=>({
                 files: [{ path: 'C:\\App\\com.exe', bytes: program }],
             }) },

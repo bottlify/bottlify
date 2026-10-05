@@ -21,15 +21,14 @@ import { createApp } from './app.js';
 // Where processes run at once a message sent to the parent's window is
 // answered; where one runs at a time the parent runs nothing while its child
 // does, and a send is refused rather than waited on for ever.
-// With the child in a worker of its own, every window question crosses a
-// link -- the child's about the parent's, and the parent's about the child's.
-for (const [mode, flag, sends, processWorkers] of /** @type {const} */ ([
-    [undefined, '', 0, false], [undefined, '-held', 2, false], ['workers', '', 0, false],
-    ['workers', '-send', 6, false], ['workers', '', 0, true], ['workers', '-send', 6, true]]))
+// With concurrency the child is in a worker of its own, and every window
+// question crosses a link -- the child's about the parent's, and the parent's
+// about the child's.
+for (const [concurrency, flag, sends] of /** @type {const} */ ([
+    [1, '', 0], [1, '-held', 2], [2, '', 0], [2, '-send', 6]]))
 {
-    test(`a window is found, described and posted to by another process (${
-        mode ?? 'default'} mode${flag ? `, ${flag}` : ''}${
-        processWorkers ? ', the child in a worker' : ''})`, { timeout: 120000 }, async t=>{
+    test(`a window is found, described and posted to by another process (concurrency ${
+        concurrency}${flag ? `, ${flag}` : ''})`, { timeout: 120000 }, async t=>{
         const program = new Uint8Array(await readFile(new URL('../test/fixtures/windows.exe',
             import.meta.url)));
         const app = await createApp({
@@ -37,8 +36,7 @@ for (const [mode, flag, sends, processWorkers] of /** @type {const} */ ([
             imagePath: 'C:\\App\\windows.exe',
             commandLine: `"C:\\App\\windows.exe" ${flag}`.trim(),
             engine: 'cork',
-            ...mode ? { mode: /** @type {any} */ (mode) } : {},
-            processWorkers,
+            concurrency,
             storage: { load: async()=>({
                 files: [{ path: 'C:\\App\\windows.exe', bytes: program }],
             }) },

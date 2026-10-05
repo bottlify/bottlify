@@ -17,11 +17,12 @@ differently raises a `divergence` event naming the API.
 ## Processes
 
 - A child started with `CreateProcess` runs while its parent waits; the parent resumes when the
-  child ends. In the `workers` mode a child starts at `CreateProcess` and runs beside its parent,
-  both taking turns on the engine thread.
+  child ends. With `concurrency` 2 or 4 a child starts at `CreateProcess` and runs beside its
+  parent, in a worker of its own; one past that many at once runs beside its parent taking turns
+  with it on the engine thread.
 - Only the process of an out-of-process COM server runs alongside the program that uses it, outside
-  the `workers` mode.
-- With `processWorkers`, a child in a worker of its own shares the run's registry, files, window
+  `concurrency`, beside it on the engine thread.
+- A child in a worker of its own shares the run's registry, files, window
   directory -- its windows found, read, posted and sent to by every other process, and theirs by
   it -- ids, the run's bundle (a block it misses is fetched for it), named events, semaphores
   and mutexes, and the position of a file its parent handed it as its output; a named file
@@ -34,7 +35,7 @@ differently raises a `divergence` event naming the API.
   with its parent's, and whichever process showed last is on the screen. It has no COM server.
 - Windows are the run's: a process finds another's window (`FindWindow`), reads who made it, its
   caption and class, and posts to it. A message sent to another process's window is answered in the
-  `workers` mode; its pointers cross only for `WM_COPYDATA`, `WM_SETTEXT` and `WM_GETTEXT`. Where
+  with `concurrency`; its pointers cross only for `WM_COPYDATA`, `WM_SETTEXT` and `WM_GETTEXT`. Where
   a parent waits while its child runs, a message the child sends to the parent's window is refused
   at once, as one that timed out.
 

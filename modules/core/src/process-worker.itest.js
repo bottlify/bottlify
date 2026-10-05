@@ -23,39 +23,11 @@ import { writeBundle } from './bundle-node.js';
 import { Worker } from 'node:worker_threads';
 import { buildExe } from '../../../tools/make-pe.mjs';
 import { texturedFrames } from '../../../tools/d3d9-program.mjs';
+import { waitingParent } from '../../../tools/spawn-program.mjs';
 import { createFakeDevice } from './layers/graphics/webgpu/internal/fake-device.js';
 
 /** @param {number} value */
 const u32 = value=>[0, 8, 16, 24].map(at=>(value >>> at) & 0xff);
-
-/**
- * A parent that starts C:\a.exe, waits for it and exits with its code.
- */
-function waitingParent(){
-    return buildExe({
-        imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject',
-            'GetExitCodeProcess', 'ExitProcess'] },
-        data: {
-            command: [...Buffer.from('C:\\a.exe'), 0],
-            startup: [...u32(68), ...new Array(64).fill(0)],
-            info: new Array(16).fill(0),
-            code: u32(0),
-        },
-        codeSize: 0x80,
-        code: ({ iat, at })=>[
-            0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
-            0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
-            0x68, ...u32(at('command')), 0x6a, 0,
-            0xff, 0x15, ...u32(iat('CreateProcessA')),
-            0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
-            0xff, 0x15, ...u32(iat('WaitForSingleObject')),
-            0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
-            0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
-            0xff, 0x35, ...u32(at('code')),
-            0xff, 0x15, ...u32(iat('ExitProcess')),
-        ],
-    });
-}
 
 /**
  * A window painted red through its DC (16x16 at its client's corner), then
@@ -136,8 +108,7 @@ test('a child in a worker of its own leaves its parent its file, its registry va
             executable: new Uint8Array(parent),
             imagePath: 'C:\\App\\spawn.exe',
             engine: 'cork',
-            mode: 'workers',
-            processWorkers: true,
+            concurrency: 2,
             storage: { load: async()=>({
                 files: [{ path: 'C:\\App\\spawn_child.exe', bytes: new Uint8Array(child) }],
             }) },
@@ -198,8 +169,7 @@ test('a child in a worker of its own reads what the run\'s bundle has not fetche
             executable: parent,
             imagePath: 'C:\\parent.exe',
             engine: 'cork',
-            mode: 'workers',
-            processWorkers: true,
+            concurrency: 2,
             bundle: { prefix: '', store: null, fetch: async(offset, length)=>{
                 asked.push([offset, length]);
                 const buffer = Buffer.alloc(length);
@@ -253,8 +223,7 @@ test('a child in a worker of its own draws on the run\'s graphics worker, and th
             executable: waitingParent(),
             imagePath: 'C:\\parent.exe',
             engine: 'cork',
-            mode: 'workers',
-            processWorkers: true,
+            concurrency: 2,
             cork: /** @type {any} */ ({ config: { sharedMemory: true } }),
             device: { device: gpu.device, queue: gpu.queue, screen: gpu.screen,
                 canvas: gpu.canvas, adapter: { vendor: 'fake', architecture: '',
@@ -324,8 +293,7 @@ test('a child in a worker of its own is sent the page\'s input while it stands',
             executable: waitingParent(),
             imagePath: 'C:\\parent.exe',
             engine: 'cork',
-            mode: 'workers',
-            processWorkers: true,
+            concurrency: 2,
             storage: { load: async()=>({ files: [{ path: 'C:\\a.exe', bytes: child }] }) },
         });
         t.after(()=>app.dispose());
@@ -356,8 +324,7 @@ test('a child in a worker of its own mixes on the run\'s table in a span its par
         executable: waitingParent(),
         imagePath: 'C:\\parent.exe',
         engine: 'cork',
-        mode: 'workers',
-        processWorkers: true,
+        concurrency: 2,
         storage: { load: async()=>({ files: [{ path: 'C:\\a.exe', bytes: child }] }) },
     });
     t.after(()=>app.dispose());
@@ -388,7 +355,7 @@ for (const where of ['in its own place', 'in a worker of its own'])
                 executable: across ? waitingParent() : paintsThenWaits(),
                 imagePath: 'C:\\parent.exe',
                 engine: 'cork',
-                ...across ? { mode: 'workers', processWorkers: true } : {},
+                ...across ? { concurrency: 2 } : {},
                 device: { device: gpu.device, queue: gpu.queue, screen: gpu.screen,
                     canvas: gpu.canvas },
                 storage: { load: async()=>({
@@ -417,8 +384,7 @@ test('a child in a worker of its own is among the processes standing, with its o
             executable: waitingParent(),
             imagePath: 'C:\\parent.exe',
             engine: 'cork',
-            mode: 'workers',
-            processWorkers: true,
+            concurrency: 2,
             storage: { load: async()=>({
                 files: [{ path: 'C:\\a.exe', bytes: paintsThenWaits() }],
             }) },

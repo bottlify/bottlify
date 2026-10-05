@@ -60,7 +60,7 @@
  */
 
 /*
- * `inbound` is the `workers` mode's channel from the page (`inbound.js`): a
+ * `inbound` is the channel from the page with `concurrency` (`inbound.js`): a
  * ring in shared memory, rung on the `signal` word, that input, visibility
  * and the requests handing nothing over are written into instead of posted.
  * The engine reads it between turns, and sleeps on the word when idle.
