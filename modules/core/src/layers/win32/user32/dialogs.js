@@ -293,12 +293,15 @@ const MAX_RESOURCE_NAME = 256;
  *           The dialog class's procedure: DWLP_DLGPROC first, then the default.
  * @property {() => number} focus
  * @property {(hwnd: number, thread?: unknown) => number | Promise<number>} setFocus
- * @property {(hwnd: number) => number | Promise<number>} [show]
+ * @property {(hwnd: number, thread?: unknown) => number | Promise<number>} [show]
  *           Shows a window as ShowWindow(SW_SHOW) would, answering once the
- *           procedures it sent to have.
- * @property {(hwnd: number) => number | Promise<number>} [hide]  And hides one.
- * @property {(hwnd: number, enable: boolean) => number | Promise<number>} [enable]
- *           EnableWindow, as the program would call it.
+ *           procedures it sent to have. `thread` is whose call it answers:
+ *           past an await the thread on the processor is another, and what
+ *           the show sends would be built on that one's stack.
+ * @property {(hwnd: number, thread?: unknown) => number | Promise<number>} [hide]
+ *           And hides one.
+ * @property {(hwnd: number, enable: boolean, thread?: unknown) => number | Promise<number>}
+ *     [enable]  EnableWindow, as the program would call it.
  * @property {(instance: number, name: number, type: number) => number | Promise<number>
  *     } [loadImage]  LoadImage of a module's resource, by ordinal or by a
  *     UTF-16 name in guest memory.
@@ -629,8 +632,16 @@ export function createDialogFunctions(options){
      * @param {number} dialogFunc @param {number} initParam
      * @param {boolean} [unicode]  Made through a wide call: the dialog is a
      *     Unicode window, and its procedure reads wide text.
+     * @param {unknown} [caller]  Whose call makes it, and so whose windows the
+     *     dialog and its controls are: named by a caller that awaited before
+     *     making it -- DialogBox waits on its owner's thread to take
+     *     WM_ENABLE -- or the windows are the thread's then on the processor,
+     *     and the modal loop never takes their messages.
      */
-    const createDialog = (instance, template, parent, dialogFunc, initParam, unicode = false)=>{
+    const createDialog = (instance, template, parent, dialogFunc, initParam, unicode = false,
+        caller = undefined)=>
+    {
+        const thread = caller ?? host.callerThread?.();
         const described = (template >>> 0) === 0
             ? null
             : parseTemplate(template >>> 0);
@@ -696,6 +707,7 @@ export function createDialogFunctions(options){
         const wantsVisible = (described.style & WS_VISIBLE) !== 0;
         const dialog = makeWindow({
             className: '#32770',
+            thread,
             unicode,
             title: described.title,
             style: (dialogStyle & ~WS_VISIBLE) >>> 0,
@@ -757,6 +769,7 @@ export function createDialogFunctions(options){
                 };
                 const record = makeWindow({
                     className: control.className,
+                    thread,
                     title: control.title,
                     style,
                     exStyle: extended,
@@ -789,7 +802,6 @@ export function createDialogFunctions(options){
             // Every control is told the dialog's font once it exists and has
             // set itself up, as the dialog manager tells it: before
             // WM_INITDIALOG, and after the program's own WM_CREATE.
-            const thread = host.callerThread?.();
             // One control at a time, for the reason they are made one at a time.
             /** @param {number} index @returns {any} */
             const setFonts = (index = 0)=>(font === 0 || index >= controls.length ? 0
@@ -811,7 +823,7 @@ export function createDialogFunctions(options){
                     const standing = live(dialog.hwnd);
                     if (wantsVisible && standing && !standing.dialogEnded)
                     {
-                        return after(host.show?.(dialog.hwnd) ?? 0, ()=>dialog.hwnd);
+                        return after(host.show?.(dialog.hwnd, thread) ?? 0, ()=>dialog.hwnd);
                     }
                     return dialog.hwnd;
                 });
@@ -822,7 +834,7 @@ export function createDialogFunctions(options){
             return after(after(createFrom(0), ()=>setFonts()), initialise);
         };
         return after(announce(dialog, [exStyle, 0, 0, dialog.style, x, y, width, height,
-            parent >>> 0, 0, instance >>> 0, initParam >>> 0]),
+            parent >>> 0, 0, instance >>> 0, initParam >>> 0], false, thread),
         (/** @type {number} */ made)=>(made === 0 ? 0 : build()));
     };
 
@@ -1031,7 +1043,7 @@ export function createDialogFunctions(options){
         // One its WM_INITDIALOG already ended is not shown at all.
         if (!record.dialogEnded)
         {
-            await host.show?.(hwnd);
+            await host.show?.(hwnd, thread);
         }
         // Unattended, a dialog waiting for input is put to whoever answers for
         // the run, and the button chosen is pressed as a click presses it; one
@@ -1159,9 +1171,9 @@ export function createDialogFunctions(options){
         const owner = modalOwner(parent);
         const disabled = owner && (owner.style & WS_DISABLED) === 0 ? owner.hwnd : 0;
         /** @param {boolean} on */
-        const enable = on=>(disabled !== 0 ? host.enable?.(disabled, on) ?? 0 : 0);
+        const enable = on=>(disabled !== 0 ? host.enable?.(disabled, on, thread) ?? 0 : 0);
         return once(after(enable(false), ()=>createDialog(instance, template,
-            owner ? owner.hwnd : parent, dialogFunc, initParam, unicode)),
+            owner ? owner.hwnd : parent, dialogFunc, initParam, unicode, thread)),
         hwnd=>(hwnd === 0 ? after(enable(true), ()=>DIALOG_FAILED)
             : runModal(hwnd, thread, undefined, owner?.hwnd ?? 0)));
     };
@@ -1345,8 +1357,9 @@ export function createDialogFunctions(options){
                 // The window it belongs to -- its parent, or the owner of one
                 // on the desktop -- is enabled, whoever disabled it.
                 const above = record.parent !== 0 ? record.parent : record.owner ?? 0;
-                return after(live(above) ? host.enable?.(above, true) ?? 0 : 0,
-                    ()=>after(host.hide?.(hwnd >>> 0) ?? 0, ()=>1));
+                const thread = host.callerThread?.();
+                return after(live(above) ? host.enable?.(above, true, thread) ?? 0 : 0,
+                    ()=>after(host.hide?.(hwnd >>> 0, thread) ?? 0, ()=>1));
             },
         },
 

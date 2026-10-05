@@ -552,6 +552,9 @@ const MAX_WINDOW_TEXT = 1 << 16;
  * @property {() => unknown} [callerThread]
  *           Whose call is being handled, read before an await for `dispatch`
  *           afterwards. Absent in a build with no bridge, and then unnamed.
+ * @property {<T>(thread: unknown, fn: () => T) => T} [answering]
+ *           Runs `fn` as the call of `thread`: what it reads as its caller,
+ *           and what it calls back into the guest, are that thread's.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {boolean} [unattended]
  *           Nobody is at the screen: a modal dialog waiting for input is
@@ -5563,16 +5566,21 @@ export function createWindowFunctions(host){
                 defDlgProc: controls.helpers.dialogProc, markDefault: controls.helpers.markDefault,
                 keyDown: (/** @type {number} */ key)=>
                     ((host.keyState?.(key) ?? 0) & 0x8000) !== 0,
-                show: (/** @type {number} */ hwnd)=>{
+                show: (/** @type {number} */ hwnd, /** @type {unknown} */ thread)=>{
                     const record = live(hwnd);
-                    return record ? showWindow(record, SW_SHOW) : 0;
+                    return record ? showWindow(record, SW_SHOW, thread) : 0;
                 },
-                hide: (/** @type {number} */ hwnd)=>{
+                hide: (/** @type {number} */ hwnd, /** @type {unknown} */ thread)=>{
                     const record = live(hwnd);
-                    return record ? showWindow(record, SW_HIDE) : 0;
+                    return record ? showWindow(record, SW_HIDE, thread) : 0;
                 },
-                enable: (/** @type {number} */ hwnd, /** @type {boolean} */ on)=>
-                    (/** @type {any} */ (table)).EnableWindow.handler([hwnd, on ? 1 : 0]),
+                /** @param {number} hwnd @param {boolean} on @param {unknown} thread */
+                enable: (hwnd, on, thread)=>{
+                    const enable = ()=>(/** @type {any} */ (table)).EnableWindow.handler(
+                        [hwnd, on ? 1 : 0]);
+                    return thread !== undefined && host.answering
+                        ? host.answering(thread, enable) : enable();
+                },
                 loadImage: (/** @type {number} */ instance, /** @type {number} */ name,
                     /** @type {number} */ type)=>table.LoadImageW.handler([instance, name, type,
                     0, 0, 0]),
@@ -7040,7 +7048,10 @@ export function createWindowFunctions(host){
     let messageBoxProcedures = 0;
     return Object.assign(table, createMessageBoxFunctions({
         host,
-        call: (name, args)=>/** @type {any} */ (table)[name].handler(args),
+        call: (name, args, thread)=>{
+            const run = ()=>/** @type {any} */ (table)[name].handler(args);
+            return thread !== undefined && host.answering ? host.answering(thread, run) : run();
+        },
         procedure: (name, handler)=>{
             messageBoxProcedures++;
             /** @type {number} */

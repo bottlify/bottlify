@@ -2153,6 +2153,7 @@ export function createWin32Module(){
                     }),
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     callerThread: ()=>bridge.callerThread(),
+                    answering: (thread, fn)=>bridge.answering(thread, fn),
                     divergence: config?.divergence,
                     /** @param {number} id */
                     threadExists: id=>kernel.threads().some(

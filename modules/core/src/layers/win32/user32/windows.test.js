@@ -319,6 +319,20 @@ function setup({
             return hookReply ? hookReply(entry, args) : 0;
         },
         callerThread: ()=>caller.current,
+        // As the bridge answers: the thread named is the caller for what
+        // `fn` runs before it awaits.
+        answering: (thread, fn)=>{
+            const before = caller.current;
+            caller.current = thread;
+            try
+            {
+                return fn();
+            }
+            finally
+            {
+                caller.current = before;
+            }
+        },
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         threadExists,
         /** @param {number} code */
@@ -3425,6 +3439,50 @@ test('SetWindowText and SetDlgItemText to another thread\'s window wait for that
         await tick();
         assert.equal(await answer, 1);
     }
+});
+
+test('a message box a worker raises over another thread\'s window is shown as the worker\'s,'
+    + ' whoever is on the processor by then', async()=>{
+    // Disabling the owner waits for the owner's thread to take WM_ENABLE, and
+    // by the time the box is shown the thread on the processor is that one.
+    // Shown as that thread's, the activation it sends was started on it in
+    // the middle of its own loop, which then had nothing to go back to.
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (main) };
+    const WM_ENABLE = 0x000a, WM_ACTIVATE = 0x0006;
+    const { fns, memory, dispatched, tick } = setup({ caller, heap: true,
+        reply: message=>message.message === WM_NCCREATE });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const owner = createWindow(fns, memory, { style: WS_VISIBLE });
+
+    caller.current = worker;
+    const answer = fns.MessageBoxA.handler([owner, 0, 0, 0]);
+    assert.ok(answer instanceof Promise, 'the worker waits on the owner\'s thread');
+    caller.current = main;
+    const told = dispatched.length;
+    for (let turn = 0; turn < 20 && !dispatched.slice(told).some(m=>m.message === WM_ACTIVATE);
+        turn++)
+    {
+        fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+        await tick();
+    }
+    const enabled = dispatched.slice(told).find(m=>m.message === WM_ENABLE);
+    assert.equal(enabled?.thread, main, 'WM_ENABLE was taken by the owner\'s thread');
+    const activation = dispatched.slice(told)
+        .filter(m=>m.hwnd === owner && (m.message === WM_NCACTIVATE || m.message === WM_ACTIVATE));
+    assert.ok(activation.length > 0, 'the owner was told it lost the activation');
+    assert.deepEqual([...new Set(activation.map(m=>m.thread))], [worker],
+        'by the worker, whose call raised the box');
+    // And the box is the worker's, its controls too: the worker's modal loop
+    // takes their WM_PAINT, which a box of the owner's thread never had.
+    const box = activation.find(m=>m.message === WM_ACTIVATE)?.lParam ?? 0;
+    const GW_CHILD = 5;
+    const control = fns.GetWindow.handler([box, GW_CHILD]);
+    assert.notEqual(control, 0);
+    assert.deepEqual([box, control].map(hwnd=>fns.GetWindowThreadProcessId.handler([hwnd, 0])),
+        [worker.id, worker.id]);
 });
 
 test('what the window manager sends another thread\'s window runs on the sender, and says so',

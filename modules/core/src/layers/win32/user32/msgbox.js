@@ -141,8 +141,10 @@ const TEXT_SHARE = 5 / 8;
 /**
  * @param {Object} options
  * @param {MessageBoxHost} options.host
- * @param {(name: string, args: number[]) => any} options.call
- *        One of user32's own entry points, called as a program calls it.
+ * @param {(name: string, args: number[], thread?: unknown) => any} options.call
+ *        One of user32's own entry points, called as a program calls it --
+ *        from `thread`, when named: past an await the thread on the processor
+ *        is another, and the box is its caller's.
  * @param {(name: string, handler: (record: any, message: { hwnd: number, message: number,
  *     wParam: number, lParam: number }, thread?: unknown) => number | Promise<number>)
  *     => number} options.procedure
@@ -170,16 +172,16 @@ export function createMessageBoxFunctions({ host, call, procedure, measure, fram
     /**
      * Pixels for a width and height in the dialog's units.
      *
-     * @param {number} hwnd
+     * @param {number} hwnd @param {unknown} thread
      */
-    const unitsOf = hwnd=>{
+    const unitsOf = (hwnd, thread)=>{
         const rect = host.allocate?.(16) ?? 0;
         const words = new Uint8Array(16);
         const view = new DataView(words.buffer);
         view.setInt32(8, 4000, true);
         view.setInt32(12, 8000, true);
         host.writeMemory(rect, words);
-        call('MapDialogRect', [hwnd, rect]);
+        call('MapDialogRect', [hwnd, rect], thread);
         const mapped = new DataView(host.readMemory(rect, 16).slice().buffer);
         host.release?.(rect);
         const across = mapped.getInt32(8, true) / 4000;
@@ -202,12 +204,13 @@ export function createMessageBoxFunctions({ host, call, procedure, measure, fram
      * @param {number} hwnd
      * @param {{ text: string, caption: string, type: number,
      *     buttons: { id: number, label: string }[] }} box
+     * @param {unknown} thread  The box's: the one whose call raised it.
      */
-    const layOut = async(hwnd, box)=>{
-        const units = unitsOf(hwnd);
+    const layOut = async(hwnd, box, thread)=>{
+        const units = unitsOf(hwnd, thread);
         const screen = host.screen ?? { width: 640, height: 480 };
         const margin = { x: units.x(MARGIN), y: units.y(MARGIN) };
-        const textHwnd = await call('GetDlgItem', [hwnd, TEXT_ID]);
+        const textHwnd = await call('GetDlgItem', [hwnd, TEXT_ID], thread);
         const text = measure(textHwnd, box.text, Math.floor(screen.width * TEXT_SHARE));
         const widest = Math.max(...box.buttons.map(button=>
             measure(hwnd, button.label.replace('&', ''), 0x7fff).width));
@@ -227,13 +230,15 @@ export function createMessageBoxFunctions({ host, call, procedure, measure, fram
         const height = buttonsTop + button.height + margin.y;
         const move = (/** @type {number} */ target, /** @type {number} */ x,
             /** @type {number} */ y, /** @type {number} */ across, /** @type {number} */ down)=>
-            call('SetWindowPos', [target, 0, x, y, across, down, SWP_NOZORDER | SWP_NOACTIVATE]);
+            call('SetWindowPos', [target, 0, x, y, across, down, SWP_NOZORDER | SWP_NOACTIVATE],
+                thread);
         await move(textHwnd, (box.type & MB_RIGHT) !== 0 ? width - margin.x - text.width : margin.x,
             margin.y, text.width, text.height);
         const left = Math.floor((width - row) / 2);
         for (const [index, { id }] of box.buttons.entries())
         {
-            await move(await call('GetDlgItem', [hwnd, id]), left + index * (button.width + gap),
+            await move(await call('GetDlgItem', [hwnd, id], thread),
+                left + index * (button.width + gap),
                 buttonsTop, button.width, button.height);
         }
         const outer = { width: width + edges.width, height: height + edges.height };
@@ -243,7 +248,8 @@ export function createMessageBoxFunctions({ host, call, procedure, measure, fram
         // The focus is the default button's, whatever the tab order says,
         // which is why WM_INITDIALOG answers FALSE: the dialog manager would
         // give it to the first tab stop.
-        await call('SetFocus', [await call('GetDlgItem', [hwnd, messageBoxDefault(box.type)])]);
+        await call('SetFocus',
+            [await call('GetDlgItem', [hwnd, messageBoxDefault(box.type)], thread)], thread);
         return 0;
     };
 
@@ -255,8 +261,9 @@ export function createMessageBoxFunctions({ host, call, procedure, measure, fram
      *
      * @param {any} record
      * @param {{ hwnd: number, message: number, wParam: number, lParam: number }} message
+     * @param {unknown} [thread]  Whose call delivered the message.
      */
-    const dialogProcedure = (record, message)=>{
+    const dialogProcedure = (record, message, thread)=>{
         if (message.message === WM_INITDIALOG)
         {
             const box = pending.get(message.lParam >>> 0);
@@ -265,7 +272,7 @@ export function createMessageBoxFunctions({ host, call, procedure, measure, fram
                 return 1;
             }
             standing.set(message.hwnd >>> 0, box);
-            return layOut(message.hwnd >>> 0, box);
+            return layOut(message.hwnd >>> 0, box, thread);
         }
         if (message.message !== WM_COMMAND || message.wParam >>> 16 !== BN_CLICKED)
         {
@@ -283,7 +290,7 @@ export function createMessageBoxFunctions({ host, call, procedure, measure, fram
         if (answer !== 0)
         {
             standing.delete(message.hwnd >>> 0);
-            return after(call('EndDialog', [message.hwnd, answer]), ()=>1);
+            return after(call('EndDialog', [message.hwnd, answer], thread), ()=>1);
         }
         return 1;
     };
