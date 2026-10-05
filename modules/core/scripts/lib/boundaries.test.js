@@ -93,6 +93,16 @@ test('every form of import is seen, not only a string after `from`', ()=>{
         .length, 1, 'an .mjs file');
 });
 
+test('the root reads config.json beside the package; a layer does not, nor the root another file',
+    ()=>{
+        const read = 'import SETTINGS from "../config.json" with { type: "json" };';
+        assert.deepEqual(issuesWith({ 'settings.js': read }), []);
+        assert.equal(issuesWith({ 'layers/a/x.js':
+            'import SETTINGS from "../../../config.json" with { type: "json" };' }).length, 1);
+        assert.equal(issuesWith({ 'settings.js':
+            'import P from "../package.json" with { type: "json" };' }).length, 1);
+    });
+
 test('what the design allows stays allowed', ()=>{
     assert.deepEqual(issuesWith({
         // The cpu layer and the root load an engine by a URL chosen at launch.

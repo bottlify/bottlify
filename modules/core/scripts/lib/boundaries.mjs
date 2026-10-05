@@ -280,6 +280,12 @@ export function findBoundaryIssues({ src, vendor, requires }){
                     + 'root of src reaches by URL, and nothing imports it');
                 continue;
             }
+            // The one file outside src the root may read: the package's own
+            // settings (`src/settings.js`), data rather than code.
+            if (kind === 'root' && target === resolve(src, '..', 'config.json'))
+            {
+                continue;
+            }
             if (!target.startsWith(src + sep))
             {
                 issues.push(`${file} imports outside src (${spec})`);

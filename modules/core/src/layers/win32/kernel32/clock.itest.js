@@ -138,7 +138,7 @@ test('the clock routines answer out of the block and leave a null pointer alone'
     assert.equal(read(OUT), UPTIME_TICKS, 'and wrote both words of the block');
 
     assert.equal(run(1), 1);
-    assert.equal(read(OUT + 16), 1_000_000n, 'the frequency, as an immediate');
+    assert.equal(read(OUT + 16), 1_000_000_000n, 'the frequency, as an immediate');
 
     assert.equal(run(2), UPTIME_MS, 'the tick count is the answer itself');
 
