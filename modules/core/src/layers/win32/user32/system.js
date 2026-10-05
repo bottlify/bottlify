@@ -50,6 +50,7 @@ import {
     writeU32s,
 } from './structs.js';
 import { readText, textBytes } from './unicode.js';
+import { HWND_BROADCAST, createWindowDirectory } from './directory.js';
 import { LOGFONTA, LOGFONTW_SIZE, logFontBytes } from '../gdi32/structs.js';
 import { ANY_WINDOW, threadIdOf } from './messages.js';
 import { VIDEO_ADAPTER_NAME } from '../devices.js';
@@ -443,7 +444,6 @@ const DMLERR_SYS_ERROR = 0x400f;
 const DMLERR_NO_ERROR = 0;
 
 /** Where RegisterWindowMessage numbers start: 0xc000 to 0xffff is theirs. */
-const REGISTERED_MESSAGE_FIRST = 0xc000;
 
 /** The names of the fixed clipboard formats, the ones GetClipboardFormatName reads back. */
 const CLIPBOARD_FORMAT_NAMES = new Map([
@@ -472,8 +472,12 @@ const DEFER_TOKEN = 0x4d50;
  * @param {(hwnd: number) => ({ processId: number, threadId: number, className: string,
  *     title: string } | null)} [options.elsewhere]
  *     A window of another process, as that process describes it.
+ * @param {{ register: (name: string) => number, registeredName: (id: number) => string | null }}
+ *     [options.names]  The run's registered messages and clipboard formats.
  */
-export function createSystemFunctions({ host, live, windows, classes, elsewhere = ()=>null }){
+export function createSystemFunctions({ host, live, windows, classes, elsewhere = ()=>null,
+    names = createWindowDirectory() })
+{
     /**
      * A window as the program is told of it: the desktop, the one window
      * here that is not the program's, as none.
@@ -724,7 +728,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * @param {boolean} unicode
      */
     const sendMessageTimeout = ([hwnd, message, wParam, lParam, , timeout, result], unicode)=>{
-        if (!live(hwnd) && !elsewhere(hwnd))
+        if ((hwnd >>> 0) !== HWND_BROADCAST && !live(hwnd) && !elsewhere(hwnd))
         {
             host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
             return 0;
@@ -750,17 +754,6 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
 
     const screen = host.screen ?? { width: 640, height: 480, bitsPerPixel: 32 };
 
-    /**
-     * Messages registered by name, in the range Windows keeps for them. The
-     * same name answers the same number for the life of the process, which is
-     * how two windows that never met agree on a message; case does not matter,
-     * as it does not for any other name the window manager keeps.
-     *
-     * @type {Map<string, number>}
-     */
-    const registeredMessages = new Map();
-    /** A registered number's name in the case it was first registered. */
-    const registeredMessageNames = new Map();
 
     /**
      * SetWindowPos, shared with the deferred form. The two flags that say
@@ -1938,16 +1931,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         {
             return 0;
         }
-        let id = registeredMessages.get(key);
-        if (id === undefined)
-        {
-            id = REGISTERED_MESSAGE_FIRST + registeredMessages.size;
-            registeredMessages.set(key, id);
-            // The name as the program wrote it, so GetClipboardFormatName
-            // reads back the case it registered rather than a folded one.
-            registeredMessageNames.set(id, original);
-        }
-        return id;
+        // The run's, not the process's: the same name, in any case, is the
+        // same number in every process, which is how two windows that never
+        // met agree on a message -- and the name kept as first spelled, so
+        // GetClipboardFormatName reads back the case it was registered in.
+        return names.register(original);
     };
 
     /**
@@ -1964,7 +1952,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         {
             return fixed;
         }
-        return registeredMessageNames.get(format) ?? null;
+        return names.registeredName(format);
     };
 
     /** GetClassName in either width. @param {number[]} args @param {boolean} wide */

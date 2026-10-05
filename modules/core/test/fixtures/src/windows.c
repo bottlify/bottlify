@@ -78,6 +78,7 @@ __declspec(dllimport) long __stdcall SendMessageA(void *window, unsigned message
 __declspec(dllimport) long __stdcall SendMessageTimeoutA(void *window, unsigned message,
     unsigned wParam, long lParam, unsigned flags, unsigned timeout, unsigned *result);
 __declspec(dllimport) unsigned __stdcall GetLastError(void);
+__declspec(dllimport) unsigned __stdcall RegisterWindowMessageA(const char *name);
 
 #define INFINITE 0xffffffff
 #define WM_APP 0x8000
@@ -88,6 +89,11 @@ __declspec(dllimport) unsigned __stdcall GetLastError(void);
 #define ERROR_TIMEOUT 1460
 #define COPIED 0x1234
 #define ASKED 99
+#define HWND_BROADCAST ((void *)0xffff)
+
+/* The message both processes register by name, and what reached the parent of it. */
+static unsigned hello;
+static unsigned helloSent;
 
 /* What the parent's window was handed by WM_COPYDATA, checked by the parent. */
 static unsigned copiedData, copiedCount;
@@ -109,6 +115,11 @@ static long __stdcall procedure(void *window, unsigned message, unsigned wParam,
     if (message == WM_APP + 2)
     {
         return ASKED + (long)wParam;
+    }
+    if (hello != 0 && message == hello)
+    {
+        helloSent = wParam;
+        return 0;
     }
     if (message == WM_APP + 3)
     {
@@ -199,6 +210,10 @@ static int look(void)
         CreateWindowExA(0, "BottlifyGuest", "Guest", 0, 0, 0, 10, 10, 0, 0, cls.instance, 0);
         check("child: a send the parent answers by sending back to this one, which waits",
             SendMessageA(window, WM_APP + 3, 20, 0) == 41);
+        result = 0;
+        check("child: a send to every top-level window is answered",
+            SendMessageTimeoutA(HWND_BROADCAST, RegisterWindowMessageA("BOTTLIFYHELLO"), 8, 0,
+                SMTO_NORMAL, 5000, &result) && result == 1);
     }
     if (asked("-held"))
     {
@@ -209,6 +224,8 @@ static int look(void)
             !SendMessageTimeoutA(window, WM_APP + 2, 1, 0, SMTO_NORMAL, 5000, &result)
             && GetLastError() == ERROR_TIMEOUT);
     }
+    check("child: a message posted to every top-level window is taken",
+        PostMessageA(HWND_BROADCAST, RegisterWindowMessageA("bottlifyhello"), 7, 0));
     check("child: a message posted to it is taken",
         PostMessageA(window, WM_APP + 1, owner, (long)GetCurrentProcessId()));
     return failures;
@@ -220,6 +237,7 @@ int mainCRTStartup(void)
     {
         ExitProcess(look());
     }
+    hello = RegisterWindowMessageA("BottlifyHello");
     WNDCLASSA cls = { 0 };
     cls.procedure = (void *)procedure;
     cls.instance = GetModuleHandleA(0);
@@ -248,6 +266,7 @@ int mainCRTStartup(void)
 
     MSG message;
     int got = 0;
+    unsigned helloPosted = 0;
     while (!got && GetMessageA(&message, 0, 0, 0) > 0)
     {
         if (message.message == WM_APP + 1)
@@ -255,8 +274,15 @@ int mainCRTStartup(void)
             got = 1;
             continue;
         }
+        if (message.message == hello)
+        {
+            helloPosted = message.wParam;
+            continue;
+        }
         DispatchMessageA(&message);
     }
+    check("parent: the child's broadcast arrived, as the number this process registered",
+        helloPosted == 7);
     check("parent: the child's message arrived, for this window", got && message.window == window);
     check("parent: the child named this process as the window's",
         got && message.wParam == GetCurrentProcessId());
@@ -265,6 +291,8 @@ int mainCRTStartup(void)
     {
         check("parent: the block the child sent arrived whole", copiedData == 7
             && copiedCount == 5 && copied[0] == 'h' && copied[4] == 'o');
+        check("parent: the child's broadcast send reached this window's procedure",
+            helloSent == 8);
     }
 
     unsigned code = 1;

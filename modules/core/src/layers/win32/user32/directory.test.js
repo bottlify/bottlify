@@ -132,3 +132,13 @@ test('a message sent to another process\'s window is asked after by number, and 
     directory.detach(2);
     assert.equal(directory.answer({ owner: 2, id: 1 }), null, 'gone with its process');
 });
+
+test('a registered name is one number for the run, in any case, kept as first spelled', ()=>{
+    const directory = createWindowDirectory();
+    const first = directory.register('BottlifyHello');
+    assert.equal(first, 0xc000, 'the range Windows keeps for them');
+    assert.equal(directory.register('bottlifyhello'), first);
+    assert.equal(directory.register('Other'), first + 1);
+    assert.equal(directory.registeredName(first), 'BottlifyHello');
+    assert.equal(directory.registeredName(0xc100), null);
+});

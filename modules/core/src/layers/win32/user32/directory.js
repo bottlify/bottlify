@@ -22,6 +22,15 @@
  * hand out a number the other already did, in any process.
  */
 
+/**
+ * The first number a name registered with RegisterWindowMessage or
+ * RegisterClipboardFormat is given: the range Windows keeps for them.
+ */
+const REGISTERED_FIRST = 0xc000;
+
+/** Where a message goes to every top-level window, of every process. */
+export const HWND_BROADCAST = 0xffff;
+
 /** The desktop, the one window every process shares. */
 export const DESKTOP_WINDOW = 0x00010012;
 const FIRST_WINDOW = DESKTOP_WINDOW + 4;
@@ -91,6 +100,10 @@ export function createWindowDirectory(){
     const endpoints = new Map();
     /** Processes that run nothing now, and so answer nothing. @type {Set<number>} */
     const held = new Set();
+    /** Registered names, folded, and their numbers. @type {Map<string, number>} */
+    const registered = new Map();
+    /** Each registered number's name as it was first spelled. @type {Map<number, string>} */
+    const spelled = new Map();
 
     /** @param {number} hwnd */
     const endpointOf = hwnd=>{
@@ -212,6 +225,33 @@ export function createWindowDirectory(){
             }
             return 0;
         },
+
+        /**
+         * The number a registered message or clipboard format has for the
+         * run: the same name, in any case, is the same number in every
+         * process, which is how two programs that never met agree on one.
+         *
+         * @param {string} name @returns {number}
+         */
+        register(name){
+            const key = name.toLowerCase();
+            let id = registered.get(key);
+            if (id === undefined)
+            {
+                id = REGISTERED_FIRST + registered.size;
+                registered.set(key, id);
+                spelled.set(id, name);
+            }
+            return id;
+        },
+
+        /**
+         * A registered number's name, as it was first spelled; null for a
+         * number nobody registered.
+         *
+         * @param {number} id @returns {string | null}
+         */
+        registeredName: id=>spelled.get(id >>> 0) ?? null,
 
         /**
          * Whether a process is held: paused while another runs in its place

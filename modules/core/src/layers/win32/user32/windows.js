@@ -53,7 +53,7 @@ import {
     writeWindowClassA,
 } from './structs.js';
 import { convertCharacter, readText, translated, writeText } from './unicode.js';
-import { DESKTOP_WINDOW, createWindowDirectory } from './directory.js';
+import { DESKTOP_WINDOW, HWND_BROADCAST, createWindowDirectory } from './directory.js';
 import { subtractFromArea } from '../gdi32/rects.js';
 
 /** The messages whose wParam is a character code, in the encoding of the procedure. */
@@ -349,6 +349,7 @@ const POLLED_KINDS = new Set(['event', 'semaphore', 'timer', 'thread']);
 
 /** The parent a message-only window is made with. */
 const HWND_MESSAGE = 0xfffffffd;
+
 
 /** PeekMessage takes this where a window goes to mean "thread messages only". */
 const HWND_THREAD_MESSAGES = 0xffffffff;
@@ -985,6 +986,10 @@ export function createWindowFunctions(host){
      *     the timeout passed first
      */
     const sendAcross = (hwnd, message, wParam, lParam, thread, unicode = false, how = {})=>{
+        if ((hwnd >>> 0) === HWND_BROADCAST)
+        {
+            return broadcastSend(message, wParam, lParam, thread, unicode, how);
+        }
         const record = live(hwnd);
         if (!record && directory.describe(hwnd, processId))
         {
@@ -1028,6 +1033,42 @@ export function createWindowFunctions(host){
             }
             return sent.result;
         })();
+    };
+
+    /**
+     * Every top-level window a broadcast reaches: this process's, in the
+     * order they were made, then every other process's. A message-only window
+     * is not top-level, and a child is not reached.
+     */
+    const broadcastTargets = ()=>{
+        const targets = [...windows.values()]
+            .filter(record=>!record.destroyed && record.parent === 0 && live(record.hwnd))
+            .map(record=>record.hwnd);
+        for (let at = directory.find(processId, 0, 0, null, null); at !== 0;
+            at = directory.find(processId, 0, at, null, null))
+        {
+            targets.push(at);
+        }
+        return targets;
+    };
+
+    /**
+     * SendMessage to HWND_BROADCAST: to each top-level window in turn, each
+     * answer waited for as a send to it alone is -- a process that runs
+     * nothing now is passed over -- and TRUE once all have been asked.
+     *
+     * @param {number} message @param {number} wParam @param {number} lParam
+     * @param {unknown} thread @param {boolean} unicode
+     * @param {{ kind?: number, timeout?: number }} how
+     * @returns {number | Promise<number>}
+     */
+    const broadcastSend = (message, wParam, lParam, thread, unicode, how)=>{
+        const targets = broadcastTargets();
+        /** @param {number} at @returns {number | Promise<number>} */
+        const next = at=>(at >= targets.length ? 1
+            : andThen(sendAcross(targets[at], message, wParam, lParam, thread, unicode, how),
+                ()=>next(at + 1)));
+        return next(0);
     };
 
     /**
@@ -4623,6 +4664,22 @@ export function createWindowFunctions(host){
      */
     const postTo = ([hwnd, message, wParam, lParam], unicode)=>{
         const target = hwnd >>> 0;
+        if (target === HWND_BROADCAST)
+        {
+            for (const each of broadcastTargets())
+            {
+                if (live(each))
+                {
+                    host.queue.post({ hwnd: each, message, wParam, lParam,
+                        ...unicode ? { unicode } : {} });
+                }
+                else
+                {
+                    directory.post(processId, each, message, wParam, lParam);
+                }
+            }
+            return 1;
+        }
         // A message for a window that no longer exists has nowhere to be
         // delivered, and the guest is told so rather than finding out
         // when it dispatches.
@@ -4668,7 +4725,8 @@ export function createWindowFunctions(host){
      * @param {boolean} unicode
      */
     const notify = ([hwnd, message, wParam, lParam], unicode)=>{
-        if (!live(hwnd) && !directory.describe(hwnd, processId))
+        if ((hwnd >>> 0) !== HWND_BROADCAST && !live(hwnd)
+            && !directory.describe(hwnd, processId))
         {
             host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
             return 0;
@@ -4844,6 +4902,7 @@ export function createWindowFunctions(host){
             }),
             live, windows, classes,
             elsewhere: (/** @type {number} */ hwnd)=>directory.describe(hwnd, processId),
+            names: directory,
         }),
         ...createDesktopFunctions({ host,
             topLevel: ()=>[...windows.values()]
