@@ -344,6 +344,25 @@ test('PBS_VERTICAL fills from the bottom up', async()=>{
         'and everything below the fill line is the bar');
 });
 
+test('SETPOS, DELTAPOS and STEPIT show the bar at once, with no message pumped', async()=>{
+    // An installer's copy loop moves its bar and never looks at its queue.
+    const context = setup();
+    await context.makeHost();
+    const bar = await context.bar(PBS_SMOOTH);
+    await context.pump();
+    const filled = ()=>context.barRow(bar).filter(pixel=>pixel === COLOR_HIGHLIGHT).length;
+    assert.equal(filled(), 0);
+    context.fns.SendMessageA.handler([bar, PBM_SETPOS, 50, 0]);
+    const half = filled();
+    assert.ok(half > 0, 'SETPOS');
+    context.fns.SendMessageA.handler([bar, PBM_DELTAPOS, 25, 0]);
+    const more = filled();
+    assert.ok(more > half, 'DELTAPOS');
+    context.fns.SendMessageA.handler([bar, PBM_SETSTEP, 25, 0]);
+    context.fns.SendMessageA.handler([bar, PBM_STEPIT, 0, 0]);
+    assert.ok(filled() > more, 'STEPIT');
+});
+
 test('a bar paints its track and fill on WM_PAINT', async()=>{
     const context = setup();
     await context.makeHost();

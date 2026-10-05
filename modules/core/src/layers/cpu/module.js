@@ -1064,8 +1064,12 @@ export function createCpuModule(){
                         overflow: instance.samples.overflow,
                         top: topSamples(instance.samples, 64),
                     },
-                    // The translator's own report, or null when none is attached.
-                    cork: instance.cork ? instance.cork.diagnostics() : null,
+                    // The translator's own report, with what its host adds -- the
+                    // interpreter tier's reads, instructions no tier carries -- or
+                    // null when none is attached.
+                    cork: instance.cork
+                        ? instance.host?.corkDiagnostics?.() ?? instance.cork.diagnostics()
+                        : null,
                 },
             };
         },

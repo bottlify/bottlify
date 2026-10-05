@@ -11,6 +11,7 @@ import {
     absolutePriority, createScheduler,
 } from './threads.js';
 import { createSwitcher } from './switch.js';
+import { createSyncObjects } from './sync.js';
 
 /**
  * A cpu whose slices retire a fixed number of instructions, so scheduling can
@@ -761,4 +762,108 @@ test('the report says how long a short-period thread went without the processor'
     assert.equal(mixer.worstGap, 54);
     assert.ok(sched.diagnostics().byThread.includes('p15 b0 g54/1'), 'and the report says so');
     assert.ok(sched.diagnostics().lateGaps.startsWith('mixer@60+54 '));
+});
+
+test('a thread queued on an object that is ready now says so', ()=>{
+    // A worker asleep on its "work" event while that event is set: the set
+    // reached nobody, and the report is where that has to show.
+    const { sched } = scheduler();
+    const sync = createSyncObjects({ scheduler: sched });
+    const worker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'worker' });
+    const work = sync.createEvent({ manualReset: true, name: '#20' });
+    const quit = sync.createEvent({ manualReset: true, name: '#24' });
+
+    assert.equal(sync.waitAny([work, quit], worker), null);
+    assert.deepEqual(sched.diagnostics().waiting, ['worker: any of event "#20", event "#24"'],
+        'waiting as it should');
+    work.signalled = true;
+    assert.deepEqual(sched.diagnostics().waiting,
+        ['worker: any of event "#20", event "#24", yet event "#20" is ready']);
+});
+
+/**
+ * A cpu whose slice runs `during` once, as a host call made inside the slice
+ * would, and stops short when asked to.
+ *
+ * @param {() => void} during
+ */
+function wakingCpu(during){
+    let stopped = false;
+    let pending = /** @type {(() => void) | null} */ (during);
+    const cpu = {
+        stops: 0,
+        captureContext: ()=>({ saved: true }),
+        restoreContext: ()=>{},
+        /** @param {{ entry: number, stackTop: number }} options */
+        newContext: ({ entry, stackTop })=>({ eip: entry, esp: stackTop }),
+        stop(){
+            cpu.stops++;
+            stopped = true;
+        },
+        /** @param {number} max */
+        runSlice: max=>{
+            stopped = false;
+            const call = pending;
+            pending = null;
+            call?.();
+            return stopped ? 10 : max;
+        },
+    };
+    return cpu;
+}
+
+test('a thread of higher priority woken by the running one takes the processor at once', ()=>{
+    /** @type {any} */
+    let worker = null;
+    /** @type {any} */
+    let sched = null;
+    const cpu = wakingCpu(()=>sched.wake(worker));
+    sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000 });
+    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    worker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'worker' });
+    worker.priority = 2;
+    sched.block(worker, 'its work event');
+
+    const first = sched.runOnce();
+    assert.equal(first.ran, main);
+    assert.equal(first.instructions, 10, 'the slice ended at the call that woke it');
+    assert.equal(cpu.stops, 1);
+    assert.equal(sched.runOnce().ran, worker, 'and the worker has the next turn');
+    assert.equal(sched.diagnostics().preemptions, 1);
+});
+
+test('a thread woken at the same priority or lower waits for the slice to end', ()=>{
+    for (const priority of [0, -1])
+    {
+        /** @type {any} */
+        let other = null;
+        /** @type {any} */
+        let sched = null;
+        const cpu = wakingCpu(()=>sched.wake(other));
+        sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000 });
+        const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+        other = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'other' });
+        other.priority = priority;
+        sched.block(other, 'an event');
+
+        const first = sched.runOnce();
+        assert.equal(first.ran, main);
+        assert.equal(first.instructions, 5000, `priority ${priority}: the whole quantum`);
+        assert.equal(cpu.stops, 0);
+    }
+});
+
+test('a thread woken between slices ends no slice', ()=>{
+    const cpu = wakingCpu(()=>{});
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000 });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    const worker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'worker' });
+    worker.priority = 2;
+    sched.block(worker, 'a timer');
+    sched.runOnce();
+
+    // A wait that came due, a completion the page delivered: nothing is
+    // running, so there is no slice to end.
+    sched.wake(worker);
+    assert.equal(cpu.stops, 0);
 });

@@ -20,8 +20,9 @@ const STACK = 0x2f0000;
  * @param {Record<number, number>} [options.stack]  What the guest stack holds.
  * @param {Record<string, number>} [options.registers]
  * @param {string[]} [options.waiting]  What each blocked thread is waiting on.
+ * @param {any[]} [options.threads]  The others, as the kernel keeps them.
  */
-function machine({ stack = {}, registers = {}, waiting = [] } = {}){
+function machine({ stack = {}, registers = {}, waiting = [], threads = [] } = {}){
     const regions = [
         { name: 'image', base: IMAGE, size: 0x2000, kind: 'image' },
         { name: 'thunks', base: THUNKS, size: 0x100, kind: 'thunk_code' },
@@ -60,6 +61,7 @@ function machine({ stack = {}, registers = {}, waiting = [] } = {}){
         kernel: {
             currentThread: ()=>({ id: 1, name: 'main', state: 'running' }),
             diagnosticsSnapshot: ()=>({ threads: 1, waiting }),
+            threads: ()=>threads,
         },
         bridge: {
             /** @param {number} address */
@@ -212,4 +214,54 @@ test('a stalled machine names every blocked thread and what it waits on', ()=>{
     assert.match(text, /^waiting:$/m);
     assert.match(text, /^ {2}thread-3: WaitForSingleObject on 0x1c$/m);
     assert.match(text, /^ {2}thread-5: message queue$/m);
+});
+
+test('every other thread\'s stack is read from where it stopped, past a kilobyte of locals', ()=>{
+    // Two threads passing a lock back and forth: each is parked in a routine
+    // that keeps a kilobyte on its stack, and the loop that keeps calling it
+    // is the frame above.
+    const parked = STACK + 0x4000;
+    const table = Object.fromEntries(Array.from({ length: 12 },
+        (_, i)=>[parked + 0x40 + i * 4, IMAGE + 0x1600]));
+    const text = formatTrace(captureTrace(machine({
+        stack: { ...table, [parked + 0x408]: IMAGE + 0x1500 },
+        threads: [
+            { name: 'thread-18', state: 'blocked', resumeStack: parked, stackTop: STACK + 0x10000,
+                context: { reg32: [0, 0, 0, 0, STACK + 0x100, 0, 0, 0] } },
+            { name: 'thread-9', state: 'terminated',
+                context: { reg32: [0, 0, 0, 0, parked, 0, 0, 0] } },
+        ],
+    })));
+
+    const own = text.slice(text.indexOf('thread thread-18 (blocked):'));
+    assert.ok(own.length < text.length, 'the parked thread has a section of its own');
+    assert.match(own, /image\+0x00001500/, 'the caller above a kilobyte of locals is found');
+    assert.equal(own.match(/image\+0x00001600/g)?.length, 1, 'a run of one stale pointer is one entry');
+    assert.doesNotMatch(text, /thread-9/, 'a thread that ended has no stack to read');
+});
+
+test('the scan keeps what follows a call and drops pointers to data and to functions', ()=>{
+    const esp = STACK + 0x8000;
+    const fixture = machine({
+        stack: {
+            [esp]: IMAGE + 0x1200, //      after `call rel32`
+            [esp + 4]: IMAGE + 0x1300, //  after `call [disp32]`
+            [esp + 8]: IMAGE + 0x1400, //  after `call eax`
+            [esp + 12]: IMAGE + 0x1500, // a table in the image, after nothing callable
+        },
+    });
+    const code = new Uint8Array(0x2000);
+    code.set([0xe8, 1, 2, 3, 4], 0x1200 - 5);
+    code.set([0xff, 0x15, 1, 2, 3, 4], 0x1300 - 6);
+    code.set([0xff, 0xd0], 0x1400 - 2);
+    code.set([0x8b, 0x45, 0x08, 0x90, 0x90, 0x90, 0x90], 0x1500 - 7);
+    const memory = /** @type {any} */ (fixture.memory);
+    memory.readBytes = (/** @type {number} */ address, /** @type {number} */ length)=>
+        code.subarray(address - IMAGE, address - IMAGE + length);
+
+    const rendered = captureTrace(fixture).stack.join('\n');
+    assert.match(rendered, /image\+0x00001200/);
+    assert.match(rendered, /image\+0x00001300/);
+    assert.match(rendered, /image\+0x00001400/);
+    assert.doesNotMatch(rendered, /image\+0x00001500/, 'nothing calls to land there');
 });

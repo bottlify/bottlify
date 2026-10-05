@@ -23,7 +23,7 @@
 
 import {
     WM_PAINT, WM_ERASEBKGND,
-    COLOR_3DFACE, COLOR_HIGHLIGHT,
+    COLOR_3DFACE, COLOR_HIGHLIGHT, after,
 } from '../user32/controls.js';
 
 /** The class name a program creates the control by. */
@@ -84,6 +84,18 @@ export function createProgressProcedure(host, tk){
 
     /** @param {any} record @param {number} pos */
     const clamp = (record, pos)=>Math.min(Math.max(pos, state(record).min), state(record).max);
+
+    /**
+     * A new position shown at once: the real control updates its window when
+     * the position moves, and a copy loop that never looks at its queue has
+     * a bar that grows. Answers what the message answers.
+     *
+     * @param {any} record @param {number} previous
+     */
+    const moved = (record, previous)=>{
+        host.invalidate(record);
+        return after(host.update?.(record) ?? 1, ()=>previous);
+    };
 
     /**
      * The track the fill sits in: the client area less the sunken edge that
@@ -182,14 +194,12 @@ export function createProgressProcedure(host, tk){
             case PBM_SETPOS: {
                 const previous = held.pos;
                 held.pos = clamp(record, message.wParam | 0);
-                host.invalidate(record);
-                return previous;
+                return moved(record, previous);
             }
             case PBM_DELTAPOS: {
                 const previous = held.pos;
                 held.pos = clamp(record, held.pos + (message.wParam | 0));
-                host.invalidate(record);
-                return previous;
+                return moved(record, previous);
             }
             case PBM_SETSTEP: {
                 const previous = held.step;
@@ -207,8 +217,7 @@ export function createProgressProcedure(host, tk){
                     next = held.min + (next - held.max - 1) % (span + 1);
                 }
                 held.pos = clamp(record, next);
-                host.invalidate(record);
-                return previous;
+                return moved(record, previous);
             }
             case PBM_GETPOS:
                 return held.pos;

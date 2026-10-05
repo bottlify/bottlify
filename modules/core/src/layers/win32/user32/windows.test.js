@@ -232,10 +232,11 @@ function paintedHost(fills, presents, clips){
  *        test that moves between threads; THREAD otherwise.
  * @param {() => number} [options.queueNow] The message queue's clock, for a test
  *        that waits for something the queue does later.
+ * @param {(region: number) => any} [options.regionBox] gdi32's rectangle of a region.
  */
 function setup({
     heap = false, reply, waitForObjects, now, hookReply, threadExists, trace, paint = false,
-    caller = { current: THREAD }, queueNow,
+    caller = { current: THREAD }, queueNow, regionBox,
 } = {})
 {
     const memory = fakeMemory();
@@ -314,6 +315,7 @@ function setup({
             return at;
         } : undefined,
         release: heap ? (/** @type {number} */ at)=>released.push(at) : undefined,
+        regionBox,
         ...(paint ? paintedHost(fills, presents, clips) : {}),
     });
 
@@ -1721,6 +1723,81 @@ test('a window that goes shows the desktop only where no other window is', ()=>{
     assert.deepEqual(desktop(), [{ left: 10, top: 20, right: 310, bottom: 220 }],
         'and all of the last one');
 });
+
+test('UpdateWindow paints the window and then its children, as RDW_UPDATENOW | RDW_ALLCHILDREN',
+    ()=>{
+        // A dialog shown and updated before a job that never pumps has its
+        // controls drawn, not only itself.
+        const { fns, memory, dispatched } = setup();
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const parent = createWindow(fns, memory, { style: WS_VISIBLE });
+        const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent,
+            x: 0, y: 0, width: 20, height: 10 });
+        dispatched.length = 0;
+        assert.equal(fns.UpdateWindow.handler([parent]), 1);
+        assert.deepEqual(dispatched.filter(message=>message.message === WM_PAINT)
+            .map(message=>message.hwnd), [parent, child]);
+    });
+
+test('a window shaped to an empty region takes none of the screen, and the desktop shows there',
+    ()=>{
+        // SetWindowRgn: "the system does not display any portion of a window
+        // that lies outside of the window region". A visible full-screen
+        // window shaped to nothing covered the whole screen here: a page that
+        // left the screen over it was its to paint over, it painted nothing,
+        // and the page stayed on the screen for good.
+        let clock = 0;
+        const EMPTY = 0x5000;
+        const nothing = { left: 0, top: 0, right: 0, bottom: 0 };
+        const { fns, memory, fills } = setup({ paint: true, queueNow: ()=>clock,
+            regionBox: region=>(region === EMPTY ? nothing : null) });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const WS_POPUP = 0x80000000;
+        const drain = ()=>{
+            while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) !== 0)
+            {
+                fns.ValidateRect.handler([memory.u32(MSG_BUFFER + MSG.hwnd), 0]);
+            }
+        };
+        const desktop = ()=>fills.filter(fill=>fill.color === 0x808080 && !fill.quiet)
+            .map(fill=>fill.rect);
+        const back = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+            x: 0, y: 0, width: 640, height: 480 });
+        drain();
+        fills.length = 0;
+
+        assert.equal(fns.SetWindowRgn.handler([back, EMPTY, 1]), 1);
+        clock += 1000;
+        drain();
+        assert.deepEqual(desktop(), [{ left: 0, top: 0, right: 640, bottom: 480 }],
+            'redrawn, what it took is the desktop\'s again');
+
+        const page = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+            x: 200, y: 100, width: 300, height: 200 });
+        drain();
+        fills.length = 0;
+        fns.ShowWindow.handler([page, SW_HIDE]);
+        clock += 1000;
+        drain();
+        assert.deepEqual(desktop(), [{ left: 200, top: 100, right: 500, bottom: 300 }],
+            'a page that goes over it uncovers the desktop');
+
+        assert.equal(fns.WindowFromPoint.handler([300, 200]), 0, 'a point over it is not on it');
+        fns.GetWindowRect.handler([back, RECT_BUFFER]);
+        assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at)), [0, 0, 640, 480],
+            'its rectangle is what it was');
+
+        const other = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+            x: 700, y: 0, width: 100, height: 100 });
+        drain();
+        fills.length = 0;
+        fns.SetWindowRgn.handler([other, EMPTY, 0]);
+        clock += 1000;
+        drain();
+        assert.deepEqual(desktop(), [], 'not redrawn, the screen is left until something paints');
+    });
 
 test('the desktop paints where a window went a moment later, under whatever came there', ()=>{
     // A wizard that replaces its window between pages destroys one, pumps

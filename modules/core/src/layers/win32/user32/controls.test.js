@@ -564,6 +564,17 @@ test('a click at the button\'s screen coordinates reaches the dialog as BN_CLICK
     assert.equal(context.commands().length, 1);
 });
 
+test('a shown static given new text paints it at once, with no message pumped', async()=>{
+    // As the real static does: a setup labels each file it copies from a
+    // loop that never looks at its queue, and the label changes on the screen.
+    const context = setup();
+    const dialog = await openDialog(context);
+    const label = context.fns.GetDlgItem.handler([dialog, 100]);
+    context.memory.putString(TEXT, 'Copying');
+    context.fns.SetWindowTextA.handler([label, TEXT]);
+    assert.equal(context.fns.GetUpdateRect.handler([label, 0, 0]), 0, 'nothing left to paint');
+});
+
 test('a static passes the pointer through to the dialog unless it has SS_NOTIFY', async()=>{
     const context = setup();
     const dialog = await openDialog(context);

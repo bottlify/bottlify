@@ -315,7 +315,10 @@ export function createCorkHost(config){
     /** @param {number} index */
     const x87At = index=>layout.x87 + (index & 7) * 16;
 
-    /** The trap the call channel reaches: run the handler, answer whether to leave.
+    /** The trap the call channel reaches: run the handler, answer whether to leave
+     * -- 1 where the handler moved EIP, 2 where the turn is to end (a stop, a halt),
+     * which a region answers by going back to the loop rather than on to the
+     * region found for EIP.
      * @param {number} value
      */
     const raiseTrap = value=>{
@@ -325,7 +328,7 @@ export function createCorkHost(config){
         {
             trapHandler(value >>> 0);
         }
-        return eip() !== at || halted || stopped ? 1 : 0;
+        return halted || stopped ? 2 : eip() !== at ? 1 : 0;
     };
 
     /**

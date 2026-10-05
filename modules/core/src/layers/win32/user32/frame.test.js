@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     WS_BORDER, WS_CAPTION, WS_CHILD, WS_DLGFRAME, WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME,
-    WS_EX_STATICEDGE, WS_THICKFRAME, frameOf, frameRings,
+    WS_EX_STATICEDGE, WS_THICKFRAME, createGeometry, frameOf, frameRings, isEmpty,
 } from './frame.js';
 
 const COLOR_WINDOWFRAME = 6;
@@ -68,3 +68,26 @@ test('there is one ring for every pixel of edge the frame takes', ()=>{
         }
     }
 });
+
+test('a window shaped by a region takes the part of its rectangle inside it, and its children too',
+    ()=>{
+        // The region is in window coordinates, as SetWindowRgn is given it.
+        /** @type {Map<number, any>} */
+        const windows = new Map();
+        const geometry = createGeometry(hwnd=>windows.get(hwnd) ?? null);
+        const WS_POPUP = 0x80000000;
+        const parent = { hwnd: 1, parent: 0, style: WS_POPUP, exStyle: 0, x: 10, y: 20,
+            width: 100, height: 50, regionBox: { left: 5, top: 5, right: 20, bottom: 20 } };
+        const child = { hwnd: 2, parent: 1, style: WS_CHILD, exStyle: 0, x: 0, y: 0,
+            width: 40, height: 40 };
+        windows.set(1, parent).set(2, child);
+        assert.deepEqual(geometry.shapedRect(parent), { left: 15, top: 25, right: 30, bottom: 40 });
+        assert.deepEqual(geometry.windowRect(parent), { left: 10, top: 20, right: 110, bottom: 70 },
+            'its rectangle is what it was');
+        assert.deepEqual(geometry.visibleClientRect(child),
+            { left: 15, top: 25, right: 30, bottom: 40 }, 'a child shows inside the region only');
+
+        parent.regionBox = { left: 0, top: 0, right: 0, bottom: 0 };
+        assert.ok(isEmpty(geometry.shapedRect(parent)), 'shaped to nothing, it takes nothing');
+        assert.ok(isEmpty(geometry.visibleWindowRect(child)));
+    });

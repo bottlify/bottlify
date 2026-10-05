@@ -244,6 +244,8 @@ const NO_FRAME = Object.freeze({
  *           A window a fullscreen device took over: it covers the display,
  *           and the frame its style describes is not drawn and takes no room.
  * @property {number} [menu]  The menu a window that is not a child has, or zero.
+ * @property {Rect | null} [regionBox]
+ *           The region SetWindowRgn shaped it with, in window coordinates.
  */
 
 /**
@@ -322,6 +324,27 @@ export function createGeometry(windowOf){
         };
     };
 
+    /**
+     * The part of the screen a window takes: its rectangle, cut to the region
+     * SetWindowRgn shaped it with when it has one -- kept in window
+     * coordinates, as the region is given. "The system does not display any
+     * portion of a window that lies outside of the window region": there it
+     * covers nothing, is hit nowhere and draws nothing, and what is beneath
+     * it shows and paints. A window shaped to an empty region takes none of
+     * the screen while it stays visible.
+     *
+     * @param {PlacedWindow} record
+     * @returns {Rect}
+     */
+    const shapedRect = record=>{
+        const rect = windowRect(record);
+        const region = record.regionBox;
+        return region
+            ? intersect(rect, { left: rect.left + region.left, top: rect.top + region.top,
+                right: rect.left + region.right, bottom: rect.top + region.bottom })
+            : rect;
+    };
+
     /** @param {PlacedWindow} record @returns {Rect} the client area on the screen */
     const clientRect = record=>{
         const origin = clientOrigin(record);
@@ -343,10 +366,10 @@ export function createGeometry(windowOf){
      * @returns {Rect}
      */
     const visibleClientRect = record=>{
-        let rect = clientRect(record);
+        let rect = intersect(clientRect(record), shapedRect(record));
         for (let parent = container(record); parent; parent = container(parent))
         {
-            rect = intersect(rect, clientRect(parent));
+            rect = intersect(intersect(rect, clientRect(parent)), shapedRect(parent));
         }
         return rect;
     };
@@ -359,17 +382,17 @@ export function createGeometry(windowOf){
      * @returns {Rect}
      */
     const visibleWindowRect = record=>{
-        let rect = windowRect(record);
+        let rect = shapedRect(record);
         for (let parent = container(record); parent; parent = container(parent))
         {
-            rect = intersect(rect, clientRect(parent));
+            rect = intersect(intersect(rect, clientRect(parent)), shapedRect(parent));
         }
         return rect;
     };
 
     return {
-        frame, container, clientSize, windowOrigin, clientOrigin, windowRect, clientRect,
-        visibleClientRect, visibleWindowRect,
+        frame, container, clientSize, windowOrigin, clientOrigin, windowRect, shapedRect,
+        clientRect, visibleClientRect, visibleWindowRect,
     };
 }
 
