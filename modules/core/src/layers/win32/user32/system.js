@@ -68,6 +68,22 @@ const SWP_NOZORDER = 0x0004;
 const SWP_NOACTIVATE = 0x0010;
 /** What a child window is told when it is brought forward to be the active one. */
 const WM_CHILDACTIVATE = 0x0022;
+const WM_WINDOWPOSCHANGING = 0x0046;
+const WM_WINDOWPOSCHANGED = 0x0047;
+/** WINDOWPOS: hwnd, hwndInsertAfter, x, y, cx, cy, flags. */
+const WINDOWPOS_SIZE = 28;
+const SWP_SHOWWINDOW = 0x0040;
+const SWP_HIDEWINDOW = 0x0080;
+const SWP_FRAMECHANGED = 0x0020;
+const SWP_NOSENDCHANGING = 0x0400;
+const SWP_NOREDRAW = 0x0008;
+/** What WM_WINDOWPOSCHANGED says of the client area: it neither moved nor changed size. */
+const SWP_NOCLIENTSIZE = 0x0800;
+const SWP_NOCLIENTMOVE = 0x1000;
+/** The flags that say what changed, and their value when nothing did. */
+const SWP_NO_CHANGE = SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOCLIENTSIZE
+    | SWP_NOCLIENTMOVE;
+const SWP_STATUS = SWP_NO_CHANGE | SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_HIDEWINDOW;
 
 const SM_CXSCREEN = 0;
 const SM_CYSCREEN = 1;
@@ -768,12 +784,88 @@ export function createSystemFunctions({ host, live, windows, classes }){
      * it never asked for.
      *
      * @param {number[]} args  hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags.
+     * @param {unknown} [caller]  the thread whose call this answers, when a
+     *     procedure on this side places a window past an await
      */
-    const setWindowPos = ([hwnd, after, x, y, cx, cy, flags])=>{
-        const SWP_NOREDRAW = 0x0008;
+    const setWindowPos = (args, caller = undefined)=>{
+        const record = live(args[0]);
+        if (!record)
+        {
+            return 0;
+        }
+        const thread = caller ?? host.callerThread?.();
+        const pos = host.send && host.allocate ? host.allocate(WINDOWPOS_SIZE) : 0;
+        if (!pos)
+        {
+            return place(args, thread);
+        }
+        // The window hears what is asked before anything moves, in a WINDOWPOS
+        // it may change -- a framework keeps its own copy of its bounds and
+        // enforces its constraints there -- and what became of it after, with
+        // the client area's moving and sizing told apart, from which
+        // DefWindowProc tells it WM_MOVE and WM_SIZE.
+        const struct = new Uint8Array(WINDOWPOS_SIZE);
+        const view = new DataView(struct.buffer);
+        args.slice(0, 7).forEach((value, index)=>view.setUint32(index * 4, value >>> 0, true));
+        host.writeMemory(pos, struct);
+        const asked = (args[6] >>> 0 & SWP_NOSENDCHANGING) !== 0 ? 0
+            : host.send(record.hwnd, WM_WINDOWPOSCHANGING, 0, pos, thread);
+        return andThen(asked, ()=>{
+            const given = host.readMemory(pos, WINDOWPOS_SIZE);
+            const read = new DataView(given.buffer, given.byteOffset, WINDOWPOS_SIZE);
+            const [, after, x, y, cx, cy, flags] = [0, 1, 2, 3, 4, 5, 6]
+                .map(index=>read.getInt32(index * 4, true));
+            const before = { window: host.geometry.windowRect(record),
+                client: host.geometry.clientRect(record), visible: host.shown(record) };
+            return andThen(place([record.hwnd, after, x, y, cx, cy, flags], thread, ()=>{
+                const window = host.geometry.windowRect(record);
+                const client = host.geometry.clientRect(record);
+                const same = (/** @type {any} */ a, /** @type {any} */ b)=>a.left === b.left
+                    && a.top === b.top;
+                const sameSize = (/** @type {any} */ a, /** @type {any} */ b)=>
+                    a.right - a.left === b.right - b.left && a.bottom - a.top === b.bottom - b.top;
+                let final = flags >>> 0;
+                final |= same(window, before.window) ? SWP_NOMOVE : 0;
+                final |= sameSize(window, before.window) ? SWP_NOSIZE : 0;
+                final |= same(client, before.client) ? SWP_NOCLIENTMOVE : 0;
+                final |= sameSize(client, before.client) ? SWP_NOCLIENTSIZE : 0;
+                if (host.shown(record) === before.visible)
+                {
+                    final &= ~(SWP_SHOWWINDOW | SWP_HIDEWINDOW);
+                }
+                if ((final & SWP_STATUS) === SWP_NO_CHANGE)
+                {
+                    return 0;
+                }
+                const told = new DataView(new ArrayBuffer(WINDOWPOS_SIZE));
+                [record.hwnd, after, record.x, record.y, record.width, record.height, final]
+                    .forEach((value, index)=>told.setUint32(index * 4, value >>> 0, true));
+                host.writeMemory(pos, new Uint8Array(told.buffer));
+                return host.send(record.hwnd, WM_WINDOWPOSCHANGED, 0, pos, thread);
+            }), answer=>{
+                host.release?.(pos);
+                return answer;
+            });
+        });
+    };
+
+    // For a procedure on this side that places a window past an await, and
+    // names the thread whose call it answers.
+    host.positions?.(setWindowPos);
+
+    /**
+     * Where SetWindowPos puts a window, past the procedure's WM_WINDOWPOSCHANGING:
+     * the record moved, sized, restacked and shown or hidden, what it uncovered
+     * and showed painted, and -- between the painting and the activation, as
+     * Windows sends it -- whatever `changed` tells the window.
+     *
+     * @param {number[]} args  hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags.
+     * @param {unknown} [thread]
+     * @param {() => any} [changed]
+     */
+    const place = (args, thread = host.callerThread?.(), changed = ()=>0)=>{
+        const [hwnd, after, x, y, cx, cy, flags] = args;
         const SWP_NOCOPYBITS = 0x0100;
-        const SWP_SHOWWINDOW = 0x0040;
-        const SWP_HIDEWINDOW = 0x0080;
         const HWND_BOTTOM = 1;
         const record = live(hwnd);
         if (!record)
@@ -837,18 +929,19 @@ export function createSystemFunctions({ host, live, windows, classes }){
         // What it showed is framed and erased before it returns, as Windows
         // XP's SetWindowPos does it; SWP_NOREDRAW asks for no painting at all.
         const erased = (flags & SWP_NOREDRAW) === 0
-            ? host.eraseShown?.(host.callerThread?.()) ?? 1 : 1;
+            ? host.eraseShown?.(thread) ?? 1 : 1;
         // A child placed without SWP_NOACTIVATE is told it is the active
         // child, shown or not (user32's message tests, WmShowChildSeq_2 and
         // _4): an MDI child becomes the client's active one this way when its
         // program brings it to the top.
+        const told = andThen(erased, changed);
         if ((flags & (SWP_NOACTIVATE | SWP_HIDEWINDOW)) === 0
             && (record.style & (WS_CHILD | WS_POPUP)) === WS_CHILD)
         {
-            return andThen(erased, ()=>andThen(host.send(record.hwnd, WM_CHILDACTIVATE, 0, 0,
-                host.callerThread?.()), ()=>1));
+            return andThen(told, ()=>andThen(host.send(record.hwnd, WM_CHILDACTIVATE, 0, 0,
+                thread), ()=>1));
         }
-        return andThen(erased, ()=>1);
+        return andThen(told, ()=>1);
     };
 
     /**
@@ -2748,8 +2841,9 @@ export function createSystemFunctions({ host, live, windows, classes }){
         MoveWindow: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([hwnd, x, y, width, height])=>setWindowPos([hwnd, 0, x, y, width, height,
-                SWP_NOZORDER | SWP_NOACTIVATE]),
+            handler: ([hwnd, x, y, width, height, repaint])=>setWindowPos([hwnd, 0, x, y,
+                width, height,
+                SWP_NOZORDER | SWP_NOACTIVATE | ((repaint | 0) === 0 ? SWP_NOREDRAW : 0)]),
         },
 
         /** HWND BringWindowToTop(HWND hWnd) */
