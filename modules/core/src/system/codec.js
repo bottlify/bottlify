@@ -40,6 +40,16 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 /**
+ * UTF-8 bytes as text, wherever they are. A browser decodes no view of
+ * shared memory, and a ring's records are one: such bytes are copied out
+ * first.
+ *
+ * @param {Uint8Array} bytes
+ */
+export const textOf = bytes=>decoder.decode(typeof SharedArrayBuffer === 'function'
+    && bytes.buffer instanceof SharedArrayBuffer ? bytes.slice() : bytes);
+
+/**
  * A growing buffer the encoder writes into.
  */
 function createWriter(){
@@ -231,7 +241,7 @@ export function decodeValue(bytes){
             }
             case STRING: {
                 const length = u32();
-                const text = decoder.decode(bytes.subarray(at, at + length));
+                const text = textOf(bytes.subarray(at, at + length));
                 at += length;
                 return text;
             }

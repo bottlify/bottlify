@@ -72,3 +72,36 @@ test('what cannot cross is refused when written, not mangled', ()=>{
     }
     assert.throws(()=>decodeValue(Uint8Array.of(4, 1, 0, 0, 0, 0)), /after the value/);
 });
+
+test('a value is read out of shared memory as a browser reads it, which decodes no shared view',
+    async()=>{
+        // A browser's TextDecoder refuses a view of a SharedArrayBuffer, and a
+        // link's rings are one; Node's does not, so the browser's rule is
+        // put in its place for this read.
+        const Original = globalThis.TextDecoder;
+        class BrowserDecoder extends Original {
+            /** @param {any} [input] @param {any} [options] */
+            decode(input, options){
+                if (input?.buffer instanceof SharedArrayBuffer)
+                {
+                    throw new TypeError('The provided ArrayBufferView value must not be shared.');
+                }
+                return super.decode(input, options);
+            }
+        }
+        globalThis.TextDecoder = BrowserDecoder;
+        try
+        {
+            const { encodeValue: encode, decodeValue: decode } =
+                await import(`./codec.js?browser=${Date.now()}`);
+            const value = { name: 'C:\\App\\lithtech.exe', list: ['a', 'é', '\ud800'] };
+            const plain = encode(value);
+            const shared = new Uint8Array(new SharedArrayBuffer(plain.length + 8), 8);
+            shared.set(plain);
+            assert.deepEqual(decode(shared), value);
+        }
+        finally
+        {
+            globalThis.TextDecoder = Original;
+        }
+    });

@@ -24,12 +24,12 @@
  */
 
 import { openRing } from '../system/ring.js';
+import { textOf } from '../system/codec.js';
 
 /** The inbound ring's size: input arrives in bursts of a few hundred bytes a message. */
 export const INBOUND_BYTES = 1 << 20;
 
 const encoder = new TextEncoder();
-const decoder = new TextDecoder();
 
 /**
  * The page's side: input and visibility through the ring, everything else
@@ -95,6 +95,6 @@ export function createInboundReader(memory, receive){
     return {
         bell: ring.bell,
         /** @returns {number} how many messages there were */
-        drain: ()=>ring.drain(bytes=>receive(JSON.parse(decoder.decode(bytes)))),
+        drain: ()=>ring.drain(bytes=>receive(JSON.parse(textOf(bytes)))),
     };
 }

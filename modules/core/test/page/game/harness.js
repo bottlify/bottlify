@@ -1069,7 +1069,9 @@ export function scalars(layers){
 async function standingOf(app){
     return (await app.standing()).map((/** @type {any} */ { image, diagnostics })=>{
         /** @param {string} layer */
-        const metrics = layer=>diagnostics.find((/** @type {any} */ entry)=>
+        // A process in a worker of its own that ended while asked answers
+        // nothing.
+        const metrics = layer=>(diagnostics ?? []).find((/** @type {any} */ entry)=>
             entry.name === layer)?.metrics ?? {};
         const kernel = metrics('kernel');
         const bridge = metrics('bridge');
