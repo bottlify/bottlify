@@ -40,6 +40,40 @@ const WINDOW_STRIDE = 4;
  *     A live window of this process, or null.
  * @property {(hwnd: number, message: number, wParam: number, lParam: number) => boolean} post
  *     Posts into the queue of the thread that made the window.
+ * @property {(hwnd: number, request: SentRequest) => number | null} send
+ *     Puts a message sent from another process in front of the thread that
+ *     made the window, as one sent from another thread of its own: a number
+ *     to ask for the answer by, or null for a window that is not there.
+ * @property {(id: number) => SentAnswer | null} answer
+ *     Where a sent message stands; null once its window is gone unanswered.
+ *     An answer is handed out once.
+ * @property {(id: number) => void} withdraw
+ *     A sender that stopped waiting: the message is not delivered if it has
+ *     not been yet.
+ */
+
+/**
+ * A message another process sent, in values: what its pointers pointed at
+ * travels as bytes, and the receiving process puts them in its own memory.
+ *
+ * @typedef {Object} SentRequest
+ * @property {number} message
+ * @property {number} wParam
+ * @property {number} lParam
+ * @property {boolean} unicode  Whether the text it carries is wide.
+ * @property {boolean} wait     False for a notification, which nobody waits on.
+ * @property {{ kind: 'copydata', data: number, bytes: Uint8Array }
+ *     | { kind: 'text', bytes: Uint8Array }
+ *     | { kind: 'room', bytes: number } | null} carried
+ *     WM_COPYDATA's block; the text WM_SETTEXT and its kind carry, terminated;
+ *     the buffer WM_GETTEXT and its kind fill, by its size.
+ */
+
+/**
+ * @typedef {Object} SentAnswer
+ * @property {boolean} replied
+ * @property {number} [result]
+ * @property {Uint8Array} [bytes]  What the procedure wrote into a buffer it was lent.
  */
 
 /**
@@ -55,6 +89,8 @@ export function createWindowDirectory(){
     const owners = new Map();
     /** Each process that can have windows, in the order it started. @type {Map<number, WindowEndpoint>} */
     const endpoints = new Map();
+    /** Processes that run nothing now, and so answer nothing. @type {Set<number>} */
+    const held = new Set();
 
     /** @param {number} hwnd */
     const endpointOf = hwnd=>{
@@ -175,6 +211,56 @@ export function createWindowDirectory(){
                 }
             }
             return 0;
+        },
+
+        /**
+         * Whether a process is held: paused while another runs in its place
+         * or beside it, where one process runs at a time. A message sent to
+         * it would wait for ever, and is refused instead.
+         *
+         * @param {number} processId @param {boolean} holding
+         */
+        hold(processId, holding){
+            if (holding)
+            {
+                held.add(processId >>> 0);
+            }
+            else
+            {
+                held.delete(processId >>> 0);
+            }
+        },
+
+        /**
+         * Sends to a window of another process than `asking`. Null when the
+         * handle names none, or its process is held; otherwise what the
+         * answer is asked for by.
+         *
+         * @param {number} asking @param {number} hwnd @param {SentRequest} request
+         * @returns {{ owner: number, id: number } | null}
+         */
+        send(asking, hwnd, request){
+            const found = endpointOf(hwnd);
+            if (!found || found.owner === (asking >>> 0) || !found.endpoint
+                || held.has(found.owner))
+            {
+                return null;
+            }
+            const id = found.endpoint.send(hwnd >>> 0, request);
+            return id === null ? null : { owner: found.owner, id };
+        },
+
+        /**
+         * @param {{ owner: number, id: number }} sent
+         * @returns {SentAnswer | null} null once the window or its process is gone
+         */
+        answer(sent){
+            return endpoints.get(sent.owner)?.answer(sent.id) ?? null;
+        },
+
+        /** @param {{ owner: number, id: number }} sent */
+        withdraw(sent){
+            endpoints.get(sent.owner)?.withdraw(sent.id);
         },
 
         /**

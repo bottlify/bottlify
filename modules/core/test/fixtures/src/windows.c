@@ -11,6 +11,11 @@
  * reads its caption and class, and posts to it: which process owns the
  * window, and its own id. The parent checks what arrived, then the child's
  * exit code -- the number of its own checks that failed.
+ *
+ * Started with -send, the child also sends to the window and waits for the
+ * answers: a block of bytes, a new caption, the caption read back, a message
+ * with a timeout. With -held, where the parent runs nothing while its child
+ * runs, a send is refused at once rather than waited on for ever.
  */
 
 #include "rt.h"
@@ -41,6 +46,8 @@ typedef struct
 
 typedef struct { void *window; unsigned message; unsigned wParam, lParam, time, x, y; } MSG;
 
+typedef struct { unsigned data, count; const void *bytes; } COPYDATASTRUCT;
+
 __declspec(dllimport) char *__stdcall GetCommandLineA(void);
 __declspec(dllimport) void *__stdcall GetModuleHandleA(const char *name);
 __declspec(dllimport) unsigned __stdcall GetCurrentProcessId(void);
@@ -66,16 +73,57 @@ __declspec(dllimport) int __stdcall PostMessageA(void *window, unsigned message,
 __declspec(dllimport) int __stdcall GetMessageA(MSG *message, void *window, unsigned first,
     unsigned last);
 __declspec(dllimport) long __stdcall DispatchMessageA(const MSG *message);
+__declspec(dllimport) long __stdcall SendMessageA(void *window, unsigned message,
+    unsigned wParam, long lParam);
+__declspec(dllimport) long __stdcall SendMessageTimeoutA(void *window, unsigned message,
+    unsigned wParam, long lParam, unsigned flags, unsigned timeout, unsigned *result);
+__declspec(dllimport) unsigned __stdcall GetLastError(void);
 
 #define INFINITE 0xffffffff
 #define WM_APP 0x8000
+#define WM_SETTEXT 0x000c
+#define WM_GETTEXT 0x000d
+#define WM_COPYDATA 0x004a
+#define SMTO_NORMAL 0
+#define ERROR_TIMEOUT 1460
+#define COPIED 0x1234
+#define ASKED 99
 
-static int child(void)
+/* What the parent's window was handed by WM_COPYDATA, checked by the parent. */
+static unsigned copiedData, copiedCount;
+static char copied[8];
+
+static long __stdcall procedure(void *window, unsigned message, unsigned wParam, long lParam)
+{
+    if (message == WM_COPYDATA)
+    {
+        const COPYDATASTRUCT *block = (const COPYDATASTRUCT *)lParam;
+        copiedData = block->data;
+        copiedCount = block->count;
+        for (unsigned at = 0; at < block->count && at < sizeof copied; at++)
+        {
+            copied[at] = ((const char *)block->bytes)[at];
+        }
+        return COPIED;
+    }
+    if (message == WM_APP + 2)
+    {
+        return ASKED + (long)wParam;
+    }
+    return DefWindowProcA(window, message, wParam, lParam);
+}
+
+/* Whether the command line holds the word, whole. */
+static int asked(const char *word)
 {
     for (const char *at = GetCommandLineA(); *at; at++)
     {
-        if (at[0] == '-' && at[1] == 'c' && at[2] == 'h' && at[3] == 'i' && at[4] == 'l'
-            && at[5] == 'd')
+        int i = 0;
+        while (word[i] && at[i] == word[i])
+        {
+            i++;
+        }
+        if (!word[i] && (at[i] == ' ' || at[i] == 0))
         {
             return 1;
         }
@@ -110,6 +158,33 @@ static int look(void)
         && equal(text, "Host Window"));
     check("child: its class reads", GetClassNameA(window, text, sizeof text) == 12
         && equal(text, "BottlifyHost"));
+    if (asked("-send"))
+    {
+        static const char bytes[] = "hello";
+        COPYDATASTRUCT block = { 7, 5, bytes };
+        check("child: WM_COPYDATA is answered by the parent's procedure",
+            SendMessageA(window, WM_COPYDATA, 0, (long)&block) == COPIED);
+        check("child: WM_SETTEXT renames it",
+            SendMessageA(window, WM_SETTEXT, 0, (long)"Renamed") == 1
+            && GetWindowTextA(window, text, sizeof text) == 7 && equal(text, "Renamed"));
+        char back[32] = { 0 };
+        check("child: WM_GETTEXT fills this process's buffer",
+            SendMessageA(window, WM_GETTEXT, sizeof back, (long)back) == 7
+            && equal(back, "Renamed"));
+        unsigned result = 0;
+        check("child: SendMessageTimeout is answered in time",
+            SendMessageTimeoutA(window, WM_APP + 2, 1, 0, SMTO_NORMAL, 5000, &result)
+            && result == ASKED + 1);
+    }
+    if (asked("-held"))
+    {
+        unsigned result = 0;
+        check("child: a send to a process that runs nothing now is refused",
+            SendMessageA(window, WM_APP + 2, 1, 0) == 0);
+        check("child: as a window that does not answer in time",
+            !SendMessageTimeoutA(window, WM_APP + 2, 1, 0, SMTO_NORMAL, 5000, &result)
+            && GetLastError() == ERROR_TIMEOUT);
+    }
     check("child: a message posted to it is taken",
         PostMessageA(window, WM_APP + 1, owner, (long)GetCurrentProcessId()));
     return failures;
@@ -117,12 +192,12 @@ static int look(void)
 
 int mainCRTStartup(void)
 {
-    if (child())
+    if (asked("-child"))
     {
         ExitProcess(look());
     }
     WNDCLASSA cls = { 0 };
-    cls.procedure = (void *)DefWindowProcA;
+    cls.procedure = (void *)procedure;
     cls.instance = GetModuleHandleA(0);
     cls.className = "BottlifyHost";
     RegisterClassA(&cls);
@@ -132,7 +207,18 @@ int mainCRTStartup(void)
 
     STARTUPINFOA startup = { sizeof startup };
     PROCESS_INFORMATION information = { 0 };
-    char command[] = "C:\\App\\windows.exe -child";
+    /* The child's command line: its own flag, then whatever this one was given. */
+    char command[64];
+    char *at = command;
+    for (const char *from = "C:\\App\\windows.exe -child "; *from; )
+    {
+        *at++ = *from++;
+    }
+    for (const char *from = asked("-send") ? "-send" : asked("-held") ? "-held" : ""; *from; )
+    {
+        *at++ = *from++;
+    }
+    *at = 0;
     check("parent: the child started", CreateProcessA(0, command, 0, 0, 0, 0, 0, 0, &startup,
         &information));
 
@@ -151,6 +237,11 @@ int mainCRTStartup(void)
     check("parent: the child named this process as the window's",
         got && message.wParam == GetCurrentProcessId());
     check("parent: and itself as the poster", got && message.lParam == information.processId);
+    if (asked("-send"))
+    {
+        check("parent: the block the child sent arrived whole", copiedData == 7
+            && copiedCount == 5 && copied[0] == 'h' && copied[4] == 'o');
+    }
 
     unsigned code = 1;
     WaitForSingleObject(information.process, INFINITE);

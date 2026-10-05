@@ -71,7 +71,7 @@ const IMPORTS = {
             'GetMessageA@16', 'TranslateMessage@4', 'DispatchMessageA@4', 'PostQuitMessage@4',
             'RegisterClassA@4', 'CreateWindowExA@48', 'DefWindowProcA@16', 'FindWindowA@8',
             'IsWindow@4', 'GetWindowThreadProcessId@8', 'GetWindowTextA@12', 'GetClassNameA@12',
-            'PostMessageA@16',
+            'PostMessageA@16', 'SendMessageA@16', 'SendMessageTimeoutA@28',
         ],
     },
     'msvcrt.dll': {

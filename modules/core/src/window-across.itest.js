@@ -18,15 +18,20 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 
-for (const mode of [undefined, 'workers'])
+// Where processes run at once a message sent to the parent's window is
+// answered; where one runs at a time the parent runs nothing while its child
+// does, and a send is refused rather than waited on for ever.
+for (const [mode, flag, sends] of /** @type {const} */ ([
+    [undefined, '', 0], [undefined, '-held', 2], ['workers', '', 0], ['workers', '-send', 4]]))
 {
     test(`a window is found, described and posted to by another process (${
-        mode ?? 'default'} mode)`, { timeout: 120000 }, async t=>{
+        mode ?? 'default'} mode${flag ? `, ${flag}` : ''})`, { timeout: 120000 }, async t=>{
         const program = new Uint8Array(await readFile(new URL('../test/fixtures/windows.exe',
             import.meta.url)));
         const app = await createApp({
             executable: program,
             imagePath: 'C:\\App\\windows.exe',
+            commandLine: `"C:\\App\\windows.exe" ${flag}`.trim(),
             engine: 'cork',
             ...mode ? { mode: /** @type {any} */ (mode) } : {},
             storage: { load: async()=>({
@@ -41,7 +46,8 @@ for (const mode of [undefined, 'workers'])
         assert.equal(await app.run({ timeoutMs: 60000 }), 0, output.join(''));
         const lines = output.join('');
         assert.doesNotMatch(lines, /FAIL/);
-        assert.equal(lines.match(/^ok {3}child: /gm)?.length, 8, lines);
-        assert.equal(lines.match(/^ok {3}parent: /gm)?.length, 6, lines);
+        assert.equal(lines.match(/^ok {3}child: /gm)?.length, 8 + sends, lines);
+        assert.equal(lines.match(/^ok {3}parent: /gm)?.length, 6 + (flag === '-send' ? 1 : 0),
+            lines);
     });
 }

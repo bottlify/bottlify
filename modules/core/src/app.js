@@ -6950,6 +6950,8 @@ export async function createApp(options){
      * @type {WeakMap<any, string>}
      */
     const images = new WeakMap();
+    /** Each machine's process id, as GetCurrentProcessId answers it. @type {WeakMap<any, number>} */
+    const processIds = new WeakMap();
     /** @type {Set<Promise<unknown>>} */
     const servers = new Set();
     /** @type {Set<any>} */
@@ -6998,6 +7000,7 @@ export async function createApp(options){
         processes.set(process, built);
         names.set(built, process);
         images.set(built, extra?.imagePath ?? '');
+        processIds.set(built, extra?.processId ?? 0x1000);
         return built;
     };
 
@@ -7257,7 +7260,18 @@ export async function createApp(options){
             imagePath = request.imagePath;
         }
 
-        const code = await runProcesses(runOptions, line, true);
+        // The parent runs nothing until its child is done: a message sent to
+        // its windows meanwhile would wait for ever, and is refused instead.
+        system.windows?.hold(processIds.get(parent), true);
+        let code;
+        try
+        {
+            code = await runProcesses(runOptions, line, true);
+        }
+        finally
+        {
+            system.windows?.hold(processIds.get(parent), false);
+        }
         imagePath = parentImage;
 
         // What an installer's second stage laid down is what the first stage

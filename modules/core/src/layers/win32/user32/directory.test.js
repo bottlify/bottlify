@@ -45,6 +45,17 @@ const process = (windows, posted = [])=>({
         posted.push([hwnd, message, wParam, lParam]);
         return true;
     },
+    /** @param {number} hwnd @param {any} request */
+    send(hwnd, request){
+        posted.push([hwnd, 'sent', request]);
+        return windows.some(each=>each.hwnd === hwnd) ? posted.length : null;
+    },
+    /** @param {number} id */
+    answer: id=>(id === posted.length ? { replied: true, result: id } : { replied: false }),
+    /** @param {number} id */
+    withdraw(id){
+        posted.push(['withdrawn', id]);
+    },
 });
 
 test('a window handle is the run\'s: never one a kernel handle is, never handed out twice', ()=>{
@@ -95,3 +106,29 @@ test('another process\'s window is found, described and posted to by the process
         assert.equal(directory.post(1, second, 0x8001, 0, 0), false);
         assert.equal(directory.find(1, 0, 0, 'game', null), third);
     });
+
+test('a message sent to another process\'s window is asked after by number, and a held process'
+    + ' takes none', ()=>{
+    const directory = createWindowDirectory();
+    const theirs = directory.open(2);
+    /** @type {any[]} */
+    const seen = [];
+    directory.attach(2, process([{ hwnd: theirs, className: 'Game', title: 'Game' }], seen));
+    const request = { message: 0x4a, wParam: 0, lParam: 0, unicode: false, wait: true,
+        carried: { kind: /** @type {const} */ ('copydata'), data: 7, bytes: Uint8Array.of(1, 2) } };
+    const sent = directory.send(1, theirs, request);
+    assert.deepEqual(sent, { owner: 2, id: 1 });
+    assert.deepEqual(seen[0], [theirs, 'sent', request], 'handed over as it was given');
+    assert.deepEqual(directory.answer(/** @type {any} */ (sent)), { replied: true, result: 1 });
+    directory.withdraw(/** @type {any} */ (sent));
+    assert.deepEqual(seen.at(-1), ['withdrawn', 1]);
+    assert.equal(directory.send(2, theirs, request), null, 'a process sends to its own itself');
+
+    directory.hold(2, true);
+    assert.equal(directory.send(1, theirs, request), null, 'held: nothing it runs would answer');
+    assert.equal(directory.post(1, theirs, 0x8001, 0, 0), true, 'a post waits in its queue');
+    directory.hold(2, false);
+    assert.notEqual(directory.send(1, theirs, request), null);
+    directory.detach(2);
+    assert.equal(directory.answer({ owner: 2, id: 1 }), null, 'gone with its process');
+});

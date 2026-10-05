@@ -724,7 +724,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * @param {boolean} unicode
      */
     const sendMessageTimeout = ([hwnd, message, wParam, lParam, , timeout, result], unicode)=>{
-        if (!live(hwnd))
+        if (!live(hwnd) && !elsewhere(hwnd))
         {
             host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
             return 0;

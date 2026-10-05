@@ -369,6 +369,15 @@ const ISMEX_NOTIFY = 2;
 const ISMEX_CALLBACK = 4;
 const ISMEX_REPLIED = 8;
 
+/**
+ * The message whose block a sender in another process lends the receiver:
+ * COPYDATASTRUCT's three words, then the bytes it points at.
+ */
+const WM_COPYDATA = 0x004a;
+const COPYDATASTRUCT_SIZE = 12;
+/** The longest text a message carries to another process, in characters. */
+const MAX_CARRIED_TEXT = 0x10000;
+
 /** TrackMouseEvent's request, its flags, and the messages its tracking posts. */
 const TRACKMOUSEEVENT_SIZE = 16;
 const TME_HOVER = 0x00000001;
@@ -847,7 +856,9 @@ export function createWindowFunctions(host){
      *
      * @typedef {{ hwnd: number, message: number, wParam: number, lParam: number,
      *     unicode: boolean, kind: number, replied: boolean, result: number,
-     *     from: number | null, callback: number, data: number }} SentMessage
+     *     from: number | null, callback: number, data: number,
+     *     elsewhere?: number }} SentMessage
+     *     `elsewhere`: the number another process asks for its answer by.
      */
 
     /**
@@ -907,6 +918,12 @@ export function createWindowFunctions(host){
         }
         sent.replied = true;
         sent.result = result;
+        // A notification from another process: nobody asks for its answer,
+        // and what it lent is given back now.
+        if (sent.elsewhere !== undefined && sent.kind === ISMEX_NOTIFY)
+        {
+            settleElsewhere(sent.elsewhere);
+        }
         if (sent.kind === ISMEX_CALLBACK && sent.from !== null)
         {
             listOf(answered, sent.from).push(sent);
@@ -964,11 +981,15 @@ export function createWindowFunctions(host){
      * @param {boolean} [unicode]
      * @param {{ kind?: number, timeout?: number, callback?: number, data?: number }} [how]
      *     `timeout` in milliseconds, for SendMessageTimeout.
-     * @returns {number | Promise<number | null>} the answer; null when the
-     *     timeout passed first
+     * @returns {number | null | Promise<number | null>} the answer; null when
+     *     the timeout passed first
      */
     const sendAcross = (hwnd, message, wParam, lParam, thread, unicode = false, how = {})=>{
         const record = live(hwnd);
+        if (!record && directory.describe(hwnd, processId))
+        {
+            return sendElsewhere(hwnd, message, wParam, lParam, thread, unicode, how);
+        }
         const owner = record ? creatorOf(record) : null;
         const self = threadIdOf(thread);
         if (!record || owner === null || self === null || owner === self)
@@ -1007,6 +1028,240 @@ export function createWindowFunctions(host){
             }
             return sent.result;
         })();
+    };
+
+    /**
+     * The bytes a terminated string occupies, terminator included.
+     *
+     * @param {number} address @param {boolean} wide
+     */
+    const terminatedBytes = (address, wide)=>{
+        const width = wide ? 2 : 1;
+        /** @type {number[]} */
+        const bytes = [];
+        for (let at = address; bytes.length < MAX_CARRIED_TEXT * width; at += 256)
+        {
+            const piece = host.readMemory(at, 256);
+            for (let i = 0; i + width <= piece.length; i += width)
+            {
+                const unit = wide ? piece[i] | piece[i + 1] << 8 : piece[i];
+                bytes.push(...piece.subarray(i, i + width));
+                if (unit === 0)
+                {
+                    return Uint8Array.from(bytes);
+                }
+            }
+            if (piece.length < 256)
+            {
+                break;
+            }
+        }
+        return Uint8Array.from([...bytes, ...new Array(width).fill(0)]);
+    };
+
+    /**
+     * What a message's pointers point at, as the bytes another process is
+     * handed: the messages Windows itself carries between processes. Any
+     * other is sent as its four words, as Windows sends it.
+     *
+     * @param {number} message @param {number} wParam @param {number} lParam
+     * @param {boolean} unicode
+     * @returns {import('./directory.js').SentRequest['carried']}
+     */
+    const carriedOf = (message, wParam, lParam, unicode)=>{
+        if (message === WM_COPYDATA && lParam !== 0)
+        {
+            const [data, count, at] = [0, 4, 8].map(offset=>readU32(host, lParam + offset));
+            const bytes = count > 0 && at !== 0 ? host.readMemory(at, count).slice()
+                : new Uint8Array();
+            return { kind: 'copydata', data, bytes };
+        }
+        if (message === WM_SETTEXT && lParam !== 0)
+        {
+            return { kind: 'text', bytes: terminatedBytes(lParam, unicode) };
+        }
+        if (message === WM_GETTEXT && lParam !== 0 && wParam !== 0)
+        {
+            return { kind: 'room',
+                bytes: Math.min(wParam, MAX_CARRIED_TEXT) * (unicode ? 2 : 1) };
+        }
+        return null;
+    };
+
+    /**
+     * SendMessage to another process's window: the message crosses as values,
+     * and the caller waits for the answer the way it waits for another
+     * thread's -- taking what is sent to its own windows meanwhile, or two
+     * processes sending to each other would wait for ever.
+     *
+     * @param {number} hwnd @param {number} message @param {number} wParam
+     * @param {number} lParam @param {unknown} thread @param {boolean} unicode
+     * @param {{ kind?: number, timeout?: number }} how
+     * @returns {number | null | Promise<number | null>} null when the timeout passed first
+     */
+    const sendElsewhere = (hwnd, message, wParam, lParam, thread, unicode, how)=>{
+        const wait = (how.kind ?? ISMEX_SEND) === ISMEX_SEND;
+        const sent = directory.send(processId, hwnd, {
+            message: message >>> 0, wParam: wParam >>> 0, lParam: lParam >>> 0, unicode, wait,
+            carried: carriedOf(message >>> 0, wParam >>> 0, lParam >>> 0, unicode),
+        });
+        if (!sent)
+        {
+            // A process that runs nothing now answers nothing: as a window
+            // that does not answer in time.
+            return how.timeout === undefined ? 0 : null;
+        }
+        if (!wait)
+        {
+            return 1;
+        }
+        const clock = host.now ?? (()=>0);
+        const deadline = how.timeout === undefined ? Infinity : clock() + how.timeout;
+        return (async()=>{
+            for (;;)
+            {
+                const answer = directory.answer(sent);
+                if (!answer)
+                {
+                    return 0;
+                }
+                if (answer.replied)
+                {
+                    if (answer.bytes)
+                    {
+                        host.writeMemory(lParam >>> 0, answer.bytes);
+                    }
+                    return answer.result ?? 0;
+                }
+                if (clock() >= deadline)
+                {
+                    directory.withdraw(sent);
+                    return null;
+                }
+                await host.idle();
+                await receiveSent(thread);
+            }
+        })();
+    };
+
+    /**
+     * Messages other processes sent to this one's windows, by the number
+     * each sender asks for its answer by, with the memory lent to carry what
+     * their pointers pointed at.
+     *
+     * @type {Map<number, { sent: SentMessage, owner: number, lent: number,
+     *     carried: import('./directory.js').SentRequest['carried'] }>}
+     */
+    const sentFromElsewhere = new Map();
+    let nextElsewhere = 1;
+
+    /**
+     * A message from another process done with: what was lent for it goes
+     * back to the heap.
+     *
+     * @param {number} id
+     */
+    const settleElsewhere = id=>{
+        const entry = sentFromElsewhere.get(id);
+        if (!entry)
+        {
+            return;
+        }
+        sentFromElsewhere.delete(id);
+        const waiting = inbox.get(entry.owner) ?? [];
+        if (waiting.includes(entry.sent))
+        {
+            waiting.splice(waiting.indexOf(entry.sent), 1);
+        }
+        if (entry.lent !== 0)
+        {
+            host.release?.(entry.lent);
+        }
+    };
+
+    /**
+     * Takes a message another process sent, as a thread of this one sends
+     * one: into the inbox of the thread that made the window, with what it
+     * carries put where the procedure can read it.
+     *
+     * @param {number} hwnd @param {import('./directory.js').SentRequest} request
+     * @returns {number | null}
+     */
+    const receiveElsewhere = (hwnd, request)=>{
+        const record = live(hwnd);
+        const owner = record ? creatorOf(record) : null;
+        if (!record || owner === null)
+        {
+            return null;
+        }
+        const carried = request.carried;
+        let lParam = request.lParam;
+        let lent = 0;
+        if (carried)
+        {
+            const size = carried.kind === 'copydata'
+                ? COPYDATASTRUCT_SIZE + carried.bytes.length
+                : carried.kind === 'text' ? carried.bytes.length : carried.bytes;
+            lent = host.allocate?.(Math.max(size, 1)) ?? 0;
+            if (lent === 0)
+            {
+                return null;
+            }
+            if (carried.kind === 'copydata')
+            {
+                writeU32s(host, lent, [carried.data, carried.bytes.length,
+                    carried.bytes.length > 0 ? lent + COPYDATASTRUCT_SIZE : 0]);
+                host.writeMemory(lent + COPYDATASTRUCT_SIZE, carried.bytes);
+            }
+            else if (carried.kind === 'text')
+            {
+                host.writeMemory(lent, carried.bytes);
+            }
+            else
+            {
+                host.writeMemory(lent, new Uint8Array(carried.bytes));
+            }
+            lParam = lent;
+        }
+        const id = nextElsewhere++;
+        /** @type {SentMessage} */
+        const sent = {
+            hwnd: record.hwnd, message: request.message, wParam: request.wParam, lParam,
+            unicode: request.unicode, kind: request.wait ? ISMEX_SEND : ISMEX_NOTIFY,
+            replied: false, result: 0, from: null, callback: 0, data: 0, elsewhere: id,
+        };
+        sentFromElsewhere.set(id, { sent, owner, lent, carried });
+        listOf(inbox, owner).push(sent);
+        host.queue.sent?.(owner);
+        return id;
+    };
+
+    /**
+     * Where a message from another process stands; its answer, once, and
+     * with it what the procedure wrote into a buffer it was lent.
+     *
+     * @param {number} id
+     * @returns {import('./directory.js').SentAnswer | null}
+     */
+    const answerElsewhere = id=>{
+        const entry = sentFromElsewhere.get(id);
+        if (!entry)
+        {
+            return null;
+        }
+        if (!entry.sent.replied)
+        {
+            if (live(entry.sent.hwnd))
+            {
+                return { replied: false };
+            }
+            settleElsewhere(id);
+            return null;
+        }
+        const bytes = entry.carried?.kind === 'room'
+            ? host.readMemory(entry.lent, entry.carried.bytes).slice() : undefined;
+        settleElsewhere(id);
+        return { replied: true, result: entry.sent.result, ...bytes ? { bytes } : {} };
     };
 
     /** @param {any} value @param {(answer: any) => any} then */
@@ -4401,6 +4656,9 @@ export function createWindowFunctions(host){
             host.queue.post({ hwnd, message, wParam, lParam });
             return true;
         },
+        send: receiveElsewhere,
+        answer: answerElsewhere,
+        withdraw: settleElsewhere,
     });
 
     /**
@@ -4410,7 +4668,7 @@ export function createWindowFunctions(host){
      * @param {boolean} unicode
      */
     const notify = ([hwnd, message, wParam, lParam], unicode)=>{
-        if (!live(hwnd))
+        if (!live(hwnd) && !directory.describe(hwnd, processId))
         {
             host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
             return 0;
