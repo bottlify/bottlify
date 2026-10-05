@@ -70,8 +70,11 @@ const IMPORTS = {
             'CoWaitForMultipleHandles@20', 'CoMarshalHresult@8', 'CoUnmarshalHresult@8',
             'CreateStreamOnHGlobal@12', 'CoMarshalInterface@24', 'CoUnmarshalInterface@12',
             'CoReleaseMarshalData@4', 'CoGetMarshalSizeMax@24', 'CoCreateFreeThreadedMarshaler@8',
-            'CoGetStandardMarshal@24',
+            'CoGetStandardMarshal@24', 'CreateErrorInfo@4', 'SetErrorInfo@8', 'GetErrorInfo@8',
         ],
+    },
+    'OLEAUT32.dll': {
+        undecorated: ['SysFreeString@4'],
     },
     'USER32.dll': {
         undecorated: [

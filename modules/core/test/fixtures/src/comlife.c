@@ -14,8 +14,9 @@
  *
  * The served object is an IDispatch whose GetTypeInfoCount answers what the
  * server saw: on the first call, inside it, the call context and the client's
- * security; on the second, whether it could disconnect itself. A third call
- * through the same proxy then finds the object gone.
+ * security; the second fails, saying why through SetErrorInfo, which the
+ * client reads; on the third, whether it could disconnect itself. A fourth
+ * call through the same proxy then finds the object gone.
  */
 
 #include "rt.h"
@@ -70,6 +71,10 @@ __declspec(dllimport) long __stdcall CoMarshalHresult(Object *stream, long hresu
 __declspec(dllimport) long __stdcall CoUnmarshalHresult(Object *stream, long *hresult);
 __declspec(dllimport) long __stdcall CreateStreamOnHGlobal(void *global, int release,
     Object **stream);
+__declspec(dllimport) long __stdcall CreateErrorInfo(Object **creator);
+__declspec(dllimport) long __stdcall SetErrorInfo(unsigned reserved, Object *info);
+__declspec(dllimport) long __stdcall GetErrorInfo(unsigned reserved, Object **info);
+__declspec(dllimport) void __stdcall SysFreeString(unsigned short *text);
 __declspec(dllimport) int __stdcall PostThreadMessageA(unsigned thread, unsigned message,
     unsigned wParam, unsigned lParam);
 typedef struct { void *window; unsigned message; unsigned wParam, lParam, time, x, y; } MSG;
@@ -77,6 +82,7 @@ __declspec(dllimport) int __stdcall PeekMessageA(MSG *message, void *window, uns
     unsigned last, unsigned remove);
 
 #define S_OK 0
+#define E_FAIL ((long)0x80004005)
 #define E_INVALIDARG ((long)0x80070057)
 #define E_NOINTERFACE ((long)0x80004002)
 #define CLASS_E_NOAGGREGATION ((long)0x80040110)
@@ -101,6 +107,10 @@ static const GUID IID_IClassFactory =
     { 0x00000001, 0, 0, { 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
 static const GUID IID_IDispatch =
     { 0x00020400, 0, 0, { 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
+static const GUID IID_IErrorInfo =
+    { 0x1cf2b120, 0x547d, 0x101b, { 0x8e, 0x65, 0x08, 0x00, 0x2b, 0x2b, 0xd1, 0x19 } };
+static const unsigned short failure[] = { 'n', 'o', ' ', 'p', 'a', 'p', 'e', 'r', 0 };
+static const unsigned short source[] = { 'C', 'o', 'm', 'L', 'i', 'f', 'e', 0 };
 static const GUID IID_IServerSecurity =
     { 0x0000013e, 0, 0, { 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
 
@@ -176,6 +186,21 @@ static long __stdcall GetTypeInfoCount(Object *self, unsigned *answer)
         saw |= CoGetCurrentProcess() != 0 ? SAW_SEQUENCE : 0;
         *answer = saw;
         return S_OK;
+    }
+    if (calls == 2)
+    {
+        /* A failure that says why, which the client reads with GetErrorInfo. */
+        Object *creator = 0, *info = 0;
+        CreateErrorInfo(&creator);
+        ((long(__stdcall *)(Object *, const unsigned short *))creator->vtbl->methods[1])(creator,
+            source);
+        ((long(__stdcall *)(Object *, const unsigned short *))creator->vtbl->methods[2])(creator,
+            failure);
+        creator->vtbl->QueryInterface(creator, &IID_IErrorInfo, (void **)&info);
+        creator->vtbl->Release(creator);
+        SetErrorInfo(0, info);
+        *answer = 0;
+        return E_FAIL;
     }
     /* Every other process's hold goes, and with it the object. */
     *answer = CoDisconnectObject(self, 0) == S_OK;
@@ -329,6 +354,31 @@ static int use(void)
         unsigned saw = 0;
         check("client: inside the call the server saw its context and its client",
             count(served, &saw) == S_OK && saw == SAW_ALL);
+        unsigned none = 0;
+        Object *info = 0;
+        unsigned short *said = 0, *from = 0;
+        int read = count(served, &none) == E_FAIL && GetErrorInfo(0, &info) == S_OK && info
+            && ((long(__stdcall *)(Object *, unsigned short **))info->vtbl->methods[2])(info,
+                &said) == S_OK
+            && ((long(__stdcall *)(Object *, unsigned short **))info->vtbl->methods[1])(info,
+                &from) == S_OK;
+        int matches = read && said && from;
+        for (int at = 0; matches && (failure[at] || said[at]); at++)
+        {
+            matches = failure[at] == said[at];
+        }
+        for (int at = 0; matches && (source[at] || from[at]); at++)
+        {
+            matches = source[at] == from[at];
+        }
+        check("client: a failed call's error, as its server set it", matches);
+        if (info)
+        {
+            SysFreeString(said);
+            SysFreeString(from);
+            info->vtbl->Release(info);
+        }
+        check("client: read once, then gone", GetErrorInfo(0, &info) == 1 && !info);
         unsigned disconnected = 0;
         check("client: the server disconnected the object",
             count(served, &disconnected) == S_OK && disconnected == 1);

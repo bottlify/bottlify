@@ -64,8 +64,9 @@ for (const concurrency of /** @type {const} */ ([1, 2, 4]))
 for (const concurrency of /** @type {const} */ ([1, 2, 4]))
 {
     test(`a server's life and what its calls see: the call context, the client's security, a`
-        + ` proxy's blanket, a wait that serves the apartment, a server process counted down and`
-        + ` an object disconnected (concurrency ${concurrency})`, { timeout: 120000 }, async t=>{
+        + ` proxy's blanket, a wait that serves the apartment, a server process counted down, a`
+        + ` failed call's error information and an object disconnected`
+        + ` (concurrency ${concurrency})`, { timeout: 120000 }, async t=>{
         const program = new Uint8Array(await readFile(new URL('../test/fixtures/comlife.exe',
             import.meta.url)));
         const app = await createApp({
@@ -86,7 +87,7 @@ for (const concurrency of /** @type {const} */ ([1, 2, 4]))
         const lines = output.join('');
         assert.doesNotMatch(lines, /FAIL/);
         // Every line the program checks, client and server.
-        assert.equal(lines.match(/^ok {3}/gm)?.length, 16, lines);
+        assert.equal(lines.match(/^ok {3}/gm)?.length, 18, lines);
     });
 }
 

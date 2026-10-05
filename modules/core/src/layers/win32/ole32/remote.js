@@ -81,6 +81,18 @@ const SLOT_INVOKE = 5;
 
 const IID_IRPCCHANNELBUFFER = '{D5F56B60-593B-101A-B569-08002B2DBF7A}';
 
+/** IErrorInfo, and the methods of it and of ICreateErrorInfo a reply's error is moved by. */
+const IID_IERRORINFO = '{1CF2B120-547D-101B-8E65-08002B2BD119}';
+const SLOT_ERROR_GET_GUID = 3;
+const SLOT_ERROR_GET_SOURCE = 4;
+const SLOT_ERROR_GET_DESCRIPTION = 5;
+const SLOT_ERROR_GET_HELP_FILE = 6;
+const SLOT_ERROR_GET_HELP_CONTEXT = 7;
+const SLOT_ERROR_SET_GUID = 3;
+const SLOT_ERROR_SET_SOURCE = 4;
+const SLOT_ERROR_SET_HELP_CONTEXT = 7;
+const GUID_BYTES = 16;
+
 /** RPCOLEMESSAGE, as a channel reads and writes it. */
 const MESSAGE = Object.freeze({
     DATA_REPRESENTATION: 4, BUFFER: 8, BUFFER_LENGTH: 12, METHOD: 16, SIZE: 44,
@@ -368,6 +380,11 @@ export function createClassTable(hooks = {}){
  *     The IPSFactoryBuffer of the proxy/stub DLL the registry names for an
  *     interface, loaded into this process as COM loads it; 0 when none is.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {{ take: () => number, set: (pointer: number) => unknown,
+ *     create: (out: number) => number }} [errors]
+ *     The thread's error-information slot -- taken off it, which clears it,
+ *     and set, the slot keeping the reference handed it -- and
+ *     CreateErrorInfo: how a failed call's error crosses back to its caller.
  */
 
 /**
@@ -539,6 +556,123 @@ export function createRemoting(host){
     });
 
     /**
+     * A BSTR's text, read where it lies, and the BSTR given back.
+     *
+     * @param {number} bstr @returns {string | null}
+     */
+    const takeBstr = bstr=>{
+        if (bstr === 0)
+        {
+            return null;
+        }
+        const length = Math.min(readU32(bstr - 4), 1 << 20);
+        const bytes = host.readMemory(bstr, length);
+        let text = '';
+        for (let at = 0; at + 1 < bytes.length; at += 2)
+        {
+            text += String.fromCharCode(bytes[at] | (bytes[at + 1] << 8));
+        }
+        host.bstr.free(bstr);
+        return text;
+    };
+
+    /**
+     * The error information the thread holds, taken off it and read as
+     * values: what a call's reply carries back to the process that made it,
+     * where an IErrorInfo pointer of this one would mean nothing. Null when
+     * the thread holds none.
+     *
+     * @param {unknown} thread
+     * @returns {Promise<{ guid: string, source: string | null, description: string | null,
+     *     helpFile: string | null, helpContext: number } | null>}
+     */
+    const takeErrorInfo = async thread=>{
+        const pointer = host.errors?.take() ?? 0;
+        if (pointer === 0)
+        {
+            return null;
+        }
+        const block = host.heap.allocate(GUID_BYTES + 4);
+        if (block === 0)
+        {
+            await callSlot(pointer, SLOT_RELEASE, [], thread);
+            return null;
+        }
+        host.writeMemory(block, new Uint8Array(GUID_BYTES + 4));
+        await callSlot(pointer, SLOT_ERROR_GET_GUID, [block], thread);
+        const guid = formatGuid(host.readMemory(block, GUID_BYTES).slice());
+        /** @param {number} slot */
+        const text = async slot=>{
+            writeU32(block + GUID_BYTES, 0);
+            const hr = (await callSlot(pointer, slot, [block + GUID_BYTES], thread)) | 0;
+            return hr < 0 ? null : takeBstr(readU32(block + GUID_BYTES));
+        };
+        const source = await text(SLOT_ERROR_GET_SOURCE);
+        const description = await text(SLOT_ERROR_GET_DESCRIPTION);
+        const helpFile = await text(SLOT_ERROR_GET_HELP_FILE);
+        writeU32(block + GUID_BYTES, 0);
+        await callSlot(pointer, SLOT_ERROR_GET_HELP_CONTEXT, [block + GUID_BYTES], thread);
+        const helpContext = readU32(block + GUID_BYTES);
+        host.heap.free(block);
+        await callSlot(pointer, SLOT_RELEASE, [], thread);
+        return { guid, source, description, helpFile, helpContext };
+    };
+
+    /**
+     * Error information another process's call carried back, made an object
+     * of this process's and set on the thread, as GetErrorInfo reads it.
+     *
+     * @param {{ guid: string, source: string | null, description: string | null,
+     *     helpFile: string | null, helpContext: number }} values
+     * @param {unknown} thread
+     */
+    const giveErrorInfo = async(values, thread)=>{
+        if (!host.errors)
+        {
+            return;
+        }
+        const strings = [values.source, values.description, values.helpFile]
+            .map(value=>(value ?? ''));
+        const size = GUID_BYTES + 4 + strings.reduce((sum, value)=>sum + (value.length + 1) * 2, 0);
+        const block = host.heap.allocate(size);
+        if (block === 0)
+        {
+            return;
+        }
+        writeU32(block, 0);
+        if ((host.errors.create(block) | 0) < 0 || readU32(block) === 0)
+        {
+            host.heap.free(block);
+            return;
+        }
+        const creator = readU32(block);
+        host.writeMemory(block + 4, /** @type {Uint8Array} */ (parseGuid(values.guid)));
+        await callSlot(creator, SLOT_ERROR_SET_GUID, [block + 4], thread);
+        let at = block + 4 + GUID_BYTES;
+        for (const [index, value] of strings.entries())
+        {
+            const bytes = new Uint8Array((value.length + 1) * 2);
+            for (let unit = 0; unit < value.length; unit++)
+            {
+                bytes[unit * 2] = value.charCodeAt(unit) & 0xff;
+                bytes[unit * 2 + 1] = value.charCodeAt(unit) >>> 8;
+            }
+            host.writeMemory(at, bytes);
+            await callSlot(creator, SLOT_ERROR_SET_SOURCE + index, [at], thread);
+            at += bytes.length;
+        }
+        await callSlot(creator, SLOT_ERROR_SET_HELP_CONTEXT, [values.helpContext >>> 0], thread);
+        const asked = await queryGuest(creator, IID_IERRORINFO, thread);
+        await callSlot(creator, SLOT_RELEASE, [], thread);
+        host.heap.free(block);
+        // The thread's slot holds the reference the query took.
+        if (asked.pointer !== 0)
+        {
+            host.errors.set(asked.pointer);
+        }
+    };
+
+    /**
      * Sends a message to another process and waits for its answer, running
      * the calls that arrive for this thread meanwhile.
      *
@@ -565,6 +699,12 @@ export function createRemoting(host){
                 home.waiting = null;
                 if (settled)
                 {
+                    // What the server said of its failure is this thread's
+                    // to read with GetErrorInfo now, as the channel hands it.
+                    if (settled.value?.errorInfo)
+                    {
+                        await giveErrorInfo(settled.value.errorInfo, thread);
+                    }
                     return settled.value;
                 }
             }
@@ -1305,6 +1445,25 @@ export function createRemoting(host){
      * @returns {Promise<any>}
      */
     const execute = async(message, thread)=>{
+        const reply = await executeKind(message, thread);
+        if (message.kind === 'call' || message.kind === 'ndr')
+        {
+            const errorInfo = await takeErrorInfo(thread);
+            if (errorInfo)
+            {
+                return { ...reply, errorInfo };
+            }
+        }
+        return reply;
+    };
+
+    /**
+     * What each kind of message asks, done.
+     *
+     * @param {any} message @param {unknown} thread
+     * @returns {Promise<any>}
+     */
+    const executeKind = async(message, thread)=>{
         const entry = exported.get(message.object);
         if (!entry)
         {

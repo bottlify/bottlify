@@ -293,6 +293,10 @@ const MAX_PROGID = 255;
  *           IUnknown it got through two interfaces to decide whether they belong
  *           to one object, and two addresses for one interface fails that test
  *           however correct the object model underneath is.
+ * @property {{ take: () => number, set: (pointer: number) => unknown,
+ *     create: (out: number) => number }} [errors]
+ *           The thread's error-information slot and CreateErrorInfo
+ *           (oleaut32's), for a call's error to cross between processes.
  * @property {(code: number) => any} [raise]
  *           RpcRaiseException on the calling thread.
  * @property {(code: number, thread: unknown) => Promise<any>} [raiseLater]
@@ -764,6 +768,7 @@ export function createOleFunctions(host){
             catalog: { hive: host.hive, readFile: wholeFile },
             proxyStub: { factory: (iid, thread)=>proxyStubFactory(iid, thread) },
             divergence: host.divergence,
+            errors: host.errors,
         });
         return remoting;
     };

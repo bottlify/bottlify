@@ -2308,6 +2308,25 @@ export function createWin32Module(){
                     offerMarshaler: marshaler=>{
                         objrefMarshaler = marshaler;
                     },
+                    // What a failed call between processes said of itself
+                    // crosses back through oleaut32's error-information slot.
+                    errors: {
+                        take: ()=>{
+                            const slot = heap.allocate(4);
+                            if (slot === 0)
+                            {
+                                return 0;
+                            }
+                            writeMemory(slot, new Uint8Array(4));
+                            libraries['OLEAUT32.dll'].GetErrorInfo.handler([0, slot]);
+                            const taken = new DataView(readMemory(slot, 4).slice().buffer)
+                                .getUint32(0, true);
+                            heap.free(slot);
+                            return taken;
+                        },
+                        set: pointer=>libraries['OLEAUT32.dll'].SetErrorInfo.handler([0, pointer]),
+                        create: out=>libraries['OLEAUT32.dll'].CreateErrorInfo.handler([out]),
+                    },
                     // A user-marshal routine that cannot carry what it is handed
                     // raises the way the generated code it is called from expects.
                     raise: code=>raiseRpc(code),
