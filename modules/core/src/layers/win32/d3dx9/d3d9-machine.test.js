@@ -962,9 +962,9 @@ test('decode rejects malformed token streams', ()=>{
         0xa0e40000, 0xffff])),
     /destination shift scale/);
     // A dcl with a texture type that does not exist.
-    rejects(()=>decode(Uint32Array.from([0xffff0200, 31 | (2 << 24), 0x80000000 | (3 << 27),
+    rejects(()=>decode(Uint32Array.from([0xffff0200, 31 | (2 << 24), 0x80000000 | (5 << 27),
         0xa00f0802, 0xffff])),
-    /texture type 3/);
+    /texture type 5/);
     rejects(()=>decode(Uint32Array.from([0xffff0300, 31 | (2 << 24), 0x80000000 | 20, 0x900f0000,
         0xffff])),
     /unknown usage 20/);
@@ -1013,7 +1013,7 @@ test('assembler syntax', ()=>{
     // dcl tokens: dcl_texcoord3 v1 and dcl_cube s2.
     assert.deepEqual([...asm('ps_3_0\ndcl_texcoord3 v1\ndcl_cube s2\n')].slice(1, 7),
         [(31 | (2 << 24)) >>> 0, (0x80000000 | 5 | (3 << 16)) >>> 0, 0x900f0001,
-            (31 | (2 << 24)) >>> 0, (0x80000000 | (5 << 27)) >>> 0, 0xa00f0802]);
+            (31 | (2 << 24)) >>> 0, (0x80000000 | (3 << 27)) >>> 0, 0xa00f0802]);
     // Relative addressing in model 1 sets only the bit; in model 2 it adds a token.
     assert.deepEqual([...asm('vs_1_1\nmov oPos, c[a0.x + 5]\n')].slice(1),
         [1, 0xc00f0000, (0x80e40000 | 0x20000000 | (1 << 13) | 5) >>> 0, 0xffff]);

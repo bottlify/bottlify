@@ -133,7 +133,7 @@ const USAGES = [
     'position', 'blendweight', 'blendindices', 'normal', 'psize', 'texcoord', 'tangent',
     'binormal', 'tessfactor', 'positiont', 'color', 'fog', 'depth', 'sample',
 ];
-const SAMPLER_TYPES = new Map([[4, '2d'], [5, 'cube'], [6, 'volume']]);
+const SAMPLER_TYPES = new Map([[2, '2d'], [3, 'cube'], [4, 'volume']]);
 const RASTOUT_NAMES = ['oPos', 'oFog', 'oPts'];
 
 /**
@@ -1813,7 +1813,7 @@ function assembleDcl(word, v, operands){
     const typeNames = ['2d', 'cube', 'volume'];
     if (typeNames.includes(kind))
     {
-        usageToken |= (4 + typeNames.indexOf(kind)) << 27;
+        usageToken |= (2 + typeNames.indexOf(kind)) << 27;
     }
     else if (kind !== '')
     {

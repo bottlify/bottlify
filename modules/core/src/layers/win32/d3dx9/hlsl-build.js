@@ -93,6 +93,7 @@ const FOLD = {
     rcp: v=>(v[0] === 0 ? Infinity : f32(1 / v[0])),
     rsq: v=>(v[0] === 0 ? Infinity : f32(1 / Math.sqrt(Math.abs(v[0])))),
     exp: v=>f32(2 ** v[0]),
+    pow: v=>f32(Math.abs(v[0]) ** v[1]),
     log: v=>(v[0] === 0 ? -Infinity : f32(Math.log2(Math.abs(v[0])))),
 };
 
@@ -425,6 +426,20 @@ export function createBuilder(profile){
         return lanewise('mad', w, args);
     };
 
+    /**
+     * `t * (x - y) + y`: the blend that is `x` for 1 and `y` for 0.
+     *
+     * @param {Vec} t @param {Vec} x @param {Vec} y @returns {Vec}
+     */
+    const lrp = (t, x, y)=>{
+        const { w, args } = unify([t, x, y]);
+        if (profile.lrp)
+        {
+            return lanewise('lrp', w, args);
+        }
+        return mad(args[0], sub(args[1], args[2]), args[2]);
+    };
+
     /** @param {Vec} a @param {Vec} b @returns {Vec} */
     const min = (a, b)=>{
         const { w, args } = unify([a, b]);
@@ -468,6 +483,28 @@ export function createBuilder(profile){
     const rsq = (/** @type {Vec} */ a)=>perLane('rsq', [a]);
     const exp2 = (/** @type {Vec} */ a)=>perLane('exp', [a]);
     const log2 = (/** @type {Vec} */ a)=>perLane('log', [a]);
+
+    /**
+     * |x| to the power y, lane by lane.
+     *
+     * @param {Vec} x @param {Vec} y @returns {Vec}
+     */
+    const pow = (x, y)=>{
+        if (profile.pow)
+        {
+            return perLane('pow', [x, y]);
+        }
+        return exp2(mul(y, log2(x)));
+    };
+
+    /** The change of a value from this pixel to the next across (ddx) or down (ddy). */
+    const derivative = (/** @type {'x' | 'y'} */ axis, /** @type {Vec} */ a)=>{
+        if (!profile.derivatives)
+        {
+            throw new Error(`${profile.name} has no derivative instruction`);
+        }
+        return emit(axis === 'x' ? 'dsx' : 'dsy', a.w, [a.src]);
+    };
 
     /** a / b, as a times the reciprocal of b. @param {Vec} a @param {Vec} b @returns {Vec} */
     const div = (a, b)=>mul(a, rcp(b));
@@ -807,7 +844,8 @@ export function createBuilder(profile){
             return vregCount;
         },
         vec, imm, num, literal, lane, swizzle, splat, neg, abs, cat, unify,
-        add, sub, mul, mad, min, max, frc, rcp, rsq, exp2, log2, div, sqrt, dot,
+        add, sub, mul, mad, lrp, min, max, frc, rcp, rsq, exp2, log2, pow, derivative, div,
+        sqrt, dot,
         select, selectGE0, lt, le, gt, ge, eq, ne, nonzero, not, and, or, reduce,
         floor, ceil, trunc, sat, sincos, input, output, write, sample, kill, address,
         isZero, isOne, USAGE,

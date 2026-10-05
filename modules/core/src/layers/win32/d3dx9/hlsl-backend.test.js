@@ -75,7 +75,7 @@ test('a vertex shader assembles to a stream the translator\'s parser reads', ()=
         assert.deepEqual(result.diagnostics, [], name);
         const tokens = /** @type {Uint32Array} */ (result.tokens);
         const names = disassembled(tokens);
-        assert.deepEqual(names.filter(n=>n !== 'dcl'), ['dp4', 'dp4', 'dp4', 'dp4', 'mul', 'mov'],
+        assert.deepEqual(names.filter(n=>n !== 'dcl'), ['dp4', 'dp4', 'dp4', 'dp4', 'mul'],
             name);
         assert.equal(names.filter(n=>n === 'dcl').length, name === 'vs_3_0' ? 4 : 2, name);
         assert.equal(parseShader(tokens).version.major, Number(name[3]));
@@ -197,6 +197,6 @@ test('a limit the target has is reported with the numbers', ()=>{
     const result = assemble(ir);
     assert.equal(result.tokens, null);
     assert.match(result.diagnostics[0].message,
-        /too many arithmetic instruction slots \(72\)\. Max\. allowed by the target \(ps_2_0\) is 64/);
+        /too many arithmetic instruction slots \(71\)\. Max\. allowed by the target \(ps_2_0\) is 64/);
     assert.equal(result.diagnostics[0].code, 'X5608');
 });

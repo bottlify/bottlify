@@ -142,6 +142,239 @@ function prune(instrs){
 }
 
 /**
+ * How a register is written and read: the instructions that write it and the
+ * number of operands that read it.
+ *
+ * @param {Instr[]} instrs
+ * @returns {{ writers: Map<VReg, number[]>, reads: Map<VReg, number> }}
+ */
+function usage(instrs){
+    /** @type {Map<VReg, number[]>} */
+    const writers = new Map();
+    /** @type {Map<VReg, number>} */
+    const reads = new Map();
+    instrs.forEach((instr, i)=>{
+        for (const src of instr.srcs)
+        {
+            if (src.kind === 'reg')
+            {
+                reads.set(src.reg, (reads.get(src.reg) ?? 0) + 1);
+            }
+        }
+        if (instr.dest.kind === 'reg')
+        {
+            writers.set(instr.dest.reg, [...(writers.get(instr.dest.reg) ?? []), i]);
+        }
+    });
+    return { writers, reads };
+}
+
+/**
+ * An operand with its lanes picked from another's: lane `c` of the result is
+ * lane `lanes[c]` of `src`.
+ *
+ * @param {Src} src @param {number[]} lanes @param {boolean} negate
+ * @returns {Src}
+ */
+function reselect(src, lanes, negate){
+    if (src.kind === 'imm')
+    {
+        const values = lanes.map(l=>src.values[Math.min(l, src.values.length - 1)]);
+        return { kind: 'imm', values: negate ? values.map(v=>-v) : values };
+    }
+    if (!('swz' in src))
+    {
+        return src;
+    }
+    const flipped = negate ? !(/** @type {{ neg?: boolean }} */ (src).neg) : undefined;
+    return /** @type {Src} */ ({ ...src,
+        swz: lanes.map(l=>src.swz[Math.min(l, src.swz.length - 1)]),
+        ...(flipped === undefined ? {} : { neg: flipped }) });
+}
+
+/**
+ * A product that is added to something becomes a multiply-add, when nobody else
+ * wants the product.
+ *
+ * @param {Instr[]} instrs @param {Profile} profile
+ * @returns {Instr[]}
+ */
+function fuseMultiplyAdd(instrs, profile){
+    const { writers, reads } = usage(instrs);
+    /** @type {Set<number>} */
+    const removed = new Set();
+    const result = instrs.map(instr=>({ ...instr, srcs: instr.srcs.slice() }));
+    /** @param {Src[]} srcs */
+    const constReads = srcs=>new Set(srcs.map(src=>(src.kind === 'imm' ? 'imm' : constKey(src)))
+        .filter(key=>key !== null));
+    result.forEach((instr, j)=>{
+        if ((instr.op !== 'add' && instr.op !== 'sub') || instr.dest.kind === 'none'
+            || instr.dest.kind === 'addr')
+        {
+            return;
+        }
+        for (let p = 0; p < 2; p++)
+        {
+            const product = instr.srcs[p];
+            if (product.kind !== 'reg' || product.abs || reads.get(product.reg) !== 1)
+            {
+                continue;
+            }
+            const made = writers.get(product.reg);
+            if (!made || made.length !== 1 || removed.has(made[0]))
+            {
+                continue;
+            }
+            const maker = result[made[0]];
+            if (maker.op !== 'mul' || maker.dest.kind !== 'reg'
+                || maker.dest.mask !== (1 << product.reg.width) - 1)
+            {
+                continue;
+            }
+            // The lanes of the product the sum reads, for each of its own.
+            const lanes = [0, 1, 2, 3].map(c=>product.swz[Math.min(c, product.swz.length - 1)]);
+            const other = instr.srcs[1 - p];
+            // a*b + c, a*b - c, and c - a*b = (-a)*b + c; the product's own sign rides on a.
+            const flipFirst = Boolean(product.neg) !== (instr.op === 'sub' && p === 1);
+            const srcs = [reselect(maker.srcs[0], lanes, flipFirst),
+                reselect(maker.srcs[1], lanes, false),
+                instr.op === 'sub' && p === 0 ? negated(other) : other];
+            if (profile.oneConstPerInstr && constReads(srcs).size > 1)
+            {
+                continue;
+            }
+            result[j] = { ...instr, op: 'mad', srcs };
+            removed.add(made[0]);
+            return;
+        }
+    });
+    return result.filter((_, i)=>!removed.has(i));
+}
+
+/** @param {Src} src @returns {Src} */
+function negated(src){
+    if (src.kind === 'imm')
+    {
+        return { kind: 'imm', values: src.values.map(v=>-v) };
+    }
+    if (!('swz' in src))
+    {
+        return src;
+    }
+    return /** @type {Src} */ ({ ...src, neg: !(/** @type {{ neg?: boolean }} */ (src).neg) });
+}
+
+/**
+ * A value built by moving scalars into the lanes of a register is built by the
+ * instructions that made the scalars, writing those lanes themselves.
+ *
+ * @param {Instr[]} instrs
+ * @returns {Instr[]}
+ */
+function coalesceMoves(instrs){
+    const { writers, reads } = usage(instrs);
+    /** @type {Map<number, Instr>} */
+    const replaced = new Map();
+    /** @type {Set<number>} */
+    const dropped = new Set();
+    instrs.forEach((move, j)=>{
+        if (move.op !== 'mov' || move.dest.kind !== 'reg' || move.sat)
+        {
+            return;
+        }
+        const src = move.srcs[0];
+        if (src.kind !== 'reg' || src.neg || src.abs || reads.get(src.reg) !== 1)
+        {
+            return;
+        }
+        const made = writers.get(src.reg);
+        if (!made || made.length !== 1 || replaced.has(made[0]))
+        {
+            return;
+        }
+        const maker = instrs[made[0]];
+        const cls = /** @type {Record<string, { cls: string }>} */ (OPCODES)[maker.op]?.cls;
+        if (maker.dest.kind !== 'reg' || !(cls === 'comp' || cls === 'scalar' || cls === 'lanes')
+            || maker.op === 'sincos')
+        {
+            return;
+        }
+        const mask = move.dest.mask;
+        /** The component of the scalar's register each destination component reads. */
+        const from = [0, 1, 2, 3].map(c=>src.swz[Math.min(c, src.swz.length - 1)]);
+        let covered = true;
+        let first = -1;
+        for (let c = 0; c < 4; c++)
+        {
+            if ((mask & 1 << c) !== 0)
+            {
+                covered = covered && (maker.dest.mask & 1 << from[c]) !== 0;
+                first = first < 0 ? from[c] : first;
+            }
+        }
+        if (!covered)
+        {
+            return;
+        }
+        const lanes = from.map((l, c)=>((mask & 1 << c) !== 0 ? l : first));
+        const srcs = cls === 'comp' ? maker.srcs.map(one=>reselect(one, lanes, false))
+            : maker.srcs;
+        replaced.set(made[0], { ...maker, srcs, dest: { kind: 'reg', reg: move.dest.reg, mask } });
+        dropped.add(j);
+    });
+    return instrs.map((instr, i)=>replaced.get(i) ?? instr).filter((_, i)=>!dropped.has(i));
+}
+
+/**
+ * A result that is only moved to an output is written there in the first place.
+ *
+ * @param {Instr[]} instrs
+ * @returns {Instr[]}
+ */
+function forwardOutputs(instrs){
+    const { writers, reads } = usage(instrs);
+    /** @type {Map<number, Instr>} */
+    const replaced = new Map();
+    /** @type {Set<number>} */
+    const dropped = new Set();
+    instrs.forEach((instr, j)=>{
+        if (instr.op !== 'mov' || instr.dest.kind !== 'out' || instr.sat)
+        {
+            return;
+        }
+        const src = instr.srcs[0];
+        if (src.kind !== 'reg' || src.neg || src.abs || reads.get(src.reg) !== 1)
+        {
+            return;
+        }
+        const made = writers.get(src.reg);
+        if (!made || made.length !== 1)
+        {
+            return;
+        }
+        const maker = instrs[made[0]];
+        const cls = /** @type {Record<string, { cls: string }>} */ (OPCODES)[maker.op]?.cls;
+        if (maker.dest.kind !== 'reg' || !(cls === 'comp' || cls === 'scalar' || cls === 'lanes')
+            || maker.op === 'sincos' || maker.dest.mask !== instr.dest.mask)
+        {
+            return;
+        }
+        // Each output component must come from the same component of the result.
+        for (let c = 0; c < 4; c++)
+        {
+            if ((instr.dest.mask & 1 << c) !== 0 && src.swz[c] !== c)
+            {
+                return;
+            }
+        }
+        replaced.set(made[0], { ...maker, dest: { kind: 'out', out: instr.dest.out,
+            mask: instr.dest.mask } });
+        dropped.add(j);
+    });
+    return instrs.map((instr, i)=>replaced.get(i) ?? instr).filter((_, i)=>!dropped.has(i));
+}
+
+/**
  * Gives every constant its register. A register the program named is taken
  * first and nothing else lands on it; the rest follow in declaration order.
  *
@@ -595,6 +828,7 @@ export function assemble(ir, options = {}){
     const newReg = ()=>({ id: counter++, width: 4 });
 
     let instrs = prune(ir.instrs.map(i=>({ ...i, srcs: i.srcs.slice() })));
+    instrs = forwardOutputs(coalesceMoves(fuseMultiplyAdd(instrs, profile)));
     for (const instr of instrs)
     {
         if (instr.op === 'sincos' && profile.sincosConstants)
