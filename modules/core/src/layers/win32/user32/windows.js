@@ -3909,6 +3909,7 @@ export function createWindowFunctions(host){
             paint.invalidate(record, { left: 0, top: 0, right: size.width, bottom: size.height },
                 true);
         },
+        update: record=>(shown(record) ? paint.updateNow(record, true) : 1),
         move: (hwnd, x, y, width, height)=>/** @type {any} */ (table).MoveWindow
             .handler([hwnd, x, y, width, height, 1]),
         setFocus,

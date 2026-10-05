@@ -497,6 +497,24 @@ export function createPaintFunctions(options){
         ? after(send(record.hwnd, WM_PAINT, 0, 0, host.callerThread?.()), ()=>1)
         : 1);
 
+    /**
+     * WM_PAINT sent now to a window and, with `children`, to each of its
+     * descendants after it, one before the next: a parent paints under its
+     * children, as the screen shows them. RDW_UPDATENOW, with or without
+     * RDW_ALLCHILDREN.
+     *
+     * @param {any} record @param {boolean} children
+     * @returns {number | Promise<number>}
+     */
+    const updateNow = (record, children)=>{
+        const order = children ? [record, ...(descendants?.(record) ?? [])] : [record];
+        /** @param {number} index @returns {number | Promise<number>} */
+        const next = index=>(index >= order.length
+            ? 1
+            : after(paintNow(order[index]), ()=>next(index + 1)));
+        return next(0);
+    };
+
     /** The DC service, or null in a build that cannot make one. */
     const contexts = ()=>host.dc?.() ?? null;
 
@@ -1057,21 +1075,8 @@ export function createPaintFunctions(options){
                 {
                     validate(record, (rect >>> 0) === 0 && (region >>> 0) === 0 ? null : area);
                 }
-                if ((flags & RDW_UPDATENOW) === 0)
-                {
-                    return 1;
-                }
-                // The window first, then its descendants in order, each sent
-                // its WM_PAINT before the next: a parent paints under its
-                // children, as the screen shows them.
-                const order = (flags & RDW_ALLCHILDREN) !== 0
-                    ? [record, ...(descendants?.(record) ?? [])]
-                    : [record];
-                /** @param {number} index @returns {number | Promise<number>} */
-                const next = index=>(index >= order.length
-                    ? 1
-                    : after(paintNow(order[index]), ()=>next(index + 1)));
-                return next(0);
+                return (flags & RDW_UPDATENOW) === 0
+                    ? 1 : updateNow(record, (flags & RDW_ALLCHILDREN) !== 0);
             },
         },
 
@@ -1083,6 +1088,9 @@ export function createPaintFunctions(options){
          * UpdateWindow and then goes straight to drawing its first frame --
          * or to a long load with no pump -- relies on it: a posted paint
          * lands after the frame, over it, or not until the load is done.
+         * Its children paint too, after it: it is
+         * RedrawWindow(RDW_UPDATENOW | RDW_ALLCHILDREN), and a dialog shown
+         * and updated before a job that never pumps has its controls drawn.
          * Nothing to paint is success with nothing sent.
          */
         UpdateWindow: {
@@ -1090,7 +1098,7 @@ export function createPaintFunctions(options){
             /** @param {number[]} args */
             handler: ([hwnd])=>{
                 const record = live(hwnd);
-                return record ? paintNow(record) : 0;
+                return record ? updateNow(record, true) : 0;
             },
         },
 
@@ -1610,7 +1618,7 @@ export function createPaintFunctions(options){
         },
     };
 
-    return { table, beginPaint, endPaint, invalidate, clientArea, cellOf, contextOn };
+    return { table, beginPaint, endPaint, invalidate, updateNow, clientArea, cellOf, contextOn };
 }
 
 /** A brush argument up to this is a system colour index plus one. */

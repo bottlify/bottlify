@@ -1723,6 +1723,22 @@ test('a window that goes shows the desktop only where no other window is', ()=>{
         'and all of the last one');
 });
 
+test('UpdateWindow paints the window and then its children, as RDW_UPDATENOW | RDW_ALLCHILDREN',
+    ()=>{
+        // A dialog shown and updated before a job that never pumps has its
+        // controls drawn, not only itself.
+        const { fns, memory, dispatched } = setup();
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const parent = createWindow(fns, memory, { style: WS_VISIBLE });
+        const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent,
+            x: 0, y: 0, width: 20, height: 10 });
+        dispatched.length = 0;
+        assert.equal(fns.UpdateWindow.handler([parent]), 1);
+        assert.deepEqual(dispatched.filter(message=>message.message === WM_PAINT)
+            .map(message=>message.hwnd), [parent, child]);
+    });
+
 test('a window shaped to an empty region takes none of the screen, and the desktop shows there',
     ()=>{
         // SetWindowRgn: "the system does not display any portion of a window

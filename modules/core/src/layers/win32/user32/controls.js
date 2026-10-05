@@ -492,6 +492,8 @@ const OPAQUE = 2;
  *           measuring with; given back through endPaint.
  * @property {(record: any, hdc: number) => void} endPaint
  * @property {(record: any) => void} invalidate   The whole client area, erased.
+ * @property {(record: any) => number | Promise<number>} [update]
+ *           UpdateWindow: what is to paint painted now, when it is shown.
  * @property {(hwnd: number, x: number, y: number, width: number, height: number)
  *     => number | Promise<number>} [move]
  *           MoveWindow, for a control that places itself in its parent.
@@ -809,6 +811,13 @@ export function createControlProcedures(host){
     const common = (record, message, thread)=>{
         switch (message.message){
             case WM_SETTEXT:
+                // Painted now, not when the queue is next looked at, as the
+                // real static and button paint themselves: a program that
+                // labels its progress from a loop that never pumps shows it.
+                return after(host.defWindowProc(record, message, thread), answer=>{
+                    host.invalidate(record);
+                    return after(host.update?.(record) ?? 1, ()=>answer);
+                });
             case WM_ENABLE:
                 return after(host.defWindowProc(record, message, thread), answer=>{
                     host.invalidate(record);
