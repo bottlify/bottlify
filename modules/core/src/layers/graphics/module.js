@@ -336,12 +336,18 @@ export function createGraphicsModule(){
              * and this thread keeps only their state (`remote/`). Its frames
              * come back to be shown as this thread's own are, and its GPU
              * going away is this one's as far as those devices are concerned.
+             *
+             * A process in a worker of its own has no GPU and shows nothing: it
+             * is handed only a way in to the run's graphics worker
+             * (`config.worker`), and the frames its devices present go to the
+             * thread that shows the run's.
              */
-            const remote = device?.worker
+            const workerEnd = device?.worker ?? config?.worker ?? null;
+            const remote = workerEnd
                 ? connectGraphicsWorker({
-                    worker: device.worker,
-                    device: device.device,
-                    presentTo: device.presentTo,
+                    worker: workerEnd,
+                    device: device?.device,
+                    presentTo: device?.presentTo,
                     writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
                     // Where the memory is shared the worker writes what it reads
                     // back in place, and says only where.

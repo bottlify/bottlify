@@ -25,8 +25,10 @@ differently raises a `divergence` event naming the API.
   directory -- its windows found, read, posted and sent to by every other process, and theirs by
   it -- ids, the run's bundle (a block it misses is fetched for it) and named events, semaphores
   and mutexes; a named file mapping or waitable timer is its own; a wait on a set of objects one of which
-  another process across a worker named is refused. It has no COM server, graphics or sound; a
-  redirected standard output is written there, but the parent's position does not move with it.
+  another process across a worker named is refused. Its Direct3D 8 and 9 devices draw on the run's
+  graphics worker and what they present is shown as the run's frames; it has no DirectDraw or GDI
+  picture, no input, no COM server and no sound. A redirected standard output is written there,
+  but the parent's position does not move with it.
 - Windows are the run's: a process finds another's window (`FindWindow`), reads who made it, its
   caption and class, and posts to it. A message sent to another process's window is answered in the
   `workers` mode; its pointers cross only for `WM_COPYDATA`, `WM_SETTEXT` and `WM_GETTEXT`. Where

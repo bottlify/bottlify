@@ -15,8 +15,9 @@
  * mode's, read from the link rather than from a page's ring.
  *
  * The same file runs under a page's `Worker` and Node's `worker_threads`. It
- * is told `{ type: 'start', end, options, run }` -- its side of the link, the
- * process as `createApp` takes it, how long it may run -- and answers
+ * is told `{ type: 'start', end, graphics, options, run }` -- its side of the
+ * link, its way in to the run's graphics worker or null, the process as
+ * `createApp` takes it, how long it may run -- and answers
  * `{ type: 'exited', code }`, or `{ type: 'failed', message }`.
  */
 
@@ -29,12 +30,32 @@ import { ringPacing } from './ring-pacing.js';
 const YIELD_MS = 4;
 
 /**
+ * A port onto the graphics worker as the graphics layer takes a worker: what
+ * it posts, and where what comes back is listened for.
+ *
+ * @param {MessagePort} port
+ */
+const graphicsEnd = port=>{
+    // A port listened to through `addEventListener` delivers nothing until started.
+    port.start();
+    return {
+        /** @param {any} message @param {Transferable[]} [transfer] */
+        postMessage: (message, transfer)=>port.postMessage(message, transfer ?? []),
+        /** @param {'message'} type @param {(event: { data: any }) => void} listener */
+        addEventListener: (type, listener)=>port.addEventListener(type, listener),
+        /** @param {'message'} type @param {(event: { data: any }) => void} listener */
+        removeEventListener: (type, listener)=>port.removeEventListener(type, listener),
+    };
+};
+
+/**
  * Runs one process to its end.
  *
- * @param {{ end: import('../system/link.js').LinkEnd, options: any, run?: any }} start
+ * @param {{ end: import('../system/link.js').LinkEnd, graphics?: MessagePort | null,
+ *     options: any, run?: any }} start
  * @returns {Promise<number>} its exit code
  */
-export async function serveProcess({ end, options, run }){
+export async function serveProcess({ end, graphics, options, run }){
     /** @type {Record<string, Record<string, (...args: any[]) => any>>} */
     const handlers = {};
     const link = openLink(end, handlers);
@@ -48,6 +69,7 @@ export async function serveProcess({ end, options, run }){
         system.objects.deliver(token, result) };
     const app = await createApp({
         ...options,
+        graphics: { ...options.graphics, worker: graphics ? graphicsEnd(graphics) : undefined },
         system,
         pacing: ringPacing({ inbound: { bell: link.bell, drain: link.pump },
             macrotask: createMacrotask(), now: ()=>performance.now(), intervalMs: YIELD_MS }),
@@ -61,6 +83,8 @@ export async function serveProcess({ end, options, run }){
     finally
     {
         await app.dispose();
+        graphics?.postMessage({ type: 'close' });
+        graphics?.close();
     }
 }
 

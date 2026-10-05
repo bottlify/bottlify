@@ -20,7 +20,42 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { READ_AHEAD_BYTES, createApp } from './app.js';
 import { writeBundle } from './bundle-node.js';
+import { Worker } from 'node:worker_threads';
 import { buildExe } from '../../../tools/make-pe.mjs';
+import { texturedFrames } from '../../../tools/d3d9-program.mjs';
+import { createFakeDevice } from './layers/graphics/webgpu/internal/fake-device.js';
+
+/** @param {number} value */
+const u32 = value=>[0, 8, 16, 24].map(at=>(value >>> at) & 0xff);
+
+/**
+ * A parent that starts C:\a.exe, waits for it and exits with its code.
+ */
+function waitingParent(){
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject',
+            'GetExitCodeProcess', 'ExitProcess'] },
+        data: {
+            command: [...Buffer.from('C:\\a.exe'), 0],
+            startup: [...u32(68), ...new Array(64).fill(0)],
+            info: new Array(16).fill(0),
+            code: u32(0),
+        },
+        codeSize: 0x80,
+        code: ({ iat, at })=>[
+            0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+            0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+            0x68, ...u32(at('command')), 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateProcessA')),
+            0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+            0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
+            0xff, 0x35, ...u32(at('code')),
+            0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+}
 
 test('a child in a worker of its own leaves its parent its file, its registry value and its code',
     { timeout: 120000 }, async t=>{
@@ -60,7 +95,6 @@ test('a child in a worker of its own leaves its parent its file, its registry va
 
 test('a child in a worker of its own reads what the run\'s bundle has not fetched yet',
     { timeout: 120000 }, async t=>{
-        const u32 = (/** @type {number} */ value)=>[0, 8, 16, 24].map(at=>(value >>> at) & 0xff);
         // CreateFileA("C:\\z\\data.bin", GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0);
         // ReadFile(it, &byte, 1, &read, 0); ExitProcess(byte)
         const child = buildExe({
@@ -74,29 +108,7 @@ test('a child in a worker of its own reads what the run\'s bundle has not fetche
                 0xff, 0x35, ...u32(at('byte')), 0xff, 0x15, ...u32(iat('ExitProcess')),
             ],
         });
-        const parent = buildExe({
-            imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject',
-                'GetExitCodeProcess', 'ExitProcess'] },
-            data: {
-                command: [...Buffer.from('C:\\a.exe'), 0],
-                startup: [...u32(68), ...new Array(64).fill(0)],
-                info: new Array(16).fill(0),
-                code: u32(0),
-            },
-            codeSize: 0x80,
-            code: ({ iat, at })=>[
-                0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
-                0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
-                0x68, ...u32(at('command')), 0x6a, 0,
-                0xff, 0x15, ...u32(iat('CreateProcessA')),
-                0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
-                0xff, 0x15, ...u32(iat('WaitForSingleObject')),
-                0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
-                0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
-                0xff, 0x35, ...u32(at('code')),
-                0xff, 0x15, ...u32(iat('ExitProcess')),
-            ],
-        });
+        const parent = waitingParent();
         const root = await mkdtemp(join(tmpdir(), 'btl-src-'));
         const out = await mkdtemp(join(tmpdir(), 'btl-out-'));
         t.after(()=>rm(root, { recursive: true, force: true }));
@@ -139,4 +151,64 @@ test('a child in a worker of its own reads what the run\'s bundle has not fetche
         assert.deepEqual(started, [true]);
         assert.ok(asked.length > before.count,
             'and the read was a miss the run fetched for it, across the link');
+    });
+
+test('a child in a worker of its own draws on the run\'s graphics worker, and the run shows it',
+    { timeout: 120000 }, async t=>{
+        const FRAMES = 3;
+        const gpu = createFakeDevice();
+        Object.assign(gpu.device, { queue: gpu.queue, features: new Set(),
+            createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }) });
+        const thread = new Worker(new URL('../../../tools/fake-graphics-worker.mjs',
+            import.meta.url));
+        t.after(()=>thread.terminate());
+        thread.postMessage({ type: 'open', frames: 'pixels' });
+        /** @type {any[]} */
+        const fromWorker = [];
+        thread.on('message', data=>fromWorker.push(data));
+        /** @type {Map<Function, (data: any) => void>} */
+        const listeners = new Map();
+        const worker = {
+            postMessage: (/** @type {any} */ message, /** @type {any} */ transfer)=>
+                thread.postMessage(message, transfer),
+            addEventListener: (/** @type {string} */ _type, /** @type {Function} */ listener)=>{
+                const relay = (/** @type {any} */ data)=>listener({ data });
+                listeners.set(listener, relay);
+                thread.on('message', relay);
+            },
+            removeEventListener: (/** @type {string} */ _type, /** @type {Function} */ listener)=>{
+                thread.off('message', /** @type {any} */ (listeners.get(listener)));
+            },
+        };
+        const app = await createApp({
+            executable: waitingParent(),
+            imagePath: 'C:\\parent.exe',
+            engine: 'cork',
+            mode: 'workers',
+            processWorkers: true,
+            cork: /** @type {any} */ ({ config: { sharedMemory: true } }),
+            device: { device: gpu.device, queue: gpu.queue, screen: gpu.screen,
+                canvas: gpu.canvas, adapter: { vendor: 'fake', architecture: '',
+                    description: 'a stand-in' }, worker },
+            storage: { load: async()=>({
+                files: [{ path: 'C:\\a.exe', bytes: texturedFrames(FRAMES) }],
+            }) },
+        });
+        t.after(()=>app.dispose());
+        /** @type {string[]} */
+        const divergences = [];
+        app.on('divergence', (/** @type {any} */ seen)=>divergences.push(seen.detail));
+        /** @type {any[]} */
+        const started = [];
+        app.on('process-started', (/** @type {any} */ event)=>started.push(event.worker));
+        assert.equal(await app.run({ timeoutMs: 60000 }), 0, divergences.join('\n'));
+        assert.deepEqual(started, [true]);
+        assert.deepEqual(divergences, []);
+        const frames = fromWorker.filter(message=>message.type === 'frame');
+        assert.ok(frames.length >= 1, 'the child\'s device presented on the graphics worker');
+        assert.deepEqual([frames[0].width, frames[0].height], [64, 32],
+            'at the size of the child\'s back buffer');
+        const shown = app.presenter().presented();
+        assert.ok(shown.count >= frames.length,
+            `and the run showed what came back: ${shown.count} of ${frames.length}`);
     });

@@ -10,7 +10,7 @@
  * none, carrying the same messages either way.
  *
  * @typedef {Object} ProcessWorker
- * @property {(message: any) => void} post
+ * @property {(message: any, transfer?: Transferable[]) => void} post
  * @property {(handler: (data: any) => void) => void} onMessage
  * @property {(handler: (reason: string) => void) => void} onLost
  * @property {() => void} terminate
@@ -26,7 +26,7 @@ export async function openProcessWorker(url = new URL('./process.worker.js', imp
     {
         const worker = new globalThis.Worker(url, { type: 'module' });
         return {
-            post: message=>worker.postMessage(message),
+            post: (message, transfer)=>worker.postMessage(message, transfer ?? []),
             onMessage: handler=>worker.addEventListener('message',
                 (/** @type {any} */ event)=>handler(event.data)),
             onLost: handler=>worker.addEventListener('error',
@@ -37,7 +37,7 @@ export async function openProcessWorker(url = new URL('./process.worker.js', imp
     const { Worker } = await import('node:worker_threads');
     const worker = new Worker(typeof url === 'string' ? new URL(url) : url);
     return {
-        post: message=>worker.postMessage(message),
+        post: (message, transfer)=>worker.postMessage(message, /** @type {any} */ (transfer)),
         onMessage: handler=>worker.on('message', handler),
         onLost: handler=>{
             worker.on('error', error=>handler(error?.message ?? String(error)));

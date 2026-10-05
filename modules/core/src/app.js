@@ -230,7 +230,7 @@ import { openProcessWorker } from './host/process-worker.js';
  *           nonzero code is the page's error report instead.
  * @property {any} [device]          The GPU to draw on, when there is one.
  * @property {{ presenter?: any, compressedTextures?: boolean, maxFrameLatency?: number,
- *     lendMemory?: boolean, guestCode?: boolean, guestTraps?: string[] }}
+ *     lendMemory?: boolean, guestCode?: boolean, guestTraps?: string[], worker?: any }}
  *           [graphics]
  *           The graphics layer's configuration (docs/core/configuration.md,
  *           graphics), forwarded to it as given: `compressedTextures`
@@ -242,6 +242,9 @@ import { openProcessWorker } from './host/process-worker.js';
  *           and the texture the primary is copied into. Absent, one is made
  *           from `device` and handed to every machine; set by `createApp` on a
  *           rebuilt machine and not something a caller supplies.
+ *           `graphics.worker` is a way in to the run's graphics worker for a
+ *           process with no GPU of its own: set for a child in a worker of its
+ *           own, whose devices draw there.
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
  *           What the program is told its display is.
  * @property {{ picture?: { width: number, height: number, bits: Uint8Array } }} [desktop]
@@ -7416,6 +7419,15 @@ export async function createApp(options){
             },
         });
         const answering = link.serve();
+        // Its own way in to the run's graphics worker, where its Direct3D
+        // devices draw; what they present comes back here, to the run's
+        // presenter, as every root's frames do.
+        const graphicsWorker = options.device?.worker;
+        const graphics = graphicsWorker ? new MessageChannel() : null;
+        if (graphics)
+        {
+            graphicsWorker.postMessage({ type: 'client', port: graphics.port2 }, [graphics.port2]);
+        }
         const worker = await openProcessWorker();
         events.emit('process-started', { image: request.imagePath, sequenceBase: logSequence,
             worker: true });
@@ -7433,9 +7445,14 @@ export async function createApp(options){
                     }
                 });
                 worker.onLost(reason=>reject(new Error(reason)));
+                // The graphics layer's knobs, not the run's presenter or a
+                // callback: neither crosses, and the child shows nothing itself.
+                const knobs = Object.fromEntries(Object.entries(options.graphics ?? {})
+                    .filter(([key, value])=>key !== 'presenter' && typeof value !== 'function'));
                 worker.post({
                     type: 'start',
                     end: memory.b,
+                    graphics: graphics?.port1 ?? null,
                     options: {
                         executable: image,
                         imagePath: request.imagePath,
@@ -7447,13 +7464,20 @@ export async function createApp(options){
                         engine: options.engine,
                         mode: options.mode,
                         windows: options.windows,
+                        // The run's display, which its windows and devices
+                        // are sized against.
+                        screen: options.screen,
+                        desktop: options.desktop,
+                        graphicsApi: options.graphicsApi,
+                        maxFps: options.maxFps,
+                        graphics: knobs,
                         // The translator's store and the doorbell are this
                         // thread's: the child's translator keeps none.
                         cork: { config: { ...options.cork?.config, store: null,
                             doorbell: undefined } },
                     },
                     run: { maxTurns: runOptionsNow?.maxTurns, timeoutMs: runOptionsNow?.timeoutMs },
-                });
+                }, graphics ? [graphics.port1] : []);
             });
         }
         finally
