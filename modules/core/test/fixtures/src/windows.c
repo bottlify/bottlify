@@ -110,6 +110,22 @@ static long __stdcall procedure(void *window, unsigned message, unsigned wParam,
     {
         return ASKED + (long)wParam;
     }
+    if (message == WM_APP + 3)
+    {
+        /* Asked by the child, which waits for the answer: asking it back. */
+        void *child = FindWindowA("BottlifyGuest", 0);
+        return child ? SendMessageA(child, WM_APP + 4, wParam, 0) + 1 : -1;
+    }
+    return DefWindowProcA(window, message, wParam, lParam);
+}
+
+/* The child's own window, which the parent sends to while the child waits on it. */
+static long __stdcall guestProcedure(void *window, unsigned message, unsigned wParam, long lParam)
+{
+    if (message == WM_APP + 4)
+    {
+        return (long)wParam * 2;
+    }
     return DefWindowProcA(window, message, wParam, lParam);
 }
 
@@ -175,6 +191,14 @@ static int look(void)
         check("child: SendMessageTimeout is answered in time",
             SendMessageTimeoutA(window, WM_APP + 2, 1, 0, SMTO_NORMAL, 5000, &result)
             && result == ASKED + 1);
+        WNDCLASSA cls = { 0 };
+        cls.procedure = (void *)guestProcedure;
+        cls.instance = GetModuleHandleA(0);
+        cls.className = "BottlifyGuest";
+        RegisterClassA(&cls);
+        CreateWindowExA(0, "BottlifyGuest", "Guest", 0, 0, 0, 10, 10, 0, 0, cls.instance, 0);
+        check("child: a send the parent answers by sending back to this one, which waits",
+            SendMessageA(window, WM_APP + 3, 20, 0) == 41);
     }
     if (asked("-held"))
     {

@@ -22,7 +22,7 @@ import { createApp } from './app.js';
 // answered; where one runs at a time the parent runs nothing while its child
 // does, and a send is refused rather than waited on for ever.
 for (const [mode, flag, sends] of /** @type {const} */ ([
-    [undefined, '', 0], [undefined, '-held', 2], ['workers', '', 0], ['workers', '-send', 4]]))
+    [undefined, '', 0], [undefined, '-held', 2], ['workers', '', 0], ['workers', '-send', 5]]))
 {
     test(`a window is found, described and posted to by another process (${
         mode ?? 'default'} mode${flag ? `, ${flag}` : ''})`, { timeout: 120000 }, async t=>{
