@@ -27,6 +27,6 @@
     "bottles": "node src/server/cli.js"
   },
   "dependencies": {
-    "@bottlify/core": "^0.9.0"
+    "@bottlify/core": "^2.0.0a"
   }
 }
