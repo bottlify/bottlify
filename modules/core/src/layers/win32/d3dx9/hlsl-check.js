@@ -354,12 +354,24 @@ export function check(program, options = {}){
     /** @param {Symbol} sym */
     function declareLocal(sym){
         const scope = scopes[scopes.length - 1];
-        if (scope.has(sym.name))
+        const before = scope.get(sym.name);
+        // A variable the head of a `for` declares belongs to the block around the loop, as in
+        // the Direct3D 9 compilers, and a later declaration of the name replaces it.
+        if (before && !forDeclared && !forScoped.has(before))
         {
             fail('X3003', `redefinition of '${sym.name}'`, sym.decl.pos);
         }
+        if (forDeclared)
+        {
+            forScoped.add(sym);
+        }
         scope.set(sym.name, sym);
     }
+
+    /** Whether the head of a `for` is being checked. */
+    let forDeclared = false;
+    /** The variables declared by the head of a `for`. @type {Set<Symbol>} */
+    const forScoped = new Set();
 
     // ---- declarations ----------------------------------------------------------------------
 
@@ -589,11 +601,8 @@ export function check(program, options = {}){
         {
             case 'ident': {
                 const s = e.sym;
-                if (s.kind === 'global' && !s.isStatic)
-                {
-                    fail('X3025', 'global variables are implicitly constant, enable '
-                        + 'compatibility mode to allow modification', e.pos);
-                }
+                // A global that is not const is a program's own copy of the uniform, as in
+                // Direct3D 9 compilers: the write changes what this invocation reads back.
                 if (s.isConst || (s.kind === 'param' && s.mods.includes('uniform'))
                     || e.type.kind === 'sampler' || e.type.kind === 'texture')
                 {
@@ -764,7 +773,7 @@ export function check(program, options = {}){
         const raw = expr(e.test);
         if (isNumeric(raw.type) && scalarCount(raw.type) > 1)
         {
-            return fail('X3000', 'the condition of ?: must be a scalar', e.pos);
+            return componentwiseConditional(e, raw);
         }
         const test = toCondition(raw);
         const a = expr(e.then);
@@ -787,6 +796,30 @@ export function check(program, options = {}){
         e.then = coerce(a, t);
         e.else = coerce(b, t);
         e.type = t;
+        return e;
+    }
+
+    /**
+     * `v ? a : b` with a vector or matrix condition: each component chooses for itself, and
+     * both arms are evaluated.
+     *
+     * @param {any} e @param {any} raw The checked condition.
+     * @returns {any}
+     */
+    function componentwiseConditional(e, raw){
+        const a = expr(e.then);
+        const b = expr(e.else);
+        if (!isNumeric(a.type) || !isNumeric(b.type))
+        {
+            return fail('X3020', 'type mismatch', e.pos);
+        }
+        const base = widest(a.type, b.type);
+        const t = shapeType(base, shapeType(base, a.type, b.type, e.pos), raw.type, e.pos);
+        e.test = coerce(raw, withBase(t, 'bool'));
+        e.then = coerce(a, t);
+        e.else = coerce(b, t);
+        e.type = t;
+        e.componentwise = true;
         return e;
     }
 
@@ -1148,29 +1181,29 @@ export function check(program, options = {}){
                 }
                 return;
             case 'for':
-                scopes.push(new Map());
-                try
+                if (s.init)
                 {
-                    if (s.init)
+                    forDeclared = true;
+                    try
                     {
                         stmt(s.init);
                     }
-                    recover(()=>{
-                        if (s.test)
-                        {
-                            s.test = condition(s.test);
-                        }
-                        if (s.step)
-                        {
-                            s.step = expr(s.step);
-                        }
-                    });
-                    loopBody(s.body);
+                    finally
+                    {
+                        forDeclared = false;
+                    }
                 }
-                finally
-                {
-                    scopes.pop();
-                }
+                recover(()=>{
+                    if (s.test)
+                    {
+                        s.test = condition(s.test);
+                    }
+                    if (s.step)
+                    {
+                        s.step = expr(s.step);
+                    }
+                });
+                loopBody(s.body);
                 return;
             case 'while':
                 recover(()=>{

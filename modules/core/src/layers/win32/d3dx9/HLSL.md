@@ -43,10 +43,10 @@ reads are in its table.
 
 ## Targets
 
-vs_1_1, vs_2_0, vs_2_a (vs_2_x), vs_3_0, ps_2_0, ps_2_a, ps_2_b, ps_3_0.
-`ps_1_x` is refused with a message. A program that does not fit its target is
-refused with fxc's numbers: arithmetic and texture slots, temporaries,
-constants.
+vs_1_1, vs_2_0, vs_2_a (vs_2_x), vs_3_0, ps_1_1 to ps_1_4 (with their own limits: two
+temporaries, a few texture reads, constants in [-1, 1]; `hlsl-backend-legacy.js`), ps_2_0,
+ps_2_a, ps_2_b, ps_3_0. A program that does not fit its target is refused with fxc's
+numbers: arithmetic and texture slots, temporaries, constants.
 
 ## What is checked, and how
 
@@ -81,6 +81,11 @@ constants.
 - Instruction counts are higher than fxc's: there is no common-subexpression
   search beyond identical instructions, no scheduling, and an integer cast is the
   full sequence. The slot weights used for the limits of ps_2_0 are approximate.
+- Where the Direct3D 9 compilers differ from the Shader Model 4 ones, this one does as they
+  do: a global that is not `const` may be written (the shader has its own copy); a vector
+  condition of `?:` chooses per component; the variable of a `for` head belongs to the block
+  around the loop; `mul` cuts the longer side of a product; `faceforward` is `n` only for a
+  negative dot product.
 - Errors: the codes and texts that are certain are listed in `hlsl-check.js`'s
   tests; the rest are best-known. The location of an error in a source passed in
   memory is printed as `memory(line,col)`.

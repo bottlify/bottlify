@@ -129,6 +129,35 @@ suite('ps', [
         body: 'r = i.a.x > i.b.x ? i.a : i.b; r.w = i.c.x < 0 ? 7 : i.c.w;',
     },
     {
+        name: 'a ternary whose condition is a vector chooses per component',
+        body: 'r = (i.a - i.b) ? i.c : -i.b; r.xy = i.a.zw > 0 ? 3 : i.c.xy;',
+    },
+    {
+        name: 'a global written before and after it is read',
+        decls: 'float4 g; float4 h[2]; float k;',
+        body: 'g.xy = 10; h[1] = k; r = g + h[0] + h[1]; g += i.a; r += g;',
+    },
+    {
+        name: 'an array of uniforms, partly overwritten, read at an unknown index',
+        decls: 'float4 arr[3]; int k;',
+        body: 'arr[0] = 10; arr[2] = 30; r = arr[clamp(k, 0, 2)] + arr[clamp((int)i.a.x, 0, 2)];',
+    },
+    {
+        name: 'out parameters written to variables of another element type',
+        decls: 'void two(out float3 a, out int b){ a = 3.7; b = 4.5; }',
+        body: `int3 t; int u; two(t, u); int2 s, c; sincos(i.a.xy * 3, s, c);
+            r = float4(t, u) + float4(s, c) + float4(0, 0, 0, 0);
+            float3 w; modf(i.b.xyz * 2, w); r.xyz += w;`,
+    },
+    {
+        name: 'the variable of a for head is visible after the loop',
+        body: 'int n = 99; for (int n = 0; n < 3; n++) { r += i.a * n; } r.w = n;',
+    },
+    {
+        name: 'a subscript that assigns is taken before the array',
+        body: 'float x[3] = { i.a.x, i.b.y, i.c.z }; int j = 0; r = x[j = 2] + x[j - 1];',
+    },
+    {
         name: 'if and else assign in both arms',
         body: 'if (i.a.x > i.b.x) { r = i.a; r.y = 5; } else { r = i.b; r.z = -5; }',
     },
@@ -434,6 +463,22 @@ tex3D(V,
         decls: 'sampler2D A;',
         body: 'r = tex2Dgrad(A, i.a.xy, i.b.xy, i.c.xy);',
         profiles: ['ps_2_a', 'ps_3_0'],
+    },
+    {
+        name: 'gradients under the plain name',
+        decls: 'sampler2D A;',
+        body: 'r = tex2D(A, i.a.xy, i.b.xy, i.c.xy);',
+        profiles: ['ps_2_a', 'ps_3_0'],
+    },
+    {
+        name: 'dst',
+        body: 'r = dst(i.a, i.b);',
+    },
+    {
+        name: 'mul cuts the longer side of a product',
+        decls: 'float4x4 M; float3x3 N;',
+        body: 'r.xyz = mul(M, i.a.xyz).xyz; r.w = mul(i.b.xyz, M).w; r += mul(i.c, N).xyzx;',
+        options: { ulp: 4 },
     },
     {
         name: 'derivatives',
