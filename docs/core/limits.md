@@ -44,8 +44,7 @@ differently raises a `divergence` event naming the API.
   graphics worker and what they present is shown as the run's frames; its sound goes onto the
   run's track table in a span its parent lends it, where that table is shared memory (none
   otherwise); the page's input goes to it while it stands. Its DirectDraw primary and the desktop
-  its windows are drawn on are sent to the engine as bytes and shown there; they are not composed
-  with its parent's, and whichever process showed last is on the screen. Its COM classes are the
+  its windows are drawn on are sent to the engine as bytes and shown there. Its COM classes are the
   run's: it serves them to every other process and calls theirs. So is the running object table:
   an object one process registers (`RegisterActiveObject`, `IRunningObjectTable::Register`) is
   found from every other by class (`GetActiveObject`), by moniker and by display name
@@ -60,6 +59,11 @@ differently raises a `divergence` event naming the API.
 ## Graphics
 
 - A picture needs WebGPU. A canvas that gives no WebGPU context fails the start (`reason: 'gpu'`).
+- While windows of more than one process are showing, the screen is composed of each process's
+  newest picture by the run's top-level windows, the topmost last; the canvas takes the size of the
+  foreground window's process's picture. A process's picture is what it presented last, whole:
+  a windowed Direct3D device's back buffer is placed at the screen's corner rather than in its
+  window, and a process that has presented nothing has its windows show what is under them.
 - No Direct3D 11 or 12.
 - Direct3D 10 and Vulkan draw on the engine thread; Direct3D 7, 8, 9 and OpenGL in the graphics
   worker.

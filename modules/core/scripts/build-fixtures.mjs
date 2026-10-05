@@ -94,6 +94,9 @@ const IMPORTS = {
             'SetForegroundWindow@4', 'WindowFromPoint@8', 'EnumWindows@8',
         ],
     },
+    'GDI32.dll': {
+        undecorated: ['CreateSolidBrush@4'],
+    },
     'msvcrt.dll': {
         undecorated: [
             '__CxxFrameHandler3', '_CxxThrowException@8', '_except_handler3', 'qsort',
@@ -124,6 +127,7 @@ const PROGRAMS = [
     { name: 'rot', source: 'rot.c', cxx: false },
     { name: 'activate', source: 'activate.c', cxx: false },
     { name: 'windows', source: 'windows.c', cxx: false },
+    { name: 'overlap', source: 'overlap.c', cxx: false },
 ];
 
 /**

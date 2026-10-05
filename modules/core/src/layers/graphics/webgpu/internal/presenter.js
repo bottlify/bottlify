@@ -6,6 +6,7 @@
 
 import { createPacer } from './pacer.js';
 import { createFrameLatency } from './latency.js';
+import { baseOf, compositionPlan, needsComposing } from './compose.js';
 
 /**
  * A surface in guest memory, put on the screen -- and the canvas itself.
@@ -60,7 +61,8 @@ import { createFrameLatency } from './latency.js';
 const FORMAT = 'bgra8unorm';
 
 /** `GPUTextureUsage` bits, as numbers: this file reads no global. */
-const TEXTURE_USAGE = { COPY_DST: 0x02, TEXTURE_BINDING: 0x04, RENDER_ATTACHMENT: 0x10 };
+const TEXTURE_USAGE = { COPY_SRC: 0x01, COPY_DST: 0x02, TEXTURE_BINDING: 0x04,
+    RENDER_ATTACHMENT: 0x10 };
 
 /** `GPUBufferUsage` and `GPUShaderStage` bits the gamma pass needs. */
 const BUFFER_USAGE = { COPY_DST: 0x08, UNIFORM: 0x40 };
@@ -372,6 +374,14 @@ export function expandRow(row, width, bitCount, palette, out, rowAt = 0, outAt =
  *        The frames the device may still be working on when a presenting call
  *        answers; three by default, zero for no bound (see `latency.js`). One
  *        count for the run, as there is one queue.
+ * @param {() => import('./compose.js').PlacedWindow[]} [options.windows]
+ *        The run's top-level windows, the topmost first, each with its process
+ *        (`user32/manager.js`): with them, the newest frame of each process is
+ *        kept, and while more than one process has a window showing the screen
+ *        is composed of their pictures by window (`compose.js`).
+ * @param {() => number | null} [options.foreground]
+ *        The process of the run's foreground window, whose picture is the screen
+ *        under the windows.
  * @param {(frame: { pixels: Uint8Array, width: number, height: number,
  *     bytesPerRow: number, format: string }) => void} [options.sendFrame]
  *        Where a process with no GPU of its own -- one in a worker of its own
@@ -461,7 +471,7 @@ export function createPresenter(options = {}){
     let converted = null;
     const counters = {
         presents: 0, uploads: 0, bytes: 0, shownByOwner: 0, shown: 0, gammaShown: 0,
-        dropped: 0,
+        dropped: 0, layered: 0, composed: 0,
     };
     /**
      * Canvas copies by the label of the surface shown: a Direct3D target, a
@@ -767,7 +777,7 @@ export function createPresenter(options = {}){
      *
      * @param {any} frame
      */
-    const show = frame=>{
+    const showNow = frame=>{
         const surface = frame.surface;
         if (!gpu || !queue || !screen)
         {
@@ -861,6 +871,121 @@ export function createPresenter(options = {}){
                 message: e instanceof Error ? e.message : String(e),
             });
         }
+    };
+
+    /**
+     * Each process's newest picture, by process, kept in a texture of its own:
+     * what it drew into is drawn over again by its next frame, and the texture
+     * a picture of guest bytes is uploaded into is every machine's.
+     *
+     * @type {Map<number, { texture: any, width: number, height: number, format: string }>}
+     */
+    const layers = new Map();
+    /** @type {{ texture: any, width: number, height: number, format: string } | null} */
+    let composed = null;
+
+    /**
+     * A copy of a source's frame, as its layer.
+     *
+     * @param {number} source @param {any} surface
+     */
+    const keep = (source, surface)=>{
+        let layer = layers.get(source);
+        if (!layer || layer.width !== surface.width || layer.height !== surface.height
+            || layer.format !== surface.format)
+        {
+            layer?.texture.destroy?.();
+            layer = {
+                texture: /** @type {any} */ (gpu).createTexture({
+                    label: `layer of process ${source}`,
+                    size: { width: surface.width, height: surface.height },
+                    format: surface.format,
+                    usage: TEXTURE_USAGE.COPY_SRC | TEXTURE_USAGE.COPY_DST
+                        | TEXTURE_USAGE.TEXTURE_BINDING,
+                }),
+                width: surface.width, height: surface.height, format: surface.format,
+            };
+            layers.set(source, layer);
+        }
+        const encoder = /** @type {any} */ (gpu).createCommandEncoder({ label: 'layer' });
+        encoder.copyTextureToTexture({ texture: surface.texture }, { texture: layer.texture },
+            { width: surface.width, height: surface.height, depthOrArrayLayers: 1 });
+        /** @type {any} */ (queue).submit([encoder.finish()]);
+        counters.layered++;
+    };
+
+    /**
+     * The screen of every process's picture, by the run's windows, shown.
+     *
+     * @param {import('./compose.js').PlacedWindow[]} windows @param {any} frame
+     */
+    const compose = (windows, frame)=>{
+        const base = baseOf(windows, layers, options.foreground?.() ?? null);
+        const under = base === null ? undefined : layers.get(base);
+        if (base === null || !under)
+        {
+            showNow(frame);
+            return;
+        }
+        const screenSize = { width: under.width, height: under.height };
+        if (!composed || composed.width !== under.width || composed.height !== under.height
+            || composed.format !== under.format)
+        {
+            composed?.texture.destroy?.();
+            composed = {
+                texture: /** @type {any} */ (gpu).createTexture({
+                    label: 'composed screen',
+                    size: { width: under.width, height: under.height },
+                    format: under.format,
+                    usage: TEXTURE_USAGE.COPY_SRC | TEXTURE_USAGE.COPY_DST
+                        | TEXTURE_USAGE.TEXTURE_BINDING,
+                }),
+                width: under.width, height: under.height, format: under.format,
+            };
+        }
+        const target = composed;
+        const encoder = /** @type {any} */ (gpu).createCommandEncoder({ label: 'compose' });
+        for (const copy of compositionPlan({ windows, layers, base, screen: screenSize }))
+        {
+            const layer = /** @type {any} */ (layers.get(copy.source));
+            // A picture in another format is not copied into this one: its
+            // windows show what is under them.
+            if (layer.format !== target.format)
+            {
+                continue;
+            }
+            encoder.copyTextureToTexture(
+                { texture: layer.texture, origin: { x: copy.x, y: copy.y } },
+                { texture: target.texture, origin: { x: copy.toX, y: copy.toY } },
+                { width: copy.width, height: copy.height, depthOrArrayLayers: 1 });
+        }
+        /** @type {any} */ (queue).submit([encoder.finish()]);
+        counters.composed++;
+        showNow({ ...frame, surface: { texture: target.texture, width: target.width,
+            height: target.height, format: target.format, label: 'composed' } });
+    };
+
+    /**
+     * The canvas copy, used as the backend's `presentTo`. A frame that says
+     * whose it is is kept as that process's picture; while more than one
+     * process has a window showing, the screen is composed of them.
+     *
+     * @param {any} frame
+     */
+    const show = frame=>{
+        if (frame.source === undefined || !options.windows || !gpu || !queue || !screen)
+        {
+            showNow(frame);
+            return;
+        }
+        keep(frame.source >>> 0, frame.surface);
+        const windows = options.windows();
+        if (!needsComposing(windows))
+        {
+            showNow(frame);
+            return;
+        }
+        compose(windows, frame);
     };
 
     /**
@@ -968,6 +1093,16 @@ export function createPresenter(options = {}){
         show,
 
         /**
+         * A process that ended: its picture is let go.
+         *
+         * @param {number} source
+         */
+        forget(source){
+            layers.get(source >>> 0)?.texture.destroy?.();
+            layers.delete(source >>> 0);
+        },
+
+        /**
          * The gamma ramp frames are shown through, set by `owner`: the
          * display's own through GDI, a full-screen device's, a DirectDraw
          * primary's. The latest set is in effect; null takes an owner's ramp
@@ -1038,6 +1173,13 @@ export function createPresenter(options = {}){
          */
         dispose(){
             disposed = true;
+            for (const layer of layers.values())
+            {
+                layer.texture.destroy?.();
+            }
+            layers.clear();
+            composed?.texture.destroy?.();
+            composed = null;
             texture = null;
             converted = null;
             pending = null;

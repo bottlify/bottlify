@@ -410,6 +410,12 @@ export function retryingFetch({ fetch, events, retry }){
 }
 
 /**
+ * The process id of a run's first process, where the caller named none: the
+ * kernel's, its windows' and its frames' alike, wherever it stands.
+ */
+const FIRST_PROCESS_ID = 0x1000;
+
+/**
  * How much one range request may ask for.
  *
  * The bound is not bandwidth but what a failure costs: a request that dies at
@@ -3585,6 +3591,9 @@ async function buildApp(options){
             // is the run's and wins over a caller's value of the same name.
             ...options.graphics,
             choice: options.graphicsApi,
+            // Whose frames this machine's devices present: the run's screen
+            // is composed of every process's picture by its windows.
+            processId: options.processId ?? FIRST_PROCESS_ID,
             // The display's raster -- the vertical blank, the scan line --
             // runs on the guest's clock, which only this assembly can reach:
             // a program times its spin on the blank with its own timers.
@@ -3643,7 +3652,11 @@ async function buildApp(options){
                         // a test -- still has whatever the caller handed in.
                         if (runPresenter)
                         {
-                            runPresenter.show(frame);
+                            // A frame of the graphics worker says whose it is;
+                            // one drawn here is this process's.
+                            runPresenter.show(frame.source === undefined
+                                ? { ...frame, source: options.processId ?? FIRST_PROCESS_ID }
+                                : frame);
                         }
                         else
                         {
@@ -5464,7 +5477,7 @@ async function buildApp(options){
     const process = createProcessBlocks({
         allocate: allocateFromHeap,
         writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
-        processId: options.processId ?? 0x1000,
+        processId: options.processId ?? FIRST_PROCESS_ID,
         version: windowsVersion(options.windows),
         imageBase: image.base,
         processHeap: allLibraries['KERNEL32.dll']?.GetProcessHeap?.handler([]) ?? 0,
@@ -7415,6 +7428,19 @@ export async function createApp(options){
             onFrame: options.device.onFrame,
             onPresented: options.device.onPresented,
             onPresentFailed: options.device.onPresentFailed,
+            // The run's windows, by which the screen is composed of every
+            // process's picture while more than one has a window showing.
+            windows: ()=>{
+                const manager = system.windows?.manager;
+                return manager ? manager.topLevel().map((/** @type {any} */ state)=>({
+                    processId: state.processId, rect: state.rect, visible: state.visible,
+                    parent: state.parent })) : [];
+            },
+            foreground: ()=>{
+                const manager = system.windows?.manager;
+                const hwnd = manager?.foreground() ?? 0;
+                return hwnd !== 0 ? manager.get(hwnd)?.processId ?? null : null;
+            },
         })
         // A process in a worker of its own has no GPU: its surfaces' pictures
         // go to the thread that has one, as bytes, each burst as it flushes.
@@ -7534,7 +7560,7 @@ export async function createApp(options){
         processes.set(process, built);
         names.set(built, process);
         images.set(built, extra?.imagePath ?? '');
-        processIds.set(built, extra?.processId ?? 0x1000);
+        processIds.set(built, extra?.processId ?? FIRST_PROCESS_ID);
         return built;
     };
 
@@ -7874,6 +7900,8 @@ export async function createApp(options){
         replayLogLevels();
         Object.assign(facade, parent, own);
         bindLogLevels();
+        // Its picture goes with it: no window of the run is drawn from it.
+        presenter?.forget?.(request.id);
         parent.childExited(request, code);
         events.emit('process-resumed', { image: request.imagePath, code });
     };
@@ -7989,7 +8017,8 @@ export async function createApp(options){
         // worker's frames do and are shown by the run's presenter.
         const display = presenter && options.device?.device ? new MessageChannel() : null;
         const shown = display ? connectGraphicsWorker({ worker: portEnd(display.port1),
-            device: options.device.device, presentTo: frame=>presenter.show(frame) }) : null;
+            device: options.device.device,
+            presentTo: frame=>presenter.show({ ...frame, source: request.id }) }) : null;
         // Its sound goes onto the run's table, in a span its parent lends it,
         // where the table is shared memory a worker can be handed; elsewhere
         // the run's sound is mixed on this thread, and the child has none.
@@ -8078,6 +8107,7 @@ export async function createApp(options){
             sound?.giveBack();
             shown?.dispose();
             display?.port1.close();
+            presenter?.forget?.(request.id);
         }
     };
     /** The code the last of the run's processes beside another exited with. */
@@ -8375,6 +8405,7 @@ export async function createApp(options){
             replayLogLevels();
             Object.assign(facade, mainLine.current, own);
             bindLogLevels();
+            presenter?.forget?.(request.id);
             parent.childExited(request, code);
             lastBesideCode = code;
             events.emit('process-resumed', { image: request.imagePath, code });
@@ -8509,7 +8540,10 @@ export async function createApp(options){
         }, {
             imagePath,
             commandLine: options.commandLine,
-            id: options.processId,
+            // The id it has in its worker, where none was handed in, as a
+            // process built here has: its windows and its frames are told
+            // apart by it.
+            id: options.processId ?? FIRST_PROCESS_ID,
         }, null, ended=>{
             rootLibraries = ended.systemLibraries ?? [];
             current.ended(ended.diagnostics);
