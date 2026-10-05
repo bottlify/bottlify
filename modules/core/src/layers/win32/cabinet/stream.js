@@ -25,6 +25,7 @@ import {
  * @typedef {Object} ByteSource
  * @property {number} size
  * @property {(offset: number, length: number) => Uint8Array | Promise<Uint8Array>} read
+ * @property {() => void} [release]  What the source holds, given back when done.
  */
 
 /**
@@ -50,6 +51,13 @@ export async function readCabinetHead(source){
     for (;;)
     {
         const head = await source.read(0, length);
+        // Only a directory that does not fit in what was read asks for more;
+        // bytes that are not a cabinet at all are refused on their first four.
+        if (head.length >= 4 && (head[0] !== 0x4d || head[1] !== 0x53 || head[2] !== 0x43
+            || head[3] !== 0x46))
+        {
+            throw new CabinetError('no MSCF signature', 'format');
+        }
         try
         {
             return readCabinet(head);
@@ -70,30 +78,67 @@ export async function readCabinetHead(source){
  * @param {ByteSource} source
  * @param {(file: import('./cabinet.js').CabinetFile)
  *     => FileSink | null | Promise<FileSink | null>} sink
+ * @param {{ eager?: boolean }} [options]
+ *        `eager`: every file of a folder is asked for before the folder is
+ *        read, so a folder none is wanted from is not read at all; otherwise
+ *        each is asked for as the output reaches it, which is the order an
+ *        extractor that is told of a file when it is about to be written
+ *        expects.
  * @returns {Promise<void>}
  */
-export async function extractCabinet(source, sink){
+export async function extractCabinet(source, sink, { eager = false } = {}){
     const cabinet = await readCabinetHead(source);
     for (const folder of cabinet.folders)
     {
-        const wanted = cabinet.files.filter(file=>folderOf(cabinet, file) === folder);
-        /** @type {{ file: import('./cabinet.js').CabinetFile, out: FileSink }[]} */
-        const open = [];
-        for (const file of wanted)
-        {
-            const out = await sink(file);
-            if (out)
-            {
-                open.push({ file, out });
-            }
-        }
-        if (open.length === 0)
+        const wanted = cabinet.files.filter(file=>folderOf(cabinet, file) === folder)
+            .sort((left, right)=>left.offset - right.offset);
+        if (wanted.length === 0)
         {
             continue;
         }
-        open.sort((left, right)=>left.file.offset - right.file.offset);
         const decode = createFolderDecoder(folder.compression);
-        const end = Math.max(...open.map(({ file })=>file.offset + file.size));
+        // The files are asked for as the folder's output reaches them, one
+        // after another, as an extractor that opens a file when it is told of
+        // it and closes it when it has all of it expects them to be.
+        let next = 0;
+        /** @type {{ file: import('./cabinet.js').CabinetFile, out: FileSink }[]} */
+        const open = [];
+        /** @param {number} produced */
+        const reach = async produced=>{
+            while (next < wanted.length && wanted[next].offset <= produced)
+            {
+                const file = wanted[next++];
+                const out = await sink(file);
+                if (out)
+                {
+                    open.push({ file, out });
+                }
+            }
+        };
+        /** @param {number} produced */
+        const finish = async produced=>{
+            for (let index = 0; index < open.length;)
+            {
+                const { file, out } = open[index];
+                if (file.offset + file.size <= produced)
+                {
+                    open.splice(index, 1);
+                    await out.close();
+                }
+                else
+                {
+                    index++;
+                }
+            }
+        };
+        await reach(eager ? Infinity : 0);
+        if (eager && open.length === 0)
+        {
+            continue;
+        }
+        const end = eager ? Math.max(...open.map(({ file })=>file.offset + file.size))
+            : Math.max(...wanted.map(file=>file.offset + file.size));
+        await finish(0);
 
         /** @type {Uint8Array} */
         let buffer = new Uint8Array(0);
@@ -125,26 +170,44 @@ export async function extractCabinet(source, sink){
             const headerCopy = header.slice(4);
             const data = await take(at + 8 + cabinet.dataReserve, packed);
             const out = decodeBlock(decode, headerCopy, data, checksum, size, block);
-            for (const { file, out: target } of open)
+            // The block's bytes in pieces, cut where a file ends or the next
+            // begins, so each file is opened, filled and closed before the one
+            // after it is opened.
+            const blockEnd = produced + out.length;
+            let position = produced;
+            await reach(position);
+            while (position < blockEnd)
             {
-                const from = Math.max(file.offset, produced);
-                const to = Math.min(file.offset + file.size, produced + out.length);
-                if (from < to)
+                let boundary = blockEnd;
+                for (const { file } of open)
                 {
-                    await target.write(from - file.offset,
-                        out.subarray(from - produced, to - produced));
+                    boundary = Math.min(boundary, file.offset + file.size);
                 }
+                if (next < wanted.length && wanted[next].offset > position)
+                {
+                    boundary = Math.min(boundary, wanted[next].offset);
+                }
+                for (const { file, out: target } of open)
+                {
+                    const from = Math.max(file.offset, position);
+                    const to = Math.min(file.offset + file.size, boundary);
+                    if (from < to)
+                    {
+                        await target.write(from - file.offset,
+                            out.subarray(from - produced, to - produced));
+                    }
+                }
+                position = boundary;
+                await finish(position);
+                await reach(position);
+                await finish(position);
             }
-            produced += out.length;
+            produced = blockEnd;
             at += 8 + cabinet.dataReserve + packed;
         }
         if (produced < end)
         {
             throw new CabinetError('the folder ends before its files do', 'corrupt');
-        }
-        for (const { out } of open)
-        {
-            await out.close();
         }
     }
 }

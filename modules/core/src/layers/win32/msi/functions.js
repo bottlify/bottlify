@@ -1,0 +1,1476 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * msi.dll: the Windows Installer's API over the engine in this folder.
+ *
+ * Everything a program holds is an MSIHANDLE, a small number of the
+ * installer's own -- a database, a view, a record, a summary, a session --
+ * closed with MsiCloseHandle and never confused with a kernel handle. A
+ * string comes back the installer's way: the buffer's room in characters
+ * going in, the length coming back, ERROR_MORE_DATA and the length needed
+ * when it does not fit, and the length alone when there is no buffer.
+ *
+ * An installation reports to the user interface the program chose: an
+ * external handler it registered gets every message it filtered for, as
+ * text; without one an error is shown in a message box unless the
+ * interface is off. The package's own dialogs are not drawn.
+ */
+
+import { openCompound } from './compound.js';
+import { createEmptyDatabase, isKey, openDatabase } from './database.js';
+import {
+    ERROR_BAD_QUERY_SYNTAX, ERROR_FUNCTION_FAILED, ERROR_NO_MORE_ITEMS, columnInfo, openView,
+} from './query.js';
+import {
+    MAX_FIELDS, MSI_NULL_INTEGER, bytesStream, clearRecord, createRecord, dataSize, getInteger,
+    getString, isNull, setInteger, setStream, setString,
+} from './record.js';
+import { MSICONDITION } from './condition.js';
+import { formatRecord } from './format.js';
+import { INSTALLSTATE, createSession } from './session.js';
+import { PID_TYPES, VT, readSummary } from './summary.js';
+import { INSTALLMESSAGE, doAction, readFile, runSequence } from './actions.js';
+import { createRegistration } from './registration.js';
+import { installerVersion } from './version.js';
+import { encodeAnsi } from '../kernel32/locale.js';
+
+const ERROR_SUCCESS = 0;
+const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_OPEN_FAILED = 110;
+const ERROR_INVALID_HANDLE = 6;
+const ERROR_INVALID_DATA = 13;
+const ERROR_INVALID_PARAMETER = 87;
+const ERROR_MORE_DATA = 234;
+const ERROR_DIRECTORY = 267;
+const ERROR_FILE_INVALID = 1006;
+const ERROR_INVALID_DATATYPE = 1804;
+const ERROR_INSTALL_PACKAGE_OPEN_FAILED = 1619;
+const ERROR_INSTALL_PACKAGE_INVALID = 1620;
+const ERROR_UNKNOWN_FEATURE = 1606;
+const ERROR_UNKNOWN_COMPONENT = 1607;
+const ERROR_UNKNOWN_PROPERTY = 1608;
+const ERROR_INVALID_TABLE = 1628;
+const ERROR_CALL_NOT_IMPLEMENTED = 120;
+const ERROR_DATATYPE_MISMATCH = 1629;
+const ERROR_ACCESS_DENIED = 5;
+
+/** INSTALLUILEVEL values. */
+const INSTALLUILEVEL = Object.freeze({
+    NOCHANGE: 0, DEFAULT: 1, NONE: 2, BASIC: 3, REDUCED: 4, FULL: 5, ENDDIALOG: 0x80,
+    PROGRESSONLY: 0x40, HIDECANCEL: 0x20, SOURCERESONLY: 0x100,
+});
+
+/** MsiOpenDatabase's persistence modes; a larger value is an output path. */
+const MSIDBOPEN_READONLY = 0;
+const MSIDBOPEN_CREATE = 3;
+const MSIDBOPEN_CREATEDIRECT = 4;
+const MSIDBOPEN_PATCHFILE = 32;
+
+/** MsiGetMode's run modes, as the session's mode flags. */
+const RUN_MODES = Object.freeze({
+    0: 'admin', 1: 'advertise', 2: 'maintenance', 3: 'rollbackEnabled', 4: 'logEnabled',
+    5: 'operations', 6: 'rebootAtEnd', 7: 'rebootNow', 8: 'cabinet', 9: 'sourceShortNames',
+    10: 'targetShortNames', 12: 'windows9x', 13: 'zawEnabled', 16: 'scheduled',
+    17: 'rollback', 18: 'commit',
+});
+
+/** A string argument is read up to this many characters. */
+const MAX_TEXT = 0x8000;
+
+/** MB_OK | MB_ICONERROR, and the answer a box that is not shown gives. */
+const MB_ICONERROR = 0x10;
+const IDOK = 1;
+
+/**
+ * @typedef {Object} MsiHost
+ * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(address: number, maxLength: number) => string} readWideString
+ * @property {(bytes: number) => number} allocate
+ * @property {(address: number) => void} free
+ * @property {any} files
+ * @property {(path: string) => string} fullPath
+ * @property {import('./registration.js').Hive} hive
+ * @property {(entry: number, args: number[], thread?: unknown) => Promise<number> | number} call
+ * @property {() => unknown} callerThread
+ * @property {{ loadAnsi: (name: number) => number | Promise<number>,
+ *     procAddress: (module: number, name: number) => number | Promise<number>,
+ *     free: (module: number) => number | Promise<number> }} libraries
+ * @property {() => import('./session.js').Machine} machine
+ * @property {(text: string, caption: string, flags: number) => number | Promise<number>}
+ *     [messageBox]
+ * @property {(commandLine: string, directory: string | null, wait: boolean)
+ *     => Promise<number | null>} [runExe]
+ * @property {(path: string) => Uint8Array | null | Promise<Uint8Array | null>} [versionInfo]
+ * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(text: string) => void} [log]
+ */
+
+/**
+ * @param {MsiHost} host
+ * @returns {Record<string, { argBytes: number, handler: (args: number[]) => any }>}
+ */
+export function createMsiFunctions(host){
+    /** @type {Map<number, { kind: string, object: any }>} */
+    const handles = new Map();
+    let nextHandle = 1;
+    /** @param {string} kind @param {any} object */
+    const open = (kind, object)=>{
+        const handle = nextHandle++;
+        handles.set(handle, { kind, object });
+        return handle;
+    };
+    /** @param {number} handle @param {string} kind */
+    const get = (handle, kind)=>{
+        const entry = handles.get(handle >>> 0);
+        return entry && entry.kind === kind ? entry.object : null;
+    };
+
+    const registration = createRegistration(host.hive);
+
+    /** @param {number} address */
+    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+        .getUint32(0, true);
+    /** @param {number} address @param {number} value */
+    const writeU32 = (address, value)=>host.writeMemory(address >>> 0,
+        new Uint8Array(Uint32Array.of(value >>> 0).buffer));
+    /** @param {number} address @param {number} value */
+    const writeI32 = (address, value)=>writeU32(address, value | 0);
+
+    /** @param {boolean} wide @returns {(address: number) => string | null} */
+    const reader = wide=>address=>((address >>> 0) === 0 ? null : wide
+        ? host.readWideString(address >>> 0, MAX_TEXT) : host.readCString(address >>> 0, MAX_TEXT));
+
+    /** @param {string} text */
+    const utf16 = text=>{
+        const bytes = new Uint8Array(text.length * 2);
+        for (let at = 0; at < text.length; at++)
+        {
+            bytes[at * 2] = text.charCodeAt(at) & 0xff;
+            bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
+        }
+        return bytes;
+    };
+
+    /**
+     * A string out, the installer's way.
+     *
+     * @param {boolean} wide @param {string} text @param {number} buffer @param {number} size
+     */
+    const putString = (wide, text, buffer, size)=>{
+        if ((buffer >>> 0) !== 0 && (size >>> 0) === 0)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        if ((size >>> 0) === 0)
+        {
+            return ERROR_SUCCESS;
+        }
+        const room = readU32(size);
+        const units = wide ? utf16(text) : encodeAnsi(text);
+        const width = wide ? 2 : 1;
+        const length = units.length / width;
+        if ((buffer >>> 0) !== 0 && room > 0)
+        {
+            const fits = Math.min(length, room - 1);
+            const out = new Uint8Array((fits + 1) * width);
+            out.set(units.subarray(0, fits * width));
+            host.writeMemory(buffer >>> 0, out);
+        }
+        writeU32(size, length);
+        return (buffer >>> 0) !== 0 && length >= room ? ERROR_MORE_DATA : ERROR_SUCCESS;
+    };
+
+    /**
+     * An entry point in both widths, its body told which.
+     *
+     * @param {string} name @param {number} argBytes
+     * @param {(wide: boolean) => (args: number[]) => any} make
+     */
+    const both = (name, argBytes, make)=>({
+        [`${name}A`]: { argBytes, handler: make(false) },
+        [`${name}W`]: { argBytes, handler: make(true) },
+    });
+
+    // ----- the user interface ---------------------------------------------
+
+    /** @type {number} */
+    let uiLevel = INSTALLUILEVEL.BASIC;
+    /** @type {{ handler: number, filter: number, context: number, wide: boolean } | null} */
+    let externalUi = null;
+    /** @type {{ handler: number, filter: number, context: number } | null} */
+    let recordUi = null;
+
+    /**
+     * A message's text: an action's start as "Action time: name. description",
+     * anything else its record formatted.
+     *
+     * @param {number} type @param {import('./record.js').Record} record
+     * @param {import('./session.js').Session | null} session
+     */
+    const messageText = (type, record, session)=>{
+        const kind = type & 0xff000000;
+        if (kind === INSTALLMESSAGE.ACTIONSTART)
+        {
+            const now = new Date();
+            const two = (/** @type {number} */ value)=>String(value).padStart(2, '0');
+            const description = getString(record, 2);
+            return `Action ${two(now.getHours())}:${two(now.getMinutes())}:${two(now.getSeconds())}`
+                + `: ${getString(record, 1)}. ${description}`;
+        }
+        if (kind === INSTALLMESSAGE.INITIALIZE || kind === INSTALLMESSAGE.TERMINATE)
+        {
+            return '';
+        }
+        return formatRecord({ count: record.fields.length - 1, field: index=>{
+            const value = record.fields[index] ?? null;
+            return value !== null && typeof value === 'object' ? null : value;
+        } }, session ? { property: session.getProperty } : null);
+    };
+
+    /**
+     * Delivers a message: to a record handler, then a text handler, as the
+     * program registered them; an error with neither goes to a message box
+     * unless the interface is off. Answers what the interface answered.
+     *
+     * @param {number} type @param {import('./record.js').Record} record
+     * @param {import('./session.js').Session | null} session
+     */
+    const deliver = async(type, record, session)=>{
+        const kind = (type >>> 24) & 0xff;
+        const bit = 1 << kind;
+        if (recordUi && (recordUi.filter & bit) !== 0)
+        {
+            const handle = open('record', record);
+            try
+            {
+                const answer = await host.call(recordUi.handler,
+                    [recordUi.context, type >>> 0, handle], host.callerThread());
+                if (answer !== 0)
+                {
+                    return answer;
+                }
+            }
+            finally
+            {
+                handles.delete(handle);
+            }
+        }
+        const text = messageText(type, record, session);
+        if (externalUi && (externalUi.filter & bit) !== 0)
+        {
+            const bytes = externalUi.wide ? utf16(`${text}\0`) : encodeAnsi(`${text}\0`);
+            const block = host.allocate(bytes.length);
+            host.writeMemory(block, bytes);
+            try
+            {
+                const answer = await host.call(externalUi.handler,
+                    [externalUi.context, type >>> 0, block], host.callerThread());
+                if (answer !== 0)
+                {
+                    return answer;
+                }
+            }
+            finally
+            {
+                host.free(block);
+            }
+        }
+        const level = uiLevel & 0x0f;
+        if ((type & 0xff000000) === INSTALLMESSAGE.ERROR
+            || (type & 0xff000000) === INSTALLMESSAGE.FATALEXIT)
+        {
+            host.log?.(`Error: ${text}`);
+            if (level !== INSTALLUILEVEL.NONE && host.messageBox && text !== '')
+            {
+                const caption = session?.getProperty('ProductName') || 'Windows Installer';
+                return host.messageBox(text, caption, MB_ICONERROR | (type & 0xff));
+            }
+            return IDOK;
+        }
+        return 0;
+    };
+
+    // ----- installing -----------------------------------------------------
+
+    /** @type {Map<import('./session.js').Session, import('./actions.js').Engine>} */
+    const engines = new Map();
+
+    /**
+     * The engine a session runs its actions in.
+     *
+     * @param {import('./session.js').Session} session
+     */
+    const engineFor = session=>{
+        let engine = engines.get(session);
+        if (!engine)
+        {
+            engine = {
+                session,
+                executing: false,
+                ran: new Set(),
+                commit: [],
+                host: {
+                    files: host.files,
+                    hive: host.hive,
+                    registration,
+                    message: (type, record)=>deliver(type, record, session),
+                    openHandle: (owner, deferred)=>open('session', { session: owner, deferred }),
+                    closeHandle: handle=>{
+                        handles.delete(handle);
+                    },
+                    callDll,
+                    runExe: async(commandLine, directory, wait)=>
+                        host.runExe?.(commandLine, directory, wait) ?? null,
+                    divergence: host.divergence,
+                    log: host.log,
+                },
+            };
+            engines.set(session, engine);
+        }
+        return engine;
+    };
+
+    /**
+     * Bytes as a NUL-terminated string in the guest for as long as `use` runs.
+     *
+     * @template T
+     * @param {string} text @param {(address: number) => T | Promise<T>} use
+     * @returns {Promise<T>}
+     */
+    const withString = async(text, use)=>{
+        const bytes = encodeAnsi(`${text}\0`);
+        const block = host.allocate(bytes.length);
+        host.writeMemory(block, bytes);
+        try
+        {
+            return await use(block);
+        }
+        finally
+        {
+            host.free(block);
+        }
+    };
+
+    /**
+     * Loads a library, calls one of its exports and frees it, as the
+     * installer runs a library action.
+     *
+     * @param {string} path @param {string} entry @param {number[]} args
+     * @returns {Promise<number | null>}
+     */
+    async function callDll(path, entry, args){
+        const module = await withString(path, name=>host.libraries.loadAnsi(name));
+        if (!module)
+        {
+            return null;
+        }
+        try
+        {
+            const address = await withString(entry,
+                name=>host.libraries.procAddress(module >>> 0, name));
+            if (!address)
+            {
+                return null;
+            }
+            return (await host.call(address >>> 0, args, host.callerThread())) >>> 0;
+        }
+        finally
+        {
+            await host.libraries.free(module >>> 0);
+        }
+    }
+
+    /**
+     * A database out of a file on the volume, read where it lies.
+     *
+     * @param {string} path
+     * @returns {Promise<import('./database.js').Database | null>}
+     */
+    const loadDatabase = async path=>{
+        const full = host.fullPath(path);
+        const stat = host.files.stat(full);
+        if (!stat || stat.isDirectory)
+        {
+            return null;
+        }
+        const node = host.files.open(full, { read: true, shareWrite: true });
+        if (!node)
+        {
+            return null;
+        }
+        try
+        {
+            return await openDatabase(await openCompound({
+                size: stat.size,
+                read: (offset, length)=>host.files.read(node, offset, length),
+            }));
+        }
+        catch (e){
+            host.files.close(node);
+            host.log?.(`${full}: ${/** @type {Error} */ (e).message}`);
+            return null;
+        }
+    };
+
+    /**
+     * A package opened as a session: a path, or "#n" for a database handle
+     * already open.
+     *
+     * @param {string} path @param {string} [commandLine]
+     */
+    const openSession = async(path, commandLine = '')=>{
+        const byHandle = /^#(\d+)$/.exec(path);
+        const opened = byHandle ? get(Number(byHandle[1]), 'database') : null;
+        const packagePath = byHandle ? opened?.path ?? '' : host.fullPath(path);
+        const db = byHandle ? opened?.db ?? null : await loadDatabase(packagePath);
+        if (!db)
+        {
+            return null;
+        }
+        db.readOnly = true;
+        const session = createSession({
+            db, packagePath, machine: host.machine(), commandLine,
+            isInstalled: code=>registration.productState(code) === INSTALLSTATE.DEFAULT,
+        });
+        session.setProperty('UILevel', String(uiLevel & 0x0f || INSTALLUILEVEL.BASIC));
+        return session;
+    };
+
+    /**
+     * MsiInstallProduct's work: the UI sequence when the interface is full or
+     * reduced, which starts the execute sequence through ExecuteAction; the
+     * execute sequence alone otherwise.
+     *
+     * @param {string} path @param {string} commandLine
+     */
+    const installPackage = async(path, commandLine)=>{
+        const session = await openSession(path, commandLine);
+        if (!session)
+        {
+            return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
+        }
+        session.setProperty('ACTION', session.getProperty('ACTION') || 'INSTALL');
+        session.setProperty('EXECUTEACTION', 'INSTALL');
+        const engine = engineFor(session);
+        await deliver(INSTALLMESSAGE.INITIALIZE, createRecord(0), session);
+        const level = uiLevel & 0x0f;
+        const ui = level === INSTALLUILEVEL.FULL || level === INSTALLUILEVEL.REDUCED;
+        let code;
+        try
+        {
+            code = ui ? await runSequence(engine, 'InstallUISequence')
+                : await runSequence(engine, 'InstallExecuteSequence');
+            if (ui && code === ERROR_SUCCESS && !engine.ran.has('ExecuteAction')
+                && session.script.length === 0 && session.getProperty('CostingComplete') !== '1')
+            {
+                code = await doAction(engine, 'ExecuteAction');
+            }
+        }
+        finally
+        {
+            await deliver(INSTALLMESSAGE.TERMINATE, createRecord(0), session);
+            engines.delete(session);
+        }
+        host.log?.(`Installation of ${path} answered ${code}.`);
+        return code;
+    };
+
+    // ----- sessions: what a custom action calls ---------------------------
+
+    /**
+     * The session a handle names, and whether it is a deferred action's.
+     *
+     * @param {number} handle
+     * @returns {{ session: import('./session.js').Session, deferred: string | null } | null}
+     */
+    const sessionOf = handle=>get(handle, 'session');
+
+    /** @param {{ session: any, deferred: string | null }} owner @param {string} name */
+    const propertyOf = (owner, name)=>{
+        if (owner.deferred === null)
+        {
+            return owner.session.getProperty(name);
+        }
+        // A deferred action sees its own data and a couple of facts, no more.
+        if (name === 'CustomActionData')
+        {
+            return owner.deferred;
+        }
+        return name === 'ProductCode' || name === 'UserSID' ? owner.session.getProperty(name) : '';
+    };
+
+    /** @param {number} handle @returns {import('./record.js').Record | null} */
+    const recordOf = handle=>get(handle, 'record');
+
+    return {
+        // ----- handles and records -----
+        MsiCloseHandle: {
+            argBytes: 4,
+            handler: ([handle])=>{
+                if ((handle >>> 0) === 0)
+                {
+                    return ERROR_SUCCESS;
+                }
+                return handles.delete(handle >>> 0) ? ERROR_SUCCESS : ERROR_INVALID_HANDLE;
+            },
+        },
+        MsiCloseAllHandles: {
+            argBytes: 0,
+            handler: ()=>{
+                const count = handles.size;
+                handles.clear();
+                return count;
+            },
+        },
+        MsiCreateRecord: {
+            argBytes: 4,
+            handler: ([count])=>((count >>> 0) > MAX_FIELDS ? 0
+                : open('record', createRecord(count >>> 0))),
+        },
+        MsiRecordGetFieldCount: {
+            argBytes: 4,
+            handler: ([handle])=>{
+                const record = recordOf(handle);
+                return record ? record.fields.length - 1 : -1;
+            },
+        },
+        MsiRecordIsNull: {
+            argBytes: 8,
+            handler: ([handle, field])=>{
+                const record = recordOf(handle);
+                return record ? (isNull(record, field >>> 0) ? 1 : 0) : 0;
+            },
+        },
+        MsiRecordDataSize: {
+            argBytes: 8,
+            handler: ([handle, field])=>{
+                const record = recordOf(handle);
+                return record && (field >>> 0) < record.fields.length
+                    ? dataSize(record, field >>> 0) : 0;
+            },
+        },
+        MsiRecordGetInteger: {
+            argBytes: 8,
+            handler: ([handle, field])=>{
+                const record = recordOf(handle);
+                return record ? getInteger(record, field >>> 0) : MSI_NULL_INTEGER;
+            },
+        },
+        MsiRecordSetInteger: {
+            argBytes: 12,
+            handler: ([handle, field, value])=>{
+                const record = recordOf(handle);
+                if (!record)
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                return setInteger(record, field >>> 0, value | 0) ? ERROR_SUCCESS
+                    : ERROR_INVALID_PARAMETER;
+            },
+        },
+        ...both('MsiRecordGetString', 16, wide=>([handle, field, buffer, size])=>{
+            const record = recordOf(handle);
+            if (!record)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const value = record.fields[field >>> 0] ?? null;
+            if (value !== null && typeof value === 'object')
+            {
+                return ERROR_INVALID_DATATYPE;
+            }
+            return putString(wide, getString(record, field >>> 0), buffer, size);
+        }),
+        ...both('MsiRecordSetString', 12, wide=>([handle, field, text])=>{
+            const record = recordOf(handle);
+            if (!record)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            return setString(record, field >>> 0, reader(wide)(text)) ? ERROR_SUCCESS
+                : ERROR_INVALID_PARAMETER;
+        }),
+        ...both('MsiRecordSetStream', 12, wide=>async([handle, field, path])=>{
+            const record = recordOf(handle);
+            if (!record)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const name = reader(wide)(path);
+            if (name === null)
+            {
+                const value = record.fields[field >>> 0] ?? null;
+                if (value !== null && typeof value === 'object')
+                {
+                    value.position = 0;
+                    return ERROR_SUCCESS;
+                }
+                return ERROR_INVALID_PARAMETER;
+            }
+            const bytes = await readFile(host.files, host.fullPath(name));
+            if (!bytes)
+            {
+                return ERROR_FILE_NOT_FOUND;
+            }
+            return setStream(record, field >>> 0, bytesStream(bytes)) ? ERROR_SUCCESS
+                : ERROR_INVALID_PARAMETER;
+        }),
+        MsiRecordReadStream: {
+            argBytes: 16,
+            handler: async([handle, field, buffer, size])=>{
+                const record = recordOf(handle);
+                if (!record)
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                if ((size >>> 0) === 0 || (field >>> 0) >= record.fields.length)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                const value = record.fields[field >>> 0];
+                if (value === null)
+                {
+                    writeU32(size, 0);
+                    return ERROR_INVALID_DATA;
+                }
+                if (typeof value !== 'object')
+                {
+                    return ERROR_INVALID_DATATYPE;
+                }
+                if ((buffer >>> 0) === 0)
+                {
+                    value.position = 0;
+                    writeU32(size, value.stream.size);
+                    return ERROR_SUCCESS;
+                }
+                const want = Math.min(readU32(size), value.stream.size - value.position);
+                const bytes = want > 0 ? await value.stream.read(value.position, want)
+                    : new Uint8Array(0);
+                host.writeMemory(buffer >>> 0, bytes);
+                value.position += bytes.length;
+                writeU32(size, bytes.length);
+                return ERROR_SUCCESS;
+            },
+        },
+        MsiRecordClearData: {
+            argBytes: 4,
+            handler: ([handle])=>{
+                const record = recordOf(handle);
+                if (!record)
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                clearRecord(record);
+                return ERROR_SUCCESS;
+            },
+        },
+        ...both('MsiFormatRecord', 16, wide=>([install, handle, buffer, size])=>{
+            const record = recordOf(handle);
+            if (!record)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const owner = sessionOf(install);
+            const text = owner ? owner.session.format(record, owner.deferred !== null)
+                : formatRecord({ count: record.fields.length - 1, field: index=>{
+                    const value = record.fields[index] ?? null;
+                    return value !== null && typeof value === 'object' ? null : value;
+                } }, null);
+            return putString(wide, text, buffer, size);
+        }),
+
+        // ----- databases and views -----
+        ...both('MsiOpenDatabase', 12, wide=>async([path, persist, out])=>{
+            const name = reader(wide)(path);
+            if (name === null || (out >>> 0) === 0)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            const mode = (persist >>> 0) > 0xffff ? 1 : (persist >>> 0) & ~MSIDBOPEN_PATCHFILE;
+            let db;
+            if (mode === MSIDBOPEN_CREATE || mode === MSIDBOPEN_CREATEDIRECT)
+            {
+                db = createEmptyDatabase();
+            }
+            else
+            {
+                db = await loadDatabase(name);
+                if (!db)
+                {
+                    return host.files.stat(host.fullPath(name)) ? ERROR_INSTALL_PACKAGE_INVALID
+                        : ERROR_OPEN_FAILED;
+                }
+                db.readOnly = mode === MSIDBOPEN_READONLY;
+            }
+            writeU32(out, open('database', { db, path: host.fullPath(name) }));
+            return ERROR_SUCCESS;
+        }),
+        ...both('MsiDatabaseOpenView', 12, wide=>([database, query, out])=>{
+            const opened = get(database, 'database');
+            if (!opened)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const text = reader(wide)(query);
+            if (text === null || (out >>> 0) === 0)
+            {
+                return ERROR_BAD_QUERY_SYNTAX;
+            }
+            const result = openView(opened.db, text);
+            if ('error' in result)
+            {
+                return result.error;
+            }
+            writeU32(out, open('view', { view: result.view, db: opened.db }));
+            return ERROR_SUCCESS;
+        }),
+        MsiViewExecute: {
+            argBytes: 8,
+            handler: ([view, params])=>{
+                const opened = get(view, 'view');
+                if (!opened)
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                return opened.view.execute((params >>> 0) === 0 ? null : recordOf(params));
+            },
+        },
+        MsiViewFetch: {
+            argBytes: 8,
+            handler: ([view, out])=>{
+                const opened = get(view, 'view');
+                if (!opened)
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                if ((out >>> 0) === 0)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                if (!opened.view.executed)
+                {
+                    return ERROR_FUNCTION_FAILED;
+                }
+                const record = opened.view.fetch();
+                if (!record)
+                {
+                    writeU32(out, 0);
+                    return opened.view.kind === 'select' ? ERROR_NO_MORE_ITEMS
+                        : ERROR_FUNCTION_FAILED;
+                }
+                writeU32(out, open('record', record));
+                return ERROR_SUCCESS;
+            },
+        },
+        MsiViewClose: {
+            argBytes: 4,
+            handler: ([view])=>{
+                const opened = get(view, 'view');
+                if (!opened)
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                opened.view.close();
+                return ERROR_SUCCESS;
+            },
+        },
+        MsiViewModify: {
+            argBytes: 12,
+            handler: ([view, mode, handle])=>{
+                const opened = get(view, 'view');
+                const record = recordOf(handle);
+                if (!opened || !record)
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                return opened.view.modify(mode | 0, record);
+            },
+        },
+        MsiViewGetColumnInfo: {
+            argBytes: 12,
+            handler: ([view, kind, out])=>{
+                const opened = get(view, 'view');
+                if (!opened)
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                if ((out >>> 0) === 0 || (kind >>> 0) > 1)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                writeU32(out, open('record', columnInfo(opened.view.columns, null,
+                    (kind >>> 0) === 0 ? 'names' : 'types')));
+                return ERROR_SUCCESS;
+            },
+        },
+        ...both('MsiViewGetError', 12, wide=>([view, buffer, size])=>{
+            if (!get(view, 'view'))
+            {
+                return -3;
+            }
+            putString(wide, '', buffer, size);
+            return 0;
+        }),
+        MsiDatabaseCommit: {
+            argBytes: 4,
+            handler: ([database])=>(get(database, 'database') ? ERROR_SUCCESS
+                : ERROR_INVALID_HANDLE),
+        },
+        ...both('MsiDatabaseGetPrimaryKeys', 12, wide=>([database, table, out])=>{
+            const opened = get(database, 'database');
+            if (!opened)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const name = reader(wide)(table) ?? '';
+            const found = opened.db.table(name);
+            if (!found)
+            {
+                return ERROR_INVALID_TABLE;
+            }
+            const keys = found.columns.filter(isKey).map((/** @type {any} */ column)=>column.name);
+            const record = createRecord(keys.length);
+            record.fields[0] = name;
+            keys.forEach((/** @type {string} */ key, /** @type {number} */ index)=>{
+                record.fields[index + 1] = key;
+            });
+            writeU32(out, open('record', record));
+            return ERROR_SUCCESS;
+        }),
+        ...both('MsiDatabaseIsTablePersistent', 8, wide=>([database, table])=>{
+            const opened = get(database, 'database');
+            if (!opened)
+            {
+                return MSICONDITION.ERROR;
+            }
+            const found = opened.db.table(reader(wide)(table) ?? '');
+            return !found ? MSICONDITION.NONE : found.temporary ? MSICONDITION.FALSE
+                : MSICONDITION.TRUE;
+        }),
+        MsiGetActiveDatabase: {
+            argBytes: 4,
+            handler: ([install])=>{
+                const owner = sessionOf(install);
+                return owner ? open('database', { db: owner.session.db,
+                    path: owner.session.packagePath }) : 0;
+            },
+        },
+        MsiGetLastErrorRecord: { argBytes: 0, handler: ()=>0 },
+
+        // ----- summary information -----
+        ...both('MsiGetSummaryInformation', 16, wide=>async([database, path, count, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            void count;
+            let db = get(database, 'database')?.db ?? null;
+            if (!db && (database >>> 0) !== 0)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            if (!db)
+            {
+                const name = reader(wide)(path);
+                db = name === null ? null : await loadDatabase(name);
+                if (!db)
+                {
+                    return ERROR_INSTALL_PACKAGE_INVALID;
+                }
+            }
+            writeU32(out, open('summary', readSummary(db.summaryStream())));
+            return ERROR_SUCCESS;
+        }),
+        MsiSummaryInfoGetPropertyCount: {
+            argBytes: 8,
+            handler: ([handle, out])=>{
+                const summary = get(handle, 'summary');
+                if (!summary)
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                if ((out >>> 0) !== 0)
+                {
+                    writeU32(out, summary.size);
+                }
+                return ERROR_SUCCESS;
+            },
+        },
+        ...both('MsiSummaryInfoGetProperty', 28,
+            wide=>([handle, property, type, integer, filetime, buffer, size])=>{
+                const summary = get(handle, 'summary');
+                if (!summary)
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                if (!(property in PID_TYPES))
+                {
+                    return ERROR_UNKNOWN_PROPERTY;
+                }
+                const entry = summary.get(property >>> 0) ?? null;
+                if ((type >>> 0) !== 0)
+                {
+                    writeU32(type, entry?.type ?? VT.EMPTY);
+                }
+                if (!entry)
+                {
+                    return ERROR_SUCCESS;
+                }
+                if (entry.type === VT.LPSTR)
+                {
+                    return putString(wide, String(entry.value), buffer, size);
+                }
+                if (entry.type === VT.FILETIME)
+                {
+                    if ((filetime >>> 0) !== 0)
+                    {
+                        host.writeMemory(filetime >>> 0, new Uint8Array(
+                            BigUint64Array.of(BigInt(entry.value)).buffer));
+                    }
+                    return ERROR_SUCCESS;
+                }
+                if ((integer >>> 0) !== 0)
+                {
+                    writeI32(integer, Number(entry.value));
+                }
+                return ERROR_SUCCESS;
+            }),
+        ...both('MsiSummaryInfoSetProperty', 24, wide=>([handle, property, type, integer, filetime,
+            text])=>{
+            const summary = get(handle, 'summary');
+            if (!summary)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const wanted = /** @type {Record<number, number>} */ (PID_TYPES)[property >>> 0];
+            if (wanted === undefined)
+            {
+                return ERROR_UNKNOWN_PROPERTY;
+            }
+            if ((type >>> 0) !== wanted)
+            {
+                return ERROR_DATATYPE_MISMATCH;
+            }
+            const value = wanted === VT.LPSTR ? reader(wide)(text) ?? ''
+                : wanted === VT.FILETIME ? new DataView(host.readMemory(filetime >>> 0, 8)
+                    .slice().buffer).getBigUint64(0, true) : integer | 0;
+            summary.set(property >>> 0, { type: wanted, value });
+            return ERROR_SUCCESS;
+        }),
+        MsiSummaryInfoPersist: {
+            argBytes: 4,
+            handler: ([handle])=>(get(handle, 'summary') ? ERROR_SUCCESS : ERROR_INVALID_HANDLE),
+        },
+
+        // ----- sessions -----
+        ...both('MsiOpenPackage', 8, wide=>async([path, out])=>{
+            const name = reader(wide)(path);
+            if (name === null || (out >>> 0) === 0)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            const session = await openSession(name);
+            if (!session)
+            {
+                return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
+            }
+            writeU32(out, open('session', { session, deferred: null }));
+            return ERROR_SUCCESS;
+        }),
+        ...both('MsiOpenPackageEx', 12, wide=>async([path, options, out])=>{
+            void options;
+            const name = reader(wide)(path);
+            if (name === null || (out >>> 0) === 0)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            const session = await openSession(name);
+            if (!session)
+            {
+                return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
+            }
+            writeU32(out, open('session', { session, deferred: null }));
+            return ERROR_SUCCESS;
+        }),
+        ...both('MsiGetProperty', 16, wide=>([install, name, buffer, size])=>{
+            const owner = sessionOf(install);
+            if (!owner)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const key = reader(wide)(name);
+            if (key === null)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            return putString(wide, propertyOf(owner, key), buffer, size);
+        }),
+        ...both('MsiSetProperty', 12, wide=>([install, name, value])=>{
+            const owner = sessionOf(install);
+            if (!owner)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const key = reader(wide)(name);
+            if (key === null || key === '')
+            {
+                return ERROR_FUNCTION_FAILED;
+            }
+            if (owner.deferred !== null)
+            {
+                return ERROR_SUCCESS;
+            }
+            owner.session.setProperty(key, reader(wide)(value));
+            return ERROR_SUCCESS;
+        }),
+        ...both('MsiEvaluateCondition', 8, wide=>([install, text])=>{
+            const owner = sessionOf(install);
+            if (!owner)
+            {
+                return MSICONDITION.ERROR;
+            }
+            const condition = reader(wide)(text);
+            return condition === null ? MSICONDITION.NONE : owner.session.evaluate(condition);
+        }),
+        ...both('MsiDoAction', 8, wide=>async([install, action])=>{
+            const owner = sessionOf(install);
+            if (!owner)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const name = reader(wide)(action);
+            if (name === null)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            return doAction(engineFor(owner.session), name);
+        }),
+        ...both('MsiSequence', 12, wide=>async([install, table])=>{
+            const owner = sessionOf(install);
+            if (!owner)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            return runSequence(engineFor(owner.session), reader(wide)(table) ?? '');
+        }),
+        MsiGetMode: {
+            argBytes: 8,
+            handler: ([install, mode])=>{
+                const owner = sessionOf(install);
+                const name = /** @type {Record<number, string>} */ (RUN_MODES)[mode >>> 0];
+                if (!owner || !name)
+                {
+                    return 0;
+                }
+                if (owner.deferred !== null && name === 'scheduled')
+                {
+                    return 1;
+                }
+                return /** @type {Record<string, boolean>} */ (owner.session.mode)[name] ? 1 : 0;
+            },
+        },
+        MsiSetMode: {
+            argBytes: 12,
+            handler: ([install, mode, state])=>{
+                const owner = sessionOf(install);
+                const name = /** @type {Record<number, string>} */ (RUN_MODES)[mode >>> 0];
+                if (!owner)
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                if (name === 'rebootAtEnd' || name === 'rebootNow')
+                {
+                    /** @type {Record<string, boolean>} */ (owner.session.mode)[name] = state !== 0;
+                    return ERROR_SUCCESS;
+                }
+                return ERROR_ACCESS_DENIED;
+            },
+        },
+        MsiGetLanguage: {
+            argBytes: 4,
+            handler: ([install])=>{
+                const owner = sessionOf(install);
+                return owner ? Number(owner.session.getProperty('ProductLanguage')) || 0 : 0;
+            },
+        },
+        ...both('MsiGetTargetPath', 16, wide=>([install, folder, buffer, size])=>{
+            const owner = sessionOf(install);
+            if (!owner)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const key = reader(wide)(folder) ?? '';
+            const target = owner.session.folders.get(key)?.target;
+            if (!target)
+            {
+                return ERROR_DIRECTORY;
+            }
+            return putString(wide, target, buffer, size);
+        }),
+        ...both('MsiSetTargetPath', 12, wide=>([install, folder, path])=>{
+            const owner = sessionOf(install);
+            if (!owner)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const key = reader(wide)(folder) ?? '';
+            const target = reader(wide)(path);
+            if (target === null)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            return owner.session.folders.has(key) && owner.session.setTargetPath(key, target)
+                ? ERROR_SUCCESS : ERROR_DIRECTORY;
+        }),
+        ...both('MsiGetSourcePath', 16, wide=>([install, folder, buffer, size])=>{
+            const owner = sessionOf(install);
+            if (!owner)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const key = reader(wide)(folder) ?? '';
+            if (!owner.session.folders.has(key) && key !== 'SourceDir' && key !== 'SOURCEDIR')
+            {
+                return ERROR_DIRECTORY;
+            }
+            const source = owner.session.folders.has(key) ? owner.session.sourcePath(key)
+                : owner.session.sourceDir;
+            return putString(wide, source, buffer, size);
+        }),
+        ...both('MsiGetComponentState', 16, wide=>([install, name, installed, action])=>{
+            const owner = sessionOf(install);
+            if (!owner)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const component = owner.session.components.get(reader(wide)(name) ?? '');
+            if (!component)
+            {
+                return ERROR_UNKNOWN_COMPONENT;
+            }
+            if ((installed >>> 0) !== 0)
+            {
+                writeI32(installed, component.installed);
+            }
+            if ((action >>> 0) !== 0)
+            {
+                writeI32(action, component.action);
+            }
+            return ERROR_SUCCESS;
+        }),
+        ...both('MsiSetComponentState', 12, wide=>([install, name, state])=>{
+            const owner = sessionOf(install);
+            if (!owner)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const component = owner.session.components.get(reader(wide)(name) ?? '');
+            if (!component)
+            {
+                return ERROR_UNKNOWN_COMPONENT;
+            }
+            component.action = state | 0;
+            return ERROR_SUCCESS;
+        }),
+        ...both('MsiGetFeatureState', 16, wide=>([install, name, installed, action])=>{
+            const owner = sessionOf(install);
+            if (!owner)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const feature = owner.session.features.get(reader(wide)(name) ?? '');
+            if (!feature)
+            {
+                return ERROR_UNKNOWN_FEATURE;
+            }
+            if ((installed >>> 0) !== 0)
+            {
+                writeI32(installed, feature.installed);
+            }
+            if ((action >>> 0) !== 0)
+            {
+                writeI32(action, feature.action);
+            }
+            return ERROR_SUCCESS;
+        }),
+        ...both('MsiSetFeatureState', 12, wide=>([install, name, state])=>{
+            const owner = sessionOf(install);
+            if (!owner)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const feature = owner.session.features.get(reader(wide)(name) ?? '');
+            if (!feature)
+            {
+                return ERROR_UNKNOWN_FEATURE;
+            }
+            feature.request = state | 0;
+            owner.session.settleStates();
+            return ERROR_SUCCESS;
+        }),
+        ...both('MsiSetFeatureAttributes', 12, wide=>([install, name, attributes])=>{
+            const owner = sessionOf(install);
+            if (!owner)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const feature = owner.session.features.get(reader(wide)(name) ?? '');
+            if (!feature)
+            {
+                return ERROR_UNKNOWN_FEATURE;
+            }
+            feature.attributes = attributes >>> 0;
+            return ERROR_SUCCESS;
+        }),
+        ...both('MsiGetFeatureCost', 20, wide=>([install, name, tree, state, cost])=>{
+            void tree;
+            void state;
+            const owner = sessionOf(install);
+            if (!owner)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            if (!owner.session.features.has(reader(wide)(name) ?? ''))
+            {
+                return ERROR_UNKNOWN_FEATURE;
+            }
+            if ((cost >>> 0) !== 0)
+            {
+                writeU32(cost, 0);
+            }
+            return ERROR_SUCCESS;
+        }),
+        ...both('MsiGetFeatureValidStates', 12, wide=>([install, name, states])=>{
+            const owner = sessionOf(install);
+            if (!owner)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            if (!owner.session.features.has(reader(wide)(name) ?? ''))
+            {
+                return ERROR_UNKNOWN_FEATURE;
+            }
+            if ((states >>> 0) !== 0)
+            {
+                writeU32(states, (1 << INSTALLSTATE.LOCAL) | (1 << INSTALLSTATE.SOURCE)
+                    | (1 << INSTALLSTATE.ABSENT));
+            }
+            return ERROR_SUCCESS;
+        }),
+        MsiSetInstallLevel: {
+            argBytes: 8,
+            handler: ([install, level])=>{
+                const owner = sessionOf(install);
+                if (!owner)
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                owner.session.setProperty('INSTALLLEVEL', String(level | 0));
+                owner.session.settleStates();
+                return ERROR_SUCCESS;
+            },
+        },
+        MsiVerifyDiskSpace: {
+            argBytes: 4,
+            handler: ([install])=>(sessionOf(install) ? ERROR_SUCCESS : ERROR_INVALID_HANDLE),
+        },
+        MsiProcessMessage: {
+            argBytes: 12,
+            handler: async([install, type, handle])=>{
+                const owner = sessionOf(install);
+                const record = recordOf(handle);
+                if (!owner || !record)
+                {
+                    return -1;
+                }
+                return deliver(type >>> 0, record, owner.session);
+            },
+        },
+
+        // ----- installing and what is installed -----
+        MsiSetInternalUI: {
+            argBytes: 8,
+            handler: ([level])=>{
+                const previous = uiLevel;
+                if ((level >>> 0) !== INSTALLUILEVEL.NOCHANGE)
+                {
+                    uiLevel = (level >>> 0) === INSTALLUILEVEL.DEFAULT ? INSTALLUILEVEL.BASIC
+                        : level >>> 0;
+                }
+                return previous;
+            },
+        },
+        ...both('MsiSetExternalUI', 12, wide=>([handler, filter, context])=>{
+            const previous = externalUi?.handler ?? 0;
+            externalUi = (handler >>> 0) === 0 ? null
+                : { handler: handler >>> 0, filter: filter >>> 0, context: context >>> 0, wide };
+            return previous;
+        }),
+        MsiSetExternalUIRecord: {
+            argBytes: 16,
+            handler: ([handler, filter, context, previous])=>{
+                if ((previous >>> 0) !== 0)
+                {
+                    writeU32(previous, recordUi?.handler ?? 0);
+                }
+                recordUi = (handler >>> 0) === 0 ? null
+                    : { handler: handler >>> 0, filter: filter >>> 0, context: context >>> 0 };
+                return ERROR_SUCCESS;
+            },
+        },
+        ...both('MsiEnableLog', 12, ()=>()=>ERROR_SUCCESS),
+        ...both('MsiInstallProduct', 8, wide=>async([path, commandLine])=>{
+            const name = reader(wide)(path);
+            if (name === null)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            return installPackage(name, reader(wide)(commandLine) ?? '');
+        }),
+        ...both('MsiConfigureProduct', 12, ()=>()=>{
+            host.divergence?.('MsiConfigureProduct', 'an installed product is not reconfigured');
+            return ERROR_CALL_NOT_IMPLEMENTED;
+        }),
+        ...both('MsiQueryProductState', 4, wide=>([product])=>
+            registration.productState(reader(wide)(product) ?? '')),
+        ...both('MsiGetProductInfo', 16, wide=>([product, property, buffer, size])=>{
+            const code = reader(wide)(product);
+            const name = reader(wide)(property);
+            if (code === null || name === null)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            const answer = registration.productInfo(code, name);
+            return 'error' in answer ? answer.error : putString(wide, answer.value, buffer, size);
+        }),
+        ...both('MsiEnumProducts', 8, wide=>([index, buffer])=>{
+            const products = registration.products();
+            if ((index >>> 0) >= products.length)
+            {
+                return ERROR_NO_MORE_ITEMS;
+            }
+            const text = `${products[index >>> 0]}\0`;
+            host.writeMemory(buffer >>> 0, wide ? utf16(text) : encodeAnsi(text));
+            return ERROR_SUCCESS;
+        }),
+        ...both('MsiGetComponentPath', 16, wide=>([product, component, buffer, size])=>{
+            const path = registration.componentPath(reader(wide)(product) ?? '',
+                reader(wide)(component) ?? '');
+            if (path === null)
+            {
+                return INSTALLSTATE.UNKNOWN;
+            }
+            putString(wide, path, buffer, size);
+            return host.files.stat(path)?.exists || path === '' ? INSTALLSTATE.LOCAL
+                : INSTALLSTATE.ABSENT;
+        }),
+        ...both('MsiLocateComponent', 12, wide=>([component, buffer, size])=>{
+            const id = reader(wide)(component) ?? '';
+            for (const product of registration.products())
+            {
+                const path = registration.componentPath(product, id);
+                if (path !== null)
+                {
+                    putString(wide, path, buffer, size);
+                    return host.files.stat(path)?.exists ? INSTALLSTATE.LOCAL : INSTALLSTATE.ABSENT;
+                }
+            }
+            return INSTALLSTATE.UNKNOWN;
+        }),
+        ...both('MsiQueryFeatureState', 8, wide=>([product, feature])=>{
+            const code = reader(wide)(product) ?? '';
+            if (registration.productState(code) === INSTALLSTATE.UNKNOWN)
+            {
+                return INSTALLSTATE.UNKNOWN;
+            }
+            return registration.featureInstalled(code, reader(wide)(feature) ?? '')
+                ? INSTALLSTATE.LOCAL : INSTALLSTATE.UNKNOWN;
+        }),
+        ...both('MsiGetFileVersion', 20, wide=>async([path, version, versionSize, language,
+            languageSize])=>{
+            const name = reader(wide)(path);
+            if (name === null)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            const full = host.fullPath(name);
+            if (!host.files.stat(full)?.exists)
+            {
+                return ERROR_FILE_NOT_FOUND;
+            }
+            const block = await host.versionInfo?.(full) ?? null;
+            const fixed = block ? fixedInfo(block) : null;
+            if (!fixed)
+            {
+                return ERROR_FILE_INVALID;
+            }
+            const text = `${fixed.ms >>> 16}.${fixed.ms & 0xffff}.${fixed.ls >>> 16}.`
+                + `${fixed.ls & 0xffff}`;
+            const first = putString(wide, text, version, versionSize);
+            const second = putString(wide, String(fixed.language), language, languageSize);
+            return first !== ERROR_SUCCESS ? first : second;
+        }),
+        DllGetVersion: {
+            argBytes: 4,
+            handler: ([info])=>{
+                if ((info >>> 0) === 0)
+                {
+                    return 0x80070057 | 0;
+                }
+                const [major, minor, build] = installerVersion(host.machine().windows);
+                writeU32(info + 4, major);
+                writeU32(info + 8, minor);
+                writeU32(info + 12, build);
+                writeU32(info + 16, 2);
+                return 0;
+            },
+        },
+    };
+}
+
+/**
+ * VS_FIXEDFILEINFO's version and the first translation's language, out of
+ * a version block.
+ *
+ * @param {Uint8Array} block
+ * @returns {{ ms: number, ls: number, language: number } | null}
+ */
+function fixedInfo(block){
+    const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
+    for (let at = 0; at + 52 <= block.length; at += 4)
+    {
+        if (view.getUint32(at, true) === 0xfeef04bd)
+        {
+            const translation = findTranslation(block);
+            return { ms: view.getUint32(at + 8, true), ls: view.getUint32(at + 12, true),
+                language: translation };
+        }
+    }
+    return null;
+}
+
+/** @param {Uint8Array} block */
+function findTranslation(block){
+    const key = 'Translation';
+    for (let at = 0; at + key.length * 2 + 8 < block.length; at += 2)
+    {
+        let match = true;
+        for (let index = 0; index < key.length && match; index++)
+        {
+            match = block[at + index * 2] === key.charCodeAt(index)
+                && block[at + index * 2 + 1] === 0;
+        }
+        if (match)
+        {
+            const value = (at + key.length * 2 + 2 + 3) & ~3;
+            return block[value] | block[value + 1] << 8;
+        }
+    }
+    return 0;
+}

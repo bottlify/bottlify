@@ -144,7 +144,7 @@ const FIRST_KEY_HANDLE = 0x40000004;
  * has to be answered, because a program that cannot learn its own user name
  * often refuses to start rather than carrying on without one.
  */
-const USER_NAME = 'User';
+export const USER_NAME = 'User';
 
 /**
  * @typedef {Object} RegistryHost

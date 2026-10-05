@@ -1142,6 +1142,9 @@ export function createTokenFunctions(host){
     };
 }
 
+/** The account's SID as text, as ConvertSidToStringSid spells it. */
+export const USER_SID_TEXT = `S-1-${USER_SID.authority}-${USER_SID.subAuthorities.join('-')}`;
+
 /** BUILTIN\Administrators, laid out: what a program compares the groups against. */
 export const ADMINISTRATORS_SID = sidBytes(GROUP_SIDS[2]);
 

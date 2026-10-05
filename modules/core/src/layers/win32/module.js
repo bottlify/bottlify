@@ -43,7 +43,9 @@ import { createCrtdllFunctions } from './msvcrt/crtdll.js';
 import { createWindowFunctions } from './user32/windows.js';
 import { createMessageQueue } from './user32/messages.js';
 import { createRegistryFunctions } from './advapi32/functions.js';
-import { ADMINISTRATORS_SID, createTokenFunctions, isTokenMember } from './advapi32/tokens.js';
+import {
+    ADMINISTRATORS_SID, USER_SID_TEXT, createTokenFunctions, isTokenMember,
+} from './advapi32/tokens.js';
 import { createServiceFunctions } from './advapi32/services.js';
 import { createCryptoFunctions } from './advapi32/crypto.js';
 import {
@@ -79,6 +81,11 @@ import { formatToString } from './msvcrt/format.js';
 import { createDsetupFunctions } from './dsetup/functions.js';
 import { createDpnhpastFunctions } from './dpnhpast/functions.js';
 import { createSetupapiFunctions } from './setupapi/functions.js';
+import { createMsiFunctions } from './msi/functions.js';
+import { createCabinetFunctions } from './cabinet/functions.js';
+import { MSI_ORDINALS } from './msi/ordinals.js';
+import { COMPUTER_NAME } from './kernel32/drives.js';
+import { USER_NAME } from './advapi32/functions.js';
 import { createWintrustFunctions } from './wintrust/functions.js';
 import { createD3dxFunctions } from './d3dx9/functions.js';
 import { createSpoolerFunctions } from './winspool/functions.js';
@@ -117,7 +124,7 @@ import { registerQuartzClasses } from './quartz/graph.js';
  * the tables, because it is a fact about the library and not about any one
  * name in it.
  */
-const CDECL_LIBRARIES = /^(msvcrt|msvcr\d+d?|msvcp\d+d?|crtdll|ucrtbase)\.dll$/i;
+const CDECL_LIBRARIES = /^(msvcrt|msvcr\d+d?|msvcp\d+d?|crtdll|ucrtbase|cabinet)\.dll$/i;
 
 /** The reason a DllMain is called with when its library is unloaded, or the process ends. */
 const DLL_PROCESS_DETACH = 0;
@@ -1854,6 +1861,72 @@ export function createWin32Module(){
                     divergence: config?.divergence,
                 }),
 
+                // The File Decompression Interface a setup unpacks its own
+                // cabinets with, over the program's callbacks.
+                'CABINET.dll': createCabinetFunctions({
+                    readMemory,
+                    writeMemory,
+                    readCString,
+                    /** @param {number} bytes */
+                    allocate: bytes=>heap.allocate(bytes),
+                    /** @param {number} address */
+                    free: address=>heap.free(address),
+                    call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    callerThread: ()=>bridge.callerThread(),
+                    divergence: config?.divergence,
+                }),
+
+                // The Windows Installer: packages read where they lie and
+                // installed from their own tables, in this process.
+                'MSI.dll': createMsiFunctions({
+                    readMemory,
+                    writeMemory,
+                    readCString,
+                    readWideString,
+                    /** @param {number} bytes */
+                    allocate: bytes=>heap.allocate(bytes),
+                    /** @param {number} address */
+                    free: address=>heap.free(address),
+                    files: volume,
+                    /** @param {string} path */
+                    fullPath: path=>filesystem.resolve(path).path,
+                    hive,
+                    call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    callerThread: ()=>bridge.callerThread(),
+                    libraries: {
+                        /** @param {number} name */
+                        loadAnsi: name=>libraries['KERNEL32.dll'].LoadLibraryA.handler([name]),
+                        /** @param {number} module @param {number} name */
+                        procAddress: (module, name)=>
+                            libraries['KERNEL32.dll'].GetProcAddress.handler([module, name]),
+                        /** @param {number} module */
+                        free: module=>libraries['KERNEL32.dll'].FreeLibrary.handler([module]),
+                    },
+                    machine: ()=>({
+                        windows,
+                        computerName: COMPUTER_NAME,
+                        userName: USER_NAME,
+                        userSid: USER_SID_TEXT,
+                        language: 0x0409,
+                        screenWidth: config?.screen?.width ?? 1024,
+                        screenHeight: config?.screen?.height ?? 768,
+                        colorBits: config?.screen?.bitsPerPixel ?? 32,
+                        memoryMegabytes: Math.floor(arena.size / (1024 * 1024)),
+                        tempFolder: 'C:\\WINDOWS\\TEMP\\',
+                        environment: (/** @type {string} */ name)=>{
+                            const variables = config?.environment
+                                ?? defaultEnvironment(windows, folders);
+                            const key = Object.keys(variables)
+                                .find(candidate=>candidate.toLowerCase() === name.toLowerCase());
+                            return key === undefined ? null : variables[key];
+                        },
+                        now: ()=>new Date(kernel.clock.wallClock()),
+                    }),
+                    /** @param {string} path */
+                    versionInfo: path=>modules.versionInfo?.(path) ?? null,
+                    divergence: config?.divergence,
+                }),
+
                 // Authenticode: whether a signed file is intact and its publisher
                 // chains to a root this machine trusts -- `trustedRoots`, read when
                 // a program asks, or Microsoft's root when it is not configured.
@@ -2442,6 +2515,7 @@ export function createWin32Module(){
                     'COMCTL32.dll': COMCTL32_ORDINALS,
                     'WINMM.dll': WINMM_ORDINALS,
                     'SFC.dll': SFC_ORDINALS,
+                    'MSI.dll': MSI_ORDINALS,
                 }),
 
                 /**

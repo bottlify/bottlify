@@ -83,7 +83,7 @@ test('a file the sink declines is not written, and a folder nobody wants is not 
             written.push(file.name);
         },
         close: ()=>{},
-    } : null));
+    } : null), { eager: true });
     assert.deepEqual(written, ['c.bin']);
     assert.ok(!reads.some(offset=>offset > 0 && offset < readCabinet(bytes).folders[1].dataOffset),
         'the first folder\'s blocks were never read');
@@ -96,4 +96,33 @@ test('a corrupt block is the cabinet\'s error, not a short file', async()=>{
     await assert.rejects(extractCabinet({ size: bytes.length,
         read: (offset, length)=>bytes.subarray(offset, offset + length) },
     ()=>({ write: ()=>{}, close: ()=>{} })), CabinetError);
+});
+
+test('lazily, a file is asked for as the output reaches it and closed once it has all of it',
+    async()=>{
+        const bytes = sample();
+        /** @type {string[]} */
+        const events = [];
+        await extractCabinet({ size: bytes.length,
+            read: (offset, length)=>bytes.subarray(offset, offset + length) }, file=>{
+            events.push(`open ${file.name}`);
+            return {
+                write: ()=>{},
+                close: ()=>{
+                    events.push(`close ${file.name}`);
+                },
+            };
+        });
+        assert.deepEqual(events, ['open a.bin', 'close a.bin', 'open b.bin', 'close b.bin',
+            'open c.bin', 'close c.bin'], 'one file at a time, in the order of the folder');
+    });
+
+test('bytes that are not a cabinet are refused after their first read', async()=>{
+    /** @type {number[]} */
+    const reads = [];
+    await assert.rejects(extractCabinet({ size: 5_000_000, read: (offset, length)=>{
+        reads.push(length);
+        return new Uint8Array(length);
+    } }, ()=>null), CabinetError);
+    assert.deepEqual(reads, [64 * 1024], 'one read of the head, and no more');
 });
