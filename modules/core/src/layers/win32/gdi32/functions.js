@@ -3530,6 +3530,26 @@ export function createGdiFunctions(host){
         },
 
         /**
+         * int EnumFontsA(HDC hdc, LPCSTR lpLogfont, FONTENUMPROCA lpProc, LPARAM lParam)
+         * int EnumFontsW(HDC hdc, LPCWSTR lpLogfont, FONTENUMPROCW lpProc, LPARAM lParam)
+         *
+         * The oldest call, a face name as EnumFontFamilies takes a family's:
+         * its callback reads a LOGFONT and a TEXTMETRIC, the leading parts of
+         * what EnumFontFamilies hands, so the same answers serve.
+         */
+        EnumFontsA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: args=>(/** @type {any} */ (table)).EnumFontFamiliesA.handler(args),
+        },
+
+        EnumFontsW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: args=>(/** @type {any} */ (table)).EnumFontFamiliesW.handler(args),
+        },
+
+        /**
          * The font table here is fixed: a font file cannot be added to it,
          * and a scalable font resource cannot be written for one. Zero is the
          * documented failure of each, which an installer notes and moves on
