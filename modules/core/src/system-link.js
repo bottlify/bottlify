@@ -14,9 +14,12 @@
  * answers entries and bytes, ids are numbers -- so each crosses as it is:
  * `systemHandlers` answers a link's calls from the run's own services, and
  * `remoteSystem` gives the process objects of the same shape that make those
- * calls and wait. What cannot cross is said where it stops: the windows of a
- * process across a link are not yet found or sent to by another process, and
- * a wait on a set holding another process's object is refused (`sync.js`).
+ * calls and wait. A process across a link answers for its own windows the same
+ * way, asked back across it: the thread here blocks for the answer, and the
+ * process gives it at its next look at the link -- between two turns, while
+ * idle, or inside a call of its own that is waiting. What cannot cross is said
+ * where it stops: a wait on a set holding another process's object is refused
+ * (`sync.js`).
  */
 
 import { volumeHandlers, remoteVolume } from './layers/filesystem/internal/volume-link.js';
@@ -30,18 +33,8 @@ const REGISTRY = ['root', 'open', 'create', 'remove', 'subkeys', 'values', 'getV
 const WINDOWS = ['open', 'close', 'ownerOf', 'describe', 'find', 'register', 'registeredName',
     'hold', 'send', 'answer', 'withdraw', 'post', 'detach'];
 
-/**
- * A process across a link answers nothing about its windows yet: they are
- * its own to find and send to.
- */
-const ACROSS = {
-    find: ()=>0,
-    describe: ()=>null,
-    post: ()=>false,
-    send: ()=>null,
-    answer: ()=>null,
-    withdraw: ()=>{},
-};
+/** What a process answers about its own windows (`directory.js`'s `WindowEndpoint`). */
+const ENDPOINT = ['find', 'describe', 'post', 'send', 'answer', 'withdraw'];
 
 /**
  * @param {Record<string, any>} service @param {string[]} names
@@ -54,8 +47,10 @@ const answering = (service, names)=>Object.fromEntries(names.map(name=>
  * The link's handlers that answer for the run's system.
  *
  * @param {{ registry: any, ids: any, volume: any, windows: any }} system
+ * @param {(target: string, method: string, args: any[]) => any} [askBack]
+ *     a blocking call to the process across the link, for its windows
  */
-export function systemHandlers(system){
+export function systemHandlers(system, askBack){
     return {
         registry: answering(system.registry, REGISTRY),
         ids: { take: (/** @type {'thread' | 'process'} */ name, /** @type {number} */ step)=>
@@ -64,7 +59,9 @@ export function systemHandlers(system){
         windows: {
             ...answering(system.windows, WINDOWS),
             /** @param {number} processId */
-            attach: processId=>system.windows.attach(processId, ACROSS),
+            attach: processId=>system.windows.attach(processId, Object.fromEntries(
+                ENDPOINT.map(name=>[name, (/** @type {any[]} */ ...args)=>
+                    (askBack ? askBack('endpoint', name, args) : null)]))),
         },
     };
 }
@@ -74,8 +71,11 @@ export function systemHandlers(system){
  *
  * @param {(target: string, method: string, args: any[]) => any} ask
  *     a blocking call to `systemHandlers`
+ * @param {Record<string, any>} [handlers]
+ *     the process's side of the link, where what it answers for its own
+ *     windows is put when its window manager attaches
  */
-export function remoteSystem(ask){
+export function remoteSystem(ask, handlers = {}){
     /** @param {string} target @param {string[]} names */
     const asking = (target, names)=>Object.fromEntries(names.map(name=>
         [name, (/** @type {any[]} */ ...args)=>ask(target, name, args)]));
@@ -93,8 +93,12 @@ export function remoteSystem(ask){
         volume: remoteVolume((method, args)=>ask('volume', method, args)),
         windows: {
             ...asking('windows', WINDOWS),
-            /** @param {number} processId */
-            attach: processId=>ask('windows', 'attach', [processId]),
+            /** @param {number} processId @param {any} endpoint */
+            attach(processId, endpoint){
+                handlers.endpoint = Object.fromEntries(ENDPOINT.map(name=>
+                    [name, (/** @type {any[]} */ ...args)=>endpoint[name](...args)]));
+                ask('windows', 'attach', [processId]);
+            },
         },
         objects: remoteObjects(ask),
         bundle: null,

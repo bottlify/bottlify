@@ -7358,7 +7358,8 @@ export async function createApp(options){
             table: system.namedObjects,
             wake: (token, result)=>link.call('kernel', 'wake', [token, result]) });
         const link = openLink(memory.a, {
-            ...systemHandlers(/** @type {any} */ (system)),
+            ...systemHandlers(/** @type {any} */ (system),
+                (target, method, args)=>link.callWaiting(target, method, args)),
             ...objects,
             process: {
                 output: (/** @type {number} */ handle, /** @type {string} */ text)=>

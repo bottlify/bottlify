@@ -40,7 +40,7 @@ export async function serveProcess({ end, options, run }){
     const link = openLink(end, handlers);
     /** @param {string} target @param {string} method @param {any[]} args */
     const ask = (target, method, args)=>link.callWaiting(target, method, args);
-    const system = remoteSystem(ask);
+    const system = remoteSystem(ask, handlers);
     // A wait on another process's object ended there: its word comes in
     // with whatever else the link carries, at a turn's end or while idle.
     handlers.kernel = { wake: (/** @type {number} */ token, /** @type {number} */ result)=>
