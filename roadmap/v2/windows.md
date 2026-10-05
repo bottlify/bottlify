@@ -2,9 +2,9 @@
 
 Русская версия: [windows.ru.md](windows.ru.md).
 
-**Status:** steps 1 to 3 landed on `cork2`, 4 and 5 open; 2026-10-05, planned against `cork2`
-1ad2506c. Part of v2 stage 2; it comes before the translation pools. File references are to
-`modules/core/src/` unless said otherwise.
+**Status:** steps 1 to 5 landed on `cork2`; the browser check is open. 2026-10-05, planned
+against `cork2` 1ad2506c. Part of v2 stage 2; it comes before the translation pools. File
+references are to `modules/core/src/` unless said otherwise.
 
 ## Why
 

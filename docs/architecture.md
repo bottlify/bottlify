@@ -207,8 +207,8 @@ listings -- until that word moves; and the sharing every open is settled against
 shared memory under a lock, which a process thread settles its own opens in
 (`core/src/layers/filesystem/internal/volume-link.js`, `shared-sharing.js`). Its Direct3D devices draw on the graphics thread
 through a port of their own, its DirectDraw and GDI pictures come to the engine as bytes, its sound
-is mixed on the run's voice table in a span its parent lends it, and the page's input is forwarded
-to it while it stands. What it cannot have yet is in [`core/limits.md`](core/limits.md).
+is mixed on the run's voice table in a span its parent lends it, and the page's input reaches it
+as the run's window manager routes it (section 7). What it cannot have yet is in [`core/limits.md`](core/limits.md).
 
 **Modes.** `createApp({ mode })` says how much of this rides on shared memory, and the run's mode is
 in the `app` layer's diagnostics (`core/src/mode.js`):
@@ -583,6 +583,16 @@ flowchart TB
 - **Textures** go to the GPU as `bgra8unorm`, and DXT-compressed ones are decoded on the CPU by
   default. They reach the GPU in their BC format only with the `graphics.compressedTextures` flag,
   and only on a device with `texture-compression-bc`.
+- **Several processes, one screen.** Each process's user32 tells the run's window manager
+  (`win32/user32/manager.js`, on the engine thread beside the window directory) what every window
+  of its is -- class, title, style, rectangle, visibility -- and the manager holds the z-order of
+  the run's top-level windows, the foreground window and the window that captured the mouse, for
+  every process alike. Every frame says which process drew it; the presenter keeps each process's
+  newest picture and, while windows of more than one process show, composes the screen from them
+  by the manager's order, bottom to top (`webgpu/internal/compose.js`). The page's input goes
+  where the manager says: a pointer to the process of the window holding the mouse or under it,
+  the keyboard to the foreground window's (`inputTarget`). One process or four, on one thread or
+  in workers, it is the same manager.
 - **When something breaks.** If the graphics thread does not open, Direct3D and OpenGL draw on the
   engine thread and a warning goes to the console. If the WebGPU device is lost, `Present` and `Reset` return
   `D3DERR_DEVICELOST` (`D3DERR_DEVICEREMOVED` on 9Ex). There is no recovery: new frames simply stop

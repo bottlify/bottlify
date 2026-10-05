@@ -43,7 +43,8 @@ differently raises a `divergence` event naming the API.
   that would block on such a set is refused. Its Direct3D 8 and 9 devices draw on the run's
   graphics worker and what they present is shown as the run's frames; its sound goes onto the
   run's track table in a span its parent lends it, where that table is shared memory (none
-  otherwise); the page's input goes to it while it stands. Its DirectDraw primary and the desktop
+  otherwise); the page's input reaches it where its windows are under the pointer or in the
+  foreground. Its DirectDraw primary and the desktop
   its windows are drawn on are sent to the engine as bytes and shown there. Its COM classes are the
   run's: it serves them to every other process and calls theirs. So is the running object table:
   an object one process registers (`RegisterActiveObject`, `IRunningObjectTable::Register`) is
