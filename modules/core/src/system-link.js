@@ -46,7 +46,7 @@ const answering = (service, names)=>Object.fromEntries(names.map(name=>
 /**
  * The link's handlers that answer for the run's system.
  *
- * @param {{ registry: any, ids: any, volume: any, windows: any }} system
+ * @param {{ registry: any, ids: any, volume: any, windows: any, bundle?: any }} system
  * @param {(target: string, method: string, args: any[]) => any} [askBack]
  *     a blocking call to the process across the link, for its windows
  */
@@ -56,6 +56,11 @@ export function systemHandlers(system, askBack){
         ids: { take: (/** @type {'thread' | 'process'} */ name, /** @type {number} */ step)=>
             takeId(system.ids, name, step) },
         ...volumeHandlers(system.volume),
+        // The run's bundle fetches for every process: a block one process
+        // misses is fetched into the run's cache once, and answered when in.
+        bundle: {
+            fetch: (/** @type {any[]} */ needed)=>system.bundle?.fetch(needed),
+        },
         windows: {
             ...answering(system.windows, WINDOWS),
             /** @param {number} processId */
@@ -74,8 +79,11 @@ export function systemHandlers(system, askBack){
  * @param {Record<string, any>} [handlers]
  *     the process's side of the link, where what it answers for its own
  *     windows is put when its window manager attaches
+ * @param {(target: string, method: string, args: any[]) => Promise<any>} [call]
+ *     a call that does not block: for what the process waits on as it waits
+ *     on the network, its threads parked and the link looked at meanwhile
  */
-export function remoteSystem(ask, handlers = {}){
+export function remoteSystem(ask, handlers = {}, call){
     /** @param {string} target @param {string[]} names */
     const asking = (target, names)=>Object.fromEntries(names.map(name=>
         [name, (/** @type {any[]} */ ...args)=>ask(target, name, args)]));
@@ -101,7 +109,18 @@ export function remoteSystem(ask, handlers = {}){
             },
         },
         objects: remoteObjects(ask),
-        bundle: null,
+        // The run's bundle, as a process across a link reaches it: its drive
+        // is already the run's (`volume`), so only a block the read missed is
+        // asked for, and waited on as a fetch is.
+        bundle: call ? {
+            source: null,
+            registry: undefined,
+            fetch: (/** @type {any[]} */ needed)=>call('bundle', 'fetch', [needed]),
+            stop(){},
+            ahead: ()=>0,
+            refetched: ()=>({ blocks: 0, bytes: 0 }),
+            ranges: ()=>({ requests: 0, bytes: 0 }),
+        } : null,
     };
 }
 
