@@ -6566,6 +6566,36 @@ async function buildApp(options){
                     filesystem.close(handle);
                 }
             },
+            /**
+             * A directory made from outside, as a person makes one in Explorer
+             * beside the running program: what an installer expects to find
+             * and a disc or an earlier step did not leave.
+             *
+             * @param {string} path
+             * @returns {boolean} true when it was made, false when it was there.
+             */
+            createDirectory: path=>filesystem.createDirectory(path),
+            /**
+             * A file written whole from outside, replacing one of that name.
+             *
+             * @param {string} path @param {Uint8Array} bytes
+             */
+            write: (path, bytes)=>{
+                const handle = filesystem.open(path,
+                    { read: false, write: true, disposition: 'create-always' });
+                if (!handle)
+                {
+                    throw new Error(`${path} could not be created`);
+                }
+                try
+                {
+                    filesystem.write(handle, bytes);
+                }
+                finally
+                {
+                    filesystem.close(handle);
+                }
+            },
         },
 
         /**
