@@ -8113,6 +8113,9 @@ export async function createApp(options){
                     end: memory.b,
                     volume: { revisions: system.volume.revisions ?? null,
                         sharing: system.volume.sharingMemory ?? null },
+                    // The run's foreground window, focus and captured window,
+                    // read where the run keeps them.
+                    windowCells: system.windows?.cells ?? null,
                     graphics: graphics?.port1 ?? null,
                     display: display?.port2 ?? null,
                     options: {

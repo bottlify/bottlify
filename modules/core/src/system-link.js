@@ -24,6 +24,7 @@
 
 import { volumeHandlers, remoteVolume } from './layers/filesystem/internal/volume-link.js';
 import { takeId } from './layers/kernel/internal/processes.js';
+import { WINDOW_CELLS } from './layers/win32/user32/manager.js';
 
 /** What a process asks of the registry; the rest -- saving, loading -- is the system's. */
 const REGISTRY = ['root', 'open', 'create', 'remove', 'subkeys', 'values', 'getValue', 'setValue',
@@ -33,7 +34,7 @@ const REGISTRY = ['root', 'open', 'create', 'remove', 'subkeys', 'values', 'getV
 const WINDOWS = ['open', 'close', 'ownerOf', 'describe', 'find', 'register', 'registeredName',
     'hold', 'send', 'answer', 'withdraw', 'post', 'detach', 'publish', 'raise', 'lower',
     'insertAfter', 'stateOf', 'topLevel', 'fromPoint', 'foreground', 'setForeground',
-    'foregroundElsewhere', 'noteCapture', 'noteFocus'];
+    'foregroundElsewhere', 'noteCapture', 'noteFocus', 'focus'];
 
 /** What a process answers about its own windows (`directory.js`'s `WindowEndpoint`). */
 const ENDPOINT = ['find', 'describe', 'post', 'send', 'answer', 'withdraw', 'lostForeground',
@@ -86,11 +87,13 @@ export function systemHandlers(system, askBack){
  *     a call that does not block: for what the process waits on as it waits
  *     on the network, its threads parked and the link looked at meanwhile
  * @param {import('./layers/filesystem/internal/volume-link.js').VolumeMemory | null} [volume]
+ * @param {Int32Array | null} [windowCells]  the run's foreground window, focus and captured
+ *     window, where the run keeps them (`manager.js`), when the memory is shared
  *     the run's memory of its volume (`volume-link.js`): what the process
  *     reads of a drive is kept until the drive changes, and its opens are
  *     settled against every other process's there
  */
-export function remoteSystem(ask, handlers = {}, call, volume = null){
+export function remoteSystem(ask, handlers = {}, call, volume = null, windowCells = null){
     /** @param {string} target @param {string[]} names */
     const asking = (target, names)=>Object.fromEntries(names.map(name=>
         [name, (/** @type {any[]} */ ...args)=>ask(target, name, args)]));
@@ -109,6 +112,13 @@ export function remoteSystem(ask, handlers = {}, call, volume = null){
             call ? (method, args)=>void call('volume', method, args).catch(()=>{}) : null),
         windows: {
             ...asking('windows', WINDOWS),
+            // Read where the run keeps them, every process alike, rather than
+            // asked: one word each (`manager.js`'s WINDOW_CELLS).
+            ...windowCells ? {
+                foreground: ()=>Atomics.load(windowCells, WINDOW_CELLS.foreground) >>> 0,
+                focus: ()=>Atomics.load(windowCells, WINDOW_CELLS.focus) >>> 0,
+                cells: windowCells,
+            } : {},
             /** @param {number} processId @param {any} endpoint */
             attach(processId, endpoint){
                 handlers.endpoint = Object.fromEntries(ENDPOINT.map(name=>

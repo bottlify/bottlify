@@ -90,19 +90,21 @@ const plainOf = read=>{
  * @param {{ end: import('../system/link.js').LinkEnd,
  *     volume?: import('../layers/filesystem/internal/volume-link.js').VolumeMemory | null,
  *     graphics?: MessagePort | null,
- *     display?: MessagePort | null, options: any, run?: any }} start
+ *     display?: MessagePort | null, options: any, run?: any,
+ *     windowCells?: Int32Array | null }} start
  * @returns {Promise<{ code: number, diagnostics: any, systemLibraries: any }>} its exit
  *     code, its layers' diagnostics as it ended and the system libraries it knew, as
  *     plain data, or null
  */
-export async function serveProcess({ end, volume, graphics, display, options, run }){
+export async function serveProcess(start){
+    const { end, volume, graphics, display, options, run, windowCells = null } = start;
     /** @type {Record<string, Record<string, (...args: any[]) => any>>} */
     const handlers = {};
     const link = openLink(end, handlers);
     /** @param {string} target @param {string} method @param {any[]} args */
     const ask = (target, method, args)=>link.callWaiting(target, method, args);
     const system = remoteSystem(ask, handlers, (target, method, args)=>
-        link.call(target, method, args), volume);
+        link.call(target, method, args), volume, windowCells);
     // A wait on another process's object ended there: its word comes in
     // with whatever else the link carries, at a turn's end or while idle.
     handlers.kernel = { wake: (/** @type {number} */ token, /** @type {number} */ result)=>
