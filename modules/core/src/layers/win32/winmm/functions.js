@@ -1606,6 +1606,12 @@ export function createWinmmFunctions(host){
             /** @param {number[]} args */
             handler: ([sound, flags])=>playSound(sound, flags >>> 0),
         },
+        /** BOOL PlaySound(LPCSTR, HMODULE, DWORD): PlaySoundA under the name it had first. */
+        PlaySound: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([sound, , flags])=>playSound(sound, flags >>> 0),
+        },
 
         /**
          * BOOL PlaySoundW(LPCWSTR, HMODULE, DWORD) and

@@ -57,6 +57,9 @@ export const PROCESSOR = Object.freeze({
 export const PROCESSOR_IDENTIFIER =
     `x86 Family ${PROCESSOR.family} Model ${PROCESSOR.model} Stepping ${PROCESSOR.stepping}`;
 
+/** What the processor is called where no engine names it. */
+export const PROCESSOR_NAME = 'Bottlify x86';
+
 /** SYSTEM_INFO's wProcessorLevel and wProcessorRevision: the family, then model and stepping. */
 export const PROCESSOR_LEVEL = PROCESSOR.family;
 export const PROCESSOR_REVISION = PROCESSOR.model << 8 | PROCESSOR.stepping;

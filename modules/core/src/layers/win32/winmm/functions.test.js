@@ -893,6 +893,13 @@ test('PlaySound plays a WAVE image from memory, loops it, and null stops it', as
     assert.equal(winmm.sndPlaySoundW.handler([0, 0]), 1);
     assert.equal(mixer.diagnostics().tracks, 0);
     assert.deepEqual([winmm.PlaySoundW.argBytes, winmm.sndPlaySoundW.argBytes], [12, 8]);
+
+    // PlaySound is PlaySoundA under the name it had first.
+    assert.equal(winmm.PlaySound.handler([0x800, 0, 0x0001 | 0x0004]), 1);
+    assert.equal(mixer.diagnostics().tracks, 1);
+    assert.equal(winmm.PlaySound.handler([0, 0, 0]), 1);
+    assert.equal(mixer.diagnostics().tracks, 0);
+    assert.equal(winmm.PlaySound.argBytes, 12);
 });
 
 test('the timer reports the periods timeSetEvent accepts', ()=>{

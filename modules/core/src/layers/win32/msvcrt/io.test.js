@@ -861,3 +861,36 @@ test('__pioinfo holds each descriptor of its first block as a program reads it i
     const asked = fns._get_osfhandle.handler([opened]);
     assert.deepEqual(entry(opened), { handle: asked, wxflag: WX_OPEN | WX_TEXT });
 });
+
+test('_wopen, _sopen and _wsopen open as _open does, the share flag ignored', ()=>{
+    const { memory, fns, files, errno } = build({ 'C:\\game\\caf\u00e9.bin': bytesOf('xyz') });
+    const opened = fns._wopen.handler([memory.putWide('C:\\game\\caf\u00e9.bin'), O_RDONLY, 0]);
+    assert.equal(opened, 3);
+    assert.equal(fns._sopen.handler([memory.put('C:\\game\\new.bin'), O_CREAT | O_WRONLY, 0x40,
+        0x180]), 4);
+    assert.equal(fns._wsopen.handler([memory.putWide('C:\\game\\new2.bin'), O_CREAT | O_WRONLY,
+        0x40, 0x180]), 5);
+    assert.ok('C:\\game\\new.bin' in files.files && 'C:\\game\\new2.bin' in files.files);
+    assert.deepEqual([fns._wopen.argBytes, fns._sopen.argBytes, fns._wsopen.argBytes],
+        [12, 16, 16]);
+    assert.equal(fns._wopen.handler([memory.putWide('C:\\game\\none.bin'), O_RDONLY, 0]), -1);
+    assert.deepEqual(errno, [ENOENT]);
+});
+
+test('_chsize cuts a file, grows it with zeroes and keeps the position', ()=>{
+    const { fns, files, errno, open, tell } = build({ 'C:\\game\\f.bin': bytesOf('abcdef') });
+    const fd = open('C:\\game\\f.bin', O_RDWR);
+    fns._lseek.handler([fd, 2, SEEK_SET]);
+    assert.equal(fns._chsize.handler([fd, 3]), 0);
+    assert.deepEqual([...files.files['C:\\game\\f.bin']], [...bytesOf('abc')].map(Number));
+    assert.equal(fns._chsize.handler([fd, 5]), 0);
+    assert.deepEqual([...files.files['C:\\game\\f.bin']], [0x61, 0x62, 0x63, 0, 0]);
+    assert.equal(tell(fd), 2, 'the position stays');
+
+    const readOnly = open('C:\\game\\f.bin', O_RDONLY);
+    assert.equal(fns._chsize.handler([readOnly, 1]), -1);
+    assert.equal(fns._chsize.handler([77, 1]), -1);
+    assert.equal(fns._chsize.handler([fd, -1]), -1);
+    assert.deepEqual(errno, [EBADF, EBADF, EINVAL]);
+
+});

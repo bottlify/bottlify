@@ -33,10 +33,16 @@ import {
 } from './guid.js';
 import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 import { createStorageFunctions } from './storage.js';
+import { createUserMarshalFunctions } from './usrmarshal.js';
 import { createPropVariantFunctions } from './propvariant.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { createClassTable, createRemoting } from './remote.js';
-import { OBJREF_BYTES, decodeObjref, encodeObjref } from './objref.js';
+import { createMonikerFunctions } from './monikers.js';
+import { parseCompoundFile } from './cfb.js';
+import {
+    OBJREF_BYTES, OBJREF_CUSTOM, OBJREF_CUSTOM_BYTES, OBJREF_HEADER_BYTES, OBJREF_STANDARD,
+    SIGNATURE as OBJREF_SIGNATURE, decodeObjref, encodeCustomHeader, encodeObjref,
+} from './objref.js';
 
 /** HRESULTs this file produces. */
 const S_OK = 0x00000000;
@@ -64,6 +70,10 @@ const REGDB_E_WRITEREGDB = 0x80040151;
 /** A registry string value's type. */
 const REG_SZ = 1;
 const CO_E_NOTINITIALIZED = 0x800401f0;
+const RPC_E_CALL_COMPLETE = 0x80010117 | 0;
+const RPC_E_NO_SYNC = 0x80010120 | 0;
+const RPC_S_CALLPENDING = 0x80010115 | 0;
+const CO_E_CANCEL_DISABLED = 0x80010140 | 0;
 const CO_E_CLASSSTRING = 0x800401f3;
 const CO_E_OBJNOTREG = 0x800401fb;
 const CO_E_DLLNOTFOUND = 0x800401f8;
@@ -78,6 +88,96 @@ const CLSCTX_LOCAL_SERVER = 0x4;
 
 /** IID_IClassFactory: what a class object answers to. */
 const IID_ICLASSFACTORY = '{00000001-0000-0000-C000-000000000046}';
+const IID_IMARSHAL = '{00000003-0000-0000-C000-000000000046}';
+const IID_ISERVERSECURITY = '{0000013E-0000-0000-C000-000000000046}';
+const IID_IRUNNINGOBJECTTABLE = '{00000010-0000-0000-C000-000000000046}';
+/** The standard marshaler's class, and the free-threaded marshaler's in-process one. */
+const CLSID_STD_MARSHAL = '{00000017-0000-0000-C000-000000000046}';
+const CLSID_IN_PROC_FREE_MARSHALER = '{0000033A-0000-0000-C000-000000000046}';
+/** This layer's classes of those two marshalers' objects. */
+const CLSID_STD_MARSHAL_OBJECT = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0005}';
+const CLSID_FREE_MARSHALER_OBJECT = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0006}';
+/** IMarshal's methods, after IUnknown's. */
+const SLOT_MARSHAL_GET_UNMARSHAL_CLASS = 3;
+const SLOT_MARSHAL_GET_SIZE_MAX = 4;
+const SLOT_MARSHAL_MARSHAL = 5;
+const SLOT_MARSHAL_UNMARSHAL = 6;
+const SLOT_MARSHAL_RELEASE_DATA = 7;
+/** Where an interface goes: the same process, or another apartment of it. */
+const MSHCTX_INPROC = 3;
+const MSHCTX_CROSSCTX = 4;
+/** The free-threaded marshaler's in-process packet: flags, pointer, a word, a GUID. */
+const FREE_THREADED_BYTES = 28;
+const IID_IROTDATA = '{F29F6BC0-5021-11CE-AA15-00006901293F}';
+const IID_IMONIKER = '{0000000F-0000-0000-C000-000000000046}';
+const IID_IENUMMONIKER = '{00000102-0000-0000-C000-000000000046}';
+/** This layer's own classes: the running object table, its enumerator. */
+const CLSID_RUNNING_OBJECT_TABLE = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0003}';
+const CLSID_MONIKER_ENUMERATOR = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0004}';
+
+/** IROTData::GetComparisonData, and what the table compares at most. */
+const SLOT_GET_COMPARISON_DATA = 3;
+const ROT_COMPARE_MAX = 2048;
+/** IPersist/IPersistStream's methods on a moniker, and IMoniker::GetDisplayName. */
+const SLOT_PERSIST_GET_CLASS_ID = 3;
+const SLOT_PERSIST_LOAD = 5;
+const SLOT_PERSIST_SAVE = 6;
+const SLOT_MONIKER_GET_DISPLAY_NAME = 20;
+const SLOT_MONIKER_BIND_TO_OBJECT = 8;
+/** IBindCtx::SetBindOptions, after RegisterObjectBound, RevokeObjectBound and ReleaseBoundObjects. */
+const SLOT_BIND_SET_OPTIONS = 6;
+/** IStream::Seek, and where from. */
+const SLOT_STREAM_SEEK = 5;
+const STREAM_SEEK_SET = 0;
+const STREAM_SEEK_END = 2;
+
+const ROTFLAGS_REGISTRATIONKEEPSALIVE = 1;
+const ROTFLAGS_ALLOWANYCLIENT = 2;
+const ACTIVEOBJECT_WEAK = 1;
+const MK_S_MONIKERALREADYREGISTERED = 0x000401e7;
+const MK_E_UNAVAILABLE = 0x800401e3 | 0;
+const E_UNEXPECTED = 0x8000ffff | 0;
+const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
+const CLSCTX_INPROC_SERVER = 1;
+/** The class of the call context CoGetCallContext hands out: this layer's own. */
+const CLSID_CALL_CONTEXT = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0002}';
+
+/** An apartment's context, and what it answers as. */
+const CLSID_OBJECT_CONTEXT = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0007}';
+const IID_ICONTEXT = '{000001C0-0000-0000-C000-000000000046}';
+const IID_IOBJCONTEXT = '{000001C6-0000-0000-C000-000000000046}';
+const IID_ICOMTHREADINGINFO = '{000001CE-0000-0000-C000-000000000046}';
+const IID_ICONTEXTCALLBACK = '{000001DA-0000-0000-C000-000000000046}';
+/** What IComThreadingInfo::GetCurrentThreadType answers: whether the thread pumps messages. */
+const THDTYPE_BLOCKMESSAGES = 0;
+const THDTYPE_PROCESSMESSAGES = 1;
+
+/** IMarshal::DisconnectObject. */
+const SLOT_MARSHAL_DISCONNECT = 8;
+
+/** The blanket of a call between two processes of one user. */
+const RPC_C_AUTHN_WINNT = 10;
+const RPC_C_AUTHZ_NONE = 0;
+const RPC_C_AUTHN_LEVEL_CONNECT = 2;
+const RPC_C_IMP_LEVEL_IDENTIFY = 2;
+const EOAC_NONE = 0;
+
+/** CoWaitForMultipleHandles' flags, and what it waits for. */
+const COWAIT_WAITALL = 1;
+const COWAIT_ALERTABLE = 2;
+const QS_PAINT = 0x20;
+const QS_SENDMESSAGE = 0x40;
+const QS_ALLPOSTMESSAGE = 0x100;
+const WAIT_OBJECT_0 = 0;
+const WAIT_TIMEOUT = 0x102;
+const WAIT_FAILED = 0xffffffff;
+const INFINITE = 0xffffffff;
+const WM_QUIT = 0x12;
+const MSG_SIZE = 28;
+
+/** @param {number} code */
+const hresultFromWin32 = code=>((code >>> 0) === 0 ? 0
+    : (((code & 0xffff) | 0x80070000) | 0));
 
 /** What a proxy/stub DLL's class object is asked for. */
 const IID_IPSFACTORYBUFFER = '{D5F569D0-593B-101A-B569-08002B2DBF7A}';
@@ -208,6 +308,26 @@ const MAX_PROGID = 255;
  *           IUnknown it got through two interfaces to decide whether they belong
  *           to one object, and two addresses for one interface fails that test
  *           however correct the object model underneath is.
+ * @property {{ take: () => number, set: (pointer: number) => unknown,
+ *     create: (out: number) => number }} [errors]
+ *           The thread's error-information slot and CreateErrorInfo
+ *           (oleaut32's), for a call's error to cross between processes.
+ * @property {(code: number) => any} [raise]
+ *           RpcRaiseException on the calling thread.
+ * @property {(code: number, thread: unknown) => Promise<any>} [raiseLater]
+ *           The same from a handler that has awaited.
+ * @property {{ messages: (thread: unknown, count: number, handles: number, timeout: number,
+ *         wakeMask: number, waitAll: number) => number | Promise<number>,
+ *     objects: (thread: unknown, count: number, handles: number, waitAll: number,
+ *         timeout: number) => number | Promise<number>,
+ *     peek: (thread: unknown, message: number) => number | Promise<number>,
+ *     translate: (thread: unknown, message: number) => unknown,
+ *     dispatch: (thread: unknown, message: number) => unknown,
+ *     postQuit: (thread: unknown, code: number) => unknown, tickCount: () => number,
+ *     lastError: (thread: unknown) => number }} [waits]
+ *           user32's and kernel32's waits and message calls, made as the call
+ *           of the thread named, for a wait that goes on serving the thread's
+ *           apartment (CoWaitForMultipleHandles) after it awaited.
  * @property {{ table: ReturnType<typeof createClassTable>, process: unknown }} [com]
  *           The run's table of class objects served out of process, and what
  *           names this process to it. Absent, this process has a table of its
@@ -488,6 +608,144 @@ export function createOleFunctions(host){
     };
 
     /**
+     * The run's table of class objects and running objects -- the service
+     * control manager's -- or this process's own where it was handed none.
+     */
+    const runTable = host.com?.table ?? createClassTable();
+
+    /** What CoAddRefServerProcess counted, less what CoReleaseServerProcess gave back. */
+    let serverProcessRefs = 0;
+    /** CoGetCurrentProcess's numbers, one per thread as each first asks. */
+    let nextSequence = 1;
+
+    /**
+     * QueryInterface on a guest object, the IID lent for the call: the
+     * pointer it answered, which the caller releases, or 0.
+     *
+     * @param {number} object @param {string} iid @param {unknown} thread
+     * @returns {Promise<number>}
+     */
+    const queryPointer = async(object, iid, thread)=>{
+        const block = host.heap.allocate(4 + GUID_SIZE);
+        const bytes = parseGuid(iid);
+        if (block === 0 || !bytes)
+        {
+            return 0;
+        }
+        writeU32(block, 0);
+        host.writeMemory(block + 4, bytes);
+        const hr = (await callMethod(object, SLOT_QUERY_INTERFACE, [block + 4, block], thread)) | 0;
+        const found = readU32(block);
+        host.heap.free(block);
+        return hr < 0 ? 0 : found;
+    };
+
+    /**
+     * The authentication every call between processes here has: Windows'
+     * own between two processes of one user, connect-level, identifying,
+     * no principal, no privileges, no capabilities. Writes it where each
+     * non-null pointer asks: the service, the authorisation service, the
+     * principal's name, the level, the impersonation level, the privileges
+     * or identity, the capabilities.
+     *
+     * @param {number[]} outs
+     */
+    const writeBlanket = outs=>{
+        const values = [RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, 0, RPC_C_AUTHN_LEVEL_CONNECT,
+            RPC_C_IMP_LEVEL_IDENTIFY, 0, EOAC_NONE];
+        outs.forEach((out, index)=>{
+            if ((out >>> 0) !== 0)
+            {
+                writeU32(out >>> 0, values[index]);
+            }
+        });
+    };
+
+    /**
+     * IServerSecurity, as CoGetCallContext hands it inside a call another
+     * process made.
+     *
+     * @returns {import('./objects.js').ComClassDefinition}
+     */
+    const serverSecurity = ()=>{
+        let impersonating = false;
+        return {
+            interfaces: [{
+                id: IID_ISERVERSECURITY,
+                methods: [
+                    { name: 'QueryBlanket', argBytes: 32,
+                        invoke: (_object, outs)=>{
+                            writeBlanket(outs);
+                            return S_OK;
+                        } },
+                    { name: 'ImpersonateClient', argBytes: 4,
+                        invoke: ()=>{
+                            impersonating = true;
+                            return S_OK;
+                        } },
+                    { name: 'RevertToSelf', argBytes: 4,
+                        invoke: ()=>{
+                            impersonating = false;
+                            return S_OK;
+                        } },
+                    { name: 'IsImpersonating', argBytes: 4, invoke: ()=>(impersonating ? 1 : 0) },
+                ],
+            }],
+        };
+    };
+
+    /** The object `publishHostObject` is making, for the class it registered. @type {import('./objects.js').ComClassDefinition | null} */
+    let making = null;
+    /** The classes of this layer's own objects, registered once each. @type {Set<string>} */
+    const madeClasses = new Set();
+    /**
+     * One of this layer's own objects, its one count the caller's.
+     *
+     * @param {string} clsid @param {import('./objects.js').ComClassDefinition} definition
+     * @returns {import('./objects.js').ComObject | null}
+     */
+    const makeHostObject = (clsid, definition)=>{
+        if (!madeClasses.has(clsid))
+        {
+            madeClasses.add(clsid);
+            host.registry.registerClass(clsid, ()=>making);
+        }
+        making = definition;
+        const object = host.registry.create(clsid);
+        making = null;
+        return object;
+    };
+
+    /**
+     * One of this layer's own objects, handed out through `out` as `iid`:
+     * E_NOINTERFACE for an interface it has not, with nothing written.
+     *
+     * @param {string} clsid @param {import('./objects.js').ComClassDefinition} definition
+     * @param {string} iid @param {number} out
+     * @returns {number}
+     */
+    const publishHostObject = (clsid, definition, iid, out)=>{
+        const object = makeHostObject(clsid, definition);
+        if (!object)
+        {
+            return E_OUTOFMEMORY;
+        }
+        if (!object.interfaceFor(iid))
+        {
+            object.release();
+            return E_NOINTERFACE;
+        }
+        const pointer = host.vtables.publish(object, iid) >>> 0;
+        if (pointer === 0)
+        {
+            object.release();
+            return E_OUTOFMEMORY;
+        }
+        writeU32(out, pointer);
+        return S_OK;
+    };
+
+    /**
      * This process's end of the channel to the others, made the first time a
      * class crosses: a program that never serves or asks for an out-of-process
      * class never has one.
@@ -504,7 +762,7 @@ export function createOleFunctions(host){
         const callerThread = host.callerThread;
         const bstr = host.bstr;
         remoting = createRemoting({
-            table: host.com?.table ?? createClassTable(),
+            table: runTable,
             process: host.com?.process ?? null,
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
@@ -525,6 +783,7 @@ export function createOleFunctions(host){
             catalog: { hive: host.hive, readFile: wholeFile },
             proxyStub: { factory: (iid, thread)=>proxyStubFactory(iid, thread) },
             divergence: host.divergence,
+            errors: host.errors,
         });
         return remoting;
     };
@@ -1009,6 +1268,7 @@ export function createOleFunctions(host){
         if (apartment.model !== COINIT_APARTMENTTHREADED)
         {
             mtaThreads--;
+            mtaMaybeClosed();
         }
         if (mainSta === thread)
         {
@@ -1038,21 +1298,246 @@ export function createOleFunctions(host){
         return address === 0 ? null : readGuid(host, address);
     };
 
-    /** The proxy/stub classes this process registered for itself, by interface. */
-    const ownProxyStubs = new Map();
+    /**
+     * The apartment the calling thread is in, as CoGetApartmentType says it:
+     * the main single-threaded one, another single-threaded one, the
+     * multithreaded one -- entered, or implicitly while another thread is in
+     * it -- or none, which is CO_E_NOTINITIALIZED and APTTYPE_CURRENT.
+     */
+    const apartmentType = ()=>{
+        const thread = host.currentThread();
+        const apartment = thread?.ole32;
+        if (apartment?.model === COINIT_APARTMENTTHREADED)
+        {
+            return { kind: mainSta === thread ? APTTYPE_MAINSTA : APTTYPE_STA,
+                detail: APTTYPEQUALIFIER_NONE, answer: S_OK };
+        }
+        if (apartment)
+        {
+            return { kind: APTTYPE_MTA, detail: APTTYPEQUALIFIER_NONE, answer: S_OK };
+        }
+        if (mtaOpen())
+        {
+            return { kind: APTTYPE_MTA, detail: APTTYPEQUALIFIER_IMPLICIT_MTA, answer: S_OK };
+        }
+        return { kind: APTTYPE_CURRENT, detail: APTTYPEQUALIFIER_NONE,
+            answer: CO_E_NOTINITIALIZED };
+    };
 
     /**
-     * @param {string} api @param {number} out  Where the object would go, or 0.
-     * @returns {number} E_OUTOFMEMORY
+     * A thread's logical thread: the one IComThreadingInfo set, or by default
+     * a GUID whose last word is the thread's id, which makes it its own and
+     * never GUID_NULL.
+     *
+     * @param {any} thread @returns {string}
      */
-    const refuseObject = (api, out)=>{
-        if (out !== 0)
+    const logicalThread = thread=>thread?.oleLogicalThread
+        ?? `{1063CB43-B0F3-4A56-B7C1-${((thread?.id ?? 0) >>> 0).toString(16).toUpperCase()
+            .padStart(12, '0')}}`;
+
+    /** The multithreaded apartment's context, while that apartment stands. @type {import('./objects.js').ComObject | null} */
+    let mtaContext = null;
+    /** A multithreaded apartment made again is another, with a context of its own. */
+    const mtaMaybeClosed = ()=>{
+        if (!mtaOpen())
         {
-            writeU32(out, 0);
+            mtaContext = null;
         }
-        host.divergence?.(api, 'the running object table and monikers are not built');
-        return E_OUTOFMEMORY;
     };
+
+    /**
+     * An apartment's context. The apartment owns it, so its count is only
+     * what callers took (`owned`): Wine's compobj tests find a context token
+     * AddRef'd to one. A single-threaded apartment's work is handed to it
+     * through its window, made here, on its thread, as it is entered.
+     *
+     * @param {any} owner  The single-threaded apartment's thread, or null.
+     * @returns {{ object: import('./objects.js').ComObject | null, ready: unknown }}
+     *     the context, and what its window's making is, to wait on
+     */
+    const makeContext = owner=>{
+        const ownerCaller = owner ? host.callerThread?.() ?? null : null;
+        const ready = owner ? remote()?.prepare(ownerCaller) : undefined;
+        /** @param {number} out @param {number} value */
+        const answer = (out, value)=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            writeU32(out >>> 0, value);
+            return S_OK;
+        };
+        /** @param {string} name */
+        const unsupported = name=>({ name, argBytes: 4, invoke: ()=>{
+            host.divergence?.(`IObjContext::${name}`, 'reserved, and does nothing here');
+            return S_OK;
+        } });
+        /** @param {string} name @param {number} argBytes */
+        const property = (name, argBytes)=>({ name, argBytes, invoke: ()=>{
+            host.divergence?.(`IContext::${name}`, 'a context here holds no properties');
+            return E_NOTIMPL;
+        } });
+        const contextMethods = [property('SetProperty', 16), property('RemoveProperty', 8),
+            property('GetProperty', 16), property('EnumContextProps', 8)];
+        /** @type {import('./objects.js').ComClassDefinition} */
+        const definition = {
+            owned: true,
+            interfaces: [
+                { id: IID_ICONTEXT, methods: contextMethods },
+                { id: IID_IOBJCONTEXT, methods: [...contextMethods,
+                    ...[1, 2, 3, 4, 5, 6, 7].map(index=>unsupported(`Reserved${index}`))] },
+                { id: IID_ICOMTHREADINGINFO, methods: [
+                    { name: 'GetCurrentApartmentType', argBytes: 8,
+                        invoke: (_object, [out])=>{
+                            const { kind, answer: hr } = apartmentType();
+                            return hr === S_OK ? answer(out, kind) : hr;
+                        } },
+                    { name: 'GetCurrentThreadType', argBytes: 8,
+                        invoke: (_object, [out])=>{
+                            const { kind, answer: hr } = apartmentType();
+                            return hr === S_OK
+                                ? answer(out, kind === APTTYPE_MTA ? THDTYPE_BLOCKMESSAGES
+                                    : THDTYPE_PROCESSMESSAGES)
+                                : hr;
+                        } },
+                    { name: 'GetCurrentLogicalThreadId', argBytes: 8,
+                        invoke: (_object, [out])=>{
+                            if ((out >>> 0) === 0)
+                            {
+                                return E_INVALIDARG;
+                            }
+                            writeGuid(host, out >>> 0, logicalThread(host.currentThread()));
+                            return S_OK;
+                        } },
+                    { name: 'SetCurrentLogicalThreadId', argBytes: 8,
+                        invoke: (_object, [id])=>{
+                            const thread = host.currentThread();
+                            const guid = guidAt(id);
+                            if (!guid || !thread)
+                            {
+                                return E_INVALIDARG;
+                            }
+                            thread.oleLogicalThread = guid;
+                            return S_OK;
+                        } },
+                ] },
+                { id: IID_ICONTEXTCALLBACK, methods: [
+                    { name: 'ContextCallback', argBytes: 24,
+                        invoke: (object, [callback, data])=>enterContext(object, owner, ownerCaller,
+                            callback >>> 0, data >>> 0) },
+                ] },
+            ],
+        };
+        return { object: makeHostObject(CLSID_OBJECT_CONTEXT, definition), ready };
+    };
+
+    /**
+     * Runs `callback(data)` in `context`, answering what it returns. In the
+     * caller's own context it is a call; a single-threaded apartment's work
+     * runs on that apartment's thread, the caller serving its own meanwhile;
+     * the multithreaded apartment's runs on the calling thread, which is in
+     * that context for the length of it, as Windows moves a thread into the
+     * multithreaded apartment for the call.
+     *
+     * @param {import('./objects.js').ComObject} context @param {any} owner
+     * @param {unknown} ownerCaller @param {number} callback @param {number} data
+     * @returns {number | Promise<number>}
+     */
+    const enterContext = (context, owner, ownerCaller, callback, data)=>{
+        if (callback === 0)
+        {
+            return E_INVALIDARG;
+        }
+        if (!host.call)
+        {
+            return E_NOTIMPL;
+        }
+        const call = host.call;
+        const thread = host.currentThread();
+        const caller = host.callerThread?.();
+        if (currentContext() === context)
+        {
+            return call(callback, [data], caller);
+        }
+        const channel = owner ? remote() : null;
+        if (channel)
+        {
+            return channel.enter(ownerCaller, on=>call(callback, [data], on));
+        }
+        if (owner)
+        {
+            host.divergence?.('IContextCallback::ContextCallback',
+                'another thread\'s apartment entered on the calling thread');
+        }
+        thread.oleEntered ??= [];
+        thread.oleEntered.push(context);
+        return Promise.resolve(call(callback, [data], caller)).finally(()=>{
+            thread.oleEntered.pop();
+        });
+    };
+
+    /** The multithreaded apartment's context, made the first time it is asked. */
+    const mtaApartmentContext = ()=>{
+        mtaContext ??= makeContext(null).object;
+        return mtaContext;
+    };
+
+    /**
+     * The context the calling thread is in: one ContextCallback moved it into
+     * for a call, else its apartment's; null outside any apartment.
+     *
+     * @returns {import('./objects.js').ComObject | null}
+     */
+    const currentContext = ()=>{
+        const thread = host.currentThread();
+        const entered = thread?.oleEntered?.at(-1);
+        if (entered)
+        {
+            return entered;
+        }
+        const apartment = thread?.ole32;
+        if (apartment?.model === COINIT_APARTMENTTHREADED)
+        {
+            apartment.context ??= makeContext(thread);
+            return apartment.context.object;
+        }
+        return apartment || mtaOpen() ? mtaApartmentContext() : null;
+    };
+
+    /**
+     * `then`, once the calling thread's apartment can take work other threads
+     * hand it: at once, unless its window is being made.
+     *
+     * @param {() => number} then @returns {number | Promise<number>}
+     */
+    const whenContextReady = then=>{
+        const ready = host.currentThread()?.ole32?.context?.ready;
+        return ready ? Promise.resolve(ready).then(then, then) : then();
+    };
+
+    /**
+     * A context handed out through `out` as `iid`, with a count.
+     *
+     * @param {import('./objects.js').ComObject} context @param {string} iid @param {number} out
+     * @returns {number}
+     */
+    const handOutContext = (context, iid, out)=>{
+        if (!context.queryInterface(iid))
+        {
+            return E_NOINTERFACE;
+        }
+        const pointer = host.vtables.publish(context, iid) >>> 0;
+        if (pointer === 0)
+        {
+            context.release();
+            return E_OUTOFMEMORY;
+        }
+        writeU32(out, pointer);
+        return S_OK;
+    };
+
+    /** The proxy/stub classes this process registered for itself, by interface. */
+    const ownProxyStubs = new Map();
 
     const stringFromGuid = {
         argBytes: 8,
@@ -1175,7 +1660,961 @@ export function createOleFunctions(host){
         });
     };
 
-    return {
+    /**
+     * A UTF-16 string with its terminator in the process heap, for a call that
+     * reads one: the caller frees it.
+     *
+     * @param {string} text @returns {number}
+     */
+    const lendWide = text=>{
+        const block = host.heap.allocate((text.length + 1) * 2);
+        if (block === 0)
+        {
+            return 0;
+        }
+        const bytes = new Uint8Array((text.length + 1) * 2);
+        for (let index = 0; index < text.length; index++)
+        {
+            bytes[index * 2] = text.charCodeAt(index) & 0xff;
+            bytes[index * 2 + 1] = text.charCodeAt(index) >>> 8;
+        }
+        host.writeMemory(block, bytes);
+        return block;
+    };
+
+    /** @param {Uint8Array} bytes */
+    const hexOf = bytes=>Array.from(bytes, byte=>byte.toString(16).padStart(2, '0')).join('');
+
+    /**
+     * A call of one of this layer's own exports, with a slot of scratch
+     * memory for what it writes out: the HRESULT and the word in the slot.
+     *
+     * @param {string} name @param {(slot: number) => number[]} args
+     * @returns {Promise<{ hr: number, value: number }>}
+     */
+    const callExport = async(name, args)=>{
+        const entry = /** @type {Record<string, any>} */ (functions)[name];
+        const slot = host.heap.allocate(4);
+        if (!entry || slot === 0)
+        {
+            return { hr: entry ? E_OUTOFMEMORY : E_NOTIMPL, value: 0 };
+        }
+        writeU32(slot, 0);
+        const hr = (await entry.handler(args(slot))) | 0;
+        const value = readU32(slot);
+        host.heap.free(slot);
+        return { hr, value };
+    };
+
+    /**
+     * What a moniker compares as in the running object table: its own
+     * IROTData's comparison data where it has one, its class and display
+     * name otherwise -- the two ways Windows' table tells monikers apart.
+     * Null when it says neither.
+     *
+     * @param {number} moniker @param {unknown} thread
+     * @returns {Promise<string | null>}
+     */
+    const comparisonKey = async(moniker, thread)=>{
+        const data = await queryPointer(moniker, IID_IROTDATA, thread);
+        if (data !== 0)
+        {
+            const block = host.heap.allocate(ROT_COMPARE_MAX + 4);
+            if (block === 0)
+            {
+                await callMethod(data, SLOT_RELEASE, [], thread);
+                return null;
+            }
+            writeU32(block + ROT_COMPARE_MAX, 0);
+            const hr = (await callMethod(data, SLOT_GET_COMPARISON_DATA,
+                [block, ROT_COMPARE_MAX, block + ROT_COMPARE_MAX], thread)) | 0;
+            await callMethod(data, SLOT_RELEASE, [], thread);
+            const size = Math.min(readU32(block + ROT_COMPARE_MAX), ROT_COMPARE_MAX);
+            const key = hr === S_OK ? hexOf(host.readMemory(block, size)) : null;
+            host.heap.free(block);
+            return key;
+        }
+        const context = await callExport('CreateBindCtx', slot=>[0, slot]);
+        if (context.hr < 0 || context.value === 0)
+        {
+            return null;
+        }
+        const work = host.heap.allocate(4 + GUID_SIZE);
+        if (work === 0)
+        {
+            await callMethod(context.value, SLOT_RELEASE, [], thread);
+            return null;
+        }
+        writeU32(work, 0);
+        const named = (await callMethod(moniker, SLOT_MONIKER_GET_DISPLAY_NAME,
+            [context.value, 0, work], thread)) | 0;
+        await callMethod(context.value, SLOT_RELEASE, [], thread);
+        const classed = (await callMethod(moniker, SLOT_PERSIST_GET_CLASS_ID, [work + 4],
+            thread)) | 0;
+        const name = readU32(work);
+        const clsid = host.readMemory(work + 4, GUID_SIZE).slice();
+        host.heap.free(work);
+        if (named < 0 || name === 0)
+        {
+            return null;
+        }
+        const text = readOleString(name, ROT_COMPARE_MAX);
+        await functions.CoTaskMemFree.handler([name]);
+        if (classed < 0)
+        {
+            return null;
+        }
+        const units = new Uint8Array((text.length + 1) * 2);
+        for (let index = 0; index < text.length; index++)
+        {
+            units[index * 2] = text.charCodeAt(index) & 0xff;
+            units[index * 2 + 1] = text.charCodeAt(index) >>> 8;
+        }
+        return hexOf(clsid) + hexOf(units);
+    };
+
+    /**
+     * A moniker as its class and what IPersistStream::Save writes of it: what
+     * another process makes it again from to enumerate the table. Null for
+     * one that does not save.
+     *
+     * @param {number} moniker @param {unknown} thread
+     * @returns {Promise<{ clsid: string, bytes: Uint8Array } | null>}
+     */
+    const savedMoniker = async(moniker, thread)=>{
+        const work = host.heap.allocate(GUID_SIZE + 8);
+        const made = await callExport('CreateStreamOnHGlobal', slot=>[0, 1, slot]);
+        if (work === 0 || made.hr < 0 || made.value === 0)
+        {
+            if (work !== 0)
+            {
+                host.heap.free(work);
+            }
+            return null;
+        }
+        const stream = made.value;
+        try
+        {
+            if (((await callMethod(moniker, SLOT_PERSIST_GET_CLASS_ID, [work], thread)) | 0) < 0
+                || ((await callMethod(moniker, SLOT_PERSIST_SAVE, [stream, 1], thread)) | 0) < 0)
+            {
+                return null;
+            }
+            const clsid = readGuid(host, work);
+            await callMethod(stream, SLOT_STREAM_SEEK, [0, 0, STREAM_SEEK_END, work + GUID_SIZE],
+                thread);
+            const size = readU32(work + GUID_SIZE);
+            await callMethod(stream, SLOT_STREAM_SEEK, [0, 0, STREAM_SEEK_SET, 0], thread);
+            const bytes = size > 0 ? await readStream(stream, size, thread) : new Uint8Array(0);
+            return clsid && bytes ? { clsid, bytes } : null;
+        }
+        finally
+        {
+            host.heap.free(work);
+            await callMethod(stream, SLOT_RELEASE, [], thread);
+        }
+    };
+
+    /**
+     * A moniker made again from what `savedMoniker` kept: an IMoniker pointer,
+     * or 0 when its class does not make here.
+     *
+     * @param {{ clsid: string, bytes: Uint8Array }} saved @param {unknown} thread
+     * @returns {Promise<number>}
+     */
+    const remadeMoniker = async(saved, thread)=>{
+        const ids = host.heap.allocate(GUID_SIZE * 2);
+        if (ids === 0)
+        {
+            return 0;
+        }
+        host.writeMemory(ids, /** @type {Uint8Array} */ (parseGuid(saved.clsid)));
+        host.writeMemory(ids + GUID_SIZE, /** @type {Uint8Array} */ (parseGuid(IID_IMONIKER)));
+        const made = await callExport('CoCreateInstance',
+            slot=>[ids, 0, CLSCTX_INPROC_SERVER, ids + GUID_SIZE, slot]);
+        host.heap.free(ids);
+        if (made.hr < 0 || made.value === 0)
+        {
+            return 0;
+        }
+        const stream = await callExport('CreateStreamOnHGlobal', slot=>[0, 1, slot]);
+        const block = host.heap.allocate(Math.max(saved.bytes.length, 1));
+        if (stream.hr < 0 || stream.value === 0 || block === 0)
+        {
+            await callMethod(made.value, SLOT_RELEASE, [], thread);
+            return 0;
+        }
+        host.writeMemory(block, saved.bytes);
+        await callMethod(stream.value, SLOT_STREAM_WRITE, [block, saved.bytes.length, 0], thread);
+        host.heap.free(block);
+        await callMethod(stream.value, SLOT_STREAM_SEEK, [0, 0, STREAM_SEEK_SET, 0], thread);
+        const loaded = (await callMethod(made.value, SLOT_PERSIST_LOAD, [stream.value],
+            thread)) | 0;
+        await callMethod(stream.value, SLOT_RELEASE, [], thread);
+        if (loaded < 0)
+        {
+            await callMethod(made.value, SLOT_RELEASE, [], thread);
+            return 0;
+        }
+        return made.value;
+    };
+
+    /** Now, as a FILETIME's two words: when an object was registered or noted changed. */
+    const fileTimeNow = ()=>{
+        const ticks = (BigInt(Date.now()) + 11644473600000n) * 10000n;
+        return [Number(ticks & 0xffffffffn), Number(ticks >> 32n)];
+    };
+
+    /**
+     * The running object table as this process sees it: the run's, through
+     * the class table, with what it holds of each object a reference another
+     * process can take a count of.
+     */
+    const runningObjects = {
+        /**
+         * @param {number} object @param {number} moniker @param {number} flags
+         * @param {unknown} thread
+         * @returns {Promise<{ hr: number, cookie: number }>}
+         */
+        async register(object, moniker, flags, thread){
+            const channel = remote();
+            const key = await comparisonKey(moniker, thread);
+            if (!channel || key === null)
+            {
+                return { hr: key === null ? E_INVALIDARG : E_FAIL, cookie: 0 };
+            }
+            const reference = await channel.exportReference(object, IID_IUNKNOWN, thread);
+            const saved = await savedMoniker(moniker, thread);
+            const { cookie, duplicate } = runTable.rotRegister({ key, reference, flags,
+                time: fileTimeNow(), moniker: saved, endpoint: channel.endpoint() });
+            return { hr: duplicate ? MK_S_MONIKERALREADYREGISTERED : S_OK, cookie };
+        },
+        /** @param {number} cookie @param {unknown} thread @returns {Promise<number>} */
+        async revoke(cookie, thread){
+            const entry = runTable.rotRevoke(cookie);
+            if (!entry)
+            {
+                return E_INVALIDARG;
+            }
+            await remote()?.releaseReference(entry.reference, thread);
+            return S_OK;
+        },
+        /** @param {number} moniker @param {unknown} thread */
+        async find(moniker, thread){
+            const key = await comparisonKey(moniker, thread);
+            return key === null ? null : runTable.rotFind(key);
+        },
+        /**
+         * The object under a moniker, counted for the caller: 0 when none.
+         *
+         * @param {import('./remote.js').RunningEntry} entry @param {unknown} thread
+         */
+        async take(entry, thread){
+            const channel = remote();
+            if (!channel)
+            {
+                return 0;
+            }
+            await channel.addReference(entry.reference, thread);
+            return channel.importReference(entry.reference, IID_IUNKNOWN, thread);
+        },
+    };
+
+    /** The process's one IRunningObjectTable, once asked for. @type {any} */
+    let tableObject = null;
+
+    /**
+     * IRunningObjectTable, over `runningObjects`.
+     *
+     * @returns {import('./objects.js').ComClassDefinition}
+     */
+    const runningObjectTable = ()=>({
+        interfaces: [{
+            id: IID_IRUNNINGOBJECTTABLE,
+            methods: [
+                { name: 'Register', argBytes: 20,
+                    invoke: async(_object, [flags, unknown, moniker, cookieOut])=>{
+                        if ((flags & ~(ROTFLAGS_REGISTRATIONKEEPSALIVE | ROTFLAGS_ALLOWANYCLIENT))
+                            !== 0)
+                        {
+                            return E_INVALIDARG;
+                        }
+                        if ((unknown >>> 0) === 0 || (moniker >>> 0) === 0
+                            || (cookieOut >>> 0) === 0)
+                        {
+                            return E_INVALIDARG;
+                        }
+                        const made = await runningObjects.register(unknown >>> 0, moniker >>> 0,
+                            flags >>> 0, host.callerThread?.());
+                        if (made.hr >= 0)
+                        {
+                            writeU32(cookieOut >>> 0, made.cookie);
+                        }
+                        return made.hr;
+                    } },
+                { name: 'Revoke', argBytes: 8,
+                    invoke: (_object, [cookie])=>runningObjects.revoke(cookie >>> 0,
+                        host.callerThread?.()) },
+                { name: 'IsRunning', argBytes: 8,
+                    invoke: async(_object, [moniker])=>((moniker >>> 0) === 0 ? E_INVALIDARG
+                        : await runningObjects.find(moniker >>> 0, host.callerThread?.())
+                            ? S_OK : S_FALSE) },
+                { name: 'GetObject', argBytes: 12,
+                    invoke: async(_object, [moniker, out])=>{
+                        if ((out >>> 0) === 0 || (moniker >>> 0) === 0)
+                        {
+                            return E_INVALIDARG;
+                        }
+                        writeU32(out >>> 0, 0);
+                        const thread = host.callerThread?.();
+                        const entry = await runningObjects.find(moniker >>> 0, thread);
+                        const pointer = entry ? await runningObjects.take(entry, thread) : 0;
+                        if (pointer === 0)
+                        {
+                            return MK_E_UNAVAILABLE;
+                        }
+                        writeU32(out >>> 0, pointer);
+                        return S_OK;
+                    } },
+                { name: 'NoteChangeTime', argBytes: 12,
+                    invoke: (_object, [cookie, time])=>{
+                        if ((time >>> 0) === 0)
+                        {
+                            return E_INVALIDARG;
+                        }
+                        return runTable.rotNoteChange(cookie >>> 0,
+                            [readU32(time >>> 0), readU32((time >>> 0) + 4)]) ? S_OK : E_INVALIDARG;
+                    } },
+                { name: 'GetTimeOfLastChange', argBytes: 12,
+                    invoke: async(_object, [moniker, time])=>{
+                        if ((moniker >>> 0) === 0 || (time >>> 0) === 0)
+                        {
+                            return E_INVALIDARG;
+                        }
+                        const entry = await runningObjects.find(moniker >>> 0,
+                            host.callerThread?.());
+                        if (!entry)
+                        {
+                            return MK_E_UNAVAILABLE;
+                        }
+                        writeU32(time >>> 0, entry.time[0]);
+                        writeU32((time >>> 0) + 4, entry.time[1]);
+                        return S_OK;
+                    } },
+                { name: 'EnumRunning', argBytes: 8,
+                    invoke: async(_object, [out])=>{
+                        if ((out >>> 0) === 0)
+                        {
+                            return E_INVALIDARG;
+                        }
+                        const thread = host.callerThread?.();
+                        /** @type {number[]} */
+                        const monikers = [];
+                        for (const entry of runTable.rotEntries())
+                        {
+                            const made = entry.moniker
+                                ? await remadeMoniker(entry.moniker, thread) : 0;
+                            if (made !== 0)
+                            {
+                                monikers.push(made);
+                            }
+                        }
+                        return publishHostObject(CLSID_MONIKER_ENUMERATOR,
+                            monikerEnumerator(monikers, 0), IID_IENUMMONIKER, out >>> 0);
+                    } },
+            ],
+        }],
+    });
+
+    /**
+     * IEnumMoniker over monikers it holds a count on each of, from `at`.
+     *
+     * @param {number[]} monikers @param {number} at
+     * @returns {import('./objects.js').ComClassDefinition}
+     */
+    const monikerEnumerator = (monikers, at)=>{
+        let next = at;
+        return {
+            interfaces: [{
+                id: IID_IENUMMONIKER,
+                methods: [
+                    { name: 'Next', argBytes: 16,
+                        invoke: async(_object, [count, into, fetchedOut])=>{
+                            let fetched = 0;
+                            for (; fetched < (count >>> 0) && next < monikers.length; fetched++)
+                            {
+                                const moniker = monikers[next++];
+                                await callMethod(moniker, SLOT_ADD_REF, [], host.callerThread?.());
+                                writeU32((into >>> 0) + fetched * 4, moniker);
+                            }
+                            if ((fetchedOut >>> 0) !== 0)
+                            {
+                                writeU32(fetchedOut >>> 0, fetched);
+                            }
+                            return fetched === (count >>> 0) ? S_OK : S_FALSE;
+                        } },
+                    { name: 'Skip', argBytes: 8,
+                        invoke: (_object, [count])=>{
+                            next = Math.min(monikers.length, next + (count >>> 0));
+                            return next < monikers.length ? S_OK : S_FALSE;
+                        } },
+                    { name: 'Reset', argBytes: 4,
+                        invoke: ()=>{
+                            next = 0;
+                            return S_OK;
+                        } },
+                    { name: 'Clone', argBytes: 8,
+                        invoke: async(_object, [out])=>{
+                            for (const moniker of monikers)
+                            {
+                                await callMethod(moniker, SLOT_ADD_REF, [], host.callerThread?.());
+                            }
+                            return publishHostObject(CLSID_MONIKER_ENUMERATOR,
+                                monikerEnumerator(monikers, next), IID_IENUMMONIKER, out >>> 0);
+                        } },
+                ],
+            }],
+            destroy(){
+                const thread = host.callerThread?.();
+                for (const moniker of monikers)
+                {
+                    void callMethod(moniker, SLOT_RELEASE, [], thread);
+                }
+            },
+        };
+    };
+
+    /**
+     * The moniker an active object is registered under: an item moniker of
+     * the class's braced string after "!", as automation names one.
+     *
+     * @param {number} clsidPointer
+     * @returns {Promise<number>} the moniker, or 0
+     */
+    const activeObjectMoniker = async clsidPointer=>{
+        const clsid = guidAt(clsidPointer);
+        const delimiter = lendWide('!');
+        const item = clsid === null ? 0 : lendWide(clsid.toUpperCase());
+        if (delimiter === 0 || item === 0)
+        {
+            return 0;
+        }
+        const made = await callExport('CreateItemMoniker', slot=>[delimiter, item, slot]);
+        host.heap.free(delimiter);
+        host.heap.free(item);
+        return made.hr < 0 ? 0 : made.value;
+    };
+
+    /**
+     * Bytes written into a stream through its own IStream::Write.
+     *
+     * @param {number} stream @param {Uint8Array} bytes @param {unknown} thread
+     * @returns {Promise<number>} an HRESULT
+     */
+    const writeStream = async(stream, bytes, thread)=>{
+        const block = host.heap.allocate(Math.max(bytes.length, 1));
+        if (block === 0)
+        {
+            return E_OUTOFMEMORY;
+        }
+        host.writeMemory(block, bytes);
+        const hr = (await callMethod(stream, SLOT_STREAM_WRITE, [block, bytes.length, 0],
+            thread)) | 0;
+        host.heap.free(block);
+        return hr < 0 ? hr : S_OK;
+    };
+
+    /** @param {Uint8Array} bytes @param {number} at */
+    const wordOf = (bytes, at)=>(bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16)
+        | (bytes[at + 3] << 24)) >>> 0;
+
+    /**
+     * The standard marshaling of an interface pointer: an OBJREF naming the
+     * object as this process exports it, which carries one reference of its
+     * own -- or none for a packet marshaled into a table, which holds the
+     * reference and lets every reader take one.
+     *
+     * @param {number} stream @param {string} iid @param {number} pointer
+     * @param {number} flags  MSHLFLAGS_*. @param {unknown} thread
+     * @returns {Promise<number>}
+     */
+    const standardMarshal = async(stream, iid, pointer, flags, thread)=>{
+        const channel = remote();
+        const bytes = parseGuid(iid);
+        if (!channel || !bytes || pointer === 0)
+        {
+            return channel ? E_INVALIDARG : E_FAIL;
+        }
+        const reference = await channel.exportReference(pointer, iid, thread);
+        const table = (flags & (MSHLFLAGS_TABLESTRONG | MSHLFLAGS_TABLEWEAK)) !== 0;
+        return writeStream(stream, encodeObjref(bytes, reference, table ? 0 : 1), thread);
+    };
+
+    /**
+     * An OBJREF read off a stream: its header first, then as much more as
+     * its flags say -- a standard packet whole, or a custom one's header,
+     * after which its own marshaler's data is left in the stream for it.
+     * The bare pointer CoMarshalInterThreadInterfaceInStream writes is said
+     * apart.
+     *
+     * @param {number} stream @param {unknown} thread
+     * @returns {Promise<{ kind: 'pointer', pointer: number }
+     *     | { kind: 'standard', bytes: Uint8Array,
+     *         decoded: NonNullable<ReturnType<typeof decodeObjref>> }
+     *     | { kind: 'custom', iid: string, clsid: string } | null>}
+     */
+    const readObjref = async(stream, thread)=>{
+        const head = await readStream(stream, OBJREF_HEADER_BYTES, thread);
+        if (!head)
+        {
+            return null;
+        }
+        if (head.length === 4)
+        {
+            return { kind: 'pointer', pointer: wordOf(head, 0) };
+        }
+        if (head.length < OBJREF_HEADER_BYTES || wordOf(head, 0) !== OBJREF_SIGNATURE)
+        {
+            return null;
+        }
+        if (wordOf(head, 4) === OBJREF_STANDARD)
+        {
+            const rest = await readStream(stream, OBJREF_BYTES - OBJREF_HEADER_BYTES, thread);
+            const bytes = rest ? new Uint8Array([...head, ...rest]) : null;
+            const decoded = bytes ? decodeObjref(bytes) : null;
+            return bytes && decoded ? { kind: 'standard', bytes, decoded } : null;
+        }
+        if (wordOf(head, 4) === OBJREF_CUSTOM)
+        {
+            const rest = await readStream(stream, OBJREF_CUSTOM_BYTES - OBJREF_HEADER_BYTES,
+                thread);
+            return rest && rest.length === OBJREF_CUSTOM_BYTES - OBJREF_HEADER_BYTES
+                ? { kind: 'custom', iid: formatGuid(head.subarray(8, 24)),
+                    clsid: formatGuid(rest.subarray(0, 16)) }
+                : null;
+        }
+        return null;
+    };
+
+    /**
+     * The pointer a standard OBJREF stands for, as `iid`, into `out`: a
+     * table's packet has a reference taken for this reader first.
+     *
+     * @param {{ bytes: Uint8Array, decoded: NonNullable<ReturnType<typeof decodeObjref>> }} packet
+     * @param {number} riid  Where the IID asked for is, or 0.
+     * @param {number} out @param {unknown} thread
+     * @returns {Promise<number>}
+     */
+    const standardUnmarshal = async(packet, riid, out, thread)=>{
+        const channel = remote();
+        if (!channel)
+        {
+            return RPC_E_INVALID_OBJREF;
+        }
+        if (packet.decoded.publicRefs === 0)
+        {
+            await channel.addReference(packet.decoded.reference, thread);
+        }
+        const carried = formatGuid(packet.decoded.iid);
+        const made = await marshaler.unmarshal(packet.bytes, carried, thread);
+        if (made.hr < 0)
+        {
+            return made.hr;
+        }
+        const wanted = riid === 0 ? null : guidAt(riid);
+        if (wanted === null || wanted === GUID_NULL
+            || canonicalGuid(wanted) === canonicalGuid(carried))
+        {
+            writeU32(out, made.pointer);
+            return S_OK;
+        }
+        const hr = (await callMethod(made.pointer, SLOT_QUERY_INTERFACE, [riid, out], thread)) | 0;
+        await callMethod(made.pointer, SLOT_RELEASE, [], thread);
+        return hr;
+    };
+
+    /**
+     * The IMarshal that unmarshals a custom packet: the free-threaded or
+     * standard marshaler's own for theirs, the class's otherwise. 0 when
+     * none makes.
+     *
+     * @param {string} clsid @param {unknown} thread
+     * @returns {Promise<number>}
+     */
+    const unmarshalerFor = async(clsid, thread)=>{
+        const key = canonicalGuid(clsid);
+        const slot = host.heap.allocate(4);
+        if (slot === 0)
+        {
+            return 0;
+        }
+        writeU32(slot, 0);
+        if (key === canonicalGuid(CLSID_IN_PROC_FREE_MARSHALER)
+            || key === canonicalGuid(CLSID_STD_MARSHAL))
+        {
+            const definition = key === canonicalGuid(CLSID_STD_MARSHAL)
+                ? standardMarshaler(0) : freeThreadedMarshaler();
+            publishHostObject(key === canonicalGuid(CLSID_STD_MARSHAL)
+                ? CLSID_STD_MARSHAL_OBJECT : CLSID_FREE_MARSHALER_OBJECT, definition,
+            IID_IMARSHAL, slot);
+            const made = readU32(slot);
+            host.heap.free(slot);
+            return made;
+        }
+        const ids = host.heap.allocate(GUID_SIZE * 2);
+        if (ids === 0)
+        {
+            host.heap.free(slot);
+            return 0;
+        }
+        host.writeMemory(ids, /** @type {Uint8Array} */ (parseGuid(clsid)));
+        host.writeMemory(ids + GUID_SIZE, /** @type {Uint8Array} */ (parseGuid(IID_IMARSHAL)));
+        const hr = (await functions.CoCreateInstance.handler(
+            [ids, 0, CLSCTX_INPROC_SERVER, ids + GUID_SIZE, slot])) | 0;
+        const made = hr < 0 ? 0 : readU32(slot);
+        host.heap.free(ids);
+        host.heap.free(slot);
+        void thread;
+        return made;
+    };
+
+    /**
+     * The standard marshaler, as CoGetStandardMarshal hands it: standard
+     * OBJREFs in and out, for `bound` -- the object it disconnects -- or for
+     * whatever it is handed when it was made only to unmarshal.
+     *
+     * @param {number} bound
+     * @returns {import('./objects.js').ComClassDefinition}
+     */
+    const standardMarshaler = bound=>({
+        interfaces: [{
+            id: IID_IMARSHAL,
+            methods: [
+                { name: 'GetUnmarshalClass', argBytes: 28,
+                    invoke: (_object, [, , , , , out])=>{
+                        writeGuid(host, out >>> 0, CLSID_STD_MARSHAL);
+                        return S_OK;
+                    } },
+                { name: 'GetMarshalSizeMax', argBytes: 28,
+                    invoke: (_object, [, , , , , out])=>{
+                        writeU32(out >>> 0, OBJREF_BYTES);
+                        return S_OK;
+                    } },
+                { name: 'MarshalInterface', argBytes: 28,
+                    invoke: (_object, [stream, riid, pointer, , , flags])=>{
+                        const iid = guidAt(riid);
+                        return iid === null ? E_INVALIDARG : standardMarshal(stream >>> 0, iid,
+                            pointer >>> 0, flags >>> 0, host.callerThread?.());
+                    } },
+                { name: 'UnmarshalInterface', argBytes: 16,
+                    invoke: async(_object, [stream, riid, out])=>{
+                        const thread = host.callerThread?.();
+                        writeU32(out >>> 0, 0);
+                        const packet = await readObjref(stream >>> 0, thread);
+                        return packet?.kind === 'standard'
+                            ? standardUnmarshal(packet, riid >>> 0, out >>> 0, thread)
+                            : RPC_E_INVALID_OBJREF;
+                    } },
+                { name: 'ReleaseMarshalData', argBytes: 8,
+                    invoke: async(_object, [stream])=>{
+                        const thread = host.callerThread?.();
+                        const packet = await readObjref(stream >>> 0, thread);
+                        const channel = remote();
+                        return packet?.kind === 'standard' && channel
+                            ? channel.releaseReference(packet.decoded.reference, thread)
+                            : RPC_E_INVALID_OBJREF;
+                    } },
+                { name: 'DisconnectObject', argBytes: 8,
+                    invoke: async()=>{
+                        if (bound !== 0)
+                        {
+                            await remote()?.disconnect(bound, host.callerThread?.());
+                        }
+                        return S_OK;
+                    } },
+            ],
+        }],
+    });
+
+    /**
+     * The free-threaded marshaler: within the process the object's own
+     * pointer -- its flags, the pointer, a word and a GUID -- since any of
+     * the process's threads may call it; to another process the standard
+     * marshaler's packet. An aggregate's IMarshal counts on this object, not
+     * on its outer one.
+     *
+     * @returns {import('./objects.js').ComClassDefinition}
+     */
+    const freeThreadedMarshaler = ()=>{
+        /** @param {number} context */
+        const inProcess = context=>context === MSHCTX_INPROC || context === MSHCTX_CROSSCTX;
+        /**
+         * The flags and pointer an in-process packet holds.
+         *
+         * @param {number} stream @param {unknown} thread
+         */
+        const readPacket = async(stream, thread)=>{
+            const bytes = await readStream(stream, FREE_THREADED_BYTES, thread);
+            return bytes && bytes.length === FREE_THREADED_BYTES
+                ? { flags: wordOf(bytes, 0), pointer: wordOf(bytes, 4) } : null;
+        };
+        return {
+            interfaces: [{
+                id: IID_IMARSHAL,
+                methods: [
+                    { name: 'GetUnmarshalClass', argBytes: 28,
+                        invoke: (_object, [, , context, , , out])=>{
+                            writeGuid(host, out >>> 0, inProcess(context >>> 0)
+                                ? CLSID_IN_PROC_FREE_MARSHALER : CLSID_STD_MARSHAL);
+                            return S_OK;
+                        } },
+                    { name: 'GetMarshalSizeMax', argBytes: 28,
+                        invoke: (_object, [, , context, , , out])=>{
+                            writeU32(out >>> 0, inProcess(context >>> 0) ? FREE_THREADED_BYTES
+                                : OBJREF_BYTES);
+                            return S_OK;
+                        } },
+                    { name: 'MarshalInterface', argBytes: 28,
+                        invoke: async(_object, [stream, riid, pointer, context, , flags])=>{
+                            const thread = host.callerThread?.();
+                            const iid = guidAt(riid);
+                            if (iid === null)
+                            {
+                                return E_INVALIDARG;
+                            }
+                            if (!inProcess(context >>> 0))
+                            {
+                                return standardMarshal(stream >>> 0, iid, pointer >>> 0,
+                                    flags >>> 0, thread);
+                            }
+                            const found = await queryPointer(pointer >>> 0, iid, thread);
+                            if (found === 0)
+                            {
+                                return E_NOINTERFACE;
+                            }
+                            // A weak table's packet keeps nothing alive.
+                            if ((flags & MSHLFLAGS_TABLEWEAK) !== 0)
+                            {
+                                await callMethod(found, SLOT_RELEASE, [], thread);
+                            }
+                            const bytes = new Uint8Array(FREE_THREADED_BYTES);
+                            const view = new DataView(bytes.buffer);
+                            view.setUint32(0, flags >>> 0, true);
+                            view.setUint32(4, found >>> 0, true);
+                            return writeStream(stream >>> 0, bytes, thread);
+                        } },
+                    { name: 'UnmarshalInterface', argBytes: 16,
+                        invoke: async(_object, [stream, riid, out])=>{
+                            const thread = host.callerThread?.();
+                            writeU32(out >>> 0, 0);
+                            const packet = await readPacket(stream >>> 0, thread);
+                            if (!packet)
+                            {
+                                return RPC_E_INVALID_OBJREF;
+                            }
+                            const hr = (await callMethod(packet.pointer, SLOT_QUERY_INTERFACE,
+                                [riid >>> 0, out >>> 0], thread)) | 0;
+                            // A normal packet's reference is the reader's now.
+                            const table = MSHLFLAGS_TABLESTRONG | MSHLFLAGS_TABLEWEAK;
+                            if ((packet.flags & table) === 0)
+                            {
+                                await callMethod(packet.pointer, SLOT_RELEASE, [], thread);
+                            }
+                            return hr;
+                        } },
+                    { name: 'ReleaseMarshalData', argBytes: 8,
+                        invoke: async(_object, [stream])=>{
+                            const thread = host.callerThread?.();
+                            const packet = await readPacket(stream >>> 0, thread);
+                            if (!packet)
+                            {
+                                return RPC_E_INVALID_OBJREF;
+                            }
+                            if ((packet.flags & MSHLFLAGS_TABLEWEAK) === 0)
+                            {
+                                await callMethod(packet.pointer, SLOT_RELEASE, [], thread);
+                            }
+                            return S_OK;
+                        } },
+                    // What it marshaled is the object itself: nothing to cut.
+                    { name: 'DisconnectObject', argBytes: 8, invoke: ()=>S_OK },
+                ],
+            }],
+        };
+    };
+
+    /**
+     * CoMarshalInterface's work, past its arguments' checks.
+     *
+     * @param {number} stream @param {number} riid @param {string} iid @param {number} unknown
+     * @param {number[]} destination  The context, its data, the flags.
+     * @param {unknown} thread
+     * @returns {Promise<number>}
+     */
+    const marshalInterface = async(stream, riid, iid, unknown, destination, thread)=>{
+        const [context, contextData, flags] = destination;
+        // A proxy marshals as the standard marshaler does: the object it
+        // stands for, wherever that is.
+        const own = remote()?.isProxy(unknown) ? 0
+            : await queryPointer(unknown, IID_IMARSHAL, thread);
+        if (own !== 0)
+        {
+            const block = host.heap.allocate(GUID_SIZE + 4);
+            if (block === 0)
+            {
+                await callMethod(own, SLOT_RELEASE, [], thread);
+                return E_OUTOFMEMORY;
+            }
+            const args = [riid, unknown, context, contextData, flags];
+            let hr = (await callMethod(own, SLOT_MARSHAL_GET_UNMARSHAL_CLASS,
+                [...args, block], thread)) | 0;
+            const clsid = readGuid(host, block);
+            if (hr >= 0 && canonicalGuid(clsid) !== canonicalGuid(CLSID_STD_MARSHAL))
+            {
+                writeU32(block + GUID_SIZE, 0);
+                await callMethod(own, SLOT_MARSHAL_GET_SIZE_MAX,
+                    [...args, block + GUID_SIZE], thread);
+                hr = await writeStream(stream, encodeCustomHeader(
+                    /** @type {Uint8Array} */ (parseGuid(iid)),
+                    host.readMemory(block, GUID_SIZE).slice(),
+                    readU32(block + GUID_SIZE)), thread);
+                if (hr >= 0)
+                {
+                    hr = (await callMethod(own, SLOT_MARSHAL_MARSHAL,
+                        [stream, ...args], thread)) | 0;
+                }
+                host.heap.free(block);
+                await callMethod(own, SLOT_RELEASE, [], thread);
+                return hr;
+            }
+            host.heap.free(block);
+            await callMethod(own, SLOT_RELEASE, [], thread);
+            if (hr < 0)
+            {
+                return hr;
+            }
+        }
+        return standardMarshal(stream, iid, unknown, flags, thread);
+    };
+
+    /**
+     * CoUnmarshalInterface's work, past its arguments' checks.
+     *
+     * @param {number} stream @param {number} riid @param {number} out @param {unknown} thread
+     * @returns {Promise<number>}
+     */
+    const unmarshalInterface = async(stream, riid, out, thread)=>{
+        const packet = await readObjref(stream, thread);
+        if (packet?.kind === 'standard')
+        {
+            return standardUnmarshal(packet, riid, out, thread);
+        }
+        if (packet?.kind !== 'custom')
+        {
+            return RPC_E_INVALID_OBJREF;
+        }
+        const unmarshaler = await unmarshalerFor(packet.clsid, thread);
+        if (unmarshaler === 0)
+        {
+            return REGDB_E_CLASSNOTREG;
+        }
+        const hr = (await callMethod(unmarshaler, SLOT_MARSHAL_UNMARSHAL,
+            [stream, riid, out], thread)) | 0;
+        await callMethod(unmarshaler, SLOT_RELEASE, [], thread);
+        return hr;
+    };
+
+    /** @type {Record<string, any>} */
+    /** Milliseconds between 1601, where a FILETIME counts from, and 1970. */
+    const FILETIME_EPOCH_MS = 11644473600000n;
+
+    /**
+     * A class's activation, as the export would answer it: the GUIDs in task
+     * memory for the length of the call.
+     *
+     * @param {string} name @param {string[]} guids
+     * @param {(pointers: number[]) => number[]} args
+     * @returns {Promise<number>}
+     */
+    const callWithGuids = async(name, guids, args)=>{
+        const block = host.heap.allocate(GUID_SIZE * guids.length);
+        if (block === 0)
+        {
+            return E_OUTOFMEMORY;
+        }
+        const pointers = guids.map((guid, index)=>{
+            const at = block + index * GUID_SIZE;
+            host.writeMemory(at, /** @type {Uint8Array} */ (parseGuid(guid)));
+            return at;
+        });
+        try
+        {
+            return (await /** @type {Record<string, any>} */ (functions)[name]
+                .handler(args(pointers))) | 0;
+        }
+        finally
+        {
+            host.heap.free(block);
+        }
+    };
+
+    /**
+     * What the moniker classes reach of the rest of COM: activation, the
+     * running object table, docfiles and the volume, all as this layer's own
+     * exports answer them.
+     *
+     * @type {import('./monikers.js').MonikerEnv}
+     */
+    const monikerEnv = {
+        readMemory: host.readMemory,
+        writeMemory: host.writeMemory,
+        heap: host.heap,
+        taskAlloc: bytes=>host.heap.allocate(bytes >>> 0),
+        taskFree: address=>((address >>> 0) === 0 ? 0 : host.heap.free(address >>> 0)),
+        callMethod,
+        callerThread: ()=>host.callerThread?.(),
+        registry: host.registry,
+        vtables: host.vtables,
+        createInstance: (clsid, outer, context, iid, out)=>callWithGuids('CoCreateInstance',
+            [clsid, iid], ([classId, interfaceId])=>[classId, outer, context, interfaceId, out]),
+        getClassObject: (clsid, context, iid, out)=>callWithGuids('CoGetClassObject',
+            [clsid, iid], ([classId, interfaceId])=>[classId, context, 0, interfaceId, out]),
+        runningObjectTable: async out=>
+            (await functions.GetRunningObjectTable.handler([0, out])) | 0,
+        storageClassOf: async path=>{
+            const bytes = await wholeFile(path);
+            const root = bytes ? parseCompoundFile(bytes) : null;
+            return root ? root.clsid : null;
+        },
+        fileInfo: path=>{
+            const entry = host.files?.stat(path);
+            if (!entry?.exists)
+            {
+                return null;
+            }
+            const modified = /** @type {{ modified?: number }} */ (entry).modified ?? 0;
+            return { lastWrite: (BigInt(Math.trunc(modified)) + FILETIME_EPOCH_MS) * 10000n };
+        },
+        openStorage: async(path, mode, out)=>{
+            const name = lendWide(path);
+            if (name === 0)
+            {
+                return E_OUTOFMEMORY;
+            }
+            try
+            {
+                return (await functions.StgOpenStorage.handler([name, 0, mode, 0, 0, out])) | 0;
+            }
+            finally
+            {
+                host.heap.free(name);
+            }
+        },
+        hive: host.hive,
+        divergence: host.divergence,
+    };
+
+    const functions = {
         /** HRESULT CoInitialize(LPVOID pvReserved) */
         CoInitialize: {
             argBytes: 4,
@@ -1222,6 +2661,7 @@ export function createOleFunctions(host){
                     return E_INVALIDARG;
                 }
                 host.registry.mtaUsage.leave();
+                mtaMaybeClosed();
                 return S_OK;
             },
         },
@@ -1243,24 +2683,7 @@ export function createOleFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                const thread = host.currentThread();
-                const apartment = thread?.ole32;
-                let answer = S_OK;
-                let kind = APTTYPE_MTA;
-                let detail = APTTYPEQUALIFIER_NONE;
-                if (apartment?.model === COINIT_APARTMENTTHREADED)
-                {
-                    kind = mainSta === thread ? APTTYPE_MAINSTA : APTTYPE_STA;
-                }
-                else if (!apartment && mtaOpen())
-                {
-                    detail = APTTYPEQUALIFIER_IMPLICIT_MTA;
-                }
-                else if (!apartment)
-                {
-                    kind = APTTYPE_CURRENT;
-                    answer = CO_E_NOTINITIALIZED;
-                }
+                const { kind, detail, answer } = apartmentType();
                 writeU32(type >>> 0, kind);
                 writeU32(qualifier >>> 0, detail);
                 return answer;
@@ -1282,10 +2705,111 @@ export function createOleFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                const id = (host.currentThread()?.id ?? 0) >>> 0;
-                writeGuid(host, out >>> 0, `{1063CB43-B0F3-4A56-B7C1-${
-                    id.toString(16).toUpperCase().padStart(12, '0')}}`);
+                writeGuid(host, out >>> 0, logicalThread(host.currentThread()));
                 return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT CoGetObjectContext(REFIID riid, LPVOID *ppv)
+         *
+         * The context the calling thread is in, as `riid`, with a count: its
+         * apartment's, one object answering as IObjContext, IContext,
+         * IComThreadingInfo and IContextCallback, the same every time. Outside
+         * any apartment, CO_E_NOTINITIALIZED with the pointer cleared.
+         */
+        CoGetObjectContext: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([iid, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                writeU32(out >>> 0, 0);
+                const context = currentContext();
+                if (!context)
+                {
+                    return CO_E_NOTINITIALIZED;
+                }
+                const wanted = guidAt(iid) ?? '';
+                return whenContextReady(()=>handOutContext(context, wanted, out >>> 0));
+            },
+        },
+
+        /**
+         * HRESULT CoGetContextToken(ULONG_PTR *pToken)
+         *
+         * The calling thread's context as a token: its IObjContext pointer,
+         * with no count taken -- the apartment holds it. Nothing is written
+         * outside any apartment.
+         */
+        CoGetContextToken: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([out])=>{
+                const context = currentContext();
+                if (!context)
+                {
+                    return CO_E_NOTINITIALIZED;
+                }
+                if ((out >>> 0) === 0)
+                {
+                    return whenContextReady(()=>E_POINTER);
+                }
+                return whenContextReady(()=>{
+                    const pointer = host.vtables.publish(context, IID_IOBJCONTEXT) >>> 0;
+                    if (pointer === 0)
+                    {
+                        return E_OUTOFMEMORY;
+                    }
+                    writeU32(out >>> 0, pointer);
+                    return S_OK;
+                });
+            },
+        },
+
+        /**
+         * HRESULT CoGetDefaultContext(APTTYPE aptType, REFIID riid, LPVOID *ppv)
+         *
+         * The default context of an apartment type, as `riid`: the calling
+         * thread's own for APTTYPE_CURRENT or the type it is in, the
+         * multithreaded apartment's while it exists. A single-threaded
+         * apartment the caller is not in is another thread's, and which one
+         * the type does not say (roadmap/decisions.md, A32).
+         */
+        CoGetDefaultContext: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([type, iid, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                writeU32(out >>> 0, 0);
+                const wanted = type >>> 0;
+                if (![APTTYPE_CURRENT, APTTYPE_STA, APTTYPE_MTA, APTTYPE_MAINSTA].includes(wanted))
+                {
+                    return E_INVALIDARG;
+                }
+                const mine = apartmentType();
+                let context = null;
+                if (wanted === APTTYPE_MTA)
+                {
+                    context = mtaOpen() ? mtaApartmentContext() : null;
+                }
+                else if (mine.answer === S_OK && (wanted === APTTYPE_CURRENT
+                    || wanted === mine.kind
+                    || (wanted === APTTYPE_STA && mine.kind === APTTYPE_MAINSTA)))
+                {
+                    context = currentContext();
+                }
+                if (!context)
+                {
+                    return CO_E_NOTINITIALIZED;
+                }
+                const asked = guidAt(iid) ?? '';
+                return whenContextReady(()=>handOutContext(context, asked, out >>> 0));
             },
         },
 
@@ -1751,6 +3275,472 @@ export function createOleFunctions(host){
             },
         },
 
+        /**
+         * HRESULT CoSuspendClassObjects(void)
+         *
+         * This process's registrations stay, and no new client is handed one
+         * until CoResumeClassObjects: what a server does as it starts to shut
+         * down, so a client arriving late starts another.
+         */
+        CoSuspendClassObjects: {
+            argBytes: 0,
+            handler: ()=>{
+                remote()?.suspend();
+                return S_OK;
+            },
+        },
+
+        /**
+         * ULONG CoAddRefServerProcess(void)
+         * ULONG CoReleaseServerProcess(void)
+         *
+         * The server's own count of what keeps it running, across its
+         * objects and locks; the release that brings it to zero suspends its
+         * class objects, as the documentation says COM does, so no client is
+         * handed one while the server goes.
+         */
+        CoAddRefServerProcess: {
+            argBytes: 0,
+            handler: ()=>++serverProcessRefs >>> 0,
+        },
+        CoReleaseServerProcess: {
+            argBytes: 0,
+            handler: ()=>{
+                serverProcessRefs = Math.max(0, serverProcessRefs - 1);
+                if (serverProcessRefs === 0)
+                {
+                    remote()?.suspend();
+                }
+                return serverProcessRefs;
+            },
+        },
+
+        /**
+         * HRESULT CoLockObjectExternal(LPUNKNOWN pUnk, BOOL fLock, BOOL fLastUnlockReleases)
+         *
+         * A hold on an object as another process's is: it stays exported
+         * while nobody holds it from afar. Unlocking an object that was never
+         * exported does nothing, and says nothing, as Windows does.
+         */
+        CoLockObjectExternal: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([object, lock, lastUnlockReleases])=>{
+                if (!inApartment(host.currentThread()))
+                {
+                    return CO_E_NOTINITIALIZED;
+                }
+                if ((object >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const channel = remote();
+                return channel
+                    ? channel.lockExternal(object >>> 0, lock !== 0, lastUnlockReleases !== 0)
+                        .then(()=>S_OK)
+                    : S_OK;
+            },
+        },
+
+        /**
+         * HRESULT CoDisconnectObject(LPUNKNOWN pUnk, DWORD dwReserved)
+         *
+         * Every other process's hold on the object goes at once, and their
+         * proxies answer RPC_E_DISCONNECTED from then on. An object that
+         * marshals itself is asked to, through IMarshal::DisconnectObject.
+         */
+        CoDisconnectObject: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([object, reserved])=>{
+                if ((object >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const thread = host.callerThread?.();
+                return queryPointer(object >>> 0, IID_IMARSHAL, thread).then(async marshal=>{
+                    if (marshal !== 0)
+                    {
+                        const hr = (await callMethod(marshal, SLOT_MARSHAL_DISCONNECT,
+                            [reserved >>> 0], thread)) | 0;
+                        await callMethod(marshal, SLOT_RELEASE, [], thread);
+                        return hr;
+                    }
+                    if (!inApartment(host.currentThread()))
+                    {
+                        return CO_E_NOTINITIALIZED;
+                    }
+                    await remote()?.disconnect(object >>> 0, thread);
+                    return S_OK;
+                });
+            },
+        },
+
+        /**
+         * BOOL CoIsHandlerConnected(LPUNKNOWN pUnk)
+         *
+         * Whether an in-process handler's object is connected to its server:
+         * no handler is ever made here, and an object that is not one is
+         * taken as connected, as Windows takes it.
+         */
+        CoIsHandlerConnected: {
+            argBytes: 4,
+            handler: ()=>1,
+        },
+
+        /**
+         * DWORD CoGetCurrentProcess(void)
+         *
+         * A number unique to the calling thread among every thread of the
+         * run's processes, which COM numbers on first asking.
+         */
+        CoGetCurrentProcess: {
+            argBytes: 0,
+            handler: ()=>{
+                const thread = /** @type {any} */ (host.currentThread());
+                if (!thread)
+                {
+                    return 0;
+                }
+                thread.comSequence ??= nextSequence++;
+                return thread.comSequence;
+            },
+        },
+
+        /**
+         * HRESULT CoGetCallContext(REFIID riid, void **ppInterface)
+         *
+         * The call another process made that this thread is running, as an
+         * IServerSecurity: outside of one, RPC_E_CALL_COMPLETE.
+         */
+        CoGetCallContext: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([iid, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(out >>> 0, 0);
+                if (!remote()?.serving())
+                {
+                    return RPC_E_CALL_COMPLETE;
+                }
+                const wanted = guidAt(iid);
+                if (wanted === null)
+                {
+                    return E_INVALIDARG;
+                }
+                return publishHostObject(CLSID_CALL_CONTEXT, serverSecurity(), wanted, out >>> 0);
+            },
+        },
+
+        /**
+         * HRESULT CoImpersonateClient(void)
+         * HRESULT CoRevertToSelf(void)
+         * HRESULT CoQueryClientBlanket(DWORD *pAuthnSvc, DWORD *pAuthzSvc,
+         *     OLECHAR **pServerPrincName, DWORD *pAuthnLevel, DWORD *pImpLevel,
+         *     RPC_AUTHZ_HANDLE *pPrivs, DWORD *pCapabilities)
+         *
+         * The calling client's security, inside a call another process made:
+         * one user, so impersonating it changes nothing, and the blanket is
+         * the one every local call has.
+         */
+        CoImpersonateClient: {
+            argBytes: 0,
+            handler: ()=>(remote()?.serving() ? S_OK : RPC_E_CALL_COMPLETE),
+        },
+        CoRevertToSelf: {
+            argBytes: 0,
+            handler: ()=>(remote()?.serving() ? S_OK : RPC_E_CALL_COMPLETE),
+        },
+        CoQueryClientBlanket: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([authn, authz, principal, level, impersonation, privileges, capabilities])=>{
+                if (!remote()?.serving())
+                {
+                    return RPC_E_CALL_COMPLETE;
+                }
+                writeBlanket([authn, authz, principal, level, impersonation, privileges,
+                    capabilities]);
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT CoQueryProxyBlanket(IUnknown *pProxy, DWORD *pwAuthnSvc,
+         *     DWORD *pAuthzSvc, OLECHAR **pServerPrincName, DWORD *pAuthnLevel,
+         *     DWORD *pImpLevel, RPC_AUTH_IDENTITY_HANDLE *pAuthInfo, DWORD *pCapabilites)
+         * HRESULT CoCopyProxy(IUnknown *pProxy, IUnknown **ppCopy)
+         *
+         * What a proxy to another process's object authenticates with, and a
+         * copy of it to set another blanket on: an object that is no proxy has
+         * no blanket, and is E_NOINTERFACE, as its missing IClientSecurity is.
+         * The copy is the proxy itself, counted again: every blanket is the
+         * same one here, so nothing tells the two apart but their address.
+         */
+        CoQueryProxyBlanket: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: ([proxy, ...outs])=>{
+                if (!remote()?.isProxy(proxy >>> 0))
+                {
+                    return E_NOINTERFACE;
+                }
+                writeBlanket(outs);
+                return S_OK;
+            },
+        },
+        CoCopyProxy: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([proxy, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                if (!remote()?.isProxy(proxy >>> 0))
+                {
+                    return E_NOINTERFACE;
+                }
+                return callMethod(proxy >>> 0, SLOT_ADD_REF, [], host.callerThread?.()).then(()=>{
+                    writeU32(out >>> 0, proxy >>> 0);
+                    return S_OK;
+                });
+            },
+        },
+
+        /**
+         * HRESULT CoGetCallerTID(LPDWORD lpdwTID)
+         *
+         * Which thread of which process made the call being run: what crosses
+         * from another process carries no thread, so this is not answered,
+         * as Wine does not answer it either.
+         */
+        CoGetCallerTID: {
+            argBytes: 4,
+            handler: ()=>{
+                host.divergence?.('CoGetCallerTID', 'the calling thread is not known');
+                return E_NOTIMPL;
+            },
+        },
+
+        /**
+         * HRESULT CoEnableCallCancellation(LPVOID pReserved)
+         * HRESULT CoDisableCallCancellation(LPVOID pReserved)
+         *
+         * Counted per thread; a disable with nothing enabled is
+         * CO_E_CANCEL_DISABLED. A call here is never cancelled either way.
+         */
+        CoEnableCallCancellation: {
+            argBytes: 4,
+            handler: ()=>{
+                const thread = /** @type {any} */ (host.currentThread());
+                if (thread)
+                {
+                    thread.comCancel = (thread.comCancel ?? 0) + 1;
+                }
+                return S_OK;
+            },
+        },
+        CoDisableCallCancellation: {
+            argBytes: 4,
+            handler: ()=>{
+                const thread = /** @type {any} */ (host.currentThread());
+                if (!thread?.comCancel)
+                {
+                    return CO_E_CANCEL_DISABLED;
+                }
+                thread.comCancel--;
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT CoRegisterChannelHook(REFGUID ExtensionUuid, IChannelHook *pChannelHook)
+         *
+         * A hook on every call's channel, to carry data of its own with it.
+         * Taken and kept; nothing calls it, since a call between processes
+         * here carries no extensions.
+         */
+        CoRegisterChannelHook: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([extension, hook])=>{
+                if (guidAt(extension) === null || (hook >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                host.divergence?.('CoRegisterChannelHook',
+                    'a channel hook is kept but never called');
+                return andThen(callMethod(hook >>> 0, SLOT_ADD_REF, [], host.callerThread?.()),
+                    ()=>S_OK);
+            },
+        },
+
+        /**
+         * HRESULT CoMarshalHresult(LPSTREAM pstm, HRESULT hresult)
+         * HRESULT CoUnmarshalHresult(LPSTREAM pstm, HRESULT *phresult)
+         *
+         * An HRESULT through a stream: its four bytes, little-endian.
+         */
+        CoMarshalHresult: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([stream, hresult])=>{
+                const thread = host.callerThread?.();
+                const block = host.heap.allocate(4);
+                if (block === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                writeU32(block, hresult >>> 0);
+                return callMethod(stream >>> 0, SLOT_STREAM_WRITE, [block, 4, 0], thread)
+                    .then(hr=>{
+                        host.heap.free(block);
+                        return hr;
+                    });
+            },
+        },
+        CoUnmarshalHresult: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([stream, out])=>{
+                const thread = host.callerThread?.();
+                const block = host.heap.allocate(4);
+                if (block === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                return callMethod(stream >>> 0, SLOT_STREAM_READ, [block, 4, 0], thread)
+                    .then(hr=>{
+                        if ((hr | 0) >= 0 && (out >>> 0) !== 0)
+                        {
+                            writeU32(out >>> 0, readU32(block));
+                        }
+                        host.heap.free(block);
+                        return hr;
+                    });
+            },
+        },
+
+        /**
+         * HRESULT CoWaitForMultipleHandles(DWORD dwFlags, DWORD dwTimeout,
+         *     ULONG cHandles, LPHANDLE pHandles, LPDWORD lpdwindex)
+         *
+         * A wait that goes on serving the thread's apartment: in a
+         * single-threaded one the thread's messages are dispatched while it
+         * waits -- which is how a call from another process reaches an
+         * object of this thread meanwhile -- and a handle already signalled
+         * answers before any is looked at; in the multithreaded apartment, or
+         * none, a plain wait. A WM_QUIT taken on the way is put back. An
+         * alertable wait is not alertable here.
+         */
+        CoWaitForMultipleHandles: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([flags, timeout, count, handles, indexOut])=>{
+                if ((indexOut >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(indexOut >>> 0, 0);
+                if ((handles >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                if ((count >>> 0) === 0)
+                {
+                    return RPC_E_NO_SYNC;
+                }
+                const waits = host.waits;
+                if (!waits)
+                {
+                    return E_NOTIMPL;
+                }
+                if ((flags & COWAIT_ALERTABLE) !== 0)
+                {
+                    host.divergence?.('CoWaitForMultipleHandles',
+                        'COWAIT_ALERTABLE: the wait is not alertable');
+                }
+                const waitAll = (flags & COWAIT_WAITALL) !== 0 ? 1 : 0;
+                const thread = /** @type {any} */ (host.currentThread());
+                // Named on every call below: after the first await the thread
+                // on the processor is another's.
+                const caller = host.callerThread?.() ?? thread;
+                /** @param {number} answer */
+                const settle = answer=>{
+                    if ((answer >>> 0) === WAIT_TIMEOUT)
+                    {
+                        return RPC_S_CALLPENDING;
+                    }
+                    if ((answer >>> 0) === WAIT_FAILED)
+                    {
+                        return hresultFromWin32(waits.lastError(caller));
+                    }
+                    writeU32(indexOut >>> 0, answer >>> 0);
+                    return S_OK;
+                };
+                if (thread?.ole32?.model !== COINIT_APARTMENTTHREADED)
+                {
+                    return andThen(waits.objects(caller, count >>> 0, handles >>> 0, waitAll,
+                        timeout >>> 0), settle);
+                }
+                return (async()=>{
+                    const started = waits.tickCount() >>> 0;
+                    const message = host.heap.allocate(MSG_SIZE);
+                    if (message === 0)
+                    {
+                        return E_OUTOFMEMORY;
+                    }
+                    /** @type {number | null} */
+                    let quit = null;
+                    try
+                    {
+                        for (;;)
+                        {
+                            const elapsed = ((waits.tickCount() >>> 0) - started) >>> 0;
+                            if ((timeout >>> 0) !== INFINITE && elapsed > (timeout >>> 0))
+                            {
+                                return RPC_S_CALLPENDING;
+                            }
+                            const left = (timeout >>> 0) === INFINITE ? INFINITE
+                                : (timeout >>> 0) - elapsed;
+                            const answer = (await waits.messages(caller, count >>> 0,
+                                handles >>> 0, left, QS_SENDMESSAGE | QS_ALLPOSTMESSAGE | QS_PAINT,
+                                waitAll)) >>> 0;
+                            if (answer !== WAIT_OBJECT_0 + (count >>> 0))
+                            {
+                                return settle(answer);
+                            }
+                            // A program that never paints is not waited on for
+                            // ever: a hundred messages, then the handles again.
+                            for (let taken = 0; taken < 100
+                                && await waits.peek(caller, message); taken++)
+                            {
+                                if (readU32(message + 4) === WM_QUIT)
+                                {
+                                    quit = readU32(message + 8);
+                                    continue;
+                                }
+                                await waits.translate(caller, message);
+                                await waits.dispatch(caller, message);
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        host.heap.free(message);
+                        if (quit !== null)
+                        {
+                            await waits.postQuit(caller, quit);
+                        }
+                    }
+                })();
+            },
+        },
+
         /** HRESULT CoCreateGuid(GUID *pguid) */
         CoCreateGuid: {
             argBytes: 4,
@@ -1854,6 +3844,18 @@ export function createOleFunctions(host){
 
         // The property value, whose copy owns what it points at in task memory.
         ...createPropVariantFunctions(host),
+
+        // What a MIDL proxy or stub calls to carry a handle, a block of
+        // memory, a storage medium or an interface pointer to another process.
+        ...createUserMarshalFunctions({ ...host, marshaler: ()=>marshaler,
+            raise: host.raise ?? (code=>{
+                throw Object.assign(new Error(`RpcRaiseException 0x${(code >>> 0).toString(16)}`),
+                    { code });
+            }),
+            raiseLater: host.raiseLater ?? (async code=>{
+                throw Object.assign(new Error(`RpcRaiseException 0x${(code >>> 0).toString(16)}`),
+                    { code });
+            }) }),
 
         /**
          * HRESULT ProgIDFromCLSID(REFCLSID clsid, LPOLESTR *lplpszProgID)
@@ -1974,51 +3976,37 @@ export function createOleFunctions(host){
          * HRESULT CoMarshalInterface(IStream *pStm, REFIID riid, IUnknown *pUnk,
          *     DWORD dwDestContext, void *pvDestContext, DWORD mshlflags)
          *
-         * An OBJREF, written into the stream: the object is exported for other
-         * processes (`remote.js`), and the packet carries one reference for
-         * whoever unmarshals it. A packet unmarshals once; table marshaling,
-         * which lets it unmarshal again and again, is not built.
+         * An object that marshals itself is asked to: the class its IMarshal
+         * says unmarshals it heads a custom OBJREF, and the object writes the
+         * rest. Otherwise -- or where that class is the standard marshaler's --
+         * a standard OBJREF: the object exported for other processes
+         * (`remote.js`), the packet carrying one reference for whoever
+         * unmarshals it, or none in a table's packet, which holds one and
+         * hands a reference to every reader until CoReleaseMarshalData.
          */
         CoMarshalInterface: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([stream, riid, unknown, , , flags])=>{
+            handler: ([stream, riid, unknown, context, contextData, flags])=>{
                 const thread = host.callerThread?.();
                 const iid = guidAt(riid);
                 if ((stream >>> 0) === 0 || (unknown >>> 0) === 0 || iid === null)
                 {
                     return E_INVALIDARG;
                 }
-                if ((flags & (MSHLFLAGS_TABLESTRONG | MSHLFLAGS_TABLEWEAK)) !== 0)
-                {
-                    host.divergence?.('CoMarshalInterface', 'table marshaling is not implemented');
-                    return E_NOTIMPL;
-                }
-                return marshaler.marshal(unknown >>> 0, iid, thread).then(async made=>{
-                    if (made.hr < 0 || !made.objref)
-                    {
-                        return made.hr;
-                    }
-                    const block = host.heap.allocate(made.objref.length);
-                    if (block === 0)
-                    {
-                        return E_OUTOFMEMORY;
-                    }
-                    host.writeMemory(block, made.objref);
-                    const hr = (await callMethod(stream >>> 0, SLOT_STREAM_WRITE,
-                        [block, made.objref.length, 0], thread)) | 0;
-                    host.heap.free(block);
-                    return hr < 0 ? hr : S_OK;
-                });
+                return marshalInterface(stream >>> 0, riid >>> 0, iid, unknown >>> 0,
+                    [context >>> 0, contextData >>> 0, flags >>> 0], thread);
             },
         },
 
         /**
          * HRESULT CoUnmarshalInterface(IStream *pStm, REFIID riid, LPVOID *ppv)
          *
-         * The pointer an OBJREF stands for, holding the reference the packet
-         * carried: the object itself if this process exported it, a proxy if
-         * another did. An IID other than the packet's is asked for of it.
+         * The pointer an OBJREF stands for: a standard one's object itself if
+         * this process exported it, a proxy if another did -- holding the
+         * packet's reference, or one taken for this reader from a table's; a
+         * custom one's is the unmarshaler its class makes. An IID other than
+         * the packet's is asked for of it.
          */
         CoUnmarshalInterface: {
             argBytes: 12,
@@ -2031,56 +4019,113 @@ export function createOleFunctions(host){
                     return E_INVALIDARG;
                 }
                 writeU32(out, 0);
-                const wanted = guidAt(riid);
-                return readStream(stream >>> 0, OBJREF_BYTES, thread).then(async bytes=>{
-                    const decoded = bytes ? decodeObjref(bytes) : null;
-                    if (!decoded)
-                    {
-                        return RPC_E_INVALID_OBJREF;
-                    }
-                    const carried = formatGuid(decoded.iid);
-                    const made = await marshaler.unmarshal(/** @type {Uint8Array} */ (bytes),
-                        carried, thread);
-                    if (made.hr < 0)
-                    {
-                        return made.hr;
-                    }
-                    if (wanted === null || wanted === GUID_NULL || wanted === carried)
-                    {
-                        writeU32(out, made.pointer);
-                        return S_OK;
-                    }
-                    const hr = (await callMethod(made.pointer, SLOT_QUERY_INTERFACE,
-                        [riid >>> 0, out], thread)) | 0;
-                    await callMethod(made.pointer, SLOT_RELEASE, [], thread);
-                    return hr;
-                });
+                return unmarshalInterface(stream >>> 0, riid >>> 0, out, thread);
             },
         },
 
         /**
          * HRESULT CoGetMarshalSizeMax(ULONG *pulSize, REFIID riid, IUnknown *pUnk,
          *     DWORD dwDestContext, void *pvDestContext, DWORD mshlflags)
+         *
+         * A standard OBJREF's size, or a custom one's header and what the
+         * object's own marshaler says it writes.
          */
         CoGetMarshalSizeMax: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([size])=>{
+            handler: ([size, riid, unknown, context, contextData, flags])=>{
                 if ((size >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 writeU32(size >>> 0, OBJREF_BYTES);
-                return S_OK;
+                // Nothing to ask of an object that is none, or a proxy.
+                if ((unknown >>> 0) === 0 || remote()?.isProxy(unknown >>> 0))
+                {
+                    return S_OK;
+                }
+                return (async()=>{
+                    const thread = host.callerThread?.();
+                    const own = (unknown >>> 0) === 0 || remote()?.isProxy(unknown >>> 0) ? 0
+                        : await queryPointer(unknown >>> 0, IID_IMARSHAL, thread);
+                    writeU32(size >>> 0, OBJREF_BYTES);
+                    if (own === 0)
+                    {
+                        return S_OK;
+                    }
+                    const args = [riid >>> 0, unknown >>> 0, context >>> 0, contextData >>> 0,
+                        flags >>> 0];
+                    const block = host.heap.allocate(GUID_SIZE + 4);
+                    let hr = S_OK;
+                    if (block !== 0)
+                    {
+                        hr = (await callMethod(own, SLOT_MARSHAL_GET_UNMARSHAL_CLASS,
+                            [...args, block], thread)) | 0;
+                        if (hr >= 0 && canonicalGuid(readGuid(host, block))
+                        !== canonicalGuid(CLSID_STD_MARSHAL))
+                        {
+                            writeU32(block + GUID_SIZE, 0);
+                            hr = (await callMethod(own, SLOT_MARSHAL_GET_SIZE_MAX,
+                                [...args, block + GUID_SIZE], thread)) | 0;
+                            writeU32(size >>> 0, OBJREF_CUSTOM_BYTES + readU32(block + GUID_SIZE));
+                        }
+                        host.heap.free(block);
+                    }
+                    await callMethod(own, SLOT_RELEASE, [], thread);
+                    return hr < 0 ? hr : S_OK;
+                })();
+            },
+        },
+
+        /**
+         * HRESULT CoGetStandardMarshal(REFIID riid, IUnknown *pUnk, DWORD dwDestContext,
+         *     LPVOID pvDestContext, DWORD mshlflags, LPMARSHAL *ppMarshal)
+         *
+         * The standard marshaler, for a custom marshaler that hands some
+         * destinations to it.
+         */
+        CoGetStandardMarshal: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([, unknown, , , , out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(out >>> 0, 0);
+                return publishHostObject(CLSID_STD_MARSHAL_OBJECT, standardMarshaler(unknown >>> 0),
+                    IID_IMARSHAL, out >>> 0);
+            },
+        },
+
+        /**
+         * HRESULT CoCreateFreeThreadedMarshaler(LPUNKNOWN punkOuter, LPUNKNOWN *ppunkMarshal)
+         *
+         * The free-threaded marshaler, which an object aggregates to be called
+         * from any of its process's threads.
+         */
+        CoCreateFreeThreadedMarshaler: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(out >>> 0, 0);
+                return publishHostObject(CLSID_FREE_MARSHALER_OBJECT, freeThreadedMarshaler(),
+                    IID_IUNKNOWN, out >>> 0);
             },
         },
 
         /**
          * HRESULT CoReleaseMarshalData(IStream *pStm)
          *
-         * The reference an OBJREF nobody unmarshaled carries, given back. A
-         * packet CoMarshalInterThreadInterfaceInStream wrote holds only the
-         * pointer, and nothing is owned by it.
+         * The reference an OBJREF nobody unmarshaled carries -- or a table's,
+         * which every reader took one of its own from -- given back; a custom
+         * one's, through its unmarshaler. A packet
+         * CoMarshalInterThreadInterfaceInStream wrote holds only the pointer,
+         * and nothing is owned by it.
          */
         CoReleaseMarshalData: {
             argBytes: 4,
@@ -2091,19 +4136,31 @@ export function createOleFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                return readStream(stream >>> 0, OBJREF_BYTES, thread).then(async bytes=>{
-                    if (bytes?.length === 4)
+                return (async()=>{
+                    const packet = await readObjref(stream >>> 0, thread);
+                    if (packet?.kind === 'pointer')
                     {
                         return S_OK;
                     }
-                    const decoded = bytes ? decodeObjref(bytes) : null;
+                    if (packet?.kind === 'custom')
+                    {
+                        const unmarshaler = await unmarshalerFor(packet.clsid, thread);
+                        if (unmarshaler === 0)
+                        {
+                            return REGDB_E_CLASSNOTREG;
+                        }
+                        const hr = (await callMethod(unmarshaler, SLOT_MARSHAL_RELEASE_DATA,
+                            [stream >>> 0], thread)) | 0;
+                        await callMethod(unmarshaler, SLOT_RELEASE, [], thread);
+                        return hr;
+                    }
                     const channel = remote();
-                    if (!decoded || !channel)
+                    if (packet?.kind !== 'standard' || !channel)
                     {
                         return RPC_E_INVALID_OBJREF;
                     }
-                    return channel.releaseReference(decoded.reference, thread);
-                });
+                    return channel.releaseReference(packet.decoded.reference, thread);
+                })();
             },
         },
 
@@ -2168,34 +4225,170 @@ export function createOleFunctions(host){
         GetRunningObjectTable: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([, out])=>refuseObject('GetRunningObjectTable', out >>> 0),
+            handler: ([reserved, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(out >>> 0, 0);
+                if ((reserved >>> 0) !== 0)
+                {
+                    return E_UNEXPECTED;
+                }
+                // One for the process, as Windows hands every caller the same.
+                if (tableObject && !tableObject.destroyed)
+                {
+                    tableObject.addRef();
+                }
+                else
+                {
+                    tableObject = makeHostObject(CLSID_RUNNING_OBJECT_TABLE,
+                        runningObjectTable());
+                }
+                const pointer = tableObject
+                    ? host.vtables.publish(tableObject, IID_IRUNNINGOBJECTTABLE) >>> 0 : 0;
+                if (pointer === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                writeU32(out >>> 0, pointer);
+                return S_OK;
+            },
         },
-        CreateItemMoniker: {
+
+        /**
+         * HRESULT RegisterActiveObject(IUnknown *punk, REFCLSID rclsid, DWORD dwFlags,
+         *     DWORD *pdwRegister)
+         * HRESULT RevokeActiveObject(DWORD dwRegister, void *pvReserved)
+         * HRESULT GetActiveObject(REFCLSID rclsid, void *pvReserved, IUnknown **ppunk)
+         *
+         * Automation's running objects, by class: an item moniker of the class
+         * in the run's running object table, held strongly unless the caller
+         * asks for a weak registration -- so another process's GetActiveObject
+         * finds the object the first registered. oleaut32 exports these.
+         */
+        RegisterActiveObject: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: async([unknown, clsid, flags, cookieOut])=>{
+                const thread = host.callerThread?.();
+                const moniker = await activeObjectMoniker(clsid >>> 0);
+                if (moniker === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                const made = await runningObjects.register(unknown >>> 0, moniker,
+                    (flags >>> 0) === ACTIVEOBJECT_WEAK ? 0 : ROTFLAGS_REGISTRATIONKEEPSALIVE,
+                    thread);
+                await callMethod(moniker, SLOT_RELEASE, [], thread);
+                if (made.hr >= 0 && (cookieOut >>> 0) !== 0)
+                {
+                    writeU32(cookieOut >>> 0, made.cookie);
+                }
+                return made.hr;
+            },
+        },
+        RevokeActiveObject: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([cookie])=>runningObjects.revoke(cookie >>> 0, host.callerThread?.()),
+        },
+        GetActiveObject: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([, , out])=>refuseObject('CreateItemMoniker', out >>> 0),
+            handler: async([clsid, , out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(out >>> 0, 0);
+                const thread = host.callerThread?.();
+                const moniker = await activeObjectMoniker(clsid >>> 0);
+                if (moniker === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                const entry = await runningObjects.find(moniker, thread);
+                await callMethod(moniker, SLOT_RELEASE, [], thread);
+                const pointer = entry ? await runningObjects.take(entry, thread) : 0;
+                if (pointer === 0)
+                {
+                    return MK_E_UNAVAILABLE;
+                }
+                writeU32(out >>> 0, pointer);
+                return S_OK;
+            },
         },
+        // Monikers, bind contexts and the entry points that make and parse them.
+        ...createMonikerFunctions(monikerEnv),
 
         /**
          * HRESULT CoGetObject(LPCWSTR pszName, BIND_OPTS *pBindOptions, REFIID riid,
          *                     void **ppv)
          *
-         * An object bound by its display name: no moniker class is registered
-         * here -- WMI's winmgmts: among them -- so no name parses, which is
-         * MK_E_SYNTAX, and the name is said.
+         * An object bound by its display name, as Windows makes the call: a
+         * bind context with the options asked for, the name parsed into a
+         * moniker, and the moniker bound.
          */
         CoGetObject: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([name, , , out])=>{
-                const MK_E_SYNTAX = 0x800401e4 | 0;
-                if ((out >>> 0) !== 0)
+            handler: ([name, options, iid, out])=>{
+                if ((out >>> 0) === 0)
                 {
-                    writeU32(out >>> 0, 0);
+                    return E_POINTER;
                 }
-                host.divergence?.('CoGetObject', `no moniker binds ${JSON.stringify(
-                    (name >>> 0) === 0 ? '' : readOleString(name >>> 0, MAX_PROGID))}`);
-                return MK_E_SYNTAX;
+                writeU32(out >>> 0, 0);
+                const thread = host.callerThread?.();
+                return (async()=>{
+                    const context = await callExport('CreateBindCtx', slot=>[0, slot]);
+                    if (context.hr < 0)
+                    {
+                        return context.hr;
+                    }
+                    const work = host.heap.allocate(8);
+                    try
+                    {
+                        if (work === 0)
+                        {
+                            return E_OUTOFMEMORY;
+                        }
+                        if ((options >>> 0) !== 0)
+                        {
+                            const set = (await callMethod(context.value, SLOT_BIND_SET_OPTIONS,
+                                [options >>> 0], thread)) | 0;
+                            if (set < 0)
+                            {
+                                return set;
+                            }
+                        }
+                        writeU32(work + 4, 0);
+                        const parsed = (await functions.MkParseDisplayName.handler(
+                            [context.value, name, work, work + 4])) | 0;
+                        const moniker = readU32(work + 4);
+                        if (parsed < 0 || moniker === 0)
+                        {
+                            if ((name >>> 0) !== 0)
+                            {
+                                host.divergence?.('CoGetObject', `no moniker binds ${JSON.stringify(
+                                    readOleString(name >>> 0, MAX_PROGID))}`);
+                            }
+                            return parsed < 0 ? parsed : E_FAIL;
+                        }
+                        const bound = (await callMethod(moniker, SLOT_MONIKER_BIND_TO_OBJECT,
+                            [context.value, 0, iid >>> 0, out >>> 0], thread)) | 0;
+                        await callMethod(moniker, SLOT_RELEASE, [], thread);
+                        return bound;
+                    }
+                    finally
+                    {
+                        if (work !== 0)
+                        {
+                            host.heap.free(work);
+                        }
+                        await callMethod(context.value, SLOT_RELEASE, [], thread);
+                    }
+                })();
             },
         },
 
@@ -2284,4 +4477,6 @@ export function createOleFunctions(host){
             },
         },
     };
+
+    return functions;
 }

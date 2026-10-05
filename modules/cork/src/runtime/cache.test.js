@@ -91,3 +91,10 @@ test('a seed takes the region records and the modules they name, and nothing els
     assert.deepEqual(seedRecords(records, nameOf).map(([name])=>name),
         ['a', 'b', 'name(batch)', 'name(relinked)']);
 });
+
+test('a record is kept and read under the version it is asked for', ()=>{
+    const bytes = packRegion({ module: Uint8Array.of(1, 2, 3), labels: [], cut: [], entryTop: 0,
+        instructions: 1 }, CACHE_VERSION + 5);
+    assert.equal(unpackRegion(bytes), null, 'the translator\'s own version is another');
+    assert.deepEqual([...(unpackRegion(bytes, CACHE_VERSION + 5)?.module ?? [])], [1, 2, 3]);
+});

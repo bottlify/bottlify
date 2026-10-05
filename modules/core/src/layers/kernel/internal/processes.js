@@ -44,6 +44,8 @@ export const STILL_ACTIVE = 259;
  *           The child already ran and exited: a redistributable installer the
  *           engine itself plays the role of, so the request is answered as
  *           though it had run and left exit code 0. It is never handed over.
+ * @property {boolean} started      Running beside its parent (`concurrency` above 1), so no
+ *                                  longer waiting to take the parent's place.
  * @property {MemoryPatch[]} patches
  *           Writes made into the child before its image exists, replayed once
  *           the PE is mapped. This is process hollowing implemented as a queue.
@@ -63,10 +65,33 @@ export const STILL_ACTIVE = 259;
 const FIRST_ID = 0x2000;
 const ID_STRIDE = 4;
 
-export function createProcessTable(){
+/**
+ * Takes the next of the run's ids of a kind, moving it on by `step`. The run
+ * keeps one counter for every process, and a process in a thread of its own
+ * takes from it through `take`, which reads and moves it in one step; a
+ * counter here is read and moved in place.
+ *
+ * @param {{ take?: (name: string, step: number) => number } & Record<string, any>} ids
+ * @param {'thread' | 'process'} name @param {number} step
+ * @returns {number}
+ */
+export function takeId(ids, name, step){
+    if (typeof ids.take === 'function')
+    {
+        return ids.take(name, step);
+    }
+    const id = ids[name];
+    ids[name] += step;
+    return id;
+}
+
+/**
+ * @param {{ process: number }} [ids]  the run's, where processes are started
+ *     from more than one: a child's children are numbered on from its parent's
+ */
+export function createProcessTable(ids = { process: FIRST_ID }){
     /** @type {ProcessRecord[]} */
     const records = [];
-    let nextId = FIRST_ID;
 
     return {
         /**
@@ -82,9 +107,10 @@ export function createProcessTable(){
          * @returns {ProcessRecord}
          */
         create({ imagePath, commandLine, suspended = false, completed = false }){
+            const id = takeId(ids, 'process', ID_STRIDE * 2);
             const record = {
-                id: nextId,
-                threadId: nextId + 1,
+                id,
+                threadId: id + 1,
                 imagePath,
                 commandLine,
                 suspended,
@@ -92,10 +118,10 @@ export function createProcessTable(){
                 /** @type {MemoryPatch[]} */
                 patches: [],
                 exitCode: completed ? 0 : STILL_ACTIVE,
+                started: false,
                 handle: 0,
                 threadHandle: 0,
             };
-            nextId += ID_STRIDE * 2;
             records.push(record);
             return record;
         },
@@ -111,7 +137,18 @@ export function createProcessTable(){
          * @returns {ProcessRecord | null}
          */
         pending(){
-            return records.find(record=>!record.suspended && !record.completed) ?? null;
+            return records.find(record=>!record.suspended && !record.completed
+                && !record.started) ?? null;
+        },
+
+        /**
+         * The child runs now, beside this process, rather than waiting to take
+         * its place: it is no longer pending.
+         *
+         * @param {ProcessRecord} record
+         */
+        started(record){
+            record.started = true;
         },
 
         /**

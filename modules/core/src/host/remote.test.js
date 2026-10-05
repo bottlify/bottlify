@@ -477,6 +477,29 @@ test('an input event arrives at the router as it left the page', async()=>{
     await remote.dispose();
 });
 
+test('with concurrency input crosses through the ring, is read at a turn boundary without'
+    + ' a yield, and keeps its order with what is posted after it', async()=>{
+    const { remote, app } = await connect({ concurrency: 2 });
+    const pacing = app.options.pacing;
+    assert.ok(app.options.inbound === undefined, 'the ring is the host\'s, not the app\'s');
+    remote.input.send({ kind: 'key', code: 'KeyA', down: true });
+    remote.input.send({ kind: 'pointerMove', x: 10, y: 20, dx: 1, dy: -1 });
+    await settled();
+    assert.deepEqual(app.sent, [], 'nothing was posted: the event loop delivered nothing');
+    assert.equal(pacing.yield({ suspended: 0, fetching: 0, idlers: 0, spun: 0 }), null,
+        'a turn boundary reads the ring and goes straight on');
+    assert.deepEqual(app.sent, [
+        { kind: 'key', code: 'KeyA', down: true },
+        { kind: 'pointerMove', x: 10, y: 20, dx: 1, dy: -1 },
+    ]);
+    remote.input.send({ kind: 'key', code: 'KeyB', down: true });
+    await remote.diagnostics();
+    assert.deepEqual(app.sent.at(-1), { kind: 'key', code: 'KeyB', down: true },
+        'a request posted after an input event finds it read first');
+    assert.equal(pacing.counts().yields, 0);
+    await remote.dispose();
+});
+
 test('attaching with pointerLock asks the page canvas for the lock on a click', async()=>{
     const { remote } = await connect();
     let asked = 0;

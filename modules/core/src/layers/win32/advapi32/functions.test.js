@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { createRegistryService } from './registry-service.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { REGISTRY_NATIVES, createRegistryFunctions } from './functions.js';
@@ -96,7 +97,7 @@ function fakeMemory(size = 0x11000){
 
 function setup(){
     const memory = fakeMemory();
-    const hive = createHive();
+    const hive = createRegistryService(createHive());
     const fns = createRegistryFunctions({
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
@@ -703,7 +704,7 @@ test('a SID is built in guest memory in the layout a program compares byte by by
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
-        hive: createHive(),
+        hive: createRegistryService(createHive()),
         allocate: bytes=>{
             const at = next;
             next += bytes;
@@ -740,7 +741,7 @@ test('the wide file security calls are refused like the narrow ones, popping wha
     const fns = createRegistryFunctions({
         readMemory: memory.readMemory, writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
-        hive: createHive(), setLastError: code=>errors.push(code),
+        hive: createRegistryService(createHive()), setLastError: code=>errors.push(code),
     });
 
     assert.equal(fns.SetFileSecurityW.handler(), 0);
@@ -759,7 +760,7 @@ test('impersonating oneself succeeds, and the file security calls refuse plainly
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
-        hive: createHive(),
+        hive: createRegistryService(createHive()),
         setLastError: code=>errors.push(code),
     });
     const ERROR_CALL_NOT_IMPLEMENTED = 120;
@@ -788,7 +789,7 @@ test('a restart is not implemented, as the consumer line answered, and says so',
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
-        hive: createHive(),
+        hive: createRegistryService(createHive()),
         setLastError: code=>errors.push(code),
         divergence: api=>diverged.push(api),
     })));
@@ -1108,7 +1109,7 @@ test('a key saved to a file loads under a root, writes its changes back as it un
     + 'and opens as an app key', async()=>{
     // advapi32's registry test, test_reg_load_key and test_reg_load_app_key.
     const memory = fakeMemory();
-    const hive = createHive();
+    const hive = createRegistryService(createHive());
     const files = fakeFiles();
     const fns = /** @type {any} */ (createRegistryFunctions({
         readMemory: memory.readMemory,
@@ -1204,7 +1205,7 @@ test('RegNotifyChangeKeyValue answers one change to the key or under it, and a c
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
-        hive: createHive(),
+        hive: createRegistryService(createHive()),
         events: {
             set: handle=>told.push(`set ${handle}`) > 0,
             reset: handle=>told.push(`reset ${handle}`) > 0,

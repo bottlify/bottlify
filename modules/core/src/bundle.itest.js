@@ -411,3 +411,67 @@ test('what a bottle\'s installation left in system32 is found there, and loaded 
         assert.equal(await app.run({ timeoutMs: 20000 }), 42,
             'the program bound its import to it and called it');
     });
+
+test('a process started from a bundle mounts the run\'s bundle rather than opening it again',
+    { timeout: 60000 }, async t=>{
+        // The child's image is in the bundle, as a launcher's game is. Its
+        // process is handed the parent's mount -- index, block cache, the fill
+        // in the gaps -- so the bundle's head is read once for the run.
+        const child = buildExe({
+            imports: { 'KERNEL32.dll': ['ExitProcess'] },
+            code: ({ iat })=>[0x6a, 0x07, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+        });
+        const parent = buildExe({
+            imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject',
+                'GetExitCodeProcess', 'ExitProcess'] },
+            data: {
+                command: [...Buffer.from('C:\\child.exe'), 0],
+                startup: [...u32(68), ...new Array(64).fill(0)],
+                info: new Array(16).fill(0),
+                code: u32(0),
+            },
+            codeSize: 0x80,
+            code: ({ iat, at })=>[
+                0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+                0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+                0x68, ...u32(at('command')), 0x6a, 0,
+                0xff, 0x15, ...u32(iat('CreateProcessA')),
+                0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+                0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+                // GetExitCodeProcess(info.hProcess, &code); ExitProcess(code)
+                0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
+                0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
+                0xff, 0x35, ...u32(at('code')),
+                0xff, 0x15, ...u32(iat('ExitProcess')),
+            ],
+        });
+        const root = await mkdtemp(join(tmpdir(), 'btl-src-'));
+        const out = await mkdtemp(join(tmpdir(), 'btl-out-'));
+        t.after(()=>rm(root, { recursive: true, force: true }));
+        t.after(()=>rm(out, { recursive: true, force: true }));
+        await writeFile(join(root, 'child.exe'), child);
+        const path = join(out, 'bundle.btl');
+        await writeBundle({ root, output: path, blockSize: BLOCK_SIZE });
+        const handle = await open(path, 'r');
+        t.after(()=>handle.close());
+        let heads = 0;
+        /** @param {number} offset @param {number} length */
+        const readCounting = async(offset, length)=>{
+            if (offset === 0)
+            {
+                heads++;
+            }
+            const buffer = Buffer.alloc(length);
+            await handle.read(buffer, 0, length, offset);
+            return new Uint8Array(buffer);
+        };
+        const app = await createApp({
+            executable: parent,
+            imagePath: 'C:\\parent.exe',
+            engine: 'cork',
+            bundle: { prefix: '', fetch: readCounting },
+        });
+        t.after(()=>app.dispose());
+        assert.equal(await app.run({ timeoutMs: 30000 }), 7, 'the child ran, from the bundle');
+        assert.equal(heads, 1, 'and the bundle\'s head was read once for both processes');
+    });

@@ -87,3 +87,14 @@ test('a completed child is never what this process hands over to', ()=>{
     });
     assert.equal(table.pending(), ready);
 });
+
+test('a child started beside its parent is no longer the one waiting to take its place', ()=>{
+    const table = createProcessTable();
+    const first = table.create({ imagePath: 'a.exe', commandLine: 'a' });
+    const second = table.create({ imagePath: 'b.exe', commandLine: 'b' });
+    table.started(first);
+    assert.equal(table.pending(), second);
+    assert.equal(table.finished(first), false, 'started is not exited');
+    table.started(second);
+    assert.equal(table.pending(), null);
+});

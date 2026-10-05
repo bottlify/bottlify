@@ -372,6 +372,12 @@ export function expandRow(row, width, bitCount, palette, out, rowAt = 0, outAt =
  *        The frames the device may still be working on when a presenting call
  *        answers; three by default, zero for no bound (see `latency.js`). One
  *        count for the run, as there is one queue.
+ * @param {(frame: { pixels: Uint8Array, width: number, height: number,
+ *     bytesPerRow: number, format: string }) => void} [options.sendFrame]
+ *        Where a process with no GPU of its own -- one in a worker of its own
+ *        -- sends a surface's picture, in the bytes an upload would carry, for
+ *        the thread that has the GPU to show. Each frame's bytes are its own,
+ *        so the receiver may take them.
  */
 export function createPresenter(options = {}){
     const gpu = options.device ?? null;
@@ -600,6 +606,37 @@ export function createPresenter(options = {}){
         return texture;
     };
 
+    /**
+     * A surface's picture as an upload carries it, into `out`. Read a row at a
+     * time by the pitch, which may be wider than the pixels: the padding is
+     * not part of the picture. Through one window over the rows where the
+     * machine offers one, which is read here and not kept; a copy of each row
+     * otherwise.
+     *
+     * @param {Attachment} from @param {PresentableSurface} surface @param {Uint8Array} out
+     */
+    const convert = (from, surface, out)=>{
+        const rowBytes = surface.width * 4;
+        const guestRow = surface.width * (surface.bitCount >>> 3);
+        if (from.windowMemory && surface.height > 0)
+        {
+            const rows = from.windowMemory(surface.buffer,
+                (surface.height - 1) * surface.pitch + guestRow);
+            for (let y = 0; y < surface.height; y++)
+            {
+                expandRow(rows, surface.width, surface.bitCount, surface.palette, out,
+                    y * surface.pitch, y * rowBytes);
+            }
+            return;
+        }
+        for (let y = 0; y < surface.height; y++)
+        {
+            const row = from.readMemory(surface.buffer + y * surface.pitch, guestRow);
+            expandRow(row, surface.width, surface.bitCount, surface.palette, out, 0,
+                y * rowBytes);
+        }
+    };
+
     const flush = ()=>{
         const shown = burst;
         burst = null;
@@ -640,6 +677,16 @@ export function createPresenter(options = {}){
             counters.shownByOwner++;
             return owner();
         }
+        if (options.sendFrame)
+        {
+            const pixels = new Uint8Array(surface.width * 4 * surface.height);
+            convert(from, surface, pixels);
+            counters.uploads++;
+            counters.bytes += pixels.byteLength;
+            options.sendFrame({ pixels, width: surface.width, height: surface.height,
+                bytesPerRow: surface.width * 4, format: FORMAT });
+            return undefined;
+        }
         let using;
         try
         {
@@ -661,36 +708,12 @@ export function createPresenter(options = {}){
         }
         const target = textureFor(using, surface);
         uploadedLabel = surface.label ?? 'guest bytes';
-        const rowBytes = surface.width * 4;
-        const needed = rowBytes * surface.height;
+        const needed = surface.width * 4 * surface.height;
         if (!converted || converted.byteLength !== needed)
         {
             converted = new Uint8Array(needed);
         }
-        // Read a row at a time by the pitch, which may be wider than the
-        // pixels: the padding is not part of the picture. Through one window
-        // over the rows where the machine offers one, which is read here and
-        // not kept; a copy of each row otherwise.
-        const guestRow = surface.width * (surface.bitCount >>> 3);
-        if (from.windowMemory && surface.height > 0)
-        {
-            const rows = from.windowMemory(surface.buffer,
-                (surface.height - 1) * surface.pitch + guestRow);
-            for (let y = 0; y < surface.height; y++)
-            {
-                expandRow(rows, surface.width, surface.bitCount, surface.palette, converted,
-                    y * surface.pitch, y * rowBytes);
-            }
-        }
-        else
-        {
-            for (let y = 0; y < surface.height; y++)
-            {
-                const row = from.readMemory(surface.buffer + y * surface.pitch, guestRow);
-                expandRow(row, surface.width, surface.bitCount, surface.palette, converted,
-                    0, y * rowBytes);
-            }
-        }
+        convert(from, surface, converted);
         using.uploadTexture({
             texture: target.texture,
             format: FORMAT,

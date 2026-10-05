@@ -23,8 +23,22 @@
  */
 
 /** 'MEOW', read as a little-endian word. */
-const SIGNATURE = 0x574f454d;
-const OBJREF_STANDARD = 1;
+export const SIGNATURE = 0x574f454d;
+export const OBJREF_STANDARD = 1;
+export const OBJREF_CUSTOM = 4;
+
+/**
+ * What every OBJREF begins with: the signature, the flags, the IID. A reader
+ * takes this much first and then what its flags say follows.
+ */
+export const OBJREF_HEADER_BYTES = 24;
+
+/**
+ * A custom OBJREF's header, after which the object's own marshaler wrote its
+ * data (MS-DCOM 2.2.18.6): the common header, the class that unmarshals it,
+ * no extension, and the data's size.
+ */
+export const OBJREF_CUSTOM_BYTES = 48;
 
 /** The whole packet: the header, the STDOBJREF and an empty binding array. */
 export const OBJREF_BYTES = 72;
@@ -38,9 +52,12 @@ export const OBJREF_BYTES = 72;
 /**
  * @param {Uint8Array} iid  The interface's sixteen bytes.
  * @param {ObjrefReference} reference
+ * @param {number} [publicRefs]  The references the packet carries: one, or
+ *     none for a packet marshaled into a table, which the table holds the
+ *     reference behind and each reader takes one of its own from.
  * @returns {Uint8Array}
  */
-export function encodeObjref(iid, reference){
+export function encodeObjref(iid, reference, publicRefs = 1){
     const bytes = new Uint8Array(OBJREF_BYTES);
     const view = new DataView(bytes.buffer);
     view.setUint32(0, SIGNATURE, true);
@@ -48,7 +65,7 @@ export function encodeObjref(iid, reference){
     bytes.set(iid.subarray(0, 16), 8);
     // STDOBJREF
     view.setUint32(24, 0, true);
-    view.setUint32(28, 1, true);
+    view.setUint32(28, publicRefs >>> 0, true);
     view.setUint32(32, reference.endpoint >>> 0, true);
     view.setUint32(40, reference.object >>> 0, true);
     view.setUint32(48, reference.endpoint >>> 0, true);
@@ -65,7 +82,7 @@ export function encodeObjref(iid, reference){
  * standard one.
  *
  * @param {Uint8Array} bytes
- * @returns {{ iid: Uint8Array, reference: ObjrefReference } | null}
+ * @returns {{ iid: Uint8Array, reference: ObjrefReference, publicRefs: number } | null}
  */
 export function decodeObjref(bytes){
     if (bytes.length < OBJREF_BYTES)
@@ -81,5 +98,26 @@ export function decodeObjref(bytes){
     return {
         iid: bytes.slice(8, 24),
         reference: { endpoint: view.getUint32(32, true), object: view.getUint32(40, true) },
+        publicRefs: view.getUint32(28, true),
     };
+}
+
+/**
+ * A custom OBJREF's header: what CoMarshalInterface writes before an object's
+ * own marshaler writes its `size` bytes.
+ *
+ * @param {Uint8Array} iid @param {Uint8Array} clsid  The unmarshaler's class.
+ * @param {number} size
+ * @returns {Uint8Array}
+ */
+export function encodeCustomHeader(iid, clsid, size){
+    const bytes = new Uint8Array(OBJREF_CUSTOM_BYTES);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(0, SIGNATURE, true);
+    view.setUint32(4, OBJREF_CUSTOM, true);
+    bytes.set(iid.subarray(0, 16), 8);
+    bytes.set(clsid.subarray(0, 16), 24);
+    view.setUint32(40, 0, true);
+    view.setUint32(44, size >>> 0, true);
+    return bytes;
 }

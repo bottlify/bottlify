@@ -1069,7 +1069,9 @@ export function scalars(layers){
 async function standingOf(app){
     return (await app.standing()).map((/** @type {any} */ { image, diagnostics })=>{
         /** @param {string} layer */
-        const metrics = layer=>diagnostics.find((/** @type {any} */ entry)=>
+        // A process in a worker of its own that ended while asked answers
+        // nothing.
+        const metrics = layer=>(diagnostics ?? []).find((/** @type {any} */ entry)=>
             entry.name === layer)?.metrics ?? {};
         const kernel = metrics('kernel');
         const bridge = metrics('bridge');
@@ -1208,6 +1210,7 @@ export function createHarness(canvas, how = {}){
      * @param {{ exe?: string, exeUrl?: string, bundleUrl: string, bundlePrefix?: string,
      *           imagePath: string,
      *           commandLine?: string,
+     *           concurrency?: import('../../../src/mode.js').Concurrency,
      *           windows?: 'win2000' | 'winxp' | 'win7' | 'win10',
      *           sidecarHooks?: { spec: any, source: string },
      *           logCategories?: Record<string, string>,
@@ -1399,6 +1402,7 @@ export function createHarness(canvas, how = {}){
                 : undefined,
             media: decoder ? { wasmBytes: decoder } : undefined,
             imagePath: request.imagePath,
+            concurrency: request.concurrency ?? undefined,
             screen: request.screen ?? undefined,
             // The graphics layer's own configuration, whatever fields the run
             // names: a switch the layer defaults off is turned on per run here.

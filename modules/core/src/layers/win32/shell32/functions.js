@@ -689,6 +689,44 @@ export function createShellFunctions(host){
         },
 
         /**
+         * HRESULT DllGetVersion(DLLVERSIONINFO *pdvi)
+         *
+         * The shell of Windows XP Service Pack 3, 6.0.2900.5512, on the NT
+         * platform. The caller says which structure it passed by its first
+         * field -- DLLVERSIONINFO, 20 bytes, or DLLVERSIONINFO2, 32, which adds
+         * flags and the version as one 64-bit number -- and any other size is
+         * refused.
+         */
+        DllGetVersion: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([info])=>{
+                if ((info >>> 0) === 0 || !host.readMemory)
+                {
+                    return E_INVALIDARG;
+                }
+                const head = host.readMemory(info >>> 0, 4);
+                const size = (head[0] | head[1] << 8 | head[2] << 16 | head[3] << 24) >>> 0;
+                if (size !== 20 && size !== 32)
+                {
+                    return E_INVALIDARG;
+                }
+                const fields = new DataView(new ArrayBuffer(size - 4));
+                fields.setUint32(0, 6, true);
+                fields.setUint32(4, 0, true);
+                fields.setUint32(8, 2900, true);
+                fields.setUint32(12, 2, true);
+                if (size === 32)
+                {
+                    fields.setUint32(20, (2900 << 16 | 5512) >>> 0, true);
+                    fields.setUint32(24, 6 << 16, true);
+                }
+                host.writeMemory((info >>> 0) + 4, new Uint8Array(fields.buffer));
+                return S_OK;
+            },
+        },
+
+        /**
          * BOOL SHGetSpecialFolderPathA(HWND, LPSTR pszPath, int csidl, BOOL fCreate)
          *
          * The folder is not made on the volume: a program that asks to create

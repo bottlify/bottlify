@@ -153,6 +153,7 @@ flowchart TB
 | Graphics thread | the engine thread, `core/src/host/graphics-worker.js` (called from `serve.js`) | at start, if the engine has a canvas and `device.graphicsWorker: false` is not set (`?graphicsWorker=off` in the launcher). Survives a change of program. If it opens no device within 10 s, everything draws on the engine thread | Its job is to draw all the graphics, so the engine thread only keeps state and answers the program. Today Direct3D 7, 8, 9 and OpenGL are played here on a WebGPU device of its own; Direct3D 10 and Vulkan will move here too. It arrived in cork 1.3. In the `tools/graphics-bench --remote` bench the engine thread spends 0.69 ms a Direct3D frame instead of 2.95 |
 | Translation thread | cork's runtime inside the engine thread, `cork/src/runtime/translator.js` | when the engine is cork. Until it answers `ready`, regions are translated on the engine thread | Emits wasm for regions, builds a module and compiles it. The engine thread does not wait for it: it posts a batch and publishes the result between frames, whenever it arrives |
 | AudioWorklet | the page, `ui/src/engine/session.js` | if the page is cross-origin isolated (`crossOriginIsolated`) and sound is on | The Web Audio real-time thread. It reads the voices from shared memory on its own clock, so sound does not break up even while the engine is busy |
+| Process thread | the engine thread, `core/src/host/process-worker.js` (called from `app.js`) | with `concurrency` 2 or 4, once per process, the program the page started included, for as long as it runs | A process -- the launcher, and the game it starts -- runs on a thread of its own, beside its parent, with its own memory and translator. It blocks while it waits instead of taking turns with the engine's event loop, and the engine's thread runs no program at all |
 
 How the threads exchange data. ⇄ means both ways; SAB is `SharedArrayBuffer`, that is, shared
 memory.
@@ -181,6 +182,33 @@ flowchart LR
   compiled `WebAssembly.Module` come back.
 - **Engine → AudioWorklet.** No messages at all. The voice table lives in shared memory: the page
   gets it in the answer to the start request and hands it to the `AudioWorkletNode`.
+
+**Processes.** With `concurrency` 1, the default, the program runs on the engine thread and a
+child process takes its parent's place there until it exits. With 2 or 4
+(`createApp({ concurrency: 2 })`) every process runs on a process thread of its own, the program the
+page started too, and a child starts at `CreateProcess` and runs beside its parent, up to that many
+processes at once; one more runs beside its parent taking turns with it on the parent's thread. The
+engine thread is then the system alone: before any process starts it mounts the bundle, lays the
+session and the page's files on the volume, makes the registry and opens the journal and the sound
+output (`buildSystemHost` in `core/src/app.js`), and what the page asks of the program it asks the
+program's thread. It
+needs shared memory: asked for where there is none, the run falls back to `compatible` with one
+process at a time and raises a `fallback` event. What the processes of a run share -- the
+registry, the volume and the sharing of its open files, the window directory, ids, named events,
+semaphores and mutexes, the bundle, COM's class table (`core/src/com-link.js`) -- stays on the engine thread, which answers a process thread
+across a link: two rings in shared memory, one each way, with a doorbell word per side
+(`core/src/system/link.js`, values encoded by `codec.js`). The process thread blocks on its doorbell
+for each answer and answers what it is asked meanwhile (the engine asks it about its windows); a
+message longer than a ring holds goes in parts. Each side looks at its doorbell for a few
+microseconds before it sleeps on it, since a thread woken from sleep costs far more than the answer.
+The volume is mostly not asked: every change to a drive raises a word per drive letter in shared
+memory, and a process thread keeps what it read of a drive -- 64 KB pieces of files, sizes, entries,
+listings -- until that word moves; and the sharing every open is settled against is a table in
+shared memory under a lock, which a process thread settles its own opens in
+(`core/src/layers/filesystem/internal/volume-link.js`, `shared-sharing.js`). Its Direct3D devices draw on the graphics thread
+through a port of their own, its DirectDraw and GDI pictures come to the engine as bytes, its sound
+is mixed on the run's voice table in a span its parent lends it, and the page's input is forwarded
+to it while it stands. What it cannot have yet is in [`core/limits.md`](core/limits.md).
 
 **Modes.** `createApp({ mode })` says how much of this rides on shared memory, and the run's mode is
 in the `app` layer's diagnostics (`core/src/mode.js`):

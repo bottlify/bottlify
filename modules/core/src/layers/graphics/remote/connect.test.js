@@ -106,6 +106,57 @@ test('a picture this thread\'s device refuses has the worker send bytes from the
         end.dispose();
     });
 
+test('two processes on one graphics worker show its frame once, and say so once', ()=>{
+    const worker = fakeWorker();
+    /** @type {string[]} */
+    const shown = [];
+    let lost = 0;
+    /** @param {string} who */
+    const connect = who=>connectGraphicsWorker({ worker, device: fakeDevice(),
+        presentTo: ()=>shown.push(who), lost: ()=>lost++ });
+    const parent = connect('parent');
+    const child = connect('child');
+    /** @param {number} frameIndex */
+    const frame = frameIndex=>worker.answer({ type: 'frame', pixels: new Uint8Array(256 * 2),
+        bytesPerRow: 256, width: 2, height: 2, frameIndex, format: 'bgra8unorm' });
+    frame(1);
+    assert.deepEqual(shown, ['child'], 'the newest process shows it, the other does not');
+    assert.equal(worker.posted.filter(message=>message.type === 'shown').length, 1,
+        'the worker is told once, so it sends the next once');
+    worker.answer({ type: 'lost', reason: 'unknown' });
+    assert.equal(lost, 2, 'every process loses what it drew there');
+    child.dispose();
+    frame(2);
+    assert.deepEqual(shown, ['child', 'parent'], 'once the child is gone the parent shows them');
+    assert.equal(worker.posted.filter(message=>message.type === 'shown').length, 2);
+    parent.dispose();
+    frame(3);
+    assert.equal(shown.length, 2, 'nothing listens once both are gone');
+});
+
+test('a process that drew on the worker shows its frames over one that did not', ()=>{
+    const worker = fakeWorker();
+    /** @type {string[]} */
+    const shown = [];
+    /** @param {string} who */
+    const connect = who=>connectGraphicsWorker({ worker, device: fakeDevice(),
+        presentTo: ()=>shown.push(who) });
+    const game = connect('game');
+    game.root('d3d9', ()=>({}), {});
+    const helper = connect('helper');
+    try
+    {
+        worker.answer({ type: 'frame', pixels: new Uint8Array(256 * 2), bytesPerRow: 256,
+            width: 2, height: 2, frameIndex: 1, format: 'bgra8unorm' });
+        assert.deepEqual(shown, ['game']);
+    }
+    finally
+    {
+        helper.dispose();
+        game.dispose();
+    }
+});
+
 test('the worker\'s GPU going away is told, and a root is made over a port of its own', ()=>{
     const worker = fakeWorker();
     let lost = 0;

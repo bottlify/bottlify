@@ -205,6 +205,13 @@ export function fakeVolume(files, { late = false, directories = [], modified = 0
             files[node] = grown;
             return bytes.length;
         },
+        /** @param {string} node @param {number} size */
+        truncate(node, size){
+            const cut = new Uint8Array(size);
+            cut.set(files[node].subarray(0, size));
+            files[node] = cut;
+            return true;
+        },
         /** @param {string} node */
         retain: node=>void holds.set(node, (holds.get(node) ?? 0) + 1),
         /** @param {string} node */

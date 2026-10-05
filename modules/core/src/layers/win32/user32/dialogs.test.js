@@ -525,7 +525,8 @@ test('a message sent to a control with no procedure is answered with nothing', (
     assert.equal(fns.SendMessageA.handler([control, BM_SETCHECK, 1, 0]), 0);
 
     const MSG = 0x3000;
-    memory.writeMemory(MSG, Uint8Array.of(control, control >>> 8, 0, 0, BM_SETCHECK, 0, 0, 0));
+    memory.writeMemory(MSG, Uint8Array.of(control, control >>> 8, control >>> 16, control >>> 24,
+        BM_SETCHECK, 0, 0, 0));
     assert.equal(fns.DispatchMessageA.handler([MSG]), 0, 'and dispatched, the same');
 });
 
@@ -585,7 +586,8 @@ test('IsDialogMessage takes Enter for IDOK and dispatches anything else inside t
     delivered.length = 0;
 
     const MSG = 0x3000;
-    memory.writeMemory(MSG, Uint8Array.of(control, control >>> 8, 0, 0, 0x00, 0x01, 0, 0, 0x0d));
+    memory.writeMemory(MSG, Uint8Array.of(control, control >>> 8, control >>> 16, control >>> 24,
+        0x00, 0x01, 0, 0, 0x0d));
     assert.equal(fns.IsDialogMessageA.handler([dialog, MSG]), 1, 'Enter on a control inside');
     // The dialog is asked for its default button first, and told the click.
     assert.deepEqual(delivered.map(one=>[one.message, one.wParam & 0xffff]),
@@ -597,7 +599,8 @@ test('IsDialogMessage takes Enter for IDOK and dispatches anything else inside t
     memory.writeMemory(MSG + 8, Uint8Array.of(0x41));
     delivered.length = 0;
     assert.equal(fns.IsDialogMessageA.handler([dialog, MSG]), 1, 'a letter is dispatched');
-    memory.writeMemory(MSG, Uint8Array.of(dialog, dialog >>> 8, 0, 0, 0x00, 0x04, 0, 0, 0x05));
+    memory.writeMemory(MSG, Uint8Array.of(dialog, dialog >>> 8, dialog >>> 16, dialog >>> 24,
+        0x00, 0x04, 0, 0, 0x05));
     assert.equal(fns.IsDialogMessageA.handler([dialog, MSG]), 1);
     assert.deepEqual(delivered.map(one=>[one.message, one.wParam]), [[0x0400, 5]],
         'a message for the dialog itself reached its procedure');

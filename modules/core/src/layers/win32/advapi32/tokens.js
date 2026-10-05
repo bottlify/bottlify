@@ -188,6 +188,7 @@ const sidBytes = sid=>{
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(code: number) => void} setLastError
+ * @property {(bytes: number) => number} allocate  LocalFree-compatible.
  * @property {{ open: (type: string, object: any) => number,
  *              resolve: (handle: number, type?: string) => any }} handles
  *           The one handle table: a token is closed with CloseHandle like
@@ -206,6 +207,42 @@ export function createTokenFunctions(host){
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
         host.writeMemory(address, bytes);
     };
+
+    /** @param {boolean} wide */
+    const convertSid = wide=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([sid, out])=>{
+            if ((sid >>> 0) === 0 || (out >>> 0) === 0)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            const head = host.readMemory(sid >>> 0, 8);
+            if (head[0] !== 1 || head[1] > 15)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            const body = host.readMemory(sid >>> 0, 8 + 4 * head[1]);
+            const view = new DataView(body.buffer, body.byteOffset, body.length);
+            const authority = view.getUint16(2) * 2 ** 32 + view.getUint32(4);
+            let text = `S-1-${authority >= 2 ** 32 ? `0x${authority.toString(16)}` : authority}`;
+            for (let at = 0; at < head[1]; at++)
+            {
+                text += `-${view.getUint32(8 + at * 4, true)}`;
+            }
+            const unit = wide ? 2 : 1;
+            const memory = new Uint8Array((text.length + 1) * unit);
+            for (let at = 0; at < text.length; at++)
+            {
+                memory[at * unit] = text.charCodeAt(at);
+            }
+            const block = host.allocate(memory.length);
+            host.writeMemory(block, memory);
+            writeDword(out >>> 0, block);
+            host.setLastError(ERROR_SUCCESS);
+            return 1;
+        },
+    });
 
     /** @param {number} code @param {number} [result] */
     const fail = (code, result = 0)=>{
@@ -1085,6 +1122,16 @@ export function createTokenFunctions(host){
                 return 1;
             },
         },
+
+        /**
+         * BOOL ConvertSidToStringSidA(PSID Sid, LPSTR *StringSid)
+         * BOOL ConvertSidToStringSidW(PSID Sid, LPWSTR *StringSid)
+         *
+         * "S-1-<authority>-<sub>..." in a LocalAlloc block the caller frees
+         * with LocalFree; an authority past 32 bits is written in hex.
+         */
+        ConvertSidToStringSidA: convertSid(false),
+        ConvertSidToStringSidW: convertSid(true),
 
         /**
          * DWORD GetLengthSid(PSID pSid)

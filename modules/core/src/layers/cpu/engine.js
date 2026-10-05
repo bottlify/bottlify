@@ -128,6 +128,10 @@
  *     phases and the host's slices, for the milliseconds of `EngineDiagnostics` and the record of
  *     long holds. Default false -- a shipped build reads no clock for its own account, and those
  *     figures stay 0.
+ * @property {number} [cacheVersion]    A version to keep translations under when it is higher
+ *     than the translator's own (`CACHE_VERSION`), which leaves every store of a lower one
+ *     as a miss.
+ *     Default: the translator's.
  * @property {boolean} [traceStore]      A diagnostic: every store key put and missed, in the
  *     diagnostics' `storeTrace`.
  * @property {number} [batchRegions]     Regions per wasm module. Default 32.
@@ -153,6 +157,12 @@
  *     `worker_threads` only when `workerUrl` is named. `false` emits inline.
  * @property {string} [workerUrl]  The `translator.worker.js` URL. Default: the file beside
  *     the runtime. Named explicitly by a test process, or a bundler that moves it.
+ * @property {{ posted: { buffer: SharedArrayBuffer, index: number },
+ *     bell: { buffer: SharedArrayBuffer, index: number } }} [doorbell]
+ *     Words in shared memory the translation worker rings each time it posts a batch:
+ *     the count of answers posted, and the doorbell the engine thread sleeps on. A
+ *     thread that is not given its event loop on a timer hears an answer by them
+ *     rather than at its next yield. Absent, nothing is rung.
  * @property {number} [inFlightMs]  How long a batch may be with the worker before it is given
  *     up, on time the engine thread was free to hear its answer -- past it by the clock and the
  *     event loop come round twice since. Default 10000; tests shorten it.

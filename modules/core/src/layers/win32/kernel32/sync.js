@@ -500,6 +500,25 @@ export function createSyncFunctions(host){
         },
 
         /**
+         * DWORD SetCriticalSectionSpinCount(LPCRITICAL_SECTION, DWORD dwSpinCount)
+         *
+         * The count is kept in the section, where
+         * InitializeCriticalSectionAndSpinCount put it; the answer is the one it
+         * replaced.
+         */
+        SetCriticalSectionSpinCount: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([pointer, spinCount])=>{
+                const at = (pointer >>> 0) + CS_SPIN_COUNT;
+                const bytes = host.readMemory(at, 4);
+                const previous = (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+                writeI32(at, spinCount | 0);
+                return previous;
+            },
+        },
+
+        /**
          * BOOL TryEnterCriticalSection(LPCRITICAL_SECTION lpCriticalSection)
          *
          * Guest code, never a trap: a try that would wait answers FALSE.
@@ -668,6 +687,18 @@ export function createSyncFunctions(host){
                 // never blocks, so a program checking is not stopped by the
                 // question.
                 const wait = timeout >>> 0;
+                // An object another process of the run holds is answered there:
+                // its stand-in here says nothing of whether it is signalled.
+                if (wait === 0 && !waitAll && objects.some(target=>target.remote))
+                {
+                    const any = kernel.pollAny(objects, thread);
+                    if (any === null)
+                    {
+                        return WAIT_TIMEOUT;
+                    }
+                    const base = any.result === KERNEL_ABANDONED ? WAIT_ABANDONED_0 : WAIT_OBJECT_0;
+                    return (base + indices[any.index]) >>> 0;
+                }
                 if (wait === 0)
                 {
                     const satisfied = waitAll

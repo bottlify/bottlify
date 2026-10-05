@@ -162,6 +162,7 @@ export function createKernelModule(){
                 // Below a page the emulator cannot honour a smaller quantum anyway,
                 // so asking for one would only be a lie in the configuration.
                 quantum: config?.quantum ?? 100_000,
+                ids: config?.ids,
                 ...published(cpu, log),
             });
             if (typeof log.metrics?.onFrame === 'function')
@@ -180,9 +181,14 @@ export function createKernelModule(){
                 cpu.setYieldCheck?.(()=>!state.disposed
                     && state.scheduler.preemptionDue(state.refreshClock));
             }
-            state.sync = createSyncObjects({ scheduler: state.scheduler });
+            state.sync = createSyncObjects({ scheduler: state.scheduler,
+                remote: config?.remoteObjects ?? null });
+            // A wait of this process on another's object, across a link,
+            // ends there; the word comes back here.
+            config?.remoteObjects?.onWake?.((/** @type {number} */ token,
+                /** @type {number} */ result)=>state.sync?.wakeRemote(token, result));
             state.handles = createHandleTable();
-            state.processes = createProcessTable();
+            state.processes = createProcessTable(config?.ids);
 
             /**
              * Whether this instance is still open. A call still in flight when the
@@ -218,6 +224,9 @@ export function createKernelModule(){
                  * @param {number} [options.stackReserve]  The reserve a caller asked for.
                  * @param {number} [options.tebAddress]
                  * @param {string} [options.name]
+                 * @param {number} [options.id]  The id the thread was promised
+                 *   before it was made: a child's first thread has the one its
+                 *   parent was told in PROCESS_INFORMATION.
                  * @param {number} [options.returnTo]
                  *   Where the start routine returns to. A thread that returns has
                  *   ended, and something has to notice: left at the park loop it
@@ -232,7 +241,7 @@ export function createKernelModule(){
                  */
                 createThread({
                     entry, parameter = 0, stackTop, stackLimit, stackSize, stackReserve,
-                    tebAddress, name, returnTo,
+                    tebAddress, name, returnTo, id,
                 })
                 {
                     if (!live())
@@ -282,6 +291,7 @@ export function createKernelModule(){
                         stackLimit: low,
                         tebAddress: tebAddress ?? 0,
                         name,
+                        id,
                     });
                     thread.handle = state.handles.open('thread', thread);
                     if (slot)
@@ -627,6 +637,10 @@ export function createKernelModule(){
                 waitAny: (objects, thread, timed)=>live()
                     ? state.sync.waitAny(objects, thread, timed)
                     : { index: -1, result: WaitResult.FAILED },
+                /** @param {any[]} objects @param {any} thread */
+                pollAny: (objects, thread)=>(live()
+                    ? state.sync.pollAny(objects, thread)
+                    : { index: -1, result: WaitResult.FAILED }),
                 setEvent: (/** @type {any} */ object)=>live() ? state.sync.setEvent(object) : [],
                 resetEvent: (/** @type {any} */ object)=>{
                     if (live())
@@ -682,6 +696,13 @@ export function createKernelModule(){
                     all: ()=>live() ? state.processes.all() : [],
                     /** @param {any} record */
                     finished: record=>live() ? state.processes.finished(record) : false,
+                    /**
+                     * A process taken up by a machine of its own while its
+                     * parent goes on: no longer pending.
+                     *
+                     * @param {any} record
+                     */
+                    started: record=>live() ? state.processes.started(record) : undefined,
                 },
 
                 clock: state.clock,

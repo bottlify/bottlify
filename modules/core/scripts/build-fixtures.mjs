@@ -51,12 +51,45 @@ const IMPORTS = {
             'VirtualAlloc@16', 'VirtualFree@12', 'GetLastError@0', 'SetLastError@4',
             'CreateProcessA@40', 'GetExitCodeProcess@8', 'CloseHandle@4', 'CreateFileA@28',
             'ReadFile@20', 'GetCommandLineA@0', 'WaitForMultipleObjects@16',
+            'GetModuleHandleA@4', 'GetCurrentProcessId@0',
         ],
     },
     'ADVAPI32.dll': {
         undecorated: [
             'RegOpenKeyExA@20', 'RegQueryValueExA@24', 'RegCreateKeyExA@36', 'RegSetValueExA@24',
             'RegCloseKey@4',
+        ],
+    },
+    'ole32.dll': {
+        undecorated: [
+            'CoInitialize@4', 'CoUninitialize@0', 'CoRegisterClassObject@20',
+            'CoRevokeClassObject@4', 'CoCreateInstance@20', 'CoGetCallContext@8',
+            'CoImpersonateClient@0', 'CoRevertToSelf@0', 'CoQueryClientBlanket@28',
+            'CoQueryProxyBlanket@32', 'CoCopyProxy@8', 'CoDisconnectObject@8',
+            'CoAddRefServerProcess@0', 'CoReleaseServerProcess@0', 'CoGetCurrentProcess@0',
+            'CoWaitForMultipleHandles@20', 'CoMarshalHresult@8', 'CoUnmarshalHresult@8',
+            'CreateStreamOnHGlobal@12', 'CoMarshalInterface@24', 'CoUnmarshalInterface@12',
+            'CoReleaseMarshalData@4', 'CoGetMarshalSizeMax@24', 'CoCreateFreeThreadedMarshaler@8',
+            'CoGetStandardMarshal@24', 'CreateErrorInfo@4', 'SetErrorInfo@8', 'GetErrorInfo@8',
+            'CoInitializeEx@8', 'CoGetObjectContext@8', 'CoGetContextToken@4',
+            'CoGetDefaultContext@12', 'CoGetCurrentLogicalThreadId@4',
+            'GetRunningObjectTable@8', 'CreateFileMoniker@8', 'CreateBindCtx@8',
+            'MkParseDisplayName@16', 'CoGetObject@16',
+        ],
+    },
+    'OLEAUT32.dll': {
+        undecorated: [
+            'SysFreeString@4', 'RegisterActiveObject@16', 'RevokeActiveObject@8',
+            'GetActiveObject@12',
+        ],
+    },
+    'USER32.dll': {
+        undecorated: [
+            'GetMessageA@16', 'TranslateMessage@4', 'DispatchMessageA@4', 'PostQuitMessage@4',
+            'RegisterClassA@4', 'CreateWindowExA@48', 'DefWindowProcA@16', 'FindWindowA@8',
+            'IsWindow@4', 'GetWindowThreadProcessId@8', 'GetWindowTextA@12', 'GetClassNameA@12',
+            'PostMessageA@16', 'SendMessageA@16', 'SendMessageTimeoutA@28',
+            'RegisterWindowMessageA@4', 'PostThreadMessageA@16', 'PeekMessageA@20',
         ],
     },
     'msvcrt.dll': {
@@ -82,6 +115,12 @@ const PROGRAMS = [
     { name: 'spawn', source: 'spawn.c', cxx: false },
     { name: 'spawn_child', source: 'spawn_child.c', cxx: false },
     { name: 'fpuenv', source: 'fpuenv.c', cxx: false },
+    { name: 'com', source: 'com.c', cxx: false },
+    { name: 'comlife', source: 'comlife.c', cxx: false },
+    { name: 'marshal', source: 'marshal.c', cxx: false },
+    { name: 'contexts', source: 'contexts.c', cxx: false },
+    { name: 'rot', source: 'rot.c', cxx: false },
+    { name: 'windows', source: 'windows.c', cxx: false },
 ];
 
 /**

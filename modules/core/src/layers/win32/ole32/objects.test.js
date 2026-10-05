@@ -87,6 +87,22 @@ test('a new object arrives with exactly one reference', ()=>{
     assert.equal(object.destroyed, false);
 });
 
+test('an object something else owns counts only its callers, from zero, and outlives zero', ()=>{
+    /** @type {{ destroyed?: number }} */
+    const log = {};
+    const registry = createComRegistry();
+    registry.registerClass(CLSID_TEST, ()=>({ ...definition(log), owned: true }));
+    const object = /** @type {any} */ (registry.create(CLSID_TEST));
+    assert.equal(object.refCount, 0);
+    assert.equal(object.addRef(), 1);
+    assert.equal(object.release(), 0);
+    assert.equal(object.release(), 0, 'no count below zero');
+    assert.equal(object.destroyed, false);
+    assert.equal(log.destroyed, undefined);
+    assert.ok(object.queryInterface(IID_FIRST));
+    assert.equal(object.refCount, 1);
+});
+
 test('AddRef and Release report the count they produced', ()=>{
     const object = /** @type {any} */ (setup().create(CLSID_TEST));
     assert.equal(object.addRef(), 2);

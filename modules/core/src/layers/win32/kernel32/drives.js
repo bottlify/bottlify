@@ -40,10 +40,10 @@ const DRIVE_FIXED = 3;
 const DRIVE_CDROM = 5;
 
 /** Codes this surface reports. */
-const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_WRITE_PROTECT = 19;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_BUFFER_OVERFLOW = 111;
+const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 
 /** A path argument is at most this long. */
@@ -329,69 +329,6 @@ export function createDriveFunctions(host){
     });
 
     /**
-     * The MS-DOS device names and the NT devices they stand for: each drive a
-     * volume of a hard disk, numbered from one in the order of the letters,
-     * or a CD-ROM, numbered from zero, and NUL. A setup choosing a drive to
-     * unpack onto keeps one whose device is a hard disk's.
-     *
-     * @returns {Map<string, string>}
-     */
-    const dosDevices = ()=>{
-        const devices = new Map();
-        let volumes = 0, discs = 0;
-        for (const letter of letters())
-        {
-            devices.set(`${letter}:`, discAt(`${letter}:`)
-                ? `\\Device\\CdRom${discs++}` : `\\Device\\HarddiskVolume${++volumes}`);
-        }
-        devices.set('NUL', '\\Device\\Null');
-        return devices;
-    };
-
-    /**
-     * QueryDosDevice in either width. Named, the device's target; unnamed,
-     * every name -- a list of strings either way, ended by an empty one, and
-     * the count of characters stored, both terminators in it. A name that is
-     * none fails with ERROR_FILE_NOT_FOUND, a buffer too small for the whole
-     * list with ERROR_INSUFFICIENT_BUFFER: nothing partial is counted.
-     *
-     * @param {(address: number, maxLength: number) => string} readName
-     * @param {(text: string) => Uint8Array} encode
-     */
-    const queryDosDevice = (readName, encode)=>({
-        argBytes: 12,
-        /** @param {number[]} args */
-        handler: ([name, buffer, size])=>{
-            const devices = dosDevices();
-            /** @type {string[]} */
-            let list;
-            if (name === 0)
-            {
-                list = [...devices.keys()];
-            }
-            else
-            {
-                const wanted = readName(name >>> 0, MAX_PATH).toUpperCase();
-                const target = devices.get(wanted);
-                if (target === undefined)
-                {
-                    host.setLastError(ERROR_FILE_NOT_FOUND);
-                    return 0;
-                }
-                list = [target];
-            }
-            const block = `${list.join('\0')}\0\0`;
-            if (buffer === 0 || block.length > (size >>> 0))
-            {
-                host.setLastError(ERROR_INSUFFICIENT_BUFFER);
-                return 0;
-            }
-            host.writeMemory(buffer >>> 0, encode(block));
-            return block.length;
-        },
-    });
-
-    /**
      * GetComputerName in either width: the name is ASCII, so the sizes are
      * the same numbers counted in characters.
      *
@@ -419,7 +356,70 @@ export function createDriveFunctions(host){
         },
     });
 
+    /**
+     * The device a drive letter is a link to, as the object manager names it:
+     * the disc drives numbered from 0 as CdRom, the other volumes from 1 as
+     * HarddiskVolume, each in the order of the letters.
+     *
+     * @param {string} letter
+     */
+    const deviceOf = letter=>{
+        const all = letters();
+        const isDisc = (/** @type {string} */ other)=>host.volume?.(other)?.kind === 'cdrom';
+        const same = all.filter(other=>isDisc(other) === isDisc(letter));
+        const index = same.indexOf(letter);
+        return isDisc(letter) ? `\\Device\\CdRom${index}` : `\\Device\\HarddiskVolume${index + 1}`;
+    };
+
+    /**
+     * QueryDosDevice in either width: the target of a drive letter named
+     * "C:" -- or, named nothing, the name of every drive -- as a list of
+     * strings ended by an empty one. The answer is the characters stored,
+     * their terminators counted; a device that is no drive is not found, and
+     * a buffer too small for the list is stored nothing.
+     *
+     * @param {(address: number) => string} readName
+     * @param {(text: string) => Uint8Array} encode
+     */
+    const queryDosDevice = (readName, encode)=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([name, target, max])=>{
+            let list;
+            if (name === 0)
+            {
+                list = letters().map(letter=>`${letter}:\0`).join('');
+            }
+            else
+            {
+                const found = /^([A-Za-z]):$/.exec(readName(name >>> 0));
+                const letter = found ? found[1].toUpperCase() : null;
+                if (letter === null || !letters().includes(letter))
+                {
+                    host.setLastError(ERROR_FILE_NOT_FOUND);
+                    return 0;
+                }
+                list = `${deviceOf(letter)}\0`;
+            }
+            list += '\0';
+            if (target === 0 || list.length > (max >>> 0))
+            {
+                host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+                return 0;
+            }
+            host.writeMemory(target >>> 0, encode(list));
+            return list.length;
+        },
+    });
+
     return {
+        /** DWORD QueryDosDeviceA(LPCSTR lpDeviceName, LPSTR lpTargetPath, DWORD ucchMax) */
+        QueryDosDeviceA: queryDosDevice(address=>host.readCString(address, MAX_PATH), encodeAnsi),
+
+        /** DWORD QueryDosDeviceW(LPCWSTR lpDeviceName, LPWSTR lpTargetPath, DWORD ucchMax) */
+        QueryDosDeviceW: queryDosDevice(address=>host.readWideString(address, MAX_PATH * 2),
+            encodeWide),
+
         /**
          * DWORD GetLogicalDrives(VOID)
          *
@@ -547,14 +547,6 @@ export function createDriveFunctions(host){
                 return 1;
             },
         },
-
-        /** DWORD QueryDosDeviceA(LPCSTR lpDeviceName, LPSTR lpTargetPath, DWORD ucchMax) */
-        QueryDosDeviceA: queryDosDevice(
-            (address, length)=>host.readCString(address, length), encodeAnsi),
-
-        /** QueryDosDeviceW: the same list, in UTF-16 and counted in characters. */
-        QueryDosDeviceW: queryDosDevice(
-            (address, length)=>host.readWideString(address, length * 2), encodeWide),
 
         /**
          * BOOL GetComputerNameA(LPSTR lpBuffer, LPDWORD nSize)

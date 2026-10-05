@@ -10,6 +10,7 @@ import { createShlwapiFunctions } from './functions.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { createRegistryFunctions } from '../advapi32/functions.js';
 import { createHive } from '../advapi32/registry.js';
+import { createRegistryService } from '../advapi32/registry-service.js';
 
 const AT = 0x100;
 
@@ -41,7 +42,7 @@ function machine(){
         }
         return text;
     };
-    return { fns, put, at };
+    return { fns, put, at, memory };
 }
 
 test('a directory is answered with its attribute, a file and nothing with 0', ()=>{
@@ -473,7 +474,8 @@ function registryMachine(){
         },
         free: ()=>{},
     };
-    const registry = createRegistryFunctions({ ...base, hive: createHive() });
+    const registry = createRegistryFunctions({
+        ...base, hive: createRegistryService(createHive()) });
     const fns = createShlwapiFunctions({ ...base, advapi32: ()=>registry });
     let argAt = 0x10100;
     /** @param {string} text */
@@ -585,4 +587,15 @@ test('without a registry the helpers say so rather than pretend', ()=>{
     const { fns } = machine();
     assert.equal(fns.SHDeleteKeyA.handler([HKEY_CURRENT_USER, AT]), 120,
         'ERROR_CALL_NOT_IMPLEMENTED');
+});
+
+test('StrCatBuffA appends to what the buffer holds, terminator included', ()=>{
+    const { fns, put, memory } = machine();
+    put('abc');
+    memory.set(new TextEncoder().encode('defgh '), 0x300);
+    assert.equal(fns.StrCatBuffA.handler([AT, 0x300, 7]), AT);
+    assert.equal(String.fromCharCode(...memory.subarray(AT, AT + 7)), 'abcdef ');
+    put('abc');
+    assert.equal(fns.StrCatBuffA.handler([AT, 0x300, 20]), AT);
+    assert.equal(String.fromCharCode(...memory.subarray(AT, AT + 9)), 'abcdefgh ');
 });

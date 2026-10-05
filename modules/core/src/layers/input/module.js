@@ -67,6 +67,7 @@ export function createInputModule(){
                 publishInterface: config?.publishInterface ?? (()=>0),
                 divergence: config?.divergence,
                 signal: config?.signal,
+                mouseHeld: config?.mouseHeld,
                 // Where a DIDEVICEINSTANCE is written for a program's enumeration
                 // callback, and the route into that callback itself. The callback
                 // is guest code, so answering an enumeration means running the

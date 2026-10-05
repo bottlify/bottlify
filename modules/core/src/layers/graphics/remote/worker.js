@@ -29,6 +29,11 @@
  *                                    `lending` the slots and stash a Direct3D 8 or 9
  *                                    root lends guest memory through (`lending.js`);
  *                                    `{ type: 'close' }` on the port ends it
+ *   { type: 'client', port }         a way in for a process on another thread: `root`
+ *                                    on the port is taken as it is here, and `lost`
+ *                                    is told there too; its frames come here, as every
+ *                                    root's do, to the thread that shows them.
+ *                                    `{ type: 'close' }` on the port ends it
  * Messages from it:
  *   { type: 'opened', adapter } | { type: 'failed', message }
  *   { type: 'frame', bitmap, frameIndex, format, dropped }
@@ -79,6 +84,10 @@ export function serveGraphics(scope, deps){
     /** @type {Set<() => void>} */
     const losers = new Set();
     let lost = false;
+    /** The ports of processes on other threads, told when the GPU goes away. @type {Set<MessagePort>} */
+    const clients = new Set();
+    /** What told them, for a client that comes after. @type {{ type: 'lost', reason: string } | null} */
+    let lostWith = null;
 
     /**
      * The newest frame presented and not yet sent, kept in a texture of its
@@ -226,7 +235,12 @@ export function serveGraphics(scope, deps){
                 watcher();
             }
             losers.clear();
-            scope.postMessage({ type: 'lost', reason: info?.reason ?? 'unknown' });
+            lostWith = { type: 'lost', reason: info?.reason ?? 'unknown' };
+            scope.postMessage(lostWith);
+            for (const client of clients)
+            {
+                client.postMessage(lostWith);
+            }
         });
         const backend = createBackend({ device, queue: device.queue,
             presentTo: (/** @type {any} */ frame)=>present(device, frame) });
@@ -329,6 +343,11 @@ export function serveGraphics(scope, deps){
         };
     };
 
+    /** @param {any} data */
+    const takeRoot = data=>root(data.api, data.options ?? {}, data.port, data.memory ?? null,
+        data.lending ?? null).catch(e=>
+        data.port.postMessage({ type: 'failed', message: String(e?.message ?? e) }));
+
     scope.onmessage = ({ data })=>{
         switch (data?.type)
         {
@@ -348,10 +367,31 @@ export function serveGraphics(scope, deps){
                 opened?.then(({ device })=>send(device), ()=>{});
                 break;
             case 'root':
-                root(data.api, data.options ?? {}, data.port, data.memory ?? null,
-                    data.lending ?? null).catch(e=>
-                    data.port.postMessage({ type: 'failed', message: String(e?.message ?? e) }));
+                takeRoot(data);
                 break;
+            case 'client':
+            {
+                /** @type {MessagePort} */
+                const port = data.port;
+                clients.add(port);
+                port.onmessage = event=>{
+                    if (event.data?.type === 'root')
+                    {
+                        takeRoot(event.data);
+                    }
+                    else if (event.data?.type === 'close')
+                    {
+                        clients.delete(port);
+                        port.onmessage = null;
+                        port.close();
+                    }
+                };
+                if (lostWith)
+                {
+                    port.postMessage(lostWith);
+                }
+                break;
+            }
             default:
                 break;
         }

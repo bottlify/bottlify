@@ -654,6 +654,29 @@ export function createShlwapiFunctions(host){
         PathIsDirectoryA: pathIsDirectory(pathAt),
         PathIsDirectoryW: pathIsDirectory(widePathAt),
 
+        /**
+         * PSTR StrCatBuffA(PSTR pszDest, PCSTR pszSrc, int cchDestBuffSize)
+         *
+         * pszSrc appended, cut to what the buffer holds with its terminator.
+         */
+        StrCatBuffA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([dest, source, size])=>{
+                const head = pathAt(dest);
+                const tail = pathAt(source);
+                if (head === null || tail === null || size <= head.length)
+                {
+                    return dest;
+                }
+                const bytes = encodeAnsi(`${head}${tail} `);
+                const keep = Math.min(bytes.length, size);
+                bytes[keep - 1] = 0;
+                host.writeMemory((dest >>> 0) + head.length, bytes.subarray(head.length, keep));
+                return dest;
+            },
+        },
+
         /** BOOL PathIsUNCA(LPCSTR pszPath) */
         PathIsUNCA: {
             argBytes: 4,

@@ -177,3 +177,66 @@ test('asked for its diagnostics, the played device answers, and the asker can wa
             port2.close();
         }
     });
+
+test('a client port takes roots as the worker does, and is told when the GPU goes away',
+    async()=>{
+        const gpu = createFakeDevice();
+        Object.assign(gpu.device, { queue: gpu.queue });
+        /** @type {(info: { reason: string }) => void} */
+        let loseDevice = ()=>{};
+        Object.assign(gpu.device, { lost: new Promise(resolve=>{
+            loseDevice = resolve;
+        }) });
+        /** @type {any[]} */
+        const posted = [];
+        /** @type {any} */
+        const scope = { postMessage: (/** @type {any} */ message)=>posted.push(message),
+            onmessage: null };
+        serveGraphics(scope, {
+            gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
+                requestDevice: async()=>gpu.device }) },
+            canvas: (width, height)=>Object.assign(gpu.canvas, { width, height,
+                transferToImageBitmap: ()=>({ width, height, close: ()=>{} }) }),
+        });
+        scope.onmessage({ data: { type: 'open', frames: 'bitmap' } });
+        await settle();
+        // A process in another worker: its own way in, over which it makes roots.
+        const client = new MessageChannel();
+        scope.onmessage({ data: { type: 'client', port: client.port2 } });
+        /** @type {any[]} */
+        const told = [];
+        client.port1.onmessage = event=>told.push(event.data);
+        const { port1, port2 } = new MessageChannel();
+        client.port1.postMessage({ type: 'root', api: 'd3d9', options: {}, port: port2 },
+            [port2]);
+        const sender = createSender({ post: (message, transfer)=>port1.postMessage(message,
+            transfer), framesAhead: 100 });
+        port1.onmessage = event=>sender.receive(event.data);
+        const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+        /** @type {{ device?: any }} */
+        const out = {};
+        try
+        {
+            assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD,
+                backBufferCount: 1, backBufferWidth: 8, backBufferHeight: 8,
+                backBufferFormat: D3DFMT.X8R8G8B8 }, out), D3D_OK);
+            out.device.BeginScene();
+            out.device.Clear(0, null, D3DCLEAR.TARGET, 0xff000000, 1, 0);
+            out.device.EndScene();
+            await out.device.Present();
+            await out.device.idle();
+            await settle();
+            assert.equal(posted.filter(message=>message.type === 'frame').length, 1,
+                'its frames come back to the thread that shows them, as every root\'s do');
+            loseDevice({ reason: 'unknown' });
+            await settle();
+            assert.deepEqual(told, [{ type: 'lost', reason: 'unknown' }],
+                'and its devices are lost with the GPU');
+            assert.ok(posted.some(message=>message.type === 'lost'));
+        }
+        finally
+        {
+            port1.close();
+            client.port1.close();
+        }
+    });

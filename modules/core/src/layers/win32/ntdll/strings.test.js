@@ -276,6 +276,16 @@ test('freeing a string clears the descriptor so a second free frees nothing', ()
         { length: 0, maximumLength: 0, buffer: 0 });
 });
 
+test('RtlFreeOemString frees an OEM_STRING as RtlFreeAnsiString frees its twin', ()=>{
+    const host = fakeHost();
+    const fns = createCountedStringFunctions(host);
+    putDescriptor(host, DESTINATION, { length: 6, maximumLength: 8, buffer: BUFFER });
+    assert.equal(fns.RtlFreeOemString.argBytes, 4);
+    fns.RtlFreeOemString.handler([DESTINATION]);
+    assert.deepEqual(host.released, [BUFFER]);
+    assert.deepEqual(descriptorAt(host, DESTINATION), { length: 0, maximumLength: 0, buffer: 0 });
+});
+
 test('argument sizes match what the guest compiled against', ()=>{
     const fns = createCountedStringFunctions(fakeHost());
 

@@ -16,9 +16,12 @@ const E_NOTIMPL = 0x80004001;
 
 function machine(){
     const memory = new Uint8Array(0x1000);
+    /** @type {string[]} */
+    const diverged = [];
     const fns = createD3dxFunctions({
         readMemory: (address, length)=>memory.subarray(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
+        divergence: api=>diverged.push(api),
     });
     /** @param {number} address @param {number[]} values */
     const putFloats = (address, values)=>
@@ -34,7 +37,7 @@ function machine(){
         view.setFloat32(0, value, true);
         return view.getUint32(0, true);
     };
-    return { fns: /** @type {any} */ (fns), putFloats, getFloats, asArg, f32 };
+    return { fns: /** @type {any} */ (fns), putFloats, getFloats, asArg, f32, memory, diverged };
 }
 
 const OUT = 0x100;
@@ -148,13 +151,83 @@ test('a normal ignores translation where a coordinate does not', ()=>{
     assert.deepEqual(getFloats(OUT, 3), [1, 0, 0], 'a normal is unmoved by a translation');
 });
 
-test('the effect facilities report E_NOTIMPL and leave a null pointer behind', ()=>{
-    const { fns, getFloats } = machine();
-    assert.equal(fns.D3DXCreateEffectPool.handler([OUT]) >>> 0, E_NOTIMPL);
-    assert.deepEqual(getFloats(OUT, 1), [0]);
-    assert.equal(fns.D3DXCreateEffectFromResourceA.handler([0, 0, 0, 0, 0, 0, 0, OUT, 0]) >>> 0,
-        E_NOTIMPL);
-    assert.deepEqual(getFloats(OUT, 1), [0]);
+/**
+ * The facilities built on a device, each with its argument count as Wine's
+ * d3dx9_43.spec gives it, then the arguments that point at an object the call
+ * would have made.
+ */
+const NOT_BUILT = {
+    D3DXAssembleShader: [7, 5, 6], D3DXAssembleShaderFromFileA: [6, 4, 5],
+    D3DXCleanMesh: [6, 3, 5], D3DXComputeNormalMap: [6],
+    D3DXCreateBox: [6, 4, 5], D3DXCreateCubeTextureFromFileExA: [13, 12],
+    D3DXCreateCubeTextureFromFileInMemoryEx: [14, 13], D3DXCreateCylinder: [8, 6, 7],
+    D3DXCreateEffect: [9, 7, 8], D3DXCreateEffectCompiler: [7, 5, 6],
+    D3DXCreateEffectFromResourceA: [9, 7, 8], D3DXCreateEffectPool: [1, 0],
+    D3DXCreateFontA: [12, 11], D3DXCreateFontW: [12, 11], D3DXCreateMesh: [6, 5],
+    D3DXCreateMeshFVF: [6, 5], D3DXCreatePolygon: [5, 3, 4], D3DXCreateSphere: [6, 4, 5],
+    D3DXCreateSprite: [2, 1], D3DXCreateTeapot: [3, 1, 2], D3DXCreateTextA: [8, 5, 6],
+    D3DXCreateTextureFromFileExA: [14, 13], D3DXCreateTextureFromFileInMemoryEx: [15, 14],
+    D3DXCreateTorus: [7, 5, 6], D3DXFilterTexture: [4], D3DXGetImageInfoFromFileA: [2],
+    D3DXGetImageInfoFromFileInMemory: [3],
+    D3DXLoadSurfaceFromSurface: [8],
+    D3DXSaveSurfaceToFileInMemory: [5, 0], D3DXSaveTextureToFileInMemory: [4, 0],
+    D3DXSimplifyMesh: [7, 6], D3DXUVAtlasPartition: [17, 11, 12, 13, 14], D3DXValidMesh: [3, 2],
+};
+
+test('D3DXCreateBuffer hands over a zeroed block behind an ID3DXBuffer, freed with it', ()=>{
+    // A game fills one before it hands it on and never checks the answer:
+    // E_NOTIMPL left it calling through a null pointer.
+    const memory = new Uint8Array(0x1000).fill(0xaa);
+    /** @type {any[]} */
+    const published = [];
+    /** @type {number[]} */
+    const freed = [];
+    const fns = /** @type {any} */ (createD3dxFunctions({
+        readMemory: (address, length)=>memory.subarray(address, address + length),
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        heap: { allocate: ()=>0x800, free: address=>freed.push(address) },
+        vtables: { publish: (object, id)=>{
+            published.push({ object, id });
+            return 0x600;
+        } },
+    }));
+    const view = new DataView(memory.buffer);
+    assert.equal(fns.D3DXCreateBuffer.argBytes, 8);
+    assert.equal(fns.D3DXCreateBuffer.handler([0x424, OUT]), 0);
+    assert.equal(view.getUint32(OUT, true), 0x600, 'the interface pointer');
+    assert.ok(memory.subarray(0x800, 0x800 + 0x424).every(byte=>byte === 0), 'zeroed');
+    const [{ object, id }] = published;
+    assert.equal(id, '{8BA5FB08-5195-40E2-AC58-0D989C3A0102}', 'IID_ID3DXBuffer');
+    const methods = object.interfaceFor(id).methods;
+    const call = (/** @type {string} */ name)=>methods.find((/** @type {any} */ one)=>
+        one.name === name).invoke(object, []);
+    assert.deepEqual([call('GetBufferPointer'), call('GetBufferSize')], [0x800, 0x424]);
+    object.release();
+    assert.deepEqual(freed, [0x800], 'the block goes back with the last reference');
+    assert.equal(fns.D3DXCreateBuffer.handler([16, 0]) >>> 0, 0x8876086c, 'nowhere to put it');
+});
+
+test('what is built on a device answers E_NOTIMPL, its objects null, and says so', ()=>{
+    // Bound with the stack width the caller compiled against, so a program
+    // that imports one gets an answer it checks rather than a stack walked off.
+    for (const [name, [count, ...outs]] of Object.entries(NOT_BUILT))
+    {
+        const { fns, memory, diverged } = machine();
+        assert.equal(fns[name].argBytes, count * 4, name);
+        const args = new Array(count).fill(0);
+        for (const at of outs)
+        {
+            args[at] = 0x400 + at * 4;
+            memory.fill(0xaa, args[at], args[at] + 4);
+        }
+        assert.equal(fns[name].handler(args) >>> 0, E_NOTIMPL, name);
+        for (const at of outs)
+        {
+            assert.deepEqual([...memory.subarray(args[at], args[at] + 4)], [0, 0, 0, 0],
+                `${name}: argument ${at} left null`);
+        }
+        assert.deepEqual(diverged, [name]);
+    }
 });
 
 test('the arithmetic is code in the guest, stdcall, its handler the same JavaScript', ()=>{

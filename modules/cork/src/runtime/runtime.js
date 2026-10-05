@@ -250,6 +250,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         timings: false,
         ...config,
     };
+    // The version translations are kept under: the translator's own, or a higher one
+    // the host asks for, which empties every store of a lower version. Never lower
+    // than the emitter's -- a record of an older emitter is code that is wrong now.
+    const cacheVersion = Math.max(CACHE_VERSION, config.cacheVersion ?? 0);
     /** The host clock for a diagnostic timing, or zero when timings are off. */
     const clock = import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.timings === true
         ? ()=>performance.now() : ()=>0;
@@ -1545,7 +1549,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @param {{ region: { entry: number, hash: string }, entryTop: number, wide?: boolean,
      *     narrow?: boolean, checked?: boolean, copies?: boolean, loose?: boolean }} one */
     const regionKey = one=>cacheKey({
-        version: CACHE_VERSION, features: found, variant, layoutId: layout.id,
+        version: cacheVersion, features: found, variant, layoutId: layout.id,
         bundleId: settings.bundleId ?? 'unknown', entry: one.region.entry,
         hash: `${one.region.hash}-${one.entryTop}${one.wide ? '-w' : ''}`
             + `${one.narrow ? '-n' : ''}${one.checked ? '-c' : ''}${one.copies ? '-k' : ''}`
@@ -1584,10 +1588,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         if (store !== null)
         {
             const storeAt = clock();
-            key = moduleKey({ version: CACHE_VERSION, features: found, variant,
+            key = moduleKey({ version: cacheVersion, features: found, variant,
                 layoutId: layout.id, bundleId: settings.bundleId ?? 'unknown' }, batch.module);
             store.put(key, packRegion({ module: batch.module, labels: [], cut: [], entryTop: 0,
-                instructions: 0 })).catch(()=>{});
+                instructions: 0 }, cacheVersion)).catch(()=>{});
             if (instance !== null)
             {
                 batchInstances.set(key, instance);
@@ -1608,7 +1612,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 const storeAt = clock();
                 trace(storeTrace.put, metas[i]);
                 store.put(regionKey(metas[i]), packRegion({ ...result.region,
-                    module: new Uint8Array(0), moduleKey: key })).catch(()=>{});
+                    module: new Uint8Array(0), moduleKey: key }, cacheVersion)).catch(()=>{});
                 counts.storeMs += clock() - storeAt;
             }
             if (instance !== null)
@@ -1645,10 +1649,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         let key;
         if (store !== null)
         {
-            key = moduleKey({ version: CACHE_VERSION, features: found, variant,
+            key = moduleKey({ version: cacheVersion, features: found, variant,
                 layoutId: layout.id, bundleId: settings.bundleId ?? 'unknown' }, batch.module);
             store.put(key, packRegion({ module: batch.module, labels: [], cut: [], entryTop: 0,
-                instructions: 0 })).catch(()=>{});
+                instructions: 0 }, cacheVersion)).catch(()=>{});
             batchInstances.set(key, instance);
         }
         for (let i = 0; i < records.length; i++)
@@ -1698,7 +1702,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     entryTop: record.entryTop, wide: record.wide, narrow: record.narrow,
                     checked: record.checked, copies: record.copies, loose: record.loose };
                 store.put(regionKey(one), packRegion({ ...result.region,
-                    module: new Uint8Array(0), moduleKey: key, linked: true })).catch(()=>{});
+                    module: new Uint8Array(0), moduleKey: key, linked: true },
+                cacheVersion)).catch(()=>{});
             }
         }
     };
@@ -2213,7 +2218,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 inFlight.clear();
                 adapter.terminate();
             });
-            adapter.post({ ready: true }, []);
+            adapter.post({ ready: true, doorbell: settings.doorbell ?? null }, []);
         }, ()=>{});
     }
 
@@ -2283,7 +2288,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 {
                     return false;
                 }
-                const cached = bytes === null ? null : unpackRegion(bytes);
+                const cached = bytes === null ? null : unpackRegion(bytes, cacheVersion);
                 const batchKey = cached?.moduleKey;
                 /** @type {Uint8Array | null | undefined} */
                 let batchBytes;
@@ -2297,7 +2302,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                             return false;
                         }
                         modules.set(batchKey,
-                            stored === null ? null : unpackRegion(stored)?.module ?? null);
+                            stored === null ? null
+                                : unpackRegion(stored, cacheVersion)?.module ?? null);
                     }
                     batchBytes = modules.get(batchKey);
                 }
@@ -2639,7 +2645,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 /** @param {Uint8Array | null} bytes */
                 const unpack = bytes=>(bytes === null
-                    ? null : unpackRegion(bytes)?.module ?? null);
+                    ? null : unpackRegion(bytes, cacheVersion)?.module ?? null);
                 pending = /** @type {Promise<Uint8Array | null>} */ (store.get(key).then(unpack));
                 modules.set(key, pending);
             }
@@ -2659,7 +2665,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             try
             {
                 const bytes = await store.get(regionKey(one));
-                const cached = bytes === null ? null : unpackRegion(bytes);
+                const cached = bytes === null ? null : unpackRegion(bytes, cacheVersion);
                 const batchKey = cached?.moduleKey;
                 // Its batch's module, unless this run instantiated it already.
                 settle(one, cached, batchKey !== undefined && !batchInstances.has(batchKey)

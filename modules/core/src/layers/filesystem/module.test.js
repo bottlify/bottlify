@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { filesystemModule } from './module.js';
+import { createFilesystemModule, filesystemModule } from './module.js';
 import { createMemoryStore } from './internal/memory-store.js';
 import { buildIso } from './internal/iso/iso.fixture.js';
 import { openIso } from './internal/iso/iso9660.js';
@@ -501,4 +501,59 @@ test('what changed after a generation is named, and what a quiet apply put in is
         fs.deleteFile(at('Save', 'slot.dat'));
         assert.deepEqual(fs.changesSince(mark), [{ path: at('Save', 'slot.dat'), delete: true }]);
         await filesystemModule.dispose();
+    });
+
+/** Two processes on one run's volume, each with its own instance of the layer. */
+async function twoProcesses(){
+    const run = { drives: new Map(), volumes: new Map(), writables: new Map(),
+        watchers: new Set() };
+    const first = createFilesystemModule();
+    const second = createFilesystemModule();
+    const one = await first.create({ volume: run });
+    const other = await second.create({ volume: run });
+    one.createDirectory('C:\\Save');
+    return { one, other, first, second };
+}
+
+test('a file one process opened on terms that share nothing is refused to another process',
+    async()=>{
+        const { one, other, first, second } = await twoProcesses();
+        const kept = one.open('C:\\Save\\x.dat', { write: true, shareRead: false,
+            disposition: one.Disposition.CREATE_NEW });
+        // CreateFile's sharing is the system's, not a process's: a save file
+        // a program holds open exclusively is not written behind its back.
+        assert.throws(()=>other.open('C:\\save\\X.DAT', { write: true }),
+            (/** @type {any} */ e)=>e.code === 'SHARING_VIOLATION');
+        assert.throws(()=>other.open('C:\\Save\\x.dat', { read: true }),
+            (/** @type {any} */ e)=>e.code === 'SHARING_VIOLATION');
+        // A handle the first process handed on is the file it holds: no new
+        // terms, so nothing to refuse.
+        other.close(other.open('C:\\Save\\x.dat', { write: true, inherited: true }));
+        one.close(kept);
+        other.close(other.open('C:\\Save\\x.dat', { write: true }));
+
+        // A process that ends lets go of what it held, as Windows closes its handles.
+        one.open('C:\\Save\\x.dat', { write: true, shareRead: false });
+        await first.dispose();
+        other.close(other.open('C:\\Save\\x.dat', { write: true }));
+        await second.dispose();
+    });
+
+test('a batch over a file any process holds open is refused whole, from either process',
+    async()=>{
+        const { one, other, first, second } = await twoProcesses();
+        const kept = one.open('C:\\Save\\x.dat', { write: true,
+            disposition: one.Disposition.CREATE_NEW });
+        one.write(kept, bytes('mine'));
+        for (const side of [one, other])
+        {
+            assert.throws(()=>side.apply([{ path: 'C:\\Save\\new.dat', bytes: bytes('n') },
+                { path: 'C:\\SAVE\\x.dat', bytes: bytes('theirs') }]),
+            (/** @type {any} */ e)=>e.code === 'SHARING_VIOLATION');
+            assert.equal(side.stat('C:\\Save\\new.dat'), null, 'nothing of it applied');
+        }
+        one.close(kept);
+        assert.equal(other.apply([{ path: 'C:\\Save\\x.dat', bytes: bytes('theirs') }]), 1);
+        await first.dispose();
+        await second.dispose();
     });

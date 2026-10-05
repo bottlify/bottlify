@@ -105,6 +105,9 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  *           turn, retires nothing, and keeps whatever it was holding.
  * @property {number} [processId]      What the running process is numbered.
  * @property {() => string} [imagePath]  Where its image is, for a snapshot's entry.
+ * @property {() => { name: string, base: number, size?: number, path?: string }[]} [modules]
+ *           The modules the process has loaded, the image first, for a snapshot's
+ *           module list.
  * @property {(handle: number) => string | null} [handleType]
  * @property {(node: any) => void} [retainNode]
  *           One more hold on an open file's node, given back when the handle
@@ -138,9 +141,26 @@ const THREADENTRY32 = Object.freeze({
     tpBasePri: 16,
     SIZE: 28,
 });
+/**
+ * MODULEENTRY32 and MODULEENTRY32W: eight DWORDs, then the module's name in
+ * 256 characters and its path in 260, of a byte or of two.
+ */
+const MODULEENTRY32 = Object.freeze({
+    th32ModuleID: 4,
+    th32ProcessID: 8,
+    GlblcntUsage: 12,
+    ProccntUsage: 16,
+    modBaseAddr: 20,
+    modBaseSize: 24,
+    hModule: 28,
+    szModule: 32,
+    NAME: 256,
+});
 const MAX_PATH = 260;
 const TH32CS_SNAPPROCESS = 0x2;
 const TH32CS_SNAPTHREAD = 0x4;
+const TH32CS_SNAPHEAPLIST = 0x1;
+const TH32CS_SNAPMODULE = 0x8;
 const HANDLE_FLAG_INHERIT = 0x1;
 const HANDLE_FLAG_PROTECT_FROM_CLOSE = 0x2;
 const NORMAL_PRIORITY_BASE = 8;
@@ -150,6 +170,7 @@ const ERROR_INSUFFICIENT_BUFFER = 122;
 /**
  * @typedef {{ id: number, parent: number, threads: number, path: string }} SnapshotProcess
  * @typedef {{ id: number, owner: number }} SnapshotThread
+ * @typedef {{ base: number, size: number, path: string }} SnapshotModule
  */
 
 /** @param {Uint8Array} bytes @param {number} at */
@@ -168,7 +189,7 @@ export function createThreadingFunctions(host){
     /**
      * @param {number} handle
      * @returns {{ flags: number, processes: SnapshotProcess[], threads: SnapshotThread[],
-     *     process: number, thread: number } | null}
+     *     modules: SnapshotModule[], process: number, thread: number, module: number } | null}
      */
     const snapshotOf = handle=>{
         try
@@ -234,6 +255,85 @@ export function createThreadingFunctions(host){
         }
         host.writeMemory(entry >>> 0, bytes);
         return 1;
+    };
+
+    /**
+     * One step of a walk of the snapshot's modules, written into the caller's
+     * MODULEENTRY32 or MODULEENTRY32W. The module id is always one, as the
+     * structure's documentation says it now is, and a module the process
+     * loaded is counted as loaded for good, 0xFFFF, as Windows counts the
+     * ones an image imports.
+     *
+     * @param {number} handle @param {number} entry
+     * @param {boolean} wide @param {boolean} first
+     */
+    const walkModules = (handle, entry, wide, first)=>{
+        const snapshot = snapshotOf(handle);
+        if (!snapshot)
+        {
+            host.setLastError(ERROR_INVALID_HANDLE);
+            return 0;
+        }
+        const at = first ? 0 : snapshot.module;
+        if ((entry >>> 0) === 0 || at >= snapshot.modules.length)
+        {
+            host.setLastError(ERROR_NO_MORE_FILES);
+            return 0;
+        }
+        const unit = wide ? 2 : 1;
+        const size = MODULEENTRY32.szModule + (MODULEENTRY32.NAME + MAX_PATH) * unit;
+        if (readU32(host.readMemory(entry >>> 0, 4), 0) < size)
+        {
+            host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+        const module = snapshot.modules[at];
+        const bytes = new Uint8Array(size);
+        const view = new DataView(bytes.buffer);
+        view.setUint32(0, size, true);
+        view.setUint32(MODULEENTRY32.th32ModuleID, 1, true);
+        view.setUint32(MODULEENTRY32.th32ProcessID, (host.processId ?? 0x1000) >>> 0, true);
+        view.setUint32(MODULEENTRY32.GlblcntUsage, 0xffff, true);
+        view.setUint32(MODULEENTRY32.ProccntUsage, 0xffff, true);
+        view.setUint32(MODULEENTRY32.modBaseAddr, module.base, true);
+        view.setUint32(MODULEENTRY32.modBaseSize, module.size, true);
+        view.setUint32(MODULEENTRY32.hModule, module.base, true);
+        /** @param {string} text @param {number} offset @param {number} room */
+        const put = (text, offset, room)=>{
+            const kept = text.slice(0, room - 1);
+            if (!wide)
+            {
+                bytes.set(encodeAnsi(kept), offset);
+                return;
+            }
+            for (let i = 0; i < kept.length; i++)
+            {
+                view.setUint16(offset + i * 2, kept.charCodeAt(i), true);
+            }
+        };
+        put(module.path.slice(module.path.lastIndexOf('\\') + 1), MODULEENTRY32.szModule,
+            MODULEENTRY32.NAME);
+        put(module.path, MODULEENTRY32.szModule + MODULEENTRY32.NAME * unit, MAX_PATH);
+        snapshot.module = at + 1;
+        host.writeMemory(entry >>> 0, bytes);
+        return 1;
+    };
+
+    /**
+     * The heap walk of a snapshot, which this one does not hold: heaps are
+     * not listed, so every walk ends at once, as one over a snapshot taken
+     * without them does, and a snapshot that asked for them says so.
+     *
+     * @param {number} handle
+     */
+    const noHeaps = handle=>{
+        const snapshot = snapshotOf(handle);
+        if (snapshot && (snapshot.flags & TH32CS_SNAPHEAPLIST) !== 0)
+        {
+            host.divergence?.('Heap32ListFirst', 'a snapshot holds no heap list');
+        }
+        host.setLastError(snapshot ? ERROR_NO_MORE_FILES : ERROR_INVALID_HANDLE);
+        return 0;
     };
     const { kernel } = host;
 
@@ -992,6 +1092,29 @@ export function createThreadingFunctions(host){
             },
         },
 
+        /**
+         * BOOL PulseEvent(HANDLE)
+         *
+         * Signalled and reset in one step: the waiters it can release go --
+         * every one of them for a manual-reset event, one for an auto-reset
+         * one -- and the event is left unsignalled whether anyone was waiting
+         * or not.
+         */
+        PulseEvent: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const event = object(handle >>> 0, 'event');
+                if (!event)
+                {
+                    return 0;
+                }
+                kernel.setEvent(event);
+                kernel.resetEvent(event);
+                return 1;
+            },
+        },
+
         /** BOOL ResetEvent(HANDLE) */
         ResetEvent: {
             argBytes: 4,
@@ -1135,8 +1258,15 @@ export function createThreadingFunctions(host){
                         ...children.map((/** @type {any} */ child)=>({
                             id: child.threadId >>> 0, owner: child.id >>> 0 })),
                     ],
+                    modules: (flags & TH32CS_SNAPMODULE) === 0 ? [] : (host.modules?.() ?? [])
+                        .map(module=>({
+                            base: module.base >>> 0,
+                            size: (module.size ?? 0) >>> 0,
+                            path: module.path ?? `C:\\WINDOWS\\system32\\${module.name}`,
+                        })),
                     process: 0,
                     thread: 0,
+                    module: 0,
                 });
             },
         },
@@ -1197,6 +1327,62 @@ export function createThreadingFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, entry])=>walkSnapshot(handle, entry, false, false),
+        },
+
+        /**
+         * BOOL Module32First/Module32FirstW(HANDLE, LPMODULEENTRY32) and
+         * Module32Next/Module32NextW: the modules of a snapshot taken with
+         * TH32CS_SNAPMODULE in turn, the image first.
+         */
+        Module32First: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, entry])=>walkModules(handle, entry, false, true),
+        },
+        Module32Next: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, entry])=>walkModules(handle, entry, false, false),
+        },
+        Module32FirstW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, entry])=>walkModules(handle, entry, true, true),
+        },
+        Module32NextW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, entry])=>walkModules(handle, entry, true, false),
+        },
+
+        /**
+         * BOOL Heap32ListFirst/Heap32ListNext(HANDLE, LPHEAPLIST32),
+         * BOOL Heap32First(LPHEAPENTRY32, DWORD th32ProcessID, ULONG_PTR th32HeapID)
+         * and BOOL Heap32Next(LPHEAPENTRY32): no heap is listed (`noHeaps`).
+         */
+        Heap32ListFirst: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle])=>noHeaps(handle),
+        },
+        Heap32ListNext: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle])=>noHeaps(handle),
+        },
+        Heap32First: {
+            argBytes: 12,
+            handler: ()=>{
+                host.setLastError(ERROR_NO_MORE_FILES);
+                return 0;
+            },
+        },
+        Heap32Next: {
+            argBytes: 4,
+            handler: ()=>{
+                host.setLastError(ERROR_NO_MORE_FILES);
+                return 0;
+            },
         },
 
         /** BOOL CloseHandle(HANDLE) */

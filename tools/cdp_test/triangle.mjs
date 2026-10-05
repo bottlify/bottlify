@@ -28,6 +28,7 @@ import { launchWithGpu, shutdown } from './browser.mjs';
 import { CdpEndpoint } from './cdp.mjs';
 import { serveStatic } from './server.mjs';
 import { TRIANGLE_COLOURS, TRIANGLE_REPORT } from '../make-pe.mjs';
+import { waitingParent } from '../spawn-program.mjs';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const REPO_ROOT = resolve(TOOL_ROOT, '..', '..');
@@ -140,8 +141,12 @@ async function runOne({ cdp, sessionId, executable }){
     // would therefore not be generous: it would be a run this driver cannot
     // ask about until it ends. This is enough for a program that draws one
     // frame, and a program that has lost its way gives up inside it.
+    // `--child`: the program runs as a child in a worker of its own, which a
+    // parent starts and waits on; its frames are the run's all the same.
+    const child = process.argv.includes('--child');
     const request = JSON.stringify({
-        exe: Buffer.from(executable).toString('base64'),
+        exe: Buffer.from(child ? waitingParent() : executable).toString('base64'),
+        child: child ? Buffer.from(executable).toString('base64') : undefined,
         words: TRIANGLE_REPORT.length,
         maxTurns: 20000,
         samples: EXPECTED.map(entry=>({ name: entry.name, x: entry.x, y: entry.y })),

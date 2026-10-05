@@ -58,6 +58,8 @@ export function createAudioModule(){
      * @type {any}
      */
     let current = null;
+    /** Closes what this process opened on the output, where it stood beside another. */
+    let closeOnDispose = ()=>{};
 
     return {
         name: 'audio',
@@ -151,7 +153,10 @@ export function createAudioModule(){
                 // not cross-origin isolated -- can only read on this thread, and
                 // the engine mixer is the only backend that thread can drive.
                 shared: config?.shared ?? false,
+                // A process beside another on the same output, not in its place.
+                beside: config?.beside,
             });
+            closeOnDispose = config?.beside ? ()=>mixer.close?.() : ()=>{};
             /** The sound device, when there is one: the shared backend opens voices. @type {any} */
             const output = mixer;
 
@@ -638,6 +643,11 @@ export function createAudioModule(){
         },
 
         async dispose(){
+            // A process beside another leaves the output to it: what it held
+            // closes with it. One replaced leaves its slots to its successor's
+            // sweep, which may already have reused them.
+            closeOnDispose();
+            closeOnDispose = ()=>{};
             current = null;
         },
     };

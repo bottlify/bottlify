@@ -14,6 +14,7 @@
  */
 
 import { test } from 'node:test';
+import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { COMPILED } from './inguest.x86.js';
 import * as sources from './inguest.js';
@@ -103,6 +104,25 @@ test('multiply, transpose and inverse: random, the identity, singular, over them
             }
         }
     });
+
+test('a flexible vertex format: its position, the optional parts, and texture sets', ()=>{
+    // XYZ | NORMAL | TEX1 is 12 + 12 + 8; texture sets take two, three, four
+    // or one float by their two bits, and no more than eight are counted.
+    const cases = [[0, 0], [0x002, 12], [0x004, 16], [0x006, 16], [0x008, 20], [0x00e, 32],
+        [0x4002, 16], [0x002 | 0x010 | 0x100, 32], [0x004 | 0x040 | 0x080 | 0x200, 40],
+        [0x002 | 0x020, 16], [0x002 | 0x300 | 1 << 16 | 2 << 18 | 3 << 20, 44],
+        [0x002 | 0xf00, 76]];
+    for (const [fvf, size] of cases)
+    {
+        assert.equal(sources.D3DXGetFVFVertexSize(fvf), size, `0x${fvf.toString(16)}`);
+        same('D3DXGetFVFVertexSize', { stack: [fvf] });
+    }
+    const next = random(9);
+    for (let i = 0; i < 200; i++)
+    {
+        same('D3DXGetFVFVertexSize', { stack: [next()] });
+    }
+});
 
 test('translation, orthographic and perspective matrices from their float arguments', ()=>{
     const next = random(2);

@@ -682,3 +682,78 @@ test('a row expanded a word at a time is the row expanded a byte at a time, at e
     assert.deepEqual([...out.subarray(0, 4)], [0x12, 0x34, 0x56, 0xff],
         'a palette changed in place is read as it is now');
 });
+
+/**
+ * A process with no GPU of its own -- one in a worker of its own -- sends the
+ * bytes a present would upload, for the thread that has the GPU to show. Two
+ * paths to one picture: seeded surfaces of every depth, pitch and palette go
+ * down both, and what each hands on must be the same bytes at the same size.
+ */
+test('gate: the bytes a presenter sends are the bytes it would upload, for every surface', ()=>{
+    let seed = 0x5eed;
+    const next = ()=>{
+        seed = (seed * 1103515245 + 12345) >>> 0;
+        return seed >>> 8;
+    };
+    for (let round = 0; round < 200; round++)
+    {
+        const windowed = round % 2 === 0;
+        const h = harness({ windowed });
+        for (let at = 0; at < h.ram.length; at++)
+        {
+            h.ram[at] = next() & 0xff;
+        }
+        /** @type {any[]} */
+        const sent = [];
+        /** @type {(() => void)[]} */
+        const scheduled = [];
+        const sending = createPresenter({
+            readMemory: (address, length)=>h.ram.slice(address, address + length),
+            windowMemory: windowed
+                ? (address, length)=>h.ram.subarray(address, address + length) : undefined,
+            schedule: flush=>scheduled.push(flush),
+            sendFrame: frame=>sent.push(frame),
+        });
+        const bitCount = [8, 16, 32][next() % 3];
+        const width = 1 + next() % 40;
+        const height = 1 + next() % 20;
+        const pitch = width * (bitCount >>> 3) + next() % 9;
+        const palette = bitCount === 8 ? Array.from({ length: 256 }, ()=>next()) : null;
+        const surface = { buffer: 0x400 + next() % 0x400, width, height, pitch, bitCount,
+            palette };
+        h.presenter.present(surface);
+        h.settle();
+        sending.present(surface);
+        scheduled.splice(0).forEach(flush=>flush());
+        const detail = JSON.stringify({ round, bitCount, width, height, pitch, windowed });
+        assert.equal(sent.length, 1, detail);
+        const [frame] = sent;
+        assert.deepEqual([frame.width, frame.height, frame.bytesPerRow, frame.format],
+            [width, height, width * 4, 'bgra8unorm'], detail);
+        assert.deepEqual(frame.pixels, h.uploaded(), detail);
+        assert.equal(sending.diagnostics().uploads, 1, 'counted as the upload it stands for');
+    }
+});
+
+test('a sending presenter hands each frame its own bytes, which the receiver may take', ()=>{
+    /** @type {any[]} */
+    const sent = [];
+    /** @type {(() => void)[]} */
+    const scheduled = [];
+    const ram = new Uint8Array(64);
+    const presenter = createPresenter({
+        readMemory: (address, length)=>ram.slice(address, address + length),
+        schedule: flush=>scheduled.push(flush),
+        sendFrame: frame=>sent.push(frame),
+    });
+    const surface = { buffer: 0, width: 2, height: 2, pitch: 8, bitCount: 32, palette: null };
+    presenter.present(surface);
+    scheduled.splice(0).forEach(flush=>flush());
+    ram[0] = 0x7f;
+    presenter.present(surface);
+    scheduled.splice(0).forEach(flush=>flush());
+    assert.equal(sent.length, 2);
+    assert.notEqual(sent[0].pixels.buffer, sent[1].pixels.buffer,
+        'a buffer handed over is never written again');
+    assert.deepEqual([sent[0].pixels[0], sent[1].pixels[0]], [0, 0x7f]);
+});

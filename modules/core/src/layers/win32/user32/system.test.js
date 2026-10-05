@@ -1984,6 +1984,15 @@ test('the double-click time starts at 500 and is what SetDoubleClickTime sets', 
     assert.equal(fns.GetDoubleClickTime.handler([]), 500, 'zero is the default again');
 });
 
+test('the caret blinks every 530 ms, and SetLastErrorEx sets the error whatever its type', ()=>{
+    const { fns, errors } = setup();
+    assert.equal(fns.GetCaretBlinkTime.argBytes, 0);
+    assert.equal(fns.GetCaretBlinkTime.handler([]), 530);
+    assert.equal(fns.SetLastErrorEx.argBytes, 8);
+    fns.SetLastErrorEx.handler([1400, 3]);
+    assert.equal(errors.at(-1), 1400);
+});
+
 test('the one layout there is is named, listed, activated and loaded', ()=>{
     // input.c's test_keyboard_layout_name and test_ActivateKeyboardLayout:
     // no buffer is ERROR_NOACCESS, the name is eight hexadecimal digits, and
@@ -3218,4 +3227,80 @@ test('WindowFromDC names the window a context was handed out on, until it is giv
         'the screen\'s context is the desktop\'s');
     fns.ReleaseDC.handler([0, screen]);
     assert.equal(fns.WindowFromDC.handler([0x5555]), 0, 'a context on no window');
+});
+
+test('LoadCursorFromFile loads a .cur or .ani; SetSystemCursor replaces a system one', async()=>{
+    /** A one-entry .cur file holding a 2x2 32-bit image with its hot spot at (1, 0). */
+    const cur = (/** @type {number} */ blue)=>{
+        const image = new Uint8Array(40 + 16 + 8);
+        const imageView = new DataView(image.buffer);
+        imageView.setUint32(0, 40, true);
+        imageView.setInt32(4, 2, true);
+        imageView.setInt32(8, 4, true);
+        imageView.setUint16(14, 32, true);
+        image.set([blue, 0, 0, 255], 40);
+        const file = new Uint8Array(22 + image.length);
+        const view = new DataView(file.buffer);
+        view.setUint16(2, 2, true);
+        view.setUint16(4, 1, true);
+        file[6] = 2;
+        file[7] = 2;
+        view.setUint16(10, 1, true);
+        view.setUint32(14, image.length, true);
+        view.setUint32(18, 22, true);
+        file.set(image, 22);
+        return file;
+    };
+    /** A RIFF ACON file whose only frame is a .cur file. */
+    const ani = (/** @type {Uint8Array} */ frame)=>{
+        const file = new Uint8Array(12 + 8 + frame.length);
+        const view = new DataView(file.buffer);
+        file.set(new TextEncoder().encode('RIFF'), 0);
+        view.setUint32(4, file.length - 8, true);
+        file.set(new TextEncoder().encode('ACON'), 8);
+        file.set(new TextEncoder().encode('icon'), 12);
+        view.setUint32(16, frame.length, true);
+        file.set(frame, 20);
+        return file;
+    };
+    /** @type {Map<string, Uint8Array>} */
+    const disk = new Map([
+        ['C:\\C\\ARROW.CUR', cur(200)],
+        ['C:\\C\\SPIN.ANI', ani(cur(100))],
+        ['C:\\C\\NOTES.TXT', new TextEncoder().encode('not a cursor, only words')],
+    ]);
+    const files = {
+        stat: (/** @type {string} */ path)=>(disk.has(path.toUpperCase())
+            ? { exists: true, isDirectory: false, size: disk.get(path.toUpperCase())?.length ?? 0 }
+            : null),
+        open: (/** @type {string} */ path)=>disk.get(path.toUpperCase()) ?? null,
+        read: (/** @type {Uint8Array} */ node, /** @type {number} */ at,
+            /** @type {number} */ length)=>Promise.resolve(node.slice(at, at + length)),
+        close: ()=>{},
+    };
+    const { memory, fns, cursors } = setup({ files });
+
+    memory.putString(TEXT_BUFFER, 'C:\\C\\Arrow.cur');
+    const arrow = await fns.LoadCursorFromFileA.handler([TEXT_BUFFER]);
+    assert.notEqual(arrow, 0);
+    fns.SetCursor.handler([arrow]);
+    assert.deepEqual([cursors.at(-1).width, cursors.at(-1).height, cursors.at(-1).hotSpot],
+        [2, 2, { x: 1, y: 0 }]);
+
+    memory.putString(TEXT_BUFFER, 'C:\\C\\Spin.ani');
+    const spin = await fns.LoadCursorFromFileA.handler([TEXT_BUFFER]);
+    assert.notEqual(spin, 0, 'the first frame stands for an animated cursor');
+
+    memory.putString(TEXT_BUFFER, 'C:\\C\\Notes.txt');
+    assert.equal(await fns.LoadCursorFromFileA.handler([TEXT_BUFFER]), 0, 'not a cursor file');
+    memory.putString(TEXT_BUFFER, 'C:\\C\\Missing.cur');
+    assert.equal(fns.LoadCursorFromFileA.handler([TEXT_BUFFER]), 0, 'no file');
+
+    // The arrow replaces OCR_NORMAL; the handle is consumed, LoadCursor(NULL, IDC_ARROW)
+    // answers with the same picture.
+    assert.equal(fns.SetSystemCursor.handler([spin, 32512]), 1);
+    fns.SetCursor.handler([0x7f00]);
+    assert.equal(cursors.at(-1).bgra[8], 100, 'the standard arrow is now the file\'s picture');
+    assert.equal(fns.SetSystemCursor.handler([spin, 32512]), 0, 'the handle was destroyed');
+    assert.equal(fns.SetSystemCursor.handler([arrow, 1]), 0, 'not a system cursor id');
 });

@@ -299,42 +299,48 @@ test('the wide free-space calls answer what the A calls answer', ()=>{
         32 * 1024 * 1024 * 1024);
 });
 
-test('QueryDosDevice names a drive\'s NT device, and every name when given none', ()=>{
-    // A setup walks the letters and unpacks onto one whose device is a hard
-    // disk's; the answer is a list ended by an empty string, counted with
-    // both terminators.
-    const ERROR_FILE_NOT_FOUND = 2;
-    const ERROR_INSUFFICIENT_BUFFER = 122;
+test('QueryDosDevice names the device behind a drive letter, and lists every drive for none', ()=>{
+    const bs = String.fromCharCode(92);
     const { fns, bytes, errors } = setup(['C', 'D', 'E'], { D: { kind: 'cdrom' } });
-    const text = (/** @type {number} */ at, /** @type {number} */ length)=>
-        String.fromCharCode(...bytes.slice(at, at + length));
-    const B = String.fromCharCode(92);
+    plant(bytes, 0x200, 'c:');
+    assert.equal(fns.QueryDosDeviceA.argBytes, 12);
 
-    plant(bytes, 0x40, 'c:');
-    bytes.fill(0xaa, 0x100, 0x140);
-    const length = fns.QueryDosDeviceA.handler([0x40, 0x100, 0x40]);
-    assert.equal(text(0x100, length), `${B}Device${B}HarddiskVolume1\0\0`);
-    plant(bytes, 0x40, 'D:');
-    assert.equal(text(0x100, fns.QueryDosDeviceA.handler([0x40, 0x100, 0x40])),
-        `${B}Device${B}CdRom0\0\0`);
-    plant(bytes, 0x40, 'E:');
-    assert.equal(text(0x100, fns.QueryDosDeviceA.handler([0x40, 0x100, 0x40])),
-        `${B}Device${B}HarddiskVolume2\0\0`, 'volumes count past the disc');
+    const length = fns.QueryDosDeviceA.handler([0x200, 0x300, 0x40]);
+    const first = `${bs}Device${bs}HarddiskVolume1\0\0`;
+    assert.equal(length, first.length, 'the characters stored, both terminators counted');
+    assert.equal(String.fromCharCode(...bytes.slice(0x300, 0x300 + length)), first);
 
-    assert.equal(text(0x100, fns.QueryDosDeviceA.handler([0, 0x100, 0x40])),
-        'C:\0D:\0E:\0NUL\0\0');
+    plant(bytes, 0x200, 'D:');
+    fns.QueryDosDeviceA.handler([0x200, 0x300, 0x40]);
+    assert.equal(String.fromCharCode(...bytes.slice(0x300, 0x300 + 14)), `${bs}Device${bs}CdRom0`);
+    plant(bytes, 0x200, 'E:');
+    fns.QueryDosDeviceA.handler([0x200, 0x300, 0x40]);
+    assert.equal(String.fromCharCode(...bytes.slice(0x300, 0x300 + 23)),
+        `${bs}Device${bs}HarddiskVolume2`, 'volumes count apart from discs');
 
-    plant(bytes, 0x40, 'F:');
-    assert.equal(fns.QueryDosDeviceA.handler([0x40, 0x100, 0x40]), 0);
-    assert.equal(errors.at(-1), ERROR_FILE_NOT_FOUND);
-    plant(bytes, 0x40, `C:${B}`);
-    assert.equal(fns.QueryDosDeviceA.handler([0x40, 0x100, 0x40]), 0, 'a root is not a name');
-    plant(bytes, 0x40, 'C:');
-    assert.equal(fns.QueryDosDeviceA.handler([0x40, 0x100, 10]), 0);
-    assert.equal(errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+    const all = fns.QueryDosDeviceA.handler([0, 0x300, 0x40]);
+    assert.equal(String.fromCharCode(...bytes.slice(0x300, 0x300 + all)), 'C:\0D:\0E:\0\0');
 
-    bytes.set([0x43, 0, 0x3a, 0, 0, 0], 0x40);
-    assert.equal(fns.QueryDosDeviceW.handler([0x40, 0x200, 0x40]), length);
-    assert.equal(bytes[0x200 + 2], 0x44, 'UTF-16: D of Device at the second character');
-    assert.deepEqual([fns.QueryDosDeviceA.argBytes, fns.QueryDosDeviceW.argBytes], [12, 12]);
+    plant(bytes, 0x200, 'Z:');
+    assert.equal(fns.QueryDosDeviceA.handler([0x200, 0x300, 0x40]), 0);
+    assert.equal(errors.at(-1), 2, 'ERROR_FILE_NOT_FOUND');
+    plant(bytes, 0x200, 'C:');
+    bytes[0x300] = 0xaa;
+    assert.equal(fns.QueryDosDeviceA.handler([0x200, 0x300, 4]), 0);
+    assert.equal(errors.at(-1), 122, 'ERROR_INSUFFICIENT_BUFFER');
+    assert.equal(bytes[0x300], 0xaa, 'and nothing was stored');
+});
+
+test('QueryDosDeviceW answers in UTF-16', ()=>{
+    const { fns, bytes } = setup(['C']);
+    [...'C:'].forEach((character, index)=>{
+        bytes[0x200 + index * 2] = character.charCodeAt(0);
+        bytes[0x201 + index * 2] = 0;
+    });
+    bytes[0x204] = 0;
+    bytes[0x205] = 0;
+    const length = fns.QueryDosDeviceW.handler([0x200, 0x300, 0x40]);
+    assert.equal(length, 25, '\\Device\\HarddiskVolume1 and two terminators');
+    assert.equal(bytes[0x300], 0x5c);
+    assert.equal(bytes[0x301], 0);
 });

@@ -30,7 +30,7 @@ import { decodeAnsi } from '../kernel32/locale.js';
 import { EACCES, EBADF, EEXIST, EINVAL, EMFILE, ENOENT, ENOSPC } from './globals.js';
 import {
     O_UNICODE, O_WTEXT, bytesOfUnits, decodeUnits, encodeUnits, encodingOf, foldUnits, markIn,
-    markOf, textOfUnits, unitsOf, unmarkedEncodingOf,
+    markOf, textOfUnits, unitsOf, unmarkedEncodingOf, wideStringAt,
 } from './widetext.js';
 
 /** `_open` flags, at msvcrt's values (fcntl.h). */
@@ -885,6 +885,35 @@ export function createIoFunctions(host, descriptors){
     };
 
     /**
+     * What `_open` and its relatives do with a name and the flags.
+     *
+     * @param {number} path @param {number} oflag  Both as the guest passed them.
+     * @param {boolean} wide  Whether the name is UTF-16.
+     */
+    const openNamed = (path, oflag, wide)=>{
+        const flags = oflag >>> 0;
+        const access = flags & O_ACCMODE;
+        if ((path >>> 0) === 0 || access === O_ACCMODE)
+        {
+            fail(EINVAL);
+            return -1;
+        }
+        return descriptors.open(wide
+            ? wideStringAt(host.readMemory, path >>> 0)
+            : host.readCString(path >>> 0, MAX_STRING), {
+            read: access !== O_WRONLY,
+            write: access === O_WRONLY || access === O_RDWR,
+            create: (flags & O_CREAT) !== 0,
+            truncate: (flags & O_TRUNC) !== 0,
+            exclusive: (flags & (O_CREAT | O_EXCL)) === (O_CREAT | O_EXCL),
+            append: (flags & O_APPEND) !== 0,
+            text: (flags & O_BINARY) !== 0 ? false : ((flags & O_TEXT) !== 0 ? true : null),
+            temporary: (flags & O_TEMPORARY) !== 0,
+            unicode: (flags & O_BINARY) !== 0 ? 0 : unicodeOf(flags),
+        });
+    };
+
+    /**
      * Fills a whole `struct _stat` or `_stati64`, so no field keeps what the
      * caller's buffer held. The volume keeps one time per file, the last
      * write, and it stands for all three.
@@ -1131,25 +1160,48 @@ export function createIoFunctions(host, descriptors){
          * The permission argument only marks a new file read-only on Windows,
          * and the volume keeps no such bit, so it is read and not used.
          */
-        _open: cdecl(12, ([path, oflag])=>{
-            const flags = oflag >>> 0;
-            const access = flags & O_ACCMODE;
-            if ((path >>> 0) === 0 || access === O_ACCMODE)
+        _open: cdecl(12, ([path, oflag])=>openNamed(path, oflag, false)),
+
+        /** int _wopen(const wchar_t *filename, int oflag [, int pmode]) -- `_open`, wide. */
+        _wopen: cdecl(12, ([path, oflag])=>openNamed(path, oflag, true)),
+
+        /**
+         * int _sopen(const char *filename, int oflag, int shflag [, int pmode])
+         *
+         * `_open` with a sharing mode. The volume has no share modes -- an
+         * open file may be opened again -- so the mode is read and not used.
+         */
+        _sopen: cdecl(16, ([path, oflag])=>openNamed(path, oflag, false)),
+
+        /** int _wsopen(const wchar_t *filename, int oflag, int shflag [, int pmode]) */
+        _wsopen: cdecl(16, ([path, oflag])=>openNamed(path, oflag, true)),
+
+        /**
+         * int _chsize(int fd, long size)
+         *
+         * Cuts the file to `size` bytes or grows it with zeroes; the position
+         * stays where it was. 0, or -1 with EBADF for a number not open or
+         * not open for writing, and EINVAL for a negative size.
+         */
+        _chsize: cdecl(8, ([fd, size])=>{
+            const descriptor = fileAt(fd);
+            if (!descriptor)
+            {
+                return -1;
+            }
+            if (!descriptor.write)
+            {
+                fail(EBADF);
+                return -1;
+            }
+            if ((size | 0) < 0)
             {
                 fail(EINVAL);
                 return -1;
             }
-            return descriptors.open(host.readCString(path >>> 0, MAX_STRING), {
-                read: access !== O_WRONLY,
-                write: access === O_WRONLY || access === O_RDWR,
-                create: (flags & O_CREAT) !== 0,
-                truncate: (flags & O_TRUNC) !== 0,
-                exclusive: (flags & (O_CREAT | O_EXCL)) === (O_CREAT | O_EXCL),
-                append: (flags & O_APPEND) !== 0,
-                text: (flags & O_BINARY) !== 0 ? false : ((flags & O_TEXT) !== 0 ? true : null),
-                temporary: (flags & O_TEMPORARY) !== 0,
-                unicode: (flags & O_BINARY) !== 0 ? 0 : unicodeOf(flags),
-            });
+            host.files.truncate(descriptor.node, size >>> 0);
+            descriptor.ahead = null;
+            return 0;
         }),
 
         /** int _close(int fd) -- -1 and EBADF for a number not open. */

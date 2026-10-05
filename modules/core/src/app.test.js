@@ -732,6 +732,36 @@ test('a library without relocations whose base is taken is refused, not moved', 
         && payload.names.includes('fixed.dll') && /no relocations/.test(payload.reason)));
 });
 
+test('a library that cannot move takes its base outside the modules\' space when it is given up',
+    ()=>{
+        // Libraries linked at 0x20000000 and 0x30000000 with their relocations
+        // stripped: free memory in a new process on Windows, the heap's arena
+        // here, which gives the span up while nothing has been given it.
+        /** @type {[number, number][]} */
+        const asked = [];
+        const space = { next: 0x02000000, floor: 0x00500000, limit: 0x08000000,
+            holder: ()=>null,
+            /** @param {number | null} base @param {number} size */
+            claim: (base, size)=>{
+                asked.push([base ?? 0, size]);
+                return base === 0x20000000 ? base : base === null ? 0x31000000 : 0;
+            } };
+        const fixed = (/** @type {number} */ imageBase)=>({ relocatable: false, imageBase,
+            sizeOfImage: 0x10000 });
+        assert.deepEqual(placeLibrary(fixed(0x20000000), space), { base: 0x20000000 });
+        assert.ok('refused' in placeLibrary(fixed(0x30000000), space), 'not given up');
+        assert.deepEqual(placeLibrary(fixed(0x03000000), space), { base: 0x03000000 });
+        assert.deepEqual(asked, [[0x20000000, 0x10000], [0x30000000, 0x10000]],
+            'and a base free in the modules\' space is taken without asking');
+
+        // One that can move and finds the space full goes wherever there is room.
+        const full = { ...space, holder: ()=>({ base: 0x02000000, size: 0x06000000 }) };
+        assert.deepEqual(placeLibrary({ relocatable: true, imageBase: 0x10000000,
+            sizeOfImage: 0x10000 }, full), { base: 0x31000000 });
+        assert.ok('refused' in placeLibrary({ relocatable: true, imageBase: 0x10000000,
+            sizeOfImage: 0x10000 }, { ...full, claim: ()=>0 }), 'and nowhere is no room');
+    });
+
 test('a movable library takes the first free base at or after the next one', ()=>{
     const held = [{ base: 0x02000000, size: 0x3000 }, { base: 0x02010000, size: 0x10000 }];
     /** @param {number} base @param {number} size */

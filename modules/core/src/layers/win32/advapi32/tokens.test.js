@@ -29,6 +29,7 @@ function setup(){
     /** @type {Map<number, { type: string, object: any }>} */
     const table = new Map();
     let next = 4;
+    let heap = 0x800;
     const fns = createTokenFunctions({
         readMemory: (address, length)=>bytes.subarray(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
@@ -41,6 +42,11 @@ function setup(){
             return text;
         },
         setLastError: code=>errors.push(code),
+        allocate: size=>{
+            const at = heap;
+            heap += size + 7 & ~7;
+            return at;
+        },
         handles: {
             open(type, object){
                 table.set(next, { type, object });
@@ -392,4 +398,28 @@ test('GetKernelObjectSecurity sizes, then writes a self-relative descriptor of t
         'only the owner, when only it is asked for');
     assert.equal(fns.GetKernelObjectSecurity.handler([0x9999, ALL, BUFFER, size, OUT]), 0);
     assert.deepEqual(errors, [6], 'ERROR_INVALID_HANDLE');
+});
+
+test('ConvertSidToStringSid writes S-1-authority-subauthorities in a block, narrow or wide', ()=>{
+    const { bytes, fns, dword } = setup();
+    // S-1-5-32-544: the Administrators group.
+    bytes.set([1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 2, 0, 0], SID);
+    assert.equal(fns.ConvertSidToStringSidA.argBytes, 8);
+    assert.equal(fns.ConvertSidToStringSidA.handler([SID, OUT]), 1);
+    const narrow = dword(OUT);
+    assert.equal(String.fromCharCode(...bytes.subarray(narrow, narrow + 12)), 'S-1-5-32-544');
+    assert.equal(bytes[narrow + 12], 0);
+    assert.equal(fns.ConvertSidToStringSidW.handler([SID, OUT]), 1);
+    const wide = dword(OUT);
+    assert.deepEqual([...bytes.subarray(wide, wide + 6)], [0x53, 0, 0x2d, 0, 0x31, 0]);
+    assert.equal(bytes[wide + 24], 0);
+    assert.equal(bytes[wide + 25], 0);
+});
+
+test('ConvertSidToStringSid refuses no SID and one that is not a SID', ()=>{
+    const { bytes, errors, fns } = setup();
+    assert.equal(fns.ConvertSidToStringSidW.handler([0, OUT]), 0);
+    bytes[SID] = 9;
+    assert.equal(fns.ConvertSidToStringSidW.handler([SID, OUT]), 0);
+    assert.deepEqual(errors, [87, 87]);
 });

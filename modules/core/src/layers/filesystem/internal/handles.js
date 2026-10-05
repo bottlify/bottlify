@@ -59,16 +59,89 @@ export const SeekFrom = {
  * @property {AccessFlags} share
  * @property {number} position
  * @property {boolean} closed
+ * @property {number} token       Its open as the volume's sharing records it.
  */
+
+/**
+ * What one open agreed to, as the volume's sharing keeps it: values, so the
+ * volume's half of the system can keep them for a process in another thread.
+ *
+ * @typedef {Object} OpenTerms
+ * @property {string} key       Drive plus folded path.
+ * @property {string} path      As the file is spelled, for the refusal's text.
+ * @property {AccessFlags} access
+ * @property {AccessFlags} share
+ * @property {boolean} [inherited]  The same open file another process holds,
+ *     handed on: no new terms, so none are checked.
+ */
+
+/**
+ * Every file open on a volume, by every process that stands on it, and the
+ * terms each open agreed to: what a new open is settled against, since
+ * CreateFile's sharing is the system's and not a process's.
+ *
+ * @typedef {Object} Sharing
+ * @property {(terms: OpenTerms) => number} admit
+ *     Settles an open against every other, and records it: its number, or a
+ *     SHARING_VIOLATION thrown. Settled and recorded in one step, so two
+ *     processes opening at once cannot both get in.
+ * @property {(token: number) => void} release
+ * @property {(key: string) => boolean} isOpen
+ */
+
+/**
+ * The sharing of a volume kept here, for the processes on this thread.
+ *
+ * @returns {Sharing}
+ */
+export function createSharing(){
+    /** @type {Map<number, OpenTerms>} */
+    const opens = new Map();
+    let next = 1;
+    return {
+        admit(terms){
+            if (!terms.inherited)
+            {
+                for (const other of opens.values())
+                {
+                    if (other.key !== terms.key)
+                    {
+                        continue;
+                    }
+                    const denied = (terms.access.read && !other.share.read)
+                        || (terms.access.write && !other.share.write)
+                        || (other.access.read && !terms.share.read)
+                        || (other.access.write && !terms.share.write);
+                    if (denied)
+                    {
+                        throw fsError(ErrorCode.SHARING_VIOLATION,
+                            `"${other.path}" is already open on incompatible terms`);
+                    }
+                }
+            }
+            const token = next++;
+            opens.set(token, { key: terms.key, path: terms.path,
+                access: { ...terms.access }, share: { ...terms.share } });
+            return token;
+        },
+        release(token){
+            opens.delete(token);
+        },
+        isOpen: key=>[...opens.values()].some(terms=>terms.key === key),
+    };
+}
 
 /**
  * Builds the table of open files.
  *
  * @param {Object} [options]
  * @param {number} [options.limit]  Most files open at once.
+ * @param {Sharing} [options.sharing]
+ *     The volume's: every process's opens, which a new one is settled
+ *     against. A table with no one to share the volume with keeps its own.
  */
-export function createFileTable({ limit = 4096 } = {}){
-    /** @type {Set<FileHandle>} */
+export function createFileTable({ limit = 4096, sharing = createSharing() } = {}){
+    /** This process's own. @type {Set<FileHandle>} */
     const open = new Set();
     let nextId = 1;
     let opened = 0;
@@ -97,36 +170,6 @@ export function createFileTable({ limit = 4096 } = {}){
         return fresh;
     };
 
-    /**
-     * Win32 refuses a second open whose access is not permitted by what the
-     * first open agreed to share, and equally refuses one whose sharing does
-     * not cover what the first open already took. Both directions matter: a
-     * program that opens a save file for writing and then opens it again for
-     * reading is relying on the second check, not the first.
-     *
-     * @param {string} key
-     * @param {AccessFlags} access
-     * @param {AccessFlags} share
-     */
-    const checkSharing = (key, access, share)=>{
-        for (const handle of open)
-        {
-            if (handle.key !== key)
-            {
-                continue;
-            }
-            const denied = (access.read && !handle.share.read)
-                || (access.write && !handle.share.write)
-                || (handle.access.read && !share.read)
-                || (handle.access.write && !share.write);
-            if (denied)
-            {
-                throw fsError(ErrorCode.SHARING_VIOLATION,
-                    `"${handle.path}" is already open on incompatible terms`);
-            }
-        }
-    };
-
     /** @param {FileHandle} handle */
     const live = handle=>{
         if (!handle || handle.closed || !open.has(handle))
@@ -150,6 +193,9 @@ export function createFileTable({ limit = 4096 } = {}){
          * @param {AccessFlags} request.access
          * @param {AccessFlags} [request.share]
          * @param {string} [request.disposition]
+         * @param {boolean} [request.inherited]  The open is one a process was
+         *     handed by another, the same file it already holds: no new terms
+         *     are agreed, so none are checked.
          * @returns {FileHandle}
          */
         open(request){
@@ -174,22 +220,38 @@ export function createFileTable({ limit = 4096 } = {}){
                 // directory; the caller decides which Win32 error says so.
                 throw fsError(ErrorCode.IS_A_DIRECTORY, `"${existing.path}" is a directory`);
             }
-            checkSharing(key, access, share);
-
-            if (existing && disposition === Disposition.CREATE_NEW)
+            // Win32 refuses a second open whose access is not permitted by
+            // what the first agreed to share, and equally one whose sharing
+            // does not cover what the first already took: a program that
+            // opens a save file for writing and then again for reading relies
+            // on the second.
+            const token = sharing.admit({ key, path: existing?.path ?? components.join('\\'),
+                access: { read: !!access.read, write: !!access.write },
+                share: { read: !!share.read, write: !!share.write },
+                inherited: request.inherited === true });
+            /** @type {any} */
+            let entry;
+            try
             {
-                throw fsError(ErrorCode.ALREADY_EXISTS, `"${existing.path}" already exists`);
+                if (existing && disposition === Disposition.CREATE_NEW)
+                {
+                    throw fsError(ErrorCode.ALREADY_EXISTS, `"${existing.path}" already exists`);
+                }
+                if (!existing && (disposition === Disposition.OPEN_EXISTING
+                    || disposition === Disposition.TRUNCATE_EXISTING))
+                {
+                    throw fsError(ErrorCode.NOT_FOUND, `No file at "${components.join('\\')}"`);
+                }
+                entry = existing ?? tree.createFile(components);
+                if (existing && (disposition === Disposition.CREATE_ALWAYS
+                    || disposition === Disposition.TRUNCATE_EXISTING))
+                {
+                    tree.truncate(components, 0);
+                }
             }
-            if (!existing && (disposition === Disposition.OPEN_EXISTING
-                || disposition === Disposition.TRUNCATE_EXISTING))
-            {
-                throw fsError(ErrorCode.NOT_FOUND, `No file at "${components.join('\\')}"`);
-            }
-            const entry = existing ?? tree.createFile(components);
-            if (existing && (disposition === Disposition.CREATE_ALWAYS
-                || disposition === Disposition.TRUNCATE_EXISTING))
-            {
-                tree.truncate(components, 0);
+            catch (e){
+                sharing.release(token);
+                throw e;
             }
 
             const handle = {
@@ -202,6 +264,7 @@ export function createFileTable({ limit = 4096 } = {}){
                 share: { read: !!share.read, write: !!share.write },
                 position: 0,
                 closed: false,
+                token,
             };
             open.add(handle);
             opened++;
@@ -314,8 +377,27 @@ export function createFileTable({ limit = 4096 } = {}){
             live(handle);
             handle.closed = true;
             open.delete(handle);
+            sharing.release(handle.token);
             closed++;
         },
+
+        /** Closes everything this process holds: it has ended. */
+        closeAll(){
+            for (const handle of open)
+            {
+                handle.closed = true;
+                sharing.release(handle.token);
+                closed++;
+            }
+            open.clear();
+        },
+
+        /**
+         * Whether any process sharing the volume holds the file open.
+         *
+         * @param {string} key
+         */
+        isOpen: key=>sharing.isOpen(key),
 
         /** @returns {FileHandle[]} */
         list(){

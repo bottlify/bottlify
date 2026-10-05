@@ -22,7 +22,7 @@
  *     node tools/launch-probe.mjs <bundle-id> [--turns 200000]
  */
 
-import { createWriteStream } from 'node:fs';
+import { createWriteStream, mkdirSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { openBundle } from './btl.mjs';
@@ -45,6 +45,13 @@ function parse(argv){
         // bundle -- a launcher is a different program from the game it starts,
         // and only running it says whether it runs.
         which: argv.includes('--which') ? argv[argv.indexOf('--which') + 1] : null,
+        // Wall seconds the run may take, for a program that waits on a person.
+        seconds: argv.includes('--seconds') ? Number(argv[argv.indexOf('--seconds') + 1])
+            : undefined,
+        // How many processes run at once: a launcher and the game it starts,
+        // side by side, each child in a worker of its own.
+        concurrency: argv.includes('--concurrency')
+            ? Number(argv[argv.indexOf('--concurrency') + 1]) : undefined,
         // The translator's settings for the run, merged over the probe's own
         // (`feed: 'slice'`, `timings: true`, a translation worker), so two
         // settings compare on one title.
@@ -73,6 +80,10 @@ function parse(argv){
                 return { address: Number(address), length: Number(length ?? 32) };
             })
             : [],
+        // A folder to write the --peek ranges into as raw bytes, with the
+        // registers and the stack, at the first call --grep matches: code a
+        // packer decrypts at run time exists to be disassembled only there.
+        dump: argv.includes('--dump') ? argv[argv.indexOf('--dump') + 1] : null,
         // Which of a game's own libraries to watch calls into, as `Engine.dll`
         // for all of one library's exports or `MSVCR80.dll!toupper` for a
         // single function, comma-separated.
@@ -280,6 +291,11 @@ function report(app, { grep = null, calls = 24 } = {}){
             .map(([name, value])=>`${name}=${value}`)
             .join(' ');
         console.log(`  ${layer.name} [${layer.status}] ${interesting}`);
+        // A process in a worker of its own: what it waited on the system for.
+        for (const row of layer.name === 'link' ? metrics.asked ?? [] : [])
+        {
+            console.log(`    ${row.name}  ${row.count} calls, ${row.waitedMs.toFixed(0)} ms`);
+        }
     }
 
     // What each thread is doing, and what a blocked one is blocked on. A
@@ -386,8 +402,8 @@ function seriesRow(app, last, began){
 }
 
 async function main(){
-    const { id, turns, map, grep, calls, heap, profile, log, watch, peek, which,
-        corkConfig, series, raster } = parse(process.argv.slice(2));
+    const { id, turns, map, grep, calls, heap, profile, log, watch, peek, dump, which,
+        corkConfig, series, raster, concurrency, seconds } = parse(process.argv.slice(2));
     if (!id)
     {
         console.error('usage: node tools/launch-probe.mjs <bundle-id> [--turns N] '
@@ -432,6 +448,7 @@ async function main(){
     const sink = log ? createWriteStream(log) : null;
 
     const placement = placementOf(manifest);
+    let dumped = false;
     const app = await createApp({
         executable: new Uint8Array(executable),
         // Where the bundle is mounted and the program started from: where its
@@ -446,12 +463,13 @@ async function main(){
                 import.meta.url).href,
             ...corkConfig } },
         heapSize: heap,
+        ...concurrency ? { concurrency } : {},
         ...(raster ? {} : { graphics: { raster: false } }),
         quantum: profile > 0 ? profile : undefined,
         sample: profile > 0 ? (/** @type {number} */ eip)=>samples.push(eip) : undefined,
         // A probe is read afterwards, which is exactly when a stack string is gone.
         traceStrings: true,
-        onCall: sink || peek.length > 0
+        onCall: sink || peek.length > 0 || dump !== null
             ? (/** @type {any} */ call)=>{
                 sink?.write(`${formatCall(call)}\n`);
                 if (peek.length === 0 || grep === null || !call.name.includes(grep))
@@ -459,6 +477,30 @@ async function main(){
                     return;
                 }
                 console.log(`  ${formatCall(call)}`);
+                if (dump !== null && !dumped)
+                {
+                    dumped = true;
+                    const esp = app.debug.register('esp') >>> 0;
+                    const registers = Object.fromEntries(
+                        ['eax', 'ebx', 'ecx', 'edx', 'esi', 'edi', 'ebp', 'esp']
+                            .map(name=>[name,
+                                `0x${(app.debug.register(name) >>> 0).toString(16)}`]));
+                    mkdirSync(dump, { recursive: true });
+                    writeFileSync(`${dump}/registers.json`, JSON.stringify(registers, null, 1));
+                    for (const { address, length } of [...peek, { address: esp, length: 0x4000 }])
+                    {
+                        try
+                        {
+                            writeFileSync(`${dump}/${address.toString(16)}.bin`,
+                                app.debug.read(address, length));
+                        }
+                        catch (e){
+                            console.log(`      0x${address.toString(16)}  unreadable: ${e}`);
+                        }
+                    }
+                    console.log(`      dumped to ${dump}, esp 0x${esp.toString(16)}`);
+                    return;
+                }
                 for (const { address, length } of peek)
                 {
                     const rows = peekBytes(
@@ -483,7 +525,7 @@ async function main(){
     // function nobody wrote.
     const loader = app.diagnostics()
         .find((/** @type {any} */ layer)=>layer.name === 'loader');
-    const unresolved = byLibrary(loader?.metrics?.unresolved ?? app.image.unresolved ?? []);
+    const unresolved = byLibrary(loader?.metrics?.unresolved ?? app.image?.unresolved ?? []);
     if (unresolved.length === 0)
     {
         console.log('every import bound.\n');
@@ -548,6 +590,13 @@ async function main(){
             console.log(`  [${name}] ${JSON.stringify(payload).slice(0, 300)}`));
     }
 
+    // Nobody here can press a message box's button: the program only waits on
+    // it, and the turns left would be spent on that wait.
+    app.on('message-box', (/** @type {any} */ box)=>{
+        console.log(`  [message-box] ${box.caption ?? ''}: ${box.text ?? ''}`);
+        app.stop();
+    });
+
     let stopped;
     const began = performance.now();
     /** @type {SeriesPoint | null} */
@@ -559,7 +608,8 @@ async function main(){
         : null;
     try
     {
-        const code = await app.run({ maxTurns: turns });
+        const code = await app.run({ maxTurns: turns,
+            ...seconds ? { timeoutMs: seconds * 1000 } : {} });
         stopped = `exited with ${code}`;
     }
     catch (e){
