@@ -82,6 +82,9 @@ export function createBridgeModule(){
             const kernel = host.requireApi('kernel');
             const memory = host.requireApi('memory');
 
+            /** The thread `answering` names while its function runs, or null. @type {any} */
+            let answeringFor = null;
+
             /**
              * Everything this instance owns, and whether it is still open.
              *
@@ -94,8 +97,6 @@ export function createBridgeModule(){
              * @type {{ dispatcher: any, parking: any, callbacks: any, vtables: any,
              *          failure: Error | null, disposed: boolean }}
              */
-            /** The thread `answering` names while its function runs, or null. @type {any} */
-            let answeringFor = null;
             const state = {
                 dispatcher: null,
                 parking: null,
