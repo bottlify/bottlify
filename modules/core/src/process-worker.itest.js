@@ -121,6 +121,9 @@ test('a child in a worker of its own leaves its parent its file, its registry va
         /** @type {any[]} */
         const started = [];
         app.on('process-started', (/** @type {any} */ event)=>started.push(event));
+        /** @type {any[]} */
+        const libraries = [];
+        app.on('libraries', (/** @type {any} */ event)=>libraries.push(event));
         const code = await app.run({ timeoutMs: 60000 });
         const lines = output.join('').split('\r\n').filter(Boolean);
         assert.deepEqual(lines.filter(line=>line.startsWith('FAIL')), [], output.join(''));
@@ -131,6 +134,8 @@ test('a child in a worker of its own leaves its parent its file, its registry va
         assert.equal(code, 0);
         assert.deepEqual(started.map(event=>event.worker), [true, true],
             'both ran in workers of their own');
+        assert.equal(libraries.length, 3, 'what each child\'s machine said reached the run\'s bus');
+        assert.ok(libraries.every(event=>Array.isArray(event.loaded)));
     });
 
 test('a child in a worker of its own reads what the run\'s bundle has not fetched yet',

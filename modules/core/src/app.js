@@ -42,6 +42,7 @@ import { createCallRepeats } from './call-repeats.js';
 import { withRunMode } from './mode.js';
 import { createLinkMemory, openLink } from './system/link.js';
 import { systemHandlers } from './system-link.js';
+import { eventFrom } from './system/events-across.js';
 import { objectHandlers } from './system-objects.js';
 import { openProcessWorker } from './host/process-worker.js';
 
@@ -222,6 +223,9 @@ import { openProcessWorker } from './host/process-worker.js';
  * @property {any} [system]  The run's system half -- registry, volume, windows, ids, named
  *           objects -- for a process that joins another run's rather than making one: a
  *           process in a worker of its own is handed it across a link (`system-link.js`).
+ * @property {(name: string, payload: any) => void} [relay]
+ *           Told every event this process emits, for a process in a worker of its own
+ *           to tell the bus of the run that started it.
  * @property {{ output?: StandardFile, error?: StandardFile }} [standardFiles]
  *           The files a child's parent handed it as its output and error,
  *           each the parent's own open file, whose position the child's
@@ -6862,6 +6866,12 @@ export async function createApp(options){
     // child existed still have to fire for the last one, and the record of what
     // asked for a replacement is worthless if it dies with the asker.
     const events = createEvents();
+    // A process in a worker of its own tells the run's bus what happens to
+    // it: the page subscribes there, on the thread that started it.
+    if (options.relay)
+    {
+        events.onAny(options.relay);
+    }
     // A run asked for more than this page allows starts all the same, as
     // much as it allows, and says so: the first subscriber hears it.
     if (options.fallback)
@@ -7460,6 +7470,12 @@ export async function createApp(options){
             process: {
                 output: (/** @type {number} */ handle, /** @type {string} */ text)=>
                     events.emit('output', { handle, text }),
+            },
+            // Everything else that happens to it, for the page subscribed here.
+            events: {
+                emit: (/** @type {string} */ name, /** @type {any} */ payload)=>{
+                    events.emit(name, eventFrom(payload));
+                },
             },
             // The parent's open files the child writes its output and error
             // into: one position, the parent's, which the child's writes move.

@@ -151,6 +151,34 @@ test('calls that together overflow the ring all cross, the writer waiting for ro
         await serving;
     });
 
+test('what a process told the system before the link closed is heard, nothing waited on',
+    { timeout: 20000 }, async()=>{
+        const { a, b } = createLinkMemory();
+        /** @type {number[]} */
+        const heard = [];
+        const system = openLink(a, { events: {
+            emit: (/** @type {number} */ n)=>void heard.push(n),
+        } });
+        const serving = system.serve();
+        await new Promise(resolve=>setImmediate(resolve));
+        // The process tells and ends while this thread is held, and the link
+        // is closed before the serving side had a turn to look.
+        const done = new Int32Array(new SharedArrayBuffer(4));
+        const worker = new Worker(`
+            const { workerData } = require('node:worker_threads');
+            import(workerData.module).then(({ openLink })=>{
+                const link = openLink(workerData.end, {});
+                for (let i = 0; i < 20; i++) link.call('events', 'emit', [i]);
+                Atomics.store(workerData.done, 0, 1);
+                Atomics.notify(workerData.done, 0);
+            });`, { eval: true, workerData: { module: LINK, end: b, done } });
+        Atomics.wait(done, 0, 0, 10000);
+        system.close();
+        await serving;
+        await worker.terminate();
+        assert.deepEqual(heard, [...Array(20).keys()]);
+    });
+
 test('a failure crosses with what it says of itself, not only its message', { timeout: 20000 },
     async()=>{
         const { a, b } = createLinkMemory();

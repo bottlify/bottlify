@@ -338,6 +338,9 @@ export function openLink(end, handlers){
                     await waited.value;
                 }
             }
+            // What the other side wrote before it was closed is still its
+            // word: the last things a process tells the run as it ends.
+            pump();
         },
 
         /** Stops `serve`. */

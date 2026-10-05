@@ -27,6 +27,7 @@ import { openLink } from '../system/link.js';
 import { remoteSystem } from '../system-link.js';
 import { ringPacing } from './ring-pacing.js';
 import { portEnd } from '../layers/graphics/remote/connect.js';
+import { plainEvent } from '../system/events-across.js';
 
 /** How often a process with work to do gives its event loop a turn, as the engine's worker does. */
 const YIELD_MS = 4;
@@ -112,6 +113,14 @@ export async function serveProcess({ end, graphics, display, options, run }){
         graphics: { ...options.graphics, worker: graphics ? portEnd(graphics) : undefined,
             display: display ? sendFrames(display) : undefined },
         system,
+        // Its output is written in order with its calls, below; the rest is
+        // told as it happens, and not waited on.
+        relay: (/** @type {string} */ name, /** @type {any} */ payload)=>{
+            if (name !== 'output')
+            {
+                link.call('events', 'emit', [name, plainEvent(payload)]).catch(()=>{});
+            }
+        },
         pacing: ringPacing({ inbound: { bell: link.bell, drain: link.pump },
             macrotask: createMacrotask(), now: ()=>performance.now(), intervalMs: YIELD_MS }),
     });
