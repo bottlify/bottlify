@@ -20,6 +20,7 @@
  *
  *   /shot?file=PATH      the picture, cut to the canvas, as a PNG; answers the path
  *   /click?x=&y=         a left click at the program's own pixels
+ *   /move?x=&y=          the pointer moved there, no button
  *   /key?code=Enter      a key press, by KeyboardEvent.code
  *   /type?text=123       characters typed one after another
  *   /eval?js=EXPR        the value of an expression in the launcher tab, as JSON
@@ -137,6 +138,12 @@ createServer(async(request, answer)=>{
             await sleep(120);
             await send('Input.dispatchMouseEvent',
                 { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+        }
+        else if (url.pathname === '/move')
+        {
+            const at = await canvas();
+            await send('Input.dispatchMouseEvent', { type: 'mouseMoved',
+                x: at.x + Number(arg('x')) * at.w / at.cw, y: at.y + Number(arg('y')) * at.h / at.ch });
         }
         else if (url.pathname === '/key')
         {
