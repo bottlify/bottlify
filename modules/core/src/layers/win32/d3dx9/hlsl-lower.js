@@ -305,6 +305,13 @@ export function lower(module, entry, profile){
      * @returns {Value}
      */
     const convert = (value, from, to)=>{
+        if ((to.kind === 'struct' || to.kind === 'array') && isNumeric(from))
+        {
+            // `(S)0`: the scalars fill the structure in order, one spread over all of it.
+            const filler = flatten(value, from);
+            return build(to, filler.length === 1 ? new Array(scalarCount(to)).fill(filler[0])
+                : filler);
+        }
         if (sameType(from, to) || !isNumeric(from) || !isNumeric(to))
         {
             return value;
@@ -632,6 +639,24 @@ export function lower(module, entry, profile){
     };
 
     /**
+     * A value copied into registers of its own, whatever it was read from.
+     *
+     * @param {Value} value
+     * @returns {Value}
+     */
+    const materialize = value=>{
+        switch (value.k)
+        {
+            case 'vec': return vec(b.copy(value.v));
+            case 'mat': return { ...value, rowV: value.rowV && value.rowV.map(b.copy),
+                colV: value.colV && value.colV.map(b.copy) };
+            case 'struct': return { k: 'struct', fields: value.fields.map(materialize) };
+            case 'arr': return { k: 'arr', elems: value.elems.map(materialize) };
+            default: return value;
+        }
+    };
+
+    /**
      * The element of an array, a vector, a matrix row, picked by an operand.
      *
      * @param {Value} object @param {Type} type @param {Vec} index
@@ -657,7 +682,7 @@ export function lower(module, entry, profile){
         }
         if (object.k === 'arr' && object.uniform)
         {
-            if (!profile.mova || profile.kind !== 'vs')
+            if (profile.kind !== 'vs')
             {
                 fail('X3500', 'array reference cannot be used as an l-value; not natively '
                     + 'addressable', null);
@@ -670,7 +695,7 @@ export function lower(module, entry, profile){
             b.address(address);
             const rowMajor = u.cst.type.cls === PC.MATRIX_ROWS
                 || (u.cst.type.members ?? []).length > 0 || u.cst.type.cls === PC.MATRIX_ROWS;
-            return constantValue(u.elem, u.cst, u.base, true, rowMajor);
+            return materialize(constantValue(u.elem, u.cst, u.base, true, rowMajor));
         }
         // Not known and not in registers: each element in turn, chosen by the index.
         let result = element(0);

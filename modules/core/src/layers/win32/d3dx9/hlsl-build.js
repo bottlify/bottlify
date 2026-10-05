@@ -193,7 +193,9 @@ export function createBuilder(profile){
         const fitted = positional ? srcs : srcs.map(s=>fit(s, w));
         const key = `${op}/${w}/${extra.sat ? 's' : ''}${extra.texMode ?? ''}/${
             fitted.map(keyOf).join('/')}`;
-        const earlier = known.get(key);
+        // A relative read depends on what the address register holds when it runs.
+        const addressed = fitted.some(src=>src.kind === 'const' && src.relative);
+        const earlier = addressed ? undefined : known.get(key);
         if (earlier)
         {
             return earlier;
@@ -201,7 +203,10 @@ export function createBuilder(profile){
         const reg = newReg(w);
         instrs.push({ op, dest: { kind: 'reg', reg, mask: (1 << w) - 1 }, srcs: fitted, ...extra });
         const result = vec({ kind: 'reg', reg, swz: Array.from({ length: w }, (_, i)=>i) });
-        known.set(key, result);
+        if (!addressed)
+        {
+            known.set(key, result);
+        }
         return result;
     };
 
@@ -248,6 +253,14 @@ export function createBuilder(profile){
 
     /** @param {Vec} v @param {number} w @returns {Vec} */
     const splat = (v, w)=>(v.w === w ? v : swizzle(v, new Array(w).fill(0)));
+
+    /**
+     * The value in a register of its own, which is what a read through the
+     * address register must be before the address changes.
+     *
+     * @param {Vec} v @returns {Vec}
+     */
+    const copy = v=>(literal(v) ? v : emit('mov', v.w, [v.src]));
 
     /** @param {Vec} v @returns {Vec} */
     const neg = v=>{
@@ -843,7 +856,7 @@ export function createBuilder(profile){
         profile, instrs, inputs, outputs, constants, newReg, get vregCount(){
             return vregCount;
         },
-        vec, imm, num, literal, lane, swizzle, splat, neg, abs, cat, unify,
+        vec, imm, num, literal, copy, lane, swizzle, splat, neg, abs, cat, unify,
         add, sub, mul, mad, lrp, min, max, frc, rcp, rsq, exp2, log2, pow, derivative, div,
         sqrt, dot,
         select, selectGE0, lt, le, gt, ge, eq, ne, nonzero, not, and, or, reduce,
