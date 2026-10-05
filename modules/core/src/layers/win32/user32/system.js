@@ -18,7 +18,8 @@
  * input layer is a stub in this build, and saying "no key is down" is true.
  */
 
-import { formatToString, varargsSlots } from '../msvcrt/format.js';
+import { varargsSlots } from '../msvcrt/format.js';
+import { formatWsprintf } from './wsprintf.js';
 import {
     ANSI_PAGE, LANGID_EN_US, OEM_PAGE, decodeAnsi, decodeOem, encodeAnsi, encodeOem, mapCaseAnsi,
     transcodeSingleByte,
@@ -1145,6 +1146,12 @@ export function createSystemFunctions({ host, live, windows, classes }){
         host.writeMemory(address, bytes);
         return clipped.length;
     };
+
+    /** A wsprintf %S of a null pointer prints as a %s of one. @param {number} address */
+    const wideOrNull = address=>((address >>> 0) === 0 ? '(null)' : readWideString(address >>> 0));
+
+    /** A narrow character's byte, as the ANSI page has it. @param {number} byte */
+    const byteChar = byte=>decodeAnsi(Uint8Array.of(byte));
 
     /** In the ANSI page. @param {number} address @param {string} text @param {number} limit */
     const writeString = (address, text, limit)=>{
@@ -3102,8 +3109,8 @@ export function createSystemFunctions({ host, live, windows, classes }){
             handler: args=>{
                 const readString = (/** @type {number} */ address)=>
                     (address >>> 0) === 0 ? '(null)' : host.readCString(address, 0x10000);
-                const text = formatToString(readString(args[1]), args.slice(2), readString,
-                    { decodeBytes: decodeAnsi });
+                const text = formatWsprintf(readString(args[1]), args.slice(2),
+                    { readString, readWideString: wideOrNull, byteChar });
                 return writeString(args[0], text, text.length + 1);
             },
         },
@@ -3121,10 +3128,8 @@ export function createSystemFunctions({ host, live, windows, classes }){
             handler: args=>{
                 const readString = (/** @type {number} */ address)=>
                     (address >>> 0) === 0 ? '(null)' : host.readCString(address, 0x10000);
-                const readWide = (/** @type {number} */ address)=>
-                    (address >>> 0) === 0 ? '(null)' : readWideString(address >>> 0);
-                const text = formatToString(readWide(args[1]), args.slice(2), readString,
-                    { readWideString: readWide, wide: true, decodeBytes: decodeAnsi });
+                const text = formatWsprintf(wideOrNull(args[1]), args.slice(2),
+                    { readString, readWideString: wideOrNull, byteChar, wide: true });
                 return writeWideString(args[0], text, text.length + 1);
             },
         },
@@ -3146,8 +3151,8 @@ export function createSystemFunctions({ host, live, windows, classes }){
                     (address >>> 0) === 0 ? '(null)' : host.readCString(address, 0x10000);
                 const varargs = varargsSlots(host.readMemory,
                     address=>host.regionAt?.(address) ?? null, list >>> 0, VA_LIST_SLOTS);
-                const text = formatToString(readString(format), varargs, readString,
-                    { decodeBytes: decodeAnsi });
+                const text = formatWsprintf(readString(format), varargs,
+                    { readString, readWideString: wideOrNull, byteChar });
                 return writeString(out, text, text.length + 1);
             },
         },
@@ -3164,12 +3169,10 @@ export function createSystemFunctions({ host, live, windows, classes }){
             handler: ([out, format, list])=>{
                 const readString = (/** @type {number} */ address)=>
                     (address >>> 0) === 0 ? '(null)' : host.readCString(address, 0x10000);
-                const readWide = (/** @type {number} */ address)=>
-                    (address >>> 0) === 0 ? '(null)' : readWideString(address >>> 0);
                 const varargs = varargsSlots(host.readMemory,
                     address=>host.regionAt?.(address) ?? null, list >>> 0, VA_LIST_SLOTS);
-                const text = formatToString(readWide(format), varargs, readString,
-                    { readWideString: readWide, wide: true, decodeBytes: decodeAnsi });
+                const text = formatWsprintf(wideOrNull(format), varargs,
+                    { readString, readWideString: wideOrNull, byteChar, wide: true });
                 return writeWideString(out, text, text.length + 1);
             },
         },
