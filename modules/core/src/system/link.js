@@ -203,54 +203,70 @@ export function openLink(end, handlers){
         answer(id, true, result);
     };
 
+    /** The parts of a record still coming. @type {Uint8Array[]} */
+    const parts = [];
+    /**
+     * Records taken off the ring and not handled yet, in the order they came.
+     * A handler that makes a call of its own and waits for it pumps again
+     * from inside its record, and goes on from here: the ring's head would
+     * hand it that record a second time.
+     *
+     * @type {Uint8Array[]}
+     */
+    const taken = [];
+    /** @param {Uint8Array} bytes */
+    const handle = bytes=>{
+        let record = decodeValue(bytes);
+        if (record[0] === PART)
+        {
+            parts.push(record[2].slice());
+            if (!record[1])
+            {
+                return;
+            }
+            const whole = new Uint8Array(parts.reduce((sum, part)=>sum + part.length, 0));
+            let at = 0;
+            for (const part of parts.splice(0))
+            {
+                whole.set(part, at);
+                at += part.length;
+            }
+            record = decodeValue(whole);
+        }
+        if (record[0] === CALL)
+        {
+            dispatch(record[1], record[2], record[3], record[4]);
+            return;
+        }
+        const [, id, ok, value] = record;
+        const waiting = promised.get(id);
+        if (waiting)
+        {
+            promised.delete(id);
+            if (ok)
+            {
+                waiting.resolve(value);
+            }
+            else
+            {
+                waiting.reject(errorOf(value));
+            }
+            return;
+        }
+        arrived.set(id, { ok, value });
+    };
     /**
      * Handles everything the other side wrote: its calls, and the answers
      * to this side's. Returns how many records there were.
      */
-    /** The parts of a record still coming. @type {Uint8Array[]} */
-    const parts = [];
     const pump = ()=>{
         flush();
-        return inbound.drain(bytes=>{
-            let record = decodeValue(bytes);
-            if (record[0] === PART)
-            {
-                parts.push(record[2].slice());
-                if (!record[1])
-                {
-                    return;
-                }
-                const whole = new Uint8Array(parts.reduce((sum, part)=>sum + part.length, 0));
-                let at = 0;
-                for (const part of parts.splice(0))
-                {
-                    whole.set(part, at);
-                    at += part.length;
-                }
-                record = decodeValue(whole);
-            }
-            if (record[0] === CALL)
-            {
-                dispatch(record[1], record[2], record[3], record[4]);
-                return;
-            }
-            const [, id, ok, value] = record;
-            const waiting = promised.get(id);
-            if (waiting)
-            {
-                promised.delete(id);
-                if (ok)
-                {
-                    waiting.resolve(value);
-                }
-                else
-                {
-                    waiting.reject(errorOf(value));
-                }
-                return;
-            }
-            arrived.set(id, { ok, value });
-        });
+        const count = inbound.drain(bytes=>void taken.push(bytes.slice()));
+        while (taken.length > 0)
+        {
+            handle(/** @type {Uint8Array} */ (taken.shift()));
+        }
+        return count;
     };
 
     /** Whether this thread may block: never the page's own. */

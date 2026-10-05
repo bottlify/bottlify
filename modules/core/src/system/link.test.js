@@ -179,6 +179,34 @@ test('what a process told the system before the link closed is heard, nothing wa
         assert.deepEqual(heard, [...Array(20).keys()]);
     });
 
+test('a call answered by waiting on a call of its own is handled once, and the calls after it'
+    + ' in their order', { timeout: 20000 }, async()=>{
+    const { a, b } = createLinkMemory();
+    /** @type {any[]} */
+    const read = [];
+    const system = openLink(a, {
+        processes: { start: ()=>{
+            read.push(system.call('parent', 'read', [1]), system.call('parent', 'read', [2]));
+            return true;
+        } },
+        volume: { get: (/** @type {number} */ n)=>n * 10 },
+    });
+    const serving = system.serve();
+    const order = await processThread(b, `
+        link.callWaiting('processes', 'start', []);
+        return globalThis.order;`, `{ parent: { read: n=>{
+            (globalThis.order ??= []).push('in ' + n);
+            const got = link.callWaiting('volume', 'get', [n]);
+            globalThis.order.push('out ' + n);
+            return got;
+        } } }`);
+    assert.deepEqual(await Promise.all(read), [10, 20]);
+    assert.deepEqual(order, ['in 1', 'in 2', 'out 2', 'out 1'],
+        'each once; the second, come while the first waited, handled inside that wait');
+    system.close();
+    await serving;
+});
+
 test('a failure crosses with what it says of itself, not only its message', { timeout: 20000 },
     async()=>{
         const { a, b } = createLinkMemory();
