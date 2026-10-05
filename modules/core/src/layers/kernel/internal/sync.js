@@ -619,6 +619,29 @@ export function createSyncObjects({ scheduler, remote = null }){
         },
 
         /**
+         * Asks whether any of several objects is available now, taking the
+         * first that is, in the order given, and never queues the thread. An
+         * object another process holds is asked there; this is how a set
+         * holding one is waited on by a caller that asks again on every turn,
+         * as a message wait does.
+         *
+         * @param {any[]} objects_
+         * @param {any} thread
+         * @returns {{ index: number, result: number } | null}
+         */
+        pollAny(objects_, thread){
+            for (let i = 0; i < objects_.length; i++)
+            {
+                const result = api.poll(objects_[i], thread);
+                if (result !== null)
+                {
+                    return { index: i, result };
+                }
+            }
+            return null;
+        },
+
+        /**
          * Waits for all of several objects.
          *
          * Nothing is taken until everything is available. Acquiring what is ready

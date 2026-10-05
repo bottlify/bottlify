@@ -440,3 +440,34 @@ test('a wait on another process\'s object that ends while it is being asked for 
             'answered at once: the object is the thread\'s');
         assert.deepEqual(scheduler.log, [], 'never blocked, so nothing to wake');
     });
+
+test('a poll of a set holding another process\'s object asks that object there, in order, and'
+    + ' takes the first that is ready', ()=>{
+    const scheduler = fakeScheduler();
+    /** @type {number[]} */
+    const asked = [];
+    let ready = false;
+    const remote = /** @type {any} */ ({
+        /** @param {number} id */
+        poll: id=>{
+            asked.push(id);
+            return ready ? WaitResult.OBJECT_0 : null;
+        },
+    });
+    const sync = createSyncObjects({ scheduler, remote });
+    const local = sync.createEvent({ manualReset: false, signalled: false, name: 'here' });
+    const theirs = sync.createEvent({ manualReset: false, signalled: false, name: 'there' });
+    /** @type {any} */ (theirs).remote = 7;
+    const poller = /** @type {any} */ ({ ...thread('poller'), id: 3 });
+    assert.equal(sync.pollAny([local, theirs], poller), null, 'neither is ready');
+    assert.deepEqual(asked, [7], 'the other process was asked');
+    ready = true;
+    assert.deepEqual(sync.pollAny([local, theirs], poller),
+        { index: 1, result: WaitResult.OBJECT_0 });
+    sync.setEvent(local);
+    assert.deepEqual(sync.pollAny([local, theirs], poller),
+        { index: 0, result: WaitResult.OBJECT_0 },
+        'the first ready one is taken, and the other is not asked');
+    assert.deepEqual(asked, [7, 7]);
+    assert.deepEqual(scheduler.log, [], 'a poll never blocks');
+});

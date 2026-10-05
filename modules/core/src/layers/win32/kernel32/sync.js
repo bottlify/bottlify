@@ -687,6 +687,18 @@ export function createSyncFunctions(host){
                 // never blocks, so a program checking is not stopped by the
                 // question.
                 const wait = timeout >>> 0;
+                // An object another process of the run holds is answered there:
+                // its stand-in here says nothing of whether it is signalled.
+                if (wait === 0 && !waitAll && objects.some(target=>target.remote))
+                {
+                    const any = kernel.pollAny(objects, thread);
+                    if (any === null)
+                    {
+                        return WAIT_TIMEOUT;
+                    }
+                    const base = any.result === KERNEL_ABANDONED ? WAIT_ABANDONED_0 : WAIT_OBJECT_0;
+                    return (base + indices[any.index]) >>> 0;
+                }
                 if (wait === 0)
                 {
                     const satisfied = waitAll

@@ -637,6 +637,10 @@ export function createKernelModule(){
                 waitAny: (objects, thread, timed)=>live()
                     ? state.sync.waitAny(objects, thread, timed)
                     : { index: -1, result: WaitResult.FAILED },
+                /** @param {any[]} objects @param {any} thread */
+                pollAny: (objects, thread)=>(live()
+                    ? state.sync.pollAny(objects, thread)
+                    : { index: -1, result: WaitResult.FAILED }),
                 setEvent: (/** @type {any} */ object)=>live() ? state.sync.setEvent(object) : [],
                 resetEvent: (/** @type {any} */ object)=>{
                     if (live())
