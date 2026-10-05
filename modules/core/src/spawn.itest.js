@@ -907,3 +907,32 @@ for (const processWorkers of [false, true])
             'the child woke on its parent\'s SetEvent and exited with 7');
     });
 }
+
+test('a child beside its parent plays its sound in a span its parent lent it, and leaves the'
+    + ' parent\'s sound as it is', { timeout: 60000 }, async t=>{
+    const { parent, child } = buildEventPair();
+    /** @param {any} [mode] */
+    const arenaOfChild = async mode=>{
+        const app = await createApp({
+            executable: parent,
+            imagePath: 'C:\\App\\parent.exe',
+            engine: 'cork',
+            ...mode ? { mode } : {},
+            storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
+        });
+        t.after(()=>app.dispose());
+        /** @type {number[]} */
+        const free = [];
+        app.on('process-started', ()=>{
+            const audio = app.diagnostics().find((/** @type {any} */ layer)=>
+                layer.name === 'audio');
+            free.push(audio.metrics.arenaFree);
+        });
+        await app.run({ timeoutMs: 30000 });
+        return free;
+    };
+    assert.deepEqual(await arenaOfChild('workers'), [4 << 20],
+        'beside its parent: the span lent, not the whole arena under the parent\'s voices');
+    assert.deepEqual(await arenaOfChild(), [16 << 20],
+        'in its parent\'s place: the whole arena, as before');
+});

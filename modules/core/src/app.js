@@ -133,7 +133,8 @@ import { openProcessWorker } from './host/process-worker.js';
  *     something a caller supplies.
  * @property {{ drained?: boolean, sampleRate?: number, mp3?: boolean, shared?: boolean,
  *     memory?: { control: ArrayBufferLike, samples: ArrayBufferLike }
- *         | { table: ArrayBufferLike } }} [audio]
+ *         | { table: ArrayBufferLike },
+ *     beside?: { arena: [number, number] | null } }} [audio]
  *     Sound leaves through a shared track table a worklet reads, or -- with no
  *     shared memory to hand one -- a ring the engine thread mixes into itself.
  *     `drained` says that something on the other side is really reading, which
@@ -3279,6 +3280,10 @@ async function buildApp(options){
             // holds instead of orphaning it on a buffer nothing reads. Absent
             // on the first process, which makes its own.
             memory: options.audio?.memory,
+            // A process beside another on that storage rather than in its
+            // place: the arena span it was lent, and nothing of the other's
+            // closed.
+            beside: options.audio?.beside,
             // Shared memory is what a worklet needs to read the far end at
             // all, so this is an environment question answered here rather
             // than guessed inside the mixer: without it (a page that is not
@@ -6488,6 +6493,10 @@ async function buildApp(options){
          * without shared memory reads `ring()` directly).
          */
         audio: {
+            /** A span of the output's arena for a process beside this one. @param {number} bytes */
+            lend: bytes=>core.api('audio').output().lend?.(bytes) ?? -1,
+            /** @param {number} offset @param {number} bytes */
+            takeBack: (offset, bytes)=>core.api('audio').output().takeBack?.(offset, bytes),
             ring: ()=>core.api('audio').output().ring,
             table: ()=>core.api('audio').output().table,
             memory: ()=>core.api('audio').output().memory,
@@ -7200,6 +7209,43 @@ export async function createApp(options){
     };
 
     /**
+     * The sound a process started beside `parent` plays into: the run's
+     * output, its slots taken as free ones come, and a span of the parent's
+     * arena lent for its voices' mirrors -- the largest of four, two, one or
+     * half a mebibyte the parent has free, or none, its buffers then played
+     * through queues. Given back once the process is gone and has closed
+     * what it held.
+     *
+     * @param {any} parent
+     */
+    const lendSound = parent=>{
+        let bytes = 4 << 20;
+        let span = -1;
+        for (; bytes >= 512 << 10 && span < 0; bytes /= 2)
+        {
+            span = parent.audio?.lend?.(bytes) ?? -1;
+        }
+        bytes *= 2;
+        return {
+            options: { ...options.audio, memory: audioMemory,
+                beside: { arena: span >= 0 ? [span, bytes] : null } },
+            giveBack(){
+                if (span >= 0)
+                {
+                    try
+                    {
+                        parent.audio.takeBack(span, bytes);
+                    }
+                    catch {
+                        // The parent went before the process it lent to.
+                    }
+                    span = -1;
+                }
+            },
+        };
+    };
+
+    /**
      * Starts a class's server beside the process that asked for it, with
      * `-Embedding` after its command line as COM starts one, and runs it
      * alongside every other process until it exits. The page sees and
@@ -7211,6 +7257,7 @@ export async function createApp(options){
      */
     const startServer = async(parent, request)=>{
         const found = await serverImage(parent, request.command);
+        const sound = lendSound(parent);
         if (!found)
         {
             events.emit('divergence', { api: 'COM',
@@ -7222,6 +7269,7 @@ export async function createApp(options){
             imagePath: found.path,
             commandLine: `${request.command.trim()} -Embedding`,
             ...newProcessIds(),
+            audio: sound.options,
         });
         // A line of processes of its own: a server that starts a child and
         // waits on it, or hands over to another image, is run the way the
@@ -7244,6 +7292,7 @@ export async function createApp(options){
         serving.delete(line);
         noteMachines();
         await line.current.dispose();
+        sound.giveBack();
         Object.assign(facade, current, own);
         bindLogLevels();
         events.emit('process-server-exit', { image: found.path, code });
@@ -7474,6 +7523,7 @@ export async function createApp(options){
         const running = (async()=>{
             /** @type {any} */
             let child = null;
+            const sound = lendSound(parent);
             try
             {
                 const image = await parent.readImage(request.imagePath);
@@ -7494,6 +7544,7 @@ export async function createApp(options){
                         processId: request.id,
                         mainThreadId: request.threadId,
                         standardFiles: request.standardFiles,
+                        audio: sound.options,
                     });
                 }
             }
@@ -7506,6 +7557,7 @@ export async function createApp(options){
             }
             if (!child)
             {
+                sound.giveBack();
                 parent.childExited(request, 2);
                 return 2;
             }
@@ -7528,6 +7580,7 @@ export async function createApp(options){
             noteLogSequence();
             mediaInstance = ended.media.instance() ?? mediaInstance;
             await ended.dispose();
+            sound.giveBack();
             // The page sees whoever stands in the main line again.
             replayLogLevels();
             Object.assign(facade, mainLine.current, own);

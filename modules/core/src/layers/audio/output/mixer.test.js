@@ -11,7 +11,8 @@ import { createMixer } from './mixer.js';
 import { createRing } from './ring.js';
 import {
     WRITTEN, DROP_TO, READ, STATE, STATE_FREE, SLOTS, MIXED_FRAMES, slotHeaderOffset, slotPcmOffset,
-    SLOT_HEADER_INT32, SLOT_BYTES, RATE, createSeam, resampleInto, FRESH, STREAMING,
+    SLOT_HEADER_INT32, SLOT_BYTES, RATE, createSeam, resampleInto, FRESH, STREAMING, BASE,
+    STATE_OPEN, STATE_CLOSING,
 } from './mix.js';
 
 /** Sixteen-bit stereo at the output's own rate: no conversion in the way. */
@@ -696,4 +697,39 @@ test('a voice written whole again and again while it plays is no stream', ()=>{
     assert.equal(Atomics.load(header, STREAMING), 1, 'written in pieces after, it is one');
     voice.wrote(0, 4000);
     assert.equal(Atomics.load(header, STREAMING), 0, 'and a whole write ends it');
+});
+
+test('a mixer beside another on one table leaves the other\'s slots open, plays its voices in the'
+    + ' span it was lent, and closes its own when it goes', ()=>{
+    // Two processes at once on one thread: a child started beside its parent
+    // is not the parent's replacement, and the parent goes on playing.
+    const voice = { ...DIRECT, bytes: 4096 };
+    const parent = createMixer({ shared: true });
+    const theirs = /** @type {any} */ (parent.openVoice(voice));
+    const base = (/** @type {any} */ mixer, /** @type {number} */ slot)=>
+        Atomics.load(slotView(mixer, slot).header, BASE);
+    const lent = 1 << 20;
+    const span = parent.lend(lent);
+    assert.ok(span >= 0, 'the parent had room to lend');
+
+    const child = createMixer({ shared: true, memory: parent.memory,
+        beside: { arena: [span, lent] } });
+    const state = (/** @type {number} */ slot)=>Atomics.load(slotView(parent, slot).header, STATE);
+    assert.equal(state(theirs.slot), STATE_OPEN, 'the parent\'s voice still plays');
+
+    const mine = /** @type {any} */ (child.openVoice(voice));
+    assert.notEqual(mine.slot, theirs.slot);
+    const at = base(child, mine.slot);
+    assert.ok(at >= span && at + voice.bytes <= span + lent,
+        'the child\'s mirror is in the span it was lent');
+    const parents = base(parent, theirs.slot);
+    assert.ok(at >= parents + voice.bytes || at + voice.bytes <= parents,
+        'and nowhere in the parent\'s');
+
+    child.close();
+    assert.equal(state(mine.slot), STATE_CLOSING, 'what the child held goes with it');
+    assert.equal(state(theirs.slot), STATE_OPEN, 'and the parent\'s does not');
+    const free = parent.diagnostics().arenaFree;
+    parent.takeBack(span, lent);
+    assert.equal(parent.diagnostics().arenaFree, free + lent, 'the span is the parent\'s again');
 });
