@@ -13,6 +13,7 @@
  */
 
 import { encodeAnsi } from '../kernel32/locale.js';
+import { createForwards } from './forwards.js';
 
 /** As long as a path a program hands these may be, terminator included. */
 const MAX_LENGTH = 0x1000;
@@ -119,6 +120,10 @@ const isSeparator = c=>c === '\\' || c === '/';
  * @property {(bytes: number) => number} [allocate]
  * @property {(address: number) => void} [free]
  *           Guest memory for the handle and counts a helper asks advapi32 for.
+ * @property {(library: string) => Record<string, { handler: (args: number[]) => any }> | undefined}
+ *     [library]  Another library's exports, for the exports that are only another library's
+ *           function under a number (`forwards.js`). Absent, those are not bound.
+ * @property {(api: string, detail: string) => void} [divergence]
  */
 
 /**
@@ -489,6 +494,8 @@ export function createShlwapiFunctions(host){
     });
 
     return {
+        ...(host.library ? createForwards(host.library, host.divergence) : {}),
+
         /**
          * DWORD SHDeleteKeyA(HKEY hkey, LPCSTR pszSubKey)
          *

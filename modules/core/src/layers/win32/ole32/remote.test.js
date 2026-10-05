@@ -77,3 +77,29 @@ test('a suspended registration is handed to no new client until resumed again', 
     table.resume(1);
     assert.equal(table.take('A')?.endpoint, 1);
 });
+
+test('an RPC endpoint is one process\'s: a second to claim it is refused, and it goes with its'
+    + ' process', async()=>{
+    const table = createClassTable();
+    const first = {};
+    const id = table.attach({ process: first, alive: true, deliver: async()=>({}),
+        rundown: async()=>{} });
+    const other = table.attach({ process: {}, alive: true, deliver: async()=>({}),
+        rundown: async()=>{} });
+    assert.equal(table.rpcServer('ncalrpc:one'), null);
+    assert.equal(table.rpcListen('ncalrpc:one', id), true);
+    assert.equal(table.rpcListen('ncalrpc:one', id), true, 'the process that has it asks again');
+    assert.equal(table.rpcListen('ncalrpc:one', other), false, 'another process cannot have it');
+    assert.equal(table.rpcServer('ncalrpc:one'), id);
+
+    table.rpcUnlisten(id, 'ncalrpc:one');
+    assert.equal(table.rpcServer('ncalrpc:one'), null);
+    assert.equal(table.rpcListen('ncalrpc:one', other), true, 'and it is free again');
+
+    assert.equal(table.rpcListen('ncacn_np:\\pipe\\two', id), true);
+    assert.equal(table.rpcListen('ncalrpc:three', id), true);
+    await table.ended(first);
+    assert.equal(table.rpcServer('ncacn_np:\\pipe\\two'), null, 'what a process listened on goes');
+    assert.equal(table.rpcServer('ncalrpc:three'), null);
+    assert.equal(table.rpcServer('ncalrpc:one'), other, 'another process\'s stays');
+});

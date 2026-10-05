@@ -11,6 +11,7 @@
  */
 
 import { GUID_SIZE, formatGuid, parseGuid } from '../ole32/guid.js';
+import { createMidl } from './midl.js';
 import { createRuntime } from './runtime.js';
 
 /** The RPC statuses. */
@@ -35,6 +36,13 @@ const UUID_STRING_LENGTH = 36;
  *           What the proxy/stub runtime needs besides memory: calls into the
  *           guest, raising on the calling thread, the registry and ole32's
  *           marshaler. Absent, a proxy/stub DLL's entry points are not bound.
+ * @property {Omit<import('./midl.js').MidlHost, 'readMemory' | 'writeMemory' | 'readCString'
+ *     | 'readWideString' | 'allocate' | 'free' | 'divergence'>} [midl]
+ *           What serving and calling an interface of MIDL's generated stubs
+ *           needs besides memory: the run's table to find a server by its
+ *           endpoint in, calls into the guest and raising on the calling
+ *           thread. Absent, those entry points are not bound.
+ * @property {(address: number) => string} [readWideString]
  */
 
 /**
@@ -62,8 +70,24 @@ export function createRpcFunctions(host){
         })
         : {};
 
+    /** @type {Partial<ReturnType<typeof createMidl>>} */
+    const midl = host.midl && host.readMemory && host.allocate && host.free && host.readCString
+        && host.readWideString
+        ? createMidl({
+            ...host.midl,
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            readCString: host.readCString,
+            readWideString: host.readWideString,
+            allocate: host.allocate,
+            free: host.free,
+            divergence: detail=>report('rpcrt4', detail),
+        })
+        : {};
+
     return {
         ...runtime,
+        ...midl,
 
         /**
          * RPC_STATUS UuidCreate(UUID *Uuid)

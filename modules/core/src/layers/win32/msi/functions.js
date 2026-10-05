@@ -34,6 +34,7 @@ import { formatRecord } from './format.js';
 import { INSTALLSTATE, createSession } from './session.js';
 import { PID_TYPES, VT, readSummary } from './summary.js';
 import { INSTALLMESSAGE, doAction, readFile, runSequence } from './actions.js';
+import { finishAsync } from './custom.js';
 import { createRegistration } from './registration.js';
 import { installerVersion } from './version.js';
 import { encodeAnsi } from '../kernel32/locale.js';
@@ -48,6 +49,10 @@ const ERROR_MORE_DATA = 234;
 const ERROR_DIRECTORY = 267;
 const ERROR_FILE_INVALID = 1006;
 const ERROR_INVALID_DATATYPE = 1804;
+/** What GetExitCodeThread answers for a thread that has not ended. */
+const STILL_ACTIVE = 259;
+/** How often a library action run beside the installation is looked at for its end. */
+const THREAD_POLL_MS = 5;
 const ERROR_INSTALL_PACKAGE_OPEN_FAILED = 1619;
 const ERROR_INSTALL_PACKAGE_INVALID = 1620;
 const ERROR_UNKNOWN_FEATURE = 1606;
@@ -101,6 +106,13 @@ const IDOK = 1;
  * @property {{ loadAnsi: (name: number) => number | Promise<number>,
  *     procAddress: (module: number, name: number) => number | Promise<number>,
  *     free: (module: number) => number | Promise<number> }} libraries
+ * @property {{ start: (entry: number, argument: number) => number | Promise<number>,
+ *     exitCode: (thread: number) => number | Promise<number>,
+ *     terminate: (thread: number) => unknown,
+ *     close: (thread: number) => unknown }} [threads]
+ *     Threads of the process, for a library action that runs beside the installation: one
+ *     started at an export with its argument, and its handle; asked for its exit code (259
+ *     while it runs), ended, and given up.
  * @property {() => import('./session.js').Machine} machine
  * @property {(text: string, caption: string, flags: number) => number | Promise<number>}
  *     [messageBox]
@@ -315,6 +327,7 @@ export function createMsiFunctions(host){
                 executing: false,
                 ran: new Set(),
                 commit: [],
+                async: [],
                 host: {
                     files: host.files,
                     hive: host.hive,
@@ -325,6 +338,7 @@ export function createMsiFunctions(host){
                         handles.delete(handle);
                     },
                     callDll,
+                    startDll,
                     runExe: async(commandLine, directory, wait)=>
                         host.runExe?.(commandLine, directory, wait) ?? null,
                     divergence: host.divergence,
@@ -384,6 +398,56 @@ export function createMsiFunctions(host){
         {
             await host.libraries.free(module >>> 0);
         }
+    }
+
+    /**
+     * Loads a library and starts one of its exports on a thread of its own,
+     * which goes on after this returns: a library action that runs beside the
+     * installation. The library is freed when the thread is over.
+     *
+     * @param {string} path @param {string} entry @param {number[]} args
+     * @returns {Promise<{ done: Promise<number | null>, stop: () => void } | null>}
+     */
+    async function startDll(path, entry, args){
+        const threads = host.threads;
+        if (!threads)
+        {
+            host.divergence?.('MSI', 'a custom action that runs beside the installation has no'
+                + ' thread to run on');
+            return null;
+        }
+        const module = await withString(path, name=>host.libraries.loadAnsi(name));
+        if (!module)
+        {
+            return null;
+        }
+        const address = await withString(entry,
+            name=>host.libraries.procAddress(module >>> 0, name));
+        const thread = address ? await threads.start(address >>> 0, args[0] ?? 0) : 0;
+        if (!thread)
+        {
+            await host.libraries.free(module >>> 0);
+            return null;
+        }
+        const done = new Promise(resolve=>{
+            const poll = async()=>{
+                const code = await threads.exitCode(thread);
+                if (code === STILL_ACTIVE)
+                {
+                    setTimeout(poll, THREAD_POLL_MS);
+                    return;
+                }
+                resolve(code >>> 0);
+            };
+            poll();
+        }).then(async code=>{
+            await threads.close(thread);
+            await host.libraries.free(module >>> 0);
+            return /** @type {number} */ (code);
+        });
+        return { done, stop: ()=>{
+            threads.terminate(thread);
+        } };
     }
 
     /**
@@ -474,6 +538,11 @@ export function createMsiFunctions(host){
         }
         finally
         {
+            const late = await finishAsync(engine);
+            if (code === ERROR_SUCCESS && late !== ERROR_SUCCESS)
+            {
+                code = late;
+            }
             await deliver(INSTALLMESSAGE.TERMINATE, createRecord(0), session);
             engines.delete(session);
         }

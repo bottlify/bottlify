@@ -195,6 +195,33 @@ async function execute(engine, row, kind, flags, data){
             return answer(ERROR_INSTALL_FAILURE);
         }
         const handle = host.openHandle(session, data);
+        if ((flags & ASYNC) !== 0)
+        {
+            // In parallel with the sequence: the library's code is on a thread
+            // of its own, and what it was given stays until it is over.
+            const started = await host.startDll(path, row.target ?? '', [handle]);
+            const release = ()=>{
+                host.closeHandle(handle);
+                if (temporary)
+                {
+                    host.files.remove(path);
+                }
+            };
+            if (!started)
+            {
+                release();
+                host.log?.(`Custom action ${row.action} could not be started.`);
+                return answer(ERROR_INSTALL_FAILURE);
+            }
+            host.log?.(`Custom action ${row.action} started.`);
+            const action = { name: row.action, wait: !ignore, over: false, stop: started.stop,
+                done: started.done.finally(()=>{
+                    action.over = true;
+                    release();
+                }) };
+            engine.async.push(action);
+            return ERROR_SUCCESS;
+        }
         try
         {
             const code = await host.callDll(path, row.target ?? '', [handle]);
@@ -264,6 +291,40 @@ async function execute(engine, row, kind, flags, data){
         return answer(ERROR_INSTALL_FAILURE);
     }
     return answer(ERROR_FUNCTION_NOT_CALLED);
+}
+
+/**
+ * The end of an installation for the actions that ran beside it: the ones it
+ * waits for are waited for, and a failure of one is the installation's; the
+ * rest are stopped if they have not finished, as Windows ends them with the
+ * installation.
+ *
+ * @param {import('./actions.js').Engine} engine
+ * @returns {Promise<number>} the failure of one that was waited for, or success
+ */
+export async function finishAsync(engine){
+    let failure = ERROR_SUCCESS;
+    for (const action of engine.async.splice(0))
+    {
+        if (action.wait)
+        {
+            const code = await action.done;
+            engine.host.log?.(`Custom action ${action.name} answered ${code}.`);
+            if (code === null || sequenceAnswer(code >>> 0) === ERROR_INSTALL_FAILURE)
+            {
+                failure = code ?? ERROR_INSTALL_FAILURE;
+            }
+        }
+        else
+        {
+            if (!action.over)
+            {
+                action.stop();
+            }
+            await action.done;
+        }
+    }
+    return failure;
 }
 
 /**

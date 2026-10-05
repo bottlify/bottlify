@@ -77,6 +77,11 @@ const COMPONENT_REGISTRY_KEY_PATH = 0x4;
  * @property {(handle: number) => void} closeHandle
  * @property {(path: string, entry: string, args: number[]) => Promise<number | null>} callDll
  *           Loads a library, calls an export stdcall and frees it; null when it is not there.
+ * @property {(path: string, entry: string, args: number[])
+ *     => Promise<{ done: Promise<number | null>, stop: () => void } | null>} startDll
+ *           The same on a thread of its own, which goes on while this returns: the answer when it
+ *           ends, and a way to end it; the library is freed when it is over. Null when it cannot
+ *           be started.
  * @property {(commandLine: string, directory: string | null, wait: boolean)
  *     => Promise<number | null>} runExe
  *           Starts a program; its exit code when waited for, null when it could not start.
@@ -91,6 +96,9 @@ const COMPONENT_REGISTRY_KEY_PATH = 0x4;
  * @property {Set<string>} ran   Custom actions that ran, for the once-only kinds.
  * @property {boolean} executing  In the execute sequence rather than the UI one.
  * @property {{ run: () => Promise<number> }[]} commit  Commit custom actions, after the script.
+ * @property {{ name: string, wait: boolean, over: boolean, done: Promise<number | null>,
+ *     stop: () => void }[]} async  Library actions that run beside the installation, until it is
+ *     over.
  */
 
 /** @param {Engine} engine @param {string} text */

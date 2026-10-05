@@ -87,6 +87,7 @@ import { createMsiFunctions } from './msi/functions.js';
 import { createEventLogFunctions } from './advapi32/eventlog.js';
 import { createCabinetFunctions } from './cabinet/functions.js';
 import { MSI_ORDINALS } from './msi/ordinals.js';
+import { SHLWAPI_ORDINALS } from './shlwapi/forwards.js';
 import { COMPUTER_NAME } from './kernel32/drives.js';
 import { USER_NAME } from './advapi32/functions.js';
 import { createWintrustFunctions } from './wintrust/functions.js';
@@ -97,6 +98,7 @@ import { createAcmFunctions } from './msacm32/functions.js';
 import { createThemeFunctions } from './uxtheme/functions.js';
 import { createWininetFunctions } from './wininet/functions.js';
 import { createOleFunctions, createTaskAllocator } from './ole32/functions.js';
+import { createClassTable } from './ole32/remote.js';
 import { createAutomationFunctions, OLEAUT32_ORDINALS } from './oleaut32/functions.js';
 import { createNtdllFunctions } from './ntdll/functions.js';
 import { createComObject, createComRegistry } from './ole32/objects.js';
@@ -392,6 +394,11 @@ export function createWin32Module(){
             };
             const readWideString = (/** @type {number} */ address, /** @type {number} */ maxLength)=>
                 memory.readWideString(address, maxLength);
+
+            // The run's class table, which is also where RPC endpoints are
+            // found: COM and RPC between processes meet in the one table, and
+            // a process with no run around it has one of its own.
+            const comHost = config?.com ?? { table: createClassTable(), process: null };
 
             /** Everything a table needs from the kernel's handle table. */
             const handles = {
@@ -1863,6 +1870,11 @@ export function createWin32Module(){
                     allocate: bytes=>heap.allocate(bytes),
                     /** @param {number} address */
                     free: address=>heap.free(address),
+                    // The exports that are another library's function, as it is
+                    // when they are called: the table is still being built here.
+                    /** @param {string} name */
+                    library: name=>libraries[name],
+                    divergence: config?.divergence,
                 }),
 
                 'ADVPACK.dll': createAdvpackFunctions({
@@ -1982,6 +1994,27 @@ export function createWin32Module(){
                             libraries['KERNEL32.dll'].GetProcAddress.handler([module, name]),
                         /** @param {number} module */
                         free: module=>libraries['KERNEL32.dll'].FreeLibrary.handler([module]),
+                    },
+                    // A library action that runs beside the installation is a
+                    // thread of the process, as Windows Installer makes one.
+                    threads: {
+                        /** @param {number} entry @param {number} argument */
+                        start: (entry, argument)=>
+                            libraries['KERNEL32.dll'].CreateThread.handler(
+                                [0, 0, entry, argument, 0, 0]) >>> 0,
+                        /** @param {number} thread */
+                        exitCode: thread=>{
+                            const slot = heap.allocate(4);
+                            libraries['KERNEL32.dll'].GetExitCodeThread.handler([thread, slot]);
+                            const code = memory.readU32(slot);
+                            heap.free(slot);
+                            return code;
+                        },
+                        /** @param {number} thread */
+                        terminate: thread=>
+                            libraries['KERNEL32.dll'].TerminateThread.handler([thread, 0]),
+                        /** @param {number} thread */
+                        close: thread=>libraries['KERNEL32.dll'].CloseHandle.handler([thread]),
                     },
                     machine: ()=>({
                         windows,
@@ -2381,7 +2414,7 @@ export function createWin32Module(){
                     // The run's class objects served out of process, and the
                     // hidden window each apartment takes other processes'
                     // calls through, as ole32's own does.
-                    com: config?.com,
+                    com: comHost,
                     apartmentWindow: {
                         create: handler=>apartmentWindow(handler),
                         /** @param {number} window @param {number} message */
@@ -2471,7 +2504,9 @@ export function createWin32Module(){
                 }),
 
                 'RPCRT4.dll': createRpcFunctions({
-                    writeMemory, readCString, readMemory, divergence: config?.divergence,
+                    writeMemory, readCString, readMemory,
+                    readWideString: address=>readWideString(address, 1024),
+                    divergence: config?.divergence,
                     /** @param {number} bytes */
                     allocate: bytes=>heap.allocate(bytes),
                     /** @param {number} address */
@@ -2491,6 +2526,24 @@ export function createWin32Module(){
                         hive,
                         modulePath,
                         marshaler: ()=>objrefMarshaler,
+                    },
+                    // An interface of MIDL's generated stubs, served and
+                    // called between processes through the run's table: the
+                    // stub runs on the thread that listens, and a call that
+                    // fails is raised on the thread that made it.
+                    midl: {
+                        call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                        guardedCall: (entry, args, thread)=>callGuarded({
+                            entry, args, thread, failed: 0x80010105,
+                            report: (code, at)=>config?.divergence?.('RPC',
+                                `exception 0x${code} at 0x${at} in a stub called by another`
+                                + ' process, answered RPC_S_CALL_FAILED'),
+                        }),
+                        callerThread: ()=>bridge.callerThread(),
+                        raise: code=>raiseRpc(code),
+                        raiseLater: (code, thread)=>raiseRpcLater(code, thread),
+                        table: comHost.table,
+                        process: comHost.process,
                     },
                 }),
 
@@ -2673,6 +2726,9 @@ export function createWin32Module(){
                     'WINMM.dll': WINMM_ORDINALS,
                     'SFC.dll': SFC_ORDINALS,
                     'MSI.dll': MSI_ORDINALS,
+                    // A program of the 9x era imports shlwapi's wide-character
+                    // wrappers by number alone.
+                    'SHLWAPI.dll': SHLWAPI_ORDINALS,
                 }),
 
                 /**

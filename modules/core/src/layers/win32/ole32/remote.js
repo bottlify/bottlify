@@ -174,6 +174,15 @@ export function createClassTable(hooks = {}){
      */
     const running = new Map();
     let nextRunning = 1;
+    /**
+     * The RPC endpoints processes listen on -- the protocol sequence and the
+     * endpoint a server named, as one key -- and the endpoint of the process
+     * that has each: what Windows' endpoint mapper is to its service control
+     * manager, kept here beside it.
+     *
+     * @type {Map<string, number>}
+     */
+    const listening = new Map();
 
     const wake = ()=>{
         const woken = waiting;
@@ -249,6 +258,45 @@ export function createClassTable(hooks = {}){
                 entry.used = true;
             }
             return entry;
+        },
+
+        /**
+         * A process claims an RPC endpoint: refused when another has it, and
+         * a process that asks again for its own is given it again.
+         *
+         * @param {string} key @param {number} endpoint @returns {boolean}
+         */
+        rpcListen(key, endpoint){
+            const held = listening.get(key);
+            if (held !== undefined && held !== endpoint)
+            {
+                return false;
+            }
+            listening.set(key, endpoint);
+            return true;
+        },
+
+        /**
+         * The process listening on an RPC endpoint, as the endpoint it is
+         * delivered to by, or null when none is.
+         *
+         * @param {string} key @returns {number | null}
+         */
+        rpcServer: key=>listening.get(key) ?? null,
+
+        /**
+         * A process gives up an RPC endpoint, or every one it has.
+         *
+         * @param {number} endpoint @param {string} [key]
+         */
+        rpcUnlisten(endpoint, key){
+            for (const [held, owner] of listening)
+            {
+                if (owner === endpoint && (key === undefined || key === held))
+                {
+                    listening.delete(held);
+                }
+            }
         },
 
         /**
@@ -336,6 +384,13 @@ export function createClassTable(hooks = {}){
                 }
                 endpoint.alive = false;
                 classes = classes.filter(entry=>entry.endpoint !== id);
+                for (const [key, owner] of listening)
+                {
+                    if (owner === id)
+                    {
+                        listening.delete(key);
+                    }
+                }
                 // What it registered, and what it held no longer has a server.
                 for (const [cookie, entry] of running)
                 {
