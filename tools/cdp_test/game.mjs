@@ -460,6 +460,9 @@ function parse(argv){
         // `crossOriginIsolated` with `SharedArrayBuffer` -- what the shared-
         // table audio backend and its worklet need to run at all.
         coi: argv.includes('--coi'),
+        // The run's mode, and whether a child runs in a worker of its own.
+        mode: argv.includes('--mode') ? argv[argv.indexOf('--mode') + 1] : undefined,
+        processWorkers: argv.includes('--process-workers'),
     };
 }
 
@@ -1373,6 +1376,8 @@ export async function game(options){
             hooks: options.watches,
             peeks: options.peeks,
             maxTurns: options.turns,
+            mode: options.mode,
+            processWorkers: options.processWorkers || undefined,
             maxMs: options.runSeconds > 0 ? options.runSeconds * 1000 : null,
             // A harness run is a diagnostic one: the translator's timings and its
             // record of long holds are on unless the run turns them off.

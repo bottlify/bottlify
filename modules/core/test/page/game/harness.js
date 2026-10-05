@@ -1208,6 +1208,7 @@ export function createHarness(canvas, how = {}){
      * @param {{ exe?: string, exeUrl?: string, bundleUrl: string, bundlePrefix?: string,
      *           imagePath: string,
      *           commandLine?: string,
+     *           mode?: import('../../../src/mode.js').RunMode, processWorkers?: boolean,
      *           windows?: 'win2000' | 'winxp' | 'win7' | 'win10',
      *           sidecarHooks?: { spec: any, source: string },
      *           logCategories?: Record<string, string>,
@@ -1399,6 +1400,8 @@ export function createHarness(canvas, how = {}){
                 : undefined,
             media: decoder ? { wasmBytes: decoder } : undefined,
             imagePath: request.imagePath,
+            mode: request.mode ?? undefined,
+            processWorkers: request.processWorkers === true,
             screen: request.screen ?? undefined,
             // The graphics layer's own configuration, whatever fields the run
             // names: a switch the layer defaults off is turned on per run here.
