@@ -47,6 +47,25 @@ const sendFrames = port=>{
 };
 
 /**
+ * The files the parent handed this process as its output and error: named by
+ * path, at the position the parent's open file holds, which a write here
+ * reads and moves across the link.
+ *
+ * @param {Record<string, { path: string }> | undefined} named
+ * @param {(target: string, method: string, args: any[]) => any} ask
+ */
+const standardFilesOf = (named, ask)=>named && Object.fromEntries(Object.entries(named)
+    .map(([which, { path }])=>[which, {
+        path,
+        get position(){
+            return ask('standard', 'position', [which]);
+        },
+        set position(at){
+            ask('standard', 'setPosition', [which, at]);
+        },
+    }]));
+
+/**
  * What a report reads, as data that crosses to another thread: null where it
  * holds something that does not.
  *
@@ -89,6 +108,7 @@ export async function serveProcess({ end, graphics, display, options, run }){
     handlers.report = { diagnostics: ()=>(app ? plainOf(()=>app.diagnostics()) : null) };
     app = await createApp({
         ...options,
+        standardFiles: standardFilesOf(options.standardFiles, ask),
         graphics: { ...options.graphics, worker: graphics ? portEnd(graphics) : undefined,
             display: display ? sendFrames(display) : undefined },
         system,

@@ -211,8 +211,8 @@ import { openProcessWorker } from './host/process-worker.js';
  *           objects -- for a process that joins another run's rather than making one: a
  *           process in a worker of its own is handed it across a link (`system-link.js`).
  * @property {boolean} [processWorkers]  In the `workers` mode, a child runs in a worker of
- *           its own (`host/process.worker.js`) rather than on this thread: its named objects
- *           are its own, and its windows are not found by another process yet.
+ *           its own (`host/process.worker.js`) rather than on this thread, with the run's
+ *           system half reached across a link (docs/core/limits.md says what it has).
  * @property {{ output?: StandardFile, error?: StandardFile }} [standardFiles]
  *           The files a child's parent handed it as its output and error,
  *           each the parent's own open file, whose position the child's
@@ -7431,6 +7431,20 @@ export async function createApp(options){
                 output: (/** @type {number} */ handle, /** @type {string} */ text)=>
                     events.emit('output', { handle, text }),
             },
+            // The parent's open files the child writes its output and error
+            // into: one position, the parent's, which the child's writes move.
+            standard: {
+                /** @param {'output' | 'error'} which */
+                position: which=>request.standardFiles?.[which]?.position ?? 0,
+                /** @param {'output' | 'error'} which @param {number} at */
+                setPosition: (which, at)=>{
+                    const file = request.standardFiles?.[which];
+                    if (file)
+                    {
+                        file.position = at;
+                    }
+                },
+            },
         });
         const answering = link.serve();
         // Its own way in to the run's graphics worker, where its Direct3D
@@ -7497,7 +7511,10 @@ export async function createApp(options){
                         patches: request.patches,
                         processId: request.id,
                         mainThreadId: request.threadId,
-                        standardFiles: request.standardFiles,
+                        // Named, not handed: the position stays here.
+                        standardFiles: request.standardFiles && Object.fromEntries(
+                            Object.entries(request.standardFiles).filter(([, file])=>file)
+                                .map(([which, file])=>[which, { path: file.path }])),
                         engine: options.engine,
                         mode: options.mode,
                         windows: options.windows,

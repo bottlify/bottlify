@@ -654,12 +654,19 @@ function buildOutputChild(){
     });
 }
 
-test('a child writes into the file its parent handed it as its output',
-    { timeout: 120000 }, async t=>{
+for (const [where, options] of /** @type {[string, any][]} */ ([
+    ['in its parent\'s place', {}],
+    ['beside its parent', { mode: 'workers', engine: 'cork' }],
+    ['in a worker of its own', { mode: 'workers', engine: 'cork', processWorkers: true }],
+]))
+{
+    test(`a child ${where} writes into the file its parent handed it as its output, moving the`
+        + ' position they share', { timeout: 120000 }, async t=>{
         const app = await createApp({
             executable: buildOutputParent(),
             imagePath: 'C:\\App\\parent.exe',
             files: [{ path: 'C:\\App\\child.exe', bytes: buildOutputChild() }],
+            ...options,
         });
         t.after(()=>app.dispose());
         /** @type {string[]} */
@@ -670,6 +677,7 @@ test('a child writes into the file its parent handed it as its output',
         assert.equal(code, 0x306, 'the file reads "childP": the child first, the parent after');
         assert.equal(console.join('').includes('child'), false, 'nothing went to the console');
     });
+}
 
 test('a child that ran beside its parent is let go once it has exited', { timeout: 120000 },
     async t=>{
