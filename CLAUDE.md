@@ -82,6 +82,12 @@ a program can observe (answers, out-structures, guest memory, what the GPU or th
 A benchmark shows the frame rate rose; only the gate shows nothing else changed. A new command,
 getter or path without cases in its gate fails the gate.
 
+**An invariant that cost something has a validator.** A bug whose cause was a broken rule of the
+code — an argument count, a struct offset, a guest pointer used unchecked, one name with two
+owners — leaves a small script in `tools/` that fails when that rule is broken, run with the other
+gates; `check:boundaries` is the first of them. **An instrument that cannot answer says so** — an
+error, "not measured" — and never returns zero.
+
 **Run what the change touches; the full suite before main.**
 
 | Changed | Run |
@@ -106,6 +112,16 @@ attribution are first-class.
 - **Judge on more than one scenario** (play, menu, load).
 - **The first lever is the translator** — caching, larger blocks and regions — because it speeds
   up every title at once. Small generic gains count.
+- **A measurement carries its conditions**: the workload and the bundle's hash, both arms, every
+  raw value and how many runs, the median and the spread, the noise floor, the browser, GPU, driver
+  and power plan. A field not recorded is written `not recorded`, never reconstructed. A number is
+  a share of something: say of what.
+- **What did not pay is kept.** An idea measured without a positive signal goes into
+  [`roadmap/negative-results.md`](roadmap/negative-results.md) as a dated entry with its
+  conditions, appended and never rewritten; a later measurement is a new entry. A measurement found
+  wrong is listed there as invalidated, with the reason, and is not cited again.
+- **A plan says it is one**: its first lines give the status (plan, no code) and the date, and a
+  number in it that was not measured is marked so.
 
 ## Bringing up a program
 

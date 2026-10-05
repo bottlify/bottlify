@@ -11,6 +11,8 @@
   In Russian, [`steam/README.ru.md`](steam/README.ru.md).
 - **[`decisions.md`](decisions.md)** — behaviour this project chose rather than derived from a
   specification, each entry dated and defended on its merits; the ones v2 will replace say so.
+- **[`negative-results.md`](negative-results.md)** — what was measured and did not pay, with the
+  conditions of each measurement, so it is not tried again for nothing.
 
 The documents before v2 — the phase history and cork's design and integration plan — were retired
 when v2 was written. They remain in git history.
