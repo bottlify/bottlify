@@ -225,6 +225,24 @@ export function createWideFunctions(host){
             },
         },
 
+        /**
+         * wchar_t *wcsncat(wchar_t *dest, const wchar_t *src, size_t count)
+         *
+         * At most `count` characters of the source after the destination's
+         * end, and always a terminator -- unlike wcsncpy, no padding.
+         */
+        wcsncat: {
+            convention: 'cdecl',
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([destination, source, count])=>{
+                const existing = readWide(destination);
+                writeWide(destination + existing.length * 2,
+                    readWide(source).slice(0, count >>> 0));
+                return destination;
+            },
+        },
+
         /** int wcscmp(const wchar_t *, const wchar_t *) -- in the guest */
         wcscmp: guestEntry(inGuest.wcscmp, COMPILED.wcscmp, host),
 

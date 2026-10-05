@@ -1145,3 +1145,17 @@ test('fscanf consumes what its scan reads and leaves the rest for the next read'
     assert.deepEqual([memory.i32(numbers), memory.i32(numbers + 4)], [12, 34]);
     assert.equal(fns.fscanf.handler([stream, format, buffer]), -1, 'EOF at the end');
 });
+
+test('_fsopen and _wfsopen are fopen and _wfopen with a share flag that changes nothing', ()=>{
+    const { memory, fns, text } = runtime({ 'C:\\in.txt': 'abc' });
+    const input = fns._fsopen.handler([memory.put('C:\\in.txt'), memory.put('rb'), 0x40]);
+    assert.notEqual(input, 0);
+    assert.equal(fns.fgetc.handler([input]), 0x61);
+    const out = fns._wfsopen.handler([memory.putWide('C:\\out.txt'), memory.putWide('wb'), 0x40]);
+    assert.notEqual(out, 0);
+    fns.fputs.handler([memory.put('hi'), out]);
+    fns.fclose.handler([out]);
+    assert.equal(text('C:\\out.txt'), 'hi');
+    assert.equal(fns._fsopen.handler([memory.put('C:\\none.txt'), memory.put('r'), 0x40]), 0);
+    assert.deepEqual([fns._fsopen.argBytes, fns._wfsopen.argBytes], [12, 12]);
+});

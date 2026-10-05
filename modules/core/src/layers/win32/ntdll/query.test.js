@@ -312,3 +312,20 @@ test('NtQueryObject answers the basic class for a handle that names something', 
         STATUS.INVALID_INFO_CLASS);
     assert.ok(said.some(line=>line.includes('class 2')), 'a refused class is reported');
 });
+
+test('the debug-help queries are refused as unsupported and say so', ()=>{
+    /** @type {string[]} */
+    const said = [];
+    const fns = /** @type {Record<string, any>} */ (createQueryFunctions({ ...fakeHost(),
+        divergence: api=>said.push(api) }));
+    assert.deepEqual(['NtOpenThread', 'NtQueryInformationThread', 'RtlCreateQueryDebugBuffer',
+        'RtlDestroyQueryDebugBuffer', 'RtlQueryProcessDebugInformation']
+        .map(name=>fns[name].argBytes), [16, 20, 8, 4, 12]);
+    assert.equal(fns.NtOpenThread.handler([0, 0, 0, 0]), STATUS.NOT_IMPLEMENTED);
+    assert.equal(fns.NtQueryInformationThread.handler([0, 0, 0, 0, 0]), STATUS.NOT_IMPLEMENTED);
+    assert.equal(fns.RtlCreateQueryDebugBuffer.handler([0, 0]), 0, 'no buffer');
+    assert.equal(fns.RtlDestroyQueryDebugBuffer.handler([0]), STATUS.INVALID_PARAMETER);
+    assert.equal(fns.RtlDestroyQueryDebugBuffer.handler([0x1000]), STATUS.SUCCESS);
+    assert.equal(fns.RtlQueryProcessDebugInformation.handler([0, 0, 0]), STATUS.NOT_IMPLEMENTED);
+    assert.equal(said.length, 4);
+});

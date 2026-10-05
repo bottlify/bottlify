@@ -25,7 +25,7 @@ import {
     transcodeSingleByte,
 } from '../kernel32/locale.js';
 import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js';
-import { dibToBgra, groupImageId } from './cursors.js';
+import { cursorFilePicture, dibToBgra, groupImageId } from './cursors.js';
 import { characterOf, codeForScan, codeForVk, keyFor, keyForCharacter } from './keys.js';
 import { REFRESH_HZ, displayModes } from './display.js';
 import {
@@ -246,6 +246,9 @@ const KEYEVENTF_KEYUP = 0x0002;
 const KEYEVENTF_UNICODE = 0x0004;
 const KEYEVENTF_SCANCODE = 0x0008;
 const ERROR_INVALID_PARAMETER = 87;
+/** The ids of the system's cursors SetSystemCursor replaces (OCR_NORMAL to OCR_APPSTARTING). */
+const SYSTEM_CURSOR_IDS = Object.freeze([32512, 32513, 32514, 32515, 32516, 32640, 32641, 32642,
+    32643, 32644, 32645, 32646, 32648, 32649, 32650]);
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_WINDOW_HANDLE = 1400;
 const ERROR_NOACCESS = 998;
@@ -546,6 +549,13 @@ export function createSystemFunctions({ host, live, windows, classes }){
     let cursorShown = true;
     /** @type {import('./cursors.js').CursorPicture | null} */
     let cursorShape = null;
+    /**
+     * The pictures SetSystemCursor put in place of the system's own cursors,
+     * by the id LoadCursor(NULL, id) names them with.
+     *
+     * @type {Map<number, import('./cursors.js').CursorPicture>}
+     */
+    const systemCursors = new Map();
     /** What SetMessageExtraInfo last set, for GetMessageExtraInfo. */
     let messageExtraInfo = 0;
 
@@ -560,6 +570,11 @@ export function createSystemFunctions({ host, live, windows, classes }){
      * @returns {import('./cursors.js').CursorPicture | null}
      */
     const cursorPicture = handle=>{
+        const replaced = systemCursors.get(handle);
+        if (replaced)
+        {
+            return replaced;
+        }
         const kind = host.handles.typeOf?.(handle) ?? null;
         if (kind !== 'cursor' && kind !== 'icon')
         {
@@ -581,6 +596,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
         return object.picture;
     };
     host.pictures?.(cursorPicture);
+    const SM_CXCURSOR = 13;
 
     /**
      * A cursor's or icon's picture out of a module: the image of the standard
@@ -594,7 +610,6 @@ export function createSystemFunctions({ host, live, windows, classes }){
     const resourcePicture = (instance, name, cursor)=>{
         const RT_CURSOR = 1;
         const RT_ICON = 3;
-        const SM_CXCURSOR = 13;
         const base = instance === undefined ? 0 : host.moduleBase?.(instance) ?? 0;
         /** @param {number} type @param {number | string} key */
         const read = (type, key)=>{
@@ -1323,8 +1338,41 @@ export function createSystemFunctions({ host, live, windows, classes }){
      * @param {string} path
      * @returns {number | Promise<number>}
      */
-    const loadBitmapFile = path=>{
+    const loadBitmapFile = path=>readWhole(path, bytes=>{
         const FILE_HEADER = 14;
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        if (bytes.length <= FILE_HEADER + 12 || view.getUint16(0, true) !== 0x4d42
+            || !host.allocate || !host.bitmapFromDib)
+        {
+            return 0;
+        }
+        const dib = bytes.subarray(FILE_HEADER);
+        const at = host.allocate(dib.length);
+        if (at === 0)
+        {
+            return 0;
+        }
+        try
+        {
+            host.writeMemory(at, dib);
+            const offBits = view.getUint32(10, true);
+            return host.bitmapFromDib(at, offBits > FILE_HEADER
+                ? at + offBits - FILE_HEADER : packedBits(at));
+        }
+        finally
+        {
+            host.release?.(at);
+        }
+    });
+
+    /**
+     * A file's bytes, handed to `make`; 0 for a name that is no file. The
+     * answer waits when the volume's blocks are not resident yet.
+     *
+     * @param {string} path @param {(bytes: Uint8Array) => number} make
+     * @returns {number | Promise<number>}
+     */
+    const readWhole = (path, make)=>{
         const files = host.files;
         const stat = path === '' ? null : files?.stat(path);
         const node = files && stat?.exists && !stat.isDirectory
@@ -1334,35 +1382,28 @@ export function createSystemFunctions({ host, live, windows, classes }){
             return 0;
         }
         /** @param {Uint8Array} bytes */
-        const make = bytes=>{
+        const done = bytes=>{
             files.close(node);
-            const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-            if (bytes.length <= FILE_HEADER + 12 || view.getUint16(0, true) !== 0x4d42
-                || !host.allocate || !host.bitmapFromDib)
-            {
-                return 0;
-            }
-            const dib = bytes.subarray(FILE_HEADER);
-            const at = host.allocate(dib.length);
-            if (at === 0)
-            {
-                return 0;
-            }
-            try
-            {
-                host.writeMemory(at, dib);
-                const offBits = view.getUint32(10, true);
-                return host.bitmapFromDib(at, offBits > FILE_HEADER
-                    ? at + offBits - FILE_HEADER : packedBits(at));
-            }
-            finally
-            {
-                host.release?.(at);
-            }
+            return make(bytes);
         };
         const read = files.read(node, 0, stat.size);
-        return read instanceof Uint8Array ? make(read) : read.then(make);
+        return read instanceof Uint8Array ? done(read) : read.then(done);
     };
+
+    /**
+     * A cursor out of a .cur or .ani file, as LoadCursorFromFile loads one: a
+     * cursor of its own with the file's picture and hot spot. 0 for a name
+     * that is no file and for one that holds no cursor this can read.
+     *
+     * @param {string} path
+     */
+    const loadCursorFile = path=>readWhole(path, bytes=>{
+        const picture = cursorFilePicture(bytes, metric(SM_CXCURSOR));
+        return picture
+            ? host.handles.open('cursor', { hotSpot: picture.hotSpot, width: picture.width,
+                height: picture.height, picture })
+            : 0;
+    });
 
     /**
      * Where a packed DIB's pixels start: behind its header, the three masks
@@ -3748,6 +3789,48 @@ export function createSystemFunctions({ host, live, windows, classes }){
             /** @param {number[]} args */
             handler: ([instance, name])=>
                 loadResourceObject(host, 'cursor', RT_GROUP_CURSOR, instance, name, true),
+        },
+
+        /** HCURSOR LoadCursorFromFileA(LPCSTR lpFileName) */
+        LoadCursorFromFileA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([name])=>loadCursorFile(readText(host, name >>> 0, false, MAX_PATH)),
+        },
+
+        /** HCURSOR LoadCursorFromFileW(LPCWSTR lpFileName) */
+        LoadCursorFromFileW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([name])=>loadCursorFile(readText(host, name >>> 0, true, MAX_PATH)),
+        },
+
+        /**
+         * BOOL SetSystemCursor(HCURSOR hcur, DWORD id)
+         *
+         * One of the system's cursors (OCR_NORMAL and its fellows) replaced
+         * by a copy of this one, which the call destroys. The picture stands
+         * wherever the system's cursor would have been shown, LoadCursor(NULL,
+         * IDC_*) answering the same ids. A handle that is no cursor, and an id
+         * that is no system cursor, fail with ERROR_INVALID_PARAMETER.
+         */
+        SetSystemCursor: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([cursor, id])=>{
+                const wanted = id >>> 0;
+                const picture = host.handles.typeOf?.(cursor >>> 0) === 'cursor'
+                    ? cursorPicture(cursor >>> 0) : null;
+                if (!SYSTEM_CURSOR_IDS.includes(wanted) || !picture)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                systemCursors.set(wanted, picture);
+                host.handles.close(cursor >>> 0);
+                reportCursor();
+                return 1;
+            },
         },
 
         /**

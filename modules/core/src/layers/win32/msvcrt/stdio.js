@@ -766,6 +766,20 @@ export function createStdioFunctions(host){
             (mode >>> 0) === 0 ? null : wideStringAt(host.readMemory, mode))),
 
         /**
+         * FILE *_fsopen(const char *filename, const char *mode, int shflag)
+         *
+         * fopen with a sharing mode, which the volume has none of.
+         */
+        _fsopen: cdecl(12, ([path, mode])=>openStream(
+            (path >>> 0) === 0 ? '' : readString(path),
+            (mode >>> 0) === 0 ? null : readString(mode))),
+
+        /** FILE *_wfsopen(const wchar_t *filename, const wchar_t *mode, int shflag) */
+        _wfsopen: cdecl(12, ([path, mode])=>openStream(
+            (path >>> 0) === 0 ? '' : wideStringAt(host.readMemory, path),
+            (mode >>> 0) === 0 ? null : wideStringAt(host.readMemory, mode))),
+
+        /**
          * FILE *freopen(const char *filename, const char *mode, FILE *stream)
          *
          * Closes the stream's file and opens the one named in the same

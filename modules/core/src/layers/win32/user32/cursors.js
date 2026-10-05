@@ -205,6 +205,98 @@ export function dibToBgra(bytes){
 }
 
 /**
+ * The picture of a cursor file. A .cur file is a directory of entries, each
+ * a hot spot and the offset of a cursor image (the layout of an icon file,
+ * where the hot spot is the colour planes and bits a pixel); of the images
+ * it offers, the deepest of the size asked for, else the first. A .ani file
+ * is a RIFF list of frames, each of them a .cur file: the first frame stands
+ * for it, the page showing no animation. Null for a file that is neither or
+ * whose image this cannot read.
+ *
+ * @param {Uint8Array} bytes @param {number} size  The cursor size the system asks for.
+ * @returns {CursorPicture | null}
+ */
+export function cursorFilePicture(bytes, size){
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const tag = (/** @type {number} */ at)=>String.fromCharCode(...bytes.subarray(at, at + 4));
+    if (bytes.length >= 12 && tag(0) === 'RIFF' && tag(8) === 'ACON')
+    {
+        const frame = firstFrame(bytes, 12, bytes.length, tag, view);
+        return frame ? cursorFilePicture(frame, size) : null;
+    }
+    const ENTRY = 16;
+    if (bytes.length < GROUP_HEADER_SIZE || view.getUint16(0, true) !== 0
+        || view.getUint16(2, true) !== 2)
+    {
+        return null;
+    }
+    const count = Math.min(view.getUint16(4, true),
+        Math.floor((bytes.length - GROUP_HEADER_SIZE) / ENTRY));
+    let chosen = -1;
+    let chosenDepth = -1;
+    for (let index = 0; index < count; index++)
+    {
+        const at = GROUP_HEADER_SIZE + index * ENTRY;
+        const width = bytes[at] || MAX_SIDE;
+        const depth = view.getUint16(at + 6, true);
+        if (chosen < 0)
+        {
+            chosen = at;
+        }
+        if (width === size && depth > chosenDepth)
+        {
+            chosen = at;
+            chosenDepth = depth;
+        }
+    }
+    if (chosen < 0)
+    {
+        return null;
+    }
+    const length = view.getUint32(chosen + 8, true);
+    const offset = view.getUint32(chosen + 12, true);
+    if (offset > bytes.length || length > bytes.length - offset)
+    {
+        return null;
+    }
+    const picture = dibToBgra(bytes.subarray(offset, offset + length));
+    return picture
+        ? { ...picture, hotSpot: { x: view.getUint16(chosen + 4, true),
+            y: view.getUint16(chosen + 6, true) } }
+        : null;
+}
+
+/**
+ * The first 'icon' chunk of a RIFF animated cursor, looked for inside the
+ * LIST chunks too.
+ *
+ * @param {Uint8Array} bytes @param {number} from @param {number} to
+ * @param {(at: number) => string} tag @param {DataView} view
+ * @returns {Uint8Array | null}
+ */
+function firstFrame(bytes, from, to, tag, view){
+    for (let at = from; at + 8 <= to;)
+    {
+        const length = view.getUint32(at + 4, true);
+        const end = Math.min(at + 8 + length, to);
+        if (tag(at) === 'icon')
+        {
+            return bytes.subarray(at + 8, end);
+        }
+        if (tag(at) === 'LIST')
+        {
+            const inner = firstFrame(bytes, at + 12, end, tag, view);
+            if (inner)
+            {
+                return inner;
+            }
+        }
+        at = end + (length & 1);
+    }
+    return null;
+}
+
+/**
  * The id of the image a group directory (RT_GROUP_CURSOR or RT_GROUP_ICON)
  * offers at the size asked for -- the deepest of those -- or its first
  * image when none is that size; null for an empty or short directory.

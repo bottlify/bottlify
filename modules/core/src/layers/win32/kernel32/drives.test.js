@@ -298,3 +298,49 @@ test('the wide free-space calls answer what the A calls answer', ()=>{
     assert.equal(dword(bytes, 0x118) + dword(bytes, 0x11c) * 0x1_0000_0000,
         32 * 1024 * 1024 * 1024);
 });
+
+test('QueryDosDevice names the device behind a drive letter, and lists every drive for none', ()=>{
+    const bs = String.fromCharCode(92);
+    const { fns, bytes, errors } = setup(['C', 'D', 'E'], { D: { kind: 'cdrom' } });
+    plant(bytes, 0x200, 'c:');
+    assert.equal(fns.QueryDosDeviceA.argBytes, 12);
+
+    const length = fns.QueryDosDeviceA.handler([0x200, 0x300, 0x40]);
+    const first = `${bs}Device${bs}HarddiskVolume1\0\0`;
+    assert.equal(length, first.length, 'the characters stored, both terminators counted');
+    assert.equal(String.fromCharCode(...bytes.slice(0x300, 0x300 + length)), first);
+
+    plant(bytes, 0x200, 'D:');
+    fns.QueryDosDeviceA.handler([0x200, 0x300, 0x40]);
+    assert.equal(String.fromCharCode(...bytes.slice(0x300, 0x300 + 14)), `${bs}Device${bs}CdRom0`);
+    plant(bytes, 0x200, 'E:');
+    fns.QueryDosDeviceA.handler([0x200, 0x300, 0x40]);
+    assert.equal(String.fromCharCode(...bytes.slice(0x300, 0x300 + 23)),
+        `${bs}Device${bs}HarddiskVolume2`, 'volumes count apart from discs');
+
+    const all = fns.QueryDosDeviceA.handler([0, 0x300, 0x40]);
+    assert.equal(String.fromCharCode(...bytes.slice(0x300, 0x300 + all)), 'C:\0D:\0E:\0\0');
+
+    plant(bytes, 0x200, 'Z:');
+    assert.equal(fns.QueryDosDeviceA.handler([0x200, 0x300, 0x40]), 0);
+    assert.equal(errors.at(-1), 2, 'ERROR_FILE_NOT_FOUND');
+    plant(bytes, 0x200, 'C:');
+    bytes[0x300] = 0xaa;
+    assert.equal(fns.QueryDosDeviceA.handler([0x200, 0x300, 4]), 0);
+    assert.equal(errors.at(-1), 122, 'ERROR_INSUFFICIENT_BUFFER');
+    assert.equal(bytes[0x300], 0xaa, 'and nothing was stored');
+});
+
+test('QueryDosDeviceW answers in UTF-16', ()=>{
+    const { fns, bytes } = setup(['C']);
+    [...'C:'].forEach((character, index)=>{
+        bytes[0x200 + index * 2] = character.charCodeAt(0);
+        bytes[0x201 + index * 2] = 0;
+    });
+    bytes[0x204] = 0;
+    bytes[0x205] = 0;
+    const length = fns.QueryDosDeviceW.handler([0x200, 0x300, 0x40]);
+    assert.equal(length, 25, '\\Device\\HarddiskVolume1 and two terminators');
+    assert.equal(bytes[0x300], 0x5c);
+    assert.equal(bytes[0x301], 0);
+});

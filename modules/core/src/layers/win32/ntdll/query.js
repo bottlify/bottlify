@@ -463,5 +463,55 @@ export function createQueryFunctions(host){
                 return STATUS.SUCCESS;
             },
         },
+
+        /**
+         * NTSTATUS NtOpenThread(PHANDLE Thread, ACCESS_MASK Access,
+         *                       POBJECT_ATTRIBUTES Attributes, PCLIENT_ID Client)
+         * NTSTATUS NtQueryInformationThread(HANDLE Thread, THREADINFOCLASS Class,
+         *                                   PVOID Information, ULONG Length,
+         *                                   PULONG ReturnLength)
+         * PRTL_DEBUG_INFORMATION RtlCreateQueryDebugBuffer(ULONG Size, BOOLEAN EventPair)
+         * NTSTATUS RtlDestroyQueryDebugBuffer(PRTL_DEBUG_INFORMATION Buffer)
+         * NTSTATUS RtlQueryProcessDebugInformation(ULONG Pid, ULONG Flags,
+         *                                          PRTL_DEBUG_INFORMATION Buffer)
+         *
+         * What a crash reporter or a debugger front end asks for. No thread
+         * is opened by id and no process snapshot is kept, so each is refused
+         * as an unsupported request and says so; the program that asked for a
+         * diagnostic goes on without it.
+         */
+        NtOpenThread: {
+            argBytes: 16,
+            handler: ()=>{
+                host.divergence?.('NtOpenThread', 'a thread cannot be opened by id; refused');
+                return STATUS.NOT_IMPLEMENTED;
+            },
+        },
+        NtQueryInformationThread: {
+            argBytes: 20,
+            handler: ()=>{
+                host.divergence?.('NtQueryInformationThread', 'refused');
+                return STATUS.NOT_IMPLEMENTED;
+            },
+        },
+        RtlCreateQueryDebugBuffer: {
+            argBytes: 8,
+            handler: ()=>{
+                host.divergence?.('RtlCreateQueryDebugBuffer', 'no debug buffer; NULL answered');
+                return 0;
+            },
+        },
+        RtlDestroyQueryDebugBuffer: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([buffer])=>(buffer === 0 ? STATUS.INVALID_PARAMETER : STATUS.SUCCESS),
+        },
+        RtlQueryProcessDebugInformation: {
+            argBytes: 12,
+            handler: ()=>{
+                host.divergence?.('RtlQueryProcessDebugInformation', 'refused');
+                return STATUS.NOT_IMPLEMENTED;
+            },
+        },
     };
 }
