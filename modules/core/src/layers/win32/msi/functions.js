@@ -1337,6 +1337,18 @@ export function createMsiFunctions(host){
             host.divergence?.('MsiConfigureProduct', 'an installed product is not reconfigured');
             return ERROR_CALL_NOT_IMPLEMENTED;
         }),
+        ...both('MsiConfigureProductEx', 16, ()=>()=>{
+            host.divergence?.('MsiConfigureProductEx', 'an installed product is not reconfigured');
+            return ERROR_CALL_NOT_IMPLEMENTED;
+        }),
+        ...both('MsiOpenProduct', 8, ()=>()=>{
+            host.divergence?.('MsiOpenProduct', 'an installed product is not opened as a session');
+            return ERROR_CALL_NOT_IMPLEMENTED;
+        }),
+        ...both('MsiDatabaseApplyTransform', 12, ()=>()=>{
+            host.divergence?.('MsiDatabaseApplyTransform', 'a transform is not applied');
+            return ERROR_CALL_NOT_IMPLEMENTED;
+        }),
         ...both('MsiQueryProductState', 4, wide=>([product])=>
             registration.productState(reader(wide)(product) ?? '')),
         ...both('MsiGetProductInfo', 16, wide=>([product, property, buffer, size])=>{

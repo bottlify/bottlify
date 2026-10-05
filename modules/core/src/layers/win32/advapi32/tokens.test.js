@@ -199,6 +199,22 @@ test('the native token calls open and adjust the same tokens, with statuses', ()
     { NtOpenProcessToken: 12, NtOpenProcessTokenEx: 16, NtAdjustPrivilegesToken: 24 });
 });
 
+test('CopySid copies a SID that fits and refuses one that does not', ()=>{
+    const { bytes, errors, fns } = setup();
+    bytes.set(ADMINISTRATORS_SID, SID);
+    const length = ADMINISTRATORS_SID.length;
+    bytes.fill(0xaa, BUFFER, BUFFER + 0x40);
+    assert.equal(fns.CopySid.handler([length, BUFFER, SID]), 1);
+    assert.deepEqual([...bytes.subarray(BUFFER, BUFFER + length)], [...ADMINISTRATORS_SID]);
+    assert.equal(bytes[BUFFER + length], 0xaa, 'no more than the SID');
+    bytes.fill(0xbb, BUFFER, BUFFER + 0x40);
+    assert.equal(fns.CopySid.handler([length - 1, BUFFER, SID]), 0);
+    assert.equal(errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+    assert.equal(bytes[BUFFER], 0xbb, 'and nothing was written');
+    assert.equal(fns.CopySid.handler([length, 0, SID]), 0);
+    assert.equal(fns.CopySid.argBytes, 12);
+});
+
 test('a privilege is looked up by its fixed number and granted on the process token', ()=>{
     // An archiver enables SeRestorePrivilege before it restores what it
     // unpacks; refused, it takes the path for a user who may not.

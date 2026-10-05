@@ -84,6 +84,7 @@ import { createDsetupFunctions } from './dsetup/functions.js';
 import { createDpnhpastFunctions } from './dpnhpast/functions.js';
 import { createSetupapiFunctions } from './setupapi/functions.js';
 import { createMsiFunctions } from './msi/functions.js';
+import { createEventLogFunctions } from './advapi32/eventlog.js';
 import { createCabinetFunctions } from './cabinet/functions.js';
 import { MSI_ORDINALS } from './msi/ordinals.js';
 import { COMPUTER_NAME } from './kernel32/drives.js';
@@ -2291,6 +2292,12 @@ export function createWin32Module(){
                         // A SID has to live where a program can compare it byte by byte.
                         /** @param {number} bytes */
                         allocate: bytes=>heap.allocate(bytes),
+                    }),
+                    ...createEventLogFunctions({
+                        readCString,
+                        readWideString,
+                        setLastError: setError,
+                        handles,
                     }),
                     ...createTokenFunctions({
                         readMemory,

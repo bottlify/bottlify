@@ -1134,6 +1134,31 @@ export function createTokenFunctions(host){
         ConvertSidToStringSidW: convertSid(true),
 
         /**
+         * BOOL CopySid(DWORD nDestinationSidLength, PSID pDestinationSid, PSID pSourceSid)
+         *
+         * The SID's bytes into a buffer of the caller's, which has to hold all
+         * of it: one that does not is refused with ERROR_INSUFFICIENT_BUFFER
+         * and nothing is written.
+         */
+        CopySid: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([room, destination, source])=>{
+                if ((destination >>> 0) === 0 || (source >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const length = 8 + 4 * host.readMemory(source >>> 0, 2)[1];
+                if ((room >>> 0) < length)
+                {
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                host.writeMemory(destination >>> 0, host.readMemory(source >>> 0, length).slice());
+                return 1;
+            },
+        },
+
+        /**
          * DWORD GetLengthSid(PSID pSid)
          */
         GetLengthSid: {
