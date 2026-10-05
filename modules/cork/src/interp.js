@@ -736,8 +736,18 @@ class BlockState {
     syncIn(){
         this.x87In = false;
         this.xmmIn = false;
-        // Translated code may have written the registers since.
-        this.x87Exact = 0;
+        // The quadwords a `fild` left exact, as the block keeps them for every
+        // executor (`layout.x87Exact`); translated code takes the marks off
+        // the registers it writes. A layout with no place for them keeps none.
+        const exactAt = this.layout.x87Format === 'f64' ? this.layout.x87Exact ?? -1 : -1;
+        this.x87Exact = exactAt >= 0 ? this.view.getUint8(exactAt) : 0;
+        for (let i = 0; i < 8; i++)
+        {
+            if ((this.x87Exact >>> i & 1) !== 0)
+            {
+                this.x87Shadow[i] = this.view.getBigInt64(this.layout.x87 + i * 16 + 8, true);
+            }
+        }
         // The record a region left is folded into the word the steps use.
         this.eflags = eflagsOf(this.view, this.layout);
     }
@@ -747,6 +757,18 @@ class BlockState {
         const { view, layout } = this;
         view.setUint32(layout.eip, this.eip >>> 0, true);
         view.setUint32(layout.eflags, this.eflags >>> 0, true);
+        const exactAt = layout.x87Format === 'f64' ? layout.x87Exact ?? -1 : -1;
+        if (exactAt >= 0)
+        {
+            view.setUint8(exactAt, this.x87Exact);
+            for (let i = 0; i < 8; i++)
+            {
+                if ((this.x87Exact >>> i & 1) !== 0)
+                {
+                    view.setBigInt64(layout.x87 + i * 16 + 8, this.x87Shadow[i], true);
+                }
+            }
+        }
         if (this.x87In)
         {
             for (let i = 0; i < 8; i++)

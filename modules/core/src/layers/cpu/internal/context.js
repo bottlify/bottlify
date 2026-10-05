@@ -238,6 +238,10 @@ export function freshThreadFpu(context){
         view.setUint16(layout.x87Status, 0, true);
         block[layout.x87Top] = 0;
         block[layout.x87Empty] = 0xff;
+        if (layout.x87Exact !== undefined && layout.x87Exact >= 0)
+        {
+            block[layout.x87Exact] = 0;
+        }
         block.fill(0, layout.xmm, layout.xmm + 8 * 16);
         view.setUint32(layout.mxcsr, THREAD_MXCSR, true);
         return;

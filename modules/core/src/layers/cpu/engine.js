@@ -50,6 +50,10 @@
  * @property {number} x87Empty     u8 bitmask, bit i set = register i empty.
  * @property {number} x87Control   u16.
  * @property {number} x87Status    u16.
+ * @property {number} [x87Exact]   Cork's own, u8: the physical registers a quadword `fild`
+ *     loaded and nothing has written since, each register's quadword in the eight bytes past
+ *     its double (`x87 + 16 i + 8`), kept for a quadword `fistp` whichever executor runs it;
+ *     absent (hybrid), no executor keeps one past its own run.
  * @property {number} xmm          8 × 16 bytes.
  * @property {number} mxcsr
  * @property {number} fsBase       The thread block's linear address (32-bit Windows).

@@ -87,6 +87,8 @@ static u8 *x87TopAt;
 static u8 *x87EmptyAt;
 static u16 *x87ControlAt;
 static u16 *x87StatusAt;
+/* Where the block keeps the exact quadwords' marks between runs (see exactIn). */
+static u8 *exactAt;
 /* The XMM registers, four words each, and MXCSR, in the block. */
 static u32 *xmmRegs;
 static u32 *mxcsrAt;
@@ -151,6 +153,11 @@ __attribute__((export_name("configureEntry")))
 void configureEntry(u32 counterField)
 {
     counterAt = (u32 *)counterField;
+}
+__attribute__((export_name("configureExact")))
+void configureExact(u32 field)
+{
+    exactAt = (u8 *)field;
 }
 
 static const u8 PARITY[256] = {
@@ -569,10 +576,27 @@ static u32 xFlags;
 static u32 xWrite;
 static u32 xWriteSize;
 /* The physical registers holding a quadword fild's integer, unwritten since, and
- * the integers. Dropped at every run's start, as the JavaScript interpreter drops
- * its own at every sync: another tier may have written the registers between. */
+ * the integers. Taken from the block at every run's start and left there at its
+ * end, where the JavaScript interpreter keeps its own and translated code takes
+ * the marks off the registers it writes: a run may end between the load and the
+ * store. With no place in the block (exactAt null) they are dropped instead. */
 static u32 exactMarks;
 static i64 exactShadow[8];
+
+static void exactIn(void)
+{
+    exactMarks = exactAt ? *exactAt : 0;
+    for (u32 i = 0; i < 8; i++)
+        if ((exactMarks >> i) & 1) exactShadow[i] = *(i64 *)(x87Regs + i * 16 + 8);
+}
+
+static void exactOut(void)
+{
+    if (!exactAt) return;
+    *exactAt = (u8)exactMarks;
+    for (u32 i = 0; i < 8; i++)
+        if ((exactMarks >> i) & 1) *(i64 *)(x87Regs + i * 16 + 8) = exactShadow[i];
+}
 
 /* The stack-fault check: t1 when a source ST(i) -- a bit per i in `sources` --
  * is empty or a push finds its register held, raising IE and SF; a push sets
@@ -3222,7 +3246,7 @@ __attribute__((export_name("run")))
 u32 run(u32 budget)
 {
     xNeedsFlags = 0;
-    exactMarks = 0;
+    exactIn();
     u32 code = runInteger(budget), n = retired;
     while (code == W_UNSUPPORTED && xNeedsFlags)
     {
@@ -3244,6 +3268,7 @@ u32 run(u32 budget)
         n += retired;
     }
     retired = n;
+    exactOut();
     return code;
 }
 

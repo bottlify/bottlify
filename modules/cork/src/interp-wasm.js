@@ -157,6 +157,8 @@ export function createWasmInterpreter({ memory, layout, area, hotThreshold, trap
         exports.configureFloat(layout.x87, layout.x87Top, layout.x87Empty, layout.x87Control,
             layout.x87Status, precise ? 1 : 0, layout.xmm, layout.mxcsr);
         exports.configureEntry(layout.counter);
+        // Zero is no place: the block's first word is a register, never the marks.
+        exports.configureExact(layout.x87Format === 'f64' ? layout.x87Exact ?? 0 : 0);
         ({ retired, relaxedReads, exitValue, exitSize, enter } = exports);
         run = /** @type {(budget: number) => number} */ (exports.run);
         return run;

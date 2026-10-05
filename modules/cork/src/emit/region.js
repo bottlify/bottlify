@@ -62,7 +62,7 @@ import { callsOut, inlineReturns } from '../region.js';
 import {
     analyseX87, floatCondition, isX87, prepareX87, sameState, x87BlockEnd, x87BlockStart,
     x87Edge, x87EntryCheck, x87Epilogue, x87LoadRegisters, x87Normalise,
-    x87Prologue, x87StoreRegisters, regionHasMmx,
+    x87Prologue, x87StoreRegisters, x87DropExact, regionHasMmx,
 } from './x87.js';
 
 /**
@@ -1387,6 +1387,11 @@ export class RegionEmitter {
             this.storeMixedRegisters();
             return;
         }
+        if (this.mmWritten.size > 0)
+        {
+            const mask = [...this.mmWritten].reduce((bits, index)=>bits | 1 << index, 0);
+            x87DropExact(this, ()=>this.b.i32const(mask));
+        }
         for (const index of this.mmWritten)
         {
             b.i32const(0).localGet(this.mmLocal(index))
@@ -1491,6 +1496,8 @@ export class RegionEmitter {
     storeMixedRegisters(){
         const { b, layout } = this;
         const x = this.x87;
+        const mmMask = [...this.mmWritten].reduce((bits, index)=>bits | 1 << index, 0);
+        x87DropExact(this, ()=>b.localGet(Local.x87Dirty).i32const(mmMask).op(I32.or));
         for (let p = 0; p < 8; p++)
         {
             const at = layout.x87 + p * 16;

@@ -72,3 +72,26 @@ test('a register only the other way wrote keeps the bytes the state block had', 
     assert.equal(taken.empty, 0xff, 'pushed and popped');
     assert.equal(taken.register(7), 1, 'the pop leaves the value, as the processor');
 });
+
+test('a register the region writes back loses the exact-quadword mark the block had for it', ()=>{
+    // An interpreter's fild of a quadword left its integer in the block beside
+    // registers 6 and 7; the region writes register 7 (fld1; fstp st0) and not
+    // 6, and on the way not taken writes neither.
+    const program = [
+        0x85, 0xc0, 0x74, 0x04, 0xd9, 0xe8, 0xdd, 0xd8, 0x31, 0xc9, 0xf7, 0xf1,
+    ];
+    for (const [eax, marks] of [[0, 0xc0], [1, 0x40]])
+    {
+        const m = createTestMachine();
+        const view = new DataView(m.memory.buffer);
+        const at = /** @type {number} */ (m.layout.x87Exact);
+        view.setUint8(m.layout.x87Empty, 0xff);
+        view.setUint16(m.layout.x87Control, 0x37f, true);
+        view.setUint8(at, 0xc0);
+        m.write(CODE, program);
+        m.setReg('esp', 0x80000);
+        m.setReg('eax', eax);
+        assert.equal(m.translate(CODE).run(CODE, 1_000_000).kind, Exit.FAULT);
+        assert.equal(view.getUint8(at), marks, eax === 0 ? 'kept' : 'register 7\'s taken off');
+    }
+});

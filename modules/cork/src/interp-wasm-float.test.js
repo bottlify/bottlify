@@ -546,7 +546,7 @@ function onEmptyStack(code, data, first = 0){
 test('a quadword fild stored by a quadword fistp or fisttp copies all eight bytes', ()=>{
     // As the JavaScript interpreter keeps it (`exactWrites`): an exchange and a
     // register copy carry the quadword with its value, a write rounds it through
-    // the double, and a run starts with none exact.
+    // the double, and the block keeps it from one run to the next.
     const FILD = [0xdf, 0x6b, 0x00];    // fild qword [ebx]
     const FISTP = [0xdf, 0x7b, 0x08];   // fistp qword [ebx+8]
     const FISTTP = [0xdd, 0x4b, 0x08];  // fisttp qword [ebx+8]
@@ -579,8 +579,10 @@ test('a quadword fild stored by a quadword fistp or fisttp copies all eight byte
     const value = 0x0123456789abcdefn;
     assert.equal(quad([...FILD, 0xd9, 0xe0, 0xd9, 0xe0, ...FISTP], value).stored,
         0x0123456789abcdf0n, 'fchs twice rounds');
-    assert.equal(quad([...FILD, ...FISTP], value, 1).stored, 0x0123456789abcdf0n,
-        'a second run rounds');
+    assert.equal(quad([...FILD, ...FISTP], value, 1).stored, value,
+        'a second run stores what the first loaded');
+    assert.equal(quad([...FILD, 0xd9, 0xe0, 0xd9, 0xe0, ...FISTP], value, 2).stored,
+        0x0123456789abcdf0n, 'and a write in it rounds');
 });
 
 test('fprem and fprem1 leave the model\'s exact remainder, and its quotient bits', ()=>{
