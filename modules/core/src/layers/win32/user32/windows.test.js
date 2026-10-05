@@ -196,12 +196,16 @@ const PARKED = Object.freeze({ parked: true });
  * @param {{ rect: any, color: number, quiet: boolean }[]} fills
  * @param {number[]} presents
  * @param {any[]} clips  The area each context was cut down to, last one last.
+ * @param {any[]} [scrolls]  The screen's pixels moved, by draw.scroll.
  */
-function paintedHost(fills, presents, clips){
+function paintedHost(fills, presents, clips, scrolls = []){
     return {
         screen: { width: 640, height: 480, bitsPerPixel: 32 },
         dc: ()=>({ get: ()=>1, release: ()=>{} }),
         draw: {
+            scroll: (/** @type {any} */ hdc, /** @type {any} */ rect, /** @type {number} */ dx,
+                /** @type {number} */ dy, /** @type {any} */ clip)=>
+                scrolls.push({ rect, dx, dy, clip }),
             fill: (/** @type {any} */ hdc, /** @type {any} */ rect,
                 /** @type {number} */ color)=>fills.push({ rect, color, quiet: false }),
             // The manager's own screen background: painted, not shown.
@@ -236,10 +240,11 @@ function paintedHost(fills, presents, clips){
  *        that waits for something the queue does later.
  * @param {(region: number) => any} [options.regionBox] gdi32's rectangle of a region.
  * @param {(delay: number, fire: () => void) => boolean} [options.later] The system's clock.
+ * @param {any[]} [options.scrolls] Where the screen's moved pixels are told, with `paint`.
  */
 function setup({
     heap = false, reply, waitForObjects, now, hookReply, threadExists, trace, paint = false,
-    caller = { current: THREAD }, queueNow, regionBox, later,
+    caller = { current: THREAD }, queueNow, regionBox, later, scrolls = [],
 } = {})
 {
     const memory = fakeMemory();
@@ -320,7 +325,7 @@ function setup({
         release: heap ? (/** @type {number} */ at)=>released.push(at) : undefined,
         regionBox,
         later,
-        ...(paint ? paintedHost(fills, presents, clips) : {}),
+        ...(paint ? paintedHost(fills, presents, clips, scrolls) : {}),
     });
 
     /** Lets every waiting call look at the queue once more. */
@@ -1954,6 +1959,53 @@ test('the desktop paints what a window left on the system\'s clock, with no queu
         assert.deepEqual(desktop(), [{ left: 10, top: 20, right: 310, bottom: 220 }],
             'then, with no message looked at');
     });
+
+test('a window that moves takes its pixels with it, and only what it left is painted', ()=>{
+    // As SetWindowPos copies a window's bits. A launcher that moves itself on
+    // every mouse move of a drag had itself and every control repainted, by
+    // its own code, at every step.
+    const SWP_NOSIZE = 0x0001;
+    const SWP_NOZORDER = 0x0004;
+    const SWP_NOACTIVATE = 0x0010;
+    const WM_ERASEBKGND = 0x0014;
+    const WS_POPUP = 0x80000000;
+    /** @type {any[]} */
+    const scrolls = [];
+    const { fns, memory, fills, dispatched } = setup({ paint: true, scrolls });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const drain = ()=>{
+        while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) !== 0)
+        {
+            fns.ValidateRect.handler([memory.u32(MSG_BUFFER + MSG.hwnd), 0]);
+        }
+    };
+    const desktop = ()=>fills.filter(fill=>fill.color === 0x808080 && !fill.quiet)
+        .map(fill=>fill.rect);
+    const hwnd = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+        x: 10, y: 20, width: 300, height: 200 });
+    drain();
+    fills.length = 0;
+    dispatched.length = 0;
+
+    fns.SetWindowPos.handler([hwnd, 0, 50, 20, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]);
+    assert.deepEqual(scrolls, [{ rect: { left: 10, top: 20, right: 310, bottom: 220 }, dx: 40,
+        dy: 0, clip: { left: 50, top: 20, right: 350, bottom: 220 } }], 'its pixels moved');
+    assert.equal(fns.GetUpdateRect.handler([hwnd, 0, 0]), 0, 'nothing of it is left to paint');
+    assert.deepEqual(dispatched.filter(message=>[WM_NCPAINT, WM_ERASEBKGND, WM_PAINT]
+        .includes(message.message)), [], 'nothing was asked of its procedure');
+    assert.deepEqual(desktop(), [{ left: 10, top: 20, right: 50, bottom: 220 }],
+        'the strip it left is the desktop\'s, at once');
+
+    // Partly under another window, its pixels are not all its own.
+    createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE, x: 300, y: 100,
+        width: 100, height: 50 });
+    drain();
+    scrolls.length = 0;
+    fns.SetWindowPos.handler([hwnd, 0, 60, 20, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]);
+    assert.deepEqual(scrolls, [], 'a window partly covered is painted instead');
+    assert.equal(fns.GetUpdateRect.handler([hwnd, 0, 0]), 1);
+});
 
 test('the desktop paints where a window went a moment later, under whatever came there', ()=>{
     // A wizard that replaces its window between pages destroys one, pumps

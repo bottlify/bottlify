@@ -1653,9 +1653,11 @@ test('an unread message for a hidden window paints nothing and the desktop stays
     'plus the three-pixel dialog frame each side and the caption');
     const presentedBefore = context.presents();
     context.fns.MoveWindow.handler([dialog, 30, 10, 206, 145, 1]);
-    await context.pump(dialog);
-    assert.equal(context.desktop.read(8, 8), 0x00c0c0c0,
-        'the desktop paints where it was a moment later, not at once');
+    // Its pixels go with it, and where it was the desktop paints at once: a
+    // window that moved left no gap to wait out.
+    assert.equal(context.desktop.read(8, 8), 0x00808080, 'the desktop where it was, at once');
+    assert.equal(context.desktop.read(181, 130), 0x00c0c0c0, 'the dialog face where it is now');
+    assert.equal(context.fns.GetUpdateRect.handler([dialog, 0, 0]), 0, 'none of it to paint');
     context.clock.now += 1000;
     await context.pump(dialog);
     assert.ok(context.presents() > presentedBefore, 'moving repainted and showed the desktop');

@@ -1351,9 +1351,11 @@ export function createWindowFunctions(host){
      * transparent window paints after what is beneath it and covers nothing.
      *
      * @param {any} record
+     * @param {boolean} [withChildren]  Whether its own children count; a move
+     *        that takes them along leaves them out.
      * @returns {import('../gdi32/rects.js').Rect[]}
      */
-    const coveringOf = record=>{
+    const coveringOf = (record, withChildren = true)=>{
         /** @type {import('../gdi32/rects.js').Rect[]} */
         const covers = [];
         /** @param {any} each */
@@ -1390,7 +1392,7 @@ export function createWindowFunctions(host){
                 }
             }
         }
-        if ((record.style & WS_CLIPCHILDREN) !== 0)
+        if (withChildren && (record.style & WS_CLIPCHILDREN) !== 0)
         {
             for (const child of childrenOf(record))
             {
@@ -2921,13 +2923,16 @@ export function createWindowFunctions(host){
      * that replaces its window between two pages destroys one and shows the
      * next in the same place a few milliseconds apart, pumping messages in
      * between; painted at once, the desktop was shown in that gap, the whole
-     * window gone for a frame at every page.
+     * window gone for a frame at every page. A window that moved left no
+     * such gap -- it is on the screen still -- and its trail is painted at
+     * once; it and its children took their pixels along and are left alone.
      *
      * @param {{ left: number, top: number, right: number, bottom: number }} rect
+     * @param {any} [moving]  The window whose move left it.
      */
-    const uncover = rect=>{
+    const uncover = (rect, moving = null)=>{
         paintDesktop();
-        const waiting = exposed.length > 0 || scheduleDesktop();
+        const waiting = moving === null && (exposed.length > 0 || scheduleDesktop());
         exposed.push(rect);
         if (!waiting)
         {
@@ -2935,11 +2940,77 @@ export function createWindowFunctions(host){
         }
         for (const other of paintOrder())
         {
-            if (shown(other) && !isEmpty(intersect(rect, geometry.shapedRect(other))))
+            if (shown(other) && !insideOf(other, moving)
+                && !isEmpty(intersect(rect, geometry.shapedRect(other))))
             {
                 repaint(other);
             }
         }
+    };
+
+    /** Whether a window is `outer` or inside it. @param {any} record @param {any} outer */
+    const insideOf = (record, outer)=>{
+        if (!outer)
+        {
+            return false;
+        }
+        for (let at = record; at; at = isChild(at) ? live(at.parent) : null)
+        {
+            if (at === outer)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    /**
+     * Whether all of a window is on the screen and under no other: then its
+     * pixels there are its own, and a move can take them along.
+     *
+     * @param {any} record
+     */
+    const wholeOnScreen = record=>{
+        const rect = geometry.shapedRect(record);
+        const screen = host.screen;
+        return Boolean(screen) && !isEmpty(rect) && rect.left >= 0 && rect.top >= 0
+            && rect.right <= (screen?.width ?? 0) && rect.bottom <= (screen?.height ?? 0)
+            && sameRect(geometry.visibleWindowRect(record), rect)
+            && coveringOf(record, false).every(cover=>isEmpty(intersect(cover, rect)));
+    };
+
+    /**
+     * A window moved, its size the same: its pixels go with it, as Windows'
+     * SetWindowPos copies a window's bits, and only what it left of the
+     * screen is painted -- by the windows under it and the desktop, which is
+     * what a move renders. Repainted instead, the window and every control
+     * in it ran the program's painting again at every step of a drag. Asked
+     * only for a window that was all on the screen and under no other
+     * (`wholeOnScreen`), whose pixels were all its own. Answers whether they
+     * moved.
+     *
+     * @param {any} record
+     * @param {{ left: number, top: number, right: number, bottom: number }} before
+     *        Its rectangle on the screen before the move.
+     */
+    const moveBits = (record, before)=>{
+        const hdc = draw?.scroll ? host.dc?.()?.get(0, null) ?? 0 : 0;
+        if (hdc === 0)
+        {
+            return false;
+        }
+        const after = geometry.shapedRect(record);
+        // Drawn only where it is seen now: inside its parents, under no window above.
+        draw.clip?.(hdc, coveringOf(record, false).reduce(
+            (area, cover)=>subtractFromArea(area, cover), [geometry.visibleWindowRect(record)]));
+        draw.scroll(hdc, before, after.left - before.left, after.top - before.top, after);
+        host.dc?.()?.release(0, hdc);
+        painted();
+        for (const piece of subtractFromArea([before], after))
+        {
+            uncover(piece, record);
+        }
+        return true;
     };
 
     /**
@@ -4627,7 +4698,7 @@ export function createWindowFunctions(host){
                 capture: ()=>captured, setCapture, releaseCapture,
                 send, sendAcross, callProcedure, geometry, windowFromPoint, askedFromPoint,
                 isChild, repaint,
-                appear, uncover, eraseShown,
+                appear, uncover, eraseShown, wholeOnScreen, moveBits,
                 /** @param {(handle: number) => any} decode */
                 pictures: decode=>{
                     pictureOf = decode;
