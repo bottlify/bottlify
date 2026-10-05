@@ -4352,7 +4352,8 @@ async function buildApp(options){
                         return `0x${pointer.toString(16)}`;
                     }
                 });
-                pending.push({ label, esp, returnTo: memory.readU32(esp), named });
+                pending.push({ label, esp, returnTo: memory.readU32(esp), named,
+                    thread: kernel.currentThread() });
                 memory.writeU32(esp, catcher());
                 return 0;
             },
@@ -4362,14 +4363,18 @@ async function buildApp(options){
     };
 
     /**
-     * Watched calls that have not returned yet, innermost last.
+     * Watched calls that have not returned yet, innermost last, each with the
+     * thread that made it.
      *
      * A stack rather than a map, because a return address is not enough to tell
-     * two calls apart and the answer is wanted per call. Threads can interleave
-     * and would confuse it; this is a diagnostic taken with a handful of
-     * functions watched, where they do not.
+     * two calls apart and the answer is wanted per call; and searched for the
+     * returning thread's own innermost call, because threads interleave inside
+     * watched calls -- a worker woken by one runs before it returns -- and a
+     * return taken from another thread's frame sends this one into that
+     * thread's caller.
      *
-     * @type {{ label: string, esp: number, returnTo: number, named: string[] }[]}
+     * @type {{ label: string, esp: number, returnTo: number, named: string[],
+     *     thread: any }[]}
      */
     const pending = [];
 
@@ -4391,11 +4396,17 @@ async function buildApp(options){
             preserveResult: true,
             handler: ()=>{
                 const answer = cpu.readReg32('ecx') >>> 0;
-                const frame = pending.pop();
-                if (!frame)
+                const thread = kernel.currentThread();
+                let at = pending.length - 1;
+                while (at >= 0 && pending[at].thread !== thread)
+                {
+                    at--;
+                }
+                if (at < 0)
                 {
                     return answer;
                 }
+                const [frame] = pending.splice(at, 1);
                 events.emit('guest-return', frame.named.length
                     ? { name: frame.label, strings: frame.named, result: answer }
                     : { name: frame.label, result: answer });
