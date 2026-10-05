@@ -1715,11 +1715,16 @@ export function createWindowFunctions(host){
     const setCapture = hwnd=>{
         const previous = captured;
         captured = live(hwnd) ? hwnd >>> 0 : 0;
+        if (dragged && !insideOf(live(captured), dragged.record))
+        {
+            endDrag();
+        }
         return previous;
     };
     const releaseCapture = ()=>{
         const previous = captured;
         captured = 0;
+        endDrag();
         if (previous !== 0 && live(previous))
         {
             host.queue.post({ hwnd: previous, message: WM_CAPTURECHANGED, wParam: 0, lParam: 0 });
@@ -2980,6 +2985,89 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * The window a program is dragging -- moving it while it, or a window in
+     * it, holds the mouse -- held as it is until the mouse is let go, with
+     * its picture, which is all that moves: it paints nothing and is handed
+     * nothing to paint meanwhile, and only what it leaves is rendered, by
+     * what is under it. Painting itself at every step of a drag, it showed
+     * half-drawn frames for nothing.
+     *
+     * @type {{ record: any, shot: any } | null}
+     */
+    let dragged = null;
+
+    /** Whether a window is the dragged one or inside it. @param {any} record */
+    const frozen = record=>dragged !== null && insideOf(record, dragged.record);
+
+    /**
+     * Asked before a window moves: whether it is being dragged, its picture
+     * taken where it still is the first time.
+     *
+     * @param {any} record
+     */
+    const dragging = record=>{
+        if (dragged?.record === record)
+        {
+            return true;
+        }
+        const holder = live(captured);
+        if (!holder || !insideOf(holder, record) || !shown(record) || !draw?.snapshot)
+        {
+            return false;
+        }
+        const hdc = host.dc?.()?.get(0, null) ?? 0;
+        const shot = hdc !== 0 ? draw.snapshot(hdc, geometry.shapedRect(record)) : null;
+        host.dc?.()?.release(0, hdc);
+        if (!shot)
+        {
+            return false;
+        }
+        endDrag();
+        dragged = { record, shot };
+        return true;
+    };
+
+    /**
+     * A dragged window moved: its picture drawn where it now is and seen,
+     * and what it left rendered by the windows under it and the desktop.
+     *
+     * @param {any} record
+     * @param {{ left: number, top: number, right: number, bottom: number }} before
+     */
+    const dragMove = (record, before)=>{
+        const hdc = dragged ? host.dc?.()?.get(0, null) ?? 0 : 0;
+        if (hdc === 0 || !dragged)
+        {
+            return;
+        }
+        const after = geometry.shapedRect(record);
+        draw.clip?.(hdc, coveringOf(record, false).reduce(
+            (area, cover)=>subtractFromArea(area, cover), [geometry.visibleWindowRect(record)]));
+        draw.paste(hdc, dragged.shot, after.left, after.top);
+        host.dc?.()?.release(0, hdc);
+        painted();
+        for (const piece of subtractFromArea([before], after))
+        {
+            uncover(piece, record);
+        }
+    };
+
+    /** The mouse let go: the dragged window is itself again, and paints where it now is. */
+    const endDrag = ()=>{
+        if (!dragged)
+        {
+            return;
+        }
+        const { record, shot } = dragged;
+        dragged = null;
+        draw?.drop?.(shot);
+        if (live(record.hwnd) && shown(record))
+        {
+            appear(record);
+        }
+    };
+
+    /**
      * A window moved, its size the same: its pixels go with it, as Windows'
      * SetWindowPos copies a window's bits, and only what it left of the
      * screen is painted -- by the windows under it and the desktop, which is
@@ -3999,6 +4087,7 @@ export function createWindowFunctions(host){
         descendants: (/** @type {any} */ record)=>paintedDescendantsOf(record),
         paintsFirst: (/** @type {any} */ record)=>bubbledTo(record)
             .reduce((first, up)=>(up.updateRect ? up : first), record),
+        frozen: (/** @type {any} */ record)=>frozen(record),
         desktop: ()=>desktopWindow().hwnd,
         covering: coveringOf,
     });
@@ -4247,7 +4336,7 @@ export function createWindowFunctions(host){
         }
         for (const record of waiting ? paintOrder() : [])
         {
-            if (record.updateRect && shown(record)
+            if (record.updateRect && shown(record) && !frozen(record)
                 && (filter.hwnd === ANY_WINDOW || filter.hwnd === record.hwnd)
                 && (asking === null || creatorOf(record) === null || creatorOf(record) === asking))
             {
@@ -4293,7 +4382,7 @@ export function createWindowFunctions(host){
         painting(){
             for (const record of windows.values())
             {
-                if (record.updateRect && !record.destroyed && shown(record))
+                if (record.updateRect && !record.destroyed && shown(record) && !frozen(record))
                 {
                     const at = host.now?.() ?? 0;
                     paintingSince ??= at;
@@ -4698,7 +4787,7 @@ export function createWindowFunctions(host){
                 capture: ()=>captured, setCapture, releaseCapture,
                 send, sendAcross, callProcedure, geometry, windowFromPoint, askedFromPoint,
                 isChild, repaint,
-                appear, uncover, eraseShown, wholeOnScreen, moveBits,
+                appear, uncover, eraseShown, wholeOnScreen, moveBits, dragging, dragMove,
                 /** @param {(handle: number) => any} decode */
                 pictures: decode=>{
                     pictureOf = decode;

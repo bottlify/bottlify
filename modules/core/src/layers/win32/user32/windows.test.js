@@ -203,6 +203,13 @@ function paintedHost(fills, presents, clips, scrolls = []){
         screen: { width: 640, height: 480, bitsPerPixel: 32 },
         dc: ()=>({ get: ()=>1, release: ()=>{} }),
         draw: {
+            snapshot: (/** @type {any} */ hdc, /** @type {any} */ rect)=>{
+                scrolls.push({ snapshot: rect });
+                return { rect };
+            },
+            paste: (/** @type {any} */ hdc, /** @type {any} */ shot, /** @type {number} */ x,
+                /** @type {number} */ y)=>scrolls.push({ paste: [x, y] }),
+            drop: (/** @type {any} */ shot)=>scrolls.push({ drop: shot.rect }),
             scroll: (/** @type {any} */ hdc, /** @type {any} */ rect, /** @type {number} */ dx,
                 /** @type {number} */ dy, /** @type {any} */ clip)=>
                 scrolls.push({ rect, dx, dy, clip }),
@@ -2005,6 +2012,54 @@ test('a window that moves takes its pixels with it, and only what it left is pai
     fns.SetWindowPos.handler([hwnd, 0, 60, 20, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]);
     assert.deepEqual(scrolls, [], 'a window partly covered is painted instead');
     assert.equal(fns.GetUpdateRect.handler([hwnd, 0, 0]), 1);
+});
+
+test('a window dragged -- moved while it holds the mouse -- is held as it is until let go', ()=>{
+    // Only its picture moves; it paints nothing and is handed nothing to
+    // paint until the mouse is let go, and then it paints where it is.
+    const SWP_NOSIZE = 0x0001;
+    const SWP_NOZORDER = 0x0004;
+    const SWP_NOACTIVATE = 0x0010;
+    const WM_ERASEBKGND = 0x0014;
+    const WS_POPUP = 0x80000000;
+    /** @type {any[]} */
+    const scrolls = [];
+    const { fns, memory, fills, dispatched, clips, service } = setup({ paint: true, scrolls });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const drain = ()=>{
+        while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) !== 0)
+        {
+            fns.ValidateRect.handler([memory.u32(MSG_BUFFER + MSG.hwnd), 0]);
+        }
+    };
+    const hwnd = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+        x: 10, y: 20, width: 300, height: 200 });
+    drain();
+    fills.length = 0;
+    dispatched.length = 0;
+    const move = (/** @type {number} */ x)=>fns.SetWindowPos.handler([hwnd, 0, x, 20, 0, 0,
+        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]);
+
+    fns.SetCapture.handler([hwnd]);
+    move(50);
+    move(90);
+    assert.deepEqual(scrolls, [{ snapshot: { left: 10, top: 20, right: 310, bottom: 220 } },
+        { paste: [50, 20] }, { paste: [90, 20] }], 'taken once, drawn at every step');
+    fns.InvalidateRect.handler([hwnd, 0, 1]);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, WM_PAINT, WM_PAINT, PM_REMOVE]), 0,
+        'asked to repaint while dragged, it is handed nothing to paint');
+    assert.equal(service.painting(), false, 'nor does it hold the screen back');
+    fns.ReleaseDC.handler([hwnd, fns.GetDC.handler([hwnd])]);
+    assert.deepEqual(clips.at(-1), [], 'what it draws meanwhile reaches nothing');
+    assert.deepEqual(dispatched.filter(message=>[WM_NCPAINT, WM_ERASEBKGND, WM_PAINT]
+        .includes(message.message)), [], 'nothing was asked of its procedure');
+
+    fns.ReleaseCapture.handler();
+    assert.deepEqual(scrolls.at(-1), { drop: { left: 10, top: 20, right: 310, bottom: 220 } });
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, WM_PAINT, WM_PAINT, PM_REMOVE]), 1,
+        'let go, it paints where it is');
+    assert.equal(memory.u32(MSG_BUFFER + MSG.hwnd), hwnd);
 });
 
 test('the desktop paints where a window went a moment later, under whatever came there', ()=>{

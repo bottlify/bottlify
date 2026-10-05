@@ -786,6 +786,9 @@ export function createSystemFunctions({ host, live, windows, classes }){
         const moved = (flags & SWP_NOMOVE) === 0 && (record.x !== (x | 0) || record.y !== (y | 0));
         const sized = (flags & SWP_NOSIZE) === 0
             && (record.width !== (cx | 0) || record.height !== (cy | 0));
+        // Moved while it holds the mouse, it is being dragged: held as it is,
+        // its picture taken before it moves.
+        const dragged = wasShown && moved && !sized && host.dragging?.(record) === true;
         if ((flags & SWP_NOMOVE) === 0)
         {
             record.x = x | 0;
@@ -813,9 +816,13 @@ export function createSystemFunctions({ host, live, windows, classes }){
             host.raise(record);
         }
         const isShown = host.shown(record);
+        if (dragged && isShown)
+        {
+            host.dragMove(record, covered);
+        }
         // A window that only moved takes its pixels with it, as SetWindowPos
         // copies a window's bits unless told not to.
-        const copied = whole && isShown && moved && !sized
+        const copied = (dragged && isShown) || whole && isShown && moved && !sized
             && (flags & (SWP_NOCOPYBITS | SWP_NOREDRAW)) === 0
             && host.moveBits?.(record, covered) === true;
         if (!copied && covered && (!isShown || moved || sized))

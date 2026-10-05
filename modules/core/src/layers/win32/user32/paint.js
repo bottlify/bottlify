@@ -394,6 +394,8 @@ export function tabbedWidth(text, widthOf, stops, interval){
  * @param {(record: any) => Rect[]} [options.covering]
  *        The rectangles, in screen coordinates, of the windows over a window:
  *        what its visible region leaves out.
+ * @param {(record: any) => boolean} [options.frozen]
+ *        Whether a window is held as it is, being dragged: it draws nowhere.
  */
 export function createPaintFunctions(options){
     const { host, live, WM_PAINT, geometry, send, invalidated, painted, descendants } = options;
@@ -614,7 +616,7 @@ export function createPaintFunctions(options){
      * @returns {Rect[]}
      */
     const visibleArea = (record, whole, origin)=>{
-        if (!shown(record))
+        if (!shown(record) || options.frozen?.(record))
         {
             return [];
         }
