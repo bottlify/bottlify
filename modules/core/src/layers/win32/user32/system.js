@@ -769,6 +769,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
      * @param {number[]} args  hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags.
      */
     const setWindowPos = ([hwnd, after, x, y, cx, cy, flags])=>{
+        const SWP_NOREDRAW = 0x0008;
         const SWP_SHOWWINDOW = 0x0040;
         const SWP_HIDEWINDOW = 0x0080;
         const HWND_BOTTOM = 1;
@@ -817,6 +818,10 @@ export function createSystemFunctions({ host, live, windows, classes }){
         {
             host.appear(record);
         }
+        // What it showed is framed and erased before it returns, as Windows
+        // XP's SetWindowPos does it; SWP_NOREDRAW asks for no painting at all.
+        const erased = (flags & SWP_NOREDRAW) === 0
+            ? host.eraseShown?.(host.callerThread?.()) ?? 1 : 1;
         // A child placed without SWP_NOACTIVATE is told it is the active
         // child, shown or not (user32's message tests, WmShowChildSeq_2 and
         // _4): an MDI child becomes the client's active one this way when its
@@ -824,10 +829,10 @@ export function createSystemFunctions({ host, live, windows, classes }){
         if ((flags & (SWP_NOACTIVATE | SWP_HIDEWINDOW)) === 0
             && (record.style & (WS_CHILD | WS_POPUP)) === WS_CHILD)
         {
-            return andThen(host.send(record.hwnd, WM_CHILDACTIVATE, 0, 0, host.callerThread?.()),
-                ()=>1);
+            return andThen(erased, ()=>andThen(host.send(record.hwnd, WM_CHILDACTIVATE, 0, 0,
+                host.callerThread?.()), ()=>1));
         }
-        return 1;
+        return andThen(erased, ()=>1);
     };
 
     /**

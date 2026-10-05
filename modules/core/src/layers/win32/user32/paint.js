@@ -515,6 +515,46 @@ export function createPaintFunctions(options){
         return next(0);
     };
 
+    /**
+     * A window's frame and background painted now, its client left to its
+     * WM_PAINT: what RDW_ERASENOW does, and what Windows XP's SetWindowPos
+     * does for a window it shows. A program that shows a window and goes on
+     * without looking at its queue has it framed and erased on the screen,
+     * not the pixels of whatever was there before.
+     *
+     * @param {any} record
+     * @param {unknown} thread  Whose call showed it, named by the caller: after
+     *        an await the thread on the processor may be another.
+     * @returns {number | Promise<number>}
+     */
+    const eraseNow = (record, thread)=>{
+        const frame = record.ncDirty === true;
+        const erase = record.erase === true && Boolean(record.updateRect);
+        record.ncDirty = false;
+        record.erase = false;
+        return after(frame ? send(record.hwnd, WM_NCPAINT, 1, 0, thread) : 0, ()=>{
+            const hdc = erase ? contextOn(record) : 0;
+            if (hdc === 0)
+            {
+                return 1;
+            }
+            host.draw?.clip?.(hdc, intersectArea(
+                visibleArea(record, false, geometry.clientRect(record)),
+                record.updateRect ?? clientArea(record)));
+            // Shown only when it erased, which the answer says: a window
+            // with no background leaves the screen as it was, and that is
+            // not a picture to present.
+            return after(send(record.hwnd, WM_ERASEBKGND, hdc, 0, thread), erased=>{
+                contexts()?.release(record.hwnd, hdc);
+                if ((erased | 0) !== 0)
+                {
+                    painted();
+                }
+                return 1;
+            });
+        });
+    };
+
     /** The DC service, or null in a build that cannot make one. */
     const contexts = ()=>host.dc?.() ?? null;
 
@@ -1618,7 +1658,8 @@ export function createPaintFunctions(options){
         },
     };
 
-    return { table, beginPaint, endPaint, invalidate, updateNow, clientArea, cellOf, contextOn };
+    return { table, beginPaint, endPaint, invalidate, updateNow, eraseNow, clientArea, cellOf,
+        contextOn };
 }
 
 /** A brush argument up to this is a system colour index plus one. */

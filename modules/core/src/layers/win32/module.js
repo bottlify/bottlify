@@ -399,6 +399,8 @@ export function createWin32Module(){
                 keyState: config?.keyState,
                 currentThread: ()=>kernel.currentThread(),
             });
+            /** The desktop's own timer, made the first time it has to wait. @type {any} */
+            let desktopClock = null;
 
             /**
              * Where a thread's start routine returns to.
@@ -1924,6 +1926,13 @@ export function createWin32Module(){
                     // The desktop's background where no window is, when the
                     // embedder gave it a picture rather than its colour.
                     desktopPicture: config?.desktop?.picture ?? null,
+                    // The desktop's clock: what a window left is painted on the
+                    // guest's clock, whatever the program's threads are doing.
+                    later: (/** @type {number} */ delay, /** @type {() => void} */ fire)=>{
+                        desktopClock ??= kernel.createTimer({ name: 'desktop' });
+                        return desktopClock !== null && kernel.armTimer(desktopClock,
+                            kernel.clock.virtualTime() + delay, 0, ()=>fire()) === true;
+                    },
                     dispatching,
                     // One line per message a window procedure receives, under
                     // its own category and nothing at all when nobody asked: a

@@ -473,6 +473,10 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           Makes a GDI region hold a rectangle, for GetUpdateRgn.
  * @property {() => void} [present]
  *           Shows the desktop. Called once a paint pass has finished.
+ * @property {(delay: number, fire: () => void) => boolean} [later]
+ *           Runs `fire` once `delay` milliseconds of the guest's clock have
+ *           passed, whatever the program's threads are doing; false when
+ *           there is no such clock.
  * @property {(name: string, handler: (message: DispatchedMessage) => number | Promise<number>)
  *     => number} [registerProcedure]
  *           An address a program can call a host-side window procedure
@@ -2475,7 +2479,8 @@ export function createWindowFunctions(host){
         /** The window, shown and then activated when it was created visible. */
         const activated = ()=>{
             reveal();
-            return andThen(activateCreated(record, thread), ()=>record.hwnd);
+            return andThen(activateCreated(record, thread),
+                ()=>andThen(eraseShown(thread), ()=>record.hwnd));
         };
         // A procedure on this side reads no CREATESTRUCT: what it needs of one
         // is on the record.
@@ -2603,7 +2608,7 @@ export function createWindowFunctions(host){
                         ()=>{
                             reveal();
                             return andThen(activateCreated(record, thread),
-                                ()=>done(record.hwnd));
+                                ()=>andThen(eraseShown(thread), ()=>done(record.hwnd)));
                         })));
                 })));
         });
@@ -2768,8 +2773,47 @@ export function createWindowFunctions(host){
             if (shown(each))
             {
                 repaint(each);
+                unerased.add(each);
             }
         }
+    };
+
+    /**
+     * Windows that appeared since their frames and backgrounds were last
+     * painted at once, parents before their children.
+     *
+     * @type {Set<any>}
+     */
+    const unerased = new Set();
+
+    /**
+     * The frames and backgrounds of the windows that appeared, painted now --
+     * WM_NCPAINT and WM_ERASEBKGND sent, parents first -- as Windows XP's
+     * SetWindowPos paints a window it shows before it returns; the client
+     * waits for its WM_PAINT, as it does there. Asked for by the calls that
+     * show a window. Only the calling thread's windows: another thread's are
+     * its own to paint when it next looks at its queue.
+     *
+     * @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const eraseShown = thread=>{
+        const asking = threadIdOf(thread);
+        /** @returns {number | Promise<number>} */
+        const next = ()=>{
+            const first = unerased.values().next();
+            if (first.done)
+            {
+                return 1;
+            }
+            const record = first.value;
+            unerased.delete(record);
+            const owner = threadIdOf(record.thread);
+            return live(record.hwnd) && shown(record)
+                && (owner === null || asking === null || owner === asking)
+                ? andThen(paint.eraseNow(record, thread), next) : next();
+        };
+        return next();
     };
 
     /** @param {any} record @returns {any[]} every live descendant, in paint order */
@@ -2825,21 +2869,11 @@ export function createWindowFunctions(host){
      */
     const uncover = rect=>{
         paintDesktop();
-        if (!host.queue.postLater)
+        const waiting = exposed.length > 0 || scheduleDesktop();
+        exposed.push(rect);
+        if (!waiting)
         {
-            exposed.push(rect);
             repaintDesktop();
-        }
-        else
-        {
-            if (exposed.length === 0)
-            {
-                host.queue.postLater(DESKTOP_REPAINT_KEY, DESKTOP_REPAINT_MS, ()=>{
-                    repaintDesktop();
-                    return null;
-                });
-            }
-            exposed.push(rect);
         }
         for (const other of paintOrder())
         {
@@ -2848,6 +2882,29 @@ export function createWindowFunctions(host){
                 repaint(other);
             }
         }
+    };
+
+    /**
+     * Has the desktop paint what windows left DESKTOP_REPAINT_MS from now: on
+     * the system's own clock when the host has one -- the desktop is no
+     * thread of the program's, and on Windows its own thread paints whatever
+     * the program's are doing -- else when the queue is next looked at.
+     * False when nothing can wait.
+     */
+    const scheduleDesktop = ()=>{
+        if (host.later?.(DESKTOP_REPAINT_MS, repaintDesktop))
+        {
+            return true;
+        }
+        if (!host.queue.postLater)
+        {
+            return false;
+        }
+        host.queue.postLater(DESKTOP_REPAINT_KEY, DESKTOP_REPAINT_MS, ()=>{
+            repaintDesktop();
+            return null;
+        });
+        return true;
     };
 
     /**
@@ -4299,6 +4356,7 @@ export function createWindowFunctions(host){
         if (!wasVisible && !hide)
         {
             appear(record);
+            told = andThen(told, ()=>eraseShown(thread));
             // A window that becomes visible hears its own size, as the real
             // ShowWindow sends it: the message a program lays itself out by
             // and rasterises every glyph of its text for. Without it a program
@@ -4509,7 +4567,7 @@ export function createWindowFunctions(host){
                 capture: ()=>captured, setCapture, releaseCapture,
                 send, sendAcross, callProcedure, geometry, windowFromPoint, askedFromPoint,
                 isChild, repaint,
-                appear, uncover,
+                appear, uncover, eraseShown,
                 /** @param {(handle: number) => any} decode */
                 pictures: decode=>{
                     pictureOf = decode;

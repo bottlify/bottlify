@@ -51,6 +51,8 @@ const WM_CHAR = 0x0102;
 const WM_PAINT = 0x000f;
 const WM_MOVE = 0x0003;
 const WM_SIZE = 0x0005;
+/** The frame painted before a call that shows a window returns, as Windows XP paints it. */
+const WM_NCPAINT = 0x0085;
 const WM_SHOWWINDOW = 0x0018;
 const WM_NCACTIVATE = 0x0086;
 const WM_USER = 0x0400;
@@ -233,10 +235,11 @@ function paintedHost(fills, presents, clips){
  * @param {() => number} [options.queueNow] The message queue's clock, for a test
  *        that waits for something the queue does later.
  * @param {(region: number) => any} [options.regionBox] gdi32's rectangle of a region.
+ * @param {(delay: number, fire: () => void) => boolean} [options.later] The system's clock.
  */
 function setup({
     heap = false, reply, waitForObjects, now, hookReply, threadExists, trace, paint = false,
-    caller = { current: THREAD }, queueNow, regionBox,
+    caller = { current: THREAD }, queueNow, regionBox, later,
 } = {})
 {
     const memory = fakeMemory();
@@ -316,6 +319,7 @@ function setup({
         } : undefined,
         release: heap ? (/** @type {number} */ at)=>released.push(at) : undefined,
         regionBox,
+        later,
         ...(paint ? paintedHost(fills, presents, clips) : {}),
     });
 
@@ -956,8 +960,9 @@ test('the first window shown makes the application active before the call return
         [shown, WM_NCCREATE, 0], [shown, WM_CREATE, 0], [shown, WM_SIZE, 0], [shown, WM_MOVE, 0],
         [shown, WM_SHOWWINDOW, 1], [shown, WM_ACTIVATEAPP, 1], [hidden, WM_ACTIVATEAPP, 1],
         [shown, WM_NCACTIVATE, 1], [shown, WM_ACTIVATE, 1], [shown, WM_SETFOCUS, 0],
+        [shown, WM_NCPAINT, 1],
     ]);
-    assert.deepEqual(dispatched.slice(5).map(entry=>entry.lParam), [0, 0, 0, 0, 0],
+    assert.deepEqual(dispatched.slice(5, 10).map(entry=>entry.lParam), [0, 0, 0, 0, 0],
         'no thread of this program had the activation, and no window');
     assert.equal(queue.depth(), 0, 'nothing of it was posted');
     assert.equal(fns.GetActiveWindow.handler(), shown);
@@ -970,7 +975,8 @@ test('the first window shown makes the application active before the call return
     fns.ShowWindow.handler([hidden, SW_SHOW]);
     assert.deepEqual(dispatched.map(({ hwnd, message, wParam })=>[hwnd, message, wParam]), [
         [hidden, WM_SHOWWINDOW, 1], [hidden, WM_ACTIVATEAPP, 1], [hidden, WM_NCACTIVATE, 1],
-        [hidden, WM_ACTIVATE, 1], [hidden, WM_SETFOCUS, 0], [hidden, WM_SIZE, 0],
+        [hidden, WM_ACTIVATE, 1], [hidden, WM_SETFOCUS, 0], [hidden, WM_NCPAINT, 1],
+        [hidden, WM_SIZE, 0],
     ], 'with no window active, the application is activated again');
 });
 
@@ -1000,6 +1006,7 @@ test('a window that takes the activation is told, and the one it replaced is tol
         [first, WM_NCACTIVATE, 0, 0], [first, WM_ACTIVATE, WA_INACTIVE, second],
         [second, WM_NCACTIVATE, 1, 0], [second, WM_ACTIVATE, WA_ACTIVE, first],
         [first, WM_KILLFOCUS, second, 0], [second, WM_SETFOCUS, first, 0],
+        [second, WM_NCPAINT, 1, 0],
     ]);
     assert.equal(context.queue.depth(), 0, 'sent before the call returns, none of it posted');
 });
@@ -1624,7 +1631,11 @@ test('a window appearing paints the desktop but does not present it as a frame',
     // screen as the first frame -- the frame a launcher hides its loading
     // screen on -- before the program had presented anything. The colour is
     // still painted underneath, so whatever the program draws shows over it.
-    const { fns, hwnd, fills, presents } = withWindow({ paint: true });
+    // The window has no background of its own: its WM_ERASEBKGND answers that
+    // nothing was erased, as DefWindowProc does for a class with no brush.
+    const WM_ERASEBKGND = 0x0014;
+    const { fns, hwnd, fills, presents } = withWindow({ paint: true,
+        reply: message=>(message.message === WM_ERASEBKGND ? 0 : 0x1234) });
     fns.ShowWindow.handler([hwnd, SW_SHOW]);
     pump(fns, hwnd);
 
@@ -1632,6 +1643,25 @@ test('a window appearing paints the desktop but does not present it as a frame',
     assert.equal(fills[0].color, 0x808080, 'in the desktop colour');
     assert.equal(fills[0].quiet, true, 'through the paint that does not present');
     assert.deepEqual(presents, [], 'and was not presented as a frame');
+});
+
+test('ShowWindow frames and erases the window and its children before it returns', ()=>{
+    // Windows XP's SetWindowPos paints a window it shows -- WM_NCPAINT, then
+    // WM_ERASEBKGND, its children's after its own -- before it
+    // returns, and the client waits for WM_PAINT. A setup that shows a dialog
+    // and goes to work without looking at its queue has the dialog on the
+    // screen rather than the page that was there before it.
+    const WM_ERASEBKGND = 0x0014;
+    const { fns, memory, hwnd, dispatched } = withWindow({ paint: true, reply: ()=>1 });
+    const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: hwnd,
+        x: 0, y: 0, width: 20, height: 10 });
+    dispatched.length = 0;
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    const painting = dispatched.filter(entry=>[WM_NCPAINT, WM_ERASEBKGND, WM_PAINT]
+        .includes(entry.message)).map(entry=>[entry.hwnd, entry.message]);
+    assert.deepEqual(painting, [[hwnd, WM_NCPAINT], [hwnd, WM_ERASEBKGND],
+        [child, WM_NCPAINT], [child, WM_ERASEBKGND]]);
+    assert.equal(fns.GetUpdateRect.handler([hwnd, 0, 0]), 1, 'its client is still to paint');
 });
 
 test('a window that is not on the screen draws nowhere, and a child of one neither', ()=>{
@@ -1798,6 +1828,32 @@ test('a window shaped to an empty region takes none of the screen, and the deskt
         assert.deepEqual(desktop(), [], 'not redrawn, the screen is left until something paints');
     });
 
+test('the desktop paints what a window left on the system\'s clock, with no queue looked at',
+    ()=>{
+        // The desktop is no thread of the program's: on Windows its own thread
+        // paints what a window left a moment later, whatever the program does.
+        // Waiting for the program to look at its queue left a closed window on
+        // the screen for as long as it worked without looking.
+        /** @type {{ delay: number, fire: () => void }[]} */
+        const timers = [];
+        const { fns, memory, fills } = setup({ paint: true, later: (delay, fire)=>{
+            timers.push({ delay, fire });
+            return true;
+        } });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const hwnd = createWindow(fns, memory, { style: WS_VISIBLE });
+        const desktop = ()=>fills.filter(fill=>fill.color === 0x808080 && !fill.quiet)
+            .map(fill=>fill.rect);
+        fills.length = 0;
+        fns.ShowWindow.handler([hwnd, SW_HIDE]);
+        assert.deepEqual(timers.map(timer=>timer.delay), [100], 'a moment later');
+        assert.deepEqual(desktop(), [], 'not at once');
+        timers[0].fire();
+        assert.deepEqual(desktop(), [{ left: 10, top: 20, right: 310, bottom: 220 }],
+            'then, with no message looked at');
+    });
+
 test('the desktop paints where a window went a moment later, under whatever came there', ()=>{
     // A wizard that replaces its window between pages destroys one, pumps
     // its messages and shows the next in the same place: the desktop shown
@@ -1864,7 +1920,7 @@ test('a window with an area to paint is handed WM_PAINT when nothing else is que
     // the window in the code that follows it. Posting either one leaves the
     // text rasterised for whatever default the program started with.
     assert.deepEqual(dispatched.slice(announced).map(entry=>entry.message),
-        [WM_SHOWWINDOW, 0x001c, WM_NCACTIVATE, 0x0006, 0x0007, WM_SIZE],
+        [WM_SHOWWINDOW, 0x001c, WM_NCACTIVATE, 0x0006, 0x0007, WM_NCPAINT, WM_SIZE],
         'shown: the show message, the activation, then the size');
     assert.equal(dispatched[announced].wParam, 1, 'TRUE: the window is being shown');
     // Showing a window is the first thing that paints it.
@@ -1974,7 +2030,7 @@ test('ShowWindow answers only after the procedures it sent to have run', async()
     answer(0);
     assert.equal(await result, 0, 'SW_SHOW on a hidden window answers the state it found');
     assert.deepEqual(dispatched.map(entry=>entry.message),
-        [WM_SHOWWINDOW, 0x001c, WM_NCACTIVATE, 0x0006, 0x0007, WM_SIZE],
+        [WM_SHOWWINDOW, 0x001c, WM_NCACTIVATE, 0x0006, 0x0007, WM_NCPAINT, WM_SIZE],
         'the activation and the size went once the show message was answered');
 });
 
@@ -2000,7 +2056,7 @@ test('past the show message\'s answer, the activation and the size run on the th
     const shown = dispatched.findIndex(entry=>entry.message === WM_SHOWWINDOW);
     const later = dispatched.slice(shown + 1).map(entry=>[entry.message, entry.thread?.name]);
     assert.deepEqual(later, [[0x001c, 'main'], [WM_NCACTIVATE, 'main'], [0x0006, 'main'],
-        [0x0007, 'main'], [WM_SIZE, 'main']]);
+        [0x0007, 'main'], [WM_NCPAINT, 'main'], [WM_SIZE, 'main']]);
 });
 
 test('WaitMessage yields until there is something to retrieve, and takes nothing', async()=>{
@@ -2373,7 +2429,7 @@ test('a new window is announced to its procedure with a CREATESTRUCT', ()=>{
     // the active one: WM_ACTIVATEAPP, WM_NCACTIVATE, WM_ACTIVATE, WM_SETFOCUS.
     assert.deepEqual(dispatched.map(entry=>entry.message),
         [WM_NCCREATE, WM_CREATE, WM_SIZE, WM_MOVE, WM_SHOWWINDOW, 0x001c, WM_NCACTIVATE, 0x0006,
-            0x0007]);
+            0x0007, WM_NCPAINT]);
     assert.equal(dispatched[0].lParam, dispatched[1].lParam,
         'WM_NCCREATE carries the same structure');
     const message = dispatched[1];
@@ -2460,7 +2516,7 @@ test('CreateWindowEx tells the hook, then the procedure, in the order user32\'s 
     createWindow(fns, memory, { style: 0x80000000 | WS_VISIBLE });
     assert.deepEqual(log, [`hook:${HCBT_CREATEWND}`, '0x81:0', '0x1:0', '0x5:0', '0x3:0',
         '0x18:1', `hook:${HCBT_ACTIVATE}`, '0x1c:1', '0x1c:1', '0x86:1', '0x6:1',
-        `hook:${HCBT_SETFOCUS}`, '0x7:0'], 'visible');
+        `hook:${HCBT_SETFOCUS}`, '0x7:0', '0x85:1'], 'visible');
 });
 
 test('WM_NCCREATE answered FALSE refuses the window, which hears WM_NCDESTROY alone', ()=>{
