@@ -84,8 +84,9 @@ export async function serveProcess({ end, graphics, display, options, run }){
         system.objects.deliver(token, result) };
     /** @type {any} */
     let app = null;
-    // The page's input, while this process stands.
+    // The page's input, while this process stands, and the run's report.
     handlers.input = { send: (/** @type {any} */ event)=>app?.input.send(event) };
+    handlers.report = { diagnostics: ()=>(app ? plainOf(()=>app.diagnostics()) : null) };
     app = await createApp({
         ...options,
         graphics: { ...options.graphics, worker: graphics ? portEnd(graphics) : undefined,

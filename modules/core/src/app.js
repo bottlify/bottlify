@@ -7394,6 +7394,13 @@ export async function createApp(options){
     let across = 0;
     /** Whether a child runs in a worker of its own rather than on this thread. */
     const processWorkers = processesAtOnce && options.processWorkers === true;
+    /**
+     * The children standing in workers of their own, each with the way its
+     * diagnostics are asked for across its link.
+     *
+     * @type {Set<{ image: string, diagnostics: () => Promise<any> }>}
+     */
+    const standingAcross = new Set();
 
     /**
      * Runs a child in a worker of its own: its machine there, the run's
@@ -7455,6 +7462,9 @@ export async function createApp(options){
                 return true;
             } };
         facade.input = forwarding;
+        const asked = { image: request.imagePath,
+            diagnostics: ()=>link.call('report', 'diagnostics', []) };
+        standingAcross.add(asked);
         events.emit('process-started', { image: request.imagePath, sequenceBase: logSequence,
             worker: true });
         try
@@ -7515,6 +7525,7 @@ export async function createApp(options){
             {
                 facade.input = mainLine.current.input;
             }
+            standingAcross.delete(asked);
             forgetObjects();
             link.close();
             await answering;
@@ -7777,10 +7788,18 @@ export async function createApp(options){
          */
         async standing(){
             const machines = new Set([current, ...processes.values()]);
-            return Promise.all([...machines].map(async made=>({
-                image: images.get(made) || imagePath,
-                diagnostics: await made.diagnostics(),
-            })));
+            return Promise.all([
+                ...[...machines].map(async made=>({
+                    image: images.get(made) || imagePath,
+                    diagnostics: await made.diagnostics(),
+                })),
+                // A child in a worker of its own answers at its next look at
+                // its link; one that ends meanwhile answers nothing.
+                ...[...standingAcross].map(async child=>({
+                    image: child.image,
+                    diagnostics: await child.diagnostics().catch(()=>null),
+                })),
+            ]);
         },
 
         /**

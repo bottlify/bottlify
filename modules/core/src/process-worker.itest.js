@@ -410,3 +410,41 @@ for (const where of ['in its own place', 'in a worker of its own'])
             assert.ok(red, 'the red it painted reached the GPU');
         });
 }
+
+test('a child in a worker of its own is among the processes standing, with its own diagnostics',
+    { timeout: 120000 }, async t=>{
+        const app = await createApp({
+            executable: waitingParent(),
+            imagePath: 'C:\\parent.exe',
+            engine: 'cork',
+            mode: 'workers',
+            processWorkers: true,
+            storage: { load: async()=>({
+                files: [{ path: 'C:\\a.exe', bytes: paintsThenWaits() }],
+            }) },
+        });
+        t.after(()=>app.dispose());
+        /** @type {any[]} */
+        let standing = [];
+        /** @type {ReturnType<typeof setInterval> | null} */
+        let pressing = null;
+        const asking = setInterval(async()=>{
+            const now = await app.standing();
+            if (!pressing && now.length === 2 && now[1].diagnostics)
+            {
+                standing = now;
+                // Asked while it stood; now it may go.
+                pressing = setInterval(()=>app.input.send({ kind: 'key', code: 'KeyA',
+                    down: true }), 50);
+            }
+        }, 100);
+        t.after(()=>{
+            clearInterval(asking);
+            clearInterval(/** @type {any} */ (pressing));
+        });
+        assert.equal(await app.run({ timeoutMs: 60000 }), 0x41);
+        assert.deepEqual(standing.map(process=>process.image), ['C:\\parent.exe', 'C:\\a.exe']);
+        const child = standing[1].diagnostics;
+        assert.ok(child.find((/** @type {any} */ layer)=>layer.name === 'win32'),
+            'its layers, as it reports them');
+    });
