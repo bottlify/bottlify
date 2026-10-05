@@ -48,6 +48,13 @@ function parse(argv){
         // The translator's settings for the run, merged over the probe's own
         // (`feed: 'slice'`, `timings: true`, a translation worker), so two
         // settings compare on one title.
+        // The run's mode, and whether a child runs in a worker of its own:
+        // a launcher and the game it starts, side by side.
+        // Wall seconds the run may take, for a program that waits on a person.
+        seconds: argv.includes('--seconds') ? Number(argv[argv.indexOf('--seconds') + 1])
+            : undefined,
+        mode: argv.includes('--mode') ? argv[argv.indexOf('--mode') + 1] : undefined,
+        processWorkers: argv.includes('--process-workers'),
         corkConfig: argv.includes('--cork-config')
             ? JSON.parse(argv[argv.indexOf('--cork-config') + 1]) : {},
         // Seconds between rows of the run's time series (0: none). A game is no
@@ -387,7 +394,7 @@ function seriesRow(app, last, began){
 
 async function main(){
     const { id, turns, map, grep, calls, heap, profile, log, watch, peek, which,
-        corkConfig, series, raster } = parse(process.argv.slice(2));
+        corkConfig, series, raster, mode, processWorkers, seconds } = parse(process.argv.slice(2));
     if (!id)
     {
         console.error('usage: node tools/launch-probe.mjs <bundle-id> [--turns N] '
@@ -446,6 +453,8 @@ async function main(){
                 import.meta.url).href,
             ...corkConfig } },
         heapSize: heap,
+        ...mode ? { mode } : {},
+        ...processWorkers ? { processWorkers: true } : {},
         ...(raster ? {} : { graphics: { raster: false } }),
         quantum: profile > 0 ? profile : undefined,
         sample: profile > 0 ? (/** @type {number} */ eip)=>samples.push(eip) : undefined,
@@ -559,7 +568,8 @@ async function main(){
         : null;
     try
     {
-        const code = await app.run({ maxTurns: turns });
+        const code = await app.run({ maxTurns: turns,
+            ...seconds ? { timeoutMs: seconds * 1000 } : {} });
         stopped = `exited with ${code}`;
     }
     catch (e){
