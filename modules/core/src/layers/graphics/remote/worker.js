@@ -22,13 +22,15 @@
  *                                    frame back as a picture, 'pixels' as its
  *                                    bytes read back; anything else keeps them.
  *                                    Answered every time it is asked.
- *   { type: 'root', api, options, port, memory, lending }
+ *   { type: 'root', api, options, port, memory, lending, source }
  *                                    `api` 'd3d7', 'd3d8', 'd3d9' or 'opengl', `options` the
  *                                    plain part of what the root was made with;
  *                                    `memory` the guest's RAM where it is shared, and
  *                                    `lending` the slots and stash a Direct3D 8 or 9
  *                                    root lends guest memory through (`lending.js`);
- *                                    `{ type: 'close' }` on the port ends it
+ *                                    `source` the process it draws for, which its
+ *                                    frames carry back; `{ type: 'close' }` on the
+ *                                    port ends it
  *   { type: 'client', port }         a way in for a process on another thread: `root`
  *                                    on the port is taken as it is here, and `lost`
  *                                    is told there too; its frames come here, as every
@@ -36,10 +38,11 @@
  *                                    `{ type: 'close' }` on the port ends it
  * Messages from it:
  *   { type: 'opened', adapter } | { type: 'failed', message }
- *   { type: 'frame', bitmap, frameIndex, format, dropped }
- *   { type: 'frame', pixels, bytesPerRow, width, height, frameIndex, format, dropped }
- *                                    one at a time, the newest presented; `dropped`
- *                                    counts those a newer one replaced unsent
+ *   { type: 'frame', bitmap, frameIndex, format, dropped, source }
+ *   { type: 'frame', pixels, bytesPerRow, width, height, frameIndex, format, dropped, source }
+ *                                    one at a time, the newest presented of a process,
+ *                                    the processes in turn; `dropped` counts those a
+ *                                    newer one replaced unsent
  *   { type: 'lost', reason }
  */
 
@@ -90,13 +93,61 @@ export function serveGraphics(scope, deps){
     let lostWith = null;
 
     /**
-     * The newest frame presented and not yet sent, kept in a texture of its
-     * own: the renderer draws its next frame into the surface it presented.
+     * The newest frame each process presented and not yet sent, kept in a
+     * texture of its own: the renderer draws its next frame into the surface
+     * it presented. One slot a process, so the screen, composed of every
+     * process's picture, gets each one's: one slot for all of them let a
+     * process presenting often keep another's frames from ever being sent.
      *
-     * @type {{ texture: any, width: number, height: number, format: string,
-     *     frameIndex: number, fresh: boolean } | null}
+     * @typedef {{ texture: any, width: number, height: number, format: string,
+     *     frameIndex: number, fresh: boolean, waiting: number,
+     *     source: number | undefined }} Slot
+     * @type {Map<number | undefined, Slot>}
      */
-    let newest = null;
+    const newest = new Map();
+    /** When each slot began to wait, in presents: the one waiting longest goes next. */
+    let presents = 0;
+    /** Each process's roots still open: its slot goes with its last. @type {Map<number, number>} */
+    const rootsOf = new Map();
+    /**
+     * The process whose frame is ending: what is presented while it does is
+     * that process's.
+     *
+     * @type {number | undefined}
+     */
+    let playing;
+
+    /**
+     * The backend as a root of one process draws through: the one backend,
+     * whose frames, ending, say whose they were. A frame ends when its
+     * replay does, which is after the calls that made it have been played,
+     * so the process is known by the frame and not by the call.
+     *
+     * @param {any} backend @param {number | undefined} source
+     */
+    const drawingFor = (backend, source)=>Object.create(backend, {
+        beginFrame: {
+            value: (/** @type {any[]} */ ...args)=>{
+                const frame = backend.beginFrame(...args);
+                return Object.create(frame, {
+                    end: {
+                        value: ()=>{
+                            const before = playing;
+                            playing = source;
+                            try
+                            {
+                                return frame.end();
+                            }
+                            finally
+                            {
+                                playing = before;
+                            }
+                        },
+                    },
+                });
+            },
+        },
+    });
     /** Whether a frame sent has not yet been shown by the program's thread. */
     let sending = false;
     /** Frames presented that a newer one replaced before they were sent. */
@@ -121,28 +172,34 @@ export function serveGraphics(scope, deps){
             return;
         }
         const { surface } = frame;
-        if (!newest || newest.width !== surface.width || newest.height !== surface.height
-            || newest.format !== surface.format)
+        let slot = newest.get(playing);
+        if (!slot || slot.width !== surface.width || slot.height !== surface.height
+            || slot.format !== surface.format)
         {
-            newest?.texture.destroy();
-            newest = {
+            slot?.texture.destroy();
+            slot = {
                 texture: device.createTexture({ label: 'graphics-worker-newest',
                     size: [surface.width, surface.height], format: surface.format,
                     usage: COPY_SRC | COPY_DST }),
                 width: surface.width, height: surface.height, format: surface.format,
-                frameIndex: frame.frameIndex, fresh: false,
+                frameIndex: frame.frameIndex, fresh: false, waiting: 0, source: playing,
             };
+            newest.set(playing, slot);
         }
-        if (newest.fresh)
+        if (slot.fresh)
         {
             dropped++;
         }
+        else
+        {
+            slot.waiting = ++presents;
+        }
         const encoder = device.createCommandEncoder();
-        encoder.copyTextureToTexture({ texture: surface.texture }, { texture: newest.texture },
+        encoder.copyTextureToTexture({ texture: surface.texture }, { texture: slot.texture },
             [surface.width, surface.height]);
         device.queue.submit([encoder.finish()]);
-        newest.fresh = true;
-        newest.frameIndex = frame.frameIndex;
+        slot.fresh = true;
+        slot.frameIndex = frame.frameIndex;
         if (!sending)
         {
             send(device);
@@ -151,18 +208,26 @@ export function serveGraphics(scope, deps){
 
     /** @param {any} device */
     const send = device=>{
-        if (!newest?.fresh)
+        /** @type {Slot | null} */
+        let surface = null;
+        for (const slot of newest.values())
+        {
+            if (slot.fresh && (!surface || slot.waiting < surface.waiting))
+            {
+                surface = slot;
+            }
+        }
+        if (!surface)
         {
             return;
         }
-        newest.fresh = false;
+        surface.fresh = false;
         sending = true;
         if (frames === 'pixels')
         {
-            readPixels(device, { surface: newest, frameIndex: newest.frameIndex });
+            readPixels(device, { surface, frameIndex: surface.frameIndex });
             return;
         }
-        const surface = newest;
         if (!screen || screen.canvas.width !== surface.width
             || screen.canvas.height !== surface.height)
         {
@@ -181,7 +246,7 @@ export function serveGraphics(scope, deps){
         device.queue.submit([encoder.finish()]);
         const bitmap = screen.canvas.transferToImageBitmap();
         scope.postMessage({ type: 'frame', bitmap, frameIndex: surface.frameIndex,
-            format: surface.format, dropped }, [bitmap]);
+            format: surface.format, dropped, source: surface.source }, [bitmap]);
     };
 
     /**
@@ -192,8 +257,8 @@ export function serveGraphics(scope, deps){
      * happening.
      *
      * @param {any} device
-     * @param {{ surface: { texture: any, width: number, height: number, format: string },
-     *     frameIndex: number }} frame
+     * @param {{ surface: { texture: any, width: number, height: number, format: string,
+     *     source?: number }, frameIndex: number }} frame
      */
     const readPixels = (device, { surface, frameIndex })=>{
         const { width, height, format } = surface;
@@ -208,7 +273,7 @@ export function serveGraphics(scope, deps){
             const pixels = new Uint8Array(buffer.getMappedRange()).slice();
             buffer.destroy();
             scope.postMessage({ type: 'frame', pixels, bytesPerRow, width, height, frameIndex,
-                format, dropped }, [pixels.buffer]);
+                format, dropped, source: surface.source }, [pixels.buffer]);
         }, ()=>{
             buffer.destroy();
             sending = false;
@@ -257,9 +322,15 @@ export function serveGraphics(scope, deps){
      * @param {Uint8Array | null} memory  the guest's RAM, where it is shared
      * @param {{ slots: SharedArrayBuffer, stash: SharedArrayBuffer } | null} lending
      *     the parts of a lending, where the engine lends guest memory rather than copying it
+     * @param {number | undefined} source  the process it draws for
      */
-    const root = async(api, options, port, memory, lending)=>{
-        const { device, backend, latency } = await /** @type {Promise<any>} */ (opened);
+    const root = async(api, options, port, memory, lending, source)=>{
+        const { device, backend: shared, latency } = await /** @type {Promise<any>} */ (opened);
+        const backend = source === undefined ? shared : drawingFor(shared, source);
+        if (source !== undefined)
+        {
+            rootsOf.set(source, (rootsOf.get(source) ?? 0) + 1);
+        }
         /** @type {(message: any, transfer?: Transferable[]) => void} */
         const post = (message, transfer)=>port.postMessage(message, transfer ?? []);
         /**
@@ -337,6 +408,19 @@ export function serveGraphics(scope, deps){
             {
                 port.onmessage = null;
                 port.close();
+                const left = (rootsOf.get(/** @type {number} */ (source)) ?? 1) - 1;
+                if (source !== undefined && left === 0)
+                {
+                    rootsOf.delete(source);
+                    // A frame of it being sent was copied out of the slot by
+                    // work already submitted, which a destroy lets finish.
+                    newest.get(source)?.texture.destroy();
+                    newest.delete(source);
+                }
+                else if (source !== undefined)
+                {
+                    rootsOf.set(source, left);
+                }
                 return;
             }
             receiver.receive(event.data);
@@ -345,7 +429,7 @@ export function serveGraphics(scope, deps){
 
     /** @param {any} data */
     const takeRoot = data=>root(data.api, data.options ?? {}, data.port, data.memory ?? null,
-        data.lending ?? null).catch(e=>
+        data.lending ?? null, typeof data.source === 'number' ? data.source : undefined).catch(e=>
         data.port.postMessage({ type: 'failed', message: String(e?.message ?? e) }));
 
     scope.onmessage = ({ data })=>{

@@ -45,6 +45,7 @@ import { createCallRepeats } from './call-repeats.js';
 import { withRunMode } from './mode.js';
 import { createLinkMemory, openLink } from './system/link.js';
 import { systemHandlers } from './system-link.js';
+import { storeHandlers } from './layers/cpu/internal/store-link.js';
 import { eventFrom } from './system/events-across.js';
 import { defaultModules } from './layers/index.js';
 import { createRunRegistry } from './layers/win32/module.js';
@@ -407,6 +408,12 @@ export function retryingFetch({ fetch, events, retry }){
             + `attempts: ${reason}`);
     };
 }
+
+/**
+ * The process id of a run's first process, where the caller named none: the
+ * kernel's, its windows' and its frames' alike, wherever it stands.
+ */
+const FIRST_PROCESS_ID = 0x1000;
 
 /**
  * How much one range request may ask for.
@@ -3584,6 +3591,9 @@ async function buildApp(options){
             // is the run's and wins over a caller's value of the same name.
             ...options.graphics,
             choice: options.graphicsApi,
+            // Whose frames this machine's devices present: the run's screen
+            // is composed of every process's picture by its windows.
+            processId: options.processId ?? FIRST_PROCESS_ID,
             // The display's raster -- the vertical blank, the scan line --
             // runs on the guest's clock, which only this assembly can reach:
             // a program times its spin on the blank with its own timers.
@@ -3642,7 +3652,11 @@ async function buildApp(options){
                         // a test -- still has whatever the caller handed in.
                         if (runPresenter)
                         {
-                            runPresenter.show(frame);
+                            // A frame of the graphics worker says whose it is;
+                            // one drawn here is this process's.
+                            runPresenter.show(frame.source === undefined
+                                ? { ...frame, source: options.processId ?? FIRST_PROCESS_ID }
+                                : frame);
                         }
                         else
                         {
@@ -5463,7 +5477,7 @@ async function buildApp(options){
     const process = createProcessBlocks({
         allocate: allocateFromHeap,
         writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
-        processId: options.processId ?? 0x1000,
+        processId: options.processId ?? FIRST_PROCESS_ID,
         version: windowsVersion(options.windows),
         imageBase: image.base,
         processHeap: allLibraries['KERNEL32.dll']?.GetProcessHeap?.handler([]) ?? 0,
@@ -6753,13 +6767,13 @@ async function buildApp(options){
 
         /**
          * A child that ran beside this process has exited with this code: the
-         * threads waiting on it wake, and the picture is this process's again.
+         * threads waiting on it wake. The screen is the run's presenter's to
+         * compose again, from the pictures of the processes left.
          *
          * @param {any} request @param {number} code
          */
         childExited(/** @type {any} */ request, /** @type {number} */ code){
             win32.childExited(request, code);
-            win32.refreshWindows();
         },
 
         /**
@@ -6773,6 +6787,9 @@ async function buildApp(options){
 
         diagnostics: ()=>[
             ...core.diagnostics(),
+            // The run's windows, where this thread keeps them (`manager.js`).
+            ...options.system?.windows?.manager ? [{ name: 'windows', status: 'ready',
+                metrics: options.system.windows.manager.diagnostics() }] : [],
             {
                 name: 'app',
                 version: '0.1.0',
@@ -7030,7 +7047,7 @@ const CALLS_OFF = Object.freeze({
  *
  * @param {{ options: AppOptions, events: any, system: any, translationStore: any,
  *     now: () => number,
- *     across: () => { image: string, link: ReturnType<typeof openLink> }[],
+ *     across: () => { image: string, id: number, link: ReturnType<typeof openLink> }[],
  *     libraries: () => string[] }} deps
  *     `across`: the processes standing in workers, oldest first; `libraries`:
  *     the system libraries the run's own program knew, once it is over
@@ -7099,7 +7116,7 @@ async function buildSystemHost(deps){
      */
     let programTables = [];
     /** The tables this thread keeps for the run: its journal and its sound output. */
-    const ownTables = new Set(['log', 'audio']);
+    const ownTables = new Set(['log', 'audio', 'windows']);
 
     return {
         log: {
@@ -7141,7 +7158,11 @@ async function buildSystemHost(deps){
             },
             /** @param {any} event */
             send: event=>{
-                const process = across().at(-1);
+                // To the process of the window the run's manager says should
+                // have it; where none does, to the newest.
+                const standing = across();
+                const target = system.windows?.manager?.inputTarget(event) ?? null;
+                const process = standing.find(each=>each.id === target) ?? standing.at(-1);
                 process?.link.call('input', 'send', [event, viewport
                     ? { width: viewport.width, height: viewport.height } : null]).catch(()=>{});
                 return Boolean(process);
@@ -7228,7 +7249,9 @@ async function buildSystemHost(deps){
                 }
             }, ()=>{});
             const own = [...core.diagnostics(),
-                { name: 'audio', status: 'ready', metrics: output.diagnostics() }];
+                { name: 'audio', status: 'ready', metrics: output.diagnostics() },
+                { name: 'windows', status: 'ready',
+                    metrics: system.windows.manager.diagnostics() }];
             const theirs = programTables.filter(table=>!ownTables.has(table.name));
             const named = new Set(theirs.map(table=>table.name));
             return [...own.filter(table=>!named.has(table.name)), ...theirs];
@@ -7409,6 +7432,19 @@ export async function createApp(options){
             onFrame: options.device.onFrame,
             onPresented: options.device.onPresented,
             onPresentFailed: options.device.onPresentFailed,
+            // The run's windows, by which the screen is composed of every
+            // process's picture while more than one has a window showing.
+            windows: ()=>{
+                const manager = system.windows?.manager;
+                return manager ? manager.topLevel().map((/** @type {any} */ state)=>({
+                    processId: state.processId, rect: state.rect, visible: state.visible,
+                    parent: state.parent })) : [];
+            },
+            foreground: ()=>{
+                const manager = system.windows?.manager;
+                const hwnd = manager?.foreground() ?? 0;
+                return hwnd !== 0 ? manager.get(hwnd)?.processId ?? null : null;
+            },
         })
         // A process in a worker of its own has no GPU: its surfaces' pictures
         // go to the thread that has one, as bytes, each burst as it flushes.
@@ -7528,7 +7564,7 @@ export async function createApp(options){
         processes.set(process, built);
         names.set(built, process);
         images.set(built, extra?.imagePath ?? '');
-        processIds.set(built, extra?.processId ?? 0x1000);
+        processIds.set(built, extra?.processId ?? FIRST_PROCESS_ID);
         return built;
     };
 
@@ -7778,7 +7814,7 @@ export async function createApp(options){
         serving.add(line);
         noteMachines();
         events.emit('process-server', { image: found.path, clsid: request.clsid });
-        Object.assign(facade, server, own);
+        stand(server);
         bindLogLevels();
         let code = -1;
         try
@@ -7793,7 +7829,7 @@ export async function createApp(options){
         noteMachines();
         await line.current.dispose();
         sound.giveBack();
-        Object.assign(facade, current, own);
+        stand(current);
         bindLogLevels();
         events.emit('process-server-exit', { image: found.path, code });
         return code;
@@ -7832,7 +7868,7 @@ export async function createApp(options){
             standardFiles: request.standardFiles,
         });
         replayLogLevels();
-        Object.assign(facade, line.current, own);
+        stand(line.current);
         bindLogLevels();
         events.emit('process-started', { image: request.imagePath, sequenceBase: logSequence });
         const parentImage = imagePath;
@@ -7866,8 +7902,10 @@ export async function createApp(options){
 
         line.current = parent;
         replayLogLevels();
-        Object.assign(facade, parent, own);
+        stand(parent);
         bindLogLevels();
+        // Its picture goes with it: no window of the run is drawn from it.
+        presenter?.forget?.(request.id);
         parent.childExited(request, code);
         events.emit('process-resumed', { image: request.imagePath, code });
     };
@@ -7896,10 +7934,52 @@ export async function createApp(options){
      * The children standing in workers of their own, each with the way its
      * diagnostics are asked for across its link.
      *
-     * @type {Set<{ image: string, link: ReturnType<typeof openLink>,
+     * @type {Set<{ image: string, id: number, link: ReturnType<typeof openLink>,
      *     diagnostics: () => Promise<any> }>}
      */
     const standingAcross = new Set();
+
+    /**
+     * The page's input, where the run's window manager says it goes: a
+     * pointer to the process of the window under it or holding the mouse,
+     * the keyboard to the foreground window's. Where no window answers, the
+     * newest process in a worker of its own has it, else the process the
+     * facade speaks for.
+     *
+     * @param {any} machineInput  the input of the process the facade speaks for
+     */
+    const routedInput = machineInput=>({
+        ...machineInput,
+        /** @param {any} event */
+        send: event=>{
+            const target = system.windows?.manager?.inputTarget(event) ?? null;
+            for (const built of target === null ? [] : processes.values())
+            {
+                if (processIds.get(built) === target)
+                {
+                    return built.input.send(event);
+                }
+            }
+            const inWorkers = [...standingAcross];
+            const process = inWorkers.find(each=>each.id === target) ?? inWorkers.at(-1);
+            if (process)
+            {
+                process.link.call('input', 'send', [event, null]).catch(()=>{});
+                return true;
+            }
+            return machineInput.send(event);
+        },
+    });
+
+    /**
+     * The facade speaks for this process from now on, its input routed.
+     *
+     * @param {any} speaking
+     */
+    const stand = speaking=>{
+        Object.assign(facade, speaking, own);
+        facade.input = routedInput(speaking.input);
+    };
 
     /**
      * Runs a child in a worker of its own: its machine there, the run's
@@ -7937,6 +8017,8 @@ export async function createApp(options){
                 (target, method, args)=>link.callWaiting(target, method, args)),
             ...objects,
             com: com.handlers,
+            // The run's translation store, which only this thread can hold open.
+            ...translationStore ? storeHandlers(translationStore) : {},
             process: {
                 output: (/** @type {number} */ handle, /** @type {string} */ text)=>
                     events.emit('output', { handle, text }),
@@ -7981,21 +8063,15 @@ export async function createApp(options){
         // worker's frames do and are shown by the run's presenter.
         const display = presenter && options.device?.device ? new MessageChannel() : null;
         const shown = display ? connectGraphicsWorker({ worker: portEnd(display.port1),
-            device: options.device.device, presentTo: frame=>presenter.show(frame) }) : null;
+            device: options.device.device,
+            presentTo: frame=>presenter.show({ ...frame, source: request.id }) }) : null;
         // Its sound goes onto the run's table, in a span its parent lends it,
         // where the table is shared memory a worker can be handed; elsewhere
         // the run's sound is mixed on this thread, and the child has none.
         const sound = from.sound();
         const worker = await openProcessWorker();
-        // The page's input goes to the child while it stands, as it goes to a
-        // child on this thread; its next look at the link takes it.
-        const forwarding = { ...facade.input,
-            send: (/** @type {any} */ event)=>{
-                link.call('input', 'send', [event, null]).catch(()=>{});
-                return true;
-            } };
-        facade.input = forwarding;
-        const asked = { image: request.imagePath, link,
+        // The page's input reaches it as the run routes it (`routedInput`).
+        const asked = { image: request.imagePath, id: request.id, link,
             diagnostics: ()=>link.call('report', 'diagnostics', []) };
         standingAcross.add(asked);
         events.emit('process-started', { image: request.imagePath, sequenceBase: logSequence,
@@ -8046,10 +8122,10 @@ export async function createApp(options){
                         graphics: knobs,
                         audio: sound ? Object.fromEntries(Object.entries(sound.options)
                             .filter(([, value])=>typeof value !== 'function')) : undefined,
-                        // The translator's store and the doorbell are this
-                        // thread's: the child's translator keeps none.
-                        cork: { config: { ...options.cork?.config, store: null,
-                            doorbell: undefined } },
+                        // The translator's store is the run's, asked across the
+                        // link; the doorbell is this thread's.
+                        cork: { config: { ...options.cork?.config,
+                            store: translationStore ? 'run' : null, doorbell: undefined } },
                     },
                     run: { maxTurns: runOptionsNow?.maxTurns, timeoutMs: runOptionsNow?.timeoutMs },
                 }, [...graphics ? [graphics.port1] : [], ...display ? [display.port2] : []]);
@@ -8057,10 +8133,6 @@ export async function createApp(options){
         }
         finally
         {
-            if (facade.input === forwarding)
-            {
-                facade.input = mainLine.current.input;
-            }
             standingAcross.delete(asked);
             forgetObjects();
             await com.gone();
@@ -8070,6 +8142,7 @@ export async function createApp(options){
             sound?.giveBack();
             shown?.dispose();
             display?.port1.close();
+            presenter?.forget?.(request.id);
         }
     };
     /** The code the last of the run's processes beside another exited with. */
@@ -8344,7 +8417,7 @@ export async function createApp(options){
                 return 2;
             }
             replayLogLevels();
-            Object.assign(facade, child, own);
+            stand(child);
             bindLogLevels();
             events.emit('process-started', { image: request.imagePath,
                 sequenceBase: logSequence });
@@ -8365,8 +8438,9 @@ export async function createApp(options){
             sound.giveBack();
             // The page sees whoever stands in the main line again.
             replayLogLevels();
-            Object.assign(facade, mainLine.current, own);
+            stand(mainLine.current);
             bindLogLevels();
+            presenter?.forget?.(request.id);
             parent.childExited(request, code);
             lastBesideCode = code;
             events.emit('process-resumed', { image: request.imagePath, code });
@@ -8473,7 +8547,7 @@ export async function createApp(options){
                 imagePath = request.imagePath;
             }
             replayLogLevels();
-            Object.assign(facade, line.current, own);
+            stand(line.current);
             bindLogLevels();
             // The child's journal is a fresh block, continuing the parent's
             // sequence. Whoever holds a reader of its own -- the page's
@@ -8501,7 +8575,10 @@ export async function createApp(options){
         }, {
             imagePath,
             commandLine: options.commandLine,
-            id: options.processId,
+            // The id it has in its worker, where none was handed in, as a
+            // process built here has: its windows and its frames are told
+            // apart by it.
+            id: options.processId ?? FIRST_PROCESS_ID,
         }, null, ended=>{
             rootLibraries = ended.systemLibraries ?? [];
             current.ended(ended.diagnostics);
@@ -8588,7 +8665,7 @@ export async function createApp(options){
         replacements: ()=>[...requested],
     };
 
-    Object.assign(facade, current, own);
+    stand(current);
     bindLogLevels();
     return facade;
 }

@@ -22,6 +22,8 @@
  * hand out a number the other already did, in any process.
  */
 
+import { createWindowManager } from './manager.js';
+
 /**
  * The first number a name registered with RegisterWindowMessage or
  * RegisterClipboardFormat is given: the range Windows keeps for them.
@@ -59,6 +61,13 @@ const WINDOW_STRIDE = 4;
  * @property {(id: number) => void} withdraw
  *     A sender that stopped waiting: the message is not delivered if it has
  *     not been yet.
+ * @property {(hwnd: number, fromHwnd: number, fromThread: number) => boolean} [activate]
+ *     Another process made this one's window the foreground window: it is
+ *     activated on the thread that made it, told which window and thread had
+ *     the foreground. False for a window that is not there.
+ * @property {(gained: number, thread: number) => void} [lostForeground]
+ *     Another process's window, `gained`, of thread `thread`, is the run's
+ *     foreground window now: this process's active window is told it is not.
  */
 
 /**
@@ -94,6 +103,8 @@ const WINDOW_STRIDE = 4;
 
 export function createWindowDirectory(){
     let next = FIRST_WINDOW;
+    /** The run's windows as their processes tell them, and their order (`manager.js`). */
+    const manager = createWindowManager();
     /** Each window's process, by handle. @type {Map<number, number>} */
     const owners = new Map();
     /** Each process that can have windows, in the order it started. @type {Map<number, WindowEndpoint>} */
@@ -136,6 +147,7 @@ export function createWindowDirectory(){
                     owners.delete(hwnd);
                 }
             }
+            manager.removeProcess(processId >>> 0);
         },
 
         /**
@@ -153,6 +165,86 @@ export function createWindowDirectory(){
         /** @param {number} hwnd */
         close(hwnd){
             owners.delete(hwnd >>> 0);
+            manager.remove(hwnd >>> 0);
+        },
+
+        // What a process tells the run of its windows, and what only the run
+        // knows of them (`manager.js`); a view reads `manager` itself.
+        manager,
+        /** @param {import('./manager.js').WindowState} state */
+        publish: state=>manager.publish(state),
+        /** @param {number} hwnd */
+        raise: hwnd=>manager.raise(hwnd >>> 0),
+        /** @param {number} hwnd */
+        lower: hwnd=>manager.lower(hwnd >>> 0),
+        /** @param {number} hwnd @param {number} after */
+        insertAfter: (hwnd, after)=>manager.insertAfter(hwnd >>> 0, after >>> 0),
+        /** @param {number} hwnd */
+        stateOf: hwnd=>manager.get(hwnd >>> 0),
+        topLevel: ()=>manager.topLevel(),
+        /** @param {number} x @param {number} y */
+        fromPoint: (x, y)=>manager.fromPoint(x, y),
+        foreground: ()=>manager.foreground(),
+
+        /**
+         * A process's window took the mouse, or the process let it go: one
+         * process releasing its capture does not take another's.
+         *
+         * @param {number} hwnd  the window, zero for a release
+         * @param {number} processId  the process it is told by
+         */
+        noteCapture(hwnd, processId){
+            if (hwnd !== 0)
+            {
+                manager.setCapture(hwnd);
+                return;
+            }
+            const holder = manager.capture();
+            if (holder !== 0 && manager.get(holder)?.processId === processId)
+            {
+                manager.releaseCapture();
+            }
+        },
+        /**
+         * A process made another's window the foreground window: it is the
+         * run's at once, and the process that owns it is asked to activate
+         * it, told which window and thread had it.
+         *
+         * @param {number} hwnd @param {number} asking  the process that asked
+         * @returns {boolean} whether the window is another process's that was asked
+         */
+        foregroundElsewhere(hwnd, asking){
+            const owner = owners.get(hwnd >>> 0);
+            const endpoint = owner === undefined || owner === (asking >>> 0)
+                ? null : endpoints.get(owner);
+            if (!endpoint?.activate)
+            {
+                return false;
+            }
+            const before = manager.foreground();
+            const thread = manager.get(before)?.threadId ?? 0;
+            this.setForeground(hwnd);
+            return endpoint.activate(hwnd >>> 0, before, thread) !== false;
+        },
+        /**
+         * A process activated one of its windows: it is the run's foreground
+         * window, and the process whose window was is told it lost it -- to
+         * which window, of which thread -- as Windows tells it.
+         *
+         * @param {number} hwnd
+         */
+        setForeground(hwnd){
+            const before = manager.foreground();
+            manager.setForeground(hwnd >>> 0);
+            const after = manager.foreground();
+            // Told only when another process's window took it: a program
+            // that gave it to the desktop knows already.
+            const loser = before === 0 || after === 0 || before === after
+                ? undefined : owners.get(before);
+            if (loser !== undefined && loser !== owners.get(after))
+            {
+                endpoints.get(loser)?.lostForeground?.(after, manager.get(after)?.threadId ?? 0);
+            }
         },
 
         /**

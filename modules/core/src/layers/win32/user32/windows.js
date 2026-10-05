@@ -297,6 +297,14 @@ const MINIMISING = new Set([2, SW_MINIMIZE, 7]);
 const RESTORING = new Set([1, 9, 10]);
 const WS_MINIMIZE = 0x20000000;
 const WS_MAXIMIZE = 0x01000000;
+const WS_EX_TOPMOST = 0x00000008;
+
+/**
+ * The fields of a window's record its state on the screen is read from
+ * (`stateOf`): a change to any of them is told to the run.
+ */
+const TRACKED_FIELDS = ['x', 'y', 'width', 'height', 'style', 'exStyle', 'parent', 'owner',
+    'title', 'frameless', 'regionBox', 'menu'];
 const WS_POPUP = 0x80000000;
 const WS_EX_MDICHILD = 0x00000040;
 const ERROR_INVALID_MENU_HANDLE = 1401;
@@ -453,8 +461,6 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           How many times the application has been told WM_ACTIVATEAPP(0),
  *           for a caller that looks only now and then and must still learn
  *           of a deactivation that came and went in between.
- * @property {() => void} refresh
- *           Repaints the desktop and every window shown on it.
  * @property {(event: import('./rawinput.js').RawInputEvent) => void} rawInput
  *           One event of the mouse or the keyboard as the device reported it,
  *           posted as WM_INPUT to whoever registered for that device.
@@ -971,6 +977,11 @@ export function createWindowFunctions(host){
         if (!sent)
         {
             return 0;
+        }
+        // Work another process asked of this thread, done on it.
+        if (/** @type {any} */ (sent).run)
+        {
+            return andThen(/** @type {any} */ (sent).run(thread), ()=>receiveSent(thread));
         }
         const inside = listOf(handling, id);
         inside.push(sent);
@@ -1765,10 +1776,13 @@ export function createWindowFunctions(host){
         {
             windows.set(each.hwnd, each);
         }
+        directory.raise?.(top.hwnd);
         if (shown(top))
         {
             appear(top);
         }
+        tell(top);
+        adoptOrder();
     };
 
     /**
@@ -1810,6 +1824,7 @@ export function createWindowFunctions(host){
         {
             appear(record);
         }
+        tell(record);
     };
 
     /** @param {any} record  Whether it and every ancestor is shown. */
@@ -1839,6 +1854,12 @@ export function createWindowFunctions(host){
      * sliding in, the camera settling -- so the picture never stops arriving.
      */
     let active = 0;
+    /**
+     * Whether the run's foreground window is another process's: this one's
+     * windows were told they lost it, and none of them is active until one is
+     * activated again.
+     */
+    let foreignForeground = false;
     /** What WM_ACTIVATEAPP last told the application: false once it went. */
     let applicationActive = true;
     let deactivations = 0;
@@ -1846,6 +1867,10 @@ export function createWindowFunctions(host){
         if (active !== 0 && live(active))
         {
             return active;
+        }
+        if (foreignForeground)
+        {
+            return 0;
         }
         let candidate = 0;
         for (const record of windows.values())
@@ -1871,7 +1896,8 @@ export function createWindowFunctions(host){
      * its top-level windows hears WM_ACTIVATEAPP(1) first (WmCreatePopupSeq).
      *
      * @param {number} hwnd
-     * @param {{ thread?: unknown, how?: number }} [options]
+     * @param {{ thread?: unknown, how?: number,
+     *     from?: { hwnd: number, thread: number } | null }} [options]
      *        `how` is WM_ACTIVATE's wParam for the window gaining it:
      *        WA_CLICKACTIVE when a click did it.
      * @returns {number | Promise<number>} once every procedure told has answered
@@ -1919,10 +1945,14 @@ export function createWindowFunctions(host){
     /**
      * The activation itself, once nothing has forbidden it.
      *
-     * @param {number} hwnd @param {{ thread?: unknown, how?: number }} options
+     * @param {number} hwnd
+     * @param {{ thread?: unknown, how?: number,
+     *     from?: { hwnd: number, thread: number } | null }} options
+     *     `from`: the window and thread of another program that had the
+     *     foreground, when that program made this window the foreground one
      * @returns {number | Promise<number>}
      */
-    const activateNow = (hwnd, { thread, how = WA_ACTIVE })=>{
+    const activateNow = (hwnd, { thread, how = WA_ACTIVE, from = null })=>{
         const record = live(hwnd);
         const previous = active;
         active = record ? topLevelOf(record).hwnd : 0;
@@ -1945,6 +1975,33 @@ export function createWindowFunctions(host){
             return 0;
         }
         const gained = active;
+        // A window of the program's is the run's foreground window now; the
+        // one before it, another program's, is named to it below.
+        let foreign = 0;
+        let foreignThread = 0;
+        if (gained !== 0 && gained !== desktop?.hwnd)
+        {
+            // Another program activated this window and moved the run's
+            // foreground to it already, saying whose it had been.
+            const prior = from ? from.hwnd : directory.foreground?.() ?? 0;
+            if (prior !== 0 && directory.ownerOf(prior) !== processId)
+            {
+                foreign = prior;
+                foreignThread = from ? from.thread : directory.stateOf?.(prior)?.threadId ?? 0;
+            }
+            foreignForeground = false;
+            directory.setForeground?.(gained);
+        }
+        else
+        {
+            // The desktop, or nothing: the run's foreground window, when it
+            // was this program's, is no window now.
+            const prior = directory.foreground?.() ?? 0;
+            if (prior !== 0 && directory.ownerOf(prior) === processId)
+            {
+                directory.setForeground?.(0);
+            }
+        }
         /** @type {[number, number, number, number][]} */
         const told = [];
         if (previous !== 0)
@@ -1954,8 +2011,8 @@ export function createWindowFunctions(host){
         }
         // The program is the active application or stops being it when the
         // activation comes from, or goes to, nothing or the desktop -- the
-        // one window here that is not the program's. lParam names the thread
-        // on the other side: another program's, which here is none.
+        // one window here that is not the program's -- or another program's
+        // window. lParam names the thread on the other side: that program's.
         /** @param {number} which */
         const programs = which=>which !== 0 && which !== desktop?.hwnd;
         if (programs(previous) !== programs(gained))
@@ -1965,12 +2022,13 @@ export function createWindowFunctions(host){
             for (const top of [...windows.values()]
                 .filter(each=>!each.destroyed && !isChild(each)).reverse())
             {
-                told.push([top.hwnd, WM_ACTIVATEAPP, programs(gained) ? 1 : 0, 0]);
+                told.push([top.hwnd, WM_ACTIVATEAPP, programs(gained) ? 1 : 0, foreignThread]);
             }
         }
         if (gained !== 0)
         {
-            told.push([gained, WM_NCACTIVATE, 1, 0], [gained, WM_ACTIVATE, how, previous]);
+            told.push([gained, WM_NCACTIVATE, 1, 0],
+                [gained, WM_ACTIVATE, how, previous !== 0 ? previous : foreign]);
         }
         /** @param {number} index @returns {number | Promise<number>} */
         const tell = index=>{
@@ -2052,6 +2110,8 @@ export function createWindowFunctions(host){
     const setCapture = hwnd=>{
         const previous = captured;
         captured = live(hwnd) ? hwnd >>> 0 : 0;
+        // The run routes the page's pointer to the window holding it.
+        directory.noteCapture?.(captured, processId);
         if (dragged && !insideOf(live(captured), dragged.record))
         {
             endDrag();
@@ -2061,6 +2121,7 @@ export function createWindowFunctions(host){
     const releaseCapture = ()=>{
         const previous = captured;
         captured = 0;
+        directory.noteCapture?.(0, processId);
         endDrag();
         if (previous !== 0 && live(previous))
         {
@@ -2234,6 +2295,7 @@ export function createWindowFunctions(host){
             draw?.deleteFont?.(record.dialogFont);
         }
         directory.close(record.hwnd);
+        toldRun.delete(record.hwnd);
         if (active === record.hwnd)
         {
             active = 0;
@@ -2307,6 +2369,7 @@ export function createWindowFunctions(host){
                 {
                     record.parent = value >>> 0;
                 }
+                tell(record);
                 return;
             case GWL_ID:
                 record.id = value >>> 0;
@@ -2316,9 +2379,11 @@ export function createWindowFunctions(host){
                 // and the window edge follows the frame it now has.
                 record.style = (record.parent === 0 ? value | WS_CLIPSIBLINGS : value) >>> 0;
                 record.exStyle = edgeFor(record.style, record.exStyle);
+                tell(record);
                 return;
             case GWL_EXSTYLE:
                 record.exStyle = edgeFor(record.style, value);
+                tell(record);
                 return;
             case GWL_USERDATA:
                 record.userData = value >>> 0;
@@ -2548,12 +2613,13 @@ export function createWindowFunctions(host){
             }
         }
         record.hwnd = directory.open(processId);
-        windows.set(record.hwnd, record);
+        windows.set(record.hwnd, watchFields(record));
         hasQueue(record.thread);
         if ((record.style & WS_VISIBLE) !== 0)
         {
             appear(record);
         }
+        tell(record);
         return record;
     };
 
@@ -3169,6 +3235,7 @@ export function createWindowFunctions(host){
      * @param {any} record
      */
     const appear = record=>{
+        tell(record);
         paintDesktop();
         for (const each of [record, ...descendantsOf(record)])
         {
@@ -3221,6 +3288,166 @@ export function createWindowFunctions(host){
     /** @param {any} record @returns {any[]} every live descendant, in paint order */
     const descendantsOf = record=>childrenOf(record)
         .flatMap(child=>[child, ...descendantsOf(child)]);
+
+    /** @param {{ left: number, top: number, right: number, bottom: number }} rect */
+    const rectOf = rect=>({ left: rect.left, top: rect.top, right: rect.right,
+        bottom: rect.bottom });
+
+    /**
+     * What the run knows of a window (`manager.js`), as its record has it.
+     *
+     * @param {any} record @returns {import('./manager.js').WindowState}
+     */
+    const stateOf = record=>({
+        hwnd: record.hwnd >>> 0,
+        processId,
+        threadId: creatorOf(record) ?? 0,
+        parent: isChild(record) ? record.parent >>> 0 : 0,
+        owner: (record.owner ?? 0) >>> 0,
+        className: String(record.className),
+        title: String(record.title),
+        style: record.style >>> 0,
+        exStyle: record.exStyle >>> 0,
+        rect: rectOf(geometry.windowRect(record)),
+        client: rectOf(geometry.clientRect(record)),
+        visible: shown(record),
+        enabled: (record.style & WS_DISABLED) === 0,
+        minimized: (record.style & WS_MINIMIZE) !== 0,
+        maximized: (record.style & WS_MAXIMIZE) !== 0,
+        topmost: (record.exStyle & WS_EX_TOPMOST) !== 0,
+        region: record.regionBox ? rectOf(record.regionBox) : null,
+    });
+
+    /** What the run was last told of each window, as it compares. @type {Map<number, string>} */
+    const toldRun = new Map();
+
+    /** Windows changed since the run was last told of them. @type {Set<any>} */
+    const unsaid = new Set();
+
+    /**
+     * Makes the fields a window's state is read from tell the run when they
+     * change: whichever of user32's calls assigns one, the run hears of the
+     * window once that call is over, in a microtask.
+     *
+     * @param {any} record
+     */
+    const watchFields = record=>{
+        for (const field of TRACKED_FIELDS)
+        {
+            let value = record[field];
+            Object.defineProperty(record, field, {
+                enumerable: true,
+                get: ()=>value,
+                set: changed=>{
+                    if (changed !== value)
+                    {
+                        value = changed;
+                        if (unsaid.size === 0)
+                        {
+                            queueMicrotask(()=>{
+                                const pending = [...unsaid];
+                                unsaid.clear();
+                                for (const each of pending)
+                                {
+                                    tell(each);
+                                }
+                            });
+                        }
+                        unsaid.add(record);
+                    }
+                },
+            });
+        }
+        return record;
+    };
+
+    /**
+     * Tells the run what a window is now, and the windows inside its
+     * top-level one: a parent that moved moved them on the screen. Only a
+     * window that changed since it was last told crosses.
+     *
+     * @param {any} record
+     */
+    const tell = record=>{
+        if (!record || record.destroyed || record.hwnd === 0 || record === desktop
+            || windows.get(record.hwnd) !== record)
+        {
+            return;
+        }
+        const top = topLevelOf(record);
+        if (top.parent === HWND_MESSAGE)
+        {
+            return;
+        }
+        let reordered = false;
+        for (const each of [top, ...descendantsOf(top)])
+        {
+            const state = stateOf(each);
+            const said = JSON.stringify(state);
+            const before = toldRun.get(state.hwnd);
+            if (before !== said)
+            {
+                toldRun.set(state.hwnd, said);
+                directory.publish?.(state);
+                // A new top-level window, or one whose band or owner changed,
+                // may have moved in the run's order.
+                const was = before === undefined ? null : JSON.parse(before);
+                reordered ||= state.parent === 0 && (was === null || was.parent !== 0
+                    || was.topmost !== state.topmost || was.owner !== state.owner);
+            }
+        }
+        if (reordered)
+        {
+            adoptOrder();
+        }
+    };
+
+    /**
+     * Takes the order of this process's top-level windows from the run's,
+     * which keeps Windows' rules for it -- the topmost band above the rest,
+     * an owned window above its owner -- and is the order across processes
+     * too. A window's descendants follow it; a window that came up is shown
+     * again where it now overlaps another.
+     */
+    const adoptOrder = ()=>{
+        const run = directory.topLevel?.();
+        if (!run)
+        {
+            return;
+        }
+        const wanted = run.filter(state=>state.processId === processId)
+            .map(state=>state.hwnd).reverse();
+        const placed = new Set(wanted);
+        const current = [...windows.values()]
+            .filter(each=>!each.destroyed && !isChild(each) && placed.has(each.hwnd))
+            .map(each=>each.hwnd);
+        if (current.join() === wanted.join())
+        {
+            return;
+        }
+        /** @type {Map<number, any[]>} */
+        const groups = new Map(wanted.map(hwnd=>[hwnd, []]));
+        /** @type {any[]} */
+        const rest = [];
+        for (const each of windows.values())
+        {
+            const top = each.destroyed ? each : topLevelOf(each);
+            (groups.get(top.hwnd) ?? rest).push(each);
+        }
+        windows.clear();
+        for (const each of [...rest, ...wanted.flatMap(hwnd=>groups.get(hwnd) ?? [])])
+        {
+            windows.set(each.hwnd, each);
+        }
+        for (const [index, hwnd] of wanted.entries())
+        {
+            const record = windows.get(hwnd);
+            if (index !== current.indexOf(hwnd) && record && shown(record))
+            {
+                appear(record);
+            }
+        }
+    };
 
     /**
      * The parts of the screen windows have left that the desktop has not
@@ -4316,6 +4543,7 @@ export function createWindowFunctions(host){
             case WM_SETTEXT: {
                 const address = message.lParam >>> 0;
                 record.title = address === 0 ? '' : host.readCString(address, MAX_WINDOW_TEXT);
+                tell(record);
                 if (geometry.frame(record).caption > 0 && shown(record))
                 {
                     record.ncDirty = true;
@@ -4763,23 +4991,6 @@ export function createWindowFunctions(host){
         rawInput: rawInput.deliver,
 
         /**
-         * The desktop and every window shown on it paint again: what the
-         * screen needs when this process's picture comes back after a child
-         * that ran beside it drew over the same canvas.
-         */
-        refresh(){
-            desktopPainted = false;
-            for (const record of windows.values())
-            {
-                if (!record.destroyed && !isChild(record) && shown(record))
-                {
-                    appear(record);
-                }
-            }
-            paintDesktop();
-        },
-
-        /**
          * One window's client rectangle on the screen, or null for a handle
          * that names no window. Read by whoever has to answer a size a
          * program asked for as zero -- a back buffer's, which means exactly
@@ -4848,6 +5059,7 @@ export function createWindowFunctions(host){
             // its style describes takes no room, so the client area is the
             // whole mode and a program's cursor arithmetic sees the picture.
             record.frameless = true;
+            tell(record);
             const after = geometry.clientRect(record);
             if (moved)
             {
@@ -4952,6 +5164,7 @@ export function createWindowFunctions(host){
                     | ((client.right - client.left) & 0xffff)) >>> 0,
                 thread));
         }
+        tell(record);
         if (covered)
         {
             uncover(covered);
@@ -5010,9 +5223,79 @@ export function createWindowFunctions(host){
         return 1;
     };
 
+    /**
+     * Another program's window became the run's foreground window: this
+     * program's active window is told it is not active, the program that it
+     * is not the active application, and the focus that it went -- each a
+     * notification, delivered on the thread that made the window as a message
+     * another process sends is, and waited on by nobody.
+     *
+     * @param {number} gained @param {number} gainedThread
+     */
+    const lostForeground = (gained, gainedThread)=>{
+        const previous = activeWindow();
+        const had = focusWindow();
+        foreignForeground = true;
+        active = 0;
+        focus = 0;
+        /** @param {number} hwnd @param {number} message @param {number} wParam @param {number} lParam */
+        const notify = (hwnd, message, wParam, lParam)=>{
+            if (live(hwnd))
+            {
+                receiveElsewhere(hwnd, { message, wParam, lParam, unicode: false, wait: false,
+                    carried: null });
+            }
+        };
+        if (previous !== 0)
+        {
+            notify(previous, WM_NCACTIVATE, 0, 0);
+            notify(previous, WM_ACTIVATE, WA_INACTIVE, gained);
+        }
+        if (applicationActive)
+        {
+            applicationActive = false;
+            deactivations++;
+            for (const top of [...windows.values()]
+                .filter(each=>!each.destroyed && !isChild(each)).reverse())
+            {
+                notify(top.hwnd, WM_ACTIVATEAPP, 0, gainedThread);
+            }
+        }
+        if (had !== 0)
+        {
+            notify(had, WM_KILLFOCUS, gained, 0);
+        }
+    };
+
     // What this process answers about its windows to every other one, in
     // values: their windows are theirs to find, describe and post to.
     directory.attach(processId, {
+        lostForeground,
+        /**
+         * Another program made one of this program's windows the foreground
+         * window: activated on the thread that made it, as that thread
+         * looks at its queue, raised first.
+         *
+         * @param {number} hwnd @param {number} fromHwnd @param {number} fromThread
+         */
+        activate: (hwnd, fromHwnd, fromThread)=>{
+            const record = live(hwnd);
+            const owner = record ? creatorOf(record) : null;
+            if (!record || owner === null)
+            {
+                return false;
+            }
+            listOf(inbox, owner).push(/** @type {any} */ ({ run: (/** @type {unknown} */ thread)=>{
+                if (!live(hwnd))
+                {
+                    return 0;
+                }
+                raise(record);
+                return activate(hwnd, { thread, from: { hwnd: fromHwnd, thread: fromThread } });
+            } }));
+            host.queue.sent?.(owner);
+            return true;
+        },
         find: findOwn,
         describe: hwnd=>{
             const record = live(hwnd);
@@ -5199,7 +5482,22 @@ export function createWindowFunctions(host){
                 positions: place=>{
                     placeWindow = place;
                 },
-                shown, raise, restack, desktop: desktopWindow,
+                shown, raise, restack, tell, desktop: desktopWindow,
+                // What the run answers for every process's windows.
+                runForeground: ()=>directory.foreground?.() ?? 0,
+                /**
+                 * SetForegroundWindow of another program's window: the run's
+                 * foreground moves now, and that program activates it.
+                 *
+                 * @param {number} hwnd
+                 */
+                foregroundElsewhere: hwnd=>directory.foregroundElsewhere?.(hwnd >>> 0, processId)
+                    ?? false,
+                /** @param {number} x @param {number} y */
+                foreignAt: (x, y)=>{
+                    const hwnd = directory.fromPoint?.(x, y) ?? 0;
+                    return hwnd !== 0 && directory.ownerOf(hwnd) !== processId ? hwnd : 0;
+                },
                 isDesktop: (/** @type {any} */ record)=>record !== null && record === desktop,
                 sysColorBrush: (/** @type {number} */ index)=>(draw
                     ? draw.solidBrush(sysColor(index)) : 0),
@@ -6432,10 +6730,12 @@ export function createWindowFunctions(host){
                     return 0;
                 }
                 const thread = host.callerThread?.();
-                const listed = [...windows.values()]
-                    .filter(record=>!record.destroyed && !isChild(record))
-                    .reverse()
-                    .map(record=>record.hwnd);
+                // Every process's, in the run's order, where the run keeps one.
+                const listed = directory.topLevel?.().map(state=>state.hwnd)
+                    ?? [...windows.values()]
+                        .filter(record=>!record.destroyed && !isChild(record))
+                        .reverse()
+                        .map(record=>record.hwnd);
                 return (async()=>{
                     for (const hwnd of listed)
                     {

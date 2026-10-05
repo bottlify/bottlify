@@ -214,8 +214,11 @@ function join(worker, connection){
  *     removeEventListener: (type: 'message', listener: (event: { data: any }) => void) => void }}
  *     options.worker  a graphics worker that has answered `open`
  * @param {any} [options.device]  this thread's GPU device, which a frame is copied onto
- * @param {(frame: { surface: any, frameIndex: number }) => void} [options.presentTo]
- *     where a frame goes, as the backend of this thread hands its own on
+ * @param {(frame: { surface: any, frameIndex: number, source?: number }) => void}
+ *     [options.presentTo]  where a frame goes, as the backend of this thread hands its
+ *     own on, with the process that drew it where the worker was told
+ * @param {number} [options.source]  the process this connection's roots draw for: its
+ *     frames say so, for the screen composed of every process's picture
  * @param {(address: number, bytes: Uint8Array) => void} [options.writeMemory]
  *     guest memory the worker wrote for a call the program waited on: pixels read back
  * @param {() => Uint8Array | null} [options.sharedMemory]  the guest's RAM over a
@@ -233,7 +236,7 @@ function join(worker, connection){
  */
 export function connectGraphicsWorker(options){
     const { worker, device, presentTo, writeMemory, sharedMemory, adoptMemory, divergence, lost,
-        failed, lendMemory = true } = options;
+        failed, lendMemory = true, source } = options;
     /** Whether this thread may wait on the worker, which a lend's claim may have to. */
     let mayBlock = /** @type {boolean | null} */ (null);
     /** @type {{ texture: any, view: any, width: number, height: number, format: string } | null} */
@@ -247,9 +250,10 @@ export function connectGraphicsWorker(options){
 
     /**
      * @param {{ bitmap?: any, pixels?: Uint8Array, bytesPerRow?: number, width?: number,
-     *     height?: number, frameIndex: number, format: string }} frame
+     *     height?: number, frameIndex: number, format: string, source?: number }} frame
      */
-    const present = ({ bitmap, pixels, bytesPerRow, frameIndex, format, ...size })=>{
+    const present = ({ bitmap, pixels, bytesPerRow, frameIndex, format, source: drewFor,
+        ...size })=>{
         if (!device || !presentTo)
         {
             bitmap?.close?.();
@@ -300,7 +304,8 @@ export function connectGraphicsWorker(options){
                 [width, height]);
         }
         frames++;
-        presentTo({ surface, frameIndex });
+        presentTo(drewFor === undefined ? { surface, frameIndex }
+            : { surface, frameIndex, source: drewFor });
     };
 
     /** Frames the worker presented and replaced before they were sent. */
@@ -325,7 +330,7 @@ export function connectGraphicsWorker(options){
             const lending = memory && lendMemory && (api === 'd3d8' || api === 'd3d9')
                 && (mayBlock ??= mayWait()) ? createLendingBuffers() : null;
             worker.postMessage({ type: 'root', api, options: plainOf(services), port: port2,
-                memory, lending }, [port2]);
+                memory, lending, source }, [port2]);
             const sender = createSender({
                 post: (message, transfer)=>port1.postMessage(message, transfer),
                 on: {

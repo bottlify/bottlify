@@ -51,6 +51,16 @@ export function createFakeDevice(options = {}){
     /** @param {string} kind @param {any} extra @returns {any} */
     const object = (kind, extra = {})=>({ kind, id: `${kind}-${nextId++}`, ...extra });
 
+    /**
+     * A GPUExtent3D as WebGPU takes it, a dictionary or a sequence, as the
+     * dictionary.
+     *
+     * @param {any} size @returns {{ width: number, height: number }}
+     */
+    const extentOf = size=>(Array.isArray(size)
+        ? { width: size[0], height: size[1] ?? 1 }
+        : { width: size.width, height: size.height ?? 1 });
+
     /** @param {any} descriptor */
     const createTexture = descriptor=>{
         // What a GPUTexture says of itself, read by whoever decides how to use one.
@@ -59,7 +69,9 @@ export function createFakeDevice(options = {}){
         const kept = KEPT_FORMATS[descriptor.format];
         if (kept)
         {
-            texture.bytes = new Uint8Array(descriptor.size.width * descriptor.size.height * kept);
+            const { width, height } = extentOf(descriptor.size);
+            texture.extent = { width, height };
+            texture.bytes = new Uint8Array(width * height * kept);
             texture.bytesPerPixel = kept;
         }
         texture.createView = (/** @type {any} */ viewDescriptor)=>{
@@ -95,7 +107,7 @@ export function createFakeDevice(options = {}){
                 {
                     return null;
                 }
-                const pitch = texture.descriptor.size.width * texture.bytesPerPixel;
+                const pitch = texture.extent.width * texture.bytesPerPixel;
                 const x = side.origin?.x ?? 0;
                 const y = side.origin?.y ?? 0;
                 return { bytes: texture.bytes, pitch, at: y * pitch + x * texture.bytesPerPixel,
@@ -110,8 +122,9 @@ export function createFakeDevice(options = {}){
         {
             return;
         }
-        const rowBytes = size.width * (source.bytesPerPixel || destination.bytesPerPixel);
-        for (let row = 0; row < size.height; row++)
+        const { width, height } = extentOf(size);
+        const rowBytes = width * (source.bytesPerPixel || destination.bytesPerPixel);
+        for (let row = 0; row < height; row++)
         {
             const start = source.at + row * source.pitch;
             destination.bytes.set(source.bytes.subarray(start, start + rowBytes),
@@ -134,7 +147,7 @@ export function createFakeDevice(options = {}){
                 const value = attachment.clearValue ?? { r: 0, g: 0, b: 0, a: 1 };
                 /** @param {number} channel */
                 const byte = channel=>Math.round(Math.max(0, Math.min(1, channel)) * 255);
-                const pixel = texture.descriptor.format === 'bgra8unorm'
+                const pixel = texture.format === 'bgra8unorm'
                     ? [byte(value.b), byte(value.g), byte(value.r), byte(value.a)]
                     : [byte(value.r), byte(value.g), byte(value.b), byte(value.a)];
                 deferred.push(()=>{
@@ -425,9 +438,20 @@ export function createFakeDevice(options = {}){
         /** @param {any} descriptor */
         configure(descriptor){
             calls.push({ op: 'configure', descriptor });
+            screenTexture.format = descriptor.format;
         },
         getCurrentTexture(){
             calls.push({ op: 'getCurrentTexture' });
+            // In a kept format, the canvas keeps its texels too, so what
+            // reached the screen can be read: a new size starts a new picture.
+            const kept = KEPT_FORMATS[screenTexture.format];
+            const extent = screenTexture.extent;
+            if (kept && (extent?.width !== canvas.width || extent?.height !== canvas.height))
+            {
+                screenTexture.extent = { width: canvas.width, height: canvas.height };
+                screenTexture.bytes = new Uint8Array(canvas.width * canvas.height * kept);
+                screenTexture.bytesPerPixel = kept;
+            }
             return screenTexture;
         },
     };

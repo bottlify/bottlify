@@ -222,6 +222,9 @@
  * @property {(key: string) => Uint8Array | null | undefined} [getNow]  The record at once,
  *     without a turn of the event loop, where the store can answer so; undefined where it
  *     cannot yet, and the translator asks `get`. Optional.
+ * @property {(keys: string[]) => (Uint8Array | null)[] | undefined} [getManyNow]  Every
+ *     record named, at once and in order, as `getNow` answers one: a store across a link
+ *     answers a batch's names in one wait. Optional.
  * @property {() => Promise<void>} [prepare]  Opens the store ahead of its first lookup (a
  *     directory store reads its index). Optional.
  * @property {() => Promise<void>} [flush]  Writes any pending bookkeeping

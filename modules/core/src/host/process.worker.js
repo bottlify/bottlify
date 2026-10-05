@@ -26,6 +26,7 @@
 import { createApp, createMacrotask } from '../app.js';
 import { openLink } from '../system/link.js';
 import { remoteSystem } from '../system-link.js';
+import { remoteStore } from '../layers/cpu/internal/store-link.js';
 import { ringPacing } from './ring-pacing.js';
 import { portEnd } from '../layers/graphics/remote/connect.js';
 import { plainEvent } from '../system/events-across.js';
@@ -180,6 +181,11 @@ export async function serveProcess({ end, volume, graphics, display, options, ru
             // the batch is taken at the next turn rather than at the next timed
             // yield, as the engine's thread takes its own.
             cork: { ...options.cork, config: { ...options.cork?.config,
+                // The run's store, kept by the system's thread.
+                store: options.cork?.config?.store === 'run'
+                    ? remoteStore({ ask: (method, args)=>ask('store', method, args),
+                        call: (method, args)=>link.call('store', method, args) })
+                    : options.cork?.config?.store,
                 doorbell: { posted, bell: link.bell } } },
             pacing: ringPacing({ inbound: { bell: link.bell, drain: link.pump },
                 macrotask: createMacrotask(), now: ()=>performance.now(), intervalMs: YIELD_MS,
