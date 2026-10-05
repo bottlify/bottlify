@@ -298,3 +298,43 @@ test('the wide free-space calls answer what the A calls answer', ()=>{
     assert.equal(dword(bytes, 0x118) + dword(bytes, 0x11c) * 0x1_0000_0000,
         32 * 1024 * 1024 * 1024);
 });
+
+test('QueryDosDevice names a drive\'s NT device, and every name when given none', ()=>{
+    // A setup walks the letters and unpacks onto one whose device is a hard
+    // disk's; the answer is a list ended by an empty string, counted with
+    // both terminators.
+    const ERROR_FILE_NOT_FOUND = 2;
+    const ERROR_INSUFFICIENT_BUFFER = 122;
+    const { fns, bytes, errors } = setup(['C', 'D', 'E'], { D: { kind: 'cdrom' } });
+    const text = (/** @type {number} */ at, /** @type {number} */ length)=>
+        String.fromCharCode(...bytes.slice(at, at + length));
+    const B = String.fromCharCode(92);
+
+    plant(bytes, 0x40, 'c:');
+    bytes.fill(0xaa, 0x100, 0x140);
+    const length = fns.QueryDosDeviceA.handler([0x40, 0x100, 0x40]);
+    assert.equal(text(0x100, length), `${B}Device${B}HarddiskVolume1\0\0`);
+    plant(bytes, 0x40, 'D:');
+    assert.equal(text(0x100, fns.QueryDosDeviceA.handler([0x40, 0x100, 0x40])),
+        `${B}Device${B}CdRom0\0\0`);
+    plant(bytes, 0x40, 'E:');
+    assert.equal(text(0x100, fns.QueryDosDeviceA.handler([0x40, 0x100, 0x40])),
+        `${B}Device${B}HarddiskVolume2\0\0`, 'volumes count past the disc');
+
+    assert.equal(text(0x100, fns.QueryDosDeviceA.handler([0, 0x100, 0x40])),
+        'C:\0D:\0E:\0NUL\0\0');
+
+    plant(bytes, 0x40, 'F:');
+    assert.equal(fns.QueryDosDeviceA.handler([0x40, 0x100, 0x40]), 0);
+    assert.equal(errors.at(-1), ERROR_FILE_NOT_FOUND);
+    plant(bytes, 0x40, `C:${B}`);
+    assert.equal(fns.QueryDosDeviceA.handler([0x40, 0x100, 0x40]), 0, 'a root is not a name');
+    plant(bytes, 0x40, 'C:');
+    assert.equal(fns.QueryDosDeviceA.handler([0x40, 0x100, 10]), 0);
+    assert.equal(errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+
+    bytes.set([0x43, 0, 0x3a, 0, 0, 0], 0x40);
+    assert.equal(fns.QueryDosDeviceW.handler([0x40, 0x200, 0x40]), length);
+    assert.equal(bytes[0x200 + 2], 0x44, 'UTF-16: D of Device at the second character');
+    assert.deepEqual([fns.QueryDosDeviceA.argBytes, fns.QueryDosDeviceW.argBytes], [12, 12]);
+});
