@@ -648,7 +648,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 {
                     inboundReader = createInboundReader(ring, receive);
                     return ringPacing({ inbound: inboundReader, macrotask: breathe, now: clock,
-                        intervalMs: threaded ? WORKER_YIELD_MS : PAGE_YIELD_MS });
+                        intervalMs: threaded ? WORKER_YIELD_MS : PAGE_YIELD_MS, posted });
                 }
                 if (threaded && asked === 'event')
                 {
@@ -657,11 +657,19 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 return pagePacing({ macrotask: breathe, hidden: ()=>hidden, now: clock, signalled,
                     yieldMs: threaded ? WORKER_YIELD_MS : undefined });
             };
+            // What the translation worker raises and rings after each batch it
+            // posts, where the engine is fed through the ring: the batch is
+            // taken at the next turn rather than at the next timed yield.
+            const posted = inbound ? { buffer: new SharedArrayBuffer(4), index: 0 } : null;
+            const pacing = pacingFor(inbound, options.pacing);
+            const doorbell = posted && inboundReader ? { posted, bell: inboundReader.bell } : null;
             app = await createApp({
                 ...rest,
                 audio: rest.audio ? soundOptions : undefined,
                 win32: { ...rest.win32, network: transport ?? rest.win32?.network },
-                pacing: pacingFor(inbound, options.pacing),
+                pacing,
+                cork: doorbell
+                    ? { ...rest.cork, config: { ...rest.cork?.config, doorbell } } : rest.cork,
                 bundle: bundle ? {
                     ...bundle,
                     fetch: bundle.file ? blobFetcher(bundle.file)

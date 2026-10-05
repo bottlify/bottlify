@@ -36,16 +36,40 @@ export const IDLE_SLEEP_MS = 50;
  * @param {number} deps.intervalMs
  * @param {(bell: { buffer: SharedArrayBuffer, index: number }, seen: number,
  *     timeoutMs: number) => any} [deps.sleep]   a blocking wait; `waitDoorbell` unless a test says
+ * @param {{ buffer: SharedArrayBuffer, index: number } | null} [deps.posted]
+ *     A count the threads that post to this one -- the translation worker --
+ *     raise after each message, ringing the inbound doorbell with it: a
+ *     message is waiting on the event loop, and the next yield is now rather
+ *     than when the interval is up.
  * @returns {import('../app.js').RunPacing & { counts: () => Record<string, number> }}
  */
-export function ringPacing({ inbound, macrotask, now, intervalMs, sleep = waitDoorbell }){
-    const counts = { drained: 0, yields: 0, slept: 0, sleptMs: 0, woken: 0 };
+export function ringPacing({ inbound, macrotask, now, intervalMs, sleep = waitDoorbell,
+    posted = null })
+{
+    const counts = { drained: 0, yields: 0, slept: 0, sleptMs: 0, woken: 0, heard: 0 };
+    const postedWords = posted ? new Int32Array(posted.buffer) : null;
+    let postedSeen = postedWords ? Atomics.load(postedWords, /** @type {any} */ (posted).index) : 0;
+    /** Whether something was posted to this thread since the last look. */
+    const signalled = ()=>{
+        if (!postedWords || !posted)
+        {
+            return false;
+        }
+        const count = Atomics.load(postedWords, posted.index);
+        if (count === postedSeen)
+        {
+            return false;
+        }
+        postedSeen = count;
+        counts.heard++;
+        return true;
+    };
     /** Machines taking turns on this thread: one of several may not block it. */
     let machines = 1;
     const yieldNow = pacedYield({ macrotask: ()=>{
         counts.yields++;
         return macrotask();
-    }, now, intervalMs });
+    }, now, intervalMs, signalled });
     const drain = ()=>{
         const taken = inbound.drain();
         counts.drained += taken;
@@ -69,7 +93,7 @@ export function ringPacing({ inbound, macrotask, now, intervalMs, sleep = waitDo
             {
                 return Promise.resolve();
             }
-            if (!idle)
+            if (!idle || signalled())
             {
                 counts.yields++;
                 return macrotask();

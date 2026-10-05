@@ -1434,6 +1434,40 @@ test('a batch the worker forms from a copy of its pages runs as the one formed h
     await m.runtime.flush();
 });
 
+test('the worker rings the engine\'s doorbell after each answer it posts, its readiness too',
+    async()=>{
+        const posted = { buffer: new SharedArrayBuffer(4), index: 0 };
+        const bell = { buffer: new SharedArrayBuffer(8), index: 1 };
+        const m = machine({ worker: true, doorbell: { posted, bell } });
+        const count = ()=>Atomics.load(new Int32Array(posted.buffer), 0);
+        try
+        {
+            // Ready first: until then a batch is emitted here, and nothing rings.
+            for (let i = 0; i < 200 && count() === 0; i++)
+            {
+                await new Promise(resolve=>setTimeout(resolve, 10));
+            }
+            assert.equal(count(), 1, 'rung for its readiness');
+            m.write(CODE, COUNTDOWN);
+            m.setReg(4, 0x80000);
+            m.runtime.noteHot(CODE, 0, 2);
+            let published = false;
+            for (let i = 0; i < 200 && !published; i++)
+            {
+                await m.runtime.translatePending();
+                await new Promise(resolve=>setTimeout(resolve, 10));
+                published = m.runtime.entryOf(CODE) >= 0;
+            }
+            assert.ok(published, 'published from the worker');
+            assert.equal(count(), 2, 'and for the batch');
+            assert.equal(Atomics.load(new Int32Array(bell.buffer), 1), 2, 'the bell with each');
+        }
+        finally
+        {
+            await m.runtime.flush();
+        }
+    });
+
 test('a batch whose answer waits behind a hold of the engine thread past the limit is not given up',
     async()=>{
         const m = machine({ worker: true, inFlightMs: 200 });

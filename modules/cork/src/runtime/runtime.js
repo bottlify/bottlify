@@ -2213,7 +2213,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 inFlight.clear();
                 adapter.terminate();
             });
-            adapter.post({ ready: true }, []);
+            adapter.post({ ready: true, doorbell: settings.doorbell ?? null }, []);
         }, ()=>{});
     }
 

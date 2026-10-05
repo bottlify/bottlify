@@ -137,3 +137,29 @@ test('with another machine on the thread an idle wait never blocks it: the other
         pacing.wait({ ...idle, deadlineMs: 1 });
         assert.equal(blocked.length, 1, 'alone again, it sleeps on the doorbell');
     });
+
+test('a message posted to the thread is heard by its count: the yield is now, not when the'
+    + ' interval is up, and an idle wait goes to the event loop rather than sleeping', async()=>{
+    /** @type {any[]} */
+    const received = [];
+    /** @type {any[]} */
+    const blocked = [];
+    let clock = 0;
+    const posted = { buffer: new SharedArrayBuffer(4), index: 0 };
+    const { pacing, macrotasks } = pacingOver(received, { now: ()=>clock, posted,
+        sleep: (/** @type {any[]} */ ...args)=>{
+            blocked.push(args);
+            return 'timed-out';
+        } });
+    const quiet = { suspended: 0, fetching: 0, idlers: 0, spun: 0 };
+    assert.equal(pacing.yield(quiet), null, 'nothing posted, the interval not up');
+    Atomics.add(new Int32Array(posted.buffer), 0, 1);
+    await pacing.yield(quiet);
+    assert.equal(macrotasks(), 1, 'a batch posted: the event loop has it now');
+    assert.equal(pacing.yield(quiet), null, 'heard once');
+    Atomics.add(new Int32Array(posted.buffer), 0, 1);
+    await pacing.wait(idle);
+    assert.equal(macrotasks(), 2);
+    assert.deepEqual(blocked, [], 'not slept through');
+    assert.equal(pacing.counts().heard, 2);
+});
