@@ -363,6 +363,28 @@ test('SETPOS, DELTAPOS and STEPIT show the bar at once, with no message pumped',
     assert.ok(filled() > more, 'STEPIT');
 });
 
+test('a position set again where it was paints nothing; a moved one paints at once', async()=>{
+    // A setup copying a kilobyte at a time sets the same position after every
+    // one, hundreds of thousands of times; the real control paints when the
+    // position moves (Wine's progress.c), and DELTAPOS by nothing is no move.
+    const MARK = 0x00123456;
+    const context = setup();
+    await context.makeHost();
+    const bar = await context.bar(PBS_SMOOTH);
+    await context.pump();
+    context.fns.SendMessageA.handler([bar, PBM_SETPOS, 50, 0]);
+    context.fns.GetWindowRect.handler([bar, 0x6000]);
+    const [left, top] = [context.memory.u32(0x6000), context.memory.u32(0x6004)];
+    const marked = ()=>context.desktop.read(left + 5, top + 8) === MARK;
+    context.desktop.write(left + 5, top + 8, MARK);
+    assert.equal(context.fns.SendMessageA.handler([bar, PBM_SETPOS, 50, 0]), 50);
+    assert.ok(marked(), 'the same position: not painted');
+    context.fns.SendMessageA.handler([bar, PBM_DELTAPOS, 0, 0]);
+    assert.ok(marked(), 'a move by nothing: not painted');
+    context.fns.SendMessageA.handler([bar, PBM_SETPOS, 60, 0]);
+    assert.ok(!marked(), 'a new position: painted');
+});
+
 test('a bar paints its track and fill on WM_PAINT', async()=>{
     const context = setup();
     await context.makeHost();
