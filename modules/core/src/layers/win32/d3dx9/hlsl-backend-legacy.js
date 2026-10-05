@@ -292,7 +292,7 @@ function build(ir, options, diagnostics, stats){
                 const input = /** @type {import('./hlsl-ir.js').SrcInput} */ (src).input;
                 if (!fourth && asTexture.has(input))
                 {
-                    throw new TargetError('X4532', `${profile.name}: TEXCOORD${input.index} is `
+                    throw new TargetError('X4520', `${profile.name}: TEXCOORD${input.index} is `
                         + 'both a texture\'s coordinates and a number');
                 }
                 let reg = filled.get(input);
@@ -331,7 +331,7 @@ function build(ir, options, diagnostics, stats){
         {
             if (!fourth)
             {
-                throw new TargetError('X4532', `${profile.name} cannot read a texture at `
+                throw new TargetError('X4523', `${profile.name} cannot read a texture at `
                     + 'coordinates it computed');
             }
             if (instr.dest.kind === 'reg')
@@ -387,7 +387,7 @@ function build(ir, options, diagnostics, stats){
         {
             if (!(v >= -1 && v <= 1))
             {
-                throw new TargetError('X4533', `the constant ${v} is outside the range -1 to 1 `
+                throw new TargetError('X4532', `the constant ${v} is outside the range -1 to 1 `
                     + `that ${profile.name} holds`);
             }
         }
@@ -413,9 +413,9 @@ function build(ir, options, diagnostics, stats){
     const constantRegisters = reserved.size > 0 ? Math.max(...reserved) + 1 : 0;
     if (constantRegisters > profile.maxConsts)
     {
-        diagnostics.push({ code: 'X5629', message: 'Compiled shader code uses too many constant '
-            + `registers (${constantRegisters}). Max. allowed by the target (${profile.name}) is `
-            + `${profile.maxConsts}.` });
+        diagnostics.push({ code: 'X4507',
+            message: `Constant register limit of ${profile.maxConsts} `
+            + `exceeded; ${constantRegisters} registers needed to compile program` });
     }
 
     // Homes.
@@ -503,9 +503,9 @@ function build(ir, options, diagnostics, stats){
     stats.temps = temps;
     if (temps > profile.maxTemps)
     {
-        diagnostics.push({ code: 'X5610', message: 'Compiled shader code uses too many temporary '
-            + `registers (${temps}). Max. allowed by the target (${profile.name}) is `
-            + `${profile.maxTemps}.` });
+        diagnostics.push({ code: 'X4505',
+            message: `Temporary register limit of ${profile.maxTemps} `
+            + `exceeded; ${temps} registers needed to compile program` });
     }
 
     // Registers of the inputs.
@@ -518,7 +518,7 @@ function build(ir, options, diagnostics, stats){
     {
         if (out.usage !== USAGE.COLOR || out.index !== 0)
         {
-            throw new TargetError('X4502', `invalid ${profile.name} output semantic '${
+            throw new TargetError('X4503', `invalid ${profile.name} output semantic '${
                 USAGE_NAMES[out.usage] ?? out.usage}${out.index}': the colour is the only result`);
         }
         out.reg = 0;
@@ -566,7 +566,7 @@ function build(ir, options, diagnostics, stats){
         }
         if (dest && !allowedMask(dest.mask ?? 15) && !isTextureOp(instr))
         {
-            throw new TargetError('X4534', `${profile.name} cannot write only the components `
+            throw new TargetError('X4537', `${profile.name} cannot write only the components `
                 + `${'rgba'.split('').filter((_, c)=>((dest?.mask ?? 0) & 1 << c) !== 0).join('')}`
                 + ' of a result');
         }
@@ -623,11 +623,11 @@ function build(ir, options, diagnostics, stats){
                     }
                     break;
                 default:
-                    throw new TargetError('X4531', `${profile.name} has no such source`);
+                    throw new TargetError('X4532', `${profile.name} has no such source`);
             }
             if (/** @type {any} */ (src).abs)
             {
-                throw new TargetError('X4531', `${profile.name} has no absolute value`);
+                throw new TargetError('X4532', `${profile.name} has no absolute value`);
             }
             // The component each lane the instruction reads is in.
             const lanes = info.cls === 'comp' ? destLanes : lanesRead(instr, k);
@@ -739,7 +739,7 @@ function swizzleOf(wanted, destLanes, profile, op){
     {
         return [wanted[0], wanted[0], wanted[0], wanted[0]];
     }
-    throw new TargetError('X4535', `${profile.name} ${op}: a source can be read as it is or `
+    throw new TargetError('X4533', `${profile.name} ${op}: a source can be read as it is or `
         + 'with its blue or alpha replicated; this one is read as '
         + `.${wanted.map(w=>'rgba'[w]).join('')}`);
 }

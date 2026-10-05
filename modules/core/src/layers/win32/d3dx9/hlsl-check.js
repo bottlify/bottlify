@@ -368,7 +368,7 @@ export function check(program, options = {}){
         const { type } = declaredType(v.type, v.dims);
         if (type.kind === 'void')
         {
-            fail('X3000', 'illegal variable type', v.pos);
+            fail('X3005', 'illegal variable type', v.pos);
         }
         const sym = makeSymbol({ kind: 'global', name: v.name, type, decl: v });
         sym.isUniform = !sym.isStatic;
@@ -494,7 +494,7 @@ export function check(program, options = {}){
         const { type } = declaredType(v.type, v.dims);
         if (type.kind === 'void')
         {
-            fail('X3000', 'illegal variable type', v.pos);
+            fail('X3005', 'illegal variable type', v.pos);
         }
         return type;
     }
@@ -520,7 +520,7 @@ export function check(program, options = {}){
         const array = /** @type {Extract<Type, { kind: 'array' }>} */ (type);
         if (init.kind !== 'initlist')
         {
-            return fail('X3000', 'unsized array requires an initializer list', init.pos);
+            return fail('X3074', 'unsized array requires an initializer list', init.pos);
         }
         const per = scalarCount(array.elem);
         const total = checkedLeaves(init).reduce((n, l)=>n + scalarCount(l.type), 0);
@@ -971,7 +971,7 @@ export function check(program, options = {}){
     function call(e){
         if (e.callee.kind !== 'ident')
         {
-            return fail('X3000', 'methods are not supported', e.pos);
+            return fail('X3087', 'methods are not supported', e.pos);
         }
         const name = e.callee.name;
         e.args = e.args.map(expr);
@@ -1051,7 +1051,7 @@ export function check(program, options = {}){
         }
         if (sig.unsupported)
         {
-            return fail('X3000', `'${name}': intrinsic function is not supported`, e.pos);
+            return fail('X3500', `'${name}': intrinsic function is not supported`, e.pos);
         }
         sig.paramTypes.forEach((pt, i)=>{
             if (sig.outParams?.includes(i))
@@ -1087,7 +1087,7 @@ export function check(program, options = {}){
             let { type, lengths } = declaredType(v.type, v.dims);
             if (type.kind === 'void')
             {
-                fail('X3000', 'illegal variable type', v.pos);
+                fail('X3005', 'illegal variable type', v.pos);
             }
             if (lengths.includes(-1) && lengths.indexOf(-1) === 0 && v.init)
             {
@@ -1096,7 +1096,7 @@ export function check(program, options = {}){
             }
             else if (lengths.includes(-1))
             {
-                fail('X3000', 'unsized array requires an initializer list', v.pos);
+                fail('X3074', 'unsized array requires an initializer list', v.pos);
             }
             const sym = makeSymbol({ kind: 'local', name: v.name, type, decl: v });
             declareLocal(sym);
@@ -1213,13 +1213,13 @@ export function check(program, options = {}){
             case 'break':
                 if (ctx.loops === 0 && ctx.switches === 0)
                 {
-                    fail('X3000', "'break' statement is not inside a loop or switch", s.pos);
+                    fail('X3518', "'break' statement is not inside a loop or switch", s.pos);
                 }
                 return;
             case 'continue':
                 if (ctx.loops === 0)
                 {
-                    fail('X3000', "'continue' statement is not inside a loop", s.pos);
+                    fail('X3519', "'continue' statement is not inside a loop", s.pos);
                 }
                 return;
             case 'discard':
@@ -1231,14 +1231,14 @@ export function check(program, options = {}){
                 {
                     if (s.value)
                     {
-                        fail('X3000', `'${fn.name}': void functions cannot return a value`,
+                        fail('X3079', `'${fn.name}': void functions cannot return a value`,
                             s.pos);
                     }
                     return;
                 }
                 if (!s.value)
                 {
-                    fail('X3000', `'${fn.name}': function must return a value`, s.pos);
+                    fail('X3080', `'${fn.name}': function must return a value`, s.pos);
                 }
                 s.value = coerce(expr(s.value), fn.returnType);
                 return;
@@ -1526,7 +1526,7 @@ export function check(program, options = {}){
                 if (!c.decl.body && !reported.has(c))
                 {
                     reported.add(c);
-                    diagnostics.push({ code: 'X3000', severity: 'error', message:
+                    diagnostics.push({ code: 'X3510', severity: 'error', message:
                         `'${c.name}': function is declared but never defined`,
                     pos: c.decl.pos });
                 }

@@ -853,7 +853,7 @@ export function lower(module, entry, profile){
             case '&&': f = b.and; break;
             case '||': f = b.or; break;
             default:
-                return fail('X3000', `the '${op}' operator is not available in ${profile.name}`,
+                return fail('X3535', `the '${op}' operator is not available in ${profile.name}`,
                     null);
         }
         return zip([left, right], f);
@@ -893,7 +893,7 @@ export function lower(module, entry, profile){
                 {
                     return zip([x], b.not);
                 }
-                return fail('X3000', `the '${e.op}' operator is not available in ${profile.name}`,
+                return fail('X3535', `the '${e.op}' operator is not available in ${profile.name}`,
                     e.pos);
             }
             case 'incdec': {
@@ -1219,7 +1219,7 @@ export function lower(module, entry, profile){
                     break;
                 }
                 case 'switch':
-                    fail('X3000', 'switch is not supported', s.pos);
+                    fail('X3500', 'switch is not supported', s.pos);
                     break;
                 default:
                     fail('X3000', `unsupported statement '${s.kind}'`, s.pos);
@@ -1285,7 +1285,7 @@ export function lower(module, entry, profile){
         const parsed = parseSemantic(semantic);
         if (!parsed)
         {
-            return fail('X3000', `unknown semantic '${semantic}'`, pos);
+            return fail('X4502', `unknown semantic '${semantic}'`, pos);
         }
         const width = type.kind === 'vector' ? type.n : type.kind === 'scalar' ? 1 : 0;
         if (width === 0)
@@ -1327,13 +1327,13 @@ export function lower(module, entry, profile){
         }
         if (!semantic)
         {
-            fail('X3502', `'${name}': output parameter '${name}' is missing a semantic`, pos);
+            fail('X3503', `'${name}': output parameter '${name}' is missing a semantic`, pos);
             return;
         }
         const parsed = parseSemantic(semantic);
         if (!parsed || 'special' in parsed)
         {
-            fail('X3000', `unknown output semantic '${semantic}'`, pos);
+            fail('X4503', `unknown output semantic '${semantic}'`, pos);
             return;
         }
         if (type.kind !== 'scalar' && type.kind !== 'vector')

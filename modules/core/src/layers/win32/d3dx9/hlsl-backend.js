@@ -398,7 +398,7 @@ export function assignConstants(constants, diagnostics){
         {
             if (taken[c.set].has(c.explicit + r))
             {
-                diagnostics.push({ code: 'X4503', message: `'${c.name}': register ${
+                diagnostics.push({ code: 'X3115', message: `'${c.name}': register ${
                     c.set}${c.explicit + r} is already in use` });
             }
             taken[c.set].add(c.explicit + r);
@@ -878,7 +878,7 @@ export function assemble(ir, options = {}){
         const home = outputRegister(profile, out, position);
         if (!home)
         {
-            diagnostics.push({ code: 'X4502', message: `invalid ${profile.name} output semantic '${
+            diagnostics.push({ code: 'X4503', message: `invalid ${profile.name} output semantic '${
                 USAGE_NAMES[out.usage] ?? out.usage}${out.index}'` });
             return;
         }
@@ -1180,22 +1180,23 @@ export function assemble(ir, options = {}){
     }
     if (temps > profile.maxTemps)
     {
-        diagnostics.push({ code: 'X5610', message: 'Compiled shader code uses too many '
-            + `temporary registers (${temps}). Max. allowed by the target (${profile.name}) is `
-            + `${profile.maxTemps}.` });
+        diagnostics.push({ code: 'X4505',
+            message: `Temporary register limit of ${profile.maxTemps} exceeded; `
+            + `${temps} registers needed to compile program` });
     }
     const samplerCount = ir.constants.filter(c=>c.set === 's').length;
     if (profile.maxSamplers > 0 && samplerCount > profile.maxSamplers)
     {
-        diagnostics.push({ code: 'X5611', message: `Too many samplers (${samplerCount}) for `
-            + `${profile.name}` });
+        diagnostics.push({ code: 'X4510',
+            message: `Sampler register limit of ${profile.maxSamplers} exceeded; `
+            + `${samplerCount} registers needed to compile program` });
     }
     const constantRegisters = reserved.size > 0 ? Math.max(...reserved) + 1 : 0;
     if (constantRegisters > profile.maxConsts)
     {
-        diagnostics.push({ code: 'X5629', message: 'Compiled shader code uses too many '
-            + `constant registers (${constantRegisters}). Max. allowed by the `
-            + `target (${profile.name}) is ${profile.maxConsts}.` });
+        diagnostics.push({ code: 'X4507',
+            message: `Constant register limit of ${profile.maxConsts} exceeded; `
+            + `${constantRegisters} registers needed to compile program` });
     }
     if (diagnostics.length > 0)
     {

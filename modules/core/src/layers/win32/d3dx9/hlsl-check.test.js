@@ -553,7 +553,7 @@ test('initialiser list errors', ()=>{
         ["X3017: cannot convert initializer list to 'float[]'"]);
     assert.deepEqual(errors('float a[];'), []);
     assert.deepEqual(errors('void f(){ float a[]; }'),
-        ['X3000: unsized array requires an initializer list']);
+        ['X3074: unsized array requires an initializer list']);
     assert.deepEqual(errors('sampler2D s = { 1 };'),
         ["X3017: cannot convert from initializer list to 'sampler2D'"]);
 });
@@ -648,7 +648,7 @@ const DIAGNOSTICS = [
         'X3013', "'g': no matching 1 parameter function", 5, 10],
     ['float g(float a, float2 b){ return a; }\nfloat g(float2 a, float b){ return b; }\n'
         + 'float f(){\n  return g(1, 1);\n}', 'X3067', "'g': ambiguous function call", 4, 10],
-    ['float f(){\n  float x = 1;\n  x = noise(x);\n  return x;\n}', 'X3000',
+    ['float f(){\n  float x = 1;\n  x = noise(x);\n  return x;\n}', 'X3500',
         "'noise': intrinsic function is not supported", 3, 7],
     ['float f(){\n  const float k = 1;\n  k = 2;\n  return k;\n}', 'X3025',
         'l-value specifies const object', 3, 3],
@@ -680,15 +680,15 @@ const DIAGNOSTICS = [
     ['float f(float x){\n  for (int i = 0; i < 4; i++)\n  {\n    if (x > i)\n    {\n      break;\n'
         + '    }\n  }\n  return 1;\n}\nfloat g(float x){ }', 'X3507',
     "'g': Not all control paths return a value", 11, 7],
-    ['void f(){\n  return 1;\n}', 'X3000', "'f': void functions cannot return a value", 2, 3],
-    ['float f(){\n  return;\n}', 'X3000', "'f': function must return a value", 2, 3],
+    ['void f(){\n  return 1;\n}', 'X3079', "'f': void functions cannot return a value", 2, 3],
+    ['float f(){\n  return;\n}', 'X3080', "'f': function must return a value", 2, 3],
     ['struct S { float a; };\nfloat f(){\n  S s;\n  return s;\n}', 'X3017',
         "cannot convert from 'S' to 'float'", 4, 10],
-    ['float f(){\n  break;\n  return 1;\n}', 'X3000',
+    ['float f(){\n  break;\n  return 1;\n}', 'X3518',
         "'break' statement is not inside a loop or switch", 2, 3],
-    ['float f(){\n  continue;\n  return 1;\n}', 'X3000',
+    ['float f(){\n  continue;\n  return 1;\n}', 'X3519',
         "'continue' statement is not inside a loop", 2, 3],
-    ['float f(){\n  switch (1)\n  {\n    default:\n      continue;\n  }\n  return 1;\n}', 'X3000',
+    ['float f(){\n  switch (1)\n  {\n    default:\n      continue;\n  }\n  return 1;\n}', 'X3519',
         "'continue' statement is not inside a loop", 5, 7],
     ['float f(float3 v){\n  if (v)\n  {\n    return 1;\n  }\n  return 0;\n}', 'X3017',
         "cannot convert from 'float3' to 'bool'", 2, 7],
@@ -726,9 +726,9 @@ const DIAGNOSTICS = [
         "'tex2D': no matching 2 parameter intrinsic function", 2, 10],
     ['sampler2D s;\nfloat4 f(){\n  return texCUBE(s, float3(0,0,0));\n}', 'X3013',
         "'texCUBE': no matching 2 parameter intrinsic function", 3, 10],
-    ['float f(){\n  return x.y(1);\n}', 'X3000', 'methods are not supported', 2, 11],
-    ['void f(){\n  void x;\n}', 'X3000', 'illegal variable type', 2, 8],
-    ['void x;', 'X3000', 'illegal variable type', 1, 6],
+    ['float f(){\n  return x.y(1);\n}', 'X3087', 'methods are not supported', 2, 11],
+    ['void f(){\n  void x;\n}', 'X3005', 'illegal variable type', 2, 8],
+    ['void x;', 'X3005', 'illegal variable type', 1, 6],
 ];
 
 test('diagnostics: code, text and position of each error', ()=>{
@@ -837,7 +837,7 @@ test('prototypes: a call before the body, and a body that never comes', ()=>{
     assert.deepEqual(errors('float g(float x);\nfloat f(){ return g(1); }\n'
         + 'float g(float x){ return x; }'), []);
     assert.deepEqual(errors('float g(float x);\nfloat f(){ return g(1); }'),
-        ["X3000: 'g': function is declared but never defined"]);
+        ["X3510: 'g': function is declared but never defined"]);
     const r = compile('float g(float x);\nfloat f(){ return g(1); }\n'
         + 'float g(float x){ return x; }', { entry: 'f' });
     const call = /** @type {any} */ (r.program.decls[1]).body.stmts[0].value;

@@ -158,7 +158,8 @@ test('a profile the compiler does not target is refused', async()=>{
     {
         const result = await compile('float4 main() : COLOR0 { return 0; }', profile);
         assert.equal(result.ok, false, profile);
-        assert.match(result.messages, new RegExp(`'${profile}' is not a profile`), profile);
+        assert.match(result.messages, new RegExp(`X3506: '${profile}': invalid compiler target`),
+            profile);
     }
 });
 
@@ -177,39 +178,7 @@ test('the output reads: the program disassembles to what the source says', async
         'mad oC0, t0, v0, c0.x']);
 });
 
-test('pixel shader model 1 compiles what it can hold and says why it cannot hold the rest', async()=>{
-    const simple = 'sampler2D S;\nfloat4 main(float2 uv : TEXCOORD0, float4 c : COLOR0) : COLOR0'
-        + '{ return tex2D(S, uv) * c; }';
-    for (const profile of ['ps_1_1', 'ps_1_2', 'ps_1_3', 'ps_1_4'])
-    {
-        const result = await compile(simple, profile);
-        assert.equal(result.ok, true, `${profile}: ${result.messages}`);
-        assert.deepEqual(constants(result).map(c=>[c.name, c.set, c.index]), [['S', 3, 0]]);
-    }
-    /** @type {[string, string, RegExp][]} */
-    const refused = [
-        ['ps_1_1', 'sampler2D S;\nfloat4 main(float2 uv : TEXCOORD0) : COLOR0'
-            + '{ return tex2D(S, uv * 2); }', /X4532.*own stage/],
-        ['ps_1_1', 'float4 main(float4 c : COLOR0) : COLOR0 { return c * 3; }',
-            /X4533: the constant 3 is outside the range -1 to 1/],
-        ['ps_1_1', 'float4 main(float4 c : COLOR0) : COLOR0 { return c.yzwx; }',
-            /X4535.*read as/],
-        ['ps_1_1', 'float4 main(float4 c : COLOR0) : COLOR0 { return sqrt(c); }',
-            /X4531: rcp is not an operation ps_1_1 has|X4531/],
-        ['ps_1_1', 'float4 main(float4 c : COLOR0) : COLOR0 { clip(c.x - 0.5); return c; }',
-            /X4531: discard and clip are not available in ps_1_1/],
-        ['ps_1_1', 'sampler2D A; sampler2D B;\nfloat4 main(float2 t : TEXCOORD0) : COLOR0'
-            + '{ return tex2D(B, tex2D(A, t).xy); }', /X4532/],
-    ];
-    for (const [profile, source, pattern] of refused)
-    {
-        const result = await compile(source, profile);
-        assert.equal(result.ok, false, source);
-        assert.match(result.messages, pattern, source);
-    }
-});
-
-test('pixel shader model 1 compiles what it can hold and says why it cannot hold the rest', async()=>{
+test('pixel shader model 1 compiles what it can hold and reports the rest', async()=>{
     const simple = 'sampler2D S;\nfloat4 main(float2 uv : TEXCOORD0, float4 c : COLOR0) : COLOR0'
         + '{ return tex2D(S, uv) * c; }';
     for (const profile of ['ps_1_1', 'ps_1_2', 'ps_1_3', 'ps_1_4'])
@@ -221,15 +190,15 @@ test('pixel shader model 1 compiles what it can hold and says why it cannot hold
     /** @type {[string, RegExp][]} */
     const refused = [
         ['sampler2D S;\nfloat4 main(float2 uv : TEXCOORD0) : COLOR0 { return tex2D(S, uv * 2); }',
-            /X4532.*own stage/],
+            /X4523.*own stage/],
         ['float4 main(float4 c : COLOR0) : COLOR0 { return c * 3; }',
-            /X4533: the constant 3 is outside the range -1 to 1/],
-        ['float4 main(float4 c : COLOR0) : COLOR0 { return c.yzwx; }', /X4535.*read as/],
-        ['float4 main(float4 c : COLOR0) : COLOR0 { return sqrt(c); }', /X4531/],
+            /X4532: the constant 3 is outside the range -1 to 1/],
+        ['float4 main(float4 c : COLOR0) : COLOR0 { return c.yzwx; }', /X4533.*read as/],
+        ['float4 main(float4 c : COLOR0) : COLOR0 { return sqrt(c); }', /X4532/],
         ['float4 main(float4 c : COLOR0) : COLOR0 { clip(c.x - 0.5); return c; }',
-            /X4531: discard and clip are not available in ps_1_1/],
+            /X4532: discard and clip are not available in ps_1_1/],
         ['sampler2D A; sampler2D B;\nfloat4 main(float2 t : TEXCOORD0) : COLOR0'
-            + '{ return tex2D(B, tex2D(A, t).xy); }', /X4532/],
+            + '{ return tex2D(B, tex2D(A, t).xy); }', /X4523/],
     ];
     for (const [source, pattern] of refused)
     {

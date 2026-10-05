@@ -179,7 +179,7 @@ test('a null function name means main; a profile that is none is refused', async
     assert.equal((await g.compile(PIXEL, null, 'ps_2_0')).answer, 0);
     const result = await g.compile(PIXEL, 'main', 'ps_9_9');
     assert.equal(result.answer, E_FAIL);
-    assert.match(/** @type {string} */ (g.text(result.errors)), /ps_9_9/);
+    assert.match(/** @type {string} */ (g.text(result.errors)), /X3506: 'ps_9_9'/);
 });
 
 test('the program\'s macros are defined and its includes are read', async()=>{

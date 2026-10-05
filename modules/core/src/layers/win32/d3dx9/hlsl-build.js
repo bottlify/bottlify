@@ -189,8 +189,9 @@ export function createBuilder(profile){
     const emit = (op, w, srcs, extra = {})=>{
         if (profile.ops && !profile.ops.has(op))
         {
-            throw new TargetError('X4531', `${op === 'mova' ? 'indexing' : op} is not an operation `
-                + `${profile.name} has`);
+            const name = op === 'mova' ? 'indexing' : op;
+            throw new TargetError(op === 'dp4' ? 'X4531' : 'X4532', `${name} `
+                + `is not an operation ${profile.name} has`);
         }
         // An instruction that reads its lanes by position takes its operands as they are.
         const positional = op === 'dp2add' || op === 'dp3' || op === 'dp4' || op === 'texld'
@@ -850,7 +851,7 @@ export function createBuilder(profile){
     const legacySample = (sampler, coord, mode)=>{
         if (mode !== 'plain')
         {
-            throw new TargetError('X4531', `this texture read is not available in ${profile.name}`);
+            throw new TargetError('X4532', `this texture read is not available in ${profile.name}`);
         }
         const src = coord.src;
         const direct = src.kind === 'input' && src.input.usage === USAGE.TEXCOORD
@@ -860,14 +861,15 @@ export function createBuilder(profile){
         {
             if (!direct)
             {
-                throw new TargetError('X4532', `${profile.name} reads a texture only at the `
+                throw new TargetError(src.kind === 'reg' ? 'X4523' : 'X4515',
+                    `${profile.name} reads a texture only at the `
                     + 'coordinates of its own stage: the sampler must be read at the TEXCOORD '
                     + 'of its number');
             }
             const stage = /** @type {import('./hlsl-ir.js').SrcInput} */ (src).input.index;
             if (sampler.explicit !== undefined && sampler.explicit !== stage)
             {
-                throw new TargetError('X4532', `${profile.name}: sampler '${sampler.name}' is at `
+                throw new TargetError('X4515', `${profile.name}: sampler '${sampler.name}' is at `
                     + `s${sampler.explicit} but read at TEXCOORD${stage}`);
             }
             sampler.explicit = stage;
@@ -891,7 +893,7 @@ export function createBuilder(profile){
     const kill = v=>{
         if (profile.legacy)
         {
-            throw new TargetError('X4531', `discard and clip are not available in ${profile.name}`);
+            throw new TargetError('X4532', `discard and clip are not available in ${profile.name}`);
         }
         const reg = newReg(3);
         reg.fixed = 3;

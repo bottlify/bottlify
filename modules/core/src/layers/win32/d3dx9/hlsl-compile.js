@@ -121,8 +121,9 @@ async function compile(source, options){
     const profile = profileOf(options.profile);
     if (!profile)
     {
-        messages.push(`error X3501: '${options.profile}' is not a profile this compiler `
-            + 'targets (vs_1_1, vs_2_0, vs_2_a, vs_3_0, ps_2_0, ps_2_a, ps_2_b and ps_3_0)');
+        messages.push(`error X3506: '${options.profile}': invalid compiler target; this compiler `
+            + 'targets vs_1_1, vs_2_0, vs_2_a, vs_3_0, ps_1_1 to ps_1_4, ps_2_0, ps_2_a, ps_2_b '
+            + 'and ps_3_0');
         return failed();
     }
     const entryName = options.entry || 'main';
