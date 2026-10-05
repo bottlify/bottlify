@@ -2162,6 +2162,7 @@ export function createWin32Module(){
                         readCString,
                         setLastError: setError,
                         handles,
+                        allocate: bytes=>heap.allocate(bytes),
                     }),
                     ...createServiceFunctions({
                         readCString,
