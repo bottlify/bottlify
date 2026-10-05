@@ -151,6 +151,24 @@ test('calls that together overflow the ring all cross, the writer waiting for ro
         await serving;
     });
 
+test('a side counts what it asked of the other and how long it waited, by target and method',
+    { timeout: 20000 }, async()=>{
+        const { a, b } = createLinkMemory();
+        const system = openLink(a, { registry: { get: ()=>1 }, ids: { take: ()=>2 } });
+        const serving = system.serve();
+        const counted = await processThread(b, `
+            for (let i = 0; i < 3; i++) link.callWaiting('registry', 'get', []);
+            link.callWaiting('ids', 'take', []);
+            return link.diagnostics();`);
+        system.close();
+        await serving;
+        assert.equal(counted.calls, 4);
+        assert.deepEqual(counted.asked.map((/** @type {any} */ row)=>[row.name, row.count])
+            .sort(), [['ids.take', 1], ['registry.get', 3]]);
+        assert.ok(counted.waitedMs > 0 && counted.asked.every((/** @type {any} */ row)=>
+            row.waitedMs > 0), 'each blocked for its answer');
+    });
+
 test('what a process told the system before the link closed is heard, nothing waited on',
     { timeout: 20000 }, async()=>{
         const { a, b } = createLinkMemory();

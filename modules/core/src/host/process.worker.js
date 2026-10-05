@@ -126,7 +126,10 @@ export async function serveProcess({ end, graphics, display, options, run }){
             return app?.input.send(event);
         },
     };
-    handlers.report = { diagnostics: ()=>(app ? plainOf(()=>app.diagnostics()) : null) };
+    /** The machine's tables, and what it waited on the system for. */
+    const tables = ()=>[...app.diagnostics(),
+        { name: 'link', status: 'ready', metrics: link.diagnostics() }];
+    handlers.report = { diagnostics: ()=>(app ? plainOf(tables) : null) };
     // What the page asks of the process it drives, as it would of a machine on
     // its own thread: pausing it, and looking inside it.
     handlers.control = {
@@ -189,9 +192,9 @@ export async function serveProcess({ end, graphics, display, options, run }){
             // A run that failed is read as one that ended: what it did up to
             // the failure is what is asked of it next.
             throw Object.assign(e instanceof Error ? e : new Error(String(e)),
-                { diagnostics: plainOf(()=>app.diagnostics()) });
+                { diagnostics: plainOf(tables) });
         }
-        return { code, diagnostics: plainOf(()=>app.diagnostics()),
+        return { code, diagnostics: plainOf(tables),
             // What an installer's output is sorted against, read while the
             // machine that knows it still stands.
             systemLibraries: plainOf(()=>app.systemLibraries?.() ?? []) };

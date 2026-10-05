@@ -287,6 +287,11 @@ function report(app, { grep = null, calls = 24 } = {}){
             .map(([name, value])=>`${name}=${value}`)
             .join(' ');
         console.log(`  ${layer.name} [${layer.status}] ${interesting}`);
+        // A process in a worker of its own: what it waited on the system for.
+        for (const row of layer.name === 'link' ? metrics.asked ?? [] : [])
+        {
+            console.log(`    ${row.name}  ${row.count} calls, ${row.waitedMs.toFixed(0)} ms`);
+        }
     }
 
     // What each thread is doing, and what a blocked one is blocked on. A

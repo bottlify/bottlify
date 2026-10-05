@@ -273,6 +273,23 @@ export function openLink(end, handlers){
     const canBlock = typeof Atomics.wait === 'function'
         && (typeof globalThis.window === 'undefined');
 
+    /**
+     * What this side asked of the other, by target and method: how often,
+     * and how long it was blocked for an answer. What a process spends
+     * waiting on the system is read here, not guessed.
+     *
+     * @type {Map<string, { count: number, waitedMs: number }>}
+     */
+    const asked = new Map();
+    /** @param {string} target @param {string} method @param {number} waitedMs */
+    const note = (target, method, waitedMs)=>{
+        const key = `${target}.${method}`;
+        const entry = asked.get(key) ?? { count: 0, waitedMs: 0 };
+        entry.count++;
+        entry.waitedMs += waitedMs;
+        asked.set(key, entry);
+    };
+
     /** Whether `serve` goes on: an object, so the loop reads what `close` wrote. */
     const state = { serving: false };
 
@@ -288,6 +305,7 @@ export function openLink(end, handlers){
          * @returns {Promise<any>}
          */
         call(target, method, args = []){
+            note(target, method, 0);
             const id = nextId++;
             return new Promise((resolve, reject)=>{
                 promised.set(id, { resolve, reject });
@@ -306,6 +324,7 @@ export function openLink(end, handlers){
          */
         callWaiting(target, method, args = [], timeoutMs = Infinity){
             const id = nextId++;
+            const started = performance.now();
             send(encodeValue([CALL, id, target, method, args]));
             const until = Date.now() + timeoutMs;
             for (;;)
@@ -315,6 +334,7 @@ export function openLink(end, handlers){
                 const got = arrived.get(id);
                 if (got)
                 {
+                    note(target, method, performance.now() - started);
                     arrived.delete(id);
                     if (!got.ok)
                     {
@@ -357,6 +377,22 @@ export function openLink(end, handlers){
             // What the other side wrote before it was closed is still its
             // word: the last things a process tells the run as it ends.
             pump();
+        },
+
+        /**
+         * What this side asked, the most waited on first.
+         *
+         * @returns {{ calls: number, waitedMs: number,
+         *     asked: { name: string, count: number, waitedMs: number }[] }}
+         */
+        diagnostics(){
+            const rows = [...asked].map(([name, entry])=>({ name, ...entry }))
+                .sort((a, b)=>b.waitedMs - a.waitedMs || b.count - a.count);
+            return {
+                calls: rows.reduce((sum, row)=>sum + row.count, 0),
+                waitedMs: rows.reduce((sum, row)=>sum + row.waitedMs, 0),
+                asked: rows.slice(0, 16),
+            };
         },
 
         /** Stops `serve`. */
