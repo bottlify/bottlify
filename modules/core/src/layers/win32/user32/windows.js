@@ -1199,7 +1199,7 @@ export function createWindowFunctions(host){
                 reap(child);
             }
         }
-        const covered = shown(record) ? geometry.windowRect(record) : null;
+        const covered = shown(record) ? geometry.shapedRect(record) : null;
         forget(record);
         if (covered)
         {
@@ -1364,7 +1364,7 @@ export function createWindowFunctions(host){
             }
             else if (above && !each.destroyed && !isChild(each) && covering(each))
             {
-                covers.push(geometry.windowRect(each));
+                covers.push(geometry.shapedRect(each));
             }
         }
         for (let at = record; at && isChild(at); at = windows.get(at.parent))
@@ -1382,7 +1382,7 @@ export function createWindowFunctions(host){
                 }
                 if (covering(sibling))
                 {
-                    covers.push(geometry.windowRect(sibling));
+                    covers.push(geometry.shapedRect(sibling));
                 }
             }
         }
@@ -1392,7 +1392,7 @@ export function createWindowFunctions(host){
             {
                 if (shown(child))
                 {
-                    covers.push(geometry.windowRect(child));
+                    covers.push(geometry.shapedRect(child));
                 }
             }
         }
@@ -1821,7 +1821,7 @@ export function createWindowFunctions(host){
         // So do its hot keys: one left registered would keep eating the
         // keystroke for a window that can no longer be delivered to.
         host.queue.unregisterHotKeysFor?.(record.hwnd);
-        const covered = shown(record) ? geometry.windowRect(record) : null;
+        const covered = shown(record) ? geometry.shapedRect(record) : null;
         const on = thread ?? host.callerThread?.();
         /** @param {number} message @returns {number | Promise<number>} */
         const tell = message=>(told === 'all' || (told === 'ncdestroy' && message === WM_NCDESTROY)
@@ -2685,7 +2685,7 @@ export function createWindowFunctions(host){
         const order = paintOrder();
         for (const other of order.slice(order.indexOf(record) + 1))
         {
-            if (shown(other) && !isEmpty(intersect(dirty, geometry.windowRect(other))))
+            if (shown(other) && !isEmpty(intersect(dirty, geometry.shapedRect(other))))
             {
                 const size = geometry.clientSize(other);
                 const whole = { left: 0, top: 0, right: size.width, bottom: size.height };
@@ -2796,7 +2796,7 @@ export function createWindowFunctions(host){
         {
             if (!record.destroyed && !isChild(record) && shown(record))
             {
-                bare = subtractFromArea(bare, geometry.windowRect(record));
+                bare = subtractFromArea(bare, geometry.shapedRect(record));
             }
         }
         const hdc = bare.length > 0 ? host.dc?.()?.get(0, null) ?? 0 : 0;
@@ -2843,7 +2843,7 @@ export function createWindowFunctions(host){
         }
         for (const other of paintOrder())
         {
-            if (shown(other) && !isEmpty(intersect(rect, geometry.windowRect(other))))
+            if (shown(other) && !isEmpty(intersect(rect, geometry.shapedRect(other))))
             {
                 repaint(other);
             }
@@ -2989,7 +2989,7 @@ export function createWindowFunctions(host){
      */
     const hitTest = (record, x, y)=>{
         const rect = geometry.windowRect(record);
-        if (!contains(rect, x, y))
+        if (!contains(geometry.shapedRect(record), x, y))
         {
             return HTNOWHERE;
         }
@@ -3039,7 +3039,7 @@ export function createWindowFunctions(host){
             for (const record of candidates)
             {
                 if ((record.style & WS_VISIBLE) === 0
-                    || !contains(geometry.windowRect(record), x, y)
+                    || !contains(geometry.shapedRect(record), x, y)
                     || (!disabledToo && (record.style & WS_DISABLED) !== 0))
                 {
                     continue;
@@ -4159,6 +4159,8 @@ export function createWindowFunctions(host){
                 // On the screen, frame and client apart: where a click lands.
                 rect: geometry.windowRect(record),
                 client: geometry.clientRect(record),
+                // In window coordinates: the part of it on the screen at all.
+                region: record.regionBox ?? null,
                 visible: (record.style & WS_VISIBLE) !== 0,
                 className: record.className,
                 title: record.title,
@@ -4257,7 +4259,7 @@ export function createWindowFunctions(host){
         const wasVisible = (record.style & WS_VISIBLE) !== 0;
         const hide = cmdShow === SW_HIDE;
         const covered = wasVisible && hide && shown(record)
-            ? geometry.windowRect(record) : null;
+            ? geometry.shapedRect(record) : null;
         // Matches Wine's dlls/user32/tests/msg.c WmShowNormal sequence: the
         // message is *sent* -- the procedure runs before this call returns --
         // and only when this call changes the visibility, because SW_SHOW on

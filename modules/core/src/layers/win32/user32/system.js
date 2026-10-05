@@ -778,7 +778,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
             return 0;
         }
         const wasShown = host.shown(record);
-        const covered = wasShown ? host.geometry.windowRect(record) : null;
+        const covered = wasShown ? host.geometry.shapedRect(record) : null;
         const moved = (flags & SWP_NOMOVE) === 0 && (record.x !== (x | 0) || record.y !== (y | 0));
         const sized = (flags & SWP_NOSIZE) === 0
             && (record.width !== (cx | 0) || record.height !== (cy | 0));
@@ -3249,28 +3249,29 @@ export function createSystemFunctions({ host, live, windows, classes }){
         /**
          * int SetWindowRgn(HWND hWnd, HRGN hRgn, BOOL bRedraw)
          *
-         * A window shaped by a region. The shape is accepted and the region
-         * becomes the system's, as documented, but nothing here clips the
-         * window to it: it paints as the rectangle it always was, which is
-         * reported once because a skinned setup window looks different for
-         * it. Declared so the twelve bytes it was pushed are popped.
+         * A window shaped by a region: it shows, covers and is hit only inside
+         * it (the geometry's `shapedRect`), and the region becomes the
+         * system's, as documented. With bRedraw what it took before is
+         * uncovered -- what is beneath paints where it no longer is, and it
+         * paints again where it still is; without, the screen is left as it
+         * was until something paints, as on Windows.
          */
         SetWindowRgn: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([hwnd, hRgn])=>{
+            handler: ([hwnd, hRgn, redraw])=>{
                 const record = live(hwnd);
                 if (!record)
                 {
                     return 0;
                 }
-                // Its rectangle is kept, for what GetWindowRgn and
-                // GetWindowRgnBox answer.
+                const took = redraw && host.shown(record) ? host.geometry.shapedRect(record) : null;
+                // A rectangle, as every region here is; GetWindowRgn and
+                // GetWindowRgnBox answer it too.
                 record.regionBox = (hRgn >>> 0) === 0 ? null : host.regionBox?.(hRgn >>> 0) ?? null;
-                if ((hRgn >>> 0) !== 0)
+                if (took)
                 {
-                    host.divergence?.('SetWindowRgn',
-                        'a window region is accepted and the window is not clipped to it');
+                    host.uncover(took);
                 }
                 return 1;
             },

@@ -873,14 +873,15 @@ test('EnumDisplayMonitors hands the one monitor to the callback, cut by the clip
     assert.equal(fns.EnumDisplayMonitors.handler([0, 0, 0, 0]), 0, 'no callback');
 });
 
-test('SetWindowRgn accepts a shape it does not clip to, and says so', ()=>{
+test('SetWindowRgn shapes a live window, which it clips to, and refuses a handle of none', ()=>{
     const { memory, fns, diverged } = setup();
     const hwnd = makeWindow(memory, fns);
     assert.equal(fns.SetWindowRgn.argBytes, 12);
     assert.equal(fns.SetWindowRgn.handler([hwnd, 0x1234, 1]), 1);
-    assert.equal(fns.SetWindowRgn.handler([hwnd, 0, 1]), 1, 'no region is nothing to report');
+    assert.equal(fns.SetWindowRgn.handler([hwnd, 0, 1]), 1);
     assert.equal(fns.SetWindowRgn.handler([0x9999, 0x1234, 1]), 0);
-    assert.equal(diverged.filter(text=>text.startsWith('SetWindowRgn')).length, 1);
+    assert.deepEqual(diverged.filter(text=>text.startsWith('SetWindowRgn')), [],
+        'nothing differs from Windows to report');
 });
 
 test('DrawIcon succeeds without painting, and says so once', ()=>{
