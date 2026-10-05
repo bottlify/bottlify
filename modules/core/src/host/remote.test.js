@@ -196,7 +196,12 @@ function fakeApp({ capacity = 4096, shared = true, audioShared = false } = {}){
                 handle: Object.create({ inherited: 1 }), pages: new Map([[1, 2]]) } },
             { name: 'audio', metrics: { tracks: 2 } },
         ],
-        debug: { hook: ()=>({}) },
+        debug: {
+            hook: ()=>({}),
+            /** @param {number} address @param {number} length */
+            read: (address, length)=>Uint8Array.from({ length }, (_, i)=>(address + i) & 0xff),
+            modules: ()=>[{ name: 'GAME.EXE', base: 0x400000, size: 0x1000 }],
+        },
         dispose(){
             app.disposed++;
         },
@@ -778,6 +783,14 @@ test('the page lists and reads the volume while the program runs', async()=>{
     assert.deepEqual(await remote.files.list('C:'),
         [{ name: 'a.txt', path: 'C:\\a.txt', directory: false, size: 2, modified: 0 }]);
     assert.deepEqual(await remote.files.read('C:\\a.txt'), Uint8Array.of(1, 2));
+    await remote.dispose();
+});
+
+test('the page reads guest memory and the images mapped while the program runs', async()=>{
+    const { remote } = await connect();
+    assert.deepEqual(await remote.debug.read(0x401000, 4), Uint8Array.of(0, 1, 2, 3));
+    assert.deepEqual(await remote.debug.modules(),
+        [{ name: 'GAME.EXE', base: 0x400000, size: 0x1000 }]);
     await remote.dispose();
 });
 

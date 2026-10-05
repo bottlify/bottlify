@@ -405,6 +405,13 @@ export async function createRemoteApp(wiring){
             /** @param {string} path @returns {Promise<Uint8Array>} */
             read: path=>request('files.read', [path]),
         },
+        /** Guest memory and the images mapped (the local controller's `debug`), asked of the worker. */
+        debug: {
+            /** @param {number} address @param {number} length @returns {Promise<Uint8Array>} */
+            read: (address, length)=>request('debug.read', [address, length]),
+            /** @returns {Promise<{ name: string, base: number, size: number }[]>} */
+            modules: ()=>request('debug.modules'),
+        },
         /** @returns {Promise<{ count: number, history: import('./messages.js').Presented[] }>} */
         presented: ()=>request('presented'),
 

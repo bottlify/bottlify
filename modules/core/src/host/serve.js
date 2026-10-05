@@ -831,6 +831,13 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
         }),
         'files.list': (/** @type {string} */ path)=>volume().list(path),
         'files.read': (/** @type {string} */ path)=>volume().read(path),
+        // Guest memory as it stands, and where each image is: a queue or a
+        // flag a program waits on without calling anything shows nowhere
+        // else, and a running title is the one worth looking at. A copy, so
+        // what crosses is what was there.
+        'debug.read': (/** @type {number} */ address, /** @type {number} */ length)=>
+            app.debug.read(address, length).slice(),
+        'debug.modules': ()=>app.debug.modules(),
         presented: ()=>({ count: frames, history: presented.slice() }),
         /*
          * The emulator's account of where the guest ran, by address. Only the
