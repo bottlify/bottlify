@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { parsePe } from './pe.js';
 import { mapImage } from './image.js';
 import { bindDelayImports, readDelayImports } from './delayload.js';
+import { planDependencies } from './dependencies.js';
 
 const IMAGE_BASE = 0x400000;
 const SECTION_RVA = 0x1000;
@@ -328,4 +329,26 @@ test('the module handle slot is left alone', ()=>{
     bindDelayImports(mapped, stamp);
 
     assert.equal(slotAt(mapped, SECTION_RVA + blockOf(0) + MODULE_HANDLE), 0);
+});
+
+test('a library the program delay-loads and brought is planned, as an import is', async()=>{
+    // An update package delay-loads its own copy of the setup API, which sits
+    // beside it; the tables are bound before it runs, so it has to be mapped.
+    const { bytes } = withDelayLoads({ rvaBased: true,
+        dlls: [{ dll: 'updspapi.dll' }, { dll: 'USER32.dll' }, { dll: 'nowhere.dll' }] });
+    const library = withDelayImports({ rvaBased: true, dll: 'USER32.dll' }).bytes;
+    /** @type {string[]} */
+    const asked = [];
+    const { order, missing } = await planDependencies({
+        entry: bytes,
+        isSystem: name=>name.toLowerCase() === 'user32.dll',
+        isKnownDll: name=>name.toLowerCase() === 'user32.dll',
+        readLibrary: async name=>{
+            asked.push(name);
+            return name === 'updspapi.dll' ? library : null;
+        },
+    });
+    assert.deepEqual(order.map(entry=>entry.name), ['updspapi.dll']);
+    assert.deepEqual(asked, ['updspapi.dll', 'nowhere.dll'], 'a KnownDLL is not looked for');
+    assert.deepEqual(missing, ['nowhere.dll']);
 });
