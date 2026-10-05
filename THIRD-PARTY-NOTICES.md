@@ -3,46 +3,6 @@
 This lists components not authored in this repository that are distributed with the product.
 Full license texts are kept alongside the corresponding component.
 
-## v86 nasm instruction corpus — test data for the translator
-
-- Source: our v86 fork https://github.com/bottlify/v86 (upstream: https://github.com/copy/v86),
-  `tests/nasm/` (hand-written cases and `create_tests.js`'s generated ones), assembled and
-  recorded on real hardware by the fork's CI and published as `nasm-corpus.json.gz` beside each
-  release
-- Location in this repository: fetched into `modules/cork/vendor/` by `npm run fetch:corpus`
-  from the release pinned in `modules/cork/corpus-lock.json`; not committed, not distributed
-- License: BSD-2-Clause
-- What is used: the assembled images and the recorded register and memory state, as inputs and
-  expected outputs of `@bottlify/cork`'s corpus tests. The comparison rules
-  (which flags and status bits are compared, the seven-digit float tolerance, which state a
-  case that died is compared on) follow the fork's own `tests/nasm/run.js` so that a case
-  passes here for the reason it passes there; that runner's code is not copied.
-
-```
-Copyright (c) 2012, The v86 contributors
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
-1. Redistributions of source code must retain the above copyright notice, this
-   list of conditions and the following disclaimer.
-2. Redistributions in binary form must reproduce the above copyright notice,
-   this list of conditions and the following disclaimer in the documentation
-   and/or other materials provided with the distribution.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-```
-
 ## FFmpeg — video and audio decoding
 
 - Source: upstream https://github.com/FFmpeg/FFmpeg at release tag `n6.1`, commit
