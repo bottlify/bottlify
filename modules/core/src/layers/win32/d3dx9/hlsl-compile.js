@@ -23,7 +23,8 @@ import { parse } from './hlsl-parser.js';
 import { check } from './hlsl-check.js';
 import { LowerError, lower } from './hlsl-lower.js';
 import { assemble } from './hlsl-backend.js';
-import { profileOf } from './hlsl-ir.js';
+import { assembleLegacy } from './hlsl-backend-legacy.js';
+import { TargetError, profileOf } from './hlsl-ir.js';
 
 /** D3DXSHADER_*, the flags the compiler reads. */
 export const D3DXSHADER = Object.freeze({
@@ -120,8 +121,9 @@ async function compile(source, options){
     const profile = profileOf(options.profile);
     if (!profile)
     {
-        messages.push(`error X3501: '${options.profile}' is not a profile this compiler `
-            + 'targets (vs_1_1, vs_2_0, vs_2_a, vs_3_0, ps_2_0, ps_2_a, ps_2_b and ps_3_0)');
+        messages.push(`error X3506: '${options.profile}': invalid compiler target; this compiler `
+            + 'targets vs_1_1, vs_2_0, vs_2_a, vs_3_0, ps_1_1 to ps_1_4, ps_2_0, ps_2_a, ps_2_b '
+            + 'and ps_3_0');
         return failed();
     }
     const entryName = options.entry || 'main';
@@ -173,15 +175,16 @@ async function compile(source, options){
         ({ ir } = lower(module, entry, profile));
     }
     catch (e){
-        if (!(e instanceof LowerError))
+        if (!(e instanceof LowerError) && !(e instanceof TargetError))
         {
             throw e;
         }
-        report({ code: e.code, message: e.message, pos: e.pos ?? entry.decl.pos });
+        report({ code: e.code, message: e.message,
+            pos: (e instanceof LowerError ? e.pos : null) ?? entry.decl.pos });
         return failed();
     }
 
-    const assembled = assemble(ir);
+    const assembled = profile.legacy ? assembleLegacy(ir) : assemble(ir);
     for (const d of assembled.diagnostics)
     {
         report({ code: d.code, message: d.message, pos: entry.decl.pos });

@@ -248,6 +248,13 @@ SPECS.set('cross', (n, args)=>{
     return accept({ name: n, paramTypes: [v3, v3], resultType: v3 }, args);
 });
 
+SPECS.set('dst', (n, args)=>{
+    const v4 = vectorOf('float', 4);
+    return args.length === 2 && args.every(a=>isNumeric(a) && a.kind !== 'matrix'
+        && scalarCount(a) >= 4) ? accept({ name: n, paramTypes: [v4, v4], resultType: v4 }, args)
+        : null;
+});
+
 SPECS.set('lit', (n, args)=>args.length === 3 && args.every(a=>a.kind === 'scalar')
     ? accept({ name: n, paramTypes: [FLOAT, FLOAT, FLOAT], resultType: vectorOf('float', 4) },
         args) : null);
@@ -310,26 +317,23 @@ SPECS.set('mul', (n, args)=>{
         const k = Math.min(a.n, b.n);
         return sig(vectorOf('float', k), vectorOf('float', k), FLOAT);
     }
+    // Whatever is longer than the other side's inner dimension is cut, as in a vector of
+    // different lengths; the result keeps the outer dimensions.
     if (a.kind === 'vector' && b.kind === 'matrix')
     {
-        // The row vector is cut to the matrix's rows; a shorter one has nothing to multiply.
-        if (a.n < b.rows)
-        {
-            return null;
-        }
-        return sig(vectorOf('float', b.rows), withBase(b, 'float'), vectorOf('float', b.cols));
+        const k = Math.min(a.n, b.rows);
+        return sig(vectorOf('float', k), matrixOf('float', k, b.cols), vectorOf('float', b.cols));
     }
     if (a.kind === 'matrix' && b.kind === 'vector')
     {
-        if (b.n < a.cols)
-        {
-            return null;
-        }
-        return sig(withBase(a, 'float'), vectorOf('float', a.cols), vectorOf('float', a.rows));
+        const k = Math.min(a.cols, b.n);
+        return sig(matrixOf('float', a.rows, k), vectorOf('float', k), vectorOf('float', a.rows));
     }
-    if (a.kind === 'matrix' && b.kind === 'matrix' && a.cols === b.rows)
+    if (a.kind === 'matrix' && b.kind === 'matrix')
     {
-        return sig(withBase(a, 'float'), withBase(b, 'float'), matrixOf('float', a.rows, b.cols));
+        const k = Math.min(a.cols, b.rows);
+        return sig(matrixOf('float', a.rows, k), matrixOf('float', k, b.cols),
+            matrixOf('float', a.rows, b.cols));
     }
     return null;
 });
@@ -344,7 +348,9 @@ for (const suffix of Object.keys(TEX_DIMS))
         const [dim, count] = TEX_DIMS[/** @type {keyof typeof TEX_DIMS} */ (suffix)];
         SPECS.set(`tex${suffix}${variant}`, (n, args)=>{
             const sampler = args[0];
-            if (args.length !== (variant === 'grad' ? 4 : 2) || sampler.kind !== 'sampler'
+            // `tex2D(s, t, ddx, ddy)` is the gradient form under the plain name.
+            const gradient = variant === 'grad' || (variant === '' && args.length === 4);
+            if (args.length !== (gradient ? 4 : 2) || sampler.kind !== 'sampler'
                 || (sampler.dim !== 'any' && sampler.dim !== dim)
                 || !args.slice(1).every(isNumeric))
             {
@@ -352,7 +358,7 @@ for (const suffix of Object.keys(TEX_DIMS))
             }
             const wide = vectorOf('float', 4);
             const narrow = vectorOf('float', count);
-            const coords = variant === 'grad' ? [narrow, narrow, narrow] : [
+            const coords = gradient ? [narrow, narrow, narrow] : [
                 variant === '' ? narrow : wide];
             return accept({ name: n, paramTypes: [sampler, ...coords], resultType: wide }, args);
         });
@@ -617,9 +623,14 @@ export function evaluateIntrinsic(name, args, argTypes, resultType, hooks = {}, 
                 f32(f32(a[2] * b[0]) - f32(a[0] * b[2])),
                 f32(f32(a[0] * b[1]) - f32(a[1] * b[0]))];
         }
+        case 'dst': {
+            const [a, b] = lanes;
+            return [1, f32(a[1] * b[1]), a[2], b[3]];
+        }
         case 'faceforward': {
-            const s = sgn(dotLanes(lanes[1], lanes[2]));
-            return buildValue(resultType, lanes[0].map(x=>f32(-x * s)));
+            // A product with zero is -n in what the compiler emits: n only for a negative dot.
+            const facing = dotLanes(lanes[1], lanes[2]) < 0;
+            return buildValue(resultType, lanes[0].map(x=>(facing ? x : f32(-x))));
         }
         case 'lit': {
             const [ndl, ndh, m] = [lanes[0][0], lanes[1][0], lanes[2][0]];
@@ -678,7 +689,7 @@ function evaluateTexture(name, args, argTypes, hooks){
         throw new Error('no texture sampling is available');
     }
     const count = TEX_DIMS[/** @type {keyof typeof TEX_DIMS} */ (match[1])][1];
-    const mode = match[2];
+    const mode = match[2] ?? (args.length === 4 ? 'grad' : undefined);
     const coords = flattenValue(args[1], argTypes[1]);
     /** @type {number[]} */
     let out;

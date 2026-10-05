@@ -92,7 +92,7 @@ const LOG10_2 = Math.LOG10E * Math.LN2;
 /**
  * @param {LowerContext} L
  * @param {string} name
- * @param {{ value: Value, type: Type, expr: any }[]} args
+ * @param {{ value: Value, type: Type, expr: any, outType?: Type }[]} args
  * @param {Type} result
  * @param {any} e
  * @param {State} st
@@ -159,6 +159,18 @@ export function lowerIntrinsic(L, name, args, result, e, st){
     const length = x=>(x.w === 1 ? b.abs(x) : b.sqrt(dot(x, x)));
     /** @param {Vec} x @returns {Vec} */
     const sat = x=>b.sat(x);
+
+    /**
+     * Gives an out parameter its value, converted from the type the function writes to the
+     * type of the variable the argument names.
+     *
+     * @param {number} i @param {Value} value
+     */
+    const storeOut = (i, value)=>{
+        const to = args[i].type;
+        L.store(args[i].expr, args[i].outType ? L.convert(value, args[i].outType, to) : value,
+            st);
+    };
 
     /** The scalars of the argument as one lane each. @param {number} i */
     const scalars = i=>L.flatten(a[i], args[i].type);
@@ -266,6 +278,12 @@ export function lowerIntrinsic(L, name, args, result, e, st){
             const first = b.mul(b.swizzle(x, [1, 2, 0]), b.swizzle(y, [2, 0, 1]));
             return vec(b.mad(b.swizzle(x, [2, 0, 1]), b.neg(b.swizzle(y, [1, 2, 0])), first));
         }
+        case 'dst': {
+            const x = v(0);
+            const y = v(1);
+            return vec(b.cat([num(1), b.mul(b.lane(x, 1), b.lane(y, 1)), b.lane(x, 2),
+                b.lane(y, 3)]));
+        }
         case 'reflect': {
             const twice = b.mul(dot(v(1), v(0)), num(2));
             return vec(b.mad(b.neg(twice), v(1), v(0)));
@@ -281,7 +299,7 @@ export function lowerIntrinsic(L, name, args, result, e, st){
             return vec(b.select(b.ge(k, num(0)), bent, num(0, incident.w)));
         }
         case 'faceforward':
-            return vec(b.mul(b.neg(v(0)), sign(dot(v(1), v(2)))));
+            return vec(b.select(b.lt(dot(v(1), v(2)), num(0)), v(0), b.neg(v(0))));
         case 'lit': {
             // Diffuse and specular are zero for a light behind the surface.
             const light = v(0);
@@ -320,13 +338,13 @@ export function lowerIntrinsic(L, name, args, result, e, st){
         }
         case 'sincos': {
             const { sin, cos } = b.sincos(v(0));
-            L.store(args[1].expr, vec(sin), st);
-            L.store(args[2].expr, vec(cos), st);
+            storeOut(1, vec(sin));
+            storeOut(2, vec(cos));
             return { k: 'void' };
         }
         case 'modf': {
             const whole = b.trunc(v(0));
-            L.store(args[1].expr, vec(whole), st);
+            storeOut(1, vec(whole));
             return vec(b.sub(v(0), whole));
         }
         case 'mul': return multiply(L, a, args.map(x=>x.type));
@@ -335,10 +353,10 @@ export function lowerIntrinsic(L, name, args, result, e, st){
             return { k: 'mat', rows: m.cols, cols: m.rows, rowV: m.colV, colV: m.rowV };
         }
         case 'determinant': return vec(determinant(L, a[0]));
-        case 'tex1D': return texture(2, 'plain', 1);
-        case 'tex2D': return texture(2, 'plain', 2);
-        case 'tex3D': return texture(4, 'plain', 3);
-        case 'texCUBE': return texture(3, 'plain', 3);
+        case 'tex1D': return texture(2, args.length === 4 ? 'grad' : 'plain', 1);
+        case 'tex2D': return texture(2, args.length === 4 ? 'grad' : 'plain', 2);
+        case 'tex3D': return texture(4, args.length === 4 ? 'grad' : 'plain', 3);
+        case 'texCUBE': return texture(3, args.length === 4 ? 'grad' : 'plain', 3);
         case 'tex1Dproj': case 'tex2Dproj': return texture(2, 'project', 4);
         case 'tex3Dproj': return texture(4, 'project', 4);
         case 'texCUBEproj': return texture(3, 'project', 4);

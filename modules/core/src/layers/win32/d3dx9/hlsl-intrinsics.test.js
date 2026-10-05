@@ -97,7 +97,8 @@ test('every intrinsic of the language resolves', ()=>{
         abs: [f3], acos: [f3], all: [f3], any: [f3], asin: [f3], atan: [f3], atan2: [f3, f3],
         ceil: [f3], clamp: [f3, f3, f3], clip: [f3], cos: [f3], cosh: [f3], cross: [f3, f3],
         D3DCOLORtoUBYTE4: [f4], ddx: [f3], ddy: [f3], degrees: [f3], determinant: [m(3, 3)],
-        distance: [f3, f3], dot: [f3, f3], exp: [f3], exp2: [f3], faceforward: [f3, f3, f3],
+        distance: [f3, f3], dot: [f3, f3], dst: [f4, f4], exp: [f3], exp2: [f3],
+        faceforward: [f3, f3, f3],
         floor: [f3], fmod: [f3, f3], frac: [f3], frexp: [f3, f3], fwidth: [f3], isfinite: [f3],
         isinf: [f3], isnan: [f3], ldexp: [f3, f3], length: [f3], lerp: [f3, f3, f3], lit: [FLOAT,
             FLOAT, FLOAT], log: [f3], log10: [f3], log2: [f3], max: [f3, f3], min: [f3, f3],
@@ -244,12 +245,12 @@ test('mul covers every combination of scalar, vector and matrix', ()=>{
     assert.equal(sigText('mul', v(4), v(3)), 'float3,float3->float');
     assert.equal(sigText('mul', v(3), m(3, 4)), 'float3,float3x4->float4');
     assert.equal(sigText('mul', v(4), m(3, 2)), 'float3,float3x2->float2');
-    assert.equal(sigText('mul', v(2), m(3, 3)), null);
+    assert.equal(sigText('mul', v(2), m(3, 3)), 'float2,float2x3->float3');
     assert.equal(sigText('mul', m(3, 4), v(4)), 'float3x4,float4->float3');
     assert.equal(sigText('mul', m(3, 3), v(4)), 'float3x3,float3->float3');
-    assert.equal(sigText('mul', m(3, 4), v(3)), null);
+    assert.equal(sigText('mul', m(3, 4), v(3)), 'float3x3,float3->float3');
     assert.equal(sigText('mul', m(2, 3), m(3, 4)), 'float2x3,float3x4->float2x4');
-    assert.equal(sigText('mul', m(2, 3), m(2, 3)), null);
+    assert.equal(sigText('mul', m(2, 3), m(2, 3)), 'float2x2,float2x3->float2x3');
     assert.equal(sigText('mul', iv(3), m(3, 3)), 'float3,float3x3->float3');
     assert.equal(sigText('mul', INT, INT), 'float,float->float');
     assert.equal(sigText('mul', samplerOf('2d'), FLOAT), null);
@@ -466,12 +467,10 @@ test('vector geometry', ()=>{
         [0.3, -Math.sqrt(1 - 0.25 * 0.36), 0], 1e-6);
 });
 
-test('faceforward is -n * sign(dot(i, ng))', ()=>{
+test('faceforward is n for a negative dot(i, ng) and -n otherwise, zero included', ()=>{
     close(val('faceforward', [v(3), [0, 1, 0], [0, 1, 0], [0, 1, 0]]), [0, -1, 0]);
     close(val('faceforward', [v(3), [0, 1, 0], [0, -1, 0], [0, 1, 0]]), [0, 1, 0]);
-    const zero = /** @type {number[]} */ (val('faceforward', [v(3), [0, 1, 0], [1, 0, 0],
-        [0, 1, 0]]));
-    assert.ok(zero.every(x=>x === 0));
+    close(val('faceforward', [v(3), [0, 1, 0], [1, 0, 0], [0, 1, 0]]), [0, -1, 0]);
 });
 
 test('lit and D3DCOLORtoUBYTE4', ()=>{

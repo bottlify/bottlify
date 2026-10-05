@@ -25,7 +25,7 @@
  * Truth is 1.0 and falsehood 0.0, as in the registers of a program.
  */
 
-import { USAGE } from './hlsl-ir.js';
+import { TargetError, USAGE } from './hlsl-ir.js';
 
 /** @typedef {import('./hlsl-ir.js').Src} Src */
 /** @typedef {import('./hlsl-ir.js').VReg} VReg */
@@ -187,6 +187,12 @@ export function createBuilder(profile){
      * @returns {Vec}
      */
     const emit = (op, w, srcs, extra = {})=>{
+        if (profile.ops && !profile.ops.has(op))
+        {
+            const name = op === 'mova' ? 'indexing' : op;
+            throw new TargetError(op === 'dp4' ? 'X4531' : 'X4532', `${name} `
+                + `is not an operation ${profile.name} has`);
+        }
         // An instruction that reads its lanes by position takes its operands as they are.
         const positional = op === 'dp2add' || op === 'dp3' || op === 'dp4' || op === 'texld'
             || op === 'texldl' || op === 'texldd';
@@ -822,6 +828,10 @@ export function createBuilder(profile){
      * @returns {Vec}
      */
     const sample = (sampler, coord, mode, gradients = [])=>{
+        if (profile.legacy)
+        {
+            return legacySample(sampler, coord, mode);
+        }
         const op = mode === 'lod' ? 'texldl' : mode === 'grad' ? 'texldd' : 'texld';
         const reg = newReg(4);
         instrs.push({ op, dest: { kind: 'reg', reg, mask: 15 },
@@ -831,11 +841,60 @@ export function createBuilder(profile){
     };
 
     /**
+     * A texture read of a model 1 pixel shader. Before 1.4 the stage reads the coordinate
+     * set of the same number and leaves the texel in the texture register of that
+     * number; from 1.4 the destination register picks the stage and the coordinate can be
+     * any texture register or, after the phase marker, a temporary.
+     *
+     * @param {Const} sampler @param {Vec} coord @param {string} mode
+     */
+    const legacySample = (sampler, coord, mode)=>{
+        if (mode !== 'plain')
+        {
+            throw new TargetError('X4532', `this texture read is not available in ${profile.name}`);
+        }
+        const src = coord.src;
+        const direct = src.kind === 'input' && src.input.usage === USAGE.TEXCOORD
+            && src.swz.every((c, i)=>c === i);
+        const reg = newReg(4);
+        if (profile.minor < 4)
+        {
+            if (!direct)
+            {
+                throw new TargetError(src.kind === 'reg' ? 'X4523' : 'X4515',
+                    `${profile.name} reads a texture only at the `
+                    + 'coordinates of its own stage: the sampler must be read at the TEXCOORD '
+                    + 'of its number');
+            }
+            const stage = /** @type {import('./hlsl-ir.js').SrcInput} */ (src).input.index;
+            if (sampler.explicit !== undefined && sampler.explicit !== stage)
+            {
+                throw new TargetError('X4515', `${profile.name}: sampler '${sampler.name}' is at `
+                    + `s${sampler.explicit} but read at TEXCOORD${stage}`);
+            }
+            sampler.explicit = stage;
+            reg.pin = { file: 't', index: stage };
+            instrs.push({ op: 'tex', dest: { kind: 'reg', reg, mask: 15 }, srcs: [src] });
+        }
+        else
+        {
+            reg.pin = { file: 'r', sampler };
+            instrs.push({ op: 'texld', dest: { kind: 'reg', reg, mask: 15 },
+                srcs: [src, { kind: 'sampler', cst: sampler }] });
+        }
+        return vec({ kind: 'reg', reg, swz: [0, 1, 2, 3] });
+    };
+
+    /**
      * Kills the pixel if any of the first three lanes of a value is negative.
      *
      * @param {Vec} v
      */
     const kill = v=>{
+        if (profile.legacy)
+        {
+            throw new TargetError('X4532', `discard and clip are not available in ${profile.name}`);
+        }
         const reg = newReg(3);
         reg.fixed = 3;
         const three = splat(lane(v, 0), 3);

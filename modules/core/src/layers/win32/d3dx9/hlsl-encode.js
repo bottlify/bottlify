@@ -28,7 +28,10 @@ export const REG = Object.freeze({
 });
 
 /** D3DSPSM, the source modifiers this compiler writes. */
-export const MOD = Object.freeze({ NONE: 0, NEG: 1, ABS: 11, ABSNEG: 12 });
+export const MOD = Object.freeze({
+    NONE: 0, NEG: 1, BIAS: 2, BIASNEG: 3, SIGN: 4, SIGNNEG: 5, COMP: 6, X2: 7, X2NEG: 8,
+    ABS: 11, ABSNEG: 12,
+});
 
 /** D3DSIO: opcode, how the operands are laid out, and how many sources. */
 export const OPCODES = Object.freeze({
@@ -56,6 +59,12 @@ export const OPCODES = Object.freeze({
     texkill: { code: 65, cls: 'kill', srcs: 1 },
     texld: { code: 66, cls: 'texture', srcs: 2 },
     cmp: { code: 88, cls: 'comp', srcs: 3 },
+    cnd: { code: 80, cls: 'comp', srcs: 3 },
+    nop: { code: 0, cls: 'none', srcs: 0 },
+    tex: { code: 66, cls: 'texture', srcs: 0 },
+    texcoord: { code: 64, cls: 'texture', srcs: 0 },
+    texcrd: { code: 64, cls: 'texture', srcs: 1 },
+    phase: { code: 0xfffd, cls: 'none', srcs: 0 },
     dp2add: { code: 90, cls: 'lanes', srcs: 3 },
     dsx: { code: 91, cls: 'comp', srcs: 1 },
     dsy: { code: 92, cls: 'comp', srcs: 1 },
@@ -78,6 +87,8 @@ const END = 0x0000ffff;
  * @property {boolean} [relative] Addressed by a0.x as well.
  * @property {boolean} [sat]
  * @property {boolean} [pp]
+ * @property {number} [shift]     A destination's scale as the token holds it: 1 to 3 for x2 to x8,
+ *                                15 to 13 for d2 to d8.
  */
 
 /**
@@ -86,6 +97,7 @@ const END = 0x0000ffff;
  * @property {PhysOperand | null} dest
  * @property {PhysOperand[]} srcs
  * @property {number} [control]   Bits 16 to 23 of the opcode token.
+ * @property {boolean} [coissue]  Issued with the instruction before it (a `+` in assembly).
  */
 
 /**
@@ -114,7 +126,8 @@ function registerBits(operand){
 /** @param {PhysOperand} operand @returns {number} */
 function destToken(operand){
     return (registerBits(operand) | ((operand.mask ?? 0xf) & 0xf) << 16
-        | (operand.sat ? 1 << 20 : 0) | (operand.pp ? 2 << 20 : 0)) >>> 0;
+        | (operand.sat ? 1 << 20 : 0) | (operand.pp ? 2 << 20 : 0)
+        | ((operand.shift ?? 0) & 0xf) << 24) >>> 0;
 }
 
 /** @param {number[]} swz */
@@ -196,7 +209,12 @@ export function encodeProgram(program){
         {
             operands.push(...sourceTokens(source, modelTwo));
         }
-        instruction(info.code, one.control ?? 0, operands);
+        if (one.op === 'phase')
+        {
+            tokens.push(info.code);
+            continue;
+        }
+        instruction(info.code | (one.coissue ? 0x40000000 : 0), one.control ?? 0, operands);
     }
     tokens.push(END);
     return Uint32Array.from(tokens);

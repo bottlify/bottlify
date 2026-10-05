@@ -157,7 +157,7 @@ test('a normal ignores translation where a coordinate does not', ()=>{
  * would have made.
  */
 const NOT_BUILT = {
-    D3DXAssembleShader: [7, 5, 6], D3DXAssembleShaderFromFileA: [6, 4, 5],
+    D3DXAssembleShaderFromFileA: [6, 4, 5],
     D3DXCleanMesh: [6, 3, 5], D3DXComputeNormalMap: [6],
     D3DXCreateBox: [6, 4, 5], D3DXCreateCubeTextureFromFileExA: [13, 12],
     D3DXCreateCubeTextureFromFileInMemoryEx: [14, 13], D3DXCreateCylinder: [8, 6, 7],

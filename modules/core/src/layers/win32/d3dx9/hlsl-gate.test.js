@@ -129,6 +129,35 @@ suite('ps', [
         body: 'r = i.a.x > i.b.x ? i.a : i.b; r.w = i.c.x < 0 ? 7 : i.c.w;',
     },
     {
+        name: 'a ternary whose condition is a vector chooses per component',
+        body: 'r = (i.a - i.b) ? i.c : -i.b; r.xy = i.a.zw > 0 ? 3 : i.c.xy;',
+    },
+    {
+        name: 'a global written before and after it is read',
+        decls: 'float4 g; float4 h[2]; float k;',
+        body: 'g.xy = 10; h[1] = k; r = g + h[0] + h[1]; g += i.a; r += g;',
+    },
+    {
+        name: 'an array of uniforms, partly overwritten, read at an unknown index',
+        decls: 'float4 arr[3]; int k;',
+        body: 'arr[0] = 10; arr[2] = 30; r = arr[clamp(k, 0, 2)] + arr[clamp((int)i.a.x, 0, 2)];',
+    },
+    {
+        name: 'out parameters written to variables of another element type',
+        decls: 'void two(out float3 a, out int b){ a = 3.7; b = 4.5; }',
+        body: `int3 t; int u; two(t, u); int2 s, c; sincos(i.a.xy * 3, s, c);
+            r = float4(t, u) + float4(s, c) + float4(0, 0, 0, 0);
+            float3 w; modf(i.b.xyz * 2, w); r.xyz += w;`,
+    },
+    {
+        name: 'the variable of a for head is visible after the loop',
+        body: 'int n = 99; for (int n = 0; n < 3; n++) { r += i.a * n; } r.w = n;',
+    },
+    {
+        name: 'a subscript that assigns is taken before the array',
+        body: 'float x[3] = { i.a.x, i.b.y, i.c.z }; int j = 0; r = x[j = 2] + x[j - 1];',
+    },
+    {
         name: 'if and else assign in both arms',
         body: 'if (i.a.x > i.b.x) { r = i.a; r.y = 5; } else { r = i.b; r.z = -5; }',
     },
@@ -436,6 +465,22 @@ tex3D(V,
         profiles: ['ps_2_a', 'ps_3_0'],
     },
     {
+        name: 'gradients under the plain name',
+        decls: 'sampler2D A;',
+        body: 'r = tex2D(A, i.a.xy, i.b.xy, i.c.xy);',
+        profiles: ['ps_2_a', 'ps_3_0'],
+    },
+    {
+        name: 'dst',
+        body: 'r = dst(i.a, i.b);',
+    },
+    {
+        name: 'mul cuts the longer side of a product',
+        decls: 'float4x4 M; float3x3 N;',
+        body: 'r.xyz = mul(M, i.a.xyz).xyz; r.w = mul(i.b.xyz, M).w; r += mul(i.c, N).xyzx;',
+        options: { ulp: 4 },
+    },
+    {
         name: 'derivatives',
         body: 'r = ddx(i.a) + ddy(i.b) * 2; r.w = fwidth(i.c.x);',
         profiles: ['ps_2_a', 'ps_3_0'],
@@ -736,3 +781,67 @@ float4 main(float4 a : TEXCOORD0, float4 b : TEXCOORD1) : COLOR0
     v[j] = 7;
     return t[0] + t[1] * 2 + t[2] * 3 + v;
 }`, ['ps_2_0', 'ps_3_0'], { range: { lo: -1, hi: 1 }, ulp: 3 });
+
+// Pixel shader model 1: colours in [0, 1], a texture read at its own stage's coordinates.
+const LEGACY = ['ps_1_1', 'ps_1_2', 'ps_1_3', 'ps_1_4'];
+const UNIT = { range: { lo: 0.05, hi: 0.95 }, ulp: 4, absolute: 2e-6 };
+
+whole('ps 1.x: a texture modulated by a colour', `
+sampler2D S : register(s0);
+float4 main(float2 uv : TEXCOORD0, float4 c : COLOR0) : COLOR0 { return tex2D(S, uv) * c; }`,
+LEGACY, UNIT);
+
+whole('ps 1.x: two textures blended by an alpha and tinted', `
+sampler2D A; sampler2D B; float4 Tint;
+float4 main(float2 t0 : TEXCOORD0, float2 t1 : TEXCOORD1, float4 c : COLOR0) : COLOR0
+{
+    float4 a = tex2D(A, t0);
+    float4 b = tex2D(B, t1);
+    return lerp(a, b, c.a) * Tint;
+}`, LEGACY, UNIT);
+
+whole('ps 1.x: sums, differences and a scale', `
+sampler2D S; float4 K;
+float4 main(float2 uv : TEXCOORD0, float4 c : COLOR0) : COLOR0
+{
+    float4 t = tex2D(S, uv);
+    return saturate(t * 0.5 + c * K - 0.25 * t) * 2;
+}`, LEGACY, { ...UNIT, absolute: 1e-5 });
+
+whole('ps 1.x: a dot product of a normal and a light', `
+sampler2D N : register(s0); float4 L;
+float4 main(float2 t0 : TEXCOORD0, float4 c : COLOR0) : COLOR0
+{
+    float3 n = tex2D(N, t0).xyz * 2 - 1;
+    float d = saturate(dot(n, c.xyz * 2 - 1));
+    return float4(d * L.xyz, 1);
+}`, LEGACY, { ...UNIT, absolute: 2e-5 });
+
+whole('ps 1.x: the complement of a texture, colour and alpha apart', `
+sampler2D S;
+float4 main(float2 uv : TEXCOORD0, float4 c : COLOR0) : COLOR0
+{
+    float4 t = tex2D(S, uv);
+    return float4((1 - t.rgb) * c.rgb, t.a * c.a);
+}`, LEGACY, UNIT);
+
+whole('ps 1.x: a selection', `
+sampler2D S;
+float4 main(float2 uv : TEXCOORD0, float4 c : COLOR0) : COLOR0
+{
+    float4 t = tex2D(S, uv);
+    return t.a > 0.5 ? t * c : c;
+}`, ['ps_1_2', 'ps_1_3', 'ps_1_4'], UNIT);
+
+whole('ps 1.x: a coordinate set read as a colour (its w is one before 1.4)', `
+float4 main(float4 t : TEXCOORD0, float4 c : COLOR0) : COLOR0
+{ return float4(t.xyz * c.xyz, c.a); }`,
+['ps_1_1', 'ps_1_2', 'ps_1_3', 'ps_1_4'], UNIT);
+
+whole('ps 1.4: a texture read at coordinates another read gave', `
+sampler2D A : register(s0); sampler2D B : register(s1);
+float4 main(float2 t0 : TEXCOORD0, float4 c : COLOR0) : COLOR0
+{
+    float4 a = tex2D(A, t0);
+    return tex2D(B, a.xy) * c;
+}`, ['ps_1_4'], UNIT);

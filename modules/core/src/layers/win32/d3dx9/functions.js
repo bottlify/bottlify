@@ -37,8 +37,9 @@
 import { guestEntry } from '../msvcrt/guest-code.js';
 import { createComObject } from '../ole32/objects.js';
 import { createConstantTableObjects } from './constants.js';
-import { preprocess } from './preprocess.js';
+import { preprocess, preprocessTracked } from './preprocess.js';
 import { compileShader } from './hlsl-compile.js';
+import { assembleShader, disassembleShader } from './shader-asm.js';
 import * as inGuest from './inguest.js';
 import * as matrix from './inguest-matrix.js';
 import * as vector from './inguest-vector.js';
@@ -63,7 +64,6 @@ const IID_ID3DXBUFFER = '{8BA5FB08-5195-40E2-AC58-0D989C3A0102}';
  * @type {Record<string, number[]>}
  */
 const NOT_BUILT = {
-    D3DXAssembleShader: [28, 5, 6],
     D3DXAssembleShaderFromFileA: [24, 4, 5],
     D3DXCleanMesh: [24, 3, 5],
     D3DXComputeNormalMap: [24],
@@ -413,6 +413,127 @@ export function createD3dxFunctions(host){
                     }
                     return constantTables.publish(result.constantTable, result.tokens[0], tableOut);
                 });
+            },
+        },
+
+        /**
+         * HRESULT D3DXAssembleShader(LPCSTR pSrcData, UINT SrcDataLen,
+         *     const D3DXMACRO *pDefines, LPD3DXINCLUDE pInclude, DWORD Flags,
+         *     LPD3DXBUFFER *ppShader, LPD3DXBUFFER *ppErrorMsgs)
+         *
+         * Shader assembly (`shader-asm.js`) to bytecode, after the preprocessor
+         * has had the program's macros and includes. A line that does not assemble
+         * is `file(line): error: text` in the error buffer, the line being the one
+         * of the file it came from; any such line answers E_FAIL with no shader.
+         */
+        D3DXAssembleShader: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([source, size, defines, include, , shaderOut, errorsOut])=>{
+                for (const out of [shaderOut, errorsOut])
+                {
+                    if ((out >>> 0) !== 0)
+                    {
+                        host.writeMemory(out >>> 0, new Uint8Array(4));
+                    }
+                }
+                if ((source >>> 0) === 0 || (shaderOut >>> 0) === 0 || !host.heap
+                    || !host.vtables)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                const text = latin1(host.readMemory(source >>> 0, size >>> 0));
+                return preprocessTracked(text, { defines: macrosAt(defines),
+                    include: (include >>> 0) === 0 ? undefined : includer(include >>> 0) })
+                    .then(expanded=>{
+                        /** @type {string[]} */
+                        const messages = [];
+                        let tokens = null;
+                        if ('error' in expanded)
+                        {
+                            messages.push(`${expanded.error}\n`);
+                        }
+                        else
+                        {
+                            const result = assembleShader(expanded.text);
+                            tokens = result.tokens;
+                            for (const { line, message } of result.errors)
+                            {
+                                const origin = expanded.origins[line - 1];
+                                messages.push(`${origin?.file ?? 'memory'}(${origin?.line ?? line}`
+                                    + `): error: ${message}\n`);
+                            }
+                        }
+                        if (messages.length > 0 && (errorsOut >>> 0) !== 0)
+                        {
+                            giveBuffer(errorsOut, encode(messages.join('')));
+                        }
+                        if (messages.length > 0 || !tokens)
+                        {
+                            host.divergence?.('D3DXAssembleShader', `refused: ${
+                                messages[0]?.trim()}`);
+                            return E_FAIL;
+                        }
+                        return giveBuffer(shaderOut, new Uint8Array(tokens.buffer,
+                            tokens.byteOffset, tokens.byteLength));
+                    });
+            },
+        },
+
+        /**
+         * HRESULT D3DXDisassembleShader(const DWORD *pShader, BOOL EnableColorCode,
+         *     LPCSTR pComments, LPD3DXBUFFER *ppDisassembly)
+         *
+         * The listing of a shader (`shader-asm.js`) as text in a buffer, the
+         * comment the program gave first. The colour codes are not written: they
+         * are HTML-like markup for a viewer, and a program that asks for them
+         * gets the plain text. Bytecode that is not a shader answers
+         * D3DERR_INVALIDCALL.
+         */
+        D3DXDisassembleShader: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([shader, , comments, out])=>{
+                if ((out >>> 0) !== 0)
+                {
+                    host.writeMemory(out >>> 0, new Uint8Array(4));
+                }
+                if ((shader >>> 0) === 0 || (out >>> 0) === 0 || !host.heap || !host.vtables)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                // The length is in the stream: up to the end token, stepping over the
+                // comment blocks, whose data may hold that word, at most 1 MiB.
+                const words = [u32(shader >>> 0)];
+                for (let at = (shader >>> 0) + 4; words.length < 262144; at += 4)
+                {
+                    const word = u32(at);
+                    words.push(word);
+                    if (word === 0x0000ffff)
+                    {
+                        break;
+                    }
+                    if ((word & 0xffff) === 0xfffe)
+                    {
+                        for (let n = word >>> 16 & 0x7fff; n > 0 && words.length < 262144; n--)
+                        {
+                            at += 4;
+                            words.push(u32(at));
+                        }
+                    }
+                }
+                let listing;
+                try
+                {
+                    listing = disassembleShader(Uint32Array.from(words), (comments >>> 0) === 0
+                        ? undefined : { comments: latin1(cString(comments)) });
+                }
+                catch (e){
+                    host.divergence?.('D3DXDisassembleShader', `refused: ${
+                        /** @type {Error} */ (e).message}`);
+                    return D3DERR_INVALIDCALL;
+                }
+                return giveBuffer(out, encode(listing));
             },
         },
     };

@@ -433,6 +433,13 @@ export function createEvaluator(module, env = /** @type {Environment} */ ({})){
                 const test = ev(e.test, frame);
                 const yes = ev(e.then, frame);
                 const no = ev(e.else, frame);
+                if (e.componentwise)
+                {
+                    const c = flattenValue(test, e.test.type);
+                    const a = flattenValue(yes, e.type);
+                    const b = flattenValue(no, e.type);
+                    return buildValue(e.type, c.map((x, i)=>(x !== 0 ? a[i] : b[i])));
+                }
                 return truth(test) ? yes : no;
             }
             case 'comma': {
@@ -470,8 +477,9 @@ export function createEvaluator(module, env = /** @type {Environment} */ ({})){
                 return out.length === 1 ? out[0] : out;
             }
             case 'index': {
-                const obj = /** @type {any} */ (ev(e.object, frame));
+                // The subscript first: what it assigns is what the element is taken from.
                 const i = Number(ev(e.index, frame));
+                const obj = /** @type {any} */ (ev(e.object, frame));
                 return element(obj, i, e.object.type);
             }
             case 'initlist': {

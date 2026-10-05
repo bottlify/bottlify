@@ -120,26 +120,30 @@ export function registersOf(type){
  * @property {number} [fixed]      Must occupy components 0 to fixed-1 of its register: a
  *                                 `sincos` result (2), the argument of a `texkill` (3).
  * @property {string} [name]
+ * @property {{ file: 't' | 'r', index?: number, sampler?: Const }} [pin]   Must live in this
+ *           register of a model 1 pixel shader: where a texture read leaves its texel.
  */
 
 /**
- * @typedef {{ kind: 'reg', reg: VReg, swz: number[], neg?: boolean, abs?: boolean }} SrcReg
+ * @typedef {{ kind: 'reg', reg: VReg, swz: number[], neg?: boolean, abs?: boolean,
+ *     mod?: string }} SrcReg
  * A virtual register read through a swizzle.
  *
  * @typedef {{ kind: 'imm', values: number[], neg?: boolean, abs?: boolean }} SrcImm
  * A literal, one value per lane; the back half puts it in a `def` register.
  *
  * @typedef {{ kind: 'const', cst: Const, offset: number, swz: number[], neg?: boolean,
- *     abs?: boolean, relative?: boolean }} SrcConst
+ *     abs?: boolean, relative?: boolean, mod?: string }} SrcConst
  * Register `offset` of a constant. `relative` adds the address register a0.x.
  *
- * @typedef {{ kind: 'input', input: Input, swz: number[], neg?: boolean, abs?: boolean }} SrcInput
+ * @typedef {{ kind: 'input', input: Input, swz: number[], neg?: boolean, abs?: boolean,
+ *     mod?: string }} SrcInput
  * A shader input, read through a swizzle (components of the input's own register).
  *
  * @typedef {{ kind: 'sampler', cst: Const }} SrcSampler
- * @typedef {{ kind: 'misc', which: 'vpos' | 'vface', swz: number[] }} SrcMisc
+ * @typedef {{ kind: 'misc', which: 'vpos' | 'vface', swz: number[], mod?: string }} SrcMisc
  * @typedef {{ kind: 'creg', file: 'f' | 'i' | 'b', index: number, swz: number[],
- *     neg?: boolean, abs?: boolean, relative?: boolean }} SrcCreg
+ *     neg?: boolean, abs?: boolean, relative?: boolean, mod?: string }} SrcCreg
  * A constant register by number: what the back half turns a literal into.
  *
  * @typedef {SrcReg | SrcImm | SrcConst | SrcInput | SrcSampler | SrcMisc | SrcCreg} Src
@@ -184,6 +188,7 @@ export function registersOf(type){
  * @property {boolean} [sat]  Clamp the result to [0, 1] (pixel shaders only).
  * @property {'project' | 'bias' | undefined} [texMode]   For texld.
  * @property {boolean} [pp]   Partial precision.
+ * @property {number} [shift]  A scale of the result, as the token holds it (model 1 only).
  */
 
 /**
@@ -229,7 +234,20 @@ export function registersOf(type){
  * @property {number} maxInputs
  * @property {number} maxOutputs
  * @property {number} maxSamplers
+ * @property {boolean} [legacy]    Pixel shader model 1: two temporaries, texture stages, results
+ *                                 and constants held to a small range, a few instructions.
+ * @property {ReadonlySet<string>} [ops]   The only opcodes a legacy target has.
  */
+
+/** What the target cannot do, found while building for it. */
+export class TargetError extends Error {
+    /** @param {string} code @param {string} message */
+    constructor(code, message){
+        super(message);
+        this.name = 'TargetError';
+        this.code = code;
+    }
+}
 
 /** @type {Record<string, Omit<Profile, 'name'>>} */
 const PROFILE_TABLE = (()=>{
@@ -251,7 +269,23 @@ const PROFILE_TABLE = (()=>{
         dp2add: true, texldb: true, oneConstPerInstr: false, oneInputPerInstr: false,
         maxInputs: 10, maxSamplers: 16,
     };
+    const ps1 = {
+        ...none, legacy: true, maxTemps: 2, maxConsts: 8, maxArith: 8, maxTex: 4,
+        satDest: true, lrp: true, oneConstPerInstr: true, oneInputPerInstr: false,
+        maxInputs: 2, maxOutputs: 1, maxSamplers: 4,
+    };
+    const legacyOps = ['mov', 'add', 'sub', 'mul', 'mad', 'lrp', 'dp3', 'cnd', 'tex', 'texcoord',
+        'nop'];
     return {
+        ps_1_1: { kind: 'ps', major: 1, minor: 1, tokenMinor: 1, ...ps1,
+            ops: new Set(legacyOps) },
+        ps_1_2: { kind: 'ps', major: 1, minor: 2, tokenMinor: 2, ...ps1, cmp: true,
+            ops: new Set([...legacyOps, 'dp4', 'cmp']) },
+        ps_1_3: { kind: 'ps', major: 1, minor: 3, tokenMinor: 3, ...ps1, cmp: true,
+            ops: new Set([...legacyOps, 'dp4', 'cmp']) },
+        ps_1_4: { kind: 'ps', major: 1, minor: 4, tokenMinor: 4, ...ps1, cmp: true,
+            maxTemps: 6, maxTex: 6, maxSamplers: 6, maxInputs: 8,
+            ops: new Set([...legacyOps, 'dp4', 'cmp', 'texld', 'texcrd', 'phase']) },
         vs_1_1: { kind: 'vs', major: 1, minor: 1, tokenMinor: 1, ...none, maxOutputs: 12 },
         vs_2_0: { kind: 'vs', major: 2, minor: 0, tokenMinor: 0, ...vs2, maxOutputs: 12 },
         vs_2_a: { kind: 'vs', major: 2, minor: 1, tokenMinor: 1, ...vs2, maxArith: 256,
