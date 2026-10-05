@@ -903,8 +903,10 @@ test('decode rejects malformed token streams', ()=>{
             /truncated|malformed|has a length field|is a parameter token|needs 4 literal|unknown opcode|not available|missing END/);
     }
     rejects(()=>decode(Uint32Array.from([0x12345678, 0xffff])), /not a shader version token/);
-    rejects(()=>decode(Uint32Array.from([0xffff0104, 0xffff])), /ps_1_4 is not supported/);
-    rejects(()=>decode(Uint32Array.from([0xffff0101, 0xffff])), /ps_1_1 is not supported/);
+    rejects(()=>decode(Uint32Array.from([0xffff0100, 0xffff])),
+        /unsupported shader version ps_1_0/);
+    rejects(()=>decode(Uint32Array.from([0xffff0105, 0xffff])),
+        /unsupported shader version ps_1_5/);
     rejects(()=>decode(Uint32Array.from([0xfffe0200 | 0xff, 0xffff])),
         /unsupported shader version vs_2_255/);
     rejects(()=>decode(Uint32Array.from([0xfffe0100, 0xffff])),

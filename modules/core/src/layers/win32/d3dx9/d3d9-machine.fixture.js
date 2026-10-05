@@ -19,22 +19,105 @@
  * field, a register beyond the version's file, an instruction the version
  * does not have -- each throws, naming the register and the instruction.
  *
- * Versions: vs_1_1, vs_2_0, vs_2_x, vs_3_0, ps_2_0, ps_2_x, ps_3_0. The ps_1_x
- * models are rejected by decode(): their texture-stage semantics (phase
- * markers, fixed-function texture addressing, the colour-arithmetic source
- * modifiers) are a different machine.
+ * Versions: vs_1_1, vs_2_0, vs_2_x, vs_3_0, ps_1_1, ps_1_2, ps_1_3, ps_1_4,
+ * ps_2_0, ps_2_x, ps_3_0. The ps_1_x models are a different machine from the
+ * later ones and are described in their own section below.
  *
  * Not supported, and rejected by decode() with a message saying so:
  * predication (the p0 register, the predicated bit of an opcode token, setp,
  * breakp), relative addressing of a destination, the constant ranges beyond
- * c255 (register types 11 to 13), half-precision temporaries (type 16), the
- * `phase` marker, co-issue, and destination shift scales.
+ * c255 (register types 11 to 13), half-precision temporaries (type 16), and,
+ * outside the ps_1_x models, the `phase` marker, co-issue and destination
+ * shift scales. Inside them: ps_1_0 (the documentation describes ps_1_1 and
+ * later), and a read of a t# register by an arithmetic instruction in ps_1_4.
  *
  * What the machine does not do: it filters no texture (io.sample answers for
  * every sampler read), it models no rasteriser (interpolated inputs and the
- * pixel position are given), and it counts no instruction slots, because the
- * documented slot weights of the multi-slot instructions are not something it
- * can verify.
+ * pixel position are given), and, in the vs and ps_2 and later models, it
+ * counts no instruction slots, because the documented slot weights of the
+ * multi-slot instructions are not something it can verify.
+ *
+ * The ps_1_x models (ps_1_1 to ps_1_4)
+ * ------------------------------------
+ * The assembly spells write masks and swizzles in r, g, b, a there (`r0.rgb`,
+ * `v0.a`); the xyzw spelling is accepted on input as well. A pixel shader of
+ * these models has no dcl and no output register: the result is r0, reported
+ * as outputs.oC0 with the components the program never wrote as NaN and the
+ * written mask in written.oC0. A depth written by texdepth or texm3x2depth is
+ * outputs.oDepth, component x, written.oDepth 1.
+ *
+ * Registers. v0 and v1 are the colour inputs, c0 to c7 the constants, r0 to r1
+ * (ps_1_1 to ps_1_3) or r0 to r5 (ps_1_4) the temporaries, t0 to t3 (ps_1_1
+ * to ps_1_3) or t0 to t5 (ps_1_4) the texture registers. Before the first
+ * texture instruction a t# register holds its texture coordinate set
+ * (io.inputs.t[n], four floats). In ps_1_1 to ps_1_3 a texture instruction
+ * writes the texel (or the colour it computes) into the t# register of its own
+ * stage, and an arithmetic instruction reads that t# afterwards like a
+ * temporary; reading a t# no texture instruction filled throws. In ps_1_4 the
+ * t# registers stay coordinates, are read only by texld, texcrd and texkill,
+ * and the texture instructions write r#. The stage a texture instruction
+ * samples is the number of the register it writes; io.sample receives it as
+ * the sampler index.
+ *
+ * Where the machine clamps, and why. Only three places clamp, because they
+ * are the places the documentation names:
+ * - A constant is clamped to [-1, 1] whenever an instruction reads it, def'd
+ *   or supplied: the ps_1_x constant registers hold values in that range. The
+ *   value stored is left alone, so one clamp serves every reader.
+ * - `_sat` clamps a result to [0, 1], after the destination shift scale.
+ * - texcoord clamps the coordinates it copies to [0, 1], and texdepth and
+ *   texm3x2depth clamp the depth they write to [0, 1] (a depth buffer cannot
+ *   hold more).
+ * Nothing else is clamped: the arithmetic range of real hardware
+ * (D3DCAPS9::PixelShader1xMaxValue) is implementation-defined, so the machine
+ * is an implementation with an unbounded one, and the interpolated colour
+ * inputs are the caller's to keep inside [0, 1].
+ *
+ * Source modifiers (applied to each component after the swizzle selects it):
+ * -x, x_bias (x - 0.5), -x_bias, x_bx2 (2 * (x - 0.5)), -x_bx2, 1-x, and, in
+ * ps_1_4 only, x_x2 (2 * x) and -x_x2. The texld and texcrd sources of ps_1_4
+ * also take _dz and _dw, which divide the coordinate by its third or fourth
+ * component. There is no abs. No modifier clamps its input.
+ *
+ * Destination modifiers: _sat everywhere, and the shift scales _x2, _x4 and
+ * _d2 (ps_1_1 to ps_1_3) or those and _x8, _d4 and _d8 (ps_1_4): the result is
+ * multiplied by the scale and then saturated. An arithmetic instruction takes
+ * a write mask of .rgb, .a or .rgba (ps_1_1 to ps_1_3) or any non-empty mask
+ * (ps_1_4); a texture instruction takes no modifier.
+ *
+ * Swizzles. A source takes the identity, or a replicate of one component:
+ * .a (and .b, but only where the instruction writes the alpha component alone)
+ * in ps_1_1 to ps_1_3, any of .r .g .b .a in ps_1_4. The texld and texcrd
+ * sources of ps_1_4 also take .xyz and .xyw, with _dz and _dw respectively.
+ *
+ * Co-issue. A `+` before an arithmetic instruction pairs it with the one
+ * before it (bit 30 of the opcode token): one of the pair writes only red,
+ * green and blue, the other only alpha. ps_1_1 to ps_1_3 take the colour
+ * instruction first; ps_1_4 takes either order. The pair is one slot. Both
+ * instructions of a pair read the registers as they were before the pair.
+ *
+ * Phases. ps_1_4 has one optional `phase` marker. Registers survive it. Only
+ * in the second phase may texld and texcrd read an r# as their coordinates.
+ *
+ * Order and size. Texture instructions come before arithmetic ones (in each
+ * phase). Slot counts are the named constants of PS1_SLOT_LIMITS: a texture
+ * instruction is a texture slot, any other instruction (nop included) an
+ * arithmetic slot, a co-issued pair one. def costs none.
+ *
+ * Texture instructions, by stage n (the register written) and source m:
+ * - ps_1_1 to ps_1_3: tex tn; texcoord tn (u, v, w clamped, a = 1); texkill
+ *   tn; texbem and texbeml tn, tm; texreg2ar, texreg2gb tn, tm and (ps_1_2 up)
+ *   texreg2rgb; texm3x2pad + texm3x2tex or (ps_1_3) texm3x2depth; texm3x3pad,
+ *   texm3x3pad + texm3x3tex, texm3x3spec (with a constant), texm3x3vspec, and
+ *   (ps_1_2 up) texm3x3; (ps_1_2 up) texdp3 and texdp3tex.
+ * - ps_1_4: texld rn, src; texcrd rn.rgb, src (no alpha is written); texkill;
+ *   texdepth r5; and the arithmetic bem rn.rg, src0, src1.
+ * The pad instructions must be consecutive with their closing instruction,
+ * writing consecutive t# registers.
+ * Each reads its stage's coordinates from io.inputs.t, may look up with
+ * io.sample(stage, io.dimensions?.[stage] ?? '2d', coord, { kind: 'plain' }),
+ * and takes the bump environment state of the stage (texbem, texbeml, bem)
+ * from io.bump[stage].
  *
  * Decisions the documentation leaves open, all in one place so a mismatch
  * with hardware is easy to find:
@@ -101,6 +184,22 @@ export const VERSION_LIMITS = Object.freeze({
         temps: 32, floatConsts: 256, intConsts: 16, boolConsts: 16,
         inputs: 16, texcoords: 0, outputs: 12, samplers: 4,
     }),
+    ps_1_1: Object.freeze({
+        temps: 2, floatConsts: 8, intConsts: 0, boolConsts: 0,
+        inputs: 2, texcoords: 4, outputs: 0, samplers: 4,
+    }),
+    ps_1_2: Object.freeze({
+        temps: 2, floatConsts: 8, intConsts: 0, boolConsts: 0,
+        inputs: 2, texcoords: 4, outputs: 0, samplers: 4,
+    }),
+    ps_1_3: Object.freeze({
+        temps: 2, floatConsts: 8, intConsts: 0, boolConsts: 0,
+        inputs: 2, texcoords: 4, outputs: 0, samplers: 4,
+    }),
+    ps_1_4: Object.freeze({
+        temps: 6, floatConsts: 8, intConsts: 0, boolConsts: 0,
+        inputs: 2, texcoords: 6, outputs: 0, samplers: 6,
+    }),
     ps_2_0: Object.freeze({
         temps: 12, floatConsts: 32, intConsts: 0, boolConsts: 0,
         inputs: 2, texcoords: 8, outputs: 0, samplers: 16,
@@ -115,6 +214,20 @@ export const VERSION_LIMITS = Object.freeze({
     }),
 });
 
+/**
+ * The instruction slots of the ps_1_x models: texture addressing slots and
+ * arithmetic slots, per phase. Only ps_1_4 has two phases.
+ */
+export const PS1_SLOT_LIMITS = Object.freeze({
+    ps_1_1: Object.freeze({ texture: 4, arithmetic: 8, phases: 1 }),
+    ps_1_2: Object.freeze({ texture: 4, arithmetic: 8, phases: 1 }),
+    ps_1_3: Object.freeze({ texture: 4, arithmetic: 8, phases: 1 }),
+    ps_1_4: Object.freeze({ texture: 6, arithmetic: 8, phases: 2 }),
+});
+
+/** The range a ps_1_x constant register holds; a read clamps to it. */
+export const PS1_CONSTANT_LIMIT = 1;
+
 /** D3DSPR, the register types. */
 const REG = Object.freeze({
     TEMP: 0, INPUT: 1, CONST: 2, ADDR: 3, TEXTURE: 3, RASTOUT: 4, ATTROUT: 5,
@@ -124,7 +237,22 @@ const REG = Object.freeze({
 });
 
 /** D3DSPSM, the source modifiers this machine implements. */
-const MOD = Object.freeze({ NONE: 0, NEG: 1, ABS: 11, ABSNEG: 12 });
+const MOD = Object.freeze({
+    NONE: 0, NEG: 1, BIAS: 2, BIASNEG: 3, SIGN: 4, SIGNNEG: 5, COMP: 6, X2: 7, X2NEG: 8,
+    DZ: 9, DW: 10, ABS: 11, ABSNEG: 12,
+});
+
+/** How each ps_1_x source modifier is spelled: before the register, and after it. */
+const PS1_MODIFIER_TEXT = new Map(/** @type {[number, string[]][]} */ ([
+    [MOD.NEG, ['-', '']], [MOD.BIAS, ['', '_bias']], [MOD.BIASNEG, ['-', '_bias']],
+    [MOD.SIGN, ['', '_bx2']], [MOD.SIGNNEG, ['-', '_bx2']], [MOD.COMP, ['1-', '']],
+    [MOD.X2, ['', '_x2']], [MOD.X2NEG, ['-', '_x2']], [MOD.DZ, ['', '_dz']],
+    [MOD.DW, ['', '_dw']],
+]));
+
+/** The destination shift scales, by the 4-bit field of the destination token. */
+const SHIFT_NAMES = new Map([[1, 'x2'], [2, 'x4'], [3, 'x8'], [13, 'd8'], [14, 'd4'], [15, 'd2']]);
+const SHIFT_SCALES = new Map([[1, 2], [2, 4], [3, 8], [13, 0.125], [14, 0.25], [15, 0.5]]);
 
 const IDENTITY = 0xe4;
 const COMPONENTS = 'xyzw';
@@ -169,6 +297,17 @@ const OP_ROWS = [
     ['cmp', 88, 1, 3, null, 20], ['dp2add', 90, 1, 3, null, 20], ['dsx', 91, 1, 1, null, 21],
     ['dsy', 92, 1, 1, null, 21], ['texldd', 93, 1, 4, null, 21], ['setp', 94, 1, 2, 21, 21],
     ['texldl', 95, 1, 2, 30, 30], ['breakp', 96, 0, 1, 21, 21],
+    // The ps_1_x instructions that no later model has; PS1_ROWS says which version has which.
+    ['texcoord', 64, 1, 0, null, null], ['texbem', 67, 1, 1, null, null],
+    ['texbeml', 68, 1, 1, null, null], ['texreg2ar', 69, 1, 1, null, null],
+    ['texreg2gb', 70, 1, 1, null, null], ['texm3x2pad', 71, 1, 1, null, null],
+    ['texm3x2tex', 72, 1, 1, null, null], ['texm3x3pad', 73, 1, 1, null, null],
+    ['texm3x3tex', 74, 1, 1, null, null], ['texm3x3spec', 76, 1, 2, null, null],
+    ['texm3x3vspec', 77, 1, 1, null, null], ['cnd', 80, 1, 3, null, null],
+    ['texreg2rgb', 82, 1, 1, null, null], ['texdp3tex', 83, 1, 1, null, null],
+    ['texm3x2depth', 84, 1, 1, null, null], ['texdp3', 85, 1, 1, null, null],
+    ['texm3x3', 86, 1, 1, null, null], ['texdepth', 87, 1, 0, null, null],
+    ['bem', 89, 1, 2, null, null],
 ];
 
 /** @type {Map<number, OpInfo>} */
@@ -180,6 +319,59 @@ for (const [name, code, dst, src, vsMin, psMin] of OP_ROWS)
     const info = Object.freeze({ name, code, dst, src, vsMin, psMin });
     OP_BY_CODE.set(code, info);
     OP_BY_NAME.set(name, info);
+}
+
+// ps_1_x spells two opcodes differently from the later models: tex is texld, and in ps_1_4
+// texcrd is texcoord.
+OP_BY_NAME.set('tex', /** @type {OpInfo} */ (OP_BY_NAME.get('texld')));
+OP_BY_NAME.set('texcrd', /** @type {OpInfo} */ (OP_BY_NAME.get('texcoord')));
+
+/**
+ * @typedef {Object} Ps1Op
+ * @property {string} name
+ * @property {number} first   The lowest ps_1_N minor that has it.
+ * @property {number} last
+ * @property {'arith'|'tex'} kind  Which instruction slots it uses.
+ * @property {number} src     Source operands; the destination is always there, except for nop.
+ */
+
+/** @type {[string, number, number, 'arith'|'tex', number][]} */
+const PS1_ROWS = [
+    ['nop', 1, 4, 'arith', 0], ['mov', 1, 4, 'arith', 1], ['add', 1, 4, 'arith', 2],
+    ['sub', 1, 4, 'arith', 2], ['mul', 1, 4, 'arith', 2], ['mad', 1, 4, 'arith', 3],
+    ['lrp', 1, 4, 'arith', 3], ['dp3', 1, 4, 'arith', 2], ['dp4', 2, 4, 'arith', 2],
+    ['cmp', 2, 4, 'arith', 3], ['cnd', 1, 4, 'arith', 3], ['bem', 4, 4, 'arith', 2],
+    ['tex', 1, 3, 'tex', 0], ['texcoord', 1, 3, 'tex', 0], ['texkill', 1, 4, 'tex', 0],
+    ['texbem', 1, 3, 'tex', 1], ['texbeml', 1, 3, 'tex', 1], ['texreg2ar', 1, 3, 'tex', 1],
+    ['texreg2gb', 1, 3, 'tex', 1], ['texreg2rgb', 2, 3, 'tex', 1],
+    ['texm3x2pad', 1, 3, 'tex', 1], ['texm3x2tex', 1, 3, 'tex', 1],
+    ['texm3x2depth', 3, 3, 'tex', 1], ['texm3x3pad', 1, 3, 'tex', 1],
+    ['texm3x3tex', 1, 3, 'tex', 1], ['texm3x3spec', 1, 3, 'tex', 2],
+    ['texm3x3vspec', 1, 3, 'tex', 1], ['texm3x3', 2, 3, 'tex', 1],
+    ['texdp3', 2, 3, 'tex', 1], ['texdp3tex', 2, 3, 'tex', 1],
+    ['texld', 4, 4, 'tex', 1], ['texcrd', 4, 4, 'tex', 1], ['texdepth', 4, 4, 'tex', 0],
+    ['def', 1, 4, 'arith', 0],
+];
+
+/** @type {Map<string, Ps1Op>} */
+const PS1_OPS = new Map();
+for (const [name, first, last, kind, src] of PS1_ROWS)
+{
+    PS1_OPS.set(name, Object.freeze({ name, first, last, kind, src }));
+}
+
+/**
+ * What an opcode is called in the ps_1_x model of the given minor version.
+ * @param {number} code
+ * @param {number} minor
+ * @param {string} fallback
+ */
+function ps1Name(code, minor, fallback){
+    if (code === 64)
+    {
+        return minor === 4 ? 'texcrd' : 'texcoord';
+    }
+    return code === 66 ? (minor === 4 ? 'texld' : 'tex') : fallback;
 }
 
 const UNSUPPORTED_OPS = new Set(['setp', 'breakp']);
@@ -194,9 +386,11 @@ const SCALAR_SOURCE_OPS = new Set(['rcp', 'rsq', 'exp', 'expp', 'log', 'logp']);
  * @typedef {Object} VersionInfo
  * @property {'vertex'|'pixel'} kind
  * @property {boolean} vs
+ * @property {boolean} ps1      A ps_1_x model.
  * @property {number} major
  * @property {number} minor
- * @property {number} num       major * 10 + minor, 21 for the 2_x models.
+ * @property {number} num       major * 10 + minor, 21 for the 2_x models; not comparable between
+ *   the vs and the ps_1_x models, which test `ps1` first.
  * @property {string} name      "vs_2_0", "ps_2_x" ...
  * @property {Limits} limits
  */
@@ -215,11 +409,6 @@ function parseVersion(token){
     }
     const vs = high === 0xfffe;
     const prefix = vs ? 'vs' : 'ps';
-    if (!vs && major === 1)
-    {
-        throw new Error(`decode: ps_1_${minor} is not supported by this machine `
-            + '(the ps_1_x models are a different machine; only ps_2_0 and later)');
-    }
     const tail = major === 2 && minor === 1 ? 'x' : String(minor);
     const name = `${prefix}_${major}_${tail}`;
     const limits = /** @type {Record<string, Limits>} */ (
@@ -229,7 +418,8 @@ function parseVersion(token){
         throw new Error(`decode: unsupported shader version ${prefix}_${major}_${minor}`);
     }
     return {
-        kind: vs ? 'vertex' : 'pixel', vs, major, minor, num: major * 10 + minor, name, limits,
+        kind: vs ? 'vertex' : 'pixel', vs, ps1: !vs && major === 1, major, minor,
+        num: major * 10 + minor, name, limits,
     };
 }
 
@@ -269,7 +459,10 @@ function parseVersion(token){
  * @property {Operand[]} sources
  * @property {Declaration} [declaration]
  * @property {number[]} [literals]  The raw dwords of a def, defi or defb.
- * @property {boolean} decl         True for dcl and def*, which do not execute.
+ * @property {boolean} decl         True for dcl, def* and the phase marker, which do not
+ *   execute.
+ * @property {boolean} coissue      A ps_1_x instruction written with a `+`: the second of a pair.
+ * @property {number} phase         ps_1_x: 0, or 1 after the `phase` marker of ps_1_4.
  * @property {number} ordinal       Position among the executing instructions, from 0.
  * @property {number} tokenOffset
  * @property {number} [endIdx]      if/else/loop/rep: index of the closing instruction.
@@ -294,6 +487,8 @@ function parseVersion(token){
  * @property {Map<number, '2d'|'cube'|'volume'>} samplers
  * @property {Map<string, Declaration>} declared   Keyed "type:index".
  * @property {Map<number, number>} labels          Label number to instruction index.
+ * @property {{ texture: number[], arithmetic: number[] } | null} slots  ps_1_x: the slots used,
+ *   per phase; null in the other models.
  */
 
 /**
@@ -436,6 +631,11 @@ function readParam(t, p, limit, v, isDest, what){
  * @param {OpInfo} info
  */
 function isAvailable(v, info){
+    if (v.ps1)
+    {
+        const spec = PS1_OPS.get(ps1Name(info.code, v.minor, info.name));
+        return !!spec && v.minor >= spec.first && v.minor <= spec.last;
+    }
     const min = v.vs ? info.vsMin : info.psMin;
     return min !== null && v.num >= min;
 }
@@ -802,6 +1002,358 @@ function checkInstruction(v, ins){
     }
 }
 
+/* -------------------------------------------------------------- ps_1_x checks */
+
+/**
+ * What decode() carries from one ps_1_x instruction to the next.
+ * @typedef {Object} Ps1State
+ * @property {number} phase
+ * @property {boolean} sawArith     An arithmetic instruction was seen in this phase.
+ * @property {number[]} texture     Texture slots used, per phase.
+ * @property {number[]} arithmetic  Arithmetic slots used, per phase.
+ * @property {Instruction | null} last  The instruction before the one being checked.
+ * @property {null | { name: string, token: number, family: 'm3x2'|'m3x3', next: number,
+ *   rows: number }} pending   A matrix-multiply pad waiting for its closing instruction.
+ */
+
+/** @returns {Ps1State} */
+function newPs1State(){
+    return {
+        phase: 0, sawArith: false, texture: [0, 0], arithmetic: [0, 0], last: null, pending: null,
+    };
+}
+
+const PS1_MODIFIERS = new Set([
+    MOD.NONE, MOD.NEG, MOD.BIAS, MOD.BIASNEG, MOD.SIGN, MOD.SIGNNEG, MOD.COMP,
+]);
+const PS1_MODIFIERS_14 = new Set([...PS1_MODIFIERS, MOD.X2, MOD.X2NEG]);
+const PS1_COORD_MODIFIERS = new Set([MOD.NONE, MOD.DZ, MOD.DW]);
+/** The swizzles of a ps_1_4 coordinate source: .xyzw, .xyz, .xyw. */
+const SWIZZLE_XYZ = 0xa4;
+const SWIZZLE_XYW = 0xf4;
+const M3X2_CLOSERS = ['texm3x2tex', 'texm3x2depth'];
+const M3X3_CLOSERS = ['texm3x3tex', 'texm3x3spec', 'texm3x3vspec', 'texm3x3'];
+const MASK_RGB = 7;
+const MASK_ALPHA = 8;
+
+/**
+ * Everything the ps_1_x models say about one instruction: its register files,
+ * modifiers, swizzles, write masks, pairing, order, slot counts and the pad
+ * sequences of the matrix-multiply instructions.
+ * @param {VersionInfo} v
+ * @param {Instruction} ins
+ * @param {Ps1State} state
+ */
+function checkPs1(v, ins, state){
+    const where = `token ${ins.tokenOffset}, ${ins.name}`;
+    const bad = (/** @type {string} */ why)=>new Error(`decode: ${why} (${where})`);
+    const spec = /** @type {Ps1Op} */ (PS1_OPS.get(ins.name));
+    const lim = v.limits;
+    const late = v.minor === 4;
+    const d = ins.dest;
+    const src = ins.sources;
+    ins.phase = state.phase;
+    if (ins.control !== 0)
+    {
+        throw bad(`unexpected control bits 0x${ins.control.toString(16)}`);
+    }
+    const regName = (/** @type {Operand} */ op)=>registerName(v, op.type, op.index);
+
+    if (d)
+    {
+        if (d.partial || d.centroid)
+        {
+            throw bad(`_pp and _centroid do not exist in ${v.name}`);
+        }
+        if (d.writeMask === 0)
+        {
+            throw bad(`empty write mask on ${regName(d)}`);
+        }
+        if (d.relative)
+        {
+            throw bad(`relative addressing does not exist in ${v.name}`);
+        }
+        if (d.shift !== 0)
+        {
+            const shift = SHIFT_NAMES.get(d.shift);
+            if (!shift)
+            {
+                throw bad(`reserved destination shift ${d.shift}`);
+            }
+            if (!late && d.shift > 2 && d.shift !== 15)
+            {
+                throw bad(`_${shift} does not exist in ${v.name}`);
+            }
+        }
+        if (spec.kind === 'tex' && (d.saturate || d.shift !== 0))
+        {
+            throw bad(`${ins.name} takes no destination modifier`);
+        }
+    }
+
+    // The destination.
+    const dest = (/** @type {Operand} */ op, /** @type {number} */ type)=>{
+        const letter = type === REG.TEMP ? 'r' : 't';
+        const count = type === REG.TEMP ? lim.temps : lim.texcoords;
+        if (op.type !== type)
+        {
+            throw bad(`${ins.name} cannot write ${regName(op)} in ${v.name}; it writes a `
+                + `${letter}# register`);
+        }
+        if (op.index >= count)
+        {
+            throw bad(`register ${regName(op)} is beyond the ${count} registers of its file `
+                + `in ${v.name}`);
+        }
+    };
+    if (d)
+    {
+        if (spec.kind === 'arith')
+        {
+            dest(d, REG.TEMP);
+            if (ins.name === 'bem')
+            {
+                if (d.writeMask !== 3)
+                {
+                    throw bad('bem writes the red and green components only (.rg)');
+                }
+            }
+            else if (!late && d.writeMask !== MASK_RGB && d.writeMask !== MASK_ALPHA
+                && d.writeMask !== 0xf)
+            {
+                throw bad(`write mask ${maskText(d.writeMask, 'rgba')} is not available in `
+                    + `${v.name}; use .rgb, .a or .rgba`);
+            }
+        }
+        else if (!late)
+        {
+            dest(d, REG.TEXTURE);
+            if (d.writeMask !== 0xf)
+            {
+                throw bad(`${ins.name} takes no write mask`);
+            }
+        }
+        else if (ins.name === 'texkill')
+        {
+            if (d.type !== REG.TEMP && d.type !== REG.TEXTURE)
+            {
+                throw bad(`texkill cannot test ${regName(d)}`);
+            }
+            dest(d, d.type);
+            if (d.writeMask !== 0xf)
+            {
+                throw bad('texkill takes no write mask');
+            }
+        }
+        else if (ins.name === 'texdepth')
+        {
+            dest(d, REG.TEMP);
+            if (d.index !== 5 || d.writeMask !== 0xf)
+            {
+                throw bad('texdepth reads r5 and takes no write mask');
+            }
+        }
+        else
+        {
+            dest(d, REG.TEMP);
+            if (ins.name === 'texcrd' && (d.writeMask & MASK_ALPHA))
+            {
+                throw bad('texcrd writes the red, green and blue components only');
+            }
+        }
+    }
+
+    // The sources.
+    const register = (/** @type {Operand} */ op, /** @type {string} */ letters)=>{
+        const letter = op.type === REG.TEMP ? 'r' : op.type === REG.INPUT ? 'v'
+            : op.type === REG.CONST ? 'c' : op.type === REG.TEXTURE ? 't' : '';
+        if (op.relative)
+        {
+            throw bad(`relative addressing does not exist in ${v.name}`);
+        }
+        if (!letter)
+        {
+            throw bad(`register ${regName(op)} cannot be a source in ${v.name}`);
+        }
+        if (letter === 't' && late && spec.kind === 'arith')
+        {
+            throw bad(`reading ${regName(op)} in an arithmetic instruction is not supported by `
+                + 'this machine (ps_1_4 reads t# through texld, texcrd and texkill)');
+        }
+        if (!letters.includes(letter))
+        {
+            throw bad(`${regName(op)} cannot be a source of ${ins.name} in ${v.name}`);
+        }
+        const count = { r: lim.temps, v: lim.inputs, c: lim.floatConsts, t: lim.texcoords }[
+            /** @type {'r'|'v'|'c'|'t'} */ (letter)];
+        if (op.index >= count)
+        {
+            throw bad(`register ${regName(op)} is beyond the ${count} registers of its file `
+                + `in ${v.name}`);
+        }
+    };
+    const modifier = (/** @type {Operand} */ op, /** @type {Set<number>} */ allowed)=>{
+        if (!allowed.has(op.modifier))
+        {
+            throw bad(`source modifier ${op.modifier} is not available in ${v.name}`);
+        }
+    };
+    if (spec.kind === 'arith')
+    {
+        const mask = d ? d.writeMask : 0xf;
+        for (const op of src)
+        {
+            register(op, 'rvct');
+            modifier(op, late ? PS1_MODIFIERS_14 : PS1_MODIFIERS);
+            if (op.swizzle === IDENTITY)
+            {
+                continue;
+            }
+            const text = swizzleText(op.swizzle, 'rgba');
+            if (!isReplicate(op.swizzle))
+            {
+                throw bad(`swizzle ${text} is not available in ${v.name}; a source takes `
+                    + 'one component replicated');
+            }
+            const c = op.swizzle & 3;
+            if (!late && c !== 3 && !(c === 2 && mask === MASK_ALPHA))
+            {
+                throw bad(`swizzle ${text} is not available in ${v.name}; only .a, and .b on `
+                    + 'an instruction that writes alpha alone');
+            }
+        }
+        if (ins.name === 'cnd' && !late
+            && (src[0].type !== REG.TEMP || src[0].index !== 0 || src[0].swizzle !== 0xff))
+        {
+            throw bad(`the first source of cnd must be r0.a in ${v.name}`);
+        }
+    }
+    else if (!late)
+    {
+        for (let k = 0; k < src.length; k++)
+        {
+            const op = src[k];
+            const closing = ins.name === 'texm3x3spec' && k === 1;
+            register(op, closing ? 'c' : 't');
+            modifier(op, closing ? new Set([MOD.NONE]) : PS1_MODIFIERS);
+            if (op.swizzle !== IDENTITY)
+            {
+                throw bad(`${ins.name} takes its source without a swizzle`);
+            }
+        }
+    }
+    else if (src.length)
+    {
+        const op = src[0];
+        if (op.type === REG.TEMP && state.phase === 0)
+        {
+            throw bad(`${ins.name} reads a t# register in the first phase; an r# source needs `
+                + 'the phase marker before it');
+        }
+        register(op, 'rt');
+        modifier(op, PS1_COORD_MODIFIERS);
+        const sw = op.swizzle;
+        const ok = op.modifier === MOD.DZ ? sw === IDENTITY || sw === SWIZZLE_XYZ
+            : op.modifier === MOD.DW ? sw === IDENTITY || sw === SWIZZLE_XYW
+                : sw === IDENTITY || sw === SWIZZLE_XYZ || sw === SWIZZLE_XYW;
+        if (!ok)
+        {
+            throw bad(`swizzle ${swizzleText(sw, 'rgba')} is not available on a `
+                + `${ins.name} source${op.modifier ? ' with that modifier' : ''}; `
+                + 'it takes .xyzw, .xyz or .xyw (with _dz, .xyz; with _dw, .xyw)');
+        }
+    }
+
+    // Pairing.
+    if (ins.coissue)
+    {
+        const prev = state.last;
+        const first = prev && prev.dest ? prev.dest.writeMask : 0;
+        if (spec.kind !== 'arith')
+        {
+            throw bad('a texture instruction cannot be co-issued');
+        }
+        if (!prev || prev.decl || prev.coissue || prev.phase !== state.phase
+            || PS1_OPS.get(prev.name)?.kind !== 'arith')
+        {
+            throw bad('a co-issued instruction (+) must directly follow an arithmetic '
+                + 'instruction that is not co-issued itself');
+        }
+        const second = d ? d.writeMask : 0;
+        const colour = (/** @type {number} */ m)=>m !== 0 && (m & MASK_ALPHA) === 0;
+        if (!((colour(first) && second === MASK_ALPHA)
+            || (late && first === MASK_ALPHA && colour(second))))
+        {
+            throw bad('a co-issued pair writes red, green and blue in one instruction and alpha '
+                + `alone in the other${late ? '' : ', the colour one first'}`);
+        }
+    }
+
+    // Matrix-multiply sequences: pads must run straight into their closing instruction.
+    const pad = ins.name === 'texm3x2pad' || ins.name === 'texm3x3pad';
+    const closer = M3X2_CLOSERS.includes(ins.name) || M3X3_CLOSERS.includes(ins.name);
+    const pending = state.pending;
+    if (pending)
+    {
+        const allowed = pending.family === 'm3x2' ? M3X2_CLOSERS
+            : pending.rows === 1 ? ['texm3x3pad'] : M3X3_CLOSERS;
+        if (!allowed.includes(ins.name))
+        {
+            throw bad(`${pending.name} at token ${pending.token} must be followed by `
+                + allowed.join(' or '));
+        }
+        const index = /** @type {Operand} */ (d).index;
+        if (index !== pending.next)
+        {
+            throw bad(`${ins.name} must write t${pending.next}, the register after its pad`);
+        }
+        if (pad)
+        {
+            pending.rows++;
+            pending.next++;
+        }
+        else
+        {
+            state.pending = null;
+        }
+    }
+    else if (closer)
+    {
+        throw bad(`${ins.name} needs its ${ins.name.startsWith('texm3x2') ? 'texm3x2pad'
+            : 'two texm3x3pad'} instruction${ins.name.startsWith('texm3x2') ? '' : 's'} directly `
+            + 'before it');
+    }
+    else if (pad)
+    {
+        state.pending = {
+            name: ins.name, token: ins.tokenOffset, family: ins.name === 'texm3x2pad' ? 'm3x2'
+                : 'm3x3', next: /** @type {Operand} */ (d).index + 1, rows: 1,
+        };
+    }
+
+    // Order and size.
+    const limits = PS1_SLOT_LIMITS[/** @type {keyof typeof PS1_SLOT_LIMITS} */ (v.name)];
+    if (spec.kind === 'tex')
+    {
+        if (state.sawArith)
+        {
+            throw bad('a texture instruction cannot follow an arithmetic instruction');
+        }
+        if (++state.texture[state.phase] > limits.texture)
+        {
+            throw bad(`${v.name} has ${limits.texture} texture instruction slots per phase`);
+        }
+    }
+    else
+    {
+        state.sawArith = true;
+        if (!ins.coissue && ++state.arithmetic[state.phase] > limits.arithmetic)
+        {
+            throw bad(`${v.name} has ${limits.arithmetic} arithmetic instruction slots per phase`);
+        }
+    }
+}
+
 /**
  * @param {VersionInfo} v
  * @param {number} usageToken
@@ -925,7 +1477,13 @@ export function decode(tokens){
         instructions: [], declarations: [],
         defs: { f: new Map(), i: new Map(), b: new Map() },
         constantTable: null, samplers: new Map(), declared: new Map(), labels: new Map(),
+        slots: null,
     };
+    const ps1 = v.ps1 ? newPs1State() : null;
+    if (ps1)
+    {
+        program.slots = { texture: ps1.texture, arithmetic: ps1.arithmetic };
+    }
     /** @type {{ kind: string, idx: number }[]} */
     const stack = [];
     let ifDepth = 0;
@@ -969,7 +1527,32 @@ export function decode(tokens){
         }
         if (code === PHASE_CODE)
         {
-            throw new Error(`decode: phase marker at token ${pos} is not supported`);
+            if (v.name !== 'ps_1_4')
+            {
+                throw new Error(`decode: phase marker at token ${pos} is not supported`
+                    + `${v.ps1 ? ` in ${v.name}; only ps_1_4 has phases` : ''}`);
+            }
+            if (!ps1 || ps1.phase !== 0)
+            {
+                throw new Error(
+                    `decode: second phase marker at token ${pos}; ps_1_4 has two phases`);
+            }
+            if (ps1.pending)
+            {
+                throw new Error(`decode: ${ps1.pending.name} at token ${ps1.pending.token} is `
+                    + 'never closed');
+            }
+            ps1.phase = 1;
+            ps1.sawArith = false;
+            /** @type {Instruction} */
+            const marker = {
+                opcode: PHASE_CODE, name: 'phase', control: 0, dest: null, sources: [], decl: true,
+                coissue: false, phase: 1, ordinal: -1, tokenOffset: pos,
+            };
+            program.instructions.push(marker);
+            ps1.last = marker;
+            pos++;
+            continue;
         }
         if (tok & 0x80000000)
         {
@@ -981,20 +1564,29 @@ export function decode(tokens){
         {
             throw new Error(`decode: unknown opcode ${code} at token ${pos}`);
         }
+        const name = v.ps1 ? ps1Name(code, v.minor, info.name) : info.name;
         if (!isAvailable(v, info))
         {
-            throw new Error(`decode: ${info.name} is not available in ${v.name} (token ${pos})`);
+            throw new Error(`decode: ${name} is not available in ${v.name} (token ${pos})`);
         }
         if (UNSUPPORTED_OPS.has(info.name))
         {
             throw new Error(`decode: ${info.name} (predication) is not supported by this machine`);
         }
-        if (tok & (1 << 30))
+        if (v.ps1)
+        {
+            if (tok & ((1 << 28) | (1 << 29)))
+            {
+                throw new Error(`decode: reserved bits 0x${(tok & 0x30000000).toString(16)} in `
+                    + `the opcode token at token ${pos}`);
+            }
+        }
+        else if (tok & (1 << 30))
         {
             throw new Error(`decode: predicated instruction at token ${pos} `
                 + 'is not supported by this machine');
         }
-        if (tok & (1 << 28))
+        else if (tok & (1 << 28))
         {
             throw new Error(`decode: co-issued instruction at token ${pos} is not supported`);
         }
@@ -1016,7 +1608,8 @@ export function decode(tokens){
 
         /** @type {Instruction} */
         const ins = {
-            opcode: code, name: info.name, control, dest: null, sources: [], decl: false,
+            opcode: code, name, control, dest: null, sources: [], decl: false,
+            coissue: v.ps1 && !!(tok & (1 << 30)), phase: ps1 ? ps1.phase : 0,
             ordinal: -1, tokenOffset: pos,
         };
         let cursor = pos + 1;
@@ -1119,7 +1712,7 @@ export function decode(tokens){
                 }
                 return [dest, sources, c];
             };
-            let counts = [info.src];
+            let counts = [v.ps1 ? /** @type {Ps1Op} */ (PS1_OPS.get(name)).src : info.src];
             if (info.src < 0)
             {
                 counts = info.name === 'sgn' ? [1, 3] : v.major === 2 ? [3] : [1];
@@ -1149,15 +1742,27 @@ export function decode(tokens){
                 throw failure;
             }
             [ins.dest, ins.sources, cursor] = parsed;
-            if (info.code === 66)
+            if (ps1)
             {
-                ins.name = ins.control === 1 ? 'texldp' : ins.control === 2 ? 'texldb' : 'texld';
+                checkPs1(v, ins, ps1);
             }
-            checkInstruction(v, ins);
+            else
+            {
+                if (info.code === 66)
+                {
+                    ins.name = ins.control === 1 ? 'texldp'
+                        : ins.control === 2 ? 'texldb' : 'texld';
+                }
+                checkInstruction(v, ins);
+            }
             ins.ordinal = ordinal++;
         }
         const idx = program.instructions.length;
         program.instructions.push(ins);
+        if (ps1)
+        {
+            ps1.last = ins;
+        }
         pos = cursor;
 
         switch (ins.name)
@@ -1259,6 +1864,11 @@ export function decode(tokens){
         const open = program.instructions[stack[stack.length - 1].idx];
         throw new Error(`decode: ${open.name} at token ${open.tokenOffset} is never closed`);
     }
+    if (ps1 && ps1.pending)
+    {
+        throw new Error(`decode: ${ps1.pending.name} at token ${ps1.pending.token} is never `
+            + 'closed');
+    }
     for (const ins of program.instructions)
     {
         if (ins.name === 'call' || ins.name === 'callnz')
@@ -1333,8 +1943,11 @@ function checkDeclarations(program){
 
 /* ------------------------------------------------------------- disassemble */
 
-/** @param {number} swizzle */
-function swizzleText(swizzle){
+/**
+ * @param {number} swizzle
+ * @param {string} [letters]  The four component names; "rgba" in the ps_1_x models.
+ */
+function swizzleText(swizzle, letters = COMPONENTS){
     if (swizzle === IDENTITY)
     {
         return '';
@@ -1342,7 +1955,7 @@ function swizzleText(swizzle){
     const parts = [];
     for (let k = 0; k < 4; k++)
     {
-        parts.push(COMPONENTS[(swizzle >> (2 * k)) & 3]);
+        parts.push(letters[(swizzle >> (2 * k)) & 3]);
     }
     while (parts.length > 1 && parts[parts.length - 1] === parts[parts.length - 2])
     {
@@ -1351,8 +1964,11 @@ function swizzleText(swizzle){
     return `.${parts.join('')}`;
 }
 
-/** @param {number} mask */
-function maskText(mask){
+/**
+ * @param {number} mask
+ * @param {string} [letters]
+ */
+function maskText(mask, letters = COMPONENTS){
     if (mask === 0xf)
     {
         return '';
@@ -1362,7 +1978,7 @@ function maskText(mask){
     {
         if (mask & (1 << k))
         {
-            s += COMPONENTS[k];
+            s += letters[k];
         }
     }
     return s;
@@ -1373,6 +1989,12 @@ function maskText(mask){
  * @param {Operand} op
  */
 function sourceText(v, op){
+    if (v.ps1)
+    {
+        const [before, after] = PS1_MODIFIER_TEXT.get(op.modifier) ?? ['', ''];
+        return `${before}${registerName(v, op.type, op.index)}${after}`
+            + swizzleText(op.swizzle, 'rgba');
+    }
     let body;
     if (op.relative)
     {
@@ -1423,9 +2045,22 @@ function floatText(value){
  * @returns {string}
  */
 function formatInstruction(program, ins){
+    return (ins.coissue ? '+ ' : '') + formatBody(program, ins);
+}
+
+/**
+ * @param {Program} program
+ * @param {Instruction} ins
+ * @returns {string}
+ */
+function formatBody(program, ins){
     const v = program.info;
     let name = ins.name;
     const operands = [];
+    if (ins.name === 'phase')
+    {
+        return 'phase';
+    }
     if (ins.name === 'dcl')
     {
         const decl = /** @type {Declaration} */ (ins.declaration);
@@ -1479,6 +2114,10 @@ function formatInstruction(program, ins){
     const d = ins.dest;
     if (d)
     {
+        if (v.ps1 && d.shift !== 0)
+        {
+            name += `_${SHIFT_NAMES.get(d.shift) ?? `shift${d.shift}`}`;
+        }
         if (d.saturate)
         {
             name += '_sat';
@@ -1491,7 +2130,8 @@ function formatInstruction(program, ins){
         {
             name += '_centroid';
         }
-        operands.push(registerName(v, d.type, d.index) + maskText(d.writeMask));
+        operands.push(registerName(v, d.type, d.index)
+            + maskText(d.writeMask, v.ps1 ? 'rgba' : COMPONENTS));
     }
     for (const op of ins.sources)
     {
@@ -1657,12 +2297,35 @@ function parseMask(text){
     return mask;
 }
 
-const OPERAND_PATTERN = /^([A-Za-z]+)(\d*)(?:\[\s*(a0\.x|aL)\s*(?:\+\s*(\d+))?\s*\])?(?:\.([xyzw]+))?$/;
+const OPERAND_PATTERN = /^([A-Za-z]+)(\d*)(?:\[\s*(a0\.x|aL)\s*(?:\+\s*(\d+))?\s*\])?(?:\.([xyzwrgba]+))?$/;
+
+/**
+ * A swizzle or write mask in the xyzw spelling. The ps_1_x models spell it
+ * rgba, and a shader of another model that does is told so.
+ * @param {VersionInfo} v
+ * @param {string} text
+ * @param {string} what
+ * @returns {string}
+ */
+function xyzwLetters(v, text, what){
+    if (/^[xyzw]+$/.test(text))
+    {
+        return text;
+    }
+    if (!v.ps1 || !/^[rgba]+$/.test(text))
+    {
+        throw new Error(`bad ${what} ".${text}"`);
+    }
+    return text.replace(/./g, ch=>COMPONENTS['rgba'.indexOf(ch)]);
+}
+
+/** The destination shifts by the name the assembler gives them. */
+const SHIFT_BY_NAME = new Map([...SHIFT_NAMES].map(([raw, name])=>[name, raw]));
 
 /**
  * @param {VersionInfo} v
  * @param {string} text
- * @param {{ mods: Set<string> }} mods
+ * @param {{ mods: Set<string>, defaultMask?: number }} mods
  * @returns {number[]} the destination token
  */
 function assembleDest(v, text, mods){
@@ -1672,8 +2335,18 @@ function assembleDest(v, text, mods){
         throw new Error(`bad destination "${text}"`);
     }
     const reg = parseRegister(v, m[1], m[2], text);
-    const mask = m[5] === undefined ? 0xf : parseMask(m[5]);
+    const mask = m[5] === undefined ? mods.defaultMask ?? 0xf
+        : parseMask(xyzwLetters(v, m[5], 'write mask'));
     let tok = (0x80000000 | typeBits(reg.type) | reg.index | (mask << 16)) >>> 0;
+    const shifts = [...mods.mods].filter(mod=>SHIFT_BY_NAME.has(mod));
+    if (shifts.length > 1)
+    {
+        throw new Error(`only one destination shift is allowed, not ${shifts.join(' and ')}`);
+    }
+    if (shifts.length)
+    {
+        tok |= /** @type {number} */ (SHIFT_BY_NAME.get(shifts[0])) << 24;
+    }
     if (mods.mods.has('sat'))
     {
         tok |= 1 << 20;
@@ -1698,26 +2371,51 @@ function assembleSource(v, text){
     let s = text.trim();
     /** @type {number} */
     let modifier = MOD.NONE;
-    if (s.startsWith('-'))
+    const complement = /^1\s*-\s*/.exec(s);
+    if (complement)
+    {
+        modifier = MOD.COMP;
+        s = s.slice(complement[0].length);
+    }
+    else if (s.startsWith('-'))
     {
         modifier = MOD.NEG;
         s = s.slice(1).trim();
     }
     if (s.startsWith('|'))
     {
-        if (!s.endsWith('|') || s.length < 3)
+        if (!s.endsWith('|') || s.length < 3 || complement)
         {
             throw new Error(`bad source "${text}"`);
         }
         modifier = modifier === MOD.NEG ? MOD.ABSNEG : MOD.ABS;
         s = s.slice(1, -1).trim();
     }
+    // The ps_1_x modifiers sit between the register and its swizzle: t0_bx2.rgb.
+    const suffix = /^(.*?)_(bias|bx2|x2|dz|dw)((?:\.[a-z]+)?)$/i.exec(s);
+    if (suffix)
+    {
+        s = suffix[1] + suffix[3];
+        const name = suffix[2].toLowerCase();
+        const negated = modifier === MOD.NEG;
+        const table = /** @type {Record<string, number[]>} */ ({
+            bias: [MOD.BIAS, MOD.BIASNEG], bx2: [MOD.SIGN, MOD.SIGNNEG],
+            x2: [MOD.X2, MOD.X2NEG], dz: [MOD.DZ, -1], dw: [MOD.DW, -1],
+        });
+        const picked = table[name][negated ? 1 : 0];
+        if ((modifier !== MOD.NONE && modifier !== MOD.NEG) || picked < 0)
+        {
+            throw new Error(`bad source "${text}"; _${name} cannot be combined with that`);
+        }
+        modifier = picked;
+    }
     const m = OPERAND_PATTERN.exec(s);
     if (!m)
     {
         throw new Error(`bad source "${text}"`);
     }
-    const swizzle = m[5] === undefined ? IDENTITY : parseSwizzle(m[5]);
+    const swizzle = m[5] === undefined ? IDENTITY
+        : parseSwizzle(xyzwLetters(v, m[5], 'swizzle'));
     let reg;
     /** @type {number[]} */
     const extra = [];
@@ -1839,6 +2537,14 @@ function assembleDcl(word, v, operands){
  * `-`, `|...|` and `-|...|`; a destination takes `_sat`, `_pp` and
  * `_centroid`; comparisons spell `if_lt`, `break_ge` and so on.
  *
+ * The ps_1_x models add the registers t# (texture) and v# as in ps_2, `phase`,
+ * a `+` before a co-issued instruction, the destination shifts `_x2 _x4 _x8
+ * _d2 _d4 _d8` beside `_sat`, rgba spellings of masks and swizzles, and the
+ * source modifiers `-r0`, `1-r0`, `r0_bias`, `-r0_bias`, `r0_bx2`, `-r0_bx2`,
+ * `r0_x2`, `-r0_x2`, `t0_dz` and `t0_dw`, written between the register and
+ * its swizzle (`t0_dw.xyw`, `r0_bx2.a`). `tex` is ps_1_1 to ps_1_3's texld and
+ * `texcrd` ps_1_4's texcoord.
+ *
  * By default the result is run through decode(), so what comes back is a
  * shader the version allows; pass `{ validate: false }` to assemble a shader
  * that is meant to be rejected.
@@ -1902,6 +2608,12 @@ export function assemble(text, options = {}){
  * @returns {number[]}
  */
 function assembleStatement(v, line){
+    let coissue = false;
+    if (line.startsWith('+'))
+    {
+        coissue = true;
+        line = line.slice(1).trim();
+    }
     const space = line.search(/\s/);
     const word = (space < 0 ? line : line.slice(0, space)).toLowerCase();
     const operands = splitOperands(space < 0 ? '' : line.slice(space + 1));
@@ -1912,6 +2624,18 @@ function assembleStatement(v, line){
         }
         return v.major >= 2 ? count << 24 : 0;
     };
+    if (word === 'phase')
+    {
+        if (operands.length || coissue)
+        {
+            throw new Error('phase takes no operands and cannot be co-issued');
+        }
+        return [PHASE_CODE];
+    }
+    if (coissue && (word.startsWith('dcl') || word.startsWith('def')))
+    {
+        throw new Error(`${word} cannot be co-issued`);
+    }
     if (word.startsWith('dcl'))
     {
         const body = assembleDcl(word, v, operands);
@@ -1950,7 +2674,8 @@ function assembleStatement(v, line){
     let name = base;
     for (const part of parts.slice(1))
     {
-        if (part === 'sat' || part === 'pp' || part === 'centroid')
+        if (part === 'sat' || part === 'pp' || part === 'centroid'
+            || (v.ps1 && SHIFT_BY_NAME.has(part)))
         {
             mods.add(part);
         }
@@ -1971,7 +2696,8 @@ function assembleStatement(v, line){
     }
     const info = OP_BY_NAME.get(name);
     const bareCompare = (name === 'ifc' || name === 'breakc') && control === 0;
-    if (!info || name === 'dcl' || name.startsWith('def') || bareCompare)
+    const spelling = (name === 'tex' || name === 'texcrd') && !v.ps1;
+    if (!info || name === 'dcl' || name.startsWith('def') || bareCompare || spelling)
     {
         throw new Error(`unknown instruction "${word}"`);
     }
@@ -1984,7 +2710,9 @@ function assembleStatement(v, line){
         {
             throw new Error(`${word} needs a destination`);
         }
-        body.push(...assembleDest(v, rest[0], { mods }));
+        // texcrd has no alpha to give, so a bare register means the three it writes.
+        body.push(...assembleDest(v, rest[0],
+            { mods, defaultMask: name === 'texcrd' ? MASK_RGB : undefined }));
         rest = rest.slice(1);
     }
     else if (mods.size)
@@ -1995,7 +2723,9 @@ function assembleStatement(v, line){
     {
         body.push(...assembleSource(v, s));
     }
-    return [(info.code | (control << 16) | lengthField(body.length)) >>> 0, ...body];
+    const opcode = info.code | (control << 16) | lengthField(body.length)
+        | (coissue ? 1 << 30 : 0);
+    return [opcode >>> 0, ...body];
 }
 
 /* ---------------------------------------------------------------- execute */
@@ -2018,6 +2748,12 @@ function assembleStatement(v, line){
  * @property {(sampler: number, dimension: '2d'|'cube'|'volume', coord: number[],
  *   mode: SampleMode) => number[]} [sample]
  * @property {(axis: 'x'|'y', value: number[]) => number[]} [derivative]
+ * @property {('2d'|'cube'|'volume')[]} [dimensions]  ps_1_x: what each stage's texture is, as
+ *   io.sample is told; '2d' where a stage has no entry.
+ * @property {{ m00: number, m01: number, m10: number, m11: number, lscale?: number,
+ *   loffset?: number }[]} [bump]  ps_1_x: per stage, the bump environment matrix
+ *   (D3DTSS_BUMPENVMAT00 to 11) and the luminance scale and offset (D3DTSS_BUMPENVLSCALE and
+ *   BUMPENVLOFFSET) that texbem, texbeml and bem read.
  */
 
 /**
@@ -2050,6 +2786,10 @@ function assembleStatement(v, line){
 export function execute(subject, io){
     const program = /** @type {Program} */ (
         'instructions' in subject ? subject : decode(subject));
+    if (program.info.ps1)
+    {
+        return executePs1(program, io);
+    }
     const v = program.info;
     const list = program.instructions;
     const consts = io.constants ?? {};
@@ -2736,4 +3476,476 @@ export function execute(subject, io){
         plain[name] = Array.from(values);
     }
     return { outputs: plain, written, killed, instructionsExecuted: executed, semantics };
+}
+
+/* ------------------------------------------------------------ execute, ps_1_x */
+
+/**
+ * Runs a ps_1_x shader once. The semantics are in the header of this file.
+ *
+ * @param {Program} program
+ * @param {MachineIO} io
+ * @returns {Result}
+ */
+function executePs1(program, io){
+    const v = program.info;
+    const late = v.minor === 4;
+    const list = program.instructions;
+    const consts = io.constants ?? {};
+    const RGBA = 'rgba';
+    const temps = new Float32Array(v.limits.temps * 4);
+    const tempsWritten = new Uint8Array(v.limits.temps * 4);
+    const texels = new Float32Array(v.limits.texcoords * 4);
+    const texelsWritten = new Uint8Array(v.limits.texcoords);
+    let killed = false;
+    let executed = 0;
+    /** @type {number | null} */
+    let depth = null;
+    /** @type {number[]} */
+    let rows = [];
+
+    /** @type {Instruction} */
+    let cur = list[0];
+    /**
+     * @param {string} message
+     * @returns {never}
+     */
+    const fail = message=>{
+        throw new Error(
+            `${message} at instruction ${cur.ordinal}: ${formatInstruction(program, cur)}`);
+    };
+    const saturate = (/** @type {number} */ x)=>x > 1 ? 1 : x > 0 ? x : 0;
+
+    /** @param {number} index @param {number} c */
+    const constant = (index, c)=>{
+        const def = program.defs.f.get(index);
+        let x;
+        if (def)
+        {
+            x = def[c];
+        }
+        else
+        {
+            const arr = consts.f;
+            const k = index * 4 + c;
+            if (!arr || k >= arr.length || typeof arr[k] !== 'number')
+            {
+                return fail(`read of unsupplied constant c${index}.${RGBA[c]}`);
+            }
+            x = f32(arr[k]);
+        }
+        return x > PS1_CONSTANT_LIMIT ? PS1_CONSTANT_LIMIT
+            : x < -PS1_CONSTANT_LIMIT ? -PS1_CONSTANT_LIMIT : x;
+    };
+
+    /** One component of a texture coordinate set. @param {number} n @param {number} c */
+    const coordinate = (n, c)=>{
+        const x = io.inputs?.t?.[n]?.[c];
+        return typeof x === 'number' ? f32(x)
+            : fail(`input t${n}.${COMPONENTS[c]} was not supplied`);
+    };
+
+    /** One component of a register, before swizzle and modifier. @param {Operand} op */
+    const readRaw = (op, /** @type {number} */ c)=>{
+        switch (op.type)
+        {
+            case REG.TEMP: {
+                const k = op.index * 4 + c;
+                return tempsWritten[k] ? temps[k]
+                    : fail(`read of unwritten r${op.index}.${RGBA[c]}`);
+            }
+            case REG.INPUT: {
+                const x = io.inputs?.v?.[op.index]?.[c];
+                return typeof x === 'number' ? f32(x)
+                    : fail(`input v${op.index}.${RGBA[c]} was not supplied`);
+            }
+            case REG.CONST:
+                return constant(op.index, c);
+            case REG.TEXTURE:
+                if (late)
+                {
+                    return coordinate(op.index, c);
+                }
+                return texelsWritten[op.index] ? texels[op.index * 4 + c]
+                    : fail(`read of unwritten t${op.index}.${RGBA[c]}`);
+            default:
+                return fail(`register ${registerName(v, op.type, op.index)} cannot be read`);
+        }
+    };
+
+    /** @param {number} modifier @param {number} x */
+    const modify = (modifier, x)=>{
+        switch (modifier)
+        {
+            case MOD.NEG: return -x;
+            case MOD.BIAS: return f32(x - 0.5);
+            case MOD.BIASNEG: return f32(0.5 - x);
+            case MOD.SIGN: return f32(f32(x - 0.5) * 2);
+            case MOD.SIGNNEG: return f32(f32(0.5 - x) * 2);
+            case MOD.COMP: return f32(1 - x);
+            case MOD.X2: return f32(x * 2);
+            case MOD.X2NEG: return -f32(x * 2);
+            default: return x;
+        }
+    };
+
+    /** Component `pos` of a source after its swizzle and modifier. */
+    const src = (/** @type {Operand} */ op, /** @type {number} */ pos)=>
+        modify(op.modifier, readRaw(op, (op.swizzle >> (2 * pos)) & 3));
+
+    /** @param {Operand} a @param {Operand} b @param {number} n */
+    const dot = (a, b, n)=>{
+        let sum = f32(src(a, 0) * src(b, 0));
+        for (let k = 1; k < n; k++)
+        {
+            sum = f32(sum + f32(src(a, k) * src(b, k)));
+        }
+        return sum;
+    };
+
+    /**
+     * Stores a result in the temporaries: the shift scale, then _sat, then the mask.
+     * @param {Instruction} ins @param {number[]} res
+     */
+    const store = (ins, res)=>{
+        const d = /** @type {Operand} */ (ins.dest);
+        const scale = SHIFT_SCALES.get(d.shift) ?? 1;
+        for (let c = 0; c < 4; c++)
+        {
+            if (!(d.writeMask & (1 << c)))
+            {
+                continue;
+            }
+            let x = res[c];
+            if (scale !== 1)
+            {
+                x = f32(x * scale);
+            }
+            if (d.saturate)
+            {
+                x = saturate(x);
+            }
+            temps[d.index * 4 + c] = x;
+            tempsWritten[d.index * 4 + c] = 1;
+        }
+    };
+
+    /** @param {number} stage */
+    const dimension = stage=>{
+        const dim = io.dimensions?.[stage] ?? '2d';
+        if (dim !== '2d' && dim !== 'cube' && dim !== 'volume')
+        {
+            return fail(`io.dimensions[${stage}] is "${dim}"; it must be 2d, cube or volume`);
+        }
+        return dim;
+    };
+    /** Coordinates a lookup of the stage reads. @param {number} stage */
+    const needed = stage=>dimension(stage) === '2d' ? 2 : 3;
+
+    /** @param {number} stage @param {number[]} coord */
+    const sample = (stage, coord)=>{
+        if (!io.sample)
+        {
+            fail(`${cur.name} needs io.sample`);
+        }
+        const texel = /** @type {NonNullable<MachineIO['sample']>} */ (io.sample)(
+            stage, dimension(stage), coord, { kind: 'plain' });
+        if (!texel || texel.length < 4)
+        {
+            fail('io.sample must answer four components');
+        }
+        return [f32(texel[0]), f32(texel[1]), f32(texel[2]), f32(texel[3])];
+    };
+
+    /**
+     * The coordinate set of a stage as four floats; the first `count` must have
+     * been supplied, the rest are taken if they were.
+     * @param {number} n @param {number} count
+     */
+    const coordinates = (n, count)=>{
+        const out = [0, 0, 0, 0];
+        for (let c = 0; c < 4; c++)
+        {
+            const x = io.inputs?.t?.[n]?.[c];
+            if (c < count)
+            {
+                out[c] = coordinate(n, c);
+            }
+            else if (typeof x === 'number')
+            {
+                out[c] = f32(x);
+            }
+        }
+        return out;
+    };
+
+    /** Writes a t# register of ps_1_1 to ps_1_3. @param {number} n @param {number[]} value */
+    const fill = (n, value)=>{
+        for (let c = 0; c < 4; c++)
+        {
+            texels[n * 4 + c] = value[c];
+        }
+        texelsWritten[n] = 1;
+    };
+
+    /** The bump environment state of a stage. @param {number} stage */
+    const bump = stage=>{
+        const b = io.bump?.[stage];
+        return b ?? fail(`${cur.name} needs io.bump[${stage}]`);
+    };
+    /** @param {Record<string, number | undefined>} b @param {string} key */
+    const bumpValue = (b, key)=>{
+        const x = b[key];
+        return typeof x === 'number' ? f32(x) : fail(`io.bump needs a number ${key}`);
+    };
+
+    /** Row of a matrix multiply: the stage's (u, v, w) against the rgb of a source. */
+    const row = (/** @type {number} */ n, /** @type {Operand} */ op)=>{
+        let sum = f32(coordinate(n, 0) * src(op, 0));
+        for (let k = 1; k < 3; k++)
+        {
+            sum = f32(sum + f32(coordinate(n, k) * src(op, k)));
+        }
+        return sum;
+    };
+
+    /** The coordinates a ps_1_4 texld or texcrd takes from its source, with _dz or _dw applied. */
+    const vector = (/** @type {Operand} */ op, /** @type {number} */ count)=>{
+        const out = [0, 0, 0, 0];
+        const at = (/** @type {number} */ k)=>readRaw(op, (op.swizzle >> (2 * k)) & 3);
+        const place = op.modifier === MOD.DZ ? 2 : op.modifier === MOD.DW ? 3 : -1;
+        const divisor = place < 0 ? 1 : at(place);
+        for (let k = 0; k < count; k++)
+        {
+            out[k] = place < 0 ? at(k) : f32(at(k) / divisor);
+        }
+        return out;
+    };
+
+    /** @param {number} z @param {number} w */
+    const writeDepth = (z, w)=>{
+        depth = w === 0 ? 1 : saturate(f32(z / w));
+    };
+
+    /**
+     * Executes one instruction. An arithmetic instruction answers its result so a
+     * co-issued pair can read before either stores; a texture instruction writes
+     * its register itself.
+     * @param {Instruction} ins
+     * @returns {number[] | null}
+     */
+    const run = ins=>{
+        cur = ins;
+        executed++;
+        const s = ins.sources;
+        const d = ins.dest;
+        const mask = d ? d.writeMask : 0;
+        const res = [0, 0, 0, 0];
+        const each = (/** @type {(c: number) => number} */ fn)=>{
+            for (let c = 0; c < 4; c++)
+            {
+                if (mask & (1 << c))
+                {
+                    res[c] = fn(c);
+                }
+            }
+            return res;
+        };
+        const n = d ? d.index : 0;
+        switch (ins.name)
+        {
+            case 'nop': return null;
+            case 'mov': return each(c=>src(s[0], c));
+            case 'add': return each(c=>f32(src(s[0], c) + src(s[1], c)));
+            case 'sub': return each(c=>f32(src(s[0], c) - src(s[1], c)));
+            case 'mul': return each(c=>f32(src(s[0], c) * src(s[1], c)));
+            case 'mad': return each(c=>f32(f32(src(s[0], c) * src(s[1], c)) + src(s[2], c)));
+            case 'lrp':
+                return each(c=>{
+                    const [a, b, e] = [src(s[0], c), src(s[1], c), src(s[2], c)];
+                    return f32(e + f32(a * f32(b - e)));
+                });
+            case 'dp3': { const r = dot(s[0], s[1], 3); return each(()=>r); }
+            case 'dp4': { const r = dot(s[0], s[1], 4); return each(()=>r); }
+            case 'cmp': return each(c=>src(s[0], c) >= 0 ? src(s[1], c) : src(s[2], c));
+            case 'cnd': return each(c=>src(s[0], c) > 0.5 ? src(s[1], c) : src(s[2], c));
+            case 'bem': {
+                const b = bump(n);
+                const [sr, sg] = [src(s[1], 0), src(s[1], 1)];
+                return each(c=>c === 0
+                    ? f32(f32(src(s[0], 0) + f32(bumpValue(b, 'm00') * sr))
+                        + f32(bumpValue(b, 'm10') * sg))
+                    : f32(f32(src(s[0], 1) + f32(bumpValue(b, 'm01') * sr))
+                        + f32(bumpValue(b, 'm11') * sg)));
+            }
+            case 'tex':
+                fill(n, sample(n, coordinates(n, needed(n))));
+                return null;
+            case 'texcoord':
+                fill(n, [saturate(coordinate(n, 0)), saturate(coordinate(n, 1)),
+                    saturate(coordinate(n, 2)), 1]);
+                return null;
+            case 'texkill': {
+                const reg = /** @type {Operand} */ (d);
+                for (let c = 0; c < 3; c++)
+                {
+                    let x;
+                    if (reg.type === REG.TEMP)
+                    {
+                        x = readRaw(reg, c);
+                    }
+                    else
+                    {
+                        x = !late && texelsWritten[reg.index] ? texels[reg.index * 4 + c]
+                            : coordinate(reg.index, c);
+                    }
+                    if (x < 0)
+                    {
+                        killed = true;
+                    }
+                }
+                return null;
+            }
+            case 'texbem': case 'texbeml': {
+                const b = bump(n);
+                const [sr, sg] = [src(s[0], 0), src(s[0], 1)];
+                const coord = coordinates(n, needed(n));
+                const u = f32(f32(coord[0] + f32(bumpValue(b, 'm00') * sr))
+                    + f32(bumpValue(b, 'm10') * sg));
+                const w = f32(f32(coord[1] + f32(bumpValue(b, 'm01') * sr))
+                    + f32(bumpValue(b, 'm11') * sg));
+                const texel = sample(n, [u, w, coord[2], coord[3]]);
+                if (ins.name === 'texbeml')
+                {
+                    const lum = saturate(f32(f32(src(s[0], 2) * bumpValue(b, 'lscale'))
+                        + bumpValue(b, 'loffset')));
+                    for (let c = 0; c < 3; c++)
+                    {
+                        texel[c] = f32(texel[c] * lum);
+                    }
+                }
+                fill(n, texel);
+                return null;
+            }
+            case 'texreg2ar':
+                fill(n, sample(n, [src(s[0], 3), src(s[0], 0), 0, 0]));
+                return null;
+            case 'texreg2gb':
+                fill(n, sample(n, [src(s[0], 1), src(s[0], 2), 0, 0]));
+                return null;
+            case 'texreg2rgb':
+                fill(n, sample(n, [src(s[0], 0), src(s[0], 1), src(s[0], 2), 0]));
+                return null;
+            case 'texm3x2pad': case 'texm3x3pad':
+                rows.push(row(n, s[0]));
+                return null;
+            case 'texm3x2tex': {
+                const point = [rows[0], row(n, s[0]), 0, 0];
+                rows = [];
+                fill(n, sample(n, point));
+                return null;
+            }
+            case 'texm3x2depth': {
+                const z = rows[0];
+                rows = [];
+                writeDepth(z, row(n, s[0]));
+                return null;
+            }
+            case 'texm3x3tex': case 'texm3x3': case 'texm3x3spec': case 'texm3x3vspec': {
+                const normal = [rows[0], rows[1], row(n, s[0])];
+                rows = [];
+                if (ins.name === 'texm3x3')
+                {
+                    fill(n, [...normal, 1]);
+                    return null;
+                }
+                if (ins.name === 'texm3x3tex')
+                {
+                    fill(n, sample(n, [...normal, 0]));
+                    return null;
+                }
+                const eye = ins.name === 'texm3x3spec' ? [0, 1, 2].map(k=>src(s[1], k))
+                    : [coordinate(n - 2, 3), coordinate(n - 1, 3), coordinate(n, 3)];
+                let nn = f32(normal[0] * normal[0]);
+                let ne = f32(normal[0] * eye[0]);
+                for (let k = 1; k < 3; k++)
+                {
+                    nn = f32(nn + f32(normal[k] * normal[k]));
+                    ne = f32(ne + f32(normal[k] * eye[k]));
+                }
+                const k = f32(f32(2 * ne) / nn);
+                fill(n, sample(n, [0, 1, 2].map(c=>f32(f32(k * normal[c]) - eye[c])).concat(0)));
+                return null;
+            }
+            case 'texdp3': case 'texdp3tex': {
+                const x = row(n, s[0]);
+                fill(n, ins.name === 'texdp3' ? [x, x, x, x] : sample(n, [x, 0, 0, 0]));
+                return null;
+            }
+            case 'texld':
+                store(ins, sample(n, vector(s[0], needed(n))));
+                return null;
+            case 'texcrd':
+                store(ins, [...vector(s[0], 3), 0]);
+                return null;
+            case 'texdepth': {
+                const reg = /** @type {Operand} */ (d);
+                writeDepth(readRaw(reg, 0), readRaw(reg, 1));
+                return null;
+            }
+            default:
+                return fail(`instruction ${ins.name} is not implemented`);
+        }
+    };
+
+    let i = 0;
+    while (i < list.length)
+    {
+        const ins = list[i];
+        if (ins.decl)
+        {
+            i++;
+            continue;
+        }
+        const partner = list[i + 1];
+        if (partner && partner.coissue)
+        {
+            // Both halves read the registers as they were before either wrote.
+            const first = run(ins);
+            const second = run(partner);
+            if (first)
+            {
+                store(ins, first);
+            }
+            if (second)
+            {
+                store(partner, second);
+            }
+            i += 2;
+            continue;
+        }
+        const res = run(ins);
+        if (res)
+        {
+            store(ins, res);
+        }
+        i++;
+    }
+
+    const r0 = [0, 1, 2, 3].map(c=>tempsWritten[c] ? temps[c] : NaN);
+    let r0Mask = 0;
+    for (let c = 0; c < 4; c++)
+    {
+        r0Mask |= tempsWritten[c] << c;
+    }
+    /** @type {Record<string, number[]>} */
+    const outputs = { oC0: r0 };
+    /** @type {Record<string, number>} */
+    const written = { oC0: r0Mask };
+    if (depth !== null)
+    {
+        outputs.oDepth = [depth, NaN, NaN, NaN];
+        written.oDepth = 1;
+    }
+    return { outputs, written, killed, instructionsExecuted: executed, semantics: {} };
 }
