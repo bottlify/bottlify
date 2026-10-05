@@ -251,6 +251,22 @@ function build(ir, options, diagnostics, stats){
     instrs = propagateModifiers(prune(instrs));
     instrs = forwardOutputs(instrs);
 
+    // An input nothing reads is not declared, and not judged: a pixel shader that
+    // takes the vertex shader's output structure carries its POSITION, which no
+    // model 1 shader can read and fxc accepts as long as it is not read.
+    const read = new Set();
+    for (const instr of instrs)
+    {
+        for (const src of instr.srcs)
+        {
+            if (src.kind === 'input')
+            {
+                read.add(src.input);
+            }
+        }
+    }
+    ir.inputs = ir.inputs.filter(input=>read.has(input));
+
     // The inputs the model has: the two colours, and the texture coordinate sets.
     for (const input of ir.inputs)
     {

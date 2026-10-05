@@ -178,6 +178,21 @@ test('the output reads: the program disassembles to what the source says', async
         'mad oC0, t0, v0, c0.x']);
 });
 
+test('a model 1 pixel shader may take a structure with a POSITION it does not read', async()=>{
+    const struct = 'sampler2D S;\nstruct V { float4 Pos : POSITION; float2 Tex : TEXCOORD0; };\n';
+    for (const profile of ['ps_1_1', 'ps_1_2', 'ps_1_3', 'ps_1_4'])
+    {
+        const unread = await compile(
+            `${struct}float4 main(V In) : COLOR0 { return tex2D(S, In.Tex); }`, profile);
+        assert.equal(unread.ok, true, `${profile}: ${unread.messages}`);
+        const read = await compile(
+            `${struct}float4 main(V In) : COLOR0 { return In.Pos; }`, profile);
+        assert.equal(read.ok, false, profile);
+        assert.match(read.messages,
+            new RegExp(`X4502: invalid ${profile} input semantic 'POSITION0'`));
+    }
+});
+
 test('pixel shader model 1 compiles what it can hold and reports the rest', async()=>{
     const simple = 'sampler2D S;\nfloat4 main(float2 uv : TEXCOORD0, float4 c : COLOR0) : COLOR0'
         + '{ return tex2D(S, uv) * c; }';
