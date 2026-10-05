@@ -37,7 +37,6 @@ import { decompressZstd } from './zstd.js';
 import { mountDiscs } from './discs.js';
 import { loadZstdWasm } from './zstd-wasm.js';
 import { createClassTable } from './layers/win32/ole32/remote.js';
-import { createReplicas } from './replicas.js';
 import { createCallRepeats } from './call-repeats.js';
 import { withRunMode } from './mode.js';
 
@@ -6912,8 +6911,8 @@ export async function createApp(options){
     // a process of its own, started beside the one that asked for it and
     // running alongside it for as long as anything holds one of its objects.
     // The table of their class objects is the run's, as the service control
-    // manager's is the machine's, and what each of them writes is carried to
-    // the others whenever one runs on another's behalf (`replicas.js`).
+    // manager's is the machine's; their files and registry are the run's
+    // (`system`), so what one writes the others read at once.
     /** @type {Map<unknown, any>} */
     const processes = new Map();
     /** @type {Map<any, unknown>} */
@@ -6931,7 +6930,6 @@ export async function createApp(options){
     const serving = new Set();
     /** @type {any} */
     let runOptionsNow;
-    const replicas = createReplicas(detail=>events.emit('divergence', { api: 'process', detail }));
     const classTable = createClassTable({
         launch: (request, process)=>{
             const parent = processes.get(process);
@@ -6943,13 +6941,6 @@ export async function createApp(options){
             servers.add(exited);
             exited.finally(()=>servers.delete(exited));
             return { exited };
-        },
-        publish: process=>{
-            const running = processes.get(process);
-            if (running && replicas.tracked(running))
-            {
-                replicas.publish(running);
-            }
         },
     });
 
@@ -6964,27 +6955,17 @@ export async function createApp(options){
         processes.set(process, built);
         names.set(built, process);
         images.set(built, extra?.imagePath ?? '');
-        if (servers.size > 0)
-        {
-            replicas.track(built);
-        }
         return built;
     };
 
     /**
-     * A process is over: what it wrote reaches everyone still standing, and
-     * everything its proxies held goes back -- which is what lets a server
-     * it was using see its last client go.
+     * A process is over: everything its proxies held goes back -- which is
+     * what lets a server it was using see its last client go.
      *
      * @param {any} ended
      */
     const retire = async ended=>{
-        if (replicas.tracked(ended))
-        {
-            replicas.publish(ended);
-        }
         await classTable.ended(names.get(ended));
-        replicas.forget(ended);
         processes.delete(names.get(ended));
         names.delete(ended);
     };
@@ -7157,18 +7138,12 @@ export async function createApp(options){
                 detail: `the server ${request.command} of ${request.clsid} is not on the volume` });
             return -1;
         }
-        // Every process standing is kept in step from here on.
-        for (const standing of processes.values())
-        {
-            replicas.track(standing);
-        }
         const server = await build({
             executable: found.image,
             imagePath: found.path,
             commandLine: `${request.command.trim()} -Embedding`,
             ...newProcessIds(),
         });
-        replicas.track(server);
         // A line of processes of its own: a server that starts a child and
         // waits on it, or hands over to another image, is run the way the
         // program the page started is.
@@ -7217,10 +7192,6 @@ export async function createApp(options){
         }
         noteLogSequence();
         mediaInstance = parent.media.instance() ?? mediaInstance;
-        if (replicas.tracked(parent))
-        {
-            replicas.publish(parent);
-        }
         line.current = await build({
             executable: image,
             imagePath: request.imagePath,
@@ -7253,13 +7224,6 @@ export async function createApp(options){
         await child.dispose();
 
         line.current = parent;
-        // Brought up to date wholesale, so what it holds now is its own
-        // starting point again.
-        if (replicas.tracked(parent))
-        {
-            replicas.forget(parent);
-            replicas.track(parent);
-        }
         replayLogLevels();
         Object.assign(facade, parent, own);
         bindLogLevels();
@@ -7294,7 +7258,6 @@ export async function createApp(options){
                     {
                         await Promise.allSettled([...servers]);
                     }
-                    replicas.forget(ending);
                     noticeExit(code);
                 }
                 return code;

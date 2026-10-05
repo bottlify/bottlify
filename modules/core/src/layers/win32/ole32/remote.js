@@ -122,9 +122,6 @@ const MSHCTX_LOCAL = 0;
  * @property {(request: { command: string, clsid: string }, process: unknown)
  *     => { exited: Promise<unknown> } | null} [launch]
  *     Starts a server as a process beside the caller's, or says it cannot.
- * @property {(process: unknown) => void} [publish]
- *     What a process has written -- its files and its registry -- made what
- *     every other process sees, before another process runs on its behalf.
  */
 
 /**
@@ -420,7 +417,6 @@ export function createRemoting(host){
                 reply = { hr: RPC_E_SERVERFAULT };
             }
             home.running.delete(item.resolve);
-            host.table.hooks.publish?.(host.process);
             item.resolve(reply);
         }
     };
@@ -462,8 +458,6 @@ export function createRemoting(host){
         home.outgoing++;
         try
         {
-            // What this process wrote is what the other one runs against.
-            host.table.hooks.publish?.(host.process);
             const answer = send(target, message).then(value=>({ value }));
             for (;;)
             {

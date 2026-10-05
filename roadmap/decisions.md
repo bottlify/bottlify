@@ -524,7 +524,10 @@ the child's exit code once it exits, the files and registry the child wrote copi
 of the two machines runs at a time, so this is still not two processes executing at once -- the
 Battlefield 2 installer's shape (run a stage, wait, go on) is what it covers. *2026-09-24.*
 `roadmap/v2/` plans processes side by side, each in a worker with its own memory (stage 2); until
-that lands, this decision stands.
+that lands, this decision stands. On the `cork2` branch the copying is gone: the run's processes
+share one registry hive, one volume (the drives, their writable layers and the bundle mount) and
+one numbering of process and thread ids, so a child's writes are its parent's as they are made.
+*2026-10-05.*
 
 **Only Windows system libraries are reimplemented; a redistributable middleware runtime is ours to
 reimplement too (§B above); anything else a game ships in its own directory is loaded and run as
