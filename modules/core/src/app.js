@@ -45,6 +45,7 @@ import { createCallRepeats } from './call-repeats.js';
 import { withRunMode } from './mode.js';
 import { createLinkMemory, openLink } from './system/link.js';
 import { systemHandlers } from './system-link.js';
+import { storeHandlers } from './layers/cpu/internal/store-link.js';
 import { eventFrom } from './system/events-across.js';
 import { defaultModules } from './layers/index.js';
 import { createRunRegistry } from './layers/win32/module.js';
@@ -7937,6 +7938,8 @@ export async function createApp(options){
                 (target, method, args)=>link.callWaiting(target, method, args)),
             ...objects,
             com: com.handlers,
+            // The run's translation store, which only this thread can hold open.
+            ...translationStore ? storeHandlers(translationStore) : {},
             process: {
                 output: (/** @type {number} */ handle, /** @type {string} */ text)=>
                     events.emit('output', { handle, text }),
@@ -8046,10 +8049,10 @@ export async function createApp(options){
                         graphics: knobs,
                         audio: sound ? Object.fromEntries(Object.entries(sound.options)
                             .filter(([, value])=>typeof value !== 'function')) : undefined,
-                        // The translator's store and the doorbell are this
-                        // thread's: the child's translator keeps none.
-                        cork: { config: { ...options.cork?.config, store: null,
-                            doorbell: undefined } },
+                        // The translator's store is the run's, asked across the
+                        // link; the doorbell is this thread's.
+                        cork: { config: { ...options.cork?.config,
+                            store: translationStore ? 'run' : null, doorbell: undefined } },
                     },
                     run: { maxTurns: runOptionsNow?.maxTurns, timeoutMs: runOptionsNow?.timeoutMs },
                 }, [...graphics ? [graphics.port1] : [], ...display ? [display.port2] : []]);

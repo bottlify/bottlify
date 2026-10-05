@@ -195,7 +195,7 @@ program's thread. It
 needs shared memory: asked for where there is none, the run falls back to `compatible` with one
 process at a time and raises a `fallback` event. What the processes of a run share -- the
 registry, the volume and the sharing of its open files, the window directory, ids, named events,
-semaphores and mutexes, the bundle, COM's class table (`core/src/com-link.js`) -- stays on the engine thread, which answers a process thread
+semaphores and mutexes, the bundle, COM's class table (`core/src/com-link.js`), the translation store (`core/src/layers/cpu/internal/store-link.js`) -- stays on the engine thread, which answers a process thread
 across a link: two rings in shared memory, one each way, with a doorbell word per side
 (`core/src/system/link.js`, values encoded by `codec.js`). The process thread blocks on its doorbell
 for each answer and answers what it is asked meanwhile (the engine asks it about its windows); a

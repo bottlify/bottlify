@@ -22,8 +22,10 @@ differently raises a `divergence` event naming the API.
   that many at once runs beside its parent taking turns with it in its parent's worker.
 - With `concurrency` 2 or 4 a process's own journal -- its calls, its phase profile, its frames --
   stays in its worker: the run's log holds the events every process reports and what the engine's
-  thread writes. A process in a worker keeps no translations between runs, places no hooks
-  (`hooks`, `watchImport`), and reaches no network transport the page handed in (`win32.network`).
+  thread writes. A process in a worker takes its translations from the run's one store, which
+  the engine's thread keeps open, and puts what it makes there; a batch's lookups cross the link
+  together, one wait for the batch. It places no hooks (`hooks`, `watchImport`), and reaches no
+  network transport the page handed in (`win32.network`).
   The run's diagnostics are the program's tables as it last answered, with the journal and the
   sound output the engine's thread keeps.
 - With `concurrency` 1 the process of an out-of-process COM server runs alongside the program that

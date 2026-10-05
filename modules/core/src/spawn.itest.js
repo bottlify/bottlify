@@ -215,6 +215,44 @@ test('a child beside its parent writes to the run\'s one translation store', { t
         assert.equal(opened, 1, 'one store for the run, the children\'s machines included');
     });
 
+test('a process in a worker of its own takes its translations from the run\'s store, and the'
+    + ' next run finds them there', { timeout: 120000 }, async t=>{
+    // Where every process runs in a worker, its first one too, no process
+    // had the store: the system's thread holds its records file, and a worker
+    // opened none of its own. Every run translated everything again.
+    withOrigin(t, createMemoryDirectory());
+    const program = buildExe({
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        code: ({ iat })=>[
+            // ecx = 3000000; eax = 0; do eax = rol(eax + ecx ^ 0x55, 3) while (--ecx)
+            0xb9, ...u32(3000000), 0x31, 0xc0,
+            0x01, 0xc8, 0x35, ...u32(0x55), 0xc1, 0xc0, 0x03, 0x49, 0x75, 0x100 - 13,
+            0x25, ...u32(0x7f), 0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    const run = async()=>{
+        const app = await createApp({ executable: program, imagePath: 'C:\\App\\loop.exe',
+            engine: 'cork', concurrency: 2 });
+        try
+        {
+            const code = await app.run({ timeoutMs: 60000 });
+            const cpu = app.diagnostics().find((/** @type {any} */ table)=>table.name === 'cpu');
+            return { code, cork: /** @type {any} */ (cpu)?.metrics?.cork };
+        }
+        finally
+        {
+            await app.dispose();
+        }
+    };
+    const first = await run();
+    assert.ok(first.cork.cacheMisses > 0, 'the first run looked its regions up, and made them');
+    const second = await run();
+    assert.equal(second.code, first.code);
+    assert.ok(second.cork.cacheHits > 0, `the second took them from the store: ${
+        JSON.stringify({ hits: second.cork.cacheHits, misses: second.cork.cacheMisses })}`);
+    assert.equal(second.cork.cacheMisses, 0);
+});
+
 test('the run\'s translation store keeps its records file open past a child, until the run goes',
     { timeout: 120000 }, async t=>{
         // A child's machine going let go of the store every process shares:
