@@ -100,6 +100,95 @@ const lentOf = senders=>{
 };
 
 /**
+ * @typedef {Object} Connection
+ * @property {() => boolean} drew   whether a root of its plays on the worker
+ * @property {(data: any) => void} frame
+ * @property {() => void} lost
+ */
+
+/**
+ * The connections onto each graphics worker. Every process the run starts on
+ * this thread connects to the one worker, and the worker keeps one picture
+ * for all of them: so each frame is shown once, by one connection, and the
+ * worker told once that it was, or the next would be sent twice over and a
+ * transferred picture copied after it was given back.
+ *
+ * @type {WeakMap<object, { connections: Connection[], listener: (event: { data: any }) => void }>}
+ */
+const onWorker = new WeakMap();
+
+/**
+ * Who shows a frame: the newest connection that draws there -- a child that
+ * draws beside its parent is the one on top -- or the newest of all.
+ *
+ * @param {Connection[]} connections
+ */
+const showing = connections=>{
+    for (let at = connections.length - 1; at >= 0; at--)
+    {
+        if (connections[at].drew())
+        {
+            return connections[at];
+        }
+    }
+    return connections.at(-1);
+};
+
+/**
+ * @param {{ postMessage: (message: any) => void,
+ *     addEventListener: (type: 'message', listener: (event: { data: any }) => void) => void,
+ *     removeEventListener: (type: 'message', listener: (event: { data: any }) => void) => void }}
+ *     worker
+ * @param {Connection} connection
+ * @returns {() => void}  leaves
+ */
+function join(worker, connection){
+    let shared = onWorker.get(worker);
+    if (!shared)
+    {
+        /** @type {Connection[]} */
+        const connections = [];
+        /** @param {{ data: any }} event */
+        const listener = ({ data })=>{
+            switch (data?.type)
+            {
+                case 'frame':
+                    showing(connections)?.frame(data);
+                    // The worker sends the next once this one is on this thread's queue.
+                    worker.postMessage({ type: 'shown' });
+                    break;
+                case 'lost':
+                    for (const each of [...connections])
+                    {
+                        each.lost();
+                    }
+                    break;
+                default:
+                    break;
+            }
+        };
+        shared = { connections, listener };
+        onWorker.set(worker, shared);
+        worker.addEventListener('message', listener);
+    }
+    const { connections, listener } = shared;
+    connections.push(connection);
+    return ()=>{
+        const at = connections.indexOf(connection);
+        if (at < 0)
+        {
+            return;
+        }
+        connections.splice(at, 1);
+        if (connections.length === 0)
+        {
+            worker.removeEventListener('message', listener);
+            onWorker.delete(worker);
+        }
+    };
+}
+
+/**
  * @param {Object} options
  * @param {{ postMessage: (message: any, transfer?: Transferable[]) => void,
  *     addEventListener: (type: 'message', listener: (event: { data: any }) => void) => void,
@@ -198,24 +287,16 @@ export function connectGraphicsWorker(options){
     /** Frames the worker presented and replaced before they were sent. */
     let dropped = 0;
 
-    /** @param {{ data: any }} event */
-    const listener = ({ data })=>{
-        switch (data?.type)
-        {
-            case 'frame':
-                dropped = data.dropped ?? dropped;
-                present(data);
-                // The worker sends the next once this one is on this thread's queue.
-                worker.postMessage({ type: 'shown' });
-                break;
-            case 'lost':
-                lost?.();
-                break;
-            default:
-                break;
-        }
+    const connection = {
+        drew: ()=>ports.length > 0,
+        /** @param {any} data */
+        frame: data=>{
+            dropped = data.dropped ?? dropped;
+            present(data);
+        },
+        lost: ()=>lost?.(),
     };
-    worker.addEventListener('message', listener);
+    const leave = join(worker, connection);
 
     return {
         root(api, factory, services){
@@ -304,7 +385,7 @@ export function connectGraphicsWorker(options){
                 lent: lentOf(senders) };
         },
         dispose(){
-            worker.removeEventListener('message', listener);
+            leave();
             for (const port of ports.splice(0))
             {
                 port.postMessage({ type: 'close' });
