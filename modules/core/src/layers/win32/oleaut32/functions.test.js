@@ -473,6 +473,140 @@ test('VariantCopy keeps a reference a reference; only CopyInd follows it', ()=>{
     assert.equal(host.u32(VARIANT_B + 8), 77, 'and the value is here');
 });
 
+const VT_ARRAY = 0x2000;
+const DISP_E_ARRAYISLOCKED = 0x8002000d;
+
+/**
+ * A one-dimensional array of two strings, 'alpha' and 'beta', and its
+ * descriptor's address.
+ *
+ * @returns {number}
+ */
+const stringArray = ()=>{
+    const BOUNDS = 0x3000;
+    const INDEX = 0x3040;
+    host.putU32(BOUNDS, 2);
+    host.putU32(BOUNDS + 4, 0);
+    const psa = call('SafeArrayCreate', [VT_BSTR, 1, BOUNDS]);
+    for (const [at, text] of /** @type {[number, string][]} */ ([[0, 'alpha'], [1, 'beta']]))
+    {
+        host.putWide(TEXT, text);
+        host.putU32(INDEX, at);
+        const made = call('SysAllocString', [TEXT]);
+        assert.equal(call('SafeArrayPutElement', [psa, INDEX, made]), S_OK);
+        call('SysFreeString', [made]); // the array took a copy
+    }
+    return psa;
+};
+
+/**
+ * The string at `at` of an array of strings, read through SafeArrayGetElement.
+ *
+ * @param {number} psa @param {number} at
+ */
+const stringAt = (psa, at)=>{
+    host.putU32(0x3040, at);
+    assert.equal(call('SafeArrayGetElement', [psa, 0x3040, SLOT]), S_OK);
+    const bstr = host.u32(SLOT);
+    let text = '';
+    for (let index = 0; index < call('SysStringLen', [bstr]); index++)
+    {
+        text += String.fromCharCode(host.u16(bstr + index * 2));
+    }
+    call('SysFreeString', [bstr]);
+    return text;
+};
+
+test('VariantCopy of an array makes an array of its own, as SafeArrayCopy does, and clearing the'
+    + ' source leaves the copy whole', ()=>{
+    setUp();
+    const original = stringArray();
+    host.putVariant(VARIANT_A, VT_ARRAY | VT_BSTR, original);
+
+    assert.equal(call('VariantCopy', [VARIANT_B, VARIANT_A]), S_OK);
+    const copy = host.u32(VARIANT_B + 8);
+    assert.equal(host.u16(VARIANT_B), VT_ARRAY | VT_BSTR);
+    assert.notEqual(copy, original, 'not the same descriptor');
+    assert.notEqual(host.u32(copy + 12), host.u32(original + 12), 'nor the same data');
+    assert.equal(stringAt(copy, 0), 'alpha');
+
+    assert.equal(call('VariantClear', [VARIANT_A]), S_OK);
+    assert.equal(host.u16(VARIANT_A), VT_EMPTY);
+    assert.equal(host.live.has(original), false, 'the array the variant held is destroyed');
+    assert.equal(stringAt(copy, 1), 'beta', 'and what was copied out of it stands');
+    assert.equal(call('VariantClear', [VARIANT_B]), S_OK);
+    assert.equal(host.live.has(copy), false);
+    assert.equal(host.live.size, 0, 'every string and descriptor is given back');
+});
+
+test('an element put into a copied array is not seen through the array it was copied from', ()=>{
+    setUp();
+    const original = stringArray();
+    host.putVariant(VARIANT_A, VT_ARRAY | VT_BSTR, original);
+    assert.equal(call('VariantCopy', [VARIANT_B, VARIANT_A]), S_OK);
+    const copy = host.u32(VARIANT_B + 8);
+
+    host.putWide(TEXT, 'gamma');
+    host.putU32(0x3040, 0);
+    const made = call('SysAllocString', [TEXT]);
+    assert.equal(call('SafeArrayPutElement', [copy, 0x3040, made]), S_OK);
+    call('SysFreeString', [made]);
+
+    assert.equal(stringAt(copy, 0), 'gamma');
+    assert.equal(stringAt(original, 0), 'alpha');
+});
+
+test('VariantCopy of an array reference is a reference, and clearing it destroys nothing', ()=>{
+    setUp();
+    const original = stringArray();
+    host.putU32(SLOT, original);
+    host.putVariant(VARIANT_A, VT_ARRAY | VT_BSTR | VT_BYREF, SLOT);
+
+    assert.equal(call('VariantCopy', [VARIANT_B, VARIANT_A]), S_OK);
+    assert.equal(host.u32(VARIANT_B + 8), SLOT, 'the copy points where the source did');
+    assert.equal(call('VariantClear', [VARIANT_B]), S_OK);
+    assert.equal(host.live.has(original), true, 'the array is the owner of the reference\'s');
+});
+
+test('VariantClear leaves a locked array in its variant and says so', ()=>{
+    setUp();
+    const original = stringArray();
+    host.putVariant(VARIANT_A, VT_ARRAY | VT_BSTR, original);
+    assert.equal(call('SafeArrayLock', [original]), S_OK);
+
+    assert.equal(call('VariantClear', [VARIANT_A]), DISP_E_ARRAYISLOCKED);
+    assert.equal(host.u16(VARIANT_A), VT_ARRAY | VT_BSTR);
+    assert.equal(host.u32(VARIANT_A + 8), original);
+
+    assert.equal(call('SafeArrayUnlock', [original]), S_OK);
+    assert.equal(call('VariantClear', [VARIANT_A]), S_OK);
+    assert.equal(host.live.size, 0);
+});
+
+test('an array of variants is copied and cleared down to the arrays inside it', ()=>{
+    setUp();
+    const BOUNDS = 0x3000;
+    host.putU32(BOUNDS, 1);
+    host.putU32(BOUNDS + 4, 0);
+    const outer = call('SafeArrayCreate', [12, 1, BOUNDS]);
+    const inner = stringArray();
+    host.putVariant(VARIANT_A, VT_ARRAY | VT_BSTR, inner);
+    host.putU32(0x3040, 0);
+    assert.equal(call('SafeArrayPutElement', [outer, 0x3040, VARIANT_A]), S_OK);
+    host.putVariant(VARIANT_B, VT_ARRAY | 12, outer);
+
+    assert.equal(call('VariantCopy', [VARIANT_A, VARIANT_B]), S_OK);
+    const copy = host.u32(VARIANT_A + 8);
+    const element = host.u32(copy + 12);
+    assert.equal(host.u16(element), VT_ARRAY | VT_BSTR);
+    assert.notEqual(host.u32(element + 8), inner, 'the array inside is a copy too');
+
+    assert.equal(call('VariantClear', [VARIANT_B]), S_OK);
+    assert.equal(host.live.has(inner), false, 'clearing the outer one destroys what it held');
+    assert.equal(call('VariantClear', [VARIANT_A]), S_OK);
+    assert.equal(host.live.size, 0);
+});
+
 test('a number becomes a string and reads back as the same number', ()=>{
     setUp();
     host.putVariant(VARIANT_A, VT_I4, 4294967295); // -1 as a signed long

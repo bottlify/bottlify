@@ -102,6 +102,7 @@ const ELEMENT_BYTES = Object.freeze({
 
 /** The two bits of a VARTYPE that are not the type. */
 const VT_BYREF = 0x4000;
+const VT_ARRAY = 0x2000;
 const VT_TYPEMASK = 0x0fff;
 
 /**
@@ -614,16 +615,27 @@ export function createAutomationFunctions(host){
 
     /**
      * Empties a variant, freeing whatever it owned: a string at once, an
-     * interface by the Release put in `owed`.
+     * array as SafeArrayDestroy does, an interface by the Release put in
+     * `owed`. An array that is locked stays in its variant, which is the
+     * answer's to say.
      *
      * @param {number} pvar @param {Owed} owed
+     * @returns {number} an HRESULT
      */
     const clear = (pvar, owed)=>{
         const declared = readU16(pvar);
         const type = declared & VT_TYPEMASK;
         if ((declared & VT_BYREF) === 0)
         {
-            if (type === VT_BSTR)
+            if ((declared & VT_ARRAY) !== 0)
+            {
+                const locked = destroyArray(readU32(pvar + VARIANT_VALUE), owed);
+                if (locked !== S_OK)
+                {
+                    return locked;
+                }
+            }
+            else if (type === VT_BSTR)
             {
                 freeBstr(readU32(pvar + VARIANT_VALUE));
             }
@@ -637,6 +649,7 @@ export function createAutomationFunctions(host){
             }
         }
         host.writeMemory(pvar, new Uint8Array(VARIANT_BYTES));
+        return S_OK;
     };
 
     /** @returns {Owed} */
@@ -1029,9 +1042,9 @@ export function createAutomationFunctions(host){
     const REG_SZ = 1;
 
     /**
-     * VariantCopy: a reference is copied as a reference, a string is
-     * duplicated, and an interface pointer is shared, the copy holding a
-     * reference of its own.
+     * VariantCopy: a reference is copied as a reference, a string and an
+     * array are duplicated, and an interface pointer is shared, the copy
+     * holding a reference of its own.
      *
      * @param {number} dest @param {number} src @param {Owed} owed
      * @returns {number} an HRESULT
@@ -1049,6 +1062,21 @@ export function createAutomationFunctions(host){
         const type = declared & VT_TYPEMASK;
         const byref = (declared & VT_BYREF) !== 0;
         clear(dest, owed);
+        if (!byref && (declared & VT_ARRAY) !== 0)
+        {
+            // Two variants holding one array would each destroy it: what a
+            // program that is told it has its own copy changes or frees must
+            // not reach the other.
+            const source = readU32(src + VARIANT_VALUE);
+            const copy = source === 0 ? { hr: S_OK, descriptor: 0 } : copyArray(source, owed);
+            if (copy.hr !== S_OK)
+            {
+                return copy.hr;
+            }
+            writeU16(dest, declared);
+            writeU32(dest + VARIANT_VALUE, copy.descriptor);
+            return S_OK;
+        }
         if (!byref && type === VT_BSTR)
         {
             const source = readU32(src + VARIANT_VALUE);
@@ -1154,6 +1182,107 @@ export function createAutomationFunctions(host){
         {
             owed.release.push(readU32(address));
         }
+    };
+
+    /**
+     * Gives an array back, as SafeArrayDestroy does: what its elements own
+     * first, then its data and its descriptor. A locked array is its locker's
+     * still.
+     *
+     * @param {number} psa @param {Owed} owed
+     * @returns {number} an HRESULT
+     */
+    const destroyArray = (psa, owed)=>{
+        const array = safeArrayAt(psa);
+        if (!array)
+        {
+            return S_OK;
+        }
+        if (array.locks !== 0)
+        {
+            return DISP_E_ARRAYISLOCKED;
+        }
+        const elements = array.bounds.reduce((total, bound)=>total * bound.elements, 1);
+        if (array.data !== 0)
+        {
+            for (let index = 0; index < elements; index++)
+            {
+                releaseElement(array.features, array.data + index * array.elementBytes, owed);
+            }
+            host.heap.free(array.data);
+        }
+        host.heap.free(psa);
+        return S_OK;
+    };
+
+    /**
+     * A new descriptor and new data for an array, unlocked. Elements that own
+     * something are copied the way their type is copied: a string is
+     * duplicated, a variant goes through VariantCopy, and an interface takes
+     * a reference of its own, put in `owed`.
+     *
+     * @param {number} psa @param {Owed} owed
+     * @returns {{ hr: number, descriptor: number }}
+     */
+    const copyArray = (psa, owed)=>{
+        const array = safeArrayAt(psa);
+        if (!array)
+        {
+            return { hr: E_INVALIDARG, descriptor: 0 };
+        }
+        const descriptorBytes = SAFEARRAY_BOUNDS + array.dims * 8;
+        const elements = array.bounds.reduce((total, bound)=>total * bound.elements, 1);
+        const dataBytes = elements * array.elementBytes;
+        const descriptor = host.heap.allocate(descriptorBytes);
+        const data = dataBytes === 0 ? 0 : host.heap.allocate(dataBytes);
+        if (descriptor === 0 || (dataBytes !== 0 && data === 0))
+        {
+            host.heap.free(descriptor);
+            host.heap.free(data);
+            return { hr: E_OUTOFMEMORY, descriptor: 0 };
+        }
+        const header = host.readMemory(psa, descriptorBytes).slice();
+        host.writeMemory(descriptor, header);
+        writeU32(descriptor + 8, 0);
+        writeU32(descriptor + 12, data);
+        if (dataBytes !== 0)
+        {
+            if ((array.features & FADF_VARIANT) !== 0)
+            {
+                host.fillMemory(data, 0, dataBytes);
+                for (let index = 0; index < elements; index++)
+                {
+                    copyVariant(data + index * VARIANT_BYTES, array.data + index * VARIANT_BYTES,
+                        owed);
+                }
+            }
+            else
+            {
+                host.writeMemory(data, host.readMemory(array.data, dataBytes).slice());
+                if ((array.features & FADF_BSTR) !== 0)
+                {
+                    for (let index = 0; index < elements; index++)
+                    {
+                        const source = readU32(array.data + index * 4);
+                        const copy = source === 0 ? 0 : allocateBstr(
+                            host.readMemory(source, byteLengthOf(source)).slice());
+                        writeU32(data + index * 4, copy);
+                    }
+                }
+                else if ((array.features & (FADF_UNKNOWN | FADF_DISPATCH)) !== 0)
+                {
+                    for (let index = 0; index < elements; index++)
+                    {
+                        const pointer = readU32(array.data + index * 4);
+                        if (pointer !== 0)
+                        {
+                            owed.addRef.push(pointer);
+                        }
+                    }
+                }
+            }
+        }
+        return { hr: S_OK, descriptor };
     };
 
     const registerTypeLib = {
@@ -1529,8 +1658,8 @@ export function createAutomationFunctions(host){
                 }
                 const thread = host.callerThread?.();
                 const owed = nothingOwed();
-                clear(variant, owed);
-                return settle(owed, thread, S_OK);
+                const hr = clear(variant, owed);
+                return hr !== S_OK ? hr : settle(owed, thread, S_OK);
             },
         },
 
@@ -2334,29 +2463,10 @@ export function createAutomationFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([psa])=>{
-                const array = safeArrayAt(psa >>> 0);
-                if (!array)
-                {
-                    return S_OK;
-                }
-                if (array.locks !== 0)
-                {
-                    return DISP_E_ARRAYISLOCKED;
-                }
                 const thread = host.callerThread?.();
                 const owed = nothingOwed();
-                const elements = array.bounds.reduce((total, bound)=>total * bound.elements, 1);
-                if (array.data !== 0)
-                {
-                    for (let index = 0; index < elements; index++)
-                    {
-                        releaseElement(array.features, array.data + index * array.elementBytes,
-                            owed);
-                    }
-                    host.heap.free(array.data);
-                }
-                host.heap.free(psa >>> 0);
-                return settle(owed, thread, S_OK);
+                const hr = destroyArray(psa >>> 0, owed);
+                return hr !== S_OK ? hr : settle(owed, thread, S_OK);
             },
         },
 
@@ -2664,66 +2774,14 @@ export function createAutomationFunctions(host){
                     return E_INVALIDARG;
                 }
                 writeU32(out >>> 0, 0);
-                const array = safeArrayAt(psa >>> 0);
-                if (!array)
-                {
-                    return E_INVALIDARG;
-                }
-                const descriptorBytes = SAFEARRAY_BOUNDS + array.dims * 8;
-                const elements = array.bounds.reduce((total, bound)=>total * bound.elements, 1);
-                const dataBytes = elements * array.elementBytes;
-                const descriptor = host.heap.allocate(descriptorBytes);
-                const data = dataBytes === 0 ? 0 : host.heap.allocate(dataBytes);
-                if (descriptor === 0 || (dataBytes !== 0 && data === 0))
-                {
-                    host.heap.free(descriptor);
-                    host.heap.free(data);
-                    return E_OUTOFMEMORY;
-                }
                 const thread = host.callerThread?.();
                 const owed = nothingOwed();
-                const header = host.readMemory(psa >>> 0, descriptorBytes).slice();
-                host.writeMemory(descriptor, header);
-                writeU32(descriptor + 8, 0);
-                writeU32(descriptor + 12, data);
-                if (dataBytes !== 0)
+                const copy = copyArray(psa >>> 0, owed);
+                if (copy.hr !== S_OK)
                 {
-                    if ((array.features & FADF_VARIANT) !== 0)
-                    {
-                        host.fillMemory(data, 0, dataBytes);
-                        for (let index = 0; index < elements; index++)
-                        {
-                            copyVariant(data + index * VARIANT_BYTES,
-                                array.data + index * VARIANT_BYTES, owed);
-                        }
-                    }
-                    else
-                    {
-                        host.writeMemory(data, host.readMemory(array.data, dataBytes).slice());
-                        if ((array.features & FADF_BSTR) !== 0)
-                        {
-                            for (let index = 0; index < elements; index++)
-                            {
-                                const source = readU32(array.data + index * 4);
-                                const copy = source === 0 ? 0 : allocateBstr(
-                                    host.readMemory(source, byteLengthOf(source)).slice());
-                                writeU32(data + index * 4, copy);
-                            }
-                        }
-                        else if ((array.features & (FADF_UNKNOWN | FADF_DISPATCH)) !== 0)
-                        {
-                            for (let index = 0; index < elements; index++)
-                            {
-                                const pointer = readU32(array.data + index * 4);
-                                if (pointer !== 0)
-                                {
-                                    owed.addRef.push(pointer);
-                                }
-                            }
-                        }
-                    }
+                    return copy.hr;
                 }
-                writeU32(out >>> 0, descriptor);
+                writeU32(out >>> 0, copy.descriptor);
                 return settle(owed, thread, S_OK);
             },
         },
