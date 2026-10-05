@@ -15,6 +15,12 @@ import { applyRelocations, parsePe, readImports, rvaToFileOffset } from './pe.js
  * can inspect the finished image without an emulator running.
  */
 
+/** The section alignment an image that names none is mapped at. */
+const PAGE = 0x1000;
+
+/** @param {number} value @param {number} to */
+const align = (value, to)=>Math.ceil(value / to) * to;
+
 /**
  * @typedef {Object} LoadedImage
  * @property {number} base          Address the image is loaded at.
@@ -85,9 +91,15 @@ export function mapImage(file, base){
             continue; // pure BSS: already zero
         }
         const source = file.subarray(section.rawOffset, section.rawOffset + section.rawSize);
-        // A section's raw data can exceed its virtual size when the linker padded to
-        // file alignment; only what fits in the mapping is copied.
-        const span = Math.min(source.length, Math.max(section.virtualSize, section.rawSize));
+        // A section takes its virtual size in the image, to the next section
+        // boundary -- its raw size when the virtual one is zero -- and its raw
+        // data past that is not mapped: a self-extractor keeps its archive in
+        // the raw data of a resource section a few pages long and reads it
+        // from the file.
+        const extent = align(section.virtualSize || section.rawSize,
+            image.sectionAlignment || PAGE);
+        const span = Math.max(0, Math.min(source.length, extent,
+            image.sizeOfImage - section.virtualAddress));
         bytes.set(source.subarray(0, span), section.virtualAddress);
     }
 
