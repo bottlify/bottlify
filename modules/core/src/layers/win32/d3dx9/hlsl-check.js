@@ -1483,7 +1483,7 @@ export function check(program, options = {}){
         if (entries.length === 0)
         {
             diagnostics.push({ code: 'X3501', severity: 'error', message:
-                `'${options.entry}': entry point not found`, pos: program.decls[0]?.pos
+                `'${options.entry}': entrypoint not found`, pos: program.decls[0]?.pos
                 ?? noPos });
         }
         queue.push(...entries);

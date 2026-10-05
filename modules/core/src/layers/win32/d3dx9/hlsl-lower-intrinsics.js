@@ -26,7 +26,7 @@
  * rows or as columns -- whichever the code that made it had -- a structure, an
  * array, or a sampler.
  *
- * @typedef {{ k: 'vec', v: Vec }
+ * @typedef {{ k: 'vec', v: Vec, undef?: boolean }
  *   | { k: 'mat', rows: number, cols: number, rowV: Vec[] | null, colV: Vec[] | null }
  *   | { k: 'struct', fields: Value[] }
  *   | { k: 'arr', elems: Value[], uniform?: UniformArray }

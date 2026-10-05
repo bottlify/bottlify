@@ -837,6 +837,20 @@ export function assemble(ir, options = {}){
                 /** @type {Src} */ ({ kind: 'imm', values }))];
         }
     }
+    // An input nothing reads is not declared: a structure that carries more than the
+    // shader uses is the usual case.
+    const read = new Set();
+    for (const instr of instrs)
+    {
+        for (const src of instr.srcs)
+        {
+            if (src.kind === 'input')
+            {
+                read.add(src.input);
+            }
+        }
+    }
+    ir.inputs = ir.inputs.filter(input=>read.has(input));
     const reserved = assignConstants(ir.constants, diagnostics);
     const defs = packLiterals(instrs, reserved);
     instrs = legalize(instrs, profile, newReg);

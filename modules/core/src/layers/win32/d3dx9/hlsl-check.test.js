@@ -799,7 +799,7 @@ test('errors in several functions are all reported', ()=>{
 
 test('entry point missing, and unreachable functions are not checked', ()=>{
     assert.deepEqual(errors('float f(){ return 1; }', { entry: 'main' }),
-        ["X3501: 'main': entry point not found"]);
+        ["X3501: 'main': entrypoint not found"]);
     const src = 'float bad(){ return nope; }\nfloat main(){ return 1; }';
     assert.deepEqual(errors(src, { entry: 'main' }), []);
     assert.deepEqual(errors(src), ["X3004: undeclared identifier 'nope'"]);

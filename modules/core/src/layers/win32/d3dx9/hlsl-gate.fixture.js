@@ -179,6 +179,7 @@ function machineOutput(info, out){
  * @property {number} [seed]
  * @property {number} [ulp]          Largest distance, in units in the last place.
  * @property {number} [absolute]     Or an absolute difference.
+ * @property {number} [relative]     Or a difference relative to the larger of the two.
  * @property {{ lo: number, hi: number }} [range]   Range of the random floats.
  * @property {boolean} [rowMajor]
  */
@@ -187,7 +188,7 @@ function machineOutput(info, out){
  * Compiles a shader and compares the two paths over random trials.
  *
  * @param {string} source @param {string} profileName @param {GateOptions} [options]
- * @returns {Promise<{ trials: number, killed: number, text: string }>}
+ * @returns {Promise<{ trials: number, killed: number, text: string, tokens: Uint32Array }>}
  */
 export async function runGate(source, profileName, options = {}){
     const entryName = options.entry ?? 'main';
@@ -373,12 +374,19 @@ export async function runGate(source, profileName, options = {}){
             const out = info.outputs.find(o=>`${o.usage}:${o.index}` === want.key);
             if (!out)
             {
+                // An output the program never set is not written; it reads as zero here.
+                if (want.flat.every(x=>x === 0))
+                {
+                    continue;
+                }
                 throw new Error(`the shader has no output ${want.key}\n${text}`);
             }
             const got = answer.outputs[machineOutput(info, out)];
             want.flat.forEach((x, i)=>{
                 const close = ulps(got[i], f32(x)) <= ulp
-                    || Math.abs(got[i] - x) <= (options.absolute ?? 0);
+                    || Math.abs(got[i] - x) <= (options.absolute ?? 0)
+                    || Math.abs(got[i] - x) <= (options.relative ?? 0)
+                        * Math.max(Math.abs(got[i]), Math.abs(x));
                 if (!close)
                 {
                     throw new Error(`${profileName} trial ${trial}: output ${want.key} lane ${i}: `
@@ -389,7 +397,7 @@ export async function runGate(source, profileName, options = {}){
             });
         }
     }
-    return { trials, killed: killedCount, text };
+    return { trials, killed: killedCount, text, tokens: compiled.tokens };
 }
 
 /** @param {any} a @param {any} b @param {string} message */

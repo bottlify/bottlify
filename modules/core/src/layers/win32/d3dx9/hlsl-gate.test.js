@@ -5,7 +5,25 @@
  */
 
 import { test } from 'node:test';
-import { runGate } from './hlsl-gate.fixture.js';
+import assert from 'node:assert/strict';
+import { runGate as run } from './hlsl-gate.fixture.js';
+import { parseShader } from '../../graphics/d3d9/shader.js';
+import { translateShader } from '../../graphics/d3d9/wgsl.js';
+
+/**
+ * The gate, and then the check that the translator of bytecode to WGSL takes
+ * what the compiler wrote.
+ *
+ * @param {string} source @param {string} profile
+ * @param {import('./hlsl-gate.fixture.js').GateOptions} [options]
+ */
+async function runGate(source, profile, options){
+    const result = await run(source, profile, options);
+    const parsed = parseShader(result.tokens);
+    assert.equal(parsed.error, null, `${profile}: the bytecode parses`);
+    assert.equal(translateShader(parsed).error, null, `${profile}: it translates to WGSL`);
+    return result;
+}
 
 const PS = ['ps_2_0', 'ps_2_a', 'ps_3_0'];
 const VS = ['vs_1_1', 'vs_2_0', 'vs_3_0'];
@@ -493,3 +511,151 @@ o.fog = saturate(a.x); o.size = a.y * 2; o.uv = a.zw; return o; }`,
         options: { absolute: 0.00003, range: { lo: -3, hi: 3 } },
     },
 ]);
+
+/** @param {string} source @param {string[]} profiles @param {string} name */
+function whole(name, source, profiles, options = {}){
+    for (const profile of profiles)
+    {
+        test(`whole: ${name} (${profile})`, async()=>{
+            await runGate(source, profile, options);
+        });
+    }
+}
+
+whole('bump-mapped lighting', `
+sampler2D Diffuse : register(s0);
+sampler2D Normals : register(s1);
+float4 LightPos; float4 LightColor; float4 Ambient; float Shininess;
+struct VSOut { float4 pos : POSITION; float2 uv : TEXCOORD0; float3 light : TEXCOORD1;
+    float3 view : TEXCOORD2; float4 color : COLOR0; };
+float4 main(VSOut i) : COLOR0
+{
+    float3 n = tex2D(Normals, i.uv).xyz * 2 - 1;
+    n = normalize(n);
+    float3 l = normalize(i.light);
+    float3 v = normalize(i.view);
+    float3 h = normalize(l + v);
+    float diff = saturate(dot(n, l));
+    float spec = pow(saturate(dot(n, h)), Shininess * 8 + 1);
+    float4 base = tex2D(Diffuse, i.uv) * i.color;
+    return base * (Ambient + LightColor * diff) + LightColor * spec;
+}`, ['ps_2_0', 'ps_2_b', 'ps_3_0'], { range: { lo: 0.2, hi: 2 }, ulp: 8, absolute: 5e-6 });
+
+whole('skinned vertex shader', `
+float4x4 World; float4x4 ViewProj; float4x3 Bones[16];
+struct VSIn { float4 pos : POSITION; float3 nrm : NORMAL; float4 weights : BLENDWEIGHT;
+    float4 indices : BLENDINDICES; float2 uv : TEXCOORD0; };
+struct VSOut { float4 pos : POSITION; float3 nrm : TEXCOORD1; float2 uv : TEXCOORD0; };
+VSOut main(VSIn i)
+{
+    int4 idx = D3DCOLORtoUBYTE4(i.indices);
+    float3 p = 0; float3 n = 0;
+    for (int k = 0; k < 4; k++)
+    {
+        float4x3 b = Bones[idx[k] % 16];
+        p += mul(i.pos, b) * i.weights[k];
+        n += mul(i.nrm, (float3x3)b) * i.weights[k];
+    }
+    VSOut o;
+    o.pos = mul(float4(p, 1), mul(World, ViewProj));
+    o.nrm = normalize(n);
+    o.uv = i.uv;
+    return o;
+}`, ['vs_2_0', 'vs_3_0'], { range: { lo: 0, hi: 1 }, ulp: 12, absolute: 1e-5 });
+
+whole('input structure with a member the pixel shader cannot have', `
+struct In { float4 pos : POSITION; float4 a : TEXCOORD0; float4 c : COLOR0; };
+float4 main(In i) : COLOR0 { return i.a * i.c; }`, ['ps_2_0', 'ps_3_0']);
+
+whole('an output member that is never set', `
+struct Out { float4 pos : POSITION; float4 a : TEXCOORD0; float4 c : COLOR0; };
+Out main(float4 p : POSITION, float4 t : TEXCOORD0)
+{
+    Out o;
+    o.pos = p;
+    o.a = t * 2;
+    return o;
+}`, ['vs_1_1', 'vs_2_0', 'vs_3_0']);
+
+whole('position and face of a pixel', `
+float4 main(float2 vpos : VPOS, float f : VFACE, float4 c : COLOR0) : COLOR0
+{
+    return float4(vpos * 0.01, f, 1) * c;
+}`, ['ps_3_0']);
+
+whole('unroll attribute, dynamic branch inside, known break', `
+float4 W[8]; float Limit;
+float4 main(float4 a : TEXCOORD0) : COLOR0
+{
+    float4 sum = 0;
+    [unroll] for (int k = 0; k < 8; k++)
+    {
+        if (k >= 6) break;
+        if (a.x * W[k].x > Limit) sum += W[k] * a.y; else sum -= W[k].wzyx;
+    }
+    return sum;
+}`, ['ps_2_a', 'ps_3_0'], { ulp: 4 });
+
+whole('comma, nested ternaries and increments', `
+float4 main(float4 a : TEXCOORD0, float4 b : TEXCOORD1) : COLOR0
+{
+    float x = 1; float y = 2;
+    float z = (x += 2, y *= 3, x + y);
+    int n = 3; n++; ++n; n--;
+    float4 r = a.x > 0 ? (a.y > 0 ? a : b) : (b.x > 0 ? b.wzyx : a.wzyx);
+    return r * z + n;
+}`, ['ps_2_0', 'ps_3_0']);
+
+whole('two overloads and a helper that takes a structure', `
+struct Surface { float3 n; float3 l; float4 color; };
+float lambert(Surface s) { return saturate(dot(s.n, s.l)); }
+float4 shade(Surface s) { return s.color * lambert(s); }
+float4 shade(Surface s, float gain) { return shade(s) * gain; }
+float4 main(float4 a : TEXCOORD0, float4 b : TEXCOORD1, float4 c : COLOR0) : COLOR0
+{
+    Surface s; s.n = normalize(a.xyz); s.l = normalize(b.xyz); s.color = c;
+    return shade(s) + shade(s, 0.5);
+}`, ['ps_2_0', 'ps_3_0'], { ulp: 6 });
+
+whole('half precision types and rgba swizzles', `
+half4 main(half4 a : TEXCOORD0, half4 b : TEXCOORD1) : COLOR0
+{
+    half3 t = a.rgb * b.abg; half k = dot(t, half3(0.3, 0.59, 0.11));
+    return half4(t * k, a.a);
+}`, ['ps_2_0', 'ps_3_0'], { ulp: 4 });
+
+whole('a vertex shader with dynamic early returns', `
+float4 Colors[3];
+struct O { float4 pos : POSITION; float4 col : COLOR0; };
+O main(float4 p : POSITION, float4 a : TEXCOORD0)
+{
+    O o; o.pos = p;
+    if (a.x > 0.5) { o.col = Colors[0]; return o; }
+    o.col = Colors[1];
+    if (a.y > 0) { o.col += Colors[2]; return o; }
+    o.col *= a.z;
+    return o;
+}`, ['vs_1_1', 'vs_2_0', 'vs_3_0']);
+
+whole('boolean uniforms and conditional work', `
+bool UseFog; bool UseTint; float4 Fog; float4 Tint;
+float4 main(float4 c : COLOR0, float4 t : TEXCOORD0) : COLOR0
+{
+    float4 r = c;
+    if (UseTint) r *= Tint;
+    if (UseFog) r = lerp(r, Fog, saturate(t.x));
+    return r;
+}`, ['ps_2_0', 'ps_3_0']);
+
+whole('saturated and unsaturated returns', `
+float4 main(float4 a : TEXCOORD0) : COLOR0 { return saturate(a * 2 - 0.5); }`,
+['ps_2_0', 'ps_3_0']);
+
+whole('a transform used as a pixel shader input and passed on', `
+float4x4 M;
+void main(float4 p : POSITION, float4 uv : TEXCOORD0, out float4 pos : POSITION,
+    out float4 o : TEXCOORD0)
+{
+    pos = mul(p, M);
+    o = uv + pos.xxyy * 0.5;
+}`, ['vs_1_1', 'vs_2_0', 'vs_3_0'], { ulp: 5 });

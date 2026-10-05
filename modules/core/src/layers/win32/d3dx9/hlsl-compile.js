@@ -88,11 +88,30 @@ function withLineMarkers(text, origins){
  * @returns {Promise<CompileResult>}
  */
 export async function compileShader(source, options){
+    try
+    {
+        return await compile(source, options);
+    }
+    catch (e){
+        // A fault in the compiler is a compile that failed, not a program that stopped.
+        return { tokens: null, constantTable: null, info: null, ok: false,
+            messages: `error X0000: internal compiler error: ${
+                /** @type {Error} */ (e)?.stack ?? e}\n` };
+    }
+}
+
+/**
+ * @param {string} source
+ * @param {CompileOptions} options
+ * @returns {Promise<CompileResult>}
+ */
+async function compile(source, options){
     /** @type {string[]} */
     const messages = [];
     /** @param {Parameters<typeof formatDiagnostic>[0]} d */
     const report = d=>{
-        messages.push(formatDiagnostic(d));
+        // A missing entry point belongs to no line.
+        messages.push(d.code === 'X3501' ? `error X3501: ${d.message}` : formatDiagnostic(d));
     };
     /** @returns {CompileResult} */
     const failed = ()=>({ tokens: null, constantTable: null, info: null,

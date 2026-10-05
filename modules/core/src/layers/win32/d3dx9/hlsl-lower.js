@@ -199,6 +199,22 @@ export function lower(module, entry, profile){
     const zero = type=>build(type, new Array(scalarCount(type)).fill(b.num(0)));
 
     /**
+     * What a variable holds before anything is assigned to it: zeros, marked,
+     * so that an output the program never set is not written at all.
+     *
+     * @param {Value} value @returns {Value}
+     */
+    const unset = value=>{
+        switch (value.k)
+        {
+            case 'vec': return { ...value, undef: true };
+            case 'struct': return { k: 'struct', fields: value.fields.map(unset) };
+            case 'arr': return { k: 'arr', elems: value.elems.map(unset) };
+            default: return value;
+        }
+    };
+
+    /**
      * A value of the type from the numbers of a constant, flattened.
      *
      * @param {Type} type @param {import('./hlsl-types.js').Value} constant
@@ -322,6 +338,14 @@ export function lower(module, entry, profile){
             && (from.rows !== to.rows || from.cols !== to.cols))
         {
             const m = /** @type {Extract<Value, {k: 'mat'}>} */ (value);
+            if (fromBase === toBase && to.rows <= from.rows && to.cols <= from.cols)
+            {
+                // The corner of a matrix is the corner of its registers: no copying.
+                const lanes = (/** @type {number} */ n)=>Array.from({ length: n }, (_, i)=>i);
+                return { k: 'mat', rows: to.rows, cols: to.cols,
+                    rowV: m.rowV && m.rowV.slice(0, to.rows).map(r=>b.swizzle(r, lanes(to.cols))),
+                    colV: m.colV && m.colV.slice(0, to.cols).map(c=>b.swizzle(c, lanes(to.rows))) };
+            }
             const scalars = [];
             for (let r = 0; r < to.rows; r++)
             {
@@ -1001,7 +1025,7 @@ export function lower(module, entry, profile){
     function callUser(e, fn, st){
         const values = e.args.map((/** @type {any} */ a, /** @type {number} */ i)=>{
             const mode = fn.params[i].dir ?? 'in';
-            return mode === 'out' ? zero(fn.params[i].type) : ev(a, st);
+            return mode === 'out' ? unset(zero(fn.params[i].type)) : ev(a, st);
         });
         fn.params.forEach((p, i)=>{
             st.env.set(p, values[i]);
@@ -1089,7 +1113,7 @@ export function lower(module, entry, profile){
                 case 'decl':
                     for (const v of s.vars)
                     {
-                        st.env.set(v.sym, v.init ? ev(v.init, st) : zero(v.sym.type));
+                        st.env.set(v.sym, v.init ? ev(v.init, st) : unset(zero(v.sym.type)));
                     }
                     break;
                 case 'expr':
@@ -1323,6 +1347,10 @@ export function lower(module, entry, profile){
             fail('X3000', `'${name}': a ${typeToString(type)} cannot be a shader output`, pos);
             return;
         }
+        if (value.k === 'vec' && value.undef)
+        {
+            return;
+        }
         const x = vecOf(value);
         b.write(b.output(parsed.usage, parsed.index, x.w), x);
     };
@@ -1342,7 +1370,7 @@ export function lower(module, entry, profile){
         {
             continue;
         }
-        st.env.set(p, dir === 'out' ? zero(p.type)
+        st.env.set(p, dir === 'out' ? unset(zero(p.type))
             : inputOf(p.type, p.semantic, p.name, p.decl.pos));
     }
     const body = /** @type {any} */ (entry.decl.body);

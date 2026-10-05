@@ -74,7 +74,10 @@ function run(name, body, inputA, inputB){
     for (const [input, value] of [[ia, inputA], [ib, inputB]])
     {
         const one = /** @type {import('./hlsl-ir.js').Input} */ (input);
-        inputs[one.file ?? 'v'][one.reg ?? 0] = /** @type {number[]} */ (value);
+        if (one.reg !== undefined)
+        {
+            inputs[one.file ?? 'v'][one.reg] = /** @type {number[]} */ (value);
+        }
     }
     const key = profile.kind === 'ps' ? 'oC0' : profile.major >= 3 ? 'o0' : 'oD0';
     try
