@@ -31,6 +31,9 @@ export const HANDLE_STDERR = 3;
  * @property {(code: number) => any} [end]
  *           Ends the process as ExitProcess does, telling the libraries first;
  *           answers what the call answers. Absent, `exit` and `park` stand in.
+ * @property {(text: number) => any} [messageBox]
+ *           Shows the ANSI text at that address in a system-modal box and
+ *           answers once it is dismissed.
  */
 
 /**
@@ -73,7 +76,7 @@ export function createConsoleFunctions(host){
         }
     };
 
-    return {
+    const table = {
         /** HANDLE GetStdHandle(DWORD nStdHandle) */
         GetStdHandle: {
             argBytes: 4,
@@ -117,5 +120,22 @@ export function createConsoleFunctions(host){
                 return host.park();
             },
         },
+
+        /**
+         * VOID FatalAppExitA(UINT uAction, LPCSTR lpMessageText) -- does not return
+         *
+         * The message in a box, then the end of the process as ExitProcess(0)
+         * ends it: what Windows does once the box it raises is dismissed.
+         */
+        FatalAppExitA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, text])=>{
+                const shown = host.messageBox?.(text >>> 0);
+                const end = ()=>table.ExitProcess.handler([0]);
+                return typeof shown?.then === 'function' ? shown.then(end) : end();
+            },
+        },
     };
+    return table;
 }

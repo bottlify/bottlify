@@ -322,6 +322,13 @@ export function createCountedStringFunctions(host){
             handler: ([string])=>freeString(string),
         },
 
+        /** VOID RtlFreeOemString(POEM_STRING OemString): the same structure, freed the same way. */
+        RtlFreeOemString: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([string])=>freeString(string),
+        },
+
         /** VOID RtlFreeUnicodeString(PUNICODE_STRING UnicodeString) */
         RtlFreeUnicodeString: {
             argBytes: 4,

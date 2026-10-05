@@ -207,6 +207,21 @@ test('a timer due now is handed to a pool thread before the call returns', ()=>{
     assert.equal(m.ask(m.created[0]), PARKED, 'returned, and nothing else to do');
 });
 
+test('QueueUserWorkItem hands its routine and its context to a pool thread', ()=>{
+    // An OpenMP runtime's workers: each item an ordinary call on a pool
+    // thread, handed nothing but its context.
+    const m = machine();
+    assert.equal(m.fns.QueueUserWorkItem.argBytes, 12);
+    assert.equal(m.fns.QueueUserWorkItem.handler([0x402000, 0xcafe, 0]), 1);
+    assert.equal(m.created.length, 1, 'a thread for it');
+    assert.equal(m.ask(m.created[0]), RUN);
+    assert.deepEqual(m.record(m.created[0]), { entry: 0x402000, args: [0xcafe, 0, 0, 0] });
+    assert.equal(m.ask(m.created[0]), PARKED, 'returned, and nothing else to do');
+
+    assert.equal(m.fns.QueueUserWorkItem.handler([0, 0xcafe, 0]), 0, 'no routine to run');
+    assert.equal(m.errors.at(-1), 87, 'ERROR_INVALID_PARAMETER');
+});
+
 test('a periodic timer fires on its period on the idle thread, and a busy one makes another', ()=>{
     const m = machine();
     const queue = m.fns.CreateTimerQueue.handler();

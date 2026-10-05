@@ -21,7 +21,9 @@ const FILE_MAP_READ = 0x0004;
  *   and every pointer reads as the empty name, which is no name at all.
  */
 function setup(names = {}){
-    const bytes = new Uint8Array(0x4000);
+    const bytes = new Uint8Array(0x30000);
+    /** Where a view was placed by address, so a second one there is refused. */
+    const placed = new Set();
     /** @type {Map<number, { type: string, object: any }>} */
     const table = new Map();
     let nextHandle = 4;
@@ -50,6 +52,14 @@ function setup(names = {}){
             const address = nextAddress;
             nextAddress += size + 16;
             return address;
+        },
+        allocateAt: (address, size)=>{
+            if (placed.has(address) || address + size > bytes.length)
+            {
+                return false;
+            }
+            placed.add(address);
+            return true;
         },
         release: ()=>{},
         handles: {
@@ -152,6 +162,26 @@ test('a flushed view reaches its file at once, from the address flushed on, and 
 
     assert.equal(fns.FlushViewOfFile.handler([view, 0]), 0, 'unmapped, there is nothing to flush');
     assert.equal(errors.at(-1), 87);
+});
+
+test('MapViewOfFileEx puts a view where it is asked, on a granule, unless that is taken', ()=>{
+    // A heap library's shared pool and a debugging library's image maps ask
+    // for an address; a null one is anywhere, as MapViewOfFile.
+    const { fns, bytes, fileHandle, errors } = setup();
+    const mapping = fns.CreateFileMappingA.handler([fileHandle, 0, PAGE_READWRITE, 0, 8, 0]);
+    assert.equal(fns.MapViewOfFileEx.argBytes, 24);
+
+    assert.equal(fns.MapViewOfFileEx.handler([mapping, FILE_MAP_WRITE, 0, 0, 8, 0x20000]), 0x20000);
+    assert.deepEqual([...bytes.slice(0x20000, 0x20008)], [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert.equal(fns.MapViewOfFileEx.handler([mapping, FILE_MAP_WRITE, 0, 0, 8, 0x20000]), 0,
+        'the range is taken');
+    assert.equal(errors.at(-1), 487, 'ERROR_INVALID_ADDRESS');
+    assert.equal(fns.MapViewOfFileEx.handler([mapping, FILE_MAP_WRITE, 0, 0, 8, 0x10100]), 0,
+        'not on a granule');
+    assert.equal(errors.at(-1), 1132, 'ERROR_MAPPED_ALIGNMENT');
+    const anywhere = fns.MapViewOfFileEx.handler([mapping, FILE_MAP_WRITE, 0, 0, 8, 0]);
+    assert.ok(anywhere !== 0 && anywhere !== 0x20000, 'a null address is anywhere');
+    assert.equal(fns.UnmapViewOfFile.handler([0x20000]), 1, 'a view like any other');
 });
 
 test('a read-only view is not written back', ()=>{

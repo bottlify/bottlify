@@ -37,6 +37,33 @@ test('the shell namespace is refused out loud, with a name the reporter can key 
     assert.deepEqual(m.diverged.map(line=>line.split(':')[0]), ['SHGetDesktopFolder']);
 });
 
+test('DllGetVersion answers the shell of Windows XP SP3 in either structure', ()=>{
+    // A program checks the shell's version before calling what a newer one
+    // has; the first field says which structure it passed.
+    const memory = new Uint8Array(0x100).fill(0xaa);
+    const shell = /** @type {any} */ (createShellFunctions({
+        readMemory: (/** @type {number} */ a, /** @type {number} */ l)=>memory.slice(a, a + l),
+        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>memory.set(b, a),
+    }));
+    const view = new DataView(memory.buffer);
+    const E_INVALIDARG = 0x80070057 | 0;
+    assert.equal(shell.DllGetVersion.argBytes, 4);
+
+    view.setUint32(0x10, 20, true);
+    assert.equal(shell.DllGetVersion.handler([0x10]), 0);
+    assert.deepEqual([0x14, 0x18, 0x1c, 0x20].map(at=>view.getUint32(at, true)), [6, 0, 2900, 2]);
+    assert.equal(memory[0x24], 0xaa, 'nothing past a DLLVERSIONINFO');
+
+    view.setUint32(0x40, 32, true);
+    assert.equal(shell.DllGetVersion.handler([0x40]), 0);
+    assert.equal(view.getUint32(0x54, true), 0, 'no flags');
+    assert.equal(view.getBigUint64(0x58, true), (6n << 48n) | (2900n << 16n) | 5512n);
+
+    view.setUint32(0x80, 24, true);
+    assert.equal(shell.DllGetVersion.handler([0x80]), E_INVALIDARG);
+    assert.equal(shell.DllGetVersion.handler([0]), E_INVALIDARG);
+});
+
 /** The machine above with a heap and the folder table, for the special folders. */
 function machineWithFolders(){
     const memory = new Uint8Array(0x1000).fill(0xaa);

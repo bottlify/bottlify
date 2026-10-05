@@ -1851,27 +1851,35 @@ async function readWholeFile(filesystem, blocks, path){
  * One that carries relocations takes the first base at or after `next` that
  * nothing holds. One that does not can run only at its preferred base -- every
  * absolute address in it assumes that base -- and takes it when it lies in the
- * modules' space and nothing holds it; otherwise it is refused, as the PE
- * format says a loader refuses such an image, rather than mapped somewhere
- * its addresses do not describe.
+ * modules' space and nothing holds it, or when `claim` can give up that span
+ * from elsewhere: a base such a library names is free memory of a new process
+ * on Windows, whatever this layout has put there. Otherwise it is refused, as
+ * the PE format says a loader refuses such an image, rather than mapped
+ * somewhere its addresses do not describe. A library that can move and finds
+ * the modules' space full is put wherever `claim` finds room, as Windows puts
+ * one in any free span.
  *
  * @param {{ relocatable: boolean, imageBase: number, sizeOfImage: number }} image
  * @param {{ next: number, floor: number, limit: number,
- *     holder: (base: number, size: number) => { base: number, size: number } | null }} space
+ *     holder: (base: number, size: number) => { base: number, size: number } | null,
+ *     claim?: (base: number | null, size: number) => number }} space
  *        `floor` and `limit` bound the modules' space: below is the program and
  *        the engine's own, above the thread stacks and the heap. `holder`
- *        answers what already holds part of a span, if anything.
+ *        answers what already holds part of a span, if anything; `claim` takes
+ *        a span outside the space -- at a base, or anywhere for null -- and
+ *        answers where, or zero when there is none.
  * @returns {{ base: number } | { refused: string }}
  */
-export function placeLibrary(image, { next, floor, limit, holder }){
+export function placeLibrary(image, { next, floor, limit, holder, claim }){
     if (!image.relocatable)
     {
         const base = image.imageBase;
-        if (base < floor || base + image.sizeOfImage > limit || holder(base, image.sizeOfImage))
+        if ((base >= floor && base + image.sizeOfImage <= limit
+            && !holder(base, image.sizeOfImage)) || claim?.(base, image.sizeOfImage) === base)
         {
-            return { refused: `no relocations, and 0x${base.toString(16)} is not free` };
+            return { base };
         }
-        return { base };
+        return { refused: `no relocations, and 0x${base.toString(16)} is not free` };
     }
     let base = next;
     for (let held = holder(base, image.sizeOfImage); held;
@@ -1881,7 +1889,8 @@ export function placeLibrary(image, { next, floor, limit, holder }){
     }
     if (base + image.sizeOfImage > limit)
     {
-        return { refused: 'no room' };
+        const anywhere = claim?.(null, image.sizeOfImage) ?? 0;
+        return anywhere === 0 ? { refused: 'no room' } : { base: anywhere };
     }
     return { base };
 }
@@ -1953,8 +1962,8 @@ export async function mapShippedLibraries(options){
     for (const { name, file } of order)
     {
         const image = parsePe(file);
-        const place = placeLibrary(image,
-            { next, floor: options.floor, limit: options.limit, holder: options.holder });
+        const place = placeLibrary(image, { next, floor: options.floor, limit: options.limit,
+            holder: options.holder, claim: options.claim });
         if ('refused' in place)
         {
             // Refused here rather than as an overlap with the pool of thread
@@ -3695,6 +3704,8 @@ async function buildApp(options){
                 },
                 /** @param {number} base */
                 byBase: base=>byBase.get(base >>> 0) ?? null,
+                /** Every module the process has loaded, in the order it loaded them. */
+                list: ()=>[...byBase.values()].filter(module=>module.loaded !== false),
                 /**
                  * The module an address lies in, or null: what a program asks
                  * GetModuleHandleEx of an address in its own code.
@@ -4918,6 +4929,41 @@ async function buildApp(options){
         /** @param {number} base @param {number} size */
         holder: (base, size)=>memory.list().find((/** @type {any} */ region)=>
             base < region.base + region.size && region.base < base + size) ?? null,
+        /**
+         * A span of the heap's arena that nothing has been given -- at a base
+         * for a library that can only live there, anywhere for one the
+         * modules' space has no room for: the heap gives it up and its region
+         * is cut around it, the part above it a region of its own.
+         *
+         * @param {number | null} wanted @param {number} size
+         */
+        claim: (wanted, size)=>{
+            const heap = core.api('win32').heap();
+            const base = wanted === null
+                ? heap.allocate(size, { alignment: LIBRARY_ALIGN, owner: 'image' })
+                : heap.allocateAt(wanted, size, { owner: 'image' }) ? wanted : 0;
+            const region = base === 0 ? undefined : memory.find(base);
+            if (!region || !region.name.startsWith('heap')
+                || base + size > region.base + region.size)
+            {
+                return 0;
+            }
+            const end = base + size;
+            const regionEnd = region.base + region.size;
+            memory.unregister(region.name);
+            const { kind, access } = region;
+            if (base > region.base)
+            {
+                memory.register({ name: region.name, base: region.base,
+                    size: base - region.base, kind, access });
+            }
+            if (regionEnd > end)
+            {
+                memory.register({ name: `heap@${end.toString(16)}`, base: end,
+                    size: regionEnd - end, kind, access });
+            }
+            return base;
+        },
     };
 
     // The libraries the program brought with it, before the program itself.

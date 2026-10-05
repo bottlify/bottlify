@@ -1984,6 +1984,15 @@ test('the double-click time starts at 500 and is what SetDoubleClickTime sets', 
     assert.equal(fns.GetDoubleClickTime.handler([]), 500, 'zero is the default again');
 });
 
+test('the caret blinks every 530 ms, and SetLastErrorEx sets the error whatever its type', ()=>{
+    const { fns, errors } = setup();
+    assert.equal(fns.GetCaretBlinkTime.argBytes, 0);
+    assert.equal(fns.GetCaretBlinkTime.handler([]), 530);
+    assert.equal(fns.SetLastErrorEx.argBytes, 8);
+    fns.SetLastErrorEx.handler([1400, 3]);
+    assert.equal(errors.at(-1), 1400);
+});
+
 test('the one layout there is is named, listed, activated and loaded', ()=>{
     // input.c's test_keyboard_layout_name and test_ActivateKeyboardLayout:
     // no buffer is ERROR_NOACCESS, the name is eight hexadecimal digits, and

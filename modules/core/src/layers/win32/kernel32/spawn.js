@@ -43,6 +43,46 @@ const ERROR_BAD_LENGTH = 24;
 const ERROR_NOT_SUPPORTED = 50;
 const ERROR_GEN_FAILURE = 31;
 const ERROR_OBJECT_NAME_EXISTS = 5010;
+const ERROR_NOACCESS = 998;
+
+/**
+ * Writes into this process's memory as WriteProcessMemory writes into its
+ * own: through the protection of the pages, which it lifts for the write and
+ * puts back -- a heap library patching the C runtime's malloc writes a jump
+ * over code that is only executable. Only what lies in one mapped region is
+ * written; anything else answers false and nothing.
+ *
+ * @param {{ find: (address: number) => { name: string, base: number, size: number,
+ *     access: string } | undefined | null, protect: (name: string, access: string) => void,
+ *     writeBytes: (address: number, bytes: Uint8Array) => void }} memory
+ * @param {number} address
+ * @param {Uint8Array} bytes
+ */
+export function writeThroughProtection(memory, address, bytes){
+    const region = memory.find(address);
+    if (!region || address + bytes.length > region.base + region.size)
+    {
+        return false;
+    }
+    const access = region.access;
+    const lifted = access.includes('w') ? null : access.includes('x') ? 'rwx' : 'rw';
+    if (lifted)
+    {
+        memory.protect(region.name, lifted);
+    }
+    try
+    {
+        memory.writeBytes(address, bytes);
+    }
+    finally
+    {
+        if (lifted)
+        {
+            memory.protect(region.name, access);
+        }
+    }
+    return true;
+}
 
 /** A PROC_THREAD_ATTRIBUTE_LIST's header and each attribute after it, in bytes. */
 const ATTRIBUTE_LIST_HEADER = 20;
@@ -356,6 +396,9 @@ export function createSpawner(host){
  *           The one every library in this process launches through, when the
  *           caller assembled it. Built here otherwise, from the same fields.
  * @property {number} [processId]  The running program's own identifier.
+ * @property {(address: number, bytes: Uint8Array) => boolean} [patchMemory]
+ *           Writes into this process through the pages' protection
+ *           (`writeThroughProtection`); false when not all of it is mapped.
  */
 
 /**
@@ -681,7 +724,15 @@ export function createSpawnFunctions(host){
 
                 if ((handle >>> 0) === CURRENT_PROCESS)
                 {
-                    host.writeMemory(base >>> 0, bytes);
+                    if (!host.patchMemory)
+                    {
+                        host.writeMemory(base >>> 0, bytes);
+                    }
+                    else if (!host.patchMemory(base >>> 0, bytes))
+                    {
+                        host.setLastError(ERROR_NOACCESS);
+                        return 0;
+                    }
                 }
                 else
                 {

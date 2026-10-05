@@ -401,6 +401,18 @@ test('a spin count is recorded where a guest looks for it', ()=>{
     assert.equal(host.readI32(0x200 + CS_LOCK_COUNT), CS_UNLOCKED);
 });
 
+test('SetCriticalSectionSpinCount keeps the count in the section and answers the old one', ()=>{
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    fns.InitializeCriticalSectionAndSpinCount.handler([0x200, 4000]);
+
+    assert.equal(fns.SetCriticalSectionSpinCount.argBytes, 8);
+    assert.equal(fns.SetCriticalSectionSpinCount.handler([0x200, 1500]), 4000);
+    assert.equal(host.readI32(0x200 + CS_SPIN_COUNT), 1500);
+    assert.equal(host.readI32(0x200 + CS_LOCK_COUNT), CS_UNLOCKED, 'nothing else in it moves');
+    assert.equal(fns.SetCriticalSectionSpinCount.handler([0x200, 0]), 1500);
+});
+
 test('the interlocked exports are guest code, placed once where the host keeps code', ()=>{
     // One locked instruction on the program's dword each: nothing to trap
     // into, so the export binds to the code and registers no trap at all.

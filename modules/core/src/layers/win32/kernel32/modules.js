@@ -99,6 +99,8 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
  * @property {(handle: number) => ModuleRecord | null} [dataFile]
  *           A library LoadLibraryEx mapped as data, by the handle it gave out:
  *           no module, so not among the ones `byBase` knows.
+ * @property {(code: number) => any} [exitThread]
+ *           Ends the calling thread as ExitThread does.
  * @property {(asked: { module: string, name: string, found: number }) => void} [resolved]
  *           Told what a program looked up at runtime and what it was given. A
  *           name we answer zero to is one the program then decides about, and
@@ -202,6 +204,20 @@ export function createModuleFunctions(host){
         return written;
     };
 
+    /** @param {number} handle */
+    const freeLibrary = handle=>{
+        const module = host.byBase(handle >>> 0) ?? host.dataFile?.(handle >>> 0) ?? null;
+        if (!module)
+        {
+            // A handle with the low bits set is a data file's, and one
+            // that names no mapping is not an image at all.
+            host.setLastError(
+                (handle & 3) !== 0 ? ERROR_BAD_EXE_FORMAT : ERROR_MOD_NOT_FOUND);
+            return 0;
+        }
+        return module.release ? module.release() : 1;
+    };
+
     return {
         /**
          * HMODULE LoadLibraryA(LPCSTR lpLibFileName)
@@ -253,17 +269,23 @@ export function createModuleFunctions(host){
         FreeLibrary: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>{
-                const module = host.byBase(handle >>> 0) ?? host.dataFile?.(handle >>> 0) ?? null;
-                if (!module)
-                {
-                    // A handle with the low bits set is a data file's, and one
-                    // that names no mapping is not an image at all.
-                    host.setLastError(
-                        (handle & 3) !== 0 ? ERROR_BAD_EXE_FORMAT : ERROR_MOD_NOT_FOUND);
-                    return 0;
-                }
-                return module.release ? module.release() : 1;
+            handler: ([handle])=>freeLibrary(handle),
+        },
+
+        /**
+         * VOID FreeLibraryAndExitThread(HMODULE hLibModule, DWORD dwExitCode) --
+         * does not return
+         *
+         * What a thread running a library's code calls to unload that library
+         * and end itself, which it could not do in two calls.
+         */
+        FreeLibraryAndExitThread: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, code])=>{
+                const freed = freeLibrary(handle);
+                const exit = ()=>host.exitThread?.(code >>> 0) ?? 0;
+                return freed instanceof Promise ? freed.then(exit) : exit();
             },
         },
 

@@ -260,6 +260,8 @@ const HKL_EN_US = (LANGID_EN_US << 16 | LANGID_EN_US) >>> 0;
 
 /** The double-click time Windows starts with, in milliseconds. */
 const DOUBLE_CLICK_TIME = 500;
+/** How long a caret shows and then hides, in milliseconds: Windows XP's default. */
+const CARET_BLINK_TIME = 530;
 
 /**
  * The modifiers a 256-byte key state holds: shift and control down, caps lock
@@ -4199,6 +4201,22 @@ export function createSystemFunctions({ host, live, windows, classes }){
         GetKeyboardLayout: {
             argBytes: 4,
             handler: ()=>HKL_EN_US,
+        },
+
+        /** UINT GetCaretBlinkTime(void): `CARET_BLINK_TIME`, which nothing here changes. */
+        GetCaretBlinkTime: {
+            argBytes: 0,
+            handler: ()=>CARET_BLINK_TIME,
+        },
+
+        /** void SetLastErrorEx(DWORD dwErrCode, DWORD dwType): the type is ignored, as since XP. */
+        SetLastErrorEx: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([code])=>{
+                host.setLastError?.(code >>> 0);
+                return 0;
+            },
         },
 
         /**

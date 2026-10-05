@@ -1650,6 +1650,33 @@ export function createHeapFunctions(host){
             handler: ([handle])=>allocator.block(handle >>> 0) ? 1 : 0,
         },
 
+        /**
+         * GlobalWire and GlobalFix, GlobalUnWire and GlobalUnfix: the 16-bit
+         * calls that fixed a block in low memory, which on Win32 lock and
+         * unlock it -- and a block here never moves.
+         *
+         * LPVOID GlobalWire(HGLOBAL), VOID GlobalFix(HGLOBAL),
+         * BOOL GlobalUnWire(HGLOBAL), VOID GlobalUnfix(HGLOBAL)
+         */
+        GlobalWire: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>allocator.block(handle >>> 0) ? handle >>> 0 : 0,
+        },
+        GlobalFix: {
+            argBytes: 4,
+            handler: ()=>0,
+        },
+        GlobalUnWire: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>allocator.block(handle >>> 0) ? 1 : 0,
+        },
+        GlobalUnfix: {
+            argBytes: 4,
+            handler: ()=>0,
+        },
+
         /** SIZE_T GlobalSize(HGLOBAL hMem) */
         GlobalSize: {
             argBytes: 4,

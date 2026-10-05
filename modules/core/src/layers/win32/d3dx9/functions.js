@@ -18,8 +18,10 @@
  * once the count is right the maths is a few lines and a program that transposes
  * a matrix expects the transpose.
  *
- * The ones that build an effect need a device, which this maths-only surface
- * does not have; they answer E_NOTIMPL, with the argument width still declared.
+ * The ones that build something on a device -- an effect, a shader, a mesh, a
+ * texture, a font -- need a device this maths-only surface does not have; they
+ * answer E_NOTIMPL with the argument width still declared, their out-pointers
+ * null, and say so where divergences are told.
  *
  * Matrices are row-major, sixteen floats, `m[row * 4 + col]` -- the layout
  * D3DXMATRIX has in memory and the one every function here reads and writes.
@@ -33,6 +35,9 @@
  */
 
 import { guestEntry } from '../msvcrt/guest-code.js';
+import { createComObject } from '../ole32/objects.js';
+import { createConstantTables } from './constants.js';
+import { preprocess } from './preprocess.js';
 import * as inGuest from './inguest.js';
 import * as matrix from './inguest-matrix.js';
 import * as vector from './inguest-vector.js';
@@ -43,6 +48,55 @@ import { COMPILED as VECTOR } from './inguest-vector.x86.js';
 import { COMPILED as QUATERNION } from './inguest-quaternion.x86.js';
 
 const E_NOTIMPL = 0x80004001;
+const E_OUTOFMEMORY = 0x8007000e;
+const E_FAIL = 0x80004005;
+const D3DERR_INVALIDCALL = 0x8876086c;
+const IID_ID3DXBUFFER = '{8BA5FB08-5195-40E2-AC58-0D989C3A0102}';
+
+/**
+ * The facilities this surface does not build: each one's argument width, in
+ * bytes, then which of its arguments are out-pointers it leaves null -- a
+ * caller that does not check the answer finds no object rather than whatever
+ * its variable held. Widths are the documented signatures'.
+ *
+ * @type {Record<string, number[]>}
+ */
+const NOT_BUILT = {
+    D3DXAssembleShader: [28, 5, 6],
+    D3DXAssembleShaderFromFileA: [24, 4, 5],
+    D3DXCleanMesh: [24, 3, 5],
+    D3DXComputeNormalMap: [24],
+    D3DXCreateBox: [24, 4, 5],
+    D3DXCreateCubeTextureFromFileExA: [52, 12],
+    D3DXCreateCubeTextureFromFileInMemoryEx: [56, 13],
+    D3DXCreateCylinder: [32, 6, 7],
+    D3DXCreateEffect: [36, 7, 8],
+    D3DXCreateEffectCompiler: [28, 5, 6],
+    D3DXCreateEffectFromResourceA: [36, 7, 8],
+    D3DXCreateEffectPool: [4, 0],
+    D3DXCreateFontA: [48, 11],
+    D3DXCreateFontW: [48, 11],
+    D3DXCreateMesh: [24, 5],
+    D3DXCreateMeshFVF: [24, 5],
+    D3DXCreatePolygon: [20, 3, 4],
+    D3DXCreateSphere: [24, 4, 5],
+    D3DXCreateSprite: [8, 1],
+    D3DXCreateTeapot: [12, 1, 2],
+    D3DXCreateTextA: [32, 5, 6],
+    D3DXCreateTextureFromFileExA: [56, 13],
+    D3DXCreateTextureFromFileInMemoryEx: [60, 14],
+    D3DXCreateTorus: [28, 5, 6],
+    D3DXFilterTexture: [16],
+    D3DXGetImageInfoFromFileA: [8],
+    D3DXGetImageInfoFromFileInMemory: [12],
+    D3DXLoadSurfaceFromSurface: [32],
+    D3DXSaveSurfaceToFileInMemory: [20, 0],
+    D3DXSaveTextureToFileInMemory: [16, 0],
+    D3DXSimplifyMesh: [28, 6],
+    D3DXUVAtlasPartition: [68, 11, 12, 13, 14],
+    D3DXValidMesh: [12, 2],
+};
+
 
 /**
  * Each module of guest code and what the build made of it: every function
@@ -57,50 +111,271 @@ const IN_GUEST = [[inGuest, COMPILED], [matrix, MATRIX], [vector, VECTOR],
  * @typedef {Object} D3dxHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(api: string, detail: string) => void} [divergence]
+ * @property {{ publish: (object: any, interfaceId: string) => number }} [vtables]
+ *           Where a COM object gets the interface pointer a program holds.
+ * @property {{ allocate: (bytes: number) => number, free: (address: number) => any }} [heap]
+ * @property {(call: { entry: number, args: number[], thread?: any })
+ *     => Promise<number>} [callGuest]
+ *           A call into the guest -- a device's own method, from a constant table's setter.
+ * @property {() => any} [currentThread]
+ *           Whose call is in flight: a call into the guest made after an await names it.
  */
 
 /**
  * @param {D3dxHost} host
  */
 export function createD3dxFunctions(host){
-    /** @param {number} address @param {Float32Array} values */
-    const writeFloats = (address, values)=>host.writeMemory(address >>> 0,
-        new Uint8Array(values.buffer, values.byteOffset, values.byteLength));
+    /** @type {import('../ole32/objects.js').ComInterfaceDescriptor} */
+    const buffer = {
+        id: IID_ID3DXBUFFER,
+        methods: [
+            /** LPVOID GetBufferPointer() */
+            { name: 'GetBufferPointer', argBytes: 4, invoke: object=>object.state.data },
+            /** DWORD GetBufferSize() */
+            { name: 'GetBufferSize', argBytes: 4, invoke: object=>object.state.size },
+        ],
+    };
+
+    /** @param {Uint8Array} bytes */
+    const latin1 = bytes=>String.fromCharCode(...bytes);
+    /** Text as the bytes D3DX hands back: one a character, then a NUL. @param {string} text */
+    const encode = text=>Uint8Array.from([...text, '\0'], c=>c.charCodeAt(0) & 0xff);
+    /** @param {number} address */
+    const u32 = address=>{
+        const bytes = host.readMemory(address >>> 0, 4);
+        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+    };
+    /** A NUL-ended string's bytes, at most 4 KB of them. @param {number} address */
+    const cString = address=>{
+        const bytes = host.readMemory(address >>> 0, 4096);
+        const end = bytes.indexOf(0);
+        return bytes.slice(0, end < 0 ? bytes.length : end);
+    };
+    /** @param {number} at @param {number} value */
+    const putU32 = (at, value)=>host.writeMemory(at >>> 0, Uint8Array.of(value & 0xff,
+        value >> 8 & 0xff, value >> 16 & 0xff, value >>> 24));
+
+    /**
+     * An ID3DXBuffer holding these bytes, its pointer written to `out`.
+     *
+     * @param {number} out @param {Uint8Array} bytes
+     * @returns {number}  An HRESULT.
+     */
+    const giveBuffer = (out, bytes)=>{
+        const heap = /** @type {NonNullable<D3dxHost['heap']>} */ (host.heap);
+        const vtables = /** @type {NonNullable<D3dxHost['vtables']>} */ (host.vtables);
+        const size = bytes.length;
+        const data = heap.allocate(Math.max(size, 1));
+        if (data === 0)
+        {
+            return E_OUTOFMEMORY;
+        }
+        host.writeMemory(data, bytes);
+        const object = createComObject(IID_ID3DXBUFFER, { interfaces: [buffer],
+            state: { data, size }, destroy: ()=>heap.free(data) });
+        const pointer = vtables.publish(object, IID_ID3DXBUFFER) >>> 0;
+        if (pointer === 0)
+        {
+            object.release();
+            return E_OUTOFMEMORY;
+        }
+        putU32(out, pointer);
+        return 0;
+    };
+
+    /**
+     * A D3DXMACRO array: name and definition pointers, until a null name.
+     *
+     * @param {number} at
+     * @returns {[string, string][]}
+     */
+    const macrosAt = at=>{
+        /** @type {[string, string][]} */
+        const macros = [];
+        for (let entry = at >>> 0; entry !== 0 && u32(entry) !== 0 && macros.length < 1024;
+            entry += 8)
+        {
+            const value = u32(entry + 4);
+            macros.push([latin1(cString(u32(entry))), value === 0 ? '' : latin1(cString(value))]);
+        }
+        return macros;
+    };
+
+    /**
+     * The program's ID3DXInclude as the preprocessor's include: Open (its
+     * first slot -- the interface has no IUnknown) asked for the file, the
+     * text read from what it hands back, and Close (the second) told.
+     *
+     * @param {number} include
+     */
+    const includer = include=>{
+        // The thread whose call this answers, taken now: the calls into the
+        // guest below come after an await, when another may be running.
+        const thread = host.currentThread?.();
+        return (/** @type {string} */ name, /** @type {boolean} */ system)=>
+            open(include, thread, name, system);
+    };
+
+    /**
+     * @param {number} include @param {any} thread @param {string} name @param {boolean} system
+     * @returns {Promise<string | null>}
+     */
+    const open = async(include, thread, name, system)=>{
+        const { heap, callGuest } = host;
+        if (!heap || !callGuest)
+        {
+            return null;
+        }
+        const scratch = heap.allocate(name.length + 1 + 8);
+        if (scratch === 0)
+        {
+            return null;
+        }
+        try
+        {
+            host.writeMemory(scratch, encode(name));
+            const dataOut = scratch + name.length + 1;
+            putU32(dataOut, 0);
+            putU32(dataOut + 4, 0);
+            const vtable = u32(include);
+            const answer = await callGuest({ entry: u32(vtable), args: [include, system ? 1 : 0,
+                scratch, 0, dataOut, dataOut + 4], thread });
+            const data = u32(dataOut);
+            if ((answer | 0) < 0 || data === 0)
+            {
+                return null;
+            }
+            const text = latin1(host.readMemory(data, u32(dataOut + 4)).slice());
+            await callGuest({ entry: u32(vtable + 4), args: [include, data], thread });
+            return text;
+        }
+        finally
+        {
+            heap.free(scratch);
+        }
+    };
 
     return {
         ...Object.fromEntries(IN_GUEST.flatMap(([source, compiled])=>Object.keys(compiled)
             .map(name=>[name, guestEntry(source[name], compiled[name], host)]))),
 
-        /**
-         * The effect facilities, which build objects on a device this maths
-         * surface does not hold. Declared for their stack width and answered
-         * E_NOTIMPL, which a caller checks; the effect pointer is left null.
-         *
-         * HRESULT D3DXCreateEffectPool(LPD3DXEFFECTPOOL* ppPool)
-         * HRESULT D3DXCreateEffectFromResourceA(device, hSrcModule, pSrcResource,
-         *     pDefines, pInclude, Flags, pPool, ppEffect, ppCompilationErrors)
-         */
-        D3DXCreateEffectPool: {
-            argBytes: 4,
+        ...createConstantTables(host),
+
+        ...Object.fromEntries(Object.entries(NOT_BUILT).map(([name, [argBytes, ...outs]])=>[name, {
+            argBytes,
             /** @param {number[]} args */
-            handler: ([pool])=>{
-                if ((pool >>> 0) !== 0)
+            handler: args=>{
+                for (const at of outs)
                 {
-                    writeFloats(pool, Float32Array.of(0));
+                    if ((args[at] >>> 0) !== 0)
+                    {
+                        host.writeMemory(args[at] >>> 0, new Uint8Array(4));
+                    }
                 }
+                host.divergence?.(name, 'answered E_NOTIMPL: nothing is built on a device here');
                 return E_NOTIMPL;
+            },
+        }])),
+
+        /**
+         * HRESULT D3DXCreateBuffer(DWORD NumBytes, LPD3DXBUFFER *ppBuffer)
+         *
+         * An ID3DXBuffer over a block of that many bytes, zeroed, which goes
+         * back to the heap with the last Release. A program fills one with
+         * what it hands a shader or an effect, and does not check the answer
+         * before it writes.
+         */
+        D3DXCreateBuffer: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([bytes, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                host.writeMemory(out >>> 0, new Uint8Array(4));
+                if (!host.heap || !host.vtables)
+                {
+                    return E_NOTIMPL;
+                }
+                return giveBuffer(out, new Uint8Array(bytes >>> 0));
             },
         },
 
-        D3DXCreateEffectFromResourceA: {
-            argBytes: 36,
+        /**
+         * HRESULT D3DXPreprocessShader(LPCSTR pSrcData, UINT SrcDataSize,
+         *     const D3DXMACRO *pDefines, LPD3DXINCLUDE pInclude,
+         *     LPD3DXBUFFER *ppShaderText, LPD3DXBUFFER *ppErrorMsgs)
+         *
+         * The source run through the preprocessor (`preprocess.js`), with the
+         * program's macros and its ID3DXInclude for every #include, handed
+         * back as a buffer of text ended by a NUL; a directive that fails
+         * answers E_FAIL with its message in the error buffer.
+         */
+        D3DXPreprocessShader: {
+            argBytes: 24,
             /** @param {number[]} args */
-            handler: ([, , , , , , , effect])=>{
-                if ((effect >>> 0) !== 0)
+            handler: ([source, size, defines, include, textOut, errorsOut])=>{
+                for (const out of [textOut, errorsOut])
                 {
-                    writeFloats(effect, Float32Array.of(0));
+                    if ((out >>> 0) !== 0)
+                    {
+                        host.writeMemory(out >>> 0, new Uint8Array(4));
+                    }
                 }
-                return E_NOTIMPL;
+                if ((source >>> 0) === 0 || !host.heap || !host.vtables)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                const text = latin1(host.readMemory(source >>> 0, size >>> 0));
+                return preprocess(text, { defines: macrosAt(defines),
+                    include: (include >>> 0) === 0 ? undefined : includer(include >>> 0) })
+                    .then(result=>{
+                        if ('error' in result)
+                        {
+                            if ((errorsOut >>> 0) !== 0)
+                            {
+                                giveBuffer(errorsOut, encode(`${result.error}\n`));
+                            }
+                            return E_FAIL;
+                        }
+                        return (textOut >>> 0) === 0 ? 0 : giveBuffer(textOut, encode(result.text));
+                    });
+            },
+        },
+
+        /**
+         * HRESULT D3DXCompileShader(LPCSTR pSrcData, UINT SrcDataLen, const D3DXMACRO*,
+         *     LPD3DXINCLUDE, LPCSTR pFunctionName, LPCSTR pProfile, DWORD Flags,
+         *     LPD3DXBUFFER *ppShader, LPD3DXBUFFER *ppErrorMsgs,
+         *     LPD3DXCONSTANTTABLE *ppConstantTable)
+         *
+         * There is no HLSL compiler here. The call fails as a compile that
+         * found an error fails -- E_FAIL, the shader and table null, and a
+         * message in the error buffer -- which a program reports and goes
+         * on from, as it would from a shader its own source broke.
+         */
+        D3DXCompileShader: {
+            argBytes: 40,
+            /** @param {number[]} args */
+            handler: ([, , , , entry, profile, , shaderOut, errorsOut, tableOut])=>{
+                for (const out of [shaderOut, errorsOut, tableOut])
+                {
+                    if ((out >>> 0) !== 0)
+                    {
+                        host.writeMemory(out >>> 0, new Uint8Array(4));
+                    }
+                }
+                const named = `${(entry >>> 0) === 0 ? '' : latin1(cString(entry))} (${
+                    (profile >>> 0) === 0 ? '' : latin1(cString(profile))})`;
+                host.divergence?.('D3DXCompileShader', `no HLSL compiler: ${named} refused`);
+                if ((errorsOut >>> 0) !== 0 && host.heap && host.vtables)
+                {
+                    giveBuffer(errorsOut, encode(
+                        `error X0000: ${named}: this machine has no HLSL compiler\n`));
+                }
+                return E_FAIL;
             },
         },
     };

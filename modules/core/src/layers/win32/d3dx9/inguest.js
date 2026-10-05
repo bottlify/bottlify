@@ -481,3 +481,57 @@ export function D3DXVec3Normalize({ f32, setF32 }, out, v){
     setF32(out + 8, z * scale);
     return out;
 }
+
+/** The bytes of a texture coordinate set by its two bits: TEXTUREFORMAT2, 3, 4, then 1. */
+export const TEXCOORD_BYTES = Uint8Array.of(8, 12, 16, 4);
+
+/**
+ * UINT D3DXGetFVFVertexSize(DWORD FVF) -- the bytes a vertex of that flexible
+ * format takes: its position -- three floats, four for XYZRHW and XYZW, and
+ * one more for each blend weight XYZB1 to XYZB5 add -- a normal, a point size,
+ * the two colours, and each texture coordinate set at the size its two bits
+ * give, at most the eight a format holds. A position the mask does not name
+ * takes nothing.
+ *
+ * @guestCode stdcall
+ * @param {u32} fvf
+ * @returns {u32}
+ */
+export function D3DXGetFVFVertexSize(fvf){
+    const position = fvf & 0x400e;
+    let size = 0;
+    if (position === 2)
+    {
+        size = 12;
+    }
+    else if (position === 4 || position === 0x4002)
+    {
+        size = 16;
+    }
+    else if (position >= 6 && position <= 14)
+    {
+        size = (position * 2 + 4) | 0;
+    }
+    if ((fvf & 0x10) !== 0)
+    {
+        size += 12;
+    }
+    if ((fvf & 0x20) !== 0)
+    {
+        size += 4;
+    }
+    if ((fvf & 0x40) !== 0)
+    {
+        size += 4;
+    }
+    if ((fvf & 0x80) !== 0)
+    {
+        size += 4;
+    }
+    const sets = (fvf >>> 8) & 15;
+    for (let set = 0; set < sets && set < 8; set++)
+    {
+        size += TEXCOORD_BYTES[(fvf >>> (set * 2 + 16)) & 3];
+    }
+    return size >>> 0;
+}

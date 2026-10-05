@@ -1018,6 +1018,32 @@ export function createProcessFunctions(host){
             },
         },
 
+        /**
+         * BOOL GetSystemTimeAdjustment(PDWORD lpTimeAdjustment, PDWORD lpTimeIncrement,
+         *     PBOOL lpTimeAdjustmentDisabled)
+         *
+         * The system clock here moves a millisecond at a time and nothing
+         * adjusts it: an increment of 10 000 hundreds of nanoseconds, the
+         * same added at each, and adjustment disabled.
+         */
+        GetSystemTimeAdjustment: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([adjustment, increment, disabled])=>{
+                // Each is a DWORD or a BOOL: four bytes, no more.
+                for (const [pointer, value] of [[adjustment, 10000], [increment, 10000],
+                    [disabled, 1]])
+                {
+                    if ((pointer >>> 0) !== 0)
+                    {
+                        host.writeMemory(pointer >>> 0, Uint8Array.of(value & 0xff,
+                            value >> 8 & 0xff, value >> 16 & 0xff, value >>> 24));
+                    }
+                }
+                return 1;
+            },
+        },
+
         /** BOOL QueryPerformanceCounter(LARGE_INTEGER *lpPerformanceCount) */
         QueryPerformanceCounter: {
             argBytes: 4,

@@ -500,6 +500,25 @@ export function createSyncFunctions(host){
         },
 
         /**
+         * DWORD SetCriticalSectionSpinCount(LPCRITICAL_SECTION, DWORD dwSpinCount)
+         *
+         * The count is kept in the section, where
+         * InitializeCriticalSectionAndSpinCount put it; the answer is the one it
+         * replaced.
+         */
+        SetCriticalSectionSpinCount: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([pointer, spinCount])=>{
+                const at = (pointer >>> 0) + CS_SPIN_COUNT;
+                const bytes = host.readMemory(at, 4);
+                const previous = (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+                writeI32(at, spinCount | 0);
+                return previous;
+            },
+        },
+
+        /**
          * BOOL TryEnterCriticalSection(LPCRITICAL_SECTION lpCriticalSection)
          *
          * Guest code, never a trap: a try that would wait answers FALSE.

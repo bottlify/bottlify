@@ -417,6 +417,37 @@ test('resolution answers for itself and refuses what it cannot know', ()=>{
     assert.equal(fx.call('WSAGetLastError', []), WSAHOST_NOT_FOUND);
 });
 
+test('gethostbyaddr names the loopback with this host, and getservbyname reads the services', ()=>{
+    // Imported by ordinal, 51 and 55: the reverse of the one address
+    // answered without a resolver, and a service's port in network order.
+    const fx = fixture();
+    const view = new DataView(fx.bytes.buffer);
+    /** @param {number} at */
+    const text = at=>decodeAnsi(fx.bytes.subarray(at, fx.bytes.indexOf(0, at)));
+    fx.bytes.set([127, 0, 0, 1], BUFFER);
+    const hostent = fx.call('gethostbyaddr', [BUFFER, 4, AF_INET]);
+    assert.notEqual(hostent, 0);
+    assert.equal(text(view.getUint32(hostent, true)), 'bottlify');
+    fx.bytes.set([10, 0, 0, 7], BUFFER);
+    assert.equal(fx.call('gethostbyaddr', [BUFFER, 4, AF_INET]), 0);
+    assert.equal(fx.call('WSAGetLastError', []), WSAHOST_NOT_FOUND);
+    assert.equal(fx.call('gethostbyaddr', [BUFFER, 4, 23]), 0, 'AF_INET6 is not one');
+
+    fx.put(NAME, 'HTTP');
+    fx.put(NAME2, 'tcp');
+    const servent = fx.call('getservbyname', [NAME, NAME2]);
+    assert.notEqual(servent, 0);
+    assert.equal(text(view.getUint32(servent, true)), 'http');
+    assert.equal(view.getUint16(servent + 8, false), 80, 's_port, in network order');
+    assert.equal(text(view.getUint32(servent + 12, true)), 'tcp');
+    fx.put(NAME2, 'udp');
+    assert.equal(fx.call('getservbyname', [NAME, NAME2]), 0, 'not listed for udp');
+    assert.equal(fx.call('WSAGetLastError', []), 11004, 'WSANO_DATA');
+    assert.notEqual(fx.call('getservbyname', [NAME, 0]), 0, 'any protocol');
+    assert.deepEqual([fx.winsock.ordinals.wsock32[51], fx.winsock.ordinals.wsock32[55]],
+        ['gethostbyaddr', 'getservbyname'], 'and both resolve by ordinal');
+});
+
 test('a resolved name is named in the hostent by the bytes it was asked by', async()=>{
     // The name is read as Windows-1252, where 0x80 is the euro sign and 0x99
     // the trade mark, and h_name goes back in that page.
@@ -500,8 +531,8 @@ test('an ordinal whose function does not exist is not offered at all', ()=>{
     // does not implement. What is exported is the intersection, computed rather
     // than maintained, so the two cannot drift apart.
     const fx = fixture();
-    assert.equal(WSOCK32_ORDINALS[51], 'gethostbyaddr', 'the reference still records it');
-    assert.equal(51 in fx.winsock.ordinals.wsock32, false, 'and it is not offered');
+    assert.equal(WSOCK32_ORDINALS[56], 'getservbyport', 'the reference still records it');
+    assert.equal(56 in fx.winsock.ordinals.wsock32, false, 'and it is not offered');
     assert.ok(Object.keys(fx.winsock.ordinals.wsock32).length
         < Object.keys(WSOCK32_ORDINALS).length, 'something was filtered out');
     assert.equal(fx.winsock.ordinals.wsock32[52], 'gethostbyname',

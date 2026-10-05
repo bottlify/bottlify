@@ -381,6 +381,9 @@ export function createThreadPool(host){
     /** @type {Queue | null} */
     let defaultQueue = null;
     let fired = 0;
+    /** What QueueUserWorkItem's callbacks count against: nothing waits for them. */
+    /** @type {Owner} */
+    const workItems = { outstanding: 0, waiters: [] };
 
     /** @param {number} handle */
     const makeQueue = handle=>{
@@ -678,6 +681,27 @@ export function createThreadPool(host){
                 argBytes: 4,
                 /** @param {number[]} args */
                 handler: ([queue])=>deleteQueue(queue, 0),
+            },
+
+            /**
+             * BOOL QueueUserWorkItem(LPTHREAD_START_ROUTINE Function, PVOID Context,
+             *     ULONG Flags)
+             *
+             * The routine is handed its context on a pool thread, as a timer's
+             * callback is. The flags that choose a kind of thread choose
+             * nothing here: every work item runs on the pool's.
+             */
+            QueueUserWorkItem: {
+                argBytes: 12,
+                /** @param {number[]} args */
+                handler: ([routine, context])=>{
+                    if ((routine >>> 0) === 0)
+                    {
+                        return fail(ERROR_INVALID_PARAMETER);
+                    }
+                    dispatch({ entry: routine >>> 0, args: [context >>> 0], owner: workItems });
+                    return 1;
+                },
             },
         },
     };

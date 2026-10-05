@@ -430,5 +430,22 @@ export function createEnvironmentFunctions(host){
             /** @param {number[]} args */
             handler: ([buffer, size])=>reportWidePath(WINDOWS_DIRECTORY, buffer, size),
         },
+
+        /**
+         * UINT GetSystemWindowsDirectoryA/W(LPSTR/LPWSTR lpBuffer, UINT uSize)
+         *
+         * The shared Windows directory, which differs from the one above only
+         * for a user of a terminal server, which this is not.
+         */
+        GetSystemWindowsDirectoryA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([buffer, size])=>reportPath(WINDOWS_DIRECTORY, buffer, size),
+        },
+        GetSystemWindowsDirectoryW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([buffer, size])=>reportWidePath(WINDOWS_DIRECTORY, buffer, size),
+        },
     };
 }

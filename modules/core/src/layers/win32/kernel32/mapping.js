@@ -36,6 +36,10 @@ const ERROR_NOT_ENOUGH_MEMORY = 8;
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
 /** What a read that failed after the caller was parked answers. */
 const ERROR_IO_DEVICE = 1117;
+const ERROR_INVALID_ADDRESS = 487;
+const ERROR_MAPPED_ALIGNMENT = 1132;
+/** Where a view asked for at an address may start: on a 64 KB granule. */
+const ALLOCATION_GRANULARITY = 0x10000;
 
 /** INVALID_HANDLE_VALUE, which CreateFileMapping takes to mean "no file". */
 const INVALID_HANDLE_VALUE = 0xffffffff;
@@ -116,6 +120,8 @@ const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
  *           Counted in place: views mapped, views that waited for their
  *           bytes, views whose bytes never came.
  * @property {(bytes: number) => number} allocate  Guest memory, or 0.
+ * @property {(address: number, bytes: number) => boolean} [allocateAt]
+ *           Guest memory at exactly that address, when all of it is free.
  * @property {(address: number) => void} release
  * @property {{ open: (type: string, object: any) => number,
  *              resolve: (handle: number, type?: string) => any,
@@ -596,10 +602,15 @@ export function createMappingFunctions(host){
         MapViewOfFile: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([handle, access, offsetHigh, offsetLow, length])=>{
+            handler: ([handle, access, offsetHigh, offsetLow, length, base = 0])=>{
                 if (offsetHigh !== 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
+                }
+                const placed = base >>> 0;
+                if (placed % ALLOCATION_GRANULARITY !== 0)
+                {
+                    return fail(ERROR_MAPPED_ALIGNMENT);
                 }
                 const mapping = object(handle, 'mapping');
                 if (!mapping)
@@ -613,10 +624,13 @@ export function createMappingFunctions(host){
                     return fail(ERROR_INVALID_PARAMETER);
                 }
 
-                const address = host.allocate(wanted);
+                // At the address asked for, when one is and all of the view
+                // fits there; anywhere, when none is.
+                const address = placed === 0 ? host.allocate(wanted)
+                    : host.allocateAt?.(placed, wanted) ? placed : 0;
                 if (address === 0)
                 {
-                    return fail(ERROR_NOT_ENOUGH_MEMORY);
+                    return fail(placed === 0 ? ERROR_NOT_ENOUGH_MEMORY : ERROR_INVALID_ADDRESS);
                 }
 
                 const writable = mapping.writable
@@ -681,6 +695,21 @@ export function createMappingFunctions(host){
                     return 0;
                 }));
             },
+        },
+
+        /**
+         * LPVOID MapViewOfFileEx(HANDLE, DWORD dwDesiredAccess, DWORD dwFileOffsetHigh,
+         *   DWORD dwFileOffsetLow, SIZE_T dwNumberOfBytesToMap, LPVOID lpBaseAddress)
+         *
+         * MapViewOfFile with the address the view is to start at: on an
+         * allocation granule, else ERROR_MAPPED_ALIGNMENT, and refused with
+         * ERROR_INVALID_ADDRESS when any of the range is taken. A null address
+         * is anywhere.
+         */
+        MapViewOfFileEx: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: args=>table.MapViewOfFile.handler(args),
         },
 
         /**

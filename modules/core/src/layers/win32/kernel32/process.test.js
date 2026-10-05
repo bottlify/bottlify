@@ -433,6 +433,18 @@ test('GetSystemTimeAsFileTime writes 100ns units since 1601', ()=>{
     assert.equal(u64(filetime), FILETIME_AT_UNIX_EPOCH + 10_000_000n);
 });
 
+test('GetSystemTimeAdjustment reports a millisecond clock nothing adjusts, a DWORD each', ()=>{
+    // Three four-byte answers side by side: one written as eight would run
+    // into the next, and past the last.
+    const { host, fns } = setup();
+    host.bytes.fill(0xaa, 0x600, 0x610);
+    assert.equal(fns.GetSystemTimeAdjustment.argBytes, 12);
+    assert.equal(fns.GetSystemTimeAdjustment.handler([0x600, 0x604, 0x608]), 1);
+    assert.deepEqual([0x600, 0x604, 0x608].map(at=>host.view.getUint32(at, true)),
+        [10000, 10000, 1]);
+    assert.equal(host.view.getUint32(0x60c, true), 0xaaaaaaaa, 'nothing past the last');
+});
+
 test('Sleep stops the thread, and a zero sleep yields instead', ()=>{
     const { host, fns } = setup();
 
