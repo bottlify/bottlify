@@ -152,8 +152,10 @@ Three routes, all `POST` and all authenticated:
 - `/bottles/<id>/art/cover`, `/bottles/<id>/art/wallpaper` — a picture (PNG,
   JPEG, WebP or GIF, by its `Content-Type`) kept beside the manifest under a
   name taken from its bytes and named there as `./<name>`: `coverLarge` and
-  `coverSmall` for the cover, `wallpaper` for the stage. The one it replaces is
-  removed.
+  `coverSmall` for the cover, `wallpaper` for the stage. A JPEG cover is kept
+  only as two smaller JPEGs, fitted into 800×1200 for the details panel and
+  400×600 for the card; a cover in another format is kept as given, in both.
+  The one it replaces is removed.
 - `DELETE /bottles/<id>` — the bottle removed whole, for everyone: its bundle,
   its manifest and its pictures. Refused while it is still being uploaded.
 

@@ -33,6 +33,7 @@
     "./bundle": "./src/bundle.js",
     "./bundle/node": "./src/bundle-node.js",
     "./iso": "./src/iso.js",
+    "./jpeg": "./src/layers/media/internal/jpeg.js",
     "./engine.worker.js": "./dist/engine.worker.js",
     "./worklet.js": "./dist/worklet.js",
     "./video-decoder.wasm": "./dist/vendor/video-decoder.wasm",

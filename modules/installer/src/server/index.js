@@ -36,6 +36,7 @@ import { join, resolve } from 'node:path';
 // The one thing this side knows about the container: where the block region
 // starts, so it can leave room for a header it writes last and never reads.
 import { HEADER_SIZE } from '@bottlify/core/bundle';
+import { fitJpeg } from './preview.js';
 
 /** Nothing larger is read into memory for one request. */
 const MAX_PART = 64 << 20;
@@ -56,11 +57,17 @@ const ART_TYPES = new Map([
 const MAX_ART = 16 << 20;
 
 /**
- * Which fields of the manifest show a picture in each place: the cover is the
- * library's card and the details panel alike, the wallpaper the stage before
- * the first frame.
+ * Which fields of the manifest show a picture in each place, and the box each
+ * picture is fitted into: the cover is the library's card, as a preview, and
+ * the details panel, a larger one -- neither needs a cover the size it is
+ * found at; the wallpaper is the stage before the first frame, kept as given.
+ *
+ * @type {Record<'cover' | 'wallpaper', Record<string, [number, number] | null>>}
  */
-const ART_FIELDS = { cover: ['coverLarge', 'coverSmall'], wallpaper: ['wallpaper'] };
+const ART_FIELDS = {
+    cover: { coverLarge: [800, 1200], coverSmall: [400, 600] },
+    wallpaper: { wallpaper: null },
+};
 
 /**
  * The fields of a manifest a bottle's settings may change, each checked: the
@@ -393,22 +400,31 @@ export function createBottleServer({ root, token, port = 8788, host = '127.0.0.1
             answer(400, `the ${slot} is empty`);
             return;
         }
-        const hash = createHash('sha256').update(body).digest('hex').slice(0, 12);
-        const name = `${slot}-${hash}.${extension}`;
-        await writeFile(join(directory, `${name}.part`), body);
-        await rename(join(directory, `${name}.part`), join(directory, name));
+        const manifest = { ...JSON.parse(held), id };
+        /** @type {Map<string, Uint8Array>} */
+        const pictures = new Map();
+        for (const [field, box] of Object.entries(ART_FIELDS[slot]))
+        {
+            // A picture this cannot fit -- one not a JPEG -- is kept as given.
+            const fitted = box && fitJpeg(body, box[0], box[1]);
+            const bytes = fitted || body;
+            const hash = createHash('sha256').update(bytes).digest('hex').slice(0, 12);
+            const name = `${slot}-${hash}.${fitted ? 'jpg' : extension}`;
+            pictures.set(name, bytes);
+            manifest[field] = `./${name}`;
+        }
+        for (const [name, bytes] of pictures)
+        {
+            await writeFile(join(directory, `${name}.part`), bytes);
+            await rename(join(directory, `${name}.part`), join(directory, name));
+        }
         const earlier = new RegExp(`^${slot}-[0-9a-f]{12}\\.(png|jpg|webp|gif)$`);
         for (const file of await readdir(directory))
         {
-            if (file !== name && earlier.test(file))
+            if (!pictures.has(file) && earlier.test(file))
             {
                 await rm(join(directory, file), { force: true });
             }
-        }
-        const manifest = { ...JSON.parse(held), id };
-        for (const field of ART_FIELDS[slot])
-        {
-            manifest[field] = `./${name}`;
         }
         await writeFile(path, `${JSON.stringify(manifest, null, 4)}\n`);
         answer(200, { id, manifest });

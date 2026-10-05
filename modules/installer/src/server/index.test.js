@@ -24,6 +24,8 @@ import { openBundle } from '../../../core/src/layers/filesystem/internal/bundle/
 import { Codec } from '@bottlify/core/bundle';
 import { collectFrom, publish } from '../index.js';
 import { createBottleServer, manifestChanges } from './index.js';
+import { encodeJpeg } from './preview.js';
+import { decodeJpeg } from '@bottlify/core/jpeg';
 
 const TOKEN = 'a-secret-nobody-else-has';
 
@@ -316,6 +318,58 @@ test('a cover and a wallpaper go beside the manifest, and a new one replaces the
         await host.stop();
     }
 });
+
+test('a JPEG cover is kept as a preview for the card and a larger picture for the details',
+    async()=>{
+        const host = await serving();
+        try
+        {
+            const prefix = collectFrom(finishedApp([
+                { path: 'C:\\Games\\Title\\game.exe', bytes: bytes('MZ program') },
+            ]), { name: 'Setup.exe', bytes: bytes('the distribution') });
+            await publish({ prefix, endpoint: host.endpoint, id: 'poster',
+                manifest: { title: 'Game', entry: 'game.exe' } });
+            const send = (/** @type {string} */ type, /** @type {Uint8Array} */ body)=>fetch(
+                `${host.endpoint.url}/bottles/poster/art/cover`, {
+                    method: 'POST',
+                    headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': type },
+                    body: Uint8Array.from(body),
+                });
+            const directory = join(host.root, 'poster');
+            const covers = async()=>(await readdir(directory))
+                .filter(file=>file.startsWith('cover-')).sort();
+
+            // A catalogue's poster: 1200 by 1800.
+            const plane = (/** @type {number} */ width, /** @type {number} */ height,
+                /** @type {number} */ value)=>({ data: new Uint8Array(width * height).fill(value),
+                width, height });
+            const poster = encodeJpeg(1200, 1800,
+                [plane(1200, 1800, 90), plane(600, 900, 110), plane(600, 900, 150)]);
+            const answered = await send('image/jpeg', poster);
+            assert.equal(answered.status, 200);
+            const { coverLarge, coverSmall } = (await answered.json()).manifest;
+            assert.match(coverLarge, /^\.\/cover-[0-9a-f]{12}\.jpg$/);
+            assert.match(coverSmall, /^\.\/cover-[0-9a-f]{12}\.jpg$/);
+            const sizes = await Promise.all([coverLarge, coverSmall].map(async name=>{
+                const decoded = decodeJpeg(await readFile(join(directory, name.slice(2))));
+                return [decoded.width, decoded.height];
+            }));
+            assert.deepEqual(sizes, [[800, 1200], [400, 600]], 'each fitted into its box');
+            assert.deepEqual(await covers(), [coverLarge.slice(2), coverSmall.slice(2)].sort(),
+                'the poster itself is not kept');
+
+            // What it cannot read is kept as it came, in both places.
+            assert.equal((await send('image/png', bytes('a png'))).status, 200);
+            const written = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'));
+            assert.equal(written.coverSmall, written.coverLarge);
+            assert.deepEqual(await covers(), [written.coverLarge.slice(2)],
+                'both previews are gone');
+        }
+        finally
+        {
+            await host.stop();
+        }
+    });
 
 test('a bottle is removed whole, and only a bottle is', async()=>{
     const host = await serving();
