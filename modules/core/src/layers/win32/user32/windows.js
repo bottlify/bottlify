@@ -461,8 +461,6 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           How many times the application has been told WM_ACTIVATEAPP(0),
  *           for a caller that looks only now and then and must still learn
  *           of a deactivation that came and went in between.
- * @property {() => void} refresh
- *           Repaints the desktop and every window shown on it.
  * @property {(event: import('./rawinput.js').RawInputEvent) => void} rawInput
  *           One event of the mouse or the keyboard as the device reported it,
  *           posted as WM_INPUT to whoever registered for that device.
@@ -2112,6 +2110,8 @@ export function createWindowFunctions(host){
     const setCapture = hwnd=>{
         const previous = captured;
         captured = live(hwnd) ? hwnd >>> 0 : 0;
+        // The run routes the page's pointer to the window holding it.
+        directory.noteCapture?.(captured, processId);
         if (dragged && !insideOf(live(captured), dragged.record))
         {
             endDrag();
@@ -2121,6 +2121,7 @@ export function createWindowFunctions(host){
     const releaseCapture = ()=>{
         const previous = captured;
         captured = 0;
+        directory.noteCapture?.(0, processId);
         endDrag();
         if (previous !== 0 && live(previous))
         {
@@ -4988,23 +4989,6 @@ export function createWindowFunctions(host){
          * beside the messages it has always had.
          */
         rawInput: rawInput.deliver,
-
-        /**
-         * The desktop and every window shown on it paint again: what the
-         * screen needs when this process's picture comes back after a child
-         * that ran beside it drew over the same canvas.
-         */
-        refresh(){
-            desktopPainted = false;
-            for (const record of windows.values())
-            {
-                if (!record.destroyed && !isChild(record) && shown(record))
-                {
-                    appear(record);
-                }
-            }
-            paintDesktop();
-        },
 
         /**
          * One window's client rectangle on the screen, or null for a handle

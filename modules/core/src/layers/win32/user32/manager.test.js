@@ -144,3 +144,29 @@ test('a subscriber hears every change in order, each with its revision, and noth
         'removed 2 r5 gone']);
     assert.equal(manager.revision(), 6, 'the change after stopping still counts');
 });
+
+test('the page\'s input goes to the process of the window that should have it', ()=>{
+    const manager = createWindowManager();
+    manager.publish(state(1, { processId: 0x100, rect: { left: 0, top: 0, right: 200,
+        bottom: 200 } }));
+    manager.publish(state(2, { processId: 0x200, rect: { left: 100, top: 100, right: 300,
+        bottom: 300 } }));
+    manager.publish(state(3, { processId: 0x300, parent: 1, rect: { left: 10, top: 10,
+        right: 50, bottom: 50 } }));
+    manager.setForeground(1);
+    assert.equal(manager.inputTarget({ kind: 'pointerMove', x: 150, y: 150 }), 0x200,
+        'the window on top under the pointer');
+    assert.equal(manager.inputTarget({ kind: 'pointerButton' }), 0x200,
+        'a button where the pointer last was');
+    assert.equal(manager.inputTarget({ kind: 'pointerMove', x: 20, y: 20 }), 0x300,
+        'the deepest child there, whoever made it');
+    assert.equal(manager.inputTarget({ kind: 'key' }), 0x100, 'the keyboard: the foreground');
+    manager.setCapture(2);
+    assert.equal(manager.inputTarget({ kind: 'pointerMove', x: 20, y: 20 }), 0x200,
+        'the window holding the mouse, wherever the pointer is');
+    manager.releaseCapture();
+    assert.equal(manager.inputTarget({ kind: 'wheel', x: 400, y: 400 }), 0x100,
+        'nothing under the pointer: the foreground');
+    manager.setForeground(0);
+    assert.equal(manager.inputTarget({ kind: 'key' }), null, 'no window: the caller decides');
+});

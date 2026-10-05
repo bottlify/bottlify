@@ -13,6 +13,11 @@
  * too -- and neither where no window is. Where one process runs at a time,
  * the parent is held while its child runs, and its picture is the one it
  * showed last.
+ *
+ * And the page's input goes where the windows say (step 4): a click on the
+ * parent's window to the parent, one on the child's to the child, the key to
+ * the program whose window is the foreground one -- the child's, once it was
+ * clicked last. When the child is gone, the screen is the parent's alone.
  */
 
 import { test } from 'node:test';
@@ -71,13 +76,34 @@ for (const concurrency of /** @type {const} */ ([1, 2, 4]))
         /** @type {(string | null)[]} */
         let seen = [];
         let composed = false;
+        /** @param {number} x @param {number} y */
+        const click = (x, y)=>{
+            app.input.send({ kind: 'pointerMove', x, y });
+            app.input.send({ kind: 'pointerButton', button: 'left', down: true, x, y });
+            app.input.send({ kind: 'pointerButton', button: 'left', down: false, x, y });
+        };
+        // Once both pictures are up: a click on each window, a while apart
+        // for the activation each brings to reach both programs, then keys.
+        let tick = 0;
         const looking = setInterval(()=>{
-            seen = [[50, 50], [150, 150], [250, 250], [50, 250], [400, 400]]
-                .map(([x, y])=>colourAt(gpu, x, y));
-            composed ||= seen.join() === 'red,blue,blue,other,other';
-            if (composed)
+            if (!composed)
             {
-                // Only once both pictures are up is the child told to go.
+                seen = [[50, 50], [150, 150], [250, 250], [50, 250], [400, 400]]
+                    .map(([x, y])=>colourAt(gpu, x, y));
+                composed = seen.join() === 'red,blue,blue,other,other';
+                return;
+            }
+            tick++;
+            if (tick === 1)
+            {
+                click(50, 50);
+            }
+            else if (tick === 20)
+            {
+                click(250, 250);
+            }
+            else if (tick > 40)
+            {
                 app.input.send({ kind: 'key', code: 'KeyA', down: true });
             }
         }, 50);
@@ -86,5 +112,7 @@ for (const concurrency of /** @type {const} */ ([1, 2, 4]))
         assert.doesNotMatch(output.join(''), /FAIL/);
         assert.ok(composed, `the screen showed both windows in their order; last seen ${
             seen.join()} at (50,50) (150,150) (250,250) (50,250) (400,400)`);
+        assert.deepEqual([colourAt(gpu, 150, 150), colourAt(gpu, 250, 250)], ['red', 'other'],
+            'the child gone, the screen is the parent\'s alone, with nothing new drawn');
     });
 }

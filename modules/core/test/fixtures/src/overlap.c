@@ -9,7 +9,9 @@
  * the screen's corner and starts its child, then looks at its queue until the
  * child is gone. The child shows a blue window over the parent's lower right
  * quarter and runs until a key comes. Each program draws only its own: what
- * the screen shows where they overlap is the run's to decide.
+ * the screen shows where they overlap is the run's to decide. A click on
+ * either window reaches the program that made it, and the key the program
+ * whose window is the foreground one: each counts the clicks it was given.
  */
 
 #include "rt.h"
@@ -64,15 +66,29 @@ __declspec(dllimport) void *__stdcall CreateSolidBrush(unsigned colour);
 #define WS_POPUP 0x80000000
 #define WS_VISIBLE 0x10000000
 #define WM_KEYDOWN 0x0100
+#define WM_LBUTTONDOWN 0x0201
 #define PM_REMOVE 1
 #define QS_ALLINPUT 0x04ff
 #define INFINITE 0xffffffff
 #define WAIT_OBJECT_0 0
 
+/* The clicks this program's window was given. */
+static unsigned clicks;
+
+static long __stdcall procedure(void *window, unsigned message, unsigned wParam,
+    unsigned lParam)
+{
+    if (message == WM_LBUTTONDOWN)
+    {
+        clicks++;
+    }
+    return DefWindowProcA(window, message, wParam, lParam);
+}
+
 static void *makeWindow(const char *className, unsigned colour, int at)
 {
     WNDCLASSA cls = { 0 };
-    cls.procedure = (void *)DefWindowProcA;
+    cls.procedure = (void *)procedure;
     cls.instance = GetModuleHandleA(0);
     cls.className = className;
     cls.background = CreateSolidBrush(colour);
@@ -102,6 +118,7 @@ static int child(void)
         }
         DispatchMessageA(&message);
     }
+    check("child: given the click on its window, and the key", clicks == 1);
     return 0;
 }
 
@@ -125,6 +142,7 @@ static int parent(void)
     }
     CloseHandle(started.process);
     CloseHandle(started.thread);
+    check("parent: given the click on its window", clicks == 1);
     return 0;
 }
 

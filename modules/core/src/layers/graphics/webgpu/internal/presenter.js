@@ -471,7 +471,7 @@ export function createPresenter(options = {}){
     let converted = null;
     const counters = {
         presents: 0, uploads: 0, bytes: 0, shownByOwner: 0, shown: 0, gammaShown: 0,
-        dropped: 0, layered: 0, composed: 0,
+        dropped: 0, layered: 0, composed: 0, unshown: 0,
     };
     /**
      * Canvas copies by the label of the surface shown: a Direct3D target, a
@@ -966,9 +966,35 @@ export function createPresenter(options = {}){
     };
 
     /**
+     * The screen from the pictures kept, with no new frame: composed while
+     * more than one process has a window showing, else the base picture.
+     */
+    const reshow = ()=>{
+        if (!options.windows || !gpu || !queue || !screen || layers.size === 0)
+        {
+            return;
+        }
+        const windows = options.windows();
+        const frame = { frameIndex: -1 };
+        if (needsComposing(windows))
+        {
+            compose(windows, frame);
+            return;
+        }
+        const base = baseOf(windows, layers, options.foreground?.() ?? null);
+        const layer = base === null ? undefined : layers.get(base);
+        if (layer)
+        {
+            showNow({ ...frame, surface: { texture: layer.texture, width: layer.width,
+                height: layer.height, format: layer.format, label: 'layer' } });
+        }
+    };
+
+    /**
      * The canvas copy, used as the backend's `presentTo`. A frame that says
      * whose it is is kept as that process's picture; while more than one
-     * process has a window showing, the screen is composed of them.
+     * process has a window showing, the screen is composed of them, and while
+     * one has, it is that one's.
      *
      * @param {any} frame
      */
@@ -978,14 +1004,24 @@ export function createPresenter(options = {}){
             showNow(frame);
             return;
         }
-        keep(frame.source >>> 0, frame.surface);
+        const source = frame.source >>> 0;
+        keep(source, frame.surface);
         const windows = options.windows();
-        if (!needsComposing(windows))
+        if (needsComposing(windows))
         {
-            showNow(frame);
+            compose(windows, frame);
             return;
         }
-        compose(windows, frame);
+        // One process has windows showing: the screen is its picture, and a
+        // frame of a process with none showing is kept, not shown over it.
+        const showing = windows.find(window=>window.visible && (window.parent ?? 0) === 0
+            && layers.has(window.processId));
+        if (showing && showing.processId !== source)
+        {
+            counters.unshown++;
+            return;
+        }
+        showNow(frame);
     };
 
     /**
@@ -1093,13 +1129,21 @@ export function createPresenter(options = {}){
         show,
 
         /**
-         * A process that ended: its picture is let go.
+         * A process that ended: its picture is let go, and the screen is the
+         * others' again at once -- the last frame shown had its windows in
+         * it, and the processes left may have nothing new to present.
          *
          * @param {number} source
          */
         forget(source){
-            layers.get(source >>> 0)?.texture.destroy?.();
+            const layer = layers.get(source >>> 0);
+            if (!layer)
+            {
+                return;
+            }
+            layer.texture.destroy?.();
             layers.delete(source >>> 0);
+            reshow();
         },
 
         /**

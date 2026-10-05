@@ -185,6 +185,26 @@ export function createWindowDirectory(){
         /** @param {number} x @param {number} y */
         fromPoint: (x, y)=>manager.fromPoint(x, y),
         foreground: ()=>manager.foreground(),
+
+        /**
+         * A process's window took the mouse, or the process let it go: one
+         * process releasing its capture does not take another's.
+         *
+         * @param {number} hwnd  the window, zero for a release
+         * @param {number} processId  the process it is told by
+         */
+        noteCapture(hwnd, processId){
+            if (hwnd !== 0)
+            {
+                manager.setCapture(hwnd);
+                return;
+            }
+            const holder = manager.capture();
+            if (holder !== 0 && manager.get(holder)?.processId === processId)
+            {
+                manager.releaseCapture();
+            }
+        },
         /**
          * A process made another's window the foreground window: it is the
          * run's at once, and the process that owns it is asked to activate

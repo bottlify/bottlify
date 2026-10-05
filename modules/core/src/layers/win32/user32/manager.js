@@ -84,6 +84,8 @@ export function createWindowManager(){
     let order = [];
     let foreground = 0;
     let captured = 0;
+    /** Where the page's pointer was last, on the screen. */
+    const pointer = { x: 0, y: 0 };
     let revision = 0;
     /** @type {Set<(event: WindowEvent) => void>} */
     const listeners = new Set();
@@ -307,6 +309,31 @@ export function createWindowManager(){
                 at = deeper || at;
             }
             return at;
+        },
+
+        /**
+         * The process an input event of the page goes to, as Windows sends
+         * it: a pointer's to the window that captured the mouse, else the one
+         * under it; the keyboard's, and anything else, to the foreground
+         * window's. Null where no window answers -- the caller's own choice
+         * then. The pointer's last place is the run's, as the cursor is one
+         * for the whole desktop: a button or a wheel with no place of its own
+         * happens where the pointer last was.
+         *
+         * @param {{ kind: string, x?: number, y?: number }} event
+         * @returns {number | null}
+         */
+        inputTarget(event){
+            const pointed = event.kind === 'pointerMove' || event.kind === 'pointerButton'
+                || event.kind === 'wheel';
+            if (pointed && typeof event.x === 'number' && typeof event.y === 'number')
+            {
+                pointer.x = event.x;
+                pointer.y = event.y;
+            }
+            const hwnd = !pointed ? foreground
+                : captured || manager.fromPoint(pointer.x, pointer.y) || foreground;
+            return hwnd !== 0 ? windows.get(hwnd)?.processId ?? null : null;
         },
 
         revision: ()=>revision,

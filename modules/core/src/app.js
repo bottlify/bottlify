@@ -6767,13 +6767,13 @@ async function buildApp(options){
 
         /**
          * A child that ran beside this process has exited with this code: the
-         * threads waiting on it wake, and the picture is this process's again.
+         * threads waiting on it wake. The screen is the run's presenter's to
+         * compose again, from the pictures of the processes left.
          *
          * @param {any} request @param {number} code
          */
         childExited(/** @type {any} */ request, /** @type {number} */ code){
             win32.childExited(request, code);
-            win32.refreshWindows();
         },
 
         /**
@@ -7047,7 +7047,7 @@ const CALLS_OFF = Object.freeze({
  *
  * @param {{ options: AppOptions, events: any, system: any, translationStore: any,
  *     now: () => number,
- *     across: () => { image: string, link: ReturnType<typeof openLink> }[],
+ *     across: () => { image: string, id: number, link: ReturnType<typeof openLink> }[],
  *     libraries: () => string[] }} deps
  *     `across`: the processes standing in workers, oldest first; `libraries`:
  *     the system libraries the run's own program knew, once it is over
@@ -7158,7 +7158,11 @@ async function buildSystemHost(deps){
             },
             /** @param {any} event */
             send: event=>{
-                const process = across().at(-1);
+                // To the process of the window the run's manager says should
+                // have it; where none does, to the newest.
+                const standing = across();
+                const target = system.windows?.manager?.inputTarget(event) ?? null;
+                const process = standing.find(each=>each.id === target) ?? standing.at(-1);
                 process?.link.call('input', 'send', [event, viewport
                     ? { width: viewport.width, height: viewport.height } : null]).catch(()=>{});
                 return Boolean(process);
@@ -7810,7 +7814,7 @@ export async function createApp(options){
         serving.add(line);
         noteMachines();
         events.emit('process-server', { image: found.path, clsid: request.clsid });
-        Object.assign(facade, server, own);
+        stand(server);
         bindLogLevels();
         let code = -1;
         try
@@ -7825,7 +7829,7 @@ export async function createApp(options){
         noteMachines();
         await line.current.dispose();
         sound.giveBack();
-        Object.assign(facade, current, own);
+        stand(current);
         bindLogLevels();
         events.emit('process-server-exit', { image: found.path, code });
         return code;
@@ -7864,7 +7868,7 @@ export async function createApp(options){
             standardFiles: request.standardFiles,
         });
         replayLogLevels();
-        Object.assign(facade, line.current, own);
+        stand(line.current);
         bindLogLevels();
         events.emit('process-started', { image: request.imagePath, sequenceBase: logSequence });
         const parentImage = imagePath;
@@ -7898,7 +7902,7 @@ export async function createApp(options){
 
         line.current = parent;
         replayLogLevels();
-        Object.assign(facade, parent, own);
+        stand(parent);
         bindLogLevels();
         // Its picture goes with it: no window of the run is drawn from it.
         presenter?.forget?.(request.id);
@@ -7930,10 +7934,52 @@ export async function createApp(options){
      * The children standing in workers of their own, each with the way its
      * diagnostics are asked for across its link.
      *
-     * @type {Set<{ image: string, link: ReturnType<typeof openLink>,
+     * @type {Set<{ image: string, id: number, link: ReturnType<typeof openLink>,
      *     diagnostics: () => Promise<any> }>}
      */
     const standingAcross = new Set();
+
+    /**
+     * The page's input, where the run's window manager says it goes: a
+     * pointer to the process of the window under it or holding the mouse,
+     * the keyboard to the foreground window's. Where no window answers, the
+     * newest process in a worker of its own has it, else the process the
+     * facade speaks for.
+     *
+     * @param {any} machineInput  the input of the process the facade speaks for
+     */
+    const routedInput = machineInput=>({
+        ...machineInput,
+        /** @param {any} event */
+        send: event=>{
+            const target = system.windows?.manager?.inputTarget(event) ?? null;
+            for (const built of target === null ? [] : processes.values())
+            {
+                if (processIds.get(built) === target)
+                {
+                    return built.input.send(event);
+                }
+            }
+            const inWorkers = [...standingAcross];
+            const process = inWorkers.find(each=>each.id === target) ?? inWorkers.at(-1);
+            if (process)
+            {
+                process.link.call('input', 'send', [event, null]).catch(()=>{});
+                return true;
+            }
+            return machineInput.send(event);
+        },
+    });
+
+    /**
+     * The facade speaks for this process from now on, its input routed.
+     *
+     * @param {any} speaking
+     */
+    const stand = speaking=>{
+        Object.assign(facade, speaking, own);
+        facade.input = routedInput(speaking.input);
+    };
 
     /**
      * Runs a child in a worker of its own: its machine there, the run's
@@ -8024,15 +8070,8 @@ export async function createApp(options){
         // the run's sound is mixed on this thread, and the child has none.
         const sound = from.sound();
         const worker = await openProcessWorker();
-        // The page's input goes to the child while it stands, as it goes to a
-        // child on this thread; its next look at the link takes it.
-        const forwarding = { ...facade.input,
-            send: (/** @type {any} */ event)=>{
-                link.call('input', 'send', [event, null]).catch(()=>{});
-                return true;
-            } };
-        facade.input = forwarding;
-        const asked = { image: request.imagePath, link,
+        // The page's input reaches it as the run routes it (`routedInput`).
+        const asked = { image: request.imagePath, id: request.id, link,
             diagnostics: ()=>link.call('report', 'diagnostics', []) };
         standingAcross.add(asked);
         events.emit('process-started', { image: request.imagePath, sequenceBase: logSequence,
@@ -8094,10 +8133,6 @@ export async function createApp(options){
         }
         finally
         {
-            if (facade.input === forwarding)
-            {
-                facade.input = mainLine.current.input;
-            }
             standingAcross.delete(asked);
             forgetObjects();
             await com.gone();
@@ -8382,7 +8417,7 @@ export async function createApp(options){
                 return 2;
             }
             replayLogLevels();
-            Object.assign(facade, child, own);
+            stand(child);
             bindLogLevels();
             events.emit('process-started', { image: request.imagePath,
                 sequenceBase: logSequence });
@@ -8403,7 +8438,7 @@ export async function createApp(options){
             sound.giveBack();
             // The page sees whoever stands in the main line again.
             replayLogLevels();
-            Object.assign(facade, mainLine.current, own);
+            stand(mainLine.current);
             bindLogLevels();
             presenter?.forget?.(request.id);
             parent.childExited(request, code);
@@ -8512,7 +8547,7 @@ export async function createApp(options){
                 imagePath = request.imagePath;
             }
             replayLogLevels();
-            Object.assign(facade, line.current, own);
+            stand(line.current);
             bindLogLevels();
             // The child's journal is a fresh block, continuing the parent's
             // sequence. Whoever holds a reader of its own -- the page's
@@ -8630,7 +8665,7 @@ export async function createApp(options){
         replacements: ()=>[...requested],
     };
 
-    Object.assign(facade, current, own);
+    stand(current);
     bindLogLevels();
     return facade;
 }

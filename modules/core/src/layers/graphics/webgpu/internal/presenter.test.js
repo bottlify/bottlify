@@ -169,8 +169,8 @@ test('recorded: a burst of changes is one upload, one frame and one present', ()
     assert.equal(h.presented[0].surface.format, 'bgra8unorm');
     assert.deepEqual(h.presenter.diagnostics(), {
         presents: 3, uploads: 1, bytes: 64, shownByOwner: 0, shown: 0, gammaShown: 0,
-        dropped: 0, layered: 0, composed: 0, shownBy: {}, lastBuffer: 0x1000, pending: false,
-        claimed: 0, attached: 0, gamma: false, failures: [], disposed: false,
+        dropped: 0, layered: 0, composed: 0, unshown: 0, shownBy: {}, lastBuffer: 0x1000,
+        pending: false, claimed: 0, attached: 0, gamma: false, failures: [], disposed: false,
         // No queue was handed over, so nothing is counted against the bound.
         latency: { limit: 3, counting: false, inFlight: 0, peak: 0, frames: 0, held: 0,
             heldMs: 0, waiting: 0 },

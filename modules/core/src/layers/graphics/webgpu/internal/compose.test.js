@@ -152,7 +152,11 @@ for (let seed = 1; seed <= 24; seed++)
         const shown = new Uint32Array(canvas.bytes.buffer.slice(0));
         if (!needsComposing(windows))
         {
-            assert.deepEqual(shown, /** @type {any} */ (layers.get(last)).pixels,
+            // The process with windows showing, whoever presented last; with
+            // none showing, the last frame.
+            const showing = windows.find(window=>window.visible && layers.has(window.processId));
+            const expected = showing ? showing.processId : last;
+            assert.deepEqual(shown, /** @type {any} */ (layers.get(expected)).pixels,
                 'one process showing: its frame, as it is');
             return;
         }
@@ -182,3 +186,32 @@ test('the base is the foreground window\'s process, else the topmost visible win
     assert.equal(baseOf(windows, layers, 3), 1, 'a process with no picture is passed over');
     assert.equal(baseOf(windows, layers, null), 1);
 });
+
+test('a frame of a process with no window showing is kept, not shown over the one that has',
+    ()=>{
+        const gpu = createFakeDevice();
+        const rect = { left: 0, top: 0, right: 4, bottom: 4 };
+        const windows = [{ processId: 1, rect, visible: true },
+            { processId: 2, rect, visible: false }];
+        const presenter = createPresenter({
+            device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
+            now: ()=>0, windows: ()=>windows, foreground: ()=>null,
+        });
+        /** @param {number} source @param {number} value */
+        const present = (source, value)=>{
+            const texture = gpu.device.createTexture({ size: { width: 4, height: 4 },
+                format: 'bgra8unorm', usage: 0x01 | 0x02 | 0x04 });
+            texture.bytes.fill(value);
+            presenter.show({ surface: { texture, width: 4, height: 4, format: 'bgra8unorm' },
+                frameIndex: 0, source });
+        };
+        present(1, 0x11);
+        present(2, 0x22);
+        assert.equal(gpu.screen.getCurrentTexture().bytes[0], 0x11, 'the showing process\'s');
+        assert.equal(presenter.diagnostics().unshown, 1);
+        presenter.forget(1);
+        windows.shift();
+        present(2, 0x33);
+        assert.equal(gpu.screen.getCurrentTexture().bytes[0], 0x33,
+            'none showing: the newest frame, as before');
+    });

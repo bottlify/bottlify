@@ -291,13 +291,13 @@ export function createWin32Module(){
              *     place: (hwnd: number, x: number, y: number, width: number,
              *     height: number, how?: { announce?: boolean }) => boolean,
              *     active: () => number, deactivated: () => boolean,
-             *     deactivations: () => number, refresh: () => void,
+             *     deactivations: () => number,
              *     rawInput: (report: import('./user32/rawinput.js').RawInputEvent) => void,
              *     modalLoop: import('./user32/windows.js').WindowService['modalLoop'],
              *     painting: () => boolean }} */
             let windowService = {
                 list: ()=>[], clientRect: ()=>null, place: ()=>false, active: ()=>0,
-                deactivated: ()=>false, deactivations: ()=>0, refresh: ()=>{}, rawInput: ()=>{},
+                deactivated: ()=>false, deactivations: ()=>0, rawInput: ()=>{},
                 modalLoop: ()=>0, painting: ()=>false,
             };
 
@@ -2821,9 +2821,6 @@ export function createWin32Module(){
                         kernel.wake(thread, settle ? settle() : result);
                     }
                 },
-
-                /** Every window repaints: the process's desktop is shown again. */
-                refreshWindows: ()=>windowService.refresh(),
 
                 /**
                  * Places a window as the system would, telling the program with a
