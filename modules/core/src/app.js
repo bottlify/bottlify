@@ -7447,12 +7447,16 @@ export async function createApp(options){
      * system half answered from here across a link (`system-link.js`), its
      * output the run's. Its exit code is the answer.
      *
-     * @param {any} parent @param {any} request
+     * @param {{ readImage: (path: string) => Promise<Uint8Array | null>,
+     *     sound: () => ({ options: any, giveBack: () => void } | null) }} from
+     *     its parent, as the run reaches it: where its image is read, and the
+     *     sound it lends
+     * @param {any} request
      * @returns {Promise<{ code: number, diagnostics?: any }>}  its exit code, and
      *     its layers' diagnostics as it ended
      */
-    const runAcross = async(parent, request)=>{
-        const image = await parent.readImage(request.imagePath);
+    const runAcross = async(from, request)=>{
+        const image = await from.readImage(request.imagePath).catch(()=>null);
         if (!image)
         {
             events.emit('divergence', { api: 'process',
@@ -7476,6 +7480,10 @@ export async function createApp(options){
                 emit: (/** @type {string} */ name, /** @type {any} */ payload)=>{
                     events.emit(name, eventFrom(payload));
                 },
+            },
+            // Its own children, which the run starts, counted with the rest.
+            processes: {
+                start: (/** @type {any} */ asked)=>startAcrossFor(link, asked),
             },
             // The parent's open files the child writes its output and error
             // into: one position, the parent's, which the child's writes move.
@@ -7511,8 +7519,7 @@ export async function createApp(options){
         // Its sound goes onto the run's table, in a span its parent lends it,
         // where the table is shared memory a worker can be handed; elsewhere
         // the run's sound is mixed on this thread, and the child has none.
-        const sound = audioMemory && 'table' in audioMemory
-            && audioMemory.table instanceof SharedArrayBuffer ? lendSound(parent) : null;
+        const sound = from.sound();
         const worker = await openProcessWorker();
         // The page's input goes to the child while it stands, as it goes to a
         // child on this thread; its next look at the link takes it.
@@ -7611,6 +7618,121 @@ export async function createApp(options){
     };
 
     /**
+     * Runs a child in a worker of its own, counted among the run's, and tells
+     * `exited` its code when it is gone.
+     *
+     * @param {Parameters<typeof runAcross>[0]} from @param {any} request
+     * @param {(code: number) => void} exited
+     */
+    const startAcross = (from, request, exited)=>{
+        across++;
+        const running = (async()=>{
+            /** @type {{ code: number, diagnostics?: any }} */
+            let ended = { code: -1 };
+            try
+            {
+                ended = await runAcross(from, request);
+            }
+            catch (e){
+                events.emit('error', { reason: 'process', error: e });
+            }
+            finally
+            {
+                across--;
+            }
+            const { code, diagnostics } = ended;
+            exited(code);
+            lastBesideCode = code;
+            events.emit('process-resumed', { image: request.imagePath, code, diagnostics });
+            return code;
+        })();
+        besides.add(running);
+        noteMachines();
+        running.finally(()=>{
+            besides.delete(running);
+            noteMachines();
+        });
+    };
+
+    /**
+     * A child a process in a worker of its own asked for, started in a worker
+     * of its own while the run has room for one; its parent is asked across
+     * its link for the image, for the position of the files it handed on, and
+     * told when it is gone. False when there is no room: the parent runs it
+     * beside itself, in its own worker.
+     *
+     * @param {ReturnType<typeof openLink>} link  the parent's
+     * @param {any} asked  the child, as values
+     * @returns {boolean}
+     */
+    const startAcrossFor = (link, asked)=>{
+        if (!inWorker())
+        {
+            return false;
+        }
+        /** @param {string} which */
+        const handedOn = which=>({
+            path: asked.standardFiles[which].path,
+            get position(){
+                return link.callWaiting('parent', 'position', [asked.id, which]);
+            },
+            set position(at){
+                link.callWaiting('parent', 'setPosition', [asked.id, which, at]);
+            },
+        });
+        const request = { ...asked, standardFiles: asked.standardFiles && Object.fromEntries(
+            Object.keys(asked.standardFiles).map(which=>[which, handedOn(which)])) };
+        startAcross({
+            readImage: path=>link.call('parent', 'readImage', [asked.id, path]),
+            // Lent by the parent, and taken back there when it hears the
+            // child is gone.
+            sound: ()=>(asked.arena ? { options: { ...options.audio, memory: audioMemory,
+                beside: { arena: asked.arena } }, giveBack(){} } : null),
+        }, request, code=>{
+            link.call('parent', 'exited', [asked.id, code]).catch(()=>{
+                // The parent went first: nothing of it waits on the code.
+            });
+        });
+        return true;
+    };
+
+    /**
+     * The children this process, joined to the run from a worker of its own,
+     * had the run start in workers of their own: by process id, each with
+     * the machine that asked and the sound it lent.
+     *
+     * @type {Map<number, { parent: any, request: any,
+     *     sound: { giveBack: () => void } | null }>}
+     */
+    const childrenAcross = new Map();
+    options.system?.processes?.answer({
+        /** @param {number} id @param {string} path */
+        readImage: (id, path)=>childrenAcross.get(id)?.parent.readImage(path) ?? null,
+        /** @param {number} id @param {'output' | 'error'} which */
+        position: (id, which)=>childrenAcross.get(id)?.request.standardFiles?.[which]
+            ?.position ?? 0,
+        /** @param {number} id @param {'output' | 'error'} which @param {number} at */
+        setPosition: (id, which, at)=>{
+            const file = childrenAcross.get(id)?.request.standardFiles?.[which];
+            if (file)
+            {
+                file.position = at;
+            }
+        },
+        /** @param {number} id @param {number} code */
+        exited: (id, code)=>{
+            const child = childrenAcross.get(id);
+            if (!child)
+            {
+                return;
+            }
+            childrenAcross.delete(id);
+            child.sound?.giveBack();
+            child.parent.childExited(child.request, code);
+        },
+    });
+
+    /**
      * Starts a child at once, beside the parent that asked for it, and runs
      * it alongside every other process until it exits: concurrency's
      * CreateProcess, as on Windows. The parent goes on running; a thread of
@@ -7622,36 +7744,44 @@ export async function createApp(options){
      * @param {any} parent @param {any} request
      */
     const startBeside = (parent, request)=>{
+        const shared = audioMemory && 'table' in audioMemory
+            && audioMemory.table instanceof SharedArrayBuffer;
         if (inWorker())
         {
-            across++;
-            const running = (async()=>{
-                /** @type {{ code: number, diagnostics?: any }} */
-                let ended = { code: -1 };
-                try
-                {
-                    ended = await runAcross(parent, request);
-                }
-                catch (e){
-                    events.emit('error', { reason: 'process', error: e });
-                }
-                finally
-                {
-                    across--;
-                }
-                const { code, diagnostics } = ended;
-                parent.childExited(request, code);
-                lastBesideCode = code;
-                events.emit('process-resumed', { image: request.imagePath, code, diagnostics });
-                return code;
-            })();
-            besides.add(running);
-            noteMachines();
-            running.finally(()=>{
-                besides.delete(running);
-                noteMachines();
-            });
+            startAcross({
+                readImage: path=>parent.readImage(path),
+                sound: ()=>(shared ? lendSound(parent) : null),
+            }, request, code=>parent.childExited(request, code));
             return;
+        }
+        // A process that joined the run's system from a worker of its own has
+        // the run start its child, which counts the workers; the sound it
+        // plays into is this process's to lend, and to take back when the
+        // run says the child has gone.
+        const processesAcross = options.system?.processes;
+        if (processesAcross)
+        {
+            const sound = shared ? lendSound(parent) : null;
+            // Known before it is asked for: the run reads its image back from
+            // here before the call that starts it returns.
+            childrenAcross.set(request.id, { parent, request, sound });
+            const placed = processesAcross.start({
+                imagePath: request.imagePath,
+                commandLine: request.commandLine,
+                patches: request.patches,
+                id: request.id,
+                threadId: request.threadId,
+                standardFiles: request.standardFiles && Object.fromEntries(
+                    Object.entries(request.standardFiles).filter(([, file])=>file)
+                        .map(([which, file])=>[which, { path: file.path }])),
+                arena: sound?.options.beside.arena ?? null,
+            });
+            if (placed)
+            {
+                return;
+            }
+            childrenAcross.delete(request.id);
+            sound?.giveBack();
         }
         // Running from the moment it is asked for, not from when its machine
         // is built: a parent that waits on it at once is waiting on something

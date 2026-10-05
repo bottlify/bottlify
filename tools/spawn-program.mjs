@@ -17,12 +17,13 @@ import { buildExe } from './make-pe.mjs';
 /** @param {number} value */
 const u32 = value=>[0, 8, 16, 24].map(at=>(value >>> at) & 0xff);
 
-export function waitingParent(){
+/** @param {string} [command]  the child it starts */
+export function waitingParent(command = 'C:\\a.exe'){
     return buildExe({
         imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject',
             'GetExitCodeProcess', 'ExitProcess'] },
         data: {
-            command: [...Buffer.from('C:\\a.exe'), 0],
+            command: [...Buffer.from(command), 0],
             startup: [...u32(68), ...new Array(64).fill(0)],
             info: new Array(16).fill(0),
             code: u32(0),

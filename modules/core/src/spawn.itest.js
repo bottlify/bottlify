@@ -21,6 +21,7 @@ import v8 from 'node:v8';
 import vm from 'node:vm';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
+import { waitingParent } from '../../../tools/spawn-program.mjs';
 import {
     HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_DWORD,
 } from './layers/win32/advapi32/registry.js';
@@ -985,6 +986,37 @@ test('a child past the run\'s concurrency runs beside its parent on the engine\'
     assert.equal(started[1][2], 4 << 20,
         'the one here mixes in the span lent it, not under its parent\'s voices');
 });
+
+for (const [concurrency, across] of /** @type {[2 | 4, boolean][]} */ ([[4, true], [2, false]]))
+{
+    test(`a child's own child runs in a worker of its own while the run has room (concurrency`
+        + ` ${concurrency}), and its code reaches the parent through it`,
+    { timeout: 60000 }, async t=>{
+        const leaf = buildExe({
+            imports: { 'KERNEL32.dll': ['ExitProcess'] },
+            code: ({ iat })=>[0x6a, 7, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+        });
+        const app = await createApp({
+            executable: waitingParent('C:\\App\\middle.exe'),
+            imagePath: 'C:\\App\\root.exe',
+            engine: 'cork',
+            concurrency,
+            storage: { load: async()=>({ files: [
+                { path: 'C:\\App\\middle.exe', bytes: waitingParent('C:\\App\\leaf.exe') },
+                { path: 'C:\\App\\leaf.exe', bytes: leaf }] }) },
+        });
+        t.after(()=>app.dispose());
+        /** @type {[string, boolean][]} */
+        const started = [];
+        app.on('process-started', (/** @type {any} */ event)=>
+            started.push([event.image, event.worker === true]));
+        assert.equal(await app.run({ timeoutMs: 30000 }), 7);
+        assert.deepEqual(started,
+            [['C:\\App\\middle.exe', true], ['C:\\App\\leaf.exe', across]], across
+                ? 'each in a worker of its own'
+                : 'the second past the run\'s room, beside its parent');
+    });
+}
 
 test('concurrency asked for where memory cannot be shared falls back to one process at a time,'
     + ' and says so', { timeout: 60000 }, async t=>{

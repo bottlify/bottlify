@@ -109,6 +109,16 @@ export function remoteSystem(ask, handlers = {}, call){
             },
         },
         objects: remoteObjects(ask),
+        // Its children, which the run starts in workers of their own while it
+        // has room, asking back here for what only their parent has.
+        processes: {
+            /** @param {any} request  as values @returns {boolean} whether the run took it */
+            start: request=>ask('processes', 'start', [request]),
+            /** @param {Record<string, (...args: any[]) => any>} parent */
+            answer(parent){
+                handlers.parent = parent;
+            },
+        },
         // The run's bundle, as a process across a link reaches it: its drive
         // is already the run's (`volume`), so only a block the read missed is
         // asked for, and waited on as a fetch is.
