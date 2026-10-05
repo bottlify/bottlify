@@ -2443,6 +2443,14 @@ export function createWin32Module(){
             {
                 libraries['ole32.dll'][name] = libraries['OLEAUT32.dll'][name];
             }
+            // The active-object calls are oleaut32's exports, and ole32 has
+            // none of them; they live with ole32's running object table,
+            // which is what they register in.
+            for (const name of ['RegisterActiveObject', 'RevokeActiveObject', 'GetActiveObject'])
+            {
+                libraries['OLEAUT32.dll'][name] = libraries['ole32.dll'][name];
+                delete libraries['ole32.dll'][name];
+            }
 
             libraries['SHFOLDER.dll'] = {
                 SHGetFolderPathA: libraries['SHELL32.dll'].SHGetFolderPathA,

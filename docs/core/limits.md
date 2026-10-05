@@ -35,14 +35,20 @@ differently raises a `divergence` event naming the API.
   directory -- its windows found, read, posted and sent to by every other process, and theirs by
   it -- ids, the run's bundle (a block it misses is fetched for it), named events, semaphores
   and mutexes, and the position of a file its parent handed it as its output; a named file
-  mapping or waitable timer is its own; a wait on a set of objects one of which another process
-  across a worker named is refused. Its Direct3D 8 and 9 devices draw on the run's
+  mapping or waitable timer is its own. A set of objects one of which another process across a
+  worker named is answered when polled -- with a zero timeout, or by a message wait
+  (`MsgWaitForMultipleObjects`, COM's `CoWaitForMultipleHandles`), which polls -- and a wait
+  that would block on such a set is refused. Its Direct3D 8 and 9 devices draw on the run's
   graphics worker and what they present is shown as the run's frames; its sound goes onto the
   run's track table in a span its parent lends it, where that table is shared memory (none
   otherwise); the page's input goes to it while it stands. Its DirectDraw primary and the desktop
   its windows are drawn on are sent to the engine as bytes and shown there; they are not composed
   with its parent's, and whichever process showed last is on the screen. Its COM classes are the
-  run's: it serves them to every other process and calls theirs.
+  run's: it serves them to every other process and calls theirs. So is the running object table:
+  an object one process registers (`RegisterActiveObject`, `IRunningObjectTable::Register`) is
+  found from every other by class (`GetActiveObject`), by moniker and by display name
+  (`MkParseDisplayName`, `CoGetObject`), and goes when its process does. The error information
+  a server sets on a failed call is the caller's to read.
 - Windows are the run's: a process finds another's window (`FindWindow`), reads who made it, its
   caption and class, and posts to it. A message sent to another process's window is answered in the
   with `concurrency`; its pointers cross only for `WM_COPYDATA`, `WM_SETTEXT` and `WM_GETTEXT`. Where

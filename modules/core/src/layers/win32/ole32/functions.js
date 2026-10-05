@@ -37,6 +37,8 @@ import { createUserMarshalFunctions } from './usrmarshal.js';
 import { createPropVariantFunctions } from './propvariant.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { createClassTable, createRemoting } from './remote.js';
+import { createMonikerFunctions } from './monikers.js';
+import { parseCompoundFile } from './cfb.js';
 import {
     OBJREF_BYTES, OBJREF_CUSTOM, OBJREF_CUSTOM_BYTES, OBJREF_HEADER_BYTES, OBJREF_STANDARD,
     SIGNATURE as OBJREF_SIGNATURE, decodeObjref, encodeCustomHeader, encodeObjref,
@@ -121,6 +123,9 @@ const SLOT_PERSIST_GET_CLASS_ID = 3;
 const SLOT_PERSIST_LOAD = 5;
 const SLOT_PERSIST_SAVE = 6;
 const SLOT_MONIKER_GET_DISPLAY_NAME = 20;
+const SLOT_MONIKER_BIND_TO_OBJECT = 8;
+/** IBindCtx::SetBindOptions, after RegisterObjectBound, RevokeObjectBound and ReleaseBoundObjects. */
+const SLOT_BIND_SET_OPTIONS = 6;
 /** IStream::Seek, and where from. */
 const SLOT_STREAM_SEEK = 5;
 const STREAM_SEEK_SET = 0;
@@ -1534,19 +1539,6 @@ export function createOleFunctions(host){
     /** The proxy/stub classes this process registered for itself, by interface. */
     const ownProxyStubs = new Map();
 
-    /**
-     * @param {string} api @param {number} out  Where the object would go, or 0.
-     * @returns {number} E_OUTOFMEMORY
-     */
-    const refuseObject = (api, out)=>{
-        if (out !== 0)
-        {
-            writeU32(out, 0);
-        }
-        host.divergence?.(api, 'the running object table and monikers are not built');
-        return E_OUTOFMEMORY;
-    };
-
     const stringFromGuid = {
         argBytes: 8,
         /** @param {number[]} args */
@@ -1701,7 +1693,7 @@ export function createOleFunctions(host){
      * @returns {Promise<{ hr: number, value: number }>}
      */
     const callExport = async(name, args)=>{
-        const entry = functions[name];
+        const entry = /** @type {Record<string, any>} */ (functions)[name];
         const slot = host.heap.allocate(4);
         if (!entry || slot === 0)
         {
@@ -2533,6 +2525,95 @@ export function createOleFunctions(host){
     };
 
     /** @type {Record<string, any>} */
+    /** Milliseconds between 1601, where a FILETIME counts from, and 1970. */
+    const FILETIME_EPOCH_MS = 11644473600000n;
+
+    /**
+     * A class's activation, as the export would answer it: the GUIDs in task
+     * memory for the length of the call.
+     *
+     * @param {string} name @param {string[]} guids
+     * @param {(pointers: number[]) => number[]} args
+     * @returns {Promise<number>}
+     */
+    const callWithGuids = async(name, guids, args)=>{
+        const block = host.heap.allocate(GUID_SIZE * guids.length);
+        if (block === 0)
+        {
+            return E_OUTOFMEMORY;
+        }
+        const pointers = guids.map((guid, index)=>{
+            const at = block + index * GUID_SIZE;
+            host.writeMemory(at, /** @type {Uint8Array} */ (parseGuid(guid)));
+            return at;
+        });
+        try
+        {
+            return (await /** @type {Record<string, any>} */ (functions)[name]
+                .handler(args(pointers))) | 0;
+        }
+        finally
+        {
+            host.heap.free(block);
+        }
+    };
+
+    /**
+     * What the moniker classes reach of the rest of COM: activation, the
+     * running object table, docfiles and the volume, all as this layer's own
+     * exports answer them.
+     *
+     * @type {import('./monikers.js').MonikerEnv}
+     */
+    const monikerEnv = {
+        readMemory: host.readMemory,
+        writeMemory: host.writeMemory,
+        heap: host.heap,
+        taskAlloc: bytes=>host.heap.allocate(bytes >>> 0),
+        taskFree: address=>((address >>> 0) === 0 ? 0 : host.heap.free(address >>> 0)),
+        callMethod,
+        callerThread: ()=>host.callerThread?.(),
+        registry: host.registry,
+        vtables: host.vtables,
+        createInstance: (clsid, outer, context, iid, out)=>callWithGuids('CoCreateInstance',
+            [clsid, iid], ([classId, interfaceId])=>[classId, outer, context, interfaceId, out]),
+        getClassObject: (clsid, context, iid, out)=>callWithGuids('CoGetClassObject',
+            [clsid, iid], ([classId, interfaceId])=>[classId, context, 0, interfaceId, out]),
+        runningObjectTable: async out=>
+            (await functions.GetRunningObjectTable.handler([0, out])) | 0,
+        storageClassOf: async path=>{
+            const bytes = await wholeFile(path);
+            const root = bytes ? parseCompoundFile(bytes) : null;
+            return root ? root.clsid : null;
+        },
+        fileInfo: path=>{
+            const entry = host.files?.stat(path);
+            if (!entry?.exists)
+            {
+                return null;
+            }
+            const modified = /** @type {{ modified?: number }} */ (entry).modified ?? 0;
+            return { lastWrite: (BigInt(Math.trunc(modified)) + FILETIME_EPOCH_MS) * 10000n };
+        },
+        openStorage: async(path, mode, out)=>{
+            const name = lendWide(path);
+            if (name === 0)
+            {
+                return E_OUTOFMEMORY;
+            }
+            try
+            {
+                return (await functions.StgOpenStorage.handler([name, 0, mode, 0, 0, out])) | 0;
+            }
+            finally
+            {
+                host.heap.free(name);
+            }
+        },
+        hive: host.hive,
+        divergence: host.divergence,
+    };
+
     const functions = {
         /** HRESULT CoInitialize(LPVOID pvReserved) */
         CoInitialize: {
@@ -4238,32 +4319,76 @@ export function createOleFunctions(host){
                 return S_OK;
             },
         },
-        CreateItemMoniker: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([, , out])=>refuseObject('CreateItemMoniker', out >>> 0),
-        },
+        // Monikers, bind contexts and the entry points that make and parse them.
+        ...createMonikerFunctions(monikerEnv),
 
         /**
          * HRESULT CoGetObject(LPCWSTR pszName, BIND_OPTS *pBindOptions, REFIID riid,
          *                     void **ppv)
          *
-         * An object bound by its display name: no moniker class is registered
-         * here -- WMI's winmgmts: among them -- so no name parses, which is
-         * MK_E_SYNTAX, and the name is said.
+         * An object bound by its display name, as Windows makes the call: a
+         * bind context with the options asked for, the name parsed into a
+         * moniker, and the moniker bound.
          */
         CoGetObject: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([name, , , out])=>{
-                const MK_E_SYNTAX = 0x800401e4 | 0;
-                if ((out >>> 0) !== 0)
+            handler: ([name, options, iid, out])=>{
+                if ((out >>> 0) === 0)
                 {
-                    writeU32(out >>> 0, 0);
+                    return E_POINTER;
                 }
-                host.divergence?.('CoGetObject', `no moniker binds ${JSON.stringify(
-                    (name >>> 0) === 0 ? '' : readOleString(name >>> 0, MAX_PROGID))}`);
-                return MK_E_SYNTAX;
+                writeU32(out >>> 0, 0);
+                const thread = host.callerThread?.();
+                return (async()=>{
+                    const context = await callExport('CreateBindCtx', slot=>[0, slot]);
+                    if (context.hr < 0)
+                    {
+                        return context.hr;
+                    }
+                    const work = host.heap.allocate(8);
+                    try
+                    {
+                        if (work === 0)
+                        {
+                            return E_OUTOFMEMORY;
+                        }
+                        if ((options >>> 0) !== 0)
+                        {
+                            const set = (await callMethod(context.value, SLOT_BIND_SET_OPTIONS,
+                                [options >>> 0], thread)) | 0;
+                            if (set < 0)
+                            {
+                                return set;
+                            }
+                        }
+                        writeU32(work + 4, 0);
+                        const parsed = (await functions.MkParseDisplayName.handler(
+                            [context.value, name, work, work + 4])) | 0;
+                        const moniker = readU32(work + 4);
+                        if (parsed < 0 || moniker === 0)
+                        {
+                            if ((name >>> 0) !== 0)
+                            {
+                                host.divergence?.('CoGetObject', `no moniker binds ${JSON.stringify(
+                                    readOleString(name >>> 0, MAX_PROGID))}`);
+                            }
+                            return parsed < 0 ? parsed : E_FAIL;
+                        }
+                        const bound = (await callMethod(moniker, SLOT_MONIKER_BIND_TO_OBJECT,
+                            [context.value, 0, iid >>> 0, out >>> 0], thread)) | 0;
+                        await callMethod(moniker, SLOT_RELEASE, [], thread);
+                        return bound;
+                    }
+                    finally
+                    {
+                        if (work !== 0)
+                        {
+                            host.heap.free(work);
+                        }
+                        await callMethod(context.value, SLOT_RELEASE, [], thread);
+                    }
+                })();
             },
         },
 

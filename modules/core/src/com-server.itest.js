@@ -128,3 +128,32 @@ test('an apartment\'s context: one object per apartment, its token handed out wi
     assert.doesNotMatch(lines, /FAIL/);
     assert.equal(lines.match(/^ok {3}/gm)?.length, 20, lines);
 });
+
+for (const concurrency of /** @type {const} */ ([1, 2, 4]))
+{
+    test('the running object table across processes: an object its server registered, found by'
+        + ' class, by moniker and by display name in another, and gone with its server'
+        + ` (concurrency ${concurrency})`, { timeout: 120000 }, async t=>{
+        const program = new Uint8Array(await readFile(new URL('../test/fixtures/rot.exe',
+            import.meta.url)));
+        const app = await createApp({
+            executable: program,
+            imagePath: 'C:\\App\\rot.exe',
+            engine: 'cork',
+            concurrency,
+            storage: { load: async()=>({
+                files: [{ path: 'C:\\App\\rot.exe', bytes: program }],
+            }) },
+        });
+        t.after(()=>app.dispose());
+        /** @type {string[]} */
+        const output = [];
+        app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>
+            output.push(text));
+        assert.equal(await app.run({ timeoutMs: 60000 }), 0, output.join(''));
+        const lines = output.join('');
+        assert.doesNotMatch(lines, /FAIL/);
+        // Every line the program checks, client and server.
+        assert.equal(lines.match(/^ok {3}/gm)?.length, 13, lines);
+    });
+}

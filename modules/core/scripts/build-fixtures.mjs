@@ -73,10 +73,15 @@ const IMPORTS = {
             'CoGetStandardMarshal@24', 'CreateErrorInfo@4', 'SetErrorInfo@8', 'GetErrorInfo@8',
             'CoInitializeEx@8', 'CoGetObjectContext@8', 'CoGetContextToken@4',
             'CoGetDefaultContext@12', 'CoGetCurrentLogicalThreadId@4',
+            'GetRunningObjectTable@8', 'CreateFileMoniker@8', 'CreateBindCtx@8',
+            'MkParseDisplayName@16', 'CoGetObject@16',
         ],
     },
     'OLEAUT32.dll': {
-        undecorated: ['SysFreeString@4'],
+        undecorated: [
+            'SysFreeString@4', 'RegisterActiveObject@16', 'RevokeActiveObject@8',
+            'GetActiveObject@12',
+        ],
     },
     'USER32.dll': {
         undecorated: [
@@ -114,6 +119,7 @@ const PROGRAMS = [
     { name: 'comlife', source: 'comlife.c', cxx: false },
     { name: 'marshal', source: 'marshal.c', cxx: false },
     { name: 'contexts', source: 'contexts.c', cxx: false },
+    { name: 'rot', source: 'rot.c', cxx: false },
     { name: 'windows', source: 'windows.c', cxx: false },
 ];
 

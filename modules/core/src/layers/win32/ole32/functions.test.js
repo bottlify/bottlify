@@ -821,12 +821,7 @@ test('CLSIDFromProgID reads the ProgID key, and an unknown ProgID is not a class
     assert.equal(host.u32(PPV), table, 'one for the process, whoever asks');
     assert.equal(withHive.GetRunningObjectTable.handler([1, PPV]) >>> 0, 0x8000ffff,
         'a reserved word that is not zero is E_UNEXPECTED');
-    assert.equal(withHive.CreateItemMoniker.handler([0, 0, PPV]), E_OUTOFMEMORY);
-    assert.ok(host.reported.some(text=>text.includes('CreateItemMoniker')));
-    host.fill(PPV, 1);
-    assert.equal(withHive.CoGetObject.handler([0, 0, 0, PPV]) >>> 0, 0x800401e4, 'MK_E_SYNTAX');
-    assert.equal(host.u32(PPV), 0);
-    assert.ok(host.reported.some(text=>text.includes('CoGetObject')));
+    assert.equal(withHive.CoGetObject.handler([0, 0, 0, 0]), E_POINTER);
 });
 
 test('the table declares stdcall argument sizes and nothing else', ()=>{
@@ -841,6 +836,19 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         CoGetObjectContext: 8,
         CoGetContextToken: 4,
         CoGetDefaultContext: 12,
+        CreateBindCtx: 8,
+        CreateItemMoniker: 12,
+        CreateFileMoniker: 8,
+        CreateClassMoniker: 8,
+        CreatePointerMoniker: 8,
+        CreateAntiMoniker: 4,
+        CreateGenericComposite: 12,
+        MkParseDisplayName: 16,
+        BindMoniker: 16,
+        MonikerCommonPrefixWith: 12,
+        MonikerRelativePathTo: 16,
+        GetClassFile: 8,
+        CoGetInstanceFromFile: 32,
         CoInitializeSecurity: 36,
         CoUninitialize: 0,
         OleInitialize: 4,
@@ -980,7 +988,6 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         CoRegisterPSClsid: 8,
         GetRunningObjectTable: 8,
         CoGetObject: 16,
-        CreateItemMoniker: 12,
         StringFromCLSID: 8,
         StringFromIID: 8,
         CLSIDFromString: 8,
