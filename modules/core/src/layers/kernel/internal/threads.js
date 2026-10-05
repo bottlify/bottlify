@@ -21,6 +21,7 @@
  */
 
 import { signalledNow } from './sync.js';
+import { takeId } from './processes.js';
 
 /** @enum {string} */
 export const ThreadState = {
@@ -549,7 +550,7 @@ export function createScheduler(options){
          * @returns {any} the thread
          */
         create({ entry, stackTop, stackLimit, tebAddress, name, id }){
-            const made = id ?? ids.thread++;
+            const made = id ?? takeId(ids, 'thread', 1);
             const thread = {
                 id: made,
                 name: name ?? `thread-${made}`,

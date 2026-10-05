@@ -66,6 +66,26 @@ const FIRST_ID = 0x2000;
 const ID_STRIDE = 4;
 
 /**
+ * Takes the next of the run's ids of a kind, moving it on by `step`. The run
+ * keeps one counter for every process, and a process in a thread of its own
+ * takes from it through `take`, which reads and moves it in one step; a
+ * counter here is read and moved in place.
+ *
+ * @param {{ take?: (name: string, step: number) => number } & Record<string, any>} ids
+ * @param {'thread' | 'process'} name @param {number} step
+ * @returns {number}
+ */
+export function takeId(ids, name, step){
+    if (typeof ids.take === 'function')
+    {
+        return ids.take(name, step);
+    }
+    const id = ids[name];
+    ids[name] += step;
+    return id;
+}
+
+/**
  * @param {{ process: number }} [ids]  the run's, where processes are started
  *     from more than one: a child's children are numbered on from its parent's
  */
@@ -87,7 +107,7 @@ export function createProcessTable(ids = { process: FIRST_ID }){
          * @returns {ProcessRecord}
          */
         create({ imagePath, commandLine, suspended = false, completed = false }){
-            const id = ids.process;
+            const id = takeId(ids, 'process', ID_STRIDE * 2);
             const record = {
                 id,
                 threadId: id + 1,
@@ -102,7 +122,6 @@ export function createProcessTable(ids = { process: FIRST_ID }){
                 handle: 0,
                 threadHandle: 0,
             };
-            ids.process += ID_STRIDE * 2;
             records.push(record);
             return record;
         },
