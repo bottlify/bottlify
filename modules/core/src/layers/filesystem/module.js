@@ -112,7 +112,8 @@ export function createFilesystemModule(){
              * @type {{ drives: Map<string, any>, volumes: Map<string, any>,
              *     writables: Map<string, any>,
              *     watchers: Set<(key: string, change: any) => void>,
-             *     sharing?: import('./internal/handles.js').Sharing } | null}
+             *     sharing?: import('./internal/handles.js').Sharing,
+             *     revisions?: Int32Array } | null}
              */
             const shared = config?.volume ?? null;
             // Every process's open files, which sharing is settled against:
@@ -214,10 +215,20 @@ export function createFilesystemModule(){
                     state.writables.set(key, writable);
                 }
                 state.volumes.set(key, { ...stores?.volume, readOnly });
+                // The run's word for the letter, which a drive mounted over
+                // another raises too: what was read of the one before is not
+                // this one's.
+                const revision = shared?.revisions
+                    ? { words: shared.revisions, index: key.charCodeAt(0) - 0x41 } : null;
+                if (revision)
+                {
+                    Atomics.add(revision.words, revision.index, 1);
+                }
                 state.drives.set(key, createOverlay({
                     source: stores?.source ?? null,
                     writable,
                     readOnly,
+                    revision,
                     now: config?.now,
                     onChanged: shared
                         ? (/** @type {any} */ change)=>{

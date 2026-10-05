@@ -95,3 +95,46 @@ test('a process on the run\'s volume from afar reports its drives as the run\'s,
     assert.deepEqual(asked, [], 'nothing is asked of the run for it');
     await layer.dispose();
 });
+
+test('what a process reads of a drive from afar it keeps until the drive changes, and reads'
+    + ' again after', async()=>{
+    const run = { drives: new Map(), volumes: new Map(), writables: new Map(),
+        watchers: new Set(), revisions: new Int32Array(new SharedArrayBuffer(26 * 4)) };
+    const here_ = await createFilesystemModule().create({ volume: run });
+    const file = here_.open('C:\\data.bin', { write: true,
+        disposition: here_.Disposition.CREATE_NEW });
+    here_.write(file, new Uint8Array(3000).fill(1));
+    here_.close(file);
+    const handlers = volumeHandlers(run).volume;
+    /** @type {string[]} */
+    const asked = [];
+    const there = await createFilesystemModule().create({
+        volume: remoteVolume((method, args)=>{
+            asked.push(method === 'call' ? args[1] : method);
+            return /** @type {any} */ (handlers)[method](...args);
+        }, { revisions: run.revisions }) });
+    const read = ()=>{
+        const opened = there.open('C:\\data.bin', { read: true, shareWrite: true });
+        const got = [];
+        for (let at = 0; at < 3000; at += 512)
+        {
+            got.push(...there.read(opened, 512));
+        }
+        there.close(opened);
+        return got;
+    };
+    asked.length = 0;
+    assert.deepEqual(read(), new Array(3000).fill(1));
+    const first = asked.filter(name=>name === 'read').length;
+    asked.length = 0;
+    read();
+    assert.deepEqual(asked.filter(name=>name === 'read' || name === 'size' || name === 'stat'),
+        [], 'the second time nothing is read across');
+    const writing = here_.open('C:\\data.bin', { write: true, shareRead: true });
+    here_.write(writing, new Uint8Array(10).fill(2));
+    here_.close(writing);
+    asked.length = 0;
+    assert.deepEqual(read().slice(0, 12), [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1],
+        'a write here is read there');
+    assert.equal(asked.filter(name=>name === 'read').length, first);
+});

@@ -73,6 +73,13 @@ const errorOf = failure=>(typeof failure === 'string' ? new Error(failure)
 export const LINK_BYTES = 1 << 20;
 
 /**
+ * How long a side looks at its doorbell before it sleeps on it, in ms: past
+ * the round trip of a call answered at once, short of anything a person or
+ * a frame would notice.
+ */
+export const SPIN_MS = 0.05;
+
+/**
  * @typedef {Object} LinkEnd
  * @property {import('./ring.js').RingMemory} out  what this side writes
  * @property {import('./ring.js').RingMemory} in   what this side reads; its doorbell this side's
@@ -274,6 +281,30 @@ export function openLink(end, handlers){
         && (typeof globalThis.window === 'undefined');
 
     /**
+     * Whether the doorbell rang within `SPIN_MS`, looked at without sleeping.
+     * A thread put to sleep on a word is woken tens of microseconds after
+     * the word is raised -- on both sides of a call, so a call across that
+     * sleeps costs several times the work of answering it; the other side
+     * mostly answers within a few.
+     *
+     * @param {number} seen
+     */
+    const rang = seen=>{
+        const until = performance.now() + SPIN_MS;
+        for (;;)
+        {
+            if (doorbellOf(bell) !== seen)
+            {
+                return true;
+            }
+            if (performance.now() >= until)
+            {
+                return false;
+            }
+        }
+    };
+
+    /**
      * What this side asked of the other, by target and method: how often,
      * and how long it was blocked for an answer. What a process spends
      * waiting on the system is read here, not guessed.
@@ -348,7 +379,10 @@ export function openLink(end, handlers){
                     throw new Error(
                         `link: ${target}.${method} was not answered in ${timeoutMs} ms`);
                 }
-                waitDoorbell(bell, seen, left);
+                if (!rang(seen))
+                {
+                    waitDoorbell(bell, seen, left);
+                }
             }
         },
 
@@ -363,10 +397,16 @@ export function openLink(end, handlers){
             while (state.serving)
             {
                 const seen = doorbellOf(bell);
-                pump();
+                const handled = pump();
                 if (!state.serving)
                 {
                     break;
+                }
+                // A process that asked one thing asks the next straight
+                // after; the page's own thread does not spin for it.
+                if (handled > 0 && canBlock && rang(seen))
+                {
+                    continue;
                 }
                 const waited = /** @type {any} */ (Atomics).waitAsync(words, bell.index, seen);
                 if (waited.async)

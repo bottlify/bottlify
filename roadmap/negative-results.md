@@ -18,7 +18,25 @@ evidence again.
 
 ## Entries
 
-None yet.
+### 2026-10-05 -- the system's side of a link waits blocking while calls are recent
+
+- **Idea.** A process in a worker of its own waits 200-500 us for each answer from the engine
+  thread that comes after a pause, while the answer itself takes about 12 us. The guess was that
+  `Atomics.waitAsync`, on which the engine thread sleeps, wakes slowly, and that blocking on the
+  doorbell with `Atomics.wait` (1 ms at a time, the event loop given a turn between) for 50 ms after
+  the last call would wake faster.
+- **Workload.** A scratch benchmark, not a bundle: one worker calls the engine thread through
+  `system/link.js` 300 times, 2 ms of busy work between calls, the handler returning a number.
+  Bundle hash: not applicable.
+- **Values.** One run each. `waitAsync` (baseline): median 181 us, p90 271 us. Blocking wait
+  (candidate): median 196 us, p90 317 us. Spread and noise floor: not recorded.
+- **Machine.** Node 22.22.0, a 4-core Linux VM (Firecracker). No browser, no GPU. Power plan: not
+  recorded.
+- **Why it did not pay.** What costs is waking a sleeping thread in this VM, about 100 us each way,
+  whichever call it sleeps in.
+- **Correctness.** Not checked; the candidate never left the scratch benchmark.
+- **Decision.** Removed. Instead, the calls were taken off the link: the volume's reads are kept
+  per drive revision, and opens are settled in shared memory.
 
 ## Invalidated
 

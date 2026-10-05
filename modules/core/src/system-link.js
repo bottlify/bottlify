@@ -82,8 +82,12 @@ export function systemHandlers(system, askBack){
  * @param {(target: string, method: string, args: any[]) => Promise<any>} [call]
  *     a call that does not block: for what the process waits on as it waits
  *     on the network, its threads parked and the link looked at meanwhile
+ * @param {import('./layers/filesystem/internal/volume-link.js').VolumeMemory | null} [volume]
+ *     the run's memory of its volume (`volume-link.js`): what the process
+ *     reads of a drive is kept until the drive changes, and its opens are
+ *     settled against every other process's there
  */
-export function remoteSystem(ask, handlers = {}, call){
+export function remoteSystem(ask, handlers = {}, call, volume = null){
     /** @param {string} target @param {string[]} names */
     const asking = (target, names)=>Object.fromEntries(names.map(name=>
         [name, (/** @type {any[]} */ ...args)=>ask(target, name, args)]));
@@ -98,7 +102,8 @@ export function remoteSystem(ask, handlers = {}, call){
         },
         ids: { take: (/** @type {string} */ name, /** @type {number} */ step)=>
             ask('ids', 'take', [name, step]) },
-        volume: remoteVolume((method, args)=>ask('volume', method, args)),
+        volume: remoteVolume((method, args)=>ask('volume', method, args), volume,
+            call ? (method, args)=>void call('volume', method, args).catch(()=>{}) : null),
         windows: {
             ...asking('windows', WINDOWS),
             /** @param {number} processId @param {any} endpoint */

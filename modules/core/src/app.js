@@ -31,6 +31,7 @@ import { synthesiseProcessInit, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH }
     from './layers/loader/internal/init.js';
 import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
 import { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
+import { createSharingMemory, openSharedSharing } from './layers/filesystem/internal/shared-sharing.js';
 import { resolveTranslationStore } from './layers/cpu/internal/translation-store.js';
 import { createBlockCache, resolveBlockStore }
     from './layers/filesystem/internal/bundle/cache.js';
@@ -7178,6 +7179,26 @@ async function buildSystemHost(deps){
 }
 
 /**
+ * What of a run's volume lives in memory every thread holds, where there is
+ * shared memory: a word per drive letter, raised by every change to the
+ * drive, under which a process in a worker of its own keeps what it read of
+ * the drive; and the sharing every open is settled against, which that
+ * process settles its own opens in (`volume-link.js`). A run without shared
+ * memory has no process across a link, and keeps neither.
+ *
+ * @returns {{ revisions?: Int32Array, sharing?: any, sharingMemory?: SharedArrayBuffer }}
+ */
+function volumeMemory(){
+    if (typeof SharedArrayBuffer !== 'function')
+    {
+        return {};
+    }
+    const sharingMemory = createSharingMemory();
+    return { revisions: new Int32Array(new SharedArrayBuffer(26 * 4)),
+        sharing: openSharedSharing(sharingMemory), sharingMemory };
+}
+
+/**
  * createApp — the consumer-facing entry point.
  *
  * One machine running at a time, and a process lifecycle over the top: when
@@ -7247,14 +7268,15 @@ export async function createApp(options){
      * @type {{ namedObjects: Map<string, any>, registry: any, bundle: any, windows: any,
      *     ids: { thread: number, process: number },
      *     volume: { drives: Map<string, any>, volumes: Map<string, any>,
-     *         writables: Map<string, any>, watchers: Set<Function> } }}
+     *         writables: Map<string, any>, watchers: Set<Function>, revisions?: Int32Array,
+     *         sharing?: any, sharingMemory?: SharedArrayBuffer } }}
      */
     // A process in a worker of its own is handed the run's across a link
     // (`system-link.js`), and joins it rather than making one.
     const system = options.system ?? { namedObjects, registry: null, bundle: null, windows: null,
         ids: { thread: 1, process: 0x2000 },
         volume: { drives: new Map(), volumes: new Map(), writables: new Map(),
-            watchers: new Set() } };
+            watchers: new Set(), ...volumeMemory() } };
     /**
      * A process id and its first thread's, from the run's, for a process no
      * parent was told of: a class's server, which COM starts.
@@ -7917,6 +7939,8 @@ export async function createApp(options){
                 worker.post({
                     type: 'start',
                     end: memory.b,
+                    volume: { revisions: system.volume.revisions ?? null,
+                        sharing: system.volume.sharingMemory ?? null },
                     graphics: graphics?.port1 ?? null,
                     display: display?.port2 ?? null,
                     options: {

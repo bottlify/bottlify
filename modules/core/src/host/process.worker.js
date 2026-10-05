@@ -15,9 +15,10 @@
  * ring pacing, read from the link rather than from a page's ring.
  *
  * The same file runs under a page's `Worker` and Node's `worker_threads`. It
- * is told `{ type: 'start', end, graphics, display, options, run }` -- its side
- * of the link, its way in to the run's graphics worker and the port its
- * surfaces' pictures go out on (or null), the process as
+ * is told `{ type: 'start', end, volume, graphics, display, options, run }` --
+ * its side of the link, the run's volume memory (`volume-link.js`), its way in
+ * to the run's graphics worker and the port its surfaces' pictures go out on
+ * (or null), the process as
  * `createApp` takes it, how long it may run -- and answers
  * `{ type: 'exited', code, diagnostics }`, or `{ type: 'failed', message, diagnostics }`.
  */
@@ -85,20 +86,22 @@ const plainOf = read=>{
 /**
  * Runs one process to its end.
  *
- * @param {{ end: import('../system/link.js').LinkEnd, graphics?: MessagePort | null,
+ * @param {{ end: import('../system/link.js').LinkEnd,
+ *     volume?: import('../layers/filesystem/internal/volume-link.js').VolumeMemory | null,
+ *     graphics?: MessagePort | null,
  *     display?: MessagePort | null, options: any, run?: any }} start
  * @returns {Promise<{ code: number, diagnostics: any, systemLibraries: any }>} its exit
  *     code, its layers' diagnostics as it ended and the system libraries it knew, as
  *     plain data, or null
  */
-export async function serveProcess({ end, graphics, display, options, run }){
+export async function serveProcess({ end, volume, graphics, display, options, run }){
     /** @type {Record<string, Record<string, (...args: any[]) => any>>} */
     const handlers = {};
     const link = openLink(end, handlers);
     /** @param {string} target @param {string} method @param {any[]} args */
     const ask = (target, method, args)=>link.callWaiting(target, method, args);
     const system = remoteSystem(ask, handlers, (target, method, args)=>
-        link.call(target, method, args));
+        link.call(target, method, args), volume);
     // A wait on another process's object ended there: its word comes in
     // with whatever else the link carries, at a turn's end or while idle.
     handlers.kernel = { wake: (/** @type {number} */ token, /** @type {number} */ result)=>

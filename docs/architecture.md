@@ -199,7 +199,13 @@ semaphores and mutexes, the bundle -- stays on the engine thread, which answers 
 across a link: two rings in shared memory, one each way, with a doorbell word per side
 (`core/src/system/link.js`, values encoded by `codec.js`). The process thread blocks on its doorbell
 for each answer and answers what it is asked meanwhile (the engine asks it about its windows); a
-message longer than a ring holds goes in parts. Its Direct3D devices draw on the graphics thread
+message longer than a ring holds goes in parts. Each side looks at its doorbell for a few
+microseconds before it sleeps on it, since a thread woken from sleep costs far more than the answer.
+The volume is mostly not asked: every change to a drive raises a word per drive letter in shared
+memory, and a process thread keeps what it read of a drive -- 64 KB pieces of files, sizes, entries,
+listings -- until that word moves; and the sharing every open is settled against is a table in
+shared memory under a lock, which a process thread settles its own opens in
+(`core/src/layers/filesystem/internal/volume-link.js`, `shared-sharing.js`). Its Direct3D devices draw on the graphics thread
 through a port of their own, its DirectDraw and GDI pictures come to the engine as bytes, its sound
 is mixed on the run's voice table in a span its parent lends it, and the page's input is forwarded
 to it while it stands. What it cannot have yet is in [`core/limits.md`](core/limits.md).
