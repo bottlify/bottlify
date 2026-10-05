@@ -60,6 +60,10 @@ export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
  * @property {ComInterfaceDescriptor[]} interfaces
  * @property {any} [state]        Whatever the implementation hangs off the object.
  * @property {() => void} [destroy]  Called once, when the last reference goes.
+ * @property {boolean} [owned]
+ *     The object belongs to something that is no caller -- an apartment's
+ *     context -- and lives as long as that does: its count is only its
+ *     callers', from zero, and reaching zero again frees nothing.
  */
 
 /**
@@ -79,6 +83,9 @@ export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
  * @property {(id: string) => ComInterface | null} queryInterface
  * @property {() => number} addRef
  * @property {() => number} release
+ * @property {(id: string) => boolean} [reachable]
+ *     For an object something else owns: its pointers stay good at a count
+ *     of zero, as the bridge asks of an object that can be called again.
  */
 
 /** The head of every COM vtable, in the only order it is ever in. */
@@ -136,7 +143,7 @@ export function createComObject(clsid, definition){
     const published = new Map();
     // One reference, held by whoever asked for the object: a class factory hands
     // back an object that is already alive, and the caller releases it.
-    let refCount = 1;
+    let refCount = definition.owned ? 0 : 1;
     let destroyed = false;
 
     /** @type {ComObject} */
@@ -208,11 +215,15 @@ export function createComObject(clsid, definition){
         },
 
         release(){
-            if (destroyed)
+            if (destroyed || (definition.owned && refCount === 0))
             {
                 return 0;
             }
             refCount--;
+            if (definition.owned)
+            {
+                return refCount;
+            }
             if (refCount > 0)
             {
                 return refCount;
@@ -223,6 +234,10 @@ export function createComObject(clsid, definition){
             return 0;
         },
     };
+    if (definition.owned)
+    {
+        object.reachable = ()=>true;
+    }
     return object;
 }
 

@@ -673,18 +673,18 @@ export function createRemoting(host){
     };
 
     /**
-     * Sends a message to another process and waits for its answer, running
-     * the calls that arrive for this thread meanwhile.
+     * Waits on `pending` for `thread`, running the calls that arrive for its
+     * apartment meanwhile: COM's modal loop.
      *
-     * @param {unknown} thread @param {number} target @param {any} message
+     * @param {unknown} thread @param {Promise<any>} pending
      * @returns {Promise<any>}
      */
-    const outgoing = async(thread, target, message)=>{
+    const awaitServing = async(thread, pending)=>{
         const home = apartment(thread);
         home.outgoing++;
         try
         {
-            const answer = send(target, message).then(value=>({ value }));
+            const answer = pending.then(value=>({ value }));
             for (;;)
             {
                 if (home.queue.length > 0)
@@ -699,12 +699,6 @@ export function createRemoting(host){
                 home.waiting = null;
                 if (settled)
                 {
-                    // What the server said of its failure is this thread's
-                    // to read with GetErrorInfo now, as the channel hands it.
-                    if (settled.value?.errorInfo)
-                    {
-                        await giveErrorInfo(settled.value.errorInfo, thread);
-                    }
                     return settled.value;
                 }
             }
@@ -713,6 +707,24 @@ export function createRemoting(host){
         {
             home.outgoing--;
         }
+    };
+
+    /**
+     * Sends a message to another process and waits for its answer, running
+     * the calls that arrive for this thread meanwhile.
+     *
+     * @param {unknown} thread @param {number} target @param {any} message
+     * @returns {Promise<any>}
+     */
+    const outgoing = async(thread, target, message)=>{
+        const value = await awaitServing(thread, send(target, message));
+        // What the server said of its failure is this thread's to read with
+        // GetErrorInfo now, as the channel hands it.
+        if (value?.errorInfo)
+        {
+            await giveErrorInfo(value.errorInfo, thread);
+        }
+        return value;
     };
 
     /**
@@ -1445,6 +1457,10 @@ export function createRemoting(host){
      * @returns {Promise<any>}
      */
     const execute = async(message, thread)=>{
+        if (message.kind === 'enter')
+        {
+            return { hr: await message.work(thread) };
+        }
         const reply = await executeKind(message, thread);
         if (message.kind === 'call' || message.kind === 'ndr')
         {
@@ -1667,6 +1683,33 @@ export function createRemoting(host){
          * @param {unknown} [thread]
          */
         serving: (thread = host.callerThread())=>(apartments.get(thread)?.running.size ?? 0) > 0,
+
+        /**
+         * The apartment of `thread` made ready for work other threads hand it:
+         * its window made, on that thread, as ole32 makes one when a thread
+         * enters a single-threaded apartment.
+         *
+         * @param {unknown} [thread]
+         */
+        prepare: (thread = host.callerThread())=>ensureWindow(thread),
+
+        /**
+         * Runs `work` in the apartment of `thread`: at once on the caller's
+         * own thread, otherwise posted to that apartment as an incoming call
+         * is, the caller serving its own apartment until it ran.
+         *
+         * @param {unknown} thread @param {(thread: unknown) => Promise<number> | number} work
+         * @returns {Promise<number>}
+         */
+        async enter(thread, work){
+            const caller = host.callerThread();
+            if (thread === caller)
+            {
+                return work(caller);
+            }
+            const reply = await awaitServing(caller, enqueue(thread, { kind: 'enter', work }));
+            return reply.hr;
+        },
 
         /** Whether a pointer is a proxy of this process's for another's object. @param {number} pointer */
         isProxy: pointer=>proxyAt.has(pointer >>> 0),

@@ -109,3 +109,22 @@ async t=>{
     assert.doesNotMatch(lines, /FAIL/);
     assert.equal(lines.match(/^ok {3}/gm)?.length, 22, lines);
 });
+
+test('an apartment\'s context: one object per apartment, its token handed out without a count,'
+    + ' the multithreaded apartment\'s another, and a callback run in a context -- another'
+    + ' single-threaded apartment\'s on that apartment\'s thread while it waits',
+{ timeout: 60000 }, async t=>{
+    const program = new Uint8Array(await readFile(new URL('../test/fixtures/contexts.exe',
+        import.meta.url)));
+    const app = await createApp({ executable: program, imagePath: 'C:\\App\\contexts.exe',
+        engine: 'cork' });
+    t.after(()=>app.dispose());
+    /** @type {string[]} */
+    const output = [];
+    app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>
+        output.push(text));
+    assert.equal(await app.run({ timeoutMs: 30000 }), 0, output.join(''));
+    const lines = output.join('');
+    assert.doesNotMatch(lines, /FAIL/);
+    assert.equal(lines.match(/^ok {3}/gm)?.length, 20, lines);
+});

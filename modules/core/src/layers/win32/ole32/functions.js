@@ -137,6 +137,16 @@ const CLSCTX_INPROC_SERVER = 1;
 /** The class of the call context CoGetCallContext hands out: this layer's own. */
 const CLSID_CALL_CONTEXT = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0002}';
 
+/** An apartment's context, and what it answers as. */
+const CLSID_OBJECT_CONTEXT = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0007}';
+const IID_ICONTEXT = '{000001C0-0000-0000-C000-000000000046}';
+const IID_IOBJCONTEXT = '{000001C6-0000-0000-C000-000000000046}';
+const IID_ICOMTHREADINGINFO = '{000001CE-0000-0000-C000-000000000046}';
+const IID_ICONTEXTCALLBACK = '{000001DA-0000-0000-C000-000000000046}';
+/** What IComThreadingInfo::GetCurrentThreadType answers: whether the thread pumps messages. */
+const THDTYPE_BLOCKMESSAGES = 0;
+const THDTYPE_PROCESSMESSAGES = 1;
+
 /** IMarshal::DisconnectObject. */
 const SLOT_MARSHAL_DISCONNECT = 8;
 
@@ -1253,6 +1263,7 @@ export function createOleFunctions(host){
         if (apartment.model !== COINIT_APARTMENTTHREADED)
         {
             mtaThreads--;
+            mtaMaybeClosed();
         }
         if (mainSta === thread)
         {
@@ -1280,6 +1291,244 @@ export function createOleFunctions(host){
     const guidAt = guidPointer=>{
         const address = guidPointer >>> 0;
         return address === 0 ? null : readGuid(host, address);
+    };
+
+    /**
+     * The apartment the calling thread is in, as CoGetApartmentType says it:
+     * the main single-threaded one, another single-threaded one, the
+     * multithreaded one -- entered, or implicitly while another thread is in
+     * it -- or none, which is CO_E_NOTINITIALIZED and APTTYPE_CURRENT.
+     */
+    const apartmentType = ()=>{
+        const thread = host.currentThread();
+        const apartment = thread?.ole32;
+        if (apartment?.model === COINIT_APARTMENTTHREADED)
+        {
+            return { kind: mainSta === thread ? APTTYPE_MAINSTA : APTTYPE_STA,
+                detail: APTTYPEQUALIFIER_NONE, answer: S_OK };
+        }
+        if (apartment)
+        {
+            return { kind: APTTYPE_MTA, detail: APTTYPEQUALIFIER_NONE, answer: S_OK };
+        }
+        if (mtaOpen())
+        {
+            return { kind: APTTYPE_MTA, detail: APTTYPEQUALIFIER_IMPLICIT_MTA, answer: S_OK };
+        }
+        return { kind: APTTYPE_CURRENT, detail: APTTYPEQUALIFIER_NONE,
+            answer: CO_E_NOTINITIALIZED };
+    };
+
+    /**
+     * A thread's logical thread: the one IComThreadingInfo set, or by default
+     * a GUID whose last word is the thread's id, which makes it its own and
+     * never GUID_NULL.
+     *
+     * @param {any} thread @returns {string}
+     */
+    const logicalThread = thread=>thread?.oleLogicalThread
+        ?? `{1063CB43-B0F3-4A56-B7C1-${((thread?.id ?? 0) >>> 0).toString(16).toUpperCase()
+            .padStart(12, '0')}}`;
+
+    /** The multithreaded apartment's context, while that apartment stands. @type {import('./objects.js').ComObject | null} */
+    let mtaContext = null;
+    /** A multithreaded apartment made again is another, with a context of its own. */
+    const mtaMaybeClosed = ()=>{
+        if (!mtaOpen())
+        {
+            mtaContext = null;
+        }
+    };
+
+    /**
+     * An apartment's context. The apartment owns it, so its count is only
+     * what callers took (`owned`): Wine's compobj tests find a context token
+     * AddRef'd to one. A single-threaded apartment's work is handed to it
+     * through its window, made here, on its thread, as it is entered.
+     *
+     * @param {any} owner  The single-threaded apartment's thread, or null.
+     * @returns {{ object: import('./objects.js').ComObject | null, ready: unknown }}
+     *     the context, and what its window's making is, to wait on
+     */
+    const makeContext = owner=>{
+        const ownerCaller = owner ? host.callerThread?.() ?? null : null;
+        const ready = owner ? remote()?.prepare(ownerCaller) : undefined;
+        /** @param {number} out @param {number} value */
+        const answer = (out, value)=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            writeU32(out >>> 0, value);
+            return S_OK;
+        };
+        /** @param {string} name */
+        const unsupported = name=>({ name, argBytes: 4, invoke: ()=>{
+            host.divergence?.(`IObjContext::${name}`, 'reserved, and does nothing here');
+            return S_OK;
+        } });
+        /** @param {string} name @param {number} argBytes */
+        const property = (name, argBytes)=>({ name, argBytes, invoke: ()=>{
+            host.divergence?.(`IContext::${name}`, 'a context here holds no properties');
+            return E_NOTIMPL;
+        } });
+        const contextMethods = [property('SetProperty', 16), property('RemoveProperty', 8),
+            property('GetProperty', 16), property('EnumContextProps', 8)];
+        /** @type {import('./objects.js').ComClassDefinition} */
+        const definition = {
+            owned: true,
+            interfaces: [
+                { id: IID_ICONTEXT, methods: contextMethods },
+                { id: IID_IOBJCONTEXT, methods: [...contextMethods,
+                    ...[1, 2, 3, 4, 5, 6, 7].map(index=>unsupported(`Reserved${index}`))] },
+                { id: IID_ICOMTHREADINGINFO, methods: [
+                    { name: 'GetCurrentApartmentType', argBytes: 8,
+                        invoke: (_object, [out])=>{
+                            const { kind, answer: hr } = apartmentType();
+                            return hr === S_OK ? answer(out, kind) : hr;
+                        } },
+                    { name: 'GetCurrentThreadType', argBytes: 8,
+                        invoke: (_object, [out])=>{
+                            const { kind, answer: hr } = apartmentType();
+                            return hr === S_OK
+                                ? answer(out, kind === APTTYPE_MTA ? THDTYPE_BLOCKMESSAGES
+                                    : THDTYPE_PROCESSMESSAGES)
+                                : hr;
+                        } },
+                    { name: 'GetCurrentLogicalThreadId', argBytes: 8,
+                        invoke: (_object, [out])=>{
+                            if ((out >>> 0) === 0)
+                            {
+                                return E_INVALIDARG;
+                            }
+                            writeGuid(host, out >>> 0, logicalThread(host.currentThread()));
+                            return S_OK;
+                        } },
+                    { name: 'SetCurrentLogicalThreadId', argBytes: 8,
+                        invoke: (_object, [id])=>{
+                            const thread = host.currentThread();
+                            const guid = guidAt(id);
+                            if (!guid || !thread)
+                            {
+                                return E_INVALIDARG;
+                            }
+                            thread.oleLogicalThread = guid;
+                            return S_OK;
+                        } },
+                ] },
+                { id: IID_ICONTEXTCALLBACK, methods: [
+                    { name: 'ContextCallback', argBytes: 24,
+                        invoke: (object, [callback, data])=>enterContext(object, owner, ownerCaller,
+                            callback >>> 0, data >>> 0) },
+                ] },
+            ],
+        };
+        return { object: makeHostObject(CLSID_OBJECT_CONTEXT, definition), ready };
+    };
+
+    /**
+     * Runs `callback(data)` in `context`, answering what it returns. In the
+     * caller's own context it is a call; a single-threaded apartment's work
+     * runs on that apartment's thread, the caller serving its own meanwhile;
+     * the multithreaded apartment's runs on the calling thread, which is in
+     * that context for the length of it, as Windows moves a thread into the
+     * multithreaded apartment for the call.
+     *
+     * @param {import('./objects.js').ComObject} context @param {any} owner
+     * @param {unknown} ownerCaller @param {number} callback @param {number} data
+     * @returns {number | Promise<number>}
+     */
+    const enterContext = (context, owner, ownerCaller, callback, data)=>{
+        if (callback === 0)
+        {
+            return E_INVALIDARG;
+        }
+        if (!host.call)
+        {
+            return E_NOTIMPL;
+        }
+        const call = host.call;
+        const thread = host.currentThread();
+        const caller = host.callerThread?.();
+        if (currentContext() === context)
+        {
+            return call(callback, [data], caller);
+        }
+        const channel = owner ? remote() : null;
+        if (channel)
+        {
+            return channel.enter(ownerCaller, on=>call(callback, [data], on));
+        }
+        if (owner)
+        {
+            host.divergence?.('IContextCallback::ContextCallback',
+                'another thread\'s apartment entered on the calling thread');
+        }
+        thread.oleEntered ??= [];
+        thread.oleEntered.push(context);
+        return Promise.resolve(call(callback, [data], caller)).finally(()=>{
+            thread.oleEntered.pop();
+        });
+    };
+
+    /** The multithreaded apartment's context, made the first time it is asked. */
+    const mtaApartmentContext = ()=>{
+        mtaContext ??= makeContext(null).object;
+        return mtaContext;
+    };
+
+    /**
+     * The context the calling thread is in: one ContextCallback moved it into
+     * for a call, else its apartment's; null outside any apartment.
+     *
+     * @returns {import('./objects.js').ComObject | null}
+     */
+    const currentContext = ()=>{
+        const thread = host.currentThread();
+        const entered = thread?.oleEntered?.at(-1);
+        if (entered)
+        {
+            return entered;
+        }
+        const apartment = thread?.ole32;
+        if (apartment?.model === COINIT_APARTMENTTHREADED)
+        {
+            apartment.context ??= makeContext(thread);
+            return apartment.context.object;
+        }
+        return apartment || mtaOpen() ? mtaApartmentContext() : null;
+    };
+
+    /**
+     * `then`, once the calling thread's apartment can take work other threads
+     * hand it: at once, unless its window is being made.
+     *
+     * @param {() => number} then @returns {number | Promise<number>}
+     */
+    const whenContextReady = then=>{
+        const ready = host.currentThread()?.ole32?.context?.ready;
+        return ready ? Promise.resolve(ready).then(then, then) : then();
+    };
+
+    /**
+     * A context handed out through `out` as `iid`, with a count.
+     *
+     * @param {import('./objects.js').ComObject} context @param {string} iid @param {number} out
+     * @returns {number}
+     */
+    const handOutContext = (context, iid, out)=>{
+        if (!context.queryInterface(iid))
+        {
+            return E_NOINTERFACE;
+        }
+        const pointer = host.vtables.publish(context, iid) >>> 0;
+        if (pointer === 0)
+        {
+            context.release();
+            return E_OUTOFMEMORY;
+        }
+        writeU32(out, pointer);
+        return S_OK;
     };
 
     /** The proxy/stub classes this process registered for itself, by interface. */
@@ -2331,6 +2580,7 @@ export function createOleFunctions(host){
                     return E_INVALIDARG;
                 }
                 host.registry.mtaUsage.leave();
+                mtaMaybeClosed();
                 return S_OK;
             },
         },
@@ -2352,24 +2602,7 @@ export function createOleFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                const thread = host.currentThread();
-                const apartment = thread?.ole32;
-                let answer = S_OK;
-                let kind = APTTYPE_MTA;
-                let detail = APTTYPEQUALIFIER_NONE;
-                if (apartment?.model === COINIT_APARTMENTTHREADED)
-                {
-                    kind = mainSta === thread ? APTTYPE_MAINSTA : APTTYPE_STA;
-                }
-                else if (!apartment && mtaOpen())
-                {
-                    detail = APTTYPEQUALIFIER_IMPLICIT_MTA;
-                }
-                else if (!apartment)
-                {
-                    kind = APTTYPE_CURRENT;
-                    answer = CO_E_NOTINITIALIZED;
-                }
+                const { kind, detail, answer } = apartmentType();
                 writeU32(type >>> 0, kind);
                 writeU32(qualifier >>> 0, detail);
                 return answer;
@@ -2391,10 +2624,111 @@ export function createOleFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                const id = (host.currentThread()?.id ?? 0) >>> 0;
-                writeGuid(host, out >>> 0, `{1063CB43-B0F3-4A56-B7C1-${
-                    id.toString(16).toUpperCase().padStart(12, '0')}}`);
+                writeGuid(host, out >>> 0, logicalThread(host.currentThread()));
                 return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT CoGetObjectContext(REFIID riid, LPVOID *ppv)
+         *
+         * The context the calling thread is in, as `riid`, with a count: its
+         * apartment's, one object answering as IObjContext, IContext,
+         * IComThreadingInfo and IContextCallback, the same every time. Outside
+         * any apartment, CO_E_NOTINITIALIZED with the pointer cleared.
+         */
+        CoGetObjectContext: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([iid, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                writeU32(out >>> 0, 0);
+                const context = currentContext();
+                if (!context)
+                {
+                    return CO_E_NOTINITIALIZED;
+                }
+                const wanted = guidAt(iid) ?? '';
+                return whenContextReady(()=>handOutContext(context, wanted, out >>> 0));
+            },
+        },
+
+        /**
+         * HRESULT CoGetContextToken(ULONG_PTR *pToken)
+         *
+         * The calling thread's context as a token: its IObjContext pointer,
+         * with no count taken -- the apartment holds it. Nothing is written
+         * outside any apartment.
+         */
+        CoGetContextToken: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([out])=>{
+                const context = currentContext();
+                if (!context)
+                {
+                    return CO_E_NOTINITIALIZED;
+                }
+                if ((out >>> 0) === 0)
+                {
+                    return whenContextReady(()=>E_POINTER);
+                }
+                return whenContextReady(()=>{
+                    const pointer = host.vtables.publish(context, IID_IOBJCONTEXT) >>> 0;
+                    if (pointer === 0)
+                    {
+                        return E_OUTOFMEMORY;
+                    }
+                    writeU32(out >>> 0, pointer);
+                    return S_OK;
+                });
+            },
+        },
+
+        /**
+         * HRESULT CoGetDefaultContext(APTTYPE aptType, REFIID riid, LPVOID *ppv)
+         *
+         * The default context of an apartment type, as `riid`: the calling
+         * thread's own for APTTYPE_CURRENT or the type it is in, the
+         * multithreaded apartment's while it exists. A single-threaded
+         * apartment the caller is not in is another thread's, and which one
+         * the type does not say (roadmap/decisions.md, A32).
+         */
+        CoGetDefaultContext: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([type, iid, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                writeU32(out >>> 0, 0);
+                const wanted = type >>> 0;
+                if (![APTTYPE_CURRENT, APTTYPE_STA, APTTYPE_MTA, APTTYPE_MAINSTA].includes(wanted))
+                {
+                    return E_INVALIDARG;
+                }
+                const mine = apartmentType();
+                let context = null;
+                if (wanted === APTTYPE_MTA)
+                {
+                    context = mtaOpen() ? mtaApartmentContext() : null;
+                }
+                else if (mine.answer === S_OK && (wanted === APTTYPE_CURRENT
+                    || wanted === mine.kind
+                    || (wanted === APTTYPE_STA && mine.kind === APTTYPE_MAINSTA)))
+                {
+                    context = currentContext();
+                }
+                if (!context)
+                {
+                    return CO_E_NOTINITIALIZED;
+                }
+                const asked = guidAt(iid) ?? '';
+                return whenContextReady(()=>handOutContext(context, asked, out >>> 0));
             },
         },
 

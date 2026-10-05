@@ -244,6 +244,14 @@ old enough that a program written for 2000 or 98 still recognises it, where a ve
 written before 7 existed may not recognise 7 or 10. *2026-09-26, the commit adding
 `kernel32/versions.js`.*
 
+**A32 — `CoGetDefaultContext` answers only for an apartment the caller can name.** For
+`APTTYPE_CURRENT`, or the type of the apartment the calling thread is in, it hands out that
+apartment's context; for `APTTYPE_MTA` it hands out the multithreaded apartment's context while
+that apartment exists. Otherwise it answers `CO_E_NOTINITIALIZED`. That includes a
+single-threaded apartment the caller is not in: several threads may each have one, and the type
+alone does not say which is meant. An unknown type answers `E_INVALIDARG`. Wine leaves the call
+a stub, and no conformance test pins down any of these answers. *2026-10-05.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

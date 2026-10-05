@@ -71,6 +71,8 @@ const IMPORTS = {
             'CreateStreamOnHGlobal@12', 'CoMarshalInterface@24', 'CoUnmarshalInterface@12',
             'CoReleaseMarshalData@4', 'CoGetMarshalSizeMax@24', 'CoCreateFreeThreadedMarshaler@8',
             'CoGetStandardMarshal@24', 'CreateErrorInfo@4', 'SetErrorInfo@8', 'GetErrorInfo@8',
+            'CoInitializeEx@8', 'CoGetObjectContext@8', 'CoGetContextToken@4',
+            'CoGetDefaultContext@12', 'CoGetCurrentLogicalThreadId@4',
         ],
     },
     'OLEAUT32.dll': {
@@ -111,6 +113,7 @@ const PROGRAMS = [
     { name: 'com', source: 'com.c', cxx: false },
     { name: 'comlife', source: 'comlife.c', cxx: false },
     { name: 'marshal', source: 'marshal.c', cxx: false },
+    { name: 'contexts', source: 'contexts.c', cxx: false },
     { name: 'windows', source: 'windows.c', cxx: false },
 ];
 
