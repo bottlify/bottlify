@@ -40,6 +40,20 @@ export const SyncKind = {
 };
 
 /**
+ * The run's named objects as a process across a link reaches them: the
+ * operations of `system-objects.js`, each a blocking call.
+ *
+ * @typedef {Object} RemoteObjects
+ * @property {(id: number, threadId: number, token: number) => number | null} wait
+ * @property {(token: number) => number | null} cancel
+ * @property {(id: number, threadId: number) => number | null} poll
+ * @property {(id: number) => void} set
+ * @property {(id: number) => void} reset
+ * @property {(id: number, count: number) => number} release
+ * @property {(id: number, threadId: number) => boolean} releaseMutex
+ */
+
+/**
  * Whether a wait on the object would be satisfied now.
  *
  * @param {any} object
@@ -66,8 +80,12 @@ export function signalledNow(object){
 /**
  * @param {Object} options
  * @param {any} options.scheduler  Used to block and wake threads.
+ * @param {RemoteObjects | null} [options.remote]
+ *     The run's named objects, where this process reaches them across a link
+ *     (`system-objects.js`): an object of this table that names one of those
+ *     by `remote` is a stand-in, and every change and wait on it is asked there.
  */
-export function createSyncObjects({ scheduler }){
+export function createSyncObjects({ scheduler, remote = null }){
     /** @type {any[]} */
     const objects = [];
     /** How many of each kind were ever made; the cheap answer about the table. */
@@ -81,8 +99,24 @@ export function createSyncObjects({ scheduler }){
     // Only the queues it stood in are searched: a thread remembers them when
     // it is queued, and a scan of every object for every expiry was a cost
     // paid tens of thousands of times a second by a program that polls.
+    /** Waits on another process's object, queued there, by their token. @type {Map<number, any>} */
+    const remoteWaits = new Map();
+    let nextToken = 1;
     /** @param {any} thread */
     const stopWaiting = thread=>{
+        if (thread.remoteWait && remote)
+        {
+            // Taken off the queue there -- unless it was handed the object
+            // already, in which case it has it, whatever its clock said.
+            const token = thread.remoteWait;
+            remoteWaits.delete(token);
+            thread.remoteWait = null;
+            const granted = remote.cancel(token);
+            if (granted !== null)
+            {
+                thread.waitResult = granted;
+            }
+        }
         for (const object of thread.queuedOn ?? objects)
         {
             const at = object.waiters.indexOf(thread);
@@ -263,7 +297,39 @@ export function createSyncObjects({ scheduler }){
     const describeSet = objects_=>objects_
         .map(object=>`${object.kind} "${object.name}"`).join(', ');
 
+    /**
+     * A wait on a set holding another process's object is not carried across
+     * a link yet: said, rather than answered as though the object were here.
+     *
+     * @param {any[]} set
+     */
+    const refuseRemoteSet = set=>{
+        if (remote && set.some(object=>object.remote))
+        {
+            throw new Error('a wait on a set of objects one of which is another process\'s,'
+                + ' across a link, is not carried yet');
+        }
+    };
+
     const api = {
+        /**
+         * One of this process's waits on another process's object ended
+         * there: the thread has the object, and runs on with the result.
+         *
+         * @param {number} token @param {number} result
+         */
+        wakeRemote(token, result){
+            const thread = remoteWaits.get(token);
+            if (!thread)
+            {
+                return;
+            }
+            remoteWaits.delete(token);
+            thread.remoteWait = null;
+            thread.waitResult = result;
+            (thread.scheduler ?? scheduler).wake(thread);
+        },
+
         /**
          * Wakes everything waiting on an object that has just become signalled
          * for good -- a thread that ended. Unlike a set event there is nothing
@@ -467,6 +533,21 @@ export function createSyncObjects({ scheduler }){
          * @returns {number | null} the wait result, or null if the thread blocked
          */
         wait(object, thread, timed){
+            if (object.remote && remote)
+            {
+                const token = nextToken++;
+                const now = remote.wait(object.remote, thread.id, token);
+                if (now !== null)
+                {
+                    return now;
+                }
+                thread.waitSet = null;
+                thread.queuedOn = [];
+                thread.remoteWait = token;
+                remoteWaits.set(token, thread);
+                scheduler.block(thread, `${object.kind} "${object.name}"`, timed);
+                return null;
+            }
             // A thread that already owns a mutex takes it again without waiting;
             // a recursive acquisition is not a deadlock, it is a counter.
             if (object.kind === SyncKind.MUTEX && object.owner === thread)
@@ -503,6 +584,10 @@ export function createSyncObjects({ scheduler }){
          * @returns {number | null} the wait result, or null if it is not ready
          */
         poll(object, thread){
+            if (object.remote && remote)
+            {
+                return remote.poll(object.remote, thread.id);
+            }
             if (object.kind === SyncKind.MUTEX && object.owner === thread)
             {
                 object.recursion++;
@@ -524,6 +609,7 @@ export function createSyncObjects({ scheduler }){
          * @returns {number | null}
          */
         waitAll(objects_, thread, timed){
+            refuseRemoteSet(objects_);
             const ready = objects_.every(object=>
                 isSignalled(object) || (object.kind === SyncKind.MUTEX && object.owner === thread));
             if (!ready)
@@ -564,6 +650,7 @@ export function createSyncObjects({ scheduler }){
          * @returns {{ index: number, result: number } | null}
          */
         waitAny(objects_, thread, timed){
+            refuseRemoteSet(objects_);
             for (let i = 0; i < objects_.length; i++)
             {
                 const object = objects_[i];
@@ -594,6 +681,11 @@ export function createSyncObjects({ scheduler }){
          * @returns {any[]} threads woken
          */
         setEvent(object){
+            if (object.remote && remote)
+            {
+                remote.set(object.remote);
+                return [];
+            }
             object.signalled = true;
             const woken = [];
             if (object.manualReset)
@@ -616,6 +708,11 @@ export function createSyncObjects({ scheduler }){
 
         /** @param {any} object */
         resetEvent(object){
+            if (object.remote && remote)
+            {
+                remote.reset(object.remote);
+                return;
+            }
             object.signalled = false;
         },
 
@@ -628,6 +725,10 @@ export function createSyncObjects({ scheduler }){
          * @returns {boolean} whether it was released
          */
         releaseMutex(object, thread){
+            if (object.remote && remote)
+            {
+                return remote.releaseMutex(object.remote, thread.id);
+            }
             if (object.owner !== thread)
             {
                 return false;
@@ -667,6 +768,10 @@ export function createSyncObjects({ scheduler }){
          * @returns {number} the previous count
          */
         releaseSemaphore(object, count = 1){
+            if (object.remote && remote)
+            {
+                return remote.release(object.remote, count);
+            }
             if (object.count + count > object.maximum)
             {
                 throw new Error('Semaphore released past its maximum');

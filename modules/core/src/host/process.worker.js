@@ -35,12 +35,19 @@ const YIELD_MS = 4;
  * @returns {Promise<number>} its exit code
  */
 export async function serveProcess({ end, options, run }){
-    const link = openLink(end, {});
+    /** @type {Record<string, Record<string, (...args: any[]) => any>>} */
+    const handlers = {};
+    const link = openLink(end, handlers);
     /** @param {string} target @param {string} method @param {any[]} args */
     const ask = (target, method, args)=>link.callWaiting(target, method, args);
+    const system = remoteSystem(ask);
+    // A wait on another process's object ended there: its word comes in
+    // with whatever else the link carries, at a turn's end or while idle.
+    handlers.kernel = { wake: (/** @type {number} */ token, /** @type {number} */ result)=>
+        system.objects.deliver(token, result) };
     const app = await createApp({
         ...options,
-        system: remoteSystem(ask),
+        system,
         pacing: ringPacing({ inbound: { bell: link.bell, drain: link.pump },
             macrotask: createMacrotask(), now: ()=>performance.now(), intervalMs: YIELD_MS }),
     });

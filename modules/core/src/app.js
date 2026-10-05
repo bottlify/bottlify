@@ -41,6 +41,7 @@ import { createCallRepeats } from './call-repeats.js';
 import { withRunMode } from './mode.js';
 import { createLinkMemory, openLink } from './system/link.js';
 import { systemHandlers } from './system-link.js';
+import { objectHandlers } from './system-objects.js';
 import { openProcessWorker } from './host/process-worker.js';
 
 /**
@@ -3113,6 +3114,8 @@ async function buildApp(options){
             // The run's thread and process ids, which every process numbers
             // its own from (`system`).
             ids: options.system?.ids,
+            // A process across a link reaches the run's named objects there.
+            remoteObjects: options.system?.objects ?? null,
         },
         cpu: {
             jit: options.jit, sampling: options.sampling, memorySize,
@@ -7351,8 +7354,11 @@ export async function createApp(options){
             return 2;
         }
         const memory = createLinkMemory();
+        const objects = objectHandlers({ table: system.namedObjects,
+            wake: (token, result)=>link.call('kernel', 'wake', [token, result]) });
         const link = openLink(memory.a, {
             ...systemHandlers(/** @type {any} */ (system)),
+            ...objects,
             process: {
                 output: (/** @type {number} */ handle, /** @type {string} */ text)=>
                     events.emit('output', { handle, text }),

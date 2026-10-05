@@ -816,3 +816,94 @@ test('in the workers mode a child runs beside its parent, which goes on: woken b
         'where one process runs at a time the child runs while its parent waits, and the'
         + ' parent goes on after it');
 });
+
+test('a child in a worker of its own sets the event its parent named, and the parent wakes',
+    { timeout: 60000 }, async t=>{
+        const { parent, child } = buildEventPair();
+        const app = await createApp({
+            executable: parent,
+            imagePath: 'C:\\App\\parent.exe',
+            engine: 'cork',
+            mode: 'workers',
+            processWorkers: true,
+            storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
+        });
+        t.after(()=>app.dispose());
+        /** @type {any[]} */
+        const started = [];
+        app.on('process-started', (/** @type {any} */ event)=>started.push(event.worker));
+        assert.equal((await app.run({ timeoutMs: 30000 })) >>> 0, 0x105,
+            'woken by the event the child set across the link, then by its exit with 5');
+        assert.deepEqual(started, [true], 'the child ran in a worker of its own');
+    });
+
+/**
+ * A child that names an event and waits on it, exiting with 7 once it is set;
+ * and its parent, which polls for the name until the child has made it, sets
+ * it, waits for the child and exits with 0x100 + the child's code.
+ */
+function buildWaitingChild(){
+    const parent = buildExe({
+        imports: { 'KERNEL32.dll': ['CreateProcessA', 'OpenEventA', 'Sleep', 'SetEvent',
+            'WaitForSingleObject', 'GetExitCodeProcess', 'ExitProcess'] },
+        data: {
+            name: ascii('Go'),
+            command: ascii('C:\\App\\child.exe'),
+            startup: [...u32(68), ...new Array(64).fill(0)],
+            info: new Array(16).fill(0),
+            code: u32(0),
+        },
+        codeSize: 0x80,
+        code: ({ iat, at })=>[
+            0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+            0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+            0x68, ...u32(at('command')), 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateProcessA')),
+            // until OpenEventA(EVENT_ALL_ACCESS, FALSE, "Go") finds it: Sleep(1)
+            0x68, ...u32(at('name')), 0x6a, 0, 0x68, ...u32(0x1f0003),
+            0xff, 0x15, ...u32(iat('OpenEventA')),
+            0x85, 0xc0, 0x75, 0x0a,
+            0x6a, 0x01, 0xff, 0x15, ...u32(iat('Sleep')),
+            0xeb, 0x100 - 32,
+            // SetEvent(eax); WaitForSingleObject(info.hProcess, INFINITE)
+            0x50, 0xff, 0x15, ...u32(iat('SetEvent')),
+            0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+            0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
+            0xa1, ...u32(at('code')), 0x05, ...u32(0x100), 0x50,
+            0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    const child = buildExe({
+        imports: { 'KERNEL32.dll': ['CreateEventA', 'WaitForSingleObject', 'ExitProcess'] },
+        data: { name: ascii('Go') },
+        code: ({ iat, at })=>[
+            // WaitForSingleObject(CreateEventA(NULL, FALSE, FALSE, "Go"), INFINITE)
+            0x68, ...u32(at('name')), 0x6a, 0, 0x6a, 0, 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateEventA')),
+            0x6a, 0xff, 0x50, 0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+            0x6a, 7, 0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    return { parent, child };
+}
+
+for (const processWorkers of [false, true])
+{
+    test(`a child${processWorkers ? ' in a worker of its own' : ''} waits on the event it named`
+        + ' until its parent finds and sets it', { timeout: 60000 }, async t=>{
+        const { parent, child } = buildWaitingChild();
+        const app = await createApp({
+            executable: parent,
+            imagePath: 'C:\\App\\parent.exe',
+            engine: 'cork',
+            mode: 'workers',
+            processWorkers,
+            storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
+        });
+        t.after(()=>app.dispose());
+        assert.equal((await app.run({ timeoutMs: 30000 })) >>> 0, 0x107,
+            'the child woke on its parent\'s SetEvent and exited with 7');
+    });
+}

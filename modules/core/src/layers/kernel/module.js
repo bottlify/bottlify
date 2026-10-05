@@ -181,7 +181,12 @@ export function createKernelModule(){
                 cpu.setYieldCheck?.(()=>!state.disposed
                     && state.scheduler.preemptionDue(state.refreshClock));
             }
-            state.sync = createSyncObjects({ scheduler: state.scheduler });
+            state.sync = createSyncObjects({ scheduler: state.scheduler,
+                remote: config?.remoteObjects ?? null });
+            // A wait of this process on another's object, across a link,
+            // ends there; the word comes back here.
+            config?.remoteObjects?.onWake?.((/** @type {number} */ token,
+                /** @type {number} */ result)=>state.sync?.wakeRemote(token, result));
             state.handles = createHandleTable();
             state.processes = createProcessTable(config?.ids);
 

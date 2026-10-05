@@ -14,9 +14,9 @@
  * answers entries and bytes, ids are numbers -- so each crosses as it is:
  * `systemHandlers` answers a link's calls from the run's own services, and
  * `remoteSystem` gives the process objects of the same shape that make those
- * calls and wait. What cannot cross is said where it stops: a named kernel
- * object is the process's own, and the windows of a process across a link are
- * not yet found or sent to by another process.
+ * calls and wait. What cannot cross is said where it stops: the windows of a
+ * process across a link are not yet found or sent to by another process, and
+ * a wait on a set holding another process's object is refused (`sync.js`).
  */
 
 import { volumeHandlers, remoteVolume } from './layers/filesystem/internal/volume-link.js';
@@ -80,8 +80,8 @@ export function remoteSystem(ask){
     const asking = (target, names)=>Object.fromEntries(names.map(name=>
         [name, (/** @type {any[]} */ ...args)=>ask(target, name, args)]));
     return {
-        // A process's named objects are its own across a link: the waits on
-        // them are its scheduler's, and no other process's can wake them yet.
+        // The run's named objects are asked there (`objects`); this table is
+        // not consulted.
         namedObjects: new Map(),
         registry: {
             ...asking('registry', REGISTRY),
@@ -96,6 +96,35 @@ export function remoteSystem(ask){
             /** @param {number} processId */
             attach: processId=>ask('windows', 'attach', [processId]),
         },
+        objects: remoteObjects(ask),
         bundle: null,
+    };
+}
+
+/** What a process asks of the run's named objects (`system-objects.js`). */
+const OBJECTS = ['peek', 'create', 'reference', 'close', 'wait', 'cancel', 'poll', 'set', 'reset',
+    'release', 'releaseMutex'];
+
+/**
+ * The run's named objects, asked across a link; and where the word that one
+ * of this process's waits ended there is delivered (`deliver`, from the
+ * link's `kernel.wake`) to whoever listens (`onWake`, the kernel).
+ *
+ * @param {(target: string, method: string, args: any[]) => any} ask
+ */
+function remoteObjects(ask){
+    /** @type {((token: number, result: number) => void) | null} */
+    let listener = null;
+    return {
+        ...Object.fromEntries(OBJECTS.map(name=>
+            [name, (/** @type {any[]} */ ...args)=>ask('objects', name, args)])),
+        /** @param {(token: number, result: number) => void} handler */
+        onWake(handler){
+            listener = handler;
+        },
+        /** @param {number} token @param {number} result */
+        deliver(token, result){
+            listener?.(token, result);
+        },
     };
 }

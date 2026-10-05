@@ -6,7 +6,7 @@
 
 import { createConsoleFunctions, HANDLE_STDOUT, HANDLE_STDERR } from './kernel32/console.js';
 import { createThreadingFunctions } from './kernel32/threading.js';
-import { createNamedObjects } from './kernel32/named-objects.js';
+import { createNamedObjects, createRemoteNamedObjects } from './kernel32/named-objects.js';
 import { createRegistryService } from './advapi32/registry-service.js';
 import { createDebugFunctions } from './kernel32/debug.js';
 import { createHeapAllocator, createHeapFunctions } from './kernel32/heap.js';
@@ -234,9 +234,14 @@ export function createWin32Module(){
             // to share it with; a caller with nothing to share it with gets
             // its own. The one namespace a mutex, event, semaphore, timer and
             // file mapping all share is part of it.
-            /** @type {{ namedObjects: Map<string, any>, registry: any, windows?: any } | null} */
+            /** @type {{ namedObjects: Map<string, any>, registry: any, windows?: any,
+             *     objects?: any } | null} */
             const system = config?.system ?? null;
-            const namedObjects = createNamedObjects({ table: system?.namedObjects });
+            // Across a link the run's namespace is asked there, and the
+            // objects here are stand-ins for the run's (`system-objects.js`).
+            const namedObjects = system?.objects
+                ? createRemoteNamedObjects({ objects: system.objects, kernel })
+                : createNamedObjects({ table: system?.namedObjects });
             // What GetCurrentProcessId answers: a child is the process its parent
             // was told of in PROCESS_INFORMATION, not a second copy of the first.
             const processId = (config?.processId ?? 0x1000) >>> 0;

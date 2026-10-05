@@ -125,3 +125,90 @@ export function createNamedObjects({ table = new Map() } = {}){
         },
     };
 }
+
+/**
+ * The run's one namespace as a process across a link reaches it
+ * (`system-objects.js`): a name it creates is made there, one it opens is
+ * whichever process's object holds it, and the object here is a stand-in --
+ * a kernel object of the kind that names the real one by `remote`, so the
+ * kernel asks there for every change and wait (`sync.js`). The same
+ * operations as the table here, so kernel32 does not know which it has.
+ *
+ * @param {Object} options
+ * @param {any} options.objects  the link's `objects` calls
+ * @param {any} options.kernel   for the stand-ins
+ */
+export function createRemoteNamedObjects({ objects, kernel }){
+    /** One stand-in per object, so two handles onto it are one object here. @type {Map<number, any>} */
+    const standIns = new Map();
+    /** @param {string} kind @param {number} id @param {string} name */
+    const standInFor = (kind, id, name)=>{
+        let made = standIns.get(id);
+        if (!made)
+        {
+            made = kind === 'event' ? kernel.createEvent({ name })
+                : kind === 'semaphore' ? kernel.createSemaphore({ initial: 0, maximum: 1, name })
+                    : kernel.createMutex({ name });
+            made.remote = id;
+            standIns.set(id, made);
+        }
+        return made;
+    };
+    return {
+        /** @param {string | null} name @param {string} kind */
+        existing(name, kind){
+            if (name === null)
+            {
+                return null;
+            }
+            const found = objects.peek(kind, name);
+            return found === null ? null : found.taken ? TAKEN : standInFor(kind, found.id, name);
+        },
+
+        /**
+         * A fresh object made here is made there instead, with the state it
+         * was made in, and becomes its stand-in.
+         *
+         * @param {string | null} name @param {string} kind @param {any} made
+         * @param {boolean} reused
+         * @param {(code: number) => void} setLastError
+         */
+        remember(name, kind, made, reused, setLastError){
+            if (name !== null)
+            {
+                if (reused)
+                {
+                    objects.reference(made.remote);
+                }
+                else
+                {
+                    const answer = objects.create(kind, name, {
+                        manualReset: made.manualReset === true, signalled: made.signalled === true,
+                        initial: made.count, maximum: made.maximum,
+                        owner: made.owner ? made.owner.id : null,
+                    });
+                    made.remote = answer.id;
+                    standIns.set(answer.id, made);
+                    reused = answer.reused === true;
+                }
+            }
+            setLastError(reused ? ERROR_ALREADY_EXISTS : ERROR_SUCCESS);
+        },
+
+        /** @param {any} object */
+        reference(object){
+            if (object.remote)
+            {
+                objects.reference(object.remote);
+            }
+        },
+
+        /** @param {any} object */
+        forget(object){
+            if (object.remote)
+            {
+                objects.close(object.remote);
+            }
+        },
+    };
+}
