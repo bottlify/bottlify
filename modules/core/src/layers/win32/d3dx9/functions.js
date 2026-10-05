@@ -36,9 +36,8 @@
 
 import { guestEntry } from '../msvcrt/guest-code.js';
 import { createComObject } from '../ole32/objects.js';
-import { createConstantTableObjects } from './constants.js';
+import { createConstantTables } from './constants.js';
 import { preprocess } from './preprocess.js';
-import { compileShader } from './hlsl-compile.js';
 import * as inGuest from './inguest.js';
 import * as matrix from './inguest-matrix.js';
 import * as vector from './inguest-vector.js';
@@ -139,14 +138,7 @@ export function createD3dxFunctions(host){
     };
 
     /** @param {Uint8Array} bytes */
-    const latin1 = bytes=>{
-        let text = '';
-        for (let at = 0; at < bytes.length; at += 8192)
-        {
-            text += String.fromCharCode(...bytes.subarray(at, at + 8192));
-        }
-        return text;
-    };
+    const latin1 = bytes=>String.fromCharCode(...bytes);
     /** Text as the bytes D3DX hands back: one a character, then a NUL. @param {string} text */
     const encode = text=>Uint8Array.from([...text, '\0'], c=>c.charCodeAt(0) & 0xff);
     /** @param {number} address */
@@ -264,13 +256,11 @@ export function createD3dxFunctions(host){
         }
     };
 
-    const constantTables = createConstantTableObjects(host);
-
     return {
         ...Object.fromEntries(IN_GUEST.flatMap(([source, compiled])=>Object.keys(compiled)
             .map(name=>[name, guestEntry(source[name], compiled[name], host)]))),
 
-        ...constantTables.exports,
+        ...createConstantTables(host),
 
         ...Object.fromEntries(Object.entries(NOT_BUILT).map(([name, [argBytes, ...outs]])=>[name, {
             argBytes,
@@ -361,19 +351,15 @@ export function createD3dxFunctions(host){
          *     LPD3DXBUFFER *ppShader, LPD3DXBUFFER *ppErrorMsgs,
          *     LPD3DXCONSTANTTABLE *ppConstantTable)
          *
-         * The HLSL compiler (`hlsl-compile.js`): the source through the
-         * preprocessor with the program's macros and its ID3DXInclude, to the
-         * bytecode of the entry point for the profile, and its constant table.
-         * What was found wrong -- and any warning, for a compile that went
-         * through -- is text in the error buffer, `file(line,col): error
-         * Xnnnn: ...` as fxc prints it; a compile with errors answers E_FAIL
-         * and leaves the shader and the table null.
+         * There is no HLSL compiler here. The call fails as a compile that
+         * found an error fails -- E_FAIL, the shader and table null, and a
+         * message in the error buffer -- which a program reports and goes
+         * on from, as it would from a shader its own source broke.
          */
         D3DXCompileShader: {
             argBytes: 40,
             /** @param {number[]} args */
-            handler: ([source, size, defines, include, entry, profile, flags, shaderOut,
-                errorsOut, tableOut])=>{
+            handler: ([, , , , entry, profile, , shaderOut, errorsOut, tableOut])=>{
                 for (const out of [shaderOut, errorsOut, tableOut])
                 {
                     if ((out >>> 0) !== 0)
@@ -381,38 +367,15 @@ export function createD3dxFunctions(host){
                         host.writeMemory(out >>> 0, new Uint8Array(4));
                     }
                 }
-                if ((source >>> 0) === 0 || (profile >>> 0) === 0 || (shaderOut >>> 0) === 0
-                    || !host.heap || !host.vtables)
+                const named = `${(entry >>> 0) === 0 ? '' : latin1(cString(entry))} (${
+                    (profile >>> 0) === 0 ? '' : latin1(cString(profile))})`;
+                host.divergence?.('D3DXCompileShader', `no HLSL compiler: ${named} refused`);
+                if ((errorsOut >>> 0) !== 0 && host.heap && host.vtables)
                 {
-                    return D3DERR_INVALIDCALL;
+                    giveBuffer(errorsOut, encode(
+                        `error X0000: ${named}: this machine has no HLSL compiler\n`));
                 }
-                const text = latin1(host.readMemory(source >>> 0, size >>> 0));
-                return compileShader(text, {
-                    entry: (entry >>> 0) === 0 ? 'main' : latin1(cString(entry)),
-                    profile: latin1(cString(profile)),
-                    flags: flags >>> 0,
-                    defines: macrosAt(defines),
-                    include: (include >>> 0) === 0 ? undefined : includer(include >>> 0),
-                }).then(result=>{
-                    if ((errorsOut >>> 0) !== 0 && result.messages !== '')
-                    {
-                        giveBuffer(errorsOut, encode(result.messages));
-                    }
-                    if (!result.ok || !result.tokens)
-                    {
-                        host.divergence?.('D3DXCompileShader', `refused: ${
-                            result.messages.split('\n')[0]}`);
-                        return E_FAIL;
-                    }
-                    const bytes = new Uint8Array(result.tokens.buffer, result.tokens.byteOffset,
-                        result.tokens.byteLength);
-                    const answer = giveBuffer(shaderOut, bytes);
-                    if (answer !== 0 || (tableOut >>> 0) === 0 || !result.constantTable)
-                    {
-                        return answer;
-                    }
-                    return constantTables.publish(result.constantTable, result.tokens[0], tableOut);
-                });
+                return E_FAIL;
             },
         },
     };

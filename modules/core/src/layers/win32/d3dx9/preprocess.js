@@ -300,21 +300,13 @@ export function evaluate(text, macros){
 }
 
 /**
- * @typedef {Object} Origin
- * @property {string} file
- * @property {number} line
- */
-
-/**
- * HLSL source preprocessed, or the error a directive raised. `origins` has an
- * entry for each line of the text: the file it was read from and its line
- * there, which differ from the text's own once an include has been expanded.
+ * HLSL source preprocessed, or the error a directive raised.
  *
  * @param {string} source
  * @param {PreprocessOptions} [options]
- * @returns {Promise<{ text: string, origins: Origin[] } | { error: string }>}
+ * @returns {Promise<{ text: string } | { error: string }>}
  */
-export async function preprocessTracked(source, options = {}){
+export async function preprocess(source, options = {}){
     /** @type {Map<string, Macro>} */
     const macros = new Map();
     for (const [name, value] of options.defines ?? [])
@@ -323,13 +315,6 @@ export async function preprocessTracked(source, options = {}){
     }
     /** @type {string[]} */
     const out = [];
-    /** Where each output line came from: the file and its line there. @type {Origin[]} */
-    const origins = [];
-    /** @param {string} text @param {string} file @param {number} n */
-    const emit = (text, file, n)=>{
-        out.push(text);
-        origins.push({ file, line: n + 1 });
-    };
     /**
      * @param {string} text @param {string} file @param {number} depth
      * @returns {Promise<string | null>}  An error, or null.
@@ -346,10 +331,10 @@ export async function preprocessTracked(source, options = {}){
             const directive = /^\s*#\s*(\w*)\s*(.*)$/.exec(line);
             if (!directive)
             {
-                emit(active() ? expand(line, macros) : '', file, n);
+                out.push(active() ? expand(line, macros) : '');
                 continue;
             }
-            emit('', file, n);
+            out.push('');
             const [, name, rest] = directive;
             const where = `${file}(${n + 1})`;
             if (name === 'if' || name === 'ifdef' || name === 'ifndef')
@@ -422,13 +407,12 @@ export async function preprocessTracked(source, options = {}){
                     return `${where}: cannot open include file '${target[1] ?? target[2]}'`;
                 }
                 out.pop();
-                origins.pop();
                 const failed = await run(included, target[1] ?? target[2], depth + 1);
                 if (failed)
                 {
                     return failed;
                 }
-                emit('', file, n);
+                out.push('');
             }
             else if (name === 'error')
             {
@@ -442,17 +426,5 @@ export async function preprocessTracked(source, options = {}){
         return stack.length > 0 ? `${file}: #if without #endif` : null;
     };
     const error = await run(source, 'memory', 0);
-    return error ? { error } : { text: out.join('\n'), origins };
-}
-
-/**
- * HLSL source preprocessed, or the error a directive raised.
- *
- * @param {string} source
- * @param {PreprocessOptions} [options]
- * @returns {Promise<{ text: string } | { error: string }>}
- */
-export async function preprocess(source, options = {}){
-    const result = await preprocessTracked(source, options);
-    return 'error' in result ? result : { text: result.text };
+    return error ? { error } : { text: out.join('\n') };
 }

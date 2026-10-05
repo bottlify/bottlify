@@ -76,7 +76,7 @@ test('#if expressions follow C', ()=>{
     assert.equal(evaluate('UNDEFINED', macros), 0);
 });
 
-test('D3DXPreprocessShader answers the text in a buffer; D3DXCompileShader fails on an error',
+test('D3DXPreprocessShader answers the text in a buffer; D3DXCompileShader fails as a compile does',
     async()=>{
         const memory = new Uint8Array(0x8000);
         const view = new DataView(memory.buffer);
@@ -114,14 +114,14 @@ test('D3DXPreprocessShader answers the text in a buffer; D3DXCompileShader fails
 
         memory.set(new TextEncoder().encode('main\0ps_2_0\0'), 0x1300);
         assert.equal(fns.D3DXCompileShader.argBytes, 40);
-        assert.equal(await fns.D3DXCompileShader.handler([0x1000, source.length, 0, 0, 0x1300,
-            0x1305, 0, 0x60, 0x64, 0x68]) >>> 0, 0x80004005, 'E_FAIL');
+        assert.equal(fns.D3DXCompileShader.handler([0x1000, source.length, 0, 0, 0x1300, 0x1305, 0,
+            0x60, 0x64, 0x68]) >>> 0, 0x80004005, 'E_FAIL');
         assert.deepEqual([0x60, 0x68].map(at=>view.getUint32(at, true)), [0, 0],
             'no shader, no table');
         const errors = published[1].state;
         const message = memory.subarray(errors.data, errors.data + errors.size);
         assert.match(new TextDecoder().decode(message),
-            /error X3501: 'main': entrypoint not found/);
+            /main \(ps_2_0\): this machine has no HLSL compiler/);
         assert.deepEqual(said, ['D3DXCompileShader']);
     });
 
