@@ -57,6 +57,28 @@ const SELECTORS = [0x10, 0x08, 0x10, 0x10, 0x18, 0x10];
  */
 
 /**
+ * After the host's handler, which answered 2 (`TRAP_END_TURN`): the region
+ * leaves for the host's loop rather than going on in the region a transfer
+ * would find for EIP. The handler asked for the turn to end -- a thread of
+ * higher priority made ready, the machine halted -- and only the loop can
+ * give the processor to anyone else; with budget left, an untranslated exit
+ * tail-calls the next region and the thread runs out its quantum instead.
+ * The answer is in `t1`.
+ *
+ * @param {any} e
+ */
+function endTurnIfAsked(e){
+    const { b } = e;
+    b.localGet(Local.t1).i32const(TRAP_END_TURN).op(I32.eq);
+    e.openIf('endTurn');
+    b.i32const(0).localSet(Local.budget);
+    e.close();
+}
+
+/** What the trap import answers when the turn is to end there. */
+export const TRAP_END_TURN = 2;
+
+/**
  * The class a run may leave out: x87, MMX (an mm operand) or SSE (an xmm operand),
  * or '' for the integer core.
  *
@@ -868,10 +890,11 @@ export function emitInstruction(e, instruction, flagsLive){
                     x87Normalise(e);
                     e.storeState();
                     e.resetRun();
-                    b.localGet(Local.reg).call(e.context.trap).drop();
+                    b.localGet(Local.reg).call(e.context.trap).localSet(Local.t1);
                     e.loadState();
                     x87Reloaded(e);
                     b.i32const(0).load('i32', { offset: e.layout.eip }).localSet(Local.eip);
+                    endTurnIfAsked(e);
                     e.exitDynamic(Exit.UNTRANSLATED);
                     e.dead = true;
                     return true;
@@ -885,10 +908,11 @@ export function emitInstruction(e, instruction, flagsLive){
                 b.i32const(next).localSet(Local.eip);
                 e.storeState();
                 e.resetRun();
-                b.localGet(Local.reg).call(e.context.trap);
+                b.localGet(Local.reg).call(e.context.trap).localTee(Local.t1);
                 e.openGuard('moved');
                 e.loadState();
                 b.i32const(0).load('i32', { offset: e.layout.eip }).localSet(Local.eip);
+                endTurnIfAsked(e);
                 e.exitDynamic(Exit.UNTRANSLATED);
                 e.close();
                 e.loadState();

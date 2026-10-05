@@ -237,6 +237,15 @@ test('out dx, eax to the trap port calls the host from inside the region; others
         assert.deepEqual(moved.translate(CODE, { hash: true }).run(CODE), { kind: 0, vector: 0 });
         assert.equal(moved.eip(), 0x9000);
         assert.equal(moved.reg('ebx'), 1, 'the instruction after the out did not run');
+        // A handler that ends the turn (2) -- a thread of higher priority made
+        // ready -- with EIP left past the out: the region goes back to the
+        // host's loop there, rather than on through the code after the write.
+        const ended = createTestMachine({ trapPort: PORT, trap: ()=>2 });
+        ended.write(CODE, program);
+        ended.setReg('esp', STACK);
+        assert.deepEqual(ended.translate(CODE, { hash: true }).run(CODE), { kind: 0, vector: 0 });
+        assert.equal(ended.eip(), CODE + 15, 'stopped past the out');
+        assert.equal(ended.reg('ebx'), 1, 'the instruction after the out is left to the next turn');
         // With x87 registers live in the region the call is made from it too,
         // the stack written back first, and the region then leaves for wherever
         // EIP is: the handler may have moved the top the code after the out was
