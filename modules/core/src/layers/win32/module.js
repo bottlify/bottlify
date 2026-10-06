@@ -1881,6 +1881,17 @@ export function createWin32Module(){
 
                 'ADVPACK.dll': createAdvpackFunctions({
                     isAdministrator: ()=>isTokenMember(ADMINISTRATORS_SID),
+                    hive,
+                    folders,
+                    /** @param {number} instance @param {any} type @param {any} name */
+                    findResource: (instance, type, name)=>
+                        modules.findResource?.(instance, type, name) ?? null,
+                    moduleBase: instance=>modules.moduleBase?.(instance) ?? 0,
+                    modulePath,
+                    readMemory,
+                    readCString,
+                    readWideString,
+                    divergence: config?.divergence,
                 }),
 
                 'SFC.dll': createSfcFunctions({ writeMemory, readCString, files: volume }),

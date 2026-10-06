@@ -32,6 +32,7 @@ const ERROR_WRONG_INF_STYLE = 0xe0000100;
 const ERROR_LINE_NOT_FOUND = 0xe0000102;
 const ERROR_CLASS_MISMATCH = 0xe0000201;
 const INF_STYLE_WIN4 = 2;
+const SPINST_REGISTRY = 0x04;
 const SPINST_FILES = 0x10;
 
 /** Where the tests put their arguments; the heap starts above them. */
@@ -154,7 +155,7 @@ async function machine(){
         return at;
     };
     return {
-        fns, view, errors, str, buffer, file, contents, callback, readCString, volume,
+        fns, view, errors, str, buffer, file, contents, callback, readCString, volume, hive,
         u32: (/** @type {number} */ at)=>view.getUint32(at, true),
         lastError: ()=>errors.at(-1),
     };
@@ -1015,3 +1016,29 @@ test('a section\'s line count, -1 for a section that is not there', async()=>{
     assert.equal(m.fns.SetupGetLineCountA.handler([0x999, m.str('Section')]), -1);
     assert.equal(m.lastError(), ERROR_INVALID_HANDLE);
 });
+
+test('SPINST_REGISTRY carries out a section\'s DelReg and AddReg, HKR the predefined key named',
+    async()=>{
+        const m = await machine();
+        m.file('C:\\src\\reg.inf', [
+            '[Version]', 'Signature="$Chicago$"',
+            '[Install]', 'DelReg=Old', 'AddReg=New', 'UpdateInis=Ini',
+            '[Old]', 'HKLM,Software\\Product,Stale',
+            '[New]', 'HKLM,Software\\Product,Path,,"%11%\\product.dll"',
+            'HKR,Software\\Product,Relative,0x00010001,7', '',
+        ].join('\r\n'));
+        const machineRoot = m.hive.root(0x80000002);
+        const product = m.hive.create(/** @type {any} */ (machineRoot), 'Software\\Product').key;
+        m.hive.setValue(product, 'Stale', 1, Uint8Array.of(0x78, 0));
+        const inf = await m.fns.SetupOpenInfFileA.handler([m.str('C:\\src\\reg.inf'), 0,
+            INF_STYLE_WIN4, 0]);
+        assert.equal(await m.fns.SetupInstallFromInfSectionA.handler([0, inf, m.str('Install'),
+            SPINST_REGISTRY, 0x80000001, 0, 0, 0, 0, 0, 0]), 1);
+        assert.equal(m.hive.getValue(product, 'Stale'), null);
+        assert.equal(new TextDecoder().decode(m.hive.getValue(product, 'Path')?.data),
+            'C:\\WINDOWS\\system32\\product.dll\0');
+        const user = m.hive.open(/** @type {any} */ (m.hive.root(0x80000001)),
+            'Software\\Product');
+        assert.deepEqual([...(user ? m.hive.getValue(user, 'Relative')?.data ?? [] : [])],
+            [7, 0, 0, 0], 'HKR is HKEY_CURRENT_USER here');
+    });
