@@ -4595,17 +4595,21 @@ async function buildApp(options){
      *
      * @param {string} name
      * @param {number} [flags]
+     * @param {any} [thread]  Whose LoadLibrary this answers, for a library loaded
+     *     as another's dependency: by then the processor is someone else's.
      * @returns {number | Promise<number>}
      */
-    const loadLibraryAtRuntime = (name, flags = 0)=>{
+    const loadLibraryAtRuntime = (name, flags = 0, thread = undefined)=>{
         if ((flags & LOAD_AS_DATA) !== 0)
         {
             return loadAsData(name, flags);
         }
         // Read now, before anything is awaited: this is the thread whose
         // LoadLibrary call is being answered, and it is the one whose stack the
-        // library's entry point has to run on.
-        const asked = kernel.currentThread();
+        // library's entry point has to run on -- the dependencies' entry points
+        // too, which are loaded after awaits, when the thread on the processor
+        // is any other.
+        const asked = thread ?? kernel.currentThread();
         const unresolved = (flags & DONT_RESOLVE_DLL_REFERENCES) !== 0;
         const key = name.toLowerCase().replace(/\.dll$/, '');
         if (absentLibraries.has(key))
@@ -4748,7 +4752,7 @@ async function buildApp(options){
                         {
                             if (findModule(dependency.dll) === null)
                             {
-                                await loadLibraryAtRuntime(dependency.dll);
+                                await loadLibraryAtRuntime(dependency.dll, 0, asked);
                             }
                         }
 
