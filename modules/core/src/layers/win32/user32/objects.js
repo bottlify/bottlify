@@ -31,7 +31,7 @@
 
 import { ddbToBgra, planesToBgra } from './cursors.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
-import { readText, readWideString } from './unicode.js';
+import { readText, readWideString, writeText } from './unicode.js';
 
 /** The resource directories a cursor and an icon are named in. */
 export const RT_GROUP_CURSOR = 12;
@@ -766,25 +766,51 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         return null;
     };
 
-    /** @param {number} address @returns {any | null} the item a MENUITEMINFO describes */
-    const readItemInfo = address=>{
+    /**
+     * The item a MENUITEMINFOA or MENUITEMINFOW describes; the two differ only
+     * in what dwTypeData points at.
+     *
+     * Under MIIM_TYPE alone dwTypeData is a string only for a string item:
+     * for a bitmap it is the bitmap's handle, for an owner-drawn item the
+     * program's own value and for a separator nothing, and reading any of
+     * them as a pointer reads wherever it happens to point. Such an item
+     * carries no text.
+     *
+     * @param {number} address @param {boolean} wide
+     * @returns {any | null}
+     */
+    const readItemInfo = (address, wide)=>{
         const declared = readU32(address + MENUITEMINFO.cbSize);
         if (declared !== MENUITEMINFO.SIZE && declared !== MENUITEMINFO.SIZE_LEGACY)
         {
             return null;
         }
         const mask = readU32(address + MENUITEMINFO.fMask);
+        const type = readU32(address + MENUITEMINFO.fType);
         const typeData = readU32(address + MENUITEMINFO.dwTypeData);
+        const notText = (mask & MIIM_STRING) === 0
+            && (type & (MF_BITMAP | MF_OWNERDRAW | MFT_SEPARATOR)) !== 0;
+        /** @type {string | null} */
+        let text = null;
+        if ((mask & (MIIM_STRING | MIIM_TYPE)) !== 0)
+        {
+            if (notText)
+            {
+                text = '';
+            }
+            else if (typeData !== 0)
+            {
+                text = readText(host, typeData, wide, MAX_TEXT);
+            }
+        }
         return {
             mask,
-            type: readU32(address + MENUITEMINFO.fType),
+            type,
             state: readU32(address + MENUITEMINFO.fState),
             id: readU32(address + MENUITEMINFO.wID),
             submenu: readU32(address + MENUITEMINFO.hSubMenu),
             data: readU32(address + MENUITEMINFO.dwItemData),
-            text: (mask & (MIIM_STRING | MIIM_TYPE)) !== 0 && typeData !== 0
-                ? host.readCString(typeData, MAX_TEXT)
-                : null,
+            text,
         };
     };
 
@@ -893,6 +919,139 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
             const into = found?.menu ?? menu;
             into.items.splice(found ? found.at : into.items.length, 0,
                 flaggedItem(flags, id, newItem, wide));
+            return 1;
+        },
+    });
+
+    /**
+     * InsertMenuItemA or InsertMenuItemW. fByPosition is an argument here
+     * rather than a flag inside the structure, which is the one thing that
+     * makes this call differ from SetMenuItemInfo in shape as well as in
+     * effect.
+     *
+     * @param {boolean} wide
+     */
+    const insertMenuItem = wide=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [handle, position, byPosition, info])=>{
+            const menu = menuOf(handle);
+            const described = (info >>> 0) === 0 ? null : readItemInfo(info, wide);
+            if (!menu || !described)
+            {
+                return 0;
+            }
+            const at = (byPosition >>> 0) !== 0
+                ? Math.min(Math.max(position | 0, 0), menu.items.length)
+                : menu.items.findIndex((/** @type {any} */ item)=>item.id === (position >>> 0));
+            menu.items.splice(at < 0 ? menu.items.length : at, 0, {
+                id: described.id,
+                type: described.type,
+                state: described.state,
+                submenu: described.submenu,
+                data: described.data,
+                text: described.text ?? '',
+            });
+            return 1;
+        },
+    });
+
+    /**
+     * The item GetMenuItemInfo or SetMenuItemInfo names, by place or by
+     * command.
+     *
+     * @param {number} handle @param {number} item @param {number} byPosition
+     */
+    const itemNamed = (handle, item, byPosition)=>{
+        const menu = menuOf(handle);
+        return menu
+            ? findItem(menu, item, (byPosition >>> 0) !== 0 ? MF_BYPOSITION : MF_BYCOMMAND)
+            : null;
+    };
+
+    /**
+     * GetMenuItemInfoA or GetMenuItemInfoW: the two write the same structure,
+     * and the text in the caller's encoding with cch counting its characters.
+     *
+     * @param {boolean} wide
+     */
+    const getMenuItemInfo = wide=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [handle, item, byPosition, info])=>{
+            const found = itemNamed(handle, item, byPosition);
+            if (!found || (info >>> 0) === 0)
+            {
+                return 0;
+            }
+            const declared = readU32(info + MENUITEMINFO.cbSize);
+            if (declared !== MENUITEMINFO.SIZE && declared !== MENUITEMINFO.SIZE_LEGACY)
+            {
+                return 0;
+            }
+            const mask = readU32(info + MENUITEMINFO.fMask);
+            const held = found.menu.items[found.at];
+            /** @type {[number, number, number][]} */
+            const members = [
+                [MIIM_TYPE, MENUITEMINFO.fType, held.type],
+                [MIIM_STATE, MENUITEMINFO.fState, held.state],
+                [MIIM_ID, MENUITEMINFO.wID, held.id],
+                [MIIM_SUBMENU, MENUITEMINFO.hSubMenu, held.submenu],
+                [MIIM_DATA, MENUITEMINFO.dwItemData, held.data],
+            ];
+            for (const [bit, offset, value] of members)
+            {
+                if ((mask & bit) !== 0)
+                {
+                    writeU32s(info + offset, [value]);
+                }
+            }
+            if ((mask & (MIIM_STRING | MIIM_TYPE)) !== 0)
+            {
+                // cch is the buffer's size going in and the length coming
+                // out, and dwTypeData being null means the caller is asking
+                // for that length rather than for the text.
+                const buffer = readU32(info + MENUITEMINFO.dwTypeData);
+                const room = readU32(info + MENUITEMINFO.cch);
+                const written = buffer === 0
+                    ? held.text.length
+                    : writeText(host, buffer, held.text, room, wide);
+                writeU32s(info + MENUITEMINFO.cch, [written]);
+            }
+            return 1;
+        },
+    });
+
+    /** SetMenuItemInfoA or SetMenuItemInfoW. @param {boolean} wide */
+    const setMenuItemInfo = wide=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [handle, item, byPosition, info])=>{
+            const found = itemNamed(handle, item, byPosition);
+            const described = (info >>> 0) === 0 ? null : readItemInfo(info, wide);
+            if (!found || !described)
+            {
+                return 0;
+            }
+            const held = found.menu.items[found.at];
+            // Only what the mask names is changed. Copying the whole
+            // structure would blank every member the caller left alone.
+            /** @type {[number, string][]} */
+            const members = [
+                [MIIM_TYPE, 'type'], [MIIM_STATE, 'state'], [MIIM_ID, 'id'],
+                [MIIM_SUBMENU, 'submenu'], [MIIM_DATA, 'data'],
+            ];
+            for (const [bit, name] of members)
+            {
+                if ((described.mask & bit) !== 0)
+                {
+                    held[name] = described[name];
+                }
+            }
+            if (described.text !== null)
+            {
+                held.text = described.text;
+            }
             return 1;
         },
     });
@@ -1431,36 +1590,11 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         /**
          * BOOL InsertMenuItemA(HMENU hmenu, UINT item, BOOL fByPosition,
          *                     LPCMENUITEMINFOA lpmi)
-         *
-         * fByPosition is a separate argument here rather than a flag inside the
-         * structure, which is the one thing that makes this call differ from
-         * SetMenuItemInfo in shape as well as in effect.
+         * BOOL InsertMenuItemW(HMENU hmenu, UINT item, BOOL fByPosition,
+         *                     LPCMENUITEMINFOW lpmi)
          */
-        InsertMenuItemA: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([handle, position, byPosition, info])=>{
-                const menu = menuOf(handle);
-                const described = (info >>> 0) === 0 ? null : readItemInfo(info);
-                if (!menu || !described)
-                {
-                    return 0;
-                }
-                const at = (byPosition >>> 0) !== 0
-                    ? Math.min(Math.max(position | 0, 0), menu.items.length)
-                    : menu.items.findIndex((/** @type {any} */ item)=>
-                        item.id === (position >>> 0));
-                menu.items.splice(at < 0 ? menu.items.length : at, 0, {
-                    id: described.id,
-                    type: described.type,
-                    state: described.state,
-                    submenu: described.submenu,
-                    data: described.data,
-                    text: described.text ?? '',
-                });
-                return 1;
-            },
-        },
+        InsertMenuItemA: insertMenuItem(false),
+        InsertMenuItemW: insertMenuItem(true),
 
         /**
          * BOOL AppendMenuA(HMENU hMenu, UINT uFlags, UINT_PTR uIDNewItem, LPCSTR lpNewItem)
@@ -1488,106 +1622,19 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         InsertMenuA: insertMenu(false),
         InsertMenuW: insertMenu(true),
 
-        /** BOOL GetMenuItemInfoA(HMENU, UINT, BOOL, LPMENUITEMINFOA) */
-        GetMenuItemInfoA: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([handle, item, byPosition, info])=>{
-                const menu = menuOf(handle);
-                const found = menu
-                    ? findItem(menu, item, (byPosition >>> 0) !== 0 ? MF_BYPOSITION : MF_BYCOMMAND)
-                    : null;
-                if (!found || (info >>> 0) === 0)
-                {
-                    return 0;
-                }
-                const declared = readU32(info + MENUITEMINFO.cbSize);
-                if (declared !== MENUITEMINFO.SIZE && declared !== MENUITEMINFO.SIZE_LEGACY)
-                {
-                    return 0;
-                }
-                const mask = readU32(info + MENUITEMINFO.fMask);
-                const held = found.menu.items[found.at];
-                if ((mask & MIIM_TYPE) !== 0)
-                {
-                    writeU32s(info + MENUITEMINFO.fType, [held.type]);
-                }
-                if ((mask & MIIM_STATE) !== 0)
-                {
-                    writeU32s(info + MENUITEMINFO.fState, [held.state]);
-                }
-                if ((mask & MIIM_ID) !== 0)
-                {
-                    writeU32s(info + MENUITEMINFO.wID, [held.id]);
-                }
-                if ((mask & MIIM_SUBMENU) !== 0)
-                {
-                    writeU32s(info + MENUITEMINFO.hSubMenu, [held.submenu]);
-                }
-                if ((mask & MIIM_DATA) !== 0)
-                {
-                    writeU32s(info + MENUITEMINFO.dwItemData, [held.data]);
-                }
-                if ((mask & (MIIM_STRING | MIIM_TYPE)) !== 0)
-                {
-                    // cch is the buffer's size going in and the length coming
-                    // out, and dwTypeData being null means the caller is asking
-                    // for that length rather than for the text.
-                    const buffer = readU32(info + MENUITEMINFO.dwTypeData);
-                    const room = readU32(info + MENUITEMINFO.cch);
-                    const written = buffer === 0
-                        ? held.text.length
-                        : writeString(buffer, held.text, room);
-                    writeU32s(info + MENUITEMINFO.cch, [written]);
-                }
-                return 1;
-            },
-        },
+        /**
+         * BOOL GetMenuItemInfoA(HMENU, UINT, BOOL, LPMENUITEMINFOA)
+         * BOOL GetMenuItemInfoW(HMENU, UINT, BOOL, LPMENUITEMINFOW)
+         */
+        GetMenuItemInfoA: getMenuItemInfo(false),
+        GetMenuItemInfoW: getMenuItemInfo(true),
 
-        /** BOOL SetMenuItemInfoA(HMENU, UINT, BOOL, LPCMENUITEMINFOA) */
-        SetMenuItemInfoA: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([handle, item, byPosition, info])=>{
-                const menu = menuOf(handle);
-                const found = menu
-                    ? findItem(menu, item, (byPosition >>> 0) !== 0 ? MF_BYPOSITION : MF_BYCOMMAND)
-                    : null;
-                const described = (info >>> 0) === 0 ? null : readItemInfo(info);
-                if (!found || !described)
-                {
-                    return 0;
-                }
-                const held = found.menu.items[found.at];
-                // Only what the mask names is changed. Copying the whole
-                // structure would blank every member the caller left alone.
-                if ((described.mask & MIIM_TYPE) !== 0)
-                {
-                    held.type = described.type;
-                }
-                if ((described.mask & MIIM_STATE) !== 0)
-                {
-                    held.state = described.state;
-                }
-                if ((described.mask & MIIM_ID) !== 0)
-                {
-                    held.id = described.id;
-                }
-                if ((described.mask & MIIM_SUBMENU) !== 0)
-                {
-                    held.submenu = described.submenu;
-                }
-                if ((described.mask & MIIM_DATA) !== 0)
-                {
-                    held.data = described.data;
-                }
-                if (described.text !== null)
-                {
-                    held.text = described.text;
-                }
-                return 1;
-            },
-        },
+        /**
+         * BOOL SetMenuItemInfoA(HMENU, UINT, BOOL, LPCMENUITEMINFOA)
+         * BOOL SetMenuItemInfoW(HMENU, UINT, BOOL, LPCMENUITEMINFOW)
+         */
+        SetMenuItemInfoA: setMenuItemInfo(false),
+        SetMenuItemInfoW: setMenuItemInfo(true),
 
         /** HMENU GetMenu(HWND hWnd) */
         GetMenu: {

@@ -2188,6 +2188,10 @@ export function createWin32Module(){
                     /** @param {number} id */
                     threadExists: id=>kernel.threads().some(
                         (/** @type {{ id: number }} */ thread)=>(thread.id >>> 0) === id),
+                    // The processes OpenProcess finds, for AllowSetForegroundWindow.
+                    /** @param {number} id */
+                    processExists: id=>(kernel.processes?.all() ?? []).some(
+                        (/** @type {any} */ made)=>made.id === id),
                     setLastError: setError,
                     park: ()=>bridge.park(),
                     idle,

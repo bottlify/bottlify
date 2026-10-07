@@ -22,14 +22,31 @@
  * drawing is two raster operations: AND the mask in, OR the image over it.
  * Every pixel moves through gdi32's own calls, handed in by the host; a build
  * without gdi32 behind it keeps the indices and draws nothing.
+ *
+ * How many images the bitmaps have room for is kept as Windows keeps it,
+ * because ImageList_Write records it and sizes the bitmaps it writes by it
+ * (Wine's test_imagelist_storage reads both back): one more than cInitial
+ * at first, and when an addition would fill it, as many more as were added
+ * or cGrow -- rounded up to a multiple of four -- whichever is more, plus one.
  */
 
 /** ImageList_Add and friends report failure with this, not with zero. */
 const FAILED = -1;
 
-/** ImageList_Create's flag for a list with a mask. */
+/** ImageList_Create's flag for a list with a mask, and the bits that say its depth. */
 const ILC_MASK = 0x0001;
+const ILC_COLORMASK = 0x00fe;
+const ILC_COLOR4 = 0x0004;
 const ILC_COLOR24 = 0x0018;
+
+/** No overlay image is set: ILHEAD's ovls as a list starts. */
+const NO_OVERLAYS = Object.freeze([-1, -1, -1, -1]);
+
+/** The depths a list's image is written at; any other -- ILC_COLORDDB -- is 32. */
+const DIB_DEPTHS = new Set([4, 8, 16, 24, 32]);
+const BITMAPINFOHEADER_SIZE = 40;
+const BI_RGB = 0;
+const DIB_RGB_COLORS = 0;
 
 /** LoadImage's type for a bitmap. */
 const IMAGE_BITMAP = 0;
@@ -85,16 +102,40 @@ const dwords = values=>new Uint8Array(new Uint32Array(values.map(value=>value >>
  * @property {ReturnType<typeof createImageLists>} [imageLists]  The lists to
  *           export, when the host built them itself to share with the
  *           controls that draw from them.
+ * @property {(bytes: number) => number} [allocate]
+ * @property {(address: number) => void} [release]
+ *           Guest memory, which a list written to or read from a stream
+ *           passes through: gdi32 exchanges a bitmap's bits only there.
+ * @property {(entry: number, args: number[], thread?: unknown) => number | Promise<number>}
+ *     [call]  Guest code called, which a stream's own methods are.
+ * @property {() => unknown} [callerThread]
  */
 
 /**
- * The image list family's exports, the host's own lists when it built them.
+ * The fields of a list ILHEAD carries.
  *
- * @param {ImageListHost} host
+ * @typedef {Object} ListFields
+ * @property {number} cx @property {number} cy @property {number} flags
+ * @property {number} count @property {number} max @property {number} grow
+ * @property {number} background
+ * @property {readonly number[]} overlays
  */
-export function createImageListFunctions(host){
-    return (host.imageLists ?? createImageLists(host)).functions;
-}
+
+/**
+ * A device-independent bitmap: its BITMAPINFOHEADER and colour table, and
+ * its bits.
+ *
+ * @typedef {Object} Dib
+ * @property {Uint8Array} info @property {Uint8Array} bits
+ */
+
+/**
+ * Guest memory to pass a bitmap's bits to and from gdi32 in.
+ *
+ * @typedef {Object} Scratch
+ * @property {(bytes: number) => number} allocate
+ * @property {(address: number) => void} release
+ */
 
 /**
  * The lists, their exports, and what a control that shows their images asks
@@ -109,10 +150,13 @@ export function createImageLists(host){
      * @property {number} cy
      * @property {number} flags
      * @property {number} count     How many images it holds.
-     * @property {number} capacity  How many its bitmaps have room for.
+     * @property {number} max       How many its bitmaps have room for: cMaxImage.
+     * @property {number} initial   cInitial, which SetIconSize starts it over from.
+     * @property {number} grow      cGrow, at least one and rounded up to a multiple of four.
      * @property {number} image     The bitmap every image sits in, side by side.
      * @property {number} mask      Its monochrome mask, or 0 without ILC_MASK.
      * @property {number} background  What ILD_NORMAL fills behind the image.
+     * @property {readonly number[]} overlays  The images the four overlays are, or -1.
      */
 
     /** @type {Map<number, ImageList>} */
@@ -175,37 +219,86 @@ export function createImageLists(host){
     };
 
     /**
-     * Makes room for `needed` images, twice as many as there were when it
-     * grows, the images already there carried over.
+     * Gives the list's bitmaps room for `max` images, the first `keep` of
+     * those it had carried over. False, and the list as it was, when the
+     * bitmaps cannot be made that large.
      *
-     * @param {ImageList} list @param {number} needed
+     * @param {ImageList} list @param {number} max @param {number} keep
+     * @returns {boolean}
      */
-    const reserve = (list, needed)=>{
-        if (!host.gdi32 || needed <= list.capacity)
+    const resize = (list, max, keep)=>{
+        if (!host.gdi32)
         {
-            return;
+            list.max = max;
+            return true;
         }
-        const capacity = Math.max(needed, list.capacity * 2, 4);
-        const width = list.cx * capacity;
+        const width = list.cx * max;
+        const masked = (list.flags & ILC_MASK) !== 0;
         const image = gdi('CreateBitmap', width, list.cy, 1, 32, 0);
-        const mask = (list.flags & ILC_MASK) !== 0
-            ? gdi('CreateBitmap', width, list.cy, 1, 1, 0)
-            : 0;
+        const mask = masked ? gdi('CreateBitmap', width, list.cy, 1, 1, 0) : 0;
+        if (image === 0 || (masked && mask === 0))
+        {
+            [image, mask].filter(bitmap=>bitmap !== 0)
+                .forEach(bitmap=>gdi('DeleteObject', bitmap));
+            return false;
+        }
         /** @type {[number, number][]} */
         const pairs = [[list.image, image], [list.mask, mask]];
         for (const [from, to] of pairs)
         {
-            if (from !== 0 && to !== 0)
+            if (from !== 0 && to !== 0 && keep > 0)
             {
                 withDCs([to, from], (target, source)=>gdi('BitBlt', target, 0, 0,
-                    list.cx * list.count, list.cy, source, 0, 0, SRCCOPY));
+                    list.cx * keep, list.cy, source, 0, 0, SRCCOPY));
             }
             if (from !== 0)
             {
                 gdi('DeleteObject', from);
             }
         }
-        Object.assign(list, { image, mask, capacity });
+        Object.assign(list, { image, mask, max });
+        return true;
+    };
+
+    /**
+     * Makes room for `adding` more images, as Windows grows a list: not at
+     * all while one place stays free after them, and otherwise by as many
+     * as are added or by cGrow, whichever is more, and one besides.
+     *
+     * @param {ImageList} list @param {number} adding
+     * @returns {boolean} false when the bitmaps could not grow
+     */
+    const makeRoom = (list, adding)=>list.count + adding < list.max
+        || resize(list, list.max + Math.max(adding, list.grow) + 1, list.count);
+
+    /**
+     * A list as ImageList_Create makes one, or as ImageList_Read restores
+     * one with the room its stream says it had; zero when its bitmaps
+     * cannot be made.
+     *
+     * A list made with ILC_COLOR is a 4-bit list from the start: it is
+     * written so, and Wine's test_imagelist_storage reads it back so.
+     *
+     * @param {number} cx @param {number} cy @param {number} flags
+     * @param {number} initial @param {number} grow @param {number} [max]
+     * @returns {number} its handle
+     */
+    const makeList = (cx, cy, flags, initial, grow, max = initial + 1)=>{
+        const colour = (flags & ILC_COLORMASK) === 0 ? ILC_COLOR4 : 0;
+        /** @type {ImageList} */
+        const list = {
+            cx, cy, flags: (flags | colour) >>> 0, count: 0, max: 0, initial,
+            // A WORD, as it is kept and written.
+            grow: (Math.max(grow, 1) + 3) & 0xfffc,
+            image: 0, mask: 0, background: CLR_NONE, overlays: NO_OVERLAYS,
+        };
+        if (!resize(list, max, 0))
+        {
+            return 0;
+        }
+        const handle = nextHandle++;
+        lists.set(handle, list);
+        return handle;
     };
 
     /**
@@ -261,7 +354,10 @@ export function createImageLists(host){
         }
         const first = list.count;
         const count = countIn(list, bitmap);
-        reserve(list, first + count);
+        if (!makeRoom(list, count))
+        {
+            return FAILED;
+        }
         if (host.gdi32 && (bitmap >>> 0) !== 0)
         {
             for (let at = 0; at < count; at++)
@@ -365,18 +461,12 @@ export function createImageLists(host){
         ImageList_Create: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([cx, cy, flags, initial])=>{
+            handler: ([cx, cy, flags, initial, grow])=>{
                 if ((cx | 0) <= 0 || (cy | 0) <= 0)
                 {
                     return 0;
                 }
-                const handle = nextHandle++;
-                /** @type {ImageList} */
-                const list = { cx: cx | 0, cy: cy | 0, flags: flags >>> 0, count: 0, capacity: 0,
-                    image: 0, mask: 0, background: CLR_NONE };
-                reserve(list, Math.max(1, initial | 0));
-                lists.set(handle, list);
-                return handle;
+                return makeList(cx | 0, cy | 0, flags >>> 0, Math.max(initial | 0, 0), grow | 0);
             },
         },
 
@@ -502,7 +592,10 @@ export function createImageLists(host){
                 {
                     return at;
                 }
-                reserve(list, list.count + 1);
+                if (!makeRoom(list, 1))
+                {
+                    return -1;
+                }
                 list.count++;
                 return list.count - 1;
             },
@@ -511,7 +604,8 @@ export function createImageLists(host){
         /**
          * BOOL ImageList_Remove(HIMAGELIST himl, int i)
          *
-         * The images after it move down one; -1 removes them all.
+         * The images after it move down one; -1 removes them all, and leaves
+         * room for cGrow (Wine's test_imagelist_storage).
          */
         ImageList_Remove: {
             argBytes: 8,
@@ -525,6 +619,7 @@ export function createImageLists(host){
                 if ((index | 0) === -1)
                 {
                     list.count = 0;
+                    resize(list, list.grow, 0);
                     return 1;
                 }
                 const at = (index | 0) * list.cx;
@@ -557,6 +652,59 @@ export function createImageLists(host){
                 }
                 host.writeMemory(cx >>> 0, dwords([list.cx]));
                 host.writeMemory(cy >>> 0, dwords([list.cy]));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL ImageList_SetIconSize(HIMAGELIST himl, int cx, int cy)
+         *
+         * A new image size empties the list -- no image is cut or stretched
+         * to fit -- and it starts over with the room it was made with and no
+         * overlays. A size of nothing is refused, as ImageList_Create refuses
+         * it, and so is one too large for its bitmaps; either leaves the list
+         * as it was.
+         */
+        ImageList_SetIconSize: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, cx, cy])=>{
+                const list = listOf(handle);
+                if (!list || (cx | 0) <= 0 || (cy | 0) <= 0)
+                {
+                    return 0;
+                }
+                const before = { cx: list.cx, cy: list.cy };
+                Object.assign(list, { cx: cx | 0, cy: cy | 0 });
+                if (!resize(list, list.initial + 1, 0))
+                {
+                    Object.assign(list, before);
+                    return 0;
+                }
+                Object.assign(list, { count: 0, overlays: NO_OVERLAYS });
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL ImageList_SetImageCount(HIMAGELIST himl, UINT uNewCount)
+         *
+         * The list is cut to that many images or grown to it, and keeps room
+         * for one more (Wine's test_imagelist_storage). The images it keeps
+         * are its first; the places it gains are blank until the program
+         * replaces them, as it is documented to.
+         */
+        ImageList_SetImageCount: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, count])=>{
+                const list = listOf(handle);
+                const wanted = count >>> 0;
+                if (!list || !resize(list, wanted + 1, Math.min(list.count, wanted)))
+                {
+                    return 0;
+                }
+                list.count = wanted;
                 return 1;
             },
         },
@@ -835,9 +983,168 @@ export function createImageLists(host){
         return true;
     };
 
+    /**
+     * One of a list's bitmaps as a DIB of `columns` images a row, room for
+     * every place the list has, read out through gdi32 at `depth` bits a
+     * pixel; null when there is no guest memory for it. A build without
+     * gdi32 has no pixels to give, and gives a blank DIB of the same shape.
+     *
+     * @param {ImageList} list @param {number} source @param {number} depth
+     * @param {number} columns @param {Scratch} scratch
+     * @returns {Dib | null}
+     */
+    const saveDib = (list, source, depth, columns, scratch)=>{
+        const width = list.cx * columns;
+        const height = list.cy * Math.ceil(list.max / columns);
+        const stride = ((width * depth + 31) >>> 5) * 4;
+        const infoSize = BITMAPINFOHEADER_SIZE + (depth <= 8 ? (1 << depth) * 4 : 0);
+        const total = infoSize + stride * height;
+        const read = host.readMemory;
+        const block = read ? scratch.allocate(total) : 0;
+        if (!read || block === 0)
+        {
+            return null;
+        }
+        try
+        {
+            const laid = new Uint8Array(total);
+            const header = new DataView(laid.buffer, 0, BITMAPINFOHEADER_SIZE);
+            header.setUint32(0, BITMAPINFOHEADER_SIZE, true);
+            header.setInt32(4, width, true);
+            header.setInt32(8, height, true);
+            header.setUint16(12, 1, true);
+            header.setUint16(14, depth, true);
+            header.setUint32(16, BI_RGB, true);
+            header.setUint32(20, stride * height, true);
+            host.writeMemory(block, laid);
+            if (host.gdi32 && source !== 0)
+            {
+                const grid = gdi('CreateBitmap', width, height, 1, depth === 1 ? 1 : 32, 0);
+                withDCs([grid, source], (target, from)=>{
+                    for (let index = 0; index < list.count; index++)
+                    {
+                        gdi('BitBlt', target, (index % columns) * list.cx,
+                            Math.floor(index / columns) * list.cy, list.cx, list.cy, from,
+                            index * list.cx, 0, SRCCOPY);
+                    }
+                });
+                const dc = gdi('CreateCompatibleDC', 0);
+                gdi('GetDIBits', dc, grid, 0, height, block + infoSize, block, DIB_RGB_COLORS);
+                gdi('DeleteDC', dc);
+                gdi('DeleteObject', grid);
+            }
+            const bytes = read(block, total);
+            return { info: bytes.slice(0, infoSize), bits: bytes.slice(infoSize) };
+        }
+        finally
+        {
+            scratch.release(block);
+        }
+    };
+
+    /**
+     * A DIB of images laid `columns` a row put into one of a list's bitmaps,
+     * a strip, as many images as the list counts. The columns are as many
+     * as the DIB is wide for. False when there is no guest memory for it.
+     *
+     * @param {ImageList} list @param {number} target @param {Dib} dib
+     * @param {Scratch} scratch
+     * @returns {boolean}
+     */
+    const restoreDib = (list, target, dib, scratch)=>{
+        if (!host.gdi32 || target === 0)
+        {
+            return true;
+        }
+        const header = new DataView(dib.info.buffer, dib.info.byteOffset, dib.info.byteLength);
+        const width = header.getInt32(4, true);
+        const height = Math.abs(header.getInt32(8, true));
+        const block = scratch.allocate(dib.info.length + dib.bits.length);
+        if (block === 0)
+        {
+            return false;
+        }
+        host.writeMemory(block, dib.info);
+        host.writeMemory(block + dib.info.length, dib.bits);
+        const grid = gdi('CreateBitmap', width, height, 1, target === list.mask ? 1 : 32, 0);
+        const dc = gdi('CreateCompatibleDC', 0);
+        gdi('SetDIBits', dc, grid, 0, height, block + dib.info.length, block, DIB_RGB_COLORS);
+        gdi('DeleteDC', dc);
+        scratch.release(block);
+        const columns = Math.max(1, Math.floor(width / list.cx));
+        withDCs([target, grid], (into, from)=>{
+            for (let index = 0; index < list.count; index++)
+            {
+                gdi('BitBlt', into, index * list.cx, 0, list.cx, list.cy, from,
+                    (index % columns) * list.cx, Math.floor(index / columns) * list.cy, SRCCOPY);
+            }
+        });
+        gdi('DeleteObject', grid);
+        return true;
+    };
+
     return {
         functions,
         drawEmbossed,
+        /**
+         * A list as ImageList_Write records it: the fields of its header,
+         * and its image and mask as DIBs of `columns` images a row, the image
+         * at the depth the list was made with. Null for no list, or no guest
+         * memory to read its bitmaps through.
+         *
+         * @param {number} handle @param {number} columns @param {Scratch} scratch
+         * @returns {{ fields: ListFields, image: Dib, mask: Dib | null } | null}
+         */
+        save: (handle, columns, scratch)=>{
+            const list = listOf(handle);
+            if (!list)
+            {
+                return null;
+            }
+            const declared = list.flags & ILC_COLORMASK;
+            const image = saveDib(list, list.image, DIB_DEPTHS.has(declared) ? declared : 32,
+                columns, scratch);
+            const mask = (list.flags & ILC_MASK) !== 0
+                ? saveDib(list, list.mask, 1, columns, scratch)
+                : null;
+            if (!image || ((list.flags & ILC_MASK) !== 0 && !mask))
+            {
+                return null;
+            }
+            const { cx, cy, flags, count, max, grow, background, overlays } = list;
+            return { fields: { cx, cy, flags, count, max, grow, background, overlays }, image,
+                mask };
+        },
+        /**
+         * A list made again from what `save` recorded, with the room its
+         * header says it had; zero when it cannot be made.
+         *
+         * @param {ListFields} fields @param {Dib} image @param {Dib | null} mask
+         * @param {Scratch} scratch
+         * @returns {number} its handle
+         */
+        restore: (fields, image, mask, scratch)=>{
+            if (fields.cx <= 0 || fields.cy <= 0)
+            {
+                return 0;
+            }
+            const handle = makeList(fields.cx, fields.cy, fields.flags, fields.count, fields.grow,
+                Math.max(fields.max, fields.count + 1));
+            const list = listOf(handle);
+            if (!list)
+            {
+                return 0;
+            }
+            Object.assign(list, { count: fields.count, background: fields.background >>> 0,
+                overlays: [...fields.overlays] });
+            if (!restoreDib(list, list.image, image, scratch)
+                || (mask !== null && !restoreDib(list, list.mask, mask, scratch)))
+            {
+                functions.ImageList_Destroy.handler([handle]);
+                return 0;
+            }
+            return handle;
+        },
         /** @param {number} handle @returns {{ cx: number, cy: number } | null} */
         size: handle=>{
             const list = listOf(handle);

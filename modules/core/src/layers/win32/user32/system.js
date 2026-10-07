@@ -482,6 +482,20 @@ const ERROR_HOTKEY_NOT_REGISTERED = 1410;
 /** The one deferred-placement batch there ever is, as the handle a caller holds. */
 const DEFER_TOKEN = 0x4d50;
 
+/** AllowSetForegroundWindow's process id that names every process. */
+const ASFW_ANY = 0xffffffff;
+
+/** AnimateWindow's flags: the four directions, then the kinds of effect. */
+const AW_DIRECTIONS = 0x0000000f;
+const AW_CENTER = 0x00000010;
+const AW_HIDE = 0x00010000;
+const AW_ACTIVATE = 0x00020000;
+const AW_BLEND = 0x00080000;
+/** What ShowWindow is asked for to reach AnimateWindow's end state. */
+const SW_HIDE = 0;
+const SW_SHOW = 5;
+const SW_SHOWNA = 8;
+
 /**
  * Builds the system-query half of user32, over the window records the
  * bookkeeping half keeps.
@@ -4961,6 +4975,115 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 return andThen(host.activate?.(hwnd >>> 0,
                     { thread: host.callerThread?.(), sent: true }), ()=>1);
             },
+        },
+
+        /**
+         * BOOL AllowSetForegroundWindow(DWORD dwProcessId)
+         *
+         * Lends the caller's right to set the foreground to another process,
+         * or to all of them for ASFW_ANY. It fails only for a caller that has
+         * no such right, and here every SetForegroundWindow succeeds, so every
+         * caller has it. A process id that names no process is refused with
+         * ERROR_INVALID_PARAMETER when the host can say which ids are live;
+         * a host that cannot leaves every id accepted.
+         */
+        AllowSetForegroundWindow: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([processId])=>{
+                const id = processId >>> 0;
+                if (id !== ASFW_ANY && id !== (host.processId ?? 0)
+                    && host.processExists?.(id) === false)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL AnimateWindow(HWND hWnd, DWORD dwTime, DWORD dwFlags)
+         *
+         * The effect is not played: the window reaches the state the
+         * animation ends in at once rather than after dwTime, hidden for
+         * AW_HIDE and otherwise shown, activated only for AW_ACTIVATE --
+         * ShowWindow's SW_HIDE, SW_SHOW or SW_SHOWNA. What MSDN says the call
+         * refuses is refused, with ERROR_INVALID_PARAMETER: showing a window
+         * that is visible or hiding one that is not (its own WS_VISIBLE,
+         * which is what ShowWindow reports), a roll or slide with no
+         * direction -- only a fade or AW_CENTER needs none -- and a fade of a
+         * child window; so is AW_ACTIVATE with AW_HIDE, which MSDN forbids. A
+         * window another thread owns is refused with the last error
+         * ERROR_SUCCESS, as documented.
+         */
+        AnimateWindow: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hwnd, , flags])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+                    return 0;
+                }
+                const thread = host.callerThread?.();
+                const owner = threadIdOf(record.thread);
+                const caller = threadIdOf(thread);
+                if (owner !== null && caller !== null && owner !== caller)
+                {
+                    host.setLastError?.(0);
+                    return 0;
+                }
+                const asked = flags >>> 0;
+                const hide = (asked & AW_HIDE) !== 0;
+                const visible = (record.style & WS_VISIBLE) !== 0;
+                const directionless = (asked & (AW_BLEND | AW_CENTER)) === 0
+                    && (asked & AW_DIRECTIONS) === 0;
+                const childFade = (asked & AW_BLEND) !== 0 && (record.style & WS_CHILD) !== 0;
+                if (hide === !visible || directionless || childFade
+                    || (hide && (asked & AW_ACTIVATE) !== 0))
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                let command = SW_SHOWNA;
+                if (hide)
+                {
+                    command = SW_HIDE;
+                }
+                else if ((asked & AW_ACTIVATE) !== 0)
+                {
+                    command = SW_SHOW;
+                }
+                return andThen(host.showWindow(record, command, thread), ()=>1);
+            },
+        },
+
+        /**
+         * void DisableProcessWindowsGhosting(void)
+         *
+         * Ghosting puts a stand-in frame over a window whose thread has
+         * stopped reading its messages. No window is ghosted here, so there
+         * is nothing to turn off.
+         */
+        DisableProcessWindowsGhosting: {
+            argBytes: 0,
+            handler: ()=>0,
+        },
+
+        /**
+         * BOOL WINNLSEnableIME(HWND hWnd, BOOL fEnable)
+         *
+         * Turns the input method on or off and answers the state it found.
+         * The call belongs to the Japanese and Korean systems' input methods
+         * and does nothing elsewhere; this system is en-US and has no input
+         * method at all -- imm32 reports none -- so the state found is always
+         * off and the answer FALSE whatever is asked.
+         */
+        WINNLSEnableIME: {
+            argBytes: 8,
+            handler: ()=>0,
         },
 
         /**

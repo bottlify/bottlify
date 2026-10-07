@@ -565,6 +565,9 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           Whether a thread identifier names a thread of this process, which
  *           is the whole of what PostThreadMessage validates. Absent in a build
  *           with no scheduler behind it, which then only refuses zero.
+ * @property {(id: number) => boolean} [processExists]
+ *           Whether a process identifier names a running process, which
+ *           AllowSetForegroundWindow validates. Absent, every id is taken.
  * @property {(code: number) => void} [setLastError]
  *           Where a refusal leaves its reason, for the caller that asks why.
  * @property {() => any} park   Stops the caller; returns the parked token.
@@ -5523,7 +5526,7 @@ export function createWindowFunctions(host){
                 positions: place=>{
                     placeWindow = place;
                 },
-                shown, raise, restack, tell, desktop: desktopWindow,
+                shown, raise, restack, tell, desktop: desktopWindow, showWindow,
                 // What the run answers for every process's windows.
                 runForeground: ()=>directory.foreground?.() ?? 0,
                 /**
