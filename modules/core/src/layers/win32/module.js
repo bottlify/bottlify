@@ -2088,7 +2088,16 @@ export function createWin32Module(){
 
                 'MPR.dll': createNetworkFunctions({ setLastError: setError }),
 
-                'UXTHEME.dll': createThemeFunctions({ setLastError: setError }),
+                'UXTHEME.dll': createThemeFunctions({
+                    setLastError: setError, readMemory, writeMemory,
+                    // A null theme means the system's own value, which user32
+                    // answers; read when called, as the tables are still being
+                    // built here.
+                    user32: name=>libraries['USER32.dll']?.[name],
+                    gdi32: name=>libraries['GDI32.dll']?.[name],
+                    allocate: bytes=>heap.allocate(bytes),
+                    release: address=>heap.free(address),
+                }),
 
                 // The codec manager, with the drivers Windows installs: a sound
                 // engine that keeps its effects ADPCM finds its decoder here.
