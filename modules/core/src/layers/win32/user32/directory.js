@@ -22,7 +22,7 @@
  * hand out a number the other already did, in any process.
  */
 
-import { createWindowManager } from './manager.js';
+import { WINDOW_CELLS, createWindowManager, windowCells } from './manager.js';
 
 /**
  * The first number a name registered with RegisterWindowMessage or
@@ -65,7 +65,7 @@ const WINDOW_STRIDE = 4;
  *     Another process made this one's window the foreground window: it is
  *     activated on the thread that made it, told which window and thread had
  *     the foreground. False for a window that is not there.
- * @property {(gained: number, thread: number) => void} [lostForeground]
+ * @property {(gained: number, thread: number, hadFocus: number) => void} [lostForeground]
  *     Another process's window, `gained`, of thread `thread`, is the run's
  *     foreground window now: this process's active window is told it is not.
  */
@@ -101,10 +101,15 @@ const WINDOW_STRIDE = 4;
  * @property {string} title
  */
 
-export function createWindowDirectory(){
+/**
+ * @param {Object} [options]
+ * @param {Int32Array} [options.cells]  where the run's foreground window, focus
+ *     and captured window are kept (`manager.js`), every process reading them
+ */
+export function createWindowDirectory({ cells = windowCells() } = {}){
     let next = FIRST_WINDOW;
     /** The run's windows as their processes tell them, and their order (`manager.js`). */
-    const manager = createWindowManager();
+    const manager = createWindowManager({ cells });
     /** Each window's process, by handle. @type {Map<number, number>} */
     const owners = new Map();
     /** Each process that can have windows, in the order it started. @type {Map<number, WindowEndpoint>} */
@@ -171,6 +176,14 @@ export function createWindowDirectory(){
         // What a process tells the run of its windows, and what only the run
         // knows of them (`manager.js`); a view reads `manager` itself.
         manager,
+        /**
+         * The run's foreground window, focus and captured window, as words a
+         * process reads where they lie rather than a copy it keeps
+         * (`WINDOW_CELLS`): handed to a process in a worker of its own.
+         */
+        cells,
+        /** The window with the run's focus, or zero. */
+        focus: ()=>Atomics.load(cells, WINDOW_CELLS.focus) >>> 0,
         /** @param {import('./manager.js').WindowState} state */
         publish: state=>manager.publish(state),
         /** @param {number} hwnd */
@@ -185,6 +198,37 @@ export function createWindowDirectory(){
         /** @param {number} x @param {number} y */
         fromPoint: (x, y)=>manager.fromPoint(x, y),
         foreground: ()=>manager.foreground(),
+
+        /**
+         * A process's window took the keyboard focus, or the process let it
+         * go: the focus is the run's, one for every program, and a window
+         * taking it makes its top-level window the foreground one -- the
+         * process whose window that was is told so, as `setForeground` tells
+         * it. One process letting go does not take another's.
+         *
+         * @param {number} hwnd  the window, zero to let it go
+         * @param {number} processId  the process it is told by
+         */
+        noteFocus(hwnd, processId){
+            if (hwnd !== 0 && !manager.get(hwnd >>> 0))
+            {
+                // A window the run does not list -- the desktop -- holds no
+                // focus: the program's goes, if it had it.
+                this.noteFocus(0, processId);
+                return;
+            }
+            if (hwnd !== 0)
+            {
+                this.setForeground(hwnd);
+                manager.setFocus(hwnd >>> 0);
+                return;
+            }
+            const holder = manager.focus();
+            if (holder !== 0 && manager.get(holder)?.processId === processId)
+            {
+                manager.setFocus(0);
+            }
+        },
 
         /**
          * A process's window took the mouse, or the process let it go: one
@@ -235,6 +279,7 @@ export function createWindowDirectory(){
          */
         setForeground(hwnd){
             const before = manager.foreground();
+            const hadFocus = manager.focus();
             manager.setForeground(hwnd >>> 0);
             const after = manager.foreground();
             // Told only when another process's window took it: a program
@@ -243,7 +288,8 @@ export function createWindowDirectory(){
                 ? undefined : owners.get(before);
             if (loser !== undefined && loser !== owners.get(after))
             {
-                endpoints.get(loser)?.lostForeground?.(after, manager.get(after)?.threadId ?? 0);
+                endpoints.get(loser)?.lostForeground?.(after, manager.get(after)?.threadId ?? 0,
+                    owners.get(hadFocus) === loser ? hadFocus : 0);
             }
         },
 

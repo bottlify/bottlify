@@ -50,8 +50,8 @@
  * A change, as a subscriber is told it: what happened, to which window, the
  * window as it now is (none once it is gone), and the revision it made.
  *
- * @typedef {{ kind: 'created' | 'changed' | 'removed' | 'stacked' | 'foreground' | 'capture',
- *     hwnd: number, state: WindowState | null, revision: number }} WindowEvent
+ * @typedef {{ kind: 'created' | 'changed' | 'removed' | 'stacked' | 'foreground' | 'focus'
+ *     | 'capture', hwnd: number, state: WindowState | null, revision: number }} WindowEvent
  */
 
 /** The fields whose change is a change of the window, in the order they are compared. */
@@ -77,13 +77,45 @@ const frozen = state=>Object.freeze({
     region: state.region ? Object.freeze({ ...state.region }) : null,
 });
 
-export function createWindowManager(){
+/**
+ * Where the run's foreground window, focus and captured window are kept: one
+ * word each, in memory every process can read where the run has shared
+ * memory. A window is the foreground one, has the focus or holds the mouse
+ * when the word says it -- no process keeps a copy to go stale.
+ */
+export const WINDOW_CELLS = Object.freeze({ foreground: 0, focus: 1, capture: 2, length: 3 });
+
+/**
+ * The words of `WINDOW_CELLS`, where the run keeps them: shared, so a process
+ * in a worker of its own reads them, where there is shared memory.
+ *
+ * @returns {Int32Array}
+ */
+export function windowCells(){
+    const bytes = WINDOW_CELLS.length * 4;
+    return new Int32Array(typeof SharedArrayBuffer === 'function'
+        ? new SharedArrayBuffer(bytes) : new ArrayBuffer(bytes));
+}
+
+/**
+ * @param {Object} [options]
+ * @param {Int32Array} [options.cells]  where the foreground window, the focus
+ *     and the captured window are kept (`windowCells`)
+ */
+export function createWindowManager({ cells = windowCells() } = {}){
     /** @type {Map<number, WindowState>} */
     const windows = new Map();
     /** The top-level windows, bottom to top. @type {number[]} */
     let order = [];
-    let foreground = 0;
-    let captured = 0;
+    /** @param {number} at @returns {number} */
+    const cell = at=>Atomics.load(cells, at) >>> 0;
+    /** @param {number} at @param {number} hwnd */
+    const put = (at, hwnd)=>{
+        Atomics.store(cells, at, hwnd | 0);
+    };
+    // The window the keyboard goes to -- the foreground window or one inside
+    // it, or none -- is one for the run, as Windows has one: a window that
+    // takes it takes it from every other.
     /** Where the page's pointer was last, on the screen. */
     const pointer = { x: 0, y: 0 };
     let revision = 0;
@@ -219,13 +251,18 @@ export function createWindowManager(){
             }
             windows.delete(hwnd);
             order = order.filter(each=>each !== hwnd);
-            if (foreground === hwnd)
+            if (cell(WINDOW_CELLS.foreground) === hwnd)
             {
-                foreground = 0;
+                put(WINDOW_CELLS.foreground, 0);
             }
-            if (captured === hwnd)
+            const focus = cell(WINDOW_CELLS.focus);
+            if (focus === hwnd || (focus !== 0 && topLevelOf(focus) === 0))
             {
-                captured = 0;
+                put(WINDOW_CELLS.focus, 0);
+            }
+            if (cell(WINDOW_CELLS.capture) === hwnd)
+            {
+                put(WINDOW_CELLS.capture, 0);
             }
             emit('removed', hwnd);
         },
@@ -255,27 +292,69 @@ export function createWindowManager(){
             return at < 0 ? rest.length : at;
         }),
 
-        /** @param {number} hwnd */
+        /**
+         * A window is made the foreground one: one that was not comes to the
+         * top of its band, as an activated window does, and a focus in
+         * another window goes -- the new one's process places it in its
+         * window.
+         *
+         * @param {number} hwnd
+         */
         setForeground(hwnd){
             const top = hwnd === 0 ? 0 : topLevelOf(hwnd);
-            if (top !== foreground)
+            if (top !== 0 && top !== cell(WINDOW_CELLS.foreground))
             {
-                foreground = top;
+                manager.raise(top);
+            }
+            const focus = cell(WINDOW_CELLS.focus);
+            if (focus !== 0 && topLevelOf(focus) !== top)
+            {
+                put(WINDOW_CELLS.focus, 0);
+                emit('focus', 0);
+            }
+            if (top !== cell(WINDOW_CELLS.foreground))
+            {
+                put(WINDOW_CELLS.foreground, top);
                 emit('foreground', top);
             }
         },
-        foreground: ()=>foreground,
+        foreground: ()=>cell(WINDOW_CELLS.foreground),
+
+        /**
+         * A window takes the keyboard: its top-level window becomes the
+         * foreground one -- coming up, if it was not -- and every other
+         * window has lost it.
+         * Zero takes it from every window, the foreground one staying so.
+         *
+         * @param {number} hwnd
+         */
+        setFocus(hwnd){
+            if (hwnd !== 0 && !windows.has(hwnd))
+            {
+                return;
+            }
+            if (hwnd !== 0)
+            {
+                manager.setForeground(hwnd);
+            }
+            if (hwnd !== cell(WINDOW_CELLS.focus))
+            {
+                put(WINDOW_CELLS.focus, hwnd);
+                emit('focus', hwnd);
+            }
+        },
+        focus: ()=>cell(WINDOW_CELLS.focus),
 
         /** @param {number} hwnd */
         setCapture(hwnd){
-            if (hwnd !== captured)
+            if (hwnd !== cell(WINDOW_CELLS.capture))
             {
-                captured = windows.has(hwnd) ? hwnd : 0;
-                emit('capture', captured);
+                put(WINDOW_CELLS.capture, windows.has(hwnd) ? hwnd : 0);
+                emit('capture', cell(WINDOW_CELLS.capture));
             }
         },
         releaseCapture: ()=>manager.setCapture(0),
-        capture: ()=>captured,
+        capture: ()=>cell(WINDOW_CELLS.capture),
 
         /** @param {number} hwnd @returns {WindowState | null} */
         get: hwnd=>windows.get(hwnd) ?? null,
@@ -314,11 +393,12 @@ export function createWindowManager(){
         /**
          * The process an input event of the page goes to, as Windows sends
          * it: a pointer's to the window that captured the mouse, else the one
-         * under it; the keyboard's, and anything else, to the foreground
-         * window's. Null where no window answers -- the caller's own choice
-         * then. The pointer's last place is the run's, as the cursor is one
-         * for the whole desktop: a button or a wheel with no place of its own
-         * happens where the pointer last was.
+         * under it; the keyboard's, and anything else, to the window with the
+         * focus, else the foreground one. Null where no window has it -- the
+         * desktop under the pointer, no window in the foreground -- and then,
+         * as on Windows, no program is sent it. The pointer's last place is
+         * the run's, as the cursor is one for the whole desktop: a button or a
+         * wheel with no place of its own happens where the pointer last was.
          *
          * @param {{ kind: string, x?: number, y?: number }} event
          * @returns {number | null}
@@ -331,8 +411,8 @@ export function createWindowManager(){
                 pointer.x = event.x;
                 pointer.y = event.y;
             }
-            const hwnd = !pointed ? foreground
-                : captured || manager.fromPoint(pointer.x, pointer.y) || foreground;
+            const hwnd = !pointed ? cell(WINDOW_CELLS.focus) || cell(WINDOW_CELLS.foreground)
+                : cell(WINDOW_CELLS.capture) || manager.fromPoint(pointer.x, pointer.y);
             return hwnd !== 0 ? windows.get(hwnd)?.processId ?? null : null;
         },
 
@@ -353,8 +433,9 @@ export function createWindowManager(){
         diagnostics: ()=>({
             windows: windows.size,
             revision,
-            foreground: `0x${foreground.toString(16)}`,
-            capture: `0x${captured.toString(16)}`,
+            foreground: `0x${cell(WINDOW_CELLS.foreground).toString(16)}`,
+            focus: `0x${cell(WINDOW_CELLS.focus).toString(16)}`,
+            capture: `0x${cell(WINDOW_CELLS.capture).toString(16)}`,
             topLevel: manager.topLevel().map(state=>({
                 hwnd: `0x${state.hwnd.toString(16)}`, process: state.processId,
                 title: state.title, className: state.className, visible: state.visible,

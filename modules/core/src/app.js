@@ -7169,9 +7169,14 @@ async function buildSystemHost(deps){
             /** @param {any} event */
             send: event=>{
                 // To the process of the window the run's manager says should
-                // have it; where none does, to the newest.
+                // have it (`inputTarget`, where `routedInput` explains the rest).
                 const standing = across();
-                const target = system.windows?.manager?.inputTarget(event) ?? null;
+                const manager = system.windows?.manager;
+                const target = manager?.inputTarget(event) ?? null;
+                if (target === null && manager?.topLevel().some((/** @type {any} */ state)=>state.visible))
+                {
+                    return false;
+                }
                 const process = standing.find(each=>each.id === target) ?? standing.at(-1);
                 process?.link.call('input', 'send', [event, viewport
                     ? { width: viewport.width, height: viewport.height } : null]).catch(()=>{});
@@ -7952,9 +7957,11 @@ export async function createApp(options){
     /**
      * The page's input, where the run's window manager says it goes: a
      * pointer to the process of the window under it or holding the mouse,
-     * the keyboard to the foreground window's. Where no window answers, the
-     * newest process in a worker of its own has it, else the process the
-     * facade speaks for.
+     * the keyboard to the process of the window with the focus. Where no
+     * window has it -- the desktop under the pointer, no window in the
+     * foreground -- no program is sent it, as on Windows. Only a run with no
+     * window showing has the page for its console: the newest process in a
+     * worker of its own has it, else the process the facade speaks for.
      *
      * @param {any} machineInput  the input of the process the facade speaks for
      */
@@ -7962,7 +7969,12 @@ export async function createApp(options){
         ...machineInput,
         /** @param {any} event */
         send: event=>{
-            const target = system.windows?.manager?.inputTarget(event) ?? null;
+            const manager = system.windows?.manager;
+            const target = manager?.inputTarget(event) ?? null;
+            if (target === null && manager?.topLevel().some((/** @type {any} */ state)=>state.visible))
+            {
+                return false;
+            }
             for (const built of target === null ? [] : processes.values())
             {
                 if (processIds.get(built) === target)
@@ -8209,6 +8221,9 @@ export async function createApp(options){
                     end: memory.b,
                     volume: { revisions: system.volume.revisions ?? null,
                         sharing: system.volume.sharingMemory ?? null },
+                    // The run's foreground window, focus and captured window,
+                    // read where the run keeps them.
+                    windowCells: system.windows?.cells ?? null,
                     graphics: graphics?.port1 ?? null,
                     display: display?.port2 ?? null,
                     options: {

@@ -154,6 +154,7 @@ test('the page\'s input goes to the process of the window that should have it', 
     manager.publish(state(3, { processId: 0x300, parent: 1, rect: { left: 10, top: 10,
         right: 50, bottom: 50 } }));
     manager.setForeground(1);
+    manager.raise(2);
     assert.equal(manager.inputTarget({ kind: 'pointerMove', x: 150, y: 150 }), 0x200,
         'the window on top under the pointer');
     assert.equal(manager.inputTarget({ kind: 'pointerButton' }), 0x200,
@@ -165,8 +166,40 @@ test('the page\'s input goes to the process of the window that should have it', 
     assert.equal(manager.inputTarget({ kind: 'pointerMove', x: 20, y: 20 }), 0x200,
         'the window holding the mouse, wherever the pointer is');
     manager.releaseCapture();
-    assert.equal(manager.inputTarget({ kind: 'wheel', x: 400, y: 400 }), 0x100,
-        'nothing under the pointer: the foreground');
+    assert.equal(manager.inputTarget({ kind: 'wheel', x: 400, y: 400 }), null,
+        'the desktop under the pointer: no program');
+    manager.setFocus(3);
+    assert.equal(manager.inputTarget({ kind: 'key' }), 0x300, 'the keyboard: the focus');
     manager.setForeground(0);
-    assert.equal(manager.inputTarget({ kind: 'key' }), null, 'no window: the caller decides');
+    assert.equal(manager.inputTarget({ kind: 'key' }), null, 'no window in the foreground');
 });
+
+test('one focus for the run: the window that takes it comes up, and every other has lost it',
+    ()=>{
+        const manager = createWindowManager();
+        for (const hwnd of [1, 2, 3, 4, 5])
+        {
+            manager.publish(state(hwnd, { processId: 0x100 * hwnd }));
+        }
+        manager.publish(state(6, { processId: 0x200, parent: 2 }));
+        assert.deepEqual(order(manager), [5, 4, 3, 2, 1]);
+        /** @type {string[]} */
+        const heard = [];
+        manager.subscribe(event=>heard.push(`${event.kind} ${event.hwnd}`));
+        manager.setFocus(6);
+        assert.deepEqual(order(manager), [2, 5, 4, 3, 1],
+            'the second of five, the last now: on top of the rest');
+        assert.equal(manager.focus(), 6, 'the focus is the control inside it');
+        assert.equal(manager.foreground(), 2, 'its top-level window, the foreground one');
+        assert.deepEqual(heard, ['stacked 2', 'foreground 2', 'focus 6']);
+        manager.setFocus(4);
+        assert.equal(manager.focus(), 4, 'taken by another, it is that one\'s only');
+        assert.deepEqual(order(manager), [4, 2, 5, 3, 1]);
+        manager.setForeground(5);
+        assert.equal(manager.focus(), 0,
+            'another window made the foreground one: the focus is no window\'s until placed');
+        manager.setFocus(5);
+        manager.remove(5);
+        assert.deepEqual([manager.focus(), manager.foreground()], [0, 0],
+            'gone with the window');
+    });

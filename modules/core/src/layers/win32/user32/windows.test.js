@@ -4855,7 +4855,8 @@ test('SetWindowPos asks the window first, applies what it answers, and tells it 
  * sequences of the calls that change a window, and after each the run's
  * manager holds every window of the process as its user32 does -- rectangle,
  * client area, visibility, title, styles, parent and owner -- and the
- * process's top-level windows in its order, and nothing it does not hold.
+ * process's top-level windows in its order, and nothing it does not hold;
+ * and its focus is the run's one focus.
  */
 for (const seed of [1, 2, 3, 4, 5, 6, 7, 8])
 {
@@ -4932,6 +4933,8 @@ for (const seed of [1, 2, 3, 4, 5, 6, 7, 8])
                 },
                 ()=>fns.BringWindowToTop.handler([any()]),
                 ()=>(next(4) === 0 ? fns.DestroyWindow.handler([any()]) : 0),
+                ()=>fns.SetFocus.handler([next(5) === 0 ? 0 : any()]),
+                ()=>fns.SetActiveWindow.handler([any()]),
             ];
             for (let step = 0; step < 120; step++)
             {
@@ -4966,6 +4969,8 @@ for (const seed of [1, 2, 3, 4, 5, 6, 7, 8])
                     .reverse();
                 assert.deepEqual(manager.topLevel().map(each=>each.hwnd), order,
                     `step ${step}, operation ${which}: the top-level windows in the run's order`);
+                assert.equal(manager.focus(), /** @type {any} */ (fns.GetFocus).handler([]) >>> 0,
+                    `step ${step}, operation ${which}: the focus is the run's`);
             }
         });
 }

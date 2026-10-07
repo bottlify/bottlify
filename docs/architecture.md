@@ -586,12 +586,14 @@ flowchart TB
 - **Several processes, one screen.** Each process's user32 tells the run's window manager
   (`win32/user32/manager.js`, on the engine thread beside the window directory) what every window
   of its is -- class, title, style, rectangle, visibility -- and the manager holds the z-order of
-  the run's top-level windows, the foreground window and the window that captured the mouse, for
-  every process alike. Every frame says which process drew it; the presenter keeps each process's
+  the run's top-level windows, the one keyboard focus (a window taking it brings its top-level
+  window up and takes it from every other, whichever process each is) and the window that
+  captured the mouse, for every process alike. Every frame says which process drew it; the presenter keeps each process's
   newest picture and, while windows of more than one process show, composes the screen from them
   by the manager's order, bottom to top (`webgpu/internal/compose.js`). The page's input goes
   where the manager says: a pointer to the process of the window holding the mouse or under it,
-  the keyboard to the foreground window's (`inputTarget`). One process or four, on one thread or
+  the keyboard to the process of the window with the focus (`inputTarget`); with no such window,
+  to no program. One process or four, on one thread or
   in workers, it is the same manager.
 - **When something breaks.** If the graphics thread does not open, Direct3D and OpenGL draw on the
   engine thread and a warning goes to the console. If the WebGPU device is lost, `Present` and `Reset` return

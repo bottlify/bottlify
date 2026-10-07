@@ -1958,6 +1958,9 @@ export function createWindowFunctions(host){
     const activateNow = (hwnd, { thread, how = WA_ACTIVE, from = null })=>{
         const record = live(hwnd);
         const previous = active;
+        // The run's foreground window as it was, before the focus moving
+        // into this one makes this one the run's.
+        const runBefore = directory.foreground?.() ?? 0;
         active = record ? topLevelOf(record).hwnd : 0;
         if (record)
         {
@@ -1971,7 +1974,7 @@ export function createWindowFunctions(host){
             && (current === 0 || topLevelOf(live(current)).hwnd !== active);
         if (moved)
         {
-            focus = active;
+            holdFocus(active);
         }
         if (active === previous)
         {
@@ -1986,7 +1989,7 @@ export function createWindowFunctions(host){
         {
             // Another program activated this window and moved the run's
             // foreground to it already, saying whose it had been.
-            const prior = from ? from.hwnd : directory.foreground?.() ?? 0;
+            const prior = from ? from.hwnd : runBefore;
             if (prior !== 0 && directory.ownerOf(prior) !== processId)
             {
                 foreign = prior;
@@ -1994,6 +1997,8 @@ export function createWindowFunctions(host){
             }
             foreignForeground = false;
             directory.setForeground?.(gained);
+            // Made the foreground window, it came to the top of its band.
+            adoptOrder();
         }
         else
         {
@@ -2053,7 +2058,7 @@ export function createWindowFunctions(host){
             thread ?? host.callerThread?.()), refused=>{
             if ((refused | 0) !== 0)
             {
-                focus = current;
+                holdFocus(current);
                 return 0;
             }
             return andThen(current !== 0 && live(current)
@@ -2067,8 +2072,30 @@ export function createWindowFunctions(host){
      * active one is a top-level window, the focus is usually a control in
      * it, and both are asked for by name.
      */
-    let focus = 0;
-    const focusWindow = ()=>(focus !== 0 && live(focus) ? focus : 0);
+    //
+    // There is one focus for every program, and it is the run's: this program
+    // keeps no copy of it, and reads where the run keeps it (`manager.js`'s
+    // cells). One of its windows has the focus when that word names it.
+    const focusWindow = ()=>{
+        const held = directory.focus?.() ?? 0;
+        return held !== 0 && live(held) ? held : 0;
+    };
+    /**
+     * A window of this program takes the focus, from every window of every
+     * program (`manager.setFocus`), or this program lets it go. The run lists
+     * the window first, if it has not yet, as one taking the focus while it
+     * is being made does.
+     *
+     * @param {number} hwnd
+     */
+    const holdFocus = hwnd=>{
+        const record = live(hwnd);
+        if (record)
+        {
+            tell(record);
+        }
+        directory.noteFocus?.(hwnd, processId);
+    };
     /**
      * Moves the focus, telling the window that loses it and the one that
      * gains it -- in that order, as Windows sends them -- and activating the
@@ -2096,7 +2123,7 @@ export function createWindowFunctions(host){
             {
                 return 0;
             }
-            focus = target;
+            holdFocus(target);
             // Activation is told first, then the focus: a window gaining both
             // hears WM_ACTIVATE before WM_SETFOCUS.
             const activated = target !== 0 ? activate(target, { thread: on }) : 0;
@@ -2303,9 +2330,9 @@ export function createWindowFunctions(host){
         {
             active = 0;
         }
-        if (focus === record.hwnd)
+        if ((directory.focus?.() ?? 0) === record.hwnd)
         {
-            focus = 0;
+            holdFocus(0);
         }
         if (captured === record.hwnd)
         {
@@ -5234,13 +5261,14 @@ export function createWindowFunctions(host){
      * another process sends is, and waited on by nobody.
      *
      * @param {number} gained @param {number} gainedThread
+     * @param {number} hadFocus  the window of this program that had the focus,
+     *     which the run has moved already
      */
-    const lostForeground = (gained, gainedThread)=>{
+    const lostForeground = (gained, gainedThread, hadFocus)=>{
         const previous = activeWindow();
-        const had = focusWindow();
+        const had = live(hadFocus) ? hadFocus : 0;
         foreignForeground = true;
         active = 0;
-        focus = 0;
         /** @param {number} hwnd @param {number} message @param {number} wParam @param {number} lParam */
         const notify = (hwnd, message, wParam, lParam)=>{
             if (live(hwnd))
