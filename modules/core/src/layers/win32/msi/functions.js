@@ -83,8 +83,12 @@ const RUN_MODES = Object.freeze({
     17: 'rollback', 18: 'commit',
 });
 
-/** A string argument is read up to this many characters. */
-const MAX_TEXT = 0x8000;
+/**
+ * A string argument is read up to this many characters: Windows bounds no
+ * record's or property's text, and a script hands over all of a session's
+ * properties in one; this only stops a read that ran off its string.
+ */
+const MAX_TEXT = 0x1000000;
 
 /** MB_OK | MB_ICONERROR, and the answer a box that is not shown gives. */
 const MB_ICONERROR = 0x10;
