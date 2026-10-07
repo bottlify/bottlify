@@ -104,6 +104,38 @@ export async function errorMessage(engine, code, fields){
 }
 
 /**
+ * What a piece of the installation counts for on the progress bar: a file
+ * its size in bytes, a registry value and a component a fixed amount each.
+ * Windows documents the messages, not the amounts (roadmap/decisions.md, A33).
+ */
+const REGISTRY_TICKS = 13200;
+const COMPONENT_TICKS = 24000;
+
+/** INSTALLMESSAGE_PROGRESS's first field: what the message does to the bar. */
+const PROGRESS_RESET = 0;
+const PROGRESS_REPORT = 2;
+
+/**
+ * The bar moved on by so many ticks.
+ *
+ * @param {Engine} engine @param {number} ticks
+ */
+const progressed = (engine, ticks)=>
+    message(engine, INSTALLMESSAGE.PROGRESS, [null, PROGRESS_REPORT, ticks, 0, 0]);
+
+/**
+ * What an action is doing now, as its ActionText template words it.
+ *
+ * @param {Engine} engine @param {string} action @param {(string | number | null)[]} fields
+ *     From the first.
+ */
+const actionData = (engine, action, fields)=>{
+    const row = engine.session.db.table('ActionText')?.rows.find(entry=>entry[0] === action);
+    return message(engine, INSTALLMESSAGE.ACTIONDATA,
+        [row?.[2] === null || row?.[2] === undefined ? null : String(row[2]), ...fields]);
+};
+
+/**
  * Runs a sequence table: every action with a positive number, in order,
  * whose condition holds; then the one numbered for how it ended.
  *
@@ -209,13 +241,25 @@ export async function schedule(engine, name, run){
     return (await run()) ?? ERROR_SUCCESS;
 }
 
-/** Runs the script written so far, and empties it. @param {Engine} engine */
+/**
+ * Runs the script written so far, and empties it. Each action in it starts
+ * again as it is carried out, as Windows' script starts it, so the interface
+ * says what is being done while it is.
+ *
+ * @param {Engine} engine
+ */
 async function runScript(engine){
     const { session } = engine;
+    let running = '';
     while (session.script.length > 0)
     {
         const step = /** @type {{ name: string, run: () => Promise<number> }} */ (
             session.script.shift());
+        if (step.name !== running)
+        {
+            running = step.name;
+            await actionStart(engine, step.name);
+        }
         const code = await step.run();
         if (code !== ERROR_SUCCESS)
         {
@@ -310,8 +354,25 @@ const installing = (engine, key)=>{
 };
 
 /**
+ * The files the installation puts down: those of each component installing
+ * locally, but for one that never overwrites a file already there.
+ *
+ * @param {Engine} engine
+ */
+const filesToInstall = engine=>[...engine.session.files.values()]
+    .filter(file=>file.target !== null && componentOf(engine, file.component)?.action
+        === INSTALLSTATE.LOCAL)
+    .filter(file=>{
+        const component = componentOf(engine, file.component);
+        return !((Number(component?.attributes ?? 0) & COMPONENT_NEVER_OVERWRITE) !== 0
+            && engine.session.machine && engine.host.files.stat(file.target)?.exists);
+    });
+
+/**
  * The files to install and where they come from: each component installing
  * locally, its files by sequence, each in the Media row whose range holds it.
+ * Each is told to the interface as it is begun and counted on the bar when it
+ * is down.
  *
  * @param {Engine} engine
  */
@@ -320,14 +381,15 @@ async function installFiles(engine){
     const wordCount = Number(session.summary.get(PID.WORDCOUNT)?.value ?? 0);
     const compressedByDefault = (wordCount & 2) !== 0;
     const shortSourceNames = (wordCount & 1) !== 0;
-    const wanted = [...session.files.values()]
-        .filter(file=>file.target !== null && componentOf(engine, file.component)?.action
-            === INSTALLSTATE.LOCAL)
-        .filter(file=>{
-            const component = componentOf(engine, file.component);
-            return !((Number(component?.attributes ?? 0) & COMPONENT_NEVER_OVERWRITE) !== 0
-                && session.machine && engine.host.files.stat(file.target)?.exists);
-        });
+    const wanted = filesToInstall(engine);
+    /** @param {import('./session.js').PackageFile} file */
+    const begun = file=>{
+        const target = /** @type {string} */ (file.target);
+        // ActionText's template for it reads the name from the first field,
+        // the size from the sixth and the folder from the ninth.
+        return actionData(engine, 'InstallFiles', [file.name, null, null, null, null, file.size,
+            null, null, target.slice(0, target.lastIndexOf('\\') + 1)]);
+    };
     if (wanted.length === 0)
     {
         return ERROR_SUCCESS;
@@ -362,6 +424,7 @@ async function installFiles(engine){
                 componentOf(engine, file.component));
             const source = `${session.sourcePath(component.directory)}`
                 + `${shortSourceNames ? file.shortName : file.name}`;
+            await begun(file);
             const bytes = await readFile(files, source);
             if (!bytes)
             {
@@ -370,6 +433,7 @@ async function installFiles(engine){
             }
             writeFile(files, /** @type {string} */ (file.target), bytes);
             setAttributes(file);
+            await progressed(engine, file.size);
         }
         if (compressed.length === 0)
         {
@@ -412,7 +476,7 @@ async function installFiles(engine){
         const byKey = new Map(compressed.map(file=>[file.key, file]));
         /** @type {Set<string>} */
         const done = new Set();
-        const extracting = extractCabinet(source, entry=>{
+        const extracting = extractCabinet(source, async entry=>{
             const file = byKey.get(entry.name);
             if (!file || !file.target || done.has(file.key))
             {
@@ -424,13 +488,15 @@ async function installFiles(engine){
             {
                 return null;
             }
+            await begun(file);
             return {
                 write: (offset, bytes)=>{
                     files.write(node, offset, bytes);
                 },
-                close: ()=>{
+                close: async()=>{
                     files.close(node);
                     setAttributes(file);
+                    await progressed(engine, file.size);
                 },
             };
         }, { eager: true });
@@ -525,12 +591,16 @@ async function writeRegistryValues(engine){
         const raw = row[4] === null ? null : String(row[4]);
         await schedule(engine, 'WriteRegistryValues', async()=>{
             const key = host.hive.create(root, keyPath).key;
+            const value = raw === null ? null : session.formatText(raw);
+            await actionData(engine, 'WriteRegistryValues', [keyPath, name, value]);
             if (raw === null && (name === null || name === '+' || name === '*' || name === '-'))
             {
+                await progressed(engine, REGISTRY_TICKS);
                 return;
             }
-            const { type, data } = registryValue(session.formatText(raw ?? ''));
+            const { type, data } = registryValue(value ?? '');
             host.hive.setValue(key, name ?? '', type, data);
+            await progressed(engine, REGISTRY_TICKS);
         });
     }
     return ERROR_SUCCESS;
@@ -741,6 +811,7 @@ async function processComponents(engine){
         await schedule(engine, 'ProcessComponents', async()=>{
             host.registration.registerComponent(id, productCode, keyPath);
             component.installed = component.action;
+            await progressed(engine, COMPONENT_TICKS);
         });
     }
     return ERROR_SUCCESS;
@@ -929,6 +1000,24 @@ async function costFinalize(engine){
     return ERROR_SUCCESS;
 }
 
+/**
+ * The bar set to what the installation will do, counted as it is done: the
+ * files put down, the registry values written, the components registered.
+ *
+ * @param {Engine} engine
+ */
+async function installValidate(engine){
+    const { session } = engine;
+    const files = filesToInstall(engine).reduce((total, file)=>total + file.size, 0);
+    const values = (session.db.table('Registry')?.rows ?? [])
+        .filter(row=>installing(engine, String(row[5]))).length;
+    const components = [...session.components.values()]
+        .filter(component=>component.id && installing(engine, component.key)).length;
+    await message(engine, INSTALLMESSAGE.PROGRESS, [null, PROGRESS_RESET,
+        files + values * REGISTRY_TICKS + components * COMPONENT_TICKS, 0, 0]);
+    return ERROR_SUCCESS;
+}
+
 /** @param {Engine} engine */
 async function installInitialize(engine){
     engine.session.mode.scheduled = true;
@@ -1020,7 +1109,7 @@ export const STANDARD_ACTIONS = {
     CostFinalize: costFinalize,
     ResolveSource: resolveSource,
     SetODBCFolders: nothing,
-    InstallValidate: nothing,
+    InstallValidate: installValidate,
     InstallInitialize: installInitialize,
     AllocateRegistrySpace: nothing,
     ProcessComponents: processComponents,

@@ -252,6 +252,16 @@ single-threaded apartment the caller is not in: several threads may each have on
 alone does not say which is meant. An unknown type answers `E_INVALIDARG`. Wine leaves the call
 a stub, and no conformance test pins down any of these answers. *2026-10-05.*
 
+**A33 — An installation's progress bar counts a file as its size in bytes, a registry value as
+13200 ticks and a component as 24000, and its total is what this installation will do.** Windows
+documents `INSTALLMESSAGE_PROGRESS` -- a reset to a total, reports of ticks, the direction -- but
+not what anything is worth; the two fixed amounts are Wine's, and no published source gives
+others. `InstallValidate` resets the bar to the files, values and components the
+installation puts down, rather than the package's whole as Wine does, so a setup's own page
+reaches its end when the installation does. A page shows the ratio of what is done to the total,
+which these amounts set; revisit them if a program is found reading the ticks themselves.
+*2026-10-07.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
