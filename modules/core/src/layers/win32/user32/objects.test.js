@@ -358,6 +358,99 @@ test('setting an item changes only what the mask names', ()=>{
     assert.equal(memory.readCString(OUT, 16), 'Save', 'the text the mask did not name survived');
 });
 
+/**
+ * Lays out a MENUITEMINFOW: the same structure, its text in UTF-16.
+ *
+ * @param {any} memory @param {any} fields
+ */
+function putItemInfoW(memory, fields){
+    putItemInfo(memory, { ...fields, text: undefined });
+    if (fields.text !== undefined)
+    {
+        putWideString(memory, TEXT, fields.text);
+        memory.putU32s(INFO + MENUITEMINFO.dwTypeData, [TEXT, fields.cch ?? 0]);
+    }
+    return INFO;
+}
+
+/** @param {any} memory @param {number} address @param {number} length */
+const wideAt = (memory, address, length)=>String.fromCharCode(...new Uint16Array(
+    memory.bytes.slice(address, address + length * 2).buffer));
+
+test('the wide menu item calls take and give UTF-16, cch counting characters', ()=>{
+    // user32's test_menu_iteminfo runs every case through both spellings:
+    // the structure is the same, dwTypeData is a wide string, and cch is in
+    // WCHARs -- the length written, cut to one short of the room.
+    const { memory, fns } = setup();
+    const menu = fns.CreateMenu.handler([]);
+    for (const name of ['InsertMenuItemW', 'GetMenuItemInfoW', 'SetMenuItemInfoW'])
+    {
+        assert.equal(fns[name].argBytes, 16, name);
+    }
+
+    putItemInfoW(memory, { mask: MIIM_ID | MIIM_STRING, id: 31, text: 'Öffnen…' });
+    assert.equal(fns.InsertMenuItemW.handler([menu, 0, 1, INFO]), 1);
+
+    putItemInfoW(memory, { mask: MIIM_ID | MIIM_STRING });
+    memory.putU32s(INFO + MENUITEMINFO.dwTypeData, [OUT, 32]);
+    assert.equal(fns.GetMenuItemInfoW.handler([menu, 0, 1, INFO]), 1);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.wID), 31);
+    assert.equal(wideAt(memory, OUT, 8), 'Öffnen…\0');
+    assert.equal(memory.u32(INFO + MENUITEMINFO.cch), 7);
+
+    memory.putU32s(INFO + MENUITEMINFO.dwTypeData, [OUT, 4]);
+    fns.GetMenuItemInfoW.handler([menu, 31, 0, INFO]);
+    assert.equal(wideAt(memory, OUT, 4), 'Öff\0', 'cut to the room, the terminator inside it');
+    assert.equal(memory.u32(INFO + MENUITEMINFO.cch), 3);
+
+    memory.putU32s(INFO + MENUITEMINFO.dwTypeData, [0, 0]);
+    fns.GetMenuItemInfoW.handler([menu, 0, 1, INFO]);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.cch), 7, 'a null buffer asks for the length');
+
+    assert.equal(fns.GetMenuItemInfoW.handler([menu, 5, 1, INFO]), 0, 'no such place');
+    assert.equal(fns.GetMenuItemInfoW.handler([0x9999, 0, 1, INFO]), 0, 'no such menu');
+    memory.putU32s(INFO + MENUITEMINFO.cbSize, [20]);
+    assert.equal(fns.GetMenuItemInfoW.handler([menu, 0, 1, INFO]), 0, 'a size of neither version');
+    assert.equal(fns.InsertMenuItemW.handler([menu, 0, 1, INFO]), 0);
+    assert.equal(fns.SetMenuItemInfoW.handler([menu, 0, 1, INFO]), 0);
+});
+
+test('an item set through one spelling reads back through the other', ()=>{
+    const { memory, fns } = setup();
+    const menu = fns.CreateMenu.handler([]);
+    putItemInfo(memory, { mask: MIIM_ID | MIIM_STRING, id: 9, text: 'Save' });
+    fns.InsertMenuItemA.handler([menu, 0, 1, INFO]);
+
+    putItemInfoW(memory, { mask: MIIM_STATE | MIIM_STRING, state: 8, text: 'Save às' });
+    assert.equal(fns.SetMenuItemInfoW.handler([menu, 9, 0, INFO]), 1);
+
+    putItemInfo(memory, { mask: MIIM_ID | MIIM_STATE | MIIM_STRING });
+    memory.putU32s(INFO + MENUITEMINFO.dwTypeData, [OUT, 16]);
+    assert.equal(fns.GetMenuItemInfoA.handler([menu, 0, 1, INFO]), 1);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.wID), 9, 'the id the mask left alone');
+    assert.equal(memory.u32(INFO + MENUITEMINFO.fState), 8);
+    assert.equal(memory.readCString(OUT, 16), 'Save às', 'in the ANSI page');
+});
+
+test('a bitmap item\'s type data is its handle, never read as text', ()=>{
+    // Under MIIM_TYPE dwTypeData is the bitmap for MFT_BITMAP and the
+    // program's value for MFT_OWNERDRAW. Text is planted where the value
+    // would point if it were taken for a string.
+    const MIIM_TYPE = 0x0010;
+    const MFT_BITMAP = 0x0004;
+    const MFT_OWNERDRAW = 0x0100;
+    const { memory, fns } = setup();
+    const menu = fns.CreateMenu.handler([]);
+    for (const [type, wide] of [[MFT_BITMAP, false], [MFT_OWNERDRAW, true]])
+    {
+        putItemInfo(memory, { mask: MIIM_TYPE, type, text: 'Not text' });
+        const insert = wide ? fns.InsertMenuItemW : fns.InsertMenuItemA;
+        assert.equal(insert.handler([menu, 0, 1, INFO]), 1);
+        assert.equal(fns.GetMenuStringA.handler([menu, 0, OUT, 16, MF_BYPOSITION]), 0,
+            `type ${type} carries no string`);
+    }
+});
+
 test('a command names an item wherever it is, and a position names a place', ()=>{
     const { memory, fns } = setup();
     const outer = fns.CreateMenu.handler([]);

@@ -2,8 +2,10 @@
 
 Русская версия: [README.ru.md](README.ru.md).
 
-**Status:** proposed 2026-10-03, revised against `main` 6554baf0. How the engine works today is in
-[`docs/architecture.md`](../../docs/architecture.md); this document is where it goes next.
+**Status:** proposed 2026-10-03, revised against `main` 6554baf0; the workers of stage 2 and the
+translation cache arena decided 2026-10-07 on `cork2` (no pool code yet). How the engine works
+today is in [`docs/architecture.md`](../../docs/architecture.md); this document is where it goes
+next.
 
 v2 turns the engine from one thread that does everything into a platform of workers whose number
 follows the load: one worker while one copes, four when two are choking, never four held idle. On
@@ -165,6 +167,10 @@ off the thread that runs the program, not from running the program's threads at 
 
 - **Split the engine worker** into the coordinator (event loop, I/O, network, system-wide Win32,
   pools, driver) and process workers (cork, per-process Win32).
+- **A window manager for the run** ([windows.md](windows.md)): every process's windows, as its
+  user32 tells it, with their order across processes, foreground and capture, and views -- the
+  GDI compositor, input, later a JS view -- that subscribe to it, in place of the rules that ignore
+  other processes' windows. It comes before the translation pools.
 - **Processes side by side.** Each process runs in its own worker with its own memory, sized per
   process (`memorySize`). This replaces process replacement (`roadmap/decisions.md`, C) and the
   copy-back after a child exits: the registry and files are the system's, so what one process
@@ -176,35 +182,113 @@ off the thread that runs the program, not from running the program's threads at 
   another. Each needs a mechanism of its own — a copy kept coherent at the points the program can
   observe (a wait, a message, a call that maps or unmaps), or a second shared memory both process
   workers import — chosen per case by measurement; launchers and installers are where they occur.
-- **Service pools.** Translation ×M (`emitBatch` is already a pure function). Host work ×K: zstd
-  blocks, the video decoder, `ijl15`, MP3, block fetch. Graphics takes the canvas and the APIs still
-  drawn on the engine thread: Direct3D 10, Vulkan, DirectDraw and GDI presentation.
-- **The scaling driver.** One for the whole engine, in the coordinator, because the pools share the
-  same cores and drivers of their own would take them from each other. Its budget is
-  `navigator.hardwareConcurrency` minus the fixed threads (page, coordinator, AudioWorklet,
-  graphics). Workers write their own state into shared memory — busy or idle, queue length, time
-  at work — the way the engine already publishes its journal and counters for the log keeper, so
-  the driver only reads. Each decision is a comparison of a few numbers between scheduler turns,
-  and each is written to the journal (principle 6).
+- **Threads that are always there.** Two: the coordinator (the host) and the graphics worker.
+  Graphics stays one thread: everything a WebGPU device makes lives in the thread that made it, and
+  the calls of a frame run in order. What in graphics is pure — shader bytecode to WGSL, DXT
+  decoding, format conversion — goes to the pool as jobs. The AudioWorklet is the browser's own
+  audio thread.
+- **Process workers.** One per running process, apart from the pool, for as long as the process
+  runs. Running code stays there; nothing of it moves to the pool.
+- **The worker pool.** Workers that take any job without state: a batch of translation (formed,
+  emitted and compiled), zstd blocks, `ijl15`, the pure part of graphics. Two priorities: urgent,
+  which code is waiting for (the batch of a region the interpreter keeps meeting, a block a thread
+  reads), and background (relinks of hot code, reading ahead). A pool worker works for one process
+  at a time. One that works for none sleeps on `Atomics.wait` and holds nothing — no core, nothing
+  of any process — so it costs memory only: an operating system schedules only threads that have
+  something to run.
+- **What a worker holds.** Nothing between jobs. Translation does keep something worth keeping:
+  the functions already emitted, which a relink or a merge takes again instead of emitting them
+  anew — today a cache of up to 48 MB inside the translation worker. That is the process's, not
+  the worker's: it is keyed by the process's code, and a second worker with a cache of its own
+  would miss what the first one kept. A worker's heap cannot be shared or handed to another
+  worker — each has its own; what workers share is bytes (`SharedArrayBuffer`, a shared
+  `WebAssembly.Memory`) and compiled modules, which a message passes without copying their code.
+- **The translation cache arena** (decided 2026-10-07). So the cache becomes bytes in an arena of
+  the process's own, in shared memory, made with the process and gone when it exits. Every pool
+  worker working for the process looks functions up there and adds the ones it emits; a worker that
+  joins finds what the others emitted, and one that leaves takes nothing with it. An entry is bytes
+  only — the function's body, locals and hints, its type, the region's shape and what the emitter
+  answered for it, encoded — behind an index in the same memory keyed by the key the cache has
+  today. A worker adds an entry by taking space with an atomic add and publishes it by one atomic
+  store into the index, so a reader sees an entry whole or not at all, and two workers that emit the
+  same function at once both stay correct (the second copy is wasted, not wrong). The arena is
+  filled lazily, by the translation that happens anyway, grows up to its limit (48 MB, as now) and
+  frees space a segment at a time, the oldest first; that this keeps the hits the cache's
+  least-recently-used order keeps is checked before it lands, by replaying the recorded lookups of
+  Doom 3 and Tron through both. The arena lives as long as the process, quiet or not: its memory is
+  the process's, bounded by its limit, and a later load of the same process starts from what the
+  earlier ones left in it. Its gate: seeded batches emitted through several workers sharing an arena
+  and through one worker with no cache give the same module bytes, and the cache's counters say how
+  many functions came from the arena.
+- **The rule** (decided 2026-10-07). With n processes running:
+  - **Always there:** the two threads above, n process workers, and n pool workers — each process
+    has one from its start to its exit, since translation never quite stops.
+  - **Joining.** Pool workers join a process lazily, one at a time, when the median load of the
+    pool workers already working for it — the share of a window each was busy — comes to 80 %.
+    The median, not the sum or the busiest: it says the work is spread over them and each is near
+    full, so one more would take a share. Two workers at 90 % and 10 % have a median of 50 %: the
+    work does not split (one chain of batches, each waiting for the last), and a third would sit
+    as idle as the second. With one worker the median is its own load — Doom 3's 70–95 % while
+    loading joins a second. The 80 % mark and the window are where the driver starts, not
+    measured: both are checked on the recorded series below before the driver runs.
+  - **Ceilings.** At most `hardwareConcurrency` (hc) pool workers work for one process; the pool
+    holds at most hc × n. These count workers, not cores: a process that waits keeps none of its
+    joined workers busy, so the ceiling of the whole is not what limits the machine — the median
+    rule is, as each process asks only for what it can use.
+  - **Leaving.** Joined workers leave a process lazily, after seconds of its median well below the
+    mark, and at once when the process stops translating to wait; they go back to the pool and
+    sleep. Joining is quick (a window of a few hundred milliseconds), leaving slow, so the pool
+    does not swing. A process that waits keeps its arena, so when it resumes the workers that join
+    it find what was emitted before. When a process exits, its workers and its arena go, and the
+    pool's ceiling falls by hc.
+- **The driver.** In the coordinator, one for the whole engine. Workers write their own state into
+  shared memory — busy or idle, queue length, time at work — the way the engine already publishes
+  its journal and counters for the log keeper, so the driver only reads. Each decision is a
+  comparison of a few numbers between scheduler turns, and each is written to the journal
+  (principle 6); a pinned run keeps the pool's size fixed. Its thresholds are chosen on recorded
+  series of real loads, replayed through the driver as a test, before it runs in the engine.
+- **Measured** (2026-10-07, node 22, 4-core x86-64 VM, `cork2` f39364f2, one translation worker;
+  `tools/launch-probe.mjs --series`). While loading, the one translation worker is the bottleneck:
+  Doom 3 busy 70–95 % of the time with work queued behind the batch out 90–98 % of it and up to
+  2,807 regions queued; Tron's game up to 90 % busy, 1,183 queued. Run warm from a filled
+  translation store, Doom 3 reached the end of loading in 13–15 s instead of 20 s (three runs):
+  about a third of its loading is translation, the most a faster translator can take. After
+  loading the worker is busy under 1 % of the time. Two threads were ready at once 0–4 % of the
+  time (`negative-results.md`, 2026-10-07).
+- **Measured: what a worker holds** (2026-10-07, same machine; one cold run each, Doom 3 60 s and
+  Tron's game 40 s; Chromium 141 headless). Idle, a worker is small: in Chromium the JS heap of
+  four idle workers was 1.1 MB without the emitter and 7.6 MB with it loaded, about 2 MB each
+  (`performance.measureUserAgentSpecificMemory`, which counts the JS heap and not the thread
+  itself); in node an idle worker with the emitter loaded added 15 MB of resident memory (eight at
+  once). Loading, the translation worker's cache reached its 48 MB limit within 18 s; at the end
+  the worker held 31–37 MB of heap besides the cache, and its heap had peaked at 225 MB on the way
+  (garbage of emitting). The cache pays: without it the worker was busy 23.3 s instead of 14.6 s
+  for Doom 3 and 15.2 s instead of 9.9 s for Tron. Replayed under other limits, its hits are 10 %
+  of lookups at 16 MB, 29 % at 24 MB, 33 % at 48 MB and 33 % unbounded (83 MB at most) for Doom 3;
+  21 %, 21 %, 29 % and 29 % (76 MB) for Tron — a few megabytes keep almost nothing. Doom 3 took
+  no hits after its 39th second.
 
-| Pool | Min | Max | Grows when | Shrinks |
-| --- | --- | --- | --- | --- |
-| Translation | 1 | budget | hot code waits for translation, the batch queue grows | after seconds idle |
-| Host work | 0 | budget | program threads wait on decoding or block fetch | after seconds idle |
-| Graphics, log keeper, AudioWorklet | 1 | 1 | — | — |
+| Thread | How many | Joins when | Leaves when |
+| --- | --- | --- | --- |
+| Coordinator (host), graphics | 1 each | — | — |
+| Process worker | one per running process | the process starts | the process exits |
+| Pool, a process's first | one per running process | the process starts | the process exits |
+| Pool, joined to a process | up to hc − 1 more per process; the pool at most hc × n | the median load of the process's pool workers comes to 80 % | the process waits, or seconds well below the mark; with the process |
 
 | Setting | Today | Larger |
 | --- | --- | --- |
 | Processes, P | 1: a child and its parent take turns | P process workers, each with its own memory |
 | Executors per process, N | 1: on the engine thread | 1 here; N with the atomic variant in stage 3 |
-| Translation, M | 1 worker | M workers, batches split between them |
-| Host work, K | 0: all on the engine thread | K workers; the program thread waits as it waits for a file |
+| Translation | 1 worker per process, one batch out | 1 to hc pool workers per process, several batches out, one arena |
+| Host work | on the engine thread or in the process | pool jobs; the program thread waits as it waits for a file |
 | Graphics (`graphicsWorker`) | 1: Direct3D 7, 8, 9, OpenGL | 1: all graphics and the canvas |
 | Guest memory | ordinary `WebAssembly.Memory` | shared (`shared: true`) from stage 1 |
 
 **Accepted when** with the minimums the benchmarks are within the thresholds of `main`, a parent
 and a child process run at the same time and see each other's registry and file writes, and under
-a synthetic load the driver grows and shrinks each pool without oscillating.
+a synthetic load the driver grows and shrinks each pool without oscillating, and workers joining
+a loading process take functions from its arena — its hits no fewer than one worker's own cache
+gets today.
 
 ## Stage 3 — More executors per process
 
@@ -236,7 +320,7 @@ measurement before stage 1 says that pays.
 
 | Pool | Min | Max | Grows when | Shrinks |
 | --- | --- | --- | --- | --- |
-| Executors of a process | 1 | budget, at most the process's thread count | two or more of its threads are ready most of the time | rarely, after a long quiet spell: it is a mode switch |
+| Executors of a process | 1 | `hardwareConcurrency`, at most the process's thread count | two or more of its threads are ready most of the time | rarely, after a long quiet spell: it is a mode switch |
 
 **What it costs, and when it pays.** The atomic variant makes every executor slower by the tax *t*
 measured before stage 1. Two executors win when their speedup *S* satisfies *S* × (1 − *t*) > 1.

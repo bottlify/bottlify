@@ -19,12 +19,24 @@
  * (PBS_VERTICAL) is the same picture turned a quarter turn, filling from the
  * bottom. The colours are the system's until PBM_SETBARCOLOR or
  * PBM_SETBKCOLOR replaces one with a colour of the program's own.
+ *
+ * The classic look, which Wine's control draws the same: the bar takes a
+ * static edge in place of any client or window edge it was created with --
+ * the thin sunken line around it, part of its frame -- and inside it one
+ * pixel of track all round. A block is two thirds of the track's breadth,
+ * two pixels apart, and the fill ends on a whole block: a position a pixel
+ * into one shows all of it.
  */
 
 import {
-    WM_PAINT, WM_ERASEBKGND,
+    WM_CREATE, WM_PAINT, WM_ERASEBKGND,
     COLOR_3DFACE, COLOR_HIGHLIGHT, after,
 } from '../user32/controls.js';
+import { mulDiv } from '../kernel32/system.js';
+
+const WS_EX_WINDOWEDGE = 0x00000100;
+const WS_EX_CLIENTEDGE = 0x00000200;
+const WS_EX_STATICEDGE = 0x00020000;
 
 /** The class name a program creates the control by. */
 export const PROGRESS_CLASS = 'msctls_progress32';
@@ -53,9 +65,8 @@ export const PBM_SETBKCOLOR = 0x2001;
 /** PBRANGE, what PBM_GETRANGE fills in. */
 const PBRANGE = Object.freeze({ iLow: 0, iHigh: 4, SIZE: 8 });
 
-/** The gap between blocks, and the share of the cross-size a block takes. */
+/** The gap between blocks. */
 const BLOCK_GAP = 2;
-const BLOCK_SHARE = 2 / 3;
 
 /**
  * @typedef {import('../user32/controls.js').ControlHost} ControlHost
@@ -104,46 +115,23 @@ export function createProgressProcedure(host, tk){
     };
 
     /**
-     * The track the fill sits in: the client area less the sunken edge that
-     * bounds it.
-     *
-     * @param {Rect} rect
-     * @returns {Rect}
-     */
-    const trackOf = rect=>tk.shrink(rect, 2);
-
-    /**
-     * The fill, laid down as blocks or as one rectangle, along or up the
-     * track according to the orientation.
+     * The track, the fill along it from the start to `end` pixels -- block,
+     * gap, block, the last cut off at the end -- and nothing past it.
      *
      * @param {number} hdc @param {Rect} track @param {boolean} vertical
-     * @param {number} fraction  How much of the track is filled, 0..1.
-     * @param {number} cross  The track's size across the fill direction.
-     * @param {number} rgb @param {boolean} smooth
+     * @param {number} end @param {number} block  Zero for one rectangle.
+     * @param {number} rgb
      */
-    const fill = (hdc, track, vertical, fraction, cross, rgb, smooth)=>{
+    const fill = (hdc, track, vertical, end, block, rgb)=>{
         const draw = /** @type {any} */ (host.draw);
-        const along = vertical ? track.bottom - track.top : track.right - track.left;
-        const filled = Math.round(along * fraction);
-        if (smooth)
+        /** @param {number} from @param {number} to pixels along the track */
+        const span = (from, to)=>(vertical
+            ? { ...track, top: track.bottom - to, bottom: track.bottom - from }
+            : { ...track, left: track.left + from, right: track.left + to });
+        const length = block > 0 ? block : end;
+        for (let at = 0; at < end; at += length + BLOCK_GAP)
         {
-            const bar = vertical
-                ? { ...track, top: track.bottom - filled }
-                : { ...track, right: track.left + filled };
-            if (filled > 0)
-            {
-                draw.fill(hdc, bar, rgb);
-            }
-            return;
-        }
-        const block = Math.max(1, Math.floor(cross * BLOCK_SHARE));
-        const pitch = block + BLOCK_GAP;
-        for (let at = 0; at + block <= filled; at += pitch)
-        {
-            const bar = vertical
-                ? { ...track, top: track.bottom - at - block, bottom: track.bottom - at }
-                : { ...track, left: track.left + at, right: track.left + at + block };
-            draw.fill(hdc, bar, rgb);
+            draw.fill(hdc, span(at, Math.min(at + length, end)), rgb);
         }
     };
 
@@ -156,14 +144,19 @@ export function createProgressProcedure(host, tk){
         const vertical = (record.style & PBS_VERTICAL) !== 0;
         const smooth = (record.style & PBS_SMOOTH) !== 0;
         draw.fill(hdc, rect, held.bkColor ?? tk.color(COLOR_3DFACE));
-        tk.sunkenEdge(hdc, rect);
-        const track = trackOf(rect);
-        const span = held.max - held.min;
-        const fraction = span <= 0 ? 0 : Math.min(1, Math.max(0,
-            (held.pos - held.min) / span));
-        const cross = vertical ? track.right - track.left : track.bottom - track.top;
-        fill(hdc, track, vertical, fraction, cross,
-            held.barColor ?? tk.color(COLOR_HIGHLIGHT), smooth);
+        const track = tk.shrink(rect, 1);
+        const size = vertical ? track.bottom - track.top : track.right - track.left;
+        const breadth = vertical ? track.right - track.left : track.bottom - track.top;
+        const range = held.max - held.min;
+        let end = range <= 0 || size <= 0 ? 0
+            : mulDiv(held.pos - held.min, size, range) | 0;
+        const block = smooth ? 0 : Math.max(1, mulDiv(breadth, 2, 3) | 0);
+        if (!smooth)
+        {
+            const pitch = block + BLOCK_GAP;
+            end = Math.min(Math.ceil(end / pitch) * pitch, size);
+        }
+        fill(hdc, track, vertical, end, block, held.barColor ?? tk.color(COLOR_HIGHLIGHT));
     };
 
     /**
@@ -172,6 +165,10 @@ export function createProgressProcedure(host, tk){
     return (record, message, thread)=>{
         const held = state(record);
         switch (message.message){
+            case WM_CREATE:
+                record.exStyle = ((record.exStyle & ~(WS_EX_CLIENTEDGE | WS_EX_WINDOWEDGE))
+                    | WS_EX_STATICEDGE) >>> 0;
+                return tk.common(record, message, thread);
             case WM_PAINT:
                 return tk.painting(record, (/** @type {number} */ hdc)=>{
                     paintProgress(record, hdc, tk.clientRect(record));
@@ -183,8 +180,10 @@ export function createProgressProcedure(host, tk){
                 return 1;
             case PBM_SETRANGE: {
                 const previous = ((held.max & 0xffff) << 16 | held.min & 0xffff) >>> 0;
-                held.min = message.lParam << 16 >> 16;
-                held.max = message.lParam >> 16;
+                // Two WORDs, unsigned: 0..65535 is the range a program sets
+                // to keep its own ratio in, and 65535 is not -1.
+                held.min = message.lParam & 0xffff;
+                held.max = message.lParam >>> 16;
                 held.pos = clamp(record, held.pos);
                 host.invalidate(record);
                 return previous;

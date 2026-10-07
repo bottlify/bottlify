@@ -1228,8 +1228,14 @@ export async function marshalRequest(side, method, args){
     /** @type {any[]} */
     const request = [];
     const context = contextOver(request, false);
-    for (const [index, parameter] of method.parameters.entries())
+    // An array is read once what counts it has been: the count may come after
+    // it, as GetIDsOfNames' cNames comes after rgszNames.
+    const order = [...method.parameters.keys()].sort((a, b)=>
+        Number(method.parameters[a].type.kind === 'array')
+            - Number(method.parameters[b].type.kind === 'array'));
+    for (const index of order)
     {
+        const parameter = method.parameters[index];
         const at = bytes.subarray(offsets[index], offsets[index] + sizeOf(parameter.type));
         // A caller's array of results is a buffer, not a value: it crosses
         // as whether there is one, like a pointer that is only [out].

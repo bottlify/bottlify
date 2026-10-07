@@ -5,7 +5,10 @@
  */
 
 /**
- * The three block transfers: BitBlt, StretchBlt and PatBlt.
+ * The block transfers: BitBlt, and MaskBlt, which is BitBlt with a second
+ * raster operation where its mask is clear; StretchBlt, and AlphaBlend and
+ * TransparentBlt, which stretch as it does and blend, or leave out a colour,
+ * where it would combine; and PatBlt.
  *
  * Three questions have one answer each here, and they are the ones that decide
  * whether a blit is right:
@@ -53,6 +56,10 @@ export const STRETCH_MODES = Object.freeze([BLACKONWHITE, WHITEONBLACK, COLORONC
  * @property {((pixel: number) => number) | null} [convert]
  *           What a source pixel means on the destination, when that is not
  *           the pixel itself: see `sourceConversion`.
+ * @property {((x: number, y: number) => boolean) | null} [mask]
+ *           MaskBlt's mask, by destination pixel: true where the operation
+ *           `rop` names applies, false where the one in its high byte does --
+ *           MAKEROP4's background operation. Absent, every pixel takes `rop`.
  */
 
 /**
@@ -95,6 +102,8 @@ export function sourceConversion({ src, dest, textColor, bkColor, srcBkColor }){
  */
 export function bitBlt(options){
     const table = ropTable(options.rop);
+    const mask = options.mask ?? null;
+    const background = mask ? (options.rop >>> 24) & 0xff : table;
     const width = options.width | 0;
     const height = options.height | 0;
     if (width < 0 || height < 0)
@@ -102,7 +111,7 @@ export function bitBlt(options){
         return false;
     }
     const src = options.src ?? null;
-    if (ropUsesSource(table) && !src)
+    if ((ropUsesSource(table) || ropUsesSource(background)) && !src)
     {
         return false;
     }
@@ -143,7 +152,7 @@ export function bitBlt(options){
         return true;
     }
 
-    const usesPattern = ropUsesPattern(table);
+    const usesPattern = ropUsesPattern(table) || ropUsesPattern(background);
     const pattern = options.pattern;
     const convert = options.convert ?? null;
     // Same memory means the copy can eat its own source, so the loops run away
@@ -165,7 +174,8 @@ export function bitBlt(options){
             }
             const read = src ? src.read(x + shiftX, y + shiftY) : 0;
             const s = convert && src ? convert(read) : read;
-            dest.write(x, y, applyRop(table, p, s, dest.read(x, y)));
+            const operation = mask && !mask(x, y) ? background : table;
+            dest.write(x, y, applyRop(operation, p, s, dest.read(x, y)));
         }
     }
     return true;
@@ -307,12 +317,24 @@ export function stretchTarget(dest, clip, x, y, width, height){
 }
 
 /**
- * @param {StretchOptions} options
- * @returns {boolean} what StretchBlt reports
+ * Where a stretch reads and writes: the two rectangles, each with its sign.
+ *
+ * @typedef {Pick<StretchOptions, 'dest' | 'clip' | 'x' | 'y' | 'width' | 'height' | 'src'
+ *     | 'srcX' | 'srcY' | 'srcWidth' | 'srcHeight'>} StretchGeometry
  */
-export function stretchBlt(options){
-    const table = ropTable(options.rop);
-    const mode = options.mode ?? BLACKONWHITE;
+
+/**
+ * Each destination pixel a stretch reaches, with the box of source pixels it
+ * was stretched from. The box is in the coordinates of the surface handed
+ * with it: the source, or -- when the source is the destination's own
+ * memory -- a copy of the part read, taken before anything is written.
+ *
+ * @param {StretchGeometry} options
+ * @param {(x: number, y: number, src: import("./contract.js").Surface, left: number,
+ *     top: number, right: number, bottom: number) => void} visit
+ * @returns {boolean} false when the source rectangle misses the source entirely
+ */
+function stretchEach(options, visit){
     // A negative extent mirrors on that axis. Both rectangles carry a sign and
     // the two cancel: mirroring the source and the destination together is the
     // same picture the right way round.
@@ -352,9 +374,6 @@ export function stretchBlt(options){
     const readLeft = options.src === src ? 0 : visible.left;
     const readTop = options.src === src ? 0 : visible.top;
 
-    const usesPattern = ropUsesPattern(table);
-    const pattern = options.pattern;
-    const convert = options.convert ?? null;
     for (let y = target.top; y < target.bottom; y++)
     {
         const row = mirrorY ? destHeight - 1 - (y - destTop) : y - destTop;
@@ -374,16 +393,130 @@ export function stretchBlt(options){
             {
                 continue;
             }
-            const p = usesPattern && pattern ? pattern(x, y) : 0;
-            if (p === TRANSPARENT_PIXEL)
-            {
-                continue;
-            }
-            const combined = combine(src, box.left - readLeft, box.top - readTop,
-                box.right - readLeft, box.bottom - readTop, mode);
-            const s = convert ? convert(combined) : combined;
-            dest.write(x, y, applyRop(table, p, s, dest.read(x, y)));
+            visit(x, y, src, box.left - readLeft, box.top - readTop,
+                box.right - readLeft, box.bottom - readTop);
         }
     }
     return true;
+}
+
+/**
+ * @param {StretchOptions} options
+ * @returns {boolean} what StretchBlt reports
+ */
+export function stretchBlt(options){
+    const table = ropTable(options.rop);
+    const mode = options.mode ?? BLACKONWHITE;
+    const usesPattern = ropUsesPattern(table);
+    const pattern = options.pattern;
+    const convert = options.convert ?? null;
+    const dest = options.dest;
+    return stretchEach(options, (x, y, src, left, top, right, bottom)=>{
+        const p = usesPattern && pattern ? pattern(x, y) : 0;
+        if (p === TRANSPARENT_PIXEL)
+        {
+            return;
+        }
+        const combined = combine(src, left, top, right, bottom, mode);
+        const s = convert ? convert(combined) : combined;
+        dest.write(x, y, applyRop(table, p, s, dest.read(x, y)));
+    });
+}
+
+/**
+ * @typedef {StretchGeometry & {
+ *     key: number,
+ *     convert?: ((pixel: number) => number) | null }} TransparentBltOptions
+ *     `key` is the transparent colour as the source stores it, 0x00RRGGBB;
+ *     `convert` is BitBlt's.
+ */
+
+/**
+ * TransparentBlt: the source stretched over the destination, its pixels of
+ * the key colour left out. Each destination pixel takes one source pixel --
+ * folding a box of them together would make colours that are neither the key
+ * nor the picture -- and only the colour's three bytes are compared: a 32-bit
+ * source's unused byte is not part of it (Wine's test_GdiTransparentBlt).
+ *
+ * @param {TransparentBltOptions} options
+ * @returns {boolean}
+ */
+export function transparentBlt(options){
+    const key = (options.key & 0xffffff) >>> 0;
+    const convert = options.convert ?? null;
+    const dest = options.dest;
+    return stretchEach(options, (x, y, src, left, top)=>{
+        const read = src.read(left, top);
+        if (((read & 0xffffff) >>> 0) !== key)
+        {
+            dest.write(x, y, convert ? convert(read) : read);
+        }
+    });
+}
+
+/**
+ * A channel scaled by an alpha: `value * alpha / 255`, with the rounding
+ * Windows answers with in Wine's test_32bit_ddb.
+ *
+ * @param {number} value @param {number} alpha
+ * @returns {number}
+ */
+const scaled = (value, alpha)=>Math.floor((value * alpha + 127) / 255);
+
+/**
+ * One pixel of AlphaBlend, all four bytes of it, as MSDN gives the sums.
+ *
+ * Without a per-pixel alpha each byte is the source's and the destination's
+ * weighted by the constant alpha. With one the source is premultiplied: its
+ * bytes, its alpha among them, are first scaled by the constant alpha, and
+ * the destination keeps what that alpha leaves of it. A sum past 255 -- a
+ * source that was not premultiplied -- saturates rather than wrapping into
+ * another colour.
+ *
+ * @param {number} source @param {number} destination  0xAARRGGBB.
+ * @param {number} constant  SourceConstantAlpha, 0 to 255.
+ * @param {boolean} perPixel  AC_SRC_ALPHA.
+ * @returns {number}
+ */
+export function blendPixel(source, destination, constant, perPixel){
+    const alpha = perPixel ? scaled(source >>> 24, constant) : constant;
+    let out = 0;
+    for (let shift = 0; shift < 32; shift += 8)
+    {
+        const s = (source >>> shift) & 0xff;
+        const d = (destination >>> shift) & 0xff;
+        out |= (perPixel
+            ? Math.min(255, scaled(s, constant) + scaled(d, 255 - alpha))
+            : Math.floor((s * constant + d * (255 - constant) + 127) / 255)) << shift;
+    }
+    return out >>> 0;
+}
+
+/**
+ * @typedef {StretchGeometry & {
+ *     constantAlpha: number,
+ *     perPixel?: boolean,
+ *     convert?: ((pixel: number) => number) | null }} AlphaBlendOptions
+ *     `constantAlpha` and `perPixel` are the BLENDFUNCTION's SourceConstantAlpha
+ *     and AC_SRC_ALPHA; `convert` is BitBlt's.
+ */
+
+/**
+ * AlphaBlend: the source stretched over the destination and blended into it.
+ * A stretch takes one source pixel per destination pixel whatever the
+ * context's stretch mode, which MSDN says is COLORONCOLOR for this call.
+ *
+ * @param {AlphaBlendOptions} options
+ * @returns {boolean}
+ */
+export function alphaBlend(options){
+    const constant = options.constantAlpha & 0xff;
+    const perPixel = options.perPixel === true;
+    const convert = options.convert ?? null;
+    const dest = options.dest;
+    return stretchEach(options, (x, y, src, left, top)=>{
+        const read = src.read(left, top);
+        dest.write(x, y, blendPixel(convert ? convert(read) : read, dest.read(x, y), constant,
+            perPixel));
+    });
 }

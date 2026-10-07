@@ -21,6 +21,7 @@ import v8 from 'node:v8';
 import vm from 'node:vm';
 import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
+import { waitingParent } from '../../../tools/spawn-program.mjs';
 import {
     HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_DWORD,
 } from './layers/win32/advapi32/registry.js';
@@ -102,12 +103,25 @@ test('a child starts from its parent\'s registry, and the parent keeps its own a
             'InstallDone', REG_DWORD, Uint8Array.of(1, 0, 0, 0));
         /** @type {(number | null)[]} */
         const seenByChild = [];
-        app.on('process-started', ()=>seenByChild.push(readDword(
-            app.registry(), HKEY_LOCAL_MACHINE, 'SOFTWARE\\Vendor\\Game', 'InstallDone')));
+        /** @type {any[]} */
+        const childHives = [];
+        /** @type {any[]} */
+        const childDrives = [];
+        const drives = app.session.runVolume();
+        app.on('process-started', ()=>{
+            childHives.push(app.registry());
+            childDrives.push(app.session.runVolume());
+            seenByChild.push(readDword(
+                app.registry(), HKEY_LOCAL_MACHINE, 'SOFTWARE\\Vendor\\Game', 'InstallDone'));
+        });
 
         await app.run({ timeoutMs: 60000 });
 
         assert.deepEqual(seenByChild, [1, 1], 'each child started with what the parent wrote');
+        assert.ok(childHives.every(each=>each === hive) && app.registry() === hive,
+            'one hive for the run: each child is handed the parent\'s, not a copy');
+        assert.ok(drives && childDrives.length === 2 && childDrives.every(each=>each === drives),
+            'and one volume: each child stands on the parent\'s drives');
         assert.equal(readDword(app.registry(), HKEY_LOCAL_MACHINE, 'SOFTWARE\\Vendor\\Game',
             'InstallDone'), 1, 'and the parent still has it');
         assert.notEqual(readDword(app.registry(), HKEY_CURRENT_USER, 'Software\\Bottlify\\Spawn',
@@ -200,6 +214,44 @@ test('a child beside its parent writes to the run\'s one translation store', { t
         await spawnOn(t);
         assert.equal(opened, 1, 'one store for the run, the children\'s machines included');
     });
+
+test('a process in a worker of its own takes its translations from the run\'s store, and the'
+    + ' next run finds them there', { timeout: 120000 }, async t=>{
+    // Where every process runs in a worker, its first one too, no process
+    // had the store: the system's thread holds its records file, and a worker
+    // opened none of its own. Every run translated everything again.
+    withOrigin(t, createMemoryDirectory());
+    const program = buildExe({
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        code: ({ iat })=>[
+            // ecx = 3000000; eax = 0; do eax = rol(eax + ecx ^ 0x55, 3) while (--ecx)
+            0xb9, ...u32(3000000), 0x31, 0xc0,
+            0x01, 0xc8, 0x35, ...u32(0x55), 0xc1, 0xc0, 0x03, 0x49, 0x75, 0x100 - 13,
+            0x25, ...u32(0x7f), 0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    const run = async()=>{
+        const app = await createApp({ executable: program, imagePath: 'C:\\App\\loop.exe',
+            engine: 'cork', concurrency: 2 });
+        try
+        {
+            const code = await app.run({ timeoutMs: 60000 });
+            const cpu = app.diagnostics().find((/** @type {any} */ table)=>table.name === 'cpu');
+            return { code, cork: /** @type {any} */ (cpu)?.metrics?.cork };
+        }
+        finally
+        {
+            await app.dispose();
+        }
+    };
+    const first = await run();
+    assert.ok(first.cork.cacheMisses > 0, 'the first run looked its regions up, and made them');
+    const second = await run();
+    assert.equal(second.code, first.code);
+    assert.ok(second.cork.cacheHits > 0, `the second took them from the store: ${
+        JSON.stringify({ hits: second.cork.cacheHits, misses: second.cork.cacheMisses })}`);
+    assert.equal(second.cork.cacheMisses, 0);
+});
 
 test('the run\'s translation store keeps its records file open past a child, until the run goes',
     { timeout: 120000 }, async t=>{
@@ -514,6 +566,54 @@ test('a child is the process its parent was told of: GetCurrentProcessId is PROC
         assert.notEqual(told, 0x1000, 'which is not the parent\'s');
     });
 
+test('a child\'s first thread is the thread its parent was told of: GetCurrentThreadId is'
+    + ' PROCESS_INFORMATION\'s', { timeout: 60000 }, async t=>{
+    // An injector or a debugger opens the child's thread by the id it was
+    // handed; the child's own answer has to be that one, and no thread of the
+    // parent's may answer it too -- the run numbers threads as one machine.
+    const parent = buildExe({
+        imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject', 'ExitProcess'] },
+        data: {
+            command: ascii('C:\\App\\child.exe'),
+            startup: [...u32(68), ...new Array(64).fill(0)],
+            info: new Array(16).fill(0),
+        },
+        codeSize: 0x60,
+        code: ({ iat, at })=>[
+            0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+            0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+            0x68, ...u32(at('command')), 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateProcessA')),
+            0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+            // ExitProcess(info.dwThreadId)
+            0xff, 0x35, ...u32(at('info') + 12),
+            0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    const child = buildExe({
+        imports: { 'KERNEL32.dll': ['GetCurrentThreadId', 'ExitProcess'] },
+        code: ({ iat })=>[
+            0xff, 0x15, ...u32(iat('GetCurrentThreadId')),
+            0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    const app = await createApp({
+        executable: parent,
+        imagePath: 'C:\\App\\parent.exe',
+        engine: 'cork',
+        storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
+    });
+    t.after(()=>app.dispose());
+    /** @type {number[]} */
+    const childCodes = [];
+    app.on('process-resumed', (/** @type {any} */ event)=>childCodes.push(event.code >>> 0));
+    const told = (await app.run({ timeoutMs: 30000 })) >>> 0;
+    assert.notEqual(told, 0, 'the parent was handed a thread id');
+    assert.deepEqual(childCodes, [told], 'and the child\'s first thread answers that one');
+    assert.notEqual(told, 1, 'which is not the parent\'s first thread');
+});
+
 /** @param {number} value */
 const le32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 /** @param {string} text */
@@ -593,12 +693,18 @@ function buildOutputChild(){
     });
 }
 
-test('a child writes into the file its parent handed it as its output',
-    { timeout: 120000 }, async t=>{
+for (const [where, options] of /** @type {[string, any][]} */ ([
+    ['in its parent\'s place', {}],
+    ['in a worker of its own', { concurrency: 2, engine: 'cork' }],
+]))
+{
+    test(`a child ${where} writes into the file its parent handed it as its output, moving the`
+        + ' position they share', { timeout: 120000 }, async t=>{
         const app = await createApp({
             executable: buildOutputParent(),
             imagePath: 'C:\\App\\parent.exe',
             files: [{ path: 'C:\\App\\child.exe', bytes: buildOutputChild() }],
+            ...options,
         });
         t.after(()=>app.dispose());
         /** @type {string[]} */
@@ -609,6 +715,7 @@ test('a child writes into the file its parent handed it as its output',
         assert.equal(code, 0x306, 'the file reads "childP": the child first, the parent after');
         assert.equal(console.join('').includes('child'), false, 'nothing went to the console');
     });
+}
 
 test('a child that ran beside its parent is let go once it has exited', { timeout: 120000 },
     async t=>{
@@ -650,3 +757,324 @@ test('a child that ran beside its parent is let go once it has exited', { timeou
         assert.deepEqual(children.map(ref=>ref.deref() === undefined), [true, true],
             'neither machine is held once its process is over');
     });
+
+/**
+ * A parent that starts a child and waits for an event the child sets, then
+ * for the child, and exits with 0x100 + the child's code; and the child,
+ * which sets the parent's event by name and exits with 5.
+ */
+function buildEventPair(){
+    const parent = buildExe({
+        imports: { 'KERNEL32.dll': ['CreateEventA', 'CreateProcessA', 'WaitForSingleObject',
+            'GetExitCodeProcess', 'ExitProcess'] },
+        data: {
+            name: ascii('Ready'),
+            command: ascii('C:\\App\\child.exe'),
+            startup: [...u32(68), ...new Array(64).fill(0)],
+            info: new Array(16).fill(0),
+            event: u32(0),
+            code: u32(0),
+        },
+        codeSize: 0x80,
+        code: ({ iat, at })=>[
+            // event = CreateEventA(NULL, TRUE, FALSE, "Ready")
+            0x68, ...u32(at('name')), 0x6a, 0, 0x6a, 1, 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateEventA')), 0xa3, ...u32(at('event')),
+            // CreateProcessA(0, command, ..., &startup, &info)
+            0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+            0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+            0x68, ...u32(at('command')), 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateProcessA')),
+            // WaitForSingleObject(event, INFINITE): the child sets it
+            0x6a, 0xff, 0xff, 0x35, ...u32(at('event')),
+            0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+            // WaitForSingleObject(info.hProcess, INFINITE)
+            0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+            // GetExitCodeProcess(info.hProcess, &code); ExitProcess(code + 0x100)
+            0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
+            0xa1, ...u32(at('code')), 0x05, ...u32(0x100), 0x50,
+            0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    const child = buildExe({
+        imports: { 'KERNEL32.dll': ['OpenEventA', 'SetEvent', 'ExitProcess'] },
+        data: { name: ascii('Ready') },
+        code: ({ iat, at })=>[
+            // SetEvent(OpenEventA(EVENT_ALL_ACCESS, FALSE, "Ready")); ExitProcess(5)
+            0x68, ...u32(at('name')), 0x6a, 0, 0x68, ...u32(0x1f0003),
+            0xff, 0x15, ...u32(iat('OpenEventA')),
+            0x50, 0xff, 0x15, ...u32(iat('SetEvent')),
+            0x6a, 5, 0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    // The same, but polling the child's exit code without ever waiting: it
+    // never stops having something to run, so only a child running beside it
+    // ever answers.
+    const poller = buildExe({
+        imports: { 'KERNEL32.dll': ['CreateProcessA', 'GetExitCodeProcess', 'ExitProcess'] },
+        data: {
+            command: ascii('C:\\App\\child.exe'),
+            startup: [...u32(68), ...new Array(64).fill(0)],
+            info: new Array(16).fill(0),
+            code: u32(0),
+        },
+        codeSize: 0x80,
+        code: ({ iat, at })=>[
+            0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+            0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+            0x68, ...u32(at('command')), 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateProcessA')),
+            // do GetExitCodeProcess(info.hProcess, &code) while code == STILL_ACTIVE
+            0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
+            0x81, 0x3d, ...u32(at('code')), ...u32(0x103),
+            0x74, 0x100 - 29,
+            // ExitProcess(code + 0x100)
+            0xa1, ...u32(at('code')), 0x05, ...u32(0x100), 0x50,
+            0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    return { parent, poller, child };
+}
+
+test('with concurrency a child runs beside its parent, which goes on: woken by the event the'
+    + ' child sets, then by its exit; or never waiting at all', { timeout: 60000 }, async t=>{
+    const { parent, poller, child } = buildEventPair();
+    /** @param {Uint8Array} executable @param {any} [concurrency] */
+    const run = async(executable, concurrency)=>{
+        const app = await createApp({
+            executable,
+            imagePath: 'C:\\App\\parent.exe',
+            engine: 'cork',
+            ...concurrency ? { concurrency } : {},
+            storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
+        });
+        t.after(()=>app.dispose());
+        return (await app.run({ timeoutMs: 30000 })) >>> 0;
+    };
+    assert.equal(await run(parent, 2), 0x105,
+        'the parent was there when the child set its event, and saw the child exit with 5');
+    assert.equal(await run(poller, 2), 0x105,
+        'a parent that never waits still sees its child run and exit');
+    assert.equal(await run(parent), 0x105,
+        'where one process runs at a time the child runs while its parent waits, and the'
+        + ' parent goes on after it');
+});
+
+test('a child in a worker of its own sets the event its parent named, and the parent wakes',
+    { timeout: 60000 }, async t=>{
+        const { parent, child } = buildEventPair();
+        const app = await createApp({
+            executable: parent,
+            imagePath: 'C:\\App\\parent.exe',
+            engine: 'cork',
+            concurrency: 2,
+            storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
+        });
+        t.after(()=>app.dispose());
+        /** @type {any[]} */
+        const started = [];
+        app.on('process-started', (/** @type {any} */ event)=>started.push(event.worker));
+        assert.equal((await app.run({ timeoutMs: 30000 })) >>> 0, 0x105,
+            'woken by the event the child set across the link, then by its exit with 5');
+        assert.deepEqual(started, [true, true],
+            'the program and its child ran in workers of their own');
+    });
+
+/**
+ * A child that names an event and waits on it, exiting with 7 once it is set;
+ * and its parent, which polls for the name until the child has made it, sets
+ * it, waits for the child and exits with 0x100 + the child's code.
+ */
+/** @param {number} [delay]  milliseconds the parent sleeps before it looks for the event */
+function buildWaitingChild(delay = 0){
+    const parent = buildExe({
+        imports: { 'KERNEL32.dll': ['CreateProcessA', 'OpenEventA', 'Sleep', 'SetEvent',
+            'WaitForSingleObject', 'GetExitCodeProcess', 'ExitProcess'] },
+        data: {
+            name: ascii('Go'),
+            command: ascii('C:\\App\\child.exe'),
+            startup: [...u32(68), ...new Array(64).fill(0)],
+            info: new Array(16).fill(0),
+            code: u32(0),
+        },
+        codeSize: 0x100,
+        code: ({ iat, at })=>[
+            0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+            0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+            0x68, ...u32(at('command')), 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateProcessA')),
+            // Sleep(delay): the child is waiting by the time the parent looks
+            0x68, ...u32(delay), 0xff, 0x15, ...u32(iat('Sleep')),
+            // until OpenEventA(EVENT_ALL_ACCESS, FALSE, "Go") finds it: Sleep(1)
+            0x68, ...u32(at('name')), 0x6a, 0, 0x68, ...u32(0x1f0003),
+            0xff, 0x15, ...u32(iat('OpenEventA')),
+            0x85, 0xc0, 0x75, 0x0a,
+            0x6a, 0x01, 0xff, 0x15, ...u32(iat('Sleep')),
+            0xeb, 0x100 - 32,
+            // SetEvent(eax); WaitForSingleObject(info.hProcess, INFINITE)
+            0x50, 0xff, 0x15, ...u32(iat('SetEvent')),
+            0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+            0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
+            0xa1, ...u32(at('code')), 0x05, ...u32(0x100), 0x50,
+            0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    const child = buildExe({
+        imports: { 'KERNEL32.dll': ['CreateEventA', 'WaitForSingleObject', 'ExitProcess'] },
+        data: { name: ascii('Go') },
+        code: ({ iat, at })=>[
+            // WaitForSingleObject(CreateEventA(NULL, FALSE, FALSE, "Go"), INFINITE)
+            0x68, ...u32(at('name')), 0x6a, 0, 0x6a, 0, 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateEventA')),
+            0x6a, 0xff, 0x50, 0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+            0x6a, 7, 0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    return { parent, child };
+}
+
+for (const delay of [0, 1000])
+{
+    test(`a child in a worker of its own waits on the event it named until its parent finds and`
+        + ` sets it${delay ? ', however long that takes' : ''}`, { timeout: 60000 }, async t=>{
+        const { parent, child } = buildWaitingChild(delay);
+        const app = await createApp({
+            executable: parent,
+            imagePath: 'C:\\App\\parent.exe',
+            engine: 'cork',
+            concurrency: 2,
+            storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
+        });
+        t.after(()=>app.dispose());
+        assert.equal((await app.run({ timeoutMs: 30000 })) >>> 0, 0x107,
+            'the child woke on its parent\'s SetEvent and exited with 7');
+    });
+}
+
+/**
+ * A parent that starts C:\\App\\a.exe and C:\\App\\b.exe one after the other and
+ * waits for both; a.exe sleeps a while, so b.exe starts while it still runs.
+ */
+function buildTwoChildren(){
+    const parent = buildExe({
+        imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject', 'ExitProcess'] },
+        data: {
+            first: ascii('C:\\App\\a.exe'),
+            second: ascii('C:\\App\\b.exe'),
+            startup: [...u32(68), ...new Array(64).fill(0)],
+            infoA: new Array(16).fill(0),
+            infoB: new Array(16).fill(0),
+        },
+        codeSize: 0x80,
+        code: ({ iat, at })=>{
+            /** @param {string} command @param {string} info */
+            const start = (command, info)=>[
+                0x68, ...u32(at(info)), 0x68, ...u32(at('startup')),
+                0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+                0x68, ...u32(at(command)), 0x6a, 0,
+                0xff, 0x15, ...u32(iat('CreateProcessA')),
+            ];
+            /** @param {string} info */
+            const wait = info=>[0x6a, 0xff, 0xff, 0x35, ...u32(at(info)),
+                0xff, 0x15, ...u32(iat('WaitForSingleObject'))];
+            return [...start('first', 'infoA'), ...start('second', 'infoB'),
+                ...wait('infoA'), ...wait('infoB'),
+                0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess'))];
+        },
+    });
+    const sleeper = buildExe({
+        imports: { 'KERNEL32.dll': ['Sleep', 'ExitProcess'] },
+        code: ({ iat })=>[0x68, ...u32(1500), 0xff, 0x15, ...u32(iat('Sleep')),
+            0x6a, 1, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+    });
+    const quick = buildExe({
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        code: ({ iat })=>[0x6a, 2, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+    });
+    return { parent, sleeper, quick };
+}
+
+test('a child past the run\'s concurrency runs beside its parent, in its parent\'s worker',
+    { timeout: 60000 }, async t=>{
+        const { parent, sleeper, quick } = buildTwoChildren();
+        const app = await createApp({
+            executable: parent,
+            imagePath: 'C:\\App\\parent.exe',
+            engine: 'cork',
+            concurrency: 2,
+            storage: { load: async()=>({ files: [{ path: 'C:\\App\\a.exe', bytes: sleeper },
+                { path: 'C:\\App\\b.exe', bytes: quick }] }) },
+        });
+        t.after(()=>app.dispose());
+        /** @type {[string, boolean][]} */
+        const started = [];
+        app.on('process-started', (/** @type {any} */ event)=>
+            started.push([event.image, event.worker === true]));
+        assert.equal(await app.run({ timeoutMs: 30000 }), 0);
+        assert.deepEqual(started, [['C:\\App\\parent.exe', true], ['C:\\App\\a.exe', true],
+            ['C:\\App\\b.exe', false]],
+        'two at once: the program and its first child each in a worker, the second child beside'
+        + ' the program, in its worker');
+    });
+
+for (const [concurrency, across] of /** @type {[2 | 4, boolean][]} */ ([[4, true], [2, false]]))
+{
+    test(`a child's own child runs in a worker of its own while the run has room (concurrency`
+        + ` ${concurrency}), and its code reaches the parent through it`,
+    { timeout: 60000 }, async t=>{
+        const leaf = buildExe({
+            imports: { 'KERNEL32.dll': ['ExitProcess'] },
+            code: ({ iat })=>[0x6a, 7, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+        });
+        const app = await createApp({
+            executable: waitingParent('C:\\App\\middle.exe'),
+            imagePath: 'C:\\App\\root.exe',
+            engine: 'cork',
+            concurrency,
+            storage: { load: async()=>({ files: [
+                { path: 'C:\\App\\middle.exe', bytes: waitingParent('C:\\App\\leaf.exe') },
+                { path: 'C:\\App\\leaf.exe', bytes: leaf }] }) },
+        });
+        t.after(()=>app.dispose());
+        /** @type {[string, boolean][]} */
+        const started = [];
+        app.on('process-started', (/** @type {any} */ event)=>
+            started.push([event.image, event.worker === true]));
+        assert.equal(await app.run({ timeoutMs: 30000 }), 7);
+        assert.deepEqual(started, [['C:\\App\\root.exe', true],
+            ['C:\\App\\middle.exe', true], ['C:\\App\\leaf.exe', across]], across
+            ? 'each in a worker of its own'
+            : 'the second past the run\'s room, beside its parent');
+    });
+}
+
+test('concurrency asked for where memory cannot be shared falls back to one process at a time,'
+    + ' and says so', { timeout: 60000 }, async t=>{
+    const { parent, child } = buildEventPair();
+    const app = await createApp({
+        executable: parent,
+        imagePath: 'C:\\App\\parent.exe',
+        engine: 'cork',
+        mode: 'compatible',
+        concurrency: 4,
+        storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
+    });
+    t.after(()=>app.dispose());
+    /** @type {any[]} */
+    const fallbacks = [];
+    app.on('fallback', (/** @type {any} */ said)=>fallbacks.push(said));
+    assert.equal((await app.run({ timeoutMs: 30000 })) >>> 0, 0x105,
+        'the child ran in its parent\'s place');
+    assert.equal(fallbacks.length, 1);
+    assert.deepEqual([fallbacks[0].mode, fallbacks[0].concurrency, fallbacks[0].asked],
+        ['compatible', 1, { mode: 'compatible', concurrency: 4 }]);
+    assert.match(fallbacks[0].detail, /concurrency 4 is not allowed here/);
+    const metrics = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'app')
+        ?.metrics;
+    assert.deepEqual([metrics.mode, metrics.concurrency], ['compatible', 1]);
+});

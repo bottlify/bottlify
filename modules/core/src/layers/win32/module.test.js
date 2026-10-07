@@ -306,6 +306,23 @@ test('shfolder is the shell folder call under the name a program linked against'
     await win32Module.dispose();
 });
 
+test('msimg32 is gdi32\'s blending under the name a program linked against', async()=>{
+    // Windows' msimg32 forwards its drawing exports to gdi32: a program that
+    // imported AlphaBlend from it gets gdi32's implementation, not a missing
+    // library and not a second copy.
+    const api = await win32Module.create({}, stubHost());
+    const libraries = /** @type {Record<string, any>} */ (api.libraries());
+
+    for (const [name, target] of [['AlphaBlend', 'GdiAlphaBlend'],
+        ['GradientFill', 'GdiGradientFill'], ['TransparentBlt', 'GdiTransparentBlt']])
+    {
+        assert.ok(libraries['GDI32.dll'][target], `gdi32 has ${target}`);
+        assert.equal(libraries['MSIMG32.dll'][name], libraries['GDI32.dll'][target], name);
+    }
+
+    await win32Module.dispose();
+});
+
 test('comctl32\'s _TrackMouseEvent is user32\'s TrackMouseEvent', async()=>{
     // comctl32 documents _TrackMouseEvent as calling TrackMouseEvent where the
     // system has one. A query shows it: user32 fills in what it tracks --

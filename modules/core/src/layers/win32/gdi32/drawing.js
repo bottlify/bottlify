@@ -172,8 +172,30 @@ const DIB_BIT_COUNTS = new Set([1, 4, 8, 16, 24, 32]);
 /** The two ways an arc can run. */
 const AD_COUNTERCLOCKWISE = 1;
 const AD_CLOCKWISE = 2;
-/** The raster operation that copies the source as it is. */
-const SRCCOPY = 0x00cc0020;
+/** ExtFloodFill's types: up to a border of the colour, or over a surface of it. */
+const FLOODFILLBORDER = 0;
+const FLOODFILLSURFACE = 1;
+/**
+ * A BLENDFUNCTION's one operation, and the AlphaFormat that says the source
+ * carries a premultiplied alpha in each pixel.
+ */
+const AC_SRC_OVER = 0;
+const AC_SRC_ALPHA = 1;
+/**
+ * GradientFill's last mode, triangles; the two before it are rectangles
+ * shaded across and shaded down.
+ */
+const GRADIENT_FILL_TRIANGLE = 2;
+/** A TRIVERTEX: LONG x and y, then COLOR16 red, green, blue and alpha. */
+const TRIVERTEX_SIZE = 16;
+
+/**
+ * A TRIVERTEX as the drawing layer takes one: the point on the device, each
+ * channel its sixteen bits.
+ *
+ * @typedef {{ x: number, y: number, red: number, green: number, blue: number,
+ *     alpha: number }} TriVertex
+ */
 const DEFAULT_BATCH_LIMIT = 20;
 /** The static colours are the system's: GetSystemPaletteUse. */
 const SYSPAL_STATIC = 1;
@@ -382,8 +404,8 @@ function masksFor(shape, bitCount){
 
 /**
  * The points of an arc along the ellipse a rectangle bounds, counterclockwise
- * on the screen from the start radial to the end radial, a segment for about
- * every two pixels of the way.
+ * on the screen from where the start radial meets it to where the end radial
+ * does, a segment for about every two pixels of the way.
  *
  * @param {number} left @param {number} top @param {number} right @param {number} bottom
  * @param {number} xStart @param {number} yStart @param {number} xEnd @param {number} yEnd
@@ -394,9 +416,11 @@ export function arcPoints(left, top, right, bottom, xStart, yStart, xEnd, yEnd){
     const cy = (top + bottom) / 2;
     const rx = Math.abs(right - left) / 2;
     const ry = Math.abs(bottom - top) / 2;
-    // Screen y grows downward, so counterclockwise is the angle of -y.
-    const from = Math.atan2(cy - yStart, xStart - cx);
-    let to = Math.atan2(cy - yEnd, xEnd - cx);
+    // Screen y grows downward, so counterclockwise is the angle of -y. A
+    // radial meets the ellipse at the parameter whose point lies along it,
+    // which is not the radial's own angle unless the ellipse is a circle.
+    const from = Math.atan2((cy - yStart) * rx, (xStart - cx) * ry);
+    let to = Math.atan2((cy - yEnd) * rx, (xEnd - cx) * ry);
     if (to <= from)
     {
         to += 2 * Math.PI;
@@ -472,6 +496,65 @@ export function bezierPoints(start, first, second, end){
     }
     return points;
 }
+
+/**
+ * The points LineDDA hands its callback: one for each step along the longer
+ * axis, the last point left out, the shorter axis at the nearest whole
+ * position to the true line -- a half rounded back towards the start. Those
+ * are the points Windows answers with in Wine's test_linedda, in every
+ * octant. The position is kept as a running quotient and remainder, so no
+ * product of two coordinates is ever formed and none can outgrow a double.
+ *
+ * @param {number} xStart @param {number} yStart @param {number} xEnd @param {number} yEnd
+ * @returns {Generator<{ x: number, y: number }>}
+ */
+export function* lineDdaPoints(xStart, yStart, xEnd, yEnd){
+    const dx = xEnd - xStart;
+    const dy = yEnd - yStart;
+    const across = Math.abs(dx) >= Math.abs(dy);
+    const major = Math.max(Math.abs(dx), Math.abs(dy));
+    const minor = Math.min(Math.abs(dx), Math.abs(dy));
+    const stepX = Math.sign(dx);
+    const stepY = Math.sign(dy);
+    // The shorter axis is at floor((2 * step * minor + major - 1) / (2 * major)).
+    let offset = 0;
+    let remainder = major - 1;
+    for (let step = 0; step < major; step++)
+    {
+        yield across
+            ? { x: xStart + stepX * step, y: yStart + stepY * offset }
+            : { x: xStart + stepX * offset, y: yStart + stepY * step };
+        remainder += 2 * minor;
+        while (remainder >= 2 * major)
+        {
+            remainder -= 2 * major;
+            offset++;
+        }
+    }
+}
+
+/**
+ * Whether three corners make a triangle GradientFill refuses: on one line
+ * and not all one point. Windows takes a triangle that is a single point --
+ * and draws nothing -- but fails the call over one that is a line, which is
+ * what Wine's test_GdiGradientFill finds.
+ *
+ * @param {{ x: number, y: number }} a @param {{ x: number, y: number }} b
+ * @param {{ x: number, y: number }} c
+ */
+const isFlatTriangle = (a, b, c)=>(b.x - a.x) * (c.y - a.y) === (c.x - a.x) * (b.y - a.y)
+    && !(a.x === b.x && b.x === c.x && a.y === b.y && b.y === c.y);
+
+/**
+ * Whether a bitmap's pixels carry an alpha AlphaBlend can read: 32 bits, in
+ * the 8-8-8 layout a BI_RGB DIB has -- BI_BITFIELDS naming that layout is the
+ * same thing, and any other masks are not (Wine's test_GdiAlphaBlend).
+ *
+ * @param {any} shape  What the DC reports as its surface.
+ */
+const hasAlphaChannel = shape=>shape.bitCount === 32 && (shape.compression !== BI_BITFIELDS
+    || [0xff0000, 0x00ff00, 0x0000ff].every((mask, index)=>
+        (shape.bitfields?.[index] >>> 0) === mask));
 
 /**
  * Whether a PolyDraw type array is one Windows draws: every entry a move, a
@@ -578,6 +661,20 @@ export function createDrawingFunctions(
     };
 
     /**
+     * A rectangle a clip call names in logical units, as the device has it:
+     * the clip is kept in device units, as a region is.
+     *
+     * @param {any} dc @param {number} left @param {number} top
+     * @param {number} right @param {number} bottom
+     */
+    const deviceArea = (dc, left, top, right, bottom)=>{
+        const a = toDevice(dc, { x: left | 0, y: top | 0 });
+        const b = toDevice(dc, { x: right | 0, y: bottom | 0 });
+        return { left: Math.min(a.x, b.x), top: Math.min(a.y, b.y),
+            right: Math.max(a.x, b.x), bottom: Math.max(a.y, b.y) };
+    };
+
+    /**
      * Binds a device context to its pixels, once, and answers with the drawing
      * context. Null when this build cannot draw or this DC has no surface --
      * both of which the caller must turn into a truthful failure.
@@ -638,7 +735,173 @@ export function createDrawingFunctions(
         {
             services.presentDesktop?.();
         }
-        return interfaces;
+        return mapsAway(dc) ? mappedView(dc, interfaces) : interfaces;
+    };
+
+    /**
+     * Whether a DC's logical space is not its device's: an origin moved, an
+     * extent scaled, a layout mirrored. Most never are, and are drawn into
+     * as they are.
+     *
+     * @param {any} dc
+     */
+    const mapsAway = dc=>{
+        const near = toDevice(dc, { x: 0, y: 0 });
+        const far = toDevice(dc, { x: 4096, y: 4096 });
+        return near.x !== 0 || near.y !== 0 || far.x !== 4096 || far.y !== 4096;
+    };
+
+    /**
+     * The drawing context as a program addresses it through a mapped DC:
+     * every point, rectangle and size a drawing call is given taken from the
+     * DC's logical space to its device's, as LPtoDP maps it, and a blit's
+     * source from its own DC's. A framework paints a control that has no
+     * window of its own -- an image, a label -- into its parent's DC with
+     * the window origin moved to the control's corner; drawn unmapped, it
+     * lands at the parent's corner. The calls that map for themselves
+     * (AlphaBlend, TransparentBlt, GradientFill, SetDIBitsToDevice) and the
+     * clip, which is kept in device units, reach the context as they are.
+     *
+     * @param {any} dc @param {any} interfaces
+     */
+    const mappedView = (dc, interfaces)=>{
+        /** @param {number} x @param {number} y */
+        const point = (x, y)=>toDevice(dc, { x: x | 0, y: y | 0 });
+        /** @param {{ left: number, top: number, right: number, bottom: number }} rect */
+        const area = rect=>{
+            const a = point(rect.left, rect.top);
+            const b = point(rect.right, rect.bottom);
+            return { left: Math.min(a.x, b.x), top: Math.min(a.y, b.y),
+                right: Math.max(a.x, b.x), bottom: Math.max(a.y, b.y) };
+        };
+        // A width and height are the far corner's distance, sign and all: a
+        // negative extent is a mirrored stretch, which a mapping can make.
+        /** @param {number} x @param {number} y @param {number} width @param {number} height */
+        const box = (x, y, width, height)=>{
+            const a = point(x, y);
+            const b = point((x | 0) + (width | 0), (y | 0) + (height | 0));
+            return [a.x, a.y, b.x - a.x, b.y - a.y];
+        };
+        /**
+         * A call that draws from the current position and may move it.
+         *
+         * @template T @param {() => T} drawn @returns {T}
+         */
+        const through = drawn=>{
+            const logical = { x: dc.position?.x | 0, y: dc.position?.y | 0 };
+            const start = point(logical.x, logical.y);
+            dc.position = { ...start };
+            try
+            {
+                return drawn();
+            }
+            finally
+            {
+                const moved = dc.position ?? start;
+                dc.position = { x: logical.x + (moved.x - start.x),
+                    y: logical.y + (moved.y - start.y) };
+            }
+        };
+        /** @param {number} source @param {number} x @param {number} y */
+        const from = (source, x, y)=>{
+            const other = dcOf(source);
+            return other ? toDevice(other, { x: x | 0, y: y | 0 }) : { x: x | 0, y: y | 0 };
+        };
+        /** @type {Record<string, (...args: any[]) => any>} */
+        const calls = {
+            setPixel: (hdc, x, y, color)=>{
+                const at = point(x, y);
+                return interfaces.setPixel(hdc, at.x, at.y, color);
+            },
+            getPixel: (hdc, x, y)=>{
+                const at = point(x, y);
+                return interfaces.getPixel(hdc, at.x, at.y);
+            },
+            bitBlt: (hdc, x, y, width, height, source, srcX, srcY, rop)=>{
+                const [dx, dy, dw, dh] = box(x, y, width, height);
+                const at = from(source, srcX, srcY);
+                return interfaces.bitBlt(hdc, dx, dy, dw, dh, source, at.x, at.y, rop);
+            },
+            stretchBlt: (hdc, x, y, width, height, source, srcX, srcY, srcWidth, srcHeight,
+                rop)=>
+            {
+                const [dx, dy, dw, dh] = box(x, y, width, height);
+                const other = dcOf(source);
+                const [sx, sy, sw, sh] = other
+                    ? (()=>{
+                        const a = toDevice(other, { x: srcX | 0, y: srcY | 0 });
+                        const b = toDevice(other, { x: (srcX | 0) + (srcWidth | 0),
+                            y: (srcY | 0) + (srcHeight | 0) });
+                        return [a.x, a.y, b.x - a.x, b.y - a.y];
+                    })()
+                    : [srcX, srcY, srcWidth, srcHeight];
+                return interfaces.stretchBlt(hdc, dx, dy, dw, dh, source, sx, sy, sw, sh, rop);
+            },
+            maskBlt: (hdc, x, y, width, height, source, srcX, srcY, mask, maskX, maskY, rop)=>{
+                const [dx, dy, dw, dh] = box(x, y, width, height);
+                const at = from(source, srcX, srcY);
+                return interfaces.maskBlt(hdc, dx, dy, dw, dh, source, at.x, at.y, mask,
+                    maskX, maskY, rop);
+            },
+            patBlt: (hdc, x, y, width, height, rop)=>{
+                const [dx, dy, dw, dh] = box(x, y, width, height);
+                return interfaces.patBlt(hdc, dx, dy, dw, dh, rop);
+            },
+            floodFill: (hdc, x, y, color, type)=>{
+                const at = point(x, y);
+                return interfaces.floodFill(hdc, at.x, at.y, color, type);
+            },
+            fillRect: (hdc, rect, brush)=>interfaces.fillRect(hdc, area(rect), brush),
+            frameRect: (hdc, rect, brush)=>interfaces.frameRect(hdc, area(rect), brush),
+            invertRect: (hdc, rect, halftone)=>interfaces.invertRect(hdc, area(rect), halftone),
+            rectangle: (hdc, left, top, right, bottom)=>{
+                const mapped = area({ left, top, right, bottom });
+                return interfaces.rectangle(hdc, mapped.left, mapped.top, mapped.right,
+                    mapped.bottom);
+            },
+            ellipse: (hdc, left, top, right, bottom)=>{
+                const mapped = area({ left, top, right, bottom });
+                return interfaces.ellipse(hdc, mapped.left, mapped.top, mapped.right,
+                    mapped.bottom);
+            },
+            polygon: (hdc, points, fillMode)=>interfaces.polygon(hdc,
+                points.map((/** @type {{ x: number, y: number }} */ at)=>point(at.x, at.y)),
+                fillMode),
+            // The current position is the DC's own, in its logical units --
+            // MoveToEx sets it and GetCurrentPositionEx reads it -- and the
+            // context draws from it: for the length of a call it stands in
+            // device units, and afterwards it is logical again, moved by as
+            // much as the call moved it.
+            moveToEx: (hdc, x, y)=>{
+                const previous = { ...dc.position };
+                dc.position = { x: x | 0, y: y | 0 };
+                return previous;
+            },
+            lineTo: (hdc, x, y)=>through(()=>{
+                const at = point(x, y);
+                return interfaces.lineTo(hdc, at.x, at.y);
+            }),
+            textOutA: (hdc, x, y, text)=>through(()=>{
+                const at = point(x, y);
+                return interfaces.textOutA(hdc, at.x, at.y, text);
+            }),
+            extTextOutA: (hdc, x, y, flags, rect, text, dx)=>through(()=>{
+                const at = point(x, y);
+                return interfaces.extTextOutA(hdc, at.x, at.y, flags, rect ? area(rect) : rect,
+                    text, dx);
+            }),
+            drawPicture: (hdc, x, y, picture, width = picture.width, height = picture.height)=>{
+                const [dx, dy, dw, dh] = box(x, y, width, height);
+                return interfaces.drawPicture(hdc, dx, dy, picture, dw, dh);
+            },
+            stretchDIBits: (hdc, request)=>{
+                const [dx, dy, dw, dh] = box(request.xDest, request.yDest, request.destWidth,
+                    request.destHeight);
+                return interfaces.stretchDIBits(hdc, { ...request, xDest: dx, yDest: dy,
+                    destWidth: dw, destHeight: dh });
+            },
+        };
+        return Object.assign(Object.create(interfaces), calls);
     };
 
     /**
@@ -768,6 +1031,58 @@ export function createDrawingFunctions(
     });
 
     /**
+     * A logical rectangle on the device: its corner mapped, and its extents
+     * the distance between the mapped corners, signed -- a mapping that
+     * flips an axis flips the extent.
+     *
+     * @param {any} dc @param {number} x @param {number} y @param {number} width
+     * @param {number} height
+     */
+    const deviceRect = (dc, x, y, width, height)=>{
+        const corner = toDevice(dc, { x: x | 0, y: y | 0 });
+        const far = toDevice(dc, { x: (x | 0) + (width | 0), y: (y | 0) + (height | 0) });
+        return { x: corner.x, y: corner.y, width: far.x - corner.x, height: far.y - corner.y };
+    };
+
+    /**
+     * The pixels a signed device rectangle covers, as a rectangle.
+     *
+     * @param {{ x: number, y: number, width: number, height: number }} rect
+     */
+    const spanOf = ({ x, y, width, height })=>({
+        left: Math.min(x, x + width), top: Math.min(y, y + height),
+        right: Math.max(x, x + width), bottom: Math.max(y, y + height),
+    });
+
+    /**
+     * How far a DC's pixels reach: its window's part of the screen, the
+     * screen, or the bitmap selected into it.
+     *
+     * @param {any} dc
+     * @returns {{ width: number, height: number }}
+     */
+    const extentOf = dc=>(dc.bounds
+        ? { width: dc.bounds.right - dc.bounds.left, height: dc.bounds.bottom - dc.bounds.top }
+        : surfaceOf(dc));
+
+    /**
+     * A TRIVERTEX out of guest memory, its point mapped to the device.
+     *
+     * @param {any} dc @param {number} address
+     * @returns {TriVertex}
+     */
+    const readVertex = (dc, address)=>{
+        const bytes = host.readMemory(address, TRIVERTEX_SIZE);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, TRIVERTEX_SIZE);
+        const point = toDevice(dc, { x: view.getInt32(0, true), y: view.getInt32(4, true) });
+        return {
+            x: point.x, y: point.y,
+            red: view.getUint16(8, true), green: view.getUint16(10, true),
+            blue: view.getUint16(12, true), alpha: view.getUint16(14, true),
+        };
+    };
+
+    /**
      * The clip a DC is drawing under: what was last selected, or the whole
      * surface when nothing was. Kept on the DC because the drawing layer
      * holds the rectangle and answers no question about it.
@@ -885,18 +1200,58 @@ export function createDrawingFunctions(
     const outside = (area, holes)=>holes.reduce((rest, hole)=>subtractFromArea(rest, hole), area);
 
     /**
-     * Arc's outline in the DC's arc direction, from the start radial's end of
-     * it to the end radial's.
+     * The rectangle an arc's ellipse lies in, whichever way round its corners
+     * were given: the one Ellipse fills, its right and bottom edges left out
+     * (Wine's test_arcs draws nothing on them).
+     *
+     * @param {number[]} box  left, top, right, bottom.
+     */
+    const ellipseBox = ([left, top, right, bottom])=>({
+        left: Math.min(left | 0, right | 0),
+        top: Math.min(top | 0, bottom | 0),
+        right: Math.max(left | 0, right | 0) - 1,
+        bottom: Math.max(top | 0, bottom | 0) - 1,
+    });
+
+    /**
+     * An arc's outline in the DC's arc direction, from the start radial's end
+     * of it to the end radial's: Arc's, ArcTo's, and the curved side of Chord
+     * and Pie.
      *
      * @param {any} dc @param {number[]} box  left, top, right, bottom, then the radials.
      */
-    const directedArc = (dc, [left, top, right, bottom, xStart, yStart, xEnd, yEnd])=>(
+    const directedArc = (dc, box)=>{
+        const { left, top, right, bottom } = ellipseBox(box);
+        const [xStart, yStart, xEnd, yEnd] = box.slice(4).map(value=>value | 0);
         // Clockwise is the counterclockwise arc from the end radial back.
-        dc?.arcDirection === AD_CLOCKWISE
-            ? arcPoints(left | 0, top | 0, right | 0, bottom | 0,
-                xEnd | 0, yEnd | 0, xStart | 0, yStart | 0).reverse()
-            : arcPoints(left | 0, top | 0, right | 0, bottom | 0,
-                xStart | 0, yStart | 0, xEnd | 0, yEnd | 0));
+        return dc?.arcDirection === AD_CLOCKWISE
+            ? arcPoints(left, top, right, bottom, xEnd, yEnd, xStart, yStart).reverse()
+            : arcPoints(left, top, right, bottom, xStart, yStart, xEnd, yEnd);
+    };
+
+    /**
+     * Chord and Pie: the arc closed into a figure -- by its chord, or through
+     * the ellipse's centre -- filled with the brush and outlined with the
+     * pen. A rectangle with no inside has no ellipse, and nothing is drawn.
+     *
+     * @param {number[]} args  hdc, the rectangle, the two radials.
+     * @param {boolean} pie
+     */
+    const closedArc = ([handle, ...box], pie)=>{
+        const interfaces = bound(handle);
+        if (!interfaces)
+        {
+            return 0;
+        }
+        const { left, top, right, bottom } = ellipseBox(box);
+        if (right < left || bottom < top)
+        {
+            return 1;
+        }
+        const points = directedArc(dcOf(handle), box);
+        const centre = { x: Math.round((left + right) / 2), y: Math.round((top + bottom) / 2) };
+        return interfaces.polygon(handle >>> 0, pie ? [centre, ...points] : points) ? 1 : 0;
+    };
 
     /**
      * Lines from the current position through each point, which leaves the
@@ -954,6 +1309,43 @@ export function createDrawingFunctions(
         },
 
         /**
+         * BOOL MaskBlt(HDC hdcDest, int xDest, int yDest, int width, int height,
+         *   HDC hdcSrc, int xSrc, int ySrc, HBITMAP hbmMask, int xMask, int yMask,
+         *   DWORD rop)
+         *
+         * BitBlt with a monochrome mask laid over the destination from
+         * (xMask, yMask): where its bit is 1 the foreground operation applies,
+         * the ROP3 in the rop's third byte, and where it is 0 the background
+         * one in its high byte, as MAKEROP4 packs them. No mask is BitBlt with
+         * the foreground operation. A mask of any other depth is refused, as
+         * MSDN says it is an error.
+         */
+        MaskBlt: {
+            argBytes: 48,
+            /** @param {number[]} args */
+            handler: ([dest, x, y, cx, cy, source, x1, y1, mask, xMask, yMask, rop])=>{
+                if ((mask >>> 0) === 0)
+                {
+                    return functions.BitBlt.handler([dest, x, y, cx, cy, source, x1, y1,
+                        (rop & 0x00ffffff) >>> 0]);
+                }
+                const record = objects.get(mask);
+                const interfaces = bound(dest);
+                if (!interfaces || record?.type !== 'bitmap' || record.attributes.bitCount !== 1)
+                {
+                    return 0;
+                }
+                if ((source >>> 0) !== 0 && !bound(source))
+                {
+                    return 0;
+                }
+                return lend(mask >>> 0, bits=>(bound(bits, false)
+                    && interfaces.maskBlt(dest >>> 0, x | 0, y | 0, cx | 0, cy | 0, source >>> 0,
+                        x1 | 0, y1 | 0, bits >>> 0, xMask | 0, yMask | 0, rop >>> 0) ? 1 : 0));
+            },
+        },
+
+        /**
          * BOOL PatBlt(HDC hdc, int x, int y, int w, int h, DWORD rop)
          *
          * A blit with no source: the raster operation combines the brush with
@@ -992,23 +1384,162 @@ export function createDrawingFunctions(
          * BOOL GdiTransparentBlt(HDC hdcDest, int xDest, int yDest, int wDest, int hDest,
          *   HDC hdcSrc, int xSrc, int ySrc, int wSrc, int hSrc, UINT crTransparent)
          *
-         * A stretch that leaves the key colour's pixels out. The drawing
-         * layer copies every pixel, the key's too, so the copy is made whole
-         * and that is reported; a negative size is refused, as it is there.
+         * The source stretched over the destination, its pixels of the key
+         * colour left out -- what msimg32's TransparentBlt is. As AlphaBlend,
+         * its sibling there, both rectangles are logical and mapped through
+         * their own DC, and the source must then lie inside the source's
+         * pixels. A negative extent, or a source rectangle reaching outside
+         * the source, fails the call; MSDN names no error for either, and
+         * none is set.
          */
         GdiTransparentBlt: {
             argBytes: 44,
             /** @param {number[]} args */
-            handler: ([dest, x, y, cx, cy, source, x1, y1, cx1, cy1])=>{
-                const interfaces = bound(dest);
-                if (!interfaces || !bound(source) || (cx | 0) < 0 || (cy | 0) < 0
-                    || (cx1 | 0) < 0 || (cy1 | 0) < 0)
+            handler: ([dest, x, y, cx, cy, source, x1, y1, cx1, cy1, key])=>{
+                const dc = dcOf(dest);
+                const from = dcOf(source);
+                if (!dc || !from || (cx | 0) < 0 || (cy | 0) < 0 || (cx1 | 0) < 0
+                    || (cy1 | 0) < 0)
                 {
                     return 0;
                 }
-                host.divergence?.('GdiTransparentBlt', 'the key colour is copied too');
-                return interfaces.stretchBlt(dest >>> 0, x | 0, y | 0, cx | 0, cy | 0,
-                    source >>> 0, x1 | 0, y1 | 0, cx1 | 0, cy1 | 0, SRCCOPY) ? 1 : 0;
+                const target = deviceRect(dc, x, y, cx, cy);
+                const read = deviceRect(from, x1, y1, cx1, cy1);
+                const within = extentOf(from);
+                const box = spanOf(read);
+                if (box.left < 0 || box.top < 0 || box.right > within.width
+                    || box.bottom > within.height)
+                {
+                    return 0;
+                }
+                const interfaces = bound(dest);
+                if (!interfaces || !bound(source))
+                {
+                    return 0;
+                }
+                return interfaces.transparentBlt(dest >>> 0, target.x, target.y, target.width,
+                    target.height, source >>> 0, read.x, read.y, read.width, read.height,
+                    key >>> 0) ? 1 : 0;
+            },
+        },
+
+        /**
+         * BOOL GdiAlphaBlend(HDC hdcDest, int xDest, int yDest, int wDest, int hDest,
+         *   HDC hdcSrc, int xSrc, int ySrc, int wSrc, int hSrc, BLENDFUNCTION blend)
+         *
+         * The source stretched over the destination and blended into it. The
+         * BLENDFUNCTION comes by value, its four bytes in one argument:
+         * BlendOp, BlendFlags, SourceConstantAlpha, AlphaFormat.
+         *
+         * Both rectangles are logical and mapped through their own DC; the
+         * source must then lie inside the source's pixels. What Wine's
+         * test_GdiAlphaBlend finds Windows refuses with
+         * ERROR_INVALID_PARAMETER: a negative extent in either rectangle --
+         * one the mapping would flip is still drawn, mirrored -- a source
+         * rectangle not inside the source, the two rectangles overlapping in
+         * one DC, and AC_SRC_ALPHA from a source with no alpha byte. So is a
+         * BLENDFUNCTION that MSDN says cannot be: another operation, flags
+         * that are not zero, a format with other bits. A null source fails
+         * without a reason.
+         */
+        GdiAlphaBlend: {
+            argBytes: 44,
+            /** @param {number[]} args */
+            handler: ([dest, x, y, cx, cy, source, x1, y1, cx1, cy1, blend])=>{
+                const dc = dcOf(dest);
+                const from = dcOf(source);
+                if (!dc || !from)
+                {
+                    return 0;
+                }
+                const format = blend >>> 24;
+                if ((blend & 0xff) !== AC_SRC_OVER || ((blend >>> 8) & 0xff) !== 0
+                    || (format & ~AC_SRC_ALPHA) !== 0
+                    || (cx | 0) < 0 || (cy | 0) < 0 || (cx1 | 0) < 0 || (cy1 | 0) < 0)
+                {
+                    return refuse(ERROR_INVALID_PARAMETER);
+                }
+                const target = deviceRect(dc, x, y, cx, cy);
+                const read = deviceRect(from, x1, y1, cx1, cy1);
+                const within = extentOf(from);
+                const box = spanOf(read);
+                const overlapping = (dest >>> 0) === (source >>> 0)
+                    && !isEmpty(intersect(spanOf(target), box));
+                if (box.left < 0 || box.top < 0 || box.right > within.width
+                    || box.bottom > within.height || overlapping
+                    || (format === AC_SRC_ALPHA && !hasAlphaChannel(surfaceOf(from))))
+                {
+                    return refuse(ERROR_INVALID_PARAMETER);
+                }
+                const interfaces = bound(dest);
+                if (!interfaces || !bound(source))
+                {
+                    return 0;
+                }
+                return interfaces.alphaBlend(dest >>> 0, target.x, target.y, target.width,
+                    target.height, source >>> 0, read.x, read.y, read.width, read.height,
+                    { constantAlpha: (blend >>> 16) & 0xff, perPixel: format === AC_SRC_ALPHA })
+                    ? 1 : 0;
+            },
+        },
+
+        /**
+         * BOOL GdiGradientFill(HDC hdc, PTRIVERTEX pVertex, ULONG nVertex,
+         *   PVOID pMesh, ULONG nMesh, ULONG ulMode)
+         *
+         * Rectangles shaded across or down, or triangles shaded between their
+         * corners; the mesh is GRADIENT_RECTs or GRADIENT_TRIANGLEs of vertex
+         * indices, and the vertices are logical points mapped to the device.
+         * As Wine's test_GdiGradientFill finds: a context there is not, no
+         * vertices, no mesh or an unknown mode is ERROR_INVALID_PARAMETER; an
+         * index past the vertices, or a triangle that is a line, fails the
+         * call with no reason given and nothing drawn; a rectangle or
+         * triangle that is one point draws nothing and succeeds.
+         */
+        GdiGradientFill: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([handle, vertices, count, mesh, entries, mode])=>{
+                const dc = dcOf(handle);
+                if (!dc || (vertices >>> 0) === 0 || (count >>> 0) === 0 || (mesh >>> 0) === 0
+                    || (entries >>> 0) === 0 || (mode >>> 0) > GRADIENT_FILL_TRIANGLE)
+                {
+                    return refuse(ERROR_INVALID_PARAMETER);
+                }
+                const corners = (mode >>> 0) === GRADIENT_FILL_TRIANGLE ? 3 : 2;
+                const indices = host.readMemory(mesh >>> 0, (entries >>> 0) * corners * 4);
+                const view = new DataView(indices.buffer, indices.byteOffset, indices.byteLength);
+                const listed = Array.from({ length: entries >>> 0 }, (_, entry)=>
+                    Array.from({ length: corners }, (__, corner)=>
+                        view.getUint32((entry * corners + corner) * 4, true)));
+                if (listed.some(entry=>entry.some(index=>index >= (count >>> 0))))
+                {
+                    return 0;
+                }
+                // Only the vertices the mesh names are read: the count is the
+                // program's, and nothing says it is near the array's real size.
+                /** @type {TriVertex[]} */
+                const used = [];
+                /** @type {Map<number, number>} */
+                const placed = new Map();
+                const shapes = listed.map(entry=>entry.map(index=>{
+                    const known = placed.get(index);
+                    if (known !== undefined)
+                    {
+                        return known;
+                    }
+                    placed.set(index, used.length);
+                    used.push(readVertex(dc, ((vertices >>> 0) + index * TRIVERTEX_SIZE) >>> 0));
+                    return used.length - 1;
+                }));
+                if (corners === 3 && shapes.some(([a, b, c])=>
+                    isFlatTriangle(used[a], used[b], used[c])))
+                {
+                    return 0;
+                }
+                const interfaces = bound(handle);
+                return interfaces && interfaces.gradientFill(handle >>> 0, used, shapes, mode >>> 0)
+                    ? 1 : 0;
             },
         },
 
@@ -1279,6 +1810,35 @@ export function createDrawingFunctions(
         },
 
         /**
+         * BOOL Chord(HDC hdc, int x1, int y1, int x2, int y2,
+         *            int x3, int y3, int x4, int y4)
+         *
+         * Arc's arc, in the DC's direction, closed by the line from its end
+         * back to its start: the part of the ellipse the chord cuts off,
+         * outlined with the pen and filled with the brush. The current
+         * position is not used and does not move. The same radial twice is
+         * the whole ellipse.
+         */
+        Chord: {
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: args=>closedArc(args, false),
+        },
+
+        /**
+         * BOOL Pie(HDC hdc, int left, int top, int right, int bottom,
+         *          int xr1, int yr1, int xr2, int yr2)
+         *
+         * The same arc closed through the ellipse's centre instead: a wedge,
+         * outlined and filled as Chord's piece is.
+         */
+        Pie: {
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: args=>closedArc(args, true),
+        },
+
+        /**
          * BOOL Polyline(HDC hdc, const POINT *apt, int cpt)
          *
          * Lines through the points with the pen, two points at least, leaving
@@ -1439,6 +1999,44 @@ export function createDrawingFunctions(
         },
 
         /**
+         * BOOL LineDDA(int xStart, int yStart, int xEnd, int yEnd,
+         *              LINEDDAPROC lpProc, LPARAM data)
+         *
+         * The program's `void CALLBACK proc(int x, int y, LPARAM data)` called
+         * once for each point of the line, in order from the start, the end
+         * point left out: see `lineDdaPoints`. Nothing is drawn and no DC is
+         * involved. A line of no length calls nothing and succeeds; a line
+         * with points to report and no callback to report them to -- a null
+         * one, or a build that cannot call the program -- fails.
+         */
+        LineDDA: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([xStart, yStart, xEnd, yEnd, proc, data])=>{
+                if ((xStart | 0) === (xEnd | 0) && (yStart | 0) === (yEnd | 0))
+                {
+                    return 1;
+                }
+                const call = host.call;
+                if (!call || (proc >>> 0) === 0)
+                {
+                    return 0;
+                }
+                // Read before the first await: after it the processor is
+                // whoever's the scheduler chose.
+                const thread = host.callerThread?.();
+                const points = lineDdaPoints(xStart | 0, yStart | 0, xEnd | 0, yEnd | 0);
+                return (async()=>{
+                    for (const point of points)
+                    {
+                        await call(proc >>> 0, [point.x >>> 0, point.y >>> 0, data >>> 0], thread);
+                    }
+                    return 1;
+                })();
+            },
+        },
+
+        /**
          * int SetArcDirection(HDC hdc, int dir) / int GetArcDirection(HDC hdc)
          *
          * Which way Arc runs, counterclockwise until a program says otherwise;
@@ -1523,6 +2121,37 @@ export function createDrawingFunctions(
                 return interfaces && interfaces.rectangle(handle >>> 0,
                     left | 0, top | 0, right | 0, bottom | 0) ? 1 : 0;
             },
+        },
+
+        /**
+         * BOOL ExtFloodFill(HDC hdc, int x, int y, COLORREF color, UINT type)
+         *
+         * The area around the point painted with the selected brush:
+         * FLOODFILLBORDER spreads up to pixels of the colour, FLOODFILLSURFACE
+         * over pixels of it. FALSE, with nothing painted, when the point is
+         * outside the clip, when it is the border's colour or not the
+         * surface's, or for a type that is neither.
+         */
+        ExtFloodFill: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, x, y, color, type])=>{
+                const interfaces = bound(handle);
+                if (!interfaces || (type >>> 0) > FLOODFILLSURFACE)
+                {
+                    return 0;
+                }
+                return interfaces.floodFill(handle >>> 0, x | 0, y | 0, color >>> 0, type >>> 0)
+                    ? 1 : 0;
+            },
+        },
+
+        /** BOOL FloodFill(HDC hdc, int x, int y, COLORREF color): ExtFloodFill up to a border */
+        FloodFill: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, x, y, color])=>
+                functions.ExtFloodFill.handler([handle, x, y, color, FLOODFILLBORDER]),
         },
 
         /**
@@ -1845,6 +2474,40 @@ export function createDrawingFunctions(
             },
         },
 
+        /**
+         * BOOL FrameRgn(HDC hdc, HRGN hrgn, HBRUSH hbr, int w, int h)
+         *
+         * A border inside the region's edge painted with the brush: w wide
+         * down its sides, h high along its top and bottom -- FrameRect's
+         * frame at one by one. A region narrower than two sides is all
+         * border. The border is laid down as pieces that do not overlap, so
+         * no pixel is painted twice under a raster operation that would
+         * notice. MSDN gives no sign to the two sizes, and they are taken
+         * without it.
+         */
+        FrameRgn: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, region, brush, width, height])=>{
+                const rect = regionOf(region);
+                const interfaces = bound(handle);
+                if (!rect || objects.get(brush)?.type !== 'brush' || !interfaces)
+                {
+                    return 0;
+                }
+                const across = Math.abs(width | 0);
+                const down = Math.abs(height | 0);
+                const inner = { left: rect.left + across, top: rect.top + down,
+                    right: rect.right - across, bottom: rect.bottom - down };
+                const border = isEmpty(inner) ? [rect] : subtractFromArea([rect], inner);
+                for (const piece of border.filter(part=>!isEmpty(part)))
+                {
+                    interfaces.fillRect(handle >>> 0, piece, brush >>> 0);
+                }
+                return 1;
+            },
+        },
+
         /** HRGN CreateRectRgn(int x1, int y1, int x2, int y2) */
         CreateRectRgn: {
             argBytes: 16,
@@ -2055,9 +2718,8 @@ export function createDrawingFunctions(
                 {
                     return REGION_ERROR;
                 }
-                return setClipArea(handle, dc, intersectArea(clipAreaOf(dc), {
-                    left: left | 0, top: top | 0, right: right | 0, bottom: bottom | 0,
-                }));
+                return setClipArea(handle, dc, intersectArea(clipAreaOf(dc),
+                    deviceArea(dc, left, top, right, bottom)));
             },
         },
 
@@ -2079,7 +2741,7 @@ export function createDrawingFunctions(
                     return REGION_ERROR;
                 }
                 const area = clipAreaOf(dc);
-                const hole = { left: left | 0, top: top | 0, right: right | 0, bottom: bottom | 0 };
+                const hole = deviceArea(dc, left, top, right, bottom);
                 if (isEmpty(hole) || area.every(piece=>isEmpty(intersect(piece, hole))))
                 {
                     return areaKind(area);
@@ -2223,6 +2885,50 @@ export function createDrawingFunctions(
                 {
                     draw()?.setBrushOrgEx?.(handle >>> 0, x | 0, y | 0);
                 }
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetBrushOrgEx(HDC hdc, LPPOINT lppt)
+         *
+         * The origin SetBrushOrgEx last set, as it was given. With nowhere to
+         * write it there is no answer to give, and the call fails.
+         */
+        GetBrushOrgEx: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                const dc = dcOf(handle);
+                if (!dc || (out >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const origin = dc.brushOrg ?? { x: 0, y: 0 };
+                writeU32s(host, out >>> 0, [origin.x, origin.y]);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetDCOrgEx(HDC hdc, LPPOINT lppt)
+         *
+         * Where the DC's pixels start on the screen: the corner of the part
+         * of its window it was made for -- the client area, or the whole
+         * window for a window DC -- and the screen's own corner for a DC on
+         * the screen or on a bitmap. The mapping mode does not enter into it.
+         */
+        GetDCOrgEx: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                const dc = dcOf(handle);
+                if (!dc || (out >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const origin = dc.bounds ?? { left: 0, top: 0 };
+                writeU32s(host, out >>> 0, [origin.left, origin.top]);
                 return 1;
             },
         },

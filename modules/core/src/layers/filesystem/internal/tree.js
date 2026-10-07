@@ -87,6 +87,10 @@ function makeNode(parent, name){
     };
 }
 
+/** What changes a drive: everything else of it only reads. */
+const CHANGES = /** @type {const} */ (['setModified', 'replace', 'write', 'truncate', 'createFile',
+    'createDirectory', 'moveFile', 'removeFile', 'removeDirectory']);
+
 /**
  * @param {Object} options
  * @param {import('./memory-store.js').SourceStore | null} [options.source]
@@ -96,9 +100,13 @@ function makeNode(parent, name){
  * @param {boolean} [options.readOnly]
  *        The whole volume is read-only media, a disc: every write, create and
  *        delete is `WRITE_PROTECTED`, whatever layer the name is in.
+ * @param {{ words: Int32Array, index: number } | null} [options.revision]
+ *        A word raised after every change to the drive, whatever made it: a
+ *        process in another thread keeps what it read of the drive for as long
+ *        as the word stands where it stood when it read (`volume-link.js`).
  */
 export function createOverlay({
-    source = null, writable, onChanged = null, now = Date.now, readOnly = false,
+    source = null, writable, onChanged = null, now = Date.now, readOnly = false, revision = null,
 })
 {
     /**
@@ -336,7 +344,7 @@ export function createOverlay({
         node.parent?.children.delete(foldName(node.name));
     };
 
-    return {
+    const overlay = {
         readOnly,
 
         /** @param {string[]} components @returns {Entry | null} */
@@ -746,4 +754,25 @@ export function createOverlay({
             return { files, directories, tombstones, copied, layered: source !== null };
         },
     };
+    if (revision)
+    {
+        // Raised whether the change finished or failed half way: a reader that
+        // throws away what it kept for nothing loses a read, one that keeps
+        // what changed reads a file that is not there.
+        for (const name of CHANGES)
+        {
+            const change = /** @type {(...args: any[]) => any} */ (overlay[name]);
+            overlay[name] = /** @type {any} */ ((/** @type {any[]} */ ...args)=>{
+                try
+                {
+                    return change.apply(overlay, args);
+                }
+                finally
+                {
+                    Atomics.add(revision.words, revision.index, 1);
+                }
+            });
+        }
+    }
+    return overlay;
 }

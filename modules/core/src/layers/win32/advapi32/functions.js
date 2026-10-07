@@ -26,9 +26,11 @@
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { COMPUTER_NAME } from '../kernel32/drives.js';
 import {
-    HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS, detachedKey,
+    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS,
 } from './registry.js';
 import { STATUS } from '../ntdll/status.js';
+import { USER_NAME } from './tokens.js';
+import { createNamedSecurityFunctions } from './named-security.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -138,20 +140,15 @@ const HANDLE_LIMIT = 0x7ffffffc;
  */
 const FIRST_KEY_HANDLE = 0x40000004;
 
-/**
- * Who the program is running as. There is one account and no way to become
- * another, so this is a constant rather than something to configure -- but it
- * has to be answered, because a program that cannot learn its own user name
- * often refuses to start rather than carrying on without one.
- */
-const USER_NAME = 'User';
+/** The one account's name, kept beside its SID and read from here by the module. */
+export { USER_NAME };
 
 /**
  * @typedef {Object} RegistryHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
- * @property {ReturnType<typeof import('./registry.js').createHive>} hive
+ * @property {ReturnType<typeof import('./registry-service.js').createRegistryService>} hive
  * @property {(bytes: number) => number} [allocate]
  *           Guest memory for the objects this library hands out by pointer -- a
  *           SID. Without it those calls fail as an out-of-memory would, which
@@ -270,7 +267,7 @@ export function createRegistryFunctions(host){
         },
     };
 
-    /** @type {Map<number, import('./registry.js').RegistryKey>} */
+    /** @type {Map<number, number>} */
     const handles = new Map();
     /** @type {number[]} */
     const freed = [];
@@ -281,7 +278,7 @@ export function createRegistryFunctions(host){
      * used after it was closed then lands on nothing -- a defined error -- and
      * not on whatever key was opened next.
      *
-     * @param {import('./registry.js').RegistryKey} key
+     * @param {number} key
      * @returns {number}
      */
     const allocate = key=>{
@@ -308,7 +305,7 @@ export function createRegistryFunctions(host){
      * never closed.
      *
      * @param {number} handle
-     * @returns {import('./registry.js').RegistryKey | null}
+     * @returns {number | null}
      */
     const keyOf = handle=>hive.root(handle >>> 0) ?? handles.get(handle >>> 0) ?? null;
 
@@ -426,7 +423,7 @@ export function createRegistryFunctions(host){
      * and answering a stale handle with a code rather than an exception is half
      * of what this table promises.
      *
-     * @param {(key: import('./registry.js').RegistryKey, args: number[]) => number} handler
+     * @param {(key: number, args: number[]) => number} handler
      * @returns {(args: number[]) => number}
      */
     const onKey = handler=>args=>{
@@ -455,6 +452,7 @@ export function createRegistryFunctions(host){
         {
             appKeys.delete(key);
             writeHive(held, file, true);
+            hive.forget(held);
         }
         // A key closed while a change is awaited on it signals the wait.
         for (const watcher of watchers.filter(one=>one.handle === key))
@@ -472,35 +470,7 @@ export function createRegistryFunctions(host){
      *
      * @param {any} key @returns {{ parent: any, name: string } | null}
      */
-    const placeOf = key=>{
-        if (key.view === 'classes')
-        {
-            return key.path.length === 0 ? null
-                : { parent: hive.root(HKEY_CLASSES_ROOT), name: key.path.join('\\') };
-        }
-        /** @type {any[]} */
-        const pending = [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS]
-            .map(id=>hive.root(id)).filter(Boolean);
-        const seen = new Set();
-        while (pending.length > 0)
-        {
-            const node = pending.pop();
-            if (seen.has(node))
-            {
-                continue;
-            }
-            seen.add(node);
-            for (const child of node.keys.values())
-            {
-                if (child === key)
-                {
-                    return { parent: node, name: child.name };
-                }
-                pending.push(child);
-            }
-        }
-        return null;
-    };
+    const placeOf = key=>hive.placeOf(key);
 
     /**
      * The native registry: the same keys and handles, statuses for errors,
@@ -1377,7 +1347,7 @@ export function createRegistryFunctions(host){
      * A key's subtree as a hive file holds it: its values and its subkeys,
      * not its own name.
      *
-     * @param {import('./registry.js').RegistryKey} key
+     * @param {number} key
      * @returns {HiveTree}
      */
     const exportTree = key=>({
@@ -1389,7 +1359,7 @@ export function createRegistryFunctions(host){
         })),
     });
 
-    /** @param {import('./registry.js').RegistryKey} key @param {HiveTree} tree */
+    /** @param {number} key @param {HiveTree} tree */
     const importTree = (key, tree)=>{
         for (const value of tree.values ?? [])
         {
@@ -1623,7 +1593,7 @@ export function createRegistryFunctions(host){
             {
                 return tree;
             }
-            const key = detachedKey();
+            const key = hive.detached();
             importTree(key, tree);
             const handle = allocate(key);
             appKeys.set(handle, path);
@@ -1848,6 +1818,26 @@ export function createRegistryFunctions(host){
          */
         ImpersonateSelf: { argBytes: 4, handler: ()=>1 },
         RevertToSelf: { argBytes: 0, handler: ()=>1 },
+
+        /**
+         * BOOL InitiateSystemShutdownA(LPSTR lpMachineName, LPSTR lpMessage,
+         *   DWORD dwTimeout, BOOL bForceAppsClosed, BOOL bRebootAfterShutdown)
+         * BOOL InitiateSystemShutdownExA(..., DWORD dwReason)
+         *
+         * There is no machine to restart, and the call answers as the
+         * consumer line of Windows did, which never had it: not implemented.
+         * A setup asks only when what it replaced needs a restart, and the
+         * user is the one to give it.
+         */
+        ...Object.fromEntries([['InitiateSystemShutdownA', 20], ['InitiateSystemShutdownW', 20],
+            ['InitiateSystemShutdownExA', 24], ['InitiateSystemShutdownExW', 24]]
+            .map(([name, argBytes])=>[name, {
+                argBytes,
+                handler: ()=>{
+                    host.divergence?.(String(name), 'there is no machine to restart');
+                    return notImplemented();
+                },
+            }])),
 
         SetFileSecurityW: {
             argBytes: 12,
@@ -2289,7 +2279,7 @@ export function createRegistryFunctions(host){
                     return ERROR_INVALID_PARAMETER;
                 }
                 const place = placeOf(named);
-                if (!place || 'view' in named)
+                if (!place || hive.throughClasses(named))
                 {
                     return ERROR_ACCESS_DENIED;
                 }
@@ -2298,6 +2288,10 @@ export function createRegistryFunctions(host){
                     : result === 'taken' ? ERROR_ALREADY_EXISTS : ERROR_FILE_NOT_FOUND;
             },
         },
+
+        // Named by a path or a key's name, an object's security needs the
+        // volume and the hive this library already holds.
+        ...createNamedSecurityFunctions(host),
 
         [UNLOAD_KEY]: unload,
         [REGISTRY_NATIVES]: nativeRegistry(),

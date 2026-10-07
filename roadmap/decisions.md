@@ -244,6 +244,32 @@ old enough that a program written for 2000 or 98 still recognises it, where a ve
 written before 7 existed may not recognise 7 or 10. *2026-09-26, the commit adding
 `kernel32/versions.js`.*
 
+**A32 — `CoGetDefaultContext` answers only for an apartment the caller can name.** For
+`APTTYPE_CURRENT`, or the type of the apartment the calling thread is in, it hands out that
+apartment's context; for `APTTYPE_MTA` it hands out the multithreaded apartment's context while
+that apartment exists. Otherwise it answers `CO_E_NOTINITIALIZED`. That includes a
+single-threaded apartment the caller is not in: several threads may each have one, and the type
+alone does not say which is meant. An unknown type answers `E_INVALIDARG`. Wine leaves the call
+a stub, and no conformance test pins down any of these answers. *2026-10-05.*
+
+**A33 — An installation's progress bar counts a file as its size in bytes, a registry value as
+13200 ticks and a component as 24000, and its total is what this installation will do.** Windows
+documents `INSTALLMESSAGE_PROGRESS` -- a reset to a total, reports of ticks, the direction -- but
+not what anything is worth; the two fixed amounts are Wine's, and no published source gives
+others. `InstallValidate` resets the bar to the files, values and components the
+installation puts down, rather than the package's whole as Wine does, so a setup's own page
+reaches its end when the installation does. A page shows the ratio of what is done to the total,
+which these amounts set; revisit them if a program is found reading the ticks themselves.
+*2026-10-07.*
+
+**A34 — A file's security is the descriptor Windows XP answers for a volume that keeps none.**
+The volume has no ACLs, as FAT32 has none, and reports no `FILE_PERSISTENT_ACLS`: so
+`GetNamedSecurityInfo` of a file answers a made-up descriptor whose owner and group are Everyone
+and whose DACL is present and null, and `SetNamedSecurityInfo` succeeds and keeps nothing, so the
+next read answers the same. A setup that reads a folder's DACL, merges an entry with
+`SetEntriesInAcl` and writes it back goes through and changes nothing it could see. Not measured
+against XP; revisit if a program is found that checks the DACL it wrote. *2026-10-07.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
@@ -524,7 +550,10 @@ the child's exit code once it exits, the files and registry the child wrote copi
 of the two machines runs at a time, so this is still not two processes executing at once -- the
 Battlefield 2 installer's shape (run a stage, wait, go on) is what it covers. *2026-09-24.*
 `roadmap/v2/` plans processes side by side, each in a worker with its own memory (stage 2); until
-that lands, this decision stands.
+that lands, this decision stands. On the `cork2` branch the copying is gone: the run's processes
+share one registry hive, one volume (the drives, their writable layers and the bundle mount) and
+one numbering of process and thread ids, so a child's writes are its parent's as they are made.
+*2026-10-05.*
 
 **Only Windows system libraries are reimplemented; a redistributable middleware runtime is ours to
 reimplement too (§B above); anything else a game ships in its own directory is loaded and run as

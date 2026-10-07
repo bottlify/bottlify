@@ -6,7 +6,8 @@
 
 import { createConsoleFunctions, HANDLE_STDOUT, HANDLE_STDERR } from './kernel32/console.js';
 import { createThreadingFunctions } from './kernel32/threading.js';
-import { createNamedObjects } from './kernel32/named-objects.js';
+import { createNamedObjects, createRemoteNamedObjects } from './kernel32/named-objects.js';
+import { createRegistryService } from './advapi32/registry-service.js';
 import { createDebugFunctions } from './kernel32/debug.js';
 import { createHeapAllocator, createHeapFunctions } from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState } from './kernel32/process.js';
@@ -41,9 +42,12 @@ import { createVolume } from './kernel32/vfs.js';
 import { createMsvcrtFunctions } from './msvcrt/functions.js';
 import { createCrtdllFunctions } from './msvcrt/crtdll.js';
 import { createWindowFunctions } from './user32/windows.js';
+import { createWindowDirectory } from './user32/directory.js';
 import { createMessageQueue } from './user32/messages.js';
 import { createRegistryFunctions } from './advapi32/functions.js';
-import { ADMINISTRATORS_SID, createTokenFunctions, isTokenMember } from './advapi32/tokens.js';
+import {
+    ADMINISTRATORS_SID, USER_SID_TEXT, createTokenFunctions, isTokenMember,
+} from './advapi32/tokens.js';
 import { createServiceFunctions } from './advapi32/services.js';
 import { createCryptoFunctions } from './advapi32/crypto.js';
 import {
@@ -79,6 +83,13 @@ import { formatToString } from './msvcrt/format.js';
 import { createDsetupFunctions } from './dsetup/functions.js';
 import { createDpnhpastFunctions } from './dpnhpast/functions.js';
 import { createSetupapiFunctions } from './setupapi/functions.js';
+import { createMsiFunctions } from './msi/functions.js';
+import { createEventLogFunctions } from './advapi32/eventlog.js';
+import { createCabinetFunctions } from './cabinet/functions.js';
+import { MSI_ORDINALS } from './msi/ordinals.js';
+import { SHLWAPI_ORDINALS } from './shlwapi/forwards.js';
+import { COMPUTER_NAME } from './kernel32/drives.js';
+import { USER_NAME } from './advapi32/functions.js';
 import { createWintrustFunctions } from './wintrust/functions.js';
 import { createD3dxFunctions } from './d3dx9/functions.js';
 import { createSpoolerFunctions } from './winspool/functions.js';
@@ -87,6 +98,7 @@ import { createAcmFunctions } from './msacm32/functions.js';
 import { createThemeFunctions } from './uxtheme/functions.js';
 import { createWininetFunctions } from './wininet/functions.js';
 import { createOleFunctions, createTaskAllocator } from './ole32/functions.js';
+import { createClassTable } from './ole32/remote.js';
 import { createAutomationFunctions, OLEAUT32_ORDINALS } from './oleaut32/functions.js';
 import { createNtdllFunctions } from './ntdll/functions.js';
 import { createComObject, createComRegistry } from './ole32/objects.js';
@@ -117,7 +129,7 @@ import { registerQuartzClasses } from './quartz/graph.js';
  * the tables, because it is a fact about the library and not about any one
  * name in it.
  */
-const CDECL_LIBRARIES = /^(msvcrt|msvcr\d+d?|msvcp\d+d?|crtdll|ucrtbase)\.dll$/i;
+const CDECL_LIBRARIES = /^(msvcrt|msvcr\d+d?|msvcp\d+d?|crtdll|ucrtbase|cabinet)\.dll$/i;
 
 /** The reason a DllMain is called with when its library is unloaded, or the process ends. */
 const DLL_PROCESS_DETACH = 0;
@@ -163,6 +175,42 @@ const KNOWN_DLLS = new Set([
     'ws2_32.dll', 'xtajit.dll', 'xtajit64.dll',
 ]);
 
+/**
+ * The DirectX a bottle's graphics choice names, by major version; undefined
+ * for the default 9.0c, which a setup may still overwrite.
+ *
+ * @param {unknown} choice
+ */
+function directxOf(choice){
+    if (choice === undefined)
+    {
+        return undefined;
+    }
+    const release = DIRECTX_RELEASES[/** @type {'7' | '8' | '9'} */ (String(choice))];
+    if (!release)
+    {
+        throw new Error(`unknown DirectX ${JSON.stringify(choice)}: `
+            + `the choices are ${Object.keys(DIRECTX_RELEASES).join(', ')}`);
+    }
+    return release;
+}
+
+/**
+ * The registry a run starts from, as its first process makes it: the keys of
+ * the Windows and the DirectX the machine is, and the processor at the speed
+ * the engine's counter runs, under the name it is given. For a run whose
+ * processes all stand in workers of their own, which the system makes before
+ * any of them.
+ *
+ * @param {{ windows?: string, directx?: unknown, processorMhz?: number,
+ *     processorName?: string }} [config]
+ */
+export function createRunRegistry(config){
+    return createRegistryService(createHive({ processorMhz: config?.processorMhz,
+        processorName: config?.processorName, windows: windowsVersion(config?.windows),
+        directx: directxOf(config?.directx) }));
+}
+
 /** The win32 layer's module for one graph; see `defaultModules`. */
 export function createWin32Module(){
     /**
@@ -183,6 +231,8 @@ export function createWin32Module(){
      * @type {any}
      */
     let current = null;
+    /** Takes this process's windows out of the run's when it ends. */
+    let leaveWindows = ()=>{};
 
     return {
         name: 'win32',
@@ -205,15 +255,7 @@ export function createWin32Module(){
             // Before anything else: a Windows that is not one of the four is a
             // configuration error, not a machine to build.
             const windows = windowsVersion(config?.windows);
-            // The DirectX a bottle's graphics choice names, by major version;
-            // absent, the default 9.0c, which a setup may still overwrite.
-            const directx = config?.directx === undefined ? undefined
-                : DIRECTX_RELEASES[/** @type {'7' | '8' | '9'} */ (String(config.directx))];
-            if (config?.directx !== undefined && !directx)
-            {
-                throw new Error(`unknown DirectX ${JSON.stringify(config.directx)}: `
-                    + `the choices are ${Object.keys(DIRECTX_RELEASES).join(', ')}`);
-            }
+            const directx = directxOf(config?.directx);
             // What the running program is told, which Windows 10 decides from
             // what the program says it knows; everything else keeps the truth.
             const reported = reportedVersion(windows, config?.compatibility);
@@ -225,11 +267,19 @@ export function createWin32Module(){
             const filesystem = host.requireApi('filesystem');
             const journal = host.requireApi('log');
 
-            // The one namespace a mutex, event, semaphore, timer and file mapping
-            // all share. Handed a table from outside when there is a process
-            // replacement to survive; a caller with nothing to carry across a
-            // rebuild gets one that does not.
-            const namedObjects = createNamedObjects({ table: config?.namedObjects });
+            // What the run's processes share, as one Windows does: handed in
+            // from outside when there is a process beside or after this one
+            // to share it with; a caller with nothing to share it with gets
+            // its own. The one namespace a mutex, event, semaphore, timer and
+            // file mapping all share is part of it.
+            /** @type {{ namedObjects: Map<string, any>, registry: any, windows?: any,
+             *     objects?: any } | null} */
+            const system = config?.system ?? null;
+            // Across a link the run's namespace is asked there, and the
+            // objects here are stand-ins for the run's (`system-objects.js`).
+            const namedObjects = system?.objects
+                ? createRemoteNamedObjects({ objects: system.objects, kernel })
+                : createNamedObjects({ table: system?.namedObjects });
             // What GetCurrentProcessId answers: a child is the process its parent
             // was told of in PROCESS_INFORMATION, not a second copy of the first.
             const processId = (config?.processId ?? 0x1000) >>> 0;
@@ -251,13 +301,13 @@ export function createWin32Module(){
              *     place: (hwnd: number, x: number, y: number, width: number,
              *     height: number, how?: { announce?: boolean }) => boolean,
              *     active: () => number, deactivated: () => boolean,
-             *     deactivations: () => number, refresh: () => void,
+             *     deactivations: () => number,
              *     rawInput: (report: import('./user32/rawinput.js').RawInputEvent) => void,
              *     modalLoop: import('./user32/windows.js').WindowService['modalLoop'],
              *     painting: () => boolean }} */
             let windowService = {
                 list: ()=>[], clientRect: ()=>null, place: ()=>false, active: ()=>0,
-                deactivated: ()=>false, deactivations: ()=>0, refresh: ()=>{}, rawInput: ()=>{},
+                deactivated: ()=>false, deactivations: ()=>0, rawInput: ()=>{},
                 modalLoop: ()=>0, painting: ()=>false,
             };
 
@@ -345,6 +395,11 @@ export function createWin32Module(){
             const readWideString = (/** @type {number} */ address, /** @type {number} */ maxLength)=>
                 memory.readWideString(address, maxLength);
 
+            // The run's class table, which is also where RPC endpoints are
+            // found: COM and RPC between processes meet in the one table, and
+            // a process with no run around it has one of its own.
+            const comHost = config?.com ?? { table: createClassTable(), process: null };
+
             /** Everything a table needs from the kernel's handle table. */
             const handles = {
                 /** @param {string} type @param {any} object */
@@ -375,7 +430,9 @@ export function createWin32Module(){
             const sink = (handle, text)=>{
                 const file = handle === HANDLE_STDOUT ? standardFiles?.output
                     : handle === HANDLE_STDERR ? standardFiles?.error : undefined;
-                const node = file && volume.open(file.path, { write: true });
+                // The parent's own open file, handed on: written on the terms
+                // it was opened with, whatever another open would be refused.
+                const node = file && volume.open(file.path, { write: true, inherited: true });
                 if (!file || !node)
                 {
                     toConsole(handle, text);
@@ -384,10 +441,29 @@ export function createWin32Module(){
                 file.position += volume.write(node, file.position, encodeAnsi(text));
                 volume.close(node);
             };
-            const hive = createHive({
-                processorMhz: config?.processorMhz, processorName: config?.processorName,
-                windows, directx,
-            });
+            // The registry is the run's: the first process's, handed to every
+            // process after it rather than copied into each, so a key a parent
+            // writes is there for its child the moment it is written, and the
+            // child's writes are the parent's without being carried back when
+            // it exits. Reached through the system half's interface, which
+            // names keys by number (`registry-service.js`): what a process in
+            // a worker of its own will be able to call across a ring.
+            const inheritedHive = system?.registry ?? null;
+            const hive = inheritedHive ?? createRunRegistry(config);
+            if (system)
+            {
+                system.registry = hive;
+            }
+            // A window handle is the run's, and a window of another process is
+            // found and posted to through it (`user32/directory.js`).
+            const windowDirectory = system?.windows ?? createWindowDirectory();
+            if (system)
+            {
+                system.windows = windowDirectory;
+            }
+            leaveWindows = ()=>windowDirectory.detach(processId);
+            // A process's windows end with it, for every other process too.
+            endTasks.push(()=>leaveWindows());
             // The guest's clock, because a timer is due against the clock the
             // program itself reads, and the input layer's key state, because a
             // hot key fires on a combination and only the layer that sees the
@@ -1739,6 +1815,15 @@ export function createWin32Module(){
 
                 'SHELL32.dll': createShellFunctions({
                     writeMemory, readMemory, readCString,
+                    // ExtractIcon hands out an icon of pixels read from another
+                    // file: the object user32's CreateIcon makes.
+                    icon: picture=>handles.open('icon', {
+                        hotSpot: picture.hotSpot, width: picture.width,
+                        height: picture.height, picture,
+                    }),
+                    // CommandLineToArgvW answers an empty line with this.
+                    imagePath: ()=>modules.imagePath(),
+                    setLastError: setError,
                     // FindExecutable resolves an executable against the current
                     // directory the file calls use, which is the filesystem's.
                     resolve: path=>filesystem.resolve(path).path,
@@ -1783,7 +1868,7 @@ export function createWin32Module(){
                 'COMDLG32.dll': createCommonDialogFunctions(
                     { readMemory, readCString, writeMemory }),
 
-                'IMM32.dll': createImmFunctions({ writeMemory }),
+                'IMM32.dll': createImmFunctions({ writeMemory, setLastError: setError }),
 
                 'SHLWAPI.dll': createShlwapiFunctions({
                     readCString, readWideString, readMemory, writeMemory,
@@ -1796,10 +1881,26 @@ export function createWin32Module(){
                     allocate: bytes=>heap.allocate(bytes),
                     /** @param {number} address */
                     free: address=>heap.free(address),
+                    // The exports that are another library's function, as it is
+                    // when they are called: the table is still being built here.
+                    /** @param {string} name */
+                    library: name=>libraries[name],
+                    divergence: config?.divergence,
                 }),
 
                 'ADVPACK.dll': createAdvpackFunctions({
                     isAdministrator: ()=>isTokenMember(ADMINISTRATORS_SID),
+                    hive,
+                    folders,
+                    /** @param {number} instance @param {any} type @param {any} name */
+                    findResource: (instance, type, name)=>
+                        modules.findResource?.(instance, type, name) ?? null,
+                    moduleBase: instance=>modules.moduleBase?.(instance) ?? 0,
+                    modulePath,
+                    readMemory,
+                    readCString,
+                    readWideString,
+                    divergence: config?.divergence,
                 }),
 
                 'SFC.dll': createSfcFunctions({ writeMemory, readCString, files: volume }),
@@ -1875,6 +1976,97 @@ export function createWin32Module(){
                     divergence: config?.divergence,
                 }),
 
+                // The File Decompression Interface a setup unpacks its own
+                // cabinets with, over the program's callbacks.
+                'CABINET.dll': createCabinetFunctions({
+                    readMemory,
+                    writeMemory,
+                    readCString,
+                    /** @param {number} bytes */
+                    allocate: bytes=>heap.allocate(bytes),
+                    /** @param {number} address */
+                    free: address=>heap.free(address),
+                    call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    callerThread: ()=>bridge.callerThread(),
+                    divergence: config?.divergence,
+                }),
+
+                // The Windows Installer: packages read where they lie and
+                // installed from their own tables, in this process.
+                'MSI.dll': createMsiFunctions({
+                    readMemory,
+                    writeMemory,
+                    readCString,
+                    readWideString,
+                    /** @param {number} bytes */
+                    allocate: bytes=>heap.allocate(bytes),
+                    /** @param {number} address */
+                    free: address=>heap.free(address),
+                    files: volume,
+                    /** @param {string} path */
+                    fullPath: path=>filesystem.resolve(path).path,
+                    hive,
+                    call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    callerThread: ()=>bridge.callerThread(),
+                    answering: (thread, fn)=>bridge.answering(thread, fn),
+                    libraries: {
+                        /** @param {number} name */
+                        loadAnsi: name=>libraries['KERNEL32.dll'].LoadLibraryA.handler([name]),
+                        /** @param {number} module @param {number} name */
+                        procAddress: (module, name)=>
+                            libraries['KERNEL32.dll'].GetProcAddress.handler([module, name]),
+                        /** @param {number} module */
+                        free: module=>libraries['KERNEL32.dll'].FreeLibrary.handler([module]),
+                    },
+                    // A library action that runs beside the installation is a
+                    // thread of the process, as Windows Installer makes one.
+                    threads: {
+                        /** @param {number} entry @param {number} argument */
+                        start: (entry, argument)=>
+                            libraries['KERNEL32.dll'].CreateThread.handler(
+                                [0, 0, entry, argument, 0, 0]) >>> 0,
+                        /** @param {number} thread */
+                        exitCode: thread=>{
+                            const slot = heap.allocate(4);
+                            libraries['KERNEL32.dll'].GetExitCodeThread.handler([thread, slot]);
+                            const code = memory.readU32(slot);
+                            heap.free(slot);
+                            return code;
+                        },
+                        /** @param {number} thread */
+                        terminate: thread=>
+                            libraries['KERNEL32.dll'].TerminateThread.handler([thread, 0]),
+                        /** @param {number} thread */
+                        close: thread=>libraries['KERNEL32.dll'].CloseHandle.handler([thread]),
+                    },
+                    machine: ()=>({
+                        windows,
+                        computerName: COMPUTER_NAME,
+                        userName: USER_NAME,
+                        userSid: USER_SID_TEXT,
+                        language: 0x0409,
+                        screenWidth: config?.screen?.width ?? 1024,
+                        screenHeight: config?.screen?.height ?? 768,
+                        colorBits: config?.screen?.bitsPerPixel ?? 32,
+                        memoryMegabytes: Math.floor(arena.size / (1024 * 1024)),
+                        tempFolder: 'C:\\WINDOWS\\TEMP\\',
+                        environment: (/** @type {string} */ name)=>{
+                            const variables = config?.environment
+                                ?? defaultEnvironment(windows, folders);
+                            const key = Object.keys(variables)
+                                .find(candidate=>candidate.toLowerCase() === name.toLowerCase());
+                            return key === undefined ? null : variables[key];
+                        },
+                        now: ()=>new Date(kernel.clock.wallClock()),
+                    }),
+                    /** @param {string} path */
+                    versionInfo: path=>modules.versionInfo?.(path) ?? null,
+                    divergence: config?.divergence,
+                    // The installer's own log, where a failed installation says why.
+                    /** @param {string} text */
+                    log: text=>config?.divergence?.('MSI', text),
+                }),
+
                 // Authenticode: whether a signed file is intact and its publisher
                 // chains to a root this machine trusts -- `trustedRoots`, read when
                 // a program asks, or Microsoft's root when it is not configured.
@@ -1909,9 +2101,18 @@ export function createWin32Module(){
 
                 'WINSPOOL.DRV': createSpoolerFunctions({ setLastError: setError, writeMemory }),
 
-                'MPR.dll': createNetworkFunctions({ setLastError: setError }),
+                'MPR.dll': createNetworkFunctions({ setLastError: setError, writeMemory }),
 
-                'UXTHEME.dll': createThemeFunctions({ setLastError: setError }),
+                'UXTHEME.dll': createThemeFunctions({
+                    setLastError: setError, readMemory, writeMemory,
+                    // A null theme means the system's own value, which user32
+                    // answers; read when called, as the tables are still being
+                    // built here.
+                    user32: name=>libraries['USER32.dll']?.[name],
+                    gdi32: name=>libraries['GDI32.dll']?.[name],
+                    allocate: bytes=>heap.allocate(bytes),
+                    release: address=>heap.free(address),
+                }),
 
                 // The codec manager, with the drivers Windows installs: a sound
                 // engine that keeps its effects ADPCM finds its decoder here.
@@ -1939,6 +2140,7 @@ export function createWin32Module(){
                 'USER32.dll': createWindowFunctions({
                     readMemory,
                     processId,
+                    directory: windowDirectory,
                     writeMemory,
                     readCString,
                     // wvsprintfA reads a `va_list` window too, clamped the same way.
@@ -1987,10 +2189,15 @@ export function createWin32Module(){
                     }),
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     callerThread: ()=>bridge.callerThread(),
+                    answering: (thread, fn)=>bridge.answering(thread, fn),
                     divergence: config?.divergence,
                     /** @param {number} id */
                     threadExists: id=>kernel.threads().some(
                         (/** @type {{ id: number }} */ thread)=>(thread.id >>> 0) === id),
+                    // The processes OpenProcess finds, for AllowSetForegroundWindow.
+                    /** @param {number} id */
+                    processExists: id=>(kernel.processes?.all() ?? []).some(
+                        (/** @type {any} */ made)=>made.id === id),
                     setLastError: setError,
                     park: ()=>bridge.park(),
                     idle,
@@ -2162,6 +2369,12 @@ export function createWin32Module(){
                         /** @param {number} bytes */
                         allocate: bytes=>heap.allocate(bytes),
                     }),
+                    ...createEventLogFunctions({
+                        readCString,
+                        readWideString,
+                        setLastError: setError,
+                        handles,
+                    }),
                     ...createTokenFunctions({
                         readMemory,
                         writeMemory,
@@ -2244,7 +2457,7 @@ export function createWin32Module(){
                     // The run's class objects served out of process, and the
                     // hidden window each apartment takes other processes'
                     // calls through, as ole32's own does.
-                    com: config?.com,
+                    com: comHost,
                     apartmentWindow: {
                         create: handler=>apartmentWindow(handler),
                         /** @param {number} window @param {number} message */
@@ -2253,6 +2466,52 @@ export function createWin32Module(){
                     },
                     offerMarshaler: marshaler=>{
                         objrefMarshaler = marshaler;
+                    },
+                    // What a failed call between processes said of itself
+                    // crosses back through oleaut32's error-information slot.
+                    errors: {
+                        take: ()=>{
+                            const slot = heap.allocate(4);
+                            if (slot === 0)
+                            {
+                                return 0;
+                            }
+                            writeMemory(slot, new Uint8Array(4));
+                            libraries['OLEAUT32.dll'].GetErrorInfo.handler([0, slot]);
+                            const taken = new DataView(readMemory(slot, 4).slice().buffer)
+                                .getUint32(0, true);
+                            heap.free(slot);
+                            return taken;
+                        },
+                        set: pointer=>libraries['OLEAUT32.dll'].SetErrorInfo.handler([0, pointer]),
+                        create: out=>libraries['OLEAUT32.dll'].CreateErrorInfo.handler([out]),
+                    },
+                    // A user-marshal routine that cannot carry what it is handed
+                    // raises the way the generated code it is called from expects.
+                    raise: code=>raiseRpc(code),
+                    raiseLater: (code, thread)=>raiseRpcLater(code, thread),
+                    // A wait that serves the apartment while it waits: user32's
+                    // and kernel32's own calls, read when made.
+                    waits: {
+                        messages: (thread, count, list, timeout, wakeMask, waitAll)=>
+                            bridge.answering(thread, ()=>libraries['USER32.dll']
+                                .MsgWaitForMultipleObjects.handler(
+                                    [count, list, waitAll, timeout, wakeMask])),
+                        objects: (thread, count, list, waitAll, timeout)=>
+                            bridge.answering(thread, ()=>libraries['KERNEL32.dll']
+                                .WaitForMultipleObjects.handler(
+                                    [count, list, waitAll, timeout])),
+                        peek: (thread, message)=>bridge.answering(thread, ()=>
+                            libraries['USER32.dll'].PeekMessageW.handler([message, 0, 0, 0, 1])),
+                        translate: (thread, message)=>bridge.answering(thread, ()=>
+                            libraries['USER32.dll'].TranslateMessage.handler([message])),
+                        dispatch: (thread, message)=>bridge.answering(thread, ()=>
+                            libraries['USER32.dll'].DispatchMessageW.handler([message])),
+                        postQuit: (thread, code)=>bridge.answering(thread, ()=>
+                            libraries['USER32.dll'].PostQuitMessage.handler([code])),
+                        tickCount: ()=>libraries['KERNEL32.dll'].GetTickCount.handler([]),
+                        lastError: thread=>bridge.answering(thread, ()=>
+                            libraries['KERNEL32.dll'].GetLastError.handler([])),
                     },
                     strings: {
                         allocate: bytes=>/** @type {number} */ (lent(bytes, at=>
@@ -2288,7 +2547,9 @@ export function createWin32Module(){
                 }),
 
                 'RPCRT4.dll': createRpcFunctions({
-                    writeMemory, readCString, readMemory, divergence: config?.divergence,
+                    writeMemory, readCString, readMemory,
+                    readWideString: address=>readWideString(address, 1024),
+                    divergence: config?.divergence,
                     /** @param {number} bytes */
                     allocate: bytes=>heap.allocate(bytes),
                     /** @param {number} address */
@@ -2309,6 +2570,24 @@ export function createWin32Module(){
                         modulePath,
                         marshaler: ()=>objrefMarshaler,
                     },
+                    // An interface of MIDL's generated stubs, served and
+                    // called between processes through the run's table: the
+                    // stub runs on the thread that listens, and a call that
+                    // fails is raised on the thread that made it.
+                    midl: {
+                        call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                        guardedCall: (entry, args, thread)=>callGuarded({
+                            entry, args, thread, failed: 0x80010105,
+                            report: (code, at)=>config?.divergence?.('RPC',
+                                `exception 0x${code} at 0x${at} in a stub called by another`
+                                + ' process, answered RPC_S_CALL_FAILED'),
+                        }),
+                        callerThread: ()=>bridge.callerThread(),
+                        raise: code=>raiseRpc(code),
+                        raiseLater: (code, thread)=>raiseRpcLater(code, thread),
+                        table: comHost.table,
+                        process: comHost.process,
+                    },
                 }),
 
                 'OLEAUT32.dll': createAutomationFunctions({
@@ -2316,6 +2595,8 @@ export function createWin32Module(){
                     writeMemory,
                     fillMemory,
                     heap,
+                    // A date written without a year is in this one.
+                    systemTimeMs: ()=>kernel.clock.wallClock(),
                     divergence: config?.divergence,
                     // A type library is a file a program loads and an object it
                     // registers, so automation reads the volume, publishes through
@@ -2336,9 +2617,34 @@ export function createWin32Module(){
             libraries['USER32.dll'].MsgWaitForMultipleObjectsEx =
                 apcs.user32.MsgWaitForMultipleObjectsEx;
 
+            // ole32 answers the error-information calls oleaut32 does, the
+            // same calls on the same per-thread state: either library's
+            // SetErrorInfo is the other's GetErrorInfo.
+            for (const name of ['CreateErrorInfo', 'GetErrorInfo', 'SetErrorInfo'])
+            {
+                libraries['ole32.dll'][name] = libraries['OLEAUT32.dll'][name];
+            }
+            // The active-object calls are oleaut32's exports, and ole32 has
+            // none of them; they live with ole32's running object table,
+            // which is what they register in.
+            for (const name of ['RegisterActiveObject', 'RevokeActiveObject', 'GetActiveObject'])
+            {
+                libraries['OLEAUT32.dll'][name] = libraries['ole32.dll'][name];
+                delete libraries['ole32.dll'][name];
+            }
+
             libraries['SHFOLDER.dll'] = {
                 SHGetFolderPathA: libraries['SHELL32.dll'].SHGetFolderPathA,
                 SHGetFolderPathW: libraries['SHELL32.dll'].SHGetFolderPathW,
+            };
+
+            // msimg32.dll is gdi32's blending under another name, its exports
+            // forwarded there as Windows forwards them: a program that linked
+            // AlphaBlend from it draws with gdi32's GdiAlphaBlend.
+            libraries['MSIMG32.dll'] = {
+                AlphaBlend: libraries['GDI32.dll'].GdiAlphaBlend,
+                GradientFill: libraries['GDI32.dll'].GdiGradientFill,
+                TransparentBlt: libraries['GDI32.dll'].GdiTransparentBlt,
             };
 
             // timeGetTime answers the milliseconds GetTickCount answers, off the
@@ -2473,6 +2779,10 @@ export function createWin32Module(){
                     'COMCTL32.dll': COMCTL32_ORDINALS,
                     'WINMM.dll': WINMM_ORDINALS,
                     'SFC.dll': SFC_ORDINALS,
+                    'MSI.dll': MSI_ORDINALS,
+                    // A program of the 9x era imports shlwapi's wide-character
+                    // wrappers by number alone.
+                    'SHLWAPI.dll': SHLWAPI_ORDINALS,
                 }),
 
                 /**
@@ -2530,6 +2840,13 @@ export function createWin32Module(){
 
                 /** The registry, whose contents outlive the process (§9). */
                 registry: ()=>hive,
+
+                /**
+                 * Whether the registry came from a process before this one,
+                 * filled already: what a save or an installation would put
+                 * into a fresh hive is in it, and newer.
+                 */
+                registryInherited: ()=>inheritedHive !== null,
 
                 // The running thread's last error, for whoever is tracing. A
                 // program reports a code long after the call that produced it has
@@ -2697,9 +3014,6 @@ export function createWin32Module(){
                     }
                 },
 
-                /** Every window repaints: the process's desktop is shown again. */
-                refreshWindows: ()=>windowService.refresh(),
-
                 /**
                  * Places a window as the system would, telling the program with a
                  * move and a size. What a fullscreen device does to the window it
@@ -2812,6 +3126,8 @@ export function createWin32Module(){
         },
 
         async dispose(){
+            leaveWindows();
+            leaveWindows = ()=>{};
             current = null;
         },
     };

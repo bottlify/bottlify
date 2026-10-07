@@ -13,6 +13,8 @@ import { DEFAULT_ENGINE, DEFAULT_MEMORY_SIZE } from './layers/cpu/module.js';
 import { CORK_TSC_MHZ } from './layers/cpu/internal/cork-host.js';
 import { SETTINGS, processorName } from './settings.js';
 import { createPresenter } from './layers/graphics/webgpu/internal/presenter.js';
+import { baseOf, compositionPlan, needsComposing } from './layers/graphics/webgpu/internal/compose.js';
+import { connectGraphicsWorker, portEnd } from './layers/graphics/remote/connect.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
 import { parsePe, readExports, readImports, rvaToFileOffset } from './layers/loader/internal/pe.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
@@ -31,6 +33,7 @@ import { synthesiseProcessInit, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH }
     from './layers/loader/internal/init.js';
 import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
 import { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
+import { createSharingMemory, openSharedSharing } from './layers/filesystem/internal/shared-sharing.js';
 import { resolveTranslationStore } from './layers/cpu/internal/translation-store.js';
 import { createBlockCache, resolveBlockStore }
     from './layers/filesystem/internal/bundle/cache.js';
@@ -38,9 +41,19 @@ import { decompressZstd } from './zstd.js';
 import { mountDiscs } from './discs.js';
 import { loadZstdWasm } from './zstd-wasm.js';
 import { createClassTable } from './layers/win32/ole32/remote.js';
-import { createReplicas } from './replicas.js';
+import { comHandlers, remoteClassTable } from './com-link.js';
 import { createCallRepeats } from './call-repeats.js';
 import { withRunMode } from './mode.js';
+import { createLinkMemory, openLink } from './system/link.js';
+import { systemHandlers } from './system-link.js';
+import { storeHandlers } from './layers/cpu/internal/store-link.js';
+import { eventFrom } from './system/events-across.js';
+import { defaultModules } from './layers/index.js';
+import { createRunRegistry } from './layers/win32/module.js';
+import { createWindowDirectory } from './layers/win32/user32/directory.js';
+import { createMixer } from './layers/audio/output/mixer.js';
+import { objectHandlers } from './system-objects.js';
+import { openProcessWorker } from './host/process-worker.js';
 
 /**
  * createApp — the consumer-facing entry point: run a Win32 application.
@@ -131,7 +144,8 @@ import { withRunMode } from './mode.js';
  *     something a caller supplies.
  * @property {{ drained?: boolean, sampleRate?: number, mp3?: boolean, shared?: boolean,
  *     memory?: { control: ArrayBufferLike, samples: ArrayBufferLike }
- *         | { table: ArrayBufferLike } }} [audio]
+ *         | { table: ArrayBufferLike },
+ *     beside?: { arena: [number, number] | null } }} [audio]
  *     Sound leaves through a shared track table a worklet reads, or -- with no
  *     shared memory to hand one -- a ring the engine thread mixes into itself.
  *     `drained` says that something on the other side is really reading, which
@@ -153,6 +167,18 @@ import { withRunMode } from './mode.js';
  *     graphics worker, `compatible` keeps it the engine thread's own and copies what
  *     crosses, `auto` (the default) is `isolated` on a cross-origin isolated page and
  *     `compatible` elsewhere. `isolated` where memory cannot be shared is refused.
+ * @property {import('./mode.js').Concurrency} [concurrency]
+ *     How many processes run at once: 1 (the default) runs a child in its parent's
+ *     place until it exits; 2 or 4 runs it beside its parent from CreateProcess on,
+ *     each child in a worker of its own (`host/process.worker.js`) with the run's
+ *     system half reached across a link, up to that many at once and the next
+ *     beside its parent on the engine's thread. More than one needs shared memory:
+ *     asked for in `compatible` mode or on a page that is not cross-origin isolated,
+ *     the run falls back to `compatible`, one process at a time, and says so with a
+ *     `fallback` event.
+ * @property {{ asked: any, detail: string } | null} [fallback]
+ *     What a run asked for and fell back from (`mode.js`): set by `createApp`, not
+ *     something a caller supplies.
  * @property {'directx7' | 'directx8' | 'directx9' | 'directx10' | 'opengl'} [graphicsApi]
  *     The graphics a bottle prefers: every DirectX up to the one named --
  *     DirectX 9 has DirectDraw and Direct3D 8 as well -- or OpenGL alone. Only
@@ -172,7 +198,9 @@ import { withRunMode } from './mode.js';
  * @property {(record: any) => void} [onCall]
  *           Every host call as it returns. The ring kept for a failure holds
  *           the end of a run; this holds all of it, for a tool willing to
- *           write it somewhere.
+ *           write it somewhere. Each of the run's processes calls it, and a
+ *           record names the process's image (`image`) and the calling
+ *           thread (`thread`).
  * @property {Record<string, number>} [jit]
  *     The emulator's compiler budgets, by config index. For measurement.
  * @property {'emulator' | 'cork'} [engine]
@@ -203,6 +231,12 @@ import { withRunMode } from './mode.js';
  *           quote it. Defaults to the image path, quoted.
  * @property {number} [processId]    What GetCurrentProcessId answers: for a child, the
  *           identifier its parent was handed when it started it.
+ * @property {any} [system]  The run's system half -- registry, volume, windows, ids, named
+ *           objects -- for a process that joins another run's rather than making one: a
+ *           process in a worker of its own is handed it across a link (`system-link.js`).
+ * @property {(name: string, payload: any) => void} [relay]
+ *           Told every event this process emits, for a process in a worker of its own
+ *           to tell the bus of the run that started it.
  * @property {{ output?: StandardFile, error?: StandardFile }} [standardFiles]
  *           The files a child's parent handed it as its output and error,
  *           each the parent's own open file, whose position the child's
@@ -221,7 +255,8 @@ import { withRunMode } from './mode.js';
  *           nonzero code is the page's error report instead.
  * @property {any} [device]          The GPU to draw on, when there is one.
  * @property {{ presenter?: any, compressedTextures?: boolean, maxFrameLatency?: number,
- *     lendMemory?: boolean, guestCode?: boolean, guestTraps?: string[] }}
+ *     lendMemory?: boolean, guestCode?: boolean, guestTraps?: string[], worker?: any,
+ *     display?: (frame: any) => void }}
  *           [graphics]
  *           The graphics layer's configuration (docs/core/configuration.md,
  *           graphics), forwarded to it as given: `compressedTextures`
@@ -233,6 +268,10 @@ import { withRunMode } from './mode.js';
  *           and the texture the primary is copied into. Absent, one is made
  *           from `device` and handed to every machine; set by `createApp` on a
  *           rebuilt machine and not something a caller supplies.
+ *           `graphics.worker` is a way in to the run's graphics worker for a
+ *           process with no GPU of its own, and `graphics.display` where its
+ *           surfaces' pictures go: both set for a child in a worker of its own,
+ *           whose devices draw there and whose pictures the run shows.
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
  *           What the program is told its display is.
  * @property {{ picture?: { width: number, height: number, bits: Uint8Array } }} [desktop]
@@ -372,6 +411,12 @@ export function retryingFetch({ fetch, events, retry }){
             + `attempts: ${reason}`);
     };
 }
+
+/**
+ * The process id of a run's first process, where the caller named none: the
+ * kernel's, its windows' and its frames' alike, wherever it stands.
+ */
+const FIRST_PROCESS_ID = 0x1000;
 
 /**
  * How much one range request may ask for.
@@ -903,6 +948,10 @@ export function timedWait({ hidden, macrotask, timer }){
  *     `timer` is the page's own distinction, between a machine that has
  *     stopped retiring instructions and one still spinning through turns,
  *     which its default wait needs.
+ * @property {(count: number) => void} [machines]
+ *     How many machines take turns on the thread now, told whenever it
+ *     changes: a pacing that may block the thread to wait must not while
+ *     another machine has turns to run.
  */
 
 /**
@@ -2126,13 +2175,13 @@ export async function zstdWasmFor(options, here = import.meta.url){
  * of this, which is what a repeated read actually hits.
  *
  * @param {any} deps
- * @returns {Promise<{ fetch: (needed: any[]) => Promise<void>,
+ * @returns {Promise<{ source: any, fetch: (needed: any[]) => Promise<void>,
  *                     stop: () => void, ahead: () => number,
  *                     refetched: () => { blocks: number, bytes: number },
  *                     ranges: () => { requests: number, bytes: number },
  *                     registry: Promise<any> } | null>}
  */
-async function mountBundle({ options, cpu, filesystem, events, translationStore }){
+async function mountBundle({ options, cpu, events, translationStore }){
     if (!options.bundle?.fetch)
     {
         return null;
@@ -2208,7 +2257,6 @@ async function mountBundle({ options, cpu, filesystem, events, translationStore 
         relocate: { [BOTTLE_SYSTEM_PATH]: SYSTEM_DIRECTORY },
     });
 
-    filesystem.mount('C', { source });
 
     /**
      * A member's bytes, read before the program runs: one request for its run
@@ -2536,6 +2584,8 @@ async function mountBundle({ options, cpu, filesystem, events, translationStore 
     // left, which is the whole session.
     fill();
     return {
+        /** The bundle's files as a drive's read-only layer, for each machine to mount. */
+        source,
         fetch: demand,
         registry,
         /** How many blocks were brought in ahead of a read, ever. */
@@ -2757,6 +2807,158 @@ export function createKernelGl(opengl, journalCall, traced, counters){
 }
 
 /**
+ * The session storage holds for a run, its registry laid into `registry`
+ * before the program's first instruction, and what saves it from then on.
+ *
+ * @param {{ options: AppOptions, events: any, filesystem: any, registry: any,
+ *     inherited: boolean }} deps
+ *     `inherited`: the registry is the run's already, made by a process before
+ *     this one
+ */
+async function openSession({ options, events, filesystem, registry, inherited }){
+    const storage = resolveStorage(options.storage, options.id ?? 'session');
+
+    // Seeded before the program's first instruction, and awaited: a save that
+    // arrives after the program has looked for it is a save that was not there.
+    const seeded = normaliseSession(await storage.load());
+    // The registry first, and before the program's first instruction: its
+    // settings and its name are here as often as in a file, and a program
+    // that finds the key empty writes its defaults over them. The files wait
+    // for the volume they belong on, which the bundle mount replaces.
+    // A process the run started after the first has the run's registry
+    // already, with what its parent wrote a moment before starting it -- a
+    // write no save may have reached -- and reading the save back over it
+    // would undo that.
+    if (seeded.registry && !inherited)
+    {
+        registry.fromJSON(seeded.registry);
+    }
+
+    // One way out. What the program writes is announced once the writes settle;
+    // nothing is ever pulled back in while it runs.
+    const persist = storage.save;
+    /** @type {ReturnType<typeof coalescedSaver> | null} */
+    let saver = null;
+    let stopSavingRegistry = ()=>{};
+    if (persist)
+    {
+        saver = coalescedSaver({
+            snapshot: ()=>({
+                files: filesystem.export(),
+                registry: registry.toJSON(),
+            }),
+            persist: (session, changes)=>Promise.resolve(persist(session, changes)).catch(
+                (/** @type {Error} */ error)=>{
+                    events.emit('error', { reason: 'session-save', error });
+                }),
+        });
+        const pending = saver;
+        /** @param {any[]} changes */
+        const save = changes=>{
+            events.emit('session', { changes });
+            pending.note(changes);
+        };
+        filesystem.onChanged(save);
+        // A registry write is a change to the session like a file write is,
+        // announced without a path: the whole hive travels with every save.
+        // The hive is the run's and outlives this machine: the subscription
+        // goes with it (`dispose`).
+        stopSavingRegistry = registry.onChanged(()=>save([{ kind: 'registry' }]));
+    }
+    return { seeded, saver, stopSavingRegistry };
+}
+
+/**
+ * Lays down the run's volume before its first instruction: the bundle under
+ * C:, the discs, the session's files and the page's own over them; and the
+ * registry the installation wrote into `registry`, when there is one to fill.
+ *
+ * @param {{ options: AppOptions, events: any, filesystem: any, blocks: any,
+ *     seeded: { files: any[] }, registry: any }} deps
+ */
+async function furnishVolume({ options, events, filesystem, blocks, seeded, registry }){
+    if (blocks)
+    {
+        filesystem.mount('C', { source: blocks.source });
+    }
+    // What the installation wrote to the registry is the machine's before the
+    // program's first instruction, as it was on the machine it was installed
+    // on: a launcher finds its game installed by the key its setup made. What
+    // the session saved since is kept over it.
+    const installedRegistry = await blocks?.registry;
+    if (installedRegistry && registry)
+    {
+        registry.fillFromJSON(installedRegistry);
+    }
+    // A disc is a drive of its own, and takes D: or the first letter nothing
+    // holds once the machine's own disk is mounted.
+    await mountDiscs({ discs: options.discs, filesystem, events });
+
+    // The session's files go onto the volume once the bundle is under it, so
+    // that a saved file the bundle also carries is the one the program sees.
+    if (seeded.files.length > 0)
+    {
+        filesystem.apply(seeded.files);
+    }
+    // The person's own edits to the title's files -- a realm list, a config
+    // line -- laid over the session's, so they win over what the program
+    // last saved and never touch the bundle itself.
+    if (options.files && options.files.length > 0)
+    {
+        filesystem.apply(options.files);
+    }
+}
+
+/**
+ * The severity an event is journalled at: its own. A failure the program
+ * cannot see is an error whether or not anybody was listening for it, and a
+ * library that could not be found is the warning that explains a program's
+ * next decision. Everything else is what happened, at info.
+ */
+const SEVERITY = /** @type {Record<string, string>} */ ({
+    error: 'error',
+    'bundle-unavailable': 'error',
+    'library-missing': 'warn',
+    'libraries-missing': 'warn',
+    divergence: 'warn',
+    // The program's own words about why it is stopping. It is not our
+    // failure, but it is never good news.
+    'message-box': 'warn',
+    'bundle-retry': 'warn',
+    'bundle-prefetch-failed': 'warn',
+    'bundle-unbacked': 'warn',
+});
+
+/**
+ * An event whose own source writes the journal keeps a record per call while
+ * the event itself fires once, so the bus must not write the first of those
+ * calls a second time. `unimplemented` is the one: a program that calls a
+ * missing import in a loop would otherwise fill the page's queue with a clone
+ * and a wake-up per call.
+ */
+const SELF_JOURNALLED = new Set(['unimplemented']);
+
+/**
+ * Every event the run reports also goes to its journal, so that one ordered
+ * stream carries the whole story. A consumer that subscribes to a name still
+ * gets it exactly as before -- a watcher never answers, so it cannot take an
+ * event away from a handler that would have.
+ *
+ * @param {{ onAny: (watcher: (name: string, payload: any) => void) => unknown }} events
+ * @param {{ write: (level: string, category: string, template: string,
+ *     ...args: any[]) => any }} into
+ */
+function journalEvents(events, into){
+    events.onAny((/** @type {string} */ name, /** @type {any} */ payload)=>{
+        if (SELF_JOURNALLED.has(name))
+        {
+            return;
+        }
+        into.write(SEVERITY[name] ?? 'info', name, '{0}', describeEvent(payload));
+    });
+}
+
+/**
  * One machine, running one image.
  *
  * `createApp` below is what a caller reaches for; this is what it builds, once
@@ -2767,11 +2969,14 @@ export function createKernelGl(opengl, journalCall, traced, counters){
  * @param {AppOptions & {
  *     events?: any,
  *     seed?: { path: string, bytes?: Uint8Array, delete?: boolean }[],
- *     hive?: any,
  *     patches?: { address: number, bytes: Uint8Array }[],
  *     spawned?: (request: any) => void,
  *     logSinks?: Map<Function, (payload: any) => void>,
- *     namedObjects?: Map<string, { kind: string, object: any }>,
+ *     system?: { namedObjects: Map<string, any>, registry: any, bundle: any, windows?: any,
+ *         ids: { thread: number, process: number }, volume: any },
+ *     mainThreadId?: number,
+ *     beside?: (request: any) => void,
+ *     othersRunning?: () => boolean,
  *     com?: { table: any, process: unknown },
  * }} options
  * @returns {Promise<any>} an AppController
@@ -2901,7 +3106,8 @@ async function buildApp(options){
 
     // Filled in once the emulator is up and a bundle, if any, is mounted. win32
     // is built before that and is handed the lookup rather than the answer.
-    /** @type {{ fetch: (needed: any[]) => Promise<void>, stop: () => void, ahead: () => number,
+    /** @type {{ source: any, fetch: (needed: any[]) => Promise<void>, stop: () => void,
+     *          ahead: () => number,
      *          refetched: () => { blocks: number, bytes: number },
      *          ranges: () => { requests: number, bytes: number },
      *          registry: Promise<any> } | null} */
@@ -3011,8 +3217,8 @@ async function buildApp(options){
     const tracedCalls = new Map();
     // Every process of a run names its first thread "main", so in the run's one
     // journal a later process's threads carry its image name as well.
-    const callerTag = options.log?.journal
-        ? `${String(options.imagePath ?? '').split(/[\\/]/).pop()}:` : '';
+    const callerImage = String(options.imagePath ?? '').split(/[\\/]/).pop() ?? '';
+    const callerTag = options.log?.journal ? `${callerImage}:` : '';
     // The cursor the page shows: what the program last said of it -- user32's
     // count and SetCursor, or a device cursor; the last report wins -- hidden
     // while it holds the mouse exclusively through DirectInput, as Windows does.
@@ -3116,6 +3322,11 @@ async function buildApp(options){
                 size: threadStackSize,
                 limit: STACK_POOL_BASE + STACK_POOL_SIZE,
             },
+            // The run's thread and process ids, which every process numbers
+            // its own from (`system`).
+            ids: options.system?.ids,
+            // A process across a link reaches the run's named objects there.
+            remoteObjects: options.system?.objects ?? null,
         },
         cpu: {
             jit: options.jit, sampling: options.sampling, memorySize,
@@ -3153,7 +3364,14 @@ async function buildApp(options){
             record: options.record ?? 0,
             onCall: (/** @type {any} */ call)=>{
                 journalCall(call);
-                options.onCall?.(call);
+                if (options.onCall)
+                {
+                    // Every process of a run hands its calls to the one sink,
+                    // and names its first thread "main": a call says whose
+                    // image made it, beside the thread the bridge names.
+                    call.image = callerImage;
+                    options.onCall(call);
+                }
             },
             // Which calls the sink above keeps: every one for a caller's own
             // sink, the traced ones otherwise. The bridge asks once for each
@@ -3161,6 +3379,12 @@ async function buildApp(options){
             // those alone.
             wantsCall: (/** @type {string} */ name)=>options.onCall !== undefined
                 || journal.enabled(areaOfCall({ name }), journal.Level.TRACE),
+        },
+        filesystem: {
+            // The run's drives, as one Windows has one volume: a process after
+            // the first stands on the first one's, its writes and all, rather
+            // than on a copy of it.
+            volume: options.system?.volume,
         },
         media: {
             // The decoder, handed down the same way the emulator's binary is:
@@ -3274,6 +3498,10 @@ async function buildApp(options){
             // holds instead of orphaning it on a buffer nothing reads. Absent
             // on the first process, which makes its own.
             memory: options.audio?.memory,
+            // A process beside another on that storage rather than in its
+            // place: the arena span it was lent, and nothing of the other's
+            // closed.
+            beside: options.audio?.beside,
             // Shared memory is what a worklet needs to read the far end at
             // all, so this is an environment question answered here rather
             // than guessed inside the mixer: without it (a page that is not
@@ -3373,6 +3601,9 @@ async function buildApp(options){
             // is the run's and wins over a caller's value of the same name.
             ...options.graphics,
             choice: options.graphicsApi,
+            // Whose frames this machine's devices present: the run's screen
+            // is composed of every process's picture by its windows.
+            processId: options.processId ?? FIRST_PROCESS_ID,
             // The display's raster -- the vertical blank, the scan line --
             // runs on the guest's clock, which only this assembly can reach:
             // a program times its spin on the blank with its own timers.
@@ -3431,7 +3662,11 @@ async function buildApp(options){
                         // a test -- still has whatever the caller handed in.
                         if (runPresenter)
                         {
-                            runPresenter.show(frame);
+                            // A frame of the graphics worker says whose it is;
+                            // one drawn here is this process's.
+                            runPresenter.show(frame.source === undefined
+                                ? { ...frame, source: options.processId ?? FIRST_PROCESS_ID }
+                                : frame);
                         }
                         else
                         {
@@ -3539,13 +3774,14 @@ async function buildApp(options){
             processorName: (options.engine ?? DEFAULT_ENGINE) === 'cork'
                 ? processorName(SETTINGS) : undefined,
             performanceFrequency: SETTINGS.qpc.frequency,
-            // The one namespace a named mutex, event, semaphore, timer and
-            // file mapping all share, carried in from outside this build so a
-            // name a parent registered is one a child still finds: the table
-            // outlives the process the way the log's sinks and the sound
-            // ring do, for the same reason -- a replacement rebuilds this
-            // layer, and the name was never this process's to keep.
-            namedObjects: options.namedObjects,
+            // What every process of the run shares, as one Windows does: the
+            // namespace a named mutex, event, semaphore, timer and file
+            // mapping are found in, and the registry. Carried in from outside
+            // this build, so a name a parent registered is one a child still
+            // finds and a key it wrote is one the child reads -- a
+            // replacement rebuilds this layer, and neither was ever this
+            // process's to keep.
+            system: options.system,
             processId: options.processId,
             standardFiles: options.standardFiles,
             // The run's table of class objects served out of process, and this
@@ -3886,99 +4122,18 @@ async function buildApp(options){
     }
 
     const filesystem = core.api('filesystem');
-    const storage = resolveStorage(options.storage, options.id ?? 'session');
+    const registryInherited = core.api('win32').registryInherited?.() ?? false;
+    const { seeded, saver, stopSavingRegistry } = await openSession({ options, events, filesystem,
+        registry: core.api('win32').registry(), inherited: registryInherited });
 
-    // Seeded before the program's first instruction, and awaited: a save that
-    // arrives after the program has looked for it is a save that was not there.
-    const seeded = normaliseSession(await storage.load());
-    // The registry first, and before the program's first instruction: its
-    // settings and its name are here as often as in a file, and a program
-    // that finds the key empty writes its defaults over them. The files wait
-    // for the volume they belong on, which the bundle mount below replaces.
-    if (seeded.registry)
-    {
-        core.api('win32').registry().fromJSON(seeded.registry);
-    }
-    // And the registry of the process that started this one, which is the
-    // same registry: a machine has one, and a child reads what its parent
-    // wrote a moment before starting it -- a write no save may have reached.
-    if (options.hive)
-    {
-        core.api('win32').registry().fromJSON(options.hive);
-    }
-
-    // One way out. What the program writes is announced once the writes settle;
-    // nothing is ever pulled back in while it runs.
-    const persist = storage.save;
-    /** @type {ReturnType<typeof coalescedSaver> | null} */
-    let saver = null;
-    if (persist)
-    {
-        saver = coalescedSaver({
-            snapshot: ()=>({
-                files: filesystem.export(),
-                registry: core.api('win32').registry().toJSON(),
-            }),
-            persist: (session, changes)=>Promise.resolve(persist(session, changes)).catch(
-                (/** @type {Error} */ error)=>{
-                    events.emit('error', { reason: 'session-save', error });
-                }),
-        });
-        const pending = saver;
-        /** @param {any[]} changes */
-        const save = changes=>{
-            events.emit('session', { changes });
-            pending.note(changes);
-        };
-        filesystem.onChanged(save);
-        // A registry write is a change to the session like a file write is,
-        // announced without a path: the whole hive travels with every save.
-        core.api('win32').registry().onChanged(()=>save([{ kind: 'registry' }]));
-    }
-
-    // Every event the engine reports also goes to the journal, so that one
-    // ordered stream carries the whole story. A consumer that subscribes to a
-    // name still gets it exactly as before -- a watcher never answers, so it
-    // cannot take an event away from a handler that would have.
-    //
-    // The severity is the event's own: a failure the program cannot see is an
-    // error whether or not anybody was listening for it, and a library that
-    // could not be found is the warning that explains a program's next
-    // decision. Everything else is what happened, at info.
     const journal = core.api('log');
-    const SEVERITY = /** @type {Record<string, string>} */ ({
-        error: 'error',
-        'bundle-unavailable': 'error',
-        'library-missing': 'warn',
-        'libraries-missing': 'warn',
-        divergence: 'warn',
-        // The program's own words about why it is stopping. It is not our
-        // failure, but it is never good news.
-        'message-box': 'warn',
-        'bundle-retry': 'warn',
-        'bundle-prefetch-failed': 'warn',
-        'bundle-unbacked': 'warn',
-    });
-    // An event whose own source writes the journal keeps a record per call
-    // while the event itself fires once, so the generic path below must not
-    // write the first of those calls a second time. `unimplemented` is the one:
-    // a program that calls a missing import in a loop would otherwise fill the
-    // page's queue with a clone and a wake-up per call.
-    const selfJournalled = new Set(['unimplemented']);
     // The run's processes share one event bus and one journal, so only the
     // machine that made the journal writes the bus into it, and straight into
     // the journal rather than through its own view: that view closes with the
     // machine, and a process that replaced it still fires events.
     if (!options.log?.journal)
     {
-        const into = journal.journal?.() ?? journal;
-        events.onAny((/** @type {string} */ name, /** @type {any} */ payload)=>{
-            if (selfJournalled.has(name))
-            {
-                return;
-            }
-            into.write(SEVERITY[name] ?? 'info', name, '{0}', describeEvent(payload));
-        });
+        journalEvents(events, journal.journal?.() ?? journal);
     }
 
     const cpu = core.api('cpu');
@@ -4023,33 +4178,24 @@ async function buildApp(options){
 
     // Mounted after the machine is up. A zstd block is decoded by this
     // project's own decoder now, so the mount no longer needs the emulator.
-    blocks = await mountBundle({ options, cpu, filesystem, events, translationStore });
-    // What the installation wrote to the registry is the machine's before the
-    // program's first instruction, as it was on the machine it was installed
-    // on: a launcher finds its game installed by the key its setup made. What
-    // the session saved since is kept over it. A process started by another
-    // has that one's registry, which holds it already.
-    const installedRegistry = await blocks?.registry;
-    if (installedRegistry && !options.hive)
+    // The bundle is the run's: the first process opens it -- its index, its
+    // block cache, the background fill -- and every process after it mounts
+    // the same one, rather than each reading the index again and filling a
+    // second cache from the network beside the first.
+    blocks = options.system?.bundle
+        ?? await mountBundle({ options, cpu, events, translationStore });
+    if (options.system && blocks)
     {
-        core.api('win32').registry().fillFromJSON(installedRegistry);
+        options.system.bundle = blocks;
     }
-    // A disc is a drive of its own, and takes D: or the first letter nothing
-    // holds once the machine's own disk is mounted.
-    await mountDiscs({ discs: options.discs, filesystem, events });
-
-    // The session's files go onto the volume once the bundle is under it, so
-    // that a saved file the bundle also carries is the one the program sees.
-    if (seeded.files.length > 0)
+    // A process that stands on the run's drives finds the bundle under C:
+    // already, and its discs, the session and the files the page laid over
+    // it; mounting or applying any of them again would put older bytes over
+    // what the processes before it wrote.
+    if (!(filesystem.inherited?.() ?? false))
     {
-        filesystem.apply(seeded.files);
-    }
-    // The person's own edits to the title's files -- a realm list, a config
-    // line -- laid over the session's, so they win over what the program
-    // last saved and never touch the bundle itself.
-    if (options.files && options.files.length > 0)
-    {
-        filesystem.apply(options.files);
+        await furnishVolume({ options, events, filesystem, blocks, seeded,
+            registry: registryInherited ? null : core.api('win32').registry() });
     }
     // And what the process this one replaces had written. A self-extracting
     // installer unpacks its payload and then starts it; without this the
@@ -5354,7 +5500,7 @@ async function buildApp(options){
     const process = createProcessBlocks({
         allocate: allocateFromHeap,
         writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
-        processId: options.processId ?? 0x1000,
+        processId: options.processId ?? FIRST_PROCESS_ID,
         version: windowsVersion(options.windows),
         imageBase: image.base,
         processHeap: allLibraries['KERNEL32.dll']?.GetProcessHeap?.handler([]) ?? 0,
@@ -5381,21 +5527,22 @@ async function buildApp(options){
 
     // The program's first thread. Everything after this runs under the
     // scheduler, including the main thread -- there is no privileged path.
-    const mainBlock = process.createThreadBlock({
-        id: 1,
-        stackBase: initialStack,
-        stackLimit: initialStack - stackSize,
-    });
+    // Its id the one the parent was told, for a child.
     const mainThread = kernel.createThread({
         entry: start,
         stackTop: initialStack,
         stackLimit: initialStack - stackSize,
-        tebAddress: mainBlock.teb,
         name: 'main',
+        id: options.mainThreadId,
         // A program whose entry point returns ends as one that called
         // ExitThread with its answer, as Windows' process start routine sees to.
         returnTo: win32.threadReturn(),
     });
+    mainThread.tebAddress = process.createThreadBlock({
+        id: mainThread.id,
+        stackBase: initialStack,
+        stackLimit: initialStack - stackSize,
+    }).teb;
 
     /** The mixer, when this build has one. Read once; it does not change. */
     const sound = core.api('audio')?.output?.() ?? null;
@@ -5937,7 +6084,15 @@ async function buildApp(options){
                     // their own rather than an unmeasured constant.
                     journal.begin('poll', journal.PhaseKind.HOST);
                     const failure = bridge.failure();
-                    const replacing = kernel.processes.pending();
+                    let replacing = kernel.processes.pending();
+                    // Where processes run at once, a child starts now, beside
+                    // this one, rather than waiting to take its place.
+                    if (replacing && options.beside)
+                    {
+                        kernel.processes.started(replacing);
+                        options.beside(replacing);
+                        replacing = null;
+                    }
                     const code = win32.exitCode();
                     const fault = cpu.fault();
                     journal.end('poll');
@@ -6087,6 +6242,18 @@ async function buildApp(options){
                                 deadlineMs: nextDeadlineMs(), wakes: [],
                             });
                             journal.end('idle-deadline');
+                            continue;
+                        }
+                        // Or another process of the run is running beside this
+                        // one, and what every thread here waits on -- a child's
+                        // exit, an object it sets -- is its to answer.
+                        if (options.othersRunning?.())
+                        {
+                            journal.begin('idle-host-wait', journal.PhaseKind.HOST);
+                            await pacing.wait({
+                                timer: true, sleep: true, deadlineMs: null, wakes: [],
+                            });
+                            journal.end('idle-host-wait');
                             continue;
                         }
                         // Either everything finished without the program exiting,
@@ -6496,6 +6663,10 @@ async function buildApp(options){
          * without shared memory reads `ring()` directly).
          */
         audio: {
+            /** A span of the output's arena for a process beside this one. @param {number} bytes */
+            lend: bytes=>core.api('audio').output().lend?.(bytes) ?? -1,
+            /** @param {number} offset @param {number} bytes */
+            takeBack: (offset, bytes)=>core.api('audio').output().takeBack?.(offset, bytes),
             ring: ()=>core.api('audio').output().ring,
             table: ()=>core.api('audio').output().table,
             memory: ()=>core.api('audio').output().memory,
@@ -6544,6 +6715,16 @@ async function buildApp(options){
             generation: ()=>filesystem.generation(),
             /** @param {number} mark */
             changesSince: mark=>filesystem.changesSince(mark),
+            /**
+             * Whether another process's session is on the same drives as this
+             * one's: the run's, where what one writes the other reads.
+             *
+             * @param {any} other
+             */
+            shares: other=>filesystem.runVolume() !== null
+                && other?.runVolume?.() === filesystem.runVolume(),
+            /** The run's drives this session is on, or null for this process's own. */
+            runVolume: ()=>filesystem.runVolume(),
         },
 
         /**
@@ -6667,13 +6848,13 @@ async function buildApp(options){
 
         /**
          * A child that ran beside this process has exited with this code: the
-         * threads waiting on it wake, and the picture is this process's again.
+         * threads waiting on it wake. The screen is the run's presenter's to
+         * compose again, from the pictures of the processes left.
          *
          * @param {any} request @param {number} code
          */
         childExited(/** @type {any} */ request, /** @type {number} */ code){
             win32.childExited(request, code);
-            win32.refreshWindows();
         },
 
         /**
@@ -6687,6 +6868,9 @@ async function buildApp(options){
 
         diagnostics: ()=>[
             ...core.diagnostics(),
+            // The run's windows, where this thread keeps them (`manager.js`).
+            ...options.system?.windows?.manager ? [{ name: 'windows', status: 'ready',
+                metrics: options.system.windows.manager.diagnostics() }] : [],
             {
                 name: 'app',
                 version: '0.1.0',
@@ -6718,8 +6902,16 @@ async function buildApp(options){
                     // read beside the bridge's own per-hook rows: these calls
                     // never cross the bridge, so they are not in `hooks` at all.
                     kernelGlCalls: glCounters.calls,
-                    // Whether the guest's memory is shared with other threads (`mode.js`).
+                    // Whether the guest's memory is shared with other threads, and
+                    // how many processes run at once (`mode.js`).
                     mode: options.mode ?? null,
+                    concurrency: options.concurrency ?? 1,
+                    // What was asked for and not had, when the run fell back.
+                    fallback: options.fallback ?? null,
+                    // What a pacing that counts said of the run: in the workers
+                    // mode, the page's messages read between turns, the yields
+                    // to the event loop, and the sleeps on the doorbell.
+                    pacing: /** @type {any} */ (pacing).counts?.() ?? null,
                 },
             },
         ],
@@ -6819,9 +7011,14 @@ async function buildApp(options){
             // What the program wrote last is saved now rather than after it
             // settles: the machine it was written on is about to go.
             saver?.flush();
+            stopSavingRegistry();
             // Before the graph goes: the background filler would otherwise go
-            // on asking for blocks nobody can put anywhere.
-            blocks?.stop();
+            // on asking for blocks nobody can put anywhere. A run's bundle is
+            // the run's to stop, after its last process.
+            if (!options.system)
+            {
+                blocks?.stop();
+            }
             breathe.close();
             return core.dispose().then(()=>{
                 if (ownsTranslationStore)
@@ -6856,6 +7053,332 @@ const REPLACEMENT_HISTORY = 16;
 const EXIT_NOTICE_TYPE = 0x40;
 
 /**
+ * What of a run's options never goes to a process in a worker of its own:
+ * the system's -- its drives, session, bundle, devices and bus -- which the
+ * process reaches across its link, and what a process is handed of its own.
+ */
+const SYSTEM_OPTIONS = new Set(['system', 'relay', 'pacing', 'device', 'bundle', 'storage',
+    'discs', 'files', 'seed', 'events', 'spawned', 'logSinks', 'win32', 'watchImport', 'hooks',
+    'executable', 'standardFiles', 'fallback', 'graphics', 'audio', 'cork', 'log', 'com']);
+
+/**
+ * A value as it crosses to another thread's start: data -- numbers, strings,
+ * bytes, arrays and plain objects of those -- and nothing that is a function
+ * or an object of a class, which a structured clone refuses or empties.
+ *
+ * @param {any} value @param {number} [depth]
+ * @returns {any}
+ */
+function portable(value, depth = 0){
+    if (value === null || typeof value !== 'object')
+    {
+        return typeof value === 'function' || typeof value === 'symbol' ? undefined : value;
+    }
+    if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer
+        || (typeof SharedArrayBuffer === 'function' && value instanceof SharedArrayBuffer))
+    {
+        return value;
+    }
+    if (depth > 8)
+    {
+        return undefined;
+    }
+    if (Array.isArray(value))
+    {
+        return value.map(item=>portable(item, depth + 1) ?? null);
+    }
+    if (Object.getPrototypeOf(value) !== Object.prototype)
+    {
+        return undefined;
+    }
+    return Object.fromEntries(Object.entries(value).map(([key, item])=>
+        [key, portable(item, depth + 1)]).filter(([, item])=>item !== undefined));
+}
+
+/**
+ * The run's options a process in a worker of its own starts with: the
+ * engine, the mode, the Windows, the display, the knobs, the decoders'
+ * binaries.
+ *
+ * @param {AppOptions} options
+ */
+function portableOptions(options){
+    return portable(Object.fromEntries(Object.entries(options)
+        .filter(([key])=>!SYSTEM_OPTIONS.has(key))));
+}
+
+/**
+ * The call areas a run's journal starts with switched off; see `buildApp`.
+ */
+const CALLS_OFF = Object.freeze({
+    'call.cpu': 'off', 'call.gpu': 'off', 'call.audio': 'off', 'call.video': 'off',
+    'call.input': 'off', 'call.net': 'off', 'call.com': 'off', 'call.hook': 'off',
+});
+
+/**
+ * The run's system where every process of it stands in a worker of its own
+ * (`concurrency` above 1): this thread runs no program. What a process's
+ * machine is to the page -- its log, its sound, its input, its files and
+ * registry, the calls that look inside a running program -- this answers in
+ * that shape. The journal, the sound output, the volume, the bundle and the
+ * registry are the system's own, made here before any process; what only a
+ * process has is asked of the run's first process across its link, and the
+ * page's input goes to the process started last of those standing, as it
+ * goes to a child the moment it starts.
+ *
+ * @param {{ options: AppOptions, events: any, system: any, translationStore: any,
+ *     now: () => number,
+ *     across: () => { image: string, id: number, link: ReturnType<typeof openLink> }[],
+ *     libraries: () => string[] }} deps
+ *     `across`: the processes standing in workers, oldest first; `libraries`:
+ *     the system libraries the run's own program knew, once it is over
+ */
+async function buildSystemHost(deps){
+    const { options, events, system, translationStore, now, across, libraries } = deps;
+    const core = await assembleModules({
+        ...Object.fromEntries(defaultModules().map(module=>[module.name, false])),
+        log: { categories: { ...CALLS_OFF, ...options.log?.categories },
+            capacity: options.log?.capacity, bytes: options.log?.bytes, now },
+        filesystem: { volume: system.volume },
+    });
+    const filesystem = core.api('filesystem');
+    const journal = core.api('log');
+    journalEvents(events, journal.journal?.() ?? journal);
+    system.registry = createRunRegistry({
+        windows: options.windows,
+        directx: options.graphicsApi
+            ? GRAPHICS_CHOICES[options.graphicsApi].directx ?? undefined : undefined,
+        processorMhz: CORK_TSC_MHZ,
+        processorName: processorName(SETTINGS),
+    });
+    system.windows = createWindowDirectory();
+    const { seeded, saver, stopSavingRegistry } = await openSession({ options, events,
+        filesystem, registry: system.registry, inherited: false });
+    // Cork's own decoder reads the bundle's blocks: no processor is asked.
+    const blocks = await mountBundle({ options, cpu: null, events, translationStore });
+    system.bundle = blocks;
+    await furnishVolume({ options, events, filesystem, blocks, seeded,
+        registry: system.registry });
+    // The output every process plays into, each in a span of its arena lent
+    // it; the page's worklet reads the table.
+    const given = options.audio?.memory;
+    const output = createMixer({ shared: true, sampleRate: options.audio?.sampleRate,
+        memory: given && 'table' in given ? given : undefined });
+
+    /** The run's own program: the first process standing. */
+    const first = ()=>across()[0] ?? null;
+    /**
+     * What only a process has, asked of the run's own program.
+     *
+     * @param {string} path  a member of its machine, `debug.read`
+     * @param {any[]} [args]
+     */
+    const ask = (path, args = [])=>{
+        const process = first();
+        return process
+            ? process.link.call('facade', 'call', [path, args]).then(eventFrom)
+            : Promise.reject(new Error(`${path}: no process of the run stands`));
+    };
+    /** Every process standing, told the same. @param {string} method */
+    const tellAll = method=>{
+        for (const process of across())
+        {
+            process.link.call('control', method, []).catch(()=>{});
+        }
+    };
+    /** The canvas the page's pointer is measured on, once attached. @type {any} */
+    let viewport = null;
+    /**
+     * The run's own program's tables, as it last answered or as it ended:
+     * what a reader of the run's diagnostics wants of its processor, its
+     * pacing and its devices is there, not on this thread.
+     *
+     * @type {any[]}
+     */
+    let programTables = [];
+    /** The tables this thread keeps for the run: its journal and its sound output. */
+    const ownTables = new Set(['log', 'audio', 'windows']);
+
+    return {
+        log: {
+            /** @param {'error' | 'warn' | 'info'} level @param {string} category @param {string} text */
+            write: (level, category, text)=>journal.write(level, category, '{0}', text),
+            /** @param {number} [since] @param {number} [limit] */
+            drain: (since, limit)=>journal.drain(since, limit),
+            /** @param {number} [count] */
+            recent: count=>journal.recent(count),
+            journal: ()=>journal.journal?.() ?? null,
+            /** @param {string} category @param {string | number} level */
+            setLevel: (category, level)=>journal.setLevel(category, level),
+            /** @param {string | number} level */
+            setDefaultLevel: level=>journal.setDefaultLevel(level),
+            /** @param {number} [worst] */
+            profile: worst=>journal.profile(worst),
+            /** @param {number} [count] */
+            frames: count=>journal.frames(count),
+            memory: ()=>journal.memory(),
+        },
+        audio: {
+            /** @param {number} bytes */
+            lend: bytes=>output.lend(bytes),
+            /** @param {number} offset @param {number} bytes */
+            takeBack: (offset, bytes)=>output.takeBack(offset, bytes),
+            table: ()=>output.table,
+            memory: ()=>output.memory,
+            format: ()=>({ sampleRate: output.sampleRate, channels: output.channels }),
+        },
+        media: { instance: ()=>null },
+        input: {
+            /** @param {any} canvas */
+            attach: canvas=>{
+                viewport = canvas;
+                return null;
+            },
+            detach: ()=>{
+                viewport = null;
+            },
+            /** @param {any} event */
+            send: event=>{
+                // To the process of the window the run's manager says should
+                // have it (`inputTarget`, where `routedInput` explains the rest).
+                const standing = across();
+                const manager = system.windows?.manager;
+                const target = manager?.inputTarget(event) ?? null;
+                if (target === null && manager?.topLevel().some((/** @type {any} */ state)=>state.visible))
+                {
+                    return false;
+                }
+                const process = standing.find(each=>each.id === target) ?? standing.at(-1);
+                process?.link.call('input', 'send', [event, viewport
+                    ? { width: viewport.width, height: viewport.height } : null]).catch(()=>{});
+                return Boolean(process);
+            },
+            poll: ()=>{},
+        },
+        pause: ()=>tellAll('pause'),
+        resume: ()=>tellAll('resume'),
+        stop: ()=>tellAll('stop'),
+        answerMessageBox: ()=>false,
+        on: (/** @type {string} */ name, /** @type {(payload: any) => any} */ handler)=>
+            events.on(name, handler),
+        off: (/** @type {string} */ name, /** @type {(payload: any) => any} */ handler)=>
+            events.off(name, handler),
+        /** @param {(handle: number, text: string) => void} sink */
+        attachLog(sink){
+            events.on('output', (/** @type {any} */ payload)=>sink(payload.handle, payload.text));
+        },
+        guestProfile: {
+            instructionStats: ()=>ask('guestProfile.instructionStats'),
+            available: ()=>ask('guestProfile.available'),
+            /** @param {any} how */
+            start: how=>ask('guestProfile.start', [how]),
+            stop: ()=>ask('guestProfile.stop'),
+            read: ()=>ask('guestProfile.read'),
+        },
+        debug: {
+            /** @param {number} address @param {number} length */
+            read: (address, length)=>ask('debug.read', [address, length]),
+            modules: ()=>ask('debug.modules'),
+            /** @param {number} address */
+            moduleAt: address=>ask('debug.moduleAt', [address]),
+            windows: ()=>ask('debug.windows'),
+            desktop: ()=>ask('debug.desktop'),
+            /** @param {number} address @param {any} how */
+            hook: (address, how)=>ask('debug.hook', [address, how]),
+        },
+        trace: ()=>ask('trace'),
+        report: ()=>ask('report'),
+        recordedSession: ()=>ask('recordedSession'),
+        registry: ()=>system.registry,
+        // Asked while the program stands; once it is over, what it knew.
+        systemLibraries: ()=>(across().length > 0 ? ask('systemLibraries') : libraries()),
+        session: {
+            export: ()=>filesystem.export(),
+            /** @param {any[]} changes @param {{ quiet?: boolean }} [how] */
+            apply: (changes, how)=>filesystem.apply(changes, how),
+            generation: ()=>filesystem.generation(),
+            /** @param {number} mark */
+            changesSince: mark=>filesystem.changesSince(mark),
+            runVolume: ()=>filesystem.runVolume(),
+        },
+        files: {
+            /** @param {string} path */
+            list: path=>filesystem.list(path).map((/** @type {any} */ entry)=>({
+                name: entry.name, path: entry.path, directory: entry.directory === true,
+                size: entry.size ?? 0, modified: entry.modified ?? 0 })),
+            /** @param {string} path */
+            read: path=>{
+                const handle = filesystem.open(path,
+                    { read: true, shareRead: true, shareWrite: true });
+                try
+                {
+                    return filesystem.read(handle, filesystem.size(handle));
+                }
+                finally
+                {
+                    filesystem.close(handle);
+                }
+            },
+        },
+        /** @param {string} path */
+        readImage: path=>readWholeFile(filesystem, blocks, path),
+        /**
+         * The program's tables as it last answered -- asked again now, for the
+         * next reader -- with the journal and the sound output this thread
+         * keeps for the run.
+         */
+        diagnostics: ()=>{
+            first()?.link.call('report', 'diagnostics', []).then(tables=>{
+                if (Array.isArray(tables))
+                {
+                    programTables = tables;
+                }
+            }, ()=>{});
+            const own = [...core.diagnostics(),
+                { name: 'audio', status: 'ready', metrics: output.diagnostics() },
+                { name: 'windows', status: 'ready',
+                    metrics: system.windows.manager.diagnostics() }];
+            const theirs = programTables.filter(table=>!ownTables.has(table.name));
+            const named = new Set(theirs.map(table=>table.name));
+            return [...own.filter(table=>!named.has(table.name)), ...theirs];
+        },
+        /** The program's tables as it ended. @param {any[] | undefined} tables */
+        ended: tables=>{
+            if (Array.isArray(tables))
+            {
+                programTables = tables;
+            }
+        },
+        dispose(){
+            tellAll('stop');
+            saver?.flush();
+            stopSavingRegistry();
+            return core.dispose();
+        },
+    };
+}
+
+/**
+ * What of a run's volume lives in memory every thread holds, where there is
+ * shared memory: a word per drive letter, raised by every change to the
+ * drive, under which a process in a worker of its own keeps what it read of
+ * the drive; and the sharing every open is settled against, which that
+ * process settles its own opens in (`volume-link.js`). A run without shared
+ * memory has no process across a link, and keeps neither.
+ *
+ * @returns {{ revisions?: Int32Array, sharing?: any, sharingMemory?: SharedArrayBuffer }}
+ */
+function volumeMemory(){
+    if (typeof SharedArrayBuffer !== 'function')
+    {
+        return {};
+    }
+    const sharingMemory = createSharingMemory();
+    return { revisions: new Int32Array(new SharedArrayBuffer(26 * 4)),
+        sharing: openSharedSharing(sharingMemory), sharingMemory };
+}
+
+/**
  * createApp — the consumer-facing entry point.
  *
  * One machine running at a time, and a process lifecycle over the top: when
@@ -6881,6 +7404,19 @@ export async function createApp(options){
     // child existed still have to fire for the last one, and the record of what
     // asked for a replacement is worthless if it dies with the asker.
     const events = createEvents();
+    // A process in a worker of its own tells the run's bus what happens to
+    // it: the page subscribes there, on the thread that started it.
+    if (options.relay)
+    {
+        events.onAny(options.relay);
+    }
+    // A run asked for more than this page allows starts all the same, as
+    // much as it allows, and says so: the first subscriber hears it.
+    if (options.fallback)
+    {
+        events.emit('fallback', { ...options.fallback, mode: options.mode,
+            concurrency: options.concurrency });
+    }
     /** @type {any[]} */
     const requested = [];
 
@@ -6904,6 +7440,33 @@ export async function createApp(options){
     // makes of this same process -- discovering it by that name.
     /** @type {Map<string, { kind: string, object: any }>} */
     const namedObjects = new Map();
+    /**
+     * What every process of the run shares (`win32`'s `system`): the named
+     * objects, and the registry -- the first process's hive, the one each
+     * later process is handed rather than a copy of it.
+     *
+     * @type {{ namedObjects: Map<string, any>, registry: any, bundle: any, windows: any,
+     *     ids: { thread: number, process: number },
+     *     volume: { drives: Map<string, any>, volumes: Map<string, any>,
+     *         writables: Map<string, any>, watchers: Set<Function>, revisions?: Int32Array,
+     *         sharing?: any, sharingMemory?: SharedArrayBuffer } }}
+     */
+    // A process in a worker of its own is handed the run's across a link
+    // (`system-link.js`), and joins it rather than making one.
+    const system = options.system ?? { namedObjects, registry: null, bundle: null, windows: null,
+        ids: { thread: 1, process: 0x2000 },
+        volume: { drives: new Map(), volumes: new Map(), writables: new Map(),
+            watchers: new Set(), ...volumeMemory() } };
+    /**
+     * A process id and its first thread's, from the run's, for a process no
+     * parent was told of: a class's server, which COM starts.
+     */
+    const newProcessIds = ()=>{
+        const processId = system.ids.process;
+        // Eight, as the kernel's process table steps: a process and its thread.
+        system.ids.process += 8;
+        return { processId, mainThreadId: processId + 1 };
+    };
     /** @type {Map<string, string | number>} */
     const logLevels = new Map();
     /** @type {string | number | null} */
@@ -6955,8 +7518,24 @@ export async function createApp(options){
             onFrame: options.device.onFrame,
             onPresented: options.device.onPresented,
             onPresentFailed: options.device.onPresentFailed,
+            // The run's windows, by which the screen is composed of every
+            // process's picture while more than one has a window showing.
+            windows: ()=>{
+                const manager = system.windows?.manager;
+                return manager ? manager.topLevel().map((/** @type {any} */ state)=>({
+                    processId: state.processId, rect: state.rect, visible: state.visible,
+                    parent: state.parent })) : [];
+            },
+            foreground: ()=>{
+                const manager = system.windows?.manager;
+                const hwnd = manager?.foreground() ?? 0;
+                return hwnd !== 0 ? manager.get(hwnd)?.processId ?? null : null;
+            },
         })
-        : null);
+        // A process in a worker of its own has no GPU: its surfaces' pictures
+        // go to the thread that has one, as bytes, each burst as it flushes.
+        : options.graphics?.display ? createPresenter({ sendFrame: options.graphics.display })
+            : null);
 
     // The translation store is the run's as well: a child's machine is built
     // beside its paused parent's, and a second store opened on the same
@@ -6974,7 +7553,7 @@ export async function createApp(options){
         events,
         spawned: remember,
         logSinks,
-        namedObjects,
+        system,
         log: {
             ...options.log, sequenceBase: logSequence, ...runJournal ? { journal: runJournal } : {},
             now: journalClock,
@@ -6989,8 +7568,8 @@ export async function createApp(options){
     // a process of its own, started beside the one that asked for it and
     // running alongside it for as long as anything holds one of its objects.
     // The table of their class objects is the run's, as the service control
-    // manager's is the machine's, and what each of them writes is carried to
-    // the others whenever one runs on another's behalf (`replicas.js`).
+    // manager's is the machine's; their files and registry are the run's
+    // (`system`), so what one writes the others read at once.
     /** @type {Map<unknown, any>} */
     const processes = new Map();
     /** @type {Map<any, unknown>} */
@@ -7002,14 +7581,27 @@ export async function createApp(options){
      * @type {WeakMap<any, string>}
      */
     const images = new WeakMap();
+    /** Each machine's process id, as GetCurrentProcessId answers it. @type {WeakMap<any, number>} */
+    const processIds = new WeakMap();
     /** @type {Set<Promise<unknown>>} */
     const servers = new Set();
     /** @type {Set<any>} */
     const serving = new Set();
     /** @type {any} */
     let runOptionsNow;
-    const replicas = createReplicas(detail=>events.emit('divergence', { api: 'process', detail }));
-    const classTable = createClassTable({
+    /** The machines of the run not yet retired. @type {Set<any>} */
+    const standing = new Set();
+    /** Whether the run's processes run at once, each beside its parent (`mode.js`). */
+    const processesAtOnce = (options.concurrency ?? 1) > 1;
+    /**
+     * Whether every process of the run stands in a worker of its own, its
+     * first one too: where processes run at once, on cork, this thread is the
+     * system alone and runs no program (`buildSystemHost`).
+     */
+    const rootAcross = processesAtOnce && !options.system
+        && (options.engine ?? DEFAULT_ENGINE) === 'cork';
+    /** @type {import('./layers/win32/ole32/remote.js').ClassTableHooks} */
+    const serveHere = {
         launch: (request, process)=>{
             const parent = processes.get(process);
             if (!parent)
@@ -7021,14 +7613,13 @@ export async function createApp(options){
             exited.finally(()=>servers.delete(exited));
             return { exited };
         },
-        publish: process=>{
-            const running = processes.get(process);
-            if (running && replicas.tracked(running))
-            {
-                replicas.publish(running);
-            }
-        },
-    });
+    };
+    // A process in a worker of its own uses the run's table, the system's,
+    // across its link (`com-link.js`); a server it starts runs in a worker of
+    // its own while the run has room, and beside it here otherwise.
+    const classTable = options.system?.com
+        ? remoteClassTable(options.system.com, serveHere)
+        : createClassTable(serveHere);
 
     /**
      * A machine for a process, named to the class table.
@@ -7037,37 +7628,59 @@ export async function createApp(options){
      */
     const build = async extra=>{
         const process = {};
-        const built = await buildApp(machine({ ...extra, com: { table: classTable, process } }));
+        /** The machine, once built: what its children are started beside. @type {any} */
+        let self = null;
+        const built = await buildApp(machine({ ...extra, com: { table: classTable, process },
+            // With concurrency a child runs from CreateProcess on, beside
+            // its parent, as on Windows; otherwise it waits for the parent to
+            // have nothing left to run, and runs in its place.
+            beside: processesAtOnce
+                ? (/** @type {any} */ request)=>startBeside(self, request) : undefined,
+            // Only where processes run at once: one run in its parent's place
+            // has the parent paused, which wakes nothing. A process that joined
+            // the run's system from a worker of its own is never the run's only
+            // one -- its parent at least stands -- so what it waits on is
+            // another's to answer, and the run, not it, says when it is over.
+            othersRunning: processesAtOnce
+                ? ()=>Boolean(options.system) || starting > 0 || across > 0
+                    || [...standing].some(other=>other !== self)
+                : undefined }));
+        self = built;
+        standing.add(built);
         processes.set(process, built);
         names.set(built, process);
         images.set(built, extra?.imagePath ?? '');
-        if (servers.size > 0)
-        {
-            replicas.track(built);
-        }
+        processIds.set(built, extra?.processId ?? FIRST_PROCESS_ID);
         return built;
     };
 
     /**
-     * A process is over: what it wrote reaches everyone still standing, and
-     * everything its proxies held goes back -- which is what lets a server
-     * it was using see its last client go.
+     * A process is over: everything its proxies held goes back -- which is
+     * what lets a server it was using see its last client go.
      *
      * @param {any} ended
      */
     const retire = async ended=>{
-        if (replicas.tracked(ended))
-        {
-            replicas.publish(ended);
-        }
+        standing.delete(ended);
         await classTable.ended(names.get(ended));
-        replicas.forget(ended);
         processes.delete(names.get(ended));
         names.delete(ended);
     };
 
     /** @type {any} */
-    let current = await build();
+    /** The system libraries the run's own program knew, once it is over. @type {string[]} */
+    let rootLibraries = [];
+    let current = rootAcross
+        ? await buildSystemHost({ options, events, system, translationStore, now: journalClock,
+            across: ()=>[...standingAcross], libraries: ()=>rootLibraries })
+        : await build();
+    // What every process's devices present comes back from the run's
+    // graphics worker to the machine that opened it; where no process stands
+    // on this thread, the system takes those frames to the run's presenter.
+    const shownHere = rootAcross && presenter && options.device?.worker && options.device.device
+        ? connectGraphicsWorker({ worker: options.device.worker, device: options.device.device,
+            presentTo: frame=>presenter.show(frame) })
+        : null;
     // The first process's journal is the run's: every process built after it,
     // beside it or in its place, writes there, and a reader of the facade's
     // log sees them all in one order on one clock.
@@ -7148,7 +7761,7 @@ export async function createApp(options){
      * @param {number} code
      */
     const noticeExit = code=>{
-        if (options.exitNotice === false || code !== 0 || current.exitCode() !== 0)
+        if (options.exitNotice === false || code !== 0 || (current.exitCode?.() ?? code) !== 0)
         {
             return;
         }
@@ -7217,6 +7830,44 @@ export async function createApp(options){
     };
 
     /**
+     * The sound a process started beside `parent` plays into: the run's
+     * output, its slots taken as free ones come, and a span of the parent's
+     * arena lent for its voices' mirrors -- the largest of four, two, one or
+     * half a mebibyte the parent has free, or none, its buffers then played
+     * through queues. Given back once the process is gone and has closed
+     * what it held.
+     *
+     * @param {any} parent
+     * @param {number} [largest]  the most it is lent
+     */
+    const lendSound = (parent, largest = 4 << 20)=>{
+        let bytes = largest;
+        let span = -1;
+        for (; bytes >= 512 << 10 && span < 0; bytes /= 2)
+        {
+            span = parent.audio?.lend?.(bytes) ?? -1;
+        }
+        bytes *= 2;
+        return {
+            options: { ...options.audio, memory: audioMemory,
+                beside: { arena: span >= 0 ? [span, bytes] : null } },
+            giveBack(){
+                if (span >= 0)
+                {
+                    try
+                    {
+                        parent.audio.takeBack(span, bytes);
+                    }
+                    catch {
+                        // The parent went before the process it lent to.
+                    }
+                    span = -1;
+                }
+            },
+        };
+    };
+
+    /**
      * Starts a class's server beside the process that asked for it, with
      * `-Embedding` after its command line as COM starts one, and runs it
      * alongside every other process until it exits. The page sees and
@@ -7228,32 +7879,28 @@ export async function createApp(options){
      */
     const startServer = async(parent, request)=>{
         const found = await serverImage(parent, request.command);
+        const sound = lendSound(parent);
         if (!found)
         {
             events.emit('divergence', { api: 'COM',
                 detail: `the server ${request.command} of ${request.clsid} is not on the volume` });
             return -1;
         }
-        // Every process standing is kept in step from here on.
-        for (const standing of processes.values())
-        {
-            replicas.track(standing);
-        }
         const server = await build({
             executable: found.image,
             imagePath: found.path,
             commandLine: `${request.command.trim()} -Embedding`,
-            seed: parent.session.export(),
-            hive: parent.registry().toJSON(),
+            ...newProcessIds(),
+            audio: sound.options,
         });
-        replicas.track(server);
         // A line of processes of its own: a server that starts a child and
         // waits on it, or hands over to another image, is run the way the
         // program the page started is.
         const line = { current: server, main: false };
         serving.add(line);
+        noteMachines();
         events.emit('process-server', { image: found.path, clsid: request.clsid });
-        Object.assign(facade, server, own);
+        stand(server);
         bindLogLevels();
         let code = -1;
         try
@@ -7265,8 +7912,10 @@ export async function createApp(options){
         }
         await retire(line.current);
         serving.delete(line);
+        noteMachines();
         await line.current.dispose();
-        Object.assign(facade, current, own);
+        sound.giveBack();
+        stand(current);
         bindLogLevels();
         events.emit('process-server-exit', { image: found.path, code });
         return code;
@@ -7295,22 +7944,17 @@ export async function createApp(options){
         }
         noteLogSequence();
         mediaInstance = parent.media.instance() ?? mediaInstance;
-        if (replicas.tracked(parent))
-        {
-            replicas.publish(parent);
-        }
         line.current = await build({
             executable: image,
             imagePath: request.imagePath,
             commandLine: request.commandLine,
             patches: request.patches,
             processId: request.id,
+            mainThreadId: request.threadId,
             standardFiles: request.standardFiles,
-            seed: parent.session.export(),
-            hive: parent.registry().toJSON(),
         });
         replayLogLevels();
-        Object.assign(facade, line.current, own);
+        stand(line.current);
         bindLogLevels();
         events.emit('process-started', { image: request.imagePath, sequenceBase: logSequence });
         const parentImage = imagePath;
@@ -7319,37 +7963,689 @@ export async function createApp(options){
             imagePath = request.imagePath;
         }
 
-        const code = await runProcesses(runOptions, line, true);
+        // The parent runs nothing until its child is done: a message sent to
+        // its windows meanwhile would wait for ever, and is refused instead.
+        system.windows?.hold(processIds.get(parent), true);
+        let code;
+        try
+        {
+            code = await runProcesses(runOptions, line, true);
+        }
+        finally
+        {
+            system.windows?.hold(processIds.get(parent), false);
+        }
         imagePath = parentImage;
 
-        // Read while the child's machine stands, and put back into the
-        // parent's: what an installer's second stage laid down is what the
-        // first stage goes on to find. The child's registry began as the
-        // parent's, and the parent wrote nothing while it waited, so the
-        // child's is the whole of it.
+        // What an installer's second stage laid down is what the first stage
+        // goes on to find: its drives and its registry are the parent's own,
+        // the run's, so what it wrote is there already.
         const child = line.current;
         await retire(child);
-        const files = child.session.export();
-        const registry = child.registry().toJSON();
         noteLogSequence();
         mediaInstance = child.media.instance() ?? mediaInstance;
         await child.dispose();
 
         line.current = parent;
-        parent.session.apply(files);
-        parent.registry().fromJSON(registry);
-        // Brought up to date wholesale, so what it holds now is its own
-        // starting point again.
-        if (replicas.tracked(parent))
-        {
-            replicas.forget(parent);
-            replicas.track(parent);
-        }
         replayLogLevels();
-        Object.assign(facade, parent, own);
+        stand(parent);
         bindLogLevels();
+        // Its picture goes with it: no window of the run is drawn from it.
+        presenter?.forget?.(request.id);
         parent.childExited(request, code);
         events.emit('process-resumed', { image: request.imagePath, code });
+    };
+
+    /**
+     * The children running beside their parents, with concurrency: each
+     * one's run, until it exits.
+     *
+     * @type {Set<Promise<number>>}
+     */
+    const besides = new Set();
+    /** Children asked for whose machines are not built yet. */
+    let starting = 0;
+    /** Children running in workers of their own. */
+    let across = 0;
+    /**
+     * Whether the next child runs in a worker of its own: while fewer than
+     * the run's concurrency run at once, the first on this thread. One past
+     * it takes turns beside its parent here, slower and as correct. A process
+     * that joined another run's system from a worker starts its children
+     * beside it, in its worker: the run's processes are counted by the run.
+     */
+    const inWorker = ()=>!options.system
+        && across < (options.concurrency ?? 1) - (rootAcross ? 0 : 1);
+    /**
+     * The children standing in workers of their own, each with the way its
+     * diagnostics are asked for across its link.
+     *
+     * @type {Set<{ image: string, id: number, link: ReturnType<typeof openLink>,
+     *     diagnostics: () => Promise<any> }>}
+     */
+    const standingAcross = new Set();
+
+    /**
+     * The page's input, where the run's window manager says it goes: a
+     * pointer to the process of the window under it or holding the mouse,
+     * the keyboard to the process of the window with the focus. Where no
+     * window has it -- the desktop under the pointer, no window in the
+     * foreground -- no program is sent it, as on Windows. Only a run with no
+     * window showing has the page for its console: the newest process in a
+     * worker of its own has it, else the process the facade speaks for.
+     *
+     * @param {any} machineInput  the input of the process the facade speaks for
+     */
+    const routedInput = machineInput=>({
+        ...machineInput,
+        /** @param {any} event */
+        send: event=>{
+            const manager = system.windows?.manager;
+            const target = manager?.inputTarget(event) ?? null;
+            if (target === null && manager?.topLevel().some((/** @type {any} */ state)=>state.visible))
+            {
+                return false;
+            }
+            for (const built of target === null ? [] : processes.values())
+            {
+                if (processIds.get(built) === target)
+                {
+                    return built.input.send(event);
+                }
+            }
+            const inWorkers = [...standingAcross];
+            const process = inWorkers.find(each=>each.id === target) ?? inWorkers.at(-1);
+            if (process)
+            {
+                process.link.call('input', 'send', [event, null]).catch(()=>{});
+                return true;
+            }
+            return machineInput.send(event);
+        },
+    });
+
+    /**
+     * The run's windows as a tool reads them (`debug.windows`): every
+     * process's, as the run's window manager has them, the topmost top-level
+     * window first and each followed by its children -- where the facade's
+     * one process would show only its own. Null where the run keeps none.
+     */
+    const runWindows = ()=>{
+        const manager = system.windows?.manager;
+        if (!manager)
+        {
+            return null;
+        }
+        /** @param {number} value */
+        const hex = value=>`0x${(value >>> 0).toString(16)}`;
+        /** @type {any[]} */
+        const listed = [];
+        /** @param {any} state */
+        const add = state=>{
+            listed.push({
+                hwnd: hex(state.hwnd), processId: state.processId,
+                x: state.rect.left, y: state.rect.top, width: state.rect.right - state.rect.left,
+                height: state.rect.bottom - state.rect.top,
+                rect: state.rect, client: state.client, region: state.region,
+                visible: state.visible, enabled: state.enabled, className: state.className,
+                title: state.title,
+                parent: state.parent || state.owner ? hex(state.parent || state.owner) : null,
+                child: state.parent !== 0, style: hex(state.style), exStyle: hex(state.exStyle),
+            });
+            manager.children(state.hwnd).forEach(add);
+        };
+        manager.topLevel().forEach(add);
+        return listed;
+    };
+
+    /**
+     * The screen as a tool reads it (`debug.desktop`), as the presenter shows
+     * it: while windows of more than one process show, every process on this
+     * thread's desktop composed by the run's windows (`compose.js`); while one
+     * process's do, that process's desktop. Its own for the facade's process
+     * when the run keeps no windows, or the picture is not on this thread --
+     * a process in a worker of its own sends its picture to the presenter.
+     *
+     * @param {() => any} own  the desktop of the process the facade speaks for
+     */
+    const runDesktop = own=>{
+        const manager = system.windows?.manager;
+        const placed = manager ? manager.topLevel() : [];
+        if (!manager)
+        {
+            return own();
+        }
+        /** @type {Map<number, { width: number, height: number, pitch: number, bytes: Uint8Array }>} */
+        const layers = new Map();
+        for (const built of standing)
+        {
+            const id = processIds.get(built);
+            const picture = id === undefined ? null : built.debug?.desktop?.() ?? null;
+            if (id !== undefined && picture && typeof picture.then !== 'function')
+            {
+                layers.set(id, picture);
+            }
+        }
+        if (!needsComposing(placed))
+        {
+            const showing = placed.find((/** @type {any} */ state)=>state.visible
+                && layers.has(state.processId))?.processId;
+            return (showing === undefined ? null : layers.get(showing)) ?? own();
+        }
+        const foreground = manager.get(manager.foreground() ?? 0)?.processId ?? null;
+        const base = baseOf(placed, layers, foreground);
+        const first = base === null ? null : layers.get(base);
+        if (base === null || !first)
+        {
+            return own();
+        }
+        const screen = { width: first.width, height: first.height, pitch: first.width * 4,
+            bytes: new Uint8Array(first.width * first.height * 4) };
+        for (const copy of compositionPlan({ windows: placed, layers, base, screen }))
+        {
+            const layer = /** @type {{ pitch: number, bytes: Uint8Array }} */ (
+                layers.get(copy.source));
+            for (let row = 0; row < copy.height; row++)
+            {
+                const from = (copy.y + row) * layer.pitch + copy.x * 4;
+                screen.bytes.set(layer.bytes.subarray(from, from + copy.width * 4),
+                    (copy.toY + row) * screen.pitch + copy.toX * 4);
+            }
+        }
+        return screen;
+    };
+
+    /**
+     * The facade speaks for this process from now on, its input routed and a
+     * tool's view of the windows and the screen the run's.
+     *
+     * @param {any} speaking
+     */
+    const stand = speaking=>{
+        Object.assign(facade, speaking, own);
+        facade.input = routedInput(speaking.input);
+        if (speaking.debug)
+        {
+            facade.debug = { ...speaking.debug,
+                windows: ()=>runWindows() ?? speaking.debug.windows(),
+                desktop: ()=>runDesktop(()=>speaking.debug.desktop()) };
+        }
+    };
+
+    /**
+     * Runs a child in a worker of its own: its machine there, the run's
+     * system half answered from here across a link (`system-link.js`), its
+     * output the run's. Its exit code is the answer.
+     *
+     * @param {{ readImage: (path: string) => Promise<Uint8Array | null>,
+     *     sound: () => ({ options: any, giveBack: () => void } | null) }} from
+     *     its parent, as the run reaches it: where its image is read, and the
+     *     sound it lends
+     * @param {any} request
+     * @returns {Promise<{ code: number, diagnostics?: any, systemLibraries?: string[] }>}
+     *     its exit code, its layers' diagnostics as it ended, and the system
+     *     libraries it knew
+     */
+    const runAcross = async(from, request)=>{
+        const image = await from.readImage(request.imagePath).catch(()=>null);
+        if (!image)
+        {
+            events.emit('divergence', { api: 'process',
+                detail: `${request.imagePath} is not on the volume, and did not start` });
+            return { code: 2 };
+        }
+        const memory = createLinkMemory();
+        // Its classes, served to and from every other process of the run.
+        const com = comHandlers(/** @type {any} */ (classTable), {
+            call: (method, args)=>link.call('com', method, args),
+            launch: serverAcross,
+        });
+        const { dispose: forgetObjects, ...objects } = objectHandlers({
+            table: system.namedObjects,
+            wake: (token, result)=>link.call('kernel', 'wake', [token, result]) });
+        const link = openLink(memory.a, {
+            ...systemHandlers(/** @type {any} */ (system),
+                (target, method, args)=>link.callWaiting(target, method, args)),
+            ...objects,
+            com: com.handlers,
+            // The run's translation store, which only this thread can hold open.
+            ...translationStore ? storeHandlers(translationStore) : {},
+            process: {
+                output: (/** @type {number} */ handle, /** @type {string} */ text)=>
+                    events.emit('output', { handle, text }),
+            },
+            // Everything else that happens to it, for the page subscribed here.
+            events: {
+                emit: (/** @type {string} */ name, /** @type {any} */ payload)=>{
+                    events.emit(name, eventFrom(payload));
+                },
+            },
+            // Its own children, which the run starts, counted with the rest.
+            processes: {
+                start: (/** @type {any} */ asked)=>startAcrossFor(link, asked),
+            },
+            // The parent's open files the child writes its output and error
+            // into: one position, the parent's, which the child's writes move.
+            standard: {
+                /** @param {'output' | 'error'} which */
+                position: which=>request.standardFiles?.[which]?.position ?? 0,
+                /** @param {'output' | 'error'} which @param {number} at */
+                setPosition: (which, at)=>{
+                    const file = request.standardFiles?.[which];
+                    if (file)
+                    {
+                        file.position = at;
+                    }
+                },
+            },
+        });
+        const answering = link.serve();
+        // Its own way in to the run's graphics worker, where its Direct3D
+        // devices draw; what they present comes back here, to the run's
+        // presenter, as every root's frames do.
+        const graphicsWorker = options.device?.worker;
+        const graphics = graphicsWorker ? new MessageChannel() : null;
+        if (graphics)
+        {
+            graphicsWorker.postMessage({ type: 'client', port: graphics.port2 }, [graphics.port2]);
+        }
+        // And the pictures of its own surfaces -- a DirectDraw primary, the
+        // desktop its windows are drawn on -- which come in as the graphics
+        // worker's frames do and are shown by the run's presenter.
+        const display = presenter && options.device?.device ? new MessageChannel() : null;
+        const shown = display ? connectGraphicsWorker({ worker: portEnd(display.port1),
+            device: options.device.device,
+            presentTo: frame=>presenter.show({ ...frame, source: request.id }) }) : null;
+        // Its sound goes onto the run's table, in a span its parent lends it,
+        // where the table is shared memory a worker can be handed; elsewhere
+        // the run's sound is mixed on this thread, and the child has none.
+        const sound = from.sound();
+        const worker = await openProcessWorker();
+        // The page's input reaches it as the run routes it (`routedInput`).
+        const asked = { image: request.imagePath, id: request.id, link,
+            diagnostics: ()=>link.call('report', 'diagnostics', []) };
+        standingAcross.add(asked);
+        events.emit('process-started', { image: request.imagePath, sequenceBase: logSequence,
+            worker: true });
+        try
+        {
+            return await new Promise((resolve, reject)=>{
+                worker.onMessage(data=>{
+                    if (data?.type === 'exited')
+                    {
+                        resolve({ code: data.code, diagnostics: data.diagnostics,
+                            systemLibraries: data.systemLibraries });
+                    }
+                    else if (data?.type === 'failed')
+                    {
+                        reject(Object.assign(new Error(data.message),
+                            { diagnostics: data.diagnostics }));
+                    }
+                });
+                worker.onLost(reason=>reject(new Error(reason)));
+                // The graphics layer's knobs, not the run's presenter or a
+                // callback: neither crosses, and the child shows nothing itself.
+                const knobs = Object.fromEntries(Object.entries(options.graphics ?? {})
+                    .filter(([key, value])=>key !== 'presenter' && typeof value !== 'function'));
+                worker.post({
+                    type: 'start',
+                    end: memory.b,
+                    volume: { revisions: system.volume.revisions ?? null,
+                        sharing: system.volume.sharingMemory ?? null },
+                    // The run's foreground window, focus and captured window,
+                    // read where the run keeps them.
+                    windowCells: system.windows?.cells ?? null,
+                    graphics: graphics?.port1 ?? null,
+                    display: display?.port2 ?? null,
+                    options: {
+                        ...portableOptions(options),
+                        executable: image,
+                        imagePath: request.imagePath,
+                        commandLine: request.commandLine,
+                        patches: request.patches,
+                        processId: request.id,
+                        mainThreadId: request.threadId,
+                        // Named, not handed: the position stays here.
+                        standardFiles: request.standardFiles && Object.fromEntries(
+                            Object.entries(request.standardFiles).filter(([, file])=>file)
+                                .map(([which, file])=>[which, { path: file.path }])),
+                        // The run tells the player the game is over, once.
+                        exitNotice: false,
+                        log: { categories: options.log?.categories,
+                            capacity: options.log?.capacity, bytes: options.log?.bytes },
+                        graphics: knobs,
+                        audio: sound ? Object.fromEntries(Object.entries(sound.options)
+                            .filter(([, value])=>typeof value !== 'function')) : undefined,
+                        // The translator's store is the run's, asked across the
+                        // link; the doorbell is this thread's.
+                        cork: { config: { ...options.cork?.config,
+                            store: translationStore ? 'run' : null, doorbell: undefined } },
+                    },
+                    run: { maxTurns: runOptionsNow?.maxTurns, timeoutMs: runOptionsNow?.timeoutMs },
+                }, [...graphics ? [graphics.port1] : [], ...display ? [display.port2] : []]);
+            });
+        }
+        finally
+        {
+            standingAcross.delete(asked);
+            forgetObjects();
+            await com.gone();
+            link.close();
+            await answering;
+            worker.terminate();
+            sound?.giveBack();
+            shown?.dispose();
+            display?.port1.close();
+            presenter?.forget?.(request.id);
+        }
+    };
+    /** The code the last of the run's processes beside another exited with. */
+    let lastBesideCode = 0;
+    /**
+     * Tells the pacing the run shares how many machines take turns on this
+     * thread: one of several may not block the thread to wait, which would
+     * stop the others with it.
+     */
+    const noteMachines = ()=>{
+        options.pacing?.machines?.(1 + besides.size + serving.size);
+    };
+
+    /**
+     * Runs a child in a worker of its own, counted among the run's, and tells
+     * `exited` its code when it is gone.
+     *
+     * @param {Parameters<typeof runAcross>[0]} from @param {any} request
+     * @param {((code: number, ended: { systemLibraries?: string[] }) => void) | null}
+     *     exited  its parent's; null for the run's own program, which resumes
+     *     nothing
+     * @param {(ended: { code: number, diagnostics?: any, systemLibraries?: string[] })
+     *     => void} [over]
+     *     told as it ends, whoever it was
+     */
+    const startAcross = (from, request, exited, over)=>{
+        across++;
+        const running = (async()=>{
+            /** @type {{ code: number, diagnostics?: any, systemLibraries?: string[] }} */
+            let ended;
+            try
+            {
+                ended = await runAcross(from, request);
+            }
+            catch (e){
+                events.emit('error', { reason: 'process', error: e });
+                ended = { code: -1, diagnostics: /** @type {any} */ (e)?.diagnostics };
+            }
+            finally
+            {
+                across--;
+            }
+            const { code, diagnostics } = ended;
+            lastBesideCode = code;
+            over?.(ended);
+            if (exited)
+            {
+                exited(code, ended);
+                events.emit('process-resumed', { image: request.imagePath, code, diagnostics });
+            }
+            return code;
+        })();
+        besides.add(running);
+        noteMachines();
+        running.finally(()=>{
+            besides.delete(running);
+            noteMachines();
+        });
+    };
+
+    /**
+     * A class's server a process in a worker of its own asked COM for,
+     * started in a worker of its own while the run has room for one, with
+     * `-Embedding` as COM starts one; null when there is no room, and the
+     * process starts it beside itself.
+     *
+     * @param {{ command: string, clsid: string }} request
+     * @returns {{ exited: Promise<number> } | null}
+     */
+    const serverAcross = request=>{
+        if (!inWorker())
+        {
+            return null;
+        }
+        const exited = (async()=>{
+            const found = await serverImage(current, request.command);
+            if (!found)
+            {
+                events.emit('divergence', { api: 'COM',
+                    detail: `the server ${request.command} of ${request.clsid}`
+                        + ' is not on the volume' });
+                return -1;
+            }
+            const { processId, mainThreadId } = newProcessIds();
+            events.emit('process-server', { image: found.path, clsid: request.clsid });
+            return new Promise(resolve=>{
+                startAcross({ readImage: path=>current.readImage(path),
+                    sound: ()=>lendSound(current) },
+                { imagePath: found.path, commandLine: `${request.command.trim()} -Embedding`,
+                    id: processId, threadId: mainThreadId }, null, ended=>{
+                    events.emit('process-server-exit', { image: found.path, code: ended.code });
+                    resolve(ended.code);
+                });
+            });
+        })();
+        return { exited };
+    };
+
+    /**
+     * A child a process in a worker of its own asked for, started in a worker
+     * of its own while the run has room for one; its parent is asked across
+     * its link for the position of the files it handed on, and told when it
+     * is gone. False when there is no room: the parent runs it
+     * beside itself, in its own worker.
+     *
+     * @param {ReturnType<typeof openLink>} link  the parent's
+     * @param {any} asked  the child, as values
+     * @returns {boolean}
+     */
+    const startAcrossFor = (link, asked)=>{
+        if (!inWorker())
+        {
+            return false;
+        }
+        /** @param {string} which */
+        const handedOn = which=>({
+            path: asked.standardFiles[which].path,
+            get position(){
+                return link.callWaiting('parent', 'position', [asked.id, which]);
+            },
+            set position(at){
+                link.callWaiting('parent', 'setPosition', [asked.id, which, at]);
+            },
+        });
+        const request = { ...asked, standardFiles: asked.standardFiles && Object.fromEntries(
+            Object.keys(asked.standardFiles).map(which=>[which, handedOn(which)])) };
+        startAcross({
+            // Read from the run's volume, where the parent found it: a launcher
+            // that starts its game and exits is gone before the game's image
+            // would come back from it.
+            readImage: path=>current.readImage(path),
+            // Lent by the parent, and taken back there when it hears the
+            // child is gone.
+            sound: ()=>(asked.arena ? { options: { ...options.audio, memory: audioMemory,
+                beside: { arena: asked.arena } }, giveBack(){} } : null),
+        }, request, code=>{
+            link.call('parent', 'exited', [asked.id, code]).catch(()=>{
+                // The parent went first: nothing of it waits on the code.
+            });
+        });
+        return true;
+    };
+
+    /**
+     * The children this process, joined to the run from a worker of its own,
+     * had the run start in workers of their own: by process id, each with
+     * the machine that asked and the sound it lent.
+     *
+     * @type {Map<number, { parent: any, request: any,
+     *     sound: { giveBack: () => void } | null }>}
+     */
+    const childrenAcross = new Map();
+    options.system?.processes?.answer({
+        /** @param {number} id @param {'output' | 'error'} which */
+        position: (id, which)=>childrenAcross.get(id)?.request.standardFiles?.[which]
+            ?.position ?? 0,
+        /** @param {number} id @param {'output' | 'error'} which @param {number} at */
+        setPosition: (id, which, at)=>{
+            const file = childrenAcross.get(id)?.request.standardFiles?.[which];
+            if (file)
+            {
+                file.position = at;
+            }
+        },
+        /** @param {number} id @param {number} code */
+        exited: (id, code)=>{
+            const child = childrenAcross.get(id);
+            if (!child)
+            {
+                return;
+            }
+            childrenAcross.delete(id);
+            child.sound?.giveBack();
+            child.parent.childExited(child.request, code);
+        },
+    });
+
+    /**
+     * Starts a child at once, beside the parent that asked for it, and runs
+     * it alongside every other process until it exits: concurrency's
+     * CreateProcess, as on Windows. The parent goes on running; a thread of
+     * its waiting on the child, polling its exit code, or waiting on an
+     * object the child sets, is answered as the child goes. The page sees
+     * and drives the child while it stands, as it does one run in its
+     * parent's place.
+     *
+     * @param {any} parent @param {any} request
+     */
+    const startBeside = (parent, request)=>{
+        const shared = audioMemory && 'table' in audioMemory
+            && audioMemory.table instanceof SharedArrayBuffer;
+        if (inWorker())
+        {
+            startAcross({
+                readImage: path=>parent.readImage(path),
+                sound: ()=>(shared ? lendSound(parent) : null),
+            }, request, code=>parent.childExited(request, code));
+            return;
+        }
+        // A process that joined the run's system from a worker of its own has
+        // the run start its child, which counts the workers; the sound it
+        // plays into is this process's to lend, and to take back when the
+        // run says the child has gone.
+        const processesAcross = options.system?.processes;
+        if (processesAcross)
+        {
+            const sound = shared ? lendSound(parent) : null;
+            // Known before it is asked for: the run may ask for the position of
+            // a file it was handed before the call that starts it returns.
+            childrenAcross.set(request.id, { parent, request, sound });
+            const placed = processesAcross.start({
+                imagePath: request.imagePath,
+                commandLine: request.commandLine,
+                patches: request.patches,
+                id: request.id,
+                threadId: request.threadId,
+                standardFiles: request.standardFiles && Object.fromEntries(
+                    Object.entries(request.standardFiles).filter(([, file])=>file)
+                        .map(([which, file])=>[which, { path: file.path }])),
+                arena: sound?.options.beside.arena ?? null,
+            });
+            if (placed)
+            {
+                return;
+            }
+            childrenAcross.delete(request.id);
+            sound?.giveBack();
+        }
+        // Running from the moment it is asked for, not from when its machine
+        // is built: a parent that waits on it at once is waiting on something
+        // that will answer, not stuck.
+        starting++;
+        const running = (async()=>{
+            /** @type {any} */
+            let child = null;
+            const sound = lendSound(parent);
+            try
+            {
+                const image = await parent.readImage(request.imagePath);
+                if (!image)
+                {
+                    events.emit('divergence', { api: 'process',
+                        detail: `${request.imagePath} is not on the volume, and did not start` });
+                }
+                else
+                {
+                    noteLogSequence();
+                    mediaInstance = parent.media.instance() ?? mediaInstance;
+                    child = await build({
+                        executable: image,
+                        imagePath: request.imagePath,
+                        commandLine: request.commandLine,
+                        patches: request.patches,
+                        processId: request.id,
+                        mainThreadId: request.threadId,
+                        standardFiles: request.standardFiles,
+                        audio: sound.options,
+                    });
+                }
+            }
+            catch (e){
+                events.emit('error', { reason: 'process', error: e });
+            }
+            finally
+            {
+                starting--;
+            }
+            if (!child)
+            {
+                sound.giveBack();
+                parent.childExited(request, 2);
+                return 2;
+            }
+            replayLogLevels();
+            stand(child);
+            bindLogLevels();
+            events.emit('process-started', { image: request.imagePath,
+                sequenceBase: logSequence });
+            const line = { current: child, main: false };
+            let code = -1;
+            try
+            {
+                code = await runProcesses(runOptionsNow, line, true);
+            }
+            catch (e){
+                events.emit('error', { reason: 'process', error: e });
+            }
+            const ended = line.current;
+            await retire(ended);
+            noteLogSequence();
+            mediaInstance = ended.media.instance() ?? mediaInstance;
+            await ended.dispose();
+            sound.giveBack();
+            // The page sees whoever stands in the main line again.
+            replayLogLevels();
+            stand(mainLine.current);
+            bindLogLevels();
+            presenter?.forget?.(request.id);
+            parent.childExited(request, code);
+            lastBesideCode = code;
+            events.emit('process-resumed', { image: request.imagePath, code });
+            return code;
+        })();
+        besides.add(running);
+        noteMachines();
+        running.finally(()=>{
+            besides.delete(running);
+            noteMachines();
+        });
     };
 
     /**
@@ -7369,6 +8665,8 @@ export async function createApp(options){
             const request = line.current.replacement();
             if (!request)
             {
+                // Run out: nothing it holds wakes another process now.
+                standing.delete(line.current);
                 if (line.main && !nested)
                 {
                     // Its servers end with it: its references go back, and
@@ -7379,7 +8677,17 @@ export async function createApp(options){
                     {
                         await Promise.allSettled([...servers]);
                     }
-                    replicas.forget(ending);
+                    // A launcher that started its game and went is not the
+                    // end of the run: the game is, and its code is the run's.
+                    if (besides.size > 0)
+                    {
+                        while (besides.size > 0)
+                        {
+                            await Promise.allSettled([...besides]);
+                        }
+                        noticeExit(lastBesideCode);
+                        return lastBesideCode;
+                    }
                     noticeExit(code);
                 }
                 return code;
@@ -7391,14 +8699,11 @@ export async function createApp(options){
                 continue;
             }
 
-            // Read before the tear-down, because the volume it comes off
-            // belongs to the process being torn down. So does everything
-            // that process wrote: an extractor that unpacked its payload
-            // and then started it has to hand that payload across, or the
-            // child is launched against files that no longer exist.
+            // Read before the tear-down. What the process wrote stays on the
+            // run's drives when it goes: an extractor that unpacked its
+            // payload and then started it leaves the payload where the child
+            // finds it.
             const child = await line.current.readImage(request.imagePath);
-            const carried = line.current.session.export();
-            const hive = line.current.registry().toJSON();
             // The sequence the journal reached, read while the machine that
             // wrote it still stands. The child's journal continues from
             // here, so the cursor a reader is holding points into it rather
@@ -7429,15 +8734,14 @@ export async function createApp(options){
                 commandLine: request.commandLine,
                 patches: request.patches,
                 processId: request.id,
-                seed: carried,
-                hive,
+                mainThreadId: request.threadId,
             });
             if (line.main)
             {
                 imagePath = request.imagePath;
             }
             replayLogLevels();
-            Object.assign(facade, line.current, own);
+            stand(line.current);
             bindLogLevels();
             // The child's journal is a fresh block, continuing the parent's
             // sequence. Whoever holds a reader of its own -- the page's
@@ -7451,6 +8755,36 @@ export async function createApp(options){
         }
     };
 
+    /**
+     * Runs the run's program in a worker of its own, and every process it
+     * starts, until the last of them is gone; the code is the last one's, as
+     * a launcher that started its game and went leaves the game's.
+     */
+    const runRoot = async()=>{
+        rootLibraries = [];
+        startAcross({
+            readImage: async()=>options.executable,
+            // Half the output's arena: the rest is for what it starts.
+            sound: ()=>lendSound(current, 8 << 20),
+        }, {
+            imagePath,
+            commandLine: options.commandLine,
+            // The id it has in its worker, where none was handed in, as a
+            // process built here has: its windows and its frames are told
+            // apart by it.
+            id: options.processId ?? FIRST_PROCESS_ID,
+        }, null, ended=>{
+            rootLibraries = ended.systemLibraries ?? [];
+            current.ended(ended.diagnostics);
+        });
+        while (besides.size > 0)
+        {
+            await Promise.allSettled([...besides]);
+        }
+        noticeExit(lastBesideCode);
+        return lastBesideCode;
+    };
+
     const own = {
         /**
          * Every process standing, each with its image and its own diagnostics:
@@ -7460,11 +8794,19 @@ export async function createApp(options){
          * @returns {Promise<{ image: string, diagnostics: any }[]>}
          */
         async standing(){
-            const machines = new Set([current, ...processes.values()]);
-            return Promise.all([...machines].map(async made=>({
-                image: images.get(made) || imagePath,
-                diagnostics: await made.diagnostics(),
-            })));
+            const machines = new Set([...rootAcross ? [] : [current], ...processes.values()]);
+            return Promise.all([
+                ...[...machines].map(async made=>({
+                    image: images.get(made) || imagePath,
+                    diagnostics: await made.diagnostics(),
+                })),
+                // A child in a worker of its own answers at its next look at
+                // its link; one that ends meanwhile answers nothing.
+                ...[...standingAcross].map(async child=>({
+                    image: child.image,
+                    diagnostics: await child.diagnostics().catch(()=>null),
+                })),
+            ]);
         },
 
         /**
@@ -7476,7 +8818,7 @@ export async function createApp(options){
          */
         async run(runOptions){
             runOptionsNow = runOptions;
-            return runProcesses(runOptions);
+            return rootAcross ? runRoot() : runProcesses(runOptions);
         },
 
         /**
@@ -7488,6 +8830,7 @@ export async function createApp(options){
         dispose: ()=>Promise.all([...serving].map(line=>line.current.dispose()))
             .then(()=>current.dispose())
             .then(()=>{
+                system.bundle?.stop();
                 // The run's store outlives each machine it was handed to, and
                 // goes with the last of them.
                 if (runStoreSpec === 'local')
@@ -7495,7 +8838,10 @@ export async function createApp(options){
                     translationStore?.close?.();
                 }
             })
-            .finally(()=>presenter?.dispose?.()),
+            .finally(()=>{
+                shownHere?.dispose();
+                presenter?.dispose?.();
+            }),
 
         /**
          * The presenter this run draws through: the canvas, the format it was
@@ -7513,7 +8859,7 @@ export async function createApp(options){
         replacements: ()=>[...requested],
     };
 
-    Object.assign(facade, current, own);
+    stand(current);
     bindLogLevels();
     return facade;
 }

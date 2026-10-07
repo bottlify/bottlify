@@ -157,6 +157,12 @@
  *     `worker_threads` only when `workerUrl` is named. `false` emits inline.
  * @property {string} [workerUrl]  The `translator.worker.js` URL. Default: the file beside
  *     the runtime. Named explicitly by a test process, or a bundler that moves it.
+ * @property {{ posted: { buffer: SharedArrayBuffer, index: number },
+ *     bell: { buffer: SharedArrayBuffer, index: number } }} [doorbell]
+ *     Words in shared memory the translation worker rings each time it posts a batch:
+ *     the count of answers posted, and the doorbell the engine thread sleeps on. A
+ *     thread that is not given its event loop on a timer hears an answer by them
+ *     rather than at its next yield. Absent, nothing is rung.
  * @property {number} [inFlightMs]  How long a batch may be with the worker before it is given
  *     up, on time the engine thread was free to hear its answer -- past it by the clock and the
  *     event loop come round twice since. Default 10000; tests shorten it.
@@ -216,6 +222,9 @@
  * @property {(key: string) => Uint8Array | null | undefined} [getNow]  The record at once,
  *     without a turn of the event loop, where the store can answer so; undefined where it
  *     cannot yet, and the translator asks `get`. Optional.
+ * @property {(keys: string[]) => (Uint8Array | null)[] | undefined} [getManyNow]  Every
+ *     record named, at once and in order, as `getNow` answers one: a store across a link
+ *     answers a batch's names in one wait. Optional.
  * @property {() => Promise<void>} [prepare]  Opens the store ahead of its first lookup (a
  *     directory store reads its index). Optional.
  * @property {() => Promise<void>} [flush]  Writes any pending bookkeeping

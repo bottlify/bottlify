@@ -437,7 +437,7 @@ const OPAQUE = 2;
  * @property {(hdc: number, rect: Rect, color: number) => boolean} fill
  * @property {(hdc: number, rect: Rect, brush: number) => boolean} fillWith
  * @property {(hdc: number, rect: Rect, brush: number) => boolean} frame
- * @property {(hdc: number, rect: Rect) => boolean} invert
+ * @property {(hdc: number, rect: Rect, halftone?: boolean) => boolean} invert
  * @property {(hdc: number, rect: Rect, dx: number, dy: number, clip: Rect) => boolean} [scroll]
  *           The pixels of a rectangle moved within the context, only what
  *           lands inside `clip` changing.

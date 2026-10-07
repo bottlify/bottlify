@@ -751,6 +751,116 @@ export function scheduleKeyTimes(app, request){
 }
 
 /**
+ * Presses the buttons a wizard shows, by their labels, as a person reading
+ * the screen would: whenever the windows shown change, once they have had
+ * `settleMs` to paint, the first label of the list that an enabled button on
+ * the screen carries is clicked at the button's centre. An installer's pages
+ * come at moments no wall clock or frame count foretells -- a copy takes as
+ * long as it takes -- and a page names its way on.
+ *
+ * Labels compare without their mnemonic `&` and without regard to case. A
+ * check box or a radio button is pressed once, as it toggles. Returns the
+ * function that stops it.
+ *
+ * @param {any} app
+ * @param {{ presses?: string[], pressSettleMs?: number, pressEveryMs?: number }} request
+ * @param {(line: string) => void} [say]  each press, as it is made
+ */
+export function schedulePresses(app, request, say = ()=>{}){
+    const labels = (request.presses ?? []).map(label=>label.replace(/&/g, '').toLowerCase());
+    if (labels.length === 0)
+    {
+        return ()=>{};
+    }
+    /** @param {any} window */
+    const labelOf = window=>String(window.title ?? '').replace(/&/g, '').trim().toLowerCase();
+    /** The windows on the screen, and a key that changes when they do. */
+    const current = ()=>{
+        /** @type {any[]} */
+        let windows;
+        try
+        {
+            windows = app.debug?.windows?.() ?? [];
+        }
+        catch {
+            windows = [];
+        }
+        const byHwnd = new Map(windows.map(window=>[window.hwnd, window]));
+        /** @param {any} window @returns {boolean} */
+        const shown = window=>window.visible && (!window.child
+            || (byHwnd.has(window.parent) && shown(byHwnd.get(window.parent))));
+        const showing = windows.filter(shown);
+        // A button takes a click only while every window it is inside does:
+        // a modal box disables its owner, and the owner's buttons with it.
+        /** @param {any} window @returns {boolean} */
+        const usable = window=>window.enabled !== false && (!window.child
+            || (byHwnd.has(window.parent) && usable(byHwnd.get(window.parent))));
+        return { showing: showing.map(window=>({ ...window, enabled: usable(window) })),
+            key: showing.map(window=>`${window.hwnd}:${window.title}:${usable(window)}`)
+                .join('|') };
+    };
+    const toggled = new Set();
+    let seenKey = '';
+    let settling = false;
+    let stopped = false;
+    const look = ()=>{
+        if (settling || stopped)
+        {
+            return;
+        }
+        const { key } = current();
+        if (key === seenKey)
+        {
+            return;
+        }
+        seenKey = key;
+        settling = true;
+        setTimeout(()=>{
+            settling = false;
+            const now = current();
+            // A screen that changed while it settled settles again first.
+            if (stopped || now.key !== key)
+            {
+                return;
+            }
+            const buttons = now.showing.filter(window=>/button$/i.test(String(window.className))
+                && window.enabled !== false && window.rect && !toggled.has(window.hwnd));
+            for (const label of labels)
+            {
+                const button = buttons.find(window=>labelOf(window) === label);
+                if (!button)
+                {
+                    continue;
+                }
+                const style = parseInt(String(button.style ?? '0'), 16) & 0xf;
+                // BS_CHECKBOX through BS_AUTORADIOBUTTON toggle; a push
+                // button is pressed again whenever it shows again.
+                if (style >= 2 && style <= 9)
+                {
+                    toggled.add(button.hwnd);
+                }
+                const x = (button.rect.left + button.rect.right) >> 1;
+                const y = (button.rect.top + button.rect.bottom) >> 1;
+                say(`press "${button.title}" at ${x},${y}`);
+                app.input.send({ kind: 'pointerMove', x, y, dx: 0, dy: 0 });
+                app.input.send({ kind: 'pointerButton', button: 'left', down: true });
+                setTimeout(()=>app.input.send(
+                    { kind: 'pointerButton', button: 'left', down: false }), 100);
+                // Looked at afresh: a press the program did not take is made
+                // again once the screen has settled.
+                seenKey = '';
+                return;
+            }
+        }, request.pressSettleMs ?? 1500);
+    };
+    const timer = setInterval(look, request.pressEveryMs ?? 250);
+    return ()=>{
+        stopped = true;
+        clearInterval(timer);
+    };
+}
+
+/**
  * @typedef {Object} PresentState
  * @property {any} presented          The last frame this run presented.
  * @property {boolean} pointerDown    Whether the held pointer's button is down.
@@ -1092,7 +1202,9 @@ export function scalars(layers){
 async function standingOf(app){
     return (await app.standing()).map((/** @type {any} */ { image, diagnostics })=>{
         /** @param {string} layer */
-        const metrics = layer=>diagnostics.find((/** @type {any} */ entry)=>
+        // A process in a worker of its own that ended while asked answers
+        // nothing.
+        const metrics = layer=>(diagnostics ?? []).find((/** @type {any} */ entry)=>
             entry.name === layer)?.metrics ?? {};
         const kernel = metrics('kernel');
         const bridge = metrics('bridge');
@@ -1231,6 +1343,7 @@ export function createHarness(canvas, how = {}){
      * @param {{ exe?: string, exeUrl?: string, bundleUrl: string, bundlePrefix?: string,
      *           imagePath: string,
      *           commandLine?: string,
+     *           concurrency?: import('../../../src/mode.js').Concurrency,
      *           windows?: 'win2000' | 'winxp' | 'win7' | 'win10',
      *           sidecarHooks?: { spec: any, source: string },
      *           logCategories?: Record<string, string>,
@@ -1430,6 +1543,7 @@ export function createHarness(canvas, how = {}){
                 : undefined,
             media: decoder ? { wasmBytes: decoder } : undefined,
             imagePath: request.imagePath,
+            concurrency: request.concurrency ?? undefined,
             screen: request.screen ?? undefined,
             // The graphics layer's own configuration, whatever fields the run
             // names: a switch the layer defaults off is turned on per run here.
@@ -1575,6 +1689,12 @@ export function createHarness(canvas, how = {}){
         listen(app, collected);
         runningEvents = collected.events;
         scheduleKeyTimes(app, request);
+        const stopPresses = schedulePresses(app, request, line=>{
+            if (collected.events.length < LIMITS.events)
+            {
+                collected.events.push(`[press] ${line}`);
+            }
+        });
 
         /** @type {any} */
         const result = { ok: false, gpu: true, adapter: handle.adapter };
@@ -1804,6 +1924,7 @@ export function createHarness(canvas, how = {}){
             }
         });
 
+        stopPresses();
         await app.dispose();
         // Nothing is running any more, and a report asked for now must say
         // so: left set, `frameReport` reaches into a disposed machine and

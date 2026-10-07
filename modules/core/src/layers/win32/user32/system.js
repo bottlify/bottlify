@@ -51,6 +51,7 @@ import {
     writeU32s,
 } from './structs.js';
 import { readText, textBytes } from './unicode.js';
+import { HWND_BROADCAST, createWindowDirectory } from './directory.js';
 import { LOGFONTA, LOGFONTW_SIZE, logFontBytes } from '../gdi32/structs.js';
 import { ANY_WINDOW, threadIdOf } from './messages.js';
 import { VIDEO_ADAPTER_NAME } from '../devices.js';
@@ -465,7 +466,6 @@ const DMLERR_SYS_ERROR = 0x400f;
 const DMLERR_NO_ERROR = 0;
 
 /** Where RegisterWindowMessage numbers start: 0xc000 to 0xffff is theirs. */
-const REGISTERED_MESSAGE_FIRST = 0xc000;
 
 /** The names of the fixed clipboard formats, the ones GetClipboardFormatName reads back. */
 const CLIPBOARD_FORMAT_NAMES = new Map([
@@ -482,6 +482,20 @@ const ERROR_HOTKEY_NOT_REGISTERED = 1410;
 /** The one deferred-placement batch there ever is, as the handle a caller holds. */
 const DEFER_TOKEN = 0x4d50;
 
+/** AllowSetForegroundWindow's process id that names every process. */
+const ASFW_ANY = 0xffffffff;
+
+/** AnimateWindow's flags: the four directions, then the kinds of effect. */
+const AW_DIRECTIONS = 0x0000000f;
+const AW_CENTER = 0x00000010;
+const AW_HIDE = 0x00010000;
+const AW_ACTIVATE = 0x00020000;
+const AW_BLEND = 0x00080000;
+/** What ShowWindow is asked for to reach AnimateWindow's end state. */
+const SW_HIDE = 0;
+const SW_SHOW = 5;
+const SW_SHOWNA = 8;
+
 /**
  * Builds the system-query half of user32, over the window records the
  * bookkeeping half keeps.
@@ -491,8 +505,15 @@ const DEFER_TOKEN = 0x4d50;
  * @param {(hwnd: number) => any | null} options.live
  * @param {Map<number, any>} options.windows
  * @param {Map<string, any>} options.classes  Registered classes, by name.
+ * @param {(hwnd: number) => ({ processId: number, threadId: number, className: string,
+ *     title: string } | null)} [options.elsewhere]
+ *     A window of another process, as that process describes it.
+ * @param {{ register: (name: string) => number, registeredName: (id: number) => string | null }}
+ *     [options.names]  The run's registered messages and clipboard formats.
  */
-export function createSystemFunctions({ host, live, windows, classes }){
+export function createSystemFunctions({ host, live, windows, classes, elsewhere = ()=>null,
+    names = createWindowDirectory() })
+{
     /**
      * A window as the program is told of it: the desktop, the one window
      * here that is not the program's, as none.
@@ -755,7 +776,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
      * @param {boolean} unicode
      */
     const sendMessageTimeout = ([hwnd, message, wParam, lParam, , timeout, result], unicode)=>{
-        if (!live(hwnd))
+        if ((hwnd >>> 0) !== HWND_BROADCAST && !live(hwnd) && !elsewhere(hwnd))
         {
             host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
             return 0;
@@ -781,17 +802,6 @@ export function createSystemFunctions({ host, live, windows, classes }){
 
     const screen = host.screen ?? { width: 640, height: 480, bitsPerPixel: 32 };
 
-    /**
-     * Messages registered by name, in the range Windows keeps for them. The
-     * same name answers the same number for the life of the process, which is
-     * how two windows that never met agree on a message; case does not matter,
-     * as it does not for any other name the window manager keeps.
-     *
-     * @type {Map<string, number>}
-     */
-    const registeredMessages = new Map();
-    /** A registered number's name in the case it was first registered. */
-    const registeredMessageNames = new Map();
 
     /**
      * SetWindowPos, shared with the deferred form. The two flags that say
@@ -925,6 +935,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
         {
             host.raise(record);
         }
+        host.tell?.(record);
         const isShown = host.shown(record);
         if (dragged && isShown)
         {
@@ -2098,16 +2109,11 @@ export function createSystemFunctions({ host, live, windows, classes }){
         {
             return 0;
         }
-        let id = registeredMessages.get(key);
-        if (id === undefined)
-        {
-            id = REGISTERED_MESSAGE_FIRST + registeredMessages.size;
-            registeredMessages.set(key, id);
-            // The name as the program wrote it, so GetClipboardFormatName
-            // reads back the case it registered rather than a folded one.
-            registeredMessageNames.set(id, original);
-        }
-        return id;
+        // The run's, not the process's: the same name, in any case, is the
+        // same number in every process, which is how two windows that never
+        // met agree on a message -- and the name kept as first spelled, so
+        // GetClipboardFormatName reads back the case it was registered in.
+        return names.register(original);
     };
 
     /**
@@ -2124,12 +2130,12 @@ export function createSystemFunctions({ host, live, windows, classes }){
         {
             return fixed;
         }
-        return registeredMessageNames.get(format) ?? null;
+        return names.registeredName(format);
     };
 
     /** GetClassName in either width. @param {number[]} args @param {boolean} wide */
     const writeClassName = ([hwnd, out, maxCount], wide)=>{
-        const record = live(hwnd);
+        const record = live(hwnd) ?? elsewhere(hwnd);
         const room = maxCount | 0;
         if (!record || (out >>> 0) === 0 || room <= 0)
         {
@@ -2764,6 +2770,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 record.y = bounds.top;
                 record.width = bounds.right - bounds.left;
                 record.height = bounds.bottom - bounds.top;
+                host.tell?.(record);
                 return 1;
             },
         },
@@ -2935,10 +2942,19 @@ export function createSystemFunctions({ host, live, windows, classes }){
         WindowFromPoint: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([x, y])=>andThen(host.askedFromPoint
-                ? host.askedFromPoint(x | 0, y | 0, host.callerThread?.())
-                : host.windowFromPoint(x | 0, y | 0),
-            (/** @type {{ record: any } | null} */ found)=>found?.record.hwnd ?? 0),
+            handler: ([x, y])=>{
+                // Another program's window over the point is the answer; one
+                // of this program's is asked for its hit test here.
+                const foreign = host.foreignAt?.(x | 0, y | 0) ?? 0;
+                if (foreign !== 0)
+                {
+                    return foreign;
+                }
+                return andThen(host.askedFromPoint
+                    ? host.askedFromPoint(x | 0, y | 0, host.callerThread?.())
+                    : host.windowFromPoint(x | 0, y | 0),
+                (/** @type {{ record: any } | null} */ found)=>found?.record.hwnd ?? 0);
+            },
         },
 
         /**
@@ -4734,10 +4750,17 @@ export function createSystemFunctions({ host, live, windows, classes }){
             handler: ()=>programs(host.active?.() ?? 0),
         },
 
-        /** HWND GetForegroundWindow(void) */
+        /**
+         * HWND GetForegroundWindow(void)
+         *
+         * The run's: another program's window when another program has it.
+         */
         GetForegroundWindow: {
             argBytes: 0,
-            handler: ()=>programs(host.active?.() ?? 0),
+            handler: ()=>{
+                const run = host.runForeground?.() ?? 0;
+                return run !== 0 ? run : programs(host.active?.() ?? 0);
+            },
         },
 
         /**
@@ -4944,12 +4967,123 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 const record = live(hwnd);
                 if (!record)
                 {
-                    return 0;
+                    // Another program's window: the run's foreground moves
+                    // to it, and that program activates it.
+                    return host.foregroundElsewhere?.(hwnd >>> 0) ? 1 : 0;
                 }
                 host.raise?.(record);
                 return andThen(host.activate?.(hwnd >>> 0,
                     { thread: host.callerThread?.(), sent: true }), ()=>1);
             },
+        },
+
+        /**
+         * BOOL AllowSetForegroundWindow(DWORD dwProcessId)
+         *
+         * Lends the caller's right to set the foreground to another process,
+         * or to all of them for ASFW_ANY. It fails only for a caller that has
+         * no such right, and here every SetForegroundWindow succeeds, so every
+         * caller has it. A process id that names no process is refused with
+         * ERROR_INVALID_PARAMETER when the host can say which ids are live;
+         * a host that cannot leaves every id accepted.
+         */
+        AllowSetForegroundWindow: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([processId])=>{
+                const id = processId >>> 0;
+                if (id !== ASFW_ANY && id !== (host.processId ?? 0)
+                    && host.processExists?.(id) === false)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL AnimateWindow(HWND hWnd, DWORD dwTime, DWORD dwFlags)
+         *
+         * The effect is not played: the window reaches the state the
+         * animation ends in at once rather than after dwTime, hidden for
+         * AW_HIDE and otherwise shown, activated only for AW_ACTIVATE --
+         * ShowWindow's SW_HIDE, SW_SHOW or SW_SHOWNA. What MSDN says the call
+         * refuses is refused, with ERROR_INVALID_PARAMETER: showing a window
+         * that is visible or hiding one that is not (its own WS_VISIBLE,
+         * which is what ShowWindow reports), a roll or slide with no
+         * direction -- only a fade or AW_CENTER needs none -- and a fade of a
+         * child window; so is AW_ACTIVATE with AW_HIDE, which MSDN forbids. A
+         * window another thread owns is refused with the last error
+         * ERROR_SUCCESS, as documented.
+         */
+        AnimateWindow: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hwnd, , flags])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+                    return 0;
+                }
+                const thread = host.callerThread?.();
+                const owner = threadIdOf(record.thread);
+                const caller = threadIdOf(thread);
+                if (owner !== null && caller !== null && owner !== caller)
+                {
+                    host.setLastError?.(0);
+                    return 0;
+                }
+                const asked = flags >>> 0;
+                const hide = (asked & AW_HIDE) !== 0;
+                const visible = (record.style & WS_VISIBLE) !== 0;
+                const directionless = (asked & (AW_BLEND | AW_CENTER)) === 0
+                    && (asked & AW_DIRECTIONS) === 0;
+                const childFade = (asked & AW_BLEND) !== 0 && (record.style & WS_CHILD) !== 0;
+                if (hide === !visible || directionless || childFade
+                    || (hide && (asked & AW_ACTIVATE) !== 0))
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                let command = SW_SHOWNA;
+                if (hide)
+                {
+                    command = SW_HIDE;
+                }
+                else if ((asked & AW_ACTIVATE) !== 0)
+                {
+                    command = SW_SHOW;
+                }
+                return andThen(host.showWindow(record, command, thread), ()=>1);
+            },
+        },
+
+        /**
+         * void DisableProcessWindowsGhosting(void)
+         *
+         * Ghosting puts a stand-in frame over a window whose thread has
+         * stopped reading its messages. No window is ghosted here, so there
+         * is nothing to turn off.
+         */
+        DisableProcessWindowsGhosting: {
+            argBytes: 0,
+            handler: ()=>0,
+        },
+
+        /**
+         * BOOL WINNLSEnableIME(HWND hWnd, BOOL fEnable)
+         *
+         * Turns the input method on or off and answers the state it found.
+         * The call belongs to the Japanese and Korean systems' input methods
+         * and does nothing elsewhere; this system is en-US and has no input
+         * method at all -- imm32 reports none -- so the state found is always
+         * off and the answer FALSE whatever is asked.
+         */
+        WINNLSEnableIME: {
+            argBytes: 8,
+            handler: ()=>0,
         },
 
         /**
@@ -5016,14 +5150,14 @@ export function createSystemFunctions({ host, live, windows, classes }){
         GetWindowTextLengthA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([hwnd])=>live(hwnd)?.title.length ?? 0,
+            handler: ([hwnd])=>(live(hwnd) ?? elsewhere(hwnd))?.title.length ?? 0,
         },
 
         /** int GetWindowTextLengthW(HWND hWnd), in UTF-16 units. */
         GetWindowTextLengthW: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([hwnd])=>live(hwnd)?.title.length ?? 0,
+            handler: ([hwnd])=>(live(hwnd) ?? elsewhere(hwnd))?.title.length ?? 0,
         },
 
         /**
@@ -5042,8 +5176,18 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 const record = live(hwnd);
                 if (!record)
                 {
-                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
-                    return 0;
+                    // Another process's, which says who made it.
+                    const other = elsewhere(hwnd);
+                    if (!other)
+                    {
+                        host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+                        return 0;
+                    }
+                    if ((out >>> 0) !== 0)
+                    {
+                        writeU32s(host, out >>> 0, [other.processId]);
+                    }
+                    return other.threadId;
                 }
                 if ((out >>> 0) !== 0)
                 {

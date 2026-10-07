@@ -35,6 +35,8 @@
 
 import { MY_COMPUTER, createShellNamespace, listBytes, pathOfList } from './namespace.js';
 import { createDirectoryPath, runFileOperation } from './fileop.js';
+import { readFileIcons } from './icons.js';
+import { splitCommandLine } from './commandline.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
 /** ShellExecute reports failure as a value of 32 or less, not as zero. */
@@ -68,6 +70,24 @@ const S_OK = 0;
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
 const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_PARAMETER = 87;
+const ERROR_PATH_NOT_FOUND = 3;
+const ERROR_NOT_ENOUGH_MEMORY = 8;
+/** A name that is there but is a file where a directory was asked for. */
+const ERROR_DIRECTORY = 267;
+
+/** @param {number} code @returns {number} HRESULT_FROM_WIN32 */
+const fromWin32 = code=>(code === 0 ? S_OK : (0x80070000 | code) | 0);
+
+/**
+ * SHPathPrepareForWrite's flags. SHPPFW_NOWRITECHECK and
+ * SHPPFW_MEDIACHECKONLY are documented as not implemented, and are not.
+ */
+const SHPPFW_DIRCREATE = 0x01;
+const SHPPFW_ASKDIRCREATE = 0x02;
+const SHPPFW_IGNOREFILENAME = 0x04;
+
+/** The longest command line a process can be given, in characters. */
+const MAX_COMMAND_LINE = 32767;
 
 /** SHELLEXECUTEINFOA: the fields a launch reads, and the two it writes back. */
 const SEI_MASK = 4;
@@ -110,6 +130,10 @@ const E_FAIL = 0x80004005 | 0;
 
 /** The computer: a folder with no path, whose children are the drives. */
 const CSIDL_DRIVES = 0x11;
+
+/** Where a bare file name is looked for after the current directory. */
+const CSIDL_SYSTEM = 0x25;
+const CSIDL_WINDOWS = 0x24;
 
 /** CSIDL_FLAG_CREATE and its kin ride in the high bits of the folder id. */
 const CSIDL_FLAG_MASK = 0xff00;
@@ -174,8 +198,10 @@ const CSIDL_FOLDERS = Object.freeze({
  *           that asked to wait on the child.
  * @property {(bytes: number) => number} [allocate]
  *           The task allocator's memory, which is what a caller frees an item
- *           id list with. Without it no list can be made and the folder calls
- *           fail as an out-of-memory would.
+ *           id list with -- and LocalFree frees the block CommandLineToArgvW
+ *           makes with, the process having one allocator under both. Without
+ *           it no list can be made and the folder calls fail as an
+ *           out-of-memory would.
  * @property {Readonly<Record<string, string>>} [folders]
  *           The shell folders by the registry's names; absent, no CSIDL is known.
  * @property {import('./namespace.js').NamespaceVolume} [volume]
@@ -186,6 +212,14 @@ const CSIDL_FOLDERS = Object.freeze({
  * @property {(object: import('../oleaut32/objects.js').ComAdapter, interfaceId: string) => number} [publish]
  *           Puts a namespace object's interface into guest memory. Absent, as
  *           without the volume.
+ * @property {(picture: import('../user32/cursors.js').CursorPicture) => number} [icon]
+ *           An icon handle over a picture, the object user32's CreateIcon
+ *           makes, which DestroyIcon releases and DrawIcon draws. Without it
+ *           ExtractIcon still counts a file's icons but hands none out.
+ * @property {() => string} [imagePath]
+ *           The running program's path, what GetModuleFileName answers for
+ *           it: CommandLineToArgvW's whole answer to an empty command line.
+ * @property {(code: number) => void} [setLastError]
  */
 
 /** @param {string} text @returns {Uint8Array} text in the ANSI page, with its terminator */
@@ -400,18 +434,19 @@ export function createShellFunctions(host){
      * The UTF-16 string an argument points at, or null for a null pointer.
      *
      * @param {number} address
+     * @param {number} [limit]  How many characters are read at most.
      * @returns {string | null}
      */
-    const wideStringOf = address=>{
+    const wideStringOf = (address, limit = MAX_PATH)=>{
         if ((address >>> 0) === 0 || !host.readMemory)
         {
             return null;
         }
         let text = '';
-        for (let at = address >>> 0; text.length < MAX_PATH; at += 64)
+        for (let at = address >>> 0; text.length < limit; at += 64)
         {
             const bytes = host.readMemory(at, 64);
-            for (let index = 0; index + 1 < bytes.length; index += 2)
+            for (let index = 0; index + 1 < bytes.length && text.length < limit; index += 2)
             {
                 const code = bytes[index] | bytes[index + 1] << 8;
                 if (code === 0)
@@ -423,6 +458,14 @@ export function createShellFunctions(host){
         }
         return text;
     };
+
+    /**
+     * A string argument in the spelling the call was made in.
+     *
+     * @param {number} address @param {boolean} wide
+     * @returns {string | null}
+     */
+    const textOf = (address, wide)=>(wide ? wideStringOf(address) : stringOf(address));
 
     /**
      * SHFileOperation, for either spelling of the record: its lists read,
@@ -564,6 +607,254 @@ export function createShellFunctions(host){
             : { answer: SE_ERR_FNF, record: null };
     };
 
+    /**
+     * ShellExecute, for either spelling of its strings.
+     *
+     * @param {boolean} wide
+     */
+    const shellExecute = wide=>({
+        argBytes: 24,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [, operation, file, parameters, directory])=>start(
+            textOf(operation, wide), textOf(file, wide),
+            textOf(parameters, wide), textOf(directory, wide)).answer,
+    });
+
+    /**
+     * ShellExecuteEx, for either spelling of the record: SHELLEXECUTEINFOW is
+     * SHELLEXECUTEINFOA field for field, its strings pointers to wide ones.
+     *
+     * @param {boolean} wide
+     */
+    const shellExecuteEx = wide=>({
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [info])=>{
+            const at = info >>> 0;
+            if (at === 0)
+            {
+                return 0;
+            }
+            const mask = dwordAt(at, SEI_MASK);
+            /** @param {number} offset */
+            const field = offset=>textOf(dwordAt(at, offset), wide);
+            const started = (mask & (SEE_MASK_IDLIST | SEE_MASK_CLASSNAME)) !== 0
+                ? { answer: SE_ERR_NOASSOC, record: null }
+                : start(field(SEI_VERB), field(SEI_FILE), field(SEI_PARAMETERS),
+                    field(SEI_DIRECTORY));
+            host.writeMemory(at + SHELLEXECUTEINFO_HINSTAPP, dword(started.answer));
+            if ((mask & SEE_MASK_NOCLOSEPROCESS) !== 0)
+            {
+                host.writeMemory(at + SHELLEXECUTEINFO_PROCESS,
+                    dword(started.record?.handle ?? 0));
+            }
+            return started.answer === LAUNCH_SUCCESS ? 1 : 0;
+        },
+    });
+
+    /**
+     * SHGetPathFromIDList, for either spelling of the buffer.
+     *
+     * @param {boolean} wide
+     */
+    const pathFromList = wide=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [list, path])=>{
+            const found = pathOf(list >>> 0);
+            (wide ? writeWidePath : writePath)(path >>> 0, found ?? '');
+            return found === null ? 0 : 1;
+        },
+    });
+
+    /**
+     * The volume as reading a file needs it, or null in a build without one.
+     *
+     * @returns {import('./icons.js').IconVolume | null}
+     */
+    const readableVolume = ()=>{
+        const volume = /** @type {any} */ (host.volume);
+        return volume && ['stat', 'open', 'read', 'close']
+            .every(name=>typeof volume[name] === 'function')
+            ? /** @type {import('./icons.js').IconVolume} */ (volume) : null;
+    };
+
+    /**
+     * Where a file a program named by itself is: a qualified name is where it
+     * says, and a bare or relative one is looked for in the current
+     * directory, then the system directory, then the Windows directory --
+     * which is where a program finds the shell's own libraries by name.
+     *
+     * @param {import('./icons.js').IconVolume} volume @param {string} name
+     * @returns {string | null}
+     */
+    const locate = (volume, name)=>{
+        const candidates = [name];
+        if (!isQualified(name))
+        {
+            for (const folder of [folderOf(CSIDL_SYSTEM), folderOf(CSIDL_WINDOWS)])
+            {
+                if (folder !== null)
+                {
+                    candidates.push(`${folder.replace(/[\\/]+$/, '')}\\${name}`);
+                }
+            }
+        }
+        return candidates.find(candidate=>volume.stat(candidate)?.exists) ?? null;
+    };
+
+    /**
+     * ExtractIcon, for either spelling of the file name. The instance names
+     * the caller, which plays no part in which file is read.
+     *
+     * @param {boolean} wide
+     */
+    const extractIcon = wide=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [, file, index])=>{
+            const name = (textOf(file, wide) ?? '').trim();
+            const volume = readableVolume();
+            const path = name === '' || !volume ? null : locate(volume, name);
+            if (path === null || !volume)
+            {
+                return 0;
+            }
+            const wanted = index | 0;
+            /** @param {import('./icons.js').FileIcons} found */
+            const answer = found=>{
+                if (found.unread !== null)
+                {
+                    host.divergence?.('ExtractIcon',
+                        `${path} is ${found.unread}, whose icons are not read`);
+                }
+                if (wanted === -1)
+                {
+                    return found.count;
+                }
+                if (found.picture === null)
+                {
+                    return 0;
+                }
+                if (!host.icon)
+                {
+                    host.divergence?.('ExtractIcon',
+                        'no icon can be made here: the icon in the file is not handed out');
+                    return 0;
+                }
+                return host.icon(found.picture);
+            };
+            const found = readFileIcons(volume, path, wanted);
+            return found instanceof Promise ? found.then(answer) : answer(found);
+        },
+    });
+
+    /**
+     * SHPathPrepareForWrite, for either spelling of the path: whether the
+     * directory a program is about to write into is there, and with
+     * SHPPFW_DIRCREATE every directory of a full path made that is not. With
+     * SHPPFW_IGNOREFILENAME the last name is the file to be written, and only
+     * the directory above it is looked at; a bare file name is in the current
+     * directory, which is always there.
+     *
+     * @param {boolean} wide
+     */
+    const prepareForWrite = wide=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [, , path, flags])=>{
+            const named = textOf(path, wide);
+            if (named === null)
+            {
+                return E_INVALIDARG;
+            }
+            let directory = named.trim().replace(/\//g, '\\');
+            if ((flags & SHPPFW_IGNOREFILENAME) !== 0)
+            {
+                directory = directory.slice(0, directory.lastIndexOf('\\') + 1);
+            }
+            // A directory's trailing separator is not part of its name, except
+            // the root's.
+            directory = directory.replace(/([^:\\])\\+$/, '$1');
+            if (directory === '')
+            {
+                return S_OK;
+            }
+            const full = fullPath(directory, '');
+            const volume = fileVolume();
+            const entry = volume?.stat(full) ?? null;
+            if (entry)
+            {
+                return entry.isDirectory ? S_OK : fromWin32(ERROR_DIRECTORY);
+            }
+            // A relative path is looked for but never made: Windows reports
+            // it missing whatever the flags, as Wine's conformance test has it.
+            const whole = /^[A-Za-z]:\\/.test(directory) || directory.startsWith('\\\\');
+            if (!volume || !whole || (flags & (SHPPFW_DIRCREATE | SHPPFW_ASKDIRCREATE)) === 0)
+            {
+                return fromWin32(ERROR_PATH_NOT_FOUND);
+            }
+            if ((flags & SHPPFW_DIRCREATE) === 0)
+            {
+                host.divergence?.('SHPathPrepareForWrite',
+                    `${full} is made without asking: there is nobody to ask`);
+            }
+            return fromWin32(createDirectoryPath({ volume }, full));
+        },
+    });
+
+    /**
+     * LPWSTR *CommandLineToArgvW(LPCWSTR lpCmdLine, int *pNumArgs)
+     *
+     * The arguments (`commandline.js`) in one block: the array of pointers,
+     * ended by a null one, and the strings after it, so that the LocalFree
+     * the caller is documented to call frees all of it. An empty line is the
+     * program's own path alone, which is what GetModuleFileName answers.
+     */
+    const commandLineToArgv = {
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [line, count])=>{
+            /** @param {number} code */
+            const fail = code=>{
+                host.setLastError?.(code);
+                return 0;
+            };
+            const text = wideStringOf(line, MAX_COMMAND_LINE);
+            if (text === null || (count >>> 0) === 0)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            if (text === '' && !host.imagePath)
+            {
+                host.divergence?.('CommandLineToArgvW',
+                    'the program\'s path is not known: an empty line answers an empty argv[0]');
+            }
+            const args = text === '' ? [host.imagePath?.() ?? ''] : splitCommandLine(text);
+            const pointers = (args.length + 1) * 4;
+            const size = args.reduce((total, arg)=>total + (arg.length + 1) * 2, pointers);
+            const block = host.allocate?.(size) ?? 0;
+            if (block === 0)
+            {
+                return fail(ERROR_NOT_ENOUGH_MEMORY);
+            }
+            const bytes = new Uint8Array(size);
+            const view = new DataView(bytes.buffer);
+            let at = pointers;
+            args.forEach((arg, index)=>{
+                view.setUint32(index * 4, block + at, true);
+                for (let unit = 0; unit < arg.length; unit++)
+                {
+                    view.setUint16(at + unit * 2, arg.charCodeAt(unit), true);
+                }
+                at += (arg.length + 1) * 2;
+            });
+            host.writeMemory(block, bytes);
+            host.writeMemory(count >>> 0, dword(args.length));
+            return block;
+        },
+    };
+
     const table = {
         /**
          * HINSTANCE ShellExecuteA(HWND, LPCSTR lpOperation, LPCSTR lpFile,
@@ -580,14 +871,11 @@ export function createShellFunctions(host){
          * The window is not made the child's owner and nShowCmd is not carried:
          * how a program first shows its window is its own business once it runs,
          * which is what kernel32's WinExec does with the same argument.
+         *
+         * HINSTANCE ShellExecuteW(HWND, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR, INT)
          */
-        ShellExecuteA: {
-            argBytes: 24,
-            /** @param {number[]} args */
-            handler: ([, operation, file, parameters, directory])=>start(
-                stringOf(operation), stringOf(file),
-                stringOf(parameters), stringOf(directory)).answer,
-        },
+        ShellExecuteA: shellExecute(false),
+        ShellExecuteW: shellExecute(true),
 
         /**
          * HINSTANCE FindExecutableA(LPCSTR lpFile, LPCSTR lpDirectory,
@@ -660,6 +948,7 @@ export function createShellFunctions(host){
 
         /**
          * PIDLIST_ABSOLUTE SHBrowseForFolderA(LPBROWSEINFOA lpbi)
+         * PIDLIST_ABSOLUTE SHBrowseForFolderW(LPBROWSEINFOW lpbi)
          *
          * Needs a person to choose a folder. Null is what a caller checks for
          * and means the browse was cancelled, which is true.
@@ -668,9 +957,14 @@ export function createShellFunctions(host){
             argBytes: 4,
             handler: ()=>0,
         },
+        SHBrowseForFolderW: {
+            argBytes: 4,
+            handler: ()=>0,
+        },
 
         /**
          * BOOL SHGetPathFromIDListA(PCIDLIST_ABSOLUTE pidl, LPSTR pszPath)
+         * BOOL SHGetPathFromIDListW(PCIDLIST_ABSOLUTE pidl, LPWSTR pszPath)
          *
          * A list made here carries its path, and one the program combined
          * from several of ours ends in the item that does; the computer's
@@ -678,15 +972,8 @@ export function createShellFunctions(host){
          * and the buffer is cleared so a caller that reads it regardless reads
          * an empty path.
          */
-        SHGetPathFromIDListA: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([list, path])=>{
-                const found = pathOf(list >>> 0);
-                writePath(path >>> 0, found ?? '');
-                return found === null ? 0 : 1;
-            },
-        },
+        SHGetPathFromIDListA: pathFromList(false),
+        SHGetPathFromIDListW: pathFromList(true),
 
         /**
          * HRESULT DllGetVersion(DLLVERSIONINFO *pdvi)
@@ -807,6 +1094,7 @@ export function createShellFunctions(host){
 
         /**
          * BOOL ShellExecuteExA(SHELLEXECUTEINFOA *pExecInfo)
+         * BOOL ShellExecuteExW(SHELLEXECUTEINFOW *pExecInfo)
          *
          * The same launch, read out of a record and answered into it: hInstApp
          * carries what ShellExecute would have returned, and the BOOL says only
@@ -818,30 +1106,8 @@ export function createShellFunctions(host){
          * rather than read as one. A record that cannot be read at all names no
          * file, which is the access refusal a caller of this one already reads.
          */
-        ShellExecuteExA: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([info])=>{
-                const at = info >>> 0;
-                if (at === 0)
-                {
-                    return 0;
-                }
-                const mask = dwordAt(at, SEI_MASK);
-                const started = (mask & (SEE_MASK_IDLIST | SEE_MASK_CLASSNAME)) !== 0
-                    ? { answer: SE_ERR_NOASSOC, record: null }
-                    : start(stringOf(dwordAt(at, SEI_VERB)), stringOf(dwordAt(at, SEI_FILE)),
-                        stringOf(dwordAt(at, SEI_PARAMETERS)),
-                        stringOf(dwordAt(at, SEI_DIRECTORY)));
-                host.writeMemory(at + SHELLEXECUTEINFO_HINSTAPP, dword(started.answer));
-                if ((mask & SEE_MASK_NOCLOSEPROCESS) !== 0)
-                {
-                    host.writeMemory(at + SHELLEXECUTEINFO_PROCESS,
-                        dword(started.record?.handle ?? 0));
-                }
-                return started.answer === LAUNCH_SUCCESS ? 1 : 0;
-            },
-        },
+        ShellExecuteExA: shellExecuteEx(false),
+        ShellExecuteExW: shellExecuteEx(true),
 
         /**
          * int SHFileOperationA(LPSHFILEOPSTRUCTA lpFileOp)
@@ -897,15 +1163,54 @@ export function createShellFunctions(host){
         /**
          * DWORD_PTR SHGetFileInfoA(LPCSTR pszPath, DWORD dwFileAttributes,
          *                          SHFILEINFOA *psfi, UINT cbFileInfo, UINT uFlags)
+         * DWORD_PTR SHGetFileInfoW(LPCWSTR pszPath, DWORD dwFileAttributes,
+         *                          SHFILEINFOW *psfi, UINT cbFileInfo, UINT uFlags)
          *
          * Icons, type names and display names come from the shell's namespace,
          * which this build does not have. Zero is failure, and the record is
-         * left as the caller filled it.
+         * left as the caller filled it -- in either spelling, so the two
+         * layouts, whose names are twice as wide in the second, are not
+         * written at all.
          */
         SHGetFileInfoA: {
             argBytes: 20,
             handler: ()=>0,
         },
+        SHGetFileInfoW: {
+            argBytes: 20,
+            handler: ()=>0,
+        },
+
+        /**
+         * HICON ExtractIconA(HINSTANCE hInst, LPCSTR pszExeFileName, UINT nIconIndex)
+         * HICON ExtractIconW(HINSTANCE hInst, LPCWSTR pszExeFileName, UINT nIconIndex)
+         *
+         * An icon a file carries (`icons.js`), as an icon handle the caller
+         * destroys. An index of 0xFFFFFFFF asks how many there are: an
+         * executable's or a library's icon groups, or one for an icon file.
+         * A file with none, a file that is not there, and an index past the
+         * last all answer NULL, as Wine's conformance test has Windows answer
+         * them -- the 1 the documentation promises for a file that is not an
+         * image is not what Windows returns.
+         */
+        ExtractIconA: extractIcon(false),
+        ExtractIconW: extractIcon(true),
+
+        CommandLineToArgvW: commandLineToArgv,
+
+        /**
+         * HRESULT SHPathPrepareForWriteA(HWND hwnd, IUnknown *punkEnableModless,
+         *                                LPCSTR pszPath, DWORD dwFlags)
+         * HRESULT SHPathPrepareForWriteW(HWND, IUnknown *, LPCWSTR, DWORD)
+         *
+         * S_OK for a directory that is there; a file where the directory
+         * should be is ERROR_DIRECTORY, and one that is not there is
+         * ERROR_PATH_NOT_FOUND unless the caller asked for it to be made.
+         * There is no removable medium to ask for, so the window and the
+         * object whose modelessness a prompt would switch play no part.
+         */
+        SHPathPrepareForWriteA: prepareForWrite(false),
+        SHPathPrepareForWriteW: prepareForWrite(true),
 
         /**
          * HRESULT SHGetSpecialFolderLocation(HWND hwnd, int csidl,

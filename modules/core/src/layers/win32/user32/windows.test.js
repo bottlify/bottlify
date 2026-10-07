@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createMessageQueue } from './messages.js';
 import { MSG, RECT, WNDCLASSA, WNDCLASSEXA } from './structs.js';
 import { createWindowFunctions, watchDispatch } from './windows.js';
+import { createWindowDirectory } from './directory.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 
 /**
@@ -248,10 +249,15 @@ function paintedHost(fills, presents, clips, scrolls = []){
  * @param {(region: number) => any} [options.regionBox] gdi32's rectangle of a region.
  * @param {(delay: number, fire: () => void) => boolean} [options.later] The system's clock.
  * @param {any[]} [options.scrolls] Where the screen's moved pixels are told, with `paint`.
+ * @param {any} [options.directory] The run's window directory, for a test that reads what
+ *        the run is told.
+ * @param {number} [options.processId] The process this user32 is, beside another on the
+ *        same directory.
  */
 function setup({
     heap = false, reply, waitForObjects, now, hookReply, threadExists, trace, paint = false,
-    caller = { current: THREAD }, queueNow, regionBox, later, scrolls = [],
+    caller = { current: THREAD }, queueNow, regionBox, later, scrolls = [], directory,
+    processId,
 } = {})
 {
     const memory = fakeMemory();
@@ -313,6 +319,20 @@ function setup({
             return hookReply ? hookReply(entry, args) : 0;
         },
         callerThread: ()=>caller.current,
+        // As the bridge answers: the thread named is the caller for what
+        // `fn` runs before it awaits.
+        answering: (thread, fn)=>{
+            const before = caller.current;
+            caller.current = thread;
+            try
+            {
+                return fn();
+            }
+            finally
+            {
+                caller.current = before;
+            }
+        },
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         threadExists,
         /** @param {number} code */
@@ -332,6 +352,8 @@ function setup({
         release: heap ? (/** @type {number} */ at)=>released.push(at) : undefined,
         regionBox,
         later,
+        directory,
+        processId,
         ...(paint ? paintedHost(fills, presents, clips, scrolls) : {}),
     });
 
@@ -540,11 +562,12 @@ test('a window of a class that was never registered is not created', ()=>{
     assert.equal(handles.entries.size, 0, 'and no handle was spent on it');
 });
 
-test('an HWND is a handle from the table', ()=>{
+test('an HWND is the run\'s, a number no kernel handle is', ()=>{
     const { hwnd, handles } = withWindow();
 
     assert.ok(hwnd > 0);
-    assert.equal(handles.entries.get(hwnd)?.type, 'window');
+    assert.equal(hwnd % 4, 2, 'kernel handles are multiples of four');
+    assert.equal(handles.entries.has(hwnd), false, 'no kernel handle was spent on it');
 });
 
 test('CW_USEDEFAULT is replaced by a real position and size', ()=>{
@@ -2693,13 +2716,13 @@ test('a window created hidden hears only that it is being created', ()=>{
 
 test('CreateWindowEx tells the hook, then the procedure, in the order user32\'s message '
     + 'tests pin', ()=>{
-    // WmCreateOverlappedSeq and WmCreatePopupSeq, less what this layer does
-    // not send (WM_GETMINMAXINFO, WM_NCCALCSIZE, the WM_WINDOWPOS pair, the
-    // painting): HCBT_CREATEWND, WM_NCCREATE, WM_CREATE, and for a window
-    // created visible WM_SIZE (SIZE_RESTORED), WM_MOVE, WM_SHOWWINDOW(1) and
-    // the activation -- HCBT_ACTIVATE, WM_ACTIVATEAPP to each of the
-    // application's top-level windows, the hidden one too, and HCBT_SETFOCUS
-    // before the focus follows.
+    // WmCreateInvisiblePopupSeq and WmCreatePopupSeq, less what this layer
+    // does not send (WM_GETMINMAXINFO, WM_NCCALCSIZE, the WM_WINDOWPOS pair,
+    // the painting): HCBT_CREATEWND, WM_NCCREATE, WM_CREATE, WM_SIZE
+    // (SIZE_RESTORED) and WM_MOVE, shown or not; and for a window created
+    // visible WM_SHOWWINDOW(1) and the activation -- HCBT_ACTIVATE,
+    // WM_ACTIVATEAPP to each of the application's top-level windows, the
+    // hidden one too, and HCBT_SETFOCUS before the focus follows.
     /** @type {string[]} */
     const log = [];
     const { memory, fns } = setup({
@@ -2718,7 +2741,8 @@ test('CreateWindowEx tells the hook, then the procedure, in the order user32\'s 
     fns.RegisterClassA.handler([CLASS_STRUCT]);
 
     createWindow(fns, memory, { style: 0x80000000 });
-    assert.deepEqual(log, [`hook:${HCBT_CREATEWND}`, '0x81:0', '0x1:0'], 'hidden');
+    assert.deepEqual(log, [`hook:${HCBT_CREATEWND}`, '0x81:0', '0x1:0', '0x5:0', '0x3:0'],
+        'hidden');
 
     log.length = 0;
     createWindow(fns, memory, { style: 0x80000000 | WS_VISIBLE });
@@ -3376,6 +3400,90 @@ test('a thread inside a modal loop answers what another thread sends its windows
         await tick();
     }
     assert.equal(answered.value, 0x55, 'answered from inside the modal loop');
+});
+
+test('SetWindowText and SetDlgItemText to another thread\'s window wait for that thread to'
+    + ' run its procedure', async()=>{
+    // An installer's worker thread writes the progress text of the wizard its
+    // main thread made. The control is subclassed by a skin that keeps what
+    // it paints with on the thread that made it: run on the worker, it found
+    // nothing and the page was left unpainted.
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (main) };
+    const { fns, memory, dispatched, tick } = setup({ caller });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const dialog = createWindow(fns, memory);
+    const control = createWindow(fns, memory, { style: WS_CHILD, parent: dialog, menu: 0x5aa });
+    memory.putString(TEXT_BUFFER, 'Copying new files');
+    const WM_SETTEXT = 0x000c;
+
+    caller.current = worker;
+    for (const [call, args, target] of /** @type {const} */ ([
+        ['SetWindowTextA', [dialog, TEXT_BUFFER], dialog],
+        ['SetDlgItemTextA', [dialog, 0x5aa, TEXT_BUFFER], control],
+    ]))
+    {
+        const told = dispatched.length;
+        const answer = fns[call].handler([...args]);
+        assert.ok(answer instanceof Promise, `${call}: the worker waits`);
+        assert.equal(dispatched.length, told, `${call}: and nothing has run on it`);
+
+        caller.current = main;
+        fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+        const ran = dispatched.slice(told).find(m=>m.message === WM_SETTEXT);
+        assert.equal(ran?.hwnd, target, `${call}: WM_SETTEXT reached the window`);
+        assert.equal(ran?.thread, main, `${call}: on the thread that made it`);
+        caller.current = worker;
+        await tick();
+        await tick();
+        assert.equal(await answer, 1);
+    }
+});
+
+test('a message box a worker raises over another thread\'s window is shown as the worker\'s,'
+    + ' whoever is on the processor by then', async()=>{
+    // Disabling the owner waits for the owner's thread to take WM_ENABLE, and
+    // by the time the box is shown the thread on the processor is that one.
+    // Shown as that thread's, the activation it sends was started on it in
+    // the middle of its own loop, which then had nothing to go back to.
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (main) };
+    const WM_ENABLE = 0x000a, WM_ACTIVATE = 0x0006;
+    const { fns, memory, dispatched, tick } = setup({ caller, heap: true,
+        reply: message=>message.message === WM_NCCREATE });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const owner = createWindow(fns, memory, { style: WS_VISIBLE });
+
+    caller.current = worker;
+    const answer = fns.MessageBoxA.handler([owner, 0, 0, 0]);
+    assert.ok(answer instanceof Promise, 'the worker waits on the owner\'s thread');
+    caller.current = main;
+    const told = dispatched.length;
+    for (let turn = 0; turn < 20 && !dispatched.slice(told).some(m=>m.message === WM_ACTIVATE);
+        turn++)
+    {
+        fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+        await tick();
+    }
+    const enabled = dispatched.slice(told).find(m=>m.message === WM_ENABLE);
+    assert.equal(enabled?.thread, main, 'WM_ENABLE was taken by the owner\'s thread');
+    const activation = dispatched.slice(told)
+        .filter(m=>m.hwnd === owner && (m.message === WM_NCACTIVATE || m.message === WM_ACTIVATE));
+    assert.ok(activation.length > 0, 'the owner was told it lost the activation');
+    assert.deepEqual([...new Set(activation.map(m=>m.thread))], [worker],
+        'by the worker, whose call raised the box');
+    // And the box is the worker's, its controls too: the worker's modal loop
+    // takes their WM_PAINT, which a box of the owner's thread never had.
+    const box = activation.find(m=>m.message === WM_ACTIVATE)?.lParam ?? 0;
+    const GW_CHILD = 5;
+    const control = fns.GetWindow.handler([box, GW_CHILD]);
+    assert.notEqual(control, 0);
+    assert.deepEqual([box, control].map(hwnd=>fns.GetWindowThreadProcessId.handler([hwnd, 0])),
+        [worker.id, worker.id]);
 });
 
 test('what the window manager sends another thread\'s window runs on the sender, and says so',
@@ -4740,3 +4848,209 @@ test('SetWindowPos asks the window first, applies what it answers, and tells it 
             ['move', 35, 40],
         ], 'a move alone is no size');
     });
+
+// --- what the run's window manager is told ---
+
+/**
+ * The gate of what a process tells the run (roadmap/v2/windows.md): seeded
+ * sequences of the calls that change a window, and after each the run's
+ * manager holds every window of the process as its user32 does -- rectangle,
+ * client area, visibility, title, styles, parent and owner -- and the
+ * process's top-level windows in its order, and nothing it does not hold;
+ * and its focus is the run's one focus.
+ */
+for (const seed of [1, 2, 3, 4, 5, 6, 7, 8])
+{
+    test(`the run's window manager holds every window as its process does (seed ${seed})`,
+        async()=>{
+            let state = seed;
+            /** @param {number} below */
+            const next = below=>{
+                state ^= state << 13;
+                state ^= state >>> 17;
+                state ^= state << 5;
+                return (state >>> 0) % below;
+            };
+            const directory = createWindowDirectory();
+            const { memory, fns, service } = setup({ directory });
+            putClass(memory);
+            fns.RegisterClassA.handler([CLASS_STRUCT]);
+            const WS_POPUP = 0x80000000 | 0;
+            const WS_DISABLED = 0x08000000;
+            const WS_OVERLAPPEDWINDOW = 0x00cf0000;
+            const WS_EX_TOPMOST = 0x8;
+            const GWL_EXSTYLE = -20;
+            const PLACEMENT = 0x13000;
+            /** @type {number[]} */
+            let alive = [];
+            /** @param {number} hwnd */
+            const isChildWindow = hwnd=>(fns.GetWindowLongA.handler([hwnd, GWL_STYLE]) & WS_CHILD)
+                !== 0;
+            const any = ()=>alive[next(alive.length)];
+            const operations = [
+                ()=>{
+                    const owner = alive.length > 0 && next(3) === 0 ? any() : 0;
+                    const style = (next(2) ? WS_OVERLAPPEDWINDOW : WS_POPUP)
+                        | (next(3) ? WS_VISIBLE : 0);
+                    return createWindow(fns, memory, { style, parent: owner, x: next(400),
+                        y: next(300), width: 50 + next(300), height: 40 + next(200) });
+                },
+                ()=>(alive.length === 0 ? 0 : createWindow(fns, memory, {
+                    style: WS_CHILD | (next(3) ? WS_VISIBLE : 0), parent: any(), x: next(100),
+                    y: next(80), width: 10 + next(100), height: 10 + next(80) })),
+                ()=>{
+                    const hwnd = any();
+                    const after = [0, 1, any() ?? 0, 0xffffffff, 0xfffffffe][next(5)];
+                    const flags = [0x1, 0x2, 0x4, 0x10, 0x40, 0x80].filter(()=>next(3) === 0)
+                        .reduce((sum, flag)=>sum | flag, 0);
+                    return fns.SetWindowPos.handler([hwnd, after, next(500) - 50, next(400) - 50,
+                        20 + next(300), 20 + next(200), flags]);
+                },
+                ()=>fns.ShowWindow.handler([any(), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9][next(10)]]),
+                ()=>fns.MoveWindow.handler([any(), next(300), next(300), 30 + next(200),
+                    30 + next(200), next(2)]),
+                ()=>{
+                    memory.putString(TEXT_BUFFER, `title ${next(1000)}`);
+                    return fns.SetWindowTextA.handler([any(), TEXT_BUFFER]);
+                },
+                ()=>{
+                    const hwnd = any();
+                    const style = fns.GetWindowLongA.handler([hwnd, GWL_STYLE]);
+                    const flip = [WS_VISIBLE, WS_DISABLED][next(2)];
+                    return fns.SetWindowLongA.handler([hwnd, GWL_STYLE, style ^ flip]);
+                },
+                ()=>{
+                    const hwnd = any();
+                    const exStyle = fns.GetWindowLongA.handler([hwnd, GWL_EXSTYLE]);
+                    return isChildWindow(hwnd) ? 0
+                        : fns.SetWindowLongA.handler([hwnd, GWL_EXSTYLE, exStyle ^ WS_EX_TOPMOST]);
+                },
+                ()=>{
+                    const left = next(300);
+                    const top = next(300);
+                    memory.putU32s(PLACEMENT, [44, 0, 1, 0, 0, 0, 0, left, top,
+                        left + 20 + next(200), top + 20 + next(200)]);
+                    return fns.SetWindowPlacement.handler([any(), PLACEMENT]);
+                },
+                ()=>fns.BringWindowToTop.handler([any()]),
+                ()=>(next(4) === 0 ? fns.DestroyWindow.handler([any()]) : 0),
+                ()=>fns.SetFocus.handler([next(5) === 0 ? 0 : any()]),
+                ()=>fns.SetActiveWindow.handler([any()]),
+            ];
+            for (let step = 0; step < 120; step++)
+            {
+                const which = alive.length === 0 ? 0 : next(operations.length);
+                const made = await operations[which]();
+                if (which <= 1 && made)
+                {
+                    alive.push(made >>> 0);
+                }
+                const listed = service.list();
+                alive = listed.map(each=>Number(each.hwnd));
+                const manager = directory.manager;
+                for (const each of listed)
+                {
+                    const held = manager.get(Number(each.hwnd));
+                    const where = `step ${step}, operation ${which}, window ${each.hwnd}`;
+                    assert.ok(held, `${where}: the run has it`);
+                    assert.deepEqual(held.rect, each.rect, `${where}: its rectangle`);
+                    assert.deepEqual(held.client, each.client, `${where}: its client area`);
+                    assert.equal(held.title, each.title, `${where}: its title`);
+                    assert.equal(`0x${held.style.toString(16)}`, each.style, `${where}: style`);
+                    assert.equal(`0x${held.exStyle.toString(16)}`, each.exStyle,
+                        `${where}: its extended style`);
+                    assert.equal(held.parent !== 0, each.child, `${where}: whether it is a child`);
+                }
+                const own = new Set(listed.map(each=>Number(each.hwnd)));
+                const heldHere = [...manager.topLevel(), ...listed.flatMap(each=>
+                    manager.children(Number(each.hwnd)))];
+                assert.ok(heldHere.every(each=>own.has(each.hwnd)),
+                    `step ${step}: the run holds no window the process does not`);
+                const order = listed.filter(each=>!each.child).map(each=>Number(each.hwnd))
+                    .reverse();
+                assert.deepEqual(manager.topLevel().map(each=>each.hwnd), order,
+                    `step ${step}, operation ${which}: the top-level windows in the run's order`);
+                assert.equal(manager.focus(), /** @type {any} */ (fns.GetFocus).handler([]) >>> 0,
+                    `step ${step}, operation ${which}: the focus is the run's`);
+            }
+        });
+}
+
+test('another program\'s window taking the foreground is the run\'s, and both programs are'
+    + ' told, each naming the other', async()=>{
+    const WM_ACTIVATE = 0x0006;
+    const WM_ACTIVATEAPP = 0x001c;
+    const WA_INACTIVE = 0;
+    const directory = createWindowDirectory();
+    // Threads with identifiers, as the scheduler's are: a message from
+    // another process waits in the queue of the thread it names.
+    const first = setup({ directory, processId: 0x100, hookReply: ()=>1,
+        caller: { current: { name: 'main', id: 0x104 } } });
+    const second = setup({ directory, processId: 0x200,
+        caller: { current: { name: 'other', id: 0x204 } } });
+    for (const each of [first, second])
+    {
+        putClass(each.memory);
+        each.fns.RegisterClassA.handler([CLASS_STRUCT]);
+    }
+    const mine = createWindow(first.fns, first.memory, { style: WS_VISIBLE, x: 0, y: 0,
+        width: 300, height: 300 });
+    await first.fns.SetForegroundWindow.handler([mine]);
+    // A visible top-level window is activated as it is made.
+    second.dispatched.length = 0;
+    const theirs = createWindow(second.fns, second.memory, { style: WS_VISIBLE, x: 200, y: 200,
+        width: 300, height: 300 });
+    await second.fns.SetForegroundWindow.handler([theirs]);
+    await Promise.resolve();
+
+    assert.equal(first.fns.GetForegroundWindow.handler(), theirs, 'the run\'s foreground');
+    assert.equal(second.fns.GetForegroundWindow.handler(), theirs);
+    assert.equal(first.fns.GetActiveWindow.handler(), 0, 'no window of the first is active');
+    assert.equal(first.service.deactivated(), true);
+    const firstThread = directory.stateOf(mine)?.threadId;
+    const secondThread = directory.stateOf(theirs)?.threadId;
+    /** @param {any[]} list @param {number} message */
+    const of = (list, message)=>list.filter(each=>each.message === message)
+        .map(each=>[each.hwnd, each.wParam, each.lParam]);
+    assert.deepEqual(of(second.dispatched, WM_ACTIVATEAPP), [[theirs, 1, firstThread]],
+        'the second is the active program, from the first program\'s thread');
+    assert.deepEqual(of(second.dispatched, WM_ACTIVATE), [[theirs, 1, mine]]);
+
+    // The first hears of it on its own thread, at its next look at its queue.
+    first.dispatched.length = 0;
+    first.fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+    assert.deepEqual(of(first.dispatched, WM_NCACTIVATE), [[mine, 0, 0]]);
+    assert.deepEqual(of(first.dispatched, WM_ACTIVATE), [[mine, WA_INACTIVE, theirs]]);
+    assert.deepEqual(of(first.dispatched, WM_ACTIVATEAPP), [[mine, 0, secondThread]],
+        'it is not the active program, for the second program\'s thread');
+
+    assert.equal(await first.fns.WindowFromPoint.handler([250, 250]), theirs,
+        'the other program\'s window over the point');
+    first.called.length = 0;
+    await first.fns.EnumWindows.handler([0x405000, 7]);
+    assert.deepEqual(first.called.map(each=>each.args[0]), [theirs, mine],
+        'every program\'s top-level window, topmost first');
+
+    // And back.
+    first.dispatched.length = 0;
+    await first.fns.SetForegroundWindow.handler([mine]);
+    assert.equal(second.fns.GetForegroundWindow.handler(), mine);
+    assert.equal(second.fns.GetActiveWindow.handler(), 0);
+    assert.deepEqual(of(first.dispatched, WM_ACTIVATEAPP), [[mine, 1, secondThread]]);
+
+    // The second program gives the foreground to the first program's window:
+    // the run's at once; the first activates it as it looks at its queue.
+    second.fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+    await second.fns.SetForegroundWindow.handler([theirs]);
+    first.fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+    first.dispatched.length = 0;
+    assert.equal(await second.fns.SetForegroundWindow.handler([mine]), 1,
+        'another program\'s window can be made the foreground one');
+    assert.equal(second.fns.GetForegroundWindow.handler(), mine, 'at once');
+    assert.equal(second.fns.GetActiveWindow.handler(), 0);
+    await first.fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+    assert.equal(first.fns.GetActiveWindow.handler(), mine, 'and the first activated it');
+    assert.deepEqual(of(first.dispatched, WM_ACTIVATEAPP), [[mine, 1, secondThread]],
+        'told it came from the second program\'s thread');
+    assert.deepEqual(of(first.dispatched, WM_ACTIVATE), [[mine, 1, theirs]]);
+});

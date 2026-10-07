@@ -20,7 +20,9 @@
  * worker at all; `engine.worker.js` is the two lines that bind it to a real one.
  */
 
-import { createMacrotask, pacedYield, pagePacing } from '../app.js';
+import { PAGE_YIELD_MS, createMacrotask, pacedYield, pagePacing } from '../app.js';
+import { createInboundReader } from './inbound.js';
+import { ringPacing } from './ring-pacing.js';
 import { openGraphicsWorker } from './graphics-worker.js';
 import { createLogReader } from '../layers/log/reader.js';
 import { FEED_AHEAD_MS, createFeeder } from '../layers/audio/output/feed.js';
@@ -423,6 +425,13 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
     const contextOf = screenOf ?? ((/** @type {any} */ canvas)=>canvas.getContext('webgpu'));
     /** @type {any} */
     let app = null;
+    /**
+     * The ring from the page with `concurrency`, read between turns and before
+     * each posted message.
+     *
+     * @type {ReturnType<typeof createInboundReader> | null}
+     */
+    let inboundReader = null;
     /** The relay transport opened for the run, closed with it. @type {any} */
     let transport = null;
     /** The sound posted to a worklet that cannot share memory. @type {any} */
@@ -593,7 +602,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                     { reason: 'gpu' });
             }
             const { bundle, storage, watch, hooks, device: knobs, signal: word, network: relay,
-                ...rest } = options;
+                inbound, ...rest } = options;
             void word;
             const { graphicsWorker = true, ...deviceKnobs } = knobs ?? {};
             const returned = graphicsWorker === 'pixels' ? 'pixels' : 'bitmap';
@@ -625,19 +634,42 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 });
             }
             const { port: soundPort, ...soundOptions } = rest.audio ?? {};
+            /**
+             * With concurrency, ring pacing where the page wrote a ring;
+             * otherwise the page's pacing unless asked, with the signal word
+             * in both: a message the page posted is seen between two turns
+             * rather than at the next timed yield.
+             *
+             * @param {import('../system/ring.js').RingMemory | undefined} ring
+             * @param {string | undefined} asked
+             */
+            const pacingFor = (ring, asked)=>{
+                if (ring)
+                {
+                    inboundReader = createInboundReader(ring, receive);
+                    return ringPacing({ inbound: inboundReader, macrotask: breathe, now: clock,
+                        intervalMs: threaded ? WORKER_YIELD_MS : PAGE_YIELD_MS, posted });
+                }
+                if (threaded && asked === 'event')
+                {
+                    return workerPacing({ macrotask: breathe, poke, signalled, now: clock });
+                }
+                return pagePacing({ macrotask: breathe, hidden: ()=>hidden, now: clock, signalled,
+                    yieldMs: threaded ? WORKER_YIELD_MS : undefined });
+            };
+            // What the translation worker raises and rings after each batch it
+            // posts, where the engine is fed through the ring: the batch is
+            // taken at the next turn rather than at the next timed yield.
+            const posted = inbound ? { buffer: new SharedArrayBuffer(4), index: 0 } : null;
+            const pacing = pacingFor(inbound, options.pacing);
+            const doorbell = posted && inboundReader ? { posted, bell: inboundReader.bell } : null;
             app = await createApp({
                 ...rest,
                 audio: rest.audio ? soundOptions : undefined,
                 win32: { ...rest.win32, network: transport ?? rest.win32?.network },
-                // The page's pacing either way unless asked, with the signal
-                // word in both: a message the page posted is seen between
-                // two turns rather than at the next timed yield.
-                pacing: threaded && options.pacing === 'event'
-                    ? workerPacing({ macrotask: breathe, poke, signalled, now: clock })
-                    : pagePacing({
-                        macrotask: breathe, hidden: ()=>hidden, now: clock, signalled,
-                        yieldMs: threaded ? WORKER_YIELD_MS : undefined,
-                    }),
+                pacing,
+                cork: doorbell
+                    ? { ...rest.cork, config: { ...rest.cork?.config, doorbell } } : rest.cork,
                 bundle: bundle ? {
                     ...bundle,
                     fetch: bundle.file ? blobFetcher(bundle.file)
@@ -777,7 +809,8 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 files: started?.collectOnExit ? app.session.export() : [],
                 // What an installer's output is sorted against: the libraries
                 // a bottle does not carry out of system32.
-                systemLibraries: started?.collectOnExit ? app.systemLibraries?.() ?? [] : [],
+                systemLibraries: started?.collectOnExit
+                    ? await app.systemLibraries?.() ?? [] : [],
             };
         },
         pause: ()=>app.pause(),
@@ -839,8 +872,9 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
         // flag a program waits on without calling anything shows nowhere
         // else, and a running title is the one worth looking at. A copy, so
         // what crosses is what was there.
-        'debug.read': (/** @type {number} */ address, /** @type {number} */ length)=>
-            app.debug.read(address, length).slice(),
+        // Awaited: a program in a worker of its own answers across its link.
+        'debug.read': async(/** @type {number} */ address, /** @type {number} */ length)=>
+            (await app.debug.read(address, length)).slice(),
         'debug.modules': ()=>app.debug.modules(),
         presented: ()=>({ count: frames, history: presented.slice() }),
         /*
@@ -893,8 +927,13 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
         },
     };
 
-    port.onmessage = async(/** @type {{ data: import('./messages.js').ToEngine }} */ { data })=>{
-        const message = data;
+    /**
+     * What the page sent, posted or written into the inbound ring: one
+     * handler, so the two channels cannot answer differently.
+     *
+     * @param {import('./messages.js').ToEngine} message
+     */
+    const receive = async message=>{
         poked?.();
         switch (message.type)
         {
@@ -931,6 +970,11 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             default:
                 return;
         }
+    };
+    port.onmessage = (/** @type {{ data: import('./messages.js').ToEngine }} */ { data })=>{
+        // What the page wrote into the ring before it posted this comes first.
+        inboundReader?.drain();
+        return receive(data);
     };
 
     return {

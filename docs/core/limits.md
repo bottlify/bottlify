@@ -17,12 +17,54 @@ differently raises a `divergence` event naming the API.
 ## Processes
 
 - A child started with `CreateProcess` runs while its parent waits; the parent resumes when the
-  child ends.
-- Only the process of an out-of-process COM server runs alongside the program that uses it.
+  child ends. With `concurrency` 2 or 4 every process runs in a worker of its own, the program the
+  page started too, and a child starts at `CreateProcess` and runs beside its parent; one past
+  that many at once runs beside its parent taking turns with it in its parent's worker.
+- With `concurrency` 2 or 4 a process's own journal -- its calls, its phase profile, its frames --
+  stays in its worker: the run's log holds the events every process reports and what the engine's
+  thread writes. A process in a worker takes its translations from the run's one store, which
+  the engine's thread keeps open, and puts what it makes there; a batch's lookups cross the link
+  together, one wait for the batch. It places no hooks (`hooks`, `watchImport`), and reaches no
+  network transport the page handed in (`win32.network`).
+  The run's diagnostics are the program's tables as it last answered, with the journal and the
+  sound output the engine's thread keeps.
+- With `concurrency` 1 the process of an out-of-process COM server runs alongside the program that
+  uses it, outside `concurrency`, beside it on the engine thread. With 2 or 4 the class table is
+  the run's, kept on the engine thread: a server COM starts runs in a worker of its own while the
+  run has room for one, and beside the process that asked, in its worker, otherwise; a call from
+  one worker to another goes through the engine thread and back.
+- A child in a worker of its own shares the run's registry, files, window
+  directory -- its windows found, read, posted and sent to by every other process, and theirs by
+  it -- ids, the run's bundle (a block it misses is fetched for it), named events, semaphores
+  and mutexes, and the position of a file its parent handed it as its output; a named file
+  mapping or waitable timer is its own. A set of objects one of which another process across a
+  worker named is answered when polled -- with a zero timeout, or by a message wait
+  (`MsgWaitForMultipleObjects`, COM's `CoWaitForMultipleHandles`), which polls -- and a wait
+  that would block on such a set is refused. Its Direct3D 8 and 9 devices draw on the run's
+  graphics worker and what they present is shown as the run's frames; its sound goes onto the
+  run's track table in a span its parent lends it, where that table is shared memory (none
+  otherwise); the page's input reaches it where its windows are under the pointer or in the
+  foreground. Its DirectDraw primary and the desktop
+  its windows are drawn on are sent to the engine as bytes and shown there. Its COM classes are the
+  run's: it serves them to every other process and calls theirs. So is the running object table:
+  an object one process registers (`RegisterActiveObject`, `IRunningObjectTable::Register`) is
+  found from every other by class (`GetActiveObject`), by moniker and by display name
+  (`MkParseDisplayName`, `CoGetObject`), and goes when its process does. The error information
+  a server sets on a failed call is the caller's to read.
+- Windows are the run's: a process finds another's window (`FindWindow`), reads who made it, its
+  caption and class, and posts to it. A message sent to another process's window is answered in the
+  with `concurrency`; its pointers cross only for `WM_COPYDATA`, `WM_SETTEXT` and `WM_GETTEXT`. Where
+  a parent waits while its child runs, a message the child sends to the parent's window is refused
+  at once, as one that timed out.
 
 ## Graphics
 
 - A picture needs WebGPU. A canvas that gives no WebGPU context fails the start (`reason: 'gpu'`).
+- While windows of more than one process are showing, the screen is composed of each process's
+  newest picture by the run's top-level windows, the topmost last; the canvas takes the size of the
+  foreground window's process's picture. A process's picture is what it presented last, whole:
+  a windowed Direct3D device's back buffer is placed at the screen's corner rather than in its
+  window, and a process that has presented nothing has its windows show what is under them.
 - No Direct3D 11 or 12.
 - Direct3D 10 and Vulkan draw on the engine thread; Direct3D 7, 8, 9 and OpenGL in the graphics
   worker.

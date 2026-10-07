@@ -525,7 +525,8 @@ test('a message sent to a control with no procedure is answered with nothing', (
     assert.equal(fns.SendMessageA.handler([control, BM_SETCHECK, 1, 0]), 0);
 
     const MSG = 0x3000;
-    memory.writeMemory(MSG, Uint8Array.of(control, control >>> 8, 0, 0, BM_SETCHECK, 0, 0, 0));
+    memory.writeMemory(MSG, Uint8Array.of(control, control >>> 8, control >>> 16, control >>> 24,
+        BM_SETCHECK, 0, 0, 0));
     assert.equal(fns.DispatchMessageA.handler([MSG]), 0, 'and dispatched, the same');
 });
 
@@ -585,7 +586,8 @@ test('IsDialogMessage takes Enter for IDOK and dispatches anything else inside t
     delivered.length = 0;
 
     const MSG = 0x3000;
-    memory.writeMemory(MSG, Uint8Array.of(control, control >>> 8, 0, 0, 0x00, 0x01, 0, 0, 0x0d));
+    memory.writeMemory(MSG, Uint8Array.of(control, control >>> 8, control >>> 16, control >>> 24,
+        0x00, 0x01, 0, 0, 0x0d));
     assert.equal(fns.IsDialogMessageA.handler([dialog, MSG]), 1, 'Enter on a control inside');
     // The dialog is asked for its default button first, and told the click.
     assert.deepEqual(delivered.map(one=>[one.message, one.wParam & 0xffff]),
@@ -597,7 +599,8 @@ test('IsDialogMessage takes Enter for IDOK and dispatches anything else inside t
     memory.writeMemory(MSG + 8, Uint8Array.of(0x41));
     delivered.length = 0;
     assert.equal(fns.IsDialogMessageA.handler([dialog, MSG]), 1, 'a letter is dispatched');
-    memory.writeMemory(MSG, Uint8Array.of(dialog, dialog >>> 8, 0, 0, 0x00, 0x04, 0, 0, 0x05));
+    memory.writeMemory(MSG, Uint8Array.of(dialog, dialog >>> 8, dialog >>> 16, dialog >>> 24,
+        0x00, 0x04, 0, 0, 0x05));
     assert.equal(fns.IsDialogMessageA.handler([dialog, MSG]), 1);
     assert.deepEqual(delivered.map(one=>[one.message, one.wParam]), [[0x0400, 5]],
         'a message for the dialog itself reached its procedure');
@@ -960,9 +963,13 @@ test('a control of a class the program registered is the window of that class', 
     const meter = fns.GetDlgItem.handler([dialog, 201]);
     assert.notEqual(meter, 0);
     const WM_CREATE = 0x0001;
+    const WM_SIZE = 0x0005;
+    const WM_MOVE = 0x0003;
     assert.deepEqual(seen.map(call=>[call.wndProc, call.message]),
-        [[METER_PROC, WM_NCCREATE], [METER_PROC, WM_CREATE], [DIALOGPROC, WM_INITDIALOG]],
-        'the control was told it exists, then the dialog initialised, all during the call');
+        [[METER_PROC, WM_NCCREATE], [METER_PROC, WM_CREATE], [METER_PROC, WM_SIZE],
+            [METER_PROC, WM_MOVE], [DIALOGPROC, WM_INITDIALOG]],
+        'the control was told it exists and its size, then the dialog initialised, all'
+        + ' during the call');
     assert.equal(memory.u32(seen[0].lParam + 12), dialog, 'CREATESTRUCT.hwndParent');
     assert.equal(memory.u32(seen[0].lParam + 8), 201, 'CREATESTRUCT.hMenu is the id');
     assert.equal(fns.SetWindowWord.handler([meter, 0, 7]), 0, 'and it has the extra bytes');
@@ -1578,8 +1585,13 @@ test('a template\'s controls are made one after another, each handed its creatio
     const dialog = await creating;
     assert.notEqual(dialog, 0);
     const [first, second] = [301, 302].map(id=>fns.GetDlgItem.handler([dialog, id]));
+    // Each, as CreateWindowEx tells a child, then hears its size and place.
+    const WM_SIZE = 0x0005;
+    const WM_MOVE = 0x0003;
     assert.deepEqual(order, [`${first}:${WM_NCCREATE}`, `${first}:${WM_CREATE}`,
-        `${second}:${WM_NCCREATE}`, `${second}:${WM_CREATE}`]);
+        `${first}:${WM_SIZE}`, `${first}:${WM_MOVE}`,
+        `${second}:${WM_NCCREATE}`, `${second}:${WM_CREATE}`,
+        `${second}:${WM_SIZE}`, `${second}:${WM_MOVE}`]);
     assert.deepEqual(data, [[6, 7, 8], []], 'the size word, then the data; NULL for none');
 });
 

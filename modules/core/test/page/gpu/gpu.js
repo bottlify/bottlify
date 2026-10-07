@@ -207,7 +207,10 @@ function show(image){
  * Runs one guest program and reports what came out of it.
  *
  * @param {{ exe: string, samples: { name: string, x: number, y: number }[],
- *           words: number, maxTurns?: number, graphicsWorker?: boolean }} request
+ *           words: number, maxTurns?: number, graphicsWorker?: boolean | string,
+ *           child?: string }} request
+ *     `child`: the program as a child, C:\\a.exe, that `exe` starts in a worker
+ *     of its own and waits on
  * @returns {Promise<any>}
  */
 async function run(request){
@@ -233,6 +236,12 @@ async function run(request){
     let presented = null;
     const app = await createApp({
         executable: fromBase64(request.exe),
+        ...request.child ? {
+            concurrency: 2,
+            storage: { load: async()=>({
+                files: [{ path: 'C:\\a.exe', bytes: fromBase64(/** @type {string} */ (request.child)) }],
+            }) },
+        } : {},
         screen: { width: 320, height: 240, bitsPerPixel: 32 },
         device: {
             device: handle.device,

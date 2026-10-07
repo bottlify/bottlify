@@ -1165,7 +1165,7 @@ test('an edit places its caret and selection where the drawn text ends', async()
     // Clear of the page's own controls, which are stacked above a control
     // made after them and would take the clicks below.
     const edit = context.fns.CreateWindowExA.handler([WS_EX_CLIENTEDGE, TEXT, 0,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 8, 110, 100, 20, dialog, 300, HINSTANCE, 0]);
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 8, 88, 100, 20, dialog, 300, HINSTANCE, 0]);
     assert.notEqual(edit, 0);
     await context.fns.SetFocus.handler([edit]);
     for (const character of 'il')
@@ -1517,9 +1517,9 @@ test('a click on the caption\'s close box asks the dialog to close, which is Can
 
 test('a template that sets a font lays the dialog out in it and hands it to every control',
     async()=>{
-        // The system font here is 16 high, so its cell is 8 by 18; eight
-        // points is 11 pixels, a cell of 6 by 13. A dialog set in it is laid
-        // out three quarters as wide and its controls paint in it.
+        // The System font's cell is 8 by 16 and eight points of MS Sans Serif
+        // 6 by 13, as Windows measures both. A dialog set in it is laid out
+        // three quarters as wide and its controls paint in it.
         const context = setup({ engine: true });
         const dialog = await openDialog(context, {
             ...WIZARD_PAGE,
@@ -1537,7 +1537,7 @@ test('a template that sets a font lays the dialog out in it and hands it to ever
         assert.equal(context.faces.at(-1), 'MS Sans Serif', 'the face the template named');
 
         // Forty units across and fourteen down, in that cell rather than
-        // the system font's 80 by 32.
+        // the System font's 80 by 28.
         context.fns.GetWindowRect.handler([button, OUT]);
         assert.equal(context.memory.u32(OUT + 8) - context.memory.u32(OUT), 60);
         assert.equal(context.memory.u32(OUT + 12) - context.memory.u32(OUT + 4), 23);
@@ -1547,8 +1547,8 @@ test('a template that sets a font lays the dialog out in it and hands it to ever
         assert.equal(context.fns.MapDialogRect.handler([dialog, OUT]), 1);
         assert.deepEqual([context.memory.u32(OUT + 8), context.memory.u32(OUT + 12)], [6, 13],
             'MapDialogRect scales by the dialog\'s own font');
-        assert.equal(context.fns.GetDialogBaseUnits.handler([]), (18 << 16) | 8,
-            'while the base units stay the system font\'s');
+        assert.equal(context.fns.GetDialogBaseUnits.handler([]), (16 << 16) | 8,
+            'while the base units stay the System font\'s');
 
         // The font is the dialog's, and goes with it.
         context.fns.DestroyWindow.handler([dialog]);

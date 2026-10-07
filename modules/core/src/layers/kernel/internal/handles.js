@@ -23,7 +23,15 @@ export const INVALID_HANDLE_VALUE = 0xffffffff;
  * loudly here rather than subtly later.
  */
 const HANDLE_STRIDE = 4;
-const FIRST_HANDLE = HANDLE_STRIDE;
+
+/**
+ * Above every value a brush argument means as a system colour plus one
+ * (COLOR_* + 1, up to 31): a class background, FillRect's brush. A brush and
+ * a device context are handles of this table, and where Windows' GDI handles
+ * never fall in that range, one of these at 8 was read as COLOR_WINDOWFRAME's
+ * black instead of the brush the program made.
+ */
+export const FIRST_HANDLE = 0x40;
 
 /**
  * Reuse is deferred as long as possible: a fresh handle is issued while the

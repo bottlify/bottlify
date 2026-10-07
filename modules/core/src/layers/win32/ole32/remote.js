@@ -81,6 +81,18 @@ const SLOT_INVOKE = 5;
 
 const IID_IRPCCHANNELBUFFER = '{D5F56B60-593B-101A-B569-08002B2DBF7A}';
 
+/** IErrorInfo, and the methods of it and of ICreateErrorInfo a reply's error is moved by. */
+const IID_IERRORINFO = '{1CF2B120-547D-101B-8E65-08002B2BD119}';
+const SLOT_ERROR_GET_GUID = 3;
+const SLOT_ERROR_GET_SOURCE = 4;
+const SLOT_ERROR_GET_DESCRIPTION = 5;
+const SLOT_ERROR_GET_HELP_FILE = 6;
+const SLOT_ERROR_GET_HELP_CONTEXT = 7;
+const SLOT_ERROR_SET_GUID = 3;
+const SLOT_ERROR_SET_SOURCE = 4;
+const SLOT_ERROR_SET_HELP_CONTEXT = 7;
+const GUID_BYTES = 16;
+
 /** RPCOLEMESSAGE, as a channel reads and writes it. */
 const MESSAGE = Object.freeze({
     DATA_REPRESENTATION: 4, BUFFER: 8, BUFFER_LENGTH: 12, METHOD: 16, SIZE: 44,
@@ -122,9 +134,22 @@ const MSHCTX_LOCAL = 0;
  * @property {(request: { command: string, clsid: string }, process: unknown)
  *     => { exited: Promise<unknown> } | null} [launch]
  *     Starts a server as a process beside the caller's, or says it cannot.
- * @property {(process: unknown) => void} [publish]
- *     What a process has written -- its files and its registry -- made what
- *     every other process sees, before another process runs on its behalf.
+ */
+
+/**
+ * An object in the running object table: what its moniker compares as, the
+ * reference the table holds on it, and what a process that enumerates the
+ * table makes the moniker again from.
+ *
+ * @typedef {Object} RunningEntry
+ * @property {number} cookie
+ * @property {string} key        The moniker's comparison data, in hex.
+ * @property {Reference} reference
+ * @property {number} flags      ROTFLAGS_*.
+ * @property {number[]} time     The last change, a FILETIME's two words.
+ * @property {{ clsid: string, bytes: Uint8Array } | null} moniker
+ *     Its class and what IPersistStream::Save wrote of it, if it says.
+ * @property {number} endpoint   The process that registered it.
  */
 
 /**
@@ -141,6 +166,23 @@ export function createClassTable(hooks = {}){
     let classes = [];
     /** @type {{ clsid: string, wake: () => void }[]} */
     let waiting = [];
+    /**
+     * The running object table: one for the run, as Windows keeps one for a
+     * machine's processes in its service control manager.
+     *
+     * @type {Map<number, RunningEntry>}
+     */
+    const running = new Map();
+    let nextRunning = 1;
+    /**
+     * The RPC endpoints processes listen on -- the protocol sequence and the
+     * endpoint a server named, as one key -- and the endpoint of the process
+     * that has each: what Windows' endpoint mapper is to its service control
+     * manager, kept here beside it.
+     *
+     * @type {Map<string, number>}
+     */
+    const listening = new Map();
 
     const wake = ()=>{
         const woken = waiting;
@@ -181,6 +223,19 @@ export function createClassTable(hooks = {}){
             return entry ?? null;
         },
 
+        /**
+         * CoSuspendClassObjects: this endpoint's registrations stay, and no
+         * new client is handed one until they are resumed.
+         *
+         * @param {number} endpoint
+         */
+        suspend(endpoint){
+            classes.filter(entry=>entry.endpoint === endpoint)
+                .forEach(entry=>{
+                    entry.suspended = true;
+                });
+        },
+
         /** @param {number} endpoint */
         resume(endpoint){
             classes.filter(entry=>entry.endpoint === endpoint)
@@ -203,6 +258,45 @@ export function createClassTable(hooks = {}){
                 entry.used = true;
             }
             return entry;
+        },
+
+        /**
+         * A process claims an RPC endpoint: refused when another has it, and
+         * a process that asks again for its own is given it again.
+         *
+         * @param {string} key @param {number} endpoint @returns {boolean}
+         */
+        rpcListen(key, endpoint){
+            const held = listening.get(key);
+            if (held !== undefined && held !== endpoint)
+            {
+                return false;
+            }
+            listening.set(key, endpoint);
+            return true;
+        },
+
+        /**
+         * The process listening on an RPC endpoint, as the endpoint it is
+         * delivered to by, or null when none is.
+         *
+         * @param {string} key @returns {number | null}
+         */
+        rpcServer: key=>listening.get(key) ?? null,
+
+        /**
+         * A process gives up an RPC endpoint, or every one it has.
+         *
+         * @param {number} endpoint @param {string} [key]
+         */
+        rpcUnlisten(endpoint, key){
+            for (const [held, owner] of listening)
+            {
+                if (owner === endpoint && (key === undefined || key === held))
+                {
+                    listening.delete(held);
+                }
+            }
         },
 
         /**
@@ -229,6 +323,53 @@ export function createClassTable(hooks = {}){
         },
 
         /**
+         * Puts an object in the running object table under its moniker's
+         * comparison data; a second object under the same data is put there
+         * too, and told so.
+         *
+         * @param {Omit<RunningEntry, 'cookie'>} entry
+         * @returns {{ cookie: number, duplicate: boolean }}
+         */
+        rotRegister(entry){
+            const duplicate = [...running.values()].some(other=>other.key === entry.key);
+            const cookie = nextRunning++;
+            running.set(cookie, { ...entry, cookie });
+            return { cookie, duplicate };
+        },
+
+        /**
+         * Takes an object out of the table: the entry, whose reference the
+         * caller gives back, or null for a cookie it does not hold.
+         *
+         * @param {number} cookie @returns {RunningEntry | null}
+         */
+        rotRevoke(cookie){
+            const entry = running.get(cookie) ?? null;
+            running.delete(cookie);
+            return entry;
+        },
+
+        /**
+         * The object registered first under a moniker's comparison data.
+         *
+         * @param {string} key @returns {RunningEntry | null}
+         */
+        rotFind: key=>[...running.values()].find(entry=>entry.key === key) ?? null,
+
+        /** @param {number} cookie @param {number[]} time @returns {boolean} */
+        rotNoteChange(cookie, time){
+            const entry = running.get(cookie);
+            if (entry)
+            {
+                entry.time = time;
+            }
+            return Boolean(entry);
+        },
+
+        /** Every entry, in the order they were registered. @returns {RunningEntry[]} */
+        rotEntries: ()=>[...running.values()],
+
+        /**
          * A process has ended: what it registered goes, and so does every
          * reference its proxies held.
          *
@@ -243,6 +384,21 @@ export function createClassTable(hooks = {}){
                 }
                 endpoint.alive = false;
                 classes = classes.filter(entry=>entry.endpoint !== id);
+                for (const [key, owner] of listening)
+                {
+                    if (owner === id)
+                    {
+                        listening.delete(key);
+                    }
+                }
+                // What it registered, and what it held no longer has a server.
+                for (const [cookie, entry] of running)
+                {
+                    if (entry.endpoint === id || entry.reference.endpoint === id)
+                    {
+                        running.delete(cookie);
+                    }
+                }
                 await endpoint.rundown();
                 endpoints.delete(id);
             }
@@ -279,6 +435,11 @@ export function createClassTable(hooks = {}){
  *     The IPSFactoryBuffer of the proxy/stub DLL the registry names for an
  *     interface, loaded into this process as COM loads it; 0 when none is.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {{ take: () => number, set: (pointer: number) => unknown,
+ *     create: (out: number) => number }} [errors]
+ *     The thread's error-information slot -- taken off it, which clears it,
+ *     and set, the slot keeping the reference handed it -- and
+ *     CreateErrorInfo: how a failed call's error crosses back to its caller.
  */
 
 /**
@@ -420,7 +581,6 @@ export function createRemoting(host){
                 reply = { hr: RPC_E_SERVERFAULT };
             }
             home.running.delete(item.resolve);
-            host.table.hooks.publish?.(host.process);
             item.resolve(reply);
         }
     };
@@ -451,20 +611,135 @@ export function createRemoting(host){
     });
 
     /**
-     * Sends a message to another process and waits for its answer, running
-     * the calls that arrive for this thread meanwhile.
+     * A BSTR's text, read where it lies, and the BSTR given back.
      *
-     * @param {unknown} thread @param {number} target @param {any} message
+     * @param {number} bstr @returns {string | null}
+     */
+    const takeBstr = bstr=>{
+        if (bstr === 0)
+        {
+            return null;
+        }
+        const length = Math.min(readU32(bstr - 4), 1 << 20);
+        const bytes = host.readMemory(bstr, length);
+        let text = '';
+        for (let at = 0; at + 1 < bytes.length; at += 2)
+        {
+            text += String.fromCharCode(bytes[at] | (bytes[at + 1] << 8));
+        }
+        host.bstr.free(bstr);
+        return text;
+    };
+
+    /**
+     * The error information the thread holds, taken off it and read as
+     * values: what a call's reply carries back to the process that made it,
+     * where an IErrorInfo pointer of this one would mean nothing. Null when
+     * the thread holds none.
+     *
+     * @param {unknown} thread
+     * @returns {Promise<{ guid: string, source: string | null, description: string | null,
+     *     helpFile: string | null, helpContext: number } | null>}
+     */
+    const takeErrorInfo = async thread=>{
+        const pointer = host.errors?.take() ?? 0;
+        if (pointer === 0)
+        {
+            return null;
+        }
+        const block = host.heap.allocate(GUID_BYTES + 4);
+        if (block === 0)
+        {
+            await callSlot(pointer, SLOT_RELEASE, [], thread);
+            return null;
+        }
+        host.writeMemory(block, new Uint8Array(GUID_BYTES + 4));
+        await callSlot(pointer, SLOT_ERROR_GET_GUID, [block], thread);
+        const guid = formatGuid(host.readMemory(block, GUID_BYTES).slice());
+        /** @param {number} slot */
+        const text = async slot=>{
+            writeU32(block + GUID_BYTES, 0);
+            const hr = (await callSlot(pointer, slot, [block + GUID_BYTES], thread)) | 0;
+            return hr < 0 ? null : takeBstr(readU32(block + GUID_BYTES));
+        };
+        const source = await text(SLOT_ERROR_GET_SOURCE);
+        const description = await text(SLOT_ERROR_GET_DESCRIPTION);
+        const helpFile = await text(SLOT_ERROR_GET_HELP_FILE);
+        writeU32(block + GUID_BYTES, 0);
+        await callSlot(pointer, SLOT_ERROR_GET_HELP_CONTEXT, [block + GUID_BYTES], thread);
+        const helpContext = readU32(block + GUID_BYTES);
+        host.heap.free(block);
+        await callSlot(pointer, SLOT_RELEASE, [], thread);
+        return { guid, source, description, helpFile, helpContext };
+    };
+
+    /**
+     * Error information another process's call carried back, made an object
+     * of this process's and set on the thread, as GetErrorInfo reads it.
+     *
+     * @param {{ guid: string, source: string | null, description: string | null,
+     *     helpFile: string | null, helpContext: number }} values
+     * @param {unknown} thread
+     */
+    const giveErrorInfo = async(values, thread)=>{
+        if (!host.errors)
+        {
+            return;
+        }
+        const strings = [values.source, values.description, values.helpFile]
+            .map(value=>(value ?? ''));
+        const size = GUID_BYTES + 4 + strings.reduce((sum, value)=>sum + (value.length + 1) * 2, 0);
+        const block = host.heap.allocate(size);
+        if (block === 0)
+        {
+            return;
+        }
+        writeU32(block, 0);
+        if ((host.errors.create(block) | 0) < 0 || readU32(block) === 0)
+        {
+            host.heap.free(block);
+            return;
+        }
+        const creator = readU32(block);
+        host.writeMemory(block + 4, /** @type {Uint8Array} */ (parseGuid(values.guid)));
+        await callSlot(creator, SLOT_ERROR_SET_GUID, [block + 4], thread);
+        let at = block + 4 + GUID_BYTES;
+        for (const [index, value] of strings.entries())
+        {
+            const bytes = new Uint8Array((value.length + 1) * 2);
+            for (let unit = 0; unit < value.length; unit++)
+            {
+                bytes[unit * 2] = value.charCodeAt(unit) & 0xff;
+                bytes[unit * 2 + 1] = value.charCodeAt(unit) >>> 8;
+            }
+            host.writeMemory(at, bytes);
+            await callSlot(creator, SLOT_ERROR_SET_SOURCE + index, [at], thread);
+            at += bytes.length;
+        }
+        await callSlot(creator, SLOT_ERROR_SET_HELP_CONTEXT, [values.helpContext >>> 0], thread);
+        const asked = await queryGuest(creator, IID_IERRORINFO, thread);
+        await callSlot(creator, SLOT_RELEASE, [], thread);
+        host.heap.free(block);
+        // The thread's slot holds the reference the query took.
+        if (asked.pointer !== 0)
+        {
+            host.errors.set(asked.pointer);
+        }
+    };
+
+    /**
+     * Waits on `pending` for `thread`, running the calls that arrive for its
+     * apartment meanwhile: COM's modal loop.
+     *
+     * @param {unknown} thread @param {Promise<any>} pending
      * @returns {Promise<any>}
      */
-    const outgoing = async(thread, target, message)=>{
+    const awaitServing = async(thread, pending)=>{
         const home = apartment(thread);
         home.outgoing++;
         try
         {
-            // What this process wrote is what the other one runs against.
-            host.table.hooks.publish?.(host.process);
-            const answer = send(target, message).then(value=>({ value }));
+            const answer = pending.then(value=>({ value }));
             for (;;)
             {
                 if (home.queue.length > 0)
@@ -487,6 +762,24 @@ export function createRemoting(host){
         {
             home.outgoing--;
         }
+    };
+
+    /**
+     * Sends a message to another process and waits for its answer, running
+     * the calls that arrive for this thread meanwhile.
+     *
+     * @param {unknown} thread @param {number} target @param {any} message
+     * @returns {Promise<any>}
+     */
+    const outgoing = async(thread, target, message)=>{
+        const value = await awaitServing(thread, send(target, message));
+        // What the server said of its failure is this thread's to read with
+        // GetErrorInfo now, as the channel hands it.
+        if (value?.errorInfo)
+        {
+            await giveErrorInfo(value.errorInfo, thread);
+        }
+        return value;
     };
 
     /**
@@ -608,6 +901,23 @@ export function createRemoting(host){
             await callSlot(pointer, SLOT_RELEASE, [], thread);
         }
         await callSlot(entry.unknown, SLOT_RELEASE, [], thread);
+    };
+
+    /**
+     * The exported entry of the object a pointer is an interface of, if it is
+     * exported: found by its identity, as COM finds a stub manager.
+     *
+     * @param {number} pointer @param {unknown} thread
+     * @returns {Promise<Exported | null>}
+     */
+    const exportedFor = async(pointer, thread)=>{
+        const identity = await queryGuest(pointer, IID_IUNKNOWN, thread);
+        const unknown = identity.hr < 0 ? pointer : identity.pointer;
+        if (identity.hr >= 0)
+        {
+            await callSlot(unknown, SLOT_RELEASE, [], thread);
+        }
+        return exported.get(byIdentity.get(unknown) ?? 0) ?? null;
     };
 
     /**
@@ -1202,6 +1512,29 @@ export function createRemoting(host){
      * @returns {Promise<any>}
      */
     const execute = async(message, thread)=>{
+        if (message.kind === 'enter')
+        {
+            return { hr: await message.work(thread) };
+        }
+        const reply = await executeKind(message, thread);
+        if (message.kind === 'call' || message.kind === 'ndr')
+        {
+            const errorInfo = await takeErrorInfo(thread);
+            if (errorInfo)
+            {
+                return { ...reply, errorInfo };
+            }
+        }
+        return reply;
+    };
+
+    /**
+     * What each kind of message asks, done.
+     *
+     * @param {any} message @param {unknown} thread
+     * @returns {Promise<any>}
+     */
+    const executeKind = async(message, thread)=>{
         const entry = exported.get(message.object);
         if (!entry)
         {
@@ -1351,6 +1684,91 @@ export function createRemoting(host){
         /** CoResumeClassObjects: this process's suspended registrations become visible. */
         resume: ()=>host.table.resume(endpointId),
 
+        /** CoSuspendClassObjects: this process's registrations stop being handed out. */
+        suspend: ()=>host.table.suspend(endpointId),
+
+        /**
+         * CoLockObjectExternal: a count on the object held as another
+         * process's are, so it stays exported while no process holds it; the
+         * last unlock lets it go only when asked to, and otherwise leaves it
+         * to the next count given back.
+         *
+         * @param {number} pointer @param {boolean} lock @param {boolean} lastUnlockReleases
+         * @param {unknown} [thread]
+         */
+        async lockExternal(pointer, lock, lastUnlockReleases, thread = host.callerThread()){
+            if (lock)
+            {
+                await exportInterface(pointer >>> 0, IID_IUNKNOWN, false, thread);
+                return;
+            }
+            const entry = await exportedFor(pointer >>> 0, thread);
+            if (!entry)
+            {
+                return;
+            }
+            if (lastUnlockReleases)
+            {
+                await dropExported(entry, 1, thread);
+            }
+            else
+            {
+                entry.refs--;
+            }
+        },
+
+        /**
+         * CoDisconnectObject: every other process's hold on the object goes at
+         * once; their proxies answer RPC_E_DISCONNECTED from then on.
+         *
+         * @param {number} pointer @param {unknown} [thread]
+         */
+        async disconnect(pointer, thread = host.callerThread()){
+            const entry = await exportedFor(pointer >>> 0, thread);
+            if (entry)
+            {
+                await dropExported(entry, entry.refs, thread);
+            }
+        },
+
+        /**
+         * Whether `thread` is running a call another process made: what
+         * CoGetCallContext answers inside of.
+         *
+         * @param {unknown} [thread]
+         */
+        serving: (thread = host.callerThread())=>(apartments.get(thread)?.running.size ?? 0) > 0,
+
+        /**
+         * The apartment of `thread` made ready for work other threads hand it:
+         * its window made, on that thread, as ole32 makes one when a thread
+         * enters a single-threaded apartment.
+         *
+         * @param {unknown} [thread]
+         */
+        prepare: (thread = host.callerThread())=>ensureWindow(thread),
+
+        /**
+         * Runs `work` in the apartment of `thread`: at once on the caller's
+         * own thread, otherwise posted to that apartment as an incoming call
+         * is, the caller serving its own apartment until it ran.
+         *
+         * @param {unknown} thread @param {(thread: unknown) => Promise<number> | number} work
+         * @returns {Promise<number>}
+         */
+        async enter(thread, work){
+            const caller = host.callerThread();
+            if (thread === caller)
+            {
+                return work(caller);
+            }
+            const reply = await awaitServing(caller, enqueue(thread, { kind: 'enter', work }));
+            return reply.hr;
+        },
+
+        /** Whether a pointer is a proxy of this process's for another's object. @param {number} pointer */
+        isProxy: pointer=>proxyAt.has(pointer >>> 0),
+
         /**
          * An object of a class served by another process: registered already,
          * or started with `command` and waited for.
@@ -1430,6 +1848,30 @@ export function createRemoting(host){
          */
         importReference: (reference, iid, thread = host.callerThread())=>
             importInterface(reference, iid, thread),
+
+        /**
+         * One more count on what a reference names, for a reference handed on
+         * while the holder keeps its own: what the running object table does
+         * for each process that asks it for an object.
+         *
+         * @param {Reference} reference @param {unknown} [thread]
+         */
+        async addReference(reference, thread = host.callerThread()){
+            if (reference.endpoint !== endpointId)
+            {
+                await send(reference.endpoint, { kind: 'addref', object: reference.object });
+                return;
+            }
+            const entry = exported.get(reference.object);
+            if (entry)
+            {
+                entry.refs++;
+            }
+            void thread;
+        },
+
+        /** This process's endpoint in the run's table. */
+        endpoint: ()=>endpointId,
 
         /**
          * Gives back the reference a reference carries, unused: what

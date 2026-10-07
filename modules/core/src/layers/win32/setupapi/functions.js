@@ -7,8 +7,11 @@
 import { INF_STYLE_OLDNT, INF_STYLE_WIN4, infText, parseInf } from './inf.js';
 import { decodeFolder, folderOf, readCabinet } from '../cabinet/cabinet.js';
 import { commitQueue, queueInstallSection } from './queue.js';
+import { standardDirids } from './dirids.js';
+import { installRegistry } from './registry.js';
 import { CATALOG_STORE } from '../sfc/functions.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { HKEY_CLASSES_ROOT, HKEY_USERS } from '../advapi32/registry.js';
 
 /**
  * setupapi — INF files, cabinets and file queues: how an installer that
@@ -88,6 +91,7 @@ const DIRID_USER = 0x8000;
 const DEFAULT_CONTEXT_SIZE = 16;
 
 /** SetupInstallFromInfSection's flags. */
+const SPINST_REGISTRY = 0x04;
 const SPINST_FILES = 0x10;
 const SPINST_ALL = 0x3ff;
 
@@ -126,7 +130,8 @@ const SOURCE_MEDIA_SIZE = 24;
  *              resolve: (handle: number, type?: string) => any,
  *              close: (handle: number) => any }} handles
  * @property {Readonly<Record<string, string>>} folders  The shell's folders, for DIRIDs.
- * @property {any} [registry]  The hive, where registered OS components are kept.
+ * @property {any} [registry]  The hive: where registered OS components are kept, and
+ *           what an install section's AddReg and DelReg write.
  * @property {(api: string, detail: string) => void} [divergence]
  */
 
@@ -233,21 +238,8 @@ export function createSetupapiFunctions(host){
 
     const windows = host.folders.Windows;
     const system = host.folders.System;
-    /**
-     * The directory a DIRID stands for, or null for one this machine has no
-     * directory for.
-     *
-     * @param {number} id
-     */
-    const dirid = id=>({
-        10: windows, 11: system, 12: `${system}\\drivers`, 17: `${windows}\\inf`,
-        18: `${windows}\\Help`, 20: host.folders.Fonts, 24: `${windows.slice(0, 2)}\\`,
-        25: windows, 30: `${windows.slice(0, 2)}\\`, 50: `${windows}\\system`,
-        16406: host.folders['Common Start Menu'], 16407: host.folders['Common Programs'],
-        16408: host.folders['Common Startup'], 16409: host.folders['Common Desktop'],
-        16419: host.folders['Common AppData'], 16422: host.folders.ProgramFiles,
-        16427: host.folders.CommonFiles, 16430: host.folders['Common Documents'],
-    })[id] ?? null;
+    /** The directory a DIRID stands for, or null for one this machine has none for. */
+    const dirid = standardDirids(host.folders);
 
     /**
      * An open INF: what a HINF names, and the user DIRIDs set on it.
@@ -1405,14 +1397,16 @@ export function createSetupapiFunctions(host){
          * and commits them through MsgHandler, sources found from the root
          * (the INF's own directory when none is given) by SourceDisksNames
          * and SourceDisksFiles, in a cabinet when the disk's tag file is one.
-         * The section's other directives are not carried out here, and each
-         * one met is reported as a divergence.
+         * SPINST_REGISTRY then carries out its DelReg and AddReg sections,
+         * HKR the predefined key RelativeKeyRoot names. The section's other
+         * directives are not carried out here, and each one met is reported
+         * as a divergence.
          */
         SetupInstallFromInfSectionA: {
             argBytes: 44,
             /** @param {number[]} args */
-            handler: ([, handle, sectionPointer, flags, , rootPointer, copyFlags, callback,
-                context])=>{
+            handler: ([, handle, sectionPointer, flags, relativeKey, rootPointer, copyFlags,
+                callback, context])=>{
                 const open = openInf(handle);
                 if (!open)
                 {
@@ -1428,15 +1422,37 @@ export function createSetupapiFunctions(host){
                 for (const line of section.lines)
                 {
                     const directive = line.key?.toLowerCase() ?? '';
-                    if (!['copyfiles', 'delfiles', 'renfiles'].includes(directive)
-                        && directive !== '' && wanted & ~SPINST_FILES)
+                    if (!['copyfiles', 'delfiles', 'renfiles', 'addreg', 'delreg']
+                        .includes(directive) && directive !== ''
+                        && wanted & ~(SPINST_FILES | SPINST_REGISTRY))
                     {
                         host.divergence?.('SetupInstallFromInfSectionA',
                             `the ${line.key} directive is not carried out`);
                     }
                 }
+                const registry = ()=>{
+                    if ((wanted & SPINST_REGISTRY) === 0 || !host.registry)
+                    {
+                        return;
+                    }
+                    const relative = (relativeKey >>> 0) >= HKEY_CLASSES_ROOT
+                        && (relativeKey >>> 0) <= HKEY_USERS
+                        ? host.registry.root(relativeKey >>> 0) : null;
+                    if ((relativeKey >>> 0) !== 0 && !relative)
+                    {
+                        host.divergence?.('SetupInstallFromInfSectionA',
+                            'an HKR line under an opened key is not carried out');
+                    }
+                    installRegistry(host.registry, open.inf, section, {
+                        relativeRoot: relative,
+                        expand: value=>expand(open, value),
+                        divergence: detail=>host.divergence?.('SetupInstallFromInfSectionA',
+                            detail),
+                    });
+                };
                 if ((wanted & SPINST_FILES) === 0)
                 {
+                    registry();
                     return fail(ERROR_SUCCESS, 1);
                 }
                 if ((callback >>> 0) === 0)
@@ -1450,6 +1466,10 @@ export function createSetupapiFunctions(host){
                 });
                 const thread = host.callerThread();
                 return commit(queue, callback, context, thread).then(code=>{
+                    if (code === ERROR_SUCCESS)
+                    {
+                        registry();
+                    }
                     host.setLastErrorFor(thread, code);
                     return code === ERROR_SUCCESS ? 1 : 0;
                 });

@@ -13,10 +13,22 @@
  * SharedArrayBuffer, so `isolated` cannot run on it; `auto` -- the default --
  * takes `isolated` where it can and `compatible` where it cannot.
  *
+ * `concurrency` is how many processes run at once (roadmap/v2): 1, the default,
+ * is one at a time -- a child takes its parent's place until it exits; 2 or 4
+ * is that many side by side, each child in a worker of its own. More than one
+ * shares memory between threads, so it runs only `isolated`. Where that cannot
+ * be had -- `compatible` asked for, or a page that is not cross-origin
+ * isolated -- the run falls back to one process at a time in `compatible`
+ * mode, and says so (`fallback`) rather than not starting.
+ *
  * @typedef {'auto' | 'compatible' | 'isolated'} RunMode
+ * @typedef {1 | 2 | 4} Concurrency
  */
 
 export const RUN_MODES = Object.freeze(['auto', 'compatible', 'isolated']);
+
+/** How many processes may run at once. */
+export const CONCURRENCY = Object.freeze([1, 2, 4]);
 
 /** Whether this thread can share memory with another. */
 export function canShareMemory(){
@@ -42,7 +54,7 @@ export function runModeOf(asked, shareable = canShareMemory()){
     }
     if (mode === 'isolated' && !shareable)
     {
-        throw new Error('mode "isolated" needs shared memory, and this page has none: it is not'
+        throw new Error(`mode "${mode}" needs shared memory, and this page has none: it is not`
             + ' cross-origin isolated (Cross-Origin-Opener-Policy: same-origin,'
             + ' Cross-Origin-Embedder-Policy: require-corp). "compatible" or "auto" runs here.');
     }
@@ -50,24 +62,46 @@ export function runModeOf(asked, shareable = canShareMemory()){
 }
 
 /**
- * The options a run is built from, with its mode settled: in `compatible` mode the
- * guest's memory is not shared and nothing is lent from it, whatever the
- * caller's cork and graphics settings say; in `isolated` mode those settings stand.
+ * The options a run is built from, with its mode and concurrency settled: in
+ * `compatible` mode the guest's memory is not shared and nothing is lent from
+ * it, whatever the caller's cork and graphics settings say; in `isolated` those
+ * settings stand. Processes side by side are `isolated`; asked for where they
+ * cannot be, the run is one process at a time in `compatible` mode, and
+ * `fallback` says what was asked and why it was not had.
  *
- * @template {{ mode?: RunMode, cork?: any, graphics?: any }} T
+ * @template {{ mode?: RunMode, concurrency?: Concurrency, cork?: any, graphics?: any }} T
  * @param {T} options
  * @param {boolean} [shareable]
- * @returns {T & { mode: 'compatible' | 'isolated' }}
+ * @returns {T & { mode: 'compatible' | 'isolated', concurrency: Concurrency,
+ *     fallback: { asked: { mode?: RunMode, concurrency: Concurrency }, detail: string } | null }}
  */
 export function withRunMode(options, shareable = canShareMemory()){
-    const mode = runModeOf(options.mode, shareable);
-    if (mode === 'isolated')
+    const asked = options.concurrency ?? 1;
+    if (!CONCURRENCY.includes(asked))
     {
-        return { ...options, mode };
+        throw new Error(`unknown concurrency ${JSON.stringify(options.concurrency)}:`
+            + ' concurrency is 1, 2 or 4 processes at once');
+    }
+    const fallback = asked > 1 && (options.mode === 'compatible' || !shareable)
+        ? { asked: { mode: options.mode, concurrency: asked },
+            detail: `concurrency ${asked} is not allowed here: it needs memory shared between`
+                + ' threads, and '
+                + (options.mode === 'compatible' ? 'the run asked for "compatible"'
+                    : 'the page is not cross-origin isolated (Cross-Origin-Opener-Policy:'
+                    + ' same-origin, Cross-Origin-Embedder-Policy: require-corp)')
+                + '; running "compatible", one process at a time' }
+        : null;
+    const concurrency = fallback ? 1 : asked;
+    const mode = fallback ? 'compatible' : runModeOf(options.mode, shareable);
+    if (mode !== 'compatible')
+    {
+        return { ...options, mode, concurrency, fallback };
     }
     return {
         ...options,
         mode,
+        concurrency,
+        fallback,
         cork: { ...options.cork, config: { ...options.cork?.config, sharedMemory: false } },
         graphics: { ...options.graphics, lendMemory: false },
     };

@@ -199,11 +199,15 @@ function fakeContexts(){
  * @param {(bytes: number) => number} [options.allocate]
  * @param {(address: number) => void} [options.release]
  * @param {(entry: number, args: number[]) => number} [options.call]
+ * @param {any} [options.draw]  What draws on a context, for a test that reads its clip.
+ * @param {() => unknown} [options.callerThread]  The thread a call is made on.
+ * @param {(id: number) => boolean} [options.processExists]  Which process ids are live.
  */
 function setup(
     { cursor, keyState, asyncKeyState, keyboardState, setKeyboardState,
         findResource, loadString, dispatch = ()=>0, screen, regionBox,
-        moduleBase, bitmapFromDib, files, allocate, release, call } = {})
+        moduleBase, bitmapFromDib, files, allocate, release, call, draw, callerThread,
+        processExists } = {})
 {
     screen ??= { ...SCREEN, displayWidth: SCREEN.width, displayHeight: SCREEN.height };
     const memory = fakeMemory();
@@ -254,6 +258,9 @@ function setup(
         call,
         loadString,
         regionBox,
+        draw,
+        callerThread,
+        processExists,
         /** @param {string} text */
         say: text=>said.push(text),
         /** @param {string} api @param {string} detail */
@@ -898,6 +905,7 @@ test('BeginPaint fills the struct the guest allocated', ()=>{
     const { memory, fns } = setup();
     const hwnd = makeWindow(memory, fns);
     memory.fill(PAINT_BUFFER, PAINTSTRUCT.SIZE / 4);
+    fns.InvalidateRect.handler([hwnd, 0, 0]);
 
     const hdc = fns.BeginPaint.handler([hwnd, PAINT_BUFFER]);
     assert.notEqual(hdc, 0, 'a DC was made for the window');
@@ -906,7 +914,7 @@ test('BeginPaint fills the struct the guest allocated', ()=>{
     const painted = [0, 4, 8, 12].map(at=>memory.u32(PAINT_BUFFER + PAINTSTRUCT.rcPaint + at));
     fns.GetClientRect.handler([hwnd, RECT_BUFFER]);
     assert.deepEqual(painted, [0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at)),
-        'a window with no partial damage paints all of its client area');
+        'a window invalidated whole paints all of its client area');
     assert.equal(memory.u32(PAINT_BUFFER + PAINTSTRUCT.fRestore), 0);
 });
 
@@ -930,6 +938,36 @@ test('BeginPaint clears the update region, so the next one has nothing to do', (
     memory.fill(RECT_BUFFER, 4);
     assert.equal(fns.GetUpdateRect.handler([hwnd, RECT_BUFFER, 0]), 0,
         'and afterwards there is nothing left dirty');
+});
+
+test('a BeginPaint with nothing to paint paints nowhere: the second of one WM_PAINT', ()=>{
+    // A skin paints the dialog in its own WM_PAINT, then hands the message to
+    // the procedure it subclassed, whose BeginPaint finds the window clean.
+    // Windows clips that one to the empty update region; one that drew
+    // everywhere filled the dialog grey over the skin.
+    /** @type {[number, any[]][]} */
+    const clips = [];
+    const { memory, fns } = setup({ draw: {
+        clip: (/** @type {number} */ hdc, /** @type {any[]} */ area)=>clips.push([hdc, area]),
+    } });
+    const hwnd = makeWindow(memory, fns, WS_OVERLAPPED | WS_VISIBLE);
+    fns.InvalidateRect.handler([hwnd, 0, 0]);
+    const rcPaint = ()=>[0, 4, 8, 12].map(at=>memory.u32(PAINT_BUFFER + PAINTSTRUCT.rcPaint + at));
+
+    const skin = fns.BeginPaint.handler([hwnd, PAINT_BUFFER]);
+    fns.GetClientRect.handler([hwnd, RECT_BUFFER]);
+    assert.deepEqual(rcPaint(), [0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at)),
+        'the first paints the client area');
+    assert.ok((clips.at(-1)?.[1].length ?? 0) > 0, 'and draws where the window shows');
+    fns.EndPaint.handler([hwnd, PAINT_BUFFER]);
+
+    const behind = fns.BeginPaint.handler([hwnd, PAINT_BUFFER]);
+    assert.notEqual(behind, 0, 'a context all the same');
+    assert.notEqual(skin, 0);
+    assert.deepEqual(rcPaint(), [0, 0, 0, 0], 'with nothing in rcPaint');
+    assert.deepEqual(clips.at(-1), [behind, []], 'and clipped to nothing');
+    assert.equal(memory.u32(PAINT_BUFFER + PAINTSTRUCT.fErase), 0, 'nor anything to erase');
+    fns.EndPaint.handler([hwnd, PAINT_BUFFER]);
 });
 
 test('a DC taken is a DC given back', ()=>{
@@ -3303,4 +3341,128 @@ test('LoadCursorFromFile loads a .cur or .ani; SetSystemCursor replaces a system
     assert.equal(cursors.at(-1).bgra[8], 100, 'the standard arrow is now the file\'s picture');
     assert.equal(fns.SetSystemCursor.handler([spin, 32512]), 0, 'the handle was destroyed');
     assert.equal(fns.SetSystemCursor.handler([arrow, 1]), 0, 'not a system cursor id');
+});
+
+// --- AnimateWindow, AllowSetForegroundWindow, ghosting and the legacy IME switch ---
+
+const AW_HOR_POSITIVE = 0x00000001;
+const AW_VER_NEGATIVE = 0x00000008;
+const AW_CENTER = 0x00000010;
+const AW_HIDE = 0x00010000;
+const AW_ACTIVATE = 0x00020000;
+const AW_SLIDE = 0x00040000;
+const AW_BLEND = 0x00080000;
+const ERROR_INVALID_PARAMETER = 87;
+
+test('AnimateWindow ends where the animation would: shown, activated or hidden', ()=>{
+    const { memory, fns, errors } = setup();
+    assert.equal(fns.AnimateWindow.argBytes, 12);
+    const hwnd = makeWindow(memory, fns);
+
+    assert.equal(fns.AnimateWindow.handler([hwnd, 200, AW_ACTIVATE | AW_BLEND]), 1);
+    assert.equal(fns.IsWindowVisible.handler([hwnd]), 1);
+    assert.equal(fns.GetActiveWindow.handler([]), hwnd, 'AW_ACTIVATE activates it');
+
+    errors.length = 0;
+    assert.equal(fns.AnimateWindow.handler([hwnd, 200, AW_ACTIVATE | AW_BLEND]), 0,
+        'showing a window that is visible is refused');
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER]);
+
+    assert.equal(fns.AnimateWindow.handler([hwnd, 200, AW_HIDE | AW_SLIDE | AW_VER_NEGATIVE]),
+        1);
+    assert.equal(fns.IsWindowVisible.handler([hwnd]), 0);
+    errors.length = 0;
+    assert.equal(fns.AnimateWindow.handler([hwnd, 200, AW_HIDE | AW_BLEND]), 0,
+        'and so is hiding one that is hidden');
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER]);
+});
+
+test('AnimateWindow without AW_ACTIVATE shows a window and leaves the active one active', ()=>{
+    const { memory, fns } = setup();
+    const active = makeWindow(memory, fns, WS_VISIBLE);
+    const other = makeWindow(memory, fns);
+    assert.equal(fns.GetActiveWindow.handler([]), active);
+
+    assert.equal(fns.AnimateWindow.handler([other, 150, AW_CENTER]), 1,
+        'AW_CENTER needs no direction');
+    assert.equal(fns.IsWindowVisible.handler([other]), 1);
+    assert.equal(fns.GetActiveWindow.handler([]), active);
+});
+
+test('AnimateWindow refuses what MSDN says it refuses, and changes nothing', ()=>{
+    const ERROR_INVALID_WINDOW_HANDLE = 1400;
+    const WS_CHILD = 0x40000000;
+    const { memory, fns, errors } = setup();
+    const hwnd = makeWindow(memory, fns);
+    const child = fns.CreateWindowExA.handler(
+        [0, CLASS_NAME, TITLE, WS_CHILD, 0, 0, 10, 10, hwnd, 0, HINSTANCE, 0]);
+    /** @type {[number, number, string][]} */
+    const refused = [
+        [hwnd, 0, 'a roll with no direction'],
+        [hwnd, AW_SLIDE, 'a slide with no direction'],
+        [hwnd, AW_ACTIVATE, 'activation is no effect, and a roll needs a direction'],
+        [child, AW_BLEND, 'a child does not fade'],
+        [hwnd, AW_HIDE | AW_ACTIVATE | AW_BLEND, 'nor is a window hidden and activated'],
+    ];
+    for (const [target, flags, reason] of refused)
+    {
+        errors.length = 0;
+        assert.equal(fns.AnimateWindow.handler([target, 200, flags]), 0, reason);
+        assert.deepEqual(errors, [ERROR_INVALID_PARAMETER], reason);
+    }
+    assert.equal(fns.IsWindowVisible.handler([hwnd]), 0, 'nothing was shown');
+
+    errors.length = 0;
+    assert.equal(fns.AnimateWindow.handler([0x9999, 200, AW_BLEND]), 0);
+    assert.deepEqual(errors, [ERROR_INVALID_WINDOW_HANDLE]);
+    assert.equal(fns.AnimateWindow.handler([hwnd, 200, AW_SLIDE | AW_HOR_POSITIVE]), 1,
+        'a slide with a direction is accepted');
+});
+
+test('AnimateWindow refuses another thread\'s window and leaves the last error clear', ()=>{
+    const caller = { current: { id: 7 } };
+    const { memory, fns, errors } = setup({ callerThread: ()=>caller.current });
+    const hwnd = makeWindow(memory, fns);
+    caller.current = { id: 8 };
+    errors.length = 0;
+    assert.equal(fns.AnimateWindow.handler([hwnd, 200, AW_BLEND]), 0);
+    assert.deepEqual(errors, [0], 'GetLastError answers ERROR_SUCCESS, as MSDN says');
+    assert.equal(fns.IsWindowVisible.handler([hwnd]), 0);
+    caller.current = { id: 7 };
+    assert.equal(fns.AnimateWindow.handler([hwnd, 200, AW_BLEND]), 1, 'its own thread may');
+});
+
+test('AllowSetForegroundWindow lends a right every caller has, to a process that exists', ()=>{
+    const ASFW_ANY = 0xffffffff;
+    const live = new Set([0x2000]);
+    const { fns, errors } = setup({ processExists: id=>live.has(id) });
+    assert.equal(fns.AllowSetForegroundWindow.argBytes, 4);
+    assert.equal(fns.AllowSetForegroundWindow.handler([ASFW_ANY]), 1, 'every process');
+    assert.equal(fns.AllowSetForegroundWindow.handler([0x2000]), 1, 'a process that runs');
+    assert.equal(fns.AllowSetForegroundWindow.handler([0x3000]), 0, 'one that does not');
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER]);
+
+    const unknowing = setup();
+    assert.equal(unknowing.fns.AllowSetForegroundWindow.handler([0x3000]), 1,
+        'a host that cannot tell which ids are live accepts every one');
+});
+
+test('DisableProcessWindowsGhosting takes nothing and changes nothing', ()=>{
+    const { memory, fns, errors } = setup();
+    const hwnd = makeWindow(memory, fns, WS_VISIBLE);
+    assert.equal(fns.DisableProcessWindowsGhosting.argBytes, 0);
+    assert.equal(fns.DisableProcessWindowsGhosting.handler([]), 0);
+    assert.equal(fns.IsWindowVisible.handler([hwnd]), 1);
+    assert.deepEqual(errors, []);
+});
+
+test('WINNLSEnableIME finds the input method off on a system that has none', ()=>{
+    // The legacy switch serves Japanese and Korean systems' input methods;
+    // on this en-US one there is none to turn on, so the state it answers
+    // having found stays off whatever was asked before.
+    const { fns } = setup();
+    assert.equal(fns.WINNLSEnableIME.argBytes, 8);
+    assert.equal(fns.WINNLSEnableIME.handler([0, 1]), 0);
+    assert.equal(fns.WINNLSEnableIME.handler([0, 0]), 0);
+    assert.equal(fns.WINNLSEnableIME.handler([0, 1]), 0);
 });

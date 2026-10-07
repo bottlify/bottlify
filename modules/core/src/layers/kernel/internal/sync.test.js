@@ -396,3 +396,78 @@ test('a wait that ran out of time leaves only the queues it stood in', ()=>{
     assert.deepEqual(other.waiters.map((/** @type {any} */ t)=>t.name), ['c'],
         'a queue nobody timed out of is untouched');
 });
+
+test('a named object another process made wakes a waiter through the waiter\'s own scheduler',
+    ()=>{
+        // Two processes of a run share a named event: the parent made it, the
+        // child waits on it through its own kernel, and the parent sets it.
+        const parent = setup();
+        const child = setup();
+        const event = parent.sync.createEvent({ name: 'Global\\ready' });
+        const waiter = { ...thread('child-main'), scheduler: child.scheduler };
+        assert.equal(child.sync.wait(event, waiter), null,
+            'the child blocks on the parent\'s event');
+        parent.sync.setEvent(event);
+        assert.ok(child.scheduler.log.includes('wake child-main'),
+            'its own scheduler wakes it');
+        assert.ok(!parent.scheduler.log.includes('wake child-main'),
+            'and the parent\'s, which does not hold it, is not asked to');
+        assert.equal(waiter.waitResult, WaitResult.OBJECT_0);
+    });
+
+test('a wait on another process\'s object that ends while it is being asked for is not lost',
+    ()=>{
+        // The link answers what it is asked while it waits for an answer of
+        // its own, so the word that the wait ended can come in before the
+        // wait's own answer -- that it was queued -- has been taken.
+        const scheduler = fakeScheduler();
+        /** @type {ReturnType<typeof createSyncObjects>} */
+        let sync;
+        /** @param {number} _id @param {number} _thread @param {number} token */
+        const wait = (_id, _thread, token)=>{
+            sync.wakeRemote(token, WaitResult.OBJECT_0);
+            return null;
+        };
+        const remote = /** @type {any} */ ({
+            wait,
+            cancel: ()=>null,
+        });
+        sync = createSyncObjects({ scheduler, remote });
+        const event = sync.createEvent({ manualReset: false, signalled: false, name: 'Go' });
+        /** @type {any} */ (event).remote = 1;
+        const waiter = /** @type {any} */ ({ ...thread('child'), id: 2 });
+        assert.equal(sync.wait(event, waiter), WaitResult.OBJECT_0,
+            'answered at once: the object is the thread\'s');
+        assert.deepEqual(scheduler.log, [], 'never blocked, so nothing to wake');
+    });
+
+test('a poll of a set holding another process\'s object asks that object there, in order, and'
+    + ' takes the first that is ready', ()=>{
+    const scheduler = fakeScheduler();
+    /** @type {number[]} */
+    const asked = [];
+    let ready = false;
+    const remote = /** @type {any} */ ({
+        /** @param {number} id */
+        poll: id=>{
+            asked.push(id);
+            return ready ? WaitResult.OBJECT_0 : null;
+        },
+    });
+    const sync = createSyncObjects({ scheduler, remote });
+    const local = sync.createEvent({ manualReset: false, signalled: false, name: 'here' });
+    const theirs = sync.createEvent({ manualReset: false, signalled: false, name: 'there' });
+    /** @type {any} */ (theirs).remote = 7;
+    const poller = /** @type {any} */ ({ ...thread('poller'), id: 3 });
+    assert.equal(sync.pollAny([local, theirs], poller), null, 'neither is ready');
+    assert.deepEqual(asked, [7], 'the other process was asked');
+    ready = true;
+    assert.deepEqual(sync.pollAny([local, theirs], poller),
+        { index: 1, result: WaitResult.OBJECT_0 });
+    sync.setEvent(local);
+    assert.deepEqual(sync.pollAny([local, theirs], poller),
+        { index: 0, result: WaitResult.OBJECT_0 },
+        'the first ready one is taken, and the other is not asked');
+    assert.deepEqual(asked, [7, 7]);
+    assert.deepEqual(scheduler.log, [], 'a poll never blocks');
+});

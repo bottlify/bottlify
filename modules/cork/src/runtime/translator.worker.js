@@ -28,21 +28,49 @@ import { createEmitCache, emitBatch, relinkBatch } from './emit-built.js';
 const cache = createEmitCache();
 
 /**
+ * What the engine gave to be rung once an answer is posted: an engine thread
+ * that is never handed its event loop on a timer hears the answer by it at
+ * its next turn, rather than at its next yield.
+ *
+ * @type {{ posted: Int32Array, postedAt: number, bell: Int32Array, bellAt: number } | null}
+ */
+let doorbell = null;
+
+/** Rings the engine's doorbell, after the answer is posted. */
+const ring = ()=>{
+    if (doorbell)
+    {
+        Atomics.add(doorbell.posted, doorbell.postedAt, 1);
+        Atomics.add(doorbell.bell, doorbell.bellAt, 1);
+        Atomics.notify(doorbell.bell, doorbell.bellAt);
+    }
+};
+
+/**
  * A batch of formed regions (`jobs`), or a relink of running ones (`relink`:
  * formed here again from a copy of their pages).
  *
  * @param {{ id: number, jobs?: { region: any, entryTop: number }[], relink?: any,
- *     layout: any, features: any, options: any, ready?: boolean }} data
+ *     layout: any, features: any, options: any, ready?: boolean, doorbell?: any }} data
  * @param {(message: any, transfer: any[]) => void} send
  */
 function handle(data, send){
     if (data?.ready === true)
     {
+        const given = data.doorbell;
+        doorbell = given ? {
+            posted: new Int32Array(given.posted.buffer), postedAt: given.posted.index,
+            bell: new Int32Array(given.bell.buffer), bellAt: given.bell.index,
+        } : null;
         // Loaded: the runtime sends batches from here on.
         send({ ready: true }, []);
+        ring();
         return;
     }
     const { id, jobs, relink, layout, features, options } = data;
+    // The whole of what the batch held this worker for, forming a relink and
+    // compiling included: how busy the worker is, which its parts do not say.
+    const started = performance.now();
     try
     {
         const batch = relink
@@ -60,12 +88,14 @@ function handle(data, send){
         catch {
             compiled = null;
         }
-        send({ id, batch, compiled }, [batch.module.buffer]);
+        send({ id, batch, compiled, busyMs: performance.now() - started },
+            [batch.module.buffer]);
     }
     catch (e){
         const message = e instanceof Error ? e.message : String(e);
         send({ id, batch: null, message: message.slice(0, 160) }, []);
     }
+    ring();
 }
 
 if (typeof self !== 'undefined' && typeof (/** @type {any} */ (self)).postMessage === 'function')

@@ -223,6 +223,70 @@ export const folderOf = (cabinet, file)=>(file.folder >= ifoldCONTINUED_FROM_PRE
     ? null : cabinet.folders[file.folder] ?? null);
 
 /**
+ * The decoder a folder's typeCompress names: each block in, its bytes out,
+ * the history carried from block to block inside it.
+ *
+ * @param {number} compression
+ * @returns {(block: Uint8Array, size: number) => Uint8Array}
+ */
+export function createFolderDecoder(compression){
+    const method = compression & 0x0f;
+    if (method === COMPRESSION.NONE)
+    {
+        return (block, size)=>{
+            if (block.length !== size)
+            {
+                throw new CabinetError('a stored block whose sizes differ', 'corrupt');
+            }
+            return block;
+        };
+    }
+    if (method === COMPRESSION.MSZIP)
+    {
+        const inflater = createInflater();
+        return (block, size)=>inflateMszipBlock(inflater, block, size);
+    }
+    if (method === COMPRESSION.LZX)
+    {
+        const lzx = createLzxDecoder((compression >> 8) & 0x1f);
+        return (block, size)=>lzx.decodeFrame(block, size);
+    }
+    throw new CabinetError(`compression type ${method}`, 'unsupported');
+}
+
+/**
+ * One CFDATA block checked and decoded: its checksum, when it has one, is
+ * over the compressed bytes first and then the header from cbData on.
+ *
+ * @param {(block: Uint8Array, size: number) => Uint8Array} decode
+ * @param {Uint8Array} header  The block's header from cbData through its reserve.
+ * @param {Uint8Array} block @param {number} checksum @param {number} size
+ * @param {number} index  For the error.
+ */
+export function decodeBlock(decode, header, block, checksum, size, index){
+    if (size === 0)
+    {
+        throw new CabinetError('a data block continued into the next cabinet', 'unsupported');
+    }
+    if (checksum !== 0 && cabinetChecksum(header, cabinetChecksum(block, 0)) !== checksum)
+    {
+        throw new CabinetError(`data block ${index} fails its checksum`, 'corrupt');
+    }
+    try
+    {
+        return decode(block, size);
+    }
+    catch (e){
+        if (e instanceof CabinetError)
+        {
+            throw e;
+        }
+        throw new CabinetError(`data block ${index}: ${/** @type {Error} */ (e).message}`,
+            'corrupt');
+    }
+}
+
+/**
  * Decodes one folder's whole stream.
  *
  * @param {Cabinet} cabinet @param {number} index
@@ -236,34 +300,7 @@ export function decodeFolder(cabinet, index){
     }
     const { bytes } = cabinet;
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const method = folder.compression & 0x0f;
-
-    /** @type {(block: Uint8Array, size: number) => Uint8Array} */
-    let decode;
-    if (method === COMPRESSION.NONE)
-    {
-        decode = (block, size)=>{
-            if (block.length !== size)
-            {
-                throw new CabinetError('a stored block whose sizes differ', 'corrupt');
-            }
-            return block;
-        };
-    }
-    else if (method === COMPRESSION.MSZIP)
-    {
-        const inflater = createInflater();
-        decode = (block, size)=>inflateMszipBlock(inflater, block, size);
-    }
-    else if (method === COMPRESSION.LZX)
-    {
-        const lzx = createLzxDecoder((folder.compression >> 8) & 0x1f);
-        decode = (block, size)=>lzx.decodeFrame(block, size);
-    }
-    else
-    {
-        throw new CabinetError(`compression type ${method}`, 'unsupported');
-    }
+    const decode = createFolderDecoder(folder.compression);
 
     /** @type {Uint8Array[]} */
     const parts = [];
@@ -283,33 +320,9 @@ export function decodeFolder(cabinet, index){
         {
             throw new CabinetError('a data block runs off the end', 'corrupt');
         }
-        if (size === 0)
-        {
-            throw new CabinetError('a data block continued into the next cabinet', 'unsupported');
-        }
         const block = bytes.subarray(start, start + packed);
-        if (checksum !== 0)
-        {
-            // Over the compressed bytes first, then the header from cbData on.
-            const header = bytes.subarray(at + 4, at + 8 + cabinet.dataReserve);
-            if (cabinetChecksum(header, cabinetChecksum(block, 0)) !== checksum)
-            {
-                throw new CabinetError(`data block ${i} fails its checksum`, 'corrupt');
-            }
-        }
-        let out;
-        try
-        {
-            out = decode(block, size);
-        }
-        catch (e){
-            if (e instanceof CabinetError)
-            {
-                throw e;
-            }
-            throw new CabinetError(`data block ${i}: ${/** @type {Error} */ (e).message}`,
-                'corrupt');
-        }
+        const out = decodeBlock(decode, bytes.subarray(at + 4, at + 8 + cabinet.dataReserve),
+            block, checksum, size, i);
         parts.push(out);
         total += out.length;
         at = start + packed;

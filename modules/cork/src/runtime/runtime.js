@@ -668,7 +668,14 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // `translateMs`, which is the engine thread's own, so the two threads'
         // costs stay legible.
         workerMs: 0,
+        // With `timings`: all the worker was held for (forming a relink and
+        // compiling too), how long a batch was out, and how long work stood
+        // queued behind the one out -- what a second worker, or a second
+        // batch out, would have taken -- and the longest the queue grew.
+        workerBusyMs: 0, inFlightMs: 0, behindMs: 0, queueMax: 0,
     };
+    /** When `translateNow` last looked, for `behindMs`. */
+    let lookedAt = 0;
     /**
      * The engine thread's long holds, host milliseconds: what a guest thread
      * waiting on a timer (a sound mixer) sat through. The last 64 over 5 ms.
@@ -2145,7 +2152,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * host asked for.
      *
      * @param {{ id: number, batch: import('./emit-built.js').BuiltBatch | null,
-     *     compiled?: WebAssembly.Module | null, message?: string }} data
+     *     compiled?: WebAssembly.Module | null, message?: string, busyMs?: number }} data
      */
     const onWorkerResults = data=>{
         const pending = outstanding;
@@ -2160,6 +2167,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             return;
         }
         counts.workerMs += data.batch.emitMs + data.batch.encodeMs;
+        if (settings.timings === true)
+        {
+            counts.workerBusyMs += data.busyMs ?? 0;
+            counts.inFlightMs += performance.now() - pending.at;
+        }
         const publishedAt = clock();
         if (pending.relink)
         {
@@ -2218,7 +2230,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 inFlight.clear();
                 adapter.terminate();
             });
-            adapter.post({ ready: true }, []);
+            adapter.post({ ready: true, doorbell: settings.doorbell ?? null }, []);
         }, ()=>{});
     }
 
@@ -2274,6 +2286,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         {
             return false;
         }
+        // A store across a link answers a batch's names at once, one wait for
+        // all of them; any other is asked a name at a time.
+        /** @type {(keys: string[]) => (Uint8Array | null | undefined)[] | undefined} */
+        const many = typeof store.getManyNow === 'function'
+            ? keys=>(keys.length === 0 ? [] : store.getManyNow(keys))
+            : keys=>keys.map(key=>store.getNow(key));
         /** A batch module's bytes are read once for every record naming it.
          * @type {Map<string, Uint8Array | null>} */
         const modules = new Map();
@@ -2281,33 +2299,32 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         const answers = [];
         try
         {
-            for (const one of formed)
+            const records = many(formed.map(one=>regionKey(one)));
+            if (!records || records.some(bytes=>bytes === undefined))
             {
-                const bytes = store.getNow(regionKey(one));
-                if (bytes === undefined)
-                {
-                    return false;
-                }
-                const cached = bytes === null ? null : unpackRegion(bytes, cacheVersion);
-                const batchKey = cached?.moduleKey;
-                /** @type {Uint8Array | null | undefined} */
-                let batchBytes;
-                if (batchKey !== undefined && !batchInstances.has(batchKey))
-                {
-                    if (!modules.has(batchKey))
-                    {
-                        const stored = store.getNow(batchKey);
-                        if (stored === undefined)
-                        {
-                            return false;
-                        }
-                        modules.set(batchKey,
-                            stored === null ? null
-                                : unpackRegion(stored, cacheVersion)?.module ?? null);
-                    }
-                    batchBytes = modules.get(batchKey);
-                }
-                answers.push([cached, batchBytes]);
+                return false;
+            }
+            const cached = records.map(bytes=>(bytes === null || bytes === undefined
+                ? null : unpackRegion(bytes, cacheVersion)));
+            /** @type {string[]} */
+            const wanted = [...new Set(cached.map(one=>one?.moduleKey)
+                .filter(/** @returns {key is string} */ key=>key !== undefined
+                    && !batchInstances.has(key)))];
+            const stored = many(wanted);
+            if (!stored || stored.some(bytes=>bytes === undefined))
+            {
+                return false;
+            }
+            wanted.forEach((key, i)=>{
+                const bytes = stored[i];
+                modules.set(key, bytes === null || bytes === undefined
+                    ? null : unpackRegion(bytes, cacheVersion)?.module ?? null);
+            });
+            for (const one of cached)
+            {
+                const batchKey = one?.moduleKey;
+                answers.push([one, batchKey !== undefined && !batchInstances.has(batchKey)
+                    ? modules.get(batchKey) : undefined]);
             }
         }
         catch {
@@ -2446,6 +2463,16 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         if (profileAt >= 0)
         {
             sampleCalls();
+        }
+        if (settings.timings === true)
+        {
+            const now = performance.now();
+            if (lookedAt !== 0 && outstanding !== null && queue.size > 0)
+            {
+                counts.behindMs += now - lookedAt;
+            }
+            lookedAt = now;
+            counts.queueMax = Math.max(counts.queueMax, queue.size);
         }
         // A batch is with the worker: its answer is published when it
         // comes back, so the engine never waits for it. Candidates
@@ -3016,6 +3043,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 instantiateMs: counts.instantiateMs,
                 publishMs: counts.publishMs,
                 workerMs: counts.workerMs,
+                workerBusyMs: counts.workerBusyMs,
+                inFlightMs: counts.inFlightMs,
+                behindMs: counts.behindMs,
+                queueMax: counts.queueMax,
                 moduleBytes: counts.moduleBytes,
                 modules: counts.modules,
                 translatedShare: counted > 0 ? corkRetired / counted : 0,

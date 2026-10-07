@@ -124,6 +124,18 @@ const MAX_MODULE_NAME = 260;
 const NORMAL_PRIORITY_CLASS = 0x20;
 
 /**
+ * Where a process stands in the order the system shuts processes down in: the
+ * level every process starts at, the highest there is (the system's own first
+ * range ends there), and the one flag -- SHUTDOWN_NORETRY -- a process may set.
+ */
+const SHUTDOWN_DEFAULT_LEVEL = 0x280;
+const SHUTDOWN_HIGHEST_LEVEL = 0x4ff;
+const SHUTDOWN_NORETRY = 0x1;
+
+/** An out-pointer of NULL: the address cannot be written. */
+const ERROR_NOACCESS = 998;
+
+/**
  * @typedef {Object} ProcessHost
  * @property {number} [performanceFrequency]  Ticks a second of the performance counter
  *     (`PERFORMANCE_FREQUENCY` by default); a whole number a 32-bit immediate holds.
@@ -460,6 +472,9 @@ export function createProcessFunctions(host){
         writeU32: (address, value)=>host.writeMemory(address, new Uint8Array(dword(value))),
     };
     const { stateOf, setError, lastErrorOf } = createThreadState(host.currentThread, memory);
+
+    /** The process's place in the shutdown order, which it may move. */
+    const shutdown = { level: SHUTDOWN_DEFAULT_LEVEL, flags: 0 };
 
     /**
      * GetModuleHandle's answer for a name already read, null for the running
@@ -1152,6 +1167,46 @@ export function createProcessFunctions(host){
         SetProcessWorkingSetSize: {
             argBytes: 12,
             handler: ()=>1,
+        },
+
+        /**
+         * BOOL SetProcessShutdownParameters(DWORD dwLevel, DWORD dwFlags)
+         * BOOL GetProcessShutdownParameters(LPDWORD lpdwLevel, LPDWORD lpdwFlags)
+         *
+         * Kept and read back, though nothing here shuts the system down: a
+         * program that sets its place in the order may read it back to check,
+         * and one that reads it first expects the level every process starts
+         * at. A level past the documented ranges or a flag that is not
+         * SHUTDOWN_NORETRY is refused, and the setting stays as it was.
+         */
+        SetProcessShutdownParameters: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([level, flags])=>{
+                if ((level >>> 0) > SHUTDOWN_HIGHEST_LEVEL || (flags & ~SHUTDOWN_NORETRY) !== 0)
+                {
+                    setError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                shutdown.level = level >>> 0;
+                shutdown.flags = flags >>> 0;
+                return 1;
+            },
+        },
+
+        GetProcessShutdownParameters: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([level, flags])=>{
+                if ((level >>> 0) === 0 || (flags >>> 0) === 0)
+                {
+                    setError(ERROR_NOACCESS);
+                    return 0;
+                }
+                memory.writeU32(level >>> 0, shutdown.level);
+                memory.writeU32(flags >>> 0, shutdown.flags);
+                return 1;
+            },
         },
 
         /**

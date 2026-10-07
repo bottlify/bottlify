@@ -330,3 +330,63 @@ test('removing an image moves the later ones down, and -1 removes them all', ()=
     assert.equal(m.fns.ImageList_GetImageCount.handler([list]), 0);
     assert.equal(m.fns.ImageList_Draw.handler([list, 0, dest.dc, 0, 0, ILD_NORMAL]), 0);
 });
+
+test('ImageList_SetIconSize empties the list and takes images of the new size', ()=>{
+    // test_ImageList_DrawIndirect: a list of 32-bit images resized to 4x4
+    // takes a 4x4 bitmap as its first image.
+    const m = machine();
+    const list = m.fns.ImageList_Create.handler([2, 1, ILC_COLOR32 | ILC_MASK, 1, 1]);
+    m.fns.ImageList_Add.handler([list, m.section(4, 1, [1, 2, 3, 4]).bitmap, 0]);
+    assert.equal(m.fns.ImageList_GetImageCount.handler([list]), 2);
+    assert.equal(m.fns.ImageList_SetIconSize.argBytes, 12);
+
+    assert.equal(m.fns.ImageList_SetIconSize.handler([list, 4, 1]), 1);
+    assert.equal(m.fns.ImageList_GetImageCount.handler([list]), 0, 'every image went');
+    assert.equal(m.fns.ImageList_GetIconSize.handler([list, OUT, OUT + 4]), 1);
+    assert.deepEqual([m.view.getInt32(OUT, true), m.view.getInt32(OUT + 4, true)], [4, 1]);
+    const wide = [0x010203, 0x040506, 0x070809, 0x0a0b0c];
+    assert.equal(m.fns.ImageList_Add.handler([list, m.section(4, 1, wide).bitmap, 0]), 0,
+        'one image four wide');
+    assert.equal(m.fns.ImageList_GetImageCount.handler([list]), 1);
+    const dest = m.target(4);
+    assert.equal(m.fns.ImageList_Draw.handler([list, 0, dest.dc, 0, 0, ILD_NORMAL]), 1);
+    assert.deepEqual(dest.pixels(), wide);
+
+    assert.equal(m.fns.ImageList_SetIconSize.handler([list, 0, 4]), 0, 'no width');
+    assert.equal(m.fns.ImageList_SetIconSize.handler([list, 4, -1]), 0, 'a negative height');
+    assert.equal(m.fns.ImageList_GetImageCount.handler([list]), 1, 'and nothing changed');
+    assert.equal(m.fns.ImageList_SetIconSize.handler([0xdeadbeef, 4, 4]), 0, 'no list');
+});
+
+test('ImageList_SetImageCount grows and cuts the list, keeping the images it keeps', ()=>{
+    // test_imagecount: 84x84 at 16 bits, grown to three and cut to one and
+    // to none; the first image survives both ways.
+    const m = machine();
+    const big = m.fns.ImageList_Create.handler([84, 84, ILC_COLOR16, 0, 3]);
+    assert.equal(m.fns.ImageList_SetImageCount.argBytes, 8);
+    for (const count of [3, 1, 0])
+    {
+        assert.equal(m.fns.ImageList_SetImageCount.handler([big, count]), 1);
+        assert.equal(m.fns.ImageList_GetImageCount.handler([big]), count);
+    }
+    assert.equal(m.fns.ImageList_SetImageCount.handler([0xdeadbeef, 3]), 0, 'no list');
+
+    const list = m.fns.ImageList_Create.handler([1, 1, ILC_COLOR32, 0, 1]);
+    m.fns.ImageList_Add.handler([list, m.section(2, 1, [0x111111, 0x222222]).bitmap, 0]);
+    const dest = m.target(1);
+    const drawn = (/** @type {number} */ index)=>{
+        dest.fill(0x777777);
+        return m.fns.ImageList_Draw.handler([list, index, dest.dc, 0, 0, ILD_NORMAL]) === 1
+            ? dest.pixels()[0] : null;
+    };
+    assert.equal(m.fns.ImageList_SetImageCount.handler([list, 5]), 1);
+    assert.deepEqual([0, 1, 4, 5].map(drawn), [0x111111, 0x222222, 0, null],
+        'the images kept, the new places blank, none past them');
+    assert.equal(m.fns.ImageList_SetImageCount.handler([list, 1]), 1);
+    assert.deepEqual([0, 1].map(drawn), [0x111111, null]);
+    // test_DrawIndirect: a place SetImageCount made is replaced like any other.
+    assert.equal(m.fns.ImageList_SetImageCount.handler([list, 2]), 1);
+    assert.equal(m.fns.ImageList_Replace.handler([list, 1, m.section(1, 1, [0x333333]).bitmap,
+        0]), 1);
+    assert.equal(drawn(1), 0x333333);
+});

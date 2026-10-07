@@ -649,7 +649,12 @@ export function createPaintFunctions(options){
         {
             return { hdc, rect: clientArea(record) };
         }
-        const dirty = record.updateRect ?? clientArea(record);
+        // With nothing to paint, the paint is of nothing: rcPaint empty and
+        // every pixel clipped, as Windows clips to an empty update region. A
+        // skin that paints in its own WM_PAINT and then hands the message to
+        // the procedure it subclassed has that procedure's BeginPaint find
+        // the window clean; drawing everywhere, it painted over the skin.
+        const dirty = record.updateRect ?? { left: 0, top: 0, right: 0, bottom: 0 };
         // Cleared before the guest paints, not after: a program that
         // invalidates from inside its own WM_PAINT expects that request to
         // survive, and clearing afterwards would swallow it.
@@ -1579,9 +1584,11 @@ export function createPaintFunctions(options){
          * BOOL DrawFocusRect(HDC hDC, const RECT *lprc)
          *
          * The focus rectangle is drawn by inverting, which is what makes
-         * drawing it twice erase it. Without somewhere to invert, failing is
-         * the only answer that does not leave a program believing it has a
-         * rectangle it must later remove.
+         * drawing it twice erase it -- a one-pixel border inverted through the
+         * system's gray brush, so every other pixel: dotted, over whatever a
+         * skin painted. Without somewhere to invert, failing is the only
+         * answer that does not leave a program believing it has a rectangle
+         * it must later remove.
          */
         DrawFocusRect: {
             argBytes: 8,
@@ -1594,12 +1601,12 @@ export function createPaintFunctions(options){
                 }
                 const area = readRect(host, rect);
                 const h = hdc >>> 0;
-                return draw.invert(h, { ...area, bottom: area.top + 1 })
-                    && draw.invert(h, { ...area, top: area.bottom - 1 })
+                return draw.invert(h, { ...area, bottom: area.top + 1 }, true)
+                    && draw.invert(h, { ...area, top: area.bottom - 1 }, true)
                     && draw.invert(h, { ...area, top: area.top + 1, bottom: area.bottom - 1,
-                        right: area.left + 1 })
+                        right: area.left + 1 }, true)
                     && draw.invert(h, { ...area, top: area.top + 1, bottom: area.bottom - 1,
-                        left: area.right - 1 }) ? 1 : 0;
+                        left: area.right - 1 }, true) ? 1 : 0;
             },
         },
 

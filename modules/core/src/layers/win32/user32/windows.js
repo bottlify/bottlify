@@ -53,6 +53,7 @@ import {
     writeWindowClassA,
 } from './structs.js';
 import { convertCharacter, readText, translated, writeText } from './unicode.js';
+import { DESKTOP_WINDOW, HWND_BROADCAST, createWindowDirectory } from './directory.js';
 import { subtractFromArea } from '../gdi32/rects.js';
 
 /** The messages whose wParam is a character code, in the encoding of the procedure. */
@@ -296,6 +297,14 @@ const MINIMISING = new Set([2, SW_MINIMIZE, 7]);
 const RESTORING = new Set([1, 9, 10]);
 const WS_MINIMIZE = 0x20000000;
 const WS_MAXIMIZE = 0x01000000;
+const WS_EX_TOPMOST = 0x00000008;
+
+/**
+ * The fields of a window's record its state on the screen is read from
+ * (`stateOf`): a change to any of them is told to the run.
+ */
+const TRACKED_FIELDS = ['x', 'y', 'width', 'height', 'style', 'exStyle', 'parent', 'owner',
+    'title', 'frameless', 'regionBox', 'menu'];
 const WS_POPUP = 0x80000000;
 const WS_EX_MDICHILD = 0x00000040;
 const ERROR_INVALID_MENU_HANDLE = 1401;
@@ -356,6 +365,7 @@ const POLLED_KINDS = new Set(['event', 'semaphore', 'timer', 'thread']);
 /** The parent a message-only window is made with. */
 const HWND_MESSAGE = 0xfffffffd;
 
+
 /** PeekMessage takes this where a window goes to mean "thread messages only". */
 const HWND_THREAD_MESSAGES = 0xffffffff;
 
@@ -374,6 +384,15 @@ const ISMEX_SEND = 1;
 const ISMEX_NOTIFY = 2;
 const ISMEX_CALLBACK = 4;
 const ISMEX_REPLIED = 8;
+
+/**
+ * The message whose block a sender in another process lends the receiver:
+ * COPYDATASTRUCT's three words, then the bytes it points at.
+ */
+const WM_COPYDATA = 0x004a;
+const COPYDATASTRUCT_SIZE = 12;
+/** The longest text a message carries to another process, in characters. */
+const MAX_CARRIED_TEXT = 0x10000;
 
 /** TrackMouseEvent's request, its flags, and the messages its tracking posts. */
 const TRACKMOUSEEVENT_SIZE = 16;
@@ -442,8 +461,6 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           How many times the application has been told WM_ACTIVATEAPP(0),
  *           for a caller that looks only now and then and must still learn
  *           of a deactivation that came and went in between.
- * @property {() => void} refresh
- *           Repaints the desktop and every window shown on it.
  * @property {(event: import('./rawinput.js').RawInputEvent) => void} rawInput
  *           One event of the mouse or the keyboard as the device reported it,
  *           posted as WM_INPUT to whoever registered for that device.
@@ -462,6 +479,10 @@ const MAX_WINDOW_TEXT = 1 << 16;
  * @typedef {Object} WindowHost
  * @property {number} [processId]  The running process's identifier, which
  *           GetWindowThreadProcessId reports for this process's windows.
+ * @property {ReturnType<typeof createWindowDirectory>} [directory]
+ *           The run's windows (`directory.js`): where a window handle comes
+ *           from, and how a window of another process is found, described and
+ *           posted to. A host with no other process gets one of its own.
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
  *           The display every system metric is derived from.
  * @property {{ width: number, height: number, bits: Uint8Array } | null} [desktopPicture]
@@ -531,6 +552,9 @@ const MAX_WINDOW_TEXT = 1 << 16;
  * @property {() => unknown} [callerThread]
  *           Whose call is being handled, read before an await for `dispatch`
  *           afterwards. Absent in a build with no bridge, and then unnamed.
+ * @property {<T>(thread: unknown, fn: () => T) => T} [answering]
+ *           Runs `fn` as the call of `thread`: what it reads as its caller,
+ *           and what it calls back into the guest, are that thread's.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {boolean} [unattended]
  *           Nobody is at the screen: a modal dialog waiting for input is
@@ -541,6 +565,9 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           Whether a thread identifier names a thread of this process, which
  *           is the whole of what PostThreadMessage validates. Absent in a build
  *           with no scheduler behind it, which then only refuses zero.
+ * @property {(id: number) => boolean} [processExists]
+ *           Whether a process identifier names a running process, which
+ *           AllowSetForegroundWindow validates. Absent, every id is taken.
  * @property {(code: number) => void} [setLastError]
  *           Where a refusal leaves its reason, for the caller that asks why.
  * @property {() => any} park   Stops the caller; returns the parked token.
@@ -673,6 +700,8 @@ export function createWindowFunctions(host){
      */
     const windows = new Map();
     let nextAtom = FIRST_ATOM;
+    const processId = host.processId ?? 0x1000;
+    const directory = host.directory ?? createWindowDirectory();
 
     /**
      * Resolves the argument every API takes where a class name is declared. It
@@ -852,7 +881,9 @@ export function createWindowFunctions(host){
      *
      * @typedef {{ hwnd: number, message: number, wParam: number, lParam: number,
      *     unicode: boolean, kind: number, replied: boolean, result: number,
-     *     from: number | null, callback: number, data: number }} SentMessage
+     *     from: number | null, callback: number, data: number,
+     *     elsewhere?: number }} SentMessage
+     *     `elsewhere`: the number another process asks for its answer by.
      */
 
     /**
@@ -912,6 +943,12 @@ export function createWindowFunctions(host){
         }
         sent.replied = true;
         sent.result = result;
+        // A notification from another process: nobody asks for its answer,
+        // and what it lent is given back now.
+        if (sent.elsewhere !== undefined && sent.kind === ISMEX_NOTIFY)
+        {
+            settleElsewhere(sent.elsewhere);
+        }
         if (sent.kind === ISMEX_CALLBACK && sent.from !== null)
         {
             listOf(answered, sent.from).push(sent);
@@ -947,6 +984,11 @@ export function createWindowFunctions(host){
         {
             return 0;
         }
+        // Work another process asked of this thread, done on it.
+        if (/** @type {any} */ (sent).run)
+        {
+            return andThen(/** @type {any} */ (sent).run(thread), ()=>receiveSent(thread));
+        }
         const inside = listOf(handling, id);
         inside.push(sent);
         return andThen(send(sent.hwnd, sent.message, sent.wParam, sent.lParam, thread,
@@ -969,11 +1011,19 @@ export function createWindowFunctions(host){
      * @param {boolean} [unicode]
      * @param {{ kind?: number, timeout?: number, callback?: number, data?: number }} [how]
      *     `timeout` in milliseconds, for SendMessageTimeout.
-     * @returns {number | Promise<number | null>} the answer; null when the
-     *     timeout passed first
+     * @returns {number | null | Promise<number | null>} the answer; null when
+     *     the timeout passed first
      */
     const sendAcross = (hwnd, message, wParam, lParam, thread, unicode = false, how = {})=>{
+        if ((hwnd >>> 0) === HWND_BROADCAST)
+        {
+            return broadcastSend(message, wParam, lParam, thread, unicode, how);
+        }
         const record = live(hwnd);
+        if (!record && directory.describe(hwnd, processId))
+        {
+            return sendElsewhere(hwnd, message, wParam, lParam, thread, unicode, how);
+        }
         const owner = record ? creatorOf(record) : null;
         const self = threadIdOf(thread);
         if (!record || owner === null || self === null || owner === self)
@@ -1012,6 +1062,276 @@ export function createWindowFunctions(host){
             }
             return sent.result;
         })();
+    };
+
+    /**
+     * Every top-level window a broadcast reaches: this process's, in the
+     * order they were made, then every other process's. A message-only window
+     * is not top-level, and a child is not reached.
+     */
+    const broadcastTargets = ()=>{
+        const targets = [...windows.values()]
+            .filter(record=>!record.destroyed && record.parent === 0 && live(record.hwnd))
+            .map(record=>record.hwnd);
+        for (let at = directory.find(processId, 0, 0, null, null); at !== 0;
+            at = directory.find(processId, 0, at, null, null))
+        {
+            targets.push(at);
+        }
+        return targets;
+    };
+
+    /**
+     * SendMessage to HWND_BROADCAST: to each top-level window in turn, each
+     * answer waited for as a send to it alone is -- a process that runs
+     * nothing now is passed over -- and TRUE once all have been asked.
+     *
+     * @param {number} message @param {number} wParam @param {number} lParam
+     * @param {unknown} thread @param {boolean} unicode
+     * @param {{ kind?: number, timeout?: number }} how
+     * @returns {number | Promise<number>}
+     */
+    const broadcastSend = (message, wParam, lParam, thread, unicode, how)=>{
+        const targets = broadcastTargets();
+        /** @param {number} at @returns {number | Promise<number>} */
+        const next = at=>(at >= targets.length ? 1
+            : andThen(sendAcross(targets[at], message, wParam, lParam, thread, unicode, how),
+                ()=>next(at + 1)));
+        return next(0);
+    };
+
+    /**
+     * The bytes a terminated string occupies, terminator included.
+     *
+     * @param {number} address @param {boolean} wide
+     */
+    const terminatedBytes = (address, wide)=>{
+        const width = wide ? 2 : 1;
+        /** @type {number[]} */
+        const bytes = [];
+        for (let at = address; bytes.length < MAX_CARRIED_TEXT * width; at += 256)
+        {
+            const piece = host.readMemory(at, 256);
+            for (let i = 0; i + width <= piece.length; i += width)
+            {
+                const unit = wide ? piece[i] | piece[i + 1] << 8 : piece[i];
+                bytes.push(...piece.subarray(i, i + width));
+                if (unit === 0)
+                {
+                    return Uint8Array.from(bytes);
+                }
+            }
+            if (piece.length < 256)
+            {
+                break;
+            }
+        }
+        return Uint8Array.from([...bytes, ...new Array(width).fill(0)]);
+    };
+
+    /**
+     * What a message's pointers point at, as the bytes another process is
+     * handed: the messages Windows itself carries between processes. Any
+     * other is sent as its four words, as Windows sends it.
+     *
+     * @param {number} message @param {number} wParam @param {number} lParam
+     * @param {boolean} unicode
+     * @returns {import('./directory.js').SentRequest['carried']}
+     */
+    const carriedOf = (message, wParam, lParam, unicode)=>{
+        if (message === WM_COPYDATA && lParam !== 0)
+        {
+            const [data, count, at] = [0, 4, 8].map(offset=>readU32(host, lParam + offset));
+            const bytes = count > 0 && at !== 0 ? host.readMemory(at, count).slice()
+                : new Uint8Array();
+            return { kind: 'copydata', data, bytes };
+        }
+        if (message === WM_SETTEXT && lParam !== 0)
+        {
+            return { kind: 'text', bytes: terminatedBytes(lParam, unicode) };
+        }
+        if (message === WM_GETTEXT && lParam !== 0 && wParam !== 0)
+        {
+            return { kind: 'room',
+                bytes: Math.min(wParam, MAX_CARRIED_TEXT) * (unicode ? 2 : 1) };
+        }
+        return null;
+    };
+
+    /**
+     * SendMessage to another process's window: the message crosses as values,
+     * and the caller waits for the answer the way it waits for another
+     * thread's -- taking what is sent to its own windows meanwhile, or two
+     * processes sending to each other would wait for ever.
+     *
+     * @param {number} hwnd @param {number} message @param {number} wParam
+     * @param {number} lParam @param {unknown} thread @param {boolean} unicode
+     * @param {{ kind?: number, timeout?: number }} how
+     * @returns {number | null | Promise<number | null>} null when the timeout passed first
+     */
+    const sendElsewhere = (hwnd, message, wParam, lParam, thread, unicode, how)=>{
+        const wait = (how.kind ?? ISMEX_SEND) === ISMEX_SEND;
+        const sent = directory.send(processId, hwnd, {
+            message: message >>> 0, wParam: wParam >>> 0, lParam: lParam >>> 0, unicode, wait,
+            carried: carriedOf(message >>> 0, wParam >>> 0, lParam >>> 0, unicode),
+        });
+        if (!sent)
+        {
+            // A process that runs nothing now answers nothing: as a window
+            // that does not answer in time.
+            return how.timeout === undefined ? 0 : null;
+        }
+        if (!wait)
+        {
+            return 1;
+        }
+        const clock = host.now ?? (()=>0);
+        const deadline = how.timeout === undefined ? Infinity : clock() + how.timeout;
+        return (async()=>{
+            for (;;)
+            {
+                const answer = directory.answer(sent);
+                if (!answer)
+                {
+                    return 0;
+                }
+                if (answer.replied)
+                {
+                    if (answer.bytes)
+                    {
+                        host.writeMemory(lParam >>> 0, answer.bytes);
+                    }
+                    return answer.result ?? 0;
+                }
+                if (clock() >= deadline)
+                {
+                    directory.withdraw(sent);
+                    return null;
+                }
+                await host.idle();
+                await receiveSent(thread);
+            }
+        })();
+    };
+
+    /**
+     * Messages other processes sent to this one's windows, by the number
+     * each sender asks for its answer by, with the memory lent to carry what
+     * their pointers pointed at.
+     *
+     * @type {Map<number, { sent: SentMessage, owner: number, lent: number,
+     *     carried: import('./directory.js').SentRequest['carried'] }>}
+     */
+    const sentFromElsewhere = new Map();
+    let nextElsewhere = 1;
+
+    /**
+     * A message from another process done with: what was lent for it goes
+     * back to the heap.
+     *
+     * @param {number} id
+     */
+    const settleElsewhere = id=>{
+        const entry = sentFromElsewhere.get(id);
+        if (!entry)
+        {
+            return;
+        }
+        sentFromElsewhere.delete(id);
+        const waiting = inbox.get(entry.owner) ?? [];
+        if (waiting.includes(entry.sent))
+        {
+            waiting.splice(waiting.indexOf(entry.sent), 1);
+        }
+        if (entry.lent !== 0)
+        {
+            host.release?.(entry.lent);
+        }
+    };
+
+    /**
+     * Takes a message another process sent, as a thread of this one sends
+     * one: into the inbox of the thread that made the window, with what it
+     * carries put where the procedure can read it.
+     *
+     * @param {number} hwnd @param {import('./directory.js').SentRequest} request
+     * @returns {number | null}
+     */
+    const receiveElsewhere = (hwnd, request)=>{
+        const record = live(hwnd);
+        const owner = record ? creatorOf(record) : null;
+        if (!record || owner === null)
+        {
+            return null;
+        }
+        const carried = request.carried;
+        let lParam = request.lParam;
+        let lent = 0;
+        if (carried)
+        {
+            const size = carried.kind === 'copydata'
+                ? COPYDATASTRUCT_SIZE + carried.bytes.length
+                : carried.kind === 'text' ? carried.bytes.length : carried.bytes;
+            lent = host.allocate?.(Math.max(size, 1)) ?? 0;
+            if (lent === 0)
+            {
+                return null;
+            }
+            if (carried.kind === 'copydata')
+            {
+                writeU32s(host, lent, [carried.data, carried.bytes.length,
+                    carried.bytes.length > 0 ? lent + COPYDATASTRUCT_SIZE : 0]);
+                host.writeMemory(lent + COPYDATASTRUCT_SIZE, carried.bytes);
+            }
+            else if (carried.kind === 'text')
+            {
+                host.writeMemory(lent, carried.bytes);
+            }
+            else
+            {
+                host.writeMemory(lent, new Uint8Array(carried.bytes));
+            }
+            lParam = lent;
+        }
+        const id = nextElsewhere++;
+        /** @type {SentMessage} */
+        const sent = {
+            hwnd: record.hwnd, message: request.message, wParam: request.wParam, lParam,
+            unicode: request.unicode, kind: request.wait ? ISMEX_SEND : ISMEX_NOTIFY,
+            replied: false, result: 0, from: null, callback: 0, data: 0, elsewhere: id,
+        };
+        sentFromElsewhere.set(id, { sent, owner, lent, carried });
+        listOf(inbox, owner).push(sent);
+        host.queue.sent?.(owner);
+        return id;
+    };
+
+    /**
+     * Where a message from another process stands; its answer, once, and
+     * with it what the procedure wrote into a buffer it was lent.
+     *
+     * @param {number} id
+     * @returns {import('./directory.js').SentAnswer | null}
+     */
+    const answerElsewhere = id=>{
+        const entry = sentFromElsewhere.get(id);
+        if (!entry)
+        {
+            return null;
+        }
+        if (!entry.sent.replied)
+        {
+            if (live(entry.sent.hwnd))
+            {
+                return { replied: false };
+            }
+            settleElsewhere(id);
+            return null;
+        }
+        const bytes = entry.carried?.kind === 'room'
+            ? host.readMemory(entry.lent, entry.carried.bytes).slice() : undefined;
+        settleElsewhere(id);
+        return { replied: true, result: entry.sent.result, ...bytes ? { bytes } : {} };
     };
 
     /** @param {any} value @param {(answer: any) => any} then */
@@ -1107,13 +1427,39 @@ export function createWindowFunctions(host){
      */
     const findWindow = (parent, after, classPointer, namePointer, unicode = false)=>{
         const cls = classPointer === 0 ? null : classOf(classPointer, unicode);
-        if (classPointer !== 0 && !cls)
+        // A class this process never registered can still be another's, named
+        // by its string; an atom is only ever this process's to spell out.
+        const className = classPointer === 0 ? null
+            : cls?.name ?? ((classPointer >>> 0) > LAST_ATOM
+                ? readText(host, classPointer >>> 0, unicode, MAX_CLASS_NAME) : null);
+        if (classPointer !== 0 && className === null)
         {
             return 0;
         }
         const title = namePointer === 0
             ? null
-            : readText(host, namePointer, unicode, MAX_WINDOW_TEXT).toLowerCase();
+            : readText(host, namePointer, unicode, MAX_WINDOW_TEXT);
+        // This process's windows first, then every other process's: a walk
+        // that has gone past the last of its own goes on in the next process.
+        if (after !== 0 && !windows.has(after))
+        {
+            return directory.find(processId, parent, after, className, title);
+        }
+        const own = cls || classPointer === 0 ? findOwn(parent, after, className, title) : 0;
+        return own !== 0 ? own : directory.find(processId, parent, 0, className, title);
+    };
+
+    /**
+     * The first of this process's windows under `parent` and after `after`, in
+     * creation order, whose class and title match without regard to case.
+     *
+     * @param {number} parent @param {number} after
+     * @param {string | null} className  Null matches any class.
+     * @param {string | null} title      Null matches any title.
+     */
+    const findOwn = (parent, after, className, title)=>{
+        const cls = className?.toLowerCase() ?? null;
+        const text = title?.toLowerCase() ?? null;
         let reached = after === 0;
         for (const record of windows.values())
         {
@@ -1126,11 +1472,11 @@ export function createWindowFunctions(host){
             {
                 continue;
             }
-            if (cls !== null && record.className !== cls.name)
+            if (cls !== null && String(record.className).toLowerCase() !== cls)
             {
                 continue;
             }
-            if (title !== null && record.title.toLowerCase() !== title)
+            if (text !== null && record.title.toLowerCase() !== text)
             {
                 continue;
             }
@@ -1157,7 +1503,7 @@ export function createWindowFunctions(host){
                 width: 0, height: 0, userData: 0, extra: new DataView(new ArrayBuffer(0)),
                 destroyed: false, updateRect: null, erase: false, ncDirty: false,
             };
-            desktop.hwnd = host.handles.open('window', desktop);
+            desktop.hwnd = DESKTOP_WINDOW;
         }
         return desktop;
     };
@@ -1436,10 +1782,13 @@ export function createWindowFunctions(host){
         {
             windows.set(each.hwnd, each);
         }
+        directory.raise?.(top.hwnd);
         if (shown(top))
         {
             appear(top);
         }
+        tell(top);
+        adoptOrder();
     };
 
     /**
@@ -1481,6 +1830,7 @@ export function createWindowFunctions(host){
         {
             appear(record);
         }
+        tell(record);
     };
 
     /** @param {any} record  Whether it and every ancestor is shown. */
@@ -1510,6 +1860,12 @@ export function createWindowFunctions(host){
      * sliding in, the camera settling -- so the picture never stops arriving.
      */
     let active = 0;
+    /**
+     * Whether the run's foreground window is another process's: this one's
+     * windows were told they lost it, and none of them is active until one is
+     * activated again.
+     */
+    let foreignForeground = false;
     /** What WM_ACTIVATEAPP last told the application: false once it went. */
     let applicationActive = true;
     let deactivations = 0;
@@ -1517,6 +1873,10 @@ export function createWindowFunctions(host){
         if (active !== 0 && live(active))
         {
             return active;
+        }
+        if (foreignForeground)
+        {
+            return 0;
         }
         let candidate = 0;
         for (const record of windows.values())
@@ -1542,7 +1902,8 @@ export function createWindowFunctions(host){
      * its top-level windows hears WM_ACTIVATEAPP(1) first (WmCreatePopupSeq).
      *
      * @param {number} hwnd
-     * @param {{ thread?: unknown, how?: number }} [options]
+     * @param {{ thread?: unknown, how?: number,
+     *     from?: { hwnd: number, thread: number } | null }} [options]
      *        `how` is WM_ACTIVATE's wParam for the window gaining it:
      *        WA_CLICKACTIVE when a click did it.
      * @returns {number | Promise<number>} once every procedure told has answered
@@ -1590,12 +1951,19 @@ export function createWindowFunctions(host){
     /**
      * The activation itself, once nothing has forbidden it.
      *
-     * @param {number} hwnd @param {{ thread?: unknown, how?: number }} options
+     * @param {number} hwnd
+     * @param {{ thread?: unknown, how?: number,
+     *     from?: { hwnd: number, thread: number } | null }} options
+     *     `from`: the window and thread of another program that had the
+     *     foreground, when that program made this window the foreground one
      * @returns {number | Promise<number>}
      */
-    const activateNow = (hwnd, { thread, how = WA_ACTIVE })=>{
+    const activateNow = (hwnd, { thread, how = WA_ACTIVE, from = null })=>{
         const record = live(hwnd);
         const previous = active;
+        // The run's foreground window as it was, before the focus moving
+        // into this one makes this one the run's.
+        const runBefore = directory.foreground?.() ?? 0;
         active = record ? topLevelOf(record).hwnd : 0;
         if (record)
         {
@@ -1609,13 +1977,42 @@ export function createWindowFunctions(host){
             && (current === 0 || topLevelOf(live(current)).hwnd !== active);
         if (moved)
         {
-            focus = active;
+            holdFocus(active);
         }
         if (active === previous)
         {
             return 0;
         }
         const gained = active;
+        // A window of the program's is the run's foreground window now; the
+        // one before it, another program's, is named to it below.
+        let foreign = 0;
+        let foreignThread = 0;
+        if (gained !== 0 && gained !== desktop?.hwnd)
+        {
+            // Another program activated this window and moved the run's
+            // foreground to it already, saying whose it had been.
+            const prior = from ? from.hwnd : runBefore;
+            if (prior !== 0 && directory.ownerOf(prior) !== processId)
+            {
+                foreign = prior;
+                foreignThread = from ? from.thread : directory.stateOf?.(prior)?.threadId ?? 0;
+            }
+            foreignForeground = false;
+            directory.setForeground?.(gained);
+            // Made the foreground window, it came to the top of its band.
+            adoptOrder();
+        }
+        else
+        {
+            // The desktop, or nothing: the run's foreground window, when it
+            // was this program's, is no window now.
+            const prior = directory.foreground?.() ?? 0;
+            if (prior !== 0 && directory.ownerOf(prior) === processId)
+            {
+                directory.setForeground?.(0);
+            }
+        }
         /** @type {[number, number, number, number][]} */
         const told = [];
         if (previous !== 0)
@@ -1625,8 +2022,8 @@ export function createWindowFunctions(host){
         }
         // The program is the active application or stops being it when the
         // activation comes from, or goes to, nothing or the desktop -- the
-        // one window here that is not the program's. lParam names the thread
-        // on the other side: another program's, which here is none.
+        // one window here that is not the program's -- or another program's
+        // window. lParam names the thread on the other side: that program's.
         /** @param {number} which */
         const programs = which=>which !== 0 && which !== desktop?.hwnd;
         if (programs(previous) !== programs(gained))
@@ -1636,12 +2033,13 @@ export function createWindowFunctions(host){
             for (const top of [...windows.values()]
                 .filter(each=>!each.destroyed && !isChild(each)).reverse())
             {
-                told.push([top.hwnd, WM_ACTIVATEAPP, programs(gained) ? 1 : 0, 0]);
+                told.push([top.hwnd, WM_ACTIVATEAPP, programs(gained) ? 1 : 0, foreignThread]);
             }
         }
         if (gained !== 0)
         {
-            told.push([gained, WM_NCACTIVATE, 1, 0], [gained, WM_ACTIVATE, how, previous]);
+            told.push([gained, WM_NCACTIVATE, 1, 0],
+                [gained, WM_ACTIVATE, how, previous !== 0 ? previous : foreign]);
         }
         /** @param {number} index @returns {number | Promise<number>} */
         const tell = index=>{
@@ -1663,7 +2061,7 @@ export function createWindowFunctions(host){
             thread ?? host.callerThread?.()), refused=>{
             if ((refused | 0) !== 0)
             {
-                focus = current;
+                holdFocus(current);
                 return 0;
             }
             return andThen(current !== 0 && live(current)
@@ -1677,8 +2075,30 @@ export function createWindowFunctions(host){
      * active one is a top-level window, the focus is usually a control in
      * it, and both are asked for by name.
      */
-    let focus = 0;
-    const focusWindow = ()=>(focus !== 0 && live(focus) ? focus : 0);
+    //
+    // There is one focus for every program, and it is the run's: this program
+    // keeps no copy of it, and reads where the run keeps it (`manager.js`'s
+    // cells). One of its windows has the focus when that word names it.
+    const focusWindow = ()=>{
+        const held = directory.focus?.() ?? 0;
+        return held !== 0 && live(held) ? held : 0;
+    };
+    /**
+     * A window of this program takes the focus, from every window of every
+     * program (`manager.setFocus`), or this program lets it go. The run lists
+     * the window first, if it has not yet, as one taking the focus while it
+     * is being made does.
+     *
+     * @param {number} hwnd
+     */
+    const holdFocus = hwnd=>{
+        const record = live(hwnd);
+        if (record)
+        {
+            tell(record);
+        }
+        directory.noteFocus?.(hwnd, processId);
+    };
     /**
      * Moves the focus, telling the window that loses it and the one that
      * gains it -- in that order, as Windows sends them -- and activating the
@@ -1706,7 +2126,7 @@ export function createWindowFunctions(host){
             {
                 return 0;
             }
-            focus = target;
+            holdFocus(target);
             // Activation is told first, then the focus: a window gaining both
             // hears WM_ACTIVATE before WM_SETFOCUS.
             const activated = target !== 0 ? activate(target, { thread: on }) : 0;
@@ -1723,6 +2143,8 @@ export function createWindowFunctions(host){
     const setCapture = hwnd=>{
         const previous = captured;
         captured = live(hwnd) ? hwnd >>> 0 : 0;
+        // The run routes the page's pointer to the window holding it.
+        directory.noteCapture?.(captured, processId);
         if (dragged && !insideOf(live(captured), dragged.record))
         {
             endDrag();
@@ -1732,6 +2154,7 @@ export function createWindowFunctions(host){
     const releaseCapture = ()=>{
         const previous = captured;
         captured = 0;
+        directory.noteCapture?.(0, processId);
         endDrag();
         if (previous !== 0 && live(previous))
         {
@@ -1904,14 +2327,15 @@ export function createWindowFunctions(host){
         {
             draw?.deleteFont?.(record.dialogFont);
         }
-        host.handles.close(record.hwnd);
+        directory.close(record.hwnd);
+        toldRun.delete(record.hwnd);
         if (active === record.hwnd)
         {
             active = 0;
         }
-        if (focus === record.hwnd)
+        if ((directory.focus?.() ?? 0) === record.hwnd)
         {
-            focus = 0;
+            holdFocus(0);
         }
         if (captured === record.hwnd)
         {
@@ -1978,6 +2402,7 @@ export function createWindowFunctions(host){
                 {
                     record.parent = value >>> 0;
                 }
+                tell(record);
                 return;
             case GWL_ID:
                 record.id = value >>> 0;
@@ -1987,9 +2412,11 @@ export function createWindowFunctions(host){
                 // and the window edge follows the frame it now has.
                 record.style = (record.parent === 0 ? value | WS_CLIPSIBLINGS : value) >>> 0;
                 record.exStyle = edgeFor(record.style, record.exStyle);
+                tell(record);
                 return;
             case GWL_EXSTYLE:
                 record.exStyle = edgeFor(record.style, value);
+                tell(record);
                 return;
             case GWL_USERDATA:
                 record.userData = value >>> 0;
@@ -2218,13 +2645,14 @@ export function createWindowFunctions(host){
                 record.extra = new DataView(new ArrayBuffer(system.windowExtra));
             }
         }
-        record.hwnd = host.handles.open('window', record);
-        windows.set(record.hwnd, record);
+        record.hwnd = directory.open(processId);
+        windows.set(record.hwnd, watchFields(record));
         hasQueue(record.thread);
         if ((record.style & WS_VISIBLE) !== 0)
         {
             appear(record);
         }
+        tell(record);
         return record;
     };
 
@@ -2602,14 +3030,19 @@ export function createWindowFunctions(host){
                     {
                         return refuse();
                     }
-                    // A window created visible hears its own size, its place
-                    // and that it is shown inside this call, as the real
-                    // CreateWindowEx sends them once WM_CREATE has been
-                    // answered: a program that never calls ShowWindow
+                    // A child or a popup hears its own size and its place
+                    // once WM_CREATE has been answered, shown or not, as the
+                    // real CreateWindowEx sends them: a framework lays out
+                    // the controls inside a window when it is told its size,
+                    // and a page made hidden inside a notebook is sized then
+                    // or never. An overlapped window hears them when it is
+                    // first shown. A window created visible is then told it
+                    // is shown -- a program that never calls ShowWindow
                     // measures the screen it lays itself out and rasterises
-                    // its text for from the size it is told here. Then it
-                    // is activated.
-                    if ((style & WS_VISIBLE) === 0)
+                    // its text for from the size it is told here -- and is
+                    // activated.
+                    const visible = (style & WS_VISIBLE) !== 0;
+                    if (!visible && (record.style & (WS_CHILD | WS_POPUP)) === 0)
                     {
                         return done(record.hwnd);
                     }
@@ -2619,12 +3052,12 @@ export function createWindowFunctions(host){
                             | ((client.right - client.left) & 0xffff)) >>> 0, thread),
                     ()=>andThen(send(record.hwnd, WM_MOVE, 0,
                         (((y & 0xffff) << 16) | (x & 0xffff)) >>> 0, thread),
-                    ()=>andThen(send(record.hwnd, WM_SHOWWINDOW, 1, 0, thread),
-                        ()=>{
+                    ()=>(!visible ? done(record.hwnd)
+                        : andThen(send(record.hwnd, WM_SHOWWINDOW, 1, 0, thread), ()=>{
                             reveal();
                             return andThen(activateCreated(record, thread),
                                 ()=>andThen(eraseShown(thread), ()=>done(record.hwnd)));
-                        })));
+                        }))));
                 })));
         });
     };
@@ -2763,16 +3196,26 @@ export function createWindowFunctions(host){
         const order = paintOrder();
         for (const other of order.slice(order.indexOf(base) + 1))
         {
-            if (shown(other) && !isEmpty(intersect(dirty, geometry.shapedRect(other))))
+            const overlap = shown(other) ? intersect(dirty, geometry.shapedRect(other)) : null;
+            if (overlap && !isEmpty(overlap))
             {
                 const size = geometry.clientSize(other);
                 const whole = { left: 0, top: 0, right: size.width, bottom: size.height };
-                if (!record.updateRect || !other.updateRect
-                    || !sameRect(other.updateRect, whole))
+                if (!other.updateRect || !sameRect(other.updateRect, whole))
                 {
                     other.ncDirty = true;
                     other.updateRect = whole;
                     other.erase = true;
+                }
+                // Painted over past its client, the frame is painted again
+                // too, though the client was to be repainted already: a
+                // parent's one rectangle around a label and a child beside it
+                // takes in the child's edge.
+                const client = geometry.clientRect(other);
+                if (overlap.left < client.left || overlap.top < client.top
+                    || overlap.right > client.right || overlap.bottom > client.bottom)
+                {
+                    other.ncDirty = true;
                 }
             }
         }
@@ -2840,6 +3283,7 @@ export function createWindowFunctions(host){
      * @param {any} record
      */
     const appear = record=>{
+        tell(record);
         paintDesktop();
         for (const each of [record, ...descendantsOf(record)])
         {
@@ -2892,6 +3336,166 @@ export function createWindowFunctions(host){
     /** @param {any} record @returns {any[]} every live descendant, in paint order */
     const descendantsOf = record=>childrenOf(record)
         .flatMap(child=>[child, ...descendantsOf(child)]);
+
+    /** @param {{ left: number, top: number, right: number, bottom: number }} rect */
+    const rectOf = rect=>({ left: rect.left, top: rect.top, right: rect.right,
+        bottom: rect.bottom });
+
+    /**
+     * What the run knows of a window (`manager.js`), as its record has it.
+     *
+     * @param {any} record @returns {import('./manager.js').WindowState}
+     */
+    const stateOf = record=>({
+        hwnd: record.hwnd >>> 0,
+        processId,
+        threadId: creatorOf(record) ?? 0,
+        parent: isChild(record) ? record.parent >>> 0 : 0,
+        owner: (record.owner ?? 0) >>> 0,
+        className: String(record.className),
+        title: String(record.title),
+        style: record.style >>> 0,
+        exStyle: record.exStyle >>> 0,
+        rect: rectOf(geometry.windowRect(record)),
+        client: rectOf(geometry.clientRect(record)),
+        visible: shown(record),
+        enabled: (record.style & WS_DISABLED) === 0,
+        minimized: (record.style & WS_MINIMIZE) !== 0,
+        maximized: (record.style & WS_MAXIMIZE) !== 0,
+        topmost: (record.exStyle & WS_EX_TOPMOST) !== 0,
+        region: record.regionBox ? rectOf(record.regionBox) : null,
+    });
+
+    /** What the run was last told of each window, as it compares. @type {Map<number, string>} */
+    const toldRun = new Map();
+
+    /** Windows changed since the run was last told of them. @type {Set<any>} */
+    const unsaid = new Set();
+
+    /**
+     * Makes the fields a window's state is read from tell the run when they
+     * change: whichever of user32's calls assigns one, the run hears of the
+     * window once that call is over, in a microtask.
+     *
+     * @param {any} record
+     */
+    const watchFields = record=>{
+        for (const field of TRACKED_FIELDS)
+        {
+            let value = record[field];
+            Object.defineProperty(record, field, {
+                enumerable: true,
+                get: ()=>value,
+                set: changed=>{
+                    if (changed !== value)
+                    {
+                        value = changed;
+                        if (unsaid.size === 0)
+                        {
+                            queueMicrotask(()=>{
+                                const pending = [...unsaid];
+                                unsaid.clear();
+                                for (const each of pending)
+                                {
+                                    tell(each);
+                                }
+                            });
+                        }
+                        unsaid.add(record);
+                    }
+                },
+            });
+        }
+        return record;
+    };
+
+    /**
+     * Tells the run what a window is now, and the windows inside its
+     * top-level one: a parent that moved moved them on the screen. Only a
+     * window that changed since it was last told crosses.
+     *
+     * @param {any} record
+     */
+    const tell = record=>{
+        if (!record || record.destroyed || record.hwnd === 0 || record === desktop
+            || windows.get(record.hwnd) !== record)
+        {
+            return;
+        }
+        const top = topLevelOf(record);
+        if (top.parent === HWND_MESSAGE)
+        {
+            return;
+        }
+        let reordered = false;
+        for (const each of [top, ...descendantsOf(top)])
+        {
+            const state = stateOf(each);
+            const said = JSON.stringify(state);
+            const before = toldRun.get(state.hwnd);
+            if (before !== said)
+            {
+                toldRun.set(state.hwnd, said);
+                directory.publish?.(state);
+                // A new top-level window, or one whose band or owner changed,
+                // may have moved in the run's order.
+                const was = before === undefined ? null : JSON.parse(before);
+                reordered ||= state.parent === 0 && (was === null || was.parent !== 0
+                    || was.topmost !== state.topmost || was.owner !== state.owner);
+            }
+        }
+        if (reordered)
+        {
+            adoptOrder();
+        }
+    };
+
+    /**
+     * Takes the order of this process's top-level windows from the run's,
+     * which keeps Windows' rules for it -- the topmost band above the rest,
+     * an owned window above its owner -- and is the order across processes
+     * too. A window's descendants follow it; a window that came up is shown
+     * again where it now overlaps another.
+     */
+    const adoptOrder = ()=>{
+        const run = directory.topLevel?.();
+        if (!run)
+        {
+            return;
+        }
+        const wanted = run.filter(state=>state.processId === processId)
+            .map(state=>state.hwnd).reverse();
+        const placed = new Set(wanted);
+        const current = [...windows.values()]
+            .filter(each=>!each.destroyed && !isChild(each) && placed.has(each.hwnd))
+            .map(each=>each.hwnd);
+        if (current.join() === wanted.join())
+        {
+            return;
+        }
+        /** @type {Map<number, any[]>} */
+        const groups = new Map(wanted.map(hwnd=>[hwnd, []]));
+        /** @type {any[]} */
+        const rest = [];
+        for (const each of windows.values())
+        {
+            const top = each.destroyed ? each : topLevelOf(each);
+            (groups.get(top.hwnd) ?? rest).push(each);
+        }
+        windows.clear();
+        for (const each of [...rest, ...wanted.flatMap(hwnd=>groups.get(hwnd) ?? [])])
+        {
+            windows.set(each.hwnd, each);
+        }
+        for (const [index, hwnd] of wanted.entries())
+        {
+            const record = windows.get(hwnd);
+            if (index !== current.indexOf(hwnd) && record && shown(record))
+            {
+                appear(record);
+            }
+        }
+    };
 
     /**
      * The parts of the screen windows have left that the desktop has not
@@ -3987,6 +4591,7 @@ export function createWindowFunctions(host){
             case WM_SETTEXT: {
                 const address = message.lParam >>> 0;
                 record.title = address === 0 ? '' : host.readCString(address, MAX_WINDOW_TEXT);
+                tell(record);
                 if (geometry.frame(record).caption > 0 && shown(record))
                 {
                     record.ncDirty = true;
@@ -4434,23 +5039,6 @@ export function createWindowFunctions(host){
         rawInput: rawInput.deliver,
 
         /**
-         * The desktop and every window shown on it paint again: what the
-         * screen needs when this process's picture comes back after a child
-         * that ran beside it drew over the same canvas.
-         */
-        refresh(){
-            desktopPainted = false;
-            for (const record of windows.values())
-            {
-                if (!record.destroyed && !isChild(record) && shown(record))
-                {
-                    appear(record);
-                }
-            }
-            paintDesktop();
-        },
-
-        /**
          * One window's client rectangle on the screen, or null for a handle
          * that names no window. Read by whoever has to answer a size a
          * program asked for as zero -- a back buffer's, which means exactly
@@ -4519,6 +5107,7 @@ export function createWindowFunctions(host){
             // its style describes takes no room, so the client area is the
             // whole mode and a program's cursor arithmetic sees the picture.
             record.frameless = true;
+            tell(record);
             const after = geometry.clientRect(record);
             if (moved)
             {
@@ -4623,6 +5212,7 @@ export function createWindowFunctions(host){
                     | ((client.right - client.left) & 0xffff)) >>> 0,
                 thread));
         }
+        tell(record);
         if (covered)
         {
             uncover(covered);
@@ -4649,12 +5239,30 @@ export function createWindowFunctions(host){
      */
     const postTo = ([hwnd, message, wParam, lParam], unicode)=>{
         const target = hwnd >>> 0;
+        if (target === HWND_BROADCAST)
+        {
+            for (const each of broadcastTargets())
+            {
+                if (live(each))
+                {
+                    host.queue.post({ hwnd: each, message, wParam, lParam,
+                        ...unicode ? { unicode } : {} });
+                }
+                else
+                {
+                    directory.post(processId, each, message, wParam, lParam);
+                }
+            }
+            return 1;
+        }
         // A message for a window that no longer exists has nowhere to be
         // delivered, and the guest is told so rather than finding out
         // when it dispatches.
         if (target !== 0 && !live(target))
         {
-            return 0;
+            // Or it is another process's, which takes it into the queue of
+            // the thread that made it.
+            return directory.post(processId, target, message, wParam, lParam) ? 1 : 0;
         }
         // No window is a message for the poster's own thread, as
         // PostThreadMessage to itself would post it.
@@ -4664,13 +5272,107 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * Another program's window became the run's foreground window: this
+     * program's active window is told it is not active, the program that it
+     * is not the active application, and the focus that it went -- each a
+     * notification, delivered on the thread that made the window as a message
+     * another process sends is, and waited on by nobody.
+     *
+     * @param {number} gained @param {number} gainedThread
+     * @param {number} hadFocus  the window of this program that had the focus,
+     *     which the run has moved already
+     */
+    const lostForeground = (gained, gainedThread, hadFocus)=>{
+        const previous = activeWindow();
+        const had = live(hadFocus) ? hadFocus : 0;
+        foreignForeground = true;
+        active = 0;
+        /** @param {number} hwnd @param {number} message @param {number} wParam @param {number} lParam */
+        const notify = (hwnd, message, wParam, lParam)=>{
+            if (live(hwnd))
+            {
+                receiveElsewhere(hwnd, { message, wParam, lParam, unicode: false, wait: false,
+                    carried: null });
+            }
+        };
+        if (previous !== 0)
+        {
+            notify(previous, WM_NCACTIVATE, 0, 0);
+            notify(previous, WM_ACTIVATE, WA_INACTIVE, gained);
+        }
+        if (applicationActive)
+        {
+            applicationActive = false;
+            deactivations++;
+            for (const top of [...windows.values()]
+                .filter(each=>!each.destroyed && !isChild(each)).reverse())
+            {
+                notify(top.hwnd, WM_ACTIVATEAPP, 0, gainedThread);
+            }
+        }
+        if (had !== 0)
+        {
+            notify(had, WM_KILLFOCUS, gained, 0);
+        }
+    };
+
+    // What this process answers about its windows to every other one, in
+    // values: their windows are theirs to find, describe and post to.
+    directory.attach(processId, {
+        lostForeground,
+        /**
+         * Another program made one of this program's windows the foreground
+         * window: activated on the thread that made it, as that thread
+         * looks at its queue, raised first.
+         *
+         * @param {number} hwnd @param {number} fromHwnd @param {number} fromThread
+         */
+        activate: (hwnd, fromHwnd, fromThread)=>{
+            const record = live(hwnd);
+            const owner = record ? creatorOf(record) : null;
+            if (!record || owner === null)
+            {
+                return false;
+            }
+            listOf(inbox, owner).push(/** @type {any} */ ({ run: (/** @type {unknown} */ thread)=>{
+                if (!live(hwnd))
+                {
+                    return 0;
+                }
+                raise(record);
+                return activate(hwnd, { thread, from: { hwnd: fromHwnd, thread: fromThread } });
+            } }));
+            host.queue.sent?.(owner);
+            return true;
+        },
+        find: findOwn,
+        describe: hwnd=>{
+            const record = live(hwnd);
+            return record ? { threadId: creatorOf(record) ?? 0,
+                className: String(record.className), title: record.title } : null;
+        },
+        post: (hwnd, message, wParam, lParam)=>{
+            if (!live(hwnd))
+            {
+                return false;
+            }
+            host.queue.post({ hwnd, message, wParam, lParam });
+            return true;
+        },
+        send: receiveElsewhere,
+        answer: answerElsewhere,
+        withdraw: settleElsewhere,
+    });
+
+    /**
      * SendNotifyMessage, in either encoding.
      *
      * @param {number[]} args  hWnd, Msg, wParam, lParam.
      * @param {boolean} unicode
      */
     const notify = ([hwnd, message, wParam, lParam], unicode)=>{
-        if (!live(hwnd))
+        if ((hwnd >>> 0) !== HWND_BROADCAST && !live(hwnd)
+            && !directory.describe(hwnd, processId))
         {
             host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
             return 0;
@@ -4829,7 +5531,22 @@ export function createWindowFunctions(host){
                 positions: place=>{
                     placeWindow = place;
                 },
-                shown, raise, restack, desktop: desktopWindow,
+                shown, raise, restack, tell, desktop: desktopWindow, showWindow,
+                // What the run answers for every process's windows.
+                runForeground: ()=>directory.foreground?.() ?? 0,
+                /**
+                 * SetForegroundWindow of another program's window: the run's
+                 * foreground moves now, and that program activates it.
+                 *
+                 * @param {number} hwnd
+                 */
+                foregroundElsewhere: hwnd=>directory.foregroundElsewhere?.(hwnd >>> 0, processId)
+                    ?? false,
+                /** @param {number} x @param {number} y */
+                foreignAt: (x, y)=>{
+                    const hwnd = directory.fromPoint?.(x, y) ?? 0;
+                    return hwnd !== 0 && directory.ownerOf(hwnd) !== processId ? hwnd : 0;
+                },
                 isDesktop: (/** @type {any} */ record)=>record !== null && record === desktop,
                 sysColorBrush: (/** @type {number} */ index)=>(draw
                     ? draw.solidBrush(sysColor(index)) : 0),
@@ -4849,6 +5566,8 @@ export function createWindowFunctions(host){
                 },
             }),
             live, windows, classes,
+            elsewhere: (/** @type {number} */ hwnd)=>directory.describe(hwnd, processId),
+            names: directory,
         }),
         ...createDesktopFunctions({ host,
             topLevel: ()=>[...windows.values()]
@@ -4893,16 +5612,21 @@ export function createWindowFunctions(host){
                 defDlgProc: controls.helpers.dialogProc, markDefault: controls.helpers.markDefault,
                 keyDown: (/** @type {number} */ key)=>
                     ((host.keyState?.(key) ?? 0) & 0x8000) !== 0,
-                show: (/** @type {number} */ hwnd)=>{
+                show: (/** @type {number} */ hwnd, /** @type {unknown} */ thread)=>{
                     const record = live(hwnd);
-                    return record ? showWindow(record, SW_SHOW) : 0;
+                    return record ? showWindow(record, SW_SHOW, thread) : 0;
                 },
-                hide: (/** @type {number} */ hwnd)=>{
+                hide: (/** @type {number} */ hwnd, /** @type {unknown} */ thread)=>{
                     const record = live(hwnd);
-                    return record ? showWindow(record, SW_HIDE) : 0;
+                    return record ? showWindow(record, SW_HIDE, thread) : 0;
                 },
-                enable: (/** @type {number} */ hwnd, /** @type {boolean} */ on)=>
-                    (/** @type {any} */ (table)).EnableWindow.handler([hwnd, on ? 1 : 0]),
+                /** @param {number} hwnd @param {boolean} on @param {unknown} thread */
+                enable: (hwnd, on, thread)=>{
+                    const enable = ()=>(/** @type {any} */ (table)).EnableWindow.handler(
+                        [hwnd, on ? 1 : 0]);
+                    return thread !== undefined && host.answering
+                        ? host.answering(thread, enable) : enable();
+                },
                 loadImage: (/** @type {number} */ instance, /** @type {number} */ name,
                     /** @type {number} */ type)=>table.LoadImageW.handler([instance, name, type,
                     0, 0, 0]),
@@ -5234,7 +5958,7 @@ export function createWindowFunctions(host){
         IsWindow: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([hwnd])=>(live(hwnd) ? 1 : 0),
+            handler: ([hwnd])=>(live(hwnd) || directory.describe(hwnd, processId) ? 1 : 0),
         },
 
         /** BOOL GetClientRect(HWND hWnd, LPRECT lpRect) */
@@ -5275,13 +5999,14 @@ export function createWindowFunctions(host){
             handler: ([hwnd, string])=>{
                 // Sent, as Windows sends it: a control keeps its text through
                 // its own procedure, and a program that subclassed one sees
-                // the message.
+                // the message -- on the thread that made the window, which
+                // is where a skin keeps what it paints with.
                 const record = live(hwnd);
                 if (!record)
                 {
                     return 0;
                 }
-                return andThen(send(record.hwnd, WM_SETTEXT, 0, string >>> 0,
+                return andThen(sendAcross(record.hwnd, WM_SETTEXT, 0, string >>> 0,
                     host.callerThread?.()), ()=>1);
             },
         },
@@ -5302,8 +6027,8 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                return andThen(send(record.hwnd, WM_SETTEXT, 0, string >>> 0,
-                    host.callerThread?.(), true), (/** @type {number} */ set)=>(set ? 1 : 0));
+                return andThen(sendAcross(record.hwnd, WM_SETTEXT, 0, string >>> 0,
+                    host.callerThread?.(), true), (/** @type {number | null} */ set)=>(set ? 1 : 0));
             },
         },
 
@@ -5333,10 +6058,17 @@ export function createWindowFunctions(host){
             handler: ([hwnd, out, maxCount])=>{
                 const record = live(hwnd);
                 const room = maxCount | 0;
+                const elsewhere = record ? null : directory.describe(hwnd, processId);
                 // No buffer is no text, whatever count comes with it.
-                if (!record || room <= 0 || !emptied(out, 1))
+                if (!(record || elsewhere) || room <= 0 || !emptied(out, 1))
                 {
                     return 0;
+                }
+                // Another process's window is read from its caption, as
+                // Windows reads one without sending it anything.
+                if (elsewhere)
+                {
+                    return writeText(host, out, elsewhere.title, room, false);
                 }
                 if (ownedElsewhere(record))
                 {
@@ -5354,9 +6086,14 @@ export function createWindowFunctions(host){
             handler: ([hwnd, out, maxCount])=>{
                 const record = live(hwnd);
                 const room = maxCount | 0;
-                if (!record || room <= 0 || !emptied(out, 2))
+                const elsewhere = record ? null : directory.describe(hwnd, processId);
+                if (!(record || elsewhere) || room <= 0 || !emptied(out, 2))
                 {
                     return 0;
+                }
+                if (elsewhere)
+                {
+                    return writeText(host, out, elsewhere.title, room, true);
                 }
                 if (ownedElsewhere(record))
                 {
@@ -6048,10 +6785,12 @@ export function createWindowFunctions(host){
                     return 0;
                 }
                 const thread = host.callerThread?.();
-                const listed = [...windows.values()]
-                    .filter(record=>!record.destroyed && !isChild(record))
-                    .reverse()
-                    .map(record=>record.hwnd);
+                // Every process's, in the run's order, where the run keeps one.
+                const listed = directory.topLevel?.().map(state=>state.hwnd)
+                    ?? [...windows.values()]
+                        .filter(record=>!record.destroyed && !isChild(record))
+                        .reverse()
+                        .map(record=>record.hwnd);
                 return (async()=>{
                     for (const hwnd of listed)
                     {
@@ -6355,7 +7094,10 @@ export function createWindowFunctions(host){
     let messageBoxProcedures = 0;
     return Object.assign(table, createMessageBoxFunctions({
         host,
-        call: (name, args)=>/** @type {any} */ (table)[name].handler(args),
+        call: (name, args, thread)=>{
+            const run = ()=>/** @type {any} */ (table)[name].handler(args);
+            return thread !== undefined && host.answering ? host.answering(thread, run) : run();
+        },
         procedure: (name, handler)=>{
             messageBoxProcedures++;
             /** @type {number} */

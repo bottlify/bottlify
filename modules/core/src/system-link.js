@@ -1,0 +1,190 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * The run's system half, across a link (roadmap/v2, stage 2): what a process
+ * in a worker of its own is handed in place of the `system` object the
+ * processes on the engine's thread share.
+ *
+ * Every service of that object already answers in values -- the registry
+ * names keys by number, the window directory windows by handle, the volume
+ * answers entries and bytes, ids are numbers -- so each crosses as it is:
+ * `systemHandlers` answers a link's calls from the run's own services, and
+ * `remoteSystem` gives the process objects of the same shape that make those
+ * calls and wait. A process across a link answers for its own windows the same
+ * way, asked back across it: the thread here blocks for the answer, and the
+ * process gives it at its next look at the link -- between two turns, while
+ * idle, or inside a call of its own that is waiting. What cannot cross is said
+ * where it stops: a wait on a set holding another process's object is refused
+ * (`sync.js`).
+ */
+
+import { volumeHandlers, remoteVolume } from './layers/filesystem/internal/volume-link.js';
+import { takeId } from './layers/kernel/internal/processes.js';
+import { WINDOW_CELLS } from './layers/win32/user32/manager.js';
+
+/** What a process asks of the registry; the rest -- saving, loading -- is the system's. */
+const REGISTRY = ['root', 'open', 'create', 'remove', 'subkeys', 'values', 'getValue', 'setValue',
+    'rename', 'deleteValue', 'placeOf', 'throughClasses', 'detached', 'forget', 'revision'];
+
+/** What a process asks of the window directory. */
+const WINDOWS = ['open', 'close', 'ownerOf', 'describe', 'find', 'register', 'registeredName',
+    'hold', 'send', 'answer', 'withdraw', 'post', 'detach', 'publish', 'raise', 'lower',
+    'insertAfter', 'stateOf', 'topLevel', 'fromPoint', 'foreground', 'setForeground',
+    'foregroundElsewhere', 'noteCapture', 'noteFocus', 'focus'];
+
+/** What a process answers about its own windows (`directory.js`'s `WindowEndpoint`). */
+const ENDPOINT = ['find', 'describe', 'post', 'send', 'answer', 'withdraw', 'lostForeground',
+    'activate'];
+
+/**
+ * @param {Record<string, any>} service @param {string[]} names
+ * @returns {Record<string, (...args: any[]) => any>}
+ */
+const answering = (service, names)=>Object.fromEntries(names.map(name=>
+    [name, (/** @type {any[]} */ ...args)=>service[name](...args)]));
+
+/**
+ * The link's handlers that answer for the run's system.
+ *
+ * @param {{ registry: any, ids: any, volume: any, windows: any, bundle?: any }} system
+ * @param {(target: string, method: string, args: any[]) => any} [askBack]
+ *     a blocking call to the process across the link, for its windows
+ */
+export function systemHandlers(system, askBack){
+    return {
+        registry: answering(system.registry, REGISTRY),
+        ids: { take: (/** @type {'thread' | 'process'} */ name, /** @type {number} */ step)=>
+            takeId(system.ids, name, step) },
+        ...volumeHandlers(system.volume),
+        // The run's bundle fetches for every process: a block one process
+        // misses is fetched into the run's cache once, and answered when in.
+        bundle: {
+            fetch: (/** @type {any[]} */ needed)=>system.bundle?.fetch(needed),
+        },
+        windows: {
+            ...answering(system.windows, WINDOWS),
+            /** @param {number} processId */
+            attach: processId=>system.windows.attach(processId, Object.fromEntries(
+                ENDPOINT.map(name=>[name, (/** @type {any[]} */ ...args)=>
+                    (askBack ? askBack('endpoint', name, args) : null)]))),
+        },
+    };
+}
+
+/**
+ * The run's system as a process across a link sees it.
+ *
+ * @param {(target: string, method: string, args: any[]) => any} ask
+ *     a blocking call to `systemHandlers`
+ * @param {Record<string, any>} [handlers]
+ *     the process's side of the link, where what it answers for its own
+ *     windows is put when its window manager attaches
+ * @param {(target: string, method: string, args: any[]) => Promise<any>} [call]
+ *     a call that does not block: for what the process waits on as it waits
+ *     on the network, its threads parked and the link looked at meanwhile
+ * @param {import('./layers/filesystem/internal/volume-link.js').VolumeMemory | null} [volume]
+ * @param {Int32Array | null} [windowCells]  the run's foreground window, focus and captured
+ *     window, where the run keeps them (`manager.js`), when the memory is shared
+ *     the run's memory of its volume (`volume-link.js`): what the process
+ *     reads of a drive is kept until the drive changes, and its opens are
+ *     settled against every other process's there
+ */
+export function remoteSystem(ask, handlers = {}, call, volume = null, windowCells = null){
+    /** @param {string} target @param {string[]} names */
+    const asking = (target, names)=>Object.fromEntries(names.map(name=>
+        [name, (/** @type {any[]} */ ...args)=>ask(target, name, args)]));
+    return {
+        // The run's named objects are asked there (`objects`); this table is
+        // not consulted.
+        namedObjects: new Map(),
+        registry: {
+            ...asking('registry', REGISTRY),
+            // A change is the system's to save; nothing here listens for one.
+            onChanged: ()=>()=>{},
+        },
+        ids: { take: (/** @type {string} */ name, /** @type {number} */ step)=>
+            ask('ids', 'take', [name, step]) },
+        volume: remoteVolume((method, args)=>ask('volume', method, args), volume,
+            call ? (method, args)=>void call('volume', method, args).catch(()=>{}) : null),
+        windows: {
+            ...asking('windows', WINDOWS),
+            // Read where the run keeps them, every process alike, rather than
+            // asked: one word each (`manager.js`'s WINDOW_CELLS).
+            ...windowCells ? {
+                foreground: ()=>Atomics.load(windowCells, WINDOW_CELLS.foreground) >>> 0,
+                focus: ()=>Atomics.load(windowCells, WINDOW_CELLS.focus) >>> 0,
+                cells: windowCells,
+            } : {},
+            /** @param {number} processId @param {any} endpoint */
+            attach(processId, endpoint){
+                handlers.endpoint = Object.fromEntries(ENDPOINT.map(name=>
+                    [name, (/** @type {any[]} */ ...args)=>endpoint[name](...args)]));
+                ask('windows', 'attach', [processId]);
+            },
+        },
+        objects: remoteObjects(ask),
+        // The run's class table (`com-link.js`): what the process exports
+        // is delivered to it in its handlers, and what it calls in another
+        // process is waited on as the network is.
+        com: call ? {
+            ask: (/** @type {string} */ method, /** @type {any[]} */ args)=>ask('com', method, args),
+            call: (/** @type {string} */ method, /** @type {any[]} */ args)=>
+                call('com', method, args),
+            handlers,
+        } : undefined,
+        // Its children, which the run starts in workers of their own while it
+        // has room, asking back here for what only their parent has.
+        processes: {
+            /** @param {any} request  as values @returns {boolean} whether the run took it */
+            start: request=>ask('processes', 'start', [request]),
+            /** @param {Record<string, (...args: any[]) => any>} parent */
+            answer(parent){
+                handlers.parent = parent;
+            },
+        },
+        // The run's bundle, as a process across a link reaches it: its drive
+        // is already the run's (`volume`), so only a block the read missed is
+        // asked for, and waited on as a fetch is.
+        bundle: call ? {
+            source: null,
+            registry: undefined,
+            fetch: (/** @type {any[]} */ needed)=>call('bundle', 'fetch', [needed]),
+            stop(){},
+            ahead: ()=>0,
+            refetched: ()=>({ blocks: 0, bytes: 0 }),
+            ranges: ()=>({ requests: 0, bytes: 0 }),
+        } : null,
+    };
+}
+
+/** What a process asks of the run's named objects (`system-objects.js`). */
+const OBJECTS = ['peek', 'create', 'reference', 'close', 'wait', 'cancel', 'poll', 'set', 'reset',
+    'release', 'releaseMutex'];
+
+/**
+ * The run's named objects, asked across a link; and where the word that one
+ * of this process's waits ended there is delivered (`deliver`, from the
+ * link's `kernel.wake`) to whoever listens (`onWake`, the kernel).
+ *
+ * @param {(target: string, method: string, args: any[]) => any} ask
+ */
+function remoteObjects(ask){
+    /** @type {((token: number, result: number) => void) | null} */
+    let listener = null;
+    return {
+        ...Object.fromEntries(OBJECTS.map(name=>
+            [name, (/** @type {any[]} */ ...args)=>ask('objects', name, args)])),
+        /** @param {(token: number, result: number) => void} handler */
+        onWake(handler){
+            listener = handler;
+        },
+        /** @param {number} token @param {number} result */
+        deliver(token, result){
+            listener?.(token, result);
+        },
+    };
+}

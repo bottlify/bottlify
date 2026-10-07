@@ -21,6 +21,7 @@
  */
 
 import { signalledNow } from './sync.js';
+import { takeId } from './processes.js';
 
 /** @enum {string} */
 export const ThreadState = {
@@ -153,6 +154,8 @@ const readyNow = thread=>{
  * @param {{ set: (row: number, column: number, value: number) => void,
  *     used: (count: number) => void, rows: number }} [options.slowSliceTable]
  * @param {(text: string) => number} [options.intern]  A name as a dictionary id.
+ * @param {{ thread: number }} [options.ids]  The run's next thread id, shared with
+ *        the schedulers of the processes beside or after this one.
  */
 export function createScheduler(options){
     const { cpu, switcher, quantum = 100_000, now = ()=>0, skipTo = ()=>0 } = options;
@@ -310,7 +313,12 @@ export function createScheduler(options){
     const threads = [];
     /** @type {any} */
     let current = null;
-    let nextId = 1;
+    /** This scheduler, as its threads hold it. @type {any} */
+    let self = null;
+    // Thread ids are the run's, as a machine's are: a process started beside
+    // or after this one numbers its threads on from where this one got to,
+    // so no two threads of the run answer GetCurrentThreadId alike.
+    const ids = options.ids ?? { thread: 1 };
     let turns = 0;
     /**
      * Where the machine went, by 64 KiB page of guest code.
@@ -417,6 +425,14 @@ export function createScheduler(options){
      * @type {Set<any>}
      */
     const readyAtSlice = new Set();
+    /**
+     * How parallel the process's threads are: the host milliseconds and the
+     * instructions of every slice, by how many threads could have run during
+     * it -- the one running and those ready beside it, 1, 2, 3, 4 or more.
+     * What a second executor would have had to run is the share past the
+     * first column (roadmap/v2, stage 3).
+     */
+    const parallel = { ms: [0, 0, 0, 0], instructions: [0, 0, 0, 0] };
 
     /**
      * A due time the clock honours whether or not a thread is waiting for it.
@@ -525,7 +541,7 @@ export function createScheduler(options){
         noDeadlineBefore = soonest();
     };
 
-    return {
+    const api = {
         /**
          * Creates a thread. It does not run yet, and creating it does not move
          * the CPU: the creator has not necessarily finished setting up whatever
@@ -537,12 +553,19 @@ export function createScheduler(options){
          * @param {number} [options.stackLimit]  The low end of the same stack, when known.
          * @param {number} options.tebAddress
          * @param {string} [options.name]
+         * @param {number} [options.id]  the id it was already given: the one a
+         *     parent was told its child's first thread has
          * @returns {any} the thread
          */
-        create({ entry, stackTop, stackLimit, tebAddress, name }){
+        create({ entry, stackTop, stackLimit, tebAddress, name, id }){
+            const made = id ?? takeId(ids, 'thread', 1);
             const thread = {
-                id: nextId++,
-                name: name ?? `thread-${nextId - 1}`,
+                id: made,
+                name: name ?? `thread-${made}`,
+                // What wakes it: a named object another process of the run
+                // shares is signalled by that process, whose scheduler is not
+                // this one (`sync.js`).
+                scheduler: self,
                 state: ThreadState.READY,
                 tebAddress,
                 stackTop,
@@ -839,6 +862,9 @@ export function createScheduler(options){
                 instructions += cpu.runSlice(ATOMIC_STEP);
             }
             const held = wall() - began;
+            const could = Math.min(readyAtSlice.size, 3);
+            parallel.ms[could] += held;
+            parallel.instructions[could] += instructions;
             recentTurns.push({ thread: next.name ?? '?', ms: held, end: began + held,
                 outside: lastEnd === 0 ? 0 : began - lastEnd });
             const slot = busySlot(began);
@@ -1233,6 +1259,8 @@ export function createScheduler(options){
                 worstSliceFrom,
                 worstSliceOn,
                 worstSliceMs: slowSlices.length > 0 ? Math.round(slowSlices[0].ms) : 0,
+                parallel: { ms: parallel.ms.map(Math.round),
+                    instructions: [...parallel.instructions] },
                 slowSlices: slowSlices.map(s=>`${Math.round(s.ms)}ms ${s.instructions} ${
                     s.thread ?? '?'} 0x${s.from.toString(16)}->0x${s.at.toString(16)}`).join('; '),
                 // Timed waits that ran out rather than being satisfied.
@@ -1292,4 +1320,6 @@ export function createScheduler(options){
             };
         },
     };
+    self = api;
+    return api;
 }

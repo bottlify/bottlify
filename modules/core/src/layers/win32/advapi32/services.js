@@ -58,7 +58,7 @@ const HANDLE_STRIDE = 4;
  * @typedef {Object} ServiceHost
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
- * @property {ReturnType<typeof import('./registry.js').createHive>} hive
+ * @property {ReturnType<typeof import('./registry-service.js').createRegistryService>} hive
  * @property {(code: number) => void} [setLastError]
  * @property {(api: string, detail: string) => void} [divergence]
  */
@@ -125,7 +125,7 @@ export function createServiceFunctions(host){
      * The values the manager keeps for a service. Only the ones given are
      * written, which is what lets ChangeServiceConfig leave the rest alone.
      *
-     * @param {import('./registry.js').RegistryKey} key
+     * @param {number} key
      * @param {{ type?: number, start?: number, errorControl?: number,
      *           imagePath?: string | null, displayName?: string | null,
      *           objectName?: string | null }} config
@@ -160,7 +160,7 @@ export function createServiceFunctions(host){
     /** The services DeleteService marked, whose keys go with their last handle. */
     const marked = new Set();
 
-    /** @param {import('./registry.js').RegistryKey} parent @param {string} name */
+    /** @param {number} parent @param {string} name */
     const removeTree = (parent, name)=>{
         const key = hive.open(parent, name);
         if (!key)

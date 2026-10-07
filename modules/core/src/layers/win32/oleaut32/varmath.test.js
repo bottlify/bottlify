@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    compareExact, decimalBytes, exactOf, readDecimal, round, roundNumber, toNumber,
+    compareExact, decimalBytes, exactOf, fitDecimal, readDecimal, round, roundNumber, toNumber,
 } from './varmath.js';
 
 test('a double becomes the decimal its fifteen digits spell', ()=>{
@@ -35,4 +35,18 @@ test('a DECIMAL goes out and comes back through its sixteen bytes', ()=>{
     assert.equal(decimalBytes({ value: 1n << 96n, scale: 0 }), null, 'past 96 bits');
     assert.equal(compareExact({ value: 15n, scale: 1 }, { value: 150n, scale: 2 }), 0);
     assert.equal(compareExact({ value: -1n, scale: 0 }, { value: 1n, scale: 4 }), -1);
+});
+
+test('a DECIMAL keeps 28 places at most, and gives up places before it overflows', ()=>{
+    assert.deepEqual(fitDecimal({ value: 15n, scale: 1 }), { value: 15n, scale: 1 }, 'as it is');
+    assert.deepEqual(fitDecimal({ value: 10n ** 30n + 5n, scale: 30 }),
+        { value: 10n ** 28n, scale: 28 });
+    // 79228162514264337593543950335 is the largest DECIMAL: a tenth more is
+    // cut to it, and a half more rounds to the even neighbour past it.
+    assert.deepEqual(fitDecimal({ value: 792281625142643375935439503354n, scale: 1 }),
+        { value: 79228162514264337593543950335n, scale: 0 });
+    assert.equal(fitDecimal({ value: 792281625142643375935439503355n, scale: 1 }), null);
+    assert.equal(fitDecimal({ value: 1n << 96n, scale: 0 }), null, 'past 96 bits whole');
+    assert.deepEqual(fitDecimal({ value: -25n, scale: 30 }), { value: 0n, scale: 28 },
+        'rounded from the number, not from an earlier rounding');
 });

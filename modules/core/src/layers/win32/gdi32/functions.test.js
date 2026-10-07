@@ -1446,7 +1446,7 @@ test('with a font engine a string is as wide as the engine draws it', ()=>{
     memory.fill(OUT, SIZE.SIZE / 4);
     assert.equal(fns.GetTextExtentPoint32A.handler([hdc, FACE_NAME, 2, OUT]), 1);
     assert.equal(memory.i32(OUT + SIZE.cx), 5 + 4, 'A is odd, B is even');
-    assert.equal(memory.i32(OUT + SIZE.cy), 13);
+    assert.equal(memory.i32(OUT + SIZE.cy), 16, 'as high as Windows\' System font, the DC\'s own');
 
     memory.fill(OUT, 4);
     assert.equal(fns.GetCharWidth32A.handler([hdc, 0x41, 0x43, OUT]), 1);
@@ -1500,31 +1500,48 @@ test('without a font engine GetCharWidth32A is the estimate\'s fixed pitch', ()=
     assert.deepEqual([memory.i32(OUT), memory.i32(OUT + 4)], [8, 8]);
 });
 
-test('the dialog base units are the system font\'s cell, from the engine or not at all', ()=>{
-    // The width is the alphabet's average in both cases, as the dialog
-    // manager measures it -- 52 letters at 4 or 5 pixels each here come to
-    // 234, nine per letter-pair, five rounded -- not the font's own average.
-    assert.equal(withDC().gdi.draw.baseUnits(), null);
-    assert.deepEqual(withEngine().gdi.draw.baseUnits(), { width: 5, height: 13 });
+test('the dialog base units are the System font\'s cell as Windows has it, engine or not', ()=>{
+    // Whatever face draws it: a dialog's size in pixels is Windows', or a
+    // picture a program drew for that size does not cover the window.
+    assert.deepEqual(withDC().gdi.draw.baseUnits(), { width: 8, height: 16 });
+    assert.deepEqual(withEngine().gdi.draw.baseUnits(), { width: 8, height: 16 });
+});
+
+test('a face Windows has no measurement for is measured as the engine draws it', ()=>{
+    // The width is the alphabet's average, as the dialog manager measures it
+    // -- 52 letters at 4 or 5 pixels each here come to 234, nine per
+    // letter-pair, five rounded -- not the font's own average.
+    const { gdi } = withEngine();
+    const font = gdi.draw.createFont(
+        { pointSize: 8, faceName: 'Arial', weight: 0, italic: 0, charSet: 0 });
+    assert.deepEqual(gdi.draw.fontUnits(font), { width: 5, height: 13 });
+    const blind = withDC().gdi.draw;
+    assert.equal(blind.fontUnits(blind.createFont(
+        { pointSize: 8, faceName: 'Arial', weight: 0, italic: 0, charSet: 0 })), null,
+    'and without an engine the estimate stands');
 });
 
 test('a dialog\'s font is made from its point size and measured like the base units', ()=>{
-    const { gdi, asked } = withEngine();
+    const { gdi, asked, fns, hdc } = withEngine();
     const font = gdi.draw.createFont(
         { pointSize: 8, faceName: 'MS Sans Serif', weight: 0, italic: 0, charSet: 0 });
     assert.notEqual(font, 0);
-    assert.deepEqual(gdi.draw.fontUnits(font), { width: 5, height: 13 });
+    assert.deepEqual(gdi.draw.fontUnits(font), { width: 6, height: 13 },
+        'MS Sans Serif\'s eight points are six by thirteen in Windows, whatever draws them');
     // Eight points at 96 dots per inch is 10.67 pixels: a character height
-    // of 11, asked for as a negative lfHeight.
+    // of 11, asked for as a negative lfHeight -- what the engine draws it at.
+    const before = fns.SelectObject.handler([hdc, font]);
+    fns.GetTextMetricsA.handler([hdc, OUT]);
+    fns.SelectObject.handler([hdc, before]);
     assert.equal(asked.at(-1)?.height, -11);
     assert.equal(asked.at(-1)?.faceName, 'MS Sans Serif');
     assert.equal(gdi.draw.fontUnits(0x7777), null, 'not a font');
     assert.equal(gdi.draw.deleteFont(font), true);
     assert.equal(gdi.draw.fontUnits(font), null, 'and gone');
     const blind = withDC().gdi.draw;
-    assert.equal(blind.fontUnits(blind.createFont(
-        { pointSize: 8, faceName: 'MS Sans Serif', weight: 0, italic: 0, charSet: 0 })), null,
-    'without an engine the estimate stands');
+    assert.deepEqual(blind.fontUnits(blind.createFont(
+        { pointSize: 8, faceName: 'MS Sans Serif', weight: 0, italic: 0, charSet: 0 })),
+    { width: 6, height: 13 }, 'and without an engine');
 });
 
 // --- the stack every one of them pops ---

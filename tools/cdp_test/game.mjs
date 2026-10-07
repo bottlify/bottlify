@@ -25,13 +25,15 @@
  *                                  [--user-data-dir DIR] [--port N] [--store local] [--prefetch]
  *                                  [--cpu-profile SECONDS] [--heap-profile [old]]
  *                                  [--export-translations FILE]
- *                                  [--watch SECONDS]
+ *                                  [--watch SECONDS] [--press LABEL|LABEL... [--press-settle MS]]
  *
  * `--watch S` is for a program that does not present, an installer above
  * all: every S seconds the desktop it paints with GDI is written as a PNG,
  * the events since the last look are printed, and every process standing
  * says what its threads wait on, which call is parked, which windows show and
- * where its processor last ran.
+ * where its processor last ran. `--press` walks its wizard: whenever the
+ * screen changes and settles, the first of the labels an enabled button
+ * carries is pressed.
  */
 
 import { deflateSync } from 'node:zlib';
@@ -342,6 +344,13 @@ function parse(argv){
             const [x, y, atMs] = argv[index + 1].split(',').map(Number);
             return [{ x, y, atMs }];
         }),
+        // The buttons a wizard shows, pressed by label as each screen
+        // settles, as `next >|install|finish`: the first label an enabled
+        // button on the screen carries. An installer's pages come when its
+        // work is done, which no frame count or moment foretells.
+        presses: argv.includes('--press')
+            ? argv[argv.indexOf('--press') + 1].split('|') : [],
+        pressSettleMs: number('--press-settle', 1500),
         keyTimes: argv.flatMap((flag, index)=>{
             if (flag !== '--key-at')
             {
@@ -476,6 +485,9 @@ function parse(argv){
         // `crossOriginIsolated` with `SharedArrayBuffer` -- what the shared-
         // table audio backend and its worklet need to run at all.
         coi: argv.includes('--coi'),
+        // How many processes run at once, each child in a worker of its own.
+        concurrency: argv.includes('--concurrency')
+            ? Number(argv[argv.indexOf('--concurrency') + 1]) : undefined,
     };
 }
 
@@ -1431,6 +1443,7 @@ export async function game(options){
                 : undefined,
             peeks: options.peeks,
             maxTurns: options.turns,
+            concurrency: options.concurrency,
             maxMs: options.runSeconds > 0 ? options.runSeconds * 1000 : null,
             // A harness run is a diagnostic one: the translator's timings and its
             // record of long holds are on unless the run turns them off.
@@ -1462,6 +1475,8 @@ export async function game(options){
             snapEvery: options.snapEvery,
             clicks: options.clicks,
             clickTimes: options.clickTimes,
+            presses: options.presses,
+            pressSettleMs: options.pressSettleMs,
             keyTimes: options.keyTimes,
             typed: options.typed,
             looks: options.looks,

@@ -102,3 +102,22 @@ test('GetFileTitleA gives the name back in the bytes the path had', ()=>{
     assert.equal(fns.GetFileTitleA.handler([0x10, 0x100, 32]), 0);
     assert.deepEqual([...memory.subarray(0x100, 0x104)], [0x99, 0x97, 0xe9, 0]);
 });
+
+test('the wide file dialogs are cancelled the same way, over a record of the same sizes', ()=>{
+    // OPENFILENAMEW is OPENFILENAMEA with wide string pointers: 76 and 88
+    // bytes as well, and nothing in it is written when nothing was chosen.
+    const m = machine();
+    for (const name of ['GetOpenFileNameW', 'GetSaveFileNameW'])
+    {
+        for (const size of [76, 88])
+        {
+            m.put32(0, size);
+            assert.equal(m.dialogs[name].handler([0]), 0, `${name} ${size}`);
+            assert.equal(m.dialogs.CommDlgExtendedError.handler([]), 0, `${name} ${size}`);
+        }
+        m.put32(0, 64);
+        assert.equal(m.dialogs[name].handler([0]), 0);
+        assert.equal(m.dialogs.CommDlgExtendedError.handler([]), 1, `${name}: CDERR_STRUCTSIZE`);
+        assert.equal(m.dialogs[name].argBytes, 4);
+    }
+});

@@ -52,6 +52,17 @@ The network does not depend on the mode: the relay is a WebSocket to the page's 
 isolation does not touch. `isolated` on a page that cannot share memory is refused by `createApp`
 rather than run as something else.
 
+`createApp({ concurrency })` is how many processes run at once: 1, the default, runs the program
+on the engine's thread and a child in its parent's place until it exits; 2 or 4 runs every
+process in a worker of its own, the program too, and a child beside its parent from
+`CreateProcess` on -- a launcher and the game it starts, both running, while the engine's thread
+keeps only what the processes share. It takes shared
+memory, so the run is `isolated`; asked for in `compatible` mode or on a page that cannot share
+memory, the run starts `compatible` with one process at a time and says so with a `fallback`
+event. With more than one, the engine also reads the page's input between two turns of the
+program and sleeps on shared memory when idle, instead of giving its thread to the browser to
+look.
+
 ## Sound
 
 Sound is mixed on the browser's audio thread from a table the engine writes into shared memory:

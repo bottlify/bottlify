@@ -156,17 +156,18 @@ if (keepDiagnostics)
 {
     console.log('diagnostics: kept in the bundle');
 }
-// Four entries, one build: the module a page imports and the workers it
-// starts -- the engine and the log keeper -- and the one the engine starts,
-// that Direct3D draws in. Bundled apart because a worker is loaded by URL,
-// not imported, and each carries what it needs. All sit in dist/, so the
-// vendor directory below is the same for each.
+// Five entries, one build: the module a page imports and the workers it
+// starts -- the engine and the log keeper -- and the ones the engine starts:
+// the one Direct3D draws in, and a child process's own. Bundled apart because
+// a worker is loaded by URL, not imported, and each carries what it needs. All
+// sit in dist/, so the vendor directory below is the same for each.
 await build({
     entryPoints: [
         join(SRC, 'index.js'),
         join(SRC, 'host', 'engine.worker.js'),
         join(SRC, 'host', 'log.worker.js'),
         join(SRC, 'host', 'graphics.worker.js'),
+        join(SRC, 'host', 'process.worker.js'),
     ],
     bundle: true,
     format: 'esm',
@@ -175,7 +176,7 @@ await build({
     // A Node fallback for compression that a browser never reaches: every
     // engine with WebGPU has CompressionStream, so the dynamic import stays
     // unresolved rather than dragging a polyfill into the bundle.
-    external: ['node:zlib', 'node:fs/promises', 'node:url'],
+    external: ['node:zlib', 'node:fs/promises', 'node:url', 'node:worker_threads'],
     // Shipped small and with its names mangled, and without a map that would
     // hand the source back: the source is in the repository for whoever has
     // it, and the package is the built thing.
@@ -227,5 +228,6 @@ for (const name of LEGAL)
     await copyFile(join(REPO, name), join(ROOT, name));
 }
 await writeChecksums();
-console.log('dist: core.js + engine.worker.js + log.worker.js + graphics.worker.js + cork/ + '
+console.log('dist: core.js + engine.worker.js + log.worker.js + graphics.worker.js'
+    + ' + process.worker.js + cork/ + '
     + `${vendored} vendor artifacts + checksums.json`);

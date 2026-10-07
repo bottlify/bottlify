@@ -717,6 +717,17 @@ export function createSystemFunctions(host){
         },
     };
 
+    /** GetSystemWow64Directory in either form: the buffer is never written. */
+    const wow64Directory = {
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: args=>{
+            void args;
+            host.setLastError(ERROR_CALL_NOT_IMPLEMENTED);
+            return 0;
+        },
+    };
+
     /** Both time queries answer the same thing; see GetLocalTime. */
     const nowAsSystemTime = ()=>systemTimeFrom(
         BigInt(Math.trunc(host.systemTimeMs())) * 10_000n + FILETIME_AT_UNIX_EPOCH);
@@ -765,6 +776,17 @@ export function createSystemFunctions(host){
                 return 1;
             },
         },
+
+        /**
+         * UINT GetSystemWow64DirectoryA(LPSTR lpBuffer, UINT uSize)
+         * UINT GetSystemWow64DirectoryW(LPWSTR lpBuffer, UINT uSize)
+         *
+         * Exported by a 32-bit Windows, which has no WOW64 directory: always
+         * zero, and ERROR_CALL_NOT_IMPLEMENTED -- the documented answer a
+         * program takes for "this is not a 64-bit system".
+         */
+        GetSystemWow64DirectoryA: wow64Directory,
+        GetSystemWow64DirectoryW: wow64Directory,
 
         /**
          * int MulDiv(int nNumber, int nNumerator, int nDenominator)

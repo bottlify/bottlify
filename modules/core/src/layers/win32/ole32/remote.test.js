@@ -64,3 +64,42 @@ test('an ended process takes its registrations with it and runs its proxies down
     assert.equal(table.endpoint(id), null);
     assert.equal(rundowns, 1);
 });
+
+test('a suspended registration is handed to no new client until resumed again', ()=>{
+    const table = createClassTable();
+    table.register({ clsid: 'A', endpoint: 1, object: 1, flags: REGCLS_MULTIPLEUSE, cookie: 1,
+        suspended: false, used: false });
+    table.register({ clsid: 'B', endpoint: 2, object: 1, flags: REGCLS_MULTIPLEUSE, cookie: 1,
+        suspended: false, used: false });
+    table.suspend(1);
+    assert.equal(table.take('A'), null);
+    assert.equal(table.take('B')?.endpoint, 2, 'another process\'s registration is its own');
+    table.resume(1);
+    assert.equal(table.take('A')?.endpoint, 1);
+});
+
+test('an RPC endpoint is one process\'s: a second to claim it is refused, and it goes with its'
+    + ' process', async()=>{
+    const table = createClassTable();
+    const first = {};
+    const id = table.attach({ process: first, alive: true, deliver: async()=>({}),
+        rundown: async()=>{} });
+    const other = table.attach({ process: {}, alive: true, deliver: async()=>({}),
+        rundown: async()=>{} });
+    assert.equal(table.rpcServer('ncalrpc:one'), null);
+    assert.equal(table.rpcListen('ncalrpc:one', id), true);
+    assert.equal(table.rpcListen('ncalrpc:one', id), true, 'the process that has it asks again');
+    assert.equal(table.rpcListen('ncalrpc:one', other), false, 'another process cannot have it');
+    assert.equal(table.rpcServer('ncalrpc:one'), id);
+
+    table.rpcUnlisten(id, 'ncalrpc:one');
+    assert.equal(table.rpcServer('ncalrpc:one'), null);
+    assert.equal(table.rpcListen('ncalrpc:one', other), true, 'and it is free again');
+
+    assert.equal(table.rpcListen('ncacn_np:\\pipe\\two', id), true);
+    assert.equal(table.rpcListen('ncalrpc:three', id), true);
+    await table.ended(first);
+    assert.equal(table.rpcServer('ncacn_np:\\pipe\\two'), null, 'what a process listened on goes');
+    assert.equal(table.rpcServer('ncalrpc:three'), null);
+    assert.equal(table.rpcServer('ncalrpc:one'), other, 'another process\'s stays');
+});

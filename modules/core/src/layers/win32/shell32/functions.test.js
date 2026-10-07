@@ -444,8 +444,10 @@ test('DragFinish pops the drop it is handed', ()=>{
 /**
  * A shell over a real volume, with guest memory for a SHFILEOPSTRUCT and the
  * lists it points at.
+ *
+ * @param {Record<string, any>} [extra]  More of the host, laid over the rest.
  */
-async function machineWithVolume(){
+async function machineWithVolume(extra = {}){
     const fs = await filesystemModule.create({});
     const volume = /** @type {any} */ (createVolume(fs));
     volume.mkdir('C:\\work');
@@ -474,6 +476,7 @@ async function machineWithVolume(){
         },
         resolve: path=>fs.resolve(path).path,
         volume: { ...volume, drives: ()=>['C'] },
+        ...extra,
     }));
     /** A list of names, each terminated, and one more terminator. @param {string[]} names @param {boolean} wide */
     const list = (names, wide)=>{
@@ -600,4 +603,148 @@ test('SHCreateDirectoryEx makes the whole path, and says when it was there', asy
     assert.ok(m.volume.stat('C:\\work\\\u00e9t\u00e9\\three')?.isDirectory);
     assert.deepEqual([m.shell.SHCreateDirectoryExA.argBytes, m.shell.SHCreateDirectoryExW.argBytes],
         [12, 12]);
+});
+
+/** @param {Uint8Array} memory @param {string} text @param {number} at */
+function putWide(memory, text, at){
+    const view = new DataView(memory.buffer);
+    [...text, '\0'].forEach((unit, index)=>
+        view.setUint16(at + index * 2, unit.charCodeAt(0), true));
+    return at;
+}
+
+test('the wide launch reads its strings wide, and starts the same program', ()=>{
+    const m = machineWithLauncher(['C:\\App\\setup.exe']);
+    putWide(m.memory, 'setup.exe', 0x100);
+    putWide(m.memory, '/s', 0x140);
+
+    assert.equal(m.shell.ShellExecuteW.handler([0, 0, 0x100, 0x140, 0, 1]), 33);
+    assert.deepEqual(m.launched,
+        [{ named: 'C:\\App\\setup.exe', line: '"C:\\App\\setup.exe" /s', flags: 0 }]);
+    putWide(m.memory, 'readme.txt', 0x100);
+    assert.equal(m.shell.ShellExecuteW.handler([0, 0, 0x100, 0, 0, 1]), 31,
+        'a document is refused in either spelling');
+    assert.equal(m.shell.ShellExecuteW.argBytes, 24);
+});
+
+test('the wide extended launch reads the same record with wide strings', ()=>{
+    // SHELLEXECUTEINFOW is SHELLEXECUTEINFOA field for field.
+    const m = machineWithLauncher(['C:\\App\\setup.exe']);
+    putWide(m.memory, 'setup.exe', 0x200);
+    putWide(m.memory, '/VERYSILENT', 0x240);
+    const view = new DataView(m.memory.buffer);
+    m.memory.fill(0, 0x100, 0x140);
+    view.setUint32(0x100, 60, true);                        // cbSize
+    view.setUint32(0x104, 0x40, true);                      // SEE_MASK_NOCLOSEPROCESS
+    view.setUint32(0x110, 0x200, true);                     // lpFile
+    view.setUint32(0x114, 0x240, true);                     // lpParameters
+
+    assert.equal(m.shell.ShellExecuteExW.handler([0x100]), 1);
+    assert.equal(view.getUint32(0x120, true), 33);
+    assert.equal(view.getUint32(0x138, true), 0x40);
+    assert.equal(m.launched[0].line, '"C:\\App\\setup.exe" /VERYSILENT');
+
+    view.setUint32(0x104, 0x4, true);                       // SEE_MASK_IDLIST
+    assert.equal(m.shell.ShellExecuteExW.handler([0x100]), 0);
+    assert.equal(view.getUint32(0x120, true), 31);
+    assert.equal(m.shell.ShellExecuteExW.handler([0]), 0);
+    assert.equal(m.shell.ShellExecuteExW.argBytes, 4);
+});
+
+test('a list turns back into its path in UTF-16, and the wide browse is cancelled too', ()=>{
+    const m = machineWithFolders();
+    const CSIDL_PROGRAM_FILES = 0x26;
+    const PATH = 'C:\\Program Files';
+    assert.equal(m.shell.SHGetSpecialFolderLocation.handler([0, CSIDL_PROGRAM_FILES, 0x100]), 0);
+    const list = new DataView(m.memory.buffer).getUint32(0x100, true);
+
+    assert.equal(m.shell.SHGetPathFromIDListW.handler([list, 0x200]), 1);
+    assert.equal(new TextDecoder('utf-16le').decode(
+        m.memory.subarray(0x200, 0x200 + PATH.length * 2 + 2)), `${PATH}\0`);
+    assert.equal(m.shell.SHGetPathFromIDListW.handler([0, 0x300]), 0);
+    assert.deepEqual([...m.memory.subarray(0x300, 0x302)], [0, 0], 'a wide empty path');
+
+    assert.equal(m.shell.SHBrowseForFolderW.handler([0x100]), 0);
+    assert.deepEqual([m.shell.SHGetPathFromIDListW.argBytes, m.shell.SHBrowseForFolderW.argBytes],
+        [8, 4]);
+});
+
+test('SHGetFileInfoW refuses as its ANSI twin does, and leaves the wider record alone', ()=>{
+    // SHFILEINFOW is 692 bytes to SHFILEINFOA's 352; neither is written.
+    const SHGFI_SYSICONINDEX = 0x4000;
+    const SHGFI_SMALLICON = 0x1;
+    const memory = new Uint8Array(0x400).fill(0xaa);
+    const shell = /** @type {any} */ (createShellFunctions({
+        readMemory: (address, length)=>memory.slice(address, address + length),
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+    }));
+    putWide(memory, 'C:\\App', 0x10);
+    assert.equal(shell.SHGetFileInfoW.handler([0x10, 0, 0x40, 692,
+        SHGFI_SYSICONINDEX | SHGFI_SMALLICON]), 0);
+    assert.ok(memory.subarray(0x40, 0x40 + 692).every(byte=>byte === 0xaa));
+    assert.equal(shell.SHGetFileInfoW.argBytes, 20);
+});
+
+test('SHPathPrepareForWrite finds a directory, refuses a file, makes one asked for', async()=>{
+    /** @type {string[]} */
+    const diverged = [];
+    const m = await machineWithVolume({
+        divergence: (/** @type {string} */ api, /** @type {string} */ detail)=>
+            diverged.push(`${api}: ${detail}`),
+    });
+    const SHPPFW_NONE = 0;
+    const SHPPFW_DIRCREATE = 1;
+    const SHPPFW_ASKDIRCREATE = 2;
+    const SHPPFW_IGNOREFILENAME = 4;
+    const S_OK = 0;
+    const PATH_NOT_FOUND = 0x80070003 | 0;
+    const DIRECTORY = 0x8007010b | 0;
+    /** @param {string} path @param {number} flags @param {boolean} [wide] */
+    const prepare = (path, flags, wide = false)=>m.shell[
+        wide ? 'SHPathPrepareForWriteW' : 'SHPathPrepareForWriteA'].handler(
+        [0, 0, m.list([path], wide), flags]);
+
+    assert.equal(prepare('C:\\work', SHPPFW_NONE), S_OK);
+    assert.equal(prepare('C:\\work\\', SHPPFW_NONE), S_OK, 'a trailing separator');
+    assert.equal(prepare('C:\\', SHPPFW_NONE), S_OK, 'the root');
+    assert.equal(prepare('a.txt', SHPPFW_NONE), DIRECTORY, 'a file where a directory should be');
+    assert.equal(prepare('a.txt\\', SHPPFW_DIRCREATE), DIRECTORY, 'and not made over it');
+    assert.equal(prepare('a.txt', SHPPFW_IGNOREFILENAME), S_OK,
+        'a bare file name is in the current directory');
+
+    assert.equal(prepare('C:\\work\\missing\\file.txt', SHPPFW_IGNOREFILENAME), PATH_NOT_FOUND);
+    assert.equal(m.volume.stat('missing'), null, 'and nothing was made');
+    assert.equal(prepare('C:\\work\\missing\\file.txt',
+        SHPPFW_IGNOREFILENAME | SHPPFW_DIRCREATE), S_OK);
+    assert.ok(m.volume.stat('C:\\work\\missing')?.isDirectory);
+    assert.equal(m.volume.stat('C:\\work\\missing\\file.txt'), null, 'the file name is not made');
+    assert.equal(prepare('C:\\work\\whole\\', SHPPFW_IGNOREFILENAME | SHPPFW_DIRCREATE), S_OK,
+        'a trailing separator leaves no file name to ignore');
+    assert.ok(m.volume.stat('C:\\work\\whole')?.isDirectory);
+
+    // Wine's conformance test: a relative path is found, but not made.
+    assert.equal(prepare('.\\missing', SHPPFW_DIRCREATE), S_OK);
+    assert.equal(prepare('.\\relative\\dir', SHPPFW_DIRCREATE), PATH_NOT_FOUND);
+    assert.equal(m.volume.stat('relative'), null);
+
+    assert.equal(prepare('C:\\work\\one\\two', SHPPFW_DIRCREATE, true), S_OK);
+    assert.ok(m.volume.stat('C:\\work\\one\\two')?.isDirectory, 'every directory of the path');
+    assert.equal(prepare('C:\\work\\\u00e9t\u00e9', SHPPFW_NONE, true), PATH_NOT_FOUND);
+    assert.deepEqual(diverged, []);
+
+    assert.equal(prepare('C:\\work\\asked', SHPPFW_ASKDIRCREATE), S_OK);
+    assert.ok(m.volume.stat('C:\\work\\asked')?.isDirectory);
+    assert.equal(diverged.length, 1, 'made without asking, which is said');
+
+    assert.equal(m.shell.SHPathPrepareForWriteW.handler([0, 0, 0, SHPPFW_DIRCREATE]) | 0,
+        0x80070057 | 0, 'no path is E_INVALIDARG');
+    assert.deepEqual(
+        [m.shell.SHPathPrepareForWriteA.argBytes, m.shell.SHPathPrepareForWriteW.argBytes],
+        [16, 16]);
+});
+
+test('SHPathPrepareForWrite with no volume finds no path', ()=>{
+    const m = machineWithPaths('C:\\App');
+    m.put('C:\\App', 0x100);
+    assert.equal(m.shell.SHPathPrepareForWriteA.handler([0, 0, 0x100, 1]) | 0, 0x80070003 | 0);
 });
