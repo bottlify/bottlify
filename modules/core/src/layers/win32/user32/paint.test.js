@@ -287,3 +287,37 @@ test('with no stops, or past the last of several, tabs fall every default interv
     assert.equal(tabbedWidth('\tc', widthOf, [0], 64), 72, 'a zero interval is none');
     assert.equal(tabbedWidth('plain', widthOf, [10], 64), 40);
 });
+
+test('DrawFocusRect inverts the rectangle\'s one-pixel border through the gray brush, each'
+    + ' pixel once', ()=>{
+    const memory = new Uint8Array(0x100);
+    /** @type {any[]} */
+    const inverted = [];
+    const { table } = createPaintFunctions({
+        host: /** @type {any} */ ({
+            readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+                memory.slice(at, at + length),
+            writeMemory: ()=>{},
+            readCString: ()=>'',
+            draw: {
+                invert: (/** @type {number} */ hdc, /** @type {any} */ rect,
+                    /** @type {boolean} */ halftone)=>inverted.push([hdc, rect, halftone]) > 0,
+            },
+        }),
+        live: ()=>null,
+        WM_PAINT: 0x000f,
+        geometry: /** @type {any} */ ({}),
+        send: ()=>0,
+        invalidated: ()=>{},
+        painted: ()=>{},
+    });
+    const view = new DataView(memory.buffer);
+    [10, 20, 50, 40].forEach((side, i)=>view.setInt32(0x10 + i * 4, side, true));
+    assert.equal(table.DrawFocusRect.handler([HDC, 0x10]), 1);
+    assert.deepEqual(inverted, [
+        [HDC, { left: 10, top: 20, right: 50, bottom: 21 }, true],
+        [HDC, { left: 10, top: 39, right: 50, bottom: 40 }, true],
+        [HDC, { left: 10, top: 21, right: 11, bottom: 39 }, true],
+        [HDC, { left: 49, top: 21, right: 50, bottom: 39 }, true],
+    ], 'dotted, so drawing it twice takes it away and it shows over any picture');
+});

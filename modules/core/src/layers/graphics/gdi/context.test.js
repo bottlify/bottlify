@@ -260,6 +260,24 @@ test('InvertRect is exactly a DSTINVERT over the half-open rectangle', ()=>{
     assert.equal(again.read(1, 1), surface.read(1, 1));
 });
 
+test('a halftone InvertRect inverts every other pixel from the brush origin, and again'
+    + ' restores them', ()=>{
+    const { drawing, surface } = fixture();
+    const inverted = (~BACKGROUND) >>> 0;
+    const rows = ()=>[0, 1].map(y=>[0, 1, 2, 3].map(x=>surface.read(x, y)));
+    assert.equal(drawing.invertRect(HDC, { left: 0, top: 0, right: 4, bottom: 2 }, true), true);
+    assert.deepEqual(rows(), [[BACKGROUND, inverted, BACKGROUND, inverted],
+        [inverted, BACKGROUND, inverted, BACKGROUND]], 'the gray brush\'s 0x55 over 0xAA');
+    drawing.invertRect(HDC, { left: 0, top: 0, right: 4, bottom: 2 }, true);
+    assert.deepEqual(rows(), [[BACKGROUND, BACKGROUND, BACKGROUND, BACKGROUND],
+        [BACKGROUND, BACKGROUND, BACKGROUND, BACKGROUND]]);
+
+    drawing.setBrushOrgEx(HDC, 1, 0);
+    drawing.invertRect(HDC, { left: 0, top: 0, right: 4, bottom: 1 }, true);
+    assert.deepEqual(rows()[0], [inverted, BACKGROUND, inverted, BACKGROUND],
+        'the checkerboard moves with the origin');
+});
+
 test('FillRect and FrameRect use the brush the call names, not the selected one', ()=>{
     const { objects, drawing, surface, context } = fixture();
     context.state.brush = objects.create('brush', {

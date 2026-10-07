@@ -4491,8 +4491,10 @@ export function createGdiFunctions(host){
             /**
              * @param {number} hdc
              * @param {{ left: number, top: number, right: number, bottom: number }} rect
+             * @param {boolean} [halftone]  Every other pixel, as the gray brush inverts.
              */
-            invert: (hdc, rect)=>drawing.bound(hdc)?.invertRect(hdc >>> 0, rect) === true,
+            invert: (hdc, rect, halftone = false)=>
+                drawing.bound(hdc)?.invertRect(hdc >>> 0, rect, halftone) === true,
 
             /**
              * The pixels of a rectangle moved by dx, dy within the context,

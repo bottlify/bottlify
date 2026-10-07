@@ -1584,9 +1584,11 @@ export function createPaintFunctions(options){
          * BOOL DrawFocusRect(HDC hDC, const RECT *lprc)
          *
          * The focus rectangle is drawn by inverting, which is what makes
-         * drawing it twice erase it. Without somewhere to invert, failing is
-         * the only answer that does not leave a program believing it has a
-         * rectangle it must later remove.
+         * drawing it twice erase it -- a one-pixel border inverted through the
+         * system's gray brush, so every other pixel: dotted, over whatever a
+         * skin painted. Without somewhere to invert, failing is the only
+         * answer that does not leave a program believing it has a rectangle
+         * it must later remove.
          */
         DrawFocusRect: {
             argBytes: 8,
@@ -1599,12 +1601,12 @@ export function createPaintFunctions(options){
                 }
                 const area = readRect(host, rect);
                 const h = hdc >>> 0;
-                return draw.invert(h, { ...area, bottom: area.top + 1 })
-                    && draw.invert(h, { ...area, top: area.bottom - 1 })
+                return draw.invert(h, { ...area, bottom: area.top + 1 }, true)
+                    && draw.invert(h, { ...area, top: area.bottom - 1 }, true)
                     && draw.invert(h, { ...area, top: area.top + 1, bottom: area.bottom - 1,
-                        right: area.left + 1 })
+                        right: area.left + 1 }, true)
                     && draw.invert(h, { ...area, top: area.top + 1, bottom: area.bottom - 1,
-                        left: area.right - 1 }) ? 1 : 0;
+                        left: area.right - 1 }, true) ? 1 : 0;
             },
         },
 

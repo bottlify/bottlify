@@ -35,7 +35,7 @@ import { BS_SOLID, OPAQUE, createPattern, solidPattern } from './brush.js';
 import {
     BLACKONWHITE, STRETCH_MODES, bitBlt, patBlt, sourceConversion, stretchBlt,
 } from './blit.js';
-import { DSTINVERT, PATCOPY, R2_COPYPEN } from './rop.js';
+import { DSTINVERT, PATCOPY, PATINVERT, R2_COPYPEN } from './rop.js';
 import { PS_SOLID, createPainter, ellipse, fillRect, frameRect, line, polygon, rectangle }
     from './shapes.js';
 import { colorToPixel, intersectRect, isEmptyRect, pixelToColor, surfaceBounds }
@@ -540,18 +540,24 @@ export function createGdiDrawing(options = {}){
         /**
          * BOOL InvertRect(HDC, const RECT *)
          *
-         * Which is exactly a PatBlt with DSTINVERT, so it is one.
+         * Which is exactly a PatBlt with DSTINVERT, so it is one. Halftone, it
+         * is the PatBlt with PATINVERT and the system's gray brush that
+         * DrawFocusRect paints with: every other pixel inverted, a
+         * checkerboard from the brush origin, so a focus rectangle shows
+         * dotted over any picture and drawing it again still takes it away.
          *
          * @param {number} hdc
          * @param {import("./contract.js").Rect} rect
+         * @param {boolean} [halftone]
          * @returns {boolean}
          */
-        invertRect(hdc, rect){
+        invertRect(hdc, rect, halftone = false){
             const context = contextOf(hdc);
             if (!context)
             {
                 return false;
             }
+            const origin = context.brushOrigin;
             return clipped(context, ()=>patBlt({
                 dest: context.surface,
                 clip: context.clip,
@@ -559,7 +565,12 @@ export function createGdiDrawing(options = {}){
                 y: rect.top,
                 width: rect.right - rect.left,
                 height: rect.bottom - rect.top,
-                rop: DSTINVERT,
+                rop: halftone ? PATINVERT : DSTINVERT,
+                // The gray brush's bitmap is 0x55 over 0xAA: its set bits,
+                // the background white that inverts, where x + y is odd.
+                pattern: halftone
+                    ? (x, y)=>((x - origin.x + y - origin.y) & 1 ? 0xffffffff : 0)
+                    : undefined,
             }));
         },
 
