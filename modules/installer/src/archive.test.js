@@ -10,7 +10,8 @@ import { archiveDisc, isZipArchive, readZip } from './archive.js';
 import { discOptions } from './disc.js';
 
 /** @param {Uint8Array} bytes */
-const deflate = async bytes=>new Uint8Array(await new Response(new Blob([bytes]).stream()
+const deflate = async bytes=>new Uint8Array(await new Response(new Blob([
+    /** @type {BlobPart} */ (/** @type {unknown} */ (bytes))]).stream()
     .pipeThrough(new CompressionStream('deflate-raw'))).arrayBuffer());
 
 /**
@@ -20,7 +21,9 @@ const deflate = async bytes=>new Uint8Array(await new Response(new Blob([bytes])
  * @param {[string, Uint8Array | null, boolean][]} entries  name, bytes, deflated
  */
 async function zipOf(entries){
+    /** @type {BlobPart[]} */
     const parts = [];
+    /** @type {Uint8Array[]} */
     const central = [];
     let offset = 0;
     for (const [name, bytes, deflated] of entries)
@@ -42,7 +45,8 @@ async function zipOf(entries){
         head.setUint32(24, bytes?.length ?? 0, true);
         head.setUint16(28, nameBytes.length, true);
         head.setUint32(42, offset, true);
-        parts.push(new Uint8Array(local.buffer), nameBytes, body);
+        parts.push(new Uint8Array(local.buffer), nameBytes,
+            /** @type {BlobPart} */ (/** @type {unknown} */ (body)));
         central.push(new Uint8Array(head.buffer), nameBytes);
         offset += 30 + nameBytes.length + body.length;
     }
@@ -53,7 +57,8 @@ async function zipOf(entries){
     end.setUint16(10, entries.length, true);
     end.setUint32(12, size, true);
     end.setUint32(16, offset, true);
-    return new Blob([...parts, ...central, new Uint8Array(end.buffer)]);
+    return new Blob([...parts, .../** @type {BlobPart[]} */ (/** @type {unknown} */ (central)),
+        new Uint8Array(end.buffer)]);
 }
 
 test('a zip unpacks stored and deflated entries, directories and UTF-8 names', async()=>{
@@ -66,6 +71,7 @@ test('a zip unpacks stored and deflated entries, directories and UTF-8 names', a
     ]);
     assert.equal(await isZipArchive(zip), true);
     assert.equal(await isZipArchive(new Blob([new Uint8Array(2048)])), false);
+    /** @type {string[]} */
     const seen = [];
     const entries = await readZip(zip, (done, total)=>seen.push(`${done}/${total}`));
     assert.deepEqual(entries.map(entry=>entry.path),

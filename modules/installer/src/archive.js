@@ -113,7 +113,9 @@ const nameOf = (bytes, utf8)=>new TextDecoder(utf8 ? 'utf-8' : 'windows-1252').d
 async function inflate(bytes, path){
     try
     {
-        const stream = new Blob([bytes]).stream()
+        // An ArrayBuffer's view, which Blob takes whatever the declarations say.
+        const part = /** @type {BlobPart} */ (/** @type {unknown} */ (bytes));
+        const stream = new Blob([part]).stream()
             .pipeThrough(new DecompressionStream('deflate-raw'));
         return new Uint8Array(await new Response(stream).arrayBuffer());
     }
