@@ -33,15 +33,18 @@
 
 import { BS_SOLID, OPAQUE, createPattern, solidPattern } from './brush.js';
 import {
-    BLACKONWHITE, STRETCH_MODES, bitBlt, patBlt, sourceConversion, stretchBlt,
+    BLACKONWHITE, STRETCH_MODES, alphaBlend, bitBlt, patBlt, sourceConversion, stretchBlt,
+    transparentBlt,
 } from './blit.js';
 import { DSTINVERT, PATCOPY, PATINVERT, R2_COPYPEN } from './rop.js';
 import { PS_SOLID, createPainter, ellipse, fillRect, frameRect, line, polygon, rectangle }
     from './shapes.js';
-import { colorToPixel, intersectRect, isEmptyRect, pixelToColor, surfaceBounds }
+import { MONOCHROME, colorToPixel, intersectRect, isEmptyRect, pixelToColor, surfaceBounds }
     from './surface.js';
 import { encodeDib, setDIBitsToDevice, stretchDIBits } from './dib.js';
 import { extTextOut, textExtent } from './text.js';
+import { FLOODFILLSURFACE, floodFill } from './flood.js';
+import { gradientFill } from './gradient.js';
 import { paletteEntryToPixel } from '../../win32/gdi32/structs.js';
 
 /** What a call that should have returned a COLORREF says when it failed. */
@@ -469,6 +472,172 @@ export function createGdiDrawing(options = {}){
                 pattern: patternOf(context),
                 convert: conversionOf(context, from),
             }), { x: x - srcX, y: y - srcY });
+        },
+
+        /**
+         * BOOL MaskBlt(HDC, int, int, int, int, HDC, int, int, HBITMAP, int, int, DWORD)
+         *
+         * BitBlt with two raster operations, chosen pixel by pixel by a
+         * monochrome bitmap laid over the destination from the mask's own
+         * corner: a set bit takes the operation `rop` names, a clear one the
+         * background operation in its high byte. A pixel past the mask's edge
+         * has no bit, and takes the background operation.
+         *
+         * @param {number} hdc @param {number} x @param {number} y
+         * @param {number} width @param {number} height
+         * @param {number} source  The source HDC, or zero when neither operation reads one.
+         * @param {number} srcX @param {number} srcY
+         * @param {number} mask  A context with the mask bitmap's pixels.
+         * @param {number} maskX @param {number} maskY
+         * @param {number} rop  MAKEROP4 of the two.
+         * @returns {boolean}
+         */
+        maskBlt(hdc, x, y, width, height, source, srcX, srcY, mask, maskX, maskY, rop){
+            const context = contextOf(hdc);
+            const bits = contextOf(mask);
+            if (!context || !bits)
+            {
+                return false;
+            }
+            const from = contextOf(source);
+            const picture = /** @type {any} */ (bits.surface);
+            // A bit is set where the pixel is the colour a 1 means: white in a
+            // monochrome bitmap, the second entry of a one-bit section's table.
+            const one = ((picture.palette?.[1] ?? MONOCHROME[1]) & 0xffffff) >>> 0;
+            const shiftX = (maskX | 0) - (x | 0);
+            const shiftY = (maskY | 0) - (y | 0);
+            /** @param {number} px @param {number} py */
+            const set = (px, py)=>{
+                const mx = px + shiftX;
+                const my = py + shiftY;
+                return mx >= 0 && my >= 0 && mx < picture.width && my < picture.height
+                    && ((picture.read(mx, my) & 0xffffff) >>> 0) === one;
+            };
+            return clipped(context, ()=>bitBlt({
+                dest: context.surface,
+                clip: context.clip,
+                x, y, width, height,
+                src: from ? from.surface : undefined,
+                srcX, srcY,
+                rop,
+                pattern: patternOf(context),
+                convert: from ? conversionOf(context, from) : null,
+                mask: set,
+            }), { x: x - srcX, y: y - srcY });
+        },
+
+        /**
+         * BOOL GdiAlphaBlend(HDC, int, int, int, int, HDC, int, int, int, int, BLENDFUNCTION)
+         *
+         * The rectangles are the device's, each extent with its sign; the
+         * caller has checked them against the source.
+         *
+         * @param {number} hdc @param {number} x @param {number} y
+         * @param {number} width @param {number} height
+         * @param {number} source
+         * @param {number} srcX @param {number} srcY
+         * @param {number} srcWidth @param {number} srcHeight
+         * @param {{ constantAlpha: number, perPixel: boolean }} blend
+         * @returns {boolean}
+         */
+        alphaBlend(hdc, x, y, width, height, source, srcX, srcY, srcWidth, srcHeight, blend){
+            const context = contextOf(hdc);
+            const from = contextOf(source);
+            if (!context || !from)
+            {
+                return false;
+            }
+            return clipped(context, ()=>alphaBlend({
+                dest: context.surface,
+                clip: context.clip,
+                x, y, width, height,
+                src: from.surface,
+                srcX, srcY, srcWidth, srcHeight,
+                constantAlpha: blend.constantAlpha,
+                perPixel: blend.perPixel,
+                convert: conversionOf(context, from),
+            }));
+        },
+
+        /**
+         * BOOL GdiTransparentBlt(HDC, int, int, int, int, HDC, int, int, int, int, UINT)
+         *
+         * The rectangles are the device's, as AlphaBlend's are. The key is a
+         * COLORREF, compared as the source would store it: a 16-bit or
+         * indexed source cannot hold every colour, and its pixels of the key
+         * hold the nearest one it can.
+         *
+         * @param {number} hdc @param {number} x @param {number} y
+         * @param {number} width @param {number} height
+         * @param {number} source
+         * @param {number} srcX @param {number} srcY
+         * @param {number} srcWidth @param {number} srcHeight
+         * @param {number} color  The transparent colour.
+         * @returns {boolean}
+         */
+        transparentBlt(hdc, x, y, width, height, source, srcX, srcY, srcWidth, srcHeight, color){
+            const context = contextOf(hdc);
+            const from = contextOf(source);
+            if (!context || !from)
+            {
+                return false;
+            }
+            const pixel = colorToPixel(color);
+            const key = from.surface.nearest ? from.surface.nearest(pixel) : pixel;
+            return clipped(context, ()=>transparentBlt({
+                dest: context.surface,
+                clip: context.clip,
+                x, y, width, height,
+                src: from.surface,
+                srcX, srcY, srcWidth, srcHeight,
+                key,
+                convert: conversionOf(context, from),
+            }));
+        },
+
+        /**
+         * BOOL GdiGradientFill(HDC, PTRIVERTEX, ULONG, PVOID, ULONG, ULONG)
+         *
+         * The vertices are in device coordinates and the mesh's indices are
+         * the caller's to have checked. The pixels are written, not combined:
+         * the binary raster operation does not apply.
+         *
+         * @param {number} hdc
+         * @param {import("./gradient.js").Vertex[]} vertices
+         * @param {number[][]} mesh
+         * @param {number} mode
+         * @returns {boolean}
+         */
+        gradientFill(hdc, vertices, mesh, mode){
+            const context = contextOf(hdc);
+            if (!context)
+            {
+                return false;
+            }
+            clipped(context, ()=>gradientFill(createPainter(context.surface, context.clip),
+                vertices, mesh, mode));
+            return true;
+        },
+
+        /**
+         * BOOL ExtFloodFill(HDC, int, int, COLORREF, UINT)
+         *
+         * Fills with the selected brush, under the binary raster operation as
+         * any brush fill is.
+         *
+         * @param {number} hdc @param {number} x @param {number} y
+         * @param {number} color
+         * @param {number} type  FLOODFILLBORDER or FLOODFILLSURFACE.
+         * @returns {boolean} false when the fill could not start
+         */
+        floodFill(hdc, x, y, color, type){
+            const context = contextOf(hdc);
+            if (!context)
+            {
+                return false;
+            }
+            return floodFill(painterOf(context), context.clipRects ?? [context.clip], x | 0,
+                y | 0, colorToPixel(color), type === FLOODFILLSURFACE, patternOf(context));
         },
 
         /**

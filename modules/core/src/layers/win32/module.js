@@ -2626,6 +2626,15 @@ export function createWin32Module(){
                 SHGetFolderPathW: libraries['SHELL32.dll'].SHGetFolderPathW,
             };
 
+            // msimg32.dll is gdi32's blending under another name, its exports
+            // forwarded there as Windows forwards them: a program that linked
+            // AlphaBlend from it draws with gdi32's GdiAlphaBlend.
+            libraries['MSIMG32.dll'] = {
+                AlphaBlend: libraries['GDI32.dll'].GdiAlphaBlend,
+                GradientFill: libraries['GDI32.dll'].GdiGradientFill,
+                TransparentBlt: libraries['GDI32.dll'].GdiTransparentBlt,
+            };
+
             // timeGetTime answers the milliseconds GetTickCount answers, off the
             // same clock and with the same wrap -- timeBeginPeriod changes nothing
             // here -- so where GetTickCount is the guest's own read of the clock

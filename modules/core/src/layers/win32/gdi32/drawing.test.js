@@ -17,9 +17,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { arcPoints, bezierPoints, combine, isPolyDrawable, roundRectPoints } from './drawing.js';
+import {
+    arcPoints, bezierPoints, combine, isPolyDrawable, lineDdaPoints, roundRectPoints,
+} from './drawing.js';
 import { createGdiFunctions } from './functions.js';
 import { decodeAnsi } from '../kernel32/locale.js';
+import { createGdiDrawing } from '../../graphics/gdi/context.js';
+import { surfaceForDdb, surfaceForDibSection } from '../../graphics/gdi/surface.js';
 
 const HWND = 0x2000;
 const STRUCT = 0x30000;
@@ -28,6 +32,7 @@ const RAMP = 0x31000;
 
 const RGN_AND = 1;
 const RGN_OR = 2;
+const RGN_DIFF = 4;
 const RGN_COPY = 5;
 const NULLREGION = 1;
 const SIMPLEREGION = 2;
@@ -36,6 +41,7 @@ const PATCOPY = 0x00f00021;
 const DIB_RGB_COLORS = 0;
 const DIB_PAL_COLORS = 1;
 const SRCCOPY = 0x00cc0020;
+const FLOODFILLSURFACE = 1;
 
 function fakeMemory(size = 0x33000){
     const bytes = new Uint8Array(size);
@@ -355,10 +361,6 @@ test('the blits that need no source, and the ones that scale, reach the service'
 
     assert.equal(fns.PatBlt.handler([hdc, 1, 2, 30, 40, PATCOPY]), 1);
     assert.equal(fns.StretchBlt.handler([hdc, 0, 0, 10, 10, hdc, 0, 0, 5, 5, SRCCOPY]), 1);
-    assert.equal(fns.GdiTransparentBlt.handler([hdc, 0, 0, 10, 10, hdc, 0, 0, 5, 5, 0xff]), 1,
-        'a transparent blit is a stretch, the key copied too');
-    assert.equal(graphics.calls.filter(call=>call[0] === 'stretchBlt').at(-1)?.at(-1), SRCCOPY);
-    assert.equal(fns.GdiTransparentBlt.handler([hdc, 0, 0, -1, 10, hdc, 0, 0, 5, 5, 0]), 0);
     assert.equal(fns.SetStretchBltMode.handler([hdc, 3]), 1, 'the previous mode comes back');
     assert.equal(fns.GetStretchBltMode.handler([hdc]), 3);
 
@@ -1525,7 +1527,8 @@ test('ArcTo draws a line to the arc and the arc, and leaves the position at its 
     const before = graphics.calls.length;
     assert.equal(fns.ArcTo.handler([hdc, 0, 0, 20, 20, 20, 10, 10, 0]), 1);
     const drawn = linesIn(graphics.calls.slice(before));
-    assert.deepEqual(drawn[0], ['lineTo', 20, 10], 'from (50, 50) to where the arc starts');
+    // The ellipse leaves the rectangle's right edge out, as Ellipse does.
+    assert.deepEqual(drawn[0], ['lineTo', 19, 10], 'from (50, 50) to where the arc starts');
     assert.ok(drawn.every(([name])=>name === 'lineTo'), 'one stroke, no move');
     assert.deepEqual(positionOf(context), { x: 10, y: 0 }, 'and the arc\'s end is the position');
 
@@ -1533,7 +1536,7 @@ test('ArcTo draws a line to the arc and the arc, and leaves the position at its 
     fns.MoveToEx.handler([hdc, 0, 0, 0]);
     const clockwise = graphics.calls.length;
     fns.ArcTo.handler([hdc, 0, 0, 20, 20, 20, 10, 10, 0]);
-    assert.deepEqual(linesIn(graphics.calls.slice(clockwise))[0], ['lineTo', 20, 10]);
+    assert.deepEqual(linesIn(graphics.calls.slice(clockwise))[0], ['lineTo', 19, 10]);
     assert.deepEqual(positionOf(context), { x: 10, y: 0 }, 'clockwise ends there too');
     assert.ok(linesIn(graphics.calls.slice(clockwise)).some(([, x])=>x === 0),
         'having gone the long way round');
@@ -1621,7 +1624,6 @@ test('ExtSelectClipRgn combines the region into the clip in each mode, exactly',
     const { fns, hdc } = setup(graphics.services);
     const COMPLEXREGION = 3;
     const RGN_XOR = 3;
-    const RGN_DIFF = 4;
     const lastClip = ()=>graphics.calls.filter(call=>call[0] === 'setClipRect'
         || call[0] === 'setClipRegion').at(-1)?.[2];
     /** @param {any} area */
@@ -1782,4 +1784,602 @@ test('the part of its window a DC may draw in holds under any clip the program s
     gdi.draw.clip(hdc, []);
     assert.deepEqual(last(), ['setClipRect', hdc, { left: 0, top: 0, right: 0, bottom: 0 }],
         'a window off the screen draws nowhere');
+});
+
+// --- the entry points over the drawing engine itself ---
+
+/** Pixels as a 32-bit surface holds them, 0x00RRGGBB. */
+const WHITE_PIXEL = 0x00ffffff;
+const RED_PIXEL = 0x00ff0000;
+const GREEN_PIXEL = 0x0000ff00;
+const BLUE_PIXEL = 0x000000ff;
+/** The same as COLORREFs, 0x00BBGGRR. */
+const RED_COLOR = 0x000000ff;
+const GREEN_COLOR = 0x0000ff00;
+const BLUE_COLOR = 0x00ff0000;
+
+/**
+ * gdi32 over the real drawing engine, wired as the win32 module wires it: a
+ * memory DC on a top-down 32-bit DIB section whose pixels a test reads back,
+ * the program's callbacks recorded rather than run, and every last error set.
+ *
+ * @param {number} width @param {number} height
+ */
+function painted(width, height){
+    const bytes = new Uint8Array(0x80000);
+    const view = new DataView(bytes.buffer);
+    let next = 0x40000;
+    let handles = 4;
+    /** @type {number[][]} */
+    const called = [];
+    /** @type {number[]} */
+    const errors = [];
+    const gdi = createGdiFunctions({
+        readMemory: (address, length)=>bytes.slice(address, address + length),
+        writeMemory: (address, data)=>bytes.set(data, address),
+        readCString: ()=>'',
+        handles: { open: ()=>(handles += 4), close: ()=>undefined },
+        surfaces: {
+            /** @param {number} size */
+            allocate(size){
+                const address = next;
+                next += (size + 0xff) & ~0xff;
+                return address;
+            },
+            free: ()=>undefined,
+        },
+        graphics: {
+            createDrawing: options=>createGdiDrawing(options),
+            surfaceFor: (dc, bitmap)=>(bitmap.pixels ? surfaceForDdb(bitmap)
+                : surfaceForDibSection(bitmap, bytes, 0)),
+        },
+        call: async(entry, args)=>{
+            called.push([entry, ...args]);
+            return 0;
+        },
+        setLastError: code=>errors.push(code),
+    });
+    const fns = /** @type {Record<string, { argBytes: number, handler: (args: number[]) => any }>} */ (
+        /** @type {unknown} */ (gdi.table));
+    /**
+     * A top-down DIB section selected into a memory DC of its own.
+     *
+     * @param {number} w @param {number} h
+     * @param {{ bitCount?: number, masks?: number[] }} [format]
+     */
+    const section = (w, h, { bitCount = 32, masks } = {})=>{
+        const info = 0x100;
+        bytes.fill(0, info, info + 64);
+        view.setUint32(info, 40, true);
+        view.setInt32(info + 4, w, true);
+        view.setInt32(info + 8, -h, true);
+        view.setUint16(info + 12, 1, true);
+        view.setUint16(info + 14, bitCount, true);
+        if (masks)
+        {
+            view.setUint32(info + 16, 3, true);
+        }
+        // Masks, or for an indexed section black and white, follow the header.
+        (masks ?? [0, 0xffffff]).forEach((value, index)=>
+            view.setUint32(info + 40 + index * 4, value, true));
+        const bitmap = fns.CreateDIBSection.handler([0, info, 0, 0x80, 0, 0]);
+        const at = view.getUint32(0x80, true);
+        const dc = fns.CreateCompatibleDC.handler([0]);
+        fns.SelectObject.handler([dc, bitmap]);
+        return {
+            dc,
+            bitmap,
+            at,
+            /** @param {number} x @param {number} y */
+            pixel: (x, y)=>view.getUint32(at + (y * w + x) * 4, true),
+            /** @param {number} x @param {number} y @param {number} value */
+            put: (x, y, value)=>view.setUint32(at + (y * w + x) * 4, value >>> 0, true),
+            /** @param {number} value */
+            fill: value=>{
+                for (let index = 0; index < w * h; index++)
+                {
+                    view.setUint32(at + index * 4, value >>> 0, true);
+                }
+            },
+        };
+    };
+    return { bytes, view, gdi, fns, called, errors, section, ...section(width, height) };
+}
+
+/**
+ * Selects a solid pen and a solid brush into a DC.
+ *
+ * @param {ReturnType<typeof painted>} machine @param {number} pen @param {number} brush
+ */
+function pens(machine, pen, brush){
+    const { fns, dc } = machine;
+    fns.SelectObject.handler([dc, fns.CreatePen.handler([0, 1, pen])]);
+    fns.SelectObject.handler([dc, fns.CreateSolidBrush.handler([brush])]);
+}
+
+test('the new entry points pop the arguments their signatures carry', ()=>{
+    const { fns } = setup();
+    for (const [name, bytes] of /** @type {[string, number][]} */ ([['Chord', 36], ['Pie', 36],
+        ['ExtFloodFill', 20], ['FloodFill', 16], ['FrameRgn', 20], ['GetBrushOrgEx', 8],
+        ['GetDCOrgEx', 8], ['LineDDA', 24], ['MaskBlt', 48], ['GdiAlphaBlend', 44],
+        ['GdiGradientFill', 24]]))
+    {
+        assert.equal(fns[name]?.argBytes, bytes, name);
+    }
+});
+
+test('the new drawing calls fail without anything to draw with', ()=>{
+    const { fns, hdc, memory } = setup();
+    const region = fns.CreateRectRgn.handler([0, 0, 4, 4]);
+    const brush = fns.CreateSolidBrush.handler([0]);
+    memory.putU32s(STRUCT, [0, 0, 0xff00, 0, 4, 4, 0, 0]);
+    memory.putU32s(STRUCT + 0x40, [0, 1]);
+    assert.equal(fns.Chord.handler([hdc, 0, 0, 9, 9, 9, 4, 0, 4]), 0);
+    assert.equal(fns.Pie.handler([hdc, 0, 0, 9, 9, 9, 4, 0, 4]), 0);
+    assert.equal(fns.ExtFloodFill.handler([hdc, 1, 1, 0, 1]), 0);
+    assert.equal(fns.FloodFill.handler([hdc, 1, 1, 0]), 0);
+    assert.equal(fns.FrameRgn.handler([hdc, region, brush, 1, 1]), 0);
+    assert.equal(fns.MaskBlt.handler([hdc, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, PATCOPY]), 0);
+    assert.equal(fns.GdiAlphaBlend.handler([hdc, 0, 0, 1, 1, hdc, 0, 0, 1, 1, 0x00ff0000]), 0);
+    assert.equal(fns.GdiGradientFill.handler([hdc, STRUCT, 2, STRUCT + 0x40, 1, 0]), 0);
+});
+
+test('Arc keeps inside its rectangle, the right and bottom edges left out', ()=>{
+    // Wine's test_arcs, pixel for pixel where it pins them.
+    const machine = painted(64, 40);
+    pens(machine, 0x111111, 0);
+    machine.fill(0);
+    assert.equal(machine.fns.Arc.handler([machine.dc, 10, 10, 40, 25, 0, 15, 20, 0]), 1);
+    for (let y = 9; y <= 26; y++)
+    {
+        for (let x = 9; x <= 41; x++)
+        {
+            const colour = machine.pixel(x, y);
+            if (x < 10 || y < 10 || x >= 40 || y >= 25 || (x < 22 && y < 16))
+            {
+                assert.equal(colour, 0, `nothing at (${x}, ${y})`);
+            }
+            if (((x === 24 || x === 25) && (y === 10 || y === 24))
+                || ((x === 10 || x === 39) && y === 17))
+            {
+                assert.equal(colour, 0x111111, `the pen at (${x}, ${y})`);
+            }
+        }
+    }
+});
+
+test('Chord and Pie of the whole ellipse fill it, inside the same rectangle as Arc', ()=>{
+    for (const name of ['Chord', 'Pie'])
+    {
+        const machine = painted(64, 40);
+        pens(machine, 0x111111, RED_COLOR);
+        machine.fill(0);
+        assert.equal(machine.fns[name].handler([machine.dc, 10, 10, 40, 25, 0, 17, 0, 17]), 1);
+        for (let y = 0; y < 40; y++)
+        {
+            for (let x = 0; x < 64; x++)
+            {
+                if (x < 10 || y < 10 || x >= 40 || y >= 25)
+                {
+                    assert.equal(machine.pixel(x, y), 0, `${name}: nothing at (${x}, ${y})`);
+                }
+            }
+        }
+        for (const [x, y] of [[24, 10], [25, 10], [24, 24], [25, 24], [10, 17], [39, 17]])
+        {
+            assert.equal(machine.pixel(x, y), 0x111111, `${name}: the pen at (${x}, ${y})`);
+        }
+        assert.equal(machine.pixel(25, 20), RED_PIXEL, `${name}: the brush inside`);
+    }
+});
+
+test('a chord is the piece its line cuts off and a pie the wedge, in the arc\'s direction', ()=>{
+    const machine = painted(48, 48);
+    const { fns, dc, pixel, fill } = machine;
+    pens(machine, BLUE_COLOR, RED_COLOR);
+    fill(WHITE_PIXEL);
+    // From the right round to the left: over the top, counterclockwise.
+    assert.equal(fns.Chord.handler([dc, 0, 0, 41, 41, 41, 20, 0, 20]), 1);
+    assert.deepEqual([pixel(20, 10), pixel(20, 20), pixel(20, 30)],
+        [RED_PIXEL, BLUE_PIXEL, WHITE_PIXEL], 'the top half, closed by the chord along y = 20');
+    fill(WHITE_PIXEL);
+    fns.SetArcDirection.handler([dc, 2]);
+    fns.Chord.handler([dc, 0, 0, 41, 41, 41, 20, 0, 20]);
+    assert.deepEqual([pixel(20, 10), pixel(20, 30)], [WHITE_PIXEL, RED_PIXEL],
+        'clockwise, the bottom half');
+    fns.SetArcDirection.handler([dc, 1]);
+
+    fill(WHITE_PIXEL);
+    assert.equal(fns.Pie.handler([dc, 0, 0, 41, 41, 41, 20, 20, 0]), 1);
+    assert.deepEqual([pixel(30, 10), pixel(10, 10), pixel(30, 30), pixel(20, 20)],
+        [RED_PIXEL, WHITE_PIXEL, WHITE_PIXEL, BLUE_PIXEL],
+        'the upper right quarter, to the centre');
+    const before = machine.bytes.slice();
+    assert.equal(fns.Pie.handler([dc, 5, 5, 5, 20, 0, 0, 9, 9]), 1, 'a rectangle with no inside');
+    assert.deepEqual(machine.bytes, before, 'draws nothing');
+    assert.equal(fns.Chord.handler([0x7777, 0, 0, 9, 9, 9, 4, 0, 4]), 0, 'not a DC');
+});
+
+test('ExtFloodFill paints with the brush over a surface or up to a border, inside the clip', ()=>{
+    // Wine's dib.c scene, smaller: blue, a green square, a blue island at its
+    // edge, and a bar taken out of the clip that the fill cannot cross.
+    const machine = painted(32, 24);
+    const { fns, dc, pixel, put, fill } = machine;
+    pens(machine, 0, RED_COLOR);
+    fill(BLUE_PIXEL);
+    for (let y = 2; y < 20; y++)
+    {
+        for (let x = 2; x < 26; x++)
+        {
+            put(x, y, x < 6 && y >= 8 && y < 12 ? BLUE_PIXEL : GREEN_PIXEL);
+        }
+    }
+    fns.ExtSelectClipRgn.handler([dc, fns.CreateRectRgn.handler([16, 0, 18, 24]), RGN_DIFF]);
+    assert.equal(fns.ExtFloodFill.handler([dc, 10, 10, GREEN_COLOR, FLOODFILLSURFACE]), 1);
+    assert.deepEqual([pixel(10, 10), pixel(2, 2), pixel(15, 19), pixel(3, 9), pixel(16, 10),
+        pixel(20, 10), pixel(1, 1)], [RED_PIXEL, RED_PIXEL, RED_PIXEL, BLUE_PIXEL, GREEN_PIXEL,
+        GREEN_PIXEL, BLUE_PIXEL], 'the green, as far as the bar; not the island, not past it');
+    fns.SelectClipRgn.handler([dc, 0]);
+    assert.equal(fns.ExtFloodFill.handler([dc, -1, -1, GREEN_COLOR, FLOODFILLSURFACE]), 0,
+        'a start off the bitmap');
+    assert.equal(fns.ExtFloodFill.handler([dc, 20, 10, BLUE_COLOR, FLOODFILLSURFACE]), 0,
+        'a start that is not the surface\'s colour');
+    assert.equal(fns.ExtFloodFill.handler([dc, 20, 10, BLUE_COLOR, 2]), 0, 'no such type');
+
+    // FloodFill is the border form: everything up to the blue.
+    assert.equal(fns.FloodFill.handler([dc, 20, 10, BLUE_COLOR]), 1);
+    assert.deepEqual([pixel(20, 10), pixel(17, 5), pixel(3, 9), pixel(0, 0)],
+        [RED_PIXEL, RED_PIXEL, BLUE_PIXEL, BLUE_PIXEL], 'the green and what was filled in it');
+    assert.equal(fns.FloodFill.handler([dc, 0, 0, BLUE_COLOR]), 0, 'a start on the border');
+});
+
+test('FrameRgn paints a border inside the region, w across the sides and h down the ends', ()=>{
+    const machine = painted(16, 12);
+    const { fns, dc, pixel, fill } = machine;
+    const red = fns.CreateSolidBrush.handler([RED_COLOR]);
+    const region = fns.CreateRectRgn.handler([4, 2, 14, 9]);
+    const rows = ()=>Array.from({ length: 10 }, (_, y)=>Array.from({ length: 16 }, (__, x)=>
+        (pixel(x, y) === RED_PIXEL ? 'r' : '.')).join(''));
+    const framed = [
+        '................',
+        '................',
+        '....rrrrrrrrrr..',
+        '....rr......rr..',
+        '....rr......rr..',
+        '....rr......rr..',
+        '....rr......rr..',
+        '....rr......rr..',
+        '....rrrrrrrrrr..',
+        '................',
+    ];
+    fill(WHITE_PIXEL);
+    assert.equal(fns.FrameRgn.handler([dc, region, red, 2, 1]), 1);
+    assert.deepEqual(rows(), framed);
+    fill(WHITE_PIXEL);
+    assert.equal(fns.FrameRgn.handler([dc, region, red, -2, -1]), 1);
+    assert.deepEqual(rows(), framed, 'the sizes without their signs');
+
+    fill(WHITE_PIXEL);
+    fns.FrameRgn.handler([dc, fns.CreateRectRgn.handler([0, 0, 3, 3]), red, 2, 2]);
+    assert.deepEqual(rows().slice(0, 4).map(row=>row.slice(0, 4)),
+        ['rrr.', 'rrr.', 'rrr.', '....'], 'narrower than two sides is all border');
+    assert.equal(fns.FrameRgn.handler([dc, region, fns.CreatePen.handler([0, 1, 0]), 1, 1]), 0,
+        'a pen is no brush');
+    assert.equal(fns.FrameRgn.handler([dc, red, red, 1, 1]), 0, 'a brush is no region');
+});
+
+test('GetBrushOrgEx answers the origin SetBrushOrgEx set, as it was given', ()=>{
+    // Wine's test_brush_org: an origin past sixteen bits is kept whole.
+    const { fns, memory, hdc } = setup();
+    assert.equal(fns.GetBrushOrgEx.handler([hdc, OUT]), 1);
+    assert.deepEqual([memory.u32(OUT), memory.u32(OUT + 4)], [0, 0]);
+    fns.SetBrushOrgEx.handler([hdc, 0x10000, -1, 0]);
+    assert.equal(fns.GetBrushOrgEx.handler([hdc, OUT]), 1);
+    assert.deepEqual([memory.u32(OUT), memory.u32(OUT + 4) | 0], [0x10000, -1]);
+    assert.equal(fns.GetBrushOrgEx.handler([hdc, 0]), 0, 'nowhere to write it');
+    assert.equal(fns.GetBrushOrgEx.handler([0x7777, OUT]), 0, 'not a DC');
+});
+
+test('GetDCOrgEx is where a window DC starts on the screen, and the corner for any other', ()=>{
+    const { gdi, fns, dc, view } = painted(1, 1);
+    const origin = (/** @type {number} */ hdc)=>(fns.GetDCOrgEx.handler([hdc, 0x300]) === 1
+        ? [view.getInt32(0x300, true), view.getInt32(0x304, true)] : null);
+    assert.deepEqual(origin(gdi.windowContext(0x2000,
+        { left: 100, top: -50, right: 300, bottom: 250 })), [100, -50]);
+    assert.deepEqual(origin(gdi.windowContext(0, null)), [0, 0], 'the screen\'s own');
+    assert.deepEqual(origin(dc), [0, 0], 'a bitmap\'s');
+    fns.SetViewportOrgEx.handler([dc, 7, 9, 0]);
+    assert.deepEqual(origin(dc), [0, 0], 'whatever the mapping');
+    assert.equal(fns.GetDCOrgEx.handler([dc, 0]), 0);
+    assert.equal(fns.GetDCOrgEx.handler([0x7777, 0x300]), 0);
+});
+
+test('LineDDA calls back with the points Windows reports, the last left out', async()=>{
+    // Wine's test_linedda, every octant it tries.
+    /** @param {number[]} flat */
+    const pairs = flat=>Array.from({ length: flat.length / 2 }, (_, at)=>
+        [flat[at * 2], flat[at * 2 + 1]]);
+    const cases = /** @type {[number[], number[][]][]} */ ([
+        [[10, 20, 20, 40], pairs([10, 20, 10, 21, 11, 22, 11, 23, 12, 24, 12, 25, 13, 26, 13, 27,
+            14, 28, 14, 29, 15, 30, 15, 31, 16, 32, 16, 33, 17, 34, 17, 35, 18, 36, 18, 37, 19, 38,
+            19, 39])],
+        [[10, 20, 20, 43], pairs([10, 20, 10, 21, 11, 22, 11, 23, 12, 24, 12, 25, 13, 26, 13, 27,
+            13, 28, 14, 29, 14, 30, 15, 31, 15, 32, 16, 33, 16, 34, 17, 35, 17, 36, 17, 37, 18, 38,
+            18, 39, 19, 40, 19, 41, 20, 42])],
+        [[10, 20, 10, 20], []],
+        [[10, 20, 11, 27], pairs([10, 20, 10, 21, 10, 22, 10, 23, 11, 24, 11, 25, 11, 26])],
+        [[20, 43, 10, 20], pairs([20, 43, 20, 42, 19, 41, 19, 40, 18, 39, 18, 38, 17, 37, 17, 36,
+            17, 35, 16, 34, 16, 33, 15, 32, 15, 31, 14, 30, 14, 29, 13, 28, 13, 27, 13, 26, 12, 25,
+            12, 24, 11, 23, 11, 22, 10, 21])],
+        [[20, 20, 10, 43], pairs([20, 20, 20, 21, 19, 22, 19, 23, 18, 24, 18, 25, 17, 26, 17, 27,
+            17, 28, 16, 29, 16, 30, 15, 31, 15, 32, 14, 33, 14, 34, 13, 35, 13, 36, 13, 37, 12, 38,
+            12, 39, 11, 40, 11, 41, 10, 42])],
+        [[20, 20, 43, 10], pairs([20, 20, 21, 20, 22, 19, 23, 19, 24, 18, 25, 18, 26, 17, 27, 17,
+            28, 17, 29, 16, 30, 16, 31, 15, 32, 15, 33, 14, 34, 14, 35, 13, 36, 13, 37, 13, 38, 12,
+            39, 12, 40, 11, 41, 11, 42, 10])],
+    ]);
+    const { fns, called } = painted(1, 1);
+    const PROC = 0x401000;
+    for (const [line, points] of cases)
+    {
+        called.length = 0;
+        assert.equal(await fns.LineDDA.handler([...line, PROC, 0xabc]), 1);
+        assert.deepEqual(called, points.map(([x, y])=>[PROC, x, y, 0xabc]), line.join(', '));
+        assert.deepEqual([...lineDdaPoints(line[0], line[1], line[2], line[3])]
+            .map(({ x, y })=>[x, y]), points);
+    }
+    called.length = 0;
+    await fns.LineDDA.handler([-2, 0, 0, 0, PROC, 0]);
+    assert.deepEqual(called, [[PROC, 0xfffffffe, 0, 0], [PROC, 0xffffffff, 0, 0]],
+        'a negative coordinate is the int it is');
+    assert.equal(fns.LineDDA.handler([0, 0, 5, 5, 0, 0]), 0, 'no callback to call');
+    assert.equal(setup().fns.LineDDA.handler([0, 0, 5, 5, PROC, 0]), 0,
+        'nor any way to call one');
+    assert.equal(setup().fns.LineDDA.handler([3, 3, 3, 3, PROC, 0]), 1, 'but no points is done');
+});
+
+test('MaskBlt takes the foreground operation where the mask is set, the background elsewhere',
+    ()=>{
+        const machine = painted(8, 1);
+        const { fns, dc, pixel, fill, bytes, view, section } = machine;
+        const source = section(8, 1);
+        source.fill(RED_PIXEL);
+        const row = ()=>[...Array(8).keys()].map(x=>(pixel(x, 0) === RED_PIXEL ? 1 : 0));
+        bytes.set([0xa5, 0], 0x200);
+        const mask = fns.CreateBitmap.handler([8, 1, 1, 1, 0x200]);
+        const DSTCOPY = 0x00aa0029;
+        const rop = (((DSTCOPY << 8) & 0xff000000) | SRCCOPY) >>> 0;
+
+        fill(WHITE_PIXEL);
+        assert.equal(fns.MaskBlt.handler([dc, 0, 0, 8, 1, source.dc, 0, 0, mask, 0, 0, rop]), 1);
+        assert.deepEqual(row(), [1, 0, 1, 0, 0, 1, 0, 1]);
+        assert.equal(pixel(1, 0), WHITE_PIXEL, 'the background operation left it');
+
+        // A one-bit DIB section is a mask too, its bits read through its table.
+        const bits = section(8, 1, { bitCount: 1 });
+        bytes[bits.at] = 0x0f;
+        fill(WHITE_PIXEL);
+        fns.MaskBlt.handler([dc, 0, 0, 8, 1, source.dc, 0, 0, bits.bitmap, 0, 0, rop]);
+        assert.deepEqual(row(), [0, 0, 0, 0, 1, 1, 1, 1]);
+
+        fill(WHITE_PIXEL);
+        assert.equal(fns.MaskBlt.handler([dc, 0, 0, 8, 1, source.dc, 0, 0, 0, 0, 0, rop]), 1);
+        assert.deepEqual(row(), [1, 1, 1, 1, 1, 1, 1, 1], 'no mask is BitBlt with the foreground');
+
+        assert.equal(fns.MaskBlt.handler([dc, 0, 0, 8, 1, source.dc, 0, 0, source.bitmap, 0, 0,
+            rop]), 0, 'a mask of colour');
+        assert.equal(fns.MaskBlt.handler([dc, 0, 0, 8, 1, source.dc, 0, 0,
+            fns.CreateSolidBrush.handler([0]), 0, 0, rop]), 0, 'a mask that is no bitmap');
+        assert.equal(fns.MaskBlt.handler([dc, 0, 0, 8, 1, 0, 0, 0, mask, 0, 0, rop]), 0,
+            'the foreground reads a source there is not');
+        void view;
+    });
+
+/** A BLENDFUNCTION as it crosses the stack. @param {number} alpha @param {number} [format] */
+const blendOf = (alpha, format = 0)=>((format << 24) | (alpha << 16)) >>> 0;
+
+test('GdiAlphaBlend blends by MSDN\'s sums, rounded as Windows rounds them', ()=>{
+    // Wine's test_32bit_ddb: a 32-bit device bitmap of 0x40201008 over a
+    // section pixel of 0x80808080, at a constant alpha of 128.
+    const machine = painted(2, 1);
+    const { fns, dc, pixel, put, view } = machine;
+    view.setUint32(0x200, 0x40201008, true);
+    const source = fns.CreateCompatibleDC.handler([0]);
+    fns.SelectObject.handler([source, fns.CreateBitmap.handler([1, 1, 1, 32, 0x200])]);
+    put(0, 0, 0x80808080);
+    assert.equal(fns.GdiAlphaBlend.handler([dc, 0, 0, 1, 1, source, 0, 0, 1, 1,
+        blendOf(128)]), 1);
+    assert.equal(pixel(0, 0), 0x60504844);
+    put(0, 0, 0x80808080);
+    assert.equal(fns.GdiAlphaBlend.handler([dc, 0, 0, 1, 1, source, 0, 0, 1, 1,
+        blendOf(128, 1)]), 1);
+    assert.equal(pixel(0, 0), 0x90807874, 'premultiplied');
+    put(0, 0, 0);
+    put(1, 0, 0);
+    fns.GdiAlphaBlend.handler([dc, 0, 0, 2, 1, source, 0, 0, 1, 1, blendOf(255)]);
+    assert.deepEqual([pixel(0, 0), pixel(1, 0)], [0x40201008, 0x40201008], 'and stretched');
+});
+
+test('GdiAlphaBlend refuses what Windows refuses, and maps both rectangles first', ()=>{
+    // Wine's test_GdiAlphaBlend, case by case.
+    const machine = painted(100, 100);
+    const { fns, dc, errors, section } = machine;
+    const source = section(20, 20);
+    const blend = blendOf(128);
+    /** @param {number[]} args @returns {[number, number | null]} the answer and any error */
+    const tried = args=>{
+        errors.length = 0;
+        return [fns.GdiAlphaBlend.handler(args), errors.at(-1) ?? null];
+    };
+    const src = source.dc;
+    assert.deepEqual(tried([dc, 0, 0, 20, 20, src, 0, 0, 20, 20, blend]), [1, null]);
+    for (const [x, y, w, h] of [[-1, 0, 10, 10], [0, -1, 10, 10], [15, 0, 10, 10],
+        [10, 10, -2, 3]])
+    {
+        assert.deepEqual(tried([dc, 0, 0, 20, 20, src, x, y, w, h, blend]), [0, 87],
+            `the source ${x}, ${y}, ${w}, ${h}`);
+    }
+    fns.SetWindowOrgEx.handler([src, -10, -10, 0]);
+    assert.deepEqual(tried([dc, 0, 0, 20, 20, src, -1, 0, 10, 10, blend]), [1, null],
+        'the source rectangle is logical');
+    assert.deepEqual(tried([dc, 0, 0, 20, 20, src, 0, -1, 10, 10, blend]), [1, null]);
+    fns.SetWindowOrgEx.handler([src, 0, 0, 0]);
+    fns.SetMapMode.handler([dc, 8]);
+    fns.SetViewportExtEx.handler([dc, -1, -1, 0]);
+    assert.deepEqual(tried([dc, -20, -20, 20, 20, src, 0, 0, 20, 20, blend]), [1, null],
+        'a destination the mapping flips');
+    assert.deepEqual(tried([dc, 0, -20, 20, -20, src, 0, 0, 20, 20, blend]), [0, 87],
+        'but not one given flipped');
+    fns.SetMapMode.handler([dc, 1]);
+
+    assert.deepEqual(tried([dc, 0, 0, 20, 20, 0, 0, 0, 20, 20, blend]), [0, null], 'no source');
+    assert.deepEqual(tried([dc, 0, 0, 20, 20, dc, 19, 19, 20, 20, blend]), [0, 87], 'overlapping');
+    assert.deepEqual(tried([dc, 20, 20, 20, 20, dc, 1, 1, 20, 20, blend]), [0, 87]);
+    assert.deepEqual(tried([dc, 0, 0, 20, 20, dc, 20, 10, 20, 20, blend]), [1, null],
+        'side by side in one bitmap');
+    for (const bad of [blend | 1, blend | 0x100, blendOf(128, 2)])
+    {
+        assert.deepEqual(tried([dc, 0, 0, 20, 20, src, 0, 0, 20, 20, bad]), [0, 87],
+            `BLENDFUNCTION 0x${bad.toString(16)}`);
+    }
+
+    // AC_SRC_ALPHA wants a source whose pixels hold an alpha.
+    const alpha = blendOf(128, 1);
+    assert.deepEqual(tried([dc, 0, 0, 20, 20, src, 0, 0, 20, 20, alpha]), [1, null]);
+    const bgra = section(20, 20, { masks: [0xff0000, 0x00ff00, 0x0000ff] });
+    assert.deepEqual(tried([dc, 0, 0, 20, 20, bgra.dc, 0, 0, 20, 20, alpha]), [1, null]);
+    for (const other of [section(20, 20, { masks: [0x0000ff, 0x00ff00, 0xff0000] }),
+        section(20, 20, { bitCount: 24 }), section(20, 20, { bitCount: 1 })])
+    {
+        assert.deepEqual(tried([dc, 0, 0, 20, 20, other.dc, 0, 0, 20, 20, alpha]), [0, 87]);
+    }
+    const mono = fns.CreateCompatibleDC.handler([0]);
+    fns.SelectObject.handler([mono, fns.CreateBitmap.handler([100, 100, 1, 1, 0])]);
+    assert.deepEqual(tried([dc, 0, 0, 20, 20, mono, 0, 0, 20, 20, alpha]), [0, 87]);
+    assert.deepEqual(tried([dc, 0, 0, 20, 20, mono, 0, 0, 20, 20, blend]), [1, null],
+        'a constant alpha takes any source');
+});
+
+/**
+ * TRIVERTEXes into guest memory.
+ *
+ * @param {DataView} view @param {number} at @param {number[][]} vertices
+ *     x, y, red, green, blue, alpha each.
+ */
+function putVertices(view, at, vertices){
+    vertices.forEach(([x, y, ...channels], index)=>{
+        view.setInt32(at + index * 16, x, true);
+        view.setInt32(at + index * 16 + 4, y, true);
+        channels.forEach((value, channel)=>view.setUint16(at + index * 16 + 8 + channel * 2,
+            value, true));
+    });
+}
+
+/** @param {DataView} view @param {number} at @param {number[]} indices */
+function putIndices(view, at, indices){
+    indices.forEach((value, index)=>view.setUint32(at + index * 4, value, true));
+}
+
+test('GdiGradientFill checks its arguments and its mesh as Windows does', ()=>{
+    // Wine's test_GdiGradientFill, call by call.
+    const machine = painted(20, 20);
+    const { fns, dc, errors, view } = machine;
+    const VT = 0x200;
+    const RECTS = 0x300;
+    const TRIS = 0x380;
+    putVertices(view, VT, [[2, 2, 0xff00, 0, 0, 0x8000], [10, 10, 0, 0xff00, 0, 0x8000],
+        [20, 10, 0, 0, 0xff00, 0xff00]]);
+    putIndices(view, RECTS, [0, 0, 0, 1, 2, 3]);
+    putIndices(view, TRIS, [0, 0, 0, 0, 1, 2, 0, 2, 1, 0, 1, 3]);
+    /** @param {number[]} args @returns {[number, number | null]} */
+    const tried = args=>{
+        errors.length = 0;
+        return [fns.GdiGradientFill.handler(args), errors.at(-1) ?? null];
+    };
+    assert.deepEqual(tried([dc, VT, 3, RECTS, 1, 0]), [1, null]);
+    assert.deepEqual(tried([dc, VT, 3, RECTS, 1, 3]), [0, 87], 'no such mode');
+    assert.deepEqual(tried([0xdead, VT, 3, RECTS, 1, 0]), [0, 87], 'no such DC');
+    assert.deepEqual(tried([0, 0, 0, RECTS, 1, 0]), [0, 87]);
+    assert.deepEqual(tried([dc, 0, 0, RECTS, 1, 0]), [0, 87], 'no vertices');
+    assert.deepEqual(tried([dc, 0, 3, RECTS, 1, 0]), [0, 87]);
+    assert.deepEqual(tried([dc, VT, 3, 0, 0, 0]), [0, 87], 'no mesh');
+    assert.deepEqual(tried([dc, VT, 3, 0, 1, 0]), [0, 87]);
+    assert.deepEqual(tried([dc, VT, 3, RECTS, 0, 0]), [0, 87]);
+    assert.deepEqual(tried([dc, VT, 3, RECTS, 3, 0]), [0, null], 'an index past the vertices');
+    putIndices(view, RECTS + 16, [1, 1]);
+    assert.deepEqual(tried([dc, VT, 3, RECTS, 3, 0]), [1, null], 'a rectangle of one point');
+    assert.deepEqual(tried([dc, VT, 1, RECTS, 1, 0]), [1, null]);
+    assert.deepEqual(tried([dc, VT, 1, TRIS, 0, 2]), [0, 87]);
+    assert.deepEqual(tried([dc, VT, 1, TRIS, 1, 2]), [1, null], 'a triangle of one point');
+    assert.deepEqual(tried([dc, VT, 3, TRIS, 2, 2]), [1, null]);
+    assert.deepEqual(tried([dc, VT, 3, TRIS, 3, 2]), [1, null]);
+    assert.deepEqual(tried([dc, VT, 3, TRIS, 4, 2]), [0, null]);
+    for (const last of [[0, 1, 1], [0, 1, 0]])
+    {
+        putIndices(view, TRIS + 36, last);
+        assert.deepEqual(tried([dc, VT, 3, TRIS, 4, 2]), [0, null], `a line, ${last}`);
+    }
+    putIndices(view, TRIS + 36, [1, 1, 1]);
+    assert.deepEqual(tried([dc, VT, 3, TRIS, 4, 2]), [1, null]);
+});
+
+test('GdiGradientFill shades the device\'s pixels where the mapping puts its vertices', ()=>{
+    const machine = painted(20, 4);
+    const { fns, dc, pixel, fill, view } = machine;
+    putVertices(view, 0x200, [[2, 0, 0xff00, 0, 0, 0x8000], [10, 2, 0, 0xff00, 0, 0xff00]]);
+    putIndices(view, 0x300, [0, 1]);
+    fill(WHITE_PIXEL);
+    assert.equal(fns.GdiGradientFill.handler([dc, 0x200, 2, 0x300, 1, 0]), 1);
+    assert.deepEqual([pixel(1, 0), pixel(2, 0), pixel(6, 1), pixel(10, 0), pixel(2, 2)],
+        [WHITE_PIXEL, 0x80ff0000, 0xbf7f7f00, WHITE_PIXEL, WHITE_PIXEL],
+        'red to green across, alpha with them, inside the half-open box');
+    fill(WHITE_PIXEL);
+    fns.SetViewportOrgEx.handler([dc, 5, 1, 0]);
+    fns.GdiGradientFill.handler([dc, 0x200, 2, 0x300, 1, 1]);
+    assert.deepEqual([pixel(6, 1), pixel(7, 1), pixel(7, 2), pixel(7, 3)],
+        [WHITE_PIXEL, 0x80ff0000, 0xbf7f7f00, WHITE_PIXEL], 'moved by the viewport, shaded down');
+});
+
+test('GdiTransparentBlt stretches the source over the destination, leaving the key out', ()=>{
+    const machine = painted(4, 2);
+    const { fns, dc, pixel, fill, section } = machine;
+    const source = section(2, 1);
+    // Wine's test_GdiTransparentBlt: a key of white leaves out 0xffffffff,
+    // the unused byte being no part of the colour.
+    source.put(0, 0, 0xffffffff);
+    source.put(1, 0, RED_PIXEL);
+    fill(0x00123456);
+    assert.equal(fns.GdiTransparentBlt.handler([dc, 0, 0, 4, 2, source.dc, 0, 0, 2, 1,
+        0x00ffffff]), 1);
+    assert.deepEqual([0, 1, 2, 3].map(x=>pixel(x, 1)),
+        [0x00123456, 0x00123456, RED_PIXEL, RED_PIXEL], 'stretched twice over, the white left out');
+
+    // A 16-bit source holds the nearest colour it can to the key, and that
+    // is what is left out.
+    const shallow = section(2, 1, { bitCount: 16 });
+    const KEY = 0x00030507;
+    fns.SetPixel.handler([shallow.dc, 0, 0, KEY]);
+    fns.SetPixel.handler([shallow.dc, 1, 0, BLUE_COLOR]);
+    fill(0x00123456);
+    assert.equal(fns.GdiTransparentBlt.handler([dc, 0, 0, 2, 1, shallow.dc, 0, 0, 2, 1, KEY]), 1);
+    assert.deepEqual([pixel(0, 0), pixel(1, 0)], [0x00123456, BLUE_PIXEL]);
+
+    fns.SetWindowOrgEx.handler([source.dc, -1, 0, 0]);
+    fill(0x00123456);
+    assert.equal(fns.GdiTransparentBlt.handler([dc, 0, 0, 1, 1, source.dc, 0, 0, 1, 1,
+        0x00ffffff]), 1, 'the source rectangle is logical');
+    assert.equal(pixel(0, 0), RED_PIXEL);
+    fns.SetWindowOrgEx.handler([source.dc, 0, 0, 0]);
+
+    for (const args of [[0, 0, -1, 1, 0, 0, 1, 1], [0, 0, 1, 1, 0, 0, 1, -1],
+        [0, 0, 1, 1, -1, 0, 1, 1], [0, 0, 1, 1, 1, 0, 2, 1], [0, 0, 1, 1, 0, 0, 1, 2]])
+    {
+        const [x, y, w, h, x1, y1, w1, h1] = args;
+        assert.equal(fns.GdiTransparentBlt.handler([dc, x, y, w, h, source.dc, x1, y1, w1, h1,
+            0]), 0, `refused: ${args}`);
+    }
+    assert.equal(fns.GdiTransparentBlt.handler([dc, 0, 0, 1, 1, 0, 0, 0, 1, 1, 0]), 0,
+        'no source');
+    assert.equal(setup().fns.GdiTransparentBlt.handler([setup().hdc, 0, 0, 1, 1, setup().hdc,
+        0, 0, 1, 1, 0]), 0, 'nothing to draw with');
 });
