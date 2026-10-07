@@ -21,6 +21,7 @@
 import { emitRegion, finishModule, prepareModule } from '../emit/region.js';
 import { formRegion, formShared } from '../region.js';
 import { ModuleBuilder } from '../wasm/encoder.js';
+import { openArena } from './arena.js';
 
 /**
  * @typedef {Object} BuiltRegion
@@ -64,18 +65,29 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  */
 
 /**
- * @typedef {Object} EmitCache  Region functions already emitted (`createEmitCache`).
- * @property {Map<string, { typeIndex: number, locals: number[], body: Uint8Array,
- *     hints: number[], region: Omit<BatchRegion, 'exportName'>, shape: Float64Array,
- *     size: number }>} kept
- *     by the module's context, the region's entry and hash, and what its job asked of the
- *     emitter (`jobKey`), the least recently used first; `shape` is `shapeOf` the
- *     region, which a hit must match, and `region` what the emitter answered, shared by
- *     every batch that takes the function (nothing writes it)
- * @property {Map<string, number>} contexts  `contextKey` → the number keys name it by
- * @property {number} bytes   the sizes of what is kept
- * @property {number} limit
- * @property {number} hits
+ * @typedef {import('./arena.js').KeptFunction} KeptFunction
+ */
+
+/**
+ * Region functions already emitted, kept by the module's context, the region's
+ * entry and hash, and what its job asked of the emitter (`jobKey`); a hit must
+ * also match the region's `shapeOf`. Kept in this thread (`createEmitCache`) or
+ * in the arena a process's translators share (`arenaEmitCache`).
+ *
+ * @typedef {Object} EmitCache
+ * @property {(signature: string) => string} context  what keys name a module's context by
+ * @property {(key: string, shape: number[]) => KeptFunction | undefined} take
+ * @property {(key: string, shape: number[], kept: KeptFunction) => void} keep
+ * @property {number} hits  the functions this cache handed back
+ */
+
+/**
+ * @typedef {EmitCache & {
+ *     kept: Map<string, KeptFunction & { shape: Float64Array, size: number }>,
+ *     contexts: Map<string, number>, bytes: number, limit: number }} LocalEmitCache
+ *     kept: the least recently used first, `region` shared by every batch that takes the
+ *     function (nothing writes it); contexts: `contextKey` → the number keys name it by;
+ *     bytes: the sizes of what is kept
  */
 
 /**
@@ -90,10 +102,81 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  * check that its bytes are what they were.
  *
  * @param {number} [limit]  bytes of functions kept, the least recently used going first
- * @returns {EmitCache}
+ * @returns {LocalEmitCache}
  */
 export function createEmitCache(limit = 48 << 20){
-    return { kept: new Map(), contexts: new Map(), bytes: 0, limit, hits: 0 };
+    /** @type {LocalEmitCache} */
+    const cache = {
+        kept: new Map(), contexts: new Map(), bytes: 0, limit, hits: 0,
+        context(signature){
+            const number = cache.contexts.get(signature) ?? cache.contexts.size;
+            cache.contexts.set(signature, number);
+            return String(number);
+        },
+        take(key, shape){
+            const kept = cache.kept.get(key);
+            if (kept === undefined || !sameShape(kept.shape, shape))
+            {
+                return undefined;
+            }
+            cache.kept.delete(key);
+            cache.kept.set(key, kept);
+            cache.hits++;
+            return kept;
+        },
+        keep(key, shape, { typeIndex, locals, body, hints, region }){
+            const size = key.length + shape.length * 8 + body.length + locals.length * 8
+                + hints.length * 8 + region.labels.length * 32 + 256;
+            const old = cache.kept.get(key);
+            if (old !== undefined)
+            {
+                cache.kept.delete(key);
+                cache.bytes -= old.size;
+            }
+            // The shape as a typed array: guest addresses past 2^30 are not small
+            // integers, and an array of them is an object per address to the collector.
+            cache.kept.set(key, { typeIndex, locals, body, hints, region,
+                shape: Float64Array.from(shape), size });
+            cache.bytes += size;
+            for (const [oldest, one] of cache.kept)
+            {
+                if (cache.bytes <= cache.limit)
+                {
+                    break;
+                }
+                cache.kept.delete(oldest);
+                cache.bytes -= one.size;
+            }
+        },
+    };
+    return cache;
+}
+
+/**
+ * The functions a process's translators keep in its arena: what any of them
+ * emitted, every other takes. The context goes into the key whole, as every
+ * worker must name it alike.
+ *
+ * @param {SharedArrayBuffer} buffer  `createArena`'s
+ * @returns {EmitCache & { arena: ReturnType<typeof openArena> }}
+ */
+export function arenaEmitCache(buffer){
+    const arena = openArena(buffer);
+    /** @type {EmitCache & { arena: ReturnType<typeof openArena> }} */
+    const cache = {
+        arena, hits: 0,
+        context: signature=>signature,
+        take(key, shape){
+            const kept = arena.get(key, shape);
+            if (kept !== undefined)
+            {
+                cache.hits++;
+            }
+            return kept;
+        },
+        keep: (key, shape, kept)=>arena.set(key, shape, kept),
+    };
+    return cache;
 }
 
 /**
@@ -190,38 +273,6 @@ function sameShape(kept, shape){
 }
 
 /**
- * A function emitted into the cache, the least recently used ones out past its limit.
- *
- * @param {EmitCache} cache @param {string} key @param {number[]} shape
- * @param {{ typeIndex: number, locals: number[], body: Uint8Array, hints: number[] }} fn
- * @param {Omit<BatchRegion, 'exportName'>} built
- */
-function keep(cache, key, shape, { typeIndex, locals, body, hints }, built){
-    const size = key.length + shape.length * 8 + body.length + locals.length * 8
-        + hints.length * 8 + built.labels.length * 32 + 256;
-    const old = cache.kept.get(key);
-    if (old !== undefined)
-    {
-        cache.kept.delete(key);
-        cache.bytes -= old.size;
-    }
-    // The shape as a typed array: guest addresses past 2^30 are not small
-    // integers, and an array of them is an object per address to the collector.
-    cache.kept.set(key, { typeIndex, locals, body, hints, region: built,
-        shape: Float64Array.from(shape), size });
-    cache.bytes += size;
-    for (const [oldest, one] of cache.kept)
-    {
-        if (cache.bytes <= cache.limit)
-        {
-            break;
-        }
-        cache.kept.delete(oldest);
-        cache.bytes -= one.size;
-    }
-}
-
-/**
  * Many regions in one module, one function each: a call from one region into
  * another of the same module is a call within one compiled module, and V8's
  * cost of a tail call into another module's function grows with how many
@@ -275,13 +326,8 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
         ...(options.trapPort === undefined ? {} : { trapPort: options.trapPort }),
     });
     const emitAt = clock();
-    let prepared = -1;
-    if (cache !== undefined)
-    {
-        const signature = contextKey(layout, features, options, leaveOut);
-        prepared = cache.contexts.get(signature) ?? cache.contexts.size;
-        cache.contexts.set(signature, prepared);
-    }
+    const prepared = cache === undefined ? ''
+        : cache.context(contextKey(layout, features, options, leaveOut));
     /** Each job's function, for the dispatcher. @type {(number | null)[]} */
     const functions = jobs.map(()=>null);
     /** @type {BuiltBatch['results']} */
@@ -292,17 +338,13 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
             const shape = cache === undefined ? null : shapeOf(region);
             const key = shape === null ? ''
                 : `${prepared}:${region.entry}:${region.hash}:${jobKey(job)}`;
-            const kept = shape === null ? undefined : cache?.kept.get(key);
+            const kept = shape === null ? undefined : cache?.take(key, shape);
             let functionIndex;
             let copiesIndex = -1;
             /** @type {Omit<BatchRegion, 'exportName'>} */
             let built;
-            if (cache !== undefined && kept !== undefined && shape !== null
-                && sameShape(kept.shape, shape))
+            if (kept !== undefined)
             {
-                cache.kept.delete(key);
-                cache.kept.set(key, kept);
-                cache.hits++;
                 functionIndex = m.function(kept.typeIndex, kept.locals, kept.body,
                     { hints: kept.hints });
                 built = kept.region;
@@ -337,8 +379,9 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
                     && types.length === before[1] && globals.length === before[2]
                     && imports.length === before[3])
                 {
-                    keep(cache, key, shape, m.functions[functionIndex - m.importedFunctions],
-                        built);
+                    const { typeIndex, locals, body, hints } =
+                        m.functions[functionIndex - m.importedFunctions];
+                    cache.keep(key, shape, { typeIndex, locals, body, hints, region: built });
                 }
             }
             const exportName = `r${index}`;

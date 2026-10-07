@@ -21,11 +21,14 @@
  * which differ only in how the scope receives and sends messages.
  */
 
-import { createEmitCache, emitBatch, relinkBatch } from './emit-built.js';
+import { arenaEmitCache, createEmitCache, emitBatch, relinkBatch } from './emit-built.js';
 
-/** The functions this worker emitted, which a relink or a merge takes again: the
- * worker serves one runtime, whose layout, features and options key them. */
-const cache = createEmitCache();
+/** The functions emitted before, which a relink or a merge takes again: the
+ * process's arena, which every translator of the process shares, or a cache of
+ * this worker's own where the runtime has none. The worker serves one runtime,
+ * whose layout, features and options key them.
+ * @type {import('./emit-built.js').EmitCache} */
+let cache = createEmitCache();
 
 /**
  * What the engine gave to be rung once an answer is posted: an engine thread
@@ -51,13 +54,18 @@ const ring = ()=>{
  * formed here again from a copy of their pages).
  *
  * @param {{ id: number, jobs?: { region: any, entryTop: number }[], relink?: any,
- *     layout: any, features: any, options: any, ready?: boolean, doorbell?: any }} data
+ *     layout: any, features: any, options: any, ready?: boolean, doorbell?: any,
+ *     arena?: SharedArrayBuffer | null }} data
  * @param {(message: any, transfer: any[]) => void} send
  */
 function handle(data, send){
     if (data?.ready === true)
     {
         const given = data.doorbell;
+        if (data.arena instanceof SharedArrayBuffer)
+        {
+            cache = arenaEmitCache(data.arena);
+        }
         doorbell = given ? {
             posted: new Int32Array(given.posted.buffer), postedAt: given.posted.index,
             bell: new Int32Array(given.bell.buffer), bellAt: given.bell.index,
