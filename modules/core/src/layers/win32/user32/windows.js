@@ -3030,14 +3030,19 @@ export function createWindowFunctions(host){
                     {
                         return refuse();
                     }
-                    // A window created visible hears its own size, its place
-                    // and that it is shown inside this call, as the real
-                    // CreateWindowEx sends them once WM_CREATE has been
-                    // answered: a program that never calls ShowWindow
+                    // A child or a popup hears its own size and its place
+                    // once WM_CREATE has been answered, shown or not, as the
+                    // real CreateWindowEx sends them: a framework lays out
+                    // the controls inside a window when it is told its size,
+                    // and a page made hidden inside a notebook is sized then
+                    // or never. An overlapped window hears them when it is
+                    // first shown. A window created visible is then told it
+                    // is shown -- a program that never calls ShowWindow
                     // measures the screen it lays itself out and rasterises
-                    // its text for from the size it is told here. Then it
-                    // is activated.
-                    if ((style & WS_VISIBLE) === 0)
+                    // its text for from the size it is told here -- and is
+                    // activated.
+                    const visible = (style & WS_VISIBLE) !== 0;
+                    if (!visible && (record.style & (WS_CHILD | WS_POPUP)) === 0)
                     {
                         return done(record.hwnd);
                     }
@@ -3047,12 +3052,12 @@ export function createWindowFunctions(host){
                             | ((client.right - client.left) & 0xffff)) >>> 0, thread),
                     ()=>andThen(send(record.hwnd, WM_MOVE, 0,
                         (((y & 0xffff) << 16) | (x & 0xffff)) >>> 0, thread),
-                    ()=>andThen(send(record.hwnd, WM_SHOWWINDOW, 1, 0, thread),
-                        ()=>{
+                    ()=>(!visible ? done(record.hwnd)
+                        : andThen(send(record.hwnd, WM_SHOWWINDOW, 1, 0, thread), ()=>{
                             reveal();
                             return andThen(activateCreated(record, thread),
                                 ()=>andThen(eraseShown(thread), ()=>done(record.hwnd)));
-                        })));
+                        }))));
                 })));
         });
     };

@@ -2716,13 +2716,13 @@ test('a window created hidden hears only that it is being created', ()=>{
 
 test('CreateWindowEx tells the hook, then the procedure, in the order user32\'s message '
     + 'tests pin', ()=>{
-    // WmCreateOverlappedSeq and WmCreatePopupSeq, less what this layer does
-    // not send (WM_GETMINMAXINFO, WM_NCCALCSIZE, the WM_WINDOWPOS pair, the
-    // painting): HCBT_CREATEWND, WM_NCCREATE, WM_CREATE, and for a window
-    // created visible WM_SIZE (SIZE_RESTORED), WM_MOVE, WM_SHOWWINDOW(1) and
-    // the activation -- HCBT_ACTIVATE, WM_ACTIVATEAPP to each of the
-    // application's top-level windows, the hidden one too, and HCBT_SETFOCUS
-    // before the focus follows.
+    // WmCreateInvisiblePopupSeq and WmCreatePopupSeq, less what this layer
+    // does not send (WM_GETMINMAXINFO, WM_NCCALCSIZE, the WM_WINDOWPOS pair,
+    // the painting): HCBT_CREATEWND, WM_NCCREATE, WM_CREATE, WM_SIZE
+    // (SIZE_RESTORED) and WM_MOVE, shown or not; and for a window created
+    // visible WM_SHOWWINDOW(1) and the activation -- HCBT_ACTIVATE,
+    // WM_ACTIVATEAPP to each of the application's top-level windows, the
+    // hidden one too, and HCBT_SETFOCUS before the focus follows.
     /** @type {string[]} */
     const log = [];
     const { memory, fns } = setup({
@@ -2741,7 +2741,8 @@ test('CreateWindowEx tells the hook, then the procedure, in the order user32\'s 
     fns.RegisterClassA.handler([CLASS_STRUCT]);
 
     createWindow(fns, memory, { style: 0x80000000 });
-    assert.deepEqual(log, [`hook:${HCBT_CREATEWND}`, '0x81:0', '0x1:0'], 'hidden');
+    assert.deepEqual(log, [`hook:${HCBT_CREATEWND}`, '0x81:0', '0x1:0', '0x5:0', '0x3:0'],
+        'hidden');
 
     log.length = 0;
     createWindow(fns, memory, { style: 0x80000000 | WS_VISIBLE });
