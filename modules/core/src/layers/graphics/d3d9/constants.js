@@ -266,6 +266,10 @@ export const D3DFMT = Object.freeze({
     // fixed-function BUMPENVMAP read as -1..1.
     V8U8: 60,
     Q8W8V8U8: 63,
+    // One floating-point channel: what a shadow map of the Direct3D 9 era keeps its
+    // depths in when the card samples no depth texture.
+    R16F: 111,
+    R32F: 114,
     D32: 71,
     D24S8: 75,
     D24X8: 77,
@@ -301,9 +305,13 @@ export const D3DFMT = Object.freeze({
  *
  * `signed` marks a format whose channels are -1..1: sampled, never drawn into.
  *
+ * `float` marks a floating-point format: drawn into and sampled as numbers, not
+ * as fractions of 255.
+ *
  * @type {Readonly<Record<number,
  *     { bytesPerPixel: number, depth: boolean, alpha: boolean,
- *       blockBytes?: number, blockSize?: number, video?: boolean, signed?: boolean }>>}
+ *       blockBytes?: number, blockSize?: number, video?: boolean, signed?: boolean,
+ *       float?: boolean }>>}
  */
 export const FORMAT_INFO = Object.freeze({
     [D3DFMT.A8R8G8B8]: Object.freeze({ bytesPerPixel: 4, depth: false, alpha: true }),
@@ -332,6 +340,8 @@ export const FORMAT_INFO = Object.freeze({
     [D3DFMT.V8U8]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: false, signed: true }),
     [D3DFMT.Q8W8V8U8]: Object.freeze({
         bytesPerPixel: 4, depth: false, alpha: true, signed: true }),
+    [D3DFMT.R16F]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: false, float: true }),
+    [D3DFMT.R32F]: Object.freeze({ bytesPerPixel: 4, depth: false, alpha: false, float: true }),
     [D3DFMT.D32]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
     [D3DFMT.D24S8]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
     [D3DFMT.D24X8]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),

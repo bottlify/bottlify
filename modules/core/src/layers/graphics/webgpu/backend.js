@@ -8,7 +8,7 @@ import { LockFlags, carriedRanges, createDynamicBuffer } from './internal/buffer
 import { createBindingCache, createUniformPool, dynamicOffsetsOf } from './internal/bindings.js';
 import { ABSENT_PROFILER, createProfiler } from './internal/profiler.js';
 import { createShaderCache } from './internal/shaders.js';
-import { createTextureUploader } from './internal/textures.js';
+import { blockInfo, createTextureUploader } from './internal/textures.js';
 import { fullTarget, viewportState } from './internal/viewport.js';
 import { createPipelineCache, pipelineDescriptor } from './internal/pipeline.js';
 import { generateFixedFunction } from './internal/fixedfunction.js';
@@ -1023,15 +1023,16 @@ export function createBackend(options){
                  * The target's pixels as they are at this point of the frame,
                  * for a reader after `end`. The pass is closed for the copy;
                  * the caller reopens one that loads what is there. The level
-                 * and layer are the surface's; its texels are four bytes
-                 * unless it says otherwise.
+                 * and layer are the surface's; its texels are as wide as its
+                 * format makes them, unless it says otherwise.
                  *
                  * @param {import('./contract.js').Surface & { bytesPerTexel?: number }} surface
                  * @returns {() => Promise<{ width: number, height: number, data: Uint8Array }>}
                  */
                 snapshot(surface){
                     closeCurrentPass();
-                    const texel = surface.bytesPerTexel ?? 4;
+                    const texel = surface.bytesPerTexel
+                        ?? (surface.format ? blockInfo(surface.format).bytesPerBlock : 4);
                     const bytesPerRow = Math.ceil(surface.width * texel / 256) * 256;
                     const size = bytesPerRow * surface.height;
                     let staging;

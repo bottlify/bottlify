@@ -54,6 +54,7 @@ import {
 } from '../d3d9/wgsl.js';
 import { D3DDECLUSAGE } from '../d3d9/declaration.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
+import { toHalf } from '../d3d9/half.js';
 import {
     fixedFragmentStage, generates, generationOf, readsNormal,
 } from '../webgpu/internal/fixedfunction.js';
@@ -606,6 +607,18 @@ const TEXEL_EXPANSION = Object.freeze({
         return out;
     },
     [D3DFMT.Q8W8V8U8]: pixels=>pixels,
+    // The floating-point formats go to `r16float` as numbers: R16F as it lies,
+    // R32F narrowed to half precision.
+    [D3DFMT.R16F]: (pixels, count)=>pixels.slice(0, count * 2),
+    [D3DFMT.R32F]: (pixels, count)=>{
+        const floats = new Float32Array(pixels.slice(0, count * 4).buffer);
+        const out = new Uint16Array(count);
+        for (let index = 0; index < count; index++)
+        {
+            out[index] = toHalf(floats[index]);
+        }
+        return new Uint8Array(out.buffer);
+    },
 });
 
 /** @param {number} value five bits @returns {number} eight */
@@ -653,6 +666,14 @@ export function expandTexels(format, pixels, count){
 export const COLOR_FORMAT = 'bgra8unorm';
 /** What a signed format is sampled from: its channels come back -1..1. */
 const SIGNED_FORMAT = 'rgba8snorm';
+/**
+ * What a floating-point format is drawn into and sampled from: rendered,
+ * filtered and blended on every WebGPU device, where 32-bit floats are each an
+ * optional feature.
+ */
+// ponytail: R32F at half precision; `r32float` where the device has float32-filterable
+// and float32-blendable, when a picture shows the steps.
+const FLOAT_FORMAT = 'r16float';
 
 /**
  * The block-compressed formats, by the D3DFMT they arrive as.
@@ -760,6 +781,10 @@ export function gpuFormatOf(format, width, height, compressedTextures){
     if (info.signed)
     {
         return SIGNED_FORMAT;
+    }
+    if (info.float)
+    {
+        return FLOAT_FORMAT;
     }
     if (!info.depth)
     {
@@ -2220,6 +2245,20 @@ export function createRenderer(options){
     const skipTextures = new Set((options.skipTexture ?? '').split(',').filter(Boolean));
     const probeTexture = options.probeTexture ?? null;
     const compressedTextures = options.compressedTextures === true;
+    /**
+     * Nothing to add to a surface's description; said once, the first time a
+     * format is kept at less precision than it has.
+     *
+     * @param {number} format
+     * @returns {{}}
+     */
+    const narrowed = format=>{
+        if (format === D3DFMT.R32F)
+        {
+            divergence?.('Direct3D', 'an R32F surface is kept at half precision (r16float)');
+        }
+        return {};
+    };
     const fogApplied = options.fog !== false;
     const mipsApplied = options.mips !== false;
     const { LockFlags, BufferUsage, TextureUsage } = backend;
@@ -3776,6 +3815,7 @@ export function createRenderer(options){
                 height: desc.Height,
                 format: gpuFormatOf(desc.Format, desc.Width, desc.Height, compressedTextures),
                 label: depth ? 'depth' : 'target',
+                ...narrowed(desc.Format),
                 // A colour target is copied into as well as out of: a program
                 // that blits a decoded frame onto its target, or locks the
                 // target and writes it, puts bytes into it that a draw never
@@ -4159,6 +4199,7 @@ export function createRenderer(options){
                 width: record.width,
                 height: record.height,
                 format: gpuFormatOf(record.format, record.width, record.height, compressedTextures),
+                ...narrowed(record.format),
                 mipLevelCount: record.gpuLevels,
                 ...(record.faces === 6 ? { layers: 6, dimension: 'cube' } : {}),
                 ...(record.volume ? { depth: record.depth, dimension: '3d' } : {}),

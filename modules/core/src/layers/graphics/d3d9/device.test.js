@@ -787,6 +787,27 @@ test('a signed bump-map format is a texture, sampled and never drawn into', ()=>
     }
 });
 
+test('a floating-point format is a render target a shadow map draws its depths into', ()=>{
+    // A title that keeps its shadow depths in R16F or R32F asks for a render-target
+    // texture of one, and takes its lesser shader path when it is told no.
+    const d3d = createDirect3D9();
+    const device = createDevice();
+    for (const format of [D3DFMT.R16F, D3DFMT.R32F])
+    {
+        for (const type of [D3DRTYPE.TEXTURE, D3DRTYPE.CUBETEXTURE, D3DRTYPE.SURFACE])
+        {
+            assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.RENDERTARGET, type, format), D3D_OK);
+        }
+        assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.DEPTHSTENCIL, D3DRTYPE.TEXTURE, format),
+            D3DERR_NOTAVAILABLE);
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture(256, 256, 1, D3DUSAGE.RENDERTARGET, format,
+            D3DPOOL.DEFAULT, out), D3D_OK);
+        assert.ok(out.texture);
+    }
+});
+
 test('a render target and a depth stencil released to nothing while set live on until replaced',
     ()=>{
         const device = createDevice();
