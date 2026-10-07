@@ -406,6 +406,8 @@ export async function createRemoteApp(wiring){
             read: path=>request('files.read', [path]),
             /** @param {string} path @returns {Promise<boolean>} */
             createDirectory: path=>request('files.createDirectory', [path]),
+            /** @param {string} path @returns {Promise<boolean>} */
+            remove: path=>request('files.remove', [path]),
             /** @param {string} path @param {Uint8Array} bytes @returns {Promise<void>} */
             write: (path, bytes)=>request('files.write', [path, bytes]),
         },

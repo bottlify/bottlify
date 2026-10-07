@@ -201,6 +201,11 @@ function fakeApp({ capacity = 4096, shared = true, audioShared = false } = {}){
             write: (path, bytes)=>{
                 made.push(['file', path, [...bytes]]);
             },
+            /** @param {string} path */
+            remove: path=>{
+                made.push(['remove', path]);
+                return path === 'C:\\a.txt';
+            },
         },
         diagnostics: ()=>[
             { name: 'cpu', metrics: { instructions: 5, ring: ()=>0,
@@ -805,8 +810,11 @@ test('the page makes a directory and writes a file in the volume while the progr
         assert.equal(await remote.files.createDirectory('C:\\Windows\\Fonts'), true);
         assert.equal(await remote.files.createDirectory('C:\\Windows'), false, 'one that is there');
         await remote.files.write('C:\\Windows\\Fonts\\a.fon', Uint8Array.of(7, 8));
+        assert.equal(await remote.files.remove('C:\\a.txt'), true);
+        assert.equal(await remote.files.remove('C:\\none.txt'), false, 'nothing there');
         assert.deepEqual(made, [['directory', 'C:\\Windows\\Fonts'],
-            ['directory', 'C:\\Windows'], ['file', 'C:\\Windows\\Fonts\\a.fon', [7, 8]]]);
+            ['directory', 'C:\\Windows'], ['file', 'C:\\Windows\\Fonts\\a.fon', [7, 8]],
+            ['remove', 'C:\\a.txt'], ['remove', 'C:\\none.txt']]);
         await remote.dispose();
     });
 

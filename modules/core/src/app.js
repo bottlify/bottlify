@@ -6580,6 +6580,34 @@ async function buildApp(options){
              */
             createDirectory: path=>filesystem.createDirectory(path),
             /**
+             * A file or a directory with everything in it, removed from outside: a
+             * setting the program saved and would read back, taken away so it asks
+             * again.
+             *
+             * @param {string} path
+             * @returns {boolean} true when there was something to remove.
+             */
+            remove: function remove(path){
+                const entry = filesystem.stat(path);
+                if (!entry)
+                {
+                    return false;
+                }
+                if (entry.directory)
+                {
+                    for (const child of filesystem.list(path))
+                    {
+                        remove(child.path);
+                    }
+                    filesystem.removeDirectory(path);
+                }
+                else
+                {
+                    filesystem.deleteFile(path);
+                }
+                return true;
+            },
+            /**
              * A file written whole from outside, replacing one of that name.
              *
              * @param {string} path @param {Uint8Array} bytes

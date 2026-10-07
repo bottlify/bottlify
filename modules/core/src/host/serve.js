@@ -832,6 +832,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
         'files.list': (/** @type {string} */ path)=>volume().list(path),
         'files.read': (/** @type {string} */ path)=>volume().read(path),
         'files.createDirectory': (/** @type {string} */ path)=>volume().createDirectory(path),
+        'files.remove': (/** @type {string} */ path)=>volume().remove(path),
         'files.write': (/** @type {string} */ path, /** @type {Uint8Array} */ bytes)=>
             volume().write(path, bytes),
         // Guest memory as it stands, and where each image is: a queue or a

@@ -33,6 +33,7 @@
     "./bundle": "./src/bundle.js",
     "./bundle/node": "./src/bundle-node.js",
     "./iso": "./src/iso.js",
+    "./storage": "./src/storage.js",
     "./jpeg": "./src/layers/media/internal/jpeg.js",
     "./engine.worker.js": "./dist/engine.worker.js",
     "./worklet.js": "./dist/worklet.js",
@@ -49,6 +50,8 @@
     "src/layers/filesystem/internal/bundle/format.js",
     "src/layers/filesystem/internal/bundle/crc32.js",
     "src/iso.js",
+    "src/storage.js",
+    "src/layers/media/internal/jpeg.js",
     "src/layers/filesystem/internal/iso/iso9660.js",
     "src/layers/filesystem/internal/paths.js",
     "src/layers/filesystem/internal/errors.js"

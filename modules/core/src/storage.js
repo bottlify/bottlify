@@ -321,7 +321,124 @@ export function opfsSession(key, directory){
     /** @param {any} session */
     const registryBytes = session=>new TextEncoder().encode(JSON.stringify(session.registry));
 
-    return {
+    /**
+     * The folder an edit writes into, a session left in the one-file form moved
+     * into it first.
+     */
+    const folderToEdit = async()=>{
+        const dir = await open();
+        const existing = await dir.getDirectoryHandle(folderName).catch(()=>null);
+        if (existing)
+        {
+            return existing;
+        }
+        const folder = await dir.getDirectoryHandle(folderName, { create: true });
+        const handle = await dir.getFileHandle(legacy).catch(()=>null);
+        if (handle)
+        {
+            const old = await unpackSession(new Uint8Array(await (await handle.getFile())
+                .arrayBuffer()));
+            for (const file of old.files)
+            {
+                await put(folder, file.path, file.bytes);
+            }
+            if (old.registry)
+            {
+                await put(folder, REGISTRY_ENTRY, registryBytes(old));
+            }
+            await drop(dir, legacy);
+        }
+        return folder;
+    };
+
+    /**
+     * An entry's path and where its bytes start, read from its head alone.
+     *
+     * @param {any} file  A File.
+     * @returns {Promise<{ path: string, start: number } | null>}
+     */
+    const headOf = async file=>{
+        const head = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+        const view = new DataView(head.buffer);
+        if (head.length < 8 || view.getUint32(0, true) !== ENTRY_MAGIC)
+        {
+            return null;
+        }
+        const start = 8 + view.getUint32(4, true);
+        const path = new TextDecoder().decode(
+            new Uint8Array(await file.slice(8, start).arrayBuffer()));
+        return { path, start };
+    };
+
+    const store = {
+        /**
+         * The files kept, by path and size, their bytes left unread: what an
+         * editor lists while no machine holds the session.
+         *
+         * @returns {Promise<{ path: string, size: number }[]>}
+         */
+        async list(){
+            await writing;
+            const folder = await (await open()).getDirectoryHandle(folderName).catch(()=>null);
+            if (!folder)
+            {
+                return (await store.load()).files
+                    .map(file=>({ path: file.path, size: file.bytes.length }));
+            }
+            /** @type {{ path: string, size: number }[]} */
+            const files = [];
+            for await (const [, handle] of folder.entries())
+            {
+                const file = await handle.getFile();
+                const head = await headOf(file);
+                if (head && head.path !== REGISTRY_ENTRY)
+                {
+                    files.push({ path: head.path, size: file.size - head.start });
+                }
+            }
+            return files;
+        },
+        /**
+         * One file's bytes, or null when the session holds none at that path.
+         *
+         * @param {string} path
+         * @returns {Promise<Uint8Array | null>}
+         */
+        async read(path){
+            await writing;
+            const folder = await (await open()).getDirectoryHandle(folderName).catch(()=>null);
+            if (!folder)
+            {
+                return (await store.load()).files.find(file=>file.path === path)?.bytes ?? null;
+            }
+            const handle = await folder.getFileHandle(await entryName(path)).catch(()=>null);
+            if (!handle)
+            {
+                return null;
+            }
+            const file = await handle.getFile();
+            const head = await headOf(file);
+            return head ? new Uint8Array(await file.slice(head.start).arrayBuffer()) : null;
+        },
+        /**
+         * A file put in the session, or replaced: what the program will find at
+         * its next start.
+         *
+         * @param {string} path @param {Uint8Array} bytes
+         */
+        write(path, bytes){
+            writing = writing.then(async()=>put(await folderToEdit(), path, bytes));
+            return writing;
+        },
+        /**
+         * A file taken out of the session.
+         *
+         * @param {string} path
+         */
+        remove(path){
+            writing = writing.then(async()=>drop(await folderToEdit(), await entryName(path)));
+            return writing;
+        },
         async load(){
             const dir = await open();
             const folder = await dir.getDirectoryHandle(folderName).catch(()=>null);
@@ -431,6 +548,7 @@ export function opfsSession(key, directory){
             return writing;
         },
     };
+    return store;
 }
 
 /**
