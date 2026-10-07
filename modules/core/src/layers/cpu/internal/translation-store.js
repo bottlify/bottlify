@@ -539,9 +539,14 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
 
     // Without a synchronous handle (a page, a test) the appends go one at a
     // time: a writable stream is a copy of the file closed over the original,
-    // and two open at once keep only the last one's bytes.
+    // and two open at once keep only the last one's bytes. Since each stream
+    // copies the whole file, the puts that arrive while one is queued ride in
+    // it: one stream per put made a run's thousands of regions a copy of a
+    // growing file each, and the flush at the machine's end waited minutes.
     /** @type {Promise<void>} */
     let appending = Promise.resolve();
+    /** The stream queued and not yet opened, which a new put joins. @type {[number, Uint8Array][] | null} */
+    let queued = null;
 
     /**
      * Appends records at places already taken from `end`: one write each
@@ -568,9 +573,18 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
             }
             return;
         }
+        if (queued !== null)
+        {
+            queued.push(...writes);
+            await appending;
+            return;
+        }
+        const batch = [...writes];
+        queued = batch;
         appending = appending.then(async()=>{
+            queued = null;
             const writable = await records.createWritable({ keepExistingData: true });
-            for (const [offset, bytes] of writes)
+            for (const [offset, bytes] of batch)
             {
                 await writable.write({ type: 'write', position: offset, data: bytes });
             }
