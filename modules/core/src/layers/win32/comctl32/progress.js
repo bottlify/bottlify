@@ -180,8 +180,10 @@ export function createProgressProcedure(host, tk){
                 return 1;
             case PBM_SETRANGE: {
                 const previous = ((held.max & 0xffff) << 16 | held.min & 0xffff) >>> 0;
-                held.min = message.lParam << 16 >> 16;
-                held.max = message.lParam >> 16;
+                // Two WORDs, unsigned: 0..65535 is the range a program sets
+                // to keep its own ratio in, and 65535 is not -1.
+                held.min = message.lParam & 0xffff;
+                held.max = message.lParam >>> 16;
                 held.pos = clamp(record, held.pos);
                 host.invalidate(record);
                 return previous;

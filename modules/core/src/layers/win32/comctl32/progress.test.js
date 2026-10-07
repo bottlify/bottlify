@@ -269,6 +269,21 @@ test('SETRANGE keeps the previous range and SETPOS the previous position', async
     assert.equal(context.fns.SendMessageA.handler([bar, PBM_GETPOS, 0, 0]), 50);
 });
 
+test('SETRANGE\'s words are unsigned: a range up to 65535 is that range', async()=>{
+    const context = setup();
+    await context.makeHost();
+    const bar = await context.bar(PBS_SMOOTH);
+    context.fns.SendMessageA.handler([bar, PBM_SETRANGE, 0, (0xffff << 16) >>> 0]);
+    context.memory.writeMemory(OUT, new Uint8Array(8));
+    context.fns.SendMessageA.handler([bar, PBM_GETRANGE, 0, OUT]);
+    assert.deepEqual([context.memory.u32(OUT), context.memory.u32(OUT + 4)], [0, 65535]);
+    context.fns.SendMessageA.handler([bar, PBM_SETPOS, 32768, 0]);
+    assert.equal(context.fns.SendMessageA.handler([bar, PBM_GETPOS, 0, 0]), 32768,
+        'a position past 32767 is inside it');
+    await context.pump();
+    assert.equal(context.barPixel(bar, 0.25, 0.5), COLOR_HIGHLIGHT, 'and half the bar is filled');
+});
+
 test('SETRANGE32 takes two full widths where SETRANGE takes one packed pair', async()=>{
     const context = setup();
     await context.makeHost();
