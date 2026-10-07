@@ -105,6 +105,10 @@ function parse(argv){
         // which past a title's load is most of the thread: off, a run measures
         // the program and the layers instead (the graphics layer's `raster`).
         raster: !argv.includes('--no-raster'),
+        // The program's command line, in place of the manifest's: a game
+        // started straight into a level (`+map ...`) loads it and plays.
+        commandLine: argv.includes('--command-line')
+            ? argv[argv.indexOf('--command-line') + 1] : undefined,
     };
 }
 
@@ -429,7 +433,8 @@ function seriesRow(app, last, began){
 
 async function main(){
     const { id, turns, map, grep, calls, heap, profile, log, watch, peek, dump, which,
-        corkConfig, series, raster, concurrency, seconds } = parse(process.argv.slice(2));
+        corkConfig, series, raster, concurrency, seconds, commandLine }
+        = parse(process.argv.slice(2));
     if (!id)
     {
         console.error('usage: node tools/launch-probe.mjs <bundle-id> [--turns N] '
@@ -480,6 +485,7 @@ async function main(){
         // Where the bundle is mounted and the program started from: where its
         // installation put it, when the manifest says, as the launcher does.
         imagePath: placement.imagePath,
+        commandLine: commandLine ?? manifest.commandLine,
         // No frames here to feed the translator between: it takes its
         // candidates inside the slice.
         cork: { config: { feed: 'slice', timings: true,
