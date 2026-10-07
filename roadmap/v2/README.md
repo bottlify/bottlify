@@ -2,7 +2,8 @@
 
 Русская версия: [README.ru.md](README.ru.md).
 
-**Status:** proposed 2026-10-03, revised against `main` 6554baf0. How the engine works today is in
+**Status:** proposed 2026-10-03, revised against `main` 6554baf0; the workers of stage 2 decided
+2026-10-07 on `cork2` (no pool code yet). How the engine works today is in
 [`docs/architecture.md`](../../docs/architecture.md); this document is where it goes next.
 
 v2 turns the engine from one thread that does everything into a platform of workers whose number
@@ -180,29 +181,56 @@ off the thread that runs the program, not from running the program's threads at 
   another. Each needs a mechanism of its own — a copy kept coherent at the points the program can
   observe (a wait, a message, a call that maps or unmaps), or a second shared memory both process
   workers import — chosen per case by measurement; launchers and installers are where they occur.
-- **Service pools.** Translation ×M (`emitBatch` is already a pure function). Host work ×K: zstd
-  blocks, the video decoder, `ijl15`, MP3, block fetch. Graphics takes the canvas and the APIs still
-  drawn on the engine thread: Direct3D 10, Vulkan, DirectDraw and GDI presentation.
-- **The scaling driver.** One for the whole engine, in the coordinator, because the pools share the
-  same cores and drivers of their own would take them from each other. Its budget is
-  `navigator.hardwareConcurrency` minus the fixed threads (page, coordinator, AudioWorklet,
-  graphics). Workers write their own state into shared memory — busy or idle, queue length, time
-  at work — the way the engine already publishes its journal and counters for the log keeper, so
-  the driver only reads. Each decision is a comparison of a few numbers between scheduler turns,
-  and each is written to the journal (principle 6).
+- **Threads that are always there.** The coordinator and the graphics worker. Graphics stays one
+  thread: everything a WebGPU device makes lives in the thread that made it, and the calls of a
+  frame run in order. What in graphics is pure — shader bytecode to WGSL, DXT decoding, format
+  conversion — goes to the pool as jobs. The AudioWorklet is the browser's own audio thread.
+- **Process workers.** One per running process, apart from the pool, for as long as the process
+  runs. Running code stays there; nothing of it moves to the pool.
+- **The worker pool.** Workers that take any job without state: a batch of translation (formed,
+  emitted and compiled), zstd blocks, `ijl15`, the pure part of graphics. Two priorities: urgent,
+  which code is waiting for (the batch of a region the interpreter keeps meeting, a block a thread
+  reads), and background (relinks of hot code, reading ahead). A worker on standby sleeps on
+  `Atomics.wait` and holds nothing — no core, nothing of any process — so standby costs memory
+  only: an operating system schedules only threads that have something to run.
+- **The rule.** The pool always keeps standby workers in proportion to the running processes; the
+  first is never let go, since translation never quite stops. When a process's work starts to lag —
+  its urgent jobs queue behind the ones out and its workers are busy — standby workers join it, one
+  at a time; when its work subsides they leave it and wait again. Joining is quick (a window of a
+  few hundred milliseconds), leaving slow (seconds without the process's work), so the pool does
+  not swing. `navigator.hardwareConcurrency` is not a budget for the pool as a whole: it caps how
+  many workers may work for one process at once. A worker joins only if the work queued outlasts
+  what bringing it up costs, and after it joins the driver checks the yield — the work the
+  process's workers get through each second; a worker that adds little (a second thread on a busy
+  core, a throttled machine, another tab's load) leaves, and that ceiling is kept for the run.
+- **The driver.** In the coordinator, one for the whole engine. Workers write their own state into
+  shared memory — busy or idle, queue length, time at work — the way the engine already publishes
+  its journal and counters for the log keeper, so the driver only reads. Each decision is a
+  comparison of a few numbers between scheduler turns, and each is written to the journal
+  (principle 6); a pinned run keeps the pool's size fixed. Its thresholds are chosen on recorded
+  series of real loads, replayed through the driver as a test, before it runs in the engine.
+- **Measured** (2026-10-07, node 22, 4-core x86-64 VM, `cork2` f39364f2, one translation worker;
+  `tools/launch-probe.mjs --series`). While loading, the one translation worker is the bottleneck:
+  Doom 3 busy 70–95 % of the time with work queued behind the batch out 90–98 % of it and up to
+  2,807 regions queued; Tron's game up to 90 % busy, 1,183 queued. Run warm from a filled
+  translation store, Doom 3 reached the end of loading in 13–15 s instead of 20 s (three runs):
+  about a third of its loading is translation, the most a faster translator can take. After
+  loading the worker is busy under 1 % of the time. Two threads were ready at once 0–4 % of the
+  time (`negative-results.md`, 2026-10-07).
 
-| Pool | Min | Max | Grows when | Shrinks |
-| --- | --- | --- | --- | --- |
-| Translation | 1 | budget | hot code waits for translation, the batch queue grows | after seconds idle |
-| Host work | 0 | budget | program threads wait on decoding or block fetch | after seconds idle |
-| Graphics, log keeper, AudioWorklet | 1 | 1 | — | — |
+| Thread | How many | Joins when | Leaves when |
+| --- | --- | --- | --- |
+| Coordinator, graphics | 1 each | — | — |
+| Process worker | one per running process | the process starts | the process exits |
+| Pool, on standby | in proportion to the processes, at least 1 | — | — |
+| Pool, working for a process | 0 up to `hardwareConcurrency` | its urgent work queues and its workers are busy | seconds without its work |
 
 | Setting | Today | Larger |
 | --- | --- | --- |
 | Processes, P | 1: a child and its parent take turns | P process workers, each with its own memory |
 | Executors per process, N | 1: on the engine thread | 1 here; N with the atomic variant in stage 3 |
-| Translation, M | 1 worker | M workers, batches split between them |
-| Host work, K | 0: all on the engine thread | K workers; the program thread waits as it waits for a file |
+| Translation | 1 worker per process, one batch out | pool workers joining the process, several batches out |
+| Host work | on the engine thread or in the process | pool jobs; the program thread waits as it waits for a file |
 | Graphics (`graphicsWorker`) | 1: Direct3D 7, 8, 9, OpenGL | 1: all graphics and the canvas |
 | Guest memory | ordinary `WebAssembly.Memory` | shared (`shared: true`) from stage 1 |
 
@@ -240,7 +268,7 @@ measurement before stage 1 says that pays.
 
 | Pool | Min | Max | Grows when | Shrinks |
 | --- | --- | --- | --- | --- |
-| Executors of a process | 1 | budget, at most the process's thread count | two or more of its threads are ready most of the time | rarely, after a long quiet spell: it is a mode switch |
+| Executors of a process | 1 | `hardwareConcurrency`, at most the process's thread count | two or more of its threads are ready most of the time | rarely, after a long quiet spell: it is a mode switch |
 
 **What it costs, and when it pays.** The atomic variant makes every executor slower by the tax *t*
 measured before stage 1. Two executors win when their speedup *S* satisfies *S* × (1 − *t*) > 1.
