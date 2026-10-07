@@ -28,7 +28,11 @@ const MACHINE = {
     now: ()=>new Date(2026, 0, 1),
 };
 
-/** The package's tables, columns in their schema's order. */
+/**
+ * The package's tables, columns in their schema's order.
+ *
+ * @type {Record<string, [string[], (string | number | null)[][]]>}
+ */
 const TABLES = {
     Directory: [['Directory', 'Directory_Parent', 'DefaultDir'], [
         ['TARGETDIR', null, 'SourceDir'],
@@ -70,7 +74,7 @@ async function install(){
     for (const [name, [columns, rows]] of Object.entries(TABLES))
     {
         db.tables.set(name, {
-            name, rows: /** @type {any[][]} */ (rows), temporary: false,
+            name, rows, temporary: false,
             temporaryRows: new Set(), hold: 0,
             columns: columns.map((column, index)=>({ table: name, number: index + 1,
                 name: column, type: 0 })),
@@ -153,8 +157,8 @@ test('an action written into the script starts again when the script carries it 
         && entry.fields[1] === 'Software\\Test');
     assert.deepEqual(value?.fields, ['Key: [1], Name: [2], Value: [3]', 'Software\\Test', 'Path',
         'C:\\App\\'], 'and says what it writes, formatted');
-    const writing = heard.findLastIndex(entry=>entry.kind === INSTALLMESSAGE.ACTIONSTART
-        && entry.fields[1] === 'WriteRegistryValues');
+    const writing = heard.map(entry=>entry.kind === INSTALLMESSAGE.ACTIONSTART
+        && entry.fields[1] === 'WriteRegistryValues').lastIndexOf(true);
     assert.ok(heard.indexOf(/** @type {any} */ (value)) > writing,
         'while it runs, not while it is written down');
 });
