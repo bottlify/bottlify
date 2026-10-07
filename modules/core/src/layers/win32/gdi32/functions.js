@@ -22,7 +22,7 @@
 
 import { createGdiObjects } from './objects.js';
 import { DEFAULT_PALETTE_COLORS, createDrawingFunctions } from './drawing.js';
-import { FACES, FF_MODERN, FF_ROMAN, FIXED_PITCH, faceNamed } from './faces.js';
+import { FACES, FF_MODERN, FF_ROMAN, FIXED_PITCH, faceNamed, windowsMetrics } from './faces.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import {
     BITMAP,
@@ -1328,7 +1328,24 @@ export function createGdiFunctions(host){
             pitchAndFamily: ((font.pitchAndFamily & 0xf0) & ~TMPF_FIXED_PITCH) | TMPF_VECTOR,
             charSet: font.charSet === DEFAULT_CHARSET ? ANSI_CHARSET : font.charSet,
             ...measured,
+            ...windowsFields(font),
         };
+    };
+
+    /**
+     * The measurements Windows gives a dialog face, over the engine's and the
+     * estimate's: a substitute's proportions are not the window's to follow.
+     *
+     * @param {import('./structs.js').LogFontFields} font
+     */
+    const windowsFields = font=>{
+        const known = windowsMetrics(font);
+        if (!known)
+        {
+            return {};
+        }
+        const { height, ascent, descent, internalLeading, aveCharWidth } = known;
+        return { height, ascent, descent, internalLeading, aveCharWidth };
     };
 
     /** @param {any} dc @returns {import('./structs.js').LogFontFields} */
@@ -4302,6 +4319,11 @@ export function createGdiFunctions(host){
         if (record?.type !== 'font')
         {
             return null;
+        }
+        const known = windowsMetrics(record.attributes);
+        if (known)
+        {
+            return { ...known.cell };
         }
         const measured = host.graphics?.fontMetrics?.(record.attributes);
         if (!measured)

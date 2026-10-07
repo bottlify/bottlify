@@ -22,7 +22,7 @@
  * canvas's own fractional width.
  */
 
-import { FACES, FF_MODERN, FF_ROMAN } from '../../win32/gdi32/faces.js';
+import { FACES, FF_MODERN, FF_ROMAN, windowsMetrics } from '../../win32/gdi32/faces.js';
 
 /**
  * The LOGFONT fields the engine reads. The rest -- escapement, the
@@ -254,6 +254,9 @@ export function createFontEngine(options = {}){
             maxCharWidth = Math.max(maxCharWidth,
                 Math.round(ctx.measureText(String.fromCharCode(code)).width));
         }
+        // A dialog face's cell is Windows', whatever face the browser draws
+        // it with: the glyphs stand on Windows' baseline in Windows' cell.
+        const known = windowsMetrics(font);
         face = {
             css,
             em,
@@ -266,6 +269,8 @@ export function createFontEngine(options = {}){
                 aveCharWidth: Math.max(1,
                     Math.round(ctx.measureText('abcdefghijklmnopqrstuvwxyz').width / 26)),
                 maxCharWidth,
+                ...known ? { height: known.height, ascent: known.ascent, descent: known.descent,
+                    internalLeading: known.internalLeading, aveCharWidth: known.aveCharWidth } : {},
             },
         };
         faces.set(key, face);
