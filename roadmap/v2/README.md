@@ -182,18 +182,20 @@ off the thread that runs the program, not from running the program's threads at 
   another. Each needs a mechanism of its own — a copy kept coherent at the points the program can
   observe (a wait, a message, a call that maps or unmaps), or a second shared memory both process
   workers import — chosen per case by measurement; launchers and installers are where they occur.
-- **Threads that are always there.** The coordinator and the graphics worker. Graphics stays one
-  thread: everything a WebGPU device makes lives in the thread that made it, and the calls of a
-  frame run in order. What in graphics is pure — shader bytecode to WGSL, DXT decoding, format
-  conversion — goes to the pool as jobs. The AudioWorklet is the browser's own audio thread.
+- **Threads that are always there.** Two: the coordinator (the host) and the graphics worker.
+  Graphics stays one thread: everything a WebGPU device makes lives in the thread that made it, and
+  the calls of a frame run in order. What in graphics is pure — shader bytecode to WGSL, DXT
+  decoding, format conversion — goes to the pool as jobs. The AudioWorklet is the browser's own
+  audio thread.
 - **Process workers.** One per running process, apart from the pool, for as long as the process
   runs. Running code stays there; nothing of it moves to the pool.
 - **The worker pool.** Workers that take any job without state: a batch of translation (formed,
   emitted and compiled), zstd blocks, `ijl15`, the pure part of graphics. Two priorities: urgent,
   which code is waiting for (the batch of a region the interpreter keeps meeting, a block a thread
-  reads), and background (relinks of hot code, reading ahead). A worker on standby sleeps on
-  `Atomics.wait` and holds nothing — no core, nothing of any process — so standby costs memory
-  only: an operating system schedules only threads that have something to run.
+  reads), and background (relinks of hot code, reading ahead). A pool worker works for one process
+  at a time. One that works for none sleeps on `Atomics.wait` and holds nothing — no core, nothing
+  of any process — so it costs memory only: an operating system schedules only threads that have
+  something to run.
 - **What a worker holds.** Nothing between jobs. Translation does keep something worth keeping:
   the functions already emitted, which a relink or a merge takes again instead of emitting them
   anew — today a cache of up to 48 MB inside the translation worker. That is the process's, not
@@ -218,18 +220,27 @@ off the thread that runs the program, not from running the program's threads at 
   earlier ones left in it. Its gate: seeded batches emitted through several workers sharing an arena
   and through one worker with no cache give the same module bytes, and the cache's counters say how
   many functions came from the arena.
-- **The rule.** The pool always keeps standby workers in proportion to the running processes; the
-  first is never let go, since translation never quite stops. When a process's work starts to lag —
-  its urgent jobs queue behind the ones out and its workers are busy — standby workers join it, one
-  at a time; when its work subsides they leave it and wait again. Joining is quick (a window of a
-  few hundred milliseconds), leaving slow (seconds without the process's work), so the pool does
-  not swing. The pool has a ceiling: at most `max(2, hardwareConcurrency − 2)` of its workers at
-  work at once across all processes — the coordinator and graphics taken out, never fewer than
-  two — and one process may take all of them when it alone needs them. Standby workers are outside
-  that count, since they take no core. A worker joins only if the work queued outlasts
-  what bringing it up costs, and after it joins the driver checks the yield — the work the
-  process's workers get through each second; a worker that adds little (a second thread on a busy
-  core, a throttled machine, another tab's load) leaves, and that ceiling is kept for the run.
+- **The rule** (decided 2026-10-07). With n processes running:
+  - **Always there:** the two threads above, n process workers, and n pool workers — each process
+    has one from its start to its exit, since translation never quite stops.
+  - **Joining.** Pool workers join a process lazily, one at a time, when the median load of the
+    pool workers already working for it — the share of a window each was busy — comes to 80 %.
+    The median, not the sum or the busiest: it says the work is spread over them and each is near
+    full, so one more would take a share. Two workers at 90 % and 10 % have a median of 50 %: the
+    work does not split (one chain of batches, each waiting for the last), and a third would sit
+    as idle as the second. With one worker the median is its own load — Doom 3's 70–95 % while
+    loading joins a second. The 80 % mark and the window are where the driver starts, not
+    measured: both are checked on the recorded series below before the driver runs.
+  - **Ceilings.** At most `hardwareConcurrency` (hc) pool workers work for one process; the pool
+    holds at most hc × n. These count workers, not cores: a process that waits keeps none of its
+    joined workers busy, so the ceiling of the whole is not what limits the machine — the median
+    rule is, as each process asks only for what it can use.
+  - **Leaving.** Joined workers leave a process lazily, after seconds of its median well below the
+    mark, and at once when the process stops translating to wait; they go back to the pool and
+    sleep. Joining is quick (a window of a few hundred milliseconds), leaving slow, so the pool
+    does not swing. A process that waits keeps its arena, so when it resumes the workers that join
+    it find what was emitted before. When a process exits, its workers and its arena go, and the
+    pool's ceiling falls by hc.
 - **The driver.** In the coordinator, one for the whole engine. Workers write their own state into
   shared memory — busy or idle, queue length, time at work — the way the engine already publishes
   its journal and counters for the log keeper, so the driver only reads. Each decision is a
@@ -259,16 +270,16 @@ off the thread that runs the program, not from running the program's threads at 
 
 | Thread | How many | Joins when | Leaves when |
 | --- | --- | --- | --- |
-| Coordinator, graphics | 1 each | — | — |
+| Coordinator (host), graphics | 1 each | — | — |
 | Process worker | one per running process | the process starts | the process exits |
-| Pool, on standby | in proportion to the processes, at least 1 | — | — |
-| Pool, working for a process | 0 up to `max(2, hardwareConcurrency − 2)`, all processes together | its urgent work queues and its workers are busy | seconds without its work |
+| Pool, a process's first | one per running process | the process starts | the process exits |
+| Pool, joined to a process | up to hc − 1 more per process; the pool at most hc × n | the median load of the process's pool workers comes to 80 % | the process waits, or seconds well below the mark; with the process |
 
 | Setting | Today | Larger |
 | --- | --- | --- |
 | Processes, P | 1: a child and its parent take turns | P process workers, each with its own memory |
 | Executors per process, N | 1: on the engine thread | 1 here; N with the atomic variant in stage 3 |
-| Translation | 1 worker per process, one batch out | pool workers joining the process, several batches out |
+| Translation | 1 worker per process, one batch out | 1 to hc pool workers per process, several batches out, one arena |
 | Host work | on the engine thread or in the process | pool jobs; the program thread waits as it waits for a file |
 | Graphics (`graphicsWorker`) | 1: Direct3D 7, 8, 9, OpenGL | 1: all graphics and the canvas |
 | Guest memory | ordinary `WebAssembly.Memory` | shared (`shared: true`) from stage 1 |
