@@ -15,8 +15,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    listen, scheduleKeyTimes, presentFrame, recordSample, resetSamples, profile, byModule,
-    guestSamples, seedFiles, bundleStoreOptions,
+    listen, scheduleKeyTimes, schedulePresses, presentFrame, recordSample, resetSamples, profile,
+    byModule, guestSamples, seedFiles, bundleStoreOptions,
 } from './harness.js';
 
 /** An `app` that only remembers what was sent and what it was asked to do. */
@@ -68,6 +68,49 @@ test('a click at a moment lands in input.send, where the pointer is, then lets g
         { kind: 'pointerButton', button: 'left', down: true },
         { kind: 'pointerButton', button: 'left', down: false },
     ]);
+});
+
+test('a wizard\'s button is pressed by its label once the screen settles, the first label'
+    + ' the screen carries first', async t=>{
+    const app = fakeApp();
+    /** @param {string} hwnd @param {string} title @param {object} [more] */
+    const button = (hwnd, title, more = {})=>({ hwnd, parent: '0x10', child: true,
+        visible: true, enabled: true, className: 'Button', title, style: '0x50010000',
+        rect: { left: 100, top: 200, right: 180, bottom: 224 }, ...more });
+    const windows = [
+        { hwnd: '0x10', parent: null, child: false, visible: true, enabled: true,
+            className: '#32770', title: 'Setup', style: '0x94c808cc',
+            rect: { left: 0, top: 0, right: 400, bottom: 300 } },
+        button('0x20', '&Next >', { rect: { left: 300, top: 260, right: 380, bottom: 284 } }),
+        button('0x24', 'Install', { enabled: false }),
+        button('0x28', 'I &agree', { style: '0x50010003' }),
+        button('0x2c', 'Finish', { parent: '0x30' }),
+    ];
+    /** @type {any} */ (app).debug = { windows: ()=>windows };
+    /** @type {string[]} */
+    const said = [];
+    const stop = schedulePresses(app, { presses: ['finish', 'install', 'i agree', 'next >'],
+        pressSettleMs: 10, pressEveryMs: 5 }, line=>said.push(line));
+    t.after(stop);
+    for (let waited = 0; said.length < 3 && waited < 2000; waited += 10)
+    {
+        await new Promise(resolve=>setTimeout(resolve, 10));
+    }
+    stop();
+    await new Promise(resolve=>setTimeout(resolve, 150));
+
+    assert.equal(said[0], 'press "I &agree" at 140,212', 'Finish has no parent on the'
+        + ' screen and Install is disabled; a label listed before Next goes first');
+    assert.deepEqual(said.slice(1, 3), ['press "&Next >" at 340,272',
+        'press "&Next >" at 340,272'], 'the check box once, as it toggles, and a push button'
+        + ' the program did not take pressed again');
+    assert.deepEqual(app.sent.slice(0, 2), [
+        { kind: 'pointerMove', x: 140, y: 212, dx: 0, dy: 0 },
+        { kind: 'pointerButton', button: 'left', down: true },
+    ]);
+    const buttons = app.sent.filter(message=>message.kind === 'pointerButton');
+    assert.equal(buttons.filter(message=>!message.down).length,
+        buttons.filter(message=>message.down).length, 'and every press is let go');
 });
 
 test('a presented frame increments the counter and records the gap', ()=>{
