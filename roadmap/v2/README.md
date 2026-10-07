@@ -193,13 +193,28 @@ off the thread that runs the program, not from running the program's threads at 
   reads), and background (relinks of hot code, reading ahead). A worker on standby sleeps on
   `Atomics.wait` and holds nothing — no core, nothing of any process — so standby costs memory
   only: an operating system schedules only threads that have something to run.
+- **What a worker holds.** Nothing between jobs. Translation does keep something worth keeping:
+  the functions already emitted, which a relink or a merge takes again instead of emitting them
+  anew — today a cache of up to 48 MB inside the translation worker. That is the process's, not
+  the worker's: it is keyed by the process's code, and a second worker with a cache of its own
+  would miss what the first one kept. A worker's heap cannot be shared or handed to another
+  worker — each has its own; what workers share is bytes (`SharedArrayBuffer`, a shared
+  `WebAssembly.Memory`) and compiled modules, which a message passes without copying their code.
+  So the cache becomes bytes in an arena of the process's own, in shared memory: every pool worker
+  working for the process looks functions up there and adds the ones it emits, a worker that
+  leaves loses nothing, and the arena goes when the process exits. It is filled lazily, by the
+  translation that happens anyway, and since loading is when it is used, a process quiet for long
+  enough can let it go (whether a later load gains from the earlier one's functions is not
+  measured).
 - **The rule.** The pool always keeps standby workers in proportion to the running processes; the
   first is never let go, since translation never quite stops. When a process's work starts to lag —
   its urgent jobs queue behind the ones out and its workers are busy — standby workers join it, one
   at a time; when its work subsides they leave it and wait again. Joining is quick (a window of a
   few hundred milliseconds), leaving slow (seconds without the process's work), so the pool does
-  not swing. `navigator.hardwareConcurrency` is not a budget for the pool as a whole: it caps how
-  many workers may work for one process at once. A worker joins only if the work queued outlasts
+  not swing. The pool has a ceiling: at most `max(2, hardwareConcurrency − 2)` of its workers at
+  work at once across all processes — the coordinator and graphics taken out, never fewer than
+  two — and one process may take all of them when it alone needs them. Standby workers are outside
+  that count, since they take no core. A worker joins only if the work queued outlasts
   what bringing it up costs, and after it joins the driver checks the yield — the work the
   process's workers get through each second; a worker that adds little (a second thread on a busy
   core, a throttled machine, another tab's load) leaves, and that ceiling is kept for the run.
@@ -217,13 +232,25 @@ off the thread that runs the program, not from running the program's threads at 
   about a third of its loading is translation, the most a faster translator can take. After
   loading the worker is busy under 1 % of the time. Two threads were ready at once 0–4 % of the
   time (`negative-results.md`, 2026-10-07).
+- **Measured: what a worker holds** (2026-10-07, same machine; one cold run each, Doom 3 60 s and
+  Tron's game 40 s; Chromium 141 headless). Idle, a worker is small: in Chromium the JS heap of
+  four idle workers was 1.1 MB without the emitter and 7.6 MB with it loaded, about 2 MB each
+  (`performance.measureUserAgentSpecificMemory`, which counts the JS heap and not the thread
+  itself); in node an idle worker with the emitter loaded added 15 MB of resident memory (eight at
+  once). Loading, the translation worker's cache reached its 48 MB limit within 18 s; at the end
+  the worker held 31–37 MB of heap besides the cache, and its heap had peaked at 225 MB on the way
+  (garbage of emitting). The cache pays: without it the worker was busy 23.3 s instead of 14.6 s
+  for Doom 3 and 15.2 s instead of 9.9 s for Tron. Replayed under other limits, its hits are 10 %
+  of lookups at 16 MB, 29 % at 24 MB, 33 % at 48 MB and 33 % unbounded (83 MB at most) for Doom 3;
+  21 %, 21 %, 29 % and 29 % (76 MB) for Tron — a few megabytes keep almost nothing. Doom 3 took
+  no hits after its 39th second.
 
 | Thread | How many | Joins when | Leaves when |
 | --- | --- | --- | --- |
 | Coordinator, graphics | 1 each | — | — |
 | Process worker | one per running process | the process starts | the process exits |
 | Pool, on standby | in proportion to the processes, at least 1 | — | — |
-| Pool, working for a process | 0 up to `hardwareConcurrency` | its urgent work queues and its workers are busy | seconds without its work |
+| Pool, working for a process | 0 up to `max(2, hardwareConcurrency − 2)`, all processes together | its urgent work queues and its workers are busy | seconds without its work |
 
 | Setting | Today | Larger |
 | --- | --- | --- |
