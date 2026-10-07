@@ -23,98 +23,158 @@
 
 import { arenaEmitCache, createEmitCache, emitBatch, relinkBatch } from './emit-built.js';
 
-/** The functions emitted before, which a relink or a merge takes again: the
- * process's arena, which every translator of the process shares, or a cache of
- * this worker's own where the runtime has none. The worker serves one runtime,
- * whose layout, features and options key them.
- * @type {import('./emit-built.js').EmitCache} */
-let cache = createEmitCache();
-
 /**
- * What the engine gave to be rung once an answer is posted: an engine thread
- * that is never handed its event loop on a timer hears the answer by it at
- * its next turn, rather than at its next yield.
- *
- * @type {{ posted: Int32Array, postedAt: number, bell: Int32Array, bellAt: number } | null}
+ * Where this worker adds the microseconds it works, and next to them the
+ * regions it emits, when a pool lends it: the pool's driver reads from these
+ * how busy each of its workers was, and how much they got through.
+ * @type {{ cells: Int32Array, at: number } | null}
  */
-let doorbell = null;
-
-/** Rings the engine's doorbell, after the answer is posted. */
-const ring = ()=>{
-    if (doorbell)
-    {
-        Atomics.add(doorbell.posted, doorbell.postedAt, 1);
-        Atomics.add(doorbell.bell, doorbell.bellAt, 1);
-        Atomics.notify(doorbell.bell, doorbell.bellAt);
-    }
-};
+let busyCell = null;
 
 /**
- * A batch of formed regions (`jobs`), or a relink of running ones (`relink`:
- * formed here again from a copy of their pages).
+ * One runtime this worker serves: the worker's own scope, when a runtime
+ * opened it, or a port a pool handed it, when the pool lends it to a process.
+ * Each keeps what its runtime gave: the functions emitted before (the
+ * process's arena, or a cache of the connection's own where the runtime has
+ * none), whose layout, features and options key them, and the doorbell to
+ * ring once an answer is posted -- an engine thread that is never handed its
+ * event loop on a timer hears the answer by it at its next turn, rather than
+ * at its next yield.
  *
- * @param {{ id: number, jobs?: { region: any, entryTop: number }[], relink?: any,
- *     layout: any, features: any, options: any, ready?: boolean, doorbell?: any,
- *     arena?: SharedArrayBuffer | null }} data
  * @param {(message: any, transfer: any[]) => void} send
  */
-function handle(data, send){
-    if (data?.ready === true)
-    {
-        const given = data.doorbell;
-        if (data.arena instanceof SharedArrayBuffer)
+function connection(send){
+    /** @type {import('./emit-built.js').EmitCache} */
+    let cache = createEmitCache();
+    /** @type {{ posted: Int32Array, postedAt: number, bell: Int32Array, bellAt: number } | null} */
+    let doorbell = null;
+    /** Rings the engine's doorbell, after the answer is posted. */
+    const ring = ()=>{
+        if (doorbell)
         {
-            cache = arenaEmitCache(data.arena);
+            Atomics.add(doorbell.posted, doorbell.postedAt, 1);
+            Atomics.add(doorbell.bell, doorbell.bellAt, 1);
+            Atomics.notify(doorbell.bell, doorbell.bellAt);
         }
-        doorbell = given ? {
-            posted: new Int32Array(given.posted.buffer), postedAt: given.posted.index,
-            bell: new Int32Array(given.bell.buffer), bellAt: given.bell.index,
-        } : null;
-        // Loaded: the runtime sends batches from here on.
-        send({ ready: true }, []);
-        ring();
-        return;
-    }
-    const { id, jobs, relink, layout, features, options } = data;
-    // The whole of what the batch held this worker for, forming a relink and
-    // compiling included: how busy the worker is, which its parts do not say.
-    const started = performance.now();
-    try
-    {
-        const batch = relink
-            ? relinkBatch(relink, layout, features, options, cache)
-            : emitBatch(jobs ?? [], layout, features, options, cache);
-        // Compiled here too: a WebAssembly.Module travels in the message
-        // (structured clone shares the compiled code), so the engine thread
-        // only instantiates -- the compile was most of its cost on a loading
-        // phase.
-        let compiled = null;
+    };
+    /**
+     * A batch of formed regions (`jobs`), or a relink of running ones (`relink`:
+     * formed here again from a copy of their pages).
+     *
+     * @param {{ id: number, jobs?: { region: any, entryTop: number }[], relink?: any,
+     *     layout: any, features: any, options: any, ready?: boolean, doorbell?: any,
+     *     arena?: SharedArrayBuffer | null }} data
+     */
+    return data=>{
+        if (data?.ready === true)
+        {
+            const given = data.doorbell;
+            if (data.arena instanceof SharedArrayBuffer)
+            {
+                cache = arenaEmitCache(data.arena);
+            }
+            doorbell = given ? {
+                posted: new Int32Array(given.posted.buffer), postedAt: given.posted.index,
+                bell: new Int32Array(given.bell.buffer), bellAt: given.bell.index,
+            } : null;
+            // Loaded: the runtime sends batches from here on.
+            send({ ready: true }, []);
+            ring();
+            return;
+        }
+        const { id, jobs, relink, layout, features, options } = data;
+        // The whole of what the batch held this worker for, forming a relink and
+        // compiling included: how busy the worker is, which its parts do not say.
+        const started = performance.now();
         try
         {
-            compiled = new WebAssembly.Module(/** @type {Uint8Array<ArrayBuffer>} */ (batch.module));
+            const batch = relink
+                ? relinkBatch(relink, layout, features, options, cache)
+                : emitBatch(jobs ?? [], layout, features, options, cache);
+            // Compiled here too: a WebAssembly.Module travels in the message
+            // (structured clone shares the compiled code), so the engine thread
+            // only instantiates -- the compile was most of its cost on a loading
+            // phase.
+            let compiled = null;
+            try
+            {
+                compiled = new WebAssembly.Module(
+                    /** @type {Uint8Array<ArrayBuffer>} */ (batch.module));
+            }
+            catch {
+                compiled = null;
+            }
+            const busyMs = performance.now() - started;
+            if (busyCell !== null)
+            {
+                Atomics.add(busyCell.cells, busyCell.at, Math.round(busyMs * 1000));
+                Atomics.add(busyCell.cells, busyCell.at + 1, batch.results.length);
+            }
+            send({ id, batch, compiled, busyMs }, [batch.module.buffer]);
         }
-        catch {
-            compiled = null;
+        catch (e){
+            const message = e instanceof Error ? e.message : String(e);
+            send({ id, batch: null, message: message.slice(0, 160) }, []);
         }
-        send({ id, batch, compiled, busyMs: performance.now() - started },
-            [batch.module.buffer]);
-    }
-    catch (e){
-        const message = e instanceof Error ? e.message : String(e);
-        send({ id, batch: null, message: message.slice(0, 160) }, []);
-    }
-    ring();
+        ring();
+    };
+}
+
+/**
+ * What reaches the worker's own scope: a runtime's messages, when the runtime
+ * opened it; when a pool did, the pool's -- where to count the time worked
+ * (`busy`), and a port of a process to serve (`serve`) until its runtime says
+ * it is done with it (`done`, over the port).
+ *
+ * @param {(message: any, transfer: any[]) => void} send
+ */
+function scopeHandler(send){
+    const own = connection(send);
+    return (/** @type {any} */ data)=>{
+        if (data?.busy !== undefined)
+        {
+            busyCell = { cells: new Int32Array(data.busy.buffer), at: data.busy.index };
+            return;
+        }
+        if (data?.serve !== undefined)
+        {
+            /** @type {MessagePort} */
+            const port = data.serve;
+            const serve = connection((message, transfer)=>port.postMessage(message, transfer));
+            /** @param {any} message */
+            const onMessage = message=>{
+                if (message?.done === true)
+                {
+                    port.close();
+                    return;
+                }
+                serve(message);
+            };
+            if (typeof port.addEventListener === 'function' && !('on' in port))
+            {
+                port.onmessage = event=>onMessage(event.data);
+            }
+            else
+            {
+                /** @type {any} */ (port).on('message', onMessage);
+            }
+            port.start?.();
+            return;
+        }
+        own(data);
+    };
 }
 
 if (typeof self !== 'undefined' && typeof (/** @type {any} */ (self)).postMessage === 'function')
 {
     const scope = /** @type {any} */ (self);
-    scope.onmessage = (/** @type {{ data: any }} */ event)=>handle(event.data,
-        (message, transfer)=>scope.postMessage(message, transfer));
+    const handle = scopeHandler((message, transfer)=>scope.postMessage(message, transfer));
+    scope.onmessage = (/** @type {{ data: any }} */ event)=>handle(event.data);
 }
 else
 {
     const { parentPort } = await import('node:worker_threads');
-    parentPort?.on('message', (/** @type {any} */ data)=>handle(data, (message, transfer)=>
-        /** @type {any} */ (parentPort).postMessage(message, transfer)));
+    const handle = scopeHandler((message, transfer)=>
+        /** @type {any} */ (parentPort).postMessage(message, transfer));
+    parentPort?.on('message', handle);
 }

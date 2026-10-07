@@ -64,3 +64,36 @@ evidence again.
 ## Invalidated
 
 None yet.
+
+### 2026-10-07 -- several translation workers for one process, on four cores
+
+- **Idea.** Roadmap v2, stage 2: while a game loads, its one translation worker is busy most of
+  the time with work queued behind its batch, so two or three workers, each with a batch of its
+  own out and one cache arena between them, would load it sooner.
+- **Workload.** `doom-3-demo` (`Doom3.exe`, the manifest's command line) and `tron-demo`
+  (`Lithtech.exe`, the manifest's command line), each started cold in node with an empty
+  in-memory translation store, `cork.config` `{ feed: 'slice', timings: true, worker: true,
+  translators: N }`, `graphics.raster` false, 40 s; the mark is the second at which the guest had
+  retired 4.85 G instructions (Doom 3, the end of its loading) or 2.8 G (Tron). `cork2` at
+  `4ef1b2f1` (the arena, and the check that a candidate a batch out holds is not formed again;
+  the translation worker was reworked to serve ports while the rounds ran, its own scope's
+  messages handled as before); N = 1, 2, 3 in turn, three rounds.
+- **Values.** Seconds to the mark, three runs each, median in brackets. Doom 3: N=1 14, 16, 18
+  (16); N=2 16, 20, 18 (18); N=3 17, 21, 18 (18). Tron: N=1 25, 27, 27 (27); N=2 29, 27, 30 (29);
+  N=3 30, 30, 34 (30). The regions published were alike (Doom 3 5440-5827, Tron 4506-5713), but
+  the workers' emitting per region grew: Doom 3 1.97-2.57 ms with one, 3.18-3.80 with two,
+  3.81-4.94 with three; Tron 1.74-2.14, 2.41-3.46, 3.08-3.97. Cores in use by the whole process,
+  sampled each second over a 25 s Doom 3 run, one run each: 2.5-3.6 with one translator while
+  loading, 3.3-3.8 with two. The same emitting with no engine, in 1-4 threads at once (the bench
+  programs' regions, 12 rounds): 3.20, 6.65, 7.65 and 7.30 rounds a second in all. Noise floor:
+  not recorded; the first round without the arena ran 15-23 s for Doom 3 with one translator.
+- **Machine.** Node 22.22.0, a 4-core x86-64 Linux VM (Firecracker). No browser, no GPU. Power
+  plan: not recorded.
+- **Why it did not pay.** On four cores one translator already leaves no core free while a game
+  loads: the engine thread, the translator and V8's own threads (compiling the program's modules,
+  collecting) take 2.5-3.6 of them. A second translator runs on a core it takes from them, and
+  every region costs it more. In isolation two emitters run twice as fast as one.
+- **Correctness.** The gates of `translators.test.js` and `arena.test.js` pass.
+- **Decision.** Kept, for machines with cores to spare: the pool lends a process more workers
+  only where the median rule says they are busy and a check of the yield after each join says the
+  process's translation went faster -- on this machine, a joined worker leaves again.

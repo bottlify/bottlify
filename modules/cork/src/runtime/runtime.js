@@ -137,6 +137,23 @@ function nanFirst(view, layout){
 }
 
 /**
+ * The translation worker's file, beside this one, as a host opens it for a
+ * pool of its own; null where it cannot be named (a bundler that did not carry
+ * the file).
+ *
+ * @returns {string | null}
+ */
+export function translatorWorkerUrl(){
+    try
+    {
+        return new URL('./translator.worker.js', import.meta.url).href;
+    }
+    catch {
+        return null;
+    }
+}
+
+/**
  * @param {EngineEnv & { features?: ReturnType<typeof probeFeatures> }} env
  * @returns {Runtime & { pages: import('./pages.js').PageTable }}
  */
@@ -245,8 +262,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         inFlightMs: 10_000,
         // Translation workers the runtime opens itself, each with a batch of its
         // own out: a loading phase keeps one busy most of the time with work
-        // queued behind its batch. A host with a pool of them attaches its own
-        // instead (`attachTranslator`).
+        // queued behind its batch. 0 with a worker: none opened here, a host's
+        // pool lends them (`attachTranslator`).
         translators: 1,
         // Bytes of the translation cache arena, the functions emitted here and
         // by every translator, which each takes again rather than emitting
@@ -1037,17 +1054,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const workerWanted = settings.workerUrl !== undefined
         || (settings.worker ?? (settings.feed !== 'slice'
             && typeof globalThis.Worker === 'function'));
-    const workerUrl = workerWanted
-        ? (settings.workerUrl ?? (()=>{
-            try
-            {
-                return new URL('./translator.worker.js', import.meta.url).href;
-            }
-            catch {
-                return null;
-            }
-        })())
-        : null;
+    const workerUrl = workerWanted ? (settings.workerUrl ?? translatorWorkerUrl()) : null;
     /**
      * A batch with a translator: the regions it publishes (`metas`) or the
      * running ones it relinks, and whether nothing else may be out beside it
@@ -1067,8 +1074,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      */
     /** @type {Translator[]} */
     const translators = [];
+    /** Whether the translators are a pool's to lend, none opened here, until the first is. */
+    let awaitingLend = workerUrl !== null && settings.translators === 0;
     /** When the first translator was made, and the time spent emitting here since. */
-    let loadingSince = 0;
+    let loadingSince = performance.now();
     let inlineWhileLoading = 0;
     let workerClosed = false;
     /** One that can take a batch now. */
@@ -1076,8 +1085,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         && one.pending === null) ?? null;
     /** Whether any translator takes batches, free or not. */
     const translatorReady = ()=>translators.some(one=>one.ready && !one.leaving);
-    /** Whether a translator was made and has not loaded yet. */
-    const translatorLoading = ()=>translators.some(one=>!one.ready);
+    /**
+     * Whether a translator was made and has not loaded yet -- or none is
+     * opened here and the host's pool has yet to lend the first: what is asked
+     * for meanwhile is emitted here as while a worker loads.
+     */
+    const translatorLoading = ()=>translators.some(one=>!one.ready)
+        || (awaitingLend && translators.length === 0);
     const batchesOut = ()=>translators.some(one=>one.pending !== null);
     /** Set while a step that takes over running regions (`Pending.alone`) posts. */
     let postingAlone = false;
@@ -2309,10 +2323,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
         /** @type {Translator} */
         const translator = { adapter, ready: false, pending: null, leaving: false };
-        if (translators.length === 0)
+        if (translators.length === 0 && !awaitingLend)
         {
             loadingSince = performance.now();
         }
+        awaitingLend = false;
         translators.push(translator);
         adapter.onMessage(data=>{
             if (data?.ready === true)
@@ -2362,7 +2377,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
 
     if (workerUrl !== null)
     {
-        for (let n = 0; n < Math.max(1, settings.translators); n++)
+        for (let n = 0; n < settings.translators; n++)
         {
             openTranslationWorker(workerUrl).then(adapter=>{
                 if (adapter !== null)

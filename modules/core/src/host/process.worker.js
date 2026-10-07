@@ -201,6 +201,20 @@ export async function serveProcess(start){
     }
     app.attachLog((/** @type {number} */ handle, /** @type {string} */ text)=>
         ask('process', 'output', [handle, text]));
+    lendings.apply = ()=>{
+        for (const { type, port, token } of lendings.splice(0))
+        {
+            if (type === 'translator')
+            {
+                app.lendTranslator(port, token);
+            }
+            else
+            {
+                app.recallTranslator(token);
+            }
+        }
+    };
+    lendings.apply();
     try
     {
         let code;
@@ -231,10 +245,25 @@ export async function serveProcess(start){
 }
 
 /**
+ * The pool's lendings and recalls, in the order they came, and what hands them
+ * to the machine once it stands.
+ * @type {any[] & { apply?: () => void }}
+ */
+const lendings = [];
+
+/**
  * @param {(handler: (data: any) => void) => void} listen
  * @param {(message: any) => void} send
  */
 const bind = (listen, send)=>listen(data=>{
+    // A worker of the run's translation pool, lent to this process or asked
+    // back: taken by the machine, or kept until the machine is built.
+    if (data?.type === 'translator' || data?.type === 'recall')
+    {
+        lendings.push(data);
+        lendings.apply?.();
+        return;
+    }
     if (data?.type !== 'start')
     {
         return;
