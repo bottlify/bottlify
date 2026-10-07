@@ -2280,6 +2280,9 @@ export function createWin32Module(){
                     regionBox: region=>gdi.regionBox(region),
                     /** @param {number} region @param {any} rect */
                     setRegion: (region, rect)=>gdi.setRegion(region, rect),
+                    // A bitmap's size, for a caret drawn in it and an icon made from it.
+                    /** @param {number} bitmap */
+                    bitmapSize: bitmap=>gdi.bitmapSize(bitmap),
                     // Shows the desktop once a paint pass has finished. The
                     // graphics layer is above this one and is reached the way the
                     // drawing engine is: through what the assembling caller hands

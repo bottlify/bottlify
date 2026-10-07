@@ -55,6 +55,7 @@ import { HWND_BROADCAST, createWindowDirectory } from './directory.js';
 import { LOGFONTA, LOGFONTW_SIZE, logFontBytes } from '../gdi32/structs.js';
 import { ANY_WINDOW, threadIdOf } from './messages.js';
 import { VIDEO_ADAPTER_NAME } from '../devices.js';
+import { createRefusals } from '../common/refusal.js';
 
 /** GetSystemMetrics indices this build has a real answer for. */
 /** How many argument slots a `va_list` is read for, since it carries no count. */
@@ -191,6 +192,35 @@ export const SYS_COLORS = Object.freeze({
     23: 0x00000000,
     24: 0x00e1ffff,
 });
+
+/**
+ * The colours a process paints with: the classic scheme until SetSysColors
+ * changes one. One table that GetSysColor reads and the window manager draws
+ * from, so a changed colour is the one both see.
+ *
+ * They are the process's, where Windows keeps them for the whole session: a
+ * change reaches the other processes' windows as WM_SYSCOLORCHANGE, and
+ * their own tables are left as they were.
+ */
+export function createSystemColors(){
+    /** The last index SetSysColors takes: COLOR_MENUBAR. */
+    const LAST = 30;
+    /** @type {Map<number, number>} */
+    const changed = new Map();
+    return {
+        /** @param {number} index @returns {number} 0x00BBGGRR */
+        get: index=>changed.get(index | 0) ?? SYS_COLORS[index | 0] ?? 0,
+        /** @param {number} index @param {number} color @returns {boolean} whether it was one */
+        set: (index, color)=>{
+            if ((index | 0) < 0 || (index | 0) > LAST)
+            {
+                return false;
+            }
+            changed.set(index | 0, color & 0xffffff);
+            return true;
+        },
+    };
+}
 
 /** MonitorFromRect and friends answer with this, there being one display. */
 /** What SetClassWord answers for the atom, or a word past the extra bytes. */
@@ -464,6 +494,28 @@ const ENUM_REGISTRY_SETTINGS = -2;
 const DMLERR_SYS_ERROR = 0x400f;
 /** DdeGetLastError with no instance to report on: nothing has gone wrong in it. */
 const DMLERR_NO_ERROR = 0;
+/** Why the calls on a DDE instance fail: DdeInitialize never makes one. */
+const NO_DDE = 'no DDE instance: DdeInitialize refuses, so none of its handles exist';
+
+/**
+ * Whether a byte begins a two-byte character in a double-byte code page:
+ * Japanese (932), and simplified Chinese, Korean and traditional Chinese
+ * (936, 949, 950), whose lead bytes are the ranges their tables give.
+ *
+ * @param {number} codePage @param {number} byte
+ */
+const isLeadByte = (codePage, byte)=>{
+    switch (codePage){
+        case 932:
+            return (byte >= 0x81 && byte <= 0x9f) || (byte >= 0xe0 && byte <= 0xfc);
+        case 936:
+        case 949:
+        case 950:
+            return byte >= 0x81 && byte <= 0xfe;
+        default:
+            return false;
+    }
+};
 
 /** Where RegisterWindowMessage numbers start: 0xc000 to 0xffff is theirs. */
 
@@ -547,6 +599,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             unit === 2 ? character >>> 8 : 0]));
         return 1;
     };
+
+    const refuse = createRefusals(host);
 
     // Ids handed to a timer with no window, kept clear of the small numbers a
     // program picks for its own.
@@ -2156,7 +2210,51 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         GetSysColor: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([index])=>SYS_COLORS[index | 0] ?? 0,
+            handler: ([index])=>(host.colors ? host.colors.get(index | 0)
+                : SYS_COLORS[index | 0] ?? 0),
+        },
+
+        /**
+         * BOOL SetSysColors(int cElements, const INT *lpaElements,
+         *                   const COLORREF *lpaRgbValues)
+         *
+         * New colours for the elements named, an index that names none
+         * passed over. Every window is told WM_SYSCOLORCHANGE and painted
+         * again, frame and all, in the new colours.
+         */
+        SetSysColors: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([count, elements, values])=>{
+                const WM_SYSCOLORCHANGE = 0x0015;
+                const MAX_ELEMENTS = 0x400;
+                const many = Math.min(count | 0, MAX_ELEMENTS);
+                if (many > 0 && ((elements >>> 0) === 0 || (values >>> 0) === 0))
+                {
+                    host.setLastError?.(ERROR_NOACCESS);
+                    return 0;
+                }
+                if (many > 0)
+                {
+                    const indices = new DataView(host.readMemory(elements >>> 0, many * 4).buffer);
+                    const colours = new DataView(host.readMemory(values >>> 0, many * 4).buffer);
+                    for (let at = 0; at < many; at++)
+                    {
+                        host.colors?.set(indices.getInt32(at * 4, true),
+                            colours.getUint32(at * 4, true));
+                    }
+                }
+                for (const record of windows.values())
+                {
+                    if (!record.destroyed && live(record.hwnd))
+                    {
+                        host.repaint?.(record);
+                    }
+                }
+                const told = /** @type {any} */ (host.sendAcross?.(HWND_BROADCAST,
+                    WM_SYSCOLORCHANGE, 0, 0, host.callerThread?.()) ?? 0);
+                return typeof told?.then === 'function' ? told.then(()=>1) : 1;
+            },
         },
 
         /**
@@ -3239,6 +3337,45 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         },
 
         /**
+         * LPWSTR CharPrevW(LPCWSTR lpszStart, LPCWSTR lpszCurrent)
+         *
+         * One UTF-16 unit back, and the pointer as it came when it is not
+         * past the start -- not the start, as the ANSI call answers.
+         */
+        CharPrevW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([start, current])=>(
+                (current >>> 0) > (start >>> 0) ? (current >>> 0) - 2 : current >>> 0),
+        },
+
+        /**
+         * LPSTR CharNextExA(WORD CodePage, LPCSTR lpCurrentChar, DWORD dwFlags)
+         *
+         * CharNextA in a code page the caller names: past a lead byte and
+         * its trail in one of the double-byte pages, one byte otherwise.
+         * The process's own pages are single-byte; the terminator is not
+         * stepped over.
+         */
+        CharNextExA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([codePage, text])=>{
+                const at = text >>> 0;
+                if (at === 0)
+                {
+                    return 0;
+                }
+                const [lead, trail] = host.readMemory(at, 2);
+                if (lead === 0)
+                {
+                    return at;
+                }
+                return isLeadByte(codePage & 0xffff, lead) && trail !== 0 ? at + 2 : at + 1;
+            },
+        },
+
+        /**
          * int wsprintfA(LPSTR lpOut, LPCSTR lpFmt, ...)
          *
          * cdecl, which is the part that matters: the caller pops the arguments,
@@ -3767,6 +3904,51 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 4,
             handler: ()=>DMLERR_NO_ERROR,
         },
+
+        /**
+         * With no instance, nothing these name was ever handed out -- no
+         * data handle, no conversation, no transaction, no advise loop --
+         * so each answers the failure it documents for one it does not
+         * know: FALSE, or no bytes copied.
+         *
+         * BOOL DdeFreeDataHandle(HDDEDATA hData)
+         */
+        DdeFreeDataHandle: refuse('DdeFreeDataHandle', { argBytes: 4, why: NO_DDE }),
+        /** BOOL DdeAbandonTransaction(DWORD idInst, HCONV hConv, DWORD idTransaction) */
+        DdeAbandonTransaction: refuse('DdeAbandonTransaction', { argBytes: 12, why: NO_DDE }),
+        /** BOOL DdePostAdvise(DWORD idInst, HSZ hszTopic, HSZ hszItem) */
+        DdePostAdvise: refuse('DdePostAdvise', { argBytes: 12, why: NO_DDE }),
+        /** UINT DdeQueryConvInfo(HCONV hConv, DWORD idTransaction, PCONVINFO pConvInfo) */
+        DdeQueryConvInfo: refuse('DdeQueryConvInfo', { argBytes: 12, why: NO_DDE }),
+        /** BOOL DdeSetUserHandle(HCONV hConv, DWORD id, DWORD_PTR hUser) */
+        DdeSetUserHandle: refuse('DdeSetUserHandle', { argBytes: 12, why: NO_DDE }),
+
+        /**
+         * int DdeCmpStringHandles(HSZ hsz1, HSZ hsz2)
+         *
+         * The handles' values compared, which is all the call compares: the
+         * documented way to compare the strings themselves is DdeQueryString.
+         * Needs no instance, and two null handles are equal.
+         */
+        DdeCmpStringHandles: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([first, second])=>{
+                const a = first >>> 0;
+                const b = second >>> 0;
+                return a === b ? 0 : (a < b ? -1 >>> 0 : 1);
+            },
+        },
+
+        /**
+         * LRESULT SendIMEMessageExA(HWND hWnd, LPARAM lParam)
+         * LRESULT SendIMEMessageExW(HWND hWnd, LPARAM lParam)
+         *
+         * The Windows 3.1 input method interface, which answers zero when no
+         * input method is there to take the request.
+         */
+        SendIMEMessageExA: refuse('SendIMEMessageExA', { argBytes: 8, why: 'no IME' }),
+        SendIMEMessageExW: refuse('SendIMEMessageExW', { argBytes: 8, why: 'no IME' }),
 
         /**
          * HANDLE LoadImageA(HINSTANCE hInst, LPCSTR name, UINT type, int cx,

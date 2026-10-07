@@ -35,9 +35,10 @@ const WS_POPUP = 0x80000000, WS_VISIBLE = 0x10000000;
  * The whole window manager over a flat memory, with a heap the box's template
  * is made in, and a queue a test posts keys to as a person would press them.
  *
- * @param {{ unattended?: boolean, answer?: (dialog: any) => number }} [options]
+ * @param {{ unattended?: boolean, answer?: (dialog: any) => number,
+ *     loadString?: (instance: number, id: number) => string | null }} [options]
  */
-function setup({ unattended, answer } = {}){
+function setup({ unattended, answer, loadString } = {}){
     const bytes = new Uint8Array(0x20000);
     let next = HEAP;
     /** @type {string[]} */
@@ -89,6 +90,7 @@ function setup({ unattended, answer } = {}){
                     ({ ...button, default: button.id === notice.defaultButton })),
             }) : undefined,
             say: (/** @type {string} */ text)=>said.push(text),
+            loadString,
             callerThread: ()=>'the caller',
             park: ()=>({ parked: true }),
             idle: ()=>new Promise(resolve=>setImmediate(resolve)),
@@ -257,3 +259,34 @@ test('a box answers with buttons it shows, the default walking the set', ()=>{
     assert.equal(messageBoxDefault(MB_OKCANCEL | MB_DEFBUTTON3), 2,
         'a rank past the last button is the last button');
 });
+
+test('MessageBoxIndirect puts up the box its MSGBOXPARAMS describes, strings by id or pointer',
+    async()=>{
+        /** @type {any[]} */
+        const asked = [];
+        const { fns, put, putWide, write } = setup({
+            unattended: true,
+            answer: dialog=>{
+                asked.push(dialog);
+                return IDNO;
+            },
+            loadString: (instance, id)=>(instance === 0x400000 && id === 7 ? 'From the table'
+                : null),
+        });
+        const PARAMS = 0x11800;
+        /** @param {number[]} values */
+        const params = values=>write(PARAMS, new Uint8Array(new Uint32Array(values).buffer));
+        put(TEXT, 'Overwrite the file?');
+        params([40, 0, 0x400000, TEXT, 7, MB_YESNO, 0, 0, 0, 0]);
+        assert.equal(await fns.MessageBoxIndirectA.handler([PARAMS]), IDNO);
+        assert.equal(asked[0].text, 'Overwrite the file?');
+        assert.equal(asked[0].title, 'From the table', 'a caption named by its string id');
+        assert.deepEqual(asked[0].buttons.map((/** @type {any} */ button)=>button.id), [6, IDNO]);
+
+        putWide(TEXT, 'Wide text');
+        params([40, 0, 0x400000, TEXT, 0, 0, 0, 0, 0, 0]);
+        assert.equal(await fns.MessageBoxIndirectW.handler([PARAMS]), IDNO);
+        assert.equal(asked[1].text, 'Wide text');
+        assert.equal(asked[1].title, 'Error', 'no caption is "Error", as for MessageBox');
+        assert.equal(fns.MessageBoxIndirectA.argBytes, 4);
+    });

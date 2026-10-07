@@ -136,6 +136,9 @@ const TEXT_SHARE = 5 / 8;
  *           Who answers a box when nobody is at the screen.
  * @property {(text: string) => void} [say]
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(instance: number, id: number) => string | null} [loadString]
+ *           A string out of a module's table: MessageBoxIndirect's text and
+ *           caption may be named by id.
  */
 
 /**
@@ -419,7 +422,57 @@ export function createMessageBoxFunctions({ host, call, procedure, measure, fram
     const captionAt = (at, wide)=>((at >>> 0) === 0 ? 'Error'
         : readText(host, at >>> 0, wide, 0x1000));
 
+    /**
+     * A string a MSGBOXPARAMS names: a pointer to one, or the id of one in
+     * the instance's string table when its high word is zero.
+     *
+     * @param {number} instance @param {number} at @param {boolean} wide
+     * @returns {string | null} null for no string at all
+     */
+    const paramText = (instance, at, wide)=>{
+        if ((at >>> 0) === 0)
+        {
+            return null;
+        }
+        return (at >>> 0) <= 0xffff
+            ? host.loadString?.(instance >>> 0, at & 0xffff) ?? ''
+            : readText(host, at >>> 0, wide, 0x10000);
+    };
+
+    /**
+     * MessageBoxIndirectA or W: the box a MSGBOXPARAMS describes. Its text
+     * and caption may be string ids in the instance given; its icon, help
+     * id and help callback describe what this box does not draw or call --
+     * a box with MB_HELP has no Help to press here.
+     *
+     * @param {number} params @param {boolean} wide
+     */
+    const indirect = (params, wide)=>{
+        const bytes = host.readMemory(params >>> 0, 24);
+        /** @param {number} at */
+        const field = at=>(bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16
+            | bytes[at + 3] << 24) >>> 0;
+        const instance = field(8);
+        return messageBox(field(4), paramText(instance, field(12), wide) ?? '',
+            paramText(instance, field(16), wide) ?? 'Error', field(20), wide);
+    };
+
     return {
+        /**
+         * int MessageBoxIndirectA(const MSGBOXPARAMSA *lpmbp)
+         * int MessageBoxIndirectW(const MSGBOXPARAMSW *lpmbp)
+         */
+        MessageBoxIndirectA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([params])=>indirect(params, false),
+        },
+        MessageBoxIndirectW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([params])=>indirect(params, true),
+        },
+
         /**
          * int MessageBoxA(HWND hWnd, LPCSTR lpText, LPCSTR lpCaption, UINT uType)
          *

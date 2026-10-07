@@ -32,6 +32,7 @@
 import { CHECK_MARK, RADIO_DOT, RADIO_RING_DARK, RADIO_RING_LIGHT, layoutText } from './paint.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { createTabWalk } from './tabwalk.js';
+import { directoryItems } from './dlgdir.js';
 
 /** Messages the controls answer. */
 export const WM_CREATE = 0x0001;
@@ -272,6 +273,7 @@ const LB_GETCURSEL = 0x0188;
 const LB_GETTEXT = 0x0189;
 const LB_GETTEXTLEN = 0x018a;
 const LB_GETCOUNT = 0x018b;
+const LB_DIR = 0x018d;
 const LB_GETTOPINDEX = 0x018e;
 const LB_FINDSTRING = 0x018f;
 const LB_GETSELCOUNT = 0x0190;
@@ -305,6 +307,7 @@ const CB_LIMITTEXT = 0x0141;
 const CB_SETEDITSEL = 0x0142;
 const CB_ADDSTRING = 0x0143;
 const CB_DELETESTRING = 0x0144;
+const CB_DIR = 0x0145;
 const CB_GETCOUNT = 0x0146;
 const CB_GETCURSEL = 0x0147;
 const CB_GETLBTEXT = 0x0148;
@@ -516,6 +519,12 @@ const OPAQUE = 2;
  * @property {import('./objects.js').ClipboardService} [clipboard]
  *           The clipboard an edit copies to and pastes from. Absent, the
  *           clipboard messages do nothing.
+ * @property {Record<'CreateCaret' | 'DestroyCaret' | 'ShowCaret' | 'SetCaretPos',
+ *     { handler: (args: number[]) => number }>} [caret]
+ *           The thread's caret, which an edit takes while it has the focus.
+ *           Absent, an edit draws its own bar where typing goes.
+ * @property {import('../kernel32/files.js').FileSystem} [files]
+ *           The volume LB_DIR and CB_DIR list. Absent, they list nothing.
  */
 
 /**
@@ -1509,15 +1518,79 @@ export function createControlProcedures(host){
             {
                 draw.text(hdc, x, y, text, { color: ink, clip: rect });
             }
-            // The caret: a bar before the character the selection ends at.
+            // The caret, where there is no thread caret to take: a bar
+            // before the character the selection ends at.
             const caret = state.selEnd - line.start - scrolled;
-            if (focused && !readOnly && caret >= 0 && caret <= text.length
+            if (!host.caret && focused && !readOnly && caret >= 0 && caret <= text.length
                 && (state.selEnd < line.start + line.text.length || first + row === lines.length - 1
                     || state.selEnd === line.start + line.text.length))
             {
                 draw.fill(hdc, { left: xOf(caret), top: y, right: xOf(caret) + 1,
                     bottom: y + grid.cellHeight }, ink);
             }
+        }
+        if (host.caret && focused)
+        {
+            const at = caretPoint(record, hdc, rect);
+            host.caret.SetCaretPos.handler([at.x, at.y]);
+        }
+    };
+
+    /**
+     * Where an edit's caret goes: before the character its selection ends
+     * at, on the line that character is on, measured as the text is drawn --
+     * and outside the client area when that line is scrolled out of view,
+     * where the caret is clipped away rather than moved to an edge.
+     *
+     * @param {any} record @param {number} hdc @param {Rect} rect
+     * @returns {{ x: number, y: number, height: number }}
+     */
+    const caretPoint = (record, hdc, rect)=>{
+        const draw = /** @type {Drawing} */ (host.draw);
+        const state = editState(record);
+        const grid = editGrid(record, hdc);
+        const lines = editLines(record, grid.columns);
+        const top = multiline(record)
+            ? rect.top + EDIT_MARGIN
+            : rect.top + Math.max(0, Math.floor((rect.bottom - rect.top - grid.cellHeight) / 2));
+        const first = multiline(record) ? Math.min(state.firstLine, lines.length - 1) : 0;
+        const scrolled = multiline(record) ? 0 : state.firstColumn ?? 0;
+        const found = lines.findIndex(line=>state.selEnd >= line.start
+            && state.selEnd <= line.start + line.text.length);
+        const index = found === -1 ? lines.length - 1 : found;
+        const line = lines[index];
+        const text = shown(record, line.text);
+        const column = Math.max(0, Math.min(text.length, state.selEnd - line.start));
+        const x = rect.left + EDIT_MARGIN + (column >= scrolled
+            ? draw.measure(hdc, text.slice(scrolled, column)).width
+            : -draw.measure(hdc, text.slice(column, scrolled)).width);
+        return { x, y: top + (index - first) * grid.cellHeight, height: grid.cellHeight };
+    };
+
+    /**
+     * An edit gaining the focus takes the thread's caret, as the real one
+     * does: a bar one pixel wide and a line high, placed and shown.
+     *
+     * @param {any} record
+     */
+    const takeCaret = record=>{
+        const caret = host.caret;
+        if (!caret || !host.draw)
+        {
+            return;
+        }
+        const { hdc, rect } = host.contextOn(record);
+        if (hdc === 0)
+        {
+            host.endPaint(record, hdc);
+            return;
+        }
+        const at = caretPoint(record, hdc, rect);
+        host.endPaint(record, hdc);
+        if (caret.CreateCaret.handler([record.hwnd, 0, 1, at.height]) !== 0)
+        {
+            caret.SetCaretPos.handler([at.x, at.y]);
+            caret.ShowCaret.handler([record.hwnd]);
         }
     };
 
@@ -1782,9 +1855,11 @@ export function createControlProcedures(host){
                     | (multiline(record) && (record.style & ES_WANTRETURN) !== 0
                         ? DLGC_WANTALLKEYS : 0);
             case WM_SETFOCUS:
+                takeCaret(record);
                 host.invalidate(record);
                 return notify(record, EN_SETFOCUS, thread);
             case WM_KILLFOCUS:
+                host.caret?.DestroyCaret.handler([]);
                 host.invalidate(record);
                 return notify(record, EN_KILLFOCUS, thread);
             case WM_LBUTTONDOWN:
@@ -2218,6 +2293,20 @@ export function createControlProcedures(host){
         switch (message.message){
             case LB_ADDSTRING:
                 return strings ? addItem(record, sorted, text()) : addData(record, message.lParam);
+            case LB_DIR: {
+                // The entries a directory holds, added as LB_ADDSTRING adds
+                // them; the answer is the last one's index, or LB_ERR when
+                // the search found nothing at all.
+                const listed = host.files && strings
+                    ? directoryItems(host.files, message.wParam, text())
+                    : { found: false, items: [] };
+                let last = listed.found ? 0 : LB_ERR;
+                for (const item of listed.items)
+                {
+                    last = addItem(record, sorted, item);
+                }
+                return last;
+            }
             case LB_INSERTSTRING: {
                 const at = (message.wParam | 0) === -1 ? items.length : message.wParam | 0;
                 return strings ? addItem(record, sorted, text(), at)
@@ -2544,6 +2633,7 @@ export function createControlProcedures(host){
     const comboAsList = message=>{
         switch (message){
             case CB_ADDSTRING: return LB_ADDSTRING;
+            case CB_DIR: return LB_DIR;
             case CB_INSERTSTRING: return LB_INSERTSTRING;
             case CB_DELETESTRING: return LB_DELETESTRING;
             case CB_RESETCONTENT: return LB_RESETCONTENT;

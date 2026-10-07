@@ -1188,7 +1188,11 @@ test('an edit places its caret and selection where the drawn text ends', async()
     const paper = 0x00ffffff;
     const width = textWidth('il', 8);
     assert.equal(width, 14);
-    assert.equal(context.desktop.read(left + 1 + width, y), ink, 'the caret, where the text ends');
+    // The caret is the thread's, drawn by inverting what is under it: the
+    // colour comes out black and the fourth byte, inverted too, is no
+    // part of the colour.
+    assert.equal(context.desktop.read(left + 1 + width, y) & 0xffffff, ink,
+        'the caret, where the text ends');
     assert.equal(context.desktop.read(left + 1 + 18, y), paper, 'and not on the grid');
 
     // A click just past the second character lands the caret after it, and
@@ -1207,8 +1211,48 @@ test('an edit places its caret and selection where the drawn text ends', async()
     context.keysDown.delete(VK_SHIFT);
     const highlight = 0x00000080;
     assert.equal(context.desktop.read(left + 1 + width - 1, y), highlight);
-    assert.equal(context.desktop.read(left + 1 + width, y), ink, 'the caret at its end');
+    assert.equal(context.desktop.read(left + 1 + width, y) & 0xffffff, ink,
+        'the caret at its end');
     assert.equal(context.desktop.read(left + 1 + width + 1, y), paper);
+});
+
+test('an edit shows the thread\'s caret: the one GetCaretPos reads and HideCaret hides', async()=>{
+    // The real edit control creates the caret when it gains the focus and
+    // destroys it when it loses it; a program that asks where the caret is,
+    // or hides it to draw over the edit, finds the edit's.
+    const context = setup({ engine: true });
+    const dialog = await openDialog(context);
+    context.memory.putString(TEXT, 'Edit');
+    const edit = context.fns.CreateWindowExA.handler([WS_EX_CLIENTEDGE, TEXT, 0,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 8, 88, 100, 20, dialog, 300, HINSTANCE, 0]);
+    await context.fns.SetFocus.handler([edit]);
+    for (const character of 'il')
+    {
+        context.key(WM_CHAR, character.charCodeAt(0));
+    }
+    await context.pump(dialog);
+
+    context.memory.writeMemory(OUT, new Uint8Array(8));
+    assert.equal(context.fns.GetCaretPos.handler([OUT]), 1);
+    const width = textWidth('il', 8);
+    assert.equal(context.memory.u32(OUT), 1 + width, 'after the text, inside the margin');
+
+    context.memory.writeMemory(OUT + 8, new Uint8Array(8));
+    context.fns.ClientToScreen.handler([edit, OUT + 8]);
+    const left = context.memory.u32(OUT + 8);
+    const top = context.memory.u32(OUT + 12);
+    const y = top + context.memory.u32(OUT + 4) + 2;
+    assert.equal(context.desktop.read(left + 1 + width, y) & 0xffffff, 0, 'shown');
+    assert.equal(context.fns.HideCaret.handler([edit]), 1);
+    assert.equal(context.desktop.read(left + 1 + width, y) & 0xffffff, 0x00ffffff, 'hidden');
+    assert.equal(context.fns.ShowCaret.handler([edit]), 1);
+    assert.equal(context.desktop.read(left + 1 + width, y) & 0xffffff, 0, 'shown again');
+
+    // The focus gone, so is the caret.
+    await context.fns.SetFocus.handler([dialog]);
+    await context.pump(dialog);
+    assert.equal(context.fns.HideCaret.handler([0]), 0);
+    assert.equal(context.desktop.read(left + 1 + width, y) & 0xffffff, 0x00ffffff);
 });
 
 test('a read-only multi-line edit breaks its text into lines and scrolls by pages', async()=>{
