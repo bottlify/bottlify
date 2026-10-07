@@ -92,6 +92,8 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--entry PATH` | the manifest's | another program of the bundle to start, with `--command-line` for its arguments: `--entry tool.exe --command-line '"C:\App\tool.exe" -x'` |
 | `--trace` | off | peek every pointer argument of every host call for a string. Off by default: a title's draws pay for it and a measurement run should not without asking |
 | `--hook SPEC` | none | a watch in front of a routine inside one of the program's own modules, `module:offset:label:argBytes:len,len[:what+what]` as the launcher's `?hook=` takes it (instruction lengths from a disassembly; no relative branch among them). Each call goes to `--log`, and its answer as `label -> result ...` with what `what` named: a stack slot or `ecx`/`edx` read as a C string, `ecx*104` as that many bytes of the object, `[ecx.88]*64` as the bytes of the object a field points at, `@hex` for an absolute address. A library the program imports is watched as well as one it loads later. Repeatable |
+| `--watch-import LIB[#ord+ord]` | none | every import from that library -- `binkw32.dll`, or only those ordinals -- goes to `--log` with its arguments and, as `name -> result`, its answer: what a program does with a library of its own that the engine does not implement. Repeatable |
+| `--record N` | 0 | the bridge's last N events -- each host call that parked and finished, each call into the guest, each callback that returned -- written as `game-<stamp>-bridge.jsonl`: how a thread's stack got to where a failure found it |
 | `--peek address:length` | none | guest memory as the run left it, printed as hex bytes in the report: a flag, a counter or a table a program decides on without calling anything -- a middleware's timer slots, a driver's state -- that no call log shows. Repeatable |
 | `--worker` | page thread | run the engine in a worker with the page's canvas transferred to it, which is how the launcher runs it |
 | `--pacing page\|event` | `page` | with `--worker`: how the loop waits -- a look every few milliseconds, or sleep until something happens |
@@ -238,6 +240,8 @@ Every file is range-addressable, because one of the things served is a game
 bundle: a gigabyte that must never be read whole to answer one block.
 
 ## What comes back
+
+The report opens with what the engine did not do -- an `E_NOTIMPL`, a stub, a refused shader -- and then what it did otherwise than Windows, each counted once with how often, taken from a list of their own so the events' cap cannot hide them. Every shader the program compiled is written to `game-<stamp>-shaders/`: the source with the program's macros and flags at the top, the files its includes handed over, and what the compiler made of it disassembled; `node tools/shader-diff.mjs <that directory>` compiles the same sources with the system's `D3DCompiler_47` and runs both programs on the reference machine with the same inputs (Windows only; pixel shader model 1 is compared with Microsoft's ps_2_0).
 
 `tools/cdp_test/reports/game-<stamp>.txt` is the report, beside it
 `game-<stamp>.png` (the screenshot), `game-<stamp>-draws.txt` when draws were

@@ -123,8 +123,12 @@ import { isParkedCall } from './parking.js';
  */
 const CALL_RING = 4096;
 
-/** How many of a call's arguments the ring keeps. */
-const KEPT_ARGS = 6;
+/**
+ * How many of a call's arguments the ring keeps: enough for a Direct3D method's
+ * (CreateTexture has nine with its object, CheckDeviceFormat seven -- the one
+ * that names the format is the last) and CreateWindowEx's twelve.
+ */
+const KEPT_ARGS = 12;
 
 /** How a call ended, as the ring keeps it, by the number it keeps. */
 const KINDS = ['threw', 'answered', 'fellThrough', 'parked', 'waiting', 'forwarded'];

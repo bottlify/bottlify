@@ -24,7 +24,7 @@
  */
 
 import { createApp } from '../../../src/app.js';
-import { placeHooks } from '../../../src/host/serve.js';
+import { placeHooks, watchFrom } from '../../../src/host/serve.js';
 import {
     SLOTS, GLOBAL_HEADER_INT32, SLOT_HEADER_INT32, SLOT_BYTES, ARENA_OFFSET, ARENA_BYTES,
     slotHeaderOffset, slotPcmOffset, createSeam, mixBlock,
@@ -34,7 +34,7 @@ import {
 const LIMITS = {
     // Output whole: a conformance test prints three pieces per failed check,
     // and 400 ended Wine's d3d8 visual at its 130th.
-    events: 400, output: 20000, calls: 200,
+    events: 400, output: 20000, calls: 200, shaders: 2000, divergences: 2000,
     // Whole files, not a tail. A game of this age writes its own crash report,
     // and it names the exception, the address and the module -- all of which
     // are at the top of the file, which is exactly what a tail throws away.
@@ -645,6 +645,29 @@ export function bundleStoreOptions(request){
  * @param {any} collected
  */
 export function listen(app, collected){
+    // Each shader the program compiled, source and bytecode, for the driver
+    // to write out beside the report.
+    // Every divergence, in a list of its own: the events' cap is spent on the
+    // libraries a program loads first, and what it was refused later was lost.
+    for (const name of ['divergence', 'unimplemented', 'warning'])
+    {
+        app.on(name, (/** @type {any} */ payload)=>{
+            if (collected.divergences.length < LIMITS.divergences)
+            {
+                collected.divergences.push({ kind: name, payload });
+            }
+        });
+    }
+    app.on('shader-compiled', (/** @type {any} */ record)=>{
+        if (collected.shaders.length < LIMITS.shaders)
+        {
+            collected.shaders.push({ api: record.api, profile: record.profile,
+                entry: record.entry, defines: record.defines, flags: record.flags,
+                source: record.source, included: record.included, messages: record.messages,
+                tokens: record.tokens ? toBase64(new Uint8Array(record.tokens.buffer,
+                    record.tokens.byteOffset, record.tokens.byteLength)) : null });
+        }
+    });
     app.on('error', (/** @type {any} */ payload)=>{
         collected.failures.push({
             reason: payload.reason ?? payload.error?.reason,
@@ -1225,7 +1248,9 @@ export function createHarness(canvas, how = {}){
      *           files?: { path: string, base64: string }[],
      *           wholeFiles?: boolean,
      *           sampling?: boolean,
-     *           store?: string, prefetch?: boolean, bundleId?: string }} request
+     *           store?: string, prefetch?: boolean, bundleId?: string,
+     *           watch?: { libraries: Record<string, number[] | null>,
+     *               strings: number[] }, record?: number, memorySize?: number }} request
      * @returns {Promise<any>}
      */
     async function run(request){
@@ -1250,7 +1275,8 @@ export function createHarness(canvas, how = {}){
         presentState.pointerDown = false;
         presentState.pointerAt = { x: 0, y: 0 };
         /** @type {any} */
-        const collected = { failures: [], missing: [], output: [], events: [] };
+        const collected = { failures: [], missing: [], output: [], events: [], shaders: [],
+            divergences: [] };
 
         frameReport = ()=>{
             if (!running)
@@ -1387,6 +1413,11 @@ export function createHarness(canvas, how = {}){
             // started this run from beside the bundle -- never from the
             // bundle itself.
             sidecarHooks: request.sidecarHooks,
+            // Imports from the libraries `--watch-import` named, each call and
+            // its answer in the log, as the launcher's `?watch=` puts them.
+            watchImport: request.watch ? watchFrom(request.watch) : undefined,
+            record: request.record || 0,
+            ...(request.memorySize ? { memorySize: request.memorySize } : {}),
             // Journal categories on from the first instruction -- a call area
             // a run wants to read back afterwards through `journalRecent`.
             // `logCapacity`/`logBytes` raise the ring above its default when
@@ -1512,7 +1543,7 @@ export function createHarness(canvas, how = {}){
         // one that replaces it.
         // What a watched routine was handed and what it answered, in the log
         // beside the calls around it.
-        if ((request.hooks ?? []).length > 0 && request.log)
+        if (((request.hooks ?? []).length > 0 || request.watch) && request.log)
         {
             app.on('guest-return', (/** @type {any} */ back)=>{
                 const line = `${back.name} -> ${JSON.stringify(back.result)} `
@@ -1746,6 +1777,9 @@ export function createHarness(canvas, how = {}){
         result.missing = [...new Set(collected.missing)];
         result.output = collected.output;
         result.events = collected.events;
+        result.shaders = collected.shaders;
+        result.recorded = request.record ? app.recordedSession?.().events ?? [] : [];
+        result.divergences = collected.divergences;
         result.errors = errors;
         result.presentGaps = presentState.gaps.slice();
         result.presentTimes = presentState.times.slice();
