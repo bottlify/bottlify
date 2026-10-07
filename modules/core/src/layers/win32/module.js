@@ -1815,6 +1815,15 @@ export function createWin32Module(){
 
                 'SHELL32.dll': createShellFunctions({
                     writeMemory, readMemory, readCString,
+                    // ExtractIcon hands out an icon of pixels read from another
+                    // file: the object user32's CreateIcon makes.
+                    icon: picture=>handles.open('icon', {
+                        hotSpot: picture.hotSpot, width: picture.width,
+                        height: picture.height, picture,
+                    }),
+                    // CommandLineToArgvW answers an empty line with this.
+                    imagePath: ()=>modules.imagePath(),
+                    setLastError: setError,
                     // FindExecutable resolves an executable against the current
                     // directory the file calls use, which is the filesystem's.
                     resolve: path=>filesystem.resolve(path).path,

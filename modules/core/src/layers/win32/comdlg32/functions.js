@@ -38,9 +38,11 @@ const u32 = (bytes, at)=>(bytes[at] | bytes[at + 1] << 8
     | bytes[at + 2] << 16 | bytes[at + 3] << 24) >>> 0;
 
 /**
- * The sizes OPENFILENAMEA has had. The older one predates three trailing
- * fields; a program built against either passes its own and a dialog that
- * refuses the one it does not recognise refuses half its callers.
+ * The sizes OPENFILENAME has had, in either spelling: OPENFILENAMEW is
+ * OPENFILENAMEA field for field, its strings pointers to wide ones. The
+ * older size predates three trailing fields; a program built against either
+ * passes its own and a dialog that refuses the one it does not recognise
+ * refuses half its callers.
  */
 const OPENFILENAME_SIZES = Object.freeze([76, 88]);
 
@@ -59,6 +61,16 @@ export function createCommonDialogFunctions(host){
         const size = u32(host.readMemory(address >>> 0, 4), OFN_STRUCT_SIZE);
         extendedError = OPENFILENAME_SIZES.includes(size) ? 0 : CDERR_STRUCTSIZE;
         return 0;
+    };
+
+    /**
+     * A file dialog in either direction and either spelling: nothing in the
+     * record is read past its size, and nothing is written into it.
+     */
+    const fileDialog = {
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [openFileName])=>cancelled(openFileName),
     };
 
     return {
@@ -95,19 +107,14 @@ export function createCommonDialogFunctions(host){
             },
         },
 
-        /** BOOL GetOpenFileNameA(LPOPENFILENAMEA) */
-        GetOpenFileNameA: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([openFileName])=>cancelled(openFileName),
-        },
-
-        /** BOOL GetSaveFileNameA(LPOPENFILENAMEA) */
-        GetSaveFileNameA: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([openFileName])=>cancelled(openFileName),
-        },
+        /**
+         * BOOL GetOpenFileNameA(LPOPENFILENAMEA), GetOpenFileNameW(LPOPENFILENAMEW)
+         * BOOL GetSaveFileNameA(LPOPENFILENAMEA), GetSaveFileNameW(LPOPENFILENAMEW)
+         */
+        GetOpenFileNameA: fileDialog,
+        GetOpenFileNameW: fileDialog,
+        GetSaveFileNameA: fileDialog,
+        GetSaveFileNameW: fileDialog,
 
         /**
          * DWORD CommDlgExtendedError(void)
