@@ -656,6 +656,20 @@ export function createDrawingFunctions(
     };
 
     /**
+     * A rectangle a clip call names in logical units, as the device has it:
+     * the clip is kept in device units, as a region is.
+     *
+     * @param {any} dc @param {number} left @param {number} top
+     * @param {number} right @param {number} bottom
+     */
+    const deviceArea = (dc, left, top, right, bottom)=>{
+        const a = toDevice(dc, { x: left | 0, y: top | 0 });
+        const b = toDevice(dc, { x: right | 0, y: bottom | 0 });
+        return { left: Math.min(a.x, b.x), top: Math.min(a.y, b.y),
+            right: Math.max(a.x, b.x), bottom: Math.max(a.y, b.y) };
+    };
+
+    /**
      * Binds a device context to its pixels, once, and answers with the drawing
      * context. Null when this build cannot draw or this DC has no surface --
      * both of which the caller must turn into a truthful failure.
@@ -716,7 +730,173 @@ export function createDrawingFunctions(
         {
             services.presentDesktop?.();
         }
-        return interfaces;
+        return mapsAway(dc) ? mappedView(dc, interfaces) : interfaces;
+    };
+
+    /**
+     * Whether a DC's logical space is not its device's: an origin moved, an
+     * extent scaled, a layout mirrored. Most never are, and are drawn into
+     * as they are.
+     *
+     * @param {any} dc
+     */
+    const mapsAway = dc=>{
+        const near = toDevice(dc, { x: 0, y: 0 });
+        const far = toDevice(dc, { x: 4096, y: 4096 });
+        return near.x !== 0 || near.y !== 0 || far.x !== 4096 || far.y !== 4096;
+    };
+
+    /**
+     * The drawing context as a program addresses it through a mapped DC:
+     * every point, rectangle and size a drawing call is given taken from the
+     * DC's logical space to its device's, as LPtoDP maps it, and a blit's
+     * source from its own DC's. A framework paints a control that has no
+     * window of its own -- an image, a label -- into its parent's DC with
+     * the window origin moved to the control's corner; drawn unmapped, it
+     * lands at the parent's corner. The calls that map for themselves
+     * (AlphaBlend, TransparentBlt, GradientFill, SetDIBitsToDevice) and the
+     * clip, which is kept in device units, reach the context as they are.
+     *
+     * @param {any} dc @param {any} interfaces
+     */
+    const mappedView = (dc, interfaces)=>{
+        /** @param {number} x @param {number} y */
+        const point = (x, y)=>toDevice(dc, { x: x | 0, y: y | 0 });
+        /** @param {{ left: number, top: number, right: number, bottom: number }} rect */
+        const area = rect=>{
+            const a = point(rect.left, rect.top);
+            const b = point(rect.right, rect.bottom);
+            return { left: Math.min(a.x, b.x), top: Math.min(a.y, b.y),
+                right: Math.max(a.x, b.x), bottom: Math.max(a.y, b.y) };
+        };
+        // A width and height are the far corner's distance, sign and all: a
+        // negative extent is a mirrored stretch, which a mapping can make.
+        /** @param {number} x @param {number} y @param {number} width @param {number} height */
+        const box = (x, y, width, height)=>{
+            const a = point(x, y);
+            const b = point((x | 0) + (width | 0), (y | 0) + (height | 0));
+            return [a.x, a.y, b.x - a.x, b.y - a.y];
+        };
+        /**
+         * A call that draws from the current position and may move it.
+         *
+         * @template T @param {() => T} drawn @returns {T}
+         */
+        const through = drawn=>{
+            const logical = { x: dc.position?.x | 0, y: dc.position?.y | 0 };
+            const start = point(logical.x, logical.y);
+            dc.position = { ...start };
+            try
+            {
+                return drawn();
+            }
+            finally
+            {
+                const moved = dc.position ?? start;
+                dc.position = { x: logical.x + (moved.x - start.x),
+                    y: logical.y + (moved.y - start.y) };
+            }
+        };
+        /** @param {number} source @param {number} x @param {number} y */
+        const from = (source, x, y)=>{
+            const other = dcOf(source);
+            return other ? toDevice(other, { x: x | 0, y: y | 0 }) : { x: x | 0, y: y | 0 };
+        };
+        /** @type {Record<string, (...args: any[]) => any>} */
+        const calls = {
+            setPixel: (hdc, x, y, color)=>{
+                const at = point(x, y);
+                return interfaces.setPixel(hdc, at.x, at.y, color);
+            },
+            getPixel: (hdc, x, y)=>{
+                const at = point(x, y);
+                return interfaces.getPixel(hdc, at.x, at.y);
+            },
+            bitBlt: (hdc, x, y, width, height, source, srcX, srcY, rop)=>{
+                const [dx, dy, dw, dh] = box(x, y, width, height);
+                const at = from(source, srcX, srcY);
+                return interfaces.bitBlt(hdc, dx, dy, dw, dh, source, at.x, at.y, rop);
+            },
+            stretchBlt: (hdc, x, y, width, height, source, srcX, srcY, srcWidth, srcHeight,
+                rop)=>
+            {
+                const [dx, dy, dw, dh] = box(x, y, width, height);
+                const other = dcOf(source);
+                const [sx, sy, sw, sh] = other
+                    ? (()=>{
+                        const a = toDevice(other, { x: srcX | 0, y: srcY | 0 });
+                        const b = toDevice(other, { x: (srcX | 0) + (srcWidth | 0),
+                            y: (srcY | 0) + (srcHeight | 0) });
+                        return [a.x, a.y, b.x - a.x, b.y - a.y];
+                    })()
+                    : [srcX, srcY, srcWidth, srcHeight];
+                return interfaces.stretchBlt(hdc, dx, dy, dw, dh, source, sx, sy, sw, sh, rop);
+            },
+            maskBlt: (hdc, x, y, width, height, source, srcX, srcY, mask, maskX, maskY, rop)=>{
+                const [dx, dy, dw, dh] = box(x, y, width, height);
+                const at = from(source, srcX, srcY);
+                return interfaces.maskBlt(hdc, dx, dy, dw, dh, source, at.x, at.y, mask,
+                    maskX, maskY, rop);
+            },
+            patBlt: (hdc, x, y, width, height, rop)=>{
+                const [dx, dy, dw, dh] = box(x, y, width, height);
+                return interfaces.patBlt(hdc, dx, dy, dw, dh, rop);
+            },
+            floodFill: (hdc, x, y, color, type)=>{
+                const at = point(x, y);
+                return interfaces.floodFill(hdc, at.x, at.y, color, type);
+            },
+            fillRect: (hdc, rect, brush)=>interfaces.fillRect(hdc, area(rect), brush),
+            frameRect: (hdc, rect, brush)=>interfaces.frameRect(hdc, area(rect), brush),
+            invertRect: (hdc, rect, halftone)=>interfaces.invertRect(hdc, area(rect), halftone),
+            rectangle: (hdc, left, top, right, bottom)=>{
+                const mapped = area({ left, top, right, bottom });
+                return interfaces.rectangle(hdc, mapped.left, mapped.top, mapped.right,
+                    mapped.bottom);
+            },
+            ellipse: (hdc, left, top, right, bottom)=>{
+                const mapped = area({ left, top, right, bottom });
+                return interfaces.ellipse(hdc, mapped.left, mapped.top, mapped.right,
+                    mapped.bottom);
+            },
+            polygon: (hdc, points, fillMode)=>interfaces.polygon(hdc,
+                points.map((/** @type {{ x: number, y: number }} */ at)=>point(at.x, at.y)),
+                fillMode),
+            // The current position is the DC's own, in its logical units --
+            // MoveToEx sets it and GetCurrentPositionEx reads it -- and the
+            // context draws from it: for the length of a call it stands in
+            // device units, and afterwards it is logical again, moved by as
+            // much as the call moved it.
+            moveToEx: (hdc, x, y)=>{
+                const previous = { ...dc.position };
+                dc.position = { x: x | 0, y: y | 0 };
+                return previous;
+            },
+            lineTo: (hdc, x, y)=>through(()=>{
+                const at = point(x, y);
+                return interfaces.lineTo(hdc, at.x, at.y);
+            }),
+            textOutA: (hdc, x, y, text)=>through(()=>{
+                const at = point(x, y);
+                return interfaces.textOutA(hdc, at.x, at.y, text);
+            }),
+            extTextOutA: (hdc, x, y, flags, rect, text, dx)=>through(()=>{
+                const at = point(x, y);
+                return interfaces.extTextOutA(hdc, at.x, at.y, flags, rect ? area(rect) : rect,
+                    text, dx);
+            }),
+            drawPicture: (hdc, x, y, picture, width = picture.width, height = picture.height)=>{
+                const [dx, dy, dw, dh] = box(x, y, width, height);
+                return interfaces.drawPicture(hdc, dx, dy, picture, dw, dh);
+            },
+            stretchDIBits: (hdc, request)=>{
+                const [dx, dy, dw, dh] = box(request.xDest, request.yDest, request.destWidth,
+                    request.destHeight);
+                return interfaces.stretchDIBits(hdc, { ...request, xDest: dx, yDest: dy,
+                    destWidth: dw, destHeight: dh });
+            },
+        };
+        return Object.assign(Object.create(interfaces), calls);
     };
 
     /**
@@ -2533,9 +2713,8 @@ export function createDrawingFunctions(
                 {
                     return REGION_ERROR;
                 }
-                return setClipArea(handle, dc, intersectArea(clipAreaOf(dc), {
-                    left: left | 0, top: top | 0, right: right | 0, bottom: bottom | 0,
-                }));
+                return setClipArea(handle, dc, intersectArea(clipAreaOf(dc),
+                    deviceArea(dc, left, top, right, bottom)));
             },
         },
 
@@ -2557,7 +2736,7 @@ export function createDrawingFunctions(
                     return REGION_ERROR;
                 }
                 const area = clipAreaOf(dc);
-                const hole = { left: left | 0, top: top | 0, right: right | 0, bottom: bottom | 0 };
+                const hole = deviceArea(dc, left, top, right, bottom);
                 if (isEmpty(hole) || area.every(piece=>isEmpty(intersect(piece, hole))))
                 {
                     return areaKind(area);

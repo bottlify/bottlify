@@ -2383,3 +2383,57 @@ test('GdiTransparentBlt stretches the source over the destination, leaving the k
     assert.equal(setup().fns.GdiTransparentBlt.handler([setup().hdc, 0, 0, 1, 1, setup().hdc,
         0, 0, 1, 1, 0]), 0, 'nothing to draw with');
 });
+
+test('a moved window origin moves every drawing call and the clip a program names, as a'
+    + ' framework painting a windowless control relies on', ()=>{
+    // A framework paints an image that has no window of its own into its
+    // parent's DC: the window origin moved back by the image's corner, the
+    // clip narrowed to the image in the image's own coordinates, then the
+    // image drawn at 0,0. The pixels have to land at the image's corner.
+    const machine = painted(32, 32);
+    const { fns, dc, pixel, fill } = machine;
+    const BLACK = 0x00000000;
+    const WHITE_BRUSH = fns.GetStockObject.handler([0]);
+    fill(BLACK);
+    const POINT = 0x200;
+    assert.equal(fns.SetWindowOrgEx.handler([dc, -10, -12, POINT]), 1);
+    assert.equal(fns.IntersectClipRect.handler([dc, 0, 0, 4, 4]), 2, 'SIMPLEREGION');
+
+    // A source with its own pixels, blitted to the logical origin.
+    const source = machine.section(8, 8);
+    source.fill(0x00ff0000);
+    assert.equal(fns.BitBlt.handler([dc, 0, 0, 8, 8, source.dc, 0, 0, SRCCOPY]), 1);
+    assert.equal(pixel(10, 12) & 0xffffff, 0xff0000, 'the corner, at the moved origin');
+    assert.equal(pixel(13, 15) & 0xffffff, 0xff0000);
+    assert.equal(pixel(14, 12) & 0xffffff, 0, 'and clipped to four, in logical units');
+    assert.equal(pixel(0, 0) & 0xffffff, 0, 'nothing at the device corner');
+
+    // The same for a fill and a rectangle, outside that clip once it is gone.
+    fns.SelectClipRgn.handler([dc, 0]);
+    assert.equal(fns.PatBlt.handler([dc, 4, 4, 2, 2, 0x00f00021]), 1, 'PATCOPY');
+    assert.notEqual(pixel(14, 16) & 0xffffff, 0, 'the pattern at 14,16');
+    assert.equal(pixel(4, 4) & 0xffffff, 0);
+    fns.SelectObject.handler([dc, WHITE_BRUSH]);
+    assert.equal(fns.Rectangle.handler([dc, -10, -12, -6, -8]), 1);
+    assert.notEqual(pixel(1, 1) & 0xffffff, 0, 'a logical -10,-12 is the device corner');
+
+    // A line from the current position, which stays in logical units: a
+    // framework draws a bevel's edge from 0,0 to its width.
+    fill(BLACK);
+    fns.SelectObject.handler([dc, fns.GetStockObject.handler([6])]);
+    assert.equal(fns.SetWindowOrgEx.handler([dc, 0, -20, 0]), 1);
+    assert.equal(fns.MoveToEx.handler([dc, 0, 0, 0]), 1);
+    assert.equal(fns.LineTo.handler([dc, 16, 0]), 1);
+    assert.deepEqual([0, 8, 15].map(x=>pixel(x, 20) & 0xffffff), [0xffffff, 0xffffff, 0xffffff],
+        'the whole line, along device row 20');
+    assert.equal(pixel(16, 20) & 0xffffff, 0, 'its last point left out');
+    assert.equal(fns.GetCurrentPositionEx.handler([dc, POINT]), 1);
+    assert.deepEqual([machine.view.getInt32(POINT, true), machine.view.getInt32(POINT + 4, true)],
+        [16, 0], 'the position where the line ended, logical');
+
+    // Back to the device's own space: drawn where it is named again.
+    assert.equal(fns.SetWindowOrgEx.handler([dc, 0, 0, 0]), 1);
+    fill(BLACK);
+    assert.equal(fns.BitBlt.handler([dc, 0, 0, 2, 2, source.dc, 0, 0, SRCCOPY]), 1);
+    assert.equal(pixel(0, 0) & 0xffffff, 0xff0000);
+});
