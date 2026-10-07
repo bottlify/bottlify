@@ -767,8 +767,14 @@ export function schedulePresses(app, request, say = ()=>{}){
         const shown = window=>window.visible && (!window.child
             || (byHwnd.has(window.parent) && shown(byHwnd.get(window.parent))));
         const showing = windows.filter(shown);
-        return { showing, key: showing.map(window=>
-            `${window.hwnd}:${window.title}:${window.enabled}`).join('|') };
+        // A button takes a click only while every window it is inside does:
+        // a modal box disables its owner, and the owner's buttons with it.
+        /** @param {any} window @returns {boolean} */
+        const usable = window=>window.enabled !== false && (!window.child
+            || (byHwnd.has(window.parent) && usable(byHwnd.get(window.parent))));
+        return { showing: showing.map(window=>({ ...window, enabled: usable(window) })),
+            key: showing.map(window=>`${window.hwnd}:${window.title}:${usable(window)}`)
+                .join('|') };
     };
     const toggled = new Set();
     let seenKey = '';

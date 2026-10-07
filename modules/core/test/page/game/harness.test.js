@@ -113,6 +113,37 @@ test('a wizard\'s button is pressed by its label once the screen settles, the fi
         buttons.filter(message=>message.down).length, 'and every press is let go');
 });
 
+test('a button inside a window a modal box disabled is not pressed; the box\'s is', async t=>{
+    const app = fakeApp();
+    const windows = [
+        { hwnd: '0x10', parent: null, child: false, visible: true, enabled: false,
+            className: 'TWizardForm', title: 'Setup', rect: { left: 0, top: 0, right: 400,
+                bottom: 300 } },
+        { hwnd: '0x20', parent: '0x10', child: true, visible: true, enabled: true,
+            className: 'Button', title: '&Next >', style: '0x50010000',
+            rect: { left: 300, top: 260, right: 380, bottom: 284 } },
+        { hwnd: '0x30', parent: '0x10', child: false, visible: true, enabled: true,
+            className: '#32770', title: 'Folder', rect: { left: 50, top: 50, right: 350,
+                bottom: 200 } },
+        { hwnd: '0x34', parent: '0x30', child: true, visible: true, enabled: true,
+            className: 'Button', title: '&Yes', style: '0x50010000',
+            rect: { left: 100, top: 150, right: 180, bottom: 174 } },
+    ];
+    /** @type {any} */ (app).debug = { windows: ()=>windows };
+    /** @type {string[]} */
+    const said = [];
+    const stop = schedulePresses(app, { presses: ['next >', 'yes'], pressSettleMs: 10,
+        pressEveryMs: 5 }, line=>said.push(line));
+    t.after(stop);
+    for (let waited = 0; said.length < 1 && waited < 2000; waited += 10)
+    {
+        await new Promise(resolve=>setTimeout(resolve, 10));
+    }
+    stop();
+    assert.equal(said[0], 'press "&Yes" at 140,162',
+        'Next is listed first, but its window is disabled behind the box');
+});
+
 test('a presented frame increments the counter and records the gap', ()=>{
     const app = fakeApp();
     /** @type {import('./harness.js').PresentState} */
