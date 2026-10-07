@@ -267,6 +267,11 @@ function readGammaRamp(bytes){
  * @property {(font: import('./structs.js').LogFontFields) => FontMeasure | null} [fontMetrics]
  *           What the font engine measures for a font; null, or absent, when
  *           there is no engine and the estimate stands.
+ * @property {(code: number, font: import('./structs.js').LogFontFields) => {
+ *     advance: number, left: number, top: number, width: number, height: number,
+ *     coverage: Uint8Array } | null} [glyph]
+ *           One character's coverage in a font, as the engine draws it; null,
+ *           or absent, without an engine.
  * @property {(font: import('./structs.js').LogFontFields, text: string) => number | null}
  *           [textWidth]
  *           How wide the engine draws a string in a font; null, or absent,

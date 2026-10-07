@@ -18,10 +18,11 @@
  * once the count is right the maths is a few lines and a program that transposes
  * a matrix expects the transpose.
  *
- * The ones that build something on a device -- an effect, a shader, a mesh, a
- * texture, a font -- need a device this maths-only surface does not have; they
- * answer E_NOTIMPL with the argument width still declared, their out-pointers
- * null, and say so where divergences are told.
+ * The ones that build something on a device go through the program's own
+ * device's methods: a texture from an image file (`texture.js`). Those not
+ * built yet -- an effect, a mesh, a font -- answer E_NOTIMPL with the argument
+ * width still declared, their out-pointers null, and say so where divergences
+ * are told.
  *
  * Matrices are row-major, sixteen floats, `m[row * 4 + col]` -- the layout
  * D3DXMATRIX has in memory and the one every function here reads and writes.
@@ -34,6 +35,9 @@
  * mathematics does not differ.
  */
 
+import { createFonts } from './font.js';
+import { createSprites } from './sprite.js';
+import { D3DX_DEFAULT, createTextureLoader } from './texture.js';
 import { guestEntry } from '../msvcrt/guest-code.js';
 import { createComObject } from '../ole32/objects.js';
 import { createConstantTableObjects } from './constants.js';
@@ -56,6 +60,34 @@ const D3DERR_INVALIDCALL = 0x8876086c;
 const IID_ID3DXBUFFER = '{8BA5FB08-5195-40E2-AC58-0D989C3A0102}';
 
 /**
+ * What an image file is, by its signature, as D3DX's loaders tell them apart.
+ *
+ * @param {Uint8Array} head  Its first four bytes.
+ * @returns {string}
+ */
+function imageKind(head){
+    const text = String.fromCharCode(...head);
+    if (text === 'DDS ')
+    {
+        return 'DDS';
+    }
+    if (text.startsWith('BM'))
+    {
+        return 'BMP';
+    }
+    if (head[0] === 0xff && head[1] === 0xd8)
+    {
+        return 'JPEG';
+    }
+    if (text === 'PNG')
+    {
+        return 'PNG';
+    }
+    const bytes = [...head].map(b=>b.toString(16).padStart(2, '0')).join(' ');
+    return `unrecognised, perhaps TGA: ${bytes}`;
+}
+
+/**
  * The facilities this surface does not build: each one's argument width, in
  * bytes, then which of its arguments are out-pointers it leaves null -- a
  * caller that does not check the answer finds no object rather than whatever
@@ -75,21 +107,16 @@ const NOT_BUILT = {
     D3DXCreateEffectCompiler: [28, 5, 6],
     D3DXCreateEffectFromResourceA: [36, 7, 8],
     D3DXCreateEffectPool: [4, 0],
-    D3DXCreateFontA: [48, 11],
-    D3DXCreateFontW: [48, 11],
     D3DXCreateMesh: [24, 5],
     D3DXCreateMeshFVF: [24, 5],
     D3DXCreatePolygon: [20, 3, 4],
     D3DXCreateSphere: [24, 4, 5],
-    D3DXCreateSprite: [8, 1],
     D3DXCreateTeapot: [12, 1, 2],
     D3DXCreateTextA: [32, 5, 6],
     D3DXCreateTextureFromFileExA: [56, 13],
-    D3DXCreateTextureFromFileInMemoryEx: [60, 14],
     D3DXCreateTorus: [28, 5, 6],
     D3DXFilterTexture: [16],
     D3DXGetImageInfoFromFileA: [8],
-    D3DXGetImageInfoFromFileInMemory: [12],
     D3DXLoadSurfaceFromSurface: [32],
     D3DXSaveSurfaceToFileInMemory: [20, 0],
     D3DXSaveTextureToFileInMemory: [16, 0],
@@ -121,12 +148,24 @@ const IN_GUEST = [[inGuest, COMPILED], [matrix, MATRIX], [vector, VECTOR],
  *           A call into the guest -- a device's own method, from a constant table's setter.
  * @property {() => any} [currentThread]
  *           Whose call is in flight: a call into the guest made after an await names it.
+ * @property {(font: any) => any} [fontMetrics]
+ *           What the font engine GDI draws with measures for a font, or null.
+ * @property {(code: number, font: any) => any} [glyph]
+ *           One character's coverage from that engine, or null.
+ * @property {(record: { api: string, profile: string, entry: string,
+ *     defines: [string, string][], flags: number, source: string,
+ *     included: Record<string, string>, messages: string, tokens: Uint32Array | null })
+ *     => void} [shaderCompiled]
+ *           Told of each compile, for a tool that compares the source with what came out.
  */
 
 /**
  * @param {D3dxHost} host
  */
 export function createD3dxFunctions(host){
+    const textures = createTextureLoader(host);
+    const sprites = createSprites(host);
+    const fonts = createFonts(host, sprites);
     /** @type {import('../ole32/objects.js').ComInterfaceDescriptor} */
     const buffer = {
         id: IID_ID3DXBUFFER,
@@ -190,6 +229,60 @@ export function createD3dxFunctions(host){
         }
         putU32(out, pointer);
         return 0;
+    };
+
+    /**
+     * A font as D3DXCreateFont's arguments describe it.
+     *
+     * @param {number[]} args @param {boolean} isWide
+     */
+    const createFont = (args, isWide)=>{
+        const [device, height, width, weight, mips, italic, charSet, precision, quality, pitch,
+            face, out] = args;
+        if ((out >>> 0) !== 0)
+        {
+            putU32(out, 0);
+        }
+        if ((device >>> 0) === 0 || (out >>> 0) === 0 || !host.vtables)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        return fonts.create(device, { height: height | 0, width: width >>> 0,
+            weight: weight >>> 0, mipLevels: mips >>> 0, italic: italic ? 1 : 0,
+            charSet: charSet & 0xff, outputPrecision: precision & 0xff, quality: quality & 0xff,
+            pitchAndFamily: pitch & 0xff, faceName: faceNameAt(face, isWide) }, out);
+    };
+
+    /**
+     * A font as a D3DXFONT_DESC describes it.
+     *
+     * @param {number[]} args @param {boolean} isWide
+     */
+    const createFontIndirect = ([device, desc, out], isWide)=>{
+        if ((desc >>> 0) === 0)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        const bytes = host.readMemory(desc >>> 0, 24);
+        const view = new DataView(bytes.slice().buffer);
+        return createFont([device, view.getInt32(0, true), view.getUint32(4, true),
+            view.getUint32(8, true), view.getUint32(12, true), view.getUint32(16, true),
+            bytes[20], bytes[21], bytes[22], bytes[23], (desc >>> 0) + 24, out], isWide);
+    };
+
+    /** A face name, at most 31 characters. @param {number} at @param {boolean} isWide */
+    const faceNameAt = (at, isWide)=>{
+        if ((at >>> 0) === 0)
+        {
+            return '';
+        }
+        if (!isWide)
+        {
+            return latin1(cString(at)).slice(0, 31);
+        }
+        const units = new Uint16Array(host.readMemory(at >>> 0, 64).slice().buffer);
+        const end = units.indexOf(0);
+        return String.fromCharCode(...units.subarray(0, end < 0 ? 32 : end)).slice(0, 31);
     };
 
     /**
@@ -283,10 +376,90 @@ export function createD3dxFunctions(host){
                         host.writeMemory(args[at] >>> 0, new Uint8Array(4));
                     }
                 }
-                host.divergence?.(name, 'answered E_NOTIMPL: nothing is built on a device here');
+                // An image named by what it is, so a report says which decoders a
+                // program wants: the first bytes of the data it handed over.
+                const dataAt = args[name.endsWith('InMemoryEx') ? 1 : 0] >>> 0;
+                const image = name.endsWith('InMemoryEx') || name.endsWith('FileInMemory')
+                    ? ` (${imageKind(host.readMemory(dataAt, 4))})`
+                    : '';
+                host.divergence?.(name,
+                    `answered E_NOTIMPL: nothing is built on a device here${image}`);
+                if (name === 'D3DXCreateEffect' || name === 'D3DXCreateEffectCompiler')
+                {
+                    // The effect it could not have, for a tool that asks what it was.
+                    host.shaderCompiled?.({ api: name, profile: 'fx', entry: 'effect',
+                        defines: macrosAt(args[name === 'D3DXCreateEffect' ? 3 : 2]),
+                        flags: 0, source: latin1(host.readMemory(args[name === 'D3DXCreateEffect'
+                            ? 1 : 0] >>> 0, args[name === 'D3DXCreateEffect' ? 2 : 1] >>> 0)),
+                        included: {}, messages: 'E_NOTIMPL\n', tokens: null });
+                }
                 return E_NOTIMPL;
             },
         }])),
+
+        /** See texture.js. */
+        D3DXCreateTextureFromFileInMemoryEx: { argBytes: 60, handler: textures.fromMemory },
+
+        /** HRESULT D3DXCreateSprite(LPDIRECT3DDEVICE9 pDevice, LPD3DXSPRITE *ppSprite) */
+        D3DXCreateSprite: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([device, out])=>{
+                if ((out >>> 0) !== 0)
+                {
+                    putU32(out, 0);
+                }
+                if ((device >>> 0) === 0 || (out >>> 0) === 0 || !host.vtables)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                const { pointer } = sprites.create(device);
+                if (pointer === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                putU32(out, pointer);
+                return 0;
+            },
+        },
+
+        /**
+         * HRESULT D3DXCreateFontA(LPDIRECT3DDEVICE9 pDevice, INT Height, UINT Width,
+         *     UINT Weight, UINT MipLevels, BOOL Italic, DWORD CharSet, DWORD OutputPrecision,
+         *     DWORD Quality, DWORD PitchAndFamily, LPCSTR pFaceName, LPD3DXFONT *ppFont)
+         */
+        D3DXCreateFontA: { argBytes: 48,
+            handler: (/** @type {number[]} */ args)=>createFont(args, false) },
+        /** The same, the face name wide. */
+        D3DXCreateFontW: { argBytes: 48,
+            handler: (/** @type {number[]} */ args)=>createFont(args, true) },
+        /**
+         * HRESULT D3DXCreateFontIndirectA(LPDIRECT3DDEVICE9 pDevice,
+         *     CONST D3DXFONT_DESCA *pDesc, LPD3DXFONT *ppFont)
+         */
+        D3DXCreateFontIndirectA: { argBytes: 12, handler: (/** @type {number[]} */ args)=>
+            createFontIndirect(args, false) },
+        /** The same, D3DXFONT_DESCW. */
+        D3DXCreateFontIndirectW: { argBytes: 12, handler: (/** @type {number[]} */ args)=>
+            createFontIndirect(args, true) },
+
+        /**
+         * HRESULT D3DXCreateTextureFromFileInMemory(LPDIRECT3DDEVICE9 pDevice, LPCVOID pSrcData,
+         *     UINT SrcDataSize, LPDIRECT3DTEXTURE9 *ppTexture)
+         *
+         * The Ex form with what the documentation says this one means: sizes and a full
+         * chain of levels from the file, its format, the managed pool, no colour key.
+         */
+        D3DXCreateTextureFromFileInMemory: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([device, data, size, out])=>textures.fromMemory([device, data, size,
+                D3DX_DEFAULT, D3DX_DEFAULT, D3DX_DEFAULT, 0, 0, 1, D3DX_DEFAULT, D3DX_DEFAULT, 0,
+                0, 0, out]),
+        },
+
+        /** See texture.js. */
+        D3DXGetImageInfoFromFileInMemory: { argBytes: 12, handler: textures.imageInfo },
 
         /**
          * HRESULT D3DXCreateBuffer(DWORD NumBytes, LPD3DXBUFFER *ppBuffer)
@@ -387,21 +560,47 @@ export function createD3dxFunctions(host){
                     return D3DERR_INVALIDCALL;
                 }
                 const text = latin1(host.readMemory(source >>> 0, size >>> 0));
+                const macros = macrosAt(defines);
+                /** What the program's ID3DXInclude handed over, by name, for the record. */
+                /** @type {Record<string, string>} */
+                const included = {};
+                const opener = (include >>> 0) === 0 ? undefined : includer(include >>> 0);
+                /** @param {string} name @param {boolean} system */
+                const recorded = async(name, system)=>{
+                    const opened = await /** @type {NonNullable<typeof opener>} */ (opener)(name,
+                        system);
+                    if (opened !== null)
+                    {
+                        included[name] = opened;
+                    }
+                    return opened;
+                };
                 return compileShader(text, {
                     entry: (entry >>> 0) === 0 ? 'main' : latin1(cString(entry)),
                     profile: latin1(cString(profile)),
                     flags: flags >>> 0,
-                    defines: macrosAt(defines),
-                    include: (include >>> 0) === 0 ? undefined : includer(include >>> 0),
+                    defines: macros,
+                    include: opener && recorded,
                 }).then(result=>{
+                    host.shaderCompiled?.({ api: 'D3DXCompileShader',
+                        profile: latin1(cString(profile)),
+                        entry: (entry >>> 0) === 0 ? 'main' : latin1(cString(entry)),
+                        defines: macros, flags: flags >>> 0, source: text, included,
+                        messages: result.messages, tokens: result.tokens });
                     if ((errorsOut >>> 0) !== 0 && result.messages !== '')
                     {
                         giveBuffer(errorsOut, encode(result.messages));
                     }
                     if (!result.ok || !result.tokens)
                     {
-                        host.divergence?.('D3DXCompileShader', `refused: ${
-                            result.messages.split('\n')[0]}`);
+                        // The line it points at, so a report says what the program
+                        // wrote and not only where.
+                        const lines = result.messages.split('\n');
+                        const first = lines.find(line=>/ error /.test(line)) ?? lines[0];
+                        const at = /^memory\((\d+),/.exec(first);
+                        const line = at ? text.split('\n')[Number(at[1]) - 1]?.trim() : undefined;
+                        host.divergence?.('D3DXCompileShader', `refused: ${first}${
+                            line ? ` -- ${line}` : ''}`);
                         return E_FAIL;
                     }
                     const bytes = new Uint8Array(result.tokens.buffer, result.tokens.byteOffset,

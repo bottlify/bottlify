@@ -3617,6 +3617,11 @@ async function buildApp(options){
                 /** @param {import('./layers/win32/gdi32/structs.js').LogFontFields} font */
                 fontMetrics: font=>core.api('graphics').gdiDrawing().fontMetrics(font),
                 /**
+                 * @param {number} code
+                 * @param {import('./layers/win32/gdi32/structs.js').LogFontFields} font
+                 */
+                glyph: (code, font)=>core.api('graphics').gdiDrawing().glyph(code, font),
+                /**
                  * @param {import('./layers/win32/gdi32/structs.js').LogFontFields} font
                  * @param {string} text
                  */
@@ -3688,6 +3693,10 @@ async function buildApp(options){
             // accepts a flag it does not act on owes the reader the same
             // warning as a Direct3D state that is stored and unused.
             divergence: reportDivergence,
+            // Each shader the program compiled, its source beside what came
+            // out, for a tool that asks: a picture wrong in a shader is read
+            // there and nowhere else.
+            shaderCompiled: (/** @type {any} */ record)=>events.emit('shader-compiled', record),
             // Text a program copied, for the page to put on the browser's
             // clipboard: the copy button of an error console is useless if
             // what it copied cannot leave the engine.

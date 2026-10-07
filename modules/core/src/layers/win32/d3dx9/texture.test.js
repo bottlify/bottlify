@@ -1,0 +1,240 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { D3DX_DEFAULT, D3DX_FROM_FILE, createTextureLoader } from './texture.js';
+import { FMT } from './pixels.js';
+
+const D3DXERR_INVALIDDATA = 0x88760b59;
+
+/**
+ * Guest memory, a heap, and a device whose methods are reached the way a
+ * program's are: through the vtable a pointer leads to, each slot a number
+ * the fake bridge dispatches on.
+ */
+function rig(){
+    const memory = new Uint8Array(1 << 20);
+    const view = new DataView(memory.buffer);
+    let next = 0x1000;
+    const heap = {
+        allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += (bytes + 15) & ~15;
+            return at;
+        },
+        free: ()=>{},
+    };
+    /** @type {any[]} */
+    const calls = [];
+    /** @type {Map<number, any>} */
+    const textures = new Map();
+    /** An object whose vtable's slot `n` holds the entry 0xE0000 + n. @param {any} state */
+    const object = state=>{
+        const at = heap.allocate(4);
+        const vtable = heap.allocate(64 * 4);
+        view.setUint32(at, vtable, true);
+        for (let slot = 0; slot < 64; slot++)
+        {
+            view.setUint32(vtable + slot * 4, 0xe0000 + slot, true);
+        }
+        textures.set(at, state);
+        return at;
+    };
+    const device = object({ device: true });
+    // The bridge finds the stack for a call into the guest from the host call in
+    // flight, which a handler's is only once it has returned its promise.
+    let inHandler = false;
+    const callGuest = async(/** @type {{ entry: number, args: number[] }} */ { entry, args })=>{
+        if (inHandler)
+        {
+            throw new Error('a call into the guest before the handler returned');
+        }
+        const slot = entry - 0xe0000;
+        const self = textures.get(args[0]);
+        if (self.device && slot === 23)
+        {
+            const [, width, height, levels, usage, format, pool, out] = args;
+            const texture = object({ width, height, levels, usage, format, pool, released: false,
+                data: Array.from({ length: levels }, (_, level)=>heap.allocate(
+                    Math.max(1, width >> level) * Math.max(1, height >> level) * 4)) });
+            calls.push(['CreateTexture', width, height, levels, usage, format, pool]);
+            view.setUint32(out, texture, true);
+            return 0;
+        }
+        if (self.device && slot === 31)
+        {
+            const [, from, to] = args;
+            calls.push(['UpdateTexture']);
+            const source = textures.get(from);
+            const target = textures.get(to);
+            source.data.forEach((/** @type {number} */ at, /** @type {number} */ level)=>{
+                memory.copyWithin(target.data[level], at, at + 4096);
+            });
+            return 0;
+        }
+        if (slot === 19)
+        {
+            const [, level, locked] = args;
+            const pitch = Math.max(1, self.width >> level) * (self.format === FMT.DXT1 ? 2 : 4);
+            view.setUint32(locked, pitch, true);
+            view.setUint32(locked + 4, self.data[level], true);
+            calls.push(['LockRect', level]);
+            return 0;
+        }
+        if (slot === 20)
+        {
+            calls.push(['UnlockRect', args[1]]);
+            return 0;
+        }
+        if (slot === 2)
+        {
+            self.released = true;
+            calls.push(['Release']);
+            return 0;
+        }
+        throw new Error(`unexpected slot ${slot}`);
+    };
+    /** @type {string[]} */
+    const diverged = [];
+    const created = createTextureLoader({
+        readMemory: (at, length)=>memory.subarray(at, at + length),
+        writeMemory: (at, bytes)=>memory.set(bytes, at),
+        divergence: (api, detail)=>diverged.push(`${api}: ${detail}`),
+        heap, callGuest,
+    });
+    const loader = {
+        /** @param {number[]} args */
+        fromMemory: args=>{
+            inHandler = true;
+            try
+            {
+                return created.fromMemory(args);
+            }
+            finally
+            {
+                inHandler = false;
+            }
+        },
+        imageInfo: created.imageInfo,
+    };
+    /** @param {number[]} bytes */
+    const place = bytes=>{
+        const at = heap.allocate(bytes.length);
+        memory.set(bytes, at);
+        return at;
+    };
+    return { memory, view, heap, device, textures, calls, diverged, loader, place };
+}
+
+/** A 2x2 TGA, 24 bits, top row first. @param {number[][]} texels  b, g, r each */
+function tga(texels){
+    const header = new Array(18).fill(0);
+    header[2] = 2;
+    header[12] = 2;
+    header[14] = 2;
+    header[16] = 24;
+    header[17] = 0x20;
+    return [...header, ...texels.flat()];
+}
+
+/** The Ex call's arguments. @param {Record<string, number>} a */
+function exArgs(a){
+    return [a.device, a.data, a.size, a.width ?? D3DX_DEFAULT, a.height ?? D3DX_DEFAULT,
+        a.mips ?? D3DX_DEFAULT, a.usage ?? 0, a.format ?? 0, a.pool ?? 1, D3DX_DEFAULT,
+        D3DX_DEFAULT, a.key ?? 0, a.info ?? 0, 0, a.out];
+}
+
+test('a TGA becomes a managed texture in its own format, with every level of the chain', async()=>{
+    const { device, view, textures, calls, loader, place, heap, memory } = rig();
+    const file = tga([[10, 20, 30], [30, 40, 50], [50, 60, 70], [70, 80, 90]]);
+    const data = place(file);
+    const out = heap.allocate(4);
+    const info = heap.allocate(28);
+    const answer = await loader.fromMemory(exArgs({ device, data, size: file.length, out, info }));
+    assert.equal(answer, 0);
+    const texture = textures.get(view.getUint32(out, true));
+    assert.deepEqual(calls[0], ['CreateTexture', 2, 2, 2, 0, FMT.X8R8G8B8, 1]);
+    assert.deepEqual([...memory.subarray(texture.data[0], texture.data[0] + 16)],
+        [10, 20, 30, 255, 30, 40, 50, 255, 50, 60, 70, 255, 70, 80, 90, 255]);
+    // The second level is the average of the four.
+    assert.deepEqual([...memory.subarray(texture.data[1], texture.data[1] + 4)],
+        [40, 50, 60, 255]);
+    // D3DXIMAGE_INFO: 2x2, depth 1, one level, R8G8B8, a texture, a TGA.
+    assert.deepEqual(Array.from({ length: 7 }, (_, i)=>view.getUint32(info + i * 4, true)),
+        [2, 2, 1, 1, FMT.R8G8B8, 3, 2]);
+});
+
+test('a default-pool texture is filled through a system-memory copy and UpdateTexture', async()=>{
+    const { device, view, textures, calls, loader, place, heap, memory } = rig();
+    const file = tga([[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]]);
+    const data = place(file);
+    const out = heap.allocate(4);
+    const answer = await loader.fromMemory(exArgs({ device, data, size: file.length, out,
+        pool: 0, mips: 1, format: FMT.A8R8G8B8 }));
+    assert.equal(answer, 0);
+    assert.deepEqual(calls.map(c=>c[0]), ['CreateTexture', 'LockRect', 'UnlockRect',
+        'CreateTexture', 'UpdateTexture', 'Release']);
+    assert.deepEqual(calls[0].slice(4), [0, FMT.A8R8G8B8, 2], 'the copy in system memory');
+    assert.deepEqual(calls[3].slice(4), [0, FMT.A8R8G8B8, 0], 'the texture where asked');
+    const placed = textures.get(view.getUint32(out, true));
+    assert.equal(placed.pool, 0);
+    assert.equal(placed.released, false);
+    assert.deepEqual([...memory.subarray(placed.data[0], placed.data[0] + 4)], [1, 2, 3, 255]);
+});
+
+test('a DXT1 file goes into a DXT1 texture block for block, its levels from the file',
+    async()=>{
+        const { device, view, textures, calls, loader, place, heap, memory } = rig();
+        const header = new Array(128).fill(0);
+        header.splice(0, 4, 0x44, 0x44, 0x53, 0x20);
+        const u32 = (/** @type {number} */ at, /** @type {number} */ v)=>{
+            for (let k = 0; k < 4; k++)
+            {
+                header[at + k] = v >>> (k * 8) & 0xff;
+            }
+        };
+        u32(4, 124);
+        u32(8, 0x21007);
+        u32(12, 4);
+        u32(16, 4);
+        u32(28, 1);
+        u32(76, 32);
+        u32(80, 4);
+        u32(84, FMT.DXT1);
+        const block = [0x1f, 0x00, 0x00, 0xf8, 0x1b, 0x2c, 0x3d, 0x4e];
+        const file = [...header, ...block];
+        const data = place(file);
+        const out = heap.allocate(4);
+        assert.equal(await loader.fromMemory(exArgs({ device, data, size: file.length, out,
+            mips: D3DX_FROM_FILE })), 0);
+        assert.deepEqual(calls[0], ['CreateTexture', 4, 4, 1, 0, FMT.DXT1, 1]);
+        const texture = textures.get(view.getUint32(out, true));
+        assert.deepEqual([...memory.subarray(texture.data[0], texture.data[0] + 8)], block);
+    });
+
+test('a colour key clears its texels; an unreadable file is refused and said', async()=>{
+    const { device, view, textures, loader, place, heap, memory, diverged } = rig();
+    const file = tga([[0, 0, 255], [1, 2, 3], [0, 0, 255], [4, 5, 6]]);
+    const data = place(file);
+    const out = heap.allocate(4);
+    assert.equal(await loader.fromMemory(exArgs({ device, data, size: file.length, out, mips: 1,
+        format: FMT.A8R8G8B8, key: 0xffff0000 })), 0);
+    const texture = textures.get(view.getUint32(out, true));
+    assert.deepEqual([...memory.subarray(texture.data[0], texture.data[0] + 8)],
+        [0, 0, 0, 0, 1, 2, 3, 255]);
+
+    const junk = place([0xff, 0xd8, 0xff, 0xe0]);
+    view.setUint32(out, 0xaaaaaaaa, true);
+    assert.equal(await loader.fromMemory(exArgs({ device, data: junk, size: 4, out })) >>> 0,
+        D3DXERR_INVALIDDATA);
+    assert.equal(view.getUint32(out, true), 0);
+    assert.match(diverged.join('\n'), /D3DXCreateTextureFromFileInMemoryEx: answered D3DXERR_INVALIDDATA: a JPEG/);
+
+    const info = heap.allocate(28);
+    assert.equal(loader.imageInfo([data, file.length, info]), 0);
+    assert.deepEqual([view.getUint32(info, true), view.getUint32(info + 24, true)], [2, 2]);
+});

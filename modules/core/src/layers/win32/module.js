@@ -1898,6 +1898,12 @@ export function createWin32Module(){
                 // since d3dx9 exports them undecorated though they are stdcall.
                 ...d3dxLibraries(createD3dxFunctions({ readMemory, writeMemory,
                     divergence: config?.divergence, vtables: comVtables, heap,
+                    shaderCompiled: config?.shaderCompiled,
+                    // The font engine GDI draws with, for D3DX's font.
+                    fontMetrics: (/** @type {any} */ font)=>
+                        config?.graphics?.fontMetrics?.(font) ?? null,
+                    glyph: (/** @type {number} */ code, /** @type {any} */ font)=>
+                        config?.graphics?.glyph?.(code, font) ?? null,
                     callGuest: call=>bridge.callGuest(call),
                     currentThread: ()=>kernel.currentThread() })),
 
