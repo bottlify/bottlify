@@ -203,20 +203,20 @@ off the thread that runs the program, not from running the program's threads at 
   `WebAssembly.Memory`) and compiled modules, which a message passes without copying their code.
 - **The translation cache arena** (decided 2026-10-07). So the cache becomes bytes in an arena of
   the process's own, in shared memory, made with the process and gone when it exits. Every pool
-  worker working for the process looks functions up there and adds the ones it emits; a worker
-  that joins finds what the others emitted, and one that leaves takes nothing with it. An entry is
-  bytes only — the function's body, locals and hints, its type, the region's shape and what the
-  emitter answered for it, encoded — behind an index in the same memory keyed by the key the cache
-  has today. A worker adds an entry by taking space with an atomic add and publishes it by one
-  atomic store into the index, so a reader sees an entry whole or not at all, and two workers that
-  emit the same function at once both stay correct (the second copy is wasted, not wrong). The
-  arena is filled lazily, by the translation that happens anyway, grows up to its limit (48 MB,
-  as now) and frees space a segment at a time, the oldest first; that this keeps the hits the
-  cache's least-recently-used order keeps is checked before it lands, by replaying the recorded
-  lookups of Doom 3 and Tron through both. Since loading is when it is used, a process quiet for
-  long enough may let the arena go; whether a later load gains from an earlier one's functions is
-  not measured. Its gate: seeded batches emitted through several workers sharing an arena and
-  through one worker with no cache give the same module bytes, and the cache's counters say how
+  worker working for the process looks functions up there and adds the ones it emits; a worker that
+  joins finds what the others emitted, and one that leaves takes nothing with it. An entry is bytes
+  only — the function's body, locals and hints, its type, the region's shape and what the emitter
+  answered for it, encoded — behind an index in the same memory keyed by the key the cache has
+  today. A worker adds an entry by taking space with an atomic add and publishes it by one atomic
+  store into the index, so a reader sees an entry whole or not at all, and two workers that emit the
+  same function at once both stay correct (the second copy is wasted, not wrong). The arena is
+  filled lazily, by the translation that happens anyway, grows up to its limit (48 MB, as now) and
+  frees space a segment at a time, the oldest first; that this keeps the hits the cache's
+  least-recently-used order keeps is checked before it lands, by replaying the recorded lookups of
+  Doom 3 and Tron through both. The arena lives as long as the process, quiet or not: its memory is
+  the process's, bounded by its limit, and a later load of the same process starts from what the
+  earlier ones left in it. Its gate: seeded batches emitted through several workers sharing an arena
+  and through one worker with no cache give the same module bytes, and the cache's counters say how
   many functions came from the arena.
 - **The rule.** The pool always keeps standby workers in proportion to the running processes; the
   first is never let go, since translation never quite stops. When a process's work starts to lag —
@@ -386,8 +386,6 @@ one executor.
 - **Memory shared between processes** (stage 2): which mechanism for named mappings, shared
   sections and cross-process reads and writes, and which programs need them coherent rather than
   copied at a wait.
-- **The translation cache arena after loading** (stage 2): how long a quiet process keeps it, and
-  whether the next load of the same process gains from the functions an earlier one emitted.
 - **Cross-origin isolation:** which ways of embedding the player it rules out, and whether any of
   them matter to the product.
 - **The x64 address space:** `memory64` or a 4 GiB window. `memory64` ships in Chrome and Firefox;
