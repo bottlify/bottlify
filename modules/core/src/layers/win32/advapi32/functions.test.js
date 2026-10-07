@@ -7,7 +7,7 @@
 import { createRegistryService } from './registry-service.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { REGISTRY_NATIVES, createRegistryFunctions } from './functions.js';
+import { REGISTRY_NATIVES, USER_NAME, createRegistryFunctions } from './functions.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import {
     createHive,
@@ -1104,6 +1104,44 @@ function fakeFiles(){
         remove: path=>stored.delete(key(path)),
     };
 }
+
+test('an object\'s security by name is read through the volume and the hive this table holds',
+    ()=>{
+        // The account GetUserName names is the one LookupAccountSid names,
+        // and the module reads its name from here.
+        assert.equal(USER_NAME, 'User');
+        const memory = fakeMemory();
+        const files = fakeFiles();
+        files.stored.set('c:\\setup.ini', new Uint8Array(1));
+        let heap = 0x800;
+        const fns = /** @type {any} */ (createRegistryFunctions({
+            readMemory: memory.readMemory,
+            writeMemory: memory.writeMemory,
+            readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+            hive: createRegistryService(createHive()),
+            // The drive's root, which the stand-in volume of files alone lacks.
+            files: { ...files, stat: path=>(path.toLowerCase() === 'c:\\'
+                ? { exists: true, isDirectory: true, size: 0 } : files.stat(path)) },
+            allocate: size=>{
+                heap += size + 7 & ~7;
+                return heap - (size + 7 & ~7);
+            },
+        }));
+        const SE_FILE_OBJECT = 1;
+        const SE_REGISTRY_KEY = 4;
+        const DACL = 0x4;
+        memory.putString(NAME, 'C:\\setup.ini');
+        assert.equal(fns.GetNamedSecurityInfoA.handler([NAME, SE_FILE_OBJECT, DACL, 0, 0,
+            OUT_HANDLE, 0, OUT_TYPE]), ERROR_SUCCESS);
+        assert.equal(memory.dword(OUT_HANDLE), 0, 'the null DACL of a volume that keeps none');
+        memory.putString(NAME, 'C:\\gone.ini');
+        assert.equal(fns.SetNamedSecurityInfoA.handler([NAME, SE_FILE_OBJECT, DACL, 0, 0, 0, 0]),
+            ERROR_FILE_NOT_FOUND);
+        memory.putString(NAME, 'CURRENT_USER\\Software');
+        assert.equal(fns.GetNamedSecurityInfoA.handler([NAME, SE_REGISTRY_KEY, DACL, 0, 0,
+            OUT_HANDLE, 0, OUT_TYPE]), ERROR_SUCCESS);
+        assert.notEqual(memory.dword(OUT_HANDLE), 0, 'a key has a DACL');
+    });
 
 test('a key saved to a file loads under a root, writes its changes back as it unloads, '
     + 'and opens as an app key', async()=>{

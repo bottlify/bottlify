@@ -351,6 +351,20 @@ test('IsWow64Process answers FALSE for this process and a child, and fails a str
     assert.equal(fns.IsWow64Process.argBytes, 8);
 });
 
+test('a 32-bit system has no WOW64 directory, and says the call is not implemented', ()=>{
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+    host.bytes.fill(0x55, 0x200, 0x300);
+    for (const call of [fns.GetSystemWow64DirectoryA, fns.GetSystemWow64DirectoryW])
+    {
+        assert.equal(call.handler([0x200, 0x80]), 0);
+        assert.equal(call.handler([0, 0]), 0, 'sized or not');
+        assert.equal(call.argBytes, 8);
+    }
+    assert.deepEqual(host.errors, [120, 120, 120, 120], 'ERROR_CALL_NOT_IMPLEMENTED');
+    assert.ok(host.bytes.subarray(0x200, 0x300).every(byte=>byte === 0x55), 'nothing written');
+});
+
 test('a child process reports its own exit code, not this process\'s', ()=>{
     // The engine only ever answers STILL_ACTIVE for a child -- a child takes
     // this process's place rather than running beside it -- but the value has

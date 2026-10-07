@@ -2095,7 +2095,7 @@ export function createWin32Module(){
 
                 'WINSPOOL.DRV': createSpoolerFunctions({ setLastError: setError, writeMemory }),
 
-                'MPR.dll': createNetworkFunctions({ setLastError: setError }),
+                'MPR.dll': createNetworkFunctions({ setLastError: setError, writeMemory }),
 
                 'UXTHEME.dll': createThemeFunctions({
                     setLastError: setError, readMemory, writeMemory,

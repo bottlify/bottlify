@@ -262,6 +262,14 @@ reaches its end when the installation does. A page shows the ratio of what is do
 which these amounts set; revisit them if a program is found reading the ticks themselves.
 *2026-10-07.*
 
+**A34 — A file's security is the descriptor Windows XP answers for a volume that keeps none.**
+The volume has no ACLs, as FAT32 has none, and reports no `FILE_PERSISTENT_ACLS`: so
+`GetNamedSecurityInfo` of a file answers a made-up descriptor whose owner and group are Everyone
+and whose DACL is present and null, and `SetNamedSecurityInfo` succeeds and keeps nothing, so the
+next read answers the same. A setup that reads a folder's DACL, merges an entry with
+`SetEntriesInAcl` and writes it back goes through and changes nothing it could see. Not measured
+against XP; revisit if a program is found that checks the DACL it wrote. *2026-10-07.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

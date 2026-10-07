@@ -711,6 +711,19 @@ export function createProfileFunctions(host){
                 text(section, MAX_NAME), text(key, MAX_NAME), text(fallback, MAX_VALUE),
                 buffer, size),
         },
+        /**
+         * DWORD GetProfileStringW(LPCWSTR lpAppName, LPCWSTR lpKeyName,
+         *   LPCWSTR lpDefault, LPWSTR lpReturnedString, DWORD nSize)
+         *
+         * The A form in UTF-16, nSize and the answer counted in characters.
+         */
+        GetProfileStringW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([section, key, fallback, buffer, size])=>getString(WIN_INI,
+                wideText(section, MAX_NAME), wideText(key, MAX_NAME),
+                wideText(fallback, MAX_VALUE), buffer, size, true),
+        },
         GetProfileIntA: {
             argBytes: 12,
             /** @param {number[]} args */
@@ -728,6 +741,13 @@ export function createProfileFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([section, key, value])=>put(WIN_INI, section, key, value),
+        },
+        /** BOOL WriteProfileStringW(LPCWSTR lpAppName, LPCWSTR lpKeyName, LPCWSTR lpString) */
+        WriteProfileStringW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([section, key, value])=>putText(WIN_INI, wideText(section, MAX_NAME),
+                wideText(key, MAX_NAME), wideText(value, MAX_VALUE)),
         },
     };
 }

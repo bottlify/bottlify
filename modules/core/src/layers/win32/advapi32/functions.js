@@ -29,6 +29,8 @@ import {
     HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS,
 } from './registry.js';
 import { STATUS } from '../ntdll/status.js';
+import { USER_NAME } from './tokens.js';
+import { createNamedSecurityFunctions } from './named-security.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -138,13 +140,8 @@ const HANDLE_LIMIT = 0x7ffffffc;
  */
 const FIRST_KEY_HANDLE = 0x40000004;
 
-/**
- * Who the program is running as. There is one account and no way to become
- * another, so this is a constant rather than something to configure -- but it
- * has to be answered, because a program that cannot learn its own user name
- * often refuses to start rather than carrying on without one.
- */
-export const USER_NAME = 'User';
+/** The one account's name, kept beside its SID and read from here by the module. */
+export { USER_NAME };
 
 /**
  * @typedef {Object} RegistryHost
@@ -2291,6 +2288,10 @@ export function createRegistryFunctions(host){
                     : result === 'taken' ? ERROR_ALREADY_EXISTS : ERROR_FILE_NOT_FOUND;
             },
         },
+
+        // Named by a path or a key's name, an object's security needs the
+        // volume and the hive this library already holds.
+        ...createNamedSecurityFunctions(host),
 
         [UNLOAD_KEY]: unload,
         [REGISTRY_NATIVES]: nativeRegistry(),
