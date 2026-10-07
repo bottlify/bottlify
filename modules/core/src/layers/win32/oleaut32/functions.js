@@ -39,6 +39,19 @@ import { dateOf, fieldsOf, rollYear } from './dates.js';
 import {
     compareExact, decimalBytes, exactOf, readDecimal, round, roundNumber, toNumber,
 } from './varmath.js';
+import {
+    add, and, currencyFromText, divide, integerDivide, isOperandType, modulo, multiply, nearest,
+    negate, not, or, subtract, variantValue, xor,
+} from './arithmetic.js';
+import {
+    boolOf, dateFromText, numberOf, parseNumber, textOfCurrency, textOfDate,
+} from './vartext.js';
+import {
+    DISP_E_BADVARTYPE, DISP_E_OVERFLOW, DISP_E_TYPEMISMATCH, VARIANT_FALSE, VARIANT_TRUE,
+    VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_CY, VT_DATE, VT_DECIMAL, VT_DISPATCH, VT_EMPTY,
+    VT_ERROR, VT_I1, VT_I2, VT_I4, VT_I8, VT_INT, VT_NULL, VT_R4, VT_R8, VT_RESERVED,
+    VT_TYPEMASK, VT_UI1, VT_UI2, VT_UI4, VT_UI8, VT_UINT, VT_UNKNOWN, VT_VARIANT,
+} from './vartypes.js';
 
 /** The prefix, in bytes, and where the caller's pointer sits relative to it. */
 const PREFIX_BYTES = 4;
@@ -57,26 +70,6 @@ const PSDISPATCH = '{00020420-0000-0000-C000-000000000046}';
 /** A VARIANT, and the offset of the union inside it. */
 const VARIANT_BYTES = 16;
 const VARIANT_VALUE = 8;
-
-/** The variant types this build knows how to carry and convert. */
-const VT_EMPTY = 0;
-const VT_NULL = 1;
-const VT_I2 = 2;
-const VT_I4 = 3;
-const VT_R4 = 4;
-const VT_R8 = 5;
-const VT_BSTR = 8;
-const VT_DISPATCH = 9;
-const VT_ERROR = 10;
-const VT_BOOL = 11;
-const VT_VARIANT = 12;
-const VT_UNKNOWN = 13;
-const VT_I1 = 16;
-const VT_UI1 = 17;
-const VT_UI2 = 18;
-const VT_UI4 = 19;
-const VT_INT = 22;
-const VT_UINT = 23;
 
 /**
  * A SAFEARRAY: where its bounds start, and the feature bits that say what
@@ -100,20 +93,6 @@ const ELEMENT_BYTES = Object.freeze({
     [VT_UI1]: 1, [VT_UI2]: 2, [VT_UI4]: 4, [VT_INT]: 4, [VT_UINT]: 4,
 });
 
-/** The two bits of a VARTYPE that are not the type. */
-const VT_BYREF = 0x4000;
-const VT_ARRAY = 0x2000;
-const VT_TYPEMASK = 0x0fff;
-
-/**
- * VARIANT_TRUE is minus one, not one.
- *
- * A program tests `== VARIANT_TRUE` as often as it tests for non-zero, so a
- * boolean stored as 1 reads as neither true nor false to the code that asked.
- */
-const VARIANT_TRUE = -1;
-const VARIANT_FALSE = 0;
-
 /** VariantChangeType's flags: only the one that changes an answer here. */
 const VARIANT_ALPHABOOL = 0x0002;
 
@@ -128,12 +107,9 @@ const E_INVALIDARG = 0x80070057;
 const E_POINTER = 0x80004003;
 const E_NOTIMPL = 0x80004001;
 const E_OUTOFMEMORY = 0x8007000e;
-const DISP_E_TYPEMISMATCH = 0x80020005;
 const DISP_E_PARAMNOTFOUND = 0x80020004 | 0;
 const DISP_E_BADINDEX = 0x8002000b | 0;
 const E_UNEXPECTED = 0x8000ffff | 0;
-const DISP_E_BADVARTYPE = 0x80020008;
-const DISP_E_OVERFLOW = 0x8002000a;
 
 /**
  * NUMPARSE's fields (six 32-bit words) and the NUMPRS_* flags this build
@@ -166,18 +142,10 @@ const NUMPRS_INEXACT = 0x20000;
 const NUMPRS_UNPARSED = NUMPRS_TRAILING_PLUS | NUMPRS_TRAILING_MINUS | NUMPRS_HEX_OCT
     | NUMPRS_PARENS | NUMPRS_CURRENCY;
 
-/** The variant types VarNumFromParseNum can choose between, beyond this file's own. */
-const VT_CY = 6;
-const VT_DECIMAL = 14;
-const VT_DATE = 7;
-const VT_UI8 = 21;
-/** A flag bit in a VARTYPE the arithmetic calls read past. */
-const VT_RESERVED = 0x8000;
 /** VarCmp's answer when either side is null. */
 const VARCMP_NULL = 3;
 /** VarCmp's flag for a comparison of text without case. */
 const NORM_IGNORECASE = 1;
-const VT_I8 = 20;
 
 /**
  * @typedef {Object} AutomationHeap
@@ -230,6 +198,9 @@ const VT_I8 = 20;
  *           A stdcall into guest code, which is what ITypeInfo::Invoke is, and
  *           an interface's AddRef and Release are.
  * @property {() => unknown} [callerThread]  The thread whose call this is.
+ * @property {() => number} [systemTimeMs]  The guest's wall clock, milliseconds
+ *           since 1970: the year a date written without one is in. Without it
+ *           such a date is refused, and said so.
  */
 
 /**
@@ -735,7 +706,10 @@ export function createAutomationFunctions(host){
             return S_OK;
         }
 
-        const number = value.text === null ? value.number : parseText(value.text);
+        // A string becomes a boolean as VarBoolFromStr reads one, True and False
+        // included, and anything else as VarR8FromStr reads a number.
+        const number = value.text === null ? value.number
+            : type === VT_BOOL ? boolOf(value.text) : parseText(value.text);
         if (number === null || !Number.isFinite(number))
         {
             return DISP_E_TYPEMISMATCH;
@@ -744,28 +718,29 @@ export function createAutomationFunctions(host){
         const data = new DataView(bytes.buffer);
         switch (type)
         {
-            case VT_I1: data.setInt8(0, truncate(number)); break;
-            case VT_UI1: data.setUint8(0, truncate(number)); break;
-            case VT_I2: data.setInt16(0, truncate(number), true); break;
-            case VT_UI2: data.setUint16(0, truncate(number), true); break;
+            case VT_I1: data.setInt8(0, nearest(number)); break;
+            case VT_UI1: data.setUint8(0, nearest(number)); break;
+            case VT_I2: data.setInt16(0, nearest(number), true); break;
+            case VT_UI2: data.setUint16(0, nearest(number), true); break;
             case VT_BOOL:
                 data.setInt16(0, number !== 0 ? VARIANT_TRUE : VARIANT_FALSE, true);
                 break;
             case VT_I4:
             case VT_INT:
-            case VT_ERROR: data.setInt32(0, truncate(number), true); break;
+            case VT_ERROR: data.setInt32(0, nearest(number), true); break;
             case VT_UI4:
-            case VT_UINT: data.setUint32(0, truncate(number) >>> 0, true); break;
+            case VT_UINT: data.setUint32(0, nearest(number) >>> 0, true); break;
             case VT_R4: data.setFloat32(0, number, true); break;
             case VT_R8: data.setFloat64(0, number, true); break;
             default:
                 report('OLE Automation', `no conversion to VARTYPE ${type}`);
                 return DISP_E_BADVARTYPE;
         }
-        // An integral target rounds rather than truncates, and a value that
-        // will not fit is an overflow rather than a silent wrap.
+        // An integral target rounds rather than truncates -- a half to the even
+        // neighbour, as VarI4FromR8 rounds 2.5 to 2 -- and a value that will
+        // not fit is an overflow rather than a silent wrap.
         if (type !== VT_R4 && type !== VT_R8 && type !== VT_BOOL
-            && !fits(type, truncate(number)))
+            && !fits(type, nearest(number)))
         {
             return DISP_E_OVERFLOW;
         }
@@ -773,15 +748,6 @@ export function createAutomationFunctions(host){
         host.writeMemory(at, bytes);
         return S_OK;
     };
-
-    /**
-     * The integral value a conversion produces: rounded to nearest, halves away
-     * from zero, which is what the automation conversions do rather than the
-     * banker's rounding a naive implementation inherits from its language.
-     *
-     * @param {number} number
-     */
-    const truncate = number=>Math.sign(number) * Math.round(Math.abs(number));
 
     /** @param {number} type @param {number} number */
     const fits = (type, number)=>{
@@ -824,18 +790,14 @@ export function createAutomationFunctions(host){
     };
 
     /**
-     * The number a string holds, or null if it holds none.
+     * The number a string holds, read as VarR8FromStr reads it in English, or
+     * null if it holds none -- an empty or blank string included.
      *
      * @param {string} text
      */
     const parseText = text=>{
-        const trimmed = text.trim();
-        if (trimmed === '')
-        {
-            return 0;
-        }
-        const number = Number(trimmed);
-        return Number.isNaN(number) ? null : number;
+        const parsed = parseNumber(text);
+        return parsed === null ? null : numberOf(parsed);
     };
 
     /**
@@ -1338,34 +1300,287 @@ export function createAutomationFunctions(host){
     };
 
     /**
+     * Says so when a conversion is asked for in a locale other than English,
+     * which it reads and spells as English all the same.
+     *
+     * @param {string} api @param {number} lcid
+     */
+    const english = (api, lcid)=>{
+        const language = lcid & 0x3ff;
+        if (language !== 0 && language !== 0x09 && language !== 0x7f)
+        {
+            report(api, `locale ${lcid >>> 0} is read and spelled as English`);
+        }
+    };
+
+    /**
+     * A Var*FromStr: the string read in English and made by `convert` into the
+     * bytes written through the out pointer, or the HRESULT it failed with. A
+     * missing string holds no number -- DISP_E_TYPEMISMATCH, as Windows
+     * answers -- and a missing out pointer is an invalid argument.
+     *
+     * @param {string} api
+     * @param {(text: string, flags: number) => Uint8Array | number} convert
+     */
+    const fromString = (api, convert)=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([strIn, lcid, flags, out])=>{
+            if ((strIn >>> 0) === 0)
+            {
+                return DISP_E_TYPEMISMATCH;
+            }
+            if ((out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            english(api, lcid);
+            const answer = convert(wideAt(strIn >>> 0), flags >>> 0);
+            if (typeof answer === 'number')
+            {
+                return answer;
+            }
+            host.writeMemory(out >>> 0, answer);
+            return S_OK;
+        },
+    });
+
+    /**
      * Var*FromStr for an integral type: the text read as VarR8FromStr reads
      * it, rounded as every conversion to an integral type here rounds, and an
      * overflow outside the type's range rather than a wrap.
      *
-     * @param {number} type @param {number} size  the bytes written
+     * @param {string} api @param {number} type @param {number} size  the bytes written
      */
-    const integerFromString = (type, size)=>({
-        argBytes: 16,
+    const integerFromString = (api, type, size)=>fromString(api, text=>{
+        const number = parseText(text);
+        if (number === null)
+        {
+            return DISP_E_TYPEMISMATCH;
+        }
+        const whole = nearest(number);
+        if (!fits(type, whole))
+        {
+            return DISP_E_OVERFLOW;
+        }
+        return valueBytes(view=>view.setInt32(0, whole | 0, true)).subarray(0, size);
+    });
+
+    /**
+     * A VarBstrFrom*: the value `spell` spells, in a new BSTR through the last
+     * argument, or the HRESULT spelling it failed with. The out pointer is
+     * required, E_POINTER without it.
+     *
+     * @param {number} argBytes @param {(args: number[]) => string | number} spell
+     */
+    const toBstr = (argBytes, spell)=>({
+        argBytes,
         /** @param {number[]} args */
-        handler: ([strIn, , , out])=>{
-            if ((strIn >>> 0) === 0 || (out >>> 0) === 0)
+        handler: args=>{
+            const out = args[argBytes / 4 - 1] >>> 0;
+            if (out === 0)
+            {
+                return E_POINTER;
+            }
+            const text = spell(args);
+            if (typeof text === 'number')
+            {
+                return text;
+            }
+            const bstr = allocateBstr(encode(text));
+            writeU32(out, bstr);
+            return bstr === 0 ? E_OUTOFMEMORY : S_OK;
+        },
+    });
+
+    /** The year it is on the guest's clock, for a date written without one. */
+    const thisYear = ()=>{
+        if (!host.systemTimeMs)
+        {
+            report('VarDateFromStr', 'there is no clock to read, so a date written'
+                + ' without its year is refused');
+            return null;
+        }
+        return new Date(host.systemTimeMs()).getUTCFullYear();
+    };
+
+    /**
+     * A variant as the operators read it: a reference followed -- to a
+     * variant, that variant, one level deep -- and every type a variant can
+     * hold, whether or not an operator takes it. Flag bits that cannot be
+     * settled, and a type no variant holds, are left on the value for the
+     * operator to refuse, since each refuses them in its own order.
+     *
+     * A string is read to its terminator, as Var*FromStr reads an OLECHAR
+     * string: Windows converts one so, whatever its length prefix says, and
+     * only a NUL inside a string VarAdd joins to another is lost by it.
+     *
+     * @param {number} pvar
+     * @returns {import('./arithmetic.js').Value | number} the value, or an HRESULT
+     */
+    const readOperand = pvar=>{
+        const declared = readU16(pvar);
+        let type = declared & VT_TYPEMASK;
+        let flags = declared & ~VT_TYPEMASK;
+        // A reference to an empty or a null is no reference a variant holds.
+        const reference = flags === VT_BYREF && type > VT_NULL;
+        // Where a DECIMAL's sixteen bytes start, and where any other value is.
+        let base = pvar;
+        let at = pvar + VARIANT_VALUE;
+        try
+        {
+            const target = reference ? readU32(pvar + VARIANT_VALUE) : 0;
+            if (target !== 0)
+            {
+                flags = 0;
+                base = target;
+                at = target;
+                if (type === VT_VARIANT)
+                {
+                    const inner = readU16(target);
+                    type = inner & VT_TYPEMASK;
+                    flags = inner & ~VT_TYPEMASK;
+                    at = target + VARIANT_VALUE;
+                }
+            }
+            if (flags !== 0 || !isOperandType(type))
+            {
+                return variantValue(type, { flags, reference });
+            }
+            const payload = payloadAt(type, at, base);
+            return payload === null ? E_INVALIDARG : variantValue(type, { reference, ...payload });
+        }
+        catch {
+            // A reference, or a string, into memory that is not there: no value
+            // to act on, refused as a reference to nothing is.
+            return variantValue(type, { flags: VT_BYREF, reference });
+        }
+    };
+
+    /**
+     * What a variant of a type an operator can take holds, read at `at` -- or,
+     * for a DECIMAL, which fills the variant, at `base`. null for a DECIMAL
+     * with more places than one can have.
+     *
+     * @param {number} type @param {number} at @param {number} base
+     * @returns {Partial<import('./arithmetic.js').Value> | null}
+     */
+    const payloadAt = (type, at, base)=>{
+        switch (type)
+        {
+            case VT_BSTR:
+                return { text: wideAt(readU32(at)) };
+            case VT_R4:
+                return { real: peek(at, 4).getFloat32(0, true) };
+            case VT_R8:
+            case VT_DATE:
+                return { real: peek(at, 8).getFloat64(0, true) };
+            case VT_CY:
+                return { exact: { value: peek(at, 8).getBigInt64(0, true), scale: 4 } };
+            case VT_DECIMAL: {
+                const exact = readDecimal(host.readMemory(base, 16));
+                return exact.scale > 28 ? null : { exact };
+            }
+            case VT_I8:
+                return { integer: peek(at, 8).getBigInt64(0, true) };
+            case VT_UI8:
+                return { integer: peek(at, 8).getBigUint64(0, true) };
+            default: {
+                const number = numberAt(type, at);
+                return { integer: number === null ? null : BigInt(number) };
+            }
+        }
+    };
+
+    /** The bytes an integral type's value takes in a variant. */
+    const INTEGER_BYTES = new Map([[VT_I1, 1], [VT_UI1, 1], [VT_I2, 2], [VT_UI2, 2],
+        [VT_BOOL, 2], [VT_I8, 8], [VT_UI8, 8]]);
+
+    /**
+     * An operator's answer written whole over the result variant -- which is
+     * an out parameter, so nothing it held is freed -- or, for a failure, only
+     * its type set to VT_EMPTY: Windows leaves the rest of it as it was.
+     *
+     * @param {number} pvar @param {import('./arithmetic.js').Outcome} outcome
+     * @returns {number} an HRESULT
+     */
+    const writeOutcome = (pvar, outcome)=>{
+        if (typeof outcome === 'number')
+        {
+            writeU16(pvar, VT_EMPTY);
+            return outcome;
+        }
+        const { type, integer, real, exact, text } = outcome;
+        switch (type)
+        {
+            case VT_EMPTY:
+            case VT_NULL:
+                return writeVariant(pvar, type, new Uint8Array(0));
+            case VT_BSTR: {
+                const bstr = allocateBstr(encode(String(text)));
+                return bstr === 0 ? writeOutcome(pvar, E_OUTOFMEMORY)
+                    : writeVariant(pvar, type, valueBytes(view=>view.setUint32(0, bstr, true)));
+            }
+            case VT_DECIMAL: {
+                const bytes = exact && decimalBytes(exact);
+                return bytes ? writeDecimal(pvar, bytes) : writeOutcome(pvar, DISP_E_OVERFLOW);
+            }
+            case VT_CY:
+                return writeVariant(pvar, type, cyBytes(exact?.value ?? 0n));
+            case VT_R4:
+                return writeVariant(pvar, type,
+                    valueBytes(view=>view.setFloat32(0, Number(real), true)));
+            case VT_R8:
+            case VT_DATE:
+                return writeVariant(pvar, type,
+                    valueBytes(view=>view.setFloat64(0, Number(real), true)));
+            default: {
+                const bits = 8 * (INTEGER_BYTES.get(type) ?? 4);
+                return writeVariant(pvar, type, valueBytes(view=>view.setBigUint64(0,
+                    BigInt.asUintN(bits, integer ?? 0n), true)));
+            }
+        }
+    };
+
+    /**
+     * VarAdd and the other operators of two variants: both read before the
+     * result is written, since a program may name one of them as the result.
+     *
+     * @param {(left: import('./arithmetic.js').Value,
+     *     right: import('./arithmetic.js').Value) => import('./arithmetic.js').Outcome} operation
+     */
+    const binary = operation=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([pleft, pright, presult])=>{
+            if ((pleft >>> 0) === 0 || (pright >>> 0) === 0 || (presult >>> 0) === 0)
             {
                 return E_INVALIDARG;
             }
-            const number = parseText(wideAt(strIn >>> 0));
-            if (number === null || !Number.isFinite(number))
+            const left = readOperand(pleft >>> 0);
+            const right = readOperand(pright >>> 0);
+            return writeOutcome(presult >>> 0, typeof left === 'number' ? left
+                : typeof right === 'number' ? right : operation(left, right));
+        },
+    });
+
+    /**
+     * VarNeg and VarNot.
+     *
+     * @param {(operand: import('./arithmetic.js').Value) => import('./arithmetic.js').Outcome}
+     *     operation
+     */
+    const unary = operation=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([pin, presult])=>{
+            if ((pin >>> 0) === 0 || (presult >>> 0) === 0)
             {
-                return DISP_E_TYPEMISMATCH;
+                return E_INVALIDARG;
             }
-            const whole = truncate(number);
-            if (!fits(type, whole))
-            {
-                return DISP_E_OVERFLOW;
-            }
-            const bytes = new Uint8Array(4);
-            new DataView(bytes.buffer).setInt32(0, whole | 0, true);
-            host.writeMemory(out >>> 0, bytes.subarray(0, size));
-            return S_OK;
+            const value = readOperand(pin >>> 0);
+            return writeOutcome(presult >>> 0,
+                typeof value === 'number' ? value : operation(value));
         },
     });
 
@@ -1761,19 +1976,31 @@ export function createAutomationFunctions(host){
          * locale and flags are accepted and ignored, since this build speaks
          * one language; the out pointer is required, E_POINTER without it.
          */
-        VarBstrFromBool: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([boolIn, , , out])=>{
-                if ((out >>> 0) === 0)
-                {
-                    return E_POINTER;
-                }
-                const bstr = allocateBstr(encode(boolIn ? 'True' : 'False'));
-                writeU32(out >>> 0, bstr);
-                return bstr === 0 ? E_OUTOFMEMORY : S_OK;
-            },
-        },
+        VarBstrFromBool: toBstr(16, ([boolIn])=>(boolIn ? 'True' : 'False')),
+
+        /**
+         * HRESULT VarBstrFromCy(CY cyIn, LCID lcid, ULONG dwFlags, BSTR *pbstrOut)
+         *
+         * As many places as the value needs, '.' before them, no thousands
+         * separators: 1.5, 0.0009, -922337203685477.5808.
+         */
+        VarBstrFromCy: toBstr(20, ([low, high, lcid])=>{
+            english('VarBstrFromCy', lcid);
+            return textOfCurrency(BigInt.asIntN(64, BigInt(high >>> 0) << 32n | BigInt(low >>> 0)));
+        }),
+
+        /**
+         * HRESULT VarBstrFromDate(DATE dateIn, LCID lcid, ULONG dwFlags, BSTR *pbstrOut)
+         *
+         * M/D/YYYY h:mm:ss AM, as the English short date and time spell it: the
+         * date alone at midnight, the time alone on day zero, or the half
+         * VAR_TIMEVALUEONLY or VAR_DATEVALUEONLY asks for. A day no DATE can
+         * name is an invalid argument.
+         */
+        VarBstrFromDate: toBstr(20, ([low, high, lcid, flags])=>{
+            english('VarBstrFromDate', lcid);
+            return textOfDate(doubleOf(low, high), flags >>> 0) ?? E_INVALIDARG;
+        }),
         /** HRESULT VarRound(LPVARIANT pvarIn, int cDecimals, LPVARIANT pvarResult) */
         VarRound: {
             argBytes: 12,
@@ -1945,6 +2172,28 @@ export function createAutomationFunctions(host){
             },
         },
 
+        /**
+         * HRESULT VarAdd(LPVARIANT pvarLeft, LPVARIANT pvarRight, LPVARIANT pvarResult)
+         * HRESULT VarSub, VarMul, VarDiv, VarIdiv, VarMod, VarAnd, VarOr, VarXor
+         *     (the same three)
+         * HRESULT VarNeg(LPVARIANT pvarIn, LPVARIANT pvarResult), VarNot (the same)
+         *
+         * The operators of Visual Basic and of every language's variant type,
+         * by the type tables arithmetic.js keeps. An interface is not asked for
+         * its value property: beside anything but a null it is a mismatch.
+         */
+        VarAdd: binary(add),
+        VarSub: binary(subtract),
+        VarMul: binary(multiply),
+        VarDiv: binary(divide),
+        VarIdiv: binary(integerDivide),
+        VarMod: binary(modulo),
+        VarAnd: binary(and),
+        VarOr: binary(or),
+        VarXor: binary(xor),
+        VarNeg: unary(negate),
+        VarNot: unary(not),
+
         /** HRESULT VarCyFromI4(LONG lIn, CY *pCyOut) */
         VarCyFromI4: {
             argBytes: 8,
@@ -2009,34 +2258,83 @@ export function createAutomationFunctions(host){
         },
 
         /** HRESULT VarR8FromStr(LPCOLESTR strIn, LCID lcid, ULONG dwFlags, double *pDblOut) */
-        VarR8FromStr: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([strIn, , , out])=>{
-                if ((strIn >>> 0) === 0 || (out >>> 0) === 0)
-                {
-                    return E_INVALIDARG;
-                }
-                const number = parseText(wideAt(strIn >>> 0));
-                if (number === null || !Number.isFinite(number))
-                {
-                    return DISP_E_TYPEMISMATCH;
-                }
-                writeDouble(out >>> 0, number);
-                return S_OK;
-            },
-        },
+        VarR8FromStr: fromString('VarR8FromStr', text=>{
+            const number = parseText(text);
+            if (number === null)
+            {
+                return DISP_E_TYPEMISMATCH;
+            }
+            return Number.isFinite(number)
+                ? valueBytes(view=>view.setFloat64(0, number, true)) : DISP_E_OVERFLOW;
+        }),
+
+        /**
+         * HRESULT VarR4FromStr(OLECHAR *strIn, LCID lcid, ULONG dwFlags, FLOAT *pFltOut)
+         *
+         * The double VarR8FromStr reads, as the float nearest it; past the
+         * floats' range an overflow rather than an infinity.
+         */
+        VarR4FromStr: fromString('VarR4FromStr', text=>{
+            const number = parseText(text);
+            if (number === null)
+            {
+                return DISP_E_TYPEMISMATCH;
+            }
+            return Math.abs(number) <= 3.4028234663852886e38
+                ? valueBytes(view=>view.setFloat32(0, number, true)).subarray(0, 4)
+                : DISP_E_OVERFLOW;
+        }),
+
+        /**
+         * HRESULT VarCyFromStr(OLECHAR *strIn, LCID lcid, ULONG dwFlags, CY *pCyOut)
+         *
+         * Read exactly, not through a double, and rounded to the fourth place
+         * a half to the even neighbour; past a CY's range an overflow.
+         */
+        VarCyFromStr: fromString('VarCyFromStr', text=>{
+            const units = currencyFromText(text);
+            return typeof units === 'number' ? units : cyBytes(units);
+        }),
+
+        /**
+         * HRESULT VarBoolFromStr(OLECHAR *strIn, LCID lcid, ULONG dwFlags,
+         *                        VARIANT_BOOL *pBoolOut)
+         *
+         * #TRUE# and #FALSE# as spelled, True and False in any case, or a
+         * number, non-zero for VARIANT_TRUE. Yes, No, On and Off are not
+         * booleans, and a localised word is not read: this build speaks English.
+         */
+        VarBoolFromStr: fromString('VarBoolFromStr', text=>{
+            const truth = boolOf(text);
+            return truth === null ? DISP_E_TYPEMISMATCH
+                : valueBytes(view=>view.setInt16(0, truth, true)).subarray(0, 2);
+        }),
+
+        /**
+         * HRESULT VarDateFromStr(OLECHAR *strIn, LCID lcid, ULONG dwFlags, DATE *pdateOut)
+         *
+         * A date in the English order -- month, day, year, then year, month,
+         * day, then day, month, year, whichever the numbers allow -- or with a
+         * month's name, and a time before it or after it; a two-digit year is
+         * 1930 to 2029, and a date written without a year is in this one.
+         * VAR_TIMEVALUEONLY and VAR_DATEVALUEONLY keep one half of the answer.
+         */
+        VarDateFromStr: fromString('VarDateFromStr', (text, flags)=>{
+            const date = dateFromText(text, flags, thisYear);
+            return date === null ? DISP_E_TYPEMISMATCH
+                : valueBytes(view=>view.setFloat64(0, date, true));
+        }),
 
         /**
          * HRESULT VarI4FromStr(OLECHAR *strIn, LCID lcid, ULONG dwFlags, LONG *plOut),
          * and the same for the other integral types
          */
-        VarI1FromStr: integerFromString(VT_I1, 1),
-        VarUI1FromStr: integerFromString(VT_UI1, 1),
-        VarI2FromStr: integerFromString(VT_I2, 2),
-        VarUI2FromStr: integerFromString(VT_UI2, 2),
-        VarI4FromStr: integerFromString(VT_I4, 4),
-        VarUI4FromStr: integerFromString(VT_UI4, 4),
+        VarI1FromStr: integerFromString('VarI1FromStr', VT_I1, 1),
+        VarUI1FromStr: integerFromString('VarUI1FromStr', VT_UI1, 1),
+        VarI2FromStr: integerFromString('VarI2FromStr', VT_I2, 2),
+        VarUI2FromStr: integerFromString('VarUI2FromStr', VT_UI2, 2),
+        VarI4FromStr: integerFromString('VarI4FromStr', VT_I4, 4),
+        VarUI4FromStr: integerFromString('VarUI4FromStr', VT_UI4, 4),
 
         /** HRESULT VarUdateFromDate(DATE dateIn, ULONG dwFlags, UDATE *pudateOut) */
         VarUdateFromDate: {
@@ -2169,12 +2467,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                const language = lcid & 0x3ff;
-                if (language !== 0 && language !== 0x09 && language !== 0x7f)
-                {
-                    report('VarParseNumFromStr',
-                        `locale ${lcid >>> 0} is read with the invariant '.' and ','`);
-                }
+                english('VarParseNumFromStr', lcid);
                 const fields = peek(numprs, 24);
                 const capacity = fields.getInt32(NUMPARSE_C_DIG, true);
                 const allowed = fields.getUint32(NUMPARSE_IN_FLAGS, true);
@@ -2618,6 +2911,30 @@ export function createAutomationFunctions(host){
                     return settle(owed, thread, copyVariant(at.address, pv >>> 0, owed));
                 }
                 host.writeMemory(at.address, host.readMemory(pv >>> 0, elementBytes).slice());
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT SafeArrayPtrOfIndex(SAFEARRAY *psa, LONG *rgIndices, void **ppvData)
+         *
+         * Where one element lives, not a copy of it. No lock is taken or asked
+         * for: the caller is expected to hold one, and nothing here moves data.
+         */
+        SafeArrayPtrOfIndex: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([psa, rgIndices, ppvData])=>{
+                if ((ppvData >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const at = elementAt(psa >>> 0, rgIndices >>> 0);
+                if ('error' in at)
+                {
+                    return at.error;
+                }
+                writeU32(ppvData >>> 0, at.address);
                 return S_OK;
             },
         },
@@ -3142,14 +3459,32 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     47: 'VarNumFromParseNum',
     54: 'VarI2FromStr',
     64: 'VarI4FromStr',
+    74: 'VarR4FromStr',
     82: 'VarR8FromCy',
     84: 'VarR8FromStr',
+    94: 'VarDateFromStr',
     100: 'VarCyFromI4',
+    104: 'VarCyFromStr',
+    113: 'VarBstrFromCy',
+    114: 'VarBstrFromDate',
     116: 'VarBstrFromBool',
+    125: 'VarBoolFromStr',
     136: 'VarUI1FromStr',
+    141: 'VarAdd',
+    142: 'VarAnd',
+    143: 'VarDiv',
+    148: 'SafeArrayPtrOfIndex',
+    153: 'VarIdiv',
+    155: 'VarMod',
+    156: 'VarMul',
+    157: 'VarOr',
+    159: 'VarSub',
     161: 'LoadTypeLib',
     162: 'LoadRegTypeLib',
     163: 'RegisterTypeLib',
+    167: 'VarXor',
+    173: 'VarNeg',
+    174: 'VarNot',
     175: 'VarRound',
     176: 'VarCmp',
     183: 'LoadTypeLibEx',

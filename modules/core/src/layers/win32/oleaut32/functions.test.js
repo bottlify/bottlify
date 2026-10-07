@@ -11,6 +11,7 @@ import { createHive, HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 import { buildImage, buildResources } from '../../loader/internal/resources.test.js';
 import { createAutomationFunctions, OLEAUT32_ORDINALS } from './functions.js';
 import { IID_ITYPELIB } from './objects.js';
+import * as types from './vartypes.js';
 
 const S_OK = 0x00000000;
 const E_INVALIDARG = 0x80070057;
@@ -650,15 +651,21 @@ test('a value that will not fit the target overflows rather than wrapping', ()=>
     assert.equal(host.u16(VARIANT_B), VT_EMPTY, 'and nothing is left in the destination');
 });
 
-test('a rounded conversion goes to nearest, with halves away from zero', ()=>{
+test('a rounded conversion goes to nearest, a half to the even neighbour', ()=>{
+    // What VarI2FromR8 answers on Windows (vartype.c): 0.5 and -0.5 are 0, 1.5
+    // is 2 and -1.5 is -2 -- banker's rounding, not halves away from zero.
     setUp();
-    const value = new Uint8Array(8);
-    new DataView(value.buffer).setFloat64(0, 2.5, true);
-    host.putVariant(VARIANT_A, VT_R8, 0);
-    host.bytes.set(value, VARIANT_A + 8);
-
-    assert.equal(call('VariantChangeType', [VARIANT_B, VARIANT_A, 0, VT_I2]), S_OK);
-    assert.equal(host.u16(VARIANT_B + 8), 3);
+    const view = new DataView(host.bytes.buffer);
+    for (const [from, to] of [[2.5, 2], [3.5, 4], [0.5, 0], [-0.5, 0], [-1.5, -2], [0.6, 1]])
+    {
+        host.putVariant(VARIANT_A, VT_R8, 0);
+        view.setFloat64(VARIANT_A + 8, from, true);
+        assert.equal(call('VariantChangeType', [VARIANT_B, VARIANT_A, 0, VT_I2]), S_OK);
+        assert.equal(view.getInt16(VARIANT_B + 8, true), to, String(from));
+    }
+    view.setFloat64(VARIANT_A + 8, 32767.5, true);
+    assert.equal(call('VariantChangeType', [VARIANT_B, VARIANT_A, 0, VT_I2]), DISP_E_OVERFLOW,
+        'rounds to 32768, past the type');
 });
 
 test('a string that is not a number is a type mismatch, not a zero', ()=>{
@@ -1392,4 +1399,257 @@ test('the currency and decimal conversions carry exact values', ()=>{
     assert.equal(view.getFloat64(0x3060, true), -2.5);
     host.putWide(0x3050, 'x');
     assert.equal(call('VarR8FromStr', [0x3050, 0, 0, 0x3060]), 0x80020005);
+});
+
+/** A BSTR's characters, by the length in its prefix. @param {number} bstr */
+const bstrText = bstr=>{
+    const units = host.u32(bstr - 4) / 2;
+    return String.fromCharCode(...Array.from({ length: units }, (_, i)=>host.u16(bstr + i * 2)));
+};
+
+test('the operators read their variants out of guest memory and write the answer whole', ()=>{
+    setUp();
+    const L = 0x3000;
+    const R = 0x3020;
+    const OUT = 0x3040;
+    const view = new DataView(host.bytes.buffer);
+    host.putVariant(L, VT_I4, 4);
+    host.putVariant(R, VT_I2, 2);
+    host.bytes.fill(0xcc, OUT, OUT + 16);
+    assert.equal(call('VarAdd', [L, R, OUT]), S_OK);
+    assert.deepEqual([host.u16(OUT), host.u32(OUT + 8), host.u32(OUT + 12)], [VT_I4, 6, 0]);
+
+    host.putVariant(L, VT_I2, -2);
+    assert.equal(call('VarMul', [L, R, L]), S_OK, 'the result may be an operand');
+    assert.deepEqual([host.u16(L), view.getInt16(L + 8, true), host.u16(L + 10)],
+        [VT_I2, -4, 0], 'a short takes its two bytes and no more');
+
+    // VarDiv follows a reference, to a value or to a variant; VarAdd, VarSub
+    // and VarMul take none, as Windows does not.
+    host.putU32(0x3100, 40);
+    host.putVariant(L, VT_BYREF | VT_I4, 0x3100);
+    host.putVariant(0x3110, VT_R8, 0);
+    view.setFloat64(0x3118, 0.5, true);
+    host.putVariant(R, VT_BYREF | types.VT_VARIANT, 0x3110);
+    assert.equal(call('VarDiv', [L, R, OUT]), S_OK);
+    assert.deepEqual([host.u16(OUT), view.getFloat64(OUT + 8, true)], [VT_R8, 80]);
+    assert.equal(call('VarNot', [L, OUT]), S_OK);
+    assert.deepEqual([host.u16(OUT), host.u32(OUT + 8) | 0], [VT_I4, -41]);
+    assert.equal(call('VarSub', [L, R, OUT]), types.DISP_E_BADVARTYPE);
+    host.putVariant(L, VT_BYREF | VT_I4, 0xfff00);
+    assert.equal(call('VarNot', [L, OUT]), DISP_E_TYPEMISMATCH,
+        'a reference into nothing is refused, not followed into a fault');
+
+    // Two strings are joined into a string of the result's own.
+    host.putWide(TEXT, '12');
+    host.putVariant(L, VT_BSTR, call('SysAllocString', [TEXT]));
+    host.putVariant(R, VT_BSTR, call('SysAllocString', [TEXT]));
+    assert.equal(call('VarAdd', [L, R, OUT]), S_OK);
+    assert.equal(host.u16(OUT), VT_BSTR);
+    assert.equal(bstrText(host.u32(OUT + 8)), '1212');
+    assert.equal(call('VarDiv', [L, R, OUT]), S_OK);
+    assert.deepEqual([host.u16(OUT), view.getFloat64(OUT + 8, true)], [VT_R8, 1]);
+
+    // A string a program never allocated -- characters with no length before
+    // them -- reads to its terminator, as Windows converts it.
+    host.putU32(TEXT - 4, 0xfffffff0);
+    host.putWide(TEXT, '-1');
+    host.putVariant(L, VT_BSTR, TEXT);
+    assert.equal(call('VarNeg', [L, OUT]), S_OK);
+    assert.deepEqual([host.u16(OUT), view.getFloat64(OUT + 8, true)], [VT_R8, 1]);
+
+    assert.equal(fx.VarAdd.argBytes, 12);
+    assert.equal(fx.VarXor.argBytes, 12);
+    assert.equal(fx.VarNeg.argBytes, 8);
+    assert.equal(fx.VarNot.argBytes, 8);
+    assert.equal(call('VarAdd', [0, R, OUT]), E_INVALIDARG);
+    assert.equal(call('VarNot', [L, 0]), E_INVALIDARG);
+});
+
+test('a CY or a DECIMAL answer is written as the variant holds it', ()=>{
+    setUp();
+    const L = 0x3000;
+    const R = 0x3020;
+    const OUT = 0x3040;
+    const view = new DataView(host.bytes.buffer);
+    host.putVariant(L, types.VT_CY, 0);
+    view.setBigInt64(L + 8, 47110000n, true);
+    host.putVariant(R, VT_UI1, 9);
+    assert.equal(call('VarMul', [L, R, OUT]), S_OK);
+    assert.deepEqual([host.u16(OUT), view.getBigInt64(OUT + 8, true)], [types.VT_CY, 423990000n]);
+
+    // -4.2 as a DECIMAL: its scale and sign share the variant's reserved word.
+    host.bytes.fill(0, R, R + 16);
+    host.putU16(R, types.VT_DECIMAL);
+    host.bytes[R + 2] = 1;
+    host.bytes[R + 3] = 0x80;
+    host.putU32(R + 8, 42);
+    host.putVariant(L, VT_I4, -11);
+    assert.equal(call('VarAdd', [L, R, OUT]), S_OK);
+    assert.equal(host.u16(OUT), types.VT_DECIMAL);
+    assert.equal(call('VarR8FromDec', [OUT, 0x3080]), S_OK);
+    assert.equal(view.getFloat64(0x3080, true), -15.2);
+
+    assert.equal(call('VarNeg', [R, OUT]), S_OK);
+    assert.deepEqual([host.u16(OUT), host.bytes[OUT + 2], host.bytes[OUT + 3],
+        host.u32(OUT + 8)], [types.VT_DECIMAL, 1, 0, 42], 'the sign turned, the digits kept');
+});
+
+test('a failure sets only the result\'s type, and each refusal is the one Windows gives', ()=>{
+    setUp();
+    const L = 0x3000;
+    const R = 0x3020;
+    const OUT = 0x3040;
+    host.putVariant(L, VT_UNKNOWN, 100);
+    host.putVariant(R, VT_EMPTY, 0);
+    host.putVariant(OUT, VT_I4, 1231);
+    assert.equal(call('VarMod', [L, R, OUT]), DISP_E_TYPEMISMATCH);
+    assert.deepEqual([host.u16(OUT), host.u32(OUT + 8)], [VT_EMPTY, 1231]);
+
+    host.putVariant(L, VT_I4, 1);
+    host.putVariant(R, VT_BYREF | VT_I4, 0);
+    assert.equal(call('VarAdd', [L, R, OUT]), types.DISP_E_BADVARTYPE, 'a reference to nothing');
+    assert.equal(call('VarNot', [R, OUT]), DISP_E_TYPEMISMATCH, 'VarNot answers it otherwise');
+    for (const [declared, hr] of [[VT_ARRAY | VT_I4, DISP_E_TYPEMISMATCH],
+        [types.VT_RESERVED | VT_I4, types.DISP_E_BADVARTYPE],
+        [types.VT_VECTOR | VT_I4, types.DISP_E_BADVARTYPE], [24, types.DISP_E_BADVARTYPE],
+        [types.VT_I1, types.DISP_E_BADVARTYPE]])
+    {
+        host.putVariant(R, declared, 1);
+        assert.equal(call('VarSub', [L, R, OUT]), hr, `VARTYPE 0x${declared.toString(16)}`);
+    }
+    host.putVariant(R, VT_I4, 0);
+    assert.equal(call('VarDiv', [L, R, OUT]), types.DISP_E_DIVBYZERO);
+    assert.equal(call('VarIdiv', [L, R, OUT]), types.DISP_E_DIVBYZERO);
+});
+
+test('SafeArrayPtrOfIndex answers where an element lives, with or without a lock', ()=>{
+    setUp();
+    const BOUNDS = 0x3000;
+    const INDICES = 0x3020;
+    const OUT = 0x3030;
+    // Five shorts from 1 by two from 23: the leftmost index varies fastest.
+    host.putU32(BOUNDS, 5);
+    host.putU32(BOUNDS + 4, 1);
+    host.putU32(BOUNDS + 8, 2);
+    host.putU32(BOUNDS + 12, 23);
+    const psa = call('SafeArrayCreate', [VT_I2, 2, BOUNDS]);
+    const data = host.u32(psa + 12);
+    host.putU32(INDICES, 3);
+    host.putU32(INDICES + 4, 24);
+    assert.equal(call('SafeArrayPtrOfIndex', [psa, INDICES, OUT]), S_OK);
+    assert.equal(host.u32(OUT), data + (2 + 5) * 2);
+    assert.equal(host.u32(psa + 8), 0, 'no lock taken');
+
+    host.putU32(INDICES, 6);
+    host.putU32(OUT, 0x1234);
+    assert.equal(call('SafeArrayPtrOfIndex', [psa, INDICES, OUT]), 0x8002000b, 'BADINDEX');
+    assert.equal(host.u32(OUT), 0x1234, 'and nothing written');
+    host.putU32(INDICES, 1);
+    host.putU32(INDICES + 4, 22);
+    assert.equal(call('SafeArrayPtrOfIndex', [psa, INDICES, OUT]), 0x8002000b);
+    assert.equal(call('SafeArrayPtrOfIndex', [0, INDICES, OUT]), E_INVALIDARG);
+    assert.equal(call('SafeArrayPtrOfIndex', [psa, 0, OUT]), E_INVALIDARG);
+    assert.equal(call('SafeArrayPtrOfIndex', [psa, INDICES, 0]), E_INVALIDARG);
+    assert.equal(fx.SafeArrayPtrOfIndex.argBytes, 12);
+});
+
+test('the string conversions read English, and refuse what holds no value', ()=>{
+    setUp();
+    const OUT = 0x3000;
+    const view = new DataView(host.bytes.buffer);
+    host.putWide(TEXT, '1.5');
+    assert.equal(call('VarR4FromStr', [TEXT, 0x409, 0, OUT]), S_OK);
+    assert.equal(view.getFloat32(OUT, true), 1.5);
+    host.putWide(TEXT, '1e39');
+    assert.equal(call('VarR4FromStr', [TEXT, 0x409, 0, OUT]), DISP_E_OVERFLOW);
+
+    host.putWide(TEXT, '$1,234.00005');
+    assert.equal(call('VarCyFromStr', [TEXT, 0x409, 0, OUT]), S_OK);
+    assert.equal(view.getBigInt64(OUT, true), 12340000n, 'a half to the even place');
+    host.putWide(TEXT, '922337203685478');
+    assert.equal(call('VarCyFromStr', [TEXT, 0x409, 0, OUT]), DISP_E_OVERFLOW);
+
+    host.putWide(TEXT, '#TRUE#');
+    assert.equal(call('VarBoolFromStr', [TEXT, 0x409, 0, OUT]), S_OK);
+    assert.equal(view.getInt16(OUT, true), -1);
+    host.putWide(TEXT, 'Yes');
+    assert.equal(call('VarBoolFromStr', [TEXT, 0x409, 0, OUT]), DISP_E_TYPEMISMATCH);
+
+    host.putWide(TEXT, '2 January, 1970 6:00 PM');
+    assert.equal(call('VarDateFromStr', [TEXT, 0x409, 0, OUT]), S_OK);
+    assert.equal(view.getFloat64(OUT, true), 25570.75);
+
+    // A missing string is no number, as Windows answers, for every one of them.
+    for (const name of ['VarR8FromStr', 'VarR4FromStr', 'VarI4FromStr', 'VarCyFromStr',
+        'VarBoolFromStr', 'VarDateFromStr'])
+    {
+        assert.equal(call(name, [0, 0x409, 0, OUT]), DISP_E_TYPEMISMATCH, name);
+        assert.equal(call(name, [TEXT, 0x409, 0, 0]), E_INVALIDARG, name);
+        assert.equal(fx[name].argBytes, 16, name);
+    }
+    host.putWide(TEXT, '');
+    assert.equal(call('VarI4FromStr', [TEXT, 0x409, 0, OUT]), DISP_E_TYPEMISMATCH,
+        'an empty string is no zero');
+    host.putWide(TEXT, '1,5');
+    host.said.length = 0;
+    assert.equal(call('VarR8FromStr', [TEXT, 0x40c, 0, OUT]), S_OK);
+    assert.equal(view.getFloat64(OUT, true), 15, 'read as English');
+    assert.ok(host.said.some(line=>line.includes('1036')), JSON.stringify(host.said));
+});
+
+test('a date with no year is this year by the guest\'s clock, and refused without one', ()=>{
+    host = fakeHost();
+    fx = createAutomationFunctions({ ...host, systemTimeMs: ()=>Date.UTC(2009, 5, 1) });
+    host.putWide(TEXT, 'Jan 2');
+    assert.equal(call('VarDateFromStr', [TEXT, 0x409, 0, 0x3000]), S_OK);
+    assert.equal(new DataView(host.bytes.buffer).getFloat64(0x3000, true), 39815);
+
+    setUp();
+    host.putWide(TEXT, 'Jan 2');
+    assert.equal(call('VarDateFromStr', [TEXT, 0x409, 0, 0x3000]), DISP_E_TYPEMISMATCH);
+    assert.ok(host.said.some(line=>line.includes('clock')), JSON.stringify(host.said));
+});
+
+test('a currency and a date are spelled in English, into a BSTR of the caller\'s', ()=>{
+    setUp();
+    const view = new DataView(host.bytes.buffer);
+    assert.equal(call('VarBstrFromCy', [15000, 0, 0x409, 0, SLOT]), S_OK);
+    assert.equal(bstrText(host.u32(SLOT)), '1.5');
+    assert.equal(call('VarBstrFromCy', [-15000, -1, 0x409, 0, SLOT]), S_OK);
+    assert.equal(bstrText(host.u32(SLOT)), '-1.5');
+
+    view.setFloat64(0x3000, 3.34, true);
+    const [low, high] = [view.getUint32(0x3000, true), view.getUint32(0x3004, true)];
+    assert.equal(call('VarBstrFromDate', [low, high, 0x409, 0, SLOT]), S_OK);
+    assert.equal(bstrText(host.u32(SLOT)), '1/2/1900 8:09:36 AM');
+    assert.equal(call('VarBstrFromDate', [low, high, 0x409, 2, SLOT]), S_OK);
+    assert.equal(bstrText(host.u32(SLOT)), '1/2/1900', 'VAR_DATEVALUEONLY');
+    view.setFloat64(0x3000, 2958466, true);
+    assert.equal(call('VarBstrFromDate', [view.getUint32(0x3000, true),
+        view.getUint32(0x3004, true), 0x409, 0, SLOT]), E_INVALIDARG, 'no such day');
+    assert.equal(call('VarBstrFromDate', [low, high, 0x409, 0, 0]), 0x80004003, 'E_POINTER');
+    assert.equal(fx.VarBstrFromCy.argBytes, 20);
+    assert.equal(fx.VarBstrFromDate.argBytes, 20);
+});
+
+test('a string becomes a boolean as VarBoolFromStr reads one', ()=>{
+    setUp();
+    host.putWide(TEXT, 'True');
+    host.putVariant(VARIANT_A, VT_BSTR, call('SysAllocString', [TEXT]));
+    assert.equal(call('VariantChangeType', [VARIANT_B, VARIANT_A, 0, VT_BOOL]), S_OK);
+    assert.equal(host.u16(VARIANT_B + 8), 0xffff);
+});
+
+test('the operators and conversions are bound to the ordinals Windows gives them', ()=>{
+    const expected = {
+        74: 'VarR4FromStr', 94: 'VarDateFromStr', 104: 'VarCyFromStr', 113: 'VarBstrFromCy',
+        114: 'VarBstrFromDate', 125: 'VarBoolFromStr', 141: 'VarAdd', 142: 'VarAnd',
+        143: 'VarDiv', 148: 'SafeArrayPtrOfIndex', 153: 'VarIdiv', 155: 'VarMod', 156: 'VarMul',
+        157: 'VarOr', 159: 'VarSub', 167: 'VarXor', 173: 'VarNeg', 174: 'VarNot',
+    };
+    for (const [ordinal, name] of Object.entries(expected))
+    {
+        assert.equal(OLEAUT32_ORDINALS[Number(ordinal)], name, ordinal);
+    }
 });

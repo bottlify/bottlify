@@ -121,6 +121,26 @@ export function roundNumber(number, places){
 }
 
 /**
+ * An exact number as a DECIMAL holds it: no more than 28 places, and fewer --
+ * rounded from the number itself each time, never from an earlier rounding --
+ * until the digits fit 96 bits. null when even the whole number does not.
+ *
+ * @param {Exact} exact
+ * @returns {Exact | null}
+ */
+export function fitDecimal(exact){
+    for (let places = Math.min(exact.scale, MAX_SCALE); places >= 0; places--)
+    {
+        const fitted = round(exact, places);
+        if ((fitted.value < 0n ? -fitted.value : fitted.value) <= LIMIT)
+        {
+            return fitted;
+        }
+    }
+    return null;
+}
+
+/**
  * The order of two exact numbers: -1, 0 or 1.
  *
  * @param {Exact} left @param {Exact} right

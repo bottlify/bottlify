@@ -23,12 +23,52 @@
 /**
  * @typedef {Object} ImmHost
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(code: number) => void} [setLastError]  Where a refusal says why.
+ *           Without it the answers are the same and the thread's last error is
+ *           left as it was.
  */
+
+/** What a call on an input context answers in the last error when it was handed none. */
+const ERROR_INVALID_HANDLE = 6;
 
 /**
  * @param {ImmHost} host
  */
 export function createImmFunctions(host){
+    /**
+     * A call that changes an input context, refused for the handle it was
+     * given: ImmGetContext hands out none, so a null one is no context and any
+     * other is not one of ours, and Windows answers FALSE with
+     * ERROR_INVALID_HANDLE for both.
+     *
+     * @param {number} argBytes
+     */
+    const noContext = argBytes=>({
+        argBytes,
+        handler: ()=>{
+            host.setLastError?.(ERROR_INVALID_HANDLE);
+            return 0;
+        },
+    });
+
+    /**
+     * ImmGetCompositionString for either width: nothing is being composed, so
+     * every part of the composition is zero bytes long and the buffer is not
+     * touched. A null context leaves the last error as it was; a handle that
+     * is not one of ours sets ERROR_INVALID_HANDLE, as Windows does.
+     */
+    const compositionString = {
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([himc])=>{
+            if ((himc >>> 0) !== 0)
+            {
+                host.setLastError?.(ERROR_INVALID_HANDLE);
+            }
+            return 0;
+        },
+    };
+
     return {
         /**
          * HIMC ImmAssociateContext(HWND hWnd, HIMC hIMC)
@@ -51,8 +91,29 @@ export function createImmFunctions(host){
         /** BOOL ImmReleaseContext(HWND hWnd, HIMC hIMC) */
         ImmReleaseContext: { argBytes: 8, handler: ()=>1 },
 
-        /** LONG ImmGetCompositionStringA(HIMC, DWORD, LPVOID, DWORD) */
-        ImmGetCompositionStringA: { argBytes: 16, handler: ()=>0 },
+        /**
+         * LONG ImmGetCompositionStringA(HIMC hIMC, DWORD dwIndex, LPVOID lpBuf, DWORD dwBufLen)
+         * LONG ImmGetCompositionStringW(HIMC, DWORD, LPVOID, DWORD)
+         */
+        ImmGetCompositionStringA: compositionString,
+        ImmGetCompositionStringW: compositionString,
+
+        /**
+         * BOOL ImmSetCompositionFontA(HIMC hIMC, LPLOGFONTA lplf)
+         * BOOL ImmSetCompositionFontW(HIMC hIMC, LPLOGFONTW lplf)
+         *
+         * A program sets the font its composition window would draw in; there
+         * is no window to draw, and no context to keep the font in.
+         */
+        ImmSetCompositionFontA: noContext(8),
+        ImmSetCompositionFontW: noContext(8),
+
+        /**
+         * BOOL ImmSetCompositionWindow(HIMC hIMC, LPCOMPOSITIONFORM lpCompForm)
+         *
+         * Where the composition window would stand, refused as the font is.
+         */
+        ImmSetCompositionWindow: noContext(8),
 
         /** DWORD ImmGetCandidateListA(HIMC, DWORD, LPCANDIDATELIST, DWORD) */
         ImmGetCandidateListA: { argBytes: 16, handler: ()=>0 },
@@ -136,7 +197,7 @@ export function createImmFunctions(host){
          * open one on -- ImmGetContext is null -- so, as on Windows for a null or
          * foreign handle, it fails.
          */
-        ImmSetOpenStatus: { argBytes: 8, handler: ()=>0 },
+        ImmSetOpenStatus: noContext(8),
 
         /**
          * BOOL ImmSimulateHotKey(HWND hWnd, DWORD dwHotKeyID)

@@ -84,3 +84,45 @@ test('a context cannot be made, and so none can be destroyed', ()=>{
     assert.equal(m.imm.ImmDestroyContext.argBytes, 4);
     assert.equal(m.imm.ImmDestroyContext.handler([0x1234]), 0);
 });
+
+test('nothing is being composed, in either width, and the buffer is not touched', ()=>{
+    /** @type {number[]} */
+    const errors = [];
+    const memory = new Uint8Array(0x100).fill(0xcd);
+    const imm = /** @type {any} */ (createImmFunctions({
+        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>memory.set(b, a),
+        setLastError: (/** @type {number} */ code)=>errors.push(code),
+    }));
+    const GCS_COMPSTR = 0x8;
+    const GCS_RESULTSTR = 0x800;
+    for (const name of ['ImmGetCompositionStringA', 'ImmGetCompositionStringW'])
+    {
+        assert.equal(imm[name].argBytes, 16);
+        assert.equal(imm[name].handler([0, GCS_COMPSTR, 0x10, 0x40]), 0, name);
+        assert.equal(imm[name].handler([0, GCS_RESULTSTR, 0x10, 0x40]), 0, name);
+    }
+    assert.deepEqual(errors, [], 'a null context leaves the last error alone');
+    assert.ok(memory.every(byte=>byte === 0xcd), 'nothing written');
+    assert.equal(imm.ImmGetCompositionStringW.handler([0x1234, GCS_COMPSTR, 0x10, 0x40]), 0);
+    assert.deepEqual(errors, [6], 'a handle that is not a context: ERROR_INVALID_HANDLE');
+});
+
+test('the composition font and window are refused, there being no context to keep them', ()=>{
+    /** @type {number[]} */
+    const errors = [];
+    const imm = /** @type {any} */ (createImmFunctions({
+        writeMemory: ()=>{},
+        setLastError: (/** @type {number} */ code)=>errors.push(code),
+    }));
+    for (const name of ['ImmSetCompositionFontA', 'ImmSetCompositionFontW',
+        'ImmSetCompositionWindow', 'ImmSetOpenStatus'])
+    {
+        assert.equal(imm[name].argBytes, 8, name);
+        errors.length = 0;
+        assert.equal(imm[name].handler([0, 0x40]), 0, `${name} with no context`);
+        assert.equal(imm[name].handler([0x1234, 0x40]), 0, `${name} with a foreign one`);
+        assert.deepEqual(errors, [6, 6], `${name}: ERROR_INVALID_HANDLE`);
+    }
+    assert.equal(machine().imm.ImmSetCompositionWindow.handler([0, 0]), 0,
+        'the same answer with nowhere to put the error');
+});

@@ -1868,7 +1868,7 @@ export function createWin32Module(){
                 'COMDLG32.dll': createCommonDialogFunctions(
                     { readMemory, readCString, writeMemory }),
 
-                'IMM32.dll': createImmFunctions({ writeMemory }),
+                'IMM32.dll': createImmFunctions({ writeMemory, setLastError: setError }),
 
                 'SHLWAPI.dll': createShlwapiFunctions({
                     readCString, readWideString, readMemory, writeMemory,
@@ -2589,6 +2589,8 @@ export function createWin32Module(){
                     writeMemory,
                     fillMemory,
                     heap,
+                    // A date written without a year is in this one.
+                    systemTimeMs: ()=>kernel.clock.wallClock(),
                     divergence: config?.divergence,
                     // A type library is a file a program loads and an object it
                     // registers, so automation reads the volume, publishes through
