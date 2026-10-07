@@ -2,9 +2,10 @@
 
 Русская версия: [README.ru.md](README.ru.md).
 
-**Status:** proposed 2026-10-03, revised against `main` 6554baf0; the workers of stage 2 decided
-2026-10-07 on `cork2` (no pool code yet). How the engine works today is in
-[`docs/architecture.md`](../../docs/architecture.md); this document is where it goes next.
+**Status:** proposed 2026-10-03, revised against `main` 6554baf0; the workers of stage 2 and the
+translation cache arena decided 2026-10-07 on `cork2` (no pool code yet). How the engine works
+today is in [`docs/architecture.md`](../../docs/architecture.md); this document is where it goes
+next.
 
 v2 turns the engine from one thread that does everything into a platform of workers whose number
 follows the load: one worker while one copes, four when two are choking, never four held idle. On
@@ -200,12 +201,23 @@ off the thread that runs the program, not from running the program's threads at 
   would miss what the first one kept. A worker's heap cannot be shared or handed to another
   worker — each has its own; what workers share is bytes (`SharedArrayBuffer`, a shared
   `WebAssembly.Memory`) and compiled modules, which a message passes without copying their code.
-  So the cache becomes bytes in an arena of the process's own, in shared memory: every pool worker
-  working for the process looks functions up there and adds the ones it emits, a worker that
-  leaves loses nothing, and the arena goes when the process exits. It is filled lazily, by the
-  translation that happens anyway, and since loading is when it is used, a process quiet for long
-  enough can let it go (whether a later load gains from the earlier one's functions is not
-  measured).
+- **The translation cache arena** (decided 2026-10-07). So the cache becomes bytes in an arena of
+  the process's own, in shared memory, made with the process and gone when it exits. Every pool
+  worker working for the process looks functions up there and adds the ones it emits; a worker
+  that joins finds what the others emitted, and one that leaves takes nothing with it. An entry is
+  bytes only — the function's body, locals and hints, its type, the region's shape and what the
+  emitter answered for it, encoded — behind an index in the same memory keyed by the key the cache
+  has today. A worker adds an entry by taking space with an atomic add and publishes it by one
+  atomic store into the index, so a reader sees an entry whole or not at all, and two workers that
+  emit the same function at once both stay correct (the second copy is wasted, not wrong). The
+  arena is filled lazily, by the translation that happens anyway, grows up to its limit (48 MB,
+  as now) and frees space a segment at a time, the oldest first; that this keeps the hits the
+  cache's least-recently-used order keeps is checked before it lands, by replaying the recorded
+  lookups of Doom 3 and Tron through both. Since loading is when it is used, a process quiet for
+  long enough may let the arena go; whether a later load gains from an earlier one's functions is
+  not measured. Its gate: seeded batches emitted through several workers sharing an arena and
+  through one worker with no cache give the same module bytes, and the cache's counters say how
+  many functions came from the arena.
 - **The rule.** The pool always keeps standby workers in proportion to the running processes; the
   first is never let go, since translation never quite stops. When a process's work starts to lag —
   its urgent jobs queue behind the ones out and its workers are busy — standby workers join it, one
@@ -263,7 +275,9 @@ off the thread that runs the program, not from running the program's threads at 
 
 **Accepted when** with the minimums the benchmarks are within the thresholds of `main`, a parent
 and a child process run at the same time and see each other's registry and file writes, and under
-a synthetic load the driver grows and shrinks each pool without oscillating.
+a synthetic load the driver grows and shrinks each pool without oscillating, and workers joining
+a loading process take functions from its arena — its hits no fewer than one worker's own cache
+gets today.
 
 ## Stage 3 — More executors per process
 
@@ -372,6 +386,8 @@ one executor.
 - **Memory shared between processes** (stage 2): which mechanism for named mappings, shared
   sections and cross-process reads and writes, and which programs need them coherent rather than
   copied at a wait.
+- **The translation cache arena after loading** (stage 2): how long a quiet process keeps it, and
+  whether the next load of the same process gains from the functions an earlier one emitted.
 - **Cross-origin isolation:** which ways of embedding the player it rules out, and whether any of
   them matter to the product.
 - **The x64 address space:** `memory64` or a 4 GiB window. `memory64` ships in Chrome and Firefox;
