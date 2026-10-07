@@ -425,6 +425,14 @@ export function createScheduler(options){
      * @type {Set<any>}
      */
     const readyAtSlice = new Set();
+    /**
+     * How parallel the process's threads are: the host milliseconds and the
+     * instructions of every slice, by how many threads could have run during
+     * it -- the one running and those ready beside it, 1, 2, 3, 4 or more.
+     * What a second executor would have had to run is the share past the
+     * first column (roadmap/v2, stage 3).
+     */
+    const parallel = { ms: [0, 0, 0, 0], instructions: [0, 0, 0, 0] };
 
     /**
      * A due time the clock honours whether or not a thread is waiting for it.
@@ -854,6 +862,9 @@ export function createScheduler(options){
                 instructions += cpu.runSlice(ATOMIC_STEP);
             }
             const held = wall() - began;
+            const could = Math.min(readyAtSlice.size, 3);
+            parallel.ms[could] += held;
+            parallel.instructions[could] += instructions;
             recentTurns.push({ thread: next.name ?? '?', ms: held, end: began + held,
                 outside: lastEnd === 0 ? 0 : began - lastEnd });
             const slot = busySlot(began);
@@ -1248,6 +1259,8 @@ export function createScheduler(options){
                 worstSliceFrom,
                 worstSliceOn,
                 worstSliceMs: slowSlices.length > 0 ? Math.round(slowSlices[0].ms) : 0,
+                parallel: { ms: parallel.ms.map(Math.round),
+                    instructions: [...parallel.instructions] },
                 slowSlices: slowSlices.map(s=>`${Math.round(s.ms)}ms ${s.instructions} ${
                     s.thread ?? '?'} 0x${s.from.toString(16)}->0x${s.at.toString(16)}`).join('; '),
                 // Timed waits that ran out rather than being satisfied.
