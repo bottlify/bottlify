@@ -1865,8 +1865,14 @@ export function createWin32Module(){
 
                 'LZ32.dll': createLzFunctions({ readCString, writeMemory, files: volume }),
 
-                'COMDLG32.dll': createCommonDialogFunctions(
-                    { readMemory, readCString, writeMemory }),
+                'COMDLG32.dll': createCommonDialogFunctions({
+                    readMemory, readCString, writeMemory,
+                    // Whether a dialog's owner is a window, asked when it is
+                    // called: user32's table is built after this one.
+                    /** @param {number} hwnd */
+                    isWindow: hwnd=>libraries['USER32.dll'].IsWindow.handler([hwnd]) === 1,
+                    divergence: config?.divergence,
+                }),
 
                 'IMM32.dll': createImmFunctions({ writeMemory, setLastError: setError }),
 
