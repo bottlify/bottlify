@@ -217,8 +217,13 @@ async function execute(engine, row, kind, flags, data){
             const action = { name: row.action, wait: !ignore, over: false, stop: started.stop,
                 done: started.done.finally(()=>{
                     action.over = true;
+                }),
+                // The library and what it was given go when the installation
+                // is over, from the installation's own thread.
+                finish: async()=>{
+                    await started.free?.();
                     release();
-                }) };
+                } };
             engine.async.push(action);
             return ERROR_SUCCESS;
         }
@@ -323,6 +328,7 @@ export async function finishAsync(engine){
             }
             await action.done;
         }
+        await action.finish?.();
     }
     return failure;
 }

@@ -103,6 +103,9 @@ const IDOK = 1;
  * @property {import('./registration.js').Hive} hive
  * @property {(entry: number, args: number[], thread?: unknown) => Promise<number> | number} call
  * @property {() => unknown} callerThread
+ * @property {<T>(thread: unknown, fn: () => T) => T} [answering]
+ *           Runs `fn` as the call of `thread`: what it loads, frees and calls
+ *           back into the guest is that thread's.
  * @property {{ loadAnsi: (name: number) => number | Promise<number>,
  *     procAddress: (module: number, name: number) => number | Promise<number>,
  *     free: (module: number) => number | Promise<number> }} libraries
@@ -252,8 +255,10 @@ export function createMsiFunctions(host){
      *
      * @param {number} type @param {import('./record.js').Record} record
      * @param {import('./session.js').Session | null} session
+     * @param {unknown} [thread]  Whose call the message is part of; the
+     *     caller's own when a program's call delivers it.
      */
-    const deliver = async(type, record, session)=>{
+    const deliver = async(type, record, session, thread = host.callerThread())=>{
         const kind = (type >>> 24) & 0xff;
         const bit = 1 << kind;
         if (recordUi && (recordUi.filter & bit) !== 0)
@@ -262,7 +267,7 @@ export function createMsiFunctions(host){
             try
             {
                 const answer = await host.call(recordUi.handler,
-                    [recordUi.context, type >>> 0, handle], host.callerThread());
+                    [recordUi.context, type >>> 0, handle], thread);
                 if (answer !== 0)
                 {
                     return answer;
@@ -282,7 +287,7 @@ export function createMsiFunctions(host){
             try
             {
                 const answer = await host.call(externalUi.handler,
-                    [externalUi.context, type >>> 0, block], host.callerThread());
+                    [externalUi.context, type >>> 0, block], thread);
                 if (answer !== 0)
                 {
                     return answer;
@@ -317,13 +322,19 @@ export function createMsiFunctions(host){
      * The engine a session runs its actions in.
      *
      * @param {import('./session.js').Session} session
+     * @param {unknown} thread  Whose call the installation answers: what it
+     *     loads, frees and calls is that thread's, read once at the call --
+     *     past an await, the thread on the processor is any other, which may
+     *     be in the middle of its own code.
      */
-    const engineFor = session=>{
+    const engineFor = (session, thread)=>{
         let engine = engines.get(session);
         if (!engine)
         {
-            engine = {
+            /** @type {import('./engine.js').Engine} */
+            const made = {
                 session,
+                thread,
                 executing: false,
                 ran: new Set(),
                 commit: [],
@@ -332,23 +343,53 @@ export function createMsiFunctions(host){
                     files: host.files,
                     hive: host.hive,
                     registration,
-                    message: (type, record)=>deliver(type, record, session),
+                    message: (type, record)=>deliver(type, record, session, made.thread),
                     openHandle: (owner, deferred)=>open('session', { session: owner, deferred }),
                     closeHandle: handle=>{
                         handles.delete(handle);
                     },
-                    callDll,
-                    startDll,
+                    callDll: (path, entry, args)=>callDll(path, entry, args, made.thread),
+                    startDll: (path, entry, args)=>startDll(path, entry, args, made.thread),
                     runExe: async(commandLine, directory, wait)=>
                         host.runExe?.(commandLine, directory, wait) ?? null,
                     divergence: host.divergence,
                     log: host.log,
                 },
             };
+            engine = made;
             engines.set(session, engine);
         }
         return engine;
     };
+
+    /**
+     * Runs part of an installation as the call of `thread`: an action a
+     * custom action asks for runs on the custom action's thread.
+     *
+     * @template T
+     * @param {import('./engine.js').Engine} engine @param {unknown} thread
+     * @param {() => Promise<T>} run
+     * @returns {Promise<T>}
+     */
+    const asCallOf = async(engine, thread, run)=>{
+        const before = engine.thread;
+        engine.thread = thread;
+        try
+        {
+            return await run();
+        }
+        finally
+        {
+            engine.thread = before;
+        }
+    };
+
+    /**
+     * @template T
+     * @param {unknown} thread @param {() => T} fn
+     * @returns {T}
+     */
+    const on = (thread, fn)=>(host.answering ? host.answering(thread, fn) : fn());
 
     /**
      * Bytes as a NUL-terminated string in the guest for as long as `use` runs.
@@ -376,10 +417,11 @@ export function createMsiFunctions(host){
      * installer runs a library action.
      *
      * @param {string} path @param {string} entry @param {number[]} args
+     * @param {unknown} thread  The installation's: its DllMain and its export run there.
      * @returns {Promise<number | null>}
      */
-    async function callDll(path, entry, args){
-        const module = await withString(path, name=>host.libraries.loadAnsi(name));
+    async function callDll(path, entry, args, thread){
+        const module = await withString(path, name=>on(thread, ()=>host.libraries.loadAnsi(name)));
         if (!module)
         {
             return null;
@@ -387,28 +429,33 @@ export function createMsiFunctions(host){
         try
         {
             const address = await withString(entry,
-                name=>host.libraries.procAddress(module >>> 0, name));
+                name=>on(thread, ()=>host.libraries.procAddress(module >>> 0, name)));
             if (!address)
             {
                 return null;
             }
-            return (await host.call(address >>> 0, args, host.callerThread())) >>> 0;
+            return (await host.call(address >>> 0, args, thread)) >>> 0;
         }
         finally
         {
-            await host.libraries.free(module >>> 0);
+            await on(thread, ()=>host.libraries.free(module >>> 0));
         }
     }
 
     /**
      * Loads a library and starts one of its exports on a thread of its own,
      * which goes on after this returns: a library action that runs beside the
-     * installation. The library is freed when the thread is over.
+     * installation. The library is freed when the installation asks, where
+     * its own thread stands still: the action's thread ends whenever it does,
+     * and a DllMain run then would be run on whatever thread was on the
+     * processor, in the middle of its own code.
      *
      * @param {string} path @param {string} entry @param {number[]} args
-     * @returns {Promise<{ done: Promise<number | null>, stop: () => void } | null>}
+     * @param {unknown} installing  The installation's thread.
+     * @returns {Promise<{ done: Promise<number | null>, stop: () => void,
+     *     free: () => Promise<unknown> } | null>}
      */
-    async function startDll(path, entry, args){
+    async function startDll(path, entry, args, installing){
         const threads = host.threads;
         if (!threads)
         {
@@ -416,17 +463,20 @@ export function createMsiFunctions(host){
                 + ' thread to run on');
             return null;
         }
-        const module = await withString(path, name=>host.libraries.loadAnsi(name));
+        const module = await withString(path,
+            name=>on(installing, ()=>host.libraries.loadAnsi(name)));
         if (!module)
         {
             return null;
         }
+        const free = async()=>on(installing, ()=>host.libraries.free(module >>> 0));
         const address = await withString(entry,
-            name=>host.libraries.procAddress(module >>> 0, name));
-        const thread = address ? await threads.start(address >>> 0, args[0] ?? 0) : 0;
+            name=>on(installing, ()=>host.libraries.procAddress(module >>> 0, name)));
+        const thread = address
+            ? await on(installing, ()=>threads.start(address >>> 0, args[0] ?? 0)) : 0;
         if (!thread)
         {
-            await host.libraries.free(module >>> 0);
+            await free();
             return null;
         }
         const done = new Promise(resolve=>{
@@ -442,10 +492,9 @@ export function createMsiFunctions(host){
             poll();
         }).then(async code=>{
             await threads.close(thread);
-            await host.libraries.free(module >>> 0);
             return /** @type {number} */ (code);
         });
-        return { done, stop: ()=>{
+        return { done, free, stop: ()=>{
             threads.terminate(thread);
         } };
     }
@@ -514,6 +563,7 @@ export function createMsiFunctions(host){
      * @param {string} path @param {string} commandLine
      */
     const installPackage = async(path, commandLine)=>{
+        const thread = host.callerThread();
         const session = await openSession(path, commandLine);
         if (!session)
         {
@@ -521,8 +571,8 @@ export function createMsiFunctions(host){
         }
         session.setProperty('ACTION', session.getProperty('ACTION') || 'INSTALL');
         session.setProperty('EXECUTEACTION', 'INSTALL');
-        const engine = engineFor(session);
-        await deliver(INSTALLMESSAGE.INITIALIZE, createRecord(0), session);
+        const engine = engineFor(session, thread);
+        await deliver(INSTALLMESSAGE.INITIALIZE, createRecord(0), session, thread);
         const level = uiLevel & 0x0f;
         const ui = level === INSTALLUILEVEL.FULL || level === INSTALLUILEVEL.REDUCED;
         let code;
@@ -543,7 +593,7 @@ export function createMsiFunctions(host){
             {
                 code = late;
             }
-            await deliver(INSTALLMESSAGE.TERMINATE, createRecord(0), session);
+            await deliver(INSTALLMESSAGE.TERMINATE, createRecord(0), session, thread);
             engines.delete(session);
         }
         host.log?.(`Installation of ${path} answered ${code}.`);
@@ -926,7 +976,7 @@ export function createMsiFunctions(host){
             argBytes: 4,
             handler: ([install])=>{
                 const owner = sessionOf(install);
-                return owner ? open('database', { db: owner.session.db,
+                return owner ? open('database', { db: owner.session.active,
                     path: owner.session.packagePath }) : 0;
             },
         },
@@ -1118,7 +1168,9 @@ export function createMsiFunctions(host){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            return doAction(engineFor(owner.session), name);
+            const thread = host.callerThread();
+            const engine = engineFor(owner.session, thread);
+            return asCallOf(engine, thread, ()=>doAction(engine, name));
         }),
         ...both('MsiSequence', 12, wide=>async([install, table])=>{
             const owner = sessionOf(install);
@@ -1126,7 +1178,9 @@ export function createMsiFunctions(host){
             {
                 return ERROR_INVALID_HANDLE;
             }
-            return runSequence(engineFor(owner.session), reader(wide)(table) ?? '');
+            const thread = host.callerThread();
+            const engine = engineFor(owner.session, thread);
+            return asCallOf(engine, thread, ()=>runSequence(engine, reader(wide)(table) ?? ''));
         }),
         MsiGetMode: {
             argBytes: 8,

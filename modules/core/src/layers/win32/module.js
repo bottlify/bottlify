@@ -1999,6 +1999,7 @@ export function createWin32Module(){
                     hive,
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     callerThread: ()=>bridge.callerThread(),
+                    answering: (thread, fn)=>bridge.answering(thread, fn),
                     libraries: {
                         /** @param {number} name */
                         loadAnsi: name=>libraries['KERNEL32.dll'].LoadLibraryA.handler([name]),

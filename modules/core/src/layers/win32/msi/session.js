@@ -27,6 +27,7 @@ import { shellFolders } from '../advapi32/registry.js';
 import { readSummary, PID } from './summary.js';
 import { createRecord } from './record.js';
 import { installerVersion } from './version.js';
+import { MSITYPE } from './database.js';
 
 /** INSTALLSTATE values. */
 export const INSTALLSTATE = Object.freeze({
@@ -677,8 +678,31 @@ export function createSession({ db, packagePath, machine, commandLine = '', isIn
         return format(record);
     };
 
+    /**
+     * The session's database as MsiGetActiveDatabase hands it out: the
+     * package's tables and, as Windows keeps them, the session's properties
+     * as the temporary table _Property, one row a property that has a value.
+     * A script reads it to carry what the user chose into the installation it
+     * starts in a session of its own.
+     */
+    const active = /** @type {typeof db} */ (Object.assign(Object.create(db), {
+        /** @param {string} name */
+        table: name=>(name === '_Property' ? {
+            name,
+            columns: [
+                { table: name, number: 1, name: 'Property',
+                    type: MSITYPE.VALID | MSITYPE.STRING | MSITYPE.KEY | MSITYPE.TEMPORARY | 72 },
+                { table: name, number: 2, name: 'Value',
+                    type: MSITYPE.VALID | MSITYPE.STRING | MSITYPE.TEMPORARY },
+            ],
+            rows: [...properties].filter(([, value])=>value !== '')
+                .map(([property, value])=>[property, value]),
+            temporary: true, temporaryRows: new Set(), hold: 0,
+        } : db.table(name)),
+    }));
+
     return {
-        db, summary, properties, folders, features, components, files,
+        db, active, summary, properties, folders, features, components, files,
         getProperty, setProperty, evaluate, format, formatText,
         resolveTargets, setTargetPath, sourcePath, settleStates,
         packagePath, sourceDir, machine,

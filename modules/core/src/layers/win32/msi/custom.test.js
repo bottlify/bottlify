@@ -78,8 +78,13 @@ function engineWith(options = {}){
     return { engine, events, files };
 }
 
-/** An action that has been started and finishes when `finish` is called. */
-function running(){
+/**
+ * An action that has been started and finishes when `finish` is called; its
+ * library's freeing goes into `events`.
+ *
+ * @param {string[]} [events]
+ */
+function running(events = []){
     /** @type {(code: number | null) => void} */
     let finish = ()=>{};
     const done = new Promise(resolve=>{
@@ -92,8 +97,11 @@ function running(){
         started: { done, stop: ()=>{
             stopped++;
             finish(null);
+        }, free: async()=>{
+            events.push('free library');
         } },
         stopped: ()=>stopped,
+        events,
     };
 }
 
@@ -121,13 +129,22 @@ test('a library action that runs in parallel and is not waited for starts, and t
 
 test('one that finished on its own is not stopped, and its answer is not the installation\'s'
     + ' when it is not waited for', async()=>{
-    const action = running();
-    const { engine } = engineWith({ start: async()=>action.started });
+    /** @type {string[]} */
+    const freed = [];
+    const action = running(freed);
+    const { engine, events } = engineWith({ start: async()=>action.started });
     await runCustomAction(engine, ROW(DLL_BINARY | ASYNC | CONTINUE));
     action.finish(1603);
     await new Promise(resolve=>setImmediate(resolve));
+    // Its thread is over, but its library and handle are the installation's
+    // to give back, from the installation's own thread: a DllMain run when the
+    // thread ended would run on whichever thread was on the processor then.
+    assert.deepEqual(freed, [], 'the library is not freed when its thread ends');
+    assert.ok(!events.includes('close handle 5'));
     assert.equal(await finishAsync(engine), 0);
     assert.equal(action.stopped(), 0);
+    assert.deepEqual(freed, ['free library'], 'but at the end');
+    assert.ok(events.includes('close handle 5'), 'and then what it was given');
 });
 
 test('a library action run in parallel that is waited for is waited for at the end, and its'
