@@ -214,30 +214,167 @@ function component(src, lane, homes){
  * @returns {AssembleResult}
  */
 export function assembleLegacy(ir, options = {}){
-    /** @type {import('./hlsl-backend.js').Diagnostic[]} */
-    const diagnostics = [];
-    const stats = { arith: 0, texture: 0, slots: 0, temps: 0, constants: 0, defs: 0 };
-    try
+    /** @type {Rewrites} */
+    const rewrites = { spread: new Set(), split: new Set() };
+    // A source the model cannot read as it stands, or an instruction it cannot
+    // write in one, is rewritten and the program built again from the start:
+    // where a value lives is only known once it is placed.
+    for (let attempt = 0; ; attempt++)
     {
-        return build(ir, options, diagnostics, stats);
-    }
-    catch (e){
-        if (!(e instanceof TargetError))
+        /** @type {import('./hlsl-backend.js').Diagnostic[]} */
+        const diagnostics = [];
+        const stats = { arith: 0, texture: 0, slots: 0, temps: 0, constants: 0, defs: 0 };
+        try
         {
-            throw e;
+            return build(ir, options, diagnostics, stats, rewrites);
         }
-        diagnostics.push({ code: e.code, message: e.message });
-        return { tokens: null, diagnostics, stats };
+        catch (e){
+            if (e instanceof RewriteNeeded && attempt < 8)
+            {
+                const before = rewrites.spread.size + rewrites.split.size;
+                e.spread.forEach(key=>rewrites.spread.add(key));
+                e.split.forEach(key=>rewrites.split.add(key));
+                if (rewrites.spread.size + rewrites.split.size > before)
+                {
+                    continue;
+                }
+            }
+            const failure = e instanceof RewriteNeeded ? e.failure : e;
+            if (!(failure instanceof TargetError))
+            {
+                throw failure;
+            }
+            diagnostics.push({ code: failure.code, message: failure.message });
+            return { tokens: null, diagnostics, stats };
+        }
     }
+}
+
+/**
+ * @typedef {{ spread: Set<string>, split: Set<string> }} Rewrites
+ * `spread`: the sources -- a value and the one component it is read as -- to
+ * read through a dot product that puts that component in every lane;
+ * `split`: the instructions to write one component at a time.
+ */
+
+/** Where the numbers of the registers a spread reads start. */
+const SPREAD_IDS = 1 << 24;
+
+/** What a build found it has to rewrite, and the refusal it stands for if it cannot. */
+class RewriteNeeded extends Error {
+    /**
+     * @param {string[]} spread @param {string[]} split @param {TargetError} failure
+     */
+    constructor(spread, split, failure){
+        super(failure.message);
+        this.spread = spread;
+        this.split = split;
+        this.failure = failure;
+    }
+}
+
+/**
+ * The key a source is rewritten by: the value it reads and the component it
+ * replicates, or null for a source no rewrite applies to.
+ *
+ * @param {Src} src
+ * @returns {string | null}
+ */
+function spreadKey(src){
+    const swz = /** @type {number[] | undefined} */ (/** @type {any} */ (src).swz);
+    if (!swz || !swz.every(c=>c === swz[0]))
+    {
+        return null;
+    }
+    const how = `${swz[0]}${/** @type {any} */ (src).neg ? '-' : ''}${
+        /** @type {any} */ (src).mod ?? ''}`;
+    switch (src.kind)
+    {
+        case 'reg':
+            return `r${src.reg.id}.${how}`;
+        case 'input':
+            return `i${src.input.usage}:${src.input.index}.${how}`;
+        case 'const':
+            return `c${src.cst.name}+${src.offset}.${how}`;
+        default:
+            return null;
+    }
+}
+
+/** The key an instruction is split by. @param {Instr} instr */
+function splitKey(instr){
+    const dest = instr.dest.kind === 'reg' ? `r${instr.dest.reg.id}`
+        : instr.dest.kind === 'out' ? `o${instr.dest.out.usage}:${instr.dest.out.index}` : '-';
+    return `${instr.op}>${dest}:${instr.dest.kind === 'reg' || instr.dest.kind === 'out'
+        ? instr.dest.mask : 0}`;
+}
+
+/**
+ * The rewrites applied: a split instruction becomes one for each component it
+ * writes; a spread source reads a register that holds the component it wants
+ * in all four lanes -- the colour ones from a dot product with a selector,
+ * alpha from their blue, which an instruction writing alpha alone may read.
+ *
+ * @param {Instr[]} instrs @param {Rewrites} rewrites
+ * @returns {Instr[]}
+ */
+function applyRewrites(instrs, rewrites){
+    if (rewrites.spread.size === 0 && rewrites.split.size === 0)
+    {
+        return instrs;
+    }
+    /** @type {Instr[]} */
+    const out = [];
+    let made = 0;
+    for (const instr of instrs)
+    {
+        const srcs = instr.srcs.map(src=>{
+            const key = spreadKey(src);
+            if (key === null || !rewrites.spread.has(key))
+            {
+                return src;
+            }
+            // The same value in all four lanes: read through any swizzle, as it stands.
+            // Numbered apart from the registers the passes make, so that theirs -- which
+            // a later rewrite may name -- are the same in every build.
+            /** @type {VReg} */
+            const spread = { id: SPREAD_IDS + made++, width: 4, uniform: true };
+            const wanted = /** @type {number[]} */ (/** @type {any} */ (src).swz)[0];
+            const selector = [0, 1, 2, 3].map(c=>(c === wanted ? 1 : 0));
+            /** @type {Src} */
+            const whole = /** @type {any} */ ({ ...src, swz: [0, 1, 2, 3] });
+            out.push({ op: 'dp3', dest: { kind: 'reg', reg: spread, mask: 7 },
+                srcs: [whole, { kind: 'imm', values: selector }] });
+            out.push({ op: 'mov', dest: { kind: 'reg', reg: spread, mask: 8 },
+                srcs: [{ kind: 'reg', reg: spread, swz: [2, 2, 2, 2] }] });
+            return /** @type {Src} */ ({ kind: 'reg', reg: spread, swz: [0, 1, 2, 3] });
+        });
+        const mask = instr.dest.kind === 'reg' || instr.dest.kind === 'out' ? instr.dest.mask : 0;
+        if (rewrites.split.has(splitKey(instr)) && (mask & (mask - 1)) !== 0)
+        {
+            for (let c = 0; c < 4; c++)
+            {
+                if ((mask & 1 << c) !== 0)
+                {
+                    out.push({ ...instr, srcs, dest: /** @type {any} */ ({ ...instr.dest,
+                        mask: 1 << c }) });
+                }
+            }
+            continue;
+        }
+        out.push({ ...instr, srcs });
+    }
+    return out;
 }
 
 /**
  * @param {IrProgram} ir @param {{ creator?: string, flags?: number }} options
  * @param {import('./hlsl-backend.js').Diagnostic[]} diagnostics
  * @param {AssembleResult['stats']} stats
+ * @param {Rewrites} rewrites
  * @returns {AssembleResult}
  */
-function build(ir, options, diagnostics, stats){
+function build(ir, options, diagnostics, stats, rewrites){
     const { profile } = ir;
     const fourth = profile.minor >= 4;
     let counter = ir.vregCount;
@@ -331,6 +468,10 @@ function build(ir, options, diagnostics, stats){
         instrs = [...prefix, ...instrs];
     }
 
+    // What the last build could not read, read another way: after the passes, which make
+    // the registers a texture read fills, so the program is the one that build placed.
+    instrs = applyRewrites(instrs, rewrites);
+
     // The order of the program: the texture reads that need only inputs first; in 1.4,
     // those that need a result of the arithmetic after a phase marker.
     /** @type {Set<VReg>} */
@@ -394,18 +535,23 @@ function build(ir, options, diagnostics, stats){
     /** @type {Map<string, number>} */
     const defAt = new Map();
     let nextConstant = 0;
+    let clamped = false;
     ordered = ordered.map(instr=>({ ...instr, srcs: instr.srcs.map(src=>{
         if (src.kind !== 'imm')
         {
             return src;
         }
-        for (const v of src.values)
+        // A model 1 constant register holds -1 to 1 and the hardware clamps to
+        // it; fxc clamps a literal outside it and says so once, as a warning.
+        if (src.values.some(v=>!(v >= -1 && v <= 1)))
         {
-            if (!(v >= -1 && v <= 1))
+            if (!clamped)
             {
-                throw new TargetError('X4532', `the constant ${v} is outside the range -1 to 1 `
-                    + `that ${profile.name} holds`);
+                clamped = true;
+                diagnostics.push({ code: 'X4704', severity: 'warning', message: 'literal values '
+                    + 'outside range -1 to 1 are clamped on all ps_1_x shading models' });
             }
+            src = { ...src, values: src.values.map(v=>Math.max(-1, Math.min(1, v))) };
         }
         const key = src.values.map(v=>(Object.is(v, -0) ? '-0' : String(Math.fround(v)))).join();
         let index = defAt.get(key);
@@ -546,6 +692,12 @@ function build(ir, options, diagnostics, stats){
 
     /** @type {PhysInstr[]} */
     const physical = [];
+    /** @type {string[]} */
+    const spread = [];
+    /** @type {string[]} */
+    const split = [];
+    /** @type {TargetError | null} */
+    let unreadable = null;
     for (const instr of ordered)
     {
         if (instr.op === 'phase')
@@ -650,8 +802,34 @@ function build(ir, options, diagnostics, stats){
             const wanted = (info.cls === 'comp' ? lanes : Array.from({
                 length: instr.op === 'dp4' ? 4 : lanes.length }, (_, i)=>i))
                 .map(l=>component(src, l, homes));
-            operand.swz = swizzleOf(wanted, info.cls === 'comp'
-                ? destLanes.map(c=>place[c]) : null, profile, instr.op);
+            try
+            {
+                // Not the instruction that makes it so: that one reads its blue.
+                const uniform = src.kind === 'reg' && src.reg.uniform
+                    && !(instr.dest.kind === 'reg' && instr.dest.reg === src.reg);
+                operand.swz = uniform ? [0, 1, 2, 3]
+                    : swizzleOf(wanted, info.cls === 'comp'
+                        ? destLanes.map(c=>place[c]) : null, profile, instr.op, dest?.mask === 8);
+            }
+            catch (e){
+                if (!(e instanceof TargetError) || e.code !== 'X4533')
+                {
+                    throw e;
+                }
+                // Read another way, the next build: through a dot product before
+                // 1.4, one component at a time in it.
+                const key = spreadKey(src);
+                if (!fourth && key !== null && wanted.every(w=>w === wanted[0]))
+                {
+                    spread.push(key);
+                }
+                else if (fourth && info.cls === 'comp')
+                {
+                    split.push(splitKey(instr));
+                }
+                unreadable ??= e;
+                operand.swz = [0, 1, 2, 3];
+            }
             const modifier = /** @type {any} */ (src).mod;
             operand.mod = modifier ? MODIFIER[/** @type {keyof typeof MODIFIER} */ (modifier)]
                 : /** @type {any} */ (src).neg ? MOD.NEG : MOD.NONE;
@@ -659,6 +837,11 @@ function build(ir, options, diagnostics, stats){
         });
         const op = instr.op === 'texld' && !fourth ? 'tex' : instr.op;
         physical.push({ op, dest, srcs });
+    }
+
+    if (unreadable)
+    {
+        throw new RewriteNeeded(spread, split, unreadable);
     }
 
     // Instructions paired: an rgb instruction and an alpha one that does not read what the
@@ -714,7 +897,7 @@ function build(ir, options, diagnostics, stats){
                 + `(${profile.name}) is ${profile.maxTex}.` });
         }
     }
-    if (diagnostics.length > 0)
+    if (diagnostics.some(d=>d.severity !== 'warning'))
     {
         return { tokens: null, diagnostics, stats };
     }
@@ -727,35 +910,30 @@ function build(ir, options, diagnostics, stats){
 }
 
 /**
- * The swizzle that reads `wanted` components into a destination, or an error: the
- * model reads a register as it is, or replicates its blue or alpha.
+ * The swizzle that reads `wanted` components into a destination, or an error. A
+ * source is read as it is in the components written, or with one component
+ * replicated: in 1.4 any, before it alpha, and blue only by an instruction that
+ * writes alpha alone (the Direct3D 9 table of source swizzles).
  *
  * @param {number[]} wanted   For each destination component the source one.
  * @param {number[] | null} destLanes   The components the destination takes, as physical ones.
  * @param {Profile} profile @param {string} op
+ * @param {boolean} alphaAlone  The instruction writes alpha and nothing else.
  * @returns {number[]}
  */
-function swizzleOf(wanted, destLanes, profile, op){
-    const same = wanted.every(w=>w === wanted[0]);
+function swizzleOf(wanted, destLanes, profile, op, alphaAlone){
     const into = destLanes ?? wanted.map((_, i)=>i);
-    if (profile.minor >= 4)
-    {
-        // 1.4 reads any rearrangement of the colour components the destination takes.
-        const full = [0, 1, 2, 3];
-        into.forEach((d, i)=>{
-            full[d] = wanted[i];
-        });
-        return full;
-    }
     if (wanted.every((w, i)=>w === into[i]))
     {
         return [0, 1, 2, 3];
     }
-    if (same && (wanted[0] === 3 || wanted[0] === 2))
+    const c = wanted[0];
+    if (wanted.every(w=>w === c) && (profile.minor >= 4 || c === 3 || (c === 2 && alphaAlone)))
     {
-        return [wanted[0], wanted[0], wanted[0], wanted[0]];
+        return [c, c, c, c];
     }
-    throw new TargetError('X4533', `${profile.name} ${op}: a source can be read as it is or `
-        + 'with its blue or alpha replicated; this one is read as '
+    throw new TargetError('X4533', `${profile.name} ${op}: a source is read as it is or with `
+        + `one component replicated${profile.minor >= 4 ? ''
+            : ' -- alpha, or blue into alpha alone'}; this one is read as `
         + `.${wanted.map(w=>'rgba'[w]).join('')}`);
 }

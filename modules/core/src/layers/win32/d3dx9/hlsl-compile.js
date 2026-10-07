@@ -187,7 +187,7 @@ async function compile(source, options){
     const assembled = profile.legacy ? assembleLegacy(ir) : assemble(ir);
     for (const d of assembled.diagnostics)
     {
-        report({ code: d.code, message: d.message, pos: entry.decl.pos });
+        report({ code: d.code, message: d.message, severity: d.severity, pos: entry.decl.pos });
     }
     if (!assembled.tokens)
     {

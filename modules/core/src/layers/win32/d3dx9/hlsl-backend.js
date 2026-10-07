@@ -43,6 +43,7 @@ import { constantTableComment } from './hlsl-ctab.js';
  * @typedef {Object} Diagnostic
  * @property {string} code
  * @property {string} message
+ * @property {'error' | 'warning'} [severity]  An error unless it says otherwise.
  */
 
 /**

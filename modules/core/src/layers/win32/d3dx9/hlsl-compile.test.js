@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { compileShader } from './hlsl-compile.js';
 import { parseConstantTable } from './constants.js';
-import { disassemble } from './d3d9-machine.fixture.js';
+import { decode, disassemble, execute } from './d3d9-machine.fixture.js';
 
 /** @param {string} source @param {string} profile @param {import('./hlsl-compile.js').CompileOptions} [more] */
 const compile = (source, profile, more = { profile })=>compileShader(source,
@@ -193,6 +193,20 @@ test('a model 1 pixel shader may take a structure with a POSITION it does not re
     }
 });
 
+test('a model 1 literal outside -1 to 1 is clamped with fxc\'s warning, not refused', async()=>{
+    for (const profile of ['ps_1_1', 'ps_1_4'])
+    {
+        const result = await compile('float4 main(float4 c : COLOR0) : COLOR0'
+            + '{ return c * 3.3333333; }', profile);
+        assert.equal(result.ok, true, `${profile}: ${result.messages}`);
+        assert.match(result.messages, /warning X4704: literal values outside range -1 to 1 are clamped/);
+        assert.equal(result.messages.match(/X4704/g)?.length, 1, 'said once');
+        const defs = disassemble(/** @type {Uint32Array} */ (result.tokens)).split('\n')
+            .filter(line=>line.startsWith('def '));
+        assert.deepEqual(defs, ['def c0, 1, 1, 1, 1'], profile);
+    }
+});
+
 test('pixel shader model 1 compiles what it can hold and reports the rest', async()=>{
     const simple = 'sampler2D S;\nfloat4 main(float2 uv : TEXCOORD0, float4 c : COLOR0) : COLOR0'
         + '{ return tex2D(S, uv) * c; }';
@@ -206,8 +220,6 @@ test('pixel shader model 1 compiles what it can hold and reports the rest', asyn
     const refused = [
         ['sampler2D S;\nfloat4 main(float2 uv : TEXCOORD0) : COLOR0 { return tex2D(S, uv * 2); }',
             /X4523.*own stage/],
-        ['float4 main(float4 c : COLOR0) : COLOR0 { return c * 3; }',
-            /X4532: the constant 3 is outside the range -1 to 1/],
         ['float4 main(float4 c : COLOR0) : COLOR0 { return c.yzwx; }', /X4533.*read as/],
         ['float4 main(float4 c : COLOR0) : COLOR0 { return sqrt(c); }', /X4532/],
         ['float4 main(float4 c : COLOR0) : COLOR0 { clip(c.x - 0.5); return c; }',
@@ -222,3 +234,42 @@ test('pixel shader model 1 compiles what it can hold and reports the rest', asyn
         assert.match(result.messages, pattern, source);
     }
 });
+
+/**
+ * What a pixel shader writes to its colour for one colour input, run on the
+ * reference machine -- which refuses a source swizzle the model does not have.
+ *
+ * @param {import('./hlsl-compile.js').CompileResult} result @param {number[]} colour
+ */
+function shade(result, colour){
+    const program = decode(/** @type {Uint32Array} */ (result.tokens));
+    const outputs = execute(program, { inputs: { v: [colour, [0, 0, 0, 0]], t: [] },
+        constants: { f: new Float32Array(32 * 4) } }).outputs;
+    return [...Object.values(outputs)[0]].map(x=>Math.round(x * 1000) / 1000);
+}
+
+test('a model 1 source of one component in every lane is read the way the model allows',
+    async()=>{
+        const colour = [0.25, 0.5, 0.75, 1];
+        /** @type {[string, string, number[]][]} */
+        const cases = [
+            // Red and green before 1.4: through a dot product, alpha from its blue.
+            ['ps_1_1', 'return c.r;', [0.25, 0.25, 0.25, 0.25]],
+            ['ps_1_3', 'return c.g;', [0.5, 0.5, 0.5, 0.5]],
+            // Blue into the colour lanes too, which only alpha may read replicated.
+            ['ps_1_1', 'return float4(c.bbb, 1);', [0.75, 0.75, 0.75, 1]],
+            // Alpha needs nothing.
+            ['ps_1_1', 'return c.a;', [1, 1, 1, 1]],
+            // 1.4 replicates any component, and writes one at a time what it cannot read
+            // rearranged.
+            ['ps_1_4', 'return c.r;', [0.25, 0.25, 0.25, 0.25]],
+            ['ps_1_4', 'return c.gbra;', [0.5, 0.75, 0.25, 1]],
+        ];
+        for (const [profile, body, expected] of cases)
+        {
+            const result = await compile(
+                `float4 main(float4 c : COLOR0) : COLOR0 { ${body} }`, profile);
+            assert.equal(result.ok, true, `${profile} ${body}: ${result.messages}`);
+            assert.deepEqual(shade(result, colour), expected, `${profile} ${body}`);
+        }
+    });

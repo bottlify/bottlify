@@ -120,6 +120,8 @@ export function registersOf(type){
  * @property {number} [fixed]      Must occupy components 0 to fixed-1 of its register: a
  *                                 `sincos` result (2), the argument of a `texkill` (3).
  * @property {string} [name]
+ * @property {boolean} [uniform]  Holds one value in all four components: a model 1 pixel
+ *                                shader reads it through any swizzle as it stands.
  * @property {{ file: 't' | 'r', index?: number, sampler?: Const }} [pin]   Must live in this
  *           register of a model 1 pixel shader: where a texture read leaves its texel.
  */
