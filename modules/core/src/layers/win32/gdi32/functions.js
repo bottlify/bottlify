@@ -22,6 +22,8 @@
 
 import { createGdiObjects } from './objects.js';
 import { DEFAULT_PALETTE_COLORS, createDrawingFunctions } from './drawing.js';
+import { copyPath, pathMoved } from './paths.js';
+import { createMetafileFunctions } from './metafiles.js';
 import { FACES, FF_MODERN, FF_ROMAN, FIXED_PITCH, faceNamed, windowsMetrics } from './faces.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import {
@@ -710,6 +712,12 @@ export function createGdiFunctions(host){
              * @type {false | 'enhmetafile' | 'metafile'}
              */
             metafile: false,
+            /**
+             * The path BeginPath opened, until it is used or thrown away.
+             *
+             * @type {import('./paths.js').Path | null}
+             */
+            path: null,
         };
         dc.hdc = host.handles.open('dc', dc);
         forEachSelection(dc, handle=>objects.retain(handle));
@@ -725,6 +733,10 @@ export function createGdiFunctions(host){
      * @param {any} dc
      */
     const destroyContext = dc=>{
+        if (dc.recorder)
+        {
+            metafiles.finishRecording(dc);
+        }
         forEachSelection(dc, handle=>objects.release(handle));
         for (const state of dc.saved)
         {
@@ -745,7 +757,9 @@ export function createGdiFunctions(host){
      * @param {number} reference @param {number} filename @param {string} api
      * @param {'enhmetafile' | 'metafile'} [kind]  which Close ends it
      */
-    const createEnhMetaFile = (reference, filename, api, kind = 'enhmetafile')=>{
+    const createEnhMetaFile = (reference, filename, api, kind = 'enhmetafile',
+        { frame = 0, description = 0, wide = false } = {})=>
+    {
         if ((reference >>> 0) !== 0 && !dcOf(reference))
         {
             return 0;
@@ -756,11 +770,44 @@ export function createGdiFunctions(host){
             host.setLastError?.(ERROR_NOT_SUPPORTED);
             return 0;
         }
-        host.divergence?.(api, 'drawing on the metafile DC is not recorded; it closes empty');
+        if (kind === 'metafile')
+        {
+            host.divergence?.(api, 'drawing on the metafile DC is not recorded; it closes empty');
+        }
         const dc = createContext(0, 'memory');
         select(dc, defaultBitmap());
         dc.metafile = kind;
+        if (kind === 'enhmetafile')
+        {
+            metafiles.startRecording(dc, {
+                frame: (frame >>> 0) === 0 ? null : (()=>{
+                    const [left, top, right, bottom] = readU32s(host, frame, 4)
+                        .map(value=>value | 0);
+                    return { left: Math.min(left, right), top: Math.min(top, bottom),
+                        right: Math.max(left, right), bottom: Math.max(top, bottom) };
+                })(),
+                description: (description >>> 0) === 0 ? '' : descriptionAt(description, wide),
+            });
+        }
         return dc.hdc;
+    };
+
+    /**
+     * CreateEnhMetaFile's description: the application's name and the
+     * picture's, each ending in a NUL, the second followed by another.
+     *
+     * @param {number} address @param {boolean} wide
+     */
+    const descriptionAt = (address, wide)=>{
+        let text = '';
+        for (let at = 0, nuls = 0; nuls < 2 && text.length < 1024; at++)
+        {
+            const bytes = host.readMemory(address + at * (wide ? 2 : 1), wide ? 2 : 1);
+            const unit = wide ? bytes[0] | bytes[1] << 8 : bytes[0];
+            nuls = unit === 0 ? nuls + 1 : 0;
+            text += wide ? String.fromCharCode(unit) : decodeAnsi(bytes);
+        }
+        return text;
     };
 
     /** @param {any} dc @returns {any} a copy of everything SaveDC remembers */
@@ -791,6 +838,9 @@ export function createGdiFunctions(host){
         clip: dc.clip ? { ...dc.clip } : null,
         clipRects: dc.clipRects ?? null,
         clipSelected: dc.clipSelected,
+        // The path is the DC's state like any other: a path open when SaveDC
+        // was called is open again after RestoreDC (Wine's test_path_state).
+        path: dc.path ? copyPath(dc.path) : null,
     });
 
     /**
@@ -865,6 +915,7 @@ export function createGdiFunctions(host){
         dc.clip = state.clip;
         dc.clipRects = state.clipRects;
         dc.clipSelected = state.clipSelected;
+        dc.path = state.path;
     };
 
     /**
@@ -1731,6 +1782,7 @@ export function createGdiFunctions(host){
     const drawing = createDrawingFunctions({
         host, objects, dcOf, surfaceOf, currentMetrics, lend,
         toDevice: (dc, point)=>transform(dc, point, true),
+        toLogical: (dc, point)=>transform(dc, point, false),
         /** @param {number} at @param {number} count @param {number} usage @param {any} dc */
         readColorTable: (at, count, usage, dc, entryBytes)=>
             readColorTable(at, count, usage, dc, false, entryBytes),
@@ -1855,8 +1907,36 @@ export function createGdiFunctions(host){
         })();
     };
 
+    /**
+     * The metafiles: recorded on a DC CreateEnhMetaFile made, played through
+     * this table's own entry points, converted. Built before the table and
+     * reaching it only when called.
+     */
+    const metafiles = createMetafileFunctions({
+        host, objects, dcOf, transform,
+        /** @param {string} name @param {number[]} args */
+        call: (name, args)=>aliased[/** @type {keyof typeof aliased} */ (name)].handler(args),
+        reference: ()=>({
+            device: { cx: screen.width, cy: screen.height },
+            millimeters: { cx: Math.round(screen.width * MM_PER_INCH / LOGICAL_DPI),
+                cy: Math.round(screen.height * MM_PER_INCH / LOGICAL_DPI) },
+        }),
+        stockIndexOf: handle=>{
+            for (const [index, stocked] of stock)
+            {
+                if (stocked === handle)
+                {
+                    return index;
+                }
+            }
+            return null;
+        },
+        textExtent: (dc, text)=>({ cx: widthOf(dc, text), cy: currentMetrics(dc).height }),
+    });
+
     const table = {
         ...drawing.functions,
+        ...metafiles.functions,
 
         /** HDC GetDC(HWND hWnd) */
         GetDC: {
@@ -2062,20 +2142,24 @@ export function createGdiFunctions(host){
          *                        LPCWSTR lpDesc)
          *
          * A metafile in memory: a DC that accepts drawing over a memory DC's
-         * surface, which CloseEnhMetaFile turns into a metafile handle. Nothing
-         * drawn is recorded, so the metafile closes empty, and that is reported.
-         * One on disk is refused, reported likewise, rather than closed into a
-         * file that never gets written.
+         * surface and records it (`metafiles.js`), which CloseEnhMetaFile turns
+         * into a metafile handle. lprc is the picture's frame in hundredths of
+         * a millimetre, worked out from what is drawn when there is none, and
+         * lpDesc the description the header carries. One on disk is refused,
+         * and reported, rather than closed into a file that never gets
+         * written.
          */
         CreateEnhMetaFileA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([reference, file])=>createEnhMetaFile(reference, file, 'CreateEnhMetaFileA'),
+            handler: ([reference, file, frame, description])=>createEnhMetaFile(reference, file,
+                'CreateEnhMetaFileA', 'enhmetafile', { frame, description }),
         },
         CreateEnhMetaFileW: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([reference, file])=>createEnhMetaFile(reference, file, 'CreateEnhMetaFileW'),
+            handler: ([reference, file, frame, description])=>createEnhMetaFile(reference, file,
+                'CreateEnhMetaFileW', 'enhmetafile', { frame, description, wide: true }),
         },
 
         /** HENHMETAFILE CloseEnhMetaFile(HDC hdc) */
@@ -2089,8 +2173,9 @@ export function createGdiFunctions(host){
                     host.setLastError?.(ERROR_INVALID_HANDLE);
                     return 0;
                 }
+                const bits = metafiles.finishRecording(dc);
                 destroyContext(dc);
-                return objects.create('enhmetafile', {});
+                return objects.create('enhmetafile', { bits });
             },
         },
 
@@ -2123,7 +2208,7 @@ export function createGdiFunctions(host){
                     return 0;
                 }
                 destroyContext(dc);
-                return objects.create('metafile', {});
+                return objects.create('metafile', { bits: metafiles.blankWmf() });
             },
         },
 
@@ -3311,11 +3396,23 @@ export function createGdiFunctions(host){
             handler: args=>setExtent(args, 'windowExt'),
         },
 
-        /** BOOL MoveToEx(HDC hdc, int x, int y, LPPOINT lppt) */
+        /**
+         * BOOL MoveToEx(HDC hdc, int x, int y, LPPOINT lppt)
+         *
+         * In an open path the move is where the next figure begins.
+         */
         MoveToEx: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: args=>setOrigin(args, 'position'),
+            handler: args=>{
+                const moved = setOrigin(args, 'position');
+                const path = dcOf(args[0])?.path;
+                if (moved && path?.open)
+                {
+                    pathMoved(path);
+                }
+                return moved;
+            },
         },
 
         /**
@@ -3411,20 +3508,14 @@ export function createGdiFunctions(host){
         },
 
         /**
-         * A Windows metafile is a picture kept as recorded GDI calls, which a
-         * program plays back to show a logo. Nothing here records or replays
-         * one, so the handle is refused and the play fails: the caller draws
-         * without the picture rather than with a handle that means nothing.
-         *
          * HMETAFILE SetMetaFileBitsEx(UINT cbBuffer, const BYTE *lpData)
-         * BOOL PlayMetaFile(HDC hdc, HMETAFILE hmf)
+         *
+         * A Windows metafile is a picture kept as recorded GDI calls. One made
+         * from bits would hold records EnumMetaFile and PlayMetaFileRecord
+         * here do not hand out, so the bits are refused: the caller draws
+         * without the picture rather than with a handle that means nothing.
          */
         SetMetaFileBitsEx: {
-            argBytes: 8,
-            handler: ()=>0,
-        },
-
-        PlayMetaFile: {
             argBytes: 8,
             handler: ()=>0,
         },
@@ -3463,8 +3554,9 @@ export function createGdiFunctions(host){
          * BOOL PlayMetaFileRecord(HDC hdc, LPHANDLETABLE lpht, LPMETARECORD lpmr,
          *                         UINT noObjs)
          *
-         * No metafile record is played here, as no metafile is: refused, and
-         * reported, so the caller draws without it.
+         * No Windows metafile here holds a record to play, and one handed in
+         * from elsewhere is not played: refused, and reported, so the caller
+         * draws without it.
          */
         PlayMetaFileRecord: {
             argBytes: 16,
@@ -4303,6 +4395,7 @@ export function createGdiFunctions(host){
         GetTextExtentPointW: table.GetTextExtentPoint32W,
         GetCharWidthW: table.GetCharWidth32W,
     };
+    metafiles.install(aliased);
 
     /**
      * The character cell dialogs are laid out against in a font: the
@@ -4417,8 +4510,10 @@ export function createGdiFunctions(host){
              * @param {{ left: number, top: number, right: number, bottom: number }} rect
              * @param {number} color  A COLORREF.
              */
-            fill: (hdc, rect, color)=>
-                drawing.bound(hdc)?.fillRect(hdc >>> 0, rect, solidBrush(color)) === true,
+            fill: (hdc, rect, color)=>{
+                metafiles.drawn.fill(hdc, rect, solidBrush(color));
+                return drawing.bound(hdc)?.fillRect(hdc >>> 0, rect, solidBrush(color)) === true;
+            },
 
             /**
              * A fill of the window manager's own background: the screen's
@@ -4477,24 +4572,30 @@ export function createGdiFunctions(host){
              * @param {{ left: number, top: number, right: number, bottom: number }} rect
              * @param {number} brush  A brush handle the program owns.
              */
-            fillWith: (hdc, rect, brush)=>
-                drawing.bound(hdc)?.fillRect(hdc >>> 0, rect, brush >>> 0) === true,
+            fillWith: (hdc, rect, brush)=>{
+                metafiles.drawn.fill(hdc, rect, brush >>> 0);
+                return drawing.bound(hdc)?.fillRect(hdc >>> 0, rect, brush >>> 0) === true;
+            },
 
             /**
              * @param {number} hdc
              * @param {{ left: number, top: number, right: number, bottom: number }} rect
              * @param {number} brush
              */
-            frame: (hdc, rect, brush)=>
-                drawing.bound(hdc)?.frameRect(hdc >>> 0, rect, brush >>> 0) === true,
+            frame: (hdc, rect, brush)=>{
+                metafiles.drawn.frame(hdc, rect, brush >>> 0);
+                return drawing.bound(hdc)?.frameRect(hdc >>> 0, rect, brush >>> 0) === true;
+            },
 
             /**
              * @param {number} hdc
              * @param {{ left: number, top: number, right: number, bottom: number }} rect
              * @param {boolean} [halftone]  Every other pixel, as the gray brush inverts.
              */
-            invert: (hdc, rect, halftone = false)=>
-                drawing.bound(hdc)?.invertRect(hdc >>> 0, rect, halftone) === true,
+            invert: (hdc, rect, halftone = false)=>{
+                metafiles.drawn.invert(hdc, rect);
+                return drawing.bound(hdc)?.invertRect(hdc >>> 0, rect, halftone) === true;
+            },
 
             /**
              * The pixels of a rectangle moved by dx, dy within the context,
@@ -4640,6 +4741,7 @@ export function createGdiFunctions(host){
                 {
                     return false;
                 }
+                metafiles.drawn.text(hdc, x, y, text, options);
                 const { textColor, bkMode, textAlign } = dc;
                 dc.textColor = (options.color ?? dc.textColor) >>> 0;
                 dc.bkMode = options.transparent === false ? bkMode : TRANSPARENT;

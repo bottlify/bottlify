@@ -18,12 +18,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    arcPoints, bezierPoints, combine, isPolyDrawable, lineDdaPoints, roundRectPoints,
+    arcPoints, bezierPoints, isPolyDrawable, lineDdaPoints, roundRectPoints,
 } from './drawing.js';
 import { createGdiFunctions } from './functions.js';
 import { decodeAnsi } from '../kernel32/locale.js';
-import { createGdiDrawing } from '../../graphics/gdi/context.js';
-import { surfaceForDdb, surfaceForDibSection } from '../../graphics/gdi/surface.js';
+import { painted, pens } from './fixtures.test.js';
 
 const HWND = 0x2000;
 const STRUCT = 0x30000;
@@ -442,19 +441,33 @@ test('a draw on a window\'s own context shows the desktop; one on a memory conte
 
 // --- regions ---
 
-test('a region combines the way its own ceiling says it does', ()=>{
-    // AND is exact; OR is the bounding box, which repaints more than a real
-    // region would and never less. Asserting that directly keeps the ceiling
-    // honest rather than letting it drift into a claim of exactness.
-    const left = { left: 0, top: 0, right: 10, bottom: 10 };
-    const right = { left: 20, top: 20, right: 30, bottom: 30 };
+test('a region combines exactly: two far-apart rectangles are two, not the span', ()=>{
+    const { memory, fns } = setup();
+    const left = fns.CreateRectRgn.handler([0, 0, 10, 10]);
+    const right = fns.CreateRectRgn.handler([20, 20, 30, 30]);
+    const destination = fns.CreateRectRgn.handler([0, 0, 0, 0]);
+    const pieces = ()=>{
+        const size = fns.GetRegionData.handler([destination, 0, 0]);
+        fns.GetRegionData.handler([destination, size, OUT]);
+        return Array.from({ length: memory.u32(OUT + 8) }, (_, index)=>[0, 4, 8, 12]
+            .map(at=>memory.u32(OUT + 32 + index * 16 + at) | 0));
+    };
 
-    assert.deepEqual(combine(left, right, RGN_AND),
-        { left: 20, top: 20, right: 10, bottom: 10 }, 'disjoint rectangles meet nowhere');
-    assert.deepEqual(combine(left, right, RGN_OR),
-        { left: 0, top: 0, right: 30, bottom: 30 }, 'and their union is the span between');
-    assert.deepEqual(combine(left, right, RGN_COPY), left);
-    assert.equal(combine(left, right, 99), null, 'an unknown mode is an error, not a default');
+    assert.equal(fns.CombineRgn.handler([destination, left, right, RGN_OR]), 3, 'COMPLEXREGION');
+    assert.deepEqual(pieces(), [[0, 0, 10, 10], [20, 20, 30, 30]]);
+    assert.equal(fns.CombineRgn.handler([destination, left, right, RGN_AND]), NULLREGION);
+    assert.deepEqual(pieces(), []);
+    assert.equal(fns.CombineRgn.handler([destination, left, 0, RGN_COPY]), SIMPLEREGION,
+        'COPY reads only the first');
+    assert.deepEqual(pieces(), [[0, 0, 10, 10]]);
+    assert.equal(fns.CombineRgn.handler([destination, left, 0, RGN_OR]), 0,
+        'any other mode needs a second region');
+    assert.equal(fns.CombineRgn.handler([destination, left, right, 99]), 0,
+        'an unknown mode is an error, not a default');
+    const middle = fns.CreateRectRgn.handler([2, 2, 8, 8]);
+    assert.equal(fns.CombineRgn.handler([destination, left, middle, RGN_DIFF]), 3);
+    assert.deepEqual(pieces(), [[0, 0, 10, 2], [0, 2, 2, 8], [8, 2, 10, 8], [0, 8, 10, 10]],
+        'a hole is a frame, in bands');
 });
 
 test('CombineRgn writes into the destination and reports the shape', ()=>{
@@ -1641,10 +1654,10 @@ test('ExtSelectClipRgn combines the region into the clip in each mode, exactly',
     assert.equal(fns.ExtSelectClipRgn.handler([hdc, band, RGN_COPY]), SIMPLEREGION);
     assert.equal(fns.ExtSelectClipRgn.handler([hdc, square, RGN_OR]), COMPLEXREGION);
     assert.deepEqual(sorted(lastClip()), [
-        { left: 0, top: 0, right: 100, bottom: 50 },
-        { left: 100, top: 25, right: 150, bottom: 50 },
+        { left: 0, top: 0, right: 100, bottom: 25 },
+        { left: 0, top: 25, right: 150, bottom: 50 },
         { left: 50, top: 50, right: 150, bottom: 75 },
-    ], 'the union, not its bounding box');
+    ], 'the union, not its bounding box, in bands');
 
     assert.equal(fns.ExtSelectClipRgn.handler([hdc, band, RGN_COPY]), SIMPLEREGION);
     assert.equal(fns.ExtSelectClipRgn.handler([hdc, square, RGN_DIFF]), COMPLEXREGION);
@@ -1797,105 +1810,6 @@ const BLUE_PIXEL = 0x000000ff;
 const RED_COLOR = 0x000000ff;
 const GREEN_COLOR = 0x0000ff00;
 const BLUE_COLOR = 0x00ff0000;
-
-/**
- * gdi32 over the real drawing engine, wired as the win32 module wires it: a
- * memory DC on a top-down 32-bit DIB section whose pixels a test reads back,
- * the program's callbacks recorded rather than run, and every last error set.
- *
- * @param {number} width @param {number} height
- */
-function painted(width, height){
-    const bytes = new Uint8Array(0x80000);
-    const view = new DataView(bytes.buffer);
-    let next = 0x40000;
-    let handles = 4;
-    /** @type {number[][]} */
-    const called = [];
-    /** @type {number[]} */
-    const errors = [];
-    const gdi = createGdiFunctions({
-        readMemory: (address, length)=>bytes.slice(address, address + length),
-        writeMemory: (address, data)=>bytes.set(data, address),
-        readCString: ()=>'',
-        handles: { open: ()=>(handles += 4), close: ()=>undefined },
-        surfaces: {
-            /** @param {number} size */
-            allocate(size){
-                const address = next;
-                next += (size + 0xff) & ~0xff;
-                return address;
-            },
-            free: ()=>undefined,
-        },
-        graphics: {
-            createDrawing: options=>createGdiDrawing(options),
-            surfaceFor: (dc, bitmap)=>(bitmap.pixels ? surfaceForDdb(bitmap)
-                : surfaceForDibSection(bitmap, bytes, 0)),
-        },
-        call: async(entry, args)=>{
-            called.push([entry, ...args]);
-            return 0;
-        },
-        setLastError: code=>errors.push(code),
-    });
-    const fns = /** @type {Record<string, { argBytes: number, handler: (args: number[]) => any }>} */ (
-        /** @type {unknown} */ (gdi.table));
-    /**
-     * A top-down DIB section selected into a memory DC of its own.
-     *
-     * @param {number} w @param {number} h
-     * @param {{ bitCount?: number, masks?: number[] }} [format]
-     */
-    const section = (w, h, { bitCount = 32, masks } = {})=>{
-        const info = 0x100;
-        bytes.fill(0, info, info + 64);
-        view.setUint32(info, 40, true);
-        view.setInt32(info + 4, w, true);
-        view.setInt32(info + 8, -h, true);
-        view.setUint16(info + 12, 1, true);
-        view.setUint16(info + 14, bitCount, true);
-        if (masks)
-        {
-            view.setUint32(info + 16, 3, true);
-        }
-        // Masks, or for an indexed section black and white, follow the header.
-        (masks ?? [0, 0xffffff]).forEach((value, index)=>
-            view.setUint32(info + 40 + index * 4, value, true));
-        const bitmap = fns.CreateDIBSection.handler([0, info, 0, 0x80, 0, 0]);
-        const at = view.getUint32(0x80, true);
-        const dc = fns.CreateCompatibleDC.handler([0]);
-        fns.SelectObject.handler([dc, bitmap]);
-        return {
-            dc,
-            bitmap,
-            at,
-            /** @param {number} x @param {number} y */
-            pixel: (x, y)=>view.getUint32(at + (y * w + x) * 4, true),
-            /** @param {number} x @param {number} y @param {number} value */
-            put: (x, y, value)=>view.setUint32(at + (y * w + x) * 4, value >>> 0, true),
-            /** @param {number} value */
-            fill: value=>{
-                for (let index = 0; index < w * h; index++)
-                {
-                    view.setUint32(at + index * 4, value >>> 0, true);
-                }
-            },
-        };
-    };
-    return { bytes, view, gdi, fns, called, errors, section, ...section(width, height) };
-}
-
-/**
- * Selects a solid pen and a solid brush into a DC.
- *
- * @param {ReturnType<typeof painted>} machine @param {number} pen @param {number} brush
- */
-function pens(machine, pen, brush){
-    const { fns, dc } = machine;
-    fns.SelectObject.handler([dc, fns.CreatePen.handler([0, 1, pen])]);
-    fns.SelectObject.handler([dc, fns.CreateSolidBrush.handler([brush])]);
-}
 
 test('the new entry points pop the arguments their signatures carry', ()=>{
     const { fns } = setup();
