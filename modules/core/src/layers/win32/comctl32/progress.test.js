@@ -224,18 +224,19 @@ function setup(){
 
     const host_window = { hwnd: 0 };
     return { memory, desktop, gdi, fns: table, pump, bar, barRow, barColumn, barPixel,
-        makeHost: async()=>{
+        makeHost: async(visible = true, background = 0)=>{
             const name = TEXT + 64;
             memory.putString(name, 'host');
             const CLASS = name + 64;
-            [0, DIALOGPROC, 0, 0, HINSTANCE, 0, 0, 0, 0, name].forEach((value, index)=>{
+            [0, DIALOGPROC, 0, 0, HINSTANCE, 0, 0, background, 0, name].forEach((value, index)=>{
                 const bytes = new Uint8Array(4);
                 new DataView(bytes.buffer).setUint32(0, value, true);
                 memory.writeMemory(CLASS + index * 4, bytes);
             });
             table.RegisterClassA.handler([CLASS]);
             host_window.hwnd = await table.CreateWindowExA.handler([0, name, name,
-                WS_POPUP | WS_CAPTION | WS_VISIBLE, 0, 0, 220, 150, 0, 0, HINSTANCE, 0]);
+                WS_POPUP | WS_CAPTION | (visible ? WS_VISIBLE : 0), 0, 0, 220, 150, 0, 0,
+                HINSTANCE, 0]);
             await pump();
             return host_window.hwnd;
         } };
@@ -404,7 +405,7 @@ test('a bar is framed by a static edge with a pixel of track inside, and fills i
         const LIGHT = 0x00ffffff;
         const context = setup();
         await context.makeHost();
-        const bar = await context.bar(0, 8, 8, 100, 16, WS_EX_CLIENTEDGE);
+        const bar = await context.bar(0, 8, 8, 100, 16, 0);
         const exStyle = context.fns.GetWindowLongA.handler([bar, GWL_EXSTYLE]) >>> 0;
         assert.equal(exStyle & (WS_EX_CLIENTEDGE | WS_EX_STATICEDGE), WS_EX_STATICEDGE,
             'the static edge in place of the client edge it was made with');
@@ -435,3 +436,46 @@ test('a bar is framed by a static edge with a pixel of track inside, and fills i
             'the last block meets the track\'s end');
         assert.equal(context.desktop.read(left + 98, top + 8), COLOR_3DFACE);
     });
+
+test('a bar made inside a window not yet shown has its edge once the window shows', async()=>{
+    // A dialog makes its controls before it is shown, and a window that does
+    // not clip its children paints its background over theirs: the bar's
+    // edge, in its frame, is painted again after, as its client area is.
+    const SW_SHOW = 5;
+    const SHADOW = 0x00808080;
+    const context = setup();
+    const host = await context.makeHost(false);
+    const bar = await context.bar(0, 8, 8, 100, 16);
+    context.fns.SendMessageA.handler([bar, PBM_SETPOS, 50, 0]);
+    await context.fns.ShowWindow.handler([host, SW_SHOW]);
+    await context.pump();
+    context.fns.GetWindowRect.handler([bar, OUT]);
+    const [left, top] = [context.memory.u32(OUT), context.memory.u32(OUT + 4)];
+    assert.equal(context.desktop.read(left + 50, top), SHADOW, 'the edge above');
+    assert.equal(context.desktop.read(left, top + 8), SHADOW, 'and to the left');
+});
+
+test('a parent that paints over a bar\'s edge has the edge painted again after it', async()=>{
+    // A dialog that does not clip its children erases one rectangle around
+    // everything in it to repaint -- a label's text and the bar's fill
+    // together take in the bar's edge between them. The bar already had its
+    // whole client to repaint; its frame has to be repainted as well.
+    const COLOR_3DFACE_BRUSH = 15 + 1;
+    const SHADOW = 0x00808080;
+    const context = setup();
+    const host = await context.makeHost(true, COLOR_3DFACE_BRUSH);
+    const bar = await context.bar(0, 8, 8, 100, 16);
+    await context.pump();
+    context.fns.GetWindowRect.handler([bar, OUT]);
+    const [left, top] = [context.memory.u32(OUT), context.memory.u32(OUT + 4)];
+    assert.equal(context.desktop.read(left, top + 8), SHADOW, 'the edge, to begin with');
+
+    context.fns.InvalidateRect.handler([bar, 0, 1]);
+    const AREA = 0x13400;
+    [0, 0, 120, 40].forEach((side, index)=>context.memory.writeMemory(AREA + index * 4,
+        new Uint8Array(new Int32Array([side]).buffer)));
+    context.fns.InvalidateRect.handler([host, AREA, 1]);
+    await context.pump();
+    assert.equal(context.desktop.read(left, top + 8), SHADOW, 'the edge, after the parent');
+    assert.equal(context.desktop.read(left + 50, top), SHADOW);
+});

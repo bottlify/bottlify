@@ -3188,16 +3188,26 @@ export function createWindowFunctions(host){
         const order = paintOrder();
         for (const other of order.slice(order.indexOf(base) + 1))
         {
-            if (shown(other) && !isEmpty(intersect(dirty, geometry.shapedRect(other))))
+            const overlap = shown(other) ? intersect(dirty, geometry.shapedRect(other)) : null;
+            if (overlap && !isEmpty(overlap))
             {
                 const size = geometry.clientSize(other);
                 const whole = { left: 0, top: 0, right: size.width, bottom: size.height };
-                if (!record.updateRect || !other.updateRect
-                    || !sameRect(other.updateRect, whole))
+                if (!other.updateRect || !sameRect(other.updateRect, whole))
                 {
                     other.ncDirty = true;
                     other.updateRect = whole;
                     other.erase = true;
+                }
+                // Painted over past its client, the frame is painted again
+                // too, though the client was to be repainted already: a
+                // parent's one rectangle around a label and a child beside it
+                // takes in the child's edge.
+                const client = geometry.clientRect(other);
+                if (overlap.left < client.left || overlap.top < client.top
+                    || overlap.right > client.right || overlap.bottom > client.bottom)
+                {
+                    other.ncDirty = true;
                 }
             }
         }
