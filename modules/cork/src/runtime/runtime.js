@@ -668,7 +668,14 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // `translateMs`, which is the engine thread's own, so the two threads'
         // costs stay legible.
         workerMs: 0,
+        // With `timings`: all the worker was held for (forming a relink and
+        // compiling too), how long a batch was out, and how long work stood
+        // queued behind the one out -- what a second worker, or a second
+        // batch out, would have taken -- and the longest the queue grew.
+        workerBusyMs: 0, inFlightMs: 0, behindMs: 0, queueMax: 0,
     };
+    /** When `translateNow` last looked, for `behindMs`. */
+    let lookedAt = 0;
     /**
      * The engine thread's long holds, host milliseconds: what a guest thread
      * waiting on a timer (a sound mixer) sat through. The last 64 over 5 ms.
@@ -2145,7 +2152,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * host asked for.
      *
      * @param {{ id: number, batch: import('./emit-built.js').BuiltBatch | null,
-     *     compiled?: WebAssembly.Module | null, message?: string }} data
+     *     compiled?: WebAssembly.Module | null, message?: string, busyMs?: number }} data
      */
     const onWorkerResults = data=>{
         const pending = outstanding;
@@ -2160,6 +2167,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             return;
         }
         counts.workerMs += data.batch.emitMs + data.batch.encodeMs;
+        if (settings.timings === true)
+        {
+            counts.workerBusyMs += data.busyMs ?? 0;
+            counts.inFlightMs += performance.now() - pending.at;
+        }
         const publishedAt = clock();
         if (pending.relink)
         {
@@ -2451,6 +2463,16 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         if (profileAt >= 0)
         {
             sampleCalls();
+        }
+        if (settings.timings === true)
+        {
+            const now = performance.now();
+            if (lookedAt !== 0 && outstanding !== null && queue.size > 0)
+            {
+                counts.behindMs += now - lookedAt;
+            }
+            lookedAt = now;
+            counts.queueMax = Math.max(counts.queueMax, queue.size);
         }
         // A batch is with the worker: its answer is published when it
         // comes back, so the engine never waits for it. Candidates
@@ -3021,6 +3043,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 instantiateMs: counts.instantiateMs,
                 publishMs: counts.publishMs,
                 workerMs: counts.workerMs,
+                workerBusyMs: counts.workerBusyMs,
+                inFlightMs: counts.inFlightMs,
+                behindMs: counts.behindMs,
+                queueMax: counts.queueMax,
                 moduleBytes: counts.moduleBytes,
                 modules: counts.modules,
                 translatedShare: counted > 0 ? corkRetired / counted : 0,

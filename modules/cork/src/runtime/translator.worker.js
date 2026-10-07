@@ -68,6 +68,9 @@ function handle(data, send){
         return;
     }
     const { id, jobs, relink, layout, features, options } = data;
+    // The whole of what the batch held this worker for, forming a relink and
+    // compiling included: how busy the worker is, which its parts do not say.
+    const started = performance.now();
     try
     {
         const batch = relink
@@ -85,7 +88,8 @@ function handle(data, send){
         catch {
             compiled = null;
         }
-        send({ id, batch, compiled }, [batch.module.buffer]);
+        send({ id, batch, compiled, busyMs: performance.now() - started },
+            [batch.module.buffer]);
     }
     catch (e){
         const message = e instanceof Error ? e.message : String(e);

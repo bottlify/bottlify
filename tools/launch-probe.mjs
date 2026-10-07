@@ -357,11 +357,35 @@ function report(app, { grep = null, calls = 24 } = {}){
  * @property {number} at  wall milliseconds since the run began
  * @property {number} instructions
  * @property {Record<string, number>} cork  the translator's cumulative counts
+ * @property {{ ms: number[], instructions: number[] } | null} parallel  the scheduler's
+ *     slices by how many threads could have run (`parallel`)
  */
 
 /** The translator's counts a row takes the difference of. */
 const SERIES_COUNTS = ['regions', 'relinks', 'relinked', 'merges', 'reforms', 'copied',
-    'invalidations', 'workerMs', 'translateMs'];
+    'invalidations', 'workerMs', 'translateMs', 'workerBusyMs', 'inFlightMs', 'behindMs'];
+
+/**
+ * The share of the interval's slices, by host time and by instructions, during
+ * which two or more of the program's threads could have run (`parallel`, the
+ * scheduler's): what a second executor would have had to take.
+ *
+ * @param {{ ms: number[], instructions: number[] } | null} now
+ * @param {{ ms: number[], instructions: number[] } | null} before
+ */
+function parallelShare(now, before){
+    if (!now)
+    {
+        return 'parallel=not-measured';
+    }
+    /** @param {'ms' | 'instructions'} key */
+    const share = key=>{
+        const grew = now[key].map((value, at)=>value - (before?.[key][at] ?? 0));
+        const total = grew.reduce((sum, value)=>sum + value, 0);
+        return total > 0 ? `${((total - grew[0]) / total * 100).toFixed(0)}%` : '-';
+    };
+    return `parallel2+=${share('ms')}t/${share('instructions')}i`;
+}
 
 /**
  * Prints one row of the run's time series -- what the guest ran and what the
@@ -387,7 +411,7 @@ function seriesRow(app, last, began){
         cork[name] = Number(corkNow[name] ?? 0);
     }
     const point = { at: performance.now() - began, instructions: Number(cpu.instructions ?? 0),
-        cork };
+        cork, parallel: kernel.parallel ?? null };
     const seconds = (point.at - (last?.at ?? 0)) / 1000;
     const ran = point.instructions - (last?.instructions ?? 0);
     /** @param {string} name */
@@ -397,6 +421,8 @@ function seriesRow(app, last, began){
         + ` untranslatedPerM=${ran > 0 ? (grew('untranslated') / ran * 1e6).toFixed(0) : '-'}`
         + ` share=${((corkNow.translatedShare ?? 0) * 100).toFixed(1)}%`
         + SERIES_COUNTS.map(name=>` ${name}+${Math.round(grew(name))}`).join('')
+        + ` queued=${corkNow.queued ?? '-'} queueMax=${corkNow.queueMax ?? '-'}`
+        + ` ${parallelShare(point.parallel, last?.parallel ?? null)}`
         + ` worstSliceMs=${kernel.worstSliceMs ?? '-'}`);
     return point;
 }
