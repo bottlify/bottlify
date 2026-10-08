@@ -127,7 +127,8 @@ differently raises a `divergence` event naming the API.
   own: a program that starts one gets a process that drives `msi.dll`, the named library's entry
   point or its registration exports, and exits with what Windows' program would. The volume shows
   no file at those paths, so a setup that checks for one before starting it does not find it.
-  `msiexec /l` writes no log.
+- An installation's log (`MsiEnableLog`, `msiexec /l`) has its messages, its actions and, when
+  asked, its properties; the verbose trace of the engine's own decisions (`/lv`) is not written.
 - Nothing is rolled back: an installation that fails leaves what it had done.
 
 ## Network

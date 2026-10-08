@@ -57,6 +57,9 @@ import {
 import { parseGuid } from '../ole32/guid.js';
 
 const ERROR_SUCCESS = 0;
+/** MsiEnableLog: the bit that lists the properties at the end, and appending to the file. */
+const INSTALLLOGMODE_PROPERTYDUMP = 0x400;
+const INSTALLLOGATTRIBUTES_APPEND = 0x1;
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_OPEN_FAILED = 110;
 const ERROR_INVALID_HANDLE = 6;
@@ -298,6 +301,91 @@ export function createMsiFunctions(host){
     let externalUi = null;
     /** @type {{ handler: number, filter: number, context: number } | null} */
     let recordUi = null;
+    /**
+     * Where MsiEnableLog asked the installations of this process to be
+     * logged: which kinds of message, and whether the file is started afresh
+     * at its first line or added to.
+     *
+     * @type {{ mode: number, path: string, fresh: boolean } | null}
+     */
+    let log = null;
+
+    /**
+     * Adds lines to the log. The file is ANSI, as the installer writes it
+     * unless a policy asks for Unicode, and is opened for each line, so a
+     * line is on the volume once it is written, whatever happens next --
+     * which is what the flush-each-line attribute asks for and what any
+     * reader of a failed installation's log needs.
+     *
+     * @param {string[]} lines
+     */
+    const writeLog = lines=>{
+        if (!log)
+        {
+            return;
+        }
+        const files = host.files;
+        const path = host.fullPath(log.path);
+        try
+        {
+            const node = files.open(path, { write: true, create: true, truncate: log.fresh });
+            if (!node)
+            {
+                return;
+            }
+            const at = log.fresh ? 0 : files.stat(path)?.size ?? 0;
+            files.write(node, at, encodeAnsi(lines.map(line=>`${line}\r\n`).join('')));
+            files.close(node);
+            log.fresh = false;
+        }
+        catch (e){
+            host.log?.(`The installer's log ${path} could not be written: ${e}`);
+        }
+    };
+
+    /** "10/8/2026  9:05:12", as the log's opening and closing lines give the time. */
+    const logTime = ()=>{
+        const now = new Date();
+        const two = (/** @type {number} */ value)=>String(value).padStart(2, '0');
+        return `${now.getMonth() + 1}/${now.getDate()}/${now.getFullYear()}  `
+            + `${now.getHours()}:${two(now.getMinutes())}:${two(now.getSeconds())}`;
+    };
+
+    /**
+     * A message's lines in the log, when the log takes its kind. A session's
+     * start and end open and close it; a progress message is never a line,
+     * since INSTALLLOGMODE_PROGRESS is the bit that asks for the properties
+     * to be listed at the end instead.
+     *
+     * @param {number} type @param {string} text
+     * @param {import('./session.js').Session | null} session
+     */
+    const logMessage = (type, text, session)=>{
+        if (!log)
+        {
+            return;
+        }
+        const kind = type & 0xff000000;
+        if (kind === INSTALLMESSAGE.INITIALIZE)
+        {
+            writeLog([`=== Logging started: ${logTime()} ===`]);
+            return;
+        }
+        if (kind === INSTALLMESSAGE.TERMINATE)
+        {
+            const lines = (log.mode & INSTALLLOGMODE_PROPERTYDUMP) !== 0 && session
+                ? [...session.properties].sort(([a], [b])=>(a < b ? -1 : a > b ? 1 : 0))
+                    .map(([name, value])=>`Property(S): ${name} = ${value}`) : [];
+            writeLog([...lines, `=== Logging stopped: ${logTime()} ===`]);
+            return;
+        }
+        if (kind === INSTALLMESSAGE.PROGRESS || text === ''
+            || (log.mode & (1 << ((type >>> 24) & 0xff))) === 0)
+        {
+            return;
+        }
+        writeLog(text.split(/\r?\n/));
+    };
 
     /**
      * A message's text: an action's start as "Action time: name. description",
@@ -339,6 +427,9 @@ export function createMsiFunctions(host){
     const deliver = async(type, record, session, thread = host.callerThread())=>{
         const kind = (type >>> 24) & 0xff;
         const bit = 1 << kind;
+        // The log takes every message, whoever answers it.
+        const text = messageText(type, record, session);
+        logMessage(type, text, session);
         if (recordUi && (recordUi.filter & bit) !== 0)
         {
             const handle = open('record', record);
@@ -356,7 +447,6 @@ export function createMsiFunctions(host){
                 handles.delete(handle);
             }
         }
-        const text = messageText(type, record, session);
         if (externalUi && (externalUi.filter & bit) !== 0)
         {
             const bytes = externalUi.wide ? utf16(`${text}\0`) : encodeAnsi(`${text}\0`);
@@ -2241,7 +2331,15 @@ export function createMsiFunctions(host){
                 return ERROR_SUCCESS;
             },
         },
-        ...both('MsiEnableLog', 12, ()=>()=>ERROR_SUCCESS),
+        // A log file and no kinds of message, or kinds and no file, is
+        // logging turned off.
+        ...both('MsiEnableLog', 12, wide=>([mode, file, attributes])=>{
+            const path = reader(wide)(file);
+            log = path === null || path.trim() === '' || (mode >>> 0) === 0 ? null
+                : { mode: mode >>> 0, path: path.trim(),
+                    fresh: ((attributes >>> 0) & INSTALLLOGATTRIBUTES_APPEND) === 0 };
+            return ERROR_SUCCESS;
+        }),
         ...both('MsiInstallProduct', 8, wide=>async([path, commandLine])=>{
             const name = reader(wide)(path);
             if (name === null)
