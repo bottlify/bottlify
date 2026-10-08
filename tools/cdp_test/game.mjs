@@ -478,6 +478,7 @@ function parse(argv){
         // The engine in a worker, with the page's canvas transferred to it;
         // otherwise on the page's own thread.
         worker: argv.includes('--worker'),
+        headed: argv.includes('--headed'),
         // How the loop waits in the worker: `page` (a look every few
         // milliseconds) or `event` (sleep until something happens).
         pacing: argv.includes('--pacing') ? argv[argv.indexOf('--pacing') + 1] : 'page',
@@ -1380,6 +1381,7 @@ export async function game(options){
         port: options.port,
     });
     const browser = await launchWithGpu({ profileDir: options.userDataDir ?? undefined,
+        headed: options.headed,
         extraFlags: options.jsFlags ? [`--js-flags=${options.jsFlags}`] : [] });
     mkdirSync(REPORTS_DIR, { recursive: true });
 

@@ -96,6 +96,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--watch-import LIB[#ord+ord]` | none | every import from that library -- `binkw32.dll`, or only those ordinals -- goes to `--log` with its arguments and, as `name -> result`, its answer: what a program does with a library of its own that the engine does not implement. Repeatable |
 | `--record N` | 0 | the bridge's last N events -- each host call that parked and finished, each call into the guest, each callback that returned -- written as `game-<stamp>-bridge.jsonl`: how a thread's stack got to where a failure found it |
 | `--peek address:length` | none | guest memory as the run left it, printed as hex bytes in the report: a flag, a counter or a table a program decides on without calling anything -- a middleware's timer slots, a driver's state -- that no call log shows. Repeatable |
+| `--headed` | headless | a browser window on the machine's own GPU, as the launcher has it: a headless browser's adapter is not the one a person plays on, so a question about speed or about what the screen shows is asked headed |
 | `--worker` | page thread | run the engine in a worker with the page's canvas transferred to it, which is how the launcher runs it |
 | `--pacing page\|event` | `page` | with `--worker`: how the loop waits -- a look every few milliseconds, or sleep until something happens |
 | `--coi` | off | serve with the cross-origin isolation headers, so the page comes up `crossOriginIsolated` and `SharedArrayBuffer` exists -- what the shared-table audio backend and its worklet need |
@@ -105,7 +106,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--prefetch` | off | with `--store local`: fill the rest of the cache from the bundle in the background beyond whatever the run itself reads, for a fuller warm-up between runs at the cost of the bandwidth to do it |
 | `--export-translations FILE` | off | once the run ends, what the translator made of the title (`app.exportTranslations()`, the store kept to what its lookups can reach) is written to FILE as the seed a bundle carries; `node tools/make-btl.mjs translations <bundle-id> FILE` puts it into the bundle, so every first run of it starts from those translations. The store is the origin's file system (`--worker` for its synchronous handles), so a run on a kept profile (`--user-data-dir`, `--port`) exports what earlier runs made as well |
 
-The run is headless, on a fresh profile unless `--user-data-dir` names one.
+The run is headless unless `--headed`, on a fresh profile unless `--user-data-dir` names one.
 The browser flags it needs are in `browser.mjs` (below).
 
 ## `live/` -- watching a title a person is playing
