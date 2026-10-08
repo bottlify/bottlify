@@ -571,6 +571,36 @@ test('HITTEST names the row a point falls in', async()=>{
     assert.equal(context.fns.SendMessageA.handler([tree, TVM_HITTEST, 0, OUT]),
         context.fns.SendMessageA.handler([tree, TVM_GETNEXTITEM, TVGN_NEXT, first]),
         'the second row');
+    const TVHT_ONITEMLABEL = 0x4;
+    assert.equal(context.memory.u32(OUT + 8), TVHT_ONITEMLABEL, 'on its text');
+    context.memory.put32(OUT + 0, 150);
+    context.fns.SendMessageA.handler([tree, TVM_HITTEST, 0, OUT]);
+    assert.equal(context.memory.u32(OUT + 8), 0x20, 'TVHT_ONITEMRIGHT: past the text');
+    context.memory.put32(OUT + 0, -5);
+    assert.equal(context.fns.SendMessageA.handler([tree, TVM_HITTEST, 0, OUT]), 0);
+    assert.equal(context.memory.u32(OUT + 8), 0x800, 'TVHT_TOLEFT: outside the tree');
+});
+
+test('HITTEST tells the check box, the button and the indent apart', async()=>{
+    // The old answer was TVHT_ONITEMSTATEICON for every point of a row: a
+    // setup's feature tree took every click for one on the state image.
+    const context = setup();
+    await context.makeHost();
+    const tree = await context.tree(TVS_HASBUTTONS | TVS_CHECKBOXES);
+    const parent = context.insert(tree, TVI_ROOT, { text: 'Game', children: 1 });
+    context.insert(tree, parent, { text: 'Data' });
+    const at = context.treeRow(tree, 0);
+    /** @param {number} x */
+    const flagsAt = x=>{
+        context.memory.put32(OUT + 0, x);
+        context.memory.put32(OUT + 4, at.cy + 4);
+        context.fns.SendMessageA.handler([tree, TVM_HITTEST, 0, OUT]);
+        return context.memory.u32(OUT + 8);
+    };
+    assert.equal(flagsAt(0), 0x8, 'TVHT_ONITEMINDENT');
+    assert.equal(flagsAt(3), 0x10, 'TVHT_ONITEMBUTTON');
+    assert.equal(flagsAt(1 + 9 + 3 + 4), 0x40, 'TVHT_ONITEMSTATEICON');
+    assert.equal(flagsAt(1 + 9 + 3 + 13 + 3 + 4), 0x4, 'TVHT_ONITEMLABEL');
 });
 
 test('ENSUREVISIBLE opens the ancestors of a hidden item', async()=>{

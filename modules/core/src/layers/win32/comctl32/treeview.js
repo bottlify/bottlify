@@ -163,8 +163,17 @@ const DEFAULT_INDENT = 16;
 const BUTTON = 9;
 const CHECK = 13;
 const GAP = 3;
-/** TVHT_ flag for "on the item's text or icon". */
-const TVHT_ONITEM = 0x0040;
+/** TVHT_ flags: where a point falls, against the row it is in. */
+const TVHT_NOWHERE = 0x0001;
+const TVHT_ONITEMLABEL = 0x0004;
+const TVHT_ONITEMINDENT = 0x0008;
+const TVHT_ONITEMBUTTON = 0x0010;
+const TVHT_ONITEMRIGHT = 0x0020;
+const TVHT_ONITEMSTATEICON = 0x0040;
+const TVHT_ABOVE = 0x0100;
+const TVHT_BELOW = 0x0200;
+const TVHT_TORIGHT = 0x0400;
+const TVHT_TOLEFT = 0x0800;
 
 /**
  * @typedef {import('../user32/controls.js').ControlHost} ControlHost
@@ -279,6 +288,18 @@ export function createTreeViewProcedure(host, tk){
         const measured = hdc !== 0 ? host.draw.measure(hdc, 'M') : null;
         host.endPaint(record, hdc);
         return measured ? measured.height : 16;
+    };
+
+    /** A row's text width, measured the same way. @param {any} record @param {string} text */
+    const measureWidth = (record, text)=>{
+        if (!host.draw)
+        {
+            return 8 * text.length;
+        }
+        const { hdc } = host.contextOn(record);
+        const measured = hdc !== 0 ? host.draw.measure(hdc, text) : null;
+        host.endPaint(record, hdc);
+        return measured ? measured.width : 8 * text.length;
     };
 
     /** How many rows fit the client area. @param {any} record */
@@ -1167,15 +1188,34 @@ export function createTreeViewProcedure(host, tk){
                 {
                     return 0;
                 }
-                const hit = rowAtPoint(record, readI32(at + TVHT.y), measureHeight(record));
+                const x = readI32(at + TVHT.x);
+                const y = readI32(at + TVHT.y);
+                const area = tk.clientRect(record);
+                const outside = (x < 0 ? TVHT_TOLEFT : 0)
+                    | (x >= area.right - area.left ? TVHT_TORIGHT : 0)
+                    | (y < 0 ? TVHT_ABOVE : 0) | (y >= area.bottom - area.top ? TVHT_BELOW : 0);
+                const height = measureHeight(record);
+                const hit = outside === 0 ? rowAtPoint(record, y, height) : null;
                 if (!hit)
                 {
                     writeU32(at + TVHT.hItem, 0);
-                    writeU32(at + TVHT.flags, 0);
+                    writeU32(at + TVHT.flags, outside || TVHT_NOWHERE);
                     return 0;
                 }
+                // The parts of the row as the paint lays them out: the
+                // indent, the [+] / [-], the check box, the text and what is
+                // right of it.
+                const row = clientRow(record, hit.index, hit.depth, height);
+                const check = checkX(record, row, hit.item);
+                const label = check + ((record.style & TVS_CHECKBOXES) !== 0 ? CHECK + GAP : 0);
+                const flags = x < row.x ? TVHT_ONITEMINDENT
+                    : x < check ? ((record.style & TVS_HASBUTTONS) !== 0 && x < row.x + BUTTON
+                        ? TVHT_ONITEMBUTTON : TVHT_ONITEMINDENT)
+                        : x < label ? TVHT_ONITEMSTATEICON
+                            : x < label + measureWidth(record, hit.item.text) + 2
+                                ? TVHT_ONITEMLABEL : TVHT_ONITEMRIGHT;
                 writeU32(at + TVHT.hItem, hit.item.handle);
-                writeU32(at + TVHT.flags, TVHT_ONITEM);
+                writeU32(at + TVHT.flags, flags);
                 return hit.item.handle;
             }
             case TVM_ENSUREVISIBLE: {
