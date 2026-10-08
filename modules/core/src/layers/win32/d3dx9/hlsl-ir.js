@@ -288,7 +288,10 @@ const PROFILE_TABLE = (()=>{
         ps_1_4: { kind: 'ps', major: 1, minor: 4, tokenMinor: 4, ...ps1, cmp: true,
             maxTemps: 6, maxTex: 6, maxSamplers: 6, maxInputs: 8,
             ops: new Set([...legacyOps, 'dp4', 'cmp', 'texld', 'texcrd', 'phase']) },
-        vs_1_1: { kind: 'vs', major: 1, minor: 1, tokenMinor: 1, ...none, maxOutputs: 12 },
+        // fxc places vs_1_1 constants up to c255 (an array of 204 registers and more): 96 is
+        // the least a device's caps promise, which the runtime checks, not the compiler.
+        vs_1_1: { kind: 'vs', major: 1, minor: 1, tokenMinor: 1, ...none, maxConsts: 256,
+            maxOutputs: 12 },
         vs_2_0: { kind: 'vs', major: 2, minor: 0, tokenMinor: 0, ...vs2, maxOutputs: 12 },
         vs_2_a: { kind: 'vs', major: 2, minor: 1, tokenMinor: 1, ...vs2, maxArith: 256,
             maxTemps: 13, maxOutputs: 12 },

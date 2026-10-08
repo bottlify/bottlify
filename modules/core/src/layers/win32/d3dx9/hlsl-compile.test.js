@@ -273,3 +273,33 @@ test('a model 1 source of one component in every lane is read the way the model 
             assert.deepEqual(shade(result, colour), expected, `${profile} ${body}`);
         }
     });
+
+test('a value computed twice is computed once, and model 1 fits what fxc fits', async()=>{
+    // An inlined function called twice is the same instructions twice; fxc computes it
+    // once, and a model 1 target, eight instructions long, holds only what fxc puts in.
+    const twice = `sampler2D a; sampler2D b;
+        float4 lit(float2 uv, float2 uv2) { return tex2D(a, uv) * tex2D(b, uv2); }
+        float4 main(float2 uv : TEXCOORD0, float2 uv2 : TEXCOORD1, float4 v : COLOR1) : COLOR0
+        { float4 c = lit(uv, uv2); c.rgb = c.rgb * v.rgb + lit(uv, uv2).b; return c; }`;
+    const modern = await compile(twice, 'ps_2_0');
+    assert.equal(modern.ok, true, modern.messages);
+    const text = disassemble(/** @type {Uint32Array} */ (modern.tokens));
+    assert.equal(text.match(/texld/g)?.length, 2, text);
+    assert.equal(text.match(/\bmul\b/g)?.length, 1, `the product once:\n${text}`);
+    const legacy = await compile(twice, 'ps_1_4');
+    assert.equal(legacy.ok, true, legacy.messages);
+    assert.equal(disassemble(/** @type {Uint32Array} */ (legacy.tokens)).match(/texld/g)?.length,
+        2);
+
+    // A saturated result is saturated by what made it, and a scalar of a literal is
+    // read through alpha, as fxc reads it, in ps_1_1.
+    const sky = `sampler2D s0; sampler2D s1; float4 k;
+        float4 main(float2 t0 : TEXCOORD0, float2 t1 : TEXCOORD1) : COLOR0
+        { float r = (tex2D(s0, t0) + tex2D(s1, t1)).r;
+          return 1 - saturate((r * k.a - 0.2) * 0.5 + 0.25); }`;
+    const sat = await compile(sky, 'ps_1_1');
+    assert.equal(sat.ok, true, sat.messages);
+    const ps11 = disassemble(/** @type {Uint32Array} */ (sat.tokens));
+    assert.match(ps11, /mad_sat/, ps11);
+    assert.doesNotMatch(ps11, /mov_sat/, ps11);
+});

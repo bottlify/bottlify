@@ -30,7 +30,8 @@ import { TargetError, USAGE } from './hlsl-ir.js';
 import { OPCODES, REG, MOD, encodeProgram } from './hlsl-encode.js';
 import { constantTableComment } from './hlsl-ctab.js';
 import {
-    assignConstants, forwardOutputs, fuseMultiplyAdd, lanesRead, prune, usage, USAGE_NAMES,
+    assignConstants, coalesceMoves, forwardOutputs, fuseMultiplyAdd, lanesRead, numberValues,
+    prune, usage, USAGE_NAMES,
 } from './hlsl-backend.js';
 
 /** @typedef {import('./hlsl-ir.js').IrProgram} IrProgram */
@@ -312,8 +313,8 @@ function splitKey(instr){
 /**
  * The rewrites applied: a split instruction becomes one for each component it
  * writes; a spread source reads a register that holds the component it wants
- * in all four lanes -- the colour ones from a dot product with a selector,
- * alpha from their blue, which an instruction writing alpha alone may read.
+ * in all four lanes, from a dot product with a selector, which writes alpha as
+ * well as the colour (fxc's dp3 r0, c1, t0).
  *
  * @param {Instr[]} instrs @param {Rewrites} rewrites
  * @returns {Instr[]}
@@ -343,10 +344,8 @@ function applyRewrites(instrs, rewrites){
             const selector = [0, 1, 2, 3].map(c=>(c === wanted ? 1 : 0));
             /** @type {Src} */
             const whole = /** @type {any} */ ({ ...src, swz: [0, 1, 2, 3] });
-            out.push({ op: 'dp3', dest: { kind: 'reg', reg: spread, mask: 7 },
+            out.push({ op: 'dp3', dest: { kind: 'reg', reg: spread, mask: 15 },
                 srcs: [whole, { kind: 'imm', values: selector }] });
-            out.push({ op: 'mov', dest: { kind: 'reg', reg: spread, mask: 8 },
-                srcs: [{ kind: 'reg', reg: spread, swz: [2, 2, 2, 2] }] });
             return /** @type {Src} */ ({ kind: 'reg', reg: spread, swz: [0, 1, 2, 3] });
         });
         const mask = instr.dest.kind === 'reg' || instr.dest.kind === 'out' ? instr.dest.mask : 0;
@@ -382,11 +381,12 @@ function build(ir, options, diagnostics, stats, rewrites){
     const newReg = width=>({ id: counter++, width });
 
     let instrs = prune(ir.instrs.map(i=>({ ...i, srcs: i.srcs.slice() })));
+    instrs = prune(numberValues(instrs, profile));
     instrs = fuseMultiplyAdd(instrs, profile);
     instrs = foldScales(instrs, profile);
     instrs = foldModifiers(instrs);
     instrs = propagateModifiers(prune(instrs));
-    instrs = forwardOutputs(instrs);
+    instrs = forwardOutputs(coalesceMoves(instrs));
 
     // An input nothing reads is not declared, and not judged: a pixel shader that
     // takes the vertex shader's output structure carries its POSITION, which no
@@ -536,10 +536,18 @@ function build(ir, options, diagnostics, stats, rewrites){
     const defAt = new Map();
     let nextConstant = 0;
     let clamped = false;
-    ordered = ordered.map(instr=>({ ...instr, srcs: instr.srcs.map(src=>{
+    ordered = ordered.map(instr=>({ ...instr, srcs: instr.srcs.map((src, k)=>{
         if (src.kind !== 'imm')
         {
             return src;
+        }
+        // A literal of which one lane is read is that one value, held in every component
+        // and read through alpha -- as fxc places it -- since before 1.4 no other single
+        // component can be read replicated.
+        const lanes = lanesRead(instr, k);
+        if (lanes.length === 1 && src.values.length > 1)
+        {
+            src = { ...src, values: [src.values[Math.min(lanes[0], src.values.length - 1)]] };
         }
         // A model 1 constant register holds -1 to 1 and the hardware clamps to
         // it; fxc clamps a literal outside it and says so once, as a warning.
@@ -842,6 +850,22 @@ function build(ir, options, diagnostics, stats, rewrites){
     if (unreadable)
     {
         throw new RewriteNeeded(spread, split, unreadable);
+    }
+
+    // A register moved into itself -- a result the allocator already left where the
+    // colour is read from -- is no instruction.
+    for (let i = physical.length - 1; i >= 0; i--)
+    {
+        const one = physical[i];
+        const from = one.srcs[0];
+        if (one.op === 'mov' && one.dest && !one.dest.sat && !one.dest.shift && from
+            && from.type === one.dest.type && from.index === one.dest.index
+            && (from.mod ?? MOD.NONE) === MOD.NONE
+            && [0, 1, 2, 3].every(c=>((one.dest?.mask ?? 15) & 1 << c) === 0
+                || (from.swz ?? [0, 1, 2, 3])[c] === c))
+        {
+            physical.splice(i, 1);
+        }
     }
 
     // Instructions paired: an rgb instruction and an alpha one that does not read what the

@@ -207,8 +207,11 @@ export function fuseMultiplyAdd(instrs, profile){
     const removed = new Set();
     const result = instrs.map(instr=>({ ...instr, srcs: instr.srcs.slice() }));
     /** @param {Src[]} srcs */
-    const constReads = srcs=>new Set(srcs.map(src=>(src.kind === 'imm' ? 'imm' : constKey(src)))
-        .filter(key=>key !== null));
+    const constReads = srcs=>new Set(srcs.map(src=>(src.kind === 'imm'
+        ? `imm${src.values.join()}` : constKey(src))).filter(key=>key !== null));
+    // The constant registers one instruction may read: one in a vertex shader, two in a
+    // model 1 pixel shader (its read ports), any from ps_2_0.
+    const constLimit = profile.legacy ? 2 : profile.oneConstPerInstr ? 1 : Infinity;
     result.forEach((instr, j)=>{
         if ((instr.op !== 'add' && instr.op !== 'sub') || instr.dest.kind === 'none'
             || instr.dest.kind === 'addr')
@@ -241,7 +244,7 @@ export function fuseMultiplyAdd(instrs, profile){
             const srcs = [reselect(maker.srcs[0], lanes, flipFirst),
                 reselect(maker.srcs[1], lanes, false),
                 instr.op === 'sub' && p === 0 ? negated(other) : other];
-            if (profile.oneConstPerInstr && constReads(srcs).size > 1)
+            if (constReads(srcs).size > constLimit)
             {
                 continue;
             }
@@ -267,8 +270,239 @@ export function negated(src){
 }
 
 /**
+ * Every value is computed once. The front half inlines each call where it stands,
+ * so a function a shader calls twice -- a texel fetched by two of its terms, a
+ * light vector each lighting term works out again -- is the same instructions
+ * twice; fxc computes it once, and a model 1 target, eight instructions long,
+ * fits only what fxc fits.
+ *
+ * Straight-line code, so value numbering: each component of each register holds
+ * a value, named by what computed it from which values. An instruction whose
+ * results are all held somewhere already becomes a move from there, and every
+ * read goes to where its value was first computed while that still holds it --
+ * which leaves the moves unread, for `prune` to take away.
+ *
+ * @param {Instr[]} instrs @param {Profile} profile
+ * @returns {Instr[]}
+ */
+export function numberValues(instrs, profile){
+    /** @type {Map<string, number>} */
+    const ids = new Map();
+    /** @param {string} key */
+    const idOf = key=>{
+        let id = ids.get(key);
+        if (id === undefined)
+        {
+            id = ids.size;
+            ids.set(key, id);
+        }
+        return id;
+    };
+    /** What each component of each register holds: `${reg.id}:${component}` to a value. */
+    /** @type {Map<string, number>} */
+    const held = new Map();
+    /** Where each value was first put, while it is still there. */
+    /** @type {Map<number, { reg: VReg, comp: number }>} */
+    const home = new Map();
+    /** @type {Map<object, number>} */
+    const objects = new Map();
+    /** @param {object} o */
+    const objectId = o=>{
+        if (!objects.has(o))
+        {
+            objects.set(o, objects.size);
+        }
+        return /** @type {number} */ (objects.get(o));
+    };
+    let fresh = 0;
+    let addressWrites = 0;
+    /** @param {VReg} reg @param {number} comp */
+    const valueAt = (reg, comp)=>{
+        const key = `${reg.id}:${comp}`;
+        let id = held.get(key);
+        if (id === undefined)
+        {
+            // Read before any write: a value of its own, equal to nothing else.
+            id = idOf(`?${fresh++}`);
+            held.set(key, id);
+        }
+        return id;
+    };
+    /** The value lane `lane` of an operand reads, with its modifiers. @param {Src} src @param {number} lane */
+    const laneValue = (src, lane)=>{
+        /** @type {string} */
+        let base;
+        const comp = 'swz' in src ? src.swz[Math.min(lane, src.swz.length - 1)] : 0;
+        const at = /** @type {{ relative?: boolean }} */ (src).relative ? `@${addressWrites}` : '';
+        switch (src.kind)
+        {
+            case 'reg': base = `#${valueAt(src.reg, comp)}`; break;
+            case 'imm': base = `=${Object.is(src.values[Math.min(lane, src.values.length - 1)], -0)
+                ? '-0' : src.values[Math.min(lane, src.values.length - 1)]}`; break;
+            case 'const': base = `c${objectId(src.cst)}+${src.offset}.${comp}${at}`; break;
+            case 'creg': base = `k${src.file}${src.index}.${comp}${at}`; break;
+            case 'input': base = `i${objectId(src.input)}.${comp}`; break;
+            case 'misc': base = `m${src.which}.${comp}`; break;
+            case 'sampler': base = `s${objectId(src.cst)}`; break;
+            default: base = `?${fresh++}`;
+        }
+        const one = /** @type {{ neg?: boolean, abs?: boolean, mod?: string }} */ (src);
+        if (one.abs)
+        {
+            base = `|${base}|`;
+        }
+        if (one.mod)
+        {
+            base = `${one.mod}(${base})`;
+        }
+        return one.neg ? `-${base}` : base;
+    };
+    /** @param {VReg} reg @param {number} comp @param {number} id */
+    const put = (reg, comp, id)=>{
+        held.set(`${reg.id}:${comp}`, id);
+        const first = home.get(id);
+        if (!first || held.get(`${first.reg.id}:${first.comp}`) !== id)
+        {
+            home.set(id, { reg, comp });
+        }
+    };
+    /** The register and components holding these values, when one register holds them all. */
+    /** @param {number[]} values */
+    const holderOf = values=>{
+        /** @type {VReg | null} */
+        let reg = null;
+        const comps = [];
+        for (const id of values)
+        {
+            const at = home.get(id);
+            if (!at || held.get(`${at.reg.id}:${at.comp}`) !== id || (reg && at.reg !== reg))
+            {
+                return null;
+            }
+            reg = at.reg;
+            comps.push(at.comp);
+        }
+        return reg ? { reg, comps } : null;
+    };
+    // A model 1 texture instruction names its own registers; nothing is moved into it.
+    const fixedSources = (/** @type {Instr} */ instr)=>profile.legacy
+        && /** @type {Record<string, { cls: string }>} */ (OPCODES)[instr.op]?.cls === 'texture';
+
+    /** @type {Instr[]} */
+    const out = [];
+    for (const original of instrs)
+    {
+        let instr = original;
+        const cls = /** @type {Record<string, { cls: string }>} */ (OPCODES)[instr.op]?.cls;
+        // Reads go to where their values were first computed.
+        if (!fixedSources(instr))
+        {
+            const srcs = instr.srcs.map((src, k)=>{
+                if (src.kind !== 'reg' || src.reg.pin || src.reg.fixed)
+                {
+                    return src;
+                }
+                const lanes = lanesRead(instr, k);
+                const found = holderOf(lanes.map(lane=>valueAt(src.reg,
+                    src.swz[Math.min(lane, src.swz.length - 1)])));
+                if (!found || found.reg === src.reg
+                    || Boolean(found.reg.uniform) !== Boolean(src.reg.uniform))
+                {
+                    return src;
+                }
+                const swz = src.swz.slice();
+                while (swz.length < 4 && lanes.some(lane=>lane >= swz.length))
+                {
+                    swz.push(swz[swz.length - 1]);
+                }
+                lanes.forEach((lane, i)=>{
+                    swz[lane] = found.comps[i];
+                });
+                for (let lane = 0; lane < swz.length; lane++)
+                {
+                    if (!lanes.includes(lane))
+                    {
+                        swz[lane] = found.comps[0];
+                    }
+                }
+                return /** @type {Src} */ ({ ...src, reg: found.reg, swz });
+            });
+            instr = { ...instr, srcs };
+        }
+        if (instr.dest.kind === 'addr')
+        {
+            addressWrites++;
+        }
+        if (instr.dest.kind !== 'reg' && instr.dest.kind !== 'out')
+        {
+            out.push(instr);
+            continue;
+        }
+        const mask = instr.dest.mask;
+        const comps = [0, 1, 2, 3].filter(c=>(mask & 1 << c) !== 0);
+        const plain = instr.op === 'mov' && !instr.sat && !instr.shift;
+        const head = `${instr.op}|${instr.sat ? 's' : ''}|${instr.shift ?? 0}|${
+            instr.texMode ?? ''}|${instr.pp ? 'p' : ''}`;
+        /** @type {number[]} */
+        let values;
+        if (plain)
+        {
+            // A copy holds what it copies.
+            values = comps.map(c=>{
+                const lane = laneValue(instr.srcs[0], c);
+                return lane.startsWith('#') && /^#\d+$/.test(lane) ? Number(lane.slice(1))
+                    : idOf(lane);
+            });
+        }
+        else if (cls === 'comp')
+        {
+            values = comps.map(c=>idOf(`${head}(${instr.srcs.map(src=>laneValue(src, c))})`));
+        }
+        else if ((cls === 'scalar' || cls === 'lanes' || cls === 'texture') && instr.srcs.length > 0
+            && instr.op !== 'mova')
+        {
+            // A sampler has no lanes and is read whole.
+            const whole = `${head}(${instr.srcs.map((src, k)=>(laneCount(src) === 0
+                ? laneValue(src, 0)
+                : lanesRead(instr, k).map(lane=>laneValue(src, lane)).join(' '))).join(',')})`;
+            // A texel and a sine-cosine pair differ by component; the rest are replicated.
+            const perComponent = cls === 'texture' || instr.op === 'sincos';
+            values = comps.map(c=>idOf(perComponent ? `${whole}#${c}` : whole));
+        }
+        else
+        {
+            values = comps.map(()=>idOf(`?${fresh++}`));
+        }
+        const pinned = instr.dest.kind === 'reg'
+            && (instr.dest.reg.pin || instr.dest.reg.fixed || instr.dest.reg.uniform);
+        const found = plain || pinned ? null : holderOf(values);
+        if (found && instr.dest.kind === 'reg' && found.reg === instr.dest.reg
+            && found.comps.every((comp, i)=>comp === comps[i]))
+        {
+            // Already there: nothing to do.
+            continue;
+        }
+        if (found)
+        {
+            const swz = [0, 1, 2, 3].map(c=>found.comps[Math.max(0, comps.indexOf(c))]);
+            instr = { op: 'mov', dest: instr.dest,
+                srcs: [{ kind: 'reg', reg: found.reg, swz }] };
+        }
+        if (instr.dest.kind === 'reg')
+        {
+            const reg = instr.dest.reg;
+            comps.forEach((c, i)=>put(reg, c, values[i]));
+        }
+        out.push(instr);
+    }
+    return out;
+}
+
+/**
  * A value built by moving scalars into the lanes of a register is built by the
- * instructions that made the scalars, writing those lanes themselves.
+ * instructions that made the scalars, writing those lanes themselves -- and a
+ * value only saturated on its way is saturated by what made it (mad_sat for a
+ * mad and a mov_sat).
  *
  * @param {Instr[]} instrs
  * @returns {Instr[]}
@@ -280,7 +514,8 @@ export function coalesceMoves(instrs){
     /** @type {Set<number>} */
     const dropped = new Set();
     instrs.forEach((move, j)=>{
-        if (move.op !== 'mov' || move.dest.kind !== 'reg' || move.sat)
+        if (move.op !== 'mov' || move.dest.kind !== 'reg' || move.shift !== undefined
+            || move.dest.reg.pin || move.dest.reg.fixed)
         {
             return;
         }
@@ -290,14 +525,16 @@ export function coalesceMoves(instrs){
             return;
         }
         const made = writers.get(src.reg);
-        if (!made || made.length !== 1 || replaced.has(made[0]))
+        // A maker already merged into the move after it is gone: a chain of moves is
+        // merged one link at a time.
+        if (!made || made.length !== 1 || replaced.has(made[0]) || dropped.has(made[0]))
         {
             return;
         }
         const maker = instrs[made[0]];
         const cls = /** @type {Record<string, { cls: string }>} */ (OPCODES)[maker.op]?.cls;
         if (maker.dest.kind !== 'reg' || !(cls === 'comp' || cls === 'scalar' || cls === 'lanes')
-            || maker.op === 'sincos')
+            || maker.op === 'sincos' || (move.sat && (maker.sat || maker.shift !== undefined)))
         {
             return;
         }
@@ -321,14 +558,16 @@ export function coalesceMoves(instrs){
         const lanes = from.map((l, c)=>((mask & 1 << c) !== 0 ? l : first));
         const srcs = cls === 'comp' ? maker.srcs.map(one=>reselect(one, lanes, false))
             : maker.srcs;
-        replaced.set(made[0], { ...maker, srcs, dest: { kind: 'reg', reg: move.dest.reg, mask } });
+        replaced.set(made[0], { ...maker, srcs, dest: { kind: 'reg', reg: move.dest.reg, mask },
+            ...(move.sat ? { sat: true } : {}) });
         dropped.add(j);
     });
     return instrs.map((instr, i)=>replaced.get(i) ?? instr).filter((_, i)=>!dropped.has(i));
 }
 
 /**
- * A result that is only moved to an output is written there in the first place.
+ * A result that is only moved to an output is written there in the first place --
+ * by each of its writers, when it was made in parts.
  *
  * @param {Instr[]} instrs
  * @returns {Instr[]}
@@ -350,14 +589,26 @@ export function forwardOutputs(instrs){
             return;
         }
         const made = writers.get(src.reg);
-        if (!made || made.length !== 1)
+        if (!made || made.some(i=>i > j || replaced.has(i)))
         {
             return;
         }
-        const maker = instrs[made[0]];
-        const cls = /** @type {Record<string, { cls: string }>} */ (OPCODES)[maker.op]?.cls;
-        if (maker.dest.kind !== 'reg' || !(cls === 'comp' || cls === 'scalar' || cls === 'lanes')
-            || maker.op === 'sincos' || maker.dest.mask !== instr.dest.mask)
+        // The writers, in parts if there are several, make exactly what the output takes.
+        let covered = 0;
+        for (const i of made)
+        {
+            const maker = instrs[i];
+            const cls = /** @type {Record<string, { cls: string }>} */ (OPCODES)[maker.op]?.cls;
+            if (maker.dest.kind !== 'reg'
+                || !(cls === 'comp' || cls === 'scalar' || cls === 'lanes')
+                || maker.op === 'sincos' || (maker.dest.mask & ~instr.dest.mask) !== 0
+                || (maker.dest.mask & covered) !== 0)
+            {
+                return;
+            }
+            covered |= maker.dest.mask;
+        }
+        if (covered !== instr.dest.mask)
         {
             return;
         }
@@ -369,8 +620,12 @@ export function forwardOutputs(instrs){
                 return;
             }
         }
-        replaced.set(made[0], { ...maker, dest: { kind: 'out', out: instr.dest.out,
-            mask: instr.dest.mask } });
+        for (const i of made)
+        {
+            const maker = instrs[i];
+            replaced.set(i, { ...maker, dest: { kind: 'out', out: instr.dest.out,
+                mask: /** @type {{ mask: number }} */ (maker.dest).mask } });
+        }
         dropped.add(j);
     });
     return instrs.map((instr, i)=>replaced.get(i) ?? instr).filter((_, i)=>!dropped.has(i));
@@ -830,6 +1085,7 @@ export function assemble(ir, options = {}){
     const newReg = ()=>({ id: counter++, width: 4 });
 
     let instrs = prune(ir.instrs.map(i=>({ ...i, srcs: i.srcs.slice() })));
+    instrs = prune(numberValues(instrs, profile));
     instrs = forwardOutputs(coalesceMoves(fuseMultiplyAdd(instrs, profile)));
     for (const instr of instrs)
     {
