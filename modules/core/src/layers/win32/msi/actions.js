@@ -29,6 +29,7 @@ import { runCustomAction } from './custom.js';
 import { PID } from './summary.js';
 import { editIni } from './ini.js';
 import { replaces } from './versioning.js';
+import { patchFiles } from './patch.js';
 import { createMd5 } from '../crypto/digest.js';
 import { REMOVAL_ACTIONS, productGone, unpublishProduct } from './removal.js';
 import { CLASS_ACTIONS, iconPath, publishIcons } from './classes.js';
@@ -633,6 +634,7 @@ async function registerProduct(engine){
         const localPackage = kept ?? (session.packagePath.toLowerCase()
             .startsWith(installer.toLowerCase()) ? session.packagePath
             : await host.cachePackage?.(session.packagePath, installer) ?? session.packagePath);
+        await host.registerPatches?.(productCode, installer);
         host.registration.registerProduct({
             productCode,
             packageCode: session.getProperty('PackageCode'),
@@ -642,7 +644,9 @@ async function registerProduct(engine){
             manufacturer: session.getProperty('Manufacturer'),
             language: Number(session.getProperty('ProductLanguage')) || 0,
             installLocation: session.getProperty('ARPINSTALLLOCATION'),
-            installSource: session.sourceDir,
+            // Where the package came from, not the machine's copy a maintenance
+            // run reads.
+            installSource: session.getProperty('SourceDir') || session.sourceDir,
             localPackage,
             packageName: session.packagePath.slice(session.packagePath.lastIndexOf('\\') + 1),
             date,
@@ -980,7 +984,7 @@ export const STANDARD_ACTIONS = {
     ProcessComponents: processComponents,
     CreateFolders: createFolders,
     InstallFiles: installFiles,
-    PatchFiles: nothing,
+    PatchFiles: patchFiles,
     DuplicateFiles: duplicateFiles,
     BindImage: nothing,
     CreateShortcuts: createShortcuts,

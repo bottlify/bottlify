@@ -17,7 +17,7 @@
  */
 
 import {
-    HKEY_LOCAL_MACHINE, REG_DWORD, REG_EXPAND_SZ, REG_SZ,
+    HKEY_LOCAL_MACHINE, REG_DWORD, REG_EXPAND_SZ, REG_MULTI_SZ, REG_SZ,
 } from '../advapi32/registry.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
@@ -104,6 +104,13 @@ export function valueText(value){
     const text = decodeAnsi(end < 0 ? value.data : value.data.subarray(0, end));
     return text;
 }
+
+/**
+ * The strings of a REG_MULTI_SZ value, in order.
+ *
+ * @param {{ data: Uint8Array } | null} value @returns {string[]}
+ */
+const multiText = value=>(value ? decodeAnsi(value.data).split('\0') : []);
 
 /**
  * The installed product's properties MsiGetProductInfo reads from
@@ -497,6 +504,77 @@ export function createRegistration(hive){
                     }
                 }
             }
+        },
+
+        /**
+         * Records a patch applied to a product: the transforms it applied, its
+         * kept copy, and its place in the product's list of patches.
+         *
+         * @param {string} productCode @param {string} patchCode
+         * @param {string} localPackage @param {string} transforms
+         */
+        registerPatch: (productCode, patchCode, localPackage, transforms)=>{
+            const keys = productKeys(productCode);
+            const patch = squashGuid(patchCode);
+            if (!keys || !patch)
+            {
+                return;
+            }
+            const list = create(`${keys.advertised}\\Patches`);
+            hive.setValue(list, patch, REG_SZ, sz(transforms));
+            const names = multiText(hive.getValue(list, 'Patches'))
+                .filter(Boolean);
+            const all = [...new Set([...names, patch])];
+            hive.setValue(list, 'Patches', REG_MULTI_SZ, encodeAnsi(`${all.join('\0')}\0\0`));
+            hive.setValue(create(`${USER_DATA}\\Patches\\${patch}`), 'LocalPackage', REG_SZ,
+                sz(localPackage));
+            const state = create(
+                `${USER_DATA}\\Products\\${keys.squashed}\\Patches\\${patch}`);
+            hive.setValue(state, 'State', REG_DWORD, dword(1));
+        },
+
+        /** @param {string} productCode @param {string} patchCode */
+        unregisterPatch: (productCode, patchCode)=>{
+            const keys = productKeys(productCode);
+            const patch = squashGuid(patchCode);
+            if (!keys || !patch)
+            {
+                return;
+            }
+            const list = open(`${keys.advertised}\\Patches`);
+            if (list)
+            {
+                hive.deleteValue(list, patch);
+                const names = multiText(hive.getValue(list, 'Patches'))
+                    .filter(name=>name !== '' && name !== patch);
+                hive.setValue(list, 'Patches', REG_MULTI_SZ,
+                    encodeAnsi(`${names.join('\0')}\0\0`));
+            }
+            removeKeyTree(hive, machine,
+                `${USER_DATA}\\Products\\${keys.squashed}\\Patches\\${patch}`);
+            removeKeyTree(hive, machine, `${USER_DATA}\\Patches\\${patch}`);
+        },
+
+        /**
+         * The patches applied to a product, each with its kept copy.
+         *
+         * @param {string} productCode
+         * @returns {{ code: string, localPackage: string, transforms: string }[]}
+         */
+        patches: productCode=>{
+            const keys = productKeys(productCode);
+            const list = keys ? open(`${keys.advertised}\\Patches`) : null;
+            if (!list)
+            {
+                return [];
+            }
+            return multiText(hive.getValue(list, 'Patches')).filter(Boolean)
+                .map(name=>({
+                    code: unsquashGuid(name),
+                    localPackage: valueText(hive.getValue(
+                        open(`${USER_DATA}\\Patches\\${name}`) ?? list, 'LocalPackage')) ?? '',
+                    transforms: valueText(hive.getValue(list, name)) ?? '',
+                }));
         },
 
         /** @returns {any} the machine's root, for callers that keep keys of their own */

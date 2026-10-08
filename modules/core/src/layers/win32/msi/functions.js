@@ -39,6 +39,9 @@ import {
     generateTransform, writeSummaryStream,
 } from './transform.js';
 import { embeddedCabinets, writeDatabase } from './database-writer.js';
+import {
+    ERROR_PATCH_PACKAGE_OPEN_FAILED, applyPatch, effectivePatches, openPatch,
+} from './patch.js';
 import { finishAsync } from './custom.js';
 import { createRegistration, squashGuid, valueText } from './registration.js';
 import { installerVersion } from './version.js';
@@ -415,6 +418,28 @@ export function createMsiFunctions(host){
                     installNested: (kind, source, commandLine)=>installNested(session, kind,
                         source, commandLine, made.thread),
                     cachePackage,
+                    registerPatches: async(productCode, folder)=>{
+                        for (const entry of sessionPatches.get(session) ?? [])
+                        {
+                            const kept = entry.fresh
+                                ? await keepCopy(entry.path, folder, '.msp') : entry.path;
+                            registration.registerPatch(productCode, entry.patch.code,
+                                kept ?? entry.path, entry.transforms);
+                        }
+                        const removed = session.getProperty('MSIPATCHREMOVE').split(';')
+                            .map(entry=>entry.trim()).filter(Boolean);
+                        for (const code of removed)
+                        {
+                            const local = registration.patches(productCode)
+                                .find(item=>item.code.toUpperCase() === code.toUpperCase());
+                            registration.unregisterPatch(productCode, code);
+                            if (local && local.localPackage.toLowerCase()
+                                .startsWith(folder.toLowerCase()))
+                            {
+                                host.files.remove(local.localPackage);
+                            }
+                        }
+                    },
                     fileVersion: async path=>{
                         const block = await host.versionInfo?.(path) ?? null;
                         const fixed = block ? fixedInfo(block) : null;
@@ -691,6 +716,27 @@ export function createMsiFunctions(host){
     };
 
     /**
+     * A file copied whole into the machine's Installer folder under a name
+     * of its own; its path, or null when it could not be copied.
+     *
+     * @param {string} path @param {string} folder @param {string} extension
+     */
+    const keepCopy = async(path, folder, extension)=>{
+        const bytes = await readFile(host.files, host.fullPath(path));
+        if (!bytes)
+        {
+            return null;
+        }
+        if (!host.files.stat(folder.replace(/\\$/, ''))?.isDirectory)
+        {
+            host.files.mkdir(folder.replace(/\\$/, ''));
+        }
+        const name = `${folder.replace(/\\$/, '')}\\`
+            + `${Math.floor(Math.random() * 0x100000000).toString(16)}${extension}`;
+        return writeFile(host.files, name, bytes) ? name : null;
+    };
+
+    /**
      * A copy of an installed package for the machine to keep, as Windows
      * keeps one in its Installer folder for a repair or a removal: the
      * package as it shipped, its embedded cabinets left out. Null when it
@@ -756,6 +802,96 @@ export function createMsiFunctions(host){
     };
 
     /**
+     * A patch file opened for as long as an installation reads the cabinets
+     * inside it; the patch, or the error the patch calls answer.
+     *
+     * @param {string} path @returns {Promise<import('./patch.js').Patch | number>}
+     */
+    const loadPatch = async path=>{
+        const full = host.fullPath(path);
+        const stat = host.files.stat(full);
+        const node = stat && !stat.isDirectory
+            ? host.files.open(full, { read: true, shareWrite: true }) : null;
+        if (!node)
+        {
+            return ERROR_PATCH_PACKAGE_OPEN_FAILED;
+        }
+        const patch = await openPatch({ size: stat.size,
+            read: (offset, length)=>host.files.read(node, offset, length) });
+        if (typeof patch === 'number')
+        {
+            host.files.close(node);
+        }
+        return patch;
+    };
+
+    /**
+     * The patches an installation applies, with where each came from: those
+     * its PATCH property names and those already applied to the product,
+     * less the ones MSIPATCHREMOVE takes away.
+     *
+     * @type {WeakMap<import('./session.js').Session, { patch: import('./patch.js').Patch,
+     *     path: string, fresh: boolean, transforms: string }[]>}
+     */
+    const sessionPatches = new WeakMap();
+
+    /**
+     * Applies an installation's patches to its package before the session
+     * reads it.
+     *
+     * @param {import('./database.js').Database} db @param {string} commandLine
+     */
+    const patchesFor = async(db, commandLine)=>{
+        const properties = parseCommandLine(commandLine);
+        const productCode = String(db.table('Property')?.rows
+            .find((/** @type {any[]} */ row)=>row[0] === 'ProductCode')?.[1] ?? '');
+        const removing = new Set((properties.get('MSIPATCHREMOVE') ?? '').split(';')
+            .map(entry=>entry.trim().toUpperCase()).filter(Boolean));
+        /** @type {{ patch: import('./patch.js').Patch, path: string, fresh: boolean }[]} */
+        const found = [];
+        for (const path of (properties.get('PATCH') ?? '').split(';').map(entry=>entry.trim())
+            .filter(Boolean))
+        {
+            const patch = await loadPatch(path);
+            if (typeof patch === 'number')
+            {
+                return patch;
+            }
+            found.push({ patch, path: host.fullPath(path), fresh: true });
+        }
+        for (const installed of registration.patches(productCode))
+        {
+            if (removing.has(installed.code.toUpperCase()) || removing.has(installed.localPackage
+                .toUpperCase()))
+            {
+                continue;
+            }
+            const patch = await loadPatch(installed.localPackage);
+            if (typeof patch !== 'number')
+            {
+                found.push({ patch, path: installed.localPackage, fresh: false });
+            }
+        }
+        const chosen = effectivePatches(found.map(entry=>entry.patch));
+        const applied = [];
+        for (const entry of found.filter(item=>chosen.includes(item.patch)))
+        {
+            const code = await applyPatch(db, entry.patch, { productCode, log: host.log });
+            if (code !== ERROR_SUCCESS)
+            {
+                if (entry.fresh)
+                {
+                    return code;
+                }
+                continue;
+            }
+            applied.push({ ...entry, transforms: entry.patch.transforms
+                .map(name=>`:${name}`).join(';') });
+        }
+        return applied;
+    };
+
+    /**
      * A package opened as a session: a path, or "#n" for a database handle
      * already open.
      *
@@ -789,6 +925,11 @@ export function createMsiFunctions(host){
                 return ERROR_INSTALL_TRANSFORM_FAILURE;
             }
         }
+        const patched = byHandle ? [] : await patchesFor(db, commandLine);
+        if (typeof patched === 'number')
+        {
+            return patched;
+        }
         db.readOnly = true;
         const session = createSession({
             db, packagePath, machine: host.machine(), commandLine,
@@ -800,6 +941,7 @@ export function createMsiFunctions(host){
             },
         });
         session.setProperty('UILevel', String(uiLevel & 0x0f || INSTALLUILEVEL.BASIC));
+        sessionPatches.set(session, patched);
         // Run from the machine's own copy, the package's source is where it
         // was installed from, as the product's records say.
         const product = session.getProperty('ProductCode');
@@ -1095,6 +1237,17 @@ export function createMsiFunctions(host){
             messageBox: host.messageBox
                 ? (text, caption, type)=>/** @type {any} */ (host.messageBox)(text, caption, type)
                 : undefined,
+            inspectPatch: async path=>{
+                const patch = await loadPatch(path);
+                return typeof patch === 'number' ? patch
+                    : { code: patch.code, targets: patch.targets };
+            },
+            productCodeOf: async path=>{
+                const db = await loadDatabase(path);
+                const row = db?.table('Property')?.rows
+                    .find((/** @type {any[]} */ entry)=>entry[0] === 'ProductCode');
+                return row ? String(row[1]) : null;
+            },
             divergence: host.divergence,
         }),
         // ----- handles and records -----

@@ -54,6 +54,12 @@
  * @property {() => Promise<import('./database.js').Database | null>} [sourcePackage]
  *     The package the product was installed from, found through its source list, for
  *     what the machine's own copy of it left out.
+ * @property {(productCode: string, folder: string) => Promise<void>} [registerPatches]
+ *     Records the patches the installation applied -- each new one kept in the machine's
+ *     Installer folder -- and forgets the ones it removed.
+ * @property {(old: Uint8Array, delta: Uint8Array)
+ *     => Promise<{ code: number, bytes: Uint8Array | null }>} [applyDelta]
+ *     The Patch API's application of a delta to the file it was made against.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(text: string) => void} [log]
  */

@@ -54,6 +54,30 @@ export function packageDatabase(tables, streams = {}){
 }
 
 /**
+ * A database whose columns are typed as a package's schema types them --
+ * a column holding numbers a nullable long, any other a nullable string, the
+ * first the key -- so it writes to a file and reads back the same.
+ *
+ * @param {import('./database.js').Database} db
+ */
+export function typed(db){
+    db.tables.forEach(table=>{
+        if (table.name.startsWith('_'))
+        {
+            // The database's own tables are typed already.
+            return;
+        }
+        for (const column of table.columns)
+        {
+            column.type = table.rows.some(row=>typeof row[column.number - 1] === 'number')
+                ? 0x1104 : 0x19ff;
+        }
+        table.columns[0].type = (table.columns[0].type | 0x2000) & ~0x1000;
+    });
+    return db;
+}
+
+/**
  * A machine: a volume with the folders given made and files written, and a
  * registry with the installer's records over it.
  *

@@ -11,10 +11,10 @@
  * places its package can be found again, and the descriptors an advertised
  * shortcut or a published component names a feature and component by.
  *
- * Everything a Windows Installer 3.1 exports is here. Patching (.msp) and
- * advertising have no engine behind them yet: those calls answer as a
- * machine that cannot apply a patch or write an advertise script does, and
- * say so once.
+ * Everything a Windows Installer 3.1 exports is here. A patch is applied by
+ * running the product's package again with it, and its records answer the
+ * patch queries. Advertising has no engine behind it: those calls answer as
+ * an installer that cannot write an advertise script does, and say so once.
  */
 
 import { INSTALLSTATE } from './session.js';
@@ -42,6 +42,11 @@ const ERROR_INSTALL_PACKAGE_INVALID = 1620;
 const ERROR_FUNCTION_FAILED = 1627;
 const ERROR_PATCH_PACKAGE_UNSUPPORTED = 1637;
 const ERROR_UNKNOWN_PATCH = 1647;
+const ERROR_PATCH_TARGET_NOT_FOUND = 1642;
+const ERROR_SUCCESS_REBOOT_REQUIRED = 3010;
+/** MsiRemovePatches' one kind of removal, and MSIPATCHSEQUENCEINFO's patch given as a file. */
+const INSTALLTYPE_SINGLE_INSTANCE = 2;
+const MSIPATCH_DATATYPE_PATCHFILE = 0;
 const ERROR_BAD_CONFIGURATION = 1610;
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
 
@@ -160,6 +165,9 @@ export function decomposeDescriptor(descriptor){
  *     openProduct  An installed product's package opened as a session.
  * @property {(text: string, caption: string, type: number) => number | Promise<number>}
  *     [messageBox]
+ * @property {(path: string) => Promise<{ code: string, targets: string[] } | number>}
+ *     inspectPatch  A patch file's code and the products it targets, or an error code.
+ * @property {(path: string) => Promise<string | null>} productCodeOf  A package's ProductCode.
  * @property {(api: string, detail: string) => void} [divergence]
  */
 
@@ -445,13 +453,23 @@ export function createProductFunctions(context){
             const extra = putString(wide, parts ? text.slice(parts.used) : '', data, dataSize);
             return written !== ERROR_SUCCESS ? written : extra;
         }),
-        ...both('MsiEnumPatches', 20, wide=>([product])=>{
+        ...both('MsiEnumPatches', 20, wide=>([product, index, patch, transforms, size])=>{
             const code = reader(wide)(product);
-            if (code === null || squashGuid(code) === null)
+            if (code === null || squashGuid(code) === null || (patch >>> 0) === 0)
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            return known(code) ? ERROR_NO_MORE_ITEMS : ERROR_UNKNOWN_PRODUCT;
+            if (!known(code))
+            {
+                return ERROR_UNKNOWN_PRODUCT;
+            }
+            const entry = registration.patches(code)[index >>> 0];
+            if (!entry)
+            {
+                return ERROR_NO_MORE_ITEMS;
+            }
+            putFixed(wide, entry.code, patch);
+            return putString(wide, entry.transforms, transforms, size);
         }),
         ...both('MsiEnumPatchesEx', 40, ()=>()=>ERROR_NO_MORE_ITEMS),
         ...both('MsiEnumProductsEx', 32, wide=>([product, sid, contextMask, index, installed,
@@ -1217,18 +1235,167 @@ export function createProductFunctions(context){
         }),
 
         // ----- what has no engine behind it --------------------------------
-        ...both('MsiApplyPatch', 16, ()=>noPatches('MsiApplyPatch',
-            ERROR_PATCH_PACKAGE_UNSUPPORTED)),
-        ...both('MsiApplyMultiplePatches', 12, ()=>noPatches('MsiApplyMultiplePatches',
-            ERROR_PATCH_PACKAGE_UNSUPPORTED)),
-        ...both('MsiRemovePatches', 16, ()=>noPatches('MsiRemovePatches', ERROR_UNKNOWN_PATCH)),
-        ...both('MsiGetPatchInfo', 16, ()=>noPatches('MsiGetPatchInfo', ERROR_UNKNOWN_PRODUCT)),
-        ...both('MsiGetPatchInfoEx', 28, ()=>noPatches('MsiGetPatchInfoEx',
-            ERROR_UNKNOWN_PATCH)),
-        ...both('MsiDeterminePatchSequence', 20, ()=>noPatches('MsiDeterminePatchSequence',
-            ERROR_PATCH_PACKAGE_UNSUPPORTED)),
-        ...both('MsiDetermineApplicablePatches', 12, ()=>noPatches(
-            'MsiDetermineApplicablePatches', ERROR_PATCH_PACKAGE_UNSUPPORTED)),
+        ...both('MsiApplyPatch', 16, wide=>async([patch, installPackage, type, commandLine])=>{
+            const path = reader(wide)(patch);
+            if (path === null || (installPackage >>> 0) !== 0 || (type >>> 0) !== 0)
+            {
+                // Patching an administrative image has no image to patch here.
+                return ERROR_INVALID_PARAMETER;
+            }
+            const opened = await context.inspectPatch(path);
+            if (typeof opened === 'number')
+            {
+                return opened;
+            }
+            const targets = opened.targets.filter(code=>known(code));
+            if (targets.length === 0)
+            {
+                return ERROR_PATCH_TARGET_NOT_FOUND;
+            }
+            const extra = reader(wide)(commandLine) ?? '';
+            for (const product of targets)
+            {
+                const code = await context.maintain(product, [`PATCH="${path}"`,
+                    /\bREINSTALL=/i.test(extra) ? '' : 'REINSTALL=ALL',
+                    /\bREINSTALLMODE=/i.test(extra) ? '' : 'REINSTALLMODE=omus', extra]
+                    .filter(Boolean).join(' '));
+                if (code !== ERROR_SUCCESS && code !== ERROR_SUCCESS_REBOOT_REQUIRED)
+                {
+                    return code;
+                }
+            }
+            return ERROR_SUCCESS;
+        }),
+        ...both('MsiApplyMultiplePatches', 12, wide=>async([patches, product, properties])=>{
+            const list = reader(wide)(patches);
+            if (list === null || list.trim() === '')
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            const only = reader(wide)(product);
+            /** @type {Set<string>} */
+            const targets = new Set();
+            for (const path of list.split(';').map(entry=>entry.trim()).filter(Boolean))
+            {
+                const opened = await context.inspectPatch(path);
+                if (typeof opened === 'number')
+                {
+                    return opened;
+                }
+                opened.targets.filter(code=>known(code) && (!only
+                    || code.toUpperCase() === only.toUpperCase())).forEach(code=>targets.add(code));
+            }
+            if (targets.size === 0)
+            {
+                return ERROR_PATCH_TARGET_NOT_FOUND;
+            }
+            for (const code of targets)
+            {
+                const answer = await context.maintain(code, `PATCH="${list}" REINSTALL=ALL`
+                    + ` REINSTALLMODE=omus ${reader(wide)(properties) ?? ''}`);
+                if (answer !== ERROR_SUCCESS && answer !== ERROR_SUCCESS_REBOOT_REQUIRED)
+                {
+                    return answer;
+                }
+            }
+            return ERROR_SUCCESS;
+        }),
+        ...both('MsiRemovePatches', 16, wide=>async([patches, product, type, properties])=>{
+            const list = reader(wide)(patches);
+            const code = reader(wide)(product);
+            if (list === null || code === null || squashGuid(code) === null
+                || (type >>> 0) !== INSTALLTYPE_SINGLE_INSTANCE)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            if (!known(code))
+            {
+                return ERROR_UNKNOWN_PRODUCT;
+            }
+            const applied = registration.patches(code).map(entry=>entry.code.toUpperCase());
+            const asked = list.split(';').map(entry=>entry.trim().toUpperCase()).filter(Boolean);
+            if (asked.length === 0 || !asked.every(entry=>applied.includes(entry)))
+            {
+                return ERROR_UNKNOWN_PATCH;
+            }
+            // What the patches brought goes back to what the product shipped:
+            // any file of another version is put back.
+            return context.maintain(code, `MSIPATCHREMOVE="${asked.join(';')}" REINSTALL=ALL`
+                + ` REINSTALLMODE=dmus ${reader(wide)(properties) ?? ''}`);
+        }),
+        ...both('MsiGetPatchInfo', 16, wide=>([patch, attribute, buffer, size])=>{
+            const code = reader(wide)(patch);
+            const name = reader(wide)(attribute);
+            if (code === null || name === null || squashGuid(code) === null)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            const found = registration.products().flatMap(product=>registration.patches(product))
+                .find(entry=>entry.code.toUpperCase() === code.toUpperCase());
+            if (!found)
+            {
+                return ERROR_UNKNOWN_PRODUCT;
+            }
+            if (name !== 'LocalPackage')
+            {
+                return ERROR_UNKNOWN_PROPERTY_SOURCE;
+            }
+            return putString(wide, found.localPackage, buffer, size);
+        }),
+        ...both('MsiGetPatchInfoEx', 28, wide=>([patch, product, sid, contextMask, property,
+            buffer, size])=>{
+            void sid;
+            const code = reader(wide)(patch);
+            const target = reader(wide)(product);
+            const name = reader(wide)(property);
+            if (code === null || target === null || name === null || squashGuid(code) === null
+                || contextMask !== MSIINSTALLCONTEXT_MACHINE)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            if (!known(target))
+            {
+                return ERROR_UNKNOWN_PRODUCT;
+            }
+            const found = registration.patches(target)
+                .find(entry=>entry.code.toUpperCase() === code.toUpperCase());
+            if (!found)
+            {
+                return ERROR_UNKNOWN_PATCH;
+            }
+            /** @type {Record<string, string>} */
+            const answers = { LocalPackage: found.localPackage, Transforms: found.transforms,
+                State: '1', Uninstallable: '1', InstallDate: '', DisplayName: '', MoreInfoURL: '' };
+            return name in answers ? putString(wide, answers[name], buffer, size)
+                : ERROR_UNKNOWN_PROPERTY_SOURCE;
+        }),
+        ...both('MsiDeterminePatchSequence', 20, wide=>async([product, sid, contextMask, count,
+            infos])=>{
+            void sid;
+            const code = reader(wide)(product);
+            if (code === null || contextMask !== MSIINSTALLCONTEXT_MACHINE || (infos >>> 0) === 0)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            if (!known(code))
+            {
+                return ERROR_UNKNOWN_PRODUCT;
+            }
+            return sequencePatches(wide, count >>> 0, infos >>> 0, [code]);
+        }),
+        ...both('MsiDetermineApplicablePatches', 12, wide=>async([packagePath, count, infos])=>{
+            const path = reader(wide)(packagePath);
+            if (path === null || (infos >>> 0) === 0)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            const product = await context.productCodeOf(path);
+            if (product === null)
+            {
+                return ERROR_INSTALL_PACKAGE_INVALID;
+            }
+            return sequencePatches(wide, count >>> 0, infos >>> 0, [product]);
+        }),
         ...both('MsiExtractPatchXMLData', 16, ()=>noPatches('MsiExtractPatchXMLData',
             ERROR_PATCH_PACKAGE_UNSUPPORTED)),
         ...both('MsiAdvertiseProduct', 16, ()=>noAdvertising('MsiAdvertiseProduct',
@@ -1297,6 +1464,33 @@ export function createProductFunctions(context){
                 type >>> 0) ?? 0),
         QueryInstanceCount: { argBytes: 0, handler: ()=>0 },
     };
+
+    /**
+     * MsiDeterminePatchSequence's and MsiDetermineApplicablePatches' answer
+     * over an array of MSIPATCHSEQUENCEINFO -- a path, its type, the order it
+     * goes in and its status: each patch file that targets the product, in
+     * the order given, the others marked as not applying.
+     *
+     * @param {boolean} wide @param {number} count @param {number} infos
+     * @param {string[]} products
+     */
+    async function sequencePatches(wide, count, infos, products){
+        let order = 0;
+        for (let at = 0; at < count; at++)
+        {
+            const entry = infos + at * 16;
+            const path = reader(wide)(context.readU32(entry));
+            const type = context.readU32(entry + 4);
+            const opened = path === null || type !== MSIPATCH_DATATYPE_PATCHFILE ? null
+                : await context.inspectPatch(path);
+            const applies = opened && typeof opened !== 'number'
+                && opened.targets.some(code=>products.some(product=>product.toUpperCase()
+                    === code.toUpperCase()));
+            writeU32(entry + 8, applies ? order++ : 0xffffffff);
+            writeU32(entry + 12, applies ? ERROR_SUCCESS : ERROR_PATCH_TARGET_NOT_FOUND);
+        }
+        return ERROR_SUCCESS;
+    }
 
     /**
      * MsiProvideQualifiedComponent(Ex): a category's qualifier, its
