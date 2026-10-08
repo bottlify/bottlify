@@ -364,6 +364,25 @@ export function createNtdllFunctions(host){
             : {}),
 
         /**
+         * NTSTATUS LdrUnloadDll(PVOID BaseAddress)
+         *
+         * FreeLibrary underneath, as a status. Its presence is what a program
+         * built with the Microsoft Layer for Unicode asks to tell NT from
+         * Windows 9x: without it the program loads unicows.dll, whose NT
+         * forwarding is not what any NT program was run with.
+         */
+        ...(kernel32.FreeLibrary
+            ? {
+                LdrUnloadDll: {
+                    argBytes: 4,
+                    /** @param {number[]} args */
+                    handler: ([module])=>(kernel32.FreeLibrary.handler([module]) !== 0
+                        ? STATUS.SUCCESS : STATUS.DLL_NOT_FOUND),
+                },
+            }
+            : {}),
+
+        /**
          * NTSTATUS NtQuerySystemTime(PLARGE_INTEGER SystemTime)
          *
          * GetSystemTimeAsFileTime's clock, as a status: no place to put it is
@@ -456,7 +475,7 @@ export function createNtdllFunctions(host){
                     /** @param {number[]} args */
                     handler: ([handle])=>registry?.close(handle >>> 0)
                         ?? (kernel32.CloseHandle.handler([handle]) !== 0
-                            ? STATUS.SUCCESS : STATUS.INVALID_HANDLE),
+                            ? STATUS.SUCCESS : STATUS.DLL_NOT_FOUND),
                 },
             }
             : {}),

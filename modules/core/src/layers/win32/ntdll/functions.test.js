@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createNtdllFunctions } from './functions.js';
+import { STATUS } from './status.js';
 import { UNLOAD_KEY } from '../advapi32/functions.js';
 import { TOKEN_NATIVES } from '../advapi32/tokens.js';
 
@@ -138,6 +139,22 @@ test('VerSetConditionMask is the entry kernel32 exports', ()=>{
     // RtlVerifyVersionInfo.
     const host = fakeHost();
     assert.equal(createNtdllFunctions(host).VerSetConditionMask, host.kernel32.VerSetConditionMask);
+});
+
+test('LdrUnloadDll is FreeLibrary as a status', ()=>{
+    // A program linked with the Microsoft Layer for Unicode tells NT from
+    // Windows 9x by whether ntdll has this name; without it, it loads
+    // unicows.dll as on 9x.
+    const host = fakeHost();
+    /** @type {number[]} */
+    const freed = [];
+    /** @type {any} */ (host.kernel32).FreeLibrary = { argBytes: 4,
+        handler: (/** @type {number[]} */ [module])=>(freed.push(module), module === 0x10000000 ? 1 : 0) };
+    const { LdrUnloadDll } = createNtdllFunctions(host);
+    assert.equal(LdrUnloadDll.argBytes, 4);
+    assert.equal(LdrUnloadDll.handler([0x10000000]), STATUS.SUCCESS);
+    assert.equal(LdrUnloadDll.handler([0x20000000]) >>> 0, STATUS.DLL_NOT_FOUND);
+    assert.deepEqual(freed, [0x10000000, 0x20000000]);
 });
 
 test('a name the other table does not have stays unexported', ()=>{
