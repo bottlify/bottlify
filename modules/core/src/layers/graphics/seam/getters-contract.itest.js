@@ -866,7 +866,19 @@ function differences(version, options, steps){
             }
         });
     });
-    return { found, divergences: guest.divergences, guest, plain };
+    // Every refusal is reported (`refusals.js`), and a program refused alike
+    // down both paths is told so alike: only what the guest path alone said counts.
+    const said = [...plain.divergences];
+    const divergences = guest.divergences.filter(line=>{
+        const at = said.indexOf(line);
+        if (at < 0)
+        {
+            return true;
+        }
+        said.splice(at, 1);
+        return false;
+    });
+    return { found, divergences, guest, plain };
 }
 
 /**

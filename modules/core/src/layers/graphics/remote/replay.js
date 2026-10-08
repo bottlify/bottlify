@@ -111,6 +111,10 @@ function partOf(args){
 /** D3DLOCK_READONLY, the same number in both versions of the API. */
 const LOCK_READ_ONLY = 0x10;
 
+/** D3DLOCK_NOOVERWRITE and DISCARD, the same in both versions too. */
+const D3DLOCK_NOOVERWRITE = 0x1000;
+const D3DLOCK_DISCARD = 0x2000;
+
 /**
  * Whether a lock was taken to read only: its flags are its last argument, in
  * every lock of both versions.
@@ -1114,7 +1118,20 @@ export function createRecording(options){
                         const locks = lockedAt.get(target) ?? new Map();
                         locks.set(partOf(args), { address: bits, length });
                         lockedAt.set(target, locks);
-                        claim(bits, length);
+                        if (name === 'Lock' && ((args[3] ?? 0)
+                            & (D3DLOCK_NOOVERWRITE | D3DLOCK_DISCARD)) !== D3DLOCK_NOOVERWRITE)
+                        {
+                            // A buffer's lock but NOOVERWRITE alone lets the program write
+                            // anywhere in it afterwards -- DISCARD's fresh storage, or a
+                            // plain lock's wait for the GPU -- under NOOVERWRITE locks
+                            // the guest takes itself (`seam/shadow.js`): all of it is
+                            // claimed now.
+                            claim(bits - (args[0] ?? 0), null);
+                        }
+                        else
+                        {
+                            claim(bits, length);
+                        }
                     }
                 }
             }
@@ -1162,6 +1179,13 @@ export function createRecording(options){
         const made = new Map();
         return {
             get(target, key){
+                if (key === 'lendsMemory')
+                {
+                    // Asked by the seam's guest routines (`seam/shadow.js`):
+                    // what is unlocked is read later, and a lock in the
+                    // guest must come here to claim it first.
+                    return lender !== null;
+                }
                 const value = Reflect.get(target, key);
                 if (typeof value === 'function' && typeof key === 'string')
                 {

@@ -206,7 +206,7 @@ test('the block fits its two pages and its regions follow one another', ()=>{
     assert.equal(SHADOW.CLIP_PLANES + 4, SHADOW.VALIDATED);
     assert.equal(SHADOW.VALIDATED + SHADOW.VALIDATED_TABLES * SHADOW.VALIDATED_SLOTS * 4,
         SHADOW.SIZE);
-    assert.equal(BUFFER.SIZE, 32);
+    assert.equal(BUFFER.SIZE, 36);
     assert.equal(TEXTURE.LEVELS + TEXTURE.LEVEL_SLOTS * 4, TEXTURE.SIZE);
     // Enough for the longest chain a texture of this era can have: a 32768
     // texel side is sixteen levels, and no device of the era reports one.

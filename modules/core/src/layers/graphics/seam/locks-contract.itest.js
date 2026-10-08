@@ -186,9 +186,14 @@ const VERSIONS = [
  * the bytes of its vertices as the renderer would have them -- the buffer's
  * unlocked ranges, copied out of guest memory at each unlock.
  *
- * @param {Version} version
+ * Lent, the ranges are read as the graphics worker reads lent memory
+ * (`remote/lending.js`): as late as it may -- an unlocked range is lent at
+ * the next draw, and its bytes are taken when a host lock claims it or, at
+ * the end, out of what guest memory holds then.
+ *
+ * @param {Version} version @param {boolean} [lent]
  */
-function machine(version){
+function machine(version, lent = false){
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: {},
@@ -223,12 +228,22 @@ function machine(version){
     assert.equal(device.CreateVertexBuffer(LENGTH, D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY, FVF,
         D3DPOOL_DEFAULT, out), D3D_OK);
     const buffer = out.buffer;
+    device.lendsMemory = lent;
 
     // What the renderer holds of the buffer: each unlock copies the range its
     // lock named, as `unlockBuffer` reads it out of guest memory.
     const held = new Uint8Array(LENGTH);
     /** @type {{ offset: number, length: number } | null} */
     let locking = null;
+    /** Unlocked ranges a draw has yet to lend. @type {{ offset: number, length: number }[]} */
+    let unlent = [];
+    /**
+     * What the worker plays, in order: lends (their bytes once claimed) and draws.
+     *
+     * @type {({ offset: number, length: number, bytes: Uint8Array | null }
+     *     | { start: number, count: number })[]}
+     */
+    const played = [];
     const lock = buffer.Lock.bind(buffer);
     const unlock = buffer.Unlock.bind(buffer);
     /** @param {number} offset @param {number} size @param {any} result @param {number} flags */
@@ -237,6 +252,18 @@ function machine(version){
         if (hr === D3D_OK)
         {
             locking = { offset, length: size === 0 ? LENGTH - offset : size };
+            // Claimed as the recorder claims (`remote/replay.js`): a lock
+            // but NOOVERWRITE alone all of the buffer, one with it its range.
+            const [from, to] = flags !== D3DLOCK_NOOVERWRITE ? [0, LENGTH]
+                : [offset, offset + locking.length];
+            for (const entry of played)
+            {
+                if ('offset' in entry && !entry.bytes && entry.offset < to
+                    && from < entry.offset + entry.length)
+                {
+                    entry.bytes = readMemory(buffer.base + entry.offset, entry.length).slice();
+                }
+            }
         }
         return hr;
     };
@@ -244,7 +271,15 @@ function machine(version){
         const hr = unlock();
         if (hr === D3D_OK && locking)
         {
-            held.set(readMemory(buffer.base + locking.offset, locking.length), locking.offset);
+            if (lent)
+            {
+                unlent.push(locking);
+            }
+            else
+            {
+                held.set(readMemory(buffer.base + locking.offset, locking.length),
+                    locking.offset);
+            }
             locking = null;
         }
         return hr;
@@ -255,15 +290,38 @@ function machine(version){
     /** @param {number} type @param {number} start @param {number} count */
     device.DrawPrimitive = (type, start, count)=>{
         const hr = draw(type, start, count);
-        if (hr === D3D_OK)
+        if (hr === D3D_OK && lent)
+        {
+            played.push(...unlent.map(range=>({ ...range, bytes: null })), { start, count });
+            unlent = [];
+        }
+        else if (hr === D3D_OK)
         {
             reads.push([...held.subarray(start * STRIDE, (start + count * 3) * STRIDE)]);
         }
         return hr;
     };
+    /** The worker plays what was lent and drawn: what each draw read. */
+    const drained = ()=>{
+        for (const entry of played)
+        {
+            if ('offset' in entry)
+            {
+                held.set(entry.bytes ?? readMemory(buffer.base + entry.offset, entry.length),
+                    entry.offset);
+            }
+            else
+            {
+                reads.push([...held.subarray(entry.start * STRIDE,
+                    (entry.start + entry.count * 3) * STRIDE)]);
+            }
+        }
+        played.length = 0;
+        return reads;
+    };
     version.bind(device, buffer);
     assert.equal(device.BeginScene(), D3D_OK);
-    return { host, allocate, readMemory, writeMemory, readU32, device, buffer, reads };
+    return { host, allocate, readMemory, writeMemory, readU32, device, buffer, drained };
 }
 
 /**
@@ -276,9 +334,13 @@ function machine(version){
 const write = (writeMemory, at, length, fill)=>writeMemory(at,
     Uint8Array.from({ length }, (unused, i)=>(fill + i * 7) & 0xff));
 
-/** Every call made on the device as it comes. @param {Version} version @param {Step[]} steps */
-function direct(version, steps){
-    const { writeMemory, device, buffer, reads } = machine(version);
+/**
+ * Every call made on the device as it comes.
+ *
+ * @param {Version} version @param {Step[]} steps @param {boolean} [lent]
+ */
+function direct(version, steps, lent = false){
+    const { writeMemory, device, buffer, drained } = machine(version, lent);
     for (const step of steps)
     {
         if (step.kind === 'lock')
@@ -295,7 +357,7 @@ function direct(version, steps){
                 D3D_OK);
         }
     }
-    return reads;
+    return drained();
 }
 
 /**
@@ -305,11 +367,11 @@ function direct(version, steps){
  * gives back the lock and says so in the block; a device call plays it all
  * and brings the block to the device after (`settledAfter`).
  *
- * @param {Version} version @param {Step[]} steps
+ * @param {Version} version @param {Step[]} steps @param {boolean} [lent]
  */
-function guest(version, steps){
-    const { host, allocate, readMemory, writeMemory, readU32, device, buffer, reads } =
-        machine(version);
+function guest(version, steps, lent = false){
+    const { host, allocate, readMemory, writeMemory, readU32, device, buffer, drained } =
+        machine(version, lent);
     const shadow = createShadow({
         allocate, readMemory, readU32, writeMemory, device,
         commands: { take: records=>device.commands(records,
@@ -434,23 +496,27 @@ function guest(version, steps){
     }
     // A present, or any call at the end of the frame, plays what is left.
     shadow.sync();
-    return reads;
+    return drained();
 }
 
 test('a draw reads the vertices its buffer held when the program made it, however the locks'
-    + ' around it were taken', ()=>{
+    + ' around it were taken and whenever the worker reads what was lent', ()=>{
     for (const version of VERSIONS)
     {
         for (let seed = 1; seed <= 40; seed++)
         {
             const steps = generate(seed, 300);
             const expected = direct(version, steps);
-            const actual = guest(version, steps);
-            const label = `${version.name}, seed ${seed}`;
-            assert.equal(actual.length, expected.length, `${label}: every draw is made`);
-            const first = expected.findIndex((bytes, i)=>
-                bytes.some((byte, j)=>byte !== actual[i][j]));
-            assert.equal(first, -1, `${label}: draw ${first} reads what it would on the host`);
+            for (const [arm, actual] of [['guest', guest(version, steps)],
+                ['lent', direct(version, steps, true)],
+                ['guest, lent', guest(version, steps, true)]])
+            {
+                const label = `${version.name}, seed ${seed}, ${arm}`;
+                assert.equal(actual.length, expected.length, `${label}: every draw is made`);
+                const first = expected.findIndex((bytes, i)=>
+                    bytes.some((byte, j)=>byte !== actual[i][j]));
+                assert.equal(first, -1, `${label}: draw ${first} reads what it would on the host`);
+            }
         }
     }
 });
