@@ -14,6 +14,7 @@ import { createGdiFunctions } from '../gdi32/functions.js';
 import { createGdiDrawing } from '../../graphics/gdi/context.js';
 import { createSurface, surfaceForDibSection, viewOf } from '../../graphics/gdi/surface.js';
 import { createCommonControls } from '../comctl32/controls.js';
+import { imagePlace } from './controls.js';
 import { PBM_SETRANGE, PBM_SETPOS } from '../comctl32/progress.js';
 import {
     TVM_INSERTITEMA, TVM_EXPAND, TVM_SELECTITEM, TVS_HASBUTTONS, TVS_HASLINES,
@@ -1834,3 +1835,24 @@ test('a desktop given a picture shows it where no window is, its colour without 
     await openDialog(plain);
     assert.equal(plain.desktop.read(4, 150), 0x00808080, 'with no picture, the desktop colour');
 });
+
+test('a static control\'s image is centred, stretched or left at its corner as its styles say',
+    ()=>{
+        // A setup's welcome page centres a picture larger than its control;
+        // drawn from the corner, it showed its own left margin and lost its
+        // right side.
+        const SS_BITMAP = 0x0e;
+        const SS_CENTERIMAGE = 0x200;
+        const SS_REALSIZECONTROL = 0x40;
+        const SS_REALSIZEIMAGE = 0x800;
+        const rect = { left: 10, top: 20, right: 175, bottom: 321 };
+        const picture = { width: 200, height: 320 };
+        assert.deepEqual(imagePlace({ style: SS_BITMAP | SS_CENTERIMAGE | SS_REALSIZEIMAGE },
+            rect, picture), { x: -8, y: 10, centred: true }, 'centred, and clipped either side');
+        assert.deepEqual(imagePlace({ style: SS_BITMAP | SS_REALSIZECONTROL }, rect, picture),
+            { x: 10, y: 20, width: 165, height: 301, centred: false }, 'stretched to the control');
+        assert.deepEqual(imagePlace({ style: SS_BITMAP | SS_REALSIZECONTROL | SS_CENTERIMAGE },
+            rect, picture).centred, true, 'centring wins over stretching');
+        assert.deepEqual(imagePlace({ style: SS_BITMAP }, rect, picture),
+            { x: 10, y: 20, centred: false });
+    });

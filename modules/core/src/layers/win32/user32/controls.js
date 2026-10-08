@@ -189,6 +189,8 @@ const SS_ETCHEDFRAME = 0x12;
 const SS_NOPREFIX = 0x80;
 const SS_NOTIFY = 0x100;
 const SS_CENTERIMAGE = 0x200;
+/** A static control's image stretched to the control rather than the control to it. */
+const SS_REALSIZECONTROL = 0x40;
 const SS_SUNKEN = 0x1000;
 const STM_SETICON = 0x170;
 const STM_GETICON = 0x171;
@@ -455,12 +457,44 @@ const OPAQUE = 2;
  *           colour, in its own mode; otherwise over what is there.
  * @property {(hdc: number, text: string) => { width: number, height: number,
  *     ascent: number }} measure
- * @property {(hdc: number, x: number, y: number, bitmap: number) => boolean} bitmap
+ * @property {(hdc: number, x: number, y: number, bitmap: number, width?: number,
+ *     height?: number) => boolean} bitmap  Stretched to a size when one is given.
+ * @property {(bitmap: number) => { width: number, height: number, corner: number } | null}
+ *     [bitmapShape]  A bitmap's size and its top-left pixel's colour.
  * @property {(hdc: number, x: number, y: number,
  *     picture: { width: number, height: number, bgra: Uint8Array },
  *     width?: number, height?: number) => boolean} [picture]
  *           A decoded icon drawn at a point, its transparent pixels left out.
  */
+
+/**
+ * Where a static control's image goes, as its styles say: SS_CENTERIMAGE
+ * centres it, clipped when it is larger; SS_REALSIZECONTROL alone
+ * stretches it to the control; otherwise it sits at the top left at its
+ * own size.
+ *
+ * @param {{ style: number }} record @param {Rect} rect
+ * @param {{ width: number, height: number } | null} shape
+ * @returns {{ x: number, y: number, width?: number, height?: number, centred: boolean }}
+ */
+export const imagePlace = (record, rect, shape)=>{
+    if (!shape)
+    {
+        return { x: rect.left, y: rect.top, centred: false };
+    }
+    if ((record.style & SS_CENTERIMAGE) !== 0)
+    {
+        return { x: rect.left + Math.floor((rect.right - rect.left - shape.width) / 2),
+            y: rect.top + Math.floor((rect.bottom - rect.top - shape.height) / 2),
+            centred: true };
+    }
+    if ((record.style & SS_REALSIZECONTROL) !== 0)
+    {
+        return { x: rect.left, y: rect.top, width: rect.right - rect.left,
+            height: rect.bottom - rect.top, centred: false };
+    }
+    return { x: rect.left, y: rect.top, centred: false };
+};
 
 /**
  * What the procedures need from the window manager around them.
@@ -1287,12 +1321,24 @@ export function createControlProcedures(host){
                 return etchedFrame(hdc, rect);
             case SS_ICON:
             case SS_BITMAP: {
-                background(hdc, rect, brush, COLOR_3DFACE);
                 const image = state.image ?? 0;
                 const picture = image !== 0 ? host.picture?.(image) ?? null : null;
+                const shape = picture ?? (image !== 0 ? draw.bitmapShape?.(image) ?? null : null);
+                const place = imagePlace(record, rect, shape);
+                // A bitmap centred leaves the rest of the control its top-left
+                // pixel's colour, as the static control fills it.
+                if (place.centred && !picture && shape && 'corner' in shape)
+                {
+                    draw.fill(hdc, rect, shape.corner);
+                }
+                else
+                {
+                    background(hdc, rect, brush, COLOR_3DFACE);
+                }
                 const drawn = picture
-                    ? draw.picture?.(hdc, rect.left, rect.top, picture) === true
-                    : draw.bitmap(hdc, rect.left, rect.top, image);
+                    ? draw.picture?.(hdc, place.x, place.y, picture, place.width, place.height)
+                        === true
+                    : draw.bitmap(hdc, place.x, place.y, image, place.width, place.height);
                 if (image !== 0 && !drawn && !state.imageDivergenceSaid)
                 {
                     state.imageDivergenceSaid = true;
