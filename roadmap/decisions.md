@@ -270,6 +270,19 @@ next read answers the same. A setup that reads a folder's DACL, merges an entry 
 `SetEntriesInAcl` and writes it back goes through and changes nothing it could see. Not measured
 against XP; revisit if a program is found that checks the DACL it wrote. *2026-10-07.*
 
+**A35 — kernel32 exports the Windows 95 family's own calls, and each fails as it does when what it
+reaches for is absent.** XP's kernel32 is believed (not checked against an XP export table) not to
+export the flat-thunk helpers (`ThunkConnect32`, `FT_Thunk`, `FT_Exit*`, `MapLS`, `MapSL`,
+`SMapLS*`, `SUnMapLS*`, `UnMapLS`), `RegisterServiceProcess`, `OpenVxDHandle`,
+`CreateSocketHandle`, `SetHandleContext`, `ConvertToGlobalHandle` and
+`MakeCriticalSectionGlobal`. Programs written for both families import them statically all the
+same, and an image with an import the loader cannot bind does not start at all; so they are
+exported, and answer as Windows 95 does without the 16-bit subsystem, the selector or the VxD they
+need: the thunk does not connect, a pointer past 64 KiB gets no selector, no ring-0 handle is
+made. A program that probes `GetProcAddress` for one of them to tell the families apart finds it
+here and is told the failure when it calls; revisit if such a program is found to take a 9x path it
+cannot finish. *2026-10-07.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

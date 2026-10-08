@@ -23,6 +23,7 @@
 
 import { lstrcpyCode, lstrlenCode } from './lstr.js';
 import { assemble } from '../msvcrt/guest-code.js';
+import { createWin9xFunctions } from './win9x.js';
 import {
     PROCESSOR, PROCESSOR_FEATURES, PROCESSOR_LEVEL, PROCESSOR_REVISION,
 } from './processor.js';
@@ -152,13 +153,34 @@ const MAX_STRING = 0x7fffffff;
 /** Codes this surface can also report. */
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
+/** A pointer the call cannot write through. */
+const ERROR_NOACCESS = 998;
 /** What DeactivateActCtx answers for a cookie that is not the innermost. */
 const ERROR_SXS_INVALID_DEACTIVATION = 14065;
 /** What CreateActCtx sets when it cannot build a context from a manifest. */
 const ERROR_SXS_CANT_GEN_ACTCTX = 14001;
 const INVALID_HANDLE_VALUE = 0xffffffff;
 /** No activation context has this section: what a process without a manifest is told. */
+const ERROR_SXS_SECTION_NOT_FOUND = 14004;
+/**
+ * The least ACTCTX_SECTION_KEYED_DATA a section lookup writes into: up to
+ * the context handle, without the assembly roster index the later layouts add.
+ */
+const SECTION_KEYED_DATA_LEAST = 36;
+/** FIND_ACTCTX_SECTION_KEY_RETURN_HACTCTX, the one flag a lookup takes. */
+const FIND_ACTCTX_SECTION_KEY_RETURN_HACTCTX = 1;
 
+/**
+ * SetThreadExecutionState's requests: the system, the display, a user, and
+ * whether the request lasts. These four are the whole of what Windows XP
+ * takes; away mode came later and is refused here as it is there.
+ */
+const ES_SYSTEM_REQUIRED = 0x00000001;
+const ES_DISPLAY_REQUIRED = 0x00000002;
+const ES_USER_PRESENT = 0x00000004;
+const ES_CONTINUOUS = 0x80000000;
+const EXECUTION_STATES = ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED | ES_USER_PRESENT
+    | ES_CONTINUOUS;
 
 /**
  * What FormatMessage says about a code, for the codes this build produces.
@@ -339,23 +361,6 @@ export function createSystemFunctions(host){
         host.writeMemory(address, bytes);
     };
 
-    /**
-     * The buffer protocol these two share: nothing written and the length
-     * reported when there is no room, the length written otherwise -- in both
-     * cases without the terminator, which is what FormatMessage and
-     * GetProfileString both document.
-     *
-     * @param {number} buffer @param {number} size @param {string} text
-     */
-    const writeAnsiTo = (buffer, size, text)=>{
-        if (buffer === 0 || text.length + 1 > size)
-        {
-            return 0;
-        }
-        writeAnsi(buffer, text);
-        return text.length;
-    };
-
     /** @param {number} address @param {number} value */
     const writeDword = (address, value)=>{
         host.writeMemory(address, new Uint8Array([
@@ -367,6 +372,31 @@ export function createSystemFunctions(host){
     const readDword = address=>{
         const bytes = host.readMemory(address, 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+    };
+
+    /**
+     * What SetThreadExecutionState holds for each thread, by its record; a
+     * call with no thread to name is the process's own, under this map.
+     *
+     * @type {WeakMap<object, number>}
+     */
+    const executionStates = new WeakMap();
+
+    /** Both FindActCtxSectionString forms; the string itself is never read. */
+    const findActCtxSectionString = {
+        argBytes: 20,
+        /** @param {number[]} args */
+        handler: ([flags, , , text, data])=>{
+            if ((flags & ~FIND_ACTCTX_SECTION_KEY_RETURN_HACTCTX) !== 0
+                || (text >>> 0) === 0 || (data >>> 0) === 0
+                || readDword(data >>> 0) < SECTION_KEYED_DATA_LEAST)
+            {
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            host.setLastError(ERROR_SXS_SECTION_NOT_FOUND);
+            return 0;
+        },
     };
 
     /** @type {number[]} What ActivateActCtx put on the stack, innermost last. */
@@ -732,7 +762,7 @@ export function createSystemFunctions(host){
     const nowAsSystemTime = ()=>systemTimeFrom(
         BigInt(Math.trunc(host.systemTimeMs())) * 10_000n + FILETIME_AT_UNIX_EPOCH);
 
-    return {
+    const table = {
         /**
          * BOOL IsProcessorFeaturePresent(DWORD ProcessorFeature)
          *
@@ -1140,6 +1170,20 @@ export function createSystemFunctions(host){
         ReleaseActCtx: { argBytes: 4, handler: ()=>0 },
 
         /**
+         * BOOL FindActCtxSectionStringA/W(DWORD dwFlags, const GUID *lpExtensionGuid,
+         *     ULONG ulSectionId, LPCSTR lpStringToFind,
+         *     PACTCTX_SECTION_KEYED_DATA ReturnedData)
+         *
+         * No context is built here (CreateActCtx above), so no section is in
+         * any, and a lookup that is well formed answers that -- the answer a
+         * caller probing for a redirection takes its default path on. A
+         * missing string, a missing or short structure, or a flag other than
+         * the one a lookup takes is a bad parameter first, as it is there.
+         */
+        FindActCtxSectionStringA: findActCtxSectionString,
+        FindActCtxSectionStringW: findActCtxSectionString,
+
+        /**
          * UINT SetErrorMode(UINT uMode)
          *
          * Remembered and reported back, because the value is the return of the
@@ -1208,21 +1252,75 @@ export function createSystemFunctions(host){
         },
 
         /**
-         * DWORD GetProfileStringA(LPCSTR lpAppName, LPCSTR lpKeyName,
-         *   LPCSTR lpDefault, LPSTR lpReturnedString, DWORD nSize)
+         * BOOL SetThreadPriorityBoost(HANDLE hThread, BOOL DisablePriorityBoost)
+         * BOOL GetThreadPriorityBoost(HANDLE hThread, PBOOL pDisablePriorityBoost)
          *
-         * Reads win.ini, which does not exist, so every key is absent and the
-         * caller's own default is what comes back. That is the documented
-         * behaviour for a missing key and is exactly what a caller passing a
-         * default is prepared for -- inventing a value instead would override a
-         * choice the program already made.
+         * Kept on the thread and read back. The boost is the dynamic one the
+         * scheduler gives a thread that has waited, and this scheduler gives
+         * none, so the setting changes nothing a thread can measure -- but a
+         * caller that sets it and reads it back finds what it set.
          */
-        GetProfileStringA: {
-            argBytes: 20,
+        SetThreadPriorityBoost: {
+            argBytes: 8,
             /** @param {number[]} args */
-            handler: ([, , fallback, buffer, size])=>{
-                const text = fallback === 0 ? '' : readAnsi(fallback >>> 0, MAX_STRING);
-                return writeAnsiTo(buffer >>> 0, size >>> 0, text);
+            handler: ([handle, disable])=>{
+                const target = thread(handle);
+                if (!target)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                target.priorityBoostDisabled = (disable >>> 0) !== 0;
+                return 1;
+            },
+        },
+        GetThreadPriorityBoost: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                const target = thread(handle);
+                if (!target)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                if ((out >>> 0) === 0)
+                {
+                    host.setLastError(ERROR_NOACCESS);
+                    return 0;
+                }
+                writeDword(out >>> 0, target.priorityBoostDisabled ? 1 : 0);
+                return 1;
+            },
+        },
+
+        /**
+         * EXECUTION_STATE SetThreadExecutionState(EXECUTION_STATE esFlags)
+         *
+         * The thread's lasting request is replaced only by one that says
+         * ES_CONTINUOUS; one without it is a single nudge of the idle timer
+         * and leaves the lasting request as it was. The answer is the request
+         * before the call, a thread that never asked holding ES_CONTINUOUS
+         * alone. A flag outside the four is refused with NULL. Nothing here
+         * sleeps or blanks a display, so the request is kept, not acted on.
+         */
+        SetThreadExecutionState: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([flags])=>{
+                const asked = flags >>> 0;
+                if ((asked & ~EXECUTION_STATES) !== 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const key = host.currentThread() ?? executionStates;
+                const previous = executionStates.get(key) ?? ES_CONTINUOUS;
+                if ((asked & ES_CONTINUOUS) !== 0)
+                {
+                    executionStates.set(key, asked);
+                }
+                return previous >>> 0;
             },
         },
 
@@ -1461,5 +1559,20 @@ export function createSystemFunctions(host){
                 readWide(first >>> 0, MAX_STRING).toLowerCase(),
                 readWide(second >>> 0, MAX_STRING).toLowerCase())),
         },
+    };
+
+    // The undecorated names are kernel32's own exports beside the ANSI ones
+    // -- a program written before the A and W suffixes looks them up by these
+    // -- and the same entries rather than copies, so the two cannot drift.
+    return {
+        ...table,
+        // Windows 95's own calls, which find nothing of what they reach for.
+        ...createWin9xFunctions(host),
+        lstrcat: table.lstrcatA,
+        lstrcmp: table.lstrcmpA,
+        lstrcmpi: table.lstrcmpiA,
+        lstrcpy: table.lstrcpyA,
+        lstrcpyn: table.lstrcpynA,
+        lstrlen: table.lstrlenA,
     };
 }

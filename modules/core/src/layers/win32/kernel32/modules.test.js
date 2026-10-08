@@ -287,3 +287,61 @@ test("K32GetModuleInformation reads a module's base, size and entry from its own
     assert.equal(entry.handler([0xffffffff, 0x20000, 0x500, 12]), 0);
     assert.equal(lastError(), 6, 'ERROR_INVALID_HANDLE');
 });
+
+test('SetDllDirectory adds its directory to a bare name\'s search; NULL takes it away', async()=>{
+    /** @type {string[]} */
+    const asked = [];
+    const loader = (/** @type {string} */ name)=>{
+        asked.push(name);
+        if (name === 'D:\\Game\\bin\\engine.dll')
+        {
+            return 0x10000000;
+        }
+        return name === 'D:\\Game\\bin\\late.dll' ? Promise.resolve(0x20000000) : 0;
+    };
+    const { host, say, lastError } = hostFor({ load: /** @type {any} */ (loader) });
+    const fns = createModuleFunctions(/** @type {any} */ (host));
+    say(0x100, 'engine.dll');
+    say(0x200, 'D:\\Game\\bin\\');
+    say(0x300, 'late.dll');
+    say(0x400, 'C:\\Other\\engine.dll');
+
+    assert.equal(fns.LoadLibraryA.handler([0x100]), 0, 'not found with the default search');
+    assert.equal(lastError(), 126);
+    assert.equal(fns.SetDllDirectoryW.argBytes, 4);
+    assert.equal(fns.SetDllDirectoryA.handler([0x200]), 1);
+    asked.length = 0;
+    assert.equal(fns.LoadLibraryA.handler([0x100]), 0x10000000);
+    assert.deepEqual(asked, ['engine.dll', 'D:\\Game\\bin\\engine.dll'],
+        'the usual search first, then the directory');
+    assert.equal(await fns.LoadLibraryA.handler([0x300]), 0x20000000, 'a load that waits');
+    asked.length = 0;
+    assert.equal(fns.LoadLibraryA.handler([0x400]), 0);
+    assert.deepEqual(asked, ['C:\\Other\\engine.dll'], 'a path is not searched for');
+
+    assert.equal(fns.SetDllDirectoryW.handler([0]), 1);
+    asked.length = 0;
+    assert.equal(fns.LoadLibraryA.handler([0x100]), 0);
+    assert.deepEqual(asked, ['engine.dll'], 'NULL puts the default search back');
+});
+
+test('GetDllDirectory answers as the path calls do', ()=>{
+    const bytes = new Uint8Array(0x400);
+    const { host, say } = hostFor();
+    const fns = createModuleFunctions(/** @type {any} */ ({
+        ...host,
+        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
+            bytes.set(data, at),
+    }));
+    assert.equal(fns.GetDllDirectoryA.argBytes, 8);
+    assert.equal(fns.GetDllDirectoryA.handler([16, 0x100]), 0, 'none set: an empty string');
+    assert.equal(bytes[0x100], 0);
+    say(0x10, 'C:\\Libs');
+    fns.SetDllDirectoryA.handler([0x10]);
+    assert.equal(fns.GetDllDirectoryA.handler([4, 0x100]), 8, 'too small: the size needed');
+    assert.equal(fns.GetDllDirectoryA.handler([8, 0x100]), 7);
+    assert.equal(String.fromCharCode(...bytes.subarray(0x100, 0x108)), 'C:\\Libs\0');
+    assert.equal(fns.GetDllDirectoryW.handler([8, 0x200]), 7);
+    assert.equal(String.fromCharCode(...new Uint16Array(bytes.slice(0x200, 0x210).buffer)),
+        'C:\\Libs\0');
+});

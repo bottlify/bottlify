@@ -452,6 +452,87 @@ export function createProfileFunctions(host){
         return name === null ? null : resolve(name);
     };
 
+    /**
+     * A section's lines into the caller's buffer, NUL-separated: GetPrivate-
+     * ProfileSection's body, for whichever file and width.
+     *
+     * @param {string | null} path @param {string | null} name
+     * @param {number} buffer @param {number} size @param {boolean} [wide]
+     */
+    const readSection = (path, name, buffer, size, wide = false)=>{
+        /** @param {ProfileLine[]} lines */
+        const answer = lines=>{
+            const span = name === null ? null : sectionSpan(lines, name);
+            const entries = span === null
+                ? []
+                : lines.slice(span.start + 1, span.end)
+                    .map(line=>line.text.trim())
+                    .filter(line=>line !== '' && !line.startsWith(';'));
+            return writeList(buffer, size, entries, wide);
+        };
+        const loaded = path === null ? [] : load(path);
+        return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+    };
+
+    /**
+     * The NUL-separated list a section write is given, ended by an empty
+     * string, or null for a NULL pointer.
+     *
+     * @param {number} list @param {boolean} wide
+     * @returns {string[] | null}
+     */
+    const entriesOf = (list, wide)=>{
+        if ((list >>> 0) === 0)
+        {
+            return null;
+        }
+        /** @type {string[]} */
+        const entries = [];
+        for (let at = list >>> 0; ;)
+        {
+            const entry = wide
+                ? host.readWideString?.(at, MAX_VALUE) ?? ''
+                : host.readCString(at, MAX_VALUE);
+            if (entry === '')
+            {
+                return entries;
+            }
+            entries.push(entry);
+            at += wide ? (entry.length + 1) * 2 : encodeAnsi(entry).length + 1;
+        }
+    };
+
+    /**
+     * WritePrivateProfileSection's body: the section's lines replaced by the
+     * list, a section not there added at the end, a NULL list removing it.
+     *
+     * @param {string | null} path @param {string | null} name
+     * @param {string[] | null} entries
+     */
+    const writeSection = (path, name, entries)=>{
+        if (path === null || name === null)
+        {
+            return 0;
+        }
+        /** @param {ProfileLine[]} lines */
+        const answer = lines=>{
+            const span = sectionSpan(lines, name);
+            const body = entries === null
+                ? []
+                : [parseLine(`[${name}]`), ...entries.map(parseLine)];
+            if (span === null && entries === null)
+            {
+                return 1;
+            }
+            const next = span === null
+                ? [...lines, ...body]
+                : [...lines.slice(0, span.start), ...body, ...lines.slice(span.end)];
+            return store(path, next) ? 1 : 0;
+        };
+        const loaded = load(path);
+        return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+    };
+
     const WIN_INI = `${WINDOWS_DIRECTORY}\\win.ini`;
 
     return {
@@ -516,22 +597,8 @@ export function createProfileFunctions(host){
         GetPrivateProfileSectionA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([section, buffer, size, file])=>{
-                const path = pathOf(file);
-                const name = text(section, MAX_NAME);
-                /** @param {ProfileLine[]} lines */
-                const answer = lines=>{
-                    const span = name === null ? null : sectionSpan(lines, name);
-                    const entries = span === null
-                        ? []
-                        : lines.slice(span.start + 1, span.end)
-                            .map(line=>line.text.trim())
-                            .filter(line=>line !== '' && !line.startsWith(';'));
-                    return writeList(buffer, size, entries);
-                };
-                const loaded = path === null ? [] : load(path);
-                return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
-            },
+            handler: ([section, buffer, size, file])=>
+                readSection(pathOf(file), text(section, MAX_NAME), buffer, size),
         },
 
         /**
@@ -582,47 +649,8 @@ export function createProfileFunctions(host){
         WritePrivateProfileSectionA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([section, list, file])=>{
-                const path = pathOf(file);
-                const name = text(section, MAX_NAME);
-                if (path === null || name === null)
-                {
-                    return 0;
-                }
-                /** @type {string[] | null} */
-                let entries = null;
-                if ((list >>> 0) !== 0)
-                {
-                    entries = [];
-                    for (let at = list >>> 0; ;)
-                    {
-                        const entry = host.readCString(at, MAX_VALUE);
-                        if (entry === '')
-                        {
-                            break;
-                        }
-                        entries.push(entry);
-                        at += encodeAnsi(entry).length + 1;
-                    }
-                }
-                /** @param {ProfileLine[]} lines */
-                const answer = lines=>{
-                    const span = sectionSpan(lines, name);
-                    const body = entries === null
-                        ? []
-                        : [parseLine(`[${name}]`), ...entries.map(parseLine)];
-                    if (span === null && entries === null)
-                    {
-                        return 1;
-                    }
-                    const next = span === null
-                        ? [...lines, ...body]
-                        : [...lines.slice(0, span.start), ...body, ...lines.slice(span.end)];
-                    return store(path, next) ? 1 : 0;
-                };
-                const loaded = load(path);
-                return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
-            },
+            handler: ([section, list, file])=>
+                writeSection(pathOf(file), text(section, MAX_NAME), entriesOf(list, false)),
         },
 
         /**
@@ -741,6 +769,36 @@ export function createProfileFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([section, key, value])=>put(WIN_INI, section, key, value),
+        },
+        /**
+         * DWORD GetProfileSectionA/W(LPCSTR lpAppName, LPSTR lpReturnedString,
+         *     DWORD nSize) and BOOL WriteProfileSectionA/W(LPCSTR lpAppName,
+         *     LPCSTR lpString): the private-profile section calls on win.ini,
+         * the wide forms counting characters.
+         */
+        GetProfileSectionA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([section, buffer, size])=>
+                readSection(WIN_INI, text(section, MAX_NAME), buffer, size),
+        },
+        GetProfileSectionW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([section, buffer, size])=>
+                readSection(WIN_INI, wideText(section, MAX_NAME), buffer, size, true),
+        },
+        WriteProfileSectionA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([section, list])=>
+                writeSection(WIN_INI, text(section, MAX_NAME), entriesOf(list, false)),
+        },
+        WriteProfileSectionW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([section, list])=>
+                writeSection(WIN_INI, wideText(section, MAX_NAME), entriesOf(list, true)),
         },
         /** BOOL WriteProfileStringW(LPCWSTR lpAppName, LPCWSTR lpKeyName, LPCWSTR lpString) */
         WriteProfileStringW: {

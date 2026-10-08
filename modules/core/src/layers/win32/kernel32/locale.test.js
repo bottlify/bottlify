@@ -966,3 +966,150 @@ test('GetStringType refuses a missing string or type buffer', ()=>{
     assert.equal(fns.GetStringTypeA.handler([0x0409, CT_CTYPE1, 0, 5, 0x200]), 0);
     assert.deepEqual(host.errors, Array(3).fill(ERROR_INVALID_PARAMETER));
 });
+
+test('VerLanguageName names a version resource\'s language, cut to the buffer', ()=>{
+    // The Version tab's "Language" line: the length answered is the whole
+    // name's, so a short buffer is told how much more it needed.
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    const readAnsi = (/** @type {number} */ at)=>{
+        let text = '';
+        for (let i = at; host.bytes[i] !== 0; i++)
+        {
+            text += String.fromCharCode(host.bytes[i]);
+        }
+        return text;
+    };
+    assert.equal(fns.VerLanguageNameA.argBytes, 12);
+    assert.equal(fns.VerLanguageNameA.handler([0x0409, 0x100, 64]), 23);
+    assert.equal(readAnsi(0x100), 'English (United States)');
+    assert.equal(fns.VerLanguageNameA.handler([0x0407, 0x100, 64]), 16);
+    assert.equal(readAnsi(0x100), 'German (Germany)');
+    assert.equal(fns.VerLanguageNameA.handler([0, 0x100, 64]), 16);
+    assert.equal(readAnsi(0x100), 'Language Neutral');
+    assert.equal(fns.VerLanguageNameA.handler([0x0409, 0x100, 8]), 23, 'the whole length');
+    assert.equal(readAnsi(0x100), 'English', 'and as much as fits, terminated');
+    assert.equal(fns.VerLanguageNameA.handler([0x0409, 0, 0]), 23, 'no buffer asks the length');
+
+    assert.equal(fns.VerLanguageNameW.handler([0x040c, 0x200, 64]), 15);
+    assert.equal(host.readWide(0x200, 16), 'French (France)\0');
+    assert.deepEqual(host.errors, []);
+});
+
+test('EnumUILanguages hands the UI language to the callback, and succeeds when it stops',
+    async()=>{
+        // locale.c test_EnumUILanguageA: TRUE even when the callback answers
+        // FALSE; a NULL callback is ERROR_INVALID_PARAMETER before a bad flag.
+        const host = fakeHost();
+        /** @type {{ text: string, rest: number[] }[]} */
+        const seen = [];
+        const fns = createLocaleFunctions({
+            ...host,
+            callerThread: ()=>({ id: 1 }),
+            allocate: ()=>0x800,
+            free: ()=>{},
+            /** @param {number} entry @param {number[]} args */
+            call: async(entry, [text, ...rest])=>{
+                void entry;
+                seen.push({ text: host.readWide(text, host.stringLength(text, 2)), rest });
+                return 0;
+            },
+        });
+        const MUI_LANGUAGE_ID = 4;
+        const MUI_LANGUAGE_NAME = 8;
+        assert.equal(fns.EnumUILanguagesW.argBytes, 12);
+        assert.equal(await fns.EnumUILanguagesW.handler([0x1234, 0, 0x77]), 1);
+        assert.equal(await fns.EnumUILanguagesW.handler([0x1234, MUI_LANGUAGE_ID, 0]), 1);
+        assert.equal(await fns.EnumUILanguagesW.handler([0x1234, MUI_LANGUAGE_NAME, 0]), 1);
+        const id = UI_LANGUAGE.toString(16).toUpperCase().padStart(4, '0');
+        assert.deepEqual(seen, [{ text: id, rest: [0x77] }, { text: id, rest: [0] },
+            { text: 'en-US', rest: [0] }]);
+
+        assert.equal(fns.EnumUILanguagesW.handler([0, 0x5a5a5a5a, 0]), 0);
+        assert.equal(fns.EnumUILanguagesA.handler([0x1234, 0x5a5a5a5a, 0]), 0);
+        assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER, 1004]);
+
+        const unbridged = createLocaleFunctions(fakeHost());
+        assert.equal(unbridged.EnumUILanguagesA.handler([0x1234, 0, 0]), 0,
+            'with no way to call back, not a success that never called');
+    });
+
+test('GetCalendarInfo answers the Gregorian calendar, a number in lpValue when asked', ()=>{
+    // time.c test_GetCalendarInfo.
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    const CAL_GREGORIAN = 1;
+    const CAL_ITWODIGITYEARMAX = 0x30;
+    const CAL_RETURN_NUMBER = 0x20000000;
+    const CAL_SDAYNAME1 = 7;
+    const view = new DataView(host.bytes.buffer);
+    assert.equal(fns.GetCalendarInfoA.argBytes, 24);
+
+    assert.equal(fns.GetCalendarInfoA.handler([0x0409, CAL_GREGORIAN,
+        CAL_ITWODIGITYEARMAX | CAL_RETURN_NUMBER, 0, 0, 0x300]), 4);
+    const year = view.getUint32(0x300, true);
+    assert.ok(year >= 2000 && year < 2100);
+    assert.equal(fns.GetCalendarInfoW.handler([0x0409, CAL_GREGORIAN,
+        CAL_ITWODIGITYEARMAX | CAL_RETURN_NUMBER, 0, 0, 0x304]), 2);
+    assert.equal(view.getUint32(0x304, true), year);
+
+    assert.equal(fns.GetCalendarInfoA.handler([0x0409, CAL_GREGORIAN, CAL_ITWODIGITYEARMAX,
+        0x100, 20, 0]), 5);
+    assert.equal(String.fromCharCode(...host.bytes.subarray(0x100, 0x104)), String(year));
+    assert.equal(fns.GetCalendarInfoW.handler([0x0409, CAL_GREGORIAN, CAL_ITWODIGITYEARMAX,
+        0, 0, 0]), 5, 'the size asked with no room');
+    assert.equal(fns.GetCalendarInfoA.handler([0x0800, CAL_GREGORIAN, CAL_SDAYNAME1,
+        0x100, 20, 0]), 7);
+    assert.equal(fns.GetCalendarInfoW.handler([0x0800, CAL_GREGORIAN, CAL_SDAYNAME1,
+        0x200, 20, 0]), 7);
+    assert.equal(host.readWide(0x200, 6), 'Monday');
+
+    host.errors.length = 0;
+    assert.equal(fns.GetCalendarInfoA.handler([0x0409, CAL_GREGORIAN,
+        CAL_ITWODIGITYEARMAX | CAL_RETURN_NUMBER, 0, 0, 0]), 0);
+    assert.equal(fns.GetCalendarInfoA.handler([0x0409, CAL_GREGORIAN,
+        CAL_SDAYNAME1 | CAL_RETURN_NUMBER, 0, 0, 0x300]), 0);
+    assert.equal(fns.GetCalendarInfoA.handler([0x0409, 3, CAL_SDAYNAME1, 0x100, 20, 0]), 0);
+    assert.equal(fns.GetCalendarInfoA.handler([0x0409, CAL_GREGORIAN, 0x7777, 0x100, 20, 0]), 0);
+    assert.equal(fns.GetCalendarInfoA.handler([0x0409, CAL_GREGORIAN, CAL_SDAYNAME1,
+        0x100, 3, 0]), 0);
+    assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER, 1004, ERROR_INVALID_PARAMETER, 1004,
+        ERROR_INSUFFICIENT_BUFFER]);
+});
+
+test('GetGeoInfo answers for the machine\'s own location, by the types Windows XP has', ()=>{
+    // locale.c test_GetGeoInfo's protocol, on the United States (244).
+    /** @type {string[]} */
+    const said = [];
+    const host = fakeHost();
+    const fns = createLocaleFunctions({ ...host, divergence: api=>said.push(api) });
+    const US = 244;
+    const ansi = (/** @type {number} */ at, /** @type {number} */ count)=>
+        String.fromCharCode(...host.bytes.subarray(at, at + count));
+    assert.equal(fns.GetGeoInfoA.argBytes, 20);
+    assert.equal(fns.GetGeoInfoA.handler([US, 4, 0, 0, 0]), 3, 'GEO_ISO2\'s size');
+    assert.equal(fns.GetGeoInfoA.handler([US, 5, 0x100, 4, 0]), 4);
+    assert.equal(ansi(0x100, 4), 'USA\0');
+    assert.equal(fns.GetGeoInfoA.handler([US, 1, 0x100, 20, 0]), 4);
+    assert.equal(ansi(0x100, 4), '244\0');
+    assert.equal(fns.GetGeoInfoA.handler([US, 6, 0x100, 20, 0]), 6);
+    assert.equal(ansi(0x100, 6), 'en-us\0');
+    assert.equal(fns.GetGeoInfoA.handler([US, 7, 0x100, 20, 0]), 9);
+    assert.equal(ansi(0x100, 9), '00000409\0');
+    assert.equal(fns.GetGeoInfoA.handler([US, 8, 0x100, 20, 0]), 14);
+    assert.equal(fns.GetGeoInfoW.handler([US, 9, 0x200, 40, 0]), 25);
+    assert.equal(host.readWide(0x200, 25), 'United States of America\0');
+    assert.equal(fns.GetGeoInfoA.handler([US, 10, 0x100, 20, 0]), 0, 'no time zones');
+    assert.deepEqual(host.errors, []);
+
+    host.bytes.fill(0x61, 0x100, 0x108);
+    assert.equal(fns.GetGeoInfoA.handler([US, 5, 0x100, 2, 0]), 0);
+    assert.equal(ansi(0x100, 3), 'USa', 'what fits, unterminated');
+    assert.equal(fns.GetGeoInfoA.handler([203, 4, 0x100, 20, 0]), 0, 'not this machine\'s');
+    assert.equal(fns.GetGeoInfoA.handler([US, 99, 0x100, 20, 0]), 0);
+    assert.equal(fns.GetGeoInfoA.handler([US, 2, 0x100, 20, 0]), 0);
+    assert.equal(fns.GetGeoInfoA.handler([US, 3, 0x100, 20, 0]), 0);
+    assert.deepEqual(host.errors, [ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER, 1004,
+        ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER]);
+    assert.deepEqual(said, ['GetGeoInfo'], 'the coordinates\' refusal said once');
+});

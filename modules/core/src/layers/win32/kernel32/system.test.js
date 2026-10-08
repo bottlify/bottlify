@@ -723,3 +723,92 @@ test('activations stack by cookie, and the current context is always none', ()=>
     assert.equal(fns.DeactivateActCtx.handler([0, host.view.getUint32(0x304, true)]), 1);
     assert.equal(fns.ActivateActCtx.handler([0, 0]), 0, 'no cookie to hand back');
 });
+
+test('the undecorated lstr names are the ANSI entries themselves', ()=>{
+    const fns = /** @type {any} */ (createSystemFunctions(fakeHost()));
+    for (const name of ['lstrcat', 'lstrcmp', 'lstrcmpi', 'lstrcpy', 'lstrcpyn', 'lstrlen'])
+    {
+        assert.equal(fns[name], fns[`${name}A`], name);
+    }
+    const host = fakeHost();
+    const own = /** @type {any} */ (createSystemFunctions(host));
+    host.bytes.set([0x61, 0x62, 0x63, 0], 0x200);
+    assert.equal(own.lstrlen.handler([0x200]), 3);
+    assert.equal(own.lstrcpy.handler([0x300, 0x200]), 0x300);
+    assert.equal(own.lstrcmp.handler([0x300, 0x200]), 0);
+});
+
+test('the priority boost a thread disables is the one it reads back', ()=>{
+    const host = fakeHost();
+    const fns = /** @type {any} */ (createSystemFunctions(host));
+    const CURRENT_THREAD = 0xfffffffe;
+    assert.equal(fns.SetThreadPriorityBoost.argBytes, 8);
+    assert.equal(fns.GetThreadPriorityBoost.handler([CURRENT_THREAD, 0x200]), 1);
+    assert.equal(host.view.getUint32(0x200, true), 0, 'boosted until asked otherwise');
+    assert.equal(fns.SetThreadPriorityBoost.handler([CURRENT_THREAD, 1]), 1);
+    assert.equal(fns.GetThreadPriorityBoost.handler([CURRENT_THREAD, 0x200]), 1);
+    assert.equal(host.view.getUint32(0x200, true), 1);
+
+    assert.equal(fns.SetThreadPriorityBoost.handler([0x55, 1]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INVALID_HANDLE);
+    assert.equal(fns.GetThreadPriorityBoost.handler([CURRENT_THREAD, 0]), 0);
+    assert.equal(host.errors.at(-1), 998, 'ERROR_NOACCESS for no place to write');
+});
+
+test('SetThreadExecutionState answers the lasting request before the call', ()=>{
+    const host = fakeHost();
+    const fns = /** @type {any} */ (createSystemFunctions(host));
+    const ES_SYSTEM_REQUIRED = 1;
+    const ES_DISPLAY_REQUIRED = 2;
+    const ES_CONTINUOUS = 0x80000000;
+    const call = (/** @type {number} */ flags)=>fns.SetThreadExecutionState.handler([flags]);
+    assert.equal(call(ES_CONTINUOUS | ES_DISPLAY_REQUIRED), ES_CONTINUOUS >>> 0,
+        'a thread that never asked holds ES_CONTINUOUS alone');
+    assert.equal(call(ES_SYSTEM_REQUIRED), (ES_CONTINUOUS | ES_DISPLAY_REQUIRED) >>> 0);
+    assert.equal(call(ES_CONTINUOUS), (ES_CONTINUOUS | ES_DISPLAY_REQUIRED) >>> 0,
+        'a nudge without ES_CONTINUOUS left the lasting request alone');
+    assert.equal(call(ES_CONTINUOUS), ES_CONTINUOUS >>> 0);
+
+    assert.equal(call(0x40), 0, 'away mode is not Windows XP\'s');
+    assert.equal(host.errors.at(-1), 87);
+});
+
+test('FindActCtxSectionString finds no section, after checking its parameters', ()=>{
+    const host = fakeHost();
+    const fns = /** @type {any} */ (createSystemFunctions(host));
+    const ERROR_SXS_SECTION_NOT_FOUND = 14004;
+    const DLL_REDIRECTION = 2;
+    host.view.setUint32(0x300, 64, true);
+    for (const name of ['FindActCtxSectionStringA', 'FindActCtxSectionStringW'])
+    {
+        const find = fns[name];
+        assert.equal(find.argBytes, 20);
+        assert.equal(find.handler([0, 0, DLL_REDIRECTION, 0x200, 0x300]), 0);
+        assert.equal(host.errors.at(-1), ERROR_SXS_SECTION_NOT_FOUND, name);
+        assert.equal(find.handler([1, 0, DLL_REDIRECTION, 0x200, 0x300]), 0);
+        assert.equal(host.errors.at(-1), ERROR_SXS_SECTION_NOT_FOUND,
+            'FIND_ACTCTX_SECTION_KEY_RETURN_HACTCTX is a flag it takes');
+
+        for (const args of [[0, 0, DLL_REDIRECTION, 0x200, 0], [0, 0, DLL_REDIRECTION, 0, 0x300],
+            [2, 0, DLL_REDIRECTION, 0x200, 0x300]])
+        {
+            assert.equal(find.handler(args), 0);
+            assert.equal(host.errors.at(-1), 87, `${name} ${args}`);
+        }
+        host.view.setUint32(0x300, 35, true);
+        assert.equal(find.handler([0, 0, DLL_REDIRECTION, 0x200, 0x300]), 0);
+        assert.equal(host.errors.at(-1), 87, 'a structure too short to be one');
+        host.view.setUint32(0x300, 64, true);
+    }
+});
+
+test('the Windows 95 calls are kernel32\'s exports here too', ()=>{
+    const fns = /** @type {any} */ (createSystemFunctions(fakeHost()));
+    for (const name of ['ThunkConnect32', 'MapLS', 'SMapLS_IP_EBP_8', 'FT_Exit20', 'FT_Thunk',
+        'RegisterServiceProcess', 'ConvertToGlobalHandle'])
+    {
+        assert.ok(fns[name], name);
+    }
+    assert.equal(fns.GetProfileStringA, undefined,
+        'win.ini is the profile functions\' to answer, not a fixed default here');
+});

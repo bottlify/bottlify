@@ -1371,6 +1371,9 @@ export function createWin32Module(){
                     }),
                     ...createSyncFunctions({
                         kernel,
+                        // A change notification watches a directory on the
+                        // same volume every file call writes through.
+                        volume,
                         readMemory,
                         writeMemory,
                         currentThread: ()=>kernel.currentThread(),
@@ -1389,6 +1392,7 @@ export function createWin32Module(){
                     ...createLocaleFunctions({
                         readMemory, writeMemory, stringLength,
                         setLastError: setError,
+                        divergence: config?.divergence,
                         systemTimeMs: ()=>kernel.clock.wallClock(),
                         /** @param {number} entry @param {number[]} args @param {unknown} [thread] */
                         call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),

@@ -1370,3 +1370,38 @@ test('a handle reads back the flags a duplicate or SetHandleInformation gave it'
     assert.deepEqual([fns.GetHandleInformation.argBytes, fns.SetHandleInformation.argBytes],
         [8, 12]);
 });
+
+test('Process32FirstW and Process32NextW walk the same processes into a PROCESSENTRY32W', ()=>{
+    // 556 bytes: the narrow entry's 36 before the name, then MAX_PATH wide
+    // characters for it.
+    const { fns, host, written, errors } = setup();
+    host.processId = 0x2a4;
+    host.imagePath = ()=>'C:\\App\\Setup\u20ac.exe';
+    const bytes = new Uint8Array(0x1000);
+    const memory = new DataView(bytes.buffer);
+    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    memory.setUint32(0x100, 556, true);
+
+    const snapshot = fns.CreateToolhelp32Snapshot.handler([0x2, 0]);
+    assert.equal(fns.Process32FirstW.argBytes, 8);
+    assert.equal(fns.Process32NextW.argBytes, 8);
+    assert.equal(fns.Process32FirstW.handler([snapshot, 0x100]), 1);
+    const entry = /** @type {Uint8Array} */ (written.get(0x100));
+    assert.equal(entry.length, 556);
+    const view = new DataView(entry.buffer, entry.byteOffset);
+    assert.equal(view.getUint32(0, true), 556, 'dwSize');
+    assert.equal(view.getUint32(8, true), 0x2a4, 'th32ProcessID');
+    const name = String.fromCharCode(...Array.from({ length: 10 },
+        (_, i)=>view.getUint16(36 + i * 2, true)));
+    assert.equal(name, 'Setup\u20ac.exe', 'szExeFile in UTF-16, not the ANSI page');
+    assert.equal(view.getUint16(36 + 20, true), 0, 'terminated');
+    assert.equal(fns.Process32NextW.handler([snapshot, 0x100]), 0);
+    assert.equal(errors.at(-1), 18, 'ERROR_NO_MORE_FILES');
+
+    memory.setUint32(0x100, 296, true);
+    assert.equal(fns.Process32FirstW.handler([snapshot, 0x100]), 0,
+        'the narrow entry is too short for the wide call');
+    assert.equal(errors.at(-1), 122);
+    assert.equal(fns.Process32FirstW.handler([0x7777, 0x100]), 0);
+    assert.equal(errors.at(-1), 6, 'ERROR_INVALID_HANDLE');
+});

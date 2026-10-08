@@ -2068,3 +2068,49 @@ test('GetFileAttributesEx fills the head a find would, and nothing past it', ()=
     assert.equal(fns.GetFileAttributesExA.handler([at(NAME, 'C:\\GAME\\NONE.DAT'), 0, 0x400]), 0);
     assert.equal(error.code, 2);
 });
+
+test('CancelIo has nothing to cancel on a file, and refuses what is no file object', ()=>{
+    const { fns, handles, error, open } = setup();
+    const file = open('C:\\GAME\\cancel.dat', CREATE_ALWAYS);
+    assert.equal(fns.CancelIo.argBytes, 4);
+    assert.equal(fns.CancelIo.handler([file]), 1);
+    assert.equal(fns.CancelIo.handler([2]), 1, 'a standard stream is one');
+    const event = handles.open('event', { kind: 'event' });
+    assert.equal(fns.CancelIo.handler([event]), 0);
+    assert.equal(error.code, ERROR_INVALID_HANDLE);
+    error.code = 0;
+    assert.equal(fns.CancelIo.handler([0x7770]), 0);
+    assert.equal(error.code, ERROR_INVALID_HANDLE);
+});
+
+test('ReplaceFile with no suffix is the wide call', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.ReplaceFile, fns.ReplaceFileW);
+});
+
+test('the serial calls refuse a file as its file system does, anything else as no device', ()=>{
+    /** @type {string[]} */
+    const said = [];
+    const { fns, handles, error, open } = setup({ divergence: (/** @type {string} */ api)=>
+        said.push(api) });
+    const file = open('C:\\GAME\\COM1.txt', CREATE_ALWAYS);
+    const event = handles.open('event', { kind: 'event' });
+    const ERROR_INVALID_FUNCTION = 1;
+    const calls = {
+        GetCommState: 8, SetCommState: 8, SetupComm: 12, PurgeComm: 8, WaitCommEvent: 12,
+        ClearCommError: 12, EscapeCommFunction: 8, GetCommConfig: 12, SetCommConfig: 12,
+        SetCommMask: 8, SetCommTimeouts: 8,
+    };
+    for (const [name, argBytes] of Object.entries(calls))
+    {
+        const call = /** @type {any} */ (fns)[name];
+        assert.equal(call.argBytes, argBytes, `${name} pops its arguments`);
+        assert.equal(call.handler([file, 0x200, 0x200]), 0, `${name} on a file`);
+        assert.equal(error.code, ERROR_INVALID_FUNCTION, `${name}: the file system's no`);
+        assert.equal(call.handler([event, 0x200, 0x200]), 0);
+        assert.equal(error.code, ERROR_INVALID_HANDLE, `${name}: an event is no device`);
+        assert.equal(call.handler([0x7770, 0x200, 0x200]), 0);
+        assert.equal(error.code, ERROR_INVALID_HANDLE, `${name}: nor is nothing`);
+    }
+    assert.equal(said.length, Object.keys(calls).length, 'each call said once');
+});

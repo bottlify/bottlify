@@ -161,27 +161,59 @@ export function createModuleFunctions(host){
      * @returns {number | Promise<number>}
      */
     const load = (name, flags = 0)=>{
+        /** @param {number} base */
+        const settle = base=>{
+            if (base === 0)
+            {
+                host.setLastError(ERROR_MOD_NOT_FOUND);
+            }
+            return base;
+        };
+        const answer = loadOnce(name, flags);
+        // The directory SetDllDirectory named, for a bare name nothing else
+        // found. Windows looks there before the system directories rather
+        // than after them; the loader's own search is one step that cannot
+        // be split, so a name the system also answers for comes from the
+        // system here.
+        const bare = !/[\\/:]/.test(name);
+        if (!bare || dllDirectory === null || dllDirectory === '')
+        {
+            return typeof answer === 'number' ? settle(answer) : answer.then(settle);
+        }
+        const beside = `${dllDirectory.replace(/\\+$/, '')}\\${name}`;
+        /** @param {number} base */
+        const retry = base=>{
+            if (base !== 0)
+            {
+                return base;
+            }
+            const again = loadOnce(beside, flags);
+            return typeof again === 'number' ? settle(again) : again.then(settle);
+        };
+        return typeof answer === 'number' ? retry(answer) : answer.then(retry);
+    };
+
+    /**
+     * One look for a library by the name given.
+     *
+     * @param {string} name @param {number} flags
+     * @returns {number | Promise<number>}
+     */
+    const loadOnce = (name, flags)=>{
         // Through the loader even for a module already here: only it knows
         // whether this is the load that has to run the module's entry point.
         const known = host.find(name);
         const answer = host.load ? host.load(name, flags) : known?.base ?? 0;
-        if (typeof answer === 'number')
-        {
-            const base = answer || known?.base || 0;
-            if (base === 0)
-            {
-                host.setLastError(ERROR_MOD_NOT_FOUND);
-            }
-            return base;
-        }
-        return answer.then(base=>{
-            if (base === 0)
-            {
-                host.setLastError(ERROR_MOD_NOT_FOUND);
-            }
-            return base;
-        });
+        return typeof answer === 'number' ? answer || known?.base || 0 : answer;
     };
+
+    /**
+     * What SetDllDirectory last named: null for the default search, an empty
+     * string for the default without the current directory.
+     *
+     * @type {string | null}
+     */
+    let dllDirectory = null;
 
     /**
      * Writes a NUL-terminated string and reports what a Win32 out-parameter of
@@ -202,6 +234,32 @@ export function createModuleFunctions(host){
         const written = Math.min(text.length, size - 1);
         host.writeMemory(buffer, encodeAnsi(`${text.slice(0, written)}\0`));
         return written;
+    };
+
+    /**
+     * @param {number} size @param {number} buffer @param {boolean} wide
+     */
+    const getDllDirectory = (size, buffer, wide)=>{
+        const text = dllDirectory ?? '';
+        if (text.length + 1 > size || buffer === 0)
+        {
+            return text.length + 1;
+        }
+        if (wide)
+        {
+            const bytes = new Uint8Array((text.length + 1) * 2);
+            for (let at = 0; at < text.length; at++)
+            {
+                bytes[at * 2] = text.charCodeAt(at) & 0xff;
+                bytes[at * 2 + 1] = text.charCodeAt(at) >> 8;
+            }
+            host.writeMemory(buffer, bytes);
+        }
+        else
+        {
+            host.writeMemory(buffer, encodeAnsi(`${text}\0`));
+        }
+        return text.length;
     };
 
     /** @param {number} handle */
@@ -263,6 +321,44 @@ export function createModuleFunctions(host){
                 }
                 return load(host.readWideString(name >>> 0, MAX_NAME * 2), flags >>> 0);
             },
+        },
+
+        /**
+         * BOOL SetDllDirectoryA/W(LPCSTR lpPathName) and
+         * DWORD GetDllDirectoryA/W(DWORD nBufferLength, LPSTR lpBuffer)
+         *
+         * The directory LoadLibrary looks in for a bare name (`load`); NULL
+         * puts the default search back. Getting it answers as the path calls
+         * do: the length without the terminator when it fits, the size
+         * needed with it when it does not, and an empty string when none is
+         * set.
+         */
+        SetDllDirectoryA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([path])=>{
+                dllDirectory = (path >>> 0) === 0 ? null : host.readCString(path >>> 0, MAX_NAME);
+                return 1;
+            },
+        },
+        SetDllDirectoryW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([path])=>{
+                dllDirectory = (path >>> 0) === 0 ? null
+                    : host.readWideString(path >>> 0, MAX_NAME * 2);
+                return 1;
+            },
+        },
+        GetDllDirectoryA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([size, buffer])=>getDllDirectory(size >>> 0, buffer >>> 0, false),
+        },
+        GetDllDirectoryW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([size, buffer])=>getDllDirectory(size >>> 0, buffer >>> 0, true),
         },
 
         /** BOOL FreeLibrary(HMODULE hLibModule) */
