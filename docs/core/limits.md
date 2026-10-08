@@ -110,7 +110,9 @@ differently raises a `divergence` event naming the API.
 - A package's own dialogs are never drawn: an installation runs without the internal user
   interface, as a setup that drives its own does. `MsiCollectUserInfo` and the dialog previews
   show nothing.
-- Script custom actions (VBScript, JScript) do not run; the action fails.
+- JScript custom actions run in the engine's own JScript, with the installer's Session,
+  Installer, Database, View and Record objects; a script asking `ActiveXObject` for any other
+  class is told it cannot be made. VBScript custom actions do not run yet; the action fails.
 - A patch's deltas are applied (the Patch API, `mspatcha.dll`), except a delta made against a
   32-bit executable with the executable transforms -- that layout is not public -- or against an
   old file only Windows' PE normalisation would match; such a patch fails with

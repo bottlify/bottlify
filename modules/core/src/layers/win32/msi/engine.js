@@ -60,6 +60,9 @@
  * @property {(old: Uint8Array, delta: Uint8Array)
  *     => Promise<{ code: number, bytes: Uint8Array | null }>} [applyDelta]
  *     The Patch API's application of a delta to the file it was made against.
+ * @property {(script: { language: 'jscript' | 'vbscript', text: string, entry: string | null,
+ *     data: string | null, action: string }) => Promise<number>} [runScript]
+ *     A script custom action run with the Session object; its answer as a library's.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(text: string) => void} [log]
  */

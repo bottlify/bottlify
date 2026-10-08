@@ -47,6 +47,9 @@ import { createRegistration, squashGuid, valueText } from './registration.js';
 import { installerVersion } from './version.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { createProductFunctions } from './products.js';
+import { installerObject, sessionObject } from './automation.js';
+import { createJScriptEngine } from '../jscript/engine.js';
+import { ExternalError } from '../script/external.js';
 import { applyPatch as applyDeltaPatch } from '../mspatcha/pa19.js';
 import {
     ERROR_BAD_PATHNAME, exportTable, importTable, mergeDatabases, streamFolder,
@@ -78,6 +81,22 @@ const ERROR_ACCESS_DENIED = 5;
 const ERROR_UNKNOWN_PRODUCT = 1605;
 const ERROR_INSTALL_SOURCE_ABSENT = 1612;
 const ERROR_SUCCESS_REBOOT_REQUIRED = 3010;
+const ERROR_INSTALL_FAILURE = 1603;
+
+/** The script engines a script custom action runs in, by its language. */
+const SCRIPT_ENGINES = /** @type {Record<string, ((options: any) => any) | undefined>} */ ({
+    jscript: createJScriptEngine,
+});
+
+/**
+ * What a script action's function answers, as the sequence reads it: IDOK
+ * (or nothing) success, IDCANCEL the user's exit, IDABORT failure, IDRETRY a
+ * suspension, IDIGNORE the rest of the sequence skipped.
+ */
+const SCRIPT_ANSWERS = new Map([[1, 0], [2, 1602], [3, 1603], [4, 1604], [5, 259]]);
+
+/** "ActiveX component can't create object", as a script reports it (error 429). */
+const CTL_E_CANTCREATEOBJECT = 0x800a01ad | 0;
 const ERROR_CREATE_FAILED = 1631;
 
 /** LoadTypeLibEx: load without registering; UnRegisterTypeLib: a 32-bit library. */
@@ -419,6 +438,7 @@ export function createMsiFunctions(host){
                     installNested: (kind, source, commandLine)=>installNested(session, kind,
                         source, commandLine, made.thread),
                     cachePackage,
+                    runScript: script=>runScript(made, script),
                     applyDelta: async(old, delta)=>{
                         const result = applyDeltaPatch(old, delta);
                         return { code: result.code, bytes: result.bytes ?? null };
@@ -467,6 +487,88 @@ export function createMsiFunctions(host){
             engines.set(session, engine);
         }
         return engine;
+    };
+
+    /**
+     * A script custom action: the script run in the engine's own script
+     * engine with the Session object named, then -- when the action names
+     * one -- its function called, whose answer is read as a library action's
+     * (IDOK success, IDCANCEL the user's exit, IDABORT failure). A script
+     * that fails fails the action; one in a language no engine is offered
+     * for says so.
+     *
+     * @param {import('./engine.js').Engine} engine
+     * @param {{ language: 'jscript' | 'vbscript', text: string, entry: string | null,
+     *     data: string | null, action: string }} script
+     * @returns {Promise<number>}
+     */
+    const runScript = async(engine, script)=>{
+        const make = SCRIPT_ENGINES[script.language];
+        if (!make)
+        {
+            host.divergence?.(`custom action ${script.action}`,
+                `no ${script.language} engine to run it`);
+            return ERROR_INSTALL_FAILURE;
+        }
+        const { session } = engine;
+        const owner = { session, deferred: script.data };
+        const installer = installerObject({
+            windows: host.machine().windows, registration,
+            environment: name=>host.machine().environment(name),
+            fileVersion: async path=>{
+                const block = await host.versionInfo?.(host.fullPath(path)) ?? null;
+                const fixed = block ? fixedInfo(block) : null;
+                return fixed ? `${fixed.ms >>> 16}.${fixed.ms & 0xffff}.`
+                    + `${fixed.ls >>> 16}.${fixed.ls & 0xffff}` : null;
+            },
+            fileSize: path=>{
+                const stat = host.files.stat(host.fullPath(path));
+                return stat && !stat.isDirectory ? stat.size : null;
+            },
+            format: record=>session.format(record),
+        });
+        const scripting = make({
+            // The one class an installer's script asks for that this machine
+            // has a server for: the installer's own object model.
+            /** @param {string} progId */
+            createObject: progId=>{
+                if (/^WindowsInstaller\.Installer(\.\d+)?$/i.test(progId))
+                {
+                    return installer;
+                }
+                throw new ExternalError(CTL_E_CANTCREATEOBJECT,
+                    `ActiveX component can't create object: ${progId}`);
+            },
+            divergence: host.divergence,
+        });
+        scripting.addNamedItem('Session', sessionObject(engine, {
+            property: name=>propertyOf(owner, name),
+            // A deferred action's Session reads its data; it sets nothing.
+            setProperty: (name, value)=>{
+                if (script.data === null)
+                {
+                    session.setProperty(name, value);
+                }
+            },
+            doAction: action=>doAction(engine, action),
+            sequence: table=>runSequence(engine, table),
+            message: (kind, record)=>deliver(kind, record, session, engine.thread),
+            installer,
+        }));
+        try
+        {
+            await scripting.run(script.text);
+            const answer = script.entry ? await scripting.call(script.entry, []) : undefined;
+            const status = typeof answer === 'number' ? answer : IDOK;
+            return SCRIPT_ANSWERS.get(status) ?? ERROR_SUCCESS;
+        }
+        catch (e){
+            const error = /** @type {any} */ (e);
+            host.log?.(`Custom action ${script.action}: script error ${error?.number ?? ''} `
+                + `${error?.description ?? error?.message ?? String(e)}`
+                + `${error?.line ? ` at line ${error.line}` : ''}.`);
+            return ERROR_INSTALL_FAILURE;
+        }
     };
 
     /**

@@ -17,10 +17,13 @@
  *
  * A library action is the program's code, given the session's handle and
  * answering an error code; its library is written to the temporary folder
- * from the Binary table first, as Windows does. Scripts in VBScript or
- * JScript need a script engine this machine does not have. A nested installation
+ * from the Binary table first, as Windows does. A script in JScript or
+ * VBScript runs in the engine's own script engine with the Session object,
+ * its function's answer read as a library action's. A nested installation
  * is a package of its own, installed as MsiInstallProduct installs one.
  */
+
+import { decodeAnsi } from '../kernel32/locale.js';
 
 /** The type's low bits: what the action is. */
 const TYPE_DLL = 1;
@@ -66,6 +69,46 @@ let temporaryNumber = 0x1a2b;
  * @typedef {{ action: string, type: number, source: string | null,
  *     target: string | null }} CustomRow
  */
+
+/**
+ * A script's text from its bytes: UTF-16 after a byte-order mark, UTF-8 after
+ * its own mark, and otherwise the ANSI page a script file is written in.
+ *
+ * @param {Uint8Array} bytes
+ */
+function scriptText(bytes){
+    if (bytes[0] === 0xff && bytes[1] === 0xfe)
+    {
+        return new TextDecoder('utf-16le').decode(bytes.subarray(2));
+    }
+    if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf)
+    {
+        return new TextDecoder('utf-8').decode(bytes.subarray(3));
+    }
+    return decodeAnsi(bytes);
+}
+
+/**
+ * A whole file off the volume, or null.
+ *
+ * @param {any} files @param {string} path @returns {Promise<Uint8Array | null>}
+ */
+async function readWhole(files, path){
+    const stat = files.stat(path);
+    const node = stat && !stat.isDirectory ? files.open(path, { read: true }) : null;
+    if (!node)
+    {
+        return null;
+    }
+    try
+    {
+        return await files.read(node, 0, stat.size);
+    }
+    finally
+    {
+        files.close(node);
+    }
+}
 
 /**
  * A library action's answer as the sequence reads it: success and the
@@ -287,9 +330,41 @@ async function execute(engine, row, kind, flags, data){
 
     if (type === TYPE_JSCRIPT || type === TYPE_VBSCRIPT)
     {
-        host.divergence?.(`custom action ${row.action}`,
-            'a script action needs a script engine, which this machine has none of');
-        return answer(ERROR_INSTALL_FAILURE);
+        // The script is in the Binary table (5, 6), an installed file (21,
+        // 22), the Target itself (37, 38) or a property (53, 54); for all but
+        // the text in Target, Target names the function to call.
+        const inline = source === SOURCE_DIRECTORY;
+        /** @type {string | null} */
+        let text;
+        if (source === SOURCE_BINARY)
+        {
+            const bytes = await session.db.readStream(`Binary.${row.source ?? ''}`);
+            text = bytes ? scriptText(bytes) : null;
+        }
+        else if (source === SOURCE_FILE)
+        {
+            const path = session.files.get(row.source ?? '')?.target ?? null;
+            const bytes = path ? await readWhole(host.files, path) : null;
+            text = bytes ? scriptText(bytes) : null;
+        }
+        else if (inline)
+        {
+            text = row.target ?? '';
+        }
+        else
+        {
+            text = session.getProperty(row.source ?? '');
+        }
+        if (text === null || !host.runScript)
+        {
+            return answer(ERROR_INSTALL_FAILURE);
+        }
+        const code = await host.runScript({
+            language: type === TYPE_JSCRIPT ? 'jscript' : 'vbscript', text,
+            entry: inline || !row.target ? null : row.target, data, action: row.action,
+        });
+        host.log?.(`Custom action ${row.action} answered ${code}.`);
+        return answer(sequenceAnswer(code));
     }
     if (type === TYPE_INSTALL)
     {
