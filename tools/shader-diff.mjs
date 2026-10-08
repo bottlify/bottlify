@@ -21,8 +21,11 @@
  * with Microsoft's ps_2_0 of the same source, both outputs saturated as the
  * render target takes them; a model 1 register clamps to -1..1, so the inputs
  * and constants are drawn from 0..1 and a difference left is the compiler's.
+ * With --legacy and the path of d3dx9_31.dll -- the DirectX runtime's last
+ * compiler with the model 1 targets; its x86 build is loaded into a 32-bit
+ * PowerShell -- model 1 shaders are compiled by it for their own profile instead.
  *
- *     node tools/shader-diff.mjs <dir> [--trials N] [--only NNN]
+ *     node tools/shader-diff.mjs <dir> [--trials N] [--only NNN] [--legacy d3dx9_31.dll]
  */
 
 import { execFileSync } from 'node:child_process';
@@ -36,12 +39,14 @@ import { decode, execute } from '../modules/core/src/layers/win32/d3dx9/d3d9-mac
 const FXC = resolve(fileURLToPath(new URL('.', import.meta.url)), 'shader-diff-fxc.ps1');
 const argv = process.argv.slice(2);
 const dir = argv.find(a=>!a.startsWith('--') && argv[argv.indexOf(a) - 1] !== '--trials'
-    && argv[argv.indexOf(a) - 1] !== '--only');
+    && argv[argv.indexOf(a) - 1] !== '--only' && argv[argv.indexOf(a) - 1] !== '--legacy');
 const trials = argv.includes('--trials') ? Number(argv[argv.indexOf('--trials') + 1]) : 32;
 const only = argv.includes('--only') ? argv[argv.indexOf('--only') + 1] : null;
+const legacy = argv.includes('--legacy') ? argv[argv.indexOf('--legacy') + 1] : null;
 if (!dir || !existsSync(dir))
 {
-    console.error('usage: node tools/shader-diff.mjs <dir> [--trials N] [--only NNN]');
+    console.error('usage: node tools/shader-diff.mjs <dir> [--trials N] [--only NNN]'
+        + ' [--legacy d3dx9_31.dll]');
     process.exit(2);
 }
 
@@ -169,17 +174,29 @@ const files = readdirSync(dir).filter(name=>/^\d+-[pv]s_\d_\w+-.+\.hlsl$/.test(n
 /** @param {string} file */
 const partsOf = file=>{
     const [, profile, entry] = /^\d+-([pv]s_\d_\w)-(.+)\.hlsl$/.exec(file) ?? [];
-    return { profile, entry, refProfile: /^ps_1_/.test(profile) ? 'ps_2_0' : profile };
+    const model1 = /^[pv]s_1_/.test(profile);
+    return { profile, entry, legacy: Boolean(legacy) && model1,
+        refProfile: /^ps_1_/.test(profile) && !legacy ? 'ps_2_0' : profile };
 };
 // Every reference compile in one process: loading the compiler costs more than a compile.
 const list = join(dir, 'shader-diff.list');
 writeFileSync(list, files.map(file=>{
-    const { refProfile, entry } = partsOf(file);
+    const { refProfile, entry, legacy: old } = partsOf(file);
     const out = resolve(dir, `${file}.ref-${refProfile}.bin`);
-    return `${resolve(dir, file)}|${refProfile}|${entry}|${out}`;
+    return `${resolve(dir, file)}|${refProfile}|${entry}|${out}${old ? '|legacy' : ''}`;
 }).join('\n'));
-execFileSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', FXC,
-    '-List', list], { stdio: 'inherit' });
+/**
+ * The PowerShell that can load the legacy DLL: a 32-bit one for an x86 build, which
+ * runs on every Windows -- on ARM64 the default PowerShell is native and loads
+ * neither an x64 nor an x86 library.
+ */
+const shell = legacy && readFileSync(legacy).readUInt16LE(
+    readFileSync(legacy).readUInt32LE(0x3c) + 4) === 0x14c
+    ? join(process.env.SystemRoot ?? 'C:\\Windows', 'SysWOW64', 'WindowsPowerShell', 'v1.0',
+        'powershell.exe')
+    : 'powershell';
+execFileSync(shell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', FXC,
+    '-List', list, ...(legacy ? ['-Legacy', legacy] : [])], { stdio: 'inherit' });
 
 /** @type {Record<string, string[]>} */
 const verdicts = { same: [], 'values differ': [], fault: [], 'ours refuses, Microsoft compiles': [],
