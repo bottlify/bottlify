@@ -398,6 +398,15 @@ function normalisePresentParameters(parameters){
 
 /** @param {number} format */
 const isColourFormat = format=>FORMAT_INFO[format] !== undefined && !FORMAT_INFO[format].depth;
+
+/** The same layout with or without its alpha: A8R8G8B8 for X8R8G8B8 and back. @type {Map<number, number>} */
+const ALPHA_TWINS = new Map([
+    [D3DFMT.A8R8G8B8, D3DFMT.X8R8G8B8], [D3DFMT.X8R8G8B8, D3DFMT.A8R8G8B8],
+    [D3DFMT.A1R5G5B5, D3DFMT.X1R5G5B5], [D3DFMT.X1R5G5B5, D3DFMT.A1R5G5B5],
+    [D3DFMT.A4R4G4B4, D3DFMT.X4R4G4B4], [D3DFMT.X4R4G4B4, D3DFMT.A4R4G4B4],
+]);
+/** @param {number} format @returns {number | undefined} */
+const alphaTwin = format=>ALPHA_TWINS.get(format);
 /** @param {number} format */
 const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[format].depth;
 
@@ -4025,17 +4034,27 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             }
             const from = describe(source);
             const to = describe(destination);
-            if (from.Pool !== D3DPOOL.DEFAULT || to.Pool !== D3DPOOL.DEFAULT
-                || from.Format !== to.Format
-                || FORMAT_INFO[from.Format].depth !== FORMAT_INFO[to.Format].depth)
-            {
+            // Every refusal says why: a program told INVALIDCALL here carries on without the
+            // copy, and the picture it meant to show is simply not there.
+            const refuse = (/** @type {string} */ key, /** @type {string} */ why)=>{
+                report(`stretch-${key}`, `StretchRect from format ${from.Format} to ${
+                    to.Format} refused: ${why}`);
                 return D3DERR_INVALIDCALL;
+            };
+            if (from.Pool !== D3DPOOL.DEFAULT || to.Pool !== D3DPOOL.DEFAULT)
+            {
+                return refuse('pool', 'a surface outside the default pool');
+            }
+            const depth = FORMAT_INFO[from.Format].depth;
+            if (depth !== FORMAT_INFO[to.Format].depth || (depth && from.Format !== to.Format))
+            {
+                return refuse('depth', 'a depth surface with a colour one, or two depth formats');
             }
             const rect = sourceRect ?? wholeOf(from);
             const target = destinationRect ?? wholeOf(to);
             if (!rectWithin(rect, from) || !rectWithin(target, to))
             {
-                return D3DERR_INVALIDCALL;
+                return refuse('rect', 'a rectangle outside its surface');
             }
             if (rect.right - rect.left !== target.right - target.left
                 || rect.bottom - rect.top !== target.bottom - target.top)
@@ -4044,11 +4063,20 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                     + ' refused: this device copies and does not scale');
                 return D3DERR_INVALIDCALL;
             }
+            // Between colour formats a device converts, as CheckDeviceFormatConversion says it
+            // can: a scene drawn into an A8R8G8B8 target is copied onto the X8R8G8B8 back
+            // buffer this way. On the GPU two formats stored alike copy as they are (the
+            // destination's alpha, undefined in Direct3D, then holds the source's); in guest
+            // bytes only formats that differ in whether they keep an alpha do.
             if (renderer?.copySurface?.(source, rect, destination,
                 { x: target.left, y: target.top }))
             {
                 out.moves = [];
                 return D3D_OK;
+            }
+            if (from.Format !== to.Format && alphaTwin(from.Format) !== to.Format)
+            {
+                return refuse('convert', 'a conversion between these formats is not made here');
             }
             if (isGpuResident(source))
             {
