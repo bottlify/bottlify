@@ -30,6 +30,7 @@ import { PID } from './summary.js';
 import { editIni } from './ini.js';
 import { REMOVAL_ACTIONS, productGone, unpublishProduct } from './removal.js';
 import { CLASS_ACTIONS, iconPath, publishIcons } from './classes.js';
+import { SW_SHOWNORMAL, encodeShellLink } from '../common/shell-link.js';
 import { SYSTEM_ACTIONS } from './system.js';
 import { UPGRADE_ACTIONS } from './upgrade.js';
 import { environmentKey, environmentRow, installedValue } from './environment.js';
@@ -477,9 +478,19 @@ async function duplicateFiles(engine){
     return ERROR_SUCCESS;
 }
 
-/** @param {Engine} engine */
+/**
+ * CreateShortcuts: a .lnk for each Shortcut row whose component installs,
+ * made in the Shell Link format shell32 reads and writes. A row's Target is
+ * a formatted path, or -- for an advertised shortcut -- a feature, whose
+ * link runs the component's key file; its icon is the one PublishProduct
+ * keeps for the product.
+ *
+ * @param {Engine} engine
+ */
 async function createShortcuts(engine){
     const { session, host } = engine;
+    /** @param {string | number | null} value */
+    const formatted = value=>(value === null ? '' : session.formatText(String(value)));
     for (const row of session.db.table('Shortcut')?.rows ?? [])
     {
         if (!installing(engine, String(row[3])))
@@ -492,13 +503,27 @@ async function createShortcuts(engine){
             continue;
         }
         const name = `${String(row[2] ?? '').split('|').pop()}.lnk`;
+        const advertised = row[4] !== null && session.features.has(String(row[4]));
+        const component = session.components.get(String(row[3]));
+        const target = advertised
+            ? (component?.keyPath ? session.files.get(component.keyPath)?.target ?? '' : '')
+            : formatted(row[4]);
+        const fields = {
+            target,
+            arguments: formatted(row[5]),
+            description: formatted(row[6]),
+            hotkey: row[7] === null ? 0 : Number(row[7]) & 0xffff,
+            iconLocation: row[8] === null ? '' : iconPath(engine, String(row[8])),
+            iconIndex: row[9] === null ? 0 : Number(row[9]) | 0,
+            showCommand: row[10] === null ? SW_SHOWNORMAL : Number(row[10]),
+            workingDirectory: row[11] === null ? ''
+                : session.folders.get(String(row[11]))?.target ?? formatted(`[${row[11]}]`),
+        };
         await schedule(engine, 'CreateShortcuts', async()=>{
-            // As shell32's link object saves one: a file at the path, with no
-            // contents nobody on this machine reads.
-            writeFile(host.files, `${directory}${name}`, new Uint8Array(0));
+            writeFile(host.files, `${directory}${name}`,
+                encodeShellLink(fields, path=>host.files.stat(path)));
         });
     }
-    host.divergence?.('CreateShortcuts', 'a shortcut is an empty file at its path');
     return ERROR_SUCCESS;
 }
 
