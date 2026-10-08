@@ -46,6 +46,8 @@
  * @property {string} name
  * @property {Type} type
  * @property {string | null} semantic
+ * @property {boolean} [rowMajor]   Its matrices packed by row (or not), as bound where it was
+ *     declared; absent to take the packing of what holds it.
  */
 
 /** @typedef {number | number[] | number[][] | Object | any[]} Value */
@@ -71,6 +73,8 @@
  * @property {string | null} semantic
  * @property {Value | undefined} constValue   Of a constant with a constant initialiser.
  * @property {any} init   The checked initialiser, converted to the type, or null.
+ * @property {boolean} [rowMajor]   Its matrices packed by row (or not), as bound where it or
+ *     its type was declared; absent to take the program's.
  * @property {any} [defaultValue]   A parameter's default, as written, for a call leaving it out.
  * @property {'in' | 'out' | 'inout'} [dir]   Of a parameter.
  * @property {{ name: string, valueText: string }[]} [samplerState]

@@ -550,3 +550,56 @@ test('an unrolled loop breaks and continues on a value not known, as fxc compile
     assert.deepEqual(run(0), [10, 38]);
     assert.deepEqual(run(-0.75), [10, 35]);
 });
+
+test('#pragma pack_matrix packs what is declared after it, as fxc binds it', async()=>{
+    // fxc: a variable takes the pragma before it; a typedef of a matrix binds the pragma in
+    // force where it stands, one of an array binds the packing then even with none; a member
+    // is packed as it was where the structure was defined.
+    const result = await compile(`float2x2 before;
+        typedef float2x2 loose_t;
+        typedef float2x2 pair_t[2];
+        struct S { float2x2 m; };
+        #pragma pack_matrix(row_major)
+        float2x2 after; loose_t loose; pair_t pair; S s;
+        typedef float2x2 rows_t;
+        #pragma pack_matrix(column_major)
+        rows_t bound;
+        float4 main() : COLOR0
+        { return before[0].xyxy + after[0].xyxy + loose[0].xyxy + pair[1][0].xyxy
+            + s.m[0].xyxy + bound[0].xyxy; }`, 'ps_2_0');
+    assert.equal(result.ok, true, result.messages);
+    const classes = Object.fromEntries(constants(result).map(c=>[c.name,
+        c.members.length > 0 ? c.members[0].cls : c.cls]));
+    // D3DXPC_MATRIX_ROWS 2, D3DXPC_MATRIX_COLUMNS 3.
+    assert.deepEqual(classes, { before: 3, after: 2, loose: 2, pair: 3, s: 3, bound: 2 });
+});
+
+test('fxc\'s integer literals, saturate of NaN and names of entry uniforms', async()=>{
+    // 3000000000 is -1294967296 and 3000000000u itself, -1u is 4294967295; smoothstep of an
+    // empty range is saturate(0/0), which is 0; a uniform parameter of the entry is $b.
+    const result = await compile(`float4 main(uniform float b) : COLOR0
+        { return float4(3000000000, 3000000000u, -1u, smoothstep(0, 0, 0)) * b; }`, 'ps_2_0');
+    assert.equal(result.ok, true, result.messages);
+    const [b] = constants(result);
+    assert.equal(b.name, '$b');
+    const f = new Float32Array(32 * 4);
+    f[b.index * 4] = 1e-9;
+    const out = [...execute(decode(/** @type {Uint32Array} */ (result.tokens)),
+        { inputs: { v: [], t: [] }, constants: { f } }).outputs.oC0];
+    assert.deepEqual(out.map(x=>Math.round(x * 1e3) / 1e3), [-1.295, 3, 4.295, 0]);
+});
+
+test('an entry\'s array of structures reads its members\' inputs for every element', async()=>{
+    // fxc: aps[0][0].tc0 and aps[1][1].tc0 are both t0.
+    const result = await compile(`struct apple { float4 tc0 : TEXCOORD0;
+        float4 tc1 : TEXCOORD1; };
+        float4 main(in apple aps[2][2]) : COLOR0
+        { return float4(aps[0][0].tc0.x, aps[1][1].tc0.x, aps[0][0].tc1.x, aps[1][1].tc1.x); }`,
+    'ps_2_0');
+    assert.equal(result.ok, true, result.messages);
+    assert.deepEqual(constants(result), []);
+    const out = [...execute(decode(/** @type {Uint32Array} */ (result.tokens)), { inputs: {
+        v: [], t: [[0.25, 0, 0, 0], [0.5, 0, 0, 0]] }, constants: { f: new Float32Array(128) } })
+        .outputs.oC0];
+    assert.deepEqual(out, [0.25, 0.25, 0.5, 0.5]);
+});

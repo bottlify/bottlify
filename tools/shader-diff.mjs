@@ -146,19 +146,17 @@ function ioFor(program, trial){
     const lane = (/** @type {string} */ key)=>[0, 1, 2, 3].map(i=>unit(`${trial}:${key}:${i}`));
     for (let i = 0; i < 16; i++)
     {
-        // A pixel shader's inputs are the colours (v#) and the coordinate sets (t#) in
-        // every model; a vertex shader's are placed by the usage they were declared with.
+        // A model 2 pixel shader's inputs are the colours (v#) and the coordinate sets (t#);
+        // a vertex shader's and a model 3 pixel shader's are placed by the usage they were
+        // declared with, which two compilers may put in different registers.
         v[i] = lane(`color${i}`);
         t[i] = lane(`texcoord${i}`);
     }
-    if (program.kind === 'vertex')
+    for (const decl of program.declarations)
     {
-        for (const decl of program.declarations)
+        if (decl.register.startsWith('v') && decl.usage)
         {
-            if (decl.register.startsWith('v') && decl.usage)
-            {
-                v[decl.index] = lane(`${decl.usage}${decl.usageIndex}`);
-            }
+            v[decl.index] = lane(`${decl.usage}${decl.usageIndex}`);
         }
     }
     return {
@@ -277,7 +275,8 @@ for (const file of files)
             {
                 const x = a[key] ?? [];
                 const y = b[key] ?? [];
-                for (let i = 0; i < 4; i++)
+                // Depth is one number, the x of its register.
+                for (let i = 0; i < (key === 'oDepth' ? 1 : 4); i++)
                 {
                     const both = Number.isNaN(x[i] ?? NaN) && Number.isNaN(y[i] ?? NaN);
                     const error = both ? 0 : Math.abs((x[i] ?? NaN) - (y[i] ?? NaN));

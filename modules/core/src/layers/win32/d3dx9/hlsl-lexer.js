@@ -131,13 +131,14 @@ function readNumber(text, at){
  *
  * @param {string} source
  * @param {string} [file]  What positions name; `#line` can change it.
- * @returns {{ tokens: Token[], pragmas: { text: string, pos: Position }[] }}
+ * @returns {{ tokens: Token[], pragmas: { text: string, pos: Position, at: number }[] }}
+ *     A pragma's `at` is the token it stands before.
  * @throws {HlslError}
  */
 export function tokenize(source, file = 'memory'){
     /** @type {Token[]} */
     const tokens = [];
-    /** @type {{ text: string, pos: Position }[]} */
+    /** @type {{ text: string, pos: Position, at: number }[]} */
     const pragmas = [];
     let name = file;
     let line = 1;
@@ -207,7 +208,7 @@ export function tokenize(source, file = 'memory'){
             const start = here(i);
             if (directive?.[1] === 'pragma')
             {
-                pragmas.push({ text: directive[2], pos: start });
+                pragmas.push({ text: directive[2], pos: start, at: tokens.length });
             }
             else if (directive?.[1] === 'line')
             {

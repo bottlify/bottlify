@@ -737,7 +737,8 @@ export function createBuilder(profile){
             const values = literal(a);
             if (values)
             {
-                return imm(values.map(x=>Math.min(1, Math.max(0, x))));
+                // As the _sat modifier does: NaN saturates to 0.
+                return imm(values.map(x=>(Number.isNaN(x) ? 0 : Math.min(1, Math.max(0, x)))));
             }
             return emit('mov', a.w, [a.src], { sat: true });
         }

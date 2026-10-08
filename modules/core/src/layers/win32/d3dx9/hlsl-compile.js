@@ -151,8 +151,9 @@ async function compile(source, options){
         return failed();
     }
 
-    const rowMajor = ((options.flags ?? 0) & D3DXSHADER.PACKMATRIX_ROWMAJOR) !== 0
-        || program.pragmas.some(p=>/^pack_matrix\s*\(\s*row_major\s*\)/.test(p.text));
+    // The flag is the packing before any `#pragma pack_matrix`; each declaration takes the
+    // last one before it.
+    const rowMajor = ((options.flags ?? 0) & D3DXSHADER.PACKMATRIX_ROWMAJOR) !== 0;
     const { module, diagnostics } = check(program, { entry: entryName, rowMajor });
     for (const d of diagnostics)
     {

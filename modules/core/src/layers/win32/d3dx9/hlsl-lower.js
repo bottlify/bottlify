@@ -512,7 +512,7 @@ export function lower(module, entry, profile, options = {}){
             }
             case 'struct': {
                 const members = type.members.map(m=>({ name: m.name,
-                    type: ctabType(m.type, rowMajor) }));
+                    type: ctabType(m.type, m.rowMajor ?? rowMajor) }));
                 return { cls: PC.STRUCT, type: PT.VOID, rows: 1,
                     cols: members.reduce((n, m)=>n + registersOf(m.type), 0), elements: 1,
                     members };
@@ -558,8 +558,8 @@ export function lower(module, entry, profile, options = {}){
             case 'struct': {
                 let at = offset;
                 return { k: 'struct', fields: type.members.map(m=>{
-                    const field = constantValue(m.type, cst, at, relative, rowMajor);
-                    at += registersOf(ctabType(m.type, rowMajor));
+                    const field = constantValue(m.type, cst, at, relative, m.rowMajor ?? rowMajor);
+                    at += registersOf(ctabType(m.type, m.rowMajor ?? rowMajor));
                     return field;
                 }) };
             }
@@ -612,7 +612,8 @@ export function lower(module, entry, profile, options = {}){
                 let used = 0;
                 for (const m of type.members)
                 {
-                    used += defaultData(m.type, value[m.name], data, at + used, rowMajor);
+                    used += defaultData(m.type, value[m.name], data, at + used,
+                        m.rowMajor ?? rowMajor);
                 }
                 return used;
             }
@@ -632,8 +633,9 @@ export function lower(module, entry, profile, options = {}){
         {
             return known;
         }
-        const rowMajor = sym.mods.includes('row_major')
-            || (module.rowMajor && !sym.mods.includes('column_major'));
+        const rowMajor = sym.rowMajor ?? module.rowMajor;
+        // fxc names a uniform parameter of the entry point with a $ before it.
+        const name = sym.kind === 'param' ? `$${sym.name}` : sym.name;
         /** @type {Value} */
         let value;
         // An array of samplers or of textures is its elements, each the one at its place.
@@ -660,7 +662,7 @@ export function lower(module, entry, profile, options = {}){
         {
             const dim = samplerDim(inner.dim);
             /** @type {Const} */
-            const cst = { name: sym.name, set: 's', type: ctabType(sym.type, false), dim,
+            const cst = { name, set: 's', type: ctabType(sym.type, false), dim,
                 ...(sym.register && /^s\d+$/.test(sym.register.name)
                     ? { explicit: Number(sym.register.name.slice(1)) } : {}) };
             b.constants.push(cst);
@@ -680,7 +682,7 @@ export function lower(module, entry, profile, options = {}){
         {
             const type = ctabType(sym.type, rowMajor);
             /** @type {Const} */
-            const cst = { name: sym.name, set: 'f', type,
+            const cst = { name, set: 'f', type,
                 ...(sym.register && /^c\d+$/.test(sym.register.name)
                     ? { explicit: Number(sym.register.name.slice(1)) } : {}) };
             const initial = sym.init ? module.evaluateConstant(sym.init) : undefined;
@@ -999,7 +1001,10 @@ export function lower(module, entry, profile, options = {}){
         }
         switch (e.kind)
         {
-            case 'num': return vec(b.num(e.value));
+            // An integer literal is 32 bits, as fxc reads it: 3000000000 is -1294967296 and
+            // 3000000000u itself; what is done with it after is done in floats.
+            case 'num': return vec(b.num(e.ntype === 'int' ? e.value | 0
+                : e.ntype === 'uint' ? e.value >>> 0 : e.value));
             case 'bool': return vec(b.num(e.value ? 1 : 0));
             case 'string': return VOID;
             case 'ident': return read(e.sym, st);
@@ -1013,7 +1018,9 @@ export function lower(module, entry, profile, options = {}){
                 }
                 if (e.op === '-')
                 {
-                    return zip([x], b.neg);
+                    // -1u is 4294967295: an unsigned literal is negated in its own 32 bits.
+                    return e.operand.kind === 'num' && e.operand.ntype === 'uint'
+                        ? vec(b.num(-e.operand.value >>> 0)) : zip([x], b.neg);
                 }
                 if (e.op === '!')
                 {
@@ -1727,11 +1734,15 @@ export function lower(module, entry, profile, options = {}){
         }
         // An array, and a matrix a column at a time, take the semantic's indices in turn
         // (COLOR for float4 c[2] is COLOR0 and COLOR1).
-        if (semantic && type.kind === 'array')
+        // With no semantic of its own, an array of structures is its members' inputs again
+        // for each element, as fxc reads it.
+        if (type.kind === 'array' && (semantic || type.elem.kind !== 'scalar'
+            && type.elem.kind !== 'vector'))
         {
             const per = ioSlots(type.elem);
             return { k: 'arr', elems: Array.from({ length: type.length }, (_, i)=>
-                inputOf(type.elem, shiftSemantic(semantic, i * per), name, pos)) };
+                inputOf(type.elem, semantic ? shiftSemantic(semantic, i * per) : null, name,
+                    pos)) };
         }
         if (semantic && type.kind === 'matrix')
         {

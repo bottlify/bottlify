@@ -73,6 +73,8 @@ export function check(program, options = {}){
     const structs = new Map();
     /** @type {Map<string, Type>} */
     const typedefs = new Map();
+    /** The packing a typedef bound its matrices to. @type {Map<string, boolean>} */
+    const typedefPacking = new Map();
     /** @type {Symbol[]} */
     const globals = [];
     /** @type {Map<string, Symbol[]>} */
@@ -400,6 +402,11 @@ export function check(program, options = {}){
         }
         const sym = makeSymbol({ kind: 'global', name: v.name, type, decl: v });
         sym.isUniform = !sym.isStatic;
+        const rowMajor = packingOf(v);
+        if (rowMajor !== undefined)
+        {
+            sym.rowMajor = rowMajor;
+        }
         sym.order = seq++;
         const list = globalByName.get(v.name) ?? [];
         if (list.length > 0)
@@ -484,9 +491,18 @@ export function check(program, options = {}){
         // A default, as written: each call that leaves the parameter out checks a copy of it.
         sym.defaultValue = v.init ? structuredClone(v.init) : null;
         sym.isUniform = v.mods.includes('uniform') || (entry && dir === 'in' && !v.semantic
-            && (isNumeric(type) || type.kind === 'array' || type.kind === 'sampler'
-                || type.kind === 'texture'));
+            && (isNumeric(type) || (type.kind === 'array' && !holdsStruct(type))
+                || type.kind === 'sampler' || type.kind === 'texture'));
         return sym;
+    }
+
+    /**
+     * An array of structures: a parameter of the entry point that is one is its members'
+     * inputs, each element reading the same ones.
+     * @param {Type} type @returns {boolean}
+     */
+    function holdsStruct(type){
+        return type.kind === 'array' ? holdsStruct(type.elem) : type.kind === 'struct';
     }
 
     /** @param {FunctionDecl} d */
@@ -520,6 +536,28 @@ export function check(program, options = {}){
     }
 
     /** @param {Variable} v @returns {Type} */
+    /**
+     * The packing a declaration binds its matrices to: its own row_major or column_major,
+     * else a typedef's it is written with, else the `#pragma pack_matrix` before it; a
+     * packing once bound is kept by what is declared with the type later.
+     *
+     * @param {{ mods?: string[], type: any, packRows?: boolean }} d
+     * @returns {boolean | undefined}
+     */
+    function packingOf(d){
+        if (d.mods?.includes('row_major'))
+        {
+            return true;
+        }
+        if (d.mods?.includes('column_major'))
+        {
+            return false;
+        }
+        return (d.type?.cls === 'named' ? typedefPacking.get(d.type.name) : undefined)
+            ?? d.packRows;
+    }
+
+    /** @param {Variable} v */
     function memberType(v){
         const { type } = declaredType(v.type, v.dims);
         if (type.kind === 'void')
@@ -1601,14 +1639,26 @@ export function check(program, options = {}){
                             fail('X3003', `redefinition of '${m.name}'`, m.pos);
                         }
                         names.add(m.name);
-                        return { name: m.name, type: memberType(m), semantic: m.semantic };
+                        // A member's matrices are packed as they are where it is declared,
+                        // whatever the variable of the structure says later.
+                        return { name: m.name, type: memberType(m), semantic: m.semantic,
+                            rowMajor: packingOf(m) ?? options.rowMajor ?? false };
                     });
                     structs.set(d.name, structOf(d.name, [...inherited, ...members]));
                     break;
                 }
-                case 'typedef':
+                case 'typedef': {
                     typedefs.set(d.name, declaredType(d.type, d.dims).type);
+                    // As fxc binds it: a typedef of a matrix binds the pragma in force, one of
+                    // an array binds the program's packing if none is.
+                    const rowMajor = packingOf(d) ?? (d.dims.length > 0
+                        ? options.rowMajor ?? false : undefined);
+                    if (rowMajor !== undefined)
+                    {
+                        typedefPacking.set(d.name, rowMajor);
+                    }
                     break;
+                }
                 case 'var':
                     declareGlobal(d);
                     break;

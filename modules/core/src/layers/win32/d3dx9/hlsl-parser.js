@@ -87,6 +87,8 @@ import { HlslError, tokenize } from './hlsl-lexer.js';
  * @property {{ register: string, component: string } | null} packoffset
  * @property {Annotation[]} annotations
  * @property {Expr | null} init
+ * @property {boolean} [packRows]   Matrices packed by row, as the last `#pragma pack_matrix`
+ *     before the declaration says; absent where none stands before it.
  * @property {Position} pos
  */
 
@@ -208,7 +210,7 @@ import { HlslError, tokenize } from './hlsl-lexer.js';
 /**
  * @typedef {Object} Program
  * @property {Decl[]} decls
- * @property {{ text: string, pos: Position }[]} pragmas
+ * @property {{ text: string, pos: Position, at: number }[]} pragmas
  */
 
 /** The element types, with the width at which `half` and the rest are the same as `float`. */
@@ -317,6 +319,20 @@ function builtinType(word){
 export function parse(source, file = 'memory'){
     const { tokens, pragmas } = tokenize(source, file);
     let at = 0;
+    /** The packing `#pragma pack_matrix` sets from where it stands, up to the token `index`. */
+    const packing = (/** @type {number} */ index)=>{
+        /** @type {boolean | undefined} */
+        let rows;
+        for (const pragma of pragmas)
+        {
+            const set = /^pack_matrix\s*\(\s*(row_major|column_major)\s*\)/.exec(pragma.text);
+            if (set && pragma.at <= index)
+            {
+                rows = set[1] === 'row_major';
+            }
+        }
+        return rows;
+    };
     /** The names `struct` and `typedef` have introduced. @type {Set<string>} */
     const typeNames = new Set();
     /**
@@ -658,8 +674,9 @@ export function parse(source, file = 'memory'){
             // which a compile of one entry point reads past.
             skipBalanced();
         }
+        const packRows = packing(at);
         return { kind: 'var', name: name.text, type, mods, dims, ...merged, annotations, init,
-            pos: name.pos };
+            ...(packRows === undefined ? {} : { packRows }), pos: name.pos };
     };
 
     /** Past a `{ ... }` and what it holds, nested ones too. */
@@ -1357,7 +1374,9 @@ export function parse(source, file = 'memory'){
                 const name = expectIdent();
                 const dims = parseDims();
                 typeNames.add(name.text);
-                decls.push({ kind: 'typedef', name: name.text, type, dims, mods, pos: name.pos });
+                const packRows = packing(at);
+                decls.push({ kind: 'typedef', name: name.text, type, dims, mods,
+                    ...(packRows === undefined ? {} : { packRows }), pos: name.pos });
             } while (acceptPunct(','));
             expectPunct(';');
             return;
