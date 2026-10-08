@@ -268,6 +268,51 @@ const strippedRoot = path=>{
  */
 
 /**
+ * PathCompactPath's answer: the path as it is when it fits in `limit`
+ * pixels; otherwise the directories before its file name cut back and an
+ * ellipsis put in their place, as much of the path's start kept as fits --
+ * "C:\Program Fi...\setup.exe"; and when even the file name with the
+ * ellipsis does not fit, the ellipsis and as much of the name as does, or as
+ * much of the ellipsis as does when nothing else will.
+ *
+ * @param {string} path @param {number} limit
+ * @param {(text: string) => number} width  The text's width in the context's font.
+ * @returns {string}
+ */
+export function compactPath(path, limit, width){
+    if (width(path) <= limit)
+    {
+        return path;
+    }
+    const ELLIPSIS = '...';
+    const dots = width(ELLIPSIS);
+    const cut = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'));
+    const file = cut >= 0 ? path.slice(cut) : path;
+    /** The longest start of `text` that fits in `room`. @param {string} text @param {number} room */
+    const fitting = (text, room)=>{
+        let count = 0;
+        while (count < text.length && width(text.slice(0, count + 1)) <= room)
+        {
+            count++;
+        }
+        return text.slice(0, count);
+    };
+    if (cut <= 0 || width(file) + dots > limit)
+    {
+        // The name alone is too long: the ellipsis, then what of the name
+        // fits after it.
+        if (dots > limit)
+        {
+            return fitting(ELLIPSIS, limit);
+        }
+        const name = cut >= 0 ? path.slice(cut + 1) : path;
+        return ELLIPSIS + fitting(name, limit - dots);
+    }
+    const kept = fitting(path.slice(0, cut), limit - width(file) - dots);
+    return kept + ELLIPSIS + file;
+}
+
+/**
  * @param {PathHost} host
  * @param {{ A: import('./text.js').Width, W: import('./text.js').Width }} widths
  */

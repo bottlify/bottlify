@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { shlwapiMachine } from './memory.fixture.js';
+import { compactPath } from './path.js';
 
 const E_POINTER = 0x80004003;
 const E_INVALIDARG = 0x80070057;
@@ -345,4 +346,16 @@ test('each path function declares the arguments it pops, in both spellings', ()=
         assert.equal(fns[`${name}A`].argBytes, bytes, `${name}A`);
         assert.equal(fns[`${name}W`].argBytes, bytes, `${name}W`);
     }
+});
+
+test('PathCompactPath cuts the directories, then the name, behind an ellipsis', ()=>{
+    // Six pixels a character, as a fixed-pitch font measures.
+    const width = (/** @type {string} */ text)=>text.length * 6;
+    const path = 'C:\\Program Files\\Infogrames\\Desperados\\setup.exe';
+    assert.equal(compactPath(path, path.length * 6, width), path, 'it fits as it is');
+    assert.equal(compactPath(path, 30 * 6, width), 'C:\\Program Files\\...\\setup.exe');
+    assert.equal(compactPath(path, 12 * 6, width), '...setup.exe',
+        'the name is kept whole while it fits behind the ellipsis');
+    assert.equal(compactPath(path, 8 * 6, width), '...setup');
+    assert.equal(compactPath(path, 2 * 6, width), '..', 'not even the ellipsis fits');
 });

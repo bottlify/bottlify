@@ -1999,6 +1999,40 @@ export function createWin32Module(){
                     // when they are called: the table is still being built here.
                     /** @param {string} name */
                     library: name=>libraries[name],
+                    /**
+                     * Through GetTextExtentPoint32W, on the screen's context
+                     * for a null one, as the program's own call would measure.
+                     *
+                     * @param {number} hdc @param {string} text
+                     */
+                    textWidth: (hdc, text)=>{
+                        const user = libraries['USER32.dll'];
+                        const dc = hdc !== 0 ? hdc : user.GetDC.handler([0]);
+                        const bytes = new Uint8Array(text.length * 2 + 8);
+                        for (let at = 0; at < text.length; at++)
+                        {
+                            bytes[at * 2] = text.charCodeAt(at) & 0xff;
+                            bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
+                        }
+                        const block = heap.allocate(bytes.length);
+                        try
+                        {
+                            writeMemory(block, bytes);
+                            const size = block + text.length * 2;
+                            libraries['GDI32.dll'].GetTextExtentPoint32W.handler(
+                                [dc, block, text.length, size]);
+                            return new DataView(readMemory(size, 4).slice().buffer)
+                                .getInt32(0, true);
+                        }
+                        finally
+                        {
+                            heap.free(block);
+                            if (hdc === 0)
+                            {
+                                user.ReleaseDC.handler([0, dc]);
+                            }
+                        }
+                    },
                     divergence: config?.divergence,
                 }),
 

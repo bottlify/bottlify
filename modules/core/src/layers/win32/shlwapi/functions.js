@@ -17,7 +17,8 @@
 
 import { encodeAnsi } from '../kernel32/locale.js';
 import { createForwards } from './forwards.js';
-import { MAX_PATH, canonical, createPathFunctions, extensionIndex, isSeparator, rootOf }
+import { MAX_PATH, canonical, compactPath, createPathFunctions, extensionIndex, isSeparator,
+    rootOf }
     from './path.js';
 import { createRegistryHelpers } from './registry.js';
 import { createStringFunctions } from './strings.js';
@@ -155,6 +156,9 @@ const SHLWAPI_VERSION = /** @type {[number, number, number, number]} */ ([6, 0, 
  * @property {(library: string) => Record<string, { handler: (args: number[]) => any }> | undefined}
  *     [library]  Another library's exports, for the exports that are only another library's
  *           function under a number (`forwards.js`). Absent, those are not bound.
+ * @property {(hdc: number, text: string) => number} [textWidth]
+ *           A text's width in pixels in a device context's font, the
+ *           screen's for a null context: what PathCompactPath fits a path by.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(code: number) => void} [setLastError]
  *           For the calls that set one: PathCanonicalize refusing a missing
@@ -343,6 +347,36 @@ export function createShlwapiFunctions(host){
         handler: ([pointer])=>{
             const path = read(pointer);
             return path === null ? 0 : (pointer >>> 0) + extensionIndex(path) * unit;
+        },
+    });
+
+    /**
+     * PathCompactPath for either width.
+     *
+     * @param {(address: number) => string | null} read
+     * @param {(text: string) => Uint8Array} encode
+     */
+    const pathCompactPath = (read, encode)=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([hdc, pointer, limit])=>{
+            const path = read(pointer);
+            if (path === null)
+            {
+                return 0;
+            }
+            const measure = host.textWidth;
+            if (!measure)
+            {
+                host.divergence?.('PathCompactPath', 'no text measure: the path is left whole');
+                return 1;
+            }
+            const text = compactPath(path, limit >>> 0, part=>measure(hdc >>> 0, part));
+            if (text !== path)
+            {
+                host.writeMemory(pointer >>> 0, encode(text));
+            }
+            return 1;
         },
     });
 
@@ -614,6 +648,17 @@ export function createShlwapiFunctions(host){
 
         /** LPWSTR PathFindExtensionW(LPCWSTR pszPath) */
         PathFindExtensionW: pathFindExtension(widePathAt, 2),
+
+        /**
+         * BOOL PathCompactPathA(HDC hDC, LPSTR pszPath, UINT dx)
+         *
+         * The path made to fit dx pixels in the context's font -- the screen's
+         * for no context -- in its own buffer, which it only ever shortens.
+         */
+        PathCompactPathA: pathCompactPath(pathAt, narrow),
+
+        /** BOOL PathCompactPathW(HDC hDC, LPWSTR pszPath, UINT dx) */
+        PathCompactPathW: pathCompactPath(widePathAt, wide),
 
         /** LPSTR PathFindFileNameA(LPCSTR pszPath) */
         PathFindFileNameA: pathFindFileName(pathAt, 1),
