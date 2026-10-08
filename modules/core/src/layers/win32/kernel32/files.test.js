@@ -2114,3 +2114,33 @@ test('the serial calls refuse a file as its file system does, anything else as n
     }
     assert.equal(said.length, Object.keys(calls).length, 'each call said once');
 });
+
+test('a library this build implements stands in the system folder as a file', ()=>{
+    // A setup asks for a system library before loading it -- InstallShield's
+    // UseDLL looks with FindFirstFile, and stopped at "UseDLL failed" when the
+    // folder held nothing of the name.
+    const { files, memory, error, fns, at } = setup({ systemLibraries: ()=>['SHELL32.dll'] });
+    const INVALID_FILE_ATTRIBUTES = 0xffffffff;
+    const FILE_ATTRIBUTE_ARCHIVE = 0x20;
+
+    const handle = fns.FindFirstFileA.handler(
+        [at(NAME, 'C:\\WINDOWS\\system32\\Shell32.dll'), FIND_DATA]);
+    assert.notEqual(handle, INVALID_HANDLE_VALUE);
+    assert.equal(memory.string(FIND_DATA + 44), 'SHELL32.dll', 'under its own name');
+    assert.equal(fns.FindClose.handler([handle]), 1);
+    assert.equal(fns.GetFileAttributesA.handler([at(NAME, 'c:\\windows\\SYSTEM32\\shell32.DLL')]),
+        FILE_ATTRIBUTE_ARCHIVE);
+
+    assert.equal(fns.GetFileAttributesA.handler([at(NAME, 'C:\\WINDOWS\\system32\\nothere.dll')]),
+        INVALID_FILE_ATTRIBUTES, 'only the libraries there are');
+    assert.equal(fns.GetFileAttributesA.handler([at(NAME, 'C:\\Game\\Shell32.dll')]),
+        INVALID_FILE_ATTRIBUTES, 'and only in the system folder');
+    assert.equal(fns.FindFirstFileA.handler([at(NAME, 'C:\\WINDOWS\\system32\\*.dll'), FIND_DATA]),
+        INVALID_HANDLE_VALUE, 'a wildcard lists the folder as it is');
+    assert.equal(error.code, ERROR_FILE_NOT_FOUND);
+
+    files.put('C:\\WINDOWS\\system32\\shell32.dll', 'a real one');
+    assert.equal(fns.CreateFileA.handler([at(NAME, 'C:\\WINDOWS\\system32\\shell32.dll'),
+        GENERIC_READ, 0, 0, OPEN_EXISTING, 0, 0]) === INVALID_HANDLE_VALUE, false,
+    'a file on the volume is the file');
+});

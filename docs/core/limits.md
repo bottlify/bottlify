@@ -132,6 +132,9 @@ differently raises a `divergence` event naming the API.
   ShellExecute opens `.txt`, `.log`, `.ini`, `.inf`, `.nfo` and `.diz` files in it; an address
   (`http`, `https`, `ftp`, `mailto`, a `.url` shortcut) becomes an `open-url` event for the page.
   Other documents have no handler (`SE_ERR_NOASSOC`).
+- The libraries the engine implements answer, in `C:\WINDOWS\system32`, an existence check by
+  their exact name (GetFileAttributes, FindFirstFile) as files; a wildcard search does not list
+  them and they cannot be opened.
 - An installation's log (`MsiEnableLog`, `msiexec /l`) has its messages, its actions and, when
   asked, its properties; the verbose trace of the engine's own decisions (`/lv`) is not written.
 - Nothing is rolled back: an installation that fails leaves what it had done.

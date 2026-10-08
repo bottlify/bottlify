@@ -1643,6 +1643,10 @@ export function createWin32Module(){
                         readCString,
                         readWideString,
                         files: volume,
+                        // The libraries this build implements, standing in the
+                        // system folder for a setup that looks before it loads.
+                        systemLibraries: ()=>Object.keys(libraries)
+                            .filter(name=>name !== PROGRAMS_LIBRARY && /\.(dll|drv|ocx)$/i.test(name)),
                         directories: shellFolderDirectories(windows),
                         imagePath: ()=>modules.imagePath(),
                         setLastError: setError,

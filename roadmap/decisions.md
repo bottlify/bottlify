@@ -346,6 +346,17 @@ the machine reports a browser installed (A39). The frame is a class of the progr
 moved, activated and closed as any window is -- because the routine drives only exports a program
 could call and writes no window procedure in guest code. *2026-10-08.*
 
+**A41 -- The libraries the engine implements stand in the system folder as files, for the
+questions asked before loading one.** A38 left the system folder empty of what the engine
+supplies, to be revisited when a setup checked first; InstallShield 9's `UseDLL` does, with
+FindFirstFile on `system32\Shell32.dll`, and stopped at "UseDLL failed". In the system folder a
+name that is one of the engine's libraries, and is not a file on the volume, now answers
+GetFileAttributes(Ex) and a FindFirstFile for that exact name as a file: archive, 64 KiB, dated
+as Windows XP SP3's build (2008-04-14). A search with a wildcard lists the folder as it is, and
+the name cannot be opened -- what it holds is the engine's, not bytes; GetFileVersionInfo answers
+such a library already (A39). The system programs stay as A38 has them. Revisit if a program
+reads a system library's bytes or enumerates the folder to find one. *2026-10-08.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

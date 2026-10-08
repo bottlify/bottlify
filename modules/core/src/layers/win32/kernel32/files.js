@@ -354,6 +354,10 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
  *           The running program, whose directory is the first place a search
  *           with no path of its own looks. Absent, the search starts at the
  *           current directory.
+ * @property {() => string[]} [systemLibraries]
+ *           The libraries this build implements, by file name: each stands in
+ *           the system folder as a file of its own, where a setup looks for it
+ *           before loading it. Absent, the folder shows only what is on it.
  * @property {{ forget: (object: any) => void }} [namedObjects]
  *           Told when a handle closes, so a named mutex, event, semaphore,
  *           timer or file mapping can free its name once nothing holds it any
@@ -377,6 +381,55 @@ const high = value=>Math.floor(value / 0x100000000) >>> 0;
  */
 const int64 = (lowPart, highPart)=>(highPart | 0) * 0x100000000 + (lowPart >>> 0);
 
+/** When a library the system folder shows was made: Windows XP SP3's build. */
+const SYSTEM_LIBRARY_TIME = Date.UTC(2008, 3, 14, 12);
+/** The size such a library reports; nothing reads its bytes through the file. */
+const SYSTEM_LIBRARY_SIZE = 0x10000;
+
+/**
+ * A volume on which the system folder also holds the libraries this build
+ * implements, each by its own name, unless a file of that name is there.
+ *
+ * Only for the questions a setup asks before it loads one -- is it there, what
+ * are its attributes, a search for its exact name (InstallShield's UseDLL looks
+ * with FindFirstFile first). A search with a wildcard lists the folder as it
+ * is, and the file cannot be opened: what it holds is the engine's, not bytes
+ * on a volume (decision A41).
+ *
+ * @param {FileSystem} real @param {(() => string[]) | undefined} libraries
+ * @returns {FileSystem}
+ */
+function withSystemLibraries(real, libraries){
+    if (!libraries)
+    {
+        return real;
+    }
+    const folder = `${SYSTEM_DIRECTORY.toLowerCase()}\\`;
+    /** @param {string} path @returns {string | null} the library's own spelling */
+    const libraryAt = path=>{
+        const lower = path.toLowerCase();
+        if (!lower.startsWith(folder) || lower.indexOf('\\', folder.length) !== -1)
+        {
+            return null;
+        }
+        const name = lower.slice(folder.length);
+        return libraries().find(each=>each.toLowerCase() === name) ?? null;
+    };
+    const entry = { exists: true, isDirectory: false, size: SYSTEM_LIBRARY_SIZE,
+        modified: SYSTEM_LIBRARY_TIME };
+    return Object.assign(Object.create(real), {
+        /** @param {string} path */
+        stat: path=>real.stat(path) ?? (libraryAt(path) ? { ...entry } : null),
+        /** @param {string} path @param {string} pattern */
+        list: (path, pattern)=>{
+            const found = real.list(path, pattern);
+            const name = (found?.length ?? 0) === 0 && !/[*?]/.test(pattern ?? '')
+                ? libraryAt(`${path.replace(/\\$/, '')}\\${pattern}`) : null;
+            return name ? [{ ...entry, name }] : found;
+        },
+    });
+}
+
 /**
  * Builds the function table: name -> { argBytes, handler }.
  *
@@ -388,7 +441,7 @@ const int64 = (lowPart, highPart)=>(highPart | 0) * 0x100000000 + (lowPart >>> 0
  * @param {FileHost} host
  */
 export function createFileFunctions(host){
-    const { files } = host;
+    const files = withSystemLibraries(host.files, host.systemLibraries);
 
     // A machine has these directories before any program runs: GetTempPath
     // and GetSystemDirectory promise them, the registry names the program
