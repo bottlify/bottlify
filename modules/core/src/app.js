@@ -6163,6 +6163,19 @@ async function buildApp(options){
                         throw fail('guest-fault', error);
                     }
 
+                    // A parent polling a child that has not run -- its exit
+                    // code, a wait that does not block -- in a loop that never
+                    // blocks is waiting on it: the child runs now, beside it,
+                    // as it would once the parent blocked on its handle.
+                    if (replacing?.polled && win32.childWaitedOn(replacing))
+                    {
+                        events.emit('process-child', {
+                            image: replacing.imagePath,
+                            commandLine: replacing.commandLine,
+                        });
+                        return 0;
+                    }
+
                     let step;
                     try
                     {
