@@ -369,7 +369,13 @@ for (const { what, at } of all('--key').map(timed))
 // its title once it has stood visible and enabled for a whole look, and is not
 // the button pressed last unless three looks have passed -- a wizard's pages
 // driven without guessing when each will come, which drifts from run to run.
-const pressing = argv.includes('--press') ? argv[argv.indexOf('--press') + 1].split('|') : [];
+//
+// `--press-any 'Next >|OK|Finish'`: any of them, in whatever order they come,
+// for as long as the run lasts -- every installer on the disk driven by one
+// list of the buttons that go forward.
+const anyOrder = argv.includes('--press-any');
+const pressing = argv.includes('--press') || anyOrder
+    ? argv[argv.indexOf(anyOrder ? '--press-any' : '--press') + 1].split('|') : [];
 if (pressing.length > 0)
 {
     let step = 0;
@@ -392,7 +398,8 @@ if (pressing.length > 0)
                 const win32 = diagnostics.find((/** @type {any} */ entry)=>entry.name === 'win32')
                     ?.metrics ?? {};
                 const button = (win32.windows ?? []).find((/** @type {any} */ w)=>w.visible
-                    && w.className === 'Button' && w.title === pressing[step]
+                    && w.className === 'Button'
+                    && (anyOrder ? pressing.includes(w.title) : w.title === pressing[step])
                     && (w.hwnd !== lastButton || looksSince > 3)
                     && (parseInt(w.style, 16) & WS_DISABLED) === 0);
                 if (!button)
@@ -406,10 +413,10 @@ if (pressing.length > 0)
                 }
                 const x = Math.round((button.rect.left + button.rect.right) / 2);
                 const y = Math.round((button.rect.top + button.rect.bottom) / 2);
-                console.log(seconds(), 'PRESS', pressing[step], x, y);
+                console.log(seconds(), 'PRESS', button.title, x, y);
                 lastButton = button.hwnd;
                 looksSince = 0;
-                step++;
+                step += anyOrder ? 0 : 1;
                 app.input.send({ kind: 'pointerMove', x, y });
                 app.input.send({ kind: 'pointerButton', button: 'left', down: true });
                 setTimeout(()=>app.input.send({ kind: 'pointerButton', button: 'left',
