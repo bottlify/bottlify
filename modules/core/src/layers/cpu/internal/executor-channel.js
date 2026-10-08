@@ -38,8 +38,10 @@ export const CHANNEL_BYTES = TEXT_AT + TEXT_BYTES;
  * The views of a channel's memory.
  *
  * @param {SharedArrayBuffer} buffer
+ * @param {Int32Array | null} [bell]  a word the process waits on for all its executors at
+ *     once, rung after every turn the executor's side ends
  */
-export function channelOf(buffer){
+export function channelOf(buffer, bell = null){
     const words = new Int32Array(buffer, 0, TEXT_AT / 4);
     const text = new Uint8Array(buffer, TEXT_AT, TEXT_BYTES);
     return {
@@ -53,6 +55,11 @@ export function channelOf(buffer){
             Atomics.store(words, Word.FLAGS, flags | 0);
             Atomics.store(words, Word.STATE, state);
             Atomics.notify(words, Word.STATE);
+            if (bell !== null)
+            {
+                Atomics.add(bell, 0, 1);
+                Atomics.notify(bell, 0);
+            }
         },
         /**
          * Waits until the state is no longer `state`, and answers the new one.

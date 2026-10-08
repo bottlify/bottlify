@@ -120,15 +120,16 @@ function wasmModule(shared){
  * @param {{ memory: WebAssembly.Memory,
  *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout,
  *     area: number, statics: number, hotThreshold: number, trapPort?: number,
- *     parkBase: number, precise?: boolean }} options
+ *     parkBase: number, precise?: boolean, atomic?: boolean }} options
  *     area: where the tier's `WASM_INTERPRETER_AREA` bytes lie; statics: where the
  *     instance's `WASM_INTERPRETER_STATICS` bytes, its data and stack, lie; parkBase: the
  *     park loop's address, whose jumps the ring leaves out; precise: the engine's `precise`,
- *     the x87 bookkeeping games do not read kept as the JavaScript interpreter keeps it
+ *     the x87 bookkeeping games do not read kept as the JavaScript interpreter keeps it;
+ *     atomic: the engine's `atomic`, every locked instruction left to the JavaScript tier
  * @returns {WasmInterpreter | null}
  */
 export function createWasmInterpreter({ memory, layout, area, statics, hotThreshold, trapPort,
-    parkBase, precise = false })
+    parkBase, precise = false, atomic = false })
 {
     if ((layout.codePages ?? -1) >= 0 || layout.fsBase < 0
         || area + WASM_INTERPRETER_AREA > memory.buffer.byteLength
@@ -175,6 +176,7 @@ export function createWasmInterpreter({ memory, layout, area, statics, hotThresh
         exports.configureEntry(layout.counter);
         // Zero is no place: the block's first word is a register, never the marks.
         exports.configureExact(layout.x87Format === 'f64' ? layout.x87Exact ?? 0 : 0);
+        exports.configureAtomic(atomic ? 1 : 0);
         ({ retired, relaxedReads, exitValue, exitSize, enter } = exports);
         run = /** @type {(budget: number) => number} */ (exports.run);
         return run;

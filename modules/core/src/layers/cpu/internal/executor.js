@@ -56,16 +56,37 @@ async function openWorker(url){
  */
 
 /**
+ * The word a process waits on for all its executors: each rings it at the end
+ * of every turn of its own, so one wait covers every channel.
+ */
+export function createBell(){
+    const buffer = new SharedArrayBuffer(4);
+    const word = new Int32Array(buffer);
+    return {
+        buffer,
+        /** The count now: what a wait is from. */
+        rung: ()=>Atomics.load(word, 0),
+        /**
+         * Waits until the bell rings past `seen`, at most `ms`.
+         * @param {number} seen @param {number} [ms]
+         */
+        wait(seen, ms = Infinity){
+            Atomics.wait(word, 0, seen, ms);
+        },
+    };
+}
+
+/**
  * Opens executor `index` of the process whose first executor is `host`.
  *
  * @param {{ host: any, index: number, engineUrl: string,
  *     config: Omit<import('./cork-host.js').CorkHostConfig, 'engine' | 'memory' | 'executor'>,
- *     workerUrl?: URL }} options
+ *     workerUrl?: URL, bell?: ReturnType<typeof createBell> }} options
  *     host: the process's cork host, made for `config.executors`; config: the configuration
- *     it was made with
+ *     it was made with; bell: the one its executors share, when it waits on several
  */
 export async function createRemoteExecutor({ host, index, engineUrl, config,
-    workerUrl = new URL('./executor.worker.js', import.meta.url) })
+    workerUrl = new URL('./executor.worker.js', import.meta.url), bell = createBell() })
 {
     const memory = host.wasmMemory();
     if (!(memory.buffer instanceof SharedArrayBuffer))
@@ -97,7 +118,7 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
                 asked.delete(data.id);
             }
         });
-        worker.post({ type: 'start', engineUrl, memory, channel: buffer,
+        worker.post({ type: 'start', engineUrl, memory, channel: buffer, bell: bell.buffer,
             config: { ...config, executor: index } });
     });
     const own = /** @type {Uint8Array} */ (host.block());
@@ -133,52 +154,124 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
         return flags;
     };
 
-    return {
+    /** Whether a slice is out: started and its end not yet taken. */
+    let running = false;
+    /** What the process's side said last, which the executor's next turn ends.
+     * @type {number} */
+    let mine = Turn.IDLE;
+
+    const executor = {
         index,
+        /** Whether a slice is out. */
+        busy: ()=>running,
         /**
-         * Runs a slice of at most `budget` instructions on the executor, answering
-         * every trap and fault it raises meanwhile; the executor's block holds the
-         * thread it runs.
+         * Starts a slice of at most `budget` instructions on the executor's
+         * block, the thread it holds; `step` answers what it raises.
+         *
+         * @param {number} budget
+         */
+        start(budget){
+            if (failed !== null)
+            {
+                throw new Error(`executor ${index}: ${failed}`);
+            }
+            if (running)
+            {
+                throw new Error(`executor ${index}: a slice is already out`);
+            }
+            running = true;
+            mine = Turn.RUN;
+            channel.say(Turn.RUN, budget);
+        },
+        /**
+         * Answers what the executor raised since the last step, if anything:
+         * a trap or a fault, with `around` run about the answer (the process
+         * makes the executor's thread its current one there); the slice's end
+         * as its record, once.
+         *
+         * @param {(reply: () => void) => void} [around]
+         * @returns {RemoteSlice | null}
+         */
+        step(around = reply=>reply()){
+            if (!running)
+            {
+                return null;
+            }
+            const state = Atomics.load(channel.words, 0);
+            if (state === mine)
+            {
+                return null;
+            }
+            if (state === Turn.TRAP)
+            {
+                const value = channel.value() >>> 0;
+                /** @type {number} */
+                let flags = 0;
+                around(()=>{
+                    flags = answer(()=>{
+                        host.raiseTrap(value);
+                        return 0;
+                    });
+                });
+                mine = Turn.REPLY;
+                channel.say(Turn.REPLY, 0, flags);
+                return null;
+            }
+            if (state === Turn.FAULT)
+            {
+                const fault = channel.read();
+                /** @type {number} */
+                let flags = 0;
+                around(()=>{
+                    flags = answer(()=>(host.offerFault(fault) ? Said.CLAIMED : 0));
+                });
+                mine = Turn.REPLY;
+                channel.say(Turn.REPLY, 0, flags);
+                return null;
+            }
+            if (state !== Turn.DONE)
+            {
+                return null;
+            }
+            running = false;
+            mine = Turn.IDLE;
+            const flags = channel.flags();
+            return {
+                instructions: channel.value() >>> 0,
+                halted: (flags & Said.HALTED) !== 0,
+                fault: (flags & Said.FAULTED) !== 0 ? channel.read() : null,
+            };
+        },
+        /**
+         * Runs a slice to its end, answering what it raises.
          *
          * @param {number} budget
          * @returns {RemoteSlice}
          */
         runSlice(budget){
-            if (failed !== null)
-            {
-                throw new Error(`executor ${index}: ${failed}`);
-            }
-            channel.say(Turn.RUN, budget);
-            /** @type {number} */
-            let mine = Turn.RUN;
+            executor.start(budget);
             for (;;)
             {
-                const state = channel.await(mine);
-                if (state === Turn.TRAP)
+                const seen = bell.rung();
+                const ended = executor.step();
+                if (ended !== null)
                 {
-                    const value = channel.value() >>> 0;
-                    channel.say(Turn.REPLY, 0, answer(()=>{
-                        host.raiseTrap(value);
-                        return 0;
-                    }));
+                    return ended;
                 }
-                else if (state === Turn.FAULT)
-                {
-                    const fault = channel.read();
-                    channel.say(Turn.REPLY, 0,
-                        answer(()=>(host.offerFault(fault) ? Said.CLAIMED : 0)));
-                }
-                else if (state === Turn.DONE)
-                {
-                    const flags = channel.flags();
-                    return {
-                        instructions: channel.value() >>> 0,
-                        halted: (flags & Said.HALTED) !== 0,
-                        fault: (flags & Said.FAULTED) !== 0 ? channel.read() : null,
-                    };
-                }
-                mine = Turn.REPLY;
+                bell.wait(seen);
             }
+        },
+        /**
+         * Runs `work` as if on this host, over the executor's block: how the
+         * process puts a thread on it, or reads one off.
+         *
+         * @param {() => void} work
+         */
+        onBlock(work){
+            answer(()=>{
+                work();
+                return 0;
+            });
         },
         /** The executor's block: the state of the thread it runs. */
         block: ()=>theirs,
@@ -198,4 +291,5 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
             worker.terminate();
         },
     };
+    return executor;
 }

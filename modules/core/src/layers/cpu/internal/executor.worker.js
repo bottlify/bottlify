@@ -30,6 +30,7 @@ import { Said, Turn, channelOf } from './executor-channel.js';
  * @property {Omit<import('./cork-host.js').CorkHostConfig, 'engine' | 'memory'>} config
  * @property {WebAssembly.Memory} memory
  * @property {SharedArrayBuffer} channel
+ * @property {SharedArrayBuffer} bell  the process's word for all its executors' turns
  */
 
 /** The executor's host, once started. @type {any} */
@@ -39,11 +40,11 @@ let running = null;
  * @param {ExecutorStart} start
  * @param {(message: any) => void} send
  */
-async function serve({ engineUrl, config, memory, channel: buffer }, send){
+async function serve({ engineUrl, config, memory, channel: buffer, bell }, send){
     const engine = await import(engineUrl);
     const host = createCorkHost({ ...config, engine, memory });
     running = host;
-    const channel = channelOf(buffer);
+    const channel = channelOf(buffer, new Int32Array(bell));
     host.onTrap((/** @type {number} */ value)=>{
         channel.say(Turn.TRAP, value);
         channel.await(Turn.TRAP);

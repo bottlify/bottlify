@@ -49,6 +49,8 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  *     A memory with it is interpreted a run of instructions at a time, one without it
  *     an instruction at a time
  * @property {boolean} [hit]
+ * @property {boolean} [atomic]  the locked instructions run as one indivisible access
+ *     each, a compare-and-swap over this memory (`interp.js`'s `lockedStep`)
  * @property {(copy: boolean, to: number, from: number, size: number, count: number,
  *     value: number, down: boolean) => number} [repeat]  a `rep movs` (copy) or
  *     `rep stos`, as many of its `count` elements at once as the memory can move whole:

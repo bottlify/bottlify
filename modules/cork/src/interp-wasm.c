@@ -159,6 +159,16 @@ void configureExact(u32 field)
 {
     exactAt = (u8 *)field;
 }
+/* The engine's `atomic`: a process whose threads run on more than one executor.
+ * A locked instruction -- a `lock` prefix, `xchg` with memory -- is then the
+ * JavaScript interpreter's, which makes it one indivisible access as the
+ * translated code does; this module has no atomics to make it with. */
+static u32 atomic;
+__attribute__((export_name("configureAtomic")))
+void configureAtomic(u32 on)
+{
+    atomic = on;
+}
 
 static const u8 PARITY[256] = {
 #define P2(n) n, n ^ 1, n ^ 1, n
@@ -2194,6 +2204,7 @@ static u32 runInteger(u32 budget)
             if (len > 4) LEAVE(W_UNSUPPORTED);
         }
         if (op == 0x65 || op == 0x67) LEAVE(W_UNSUPPORTED);
+        if (lock && atomic) LEAVE(W_UNSUPPORTED);
         u32 si = SIZE_INDEX(opsize);
 
         /* The modrm operand: a register (isReg, ea its number) or memory at ea. */
@@ -2443,7 +2454,7 @@ static u32 runInteger(u32 budget)
         {
             u32 size = (op & 1) ? opsize : 1, a, b;
             MODRM();
-            if (lock && isReg) LEAVE(W_UNSUPPORTED);
+            if ((lock && isReg) || (atomic && !isReg)) LEAVE(W_UNSUPPORTED);
             RM_READ(size, a);
             b = regOf(greg, size);
             RM_WRITE(size, b);

@@ -16,7 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from './cork-host.js';
-import { createRemoteExecutor } from './executor.js';
+import { createBell, createRemoteExecutor } from './executor.js';
 import * as engine from '../../../../../cork/src/index.js';
 
 const ENGINE_URL = new URL('../../../../../cork/src/index.js', import.meta.url).href;
@@ -253,3 +253,95 @@ test('a store on one executor into code another translated reaches the other\'s 
             remote.close();
         }
     });
+
+test('two executors at once: interlocked counters, a spin lock and a compare-and-swap loop '
+    + 'lose no update', async()=>{
+    const config = { ...CONFIG, executors: 3, cork: { ...CONFIG.cork, atomic: true } };
+    const process = createCorkHost({ ...config, engine });
+    process.onTrap(()=>{});
+    /** @type {any[]} */
+    const faults = [];
+    process.onFault((/** @type {any} */ fault)=>{
+        faults.push(fault);
+        return false;
+    });
+    const bell = createBell();
+    const remotes = await Promise.all([1, 2].map(index=>createRemoteExecutor({ host: process,
+        index, engineUrl: ENGINE_URL, config, bell })));
+    const COUNTER = DATA;
+    const GUARDED = DATA + 8;
+    const LOCK = DATA + 16;
+    const SWAPPED = DATA + 24;
+    const N = 30_000;
+    const at = 0x50000;
+    // L: lock inc [COUNTER]
+    //    S: mov eax, 1; xchg [LOCK], eax; test eax, eax; jnz S
+    //    inc dword [GUARDED]; mov dword [LOCK], 0
+    //    mov eax, [SWAPPED]; C: lea edx, [eax+1]; lock cmpxchg [SWAPPED], edx; jnz C
+    //    dec ecx; jnz L; hlt
+    const body = [
+        0xf0, 0xff, 0x05, ...u32(COUNTER),
+        0xb8, ...u32(1), 0x87, 0x05, ...u32(LOCK), 0x85, 0xc0, 0x75, 0xf1,
+        0xff, 0x05, ...u32(GUARDED), 0xc7, 0x05, ...u32(LOCK), ...u32(0),
+        0xa1, ...u32(SWAPPED), 0x8d, 0x50, 0x01, 0xf0, 0x0f, 0xb1, 0x15, ...u32(SWAPPED),
+        0x75, 0xf3,
+    ];
+    const code = [...body, 0x49, 0x0f, 0x85, ...u32(-(body.length + 1 + 6)), 0xf4];
+    try
+    {
+        process.writePhysical(at, new Uint8Array(code));
+        process.writePhysical(DATA, new Uint8Array(32));
+        for (const remote of remotes)
+        {
+            remote.onBlock(()=>{
+                process.writeReg32('ecx', N);
+                process.writeReg32('esp', 0x300000 - remote.index * 0x10000);
+                process.writeReg32('eip', at);
+            });
+        }
+        /** @type {boolean[]} */
+        const halted = [false, false];
+        const started = Date.now();
+        remotes.forEach(remote=>remote.start(1 + 5000));
+        while (halted.includes(false) && Date.now() - started < 120_000)
+        {
+            const seen = bell.rung();
+            let moved = false;
+            remotes.forEach((remote, i)=>{
+                const ended = remote.step();
+                if (ended !== null)
+                {
+                    moved = true;
+                    assert.equal(ended.fault, null);
+                    if (ended.halted)
+                    {
+                        halted[i] = true;
+                    }
+                    else
+                    {
+                        remote.start(5000);
+                    }
+                }
+            });
+            if (!moved)
+            {
+                // A turn of the event loop now and then, as the process's own would take.
+                if (Atomics.load(new Int32Array(bell.buffer), 0) === seen)
+                {
+                    await settle();
+                }
+            }
+        }
+        assert.deepEqual(faults, []);
+        assert.deepEqual(halted, [true, true], 'both ran to the end');
+        assert.equal(process.readU32(COUNTER), 2 * N, 'lock inc');
+        assert.equal(process.readU32(GUARDED), 2 * N, 'a plain increment under an xchg lock');
+        assert.equal(process.readU32(SWAPPED), 2 * N, 'a compare-and-swap loop');
+        const translated = await Promise.all(remotes.map(remote=>remote.diagnostics()));
+        assert.ok(translated.every(one=>one?.modules > 0), 'translated on both');
+    }
+    finally
+    {
+        remotes.forEach(remote=>remote.close());
+    }
+});

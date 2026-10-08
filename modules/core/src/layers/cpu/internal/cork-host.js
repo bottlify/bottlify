@@ -260,7 +260,7 @@ export function createCorkHost(config){
         ? engine.createWasmInterpreter({ memory, layout, area: wasmArea,
             statics: stateBase + engine.WASM_INTERPRETER_STATICS_AT,
             hotThreshold: corkConfig?.hotThreshold ?? 2, trapPort, parkBase,
-            precise: corkConfig?.precise === true })
+            precise: corkConfig?.precise === true, atomic: corkConfig?.atomic === true })
         : null;
     /** The last run starts the interpreter ran, a ring: the path a run took
      * into wherever it sits. The wasm tier's, when there is one. */
@@ -848,6 +848,7 @@ export function createCorkHost(config){
             memory,
             layout,
             rdtsc: readTsc,
+            atomic: corkConfig?.atomic === true,
             ...(trapPort === undefined ? {} : { ports: { ...ports, trapPort } }),
             // An interpreted store into a page a region was translated on
             // invalidates it, as a translated store's `stale` exit does.

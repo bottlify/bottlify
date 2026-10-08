@@ -49,3 +49,38 @@ test('translated locked sequences, atomic, leave what the instruction model leav
     assert.ok(judge.share() > 0.5, `the translator ran ${judge.share()} of the instructions`);
     assert.deepEqual(failures, []);
 });
+
+test('interpreted locked sequences, atomic, on either interpreter, leave what the model leaves',
+    async()=>{
+        // Untranslated: the JavaScript interpreter's compare-and-swap step, and the wasm
+        // interpreter handing each locked instruction to it.
+        for (const wasmInterpreter of [false, true])
+        {
+            const judge = createJudge({ pool: LOCKED_POOL,
+                cork: { atomic: true, translate: false, wasmInterpreter } });
+            const next = random(0x10c4ee);
+            /** @type {string[]} */
+            const failures = [];
+            let judged = 0;
+            for (let index = 0; index < COUNT / 3; index++)
+            {
+                const body = bodyOf(next, { pool: LOCKED_POOL });
+                const result = await judge.judge(body, []);
+                if (result === null)
+                {
+                    continue;
+                }
+                judged++;
+                if (result.divergences.length > 0 && failures.length < 20)
+                {
+                    failures.push(`${wasmInterpreter ? 'wasm' : 'js'} #${index} `
+                        + `${namesOf(body, LOCKED_POOL)}: ${result.divergences.slice(0, 4)
+                            .map(one=>`${one.name} ${String(one.expected)} != `
+                                + `${String(one.actual)}`).join('; ')}`);
+                }
+            }
+            assert.ok(judged > COUNT / 3 * 0.9, `${judged} ran`);
+            assert.equal(judge.share(), 0, 'nothing translated');
+            assert.deepEqual(failures, []);
+        }
+    });

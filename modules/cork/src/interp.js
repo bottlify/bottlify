@@ -18,7 +18,8 @@
  */
 
 import { decode } from './decode/decoder.js';
-import { Fault, Unsupported, createState, evaluate } from './ir.js';
+import { Fault, Unsupported, createState, evaluate, operandAddress } from './ir.js';
+import { ZF } from './decode/table.js';
 import { compileFast } from './fast.js';
 import { eflagsOf } from './emit/flags.js';
 import { Tables, codeRangesAt, pageFlagsAt } from './runtime/layout.js';
@@ -123,7 +124,8 @@ function extendRun(state, run){
     const next = (at + decoded.length) >>> 0;
     run.starts.push(at);
     run.nexts.push(next);
-    run.steps.push(compileFast(decoded));
+    run.steps.push(memory.atomic === true && isLocked(decoded)
+        ? lockedStep(decoded) : compileFast(decoded));
     run.decoded.push(decoded);
     run.count++;
     run.closed = endsRun(decoded) || run.count >= (memory.watch === undefined ? 1 : RUN_LENGTH);
@@ -356,6 +358,135 @@ class BlockMemory {
         this.watchStart = 0;
         this.watchEnd = 0;
         this.hit = false;
+        // The locked instructions as one indivisible access each (`lockedStep`),
+        // as the atomic variant's translated code makes them.
+        this.atomic = false;
+        this.bytes8 = new Uint8Array(memory.buffer);
+        this.words16 = new Uint16Array(memory.buffer, 0, memory.buffer.byteLength >>> 1);
+        this.words32 = new Uint32Array(memory.buffer, 0, memory.buffer.byteLength >>> 2);
+        this.words64 = new BigUint64Array(memory.buffer, 0, memory.buffer.byteLength >>> 3);
+    }
+
+    /**
+     * A locked access's read, as one load: of its own width on an address that
+     * is a multiple of it, of the aligned qword holding it otherwise, and plain
+     * across two qwords, as the atomic variant's code does it. A locked access
+     * writes, so a page a store may not reach faults it here.
+     *
+     * @param {number} address @param {number} size
+     */
+    loadLocked(address, size){
+        if (this.inaccessible(address, size))
+        {
+            throw this.fault();
+        }
+        const at = this.ramBase + address;
+        if ((at & (size - 1)) === 0)
+        {
+            return size === 1 ? Atomics.load(this.bytes8, at)
+                : size === 2 ? Atomics.load(this.words16, at >>> 1)
+                    : Atomics.load(this.words32, at >>> 2);
+        }
+        if ((at & 7) + size <= 8)
+        {
+            const qword = Atomics.load(this.words64, at >>> 3);
+            return Number(qword >> BigInt((at & 7) * 8) & BigInt(size === 2 ? 0xffff : 0xffffffff));
+        }
+        return this.read(address, size);
+    }
+
+    /**
+     * A locked access's write: `value` in place of `expected`, as one
+     * compare-and-swap of the same width as `loadLocked`'s load; whether
+     * memory still held `expected`. What a store notes -- the run's own bytes,
+     * translated code -- is noted as for `write`.
+     *
+     * @param {number} address @param {number} size @param {number} expected @param {number} value
+     */
+    exchangeLocked(address, size, expected, value){
+        const at = this.ramBase + address;
+        const mask = size === 1 ? 0xff : size === 2 ? 0xffff : 0xffffffff;
+        const old = (expected & mask) >>> 0;
+        const next = (value & mask) >>> 0;
+        let swapped;
+        if ((at & (size - 1)) === 0)
+        {
+            swapped = (size === 1 ? Atomics.compareExchange(this.bytes8, at, old, next)
+                : size === 2 ? Atomics.compareExchange(this.words16, at >>> 1, old, next)
+                    : Atomics.compareExchange(this.words32, at >>> 2, old, next)) === old;
+        }
+        else if ((at & 7) + size <= 8)
+        {
+            const shift = BigInt((at & 7) * 8);
+            const bits = BigInt(mask) << shift;
+            const qword = Atomics.load(this.words64, at >>> 3);
+            swapped = (qword & bits) >> shift === BigInt(old)
+                && Atomics.compareExchange(this.words64, at >>> 3, qword,
+                    qword & ~bits | BigInt(next) << shift) === qword;
+        }
+        else
+        {
+            // Across two qwords: a split lock, which no wasm atomic spans either.
+            swapped = this.read(address, size) === old;
+            if (swapped)
+            {
+                this.write(address, size, next);
+                return true;
+            }
+        }
+        if (swapped)
+        {
+            this.noteStore(address, size);
+        }
+        return swapped;
+    }
+
+    /**
+     * `cmpxchg8b`'s qword: one compare-and-swap where it is aligned, a plain
+     * read and write where not. Answers what memory held.
+     *
+     * @param {number} address @param {bigint} expected @param {bigint} value
+     */
+    exchangeQword(address, expected, value){
+        if (this.inaccessible(address, 8))
+        {
+            throw this.fault();
+        }
+        const at = this.ramBase + address;
+        let held;
+        if ((at & 7) === 0)
+        {
+            held = Atomics.compareExchange(this.words64, at >>> 3, expected, value);
+        }
+        else
+        {
+            held = this.view.getBigUint64(at, true);
+            if (held === expected)
+            {
+                this.view.setBigUint64(at, value, true);
+            }
+        }
+        if (held === expected)
+        {
+            this.noteStore(address, 8);
+        }
+        return held;
+    }
+
+    /**
+     * What a store a locked access made notes: the run's own bytes, translated code.
+     * @param {number} address @param {number} size
+     */
+    noteStore(address, size){
+        if (address < this.watchEnd && address + size > this.watchStart)
+        {
+            this.hit = true;
+        }
+        if (this.onCodeWrite !== null
+            && (this.codeHit(address) || (size > 1 && this.codeHit(address + size - 1))))
+        {
+            this.onCodeWrite(address, size);
+        }
     }
 
     /** @param {number} address @param {number} size */
@@ -796,12 +927,132 @@ class BlockState {
  * @param {{ memory: WebAssembly.Memory,
  *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout,
  *     onCodeWrite?: (address: number, size: number) => void,
- *     rdtsc?: () => bigint, ports?: import('./ir.js').EvalState['ports'] }} what
+ *     rdtsc?: () => bigint, ports?: import('./ir.js').EvalState['ports'],
+ *     atomic?: boolean }} what
  *     `onCodeWrite` is called after an interpreted store lands in a page
  *     holding translated code, so the caller can invalidate the region it
- *     translated there, as a translated store's `stale` exit does.
+ *     translated there, as a translated store's `stale` exit does; `atomic`: the
+ *     engine's, every locked instruction one indivisible access (`lockedStep`).
  * @returns {import('./ir.js').EvalState & { syncIn: () => void, syncOut: () => void }}
  */
-export function blockState({ memory, layout, onCodeWrite, rdtsc, ports }){
-    return new BlockState(memory, layout, onCodeWrite ?? null, rdtsc, ports);
+export function blockState({ memory, layout, onCodeWrite, rdtsc, ports, atomic = false }){
+    const state = new BlockState(memory, layout, onCodeWrite ?? null, rdtsc, ports);
+    state.memory.atomic = atomic;
+    return state;
+}
+
+/**
+ * Whether the instruction is one a process on several executors runs as one
+ * indivisible access: a `lock` prefix on a memory form, or `xchg` with memory.
+ *
+ * @param {import('./decode/decoder.js').Instruction} instruction
+ */
+function isLocked(instruction){
+    return instruction.memory === true
+        && (instruction.prefixes.lock === true || instruction.op === 'xchg');
+}
+
+/**
+ * The memory a locked instruction's `evaluate` reads and writes through: the
+ * first read is the locked access's load, a write to the same bytes the value
+ * to swap in; anything else goes to memory as it would.
+ */
+class LockedAccess {
+    /** @param {BlockMemory} memory */
+    constructor(memory){
+        this.memory = memory;
+        this.address = -1;
+        this.size = 0;
+        this.old = 0;
+        this.value = 0;
+        this.wrote = false;
+    }
+
+    /** @param {number} address @param {number} size */
+    read(address, size){
+        if (this.address < 0)
+        {
+            this.address = address;
+            this.size = size;
+            this.old = this.memory.loadLocked(address, size);
+            return this.old;
+        }
+        return address === this.address && size === this.size ? this.old
+            : this.memory.read(address, size);
+    }
+
+    /** @param {number} address @param {number} size @param {number} value */
+    write(address, size, value){
+        if (address === this.address && size === this.size)
+        {
+            this.value = value;
+            this.wrote = true;
+            return;
+        }
+        this.memory.write(address, size, value);
+    }
+}
+
+/**
+ * A locked instruction's step in the atomic variant: `evaluate` over the value
+ * memory holds, its result swapped in only if memory still holds it, and the
+ * whole instruction again -- registers and flags as they were -- if another
+ * executor's store came between. `cmpxchg8b`'s two dwords are one qword swap.
+ *
+ * @param {import('./decode/decoder.js').Instruction} instruction
+ * @returns {(state: import('./ir.js').EvalState) => void}
+ */
+function lockedStep(instruction){
+    if (instruction.op === 'cmpxchg8b')
+    {
+        return state=>{
+            const memory = /** @type {BlockMemory} */ (/** @type {unknown} */ (state.memory));
+            const at = operandAddress(state, instruction.operands[0]);
+            const expected = BigInt(state.reg[2] >>> 0) << 32n | BigInt(state.reg[0] >>> 0);
+            const value = BigInt(state.reg[1] >>> 0) << 32n | BigInt(state.reg[3] >>> 0);
+            const held = memory.exchangeQword(at, expected, value);
+            if (held === expected)
+            {
+                state.eflags |= ZF;
+            }
+            else
+            {
+                state.reg[0] = Number(held & 0xffffffffn);
+                state.reg[2] = Number(held >> 32n);
+                state.eflags &= ~ZF;
+            }
+        };
+    }
+    return state=>{
+        const memory = /** @type {BlockMemory} */ (/** @type {unknown} */ (state.memory));
+        // `interpret` moved eip and the count before the step; `evaluate` moves them itself.
+        const eip = state.eip;
+        const retired = state.retired;
+        const registers = state.reg.slice();
+        const eflags = state.eflags;
+        for (;;)
+        {
+            const access = new LockedAccess(memory);
+            state.memory = /** @type {any} */ (access);
+            try
+            {
+                state.eip = instruction.eip;
+                state.retired = retired - 1;
+                evaluate(instruction, state);
+            }
+            finally
+            {
+                state.memory = /** @type {any} */ (memory);
+            }
+            if (access.address < 0 || memory.exchangeLocked(access.address, access.size,
+                access.old, access.wrote ? access.value : access.old))
+            {
+                state.eip = eip;
+                state.retired = retired;
+                return;
+            }
+            state.reg.set(registers);
+            state.eflags = eflags;
+        }
+    };
 }
