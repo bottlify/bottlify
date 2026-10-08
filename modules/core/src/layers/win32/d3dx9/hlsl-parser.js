@@ -51,6 +51,7 @@ import { HlslError, tokenize } from './hlsl-lexer.js';
  * @typedef {Object} Annotation
  * @property {TypeRef} type
  * @property {string} name
+ * @property {Expr[]} dims   Array dimensions, as a variable's.
  * @property {Expr | null} value
  */
 
@@ -276,7 +277,10 @@ function builtinType(word){
     {
         return { cls: 'scalar', scalar: 'uint', rows: 1, cols: 1, pos: none };
     }
-    const object = OBJECT_TYPES.get(word);
+    // The shader object types of an effect, like string, in any case.
+    const lower = word.toLowerCase();
+    const object = OBJECT_TYPES.get(word) ?? (lower === 'vertexshader' || lower === 'pixelshader'
+        ? OBJECT_TYPES.get(lower) : undefined);
     if (object)
     {
         return { cls: object[0], dim: object[1], name: word, pos: none };
@@ -560,13 +564,14 @@ export function parse(source, file = 'memory'){
             parseModifiers();
             const type = parseType();
             const name = expectIdent().text;
+            const dims = parseDims();
             let value = null;
             if (acceptPunct('='))
             {
                 value = parseInitializer();
             }
             expectPunct(';');
-            annotations.push({ type, name, value });
+            annotations.push({ type, name, dims, value });
         }
         expectPunct('>');
         return annotations;
@@ -1283,7 +1288,29 @@ export function parse(source, file = 'memory'){
                     expectPunct(']');
                 }
                 expectPunct('=');
-                const value = isPunct('{') ? parseInitializer() : expression();
+                /** @type {Expr} */
+                let value;
+                if (isPunct('<'))
+                {
+                    // `AlphaBlendEnable = <enabled>;`: a parameter named, as a sampler state
+                    // names its texture.
+                    next();
+                    value = { kind: 'texref', name: expectIdent().text, pos: state.pos };
+                    expectPunct('>');
+                }
+                else if (isWord('asm') && isPunct('{', 1))
+                {
+                    // A shader in assembly: read past, a compile of nothing the effect can
+                    // say it did not make.
+                    next();
+                    skipBalanced();
+                    value = { kind: 'compile', target: 'asm', callee: '', args: [],
+                        pos: state.pos };
+                }
+                else
+                {
+                    value = isPunct('{') ? parseInitializer() : expression();
+                }
                 expectPunct(';');
                 states.push({ name: state.text, index, value, pos: state.pos });
             }

@@ -19,10 +19,10 @@
  * a matrix expects the transpose.
  *
  * The ones that build something on a device go through the program's own
- * device's methods: a texture from an image file (`texture.js`). Those not
- * built yet -- an effect, a mesh, a font -- answer E_NOTIMPL with the argument
- * width still declared, their out-pointers null, and say so where divergences
- * are told.
+ * device's methods: a texture from an image file (`texture.js`), an effect
+ * (`effect.js`). Those not built yet -- a mesh, a shape -- answer E_NOTIMPL with
+ * the argument width still declared, their out-pointers null, and say so where
+ * divergences are told.
  *
  * Matrices are row-major, sixteen floats, `m[row * 4 + col]` -- the layout
  * D3DXMATRIX has in memory and the one every function here reads and writes.
@@ -37,6 +37,7 @@
 
 import { createFonts } from './font.js';
 import { createSprites } from './sprite.js';
+import { createEffects } from './effect.js';
 import { D3DX_DEFAULT, createTextureLoader } from './texture.js';
 import { guestEntry } from '../msvcrt/guest-code.js';
 import { createComObject } from '../ole32/objects.js';
@@ -103,10 +104,6 @@ const NOT_BUILT = {
     D3DXCreateCubeTextureFromFileExA: [52, 12],
     D3DXCreateCubeTextureFromFileInMemoryEx: [56, 13],
     D3DXCreateCylinder: [32, 6, 7],
-    D3DXCreateEffect: [36, 7, 8],
-    D3DXCreateEffectCompiler: [28, 5, 6],
-    D3DXCreateEffectFromResourceA: [36, 7, 8],
-    D3DXCreateEffectPool: [4, 0],
     D3DXCreateMesh: [24, 5],
     D3DXCreateMeshFVF: [24, 5],
     D3DXCreatePolygon: [20, 3, 4],
@@ -156,12 +153,19 @@ const IN_GUEST = [[inGuest, COMPILED], [matrix, MATRIX], [vector, VECTOR],
  *     included: Record<string, string>, messages: string, tokens: Uint32Array | null })
  *     => void} [shaderCompiled]
  *           Told of each compile, for a tool that compares the source with what came out.
+ * @property {(path: string) => Promise<Uint8Array | null> | Uint8Array | null} [readFile]
+ *           A file's bytes, for D3DXCreateEffectFromFile and its kin.
+ * @property {(module: number, name: string | number, type: number) =>
+ *     Promise<Uint8Array | null> | Uint8Array | null} [resource]
+ *           A module's resource, for D3DXCreateEffectFromResource and its kin.
  */
 
 /**
  * @param {D3dxHost} host
+ * @param {{ version?: number }} [options]  The d3dx9 version the table is for (24 to 43):
+ *     the layout of ID3DXEffect changed at 26 and 27. The latest when absent.
  */
-export function createD3dxFunctions(host){
+export function createD3dxFunctions(host, options = {}){
     const textures = createTextureLoader(host);
     const sprites = createSprites(host);
     const fonts = createFonts(host, sprites);
@@ -357,6 +361,10 @@ export function createD3dxFunctions(host){
     };
 
     const constantTables = createConstantTableObjects(host);
+    const effects = createEffects(host, { giveBuffer, macrosAt,
+        includer: include=>includer(include),
+        publishConstantTable: (block, version, out)=>constantTables.publish(block, version, out) },
+    { version: options.version });
 
     /**
      * Compiles already done, by source, entry, profile, flags and macros, each with the files
@@ -375,6 +383,9 @@ export function createD3dxFunctions(host){
             .map(name=>[name, guestEntry(source[name], compiled[name], host)]))),
 
         ...constantTables.exports,
+
+        /** See effect.js. */
+        ...effects.exports,
 
         ...Object.fromEntries(Object.entries(NOT_BUILT).map(([name, [argBytes, ...outs]])=>[name, {
             argBytes,
@@ -395,15 +406,6 @@ export function createD3dxFunctions(host){
                     : '';
                 host.divergence?.(name,
                     `answered E_NOTIMPL: nothing is built on a device here${image}`);
-                if (name === 'D3DXCreateEffect' || name === 'D3DXCreateEffectCompiler')
-                {
-                    // The effect it could not have, for a tool that asks what it was.
-                    host.shaderCompiled?.({ api: name, profile: 'fx', entry: 'effect',
-                        defines: macrosAt(args[name === 'D3DXCreateEffect' ? 3 : 2]),
-                        flags: 0, source: latin1(host.readMemory(args[name === 'D3DXCreateEffect'
-                            ? 1 : 0] >>> 0, args[name === 'D3DXCreateEffect' ? 2 : 1] >>> 0)),
-                        included: {}, messages: 'E_NOTIMPL\n', tokens: null });
-                }
                 return E_NOTIMPL;
             },
         }])),
