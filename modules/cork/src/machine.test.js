@@ -168,3 +168,49 @@ test('gate: seeded loops of the sequence pool leave the same machine translated 
     // Most of the gate's instructions ran down the second path, not the first.
     assert.ok(translatedAll > retiredAll / 2, `translated ${translatedAll} of ${retiredAll}`);
 });
+
+test('a return from a host call into x87 code gets an entry: the returns stop leaving'
+    + ' translated code', async()=>{
+    // L: fld1; call [IAT]; R: fld dword [X]; faddp; fstp dword [Y]; dec ecx; jnz L; hlt
+    // and the import: push edx; mov edx, PORT; out dx, eax; pop edx; ret -- a host call
+    // through the trap port, as the core's thunks make one.
+    const PORT = 0xe9;
+    const turns = 3000;
+    const F = 0x11000;
+    const IAT = 0x12000;
+    const X = 0x13000;
+    const Y = 0x13010;
+    const m = createMachine({ ramSize: 1 << 20, trapPort: PORT });
+    const code = [0xb9, ...u32(turns), 0xd9, 0xe8, 0xff, 0x15, ...u32(IAT),
+        0xd9, 0x05, ...u32(X), 0xde, 0xc1, 0xd9, 0x1d, ...u32(Y), 0x49, 0x75, 0x00, 0xf4];
+    code[code.length - 2] = (0x1005 - (0x1000 + code.length - 1)) & 0xff;
+    const R = 0x1000 + 13;
+    m.load(0x1000, code);
+    m.load(F, [0x52, 0xba, ...u32(PORT), 0xef, 0x5a, 0xc3]);
+    m.load(IAT, u32(F));
+    m.load(X, u32(0x3f800000));
+    m.setReg('esp', 0x80000);
+    m.setReg('eip', 0x1000);
+    let calls = 0;
+    let retired = 0;
+    let translated = 0;
+    for (;;)
+    {
+        const stop = await m.run();
+        retired += stop.retired;
+        translated += stop.translated;
+        if (stop.reason !== 'trap')
+        {
+            assert.equal(stop.reason, 'halt');
+            break;
+        }
+        calls++;
+    }
+    assert.equal(calls, turns);
+    // 1 + 1 = 2 stored as a float every turn.
+    assert.equal(new DataView(m.read(Y, 4).buffer).getFloat32(0, true), 2);
+    const left = (m.diagnostics().exitsByTarget ?? []).find(one=>one.address === R);
+    assert.ok((left?.count ?? 0) < 100, `left for the return ${left?.count} times`);
+    assert.ok(translated > retired * 0.9, `translated ${translated} of ${retired}`);
+    await m.dispose();
+});

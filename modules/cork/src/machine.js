@@ -24,6 +24,7 @@ import { Fault, Unsupported } from './ir.js';
 import { Tables, ownLayout, pagesFor, tablesSize } from './runtime/layout.js';
 import { createCorkRuntime } from './runtime/runtime.js';
 import { eflagsOf, setEflags } from './emit/flags.js';
+import { TRAP_END_TURN } from './emit/integer.js';
 
 /** The registers by name, in the state block's order. */
 const REGS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
@@ -80,10 +81,11 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort } = {}
         config: { feed: 'slice', ...config, ...(trapPort === undefined ? {} : { trapPort }) },
         read: address=>bytes()[layout.ramBase + address],
         imports: {
-            // A port write a region could not answer itself: the run stops past it.
+            // A port write from translated code: the run stops past it, the
+            // region ending its turn there (`TRAP_END_TURN`) rather than going on.
             trap: value=>{
                 trapped.push(value);
-                return 1;
+                return TRAP_END_TURN;
             },
             getEflags: ()=>view().getUint32(layout.eflags, true),
             x87Read: index=>view().getFloat64(layout.x87 + index * 16, true),
@@ -99,6 +101,10 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort } = {}
             trapPort, read: ()=>0xffffffff, write: ()=>{},
         } }),
     });
+    // Its pacing, the config's where it names one.
+    const hotJumps = config.hotThreshold ?? HOT_JUMPS;
+    const interpretChunk = config.interpretChunk ?? INTERPRET_CHUNK;
+    const regionChunk = config.yieldChunk ?? REGION_CHUNK;
     /** Jumps seen to each start not yet translated. @type {Map<number, number>} */
     const heat = new Map();
     let noted = false;
@@ -132,7 +138,7 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort } = {}
                     }
                     const seen = (heat.get(start) ?? 0) + 1;
                     heat.set(start, seen);
-                    if (seen === HOT_JUMPS)
+                    if (seen === hotJumps)
                     {
                         heat.delete(start);
                         runtime.noteHot(start, top(), seen);
@@ -208,7 +214,7 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort } = {}
             const entry = runtime.entryOf(at, top());
             if (entry >= 0)
             {
-                const exit = runtime.run(entry, Math.min(remaining, REGION_CHUNK));
+                const exit = runtime.run(entry, Math.min(remaining, regionChunk));
                 retired += exit.retired;
                 translated += exit.retired;
                 if (exit.kind === 'halt')
@@ -224,6 +230,13 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort } = {}
                     // Left past the port write with the value in eax.
                     return ended({ reason: 'trap', value: view().getUint32(layout.regs, true) });
                 }
+                if (exit.kind === 'untranslated')
+                {
+                    // An exit to an address the runtime counts misses at: it
+                    // queues the address itself once they are many, and the
+                    // queue is formed at the next look.
+                    noted = true;
+                }
                 if (exit.retired > 0 || eip() !== at)
                 {
                     continue;
@@ -231,7 +244,7 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort } = {}
                 // The region ran nothing here (cut for another x87 top, or
                 // leaving at its own entry): one instruction interpreted moves on.
             }
-            const { retired: stepped, stop } = interpretFrom(Math.min(remaining, INTERPRET_CHUNK),
+            const { retired: stepped, stop } = interpretFrom(Math.min(remaining, interpretChunk),
                 entry >= 0);
             retired += stepped;
             if (stop !== null)

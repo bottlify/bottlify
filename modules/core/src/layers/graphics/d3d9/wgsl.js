@@ -138,8 +138,37 @@ const EXP_PARTS = `fn expParts(x: f32) -> vec4f {
 /** vs_1_x logp: the exponent of |x|, its mantissa in [1, 2), log2 |x|, and one. */
 const LOG_PARTS = `fn logParts(x: f32) -> vec4f {
     let magnitude = abs(x);
-    let exponent = floor(log2(magnitude));
-    return vec4f(exponent, magnitude / exp2(exponent), log2(magnitude), 1.0);
+    let exponent = floor(d3dLog(x));
+    return vec4f(exponent, select(magnitude / exp2(exponent), 1.0, x == 0.0), d3dLog(x), 1.0);
+}`;
+
+/**
+ * The scalar instructions whose answer at zero is an infinity, given the
+ * largest finite float instead. Under D3D9 a shader goes on to multiply that
+ * answer -- rsq of a zero length times the zero vector, rcp of a zero w times
+ * a zero distance -- and expects a finite colour; WGSL leaves 1/0 and
+ * log2(0) to the implementation, a backend that compiles with fast maths
+ * (Metal's) may hand back NaN for them, and inf times zero is NaN everywhere,
+ * so a NaN reaches the target and the blend makes it black. pow is
+ * exp2(y log2|x|) as the D3D9 reference defines it, so pow(0, 0) is one and
+ * no exponent overflows to an infinity either; nrm is the vector times the
+ * rsq of its length squared, so the zero vector stays zero.
+ */
+const D3D_MATH = `const d3dMax = 3.4028235e38;
+fn d3dRcp(x: f32) -> f32 {
+    return select(clamp(1.0 / x, -d3dMax, d3dMax), d3dMax, x == 0.0);
+}
+fn d3dRsq(x: f32) -> f32 {
+    return select(min(inverseSqrt(abs(x)), d3dMax), d3dMax, x == 0.0);
+}
+fn d3dLog(x: f32) -> f32 {
+    return select(log2(abs(x)), -d3dMax, x == 0.0);
+}
+fn d3dPow(x: f32, y: f32) -> f32 {
+    return min(exp2(min(y * d3dLog(x), 127.99999)), d3dMax);
+}
+fn d3dNrm(v: vec3f) -> vec3f {
+    return v * d3dRsq(dot(v, v));
 }`;
 
 /** Whether a varying location carries a coordinate set. @param {number} location */
@@ -940,10 +969,10 @@ export function translateShader(parsed, options = {}){
             // names -- w for a plain register, the one component of a
             // replicate (Wine's d3d8 test_scalar_instructions).
             case OPCODE.RCP:
-                write(instruction, `vec4f(1.0 / ${src(instruction, 0)}.w)`);
+                write(instruction, `vec4f(d3dRcp(${src(instruction, 0)}.w))`);
                 break;
             case OPCODE.RSQ:
-                write(instruction, `vec4f(inverseSqrt(abs(${src(instruction, 0)}.w)))`);
+                write(instruction, `vec4f(d3dRsq(${src(instruction, 0)}.w))`);
                 break;
             case OPCODE.EXP:
                 write(instruction, `vec4f(exp2(${src(instruction, 0)}.w))`);
@@ -957,13 +986,13 @@ export function translateShader(parsed, options = {}){
                 usesParts.add('exp');
                 break;
             case OPCODE.LOG:
-                write(instruction, `vec4f(log2(abs(${src(instruction, 0)}.w)))`);
+                write(instruction, `vec4f(d3dLog(${src(instruction, 0)}.w))`);
                 break;
             case OPCODE.LOGP:
                 // And its logp: the exponent, the mantissa, the logarithm, one.
                 write(instruction, vertex && major < 2
                     ? `logParts(${src(instruction, 0)}.w)`
-                    : `vec4f(log2(abs(${src(instruction, 0)}.w)))`);
+                    : `vec4f(d3dLog(${src(instruction, 0)}.w))`);
                 usesParts.add('log');
                 break;
             case OPCODE.FRC:
@@ -992,8 +1021,10 @@ export function translateShader(parsed, options = {}){
                 break;
             case OPCODE.LIT: {
                 const s = src(instruction, 0);
-                write(instruction, `vec4f(1.0, max(${s}.x, 0.0), select(0.0, pow(max(${s}.y, 0.0),`
-                    + ` clamp(${s}.w, -128.0, 128.0)), ${s}.x > 0.0), 1.0)`);
+                // z is zero unless both x and y are above zero, so pow never sees
+                // the zero base whose zeroth power the hardware does not define.
+                write(instruction, `vec4f(1.0, max(${s}.x, 0.0), select(0.0, d3dPow(${s}.y,`
+                    + ` clamp(${s}.w, -128.0, 128.0)), ${s}.x > 0.0 && ${s}.y > 0.0), 1.0)`);
                 break;
             }
             case OPCODE.DST: {
@@ -1023,7 +1054,7 @@ export function translateShader(parsed, options = {}){
                 break;
             case OPCODE.POW:
                 write(instruction,
-                    `vec4f(pow(abs(${src(instruction, 0)}.x), ${src(instruction, 1)}.x))`);
+                    `vec4f(d3dPow(${src(instruction, 0)}.x, ${src(instruction, 1)}.x))`);
                 break;
             case OPCODE.CRS:
                 write(instruction,
@@ -1036,7 +1067,7 @@ export function translateShader(parsed, options = {}){
                 write(instruction, `abs(${src(instruction, 0)})`);
                 break;
             case OPCODE.NRM:
-                write(instruction, `vec4f(normalize(${src(instruction, 0)}.xyz), 0.0)`);
+                write(instruction, `vec4f(d3dNrm(${src(instruction, 0)}.xyz), 0.0)`);
                 break;
             case OPCODE.SINCOS: {
                 const s = src(instruction, 0);
@@ -1544,7 +1575,7 @@ export function translateShader(parsed, options = {}){
             // otherwise; the curve reads its range from a module variable,
             // since a function cannot see the entry point's input.
             const amount = table
-                ? 'fogFactorOf(select(1.0 / in.vPos.w, in.vPos.z, fogRange.w != 0.0))'
+                ? 'fogFactorOf(select(d3dRcp(in.vPos.w), in.vPos.z, fogRange.w != 0.0))'
                 : 'in.fog.x';
             const fogLines = [
                 ...(table ? ['    fogRange = in.fogRange;'] : []),
@@ -1613,6 +1644,7 @@ export function translateShader(parsed, options = {}){
         ...moduleHeader({
             vertex, constants: reach, samplers, inputFields, outputFields,
         }),
+        D3D_MATH,
         ...fogCurve,
         ...(usesParts.has('exp') && vertex && major < 2 ? [EXP_PARTS] : []),
         ...(usesParts.has('log') && vertex && major < 2 ? [LOG_PARTS] : []),
@@ -1764,7 +1796,7 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
             `    let worldView = mat4x4f(c[${wv}], c[${wv + 1}], c[${wv + 2}], c[${wv + 3}]);`,
             `    let cameraPosition = (worldView * vec4f(${vertex}, 1.0)).xyz;`,
             options.normalizeNormals
-                ? `    let cameraNormal = normalize(${turned});`
+                ? `    let cameraNormal = d3dNrm(${turned});`
                 : `    let cameraNormal = ${turned};`);
     }
     for (const [set, mode] of generated.entries())
@@ -1783,7 +1815,7 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
         }
         const coordinate = mode === TCI_CAMERASPACENORMAL ? 'cameraNormal'
             : mode === TCI_CAMERASPACEREFLECTIONVECTOR
-                ? 'reflect(normalize(cameraPosition), cameraNormal)'
+                ? 'reflect(d3dNrm(cameraPosition), cameraNormal)'
                 : 'cameraPosition';
         const row = HYBRID_CONSTANTS.TRANSFORMS + set * 4;
         body.push(`    out.o${location} = vec4f(dot(c[${row}], vec4f(${coordinate}, 1.0)),`
@@ -1856,6 +1888,7 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
             vertex: true, constants: HYBRID_CONSTANTS.COUNT, samplers: [], inputFields,
             outputFields,
         }),
+        D3D_MATH,
         // The fog curve over the fixed function's own range row.
         fogFunctionDeclaration(vertexFog ? fog : 0, `c[${HYBRID_CONSTANTS.FOG}]`, true).trimEnd(),
         // The viewport's inverse offset and scale, as the fixed-function stage

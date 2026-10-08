@@ -37,16 +37,17 @@ export const Said = Object.freeze({ HALTED: 1, STOPPED: 2, CLAIMED: 4, FAULTED: 
 export const SPIN_MS = 0.05;
 
 /**
- * Waits until `word[index]` is no longer `value`: a look for `SPIN_MS`, then a
- * sleep for at most `ms`.
+ * Waits until `word[index]` is no longer `value`: a look for `spinMs` (`SPIN_MS`),
+ * then a sleep for at most `ms`.
  *
  * @param {Int32Array} word @param {number} index @param {number} value @param {number} [ms]
+ * @param {number} [spinMs]
  */
-export function waitWhile(word, index, value, ms = Infinity){
+export function waitWhile(word, index, value, ms = Infinity, spinMs = SPIN_MS){
     const began = performance.now();
     while (Atomics.load(word, index) === value)
     {
-        if (performance.now() - began >= SPIN_MS)
+        if (performance.now() - began >= spinMs)
         {
             Atomics.wait(word, index, value, ms);
             return;
@@ -65,8 +66,9 @@ export const CHANNEL_BYTES = TEXT_AT + TEXT_BYTES;
  * @param {SharedArrayBuffer} buffer
  * @param {Int32Array | null} [bell]  a word the process waits on for all its executors at
  *     once, rung after every turn the executor's side ends
+ * @param {number} [spinMs]  how long a side looks before it sleeps (`SPIN_MS`)
  */
-export function channelOf(buffer, bell = null){
+export function channelOf(buffer, bell = null, spinMs = SPIN_MS){
     const words = new Int32Array(buffer, 0, TEXT_AT / 4);
     const text = new Uint8Array(buffer, TEXT_AT, TEXT_BYTES);
     return {
@@ -93,7 +95,7 @@ export function channelOf(buffer, bell = null){
         await(state){
             while (Atomics.load(words, Word.STATE) === state)
             {
-                waitWhile(words, Word.STATE, state);
+                waitWhile(words, Word.STATE, state, Infinity, spinMs);
             }
             return Atomics.load(words, Word.STATE);
         },

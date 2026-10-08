@@ -88,6 +88,11 @@ import { createTranslatorPool, portTranslator } from './host/pool/pool.js';
  *     translator would open a worker of its own, unless `cork.config.translators` is set.
  * @property {number} [cork.poolPerProcess]  Workers of the pool at most for one process:
  *     `navigator.hardwareConcurrency` by default.
+ * @property {number} [cork.poolWindowMs]  How often the pool's driver reads its workers.
+ *     Default 500.
+ * @property {Partial<import('./host/pool/driver.js').DriverSettings>} [cork.poolDriver]  The
+ *     driver's thresholds (`joinAt`, `leaveBelow`, `leaveAfterMs`, `idleBelow`, `trialWindows`,
+ *     `trialLimit`, `restMs`, `yieldShare`).
  * @property {Object} [zstd]              The bundle decoder's wasm build, when the package's
  *           own is not wanted: `vendor/zstd.wasm` beside this module by default; absent
  *           there, the JavaScript decoder (or the emulator's, while it is loaded) decodes.
@@ -1381,6 +1386,8 @@ async function openTranslationPool(options){
         open: ()=>openProcessWorker(url),
         perProcess: cork.poolPerProcess
             ?? Math.max(1, globalThis.navigator?.hardwareConcurrency ?? 4),
+        ...(cork.poolWindowMs === undefined ? {} : { windowMs: cork.poolWindowMs }),
+        driver: cork.poolDriver ?? {},
     });
 }
 

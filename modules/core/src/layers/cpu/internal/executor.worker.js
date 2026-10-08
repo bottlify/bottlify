@@ -19,7 +19,7 @@
  */
 
 import { createCorkHost } from './cork-host.js';
-import { Said, Turn, channelOf, waitWhile } from './executor-channel.js';
+import { SPIN_MS, Said, Turn, channelOf, waitWhile } from './executor-channel.js';
 
 /**
  * What the process sends once: where the engine is, the host's configuration,
@@ -50,7 +50,11 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell }, send)
     const host = createCorkHost({ ...config, engine, memory });
     running = host;
     const bellWords = new Int32Array(bell);
-    const channel = channelOf(buffer, bellWords);
+    // The pacing the config names (`EngineConfig`), these defaults otherwise.
+    const spinMs = config.cork?.spinMs ?? SPIN_MS;
+    const idleMs = config.cork?.executorIdleMs ?? IDLE_MS;
+    const yieldMs = config.cork?.executorYieldMs ?? YIELD_MS;
+    const channel = channelOf(buffer, bellWords, spinMs);
     host.onTrap((/** @type {number} */ value)=>{
         channel.say(Turn.TRAP, value);
         channel.await(Turn.TRAP);
@@ -89,7 +93,7 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell }, send)
         {
             // The process mostly asks again soon after a slice's end, and a
             // wake through the event loop costs more: a short wait in place first.
-            waitWhile(words, 0, state, IDLE_MS);
+            waitWhile(words, 0, state, idleMs, spinMs);
             state = Atomics.load(words, 0);
         }
         while (state !== Turn.RUN && state !== Turn.CLOSE)
@@ -104,7 +108,7 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell }, send)
             state = Atomics.load(words, 0);
             yieldedAt = performance.now();
         }
-        if (performance.now() - yieldedAt >= YIELD_MS)
+        if (performance.now() - yieldedAt >= yieldMs)
         {
             // Asked again and again without a pause: a turn of the event loop
             // all the same, now and then, or no translation would ever land.
@@ -128,7 +132,7 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell }, send)
                 retired += host.runSlice(budget);
                 if (host.halted() || host.stopRequested() || host.fault() !== null
                     || Atomics.load(bellWords, 1) !== 1
-                    || performance.now() - chained >= YIELD_MS)
+                    || performance.now() - chained >= yieldMs)
                 {
                     break;
                 }

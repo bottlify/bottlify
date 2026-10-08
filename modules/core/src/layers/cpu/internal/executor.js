@@ -107,7 +107,7 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
         throw new Error('executor: another executor needs the process\'s memory shared');
     }
     const buffer = new SharedArrayBuffer(CHANNEL_BYTES);
-    const channel = channelOf(buffer);
+    const channel = channelOf(buffer, null, config.cork?.spinMs);
     const worker = await openWorker(workerUrl);
     /** @type {string | null} */
     let failed = null;

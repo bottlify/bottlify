@@ -84,6 +84,8 @@ const TERMINAL = new Set(['ret', 'indirect', 'call', 'trap', 'hlt', 'refused', '
  * or one with direct calls of its own (formed one level deep). */
 const LEAF_BLOCKS = 16;
 const LEAF_BYTES = 512;
+/** How large a callee formed into its caller may be, unless forming says otherwise. */
+const LEAF_LIMITS = Object.freeze({ blocks: LEAF_BLOCKS, bytes: LEAF_BYTES });
 
 /**
  * Whether the function at `target` is small enough to form into its caller:
@@ -98,8 +100,9 @@ const LEAF_BYTES = 512;
  *     | import('./decode/decoder.js').Refusal} decodeAt
  * @param {number} target
  * @param {(eip: number) => boolean} translatable @param {boolean} [calls]
+ * @param {{ blocks: number, bytes: number }} [limits]  its blocks and bytes at most
  */
-function isLeaf(decodeAt, target, translatable, calls = false){
+function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIMITS){
     const seen = new Set();
     const work = [target];
     let bytes = 0;
@@ -110,7 +113,7 @@ function isLeaf(decodeAt, target, translatable, calls = false){
         {
             continue;
         }
-        if (seen.size >= LEAF_BLOCKS || !translatable(start))
+        if (seen.size >= limits.blocks || !translatable(start))
         {
             return false;
         }
@@ -123,7 +126,7 @@ function isLeaf(decodeAt, target, translatable, calls = false){
                 return false;
             }
             bytes += decoded.length;
-            if (bytes > LEAF_BYTES)
+            if (bytes > limits.bytes)
             {
                 return false;
             }
@@ -142,7 +145,7 @@ function isLeaf(decodeAt, target, translatable, calls = false){
             {
                 break;
             }
-            if (calls && exit.kind === 'call' && seen.size < LEAF_BLOCKS)
+            if (calls && exit.kind === 'call' && seen.size < limits.blocks)
             {
                 // The return lands after the call: a block of its own.
                 seen.add(eip);
@@ -294,9 +297,10 @@ const sameOperand = (a, b)=>a.kind === b.kind && a.size === b.size && a.reg === 
  *
  * @param {(address: number) => number} read @param {Block} block
  * @param {Iterable<Block>} blocks
+ * @param {number} [most]  entries a table may have
  * @returns {SwitchTable | null}
  */
-function switchTable(read, block, blocks){
+function switchTable(read, block, blocks, most = SWITCH_ENTRIES){
     const { instructions } = block;
     const jump = instructions[instructions.length - 1];
     const [operand] = jump.operands;
@@ -331,7 +335,7 @@ function switchTable(read, block, blocks){
             && by?.kind === 'imm')
         {
             const count = (/** @type {number} */ (by.value) >>> 0) + 1;
-            return count <= SWITCH_ENTRIES ? tableOf(count) : null;
+            return count <= most ? tableOf(count) : null;
         }
         if (!(PLAIN_WRITES.has(one.op) && into?.kind === 'reg' && into.reg !== index
             && !(one.op === 'imul' && one.operands.length === 1)))
@@ -397,7 +401,7 @@ function switchTable(read, block, blocks){
         }
         const bound = /** @type {number} */ (compare.operands[1].value) >>> 0;
         const count = branch.op === 'ja' || branch.op === 'jbe' ? bound + 1 : bound;
-        if (count === 0 || count > SWITCH_ENTRIES)
+        if (count === 0 || count > most)
         {
             continue;
         }
@@ -425,11 +429,14 @@ export function formShared(){
 /**
  * @param {(address: number) => number} read
  * @param {number} entry
- * @param {{ maxBlocks?: number, maxBytes?: number,
+ * @param {{ maxBlocks?: number, maxBytes?: number, leafBlocks?: number, leafBytes?: number,
+ *     switchEntries?: number,
  *     translatable?: (eip: number) => boolean, leafCalls?: boolean,
  *     callTargets?: Map<number, number[]>, shared?: FormShared,
  *     helpers?: boolean | readonly import('./helpers.js').RuntimeHelper[] }} [options]
- *     leafCalls: a small leaf callee is formed into its caller (see `isLeaf`); helpers: a
+ *     leafCalls: a small leaf callee is formed into its caller (see `isLeaf`), of
+ *     `leafBlocks` blocks and `leafBytes` bytes at most; switchEntries: the most entries a
+ *     switch's jump table is followed through; helpers: a
  *     call to a compiler's runtime helper is formed as what it amounts to (helpers.js), those
  *     of RUNTIME_HELPERS or of the list given;
  *     callTargets:
@@ -441,12 +448,15 @@ export function formShared(){
  */
 export function formRegion(read, entry,
     { maxBlocks = 128, maxBytes = 8192, translatable = ()=>true, leafCalls = true,
-        callTargets, shared, helpers = true } = {})
+        callTargets, shared, helpers = true, leafBlocks = LEAF_BLOCKS, leafBytes = LEAF_BYTES,
+        switchEntries = SWITCH_ENTRIES } = {})
 {
     // Every page forming reads decides what it forms -- an import slot a call is predicted
     // through, a callee looked at for a leaf or a runtime helper -- so a worker forms the
     // region again from copies of all of them (`reads`); only the pages its code is made
     // of (`pages`) drop it when written.
+    const leafLimits = leafBlocks === LEAF_BLOCKS && leafBytes === LEAF_BYTES ? LEAF_LIMITS
+        : { blocks: leafBlocks, bytes: leafBytes };
     /** @type {Set<number>} */
     const touched = new Set();
     let lastTouched = -1;
@@ -514,7 +524,7 @@ export function formRegion(read, entry,
         let leaf = leaves.get(key);
         if (leaf === undefined)
         {
-            leaf = isLeaf(decodeAt, target, translatable, calls);
+            leaf = isLeaf(decodeAt, target, translatable, calls, leafLimits);
             leaves.set(key, leaf);
         }
         return leaf;
@@ -706,8 +716,8 @@ export function formRegion(read, entry,
                 continue;
             }
             block.exit = exit;
-            const table = exit.kind === 'indirect' ? switchTable(read, block, blocks.values())
-                : null;
+            const table = exit.kind === 'indirect'
+                ? switchTable(read, block, blocks.values(), switchEntries) : null;
             if (table !== null)
             {
                 // The cases join the region in the table's order: a switch's

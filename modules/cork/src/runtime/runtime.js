@@ -61,11 +61,6 @@ const KINDS = /** @type {ExitKind[]} */ (
         // to arrive, the state block is whole and the run goes on at its EIP.
         'untranslated']);
 
-/** While the translation worker loads: the largest batch emitted on the engine
- * thread, and the share of the time since the worker was made that emitting
- * there may take. */
-const LOADING_BATCH = 16;
-const LOADING_SHARE = 0.25;
 
 /** @type {Function | null} */
 let noTier = null;
@@ -160,7 +155,7 @@ export function translatorWorkerUrl(){
  */
 export function createCorkRuntime({ memory, layout, config = {}, read, imports, features }){
     const settings = {
-        hotThreshold: 2000, maxRegionBlocks: 128, maxRegionBytes: 8192, batchRegions: 32,
+        maxRegionBlocks: 128, maxRegionBytes: 8192, batchRegions: 32,
         maxQueued: 8192, maxBatchRegions: 256,
         // Invalidations of one page before it is left to the other executor.
         volatileAfter: 8,
@@ -285,6 +280,41 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // shipped build runs, the clock is read only where the translator needs
         // it (a batch that never comes back is freed after a time).
         timings: false,
+        // While the translation worker loads: the largest batch emitted on the
+        // engine thread, and the share of the time since the worker was made
+        // that emitting there may take.
+        loadingBatch: 16,
+        loadingShare: 0.25,
+        // The bounded records the runtime keeps of where translated code left and
+        // what missed: targets of untranslated exits, misses per (address, top)
+        // before a candidate, and indirect call sites tried with predicted callees.
+        exitTargets: 4096,
+        missesKept: 4096,
+        callSitesKept: 4096,
+        // Merging modules a hot transfer crosses (`mergeAfter`): translated
+        // instructions between two readings of the crossings, the fewest between
+        // two merges, a region's share of that, and merges one region may take part in.
+        mergeSample: 1 << 20,
+        mergeEvery: 1 << 23,
+        mergePerRegion: 1 << 19,
+        mergesARegion: 2,
+        // Indirect-call prediction (`callTargets`): samples of a call before its
+        // callees are looked at, the share of them a callee formed in must take
+        // (one in this many), callees a call compares with, how often a region is
+        // formed again for its calls, and the window a call's samples are counted in.
+        predictAfter: 48,
+        predictShare: 8,
+        predictCallees: 4,
+        reforms: 3,
+        callWindow: 64,
+        // The entry hash's load past which a block start is kept in the host's
+        // map alone (its slots are the layout's, `hashSlots`).
+        hashLoad: 0.75,
+        // A callee formed into its caller (`leafCalls`): its blocks and bytes at
+        // most; and the most entries of a switch's jump table followed when forming.
+        leafBlocks: 16,
+        leafBytes: 512,
+        switchEntries: 1024,
         ...config,
     };
     // The version translations are kept under: the translator's own, or a higher one
@@ -309,7 +339,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     /** How a region is formed, the same on this thread, in a batch and in a relink. */
     const formOptions = { maxBlocks: settings.maxRegionBlocks,
         maxBytes: settings.maxRegionBytes, leafCalls: settings.leafCalls,
-        helpers: settings.runtimeHelpers !== false };
+        helpers: settings.runtimeHelpers !== false, leafBlocks: settings.leafBlocks,
+        leafBytes: settings.leafBytes, switchEntries: settings.switchEntries };
     /** @type {Set<string>} instruction classes left to the other executor */
     const leaveOut = new Set(settings.leaveOut ?? []);
     if (layout.tables + tablesSize(layout) > memory.buffer.byteLength)
@@ -383,7 +414,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const recordAt = new Map();
     const entries = createEntries(
         table
-            ? { memory, hashBase: layout.tables + Tables.HASH, shift: layout.hashShift ?? 16 }
+            ? { memory, hashBase: layout.tables + Tables.HASH, shift: layout.hashShift ?? 16,
+                load: settings.hashLoad }
             : {});
     if (table)
     {
@@ -551,7 +583,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     // the count, the tops its exits were at, a bit each.
     /** @type {Map<number, { count: number, held: number, tops: number }>} */
     const exitTargets = new Map();
-    const EXIT_TARGETS_CAP = 4096;
+    const EXIT_TARGETS_CAP = settings.exitTargets;
     /**
      * How often the machine stood at an address that has a region for another
      * top (or a block with no entry of its own), per key(eip, top): the heat a
@@ -568,7 +600,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     // straight-line loader never became a candidate. The oldest is evicted
     // instead, and the counts halve every cap insertions so an address hit
     // once does not hold a slot against one hit often.
-    const MISSES_CAP = 4096;
+    const MISSES_CAP = settings.missesKept;
     let missesInserted = 0;
     const decayMisses = ()=>{
         for (const [key, count] of misses)
@@ -685,7 +717,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     /** By indirect call, the callees its regions were formed again with or failed to take,
      * not tried again while those regions run. @type {Map<number, Set<number>>} */
     const callTried = new Map();
-    const CALL_SITES_CAP = 4096;
+    const CALL_SITES_CAP = settings.callSitesKept;
     /** @type {Map<number, number>} page → times invalidated, the stamp a batch checks */
     const generation = new Map();
     /** @type {Map<number, number>} page → times a write dropped its regions */
@@ -1886,23 +1918,23 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     };
 
     /** Translated instructions between two readings of the modules' crossings. */
-    const MERGE_SAMPLE = 1 << 20;
+    const MERGE_SAMPLE = settings.mergeSample;
     let sampledAt = 0;
     // At most one merge in this many: its module is instantiated on the
     // engine thread, 23 ms for a whole chunk of `relinkRegions`.
-    const MERGE_EVERY = 1 << 23;
+    const MERGE_EVERY = settings.mergeEvery;
     // And past that, this many for each region the last one built: a merge
     // builds both modules whole again, and with the worker no longer the one
     // that paced them, a module of hundreds gathering a few new regions at a
     // time would have the engine thread instantiate it over and over.
-    const MERGE_PER_REGION = 1 << 19;
+    const MERGE_PER_REGION = settings.mergePerRegion;
     let mergedAt = -MERGE_EVERY;
     let mergeWait = MERGE_EVERY;
     // The merges a region is built again by at most. A merge builds both
     // modules whole, and a module that merged once is crossed into by the
     // next new one: without a bound, every module of new code calling into a
     // hot one could have it built again, for as long as new code arrives.
-    const MERGES_A_REGION = 2;
+    const MERGES_A_REGION = settings.mergesARegion;
     /**
      * What a merge of `from` into `into` would build: both whole when they fit
      * in `relinkRegions`, else the region `from` crossed into last, alone, into
@@ -2021,17 +2053,17 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
 
     // Samples of one call before its callees are looked at: sixteen come in
     // a reading at most, the last calls of a slice.
-    const PREDICT_AFTER = 48;
+    const PREDICT_AFTER = settings.predictAfter;
     // A callee formed in takes an eighth of the call's samples, and a call
     // compares its target with four at most.
-    const PREDICT_SHARE = 8;
-    const PREDICT_CALLEES = 4;
-    const REFORMS = 3;
+    const PREDICT_SHARE = settings.predictShare;
+    const PREDICT_CALLEES = settings.predictCallees;
+    const REFORMS = settings.reforms;
     // Readings a call's samples are kept for unless it is due by then: a
     // region formed again is built, compiled and run on the baseline tier
     // again, which only a call hot now pays back, not one that gathers its
     // samples a few at a time over a long run.
-    const CALL_WINDOW = 64;
+    const CALL_WINDOW = settings.callWindow;
     let readings = 0;
     const profileAt = settings.callTargets === true && table !== null
         ? layout.callProfile ?? -1 : -1;
@@ -2748,7 +2780,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // of regions rather than per thirty-two.
         // While the worker loads, a batch emitted here is kept small.
         const ceiling = translatorLoading() && !translatorReady()
-            ? LOADING_BATCH : settings.maxBatchRegions;
+            ? settings.loadingBatch : settings.maxBatchRegions;
         const wanted = Math.min(ceiling,
             Math.max(settings.batchRegions, queue.size >> 2));
         const batch = hottest(wanted);
@@ -3182,7 +3214,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // most, and the rest waits for it. A loading phase's thousands of
             // starts, each run a few times, cost more emitted on this thread
             // than interpreted until the worker takes them.
-            if (inlineWhileLoading > LOADING_SHARE * (performance.now() - loadingSince))
+            if (inlineWhileLoading > settings.loadingShare * (performance.now() - loadingSince))
             {
                 owed++;
                 return 0;
