@@ -70,6 +70,8 @@ const PE32_PLUS = 0x20b;
  *           a group with no image this can read, or a count-only question.
  * @property {string | null} unread  What kind of image the file is when it is
  *           one whose icons are not read here, for the caller to report.
+ * @property {number | null} [id]  The resource id of the icon group read,
+ *           when it has a numeric one: what ExtractAssociatedIconEx reports.
  */
 
 /** @type {FileIcons} */
@@ -104,9 +106,10 @@ const pictureOf = bits=>{
  * @param {(offset: number, length: number) => Uint8Array | Promise<Uint8Array>} read
  * @param {Uint8Array} head  The file's first bytes.
  * @param {number} index
+ * @param {number} side  The icon size whose image is chosen.
  * @returns {Generator<Uint8Array | Promise<Uint8Array>, FileIcons, Uint8Array>}
  */
-function* iconFileSteps(read, head, index){
+function* iconFileSteps(read, head, index, side){
     const entries = Math.min(u16(head, 4), MAX_ICON_ENTRIES);
     const directory = ICONDIR_HEADER + entries * ICONDIR_ENTRY > head.length
         ? yield read(0, ICONDIR_HEADER + entries * ICONDIR_ENTRY) : head;
@@ -132,10 +135,10 @@ function* iconFileSteps(read, head, index){
         group[to + 12] = (entry + 1) & 0xff;
         group[to + 13] = (entry + 1) >>> 8;
     }
-    const chosen = /** @type {number} */ (groupImageId(group, false, ICON_SIZE)) - 1;
+    const chosen = /** @type {number} */ (groupImageId(group, false, side)) - 1;
     const at = ICONDIR_HEADER + chosen * ICONDIR_ENTRY;
     const bits = yield read(u32(directory, at + 12), u32(directory, at + 8));
-    return { count: 1, picture: pictureOf(bits), unread: null };
+    return { count: 1, picture: pictureOf(bits), unread: null, id: null };
 }
 
 /**
@@ -148,9 +151,10 @@ function* iconFileSteps(read, head, index){
  * @param {Uint8Array} head  The file's first bytes.
  * @param {number} size  The file's length.
  * @param {number} index
+ * @param {number} side  The icon size whose image is chosen.
  * @returns {Generator<Uint8Array | Promise<Uint8Array>, FileIcons, Uint8Array>}
  */
-function* imageSteps(read, head, size, index){
+function* imageSteps(read, head, size, index, side){
     let headers = head;
     const peOffset = u32(headers, 0x3c);
     if (peOffset + 24 > headers.length && headers.length < size)
@@ -204,30 +208,32 @@ function* imageSteps(read, head, size, index){
         return { count, picture: null, unread: null };
     }
     const entries = yield read(rvaToFileOffset(image, group.rva), group.size);
-    const id = groupImageId(entries, false, ICON_SIZE);
+    const id = groupImageId(entries, false, side);
     const icon = id === null ? null : findResource(tree, local, RT_ICON, id);
     if (!icon)
     {
         return { count, picture: null, unread: null };
     }
     const bits = yield read(rvaToFileOffset(image, icon.rva), icon.size);
-    return { count, picture: pictureOf(bits), unread: null };
+    return { count, picture: pictureOf(bits), unread: null,
+        id: typeof name === 'number' ? name : null };
 }
 
 /**
  * @param {(offset: number, length: number) => Uint8Array | Promise<Uint8Array>} read
  * @param {number} size @param {number} index
+ * @param {number} side  The icon size whose image is chosen.
  * @returns {Generator<Uint8Array | Promise<Uint8Array>, FileIcons, Uint8Array>}
  */
-function* fileSteps(read, size, index){
+function* fileSteps(read, size, index, side){
     const head = yield read(0, HEAD_BYTES);
     if (u16(head, 0) === 0 && u16(head, 2) === 1)
     {
-        return yield* iconFileSteps(read, head, index);
+        return yield* iconFileSteps(read, head, index, side);
     }
     if (u16(head, 0) === 0x5a4d)
     {
-        return yield* imageSteps(read, head, size, index);
+        return yield* imageSteps(read, head, size, index, side);
     }
     return NONE;
 }
@@ -282,9 +288,11 @@ function drive(steps){
  * file, has none.
  *
  * @param {IconVolume} volume @param {string} path @param {number} index
+ * @param {number} [side]  The icon size wanted: SM_CXICON's 32 unless asked for
+ *     another, as ExtractIconEx asks for SM_CXSMICON's 16 beside it.
  * @returns {FileIcons | Promise<FileIcons>}
  */
-export function readFileIcons(volume, path, index){
+export function readFileIcons(volume, path, index, side = ICON_SIZE){
     const entry = volume.stat(path);
     if (!entry?.exists || entry.isDirectory)
     {
@@ -299,7 +307,7 @@ export function readFileIcons(volume, path, index){
     /** @param {number} offset @param {number} length */
     const read = (offset, length)=>volume.read(node, offset,
         Math.max(0, Math.min(length, size - offset)));
-    const found = drive(fileSteps(read, size, index));
+    const found = drive(fileSteps(read, size, index, side));
     if (found instanceof Promise)
     {
         return found.finally(()=>volume.close(node));

@@ -138,6 +138,58 @@ export function pathOfList(memory, list){
 }
 
 /**
+ * Where a list's last item starts, which is the list itself when it is
+ * empty: what SHBindToParent hands back as the child, a pointer into the
+ * caller's own list rather than a copy.
+ *
+ * @param {NamespaceMemory} memory
+ * @param {number} list
+ * @returns {number}
+ */
+export function lastItemOf(memory, list){
+    let last = list >>> 0;
+    let at = list >>> 0;
+    for (let n = 0; at !== 0 && n < 64; n++)
+    {
+        const header = memory.readMemory(at, 2);
+        const item = header[0] | header[1] << 8;
+        if (item < 3)
+        {
+            break;
+        }
+        last = at;
+        at += item;
+    }
+    return last;
+}
+
+/**
+ * The folder an item is in: the desktop for the computer, the computer for
+ * a drive's root, and the directory above for a path; undefined for text
+ * that names no place this namespace has.
+ *
+ * @param {string} text
+ * @returns {string | null | undefined}  null is the desktop
+ */
+export function parentOf(text){
+    if (text === MY_COMPUTER)
+    {
+        return null;
+    }
+    if (/^[A-Za-z]:\\$/.test(text))
+    {
+        return MY_COMPUTER;
+    }
+    const cut = text.replace(/\\+$/, '').lastIndexOf('\\');
+    if (cut < 0)
+    {
+        return undefined;
+    }
+    const parent = text.slice(0, cut);
+    return /^[A-Za-z]:$/.test(parent) ? `${parent}\\` : parent;
+}
+
+/**
  * @typedef {Object} NamespaceVolume
  * @property {() => string[]} drives
  * @property {(path: string) => { isDirectory: boolean } | null} stat
@@ -502,6 +554,26 @@ export function createShellNamespace({ publish, allocate, memory, volume }){
          * @param {number} out
          */
         desktop: out=>handOut(folderObject(null), IID_ISHELLFOLDER, out),
+        /**
+         * The folder a list's last item is in, into guest memory, and where
+         * that item starts: SHBindToParent. An empty list is the desktop,
+         * bound to itself.
+         *
+         * @param {number} list @param {number} riid @param {number} out
+         * @returns {{ hr: number, last: number }}
+         */
+        parent: (list, riid, out)=>{
+            const last = lastItemOf(memory, list);
+            const text = itemsOf(memory, list).at(-1);
+            const folder = text === undefined ? null : parentOf(text);
+            const iid = readGuid(memory, riid >>> 0);
+            if (folder === undefined || (iid !== IID_ISHELLFOLDER && iid !== IID_IUNKNOWN))
+            {
+                memory.writeMemory(out, dword(0));
+                return { hr: folder === undefined ? E_INVALIDARG : E_NOINTERFACE, last };
+            }
+            return { hr: handOut(folderObject(folder), IID_ISHELLFOLDER, out), last };
+        },
         /** @param {string} text @returns {number} */
         listFor,
         /** @param {number} list */

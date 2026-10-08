@@ -748,3 +748,35 @@ test('SHPathPrepareForWrite with no volume finds no path', ()=>{
     m.put('C:\\App', 0x100);
     assert.equal(m.shell.SHPathPrepareForWriteA.handler([0, 0, 0x100, 1]) | 0, 0x80070003 | 0);
 });
+
+test('FindExecutableW is the same association in UTF-16, and DragQueryFileW no drop', ()=>{
+    const m = machineWithPaths('C:\\App');
+    /** @param {string} text @param {number} at */
+    const wide = (text, at)=>{
+        [...text, '\0'].forEach((c, i)=>{
+            m.memory[at + i * 2] = c.charCodeAt(0) & 0xff;
+            m.memory[at + i * 2 + 1] = c.charCodeAt(0) >>> 8;
+        });
+    };
+    /** @param {number} at */
+    const read = at=>{
+        let text = '';
+        for (let i = at; m.memory[i] !== 0 || m.memory[i + 1] !== 0; i += 2)
+        {
+            text += String.fromCharCode(m.memory[i] | m.memory[i + 1] << 8);
+        }
+        return text;
+    };
+    wide('setup.exe', 0x100);
+    assert.equal(m.shell.FindExecutableW.handler([0x100, 0, 0x200]), 33);
+    assert.equal(read(0x200), 'C:\\App\\setup.exe');
+    wide('readme.txt', 0x100);
+    assert.equal(m.shell.FindExecutableW.handler([0x100, 0, 0x200]), 31);
+    assert.equal(read(0x200), '', 'cleared');
+    assert.equal(m.shell.FindExecutableW.argBytes, 12);
+
+    assert.equal(m.shell.DragQueryFileW.handler([0, 0xffffffff, 0, 0]), 0);
+    assert.equal(m.shell.DragQueryFileW.argBytes, 16);
+    assert.equal(m.shell.DragQueryFile, m.shell.DragQueryFileA, 'the bare name is the ANSI one');
+    assert.equal(m.shell.ShellExecuteEx, m.shell.ShellExecuteExA);
+});
