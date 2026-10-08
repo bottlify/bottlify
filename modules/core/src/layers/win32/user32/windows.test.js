@@ -2069,6 +2069,37 @@ test('a window hidden or destroyed has the caller\'s windows under it erased bef
         assert.equal(erased(under), 1, 'and the same for a window destroyed');
     });
 
+test('a sibling painted over by a change repaints only where it was painted over', ()=>{
+    // A wizard page's white panel is its first control, under the labels and
+    // check boxes laid on it. A check box that repaints itself takes the
+    // panel along under it -- and the panel repainted whole painted over
+    // every label, none of which had changed or was repainted after it.
+    const WS_POPUP = 0x80000000;
+    const { fns, memory } = setup({ paint: true });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const page = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+        x: 0, y: 0, width: 400, height: 300 });
+    const panel = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: page,
+        x: 100, y: 0, width: 300, height: 300 });
+    const label = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: page,
+        x: 110, y: 20, width: 200, height: 20 });
+    const box = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: page,
+        x: 110, y: 120, width: 200, height: 20 });
+    while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) !== 0)
+    {
+        fns.ValidateRect.handler([memory.u32(MSG_BUFFER + MSG.hwnd), 0]);
+    }
+    void panel;
+
+    fns.InvalidateRect.handler([box, 0, 1]);
+    const RECT_AT = 0x7f00;
+    assert.equal(fns.GetUpdateRect.handler([panel, RECT_AT, 0]), 1);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RECT_AT + at)), [10, 120, 210, 140],
+        'the panel repaints under the check box and nowhere else');
+    assert.equal(fns.GetUpdateRect.handler([label, 0, 0]), 0, 'the label is left as it is');
+});
+
 test('a window that moves takes its pixels with it, and only what it left is painted', ()=>{
     // As SetWindowPos copies a window's bits. A launcher that moves itself on
     // every mouse move of a drag had itself and every control repainted, by

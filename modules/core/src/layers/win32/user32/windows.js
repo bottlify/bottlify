@@ -3219,19 +3219,31 @@ export function createWindowFunctions(host){
             const overlap = shown(other) ? intersect(dirty, geometry.shapedRect(other)) : null;
             if (overlap && !isEmpty(overlap))
             {
+                // Only where it was painted over: a window repainted whole
+                // paints over every sibling it overlaps beyond that area --
+                // a dialog's white panel over the labels on it -- and those
+                // are not repainted, being nowhere near what changed.
+                const client = geometry.clientRect(other);
                 const size = geometry.clientSize(other);
-                const whole = { left: 0, top: 0, right: size.width, bottom: size.height };
-                if (!other.updateRect || !sameRect(other.updateRect, whole))
+                const local = {
+                    left: Math.max(0, overlap.left - client.left),
+                    top: Math.max(0, overlap.top - client.top),
+                    right: Math.min(size.width, overlap.right - client.left),
+                    bottom: Math.min(size.height, overlap.bottom - client.top),
+                };
+                if (local.right > local.left && local.bottom > local.top)
                 {
-                    other.ncDirty = true;
-                    other.updateRect = whole;
+                    other.updateRect = other.updateRect ? {
+                        left: Math.min(other.updateRect.left, local.left),
+                        top: Math.min(other.updateRect.top, local.top),
+                        right: Math.max(other.updateRect.right, local.right),
+                        bottom: Math.max(other.updateRect.bottom, local.bottom),
+                    } : local;
                     other.erase = true;
                 }
                 // Painted over past its client, the frame is painted again
-                // too, though the client was to be repainted already: a
-                // parent's one rectangle around a label and a child beside it
-                // takes in the child's edge.
-                const client = geometry.clientRect(other);
+                // too: a parent's one rectangle around a label and a child
+                // beside it takes in the child's edge.
                 if (overlap.left < client.left || overlap.top < client.top
                     || overlap.right > client.right || overlap.bottom > client.bottom)
                 {
