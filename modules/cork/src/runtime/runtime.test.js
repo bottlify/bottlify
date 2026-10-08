@@ -1686,6 +1686,32 @@ test('a variant for another x87 top the machine keeps reaching goes before cold 
     assert.equal(reason(), 'translated since');
 });
 
+test('the untranslated exits are told apart by what left, and a target only ever left on'
+    + ' purpose is held, not a link missing', async()=>{
+    const m = machine({ batchRegions: 1, maxBatchRegions: 1 });
+    // mov eax, 0x5000; jmp eax -- a target nothing has translated: a bare exit.
+    m.write(CODE, [0xb8, 0x00, 0x50, 0x00, 0x00, 0xff, 0xe0]);
+    m.write(0x5000, [0xf4]);
+    m.runtime.noteHot(CODE);
+    await m.runtime.translatePending();
+    const exit = m.runtime.run(m.runtime.entryOf(CODE), 1000);
+    assert.equal(exit.kind, 'untranslated');
+    const counts = ()=>m.runtime.diagnostics().untranslatedBy;
+    assert.equal(counts().bare, 1);
+    assert.equal(counts().held, 0);
+
+    // Two exits a region made to the host on purpose (HELD) at one target.
+    m.runtime.missAt(0x6000, 0, true);
+    m.runtime.missAt(0x6000, 0, true);
+    const target = (/** @type {number} */ address)=>m.runtime.diagnostics().exitsByTarget
+        .find((/** @type {any} */ one)=>one.address === address);
+    assert.deepEqual([target(0x6000).count, target(0x6000).held, target(0x6000).reason],
+        [2, 2, 'held']);
+    // One bare exit among them, and its reason is read again.
+    m.runtime.missAt(0x6000, 0);
+    assert.notEqual(target(0x6000).reason, 'held');
+});
+
 test('a transfer carries the registers and the count to a callee that names none of them,'
     + ' and its exit to the host writes them all', async()=>{
     const m = machine({ leafCalls: false });

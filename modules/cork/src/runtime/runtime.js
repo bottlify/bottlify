@@ -510,7 +510,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     // candidates, but what the translator never reached is exactly what this
     // is read for. Bounded like `misses`; the coldest target makes room. With
     // the count, the tops its exits were at, a bit each.
-    /** @type {Map<number, { count: number, tops: number }>} */
+    /** @type {Map<number, { count: number, held: number, tops: number }>} */
     const exitTargets = new Map();
     const EXIT_TARGETS_CAP = 4096;
     /**
@@ -704,6 +704,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     /** @type {Record<ExitKind, number>} */
     const exits = { untranslated: 0, budget: 0, trap: 0, halt: 0, fault: 0, stale: 0,
         interpreted: 0 };
+    // The untranslated exits by what left: a bare one (nothing at the target
+    // in the region), or one a region made to the host on purpose -- a window
+    // its accesses would fault on or a store into code (HELD), the x87
+    // precision it was not formed for (PRECISION), a stack shape it was not
+    // checked for (SHAPE). One count read alone mixes them, and the held ones
+    // land on addresses that are translated, which reads as a link not made.
+    const untranslatedBy = { bare: 0, held: 0, precision: 0, shape: 0, other: 0 };
+    /** @type {Record<number, keyof typeof untranslatedBy>} */
+    const VECTOR_NAMES = { 0: 'bare', [HELD]: 'held', [PRECISION]: 'precision', [SHAPE]: 'shape' };
     /** @type {import('../../../core/src/layers/cpu/engine.js').ExitRecord} */
     const exit = { retired: 0, kind: 'untranslated', vector: 0 };
     /** @type {Record<string, number>} */
@@ -2742,6 +2751,17 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 profileResetAt = null;
                 resetBlockCounts(view(), layout.tables);
+                // The exits are counted over the same window as the blocks.
+                for (const name of /** @type {(keyof typeof exits)[]} */ (Object.keys(exits)))
+                {
+                    exits[name] = 0;
+                }
+                for (const name of /** @type {(keyof typeof untranslatedBy)[]} */ (
+                    Object.keys(untranslatedBy)))
+                {
+                    untranslatedBy[name] = 0;
+                }
+                exitTargets.clear();
             }
             // One record, rewritten per run: a call-heavy program leaves
             // and re-enters per call, and an object per leave was the
@@ -2754,6 +2774,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 : retired - ((tierEntered() - tierBefore) >>> 0);
             const kind = KINDS[code & 0xff] ?? 'untranslated';
             exits[kind]++;
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && kind === 'untranslated')
+            {
+                untranslatedBy[VECTOR_NAMES[code >>> 8] ?? 'other']++;
+            }
             if (kind === 'untranslated' && code >>> 8 === PRECISION)
             {
                 precisionSeen();
@@ -2812,10 +2836,14 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             let target = exitTargets.get(address);
             if (target === undefined)
             {
-                target = { count: 0, tops: 0 };
+                target = { count: 0, held: 0, tops: 0 };
                 exitTargets.set(address, target);
             }
             target.count++;
+            if (held)
+            {
+                target.held++;
+            }
             target.tops |= 1 << at;
             if (exitTargets.size > EXIT_TARGETS_CAP)
             {
@@ -3099,10 +3127,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 queueEvictions: counts.queueEvictions,
                 volatilePages: counts.volatilePages,
                 exits: { ...exits },
-                // The top untranslated-exit targets over the whole run, and
-                // why each has no entry: what a loading phase leaves behind.
+                untranslatedBy: { ...untranslatedBy },
+                // The top untranslated-exit targets over the whole run (or the
+                // block profile's window), and why each has no entry: what a
+                // loading phase leaves behind. One only ever left on purpose
+                // (HELD) is `held` -- its address is translated and no link is
+                // missing; the reason of the rest is read now, not at the exit.
                 exitsByTarget: [...exitTargets].sort((a, b)=>b[1].count - a[1].count).slice(0, 32)
-                    .map(([address, { count }])=>({ address, count, reason: missReason(address) })),
+                    .map(([address, { count, held }])=>({ address, count, held,
+                        reason: held === count ? 'held' : missReason(address) })),
                 refused: { ...refused },
                 refusedWhy: { ...refusedWhy },
                 // Where a program reads what `precise: false` leaves: a title that
