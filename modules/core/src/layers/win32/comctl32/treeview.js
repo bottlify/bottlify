@@ -89,6 +89,10 @@ const I_IMAGECALLBACK = -1;
 
 /** Insert-after positions. */
 const TVI_ROOT = 0xffff0000;
+/** TVITEM.mask's flag for a valid hItem, which is all a deleted item is said to have. */
+const TVIF_HANDLE = 0x0010;
+/** The window message a tree hands its items to the parent for the last time on. */
+const WM_DESTROY = 0x0002;
 const TVI_FIRST = 0xffff0001;
 const TVI_LAST = 0xffff0002;
 const TVI_SORT = 0xffff0003;
@@ -122,6 +126,7 @@ export const TVN_SELCHANGEDA = TVN_FIRST - 2;
 export const TVN_GETDISPINFOA = TVN_FIRST - 3;
 export const TVN_ITEMEXPANDINGA = TVN_FIRST - 5;
 export const TVN_ITEMEXPANDEDA = TVN_FIRST - 6;
+export const TVN_DELETEITEMA = TVN_FIRST - 9;
 
 /** Structure layouts, in bytes, as the guest compiled them. */
 export const TVITEM = Object.freeze({
@@ -543,6 +548,67 @@ export function createTreeViewProcedure(host, tk){
     };
 
     /**
+     * Deletes an item and its subtree, telling the parent of each with
+     * TVN_DELETEITEM -- children before their parent, each while it is still
+     * in the tree -- as the control does: the notification is where a program
+     * frees what its lParam holds, and a program that is never told keeps the
+     * data, or a pointer into a library it has since unloaded.
+     *
+     * @param {any} record @param {number} handle @param {unknown} [thread]
+     * @returns {number | Promise<number>}
+     */
+    const deleteItem = (record, handle, thread)=>{
+        const item = node(record, handle);
+        if (!item)
+        {
+            return 1;
+        }
+        const children = [...item.children];
+        /** @param {number} index @returns {number | Promise<number>} */
+        const next = index=>{
+            if (index < children.length)
+            {
+                return after(deleteItem(record, children[index], thread), ()=>next(index + 1));
+            }
+            const bytes = new Uint8Array(NMTREEVIEW.SIZE);
+            const view = new DataView(bytes.buffer);
+            // TVC_UNKNOWN, and of the old item only its handle and lParam.
+            view.setUint32(NMTREEVIEW.itemOld + TVITEM.mask, TVIF_HANDLE | TVIF_PARAM, true);
+            view.setUint32(NMTREEVIEW.itemOld + TVITEM.hItem, item.handle >>> 0, true);
+            view.setUint32(NMTREEVIEW.itemOld + TVITEM.lParam, item.param >>> 0, true);
+            return after(notify(record, TVN_DELETEITEMA, bytes, thread), ()=>{
+                remove(record, item.handle);
+                host.invalidate(record);
+                return 1;
+            });
+        };
+        return next(0);
+    };
+
+    /**
+     * Deletes every item, each told to the parent.
+     *
+     * @param {any} record @param {unknown} [thread]
+     * @returns {number | Promise<number>}
+     */
+    const deleteAll = (record, thread)=>{
+        const held = state(record);
+        const roots = [...held.roots];
+        /** @param {number} index @returns {number | Promise<number>} */
+        const next = index=>{
+            if (index < roots.length)
+            {
+                return after(deleteItem(record, roots[index], thread), ()=>next(index + 1));
+            }
+            held.caret = 0;
+            held.top = 0;
+            host.invalidate(record);
+            return 1;
+        };
+        return next(0);
+    };
+
+    /**
      * Sends a selection change through the parent: SELCHANGING first, and only
      * if the parent did not refuse it, the move and SELCHANGED.
      *
@@ -938,22 +1004,18 @@ export function createTreeViewProcedure(host, tk){
             case TVM_DELETEITEM: {
                 if ((message.lParam >>> 0) === TVI_ROOT)
                 {
-                    held.roots.length = 0;
-                    held.nodes.clear();
-                    held.caret = 0;
-                    held.top = 0;
-                    host.invalidate(record);
-                    return 1;
+                    return deleteAll(record, thread);
                 }
                 const item = node(record, message.lParam);
                 if (!item)
                 {
                     return 0;
                 }
-                remove(record, item.handle);
-                host.invalidate(record);
-                return 1;
+                return deleteItem(record, item.handle, thread);
             }
+            case WM_DESTROY:
+                // A tree that goes away gives its items back the same way.
+                return after(deleteAll(record, thread), ()=>tk.common(record, message, thread));
             case TVM_EXPAND: {
                 const item = node(record, message.lParam);
                 if (!item)
