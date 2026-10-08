@@ -211,6 +211,8 @@ const WS_VISIBLE = 0x10000000;
 const ES_MULTILINE = 0x0004;
 const ES_PASSWORD = 0x0020;
 const ES_AUTOHSCROLL = 0x0080;
+/** A rich edit's bars kept, disabled, when there is nothing to scroll. */
+const ES_DISABLENOSCROLL = 0x2000;
 const ES_READONLY = 0x0800;
 const ES_WANTRETURN = 0x1000;
 const EM_GETSEL = 0x00b0;
@@ -1897,11 +1899,21 @@ export function createControlProcedures(host){
      * @param {any} record
      */
     const syncEditBar = record=>{
-        if (!multiline(record) || (record.style & WS_VSCROLL) === 0)
+        const state = editState(record);
+        // The bars it was made with, which a rich edit shows and hides.
+        state.bars ??= record.style & (WS_VSCROLL | WS_HSCROLL);
+        if (!multiline(record) || (state.bars & WS_VSCROLL) === 0)
         {
             return;
         }
-        const state = editState(record);
+        if (state.rich && (record.style & ES_DISABLENOSCROLL) === 0 && showRichBars(record))
+        {
+            return;
+        }
+        if ((record.style & WS_VSCROLL) === 0)
+        {
+            return;
+        }
         const total = editLines(record, editGridColumns(record)).length;
         const held = scrollOf(record, SB_VERT_BAR);
         const next = { min: 0, max: Math.max(0, total - 1), page: editGridRows(record),
@@ -1913,6 +1925,33 @@ export function createControlProcedures(host){
         }
         Object.assign(held, next, { trackPos: next.pos });
         host.frameChanged?.(record);
+    };
+
+    /**
+     * A rich edit's bars without ES_DISABLENOSCROLL: the vertical one there
+     * only while there are more lines than show, the horizontal one only
+     * when lines run on rather than wrap -- as the rich edit hides a bar it
+     * has no use for, where a plain edit keeps it, disabled. A setup's
+     * welcome text that fits showed both bars, empty. Answers whether the
+     * style changed, the frame redrawn and the bar set on the next paint.
+     *
+     * @param {any} record
+     */
+    const showRichBars = record=>{
+        const state = editState(record);
+        const total = editLines(record, editGridColumns(record)).length;
+        const vertical = total > editGridRows(record) ? WS_VSCROLL : 0;
+        const horizontal = (state.bars & WS_HSCROLL) !== 0
+            && (record.style & ES_AUTOHSCROLL) !== 0 ? WS_HSCROLL : 0;
+        const style = ((record.style & ~(WS_VSCROLL | WS_HSCROLL)) | vertical | horizontal) >>> 0;
+        if (style === record.style)
+        {
+            return false;
+        }
+        record.style = style;
+        host.frameChanged?.(record);
+        host.invalidate(record);
+        return true;
     };
 
     /** Columns across the client without a context to measure with. @param {any} record */

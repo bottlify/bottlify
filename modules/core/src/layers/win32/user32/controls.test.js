@@ -14,6 +14,7 @@ import { createGdiFunctions } from '../gdi32/functions.js';
 import { createGdiDrawing } from '../../graphics/gdi/context.js';
 import { createSurface, surfaceForDibSection, viewOf } from '../../graphics/gdi/surface.js';
 import { createCommonControls } from '../comctl32/controls.js';
+import { createRichEditControls } from '../riched/richedit.js';
 import { imagePlace } from './controls.js';
 import { PBM_SETRANGE, PBM_SETPOS } from '../comctl32/progress.js';
 import {
@@ -364,7 +365,8 @@ function setup({ reply = ()=>0, engine = false, desktopPicture = null } = {}){
         },
         release: ()=>{},
         registerControls: (controlHost, toolkit, register)=>{
-            for (const definition of createCommonControls(controlHost, toolkit))
+            for (const definition of [...createCommonControls(controlHost, toolkit),
+                ...createRichEditControls(controlHost, toolkit)])
             {
                 register(definition);
             }
@@ -1951,3 +1953,30 @@ test('a static given a bitmap takes the bitmap\'s size, unless it centres or str
         await context.fns.SendMessageA.handler([centred, STM_SETIMAGE, IMAGE_BITMAP, bitmap]);
         assert.deepEqual(size(centred), [120, 90], 'its own size, the bitmap centred in it');
     });
+
+test('a rich edit shows a scroll bar only while it has something to scroll', async()=>{
+    // A setup's welcome page puts its text in a rich edit made with both
+    // bars. The text fits, and Windows shows neither; the bars stood there,
+    // empty, beside it.
+    const WS_HSCROLL = 0x00100000;
+    const ES_DISABLENOSCROLL = 0x2000;
+    const context = setup();
+    const dialog = await openDialog(context);
+    /** @param {number} style @param {string} text */
+    const make = async(style, text)=>{
+        context.memory.putString(TEXT, 'RichEdit20A');
+        context.memory.putString(TEXT + 0x40, text);
+        const hwnd = context.fns.CreateWindowExA.handler([0, TEXT, TEXT + 0x40,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY | style,
+            8, 8, 200, 60, dialog, 0, HINSTANCE, 0]);
+        await context.pump(dialog);
+        return hwnd;
+    };
+    /** @param {number} hwnd */
+    const bars = hwnd=>context.fns.GetWindowLongA.handler([hwnd, -16]) & (WS_VSCROLL | WS_HSCROLL);
+    assert.equal(bars(await make(0, 'Welcome.')), 0, 'neither, for text that fits');
+    const long = Array.from({ length: 30 }, (_, index)=>`Line ${index}`).join('\r\n');
+    assert.equal(bars(await make(0, long)), WS_VSCROLL, 'the vertical one, for text that does not');
+    assert.equal(bars(await make(ES_DISABLENOSCROLL, 'Welcome.')), WS_VSCROLL | WS_HSCROLL,
+        'kept, disabled, when the style asks');
+});
