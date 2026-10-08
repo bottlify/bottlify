@@ -104,6 +104,7 @@ const NEW_TARGET_WORK = 128;
 const ENGINE_EXPORTS = Object.freeze([
     'createEngine', 'ownLayout', 'pagesFor', 'Tables', 'STATE_BLOCK_SIZE',
     'interpret', 'blockState', 'eflagsOf', 'setEflags', 'executorLayout', 'EXECUTOR_BYTES',
+    'SHARED_CODE_BYTES',
 ]);
 
 /**
@@ -131,6 +132,8 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  *     tables of its own past the first's (`executorLayout`). Default 1.
  * @property {number} [executor]   Which of them this host is. Default 0, the first, whose state
  *     block is at the start of the memory.
+ * @property {WebAssembly.Memory} [memory]  The memory, made by the host of another executor of
+ *     the process (`wasmMemory`) -- shared, sized for `executors` -- rather than one of its own.
  */
 
 /**
@@ -149,7 +152,7 @@ export const CORK_TSC_MHZ = 3000;
  */
 export function createCorkHost(config){
     const { engine, memorySize, trapPort, entryVector, initialStack, cork: corkConfig,
-        closedBelow = 0, noExecuteBelow = 0, executors = 1, executor = 0 } = config;
+        closedBelow = 0, noExecuteBelow = 0, executors = 1, executor = 0, memory: given } = config;
     // Where code may run from: a closed range runs nothing either.
     const runsFrom = Math.max(closedBelow, noExecuteBelow) >>> 0;
     for (const name of ENGINE_EXPORTS)
@@ -182,16 +185,28 @@ export function createCorkHost(config){
     const firstPages = pagesFor(own, past);
     // Every other executor's: its state page, its tables and what lies past them.
     const executorPages = Math.ceil((EXECUTOR_BYTES - Tables.SIZE + past) / 65536);
-    const stateBase = executor === 0 ? 0 : (firstPages + (executor - 1) * executorPages) * 65536;
+    /** Where an executor's state page begins. @param {number} index */
+    const executorBase = index=>(index === 0 ? 0
+        : (firstPages + (index - 1) * executorPages) * 65536);
+    const stateBase = executorBase(executor);
     const layout = executor === 0 ? own : executorLayout(own, stateBase);
     const wasmArea = layout.tables + Tables.SIZE + profileSize;
-    const pages = firstPages + (executors - 1) * executorPages;
+    // Past every executor's pages, the record they keep together of who holds
+    // code where and which stores reached it (`shared-code.js`).
+    const sharedAt = executors > 1 ? (firstPages + (executors - 1) * executorPages) * 65536 : -1;
+    const pages = firstPages + (executors - 1) * executorPages
+        + (executors > 1 ? Math.ceil(engine.SHARED_CODE_BYTES / 65536) : 0);
     // Shared where the host can share it -- a page that is cross-origin
     // isolated, or node -- so another worker can read and write guest memory
     // in place; the translated code runs as fast on either.
     const shared = corkConfig?.sharedMemory !== false && typeof SharedArrayBuffer === 'function'
         && /** @type {any} */ (globalThis).crossOriginIsolated !== false;
-    const memory = new WebAssembly.Memory({ initial: pages, maximum: pages, shared });
+    if (given !== undefined && given.buffer.byteLength < pages * 65536)
+    {
+        throw new Error(`cpu: a memory of ${given.buffer.byteLength} bytes has no room for`
+            + ` ${executors} executors`);
+    }
+    const memory = given ?? new WebAssembly.Memory({ initial: pages, maximum: pages, shared });
 
     // The memory is fixed (initial === maximum), so the buffer never detaches
     // and the views are taken once.
@@ -305,7 +320,9 @@ export function createCorkHost(config){
     const isFeedDue = ()=>feedDue;
     // eip is read from the entry vector at the first slice, the way the ROM's
     // indirect jump read it: the loader writes the entry point after boot.
-    let entered = false;
+    // Another executor's threads are placed in its block by the process: it
+    // never starts from the entry vector.
+    let entered = executor !== 0;
     /** @type {import('./faults.js').GuestFault | null} */
     let lastFault = null;
     /**
@@ -400,7 +417,8 @@ export function createCorkHost(config){
     const runtime = createEngine({
         memory,
         layout,
-        config: { ...(trapPort === undefined ? {} : { trapPort }), ...corkConfig },
+        config: { ...(trapPort === undefined ? {} : { trapPort }), ...corkConfig,
+            ...(sharedAt < 0 ? {} : { sharedCode: { at: sharedAt, index: executor } }) },
         read: (/** @type {number} */ address)=>ram[address],
         imports: {
             trap: raiseTrap,
@@ -435,6 +453,12 @@ export function createCorkHost(config){
     const invalidate = (address, length)=>{
         if (length <= 0)
         {
+            return;
+        }
+        if (sharedAt >= 0)
+        {
+            // The process's other executors drop theirs too.
+            runtime.codeWritten(address, length);
             return;
         }
         const last = (address + length - 1) >>> 12;
@@ -929,6 +953,11 @@ export function createCorkHost(config){
     const runSlice = maxInstructions=>{
         const sliceAt = clock();
         const wallAt = performance.now();
+        if (sharedAt >= 0)
+        {
+            // What the process's other executors wrote over code meanwhile.
+            runtime.takeCodeWrites();
+        }
         stopped = false;
         feedDue = false;
         // A slice is the clock's tick. On the emulator a `hlt` holds the
@@ -1186,6 +1215,14 @@ export function createCorkHost(config){
         stop(){
             stopped = true;
         },
+        /** Whether something asked the turn to end since the slice began (`stop`). */
+        stopRequested: ()=>stopped,
+        /** @param {boolean} value */
+        setStopRequested(value){
+            stopped = value;
+        },
+        /** Where executor `index`'s state page begins in the memory. */
+        executorBase,
         /** @param {(() => boolean) | null} check */
         setYieldCheck(check){
             yieldCheck = check;
@@ -1326,6 +1363,13 @@ export function createCorkHost(config){
         onFault(handler){
             faultHandler = handler;
         },
+        /**
+         * A fault another executor of the process took, offered to this one's handler
+         * with that executor's state in this one's block: whether the handler claimed it.
+         *
+         * @param {any} fault
+         */
+        offerFault: fault=>faultHandler?.(fault) === true,
         clearFault(){
             lastFault = null;
         },

@@ -28,7 +28,7 @@ import { EMPTY } from '../wasm/encoder.js';
 import { I32, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { CallStack, Exit, Local, STATE_PARAMS } from './region.js';
 import { checkAccess, emitStaleExit, looseStackStore, noteStore, stackAccess } from './memory.js';
-import { Tables } from '../runtime/layout.js';
+import { pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { emitSimd } from './simd.js';
 import { emitLocked, isLocked } from './locked.js';
@@ -2186,7 +2186,7 @@ const BULK_UNIT_SHIFT = 4;
 function bulkTurn(e, size){
     const { b } = e;
     const elementShift = Math.log2(size);
-    const table = e.layout.tables + Tables.PAGE_FLAGS;
+    const table = pageFlagsAt(e.layout);
     // t0 = min(t0, the value on the stack), unsigned.
     const minInto = ()=>{
         b.localSet(Local.t1);

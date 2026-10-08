@@ -26,7 +26,7 @@
 
 import { MODULE_BASE64 } from './interp-wasm.bytes.js';
 import { eflagsOf } from './emit/flags.js';
-import { Tables } from './runtime/layout.js';
+import { Tables, codeRangesAt, pageFlagsAt } from './runtime/layout.js';
 import { withSharedMemoryImport } from './wasm/shared-import.js';
 
 /** How a run of the tier ended. `interp-wasm.c` has the same numbers. */
@@ -165,8 +165,8 @@ export function createWasmInterpreter({ memory, layout, area, statics, hotThresh
             },
         }).exports);
         exports.__wasm_apply_data_relocs?.();
-        exports.configure(layout.ramBase, layout.tables + Tables.PAGE_FLAGS,
-            layout.tables + Tables.CODE_RANGES, layout.tables + Tables.HASH, layout.hashShift ?? 16,
+        exports.configure(layout.ramBase, pageFlagsAt(layout),
+            codeRangesAt(layout), layout.tables + Tables.HASH, layout.hashShift ?? 16,
             layout.regs, layout.eip, layout.eflags, layout.fsBase, area, HOT_SLOTS, hotThreshold,
             // No port a byte or a word can name: every `out` is left to the JavaScript tier.
             trapPort ?? 0x10000, parkBase >>> 0);

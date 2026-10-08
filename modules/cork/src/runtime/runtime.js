@@ -40,6 +40,7 @@ import { buildHelpersModule } from '../emit/helpers.js';
 import { openTranslationWorker } from './translator.js';
 import { ANY_TOP, createEntries } from './entries.js';
 import { PageFlag, createPageTable } from './pages.js';
+import { createSharedCode } from './shared-code.js';
 import { Tables } from './layout.js';
 import { blockCounts, resetBlockCounts, topBlocks } from './block-profile.js';
 import {
@@ -257,6 +258,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // memory: for a process whose threads run on more than one executor
         // (roadmap/v2, stage 3). Off, a process on one executor pays nothing.
         atomic: false,
+        // Where the process's record of shared code lies and which executor this
+        // runtime is (`shared-code.js`), when other executors share its page flags;
+        // null for a process on one.
+        sharedCode: /** @type {{ at: number, index: number } | null} */ (null),
         // A store through esp alone tests no page while no translated code lies
         // on a thread's stack (`noteStack`), which the runtime then switches off
         // for good: a stack holds no code unless a program runs code there.
@@ -319,7 +324,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         && memory.buffer instanceof SharedArrayBuffer
         ? { shared: true, maxPages: SHARED_MAX_PAGES }
         : undefined;
-    const pages = createPageTable(memory, layout);
+    const codeShared = settings.sharedCode
+        ? createSharedCode(memory, settings.sharedCode.at, settings.sharedCode.index) : null;
+    const pages = createPageTable(memory, layout, codeShared);
     // The five helper functions every region imports, defined once here and
     // instantiated over this memory when the first region is published.
     /** @type {any} */
@@ -2973,6 +2980,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 {
                     invalidatePage(page);
                 }
+                codeShared?.publish(address, size);
                 // The other executor's compiled page, if that is what was hit.
                 imports.dirtyCode?.(address, size);
             }
@@ -3156,6 +3164,46 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }
         },
         invalidatePage,
+        /**
+         * A store this executor met reached code: its translations of the pages
+         * go, and the other executors of the process are told theirs do.
+         *
+         * @param {number} address @param {number} size
+         */
+        codeWritten(address, size){
+            if (size <= 0)
+            {
+                return;
+            }
+            const last = (address + size - 1) >>> 12;
+            for (let page = address >>> 12; page <= last; page++)
+            {
+                invalidatePage(page);
+            }
+            codeShared?.publish(address, size);
+        },
+        /**
+         * The stores into code the process's other executors met since this
+         * one last looked: its translations of those pages go. Asked before
+         * each slice.
+         */
+        takeCodeWrites(){
+            return codeShared?.take((address, size)=>{
+                if (size === 0xffffffff)
+                {
+                    for (const page of [...byPage.keys()])
+                    {
+                        invalidatePage(page);
+                    }
+                    return;
+                }
+                const last = size > 0 ? (address + size - 1) >>> 12 : -1;
+                for (let page = address >>> 12; page <= last; page++)
+                {
+                    invalidatePage(page);
+                }
+            }) ?? 0;
+        },
         interpretWith(entry, entered){
             if (!resumable)
             {

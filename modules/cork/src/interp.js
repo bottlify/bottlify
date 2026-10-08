@@ -21,7 +21,7 @@ import { decode } from './decode/decoder.js';
 import { Fault, Unsupported, createState, evaluate } from './ir.js';
 import { compileFast } from './fast.js';
 import { eflagsOf } from './emit/flags.js';
-import { Tables } from './runtime/layout.js';
+import { Tables, codeRangesAt, pageFlagsAt } from './runtime/layout.js';
 import { PageFlag } from './runtime/pages.js';
 
 export { Fault, Unsupported, createState };
@@ -346,9 +346,9 @@ class BlockMemory {
         this.ramBytes = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
         // The page flags as bytes: every access tests one or two, and a typed
         // array is cheaper than a DataView call.
-        this.pageFlags = new Uint8Array(memory.buffer, layout.tables + Tables.PAGE_FLAGS,
+        this.pageFlags = new Uint8Array(memory.buffer, pageFlagsAt(layout),
             Tables.PAGE_FLAGS_SIZE);
-        this.codeRanges = layout.tables + Tables.CODE_RANGES;
+        this.codeRanges = codeRangesAt(layout);
         this.onCodeWrite = onCodeWrite;
         this.owner = owner;
         // The bytes of the run being interpreted (`watch`): a store into them

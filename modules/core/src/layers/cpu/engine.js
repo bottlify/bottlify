@@ -67,6 +67,9 @@
  * @property {number} [nanFirst]   Cork's own, outside the state block: under `precise`, a NaN
  *     hunt's record (`NanRecord` in cork's emit/x87.js).
  * @property {number} tables       Wasm address of the engine's own tables.
+ * @property {number} [pageFlags]  Cork's own: where the page flags lie when not in `tables` --
+ *     another executor of a process reads and writes the first's (`executorLayout`).
+ * @property {number} [codeRanges] Cork's own: the same for the pages' code granules.
  * @property {number} codePages    Wasm address of the other executor's byte-per-page
  *                                 "has compiled code" table (hybrid), or -1: a store into
  *                                 such a page leaves `stale` so its cache can be dirtied.
@@ -401,6 +404,11 @@
  * @property {(adapter: TranslatorPort) => void} [detachTranslator]  The same worker asked
  *     back: it takes no batch from then on, and goes once the one it holds is answered.
  * @property {(page: number) => void} invalidatePage  A host or guest write into code.
+ * @property {(address: number, size: number) => void} codeWritten  A write into code this
+ *     executor met: its translations of the pages go, and the process's other executors are
+ *     told (`sharedCode`).
+ * @property {() => number} takeCodeWrites  The writes into code the process's other executors
+ *     met since this one last looked: its translations of those pages go.
  * @property {(entry: (budget: number) => number, entered: () => number) => boolean}
  *     [interpretWith]  Cork alone: the interpreter tier in wasm's `entry`, which translated
  *     code then runs at an untranslated exit whose target has no region, going on at the

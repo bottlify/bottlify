@@ -416,6 +416,15 @@ flowchart LR
   dropped. The bounds of the code are kept to 32 bytes, so a write to data next to code does not count
   as a write into code. A page that has lost its translations 8 times is marked volatile
   (`VOLATILE`), and its code is only interpreted from then on.
+- **Several executors of a process** (stage 3 of `roadmap/v2/`, not yet scheduled by the kernel).
+  An executor past the first is a cork host in a worker of its own over the process's memory
+  (`core/src/layers/cpu/internal/executor.worker.js`), with its own state page, entry hash and
+  translations. The page flags and the code bounds are the process's: a write on any executor into
+  code any of them translated is found, the finder drops its own translations and puts the range in
+  a ring in shared memory, and every other executor drops its own at its next slice
+  (`cork/src/runtime/shared-code.js`). A trap or a fault on such an executor waits for the process's
+  thread, which answers it with its own handlers over the executor's registers, swapped into its
+  state block for the call (`executor.js`).
 - **Exact exceptions.** A region exits right before the faulting instruction, with its EIP and
   registers. Division by zero gives #DE, an unknown instruction #UD, a write to a closed page #GP, a
   jump below `0x10000` (a call through a null pointer, say) #PF. `int3` is finished by the
