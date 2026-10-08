@@ -602,8 +602,9 @@ const DIAGNOSTICS = [
         'type mismatch', 3, 12],
     ['struct S { float a; };\nvoid f(){\n  S s; float x = s;\n}', 'X3017',
         "cannot convert from 'S' to 'float'", 3, 18],
-    ['struct S { float a; };\nstruct T { float a; };\nvoid f(){\n  S s; T t = s;\n}', 'X3017',
-        "cannot convert from 'S' to 'T'", 4, 14],
+    // fxc converts structures of the same components (float2 a and float a, b too); not these.
+    ['struct S { float a; };\nstruct T { float a; float b; };\nvoid f(){\n  S s; T t = s;\n}',
+        'X3017', "cannot convert from 'S' to 'T'", 4, 14],
     ['float f(){\n  float2 v = 1;\n  return v.z;\n}', 'X3018', "invalid subscript 'z'", 3, 11],
     ['float f(){\n  float4 v = 1;\n  return v.xg;\n}', 'X3018', "invalid subscript 'xg'", 3, 11],
     ['float f(){\n  float4 v = 1;\n  return v.xyzwx;\n}', 'X3018', "invalid subscript 'xyzwx'",
@@ -629,7 +630,9 @@ const DIAGNOSTICS = [
         'incorrect number of arguments to numeric-type constructor', 2, 10],
     ['float f(){\n  return float2().x;\n}', 'X3014',
         'incorrect number of arguments to numeric-type constructor', 2, 10],
-    ['struct S { float a; };\nfloat f(){\n  S s;\n  return float2(s, 1).x;\n}', 'X3017',
+    // fxc takes a structure of numbers as its numbers (float2(s, 1)); not one with an object.
+    ['struct S { float a; sampler t; };\nfloat f(){\n  S s;\n  return float2(s, 1).x;\n}',
+        'X3017',
         "cannot convert from 'S' to 'float2'", 4, 17],
     ['float f(float2 v){\n  return (float3)v;\n}', 'X3017',
         "cannot convert from 'float2' to 'float3'", 2, 10],

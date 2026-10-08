@@ -24,9 +24,9 @@
  */
 
 import {
-    BOOL, FLOAT, INT, RANK, STRING, arrayOf, baseOf, conversionRank, fromTypeRef,
-    flatBases, isNumeric, matrixOf, sameType, scalarCount, scalarOf, structOf, typeToString,
-    vectorOf, withBase,
+    BOOL, FLOAT, INT, RANK, STRING, arrayOf, baseOf, componentsOf, conversionRank, fromTypeRef,
+    flatBases, isNumeric, matrixOf, samplerOf, sameType, scalarCount, scalarOf, structOf,
+    typeToString, vectorOf, withBase,
 } from './hlsl-types.js';
 import { isIntrinsic, resolveIntrinsic } from './hlsl-intrinsics.js';
 import { createEvaluator } from './hlsl-eval.js';
@@ -572,7 +572,10 @@ export function check(program, options = {}){
             return fail('X3017', `cannot convert from initializer list to `
                 + `'${typeToString(type)}'`, node.pos);
         }
-        const leaves = checkedLeaves(node);
+        // A texture or a sampler in the list is the object member it stands at, which holds
+        // no number: the numbers fill the rest.
+        const leaves = checkedLeaves(node).filter((/** @type {any} */ l)=>
+            l.type.kind !== 'texture' && l.type.kind !== 'sampler');
         let total = 0;
         for (const l of leaves)
         {
@@ -637,6 +640,10 @@ export function check(program, options = {}){
             case 'index':
                 lvalue(e.object);
                 return;
+            case 'cast':
+                // `(float2) p = v` writes what the cast shows of p, converted back.
+                lvalue(e.operand);
+                return;
             default:
                 fail('X3025', 'l-value specifies const object', e.pos);
         }
@@ -656,6 +663,7 @@ export function check(program, options = {}){
                 e.type = STRING;
                 return e;
             case 'ident': return identifier(e);
+            case 'combine': return e;
             case 'unary': return unary(e);
             case 'incdec': {
                 e.operand = expr(e.operand);
@@ -848,7 +856,9 @@ export function check(program, options = {}){
         let total = 0;
         for (const a of e.args)
         {
-            if (!isNumeric(a.type))
+            // An array or a structure of numbers gives its numbers in order.
+            if (!isNumeric(a.type) && !((a.type.kind === 'array' || a.type.kind === 'struct')
+                && componentsOf(a.type).every(c=>c[0] === 'n')))
             {
                 return fail('X3017', `cannot convert from '${typeToString(a.type)}' to `
                     + `'${typeToString(t)}'`, a.pos);
@@ -873,13 +883,20 @@ export function check(program, options = {}){
     /** @param {any} e @returns {any} */
     function castExpr(e){
         const ref = e.typeRef ?? e.type;
-        const to = typeOf(ref);
+        const to = e.dims?.length ? declaredType(ref, e.dims).type : typeOf(ref);
         const a = expr(e.operand);
         // `(S)0` zero-fills a structure or an array; a value with as many scalars as the
         // aggregate fills it in order.
         const fills = (to.kind === 'struct' || to.kind === 'array') && isNumeric(a.type)
             && (scalarCount(a.type) === 1 || scalarCount(a.type) === scalarCount(to));
-        if (!fills && conversionRank(a.type, to) === RANK.IMPOSSIBLE)
+        // Between aggregates, component by component: the source's cover the target's in
+        // order, numbers for numbers and objects for objects of their kind.
+        const aggregate = !isNumeric(a.type) || !isNumeric(to);
+        const from = componentsOf(a.type);
+        const into = componentsOf(to);
+        const matches = aggregate && into.length > 0 && from.length >= into.length
+            && into.every((c, i)=>c === from[i] || (c[0] === 'n' && from[i][0] === 'n'));
+        if (!fills && !matches && conversionRank(a.type, to) === RANK.IMPOSSIBLE)
         {
             return fail('X3017', `cannot convert from '${typeToString(a.type)}' to `
                 + `'${typeToString(to)}'`, e.pos);
@@ -900,7 +917,7 @@ export function check(program, options = {}){
         const bad = ()=>fail('X3018', `invalid subscript '${name}'`, e.pos);
         if (t.kind === 'struct')
         {
-            const i = t.members.findIndex((/** @type {any} */ m)=>m.name === name);
+            const i = t.members.findLastIndex((/** @type {any} */ m)=>m.name === name);
             if (i < 0)
             {
                 return bad();
@@ -1013,6 +1030,10 @@ export function check(program, options = {}){
 
     /** @param {any} e @returns {any} */
     function call(e){
+        if (e.callee.kind === 'member')
+        {
+            return textureMethod(e);
+        }
         if (e.callee.kind !== 'ident')
         {
             return fail('X3087', 'methods are not supported', e.pos);
@@ -1052,6 +1073,65 @@ export function check(program, options = {}){
             return fail('X3004', `undeclared identifier '${name}'`, e.pos);
         }
         return fail('X3013', `'${name}': no matching ${args.length} parameter function`, e.pos);
+    }
+
+    /**
+     * `tex.Sample(sam, uv)` and its kin, the Direct3D 10 way of reading a texture, which fxc
+     * takes in models 2 and 3 as the tex2D family on a sampler of the pair: Sample as tex2D,
+     * SampleLevel and SampleBias as tex2Dlod and tex2Dbias with the level in w, SampleGrad
+     * as tex2Dgrad.
+     *
+     * @param {any} e @returns {any}
+     */
+    function textureMethod(e){
+        const method = e.callee.name;
+        if (!['Sample', 'SampleLevel', 'SampleBias', 'SampleGrad', 'SampleCmp', 'Load',
+            'Gather', 'GetDimensions', 'SampleCmpLevelZero'].includes(method))
+        {
+            return fail('X3087', 'methods are not supported', e.callee.pos);
+        }
+        const object = expr(e.callee.object);
+        if (object.type.kind !== 'texture')
+        {
+            return fail('X3087', 'methods are not supported', e.pos);
+        }
+        const dim = object.type.dim === 'any' ? '2d' : object.type.dim;
+        const suffix = { '1d': '1D', '2d': '2D', '3d': '3D', cube: 'CUBE' }[
+            /** @type {'1d' | '2d' | '3d' | 'cube'} */ (dim)];
+        const lanes = dim === '1d' ? 1 : dim === '2d' ? 2 : 3;
+        const known = { Sample: 2, SampleLevel: 3, SampleBias: 3, SampleGrad: 4 };
+        const arity = /** @type {Record<string, number>} */ (known)[method];
+        if (arity === undefined)
+        {
+            return fail('X3500', `'${method}' is not available in shader models 2 and 3`,
+                e.pos);
+        }
+        if (e.args.length !== arity)
+        {
+            return fail('X3013', `'${method}': no matching ${e.args.length} parameter intrinsic `
+                + 'function', e.pos);
+        }
+        const sampler = expr(e.args[0]);
+        if (sampler.type.kind !== 'sampler')
+        {
+            return fail('X3017', `cannot convert from '${typeToString(sampler.type)}' to `
+                + `'SamplerState'`, sampler.pos);
+        }
+        const combine = { kind: 'combine', sampler, texture: object, pos: e.pos,
+            type: samplerOf(dim) };
+        const pos = e.pos;
+        const zero = { kind: 'num', value: 0, ntype: 'float', text: '0', pos };
+        /** The coordinate and a level or bias in w, as tex2Dlod and tex2Dbias read them. */
+        const withW = (/** @type {any} */ w)=>({ kind: 'construct', pos, args: [e.args[1],
+            ...Array.from({ length: 3 - lanes }, ()=>zero), w],
+        type: { cls: 'vector', scalar: 'float', rows: 1, cols: 4, pos } });
+        const name = `tex${suffix}${method === 'SampleLevel' ? 'lod' : method === 'SampleBias'
+            ? 'bias' : method === 'SampleGrad' ? 'grad' : ''}`;
+        const rest = method === 'SampleLevel' || method === 'SampleBias' ? [withW(e.args[2])]
+            : e.args.slice(1);
+        const rewritten = { kind: 'call', callee: { kind: 'ident', name, pos }, pos,
+            args: [combine, ...rest.map(expr)] };
+        return intrinsicCall(rewritten, name);
     }
 
     /** @param {any} e @param {FunctionSymbol} fn @returns {any} */
@@ -1484,6 +1564,11 @@ export function check(program, options = {}){
                         fail('X3003', `redefinition of '${d.name}'`, d.pos);
                     }
                     const names = new Set();
+                    // What a structure extends comes first; a member of its own of the same
+                    // name hides the inherited one.
+                    const inherited = d.base === null ? []
+                        : /** @type {any} */ (structs.get(d.base))?.members
+                        ?? fail('X3000', `syntax error: unexpected token '${d.base}'`, d.pos);
                     const members = d.members.map(m=>{
                         if (names.has(m.name))
                         {
@@ -1492,7 +1577,7 @@ export function check(program, options = {}){
                         names.add(m.name);
                         return { name: m.name, type: memberType(m), semantic: m.semantic };
                     });
-                    structs.set(d.name, structOf(d.name, members));
+                    structs.set(d.name, structOf(d.name, [...inherited, ...members]));
                     break;
                 }
                 case 'typedef':

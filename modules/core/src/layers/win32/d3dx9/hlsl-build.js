@@ -141,7 +141,7 @@ export function createBuilder(profile){
             case 'input': return `v${inputs.indexOf(src.input)}:${src.swz}${src.neg ? 'n' : ''
             }${src.abs ? 'a' : ''}`;
             case 'misc': return `m${src.which}:${src.swz}`;
-            case 'sampler': return `s${src.cst.name}`;
+            case 'sampler': return `s${src.cst.name}+${src.offset ?? 0}`;
             default: return '?';
         }
     };
@@ -847,17 +847,24 @@ export function createBuilder(profile){
      * @param {Const} sampler @param {Vec} coord
      * @param {'plain' | 'project' | 'bias' | 'lod' | 'grad'} mode
      * @param {Vec[]} [gradients]
+     * @param {number} [offset]   The element of an array of samplers.
      * @returns {Vec}
      */
-    const sample = (sampler, coord, mode, gradients = [])=>{
+    const sample = (sampler, coord, mode, gradients = [], offset = 0)=>{
         if (profile.legacy)
         {
+            if (offset !== 0)
+            {
+                throw new TargetError('X4532', `an element of an array of samplers is not `
+                    + `available in ${profile.name}`);
+            }
             return legacySample(sampler, coord, mode);
         }
         const op = mode === 'lod' ? 'texldl' : mode === 'grad' ? 'texldd' : 'texld';
         const reg = newReg(4);
         instrs.push({ op, dest: { kind: 'reg', reg, mask: 15 },
-            srcs: [coord.src, { kind: 'sampler', cst: sampler }, ...gradients.map(g=>g.src)],
+            srcs: [coord.src, { kind: 'sampler', cst: sampler, ...(offset ? { offset } : {}) },
+                ...gradients.map(g=>g.src)],
             ...(mode === 'project' || mode === 'bias' ? { texMode: mode } : {}) });
         return vec({ kind: 'reg', reg, swz: [0, 1, 2, 3] });
     };

@@ -136,14 +136,18 @@ test('errors read as fxc prints them, with the position of the offending token',
     }
 });
 
-test('a shader the target cannot hold is refused with the numbers', async()=>{
+test('a shader longer than the target holds compiles, with the numbers as a warning', async()=>{
+    // The model's slots, temporaries and constants are what a Direct3D 9 card held; the
+    // program runs as WGSL, which holds it, so going past them is said and not refused.
     const body = Array.from({ length: 70 }, (_, i)=>`r = r * c + ${i}.5;`).join(' ');
     const source = `float4 main(float4 c : COLOR0, float4 d : TEXCOORD0) : COLOR0
 { float4 r = d; ${body} return r; }`;
     const small = await compile(source, 'ps_2_0');
-    assert.equal(small.ok, false);
-    assert.match(small.messages, /error X5608: Compiled shader code uses too many arithmetic/);
-    assert.equal((await compile(source, 'ps_2_b')).ok, true);
+    assert.equal(small.ok, true, small.messages);
+    assert.match(small.messages, /warning X5608: Compiled shader code uses too many arithmetic/);
+    const roomy = await compile(source, 'ps_2_b');
+    assert.equal(roomy.ok, true);
+    assert.doesNotMatch(roomy.messages ?? '', /X5608/);
 });
 
 test('a loop that cannot be unrolled is reported', async()=>{

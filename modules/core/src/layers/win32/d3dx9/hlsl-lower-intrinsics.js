@@ -30,7 +30,8 @@
  *   | { k: 'mat', rows: number, cols: number, rowV: Vec[] | null, colV: Vec[] | null }
  *   | { k: 'struct', fields: Value[] }
  *   | { k: 'arr', elems: Value[], uniform?: UniformArray }
- *   | { k: 'sampler', cst: Const, dim: string }
+ *   | { k: 'sampler', cst: Const, dim: string, offset?: number }
+ *   | { k: 'texture', name: string, dim: string, offset: number, count: number, order: number }
  *   | { k: 'void' }} Value
  */
 
@@ -186,8 +187,7 @@ export function lowerIntrinsic(L, name, args, result, e, st){
         const sampler = /** @type {Extract<Value, {k: 'sampler'}>} */ (a[0]);
         if (sampler?.k !== 'sampler')
         {
-            L.fail('X3500', `'${name}': an element of an array of samplers is not supported`,
-                e.pos);
+            L.fail('X3500', `'${name}': the sampler is not one this compiler knows`, e.pos);
         }
         if (sampler.cst.dim === 0 || sampler.cst.dim === undefined)
         {
@@ -217,7 +217,7 @@ export function lowerIntrinsic(L, name, args, result, e, st){
             coordinate = b.swizzle(coordinate, Array.from({ length: lanes }, (_, i)=>i));
         }
         const gradients = mode === 'grad' ? [v(2), v(3)] : [];
-        return vec(b.sample(sampler.cst, coordinate, mode, gradients));
+        return vec(b.sample(sampler.cst, coordinate, mode, gradients, sampler.offset ?? 0));
     };
 
     switch (name)

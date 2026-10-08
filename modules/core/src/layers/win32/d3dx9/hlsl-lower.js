@@ -25,7 +25,7 @@
 
 import { createBuilder } from './hlsl-build.js';
 import { PC, PT, USAGE, registersOf } from './hlsl-ir.js';
-import { baseOf, isNumeric, sameType, scalarCount, typeToString } from './hlsl-types.js';
+import { baseOf, flatBases, isNumeric, sameType, scalarCount, typeToString } from './hlsl-types.js';
 import { lowerIntrinsic } from './hlsl-lower-intrinsics.js';
 
 /** @typedef {import('./hlsl-build.js').Vec} Vec */
@@ -328,6 +328,15 @@ export function lower(module, entry, profile){
             return build(to, filler.length === 1 ? new Array(scalarCount(to)).fill(filler[0])
                 : filler);
         }
+        if (!sameType(from, to) && (!isNumeric(from) || !isNumeric(to))
+            && (from.kind === 'struct' || from.kind === 'array'))
+        {
+            // Between aggregates, component by component, each number to its slot's type.
+            const fromBases = flatBases(from);
+            const toBases = flatBases(to);
+            return build(to, flatten(value, from).slice(0, toBases.length).map((l, i)=>
+                convertBase(l, fromBases[i], toBases[i])));
+        }
         if (sameType(from, to) || !isNumeric(from) || !isNumeric(to))
         {
             return value;
@@ -417,6 +426,11 @@ export function lower(module, entry, profile){
 
     /** @type {Map<Symbol, Value>} */
     const uniforms = new Map();
+    /** The samplers of the pairs a texture is read through. @type {Map<string, Const>} */
+    const pairs = new Map();
+    /** D3DSAMPLER_TEXTURE_TYPE of a dimension. @param {string} dim */
+    const samplerDim = dim=>(dim === '1d' || dim === '2d' ? 2 : dim === '3d' ? 4
+        : dim === 'cube' ? 3 : 0);
     /** @type {Map<Const, number>} */
     const order = new Map();
 
@@ -567,17 +581,45 @@ export function lower(module, entry, profile){
             || (module.rowMajor && !sym.mods.includes('column_major'));
         /** @type {Value} */
         let value;
-        if (sym.type.kind === 'sampler')
+        // An array of samplers or of textures is its elements, each the one at its place.
+        let inner = sym.type;
+        /** @type {number[]} */
+        const lengths = [];
+        while (inner.kind === 'array')
         {
-            const dim = sym.type.dim === '1d' ? 2 : sym.type.dim === '2d' ? 2
-                : sym.type.dim === '3d' ? 4 : sym.type.dim === 'cube' ? 3 : 0;
+            lengths.push(inner.length);
+            inner = inner.elem;
+        }
+        const total = lengths.reduce((n, l)=>n * l, 1);
+        /** @param {number[]} rest @param {(i: number) => Value} make @returns {Value} */
+        const nest = (rest, make)=>{
+            if (rest.length === 0)
+            {
+                return make(0);
+            }
+            const each = rest.slice(1).reduce((n, l)=>n * l, 1);
+            return { k: 'arr', elems: Array.from({ length: rest[0] }, (_, i)=>
+                nest(rest.slice(1), j=>make(i * each + j))) };
+        };
+        if (inner.kind === 'sampler')
+        {
+            const dim = samplerDim(inner.dim);
             /** @type {Const} */
             const cst = { name: sym.name, set: 's', type: ctabType(sym.type, false), dim,
                 ...(sym.register && /^s\d+$/.test(sym.register.name)
                     ? { explicit: Number(sym.register.name.slice(1)) } : {}) };
             b.constants.push(cst);
             order.set(cst, sym.order);
-            value = { k: 'sampler', cst, dim: sym.type.dim };
+            const samplerDimension = inner.dim;
+            value = nest(lengths, i=>({ k: 'sampler', cst, dim: samplerDimension,
+                ...(i ? { offset: i } : {}) }));
+        }
+        else if (inner.kind === 'texture')
+        {
+            // A texture takes no register: a sampler read through it is the pair's (`sam+tex`).
+            const textureDimension = inner.dim;
+            value = nest(lengths, i=>({ k: 'texture', name: sym.name, dim: textureDimension,
+                offset: i, count: total, order: sym.order }));
         }
         else
         {
@@ -741,9 +783,38 @@ export function lower(module, entry, profile){
             case 'ident':
                 st.env.set(target.sym, value);
                 return;
-            case 'cast':
-                store(target.operand, value, st);
+            case 'cast': {
+                // What the cast shows of the variable is written, each number converted back:
+                // the corner a matrix cast keeps, else the components in order.
+                const to = target.operand.type;
+                const from = target.type;
+                const old = ev(target.operand, st);
+                const oldScalars = flatten(old, to);
+                const newScalars = flatten(value, from);
+                const fromBases = flatBases(from);
+                const toBases = flatBases(to);
+                const scalars = oldScalars.slice();
+                if (from.kind === 'matrix' && to.kind === 'matrix')
+                {
+                    for (let r = 0; r < from.rows; r++)
+                    {
+                        for (let c = 0; c < from.cols; c++)
+                        {
+                            const at = r * to.cols + c;
+                            scalars[at] = convertBase(newScalars[r * from.cols + c],
+                                fromBases[0] ?? 'float', toBases[0] ?? 'float');
+                        }
+                    }
+                }
+                else
+                {
+                    newScalars.slice(0, scalars.length).forEach((l, i)=>{
+                        scalars[i] = convertBase(l, fromBases[i] ?? 'float', toBases[i] ?? 'float');
+                    });
+                }
+                store(target.operand, build(to, scalars), st);
                 return;
+            }
             case 'member': {
                 const object = ev(target.object, st);
                 if (target.swizzle)
@@ -947,6 +1018,31 @@ export function lower(module, entry, profile){
                 return last;
             }
             case 'call': return call(e, st);
+            case 'combine': {
+                // fxc's sampler for a texture read through a sampler state: one for the pair,
+                // named `sampler+texture`, an element for each element of an array of textures.
+                const sampler = ev(e.sampler, st);
+                const texture = ev(e.texture, st);
+                if (sampler.k !== 'sampler' || texture.k !== 'texture')
+                {
+                    return fail('X3500', 'this sampler and texture cannot be read together',
+                        e.pos);
+                }
+                const name = `${sampler.cst.name}+${texture.name}`;
+                let cst = pairs.get(name);
+                if (!cst)
+                {
+                    /** @type {any} */
+                    const pairType = { kind: 'sampler', dim: texture.dim };
+                    cst = { name, set: 's', dim: samplerDim(texture.dim),
+                        type: { ...ctabType(pairType, false), elements: texture.count } };
+                    b.constants.push(cst);
+                    order.set(cst, texture.order);
+                    pairs.set(name, cst);
+                }
+                return { k: 'sampler', cst, dim: /** @type {any} */ (texture.dim),
+                    ...(texture.offset ? { offset: texture.offset } : {}) };
+            }
             case 'index': {
                 // The subscript first: what it assigns is what the element is taken from.
                 const index = vecOf(ev(e.index, st));
@@ -992,11 +1088,10 @@ export function lower(module, entry, profile){
         for (const arg of e.args)
         {
             const value = ev(arg, st);
-            const from = baseOf(arg.type);
-            for (const l of flatten(value, arg.type))
-            {
-                scalars.push(convertBase(l, from ?? 'float', toBase ?? 'float'));
-            }
+            const bases = flatBases(arg.type);
+            flatten(value, arg.type).forEach((l, i)=>{
+                scalars.push(convertBase(l, bases[i] ?? 'float', toBase ?? 'float'));
+            });
         }
         if (scalars.length === 1 && scalarCount(type) > 1)
         {

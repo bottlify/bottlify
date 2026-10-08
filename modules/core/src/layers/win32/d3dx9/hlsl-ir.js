@@ -142,7 +142,8 @@ export function registersOf(type){
  *     mod?: string }} SrcInput
  * A shader input, read through a swizzle (components of the input's own register).
  *
- * @typedef {{ kind: 'sampler', cst: Const }} SrcSampler
+ * @typedef {{ kind: 'sampler', cst: Const, offset?: number }} SrcSampler
+ * Register `offset` of a sampler constant: an element of an array of samplers.
  * @typedef {{ kind: 'misc', which: 'vpos' | 'vface', swz: number[], mod?: string }} SrcMisc
  * @typedef {{ kind: 'creg', file: 'f' | 'i' | 'b', index: number, swz: number[],
  *     neg?: boolean, abs?: boolean, relative?: boolean, mod?: string }} SrcCreg

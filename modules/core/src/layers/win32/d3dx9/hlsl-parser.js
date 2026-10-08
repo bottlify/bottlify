@@ -94,6 +94,8 @@ import { HlslError, tokenize } from './hlsl-lexer.js';
  * @typedef {Object} StructDecl
  * @property {'struct'} kind
  * @property {string} name
+ * @property {string | null} base   The structure it extends (`struct B : A`), whose members
+ *     come first.
  * @property {Variable[]} members
  * @property {Position} pos
  */
@@ -174,7 +176,7 @@ import { HlslError, tokenize } from './hlsl-lexer.js';
  *   | { kind: 'comma', exprs: Expr[], pos: Position }
  *   | { kind: 'call', callee: Expr, args: Expr[], pos: Position }
  *   | { kind: 'construct', type: TypeRef, args: Expr[], pos: Position }
- *   | { kind: 'cast', type: TypeRef, operand: Expr, pos: Position }
+ *   | { kind: 'cast', type: TypeRef, dims?: Expr[], operand: Expr, pos: Position }
  *   | { kind: 'index', object: Expr, index: Expr, pos: Position }
  *   | { kind: 'member', object: Expr, name: string, pos: Position }
  *   | { kind: 'initlist', items: Expr[], pos: Position }
@@ -225,6 +227,10 @@ const OBJECT_TYPES = new Map(/** @type {[string, [TypeRef['cls'], TypeRef['dim']
     ['string', ['string', undefined]], ['void', ['void', undefined]],
     ['vertexshader', ['shader', undefined]], ['pixelshader', ['shader', undefined]],
     ['VertexShader', ['shader', undefined]], ['PixelShader', ['shader', undefined]],
+    // Direct3D 10's, which fxc takes in models 2 and 3: a texture read through a sampler state.
+    ['Texture1D', ['texture', '1d']], ['Texture2D', ['texture', '2d']],
+    ['Texture3D', ['texture', '3d']], ['TextureCube', ['texture', 'cube']],
+    ['SamplerState', ['sampler', 'any']], ['SamplerComparisonState', ['sampler', 'any']],
 ]));
 
 /** Modifiers that stand before a type and are always modifiers. */
@@ -294,6 +300,15 @@ export function parse(source, file = 'memory'){
     let at = 0;
     /** The names `struct` and `typedef` have introduced. @type {Set<string>} */
     const typeNames = new Set();
+    /**
+     * Structures defined where a type is written -- `static const struct { ... } a`, or in a
+     * function -- declared at the top, before the declaration that defines them: a
+     * structure is a type of the whole program here. One with no name gets one.
+     *
+     * @type {StructDecl[]}
+     */
+    const hoisted = [];
+    let anonymous = 0;
 
     const peek = (/** @type {number} */ ahead = 0)=>tokens[Math.min(at + ahead, tokens.length - 1)];
     const next = ()=>tokens[Math.min(at++, tokens.length - 1)];
@@ -346,6 +361,13 @@ export function parse(source, file = 'memory'){
         const token = expectIdent();
         if (token.text === 'struct')
         {
+            if (isPunct('{') || (peek().type === 'ident' && (isPunct('{', 1) || isPunct(':', 1))))
+            {
+                at--;
+                const struct = parseStruct();
+                hoisted.push(struct);
+                return { cls: 'named', name: struct.name, pos: token.pos };
+            }
             const name = expectIdent();
             return { cls: 'named', name: name.text, pos: token.pos };
         }
@@ -388,6 +410,13 @@ export function parse(source, file = 'memory'){
         if (built)
         {
             built.pos = token.pos;
+            // `Texture2D<float4>`: what a texel holds, which a model 2 or 3 read ignores.
+            if (built.cls === 'texture' && /^Texture/.test(token.text) && isPunct('<'))
+            {
+                next();
+                parseType();
+                expectPunct('>');
+            }
             return built;
         }
         if (typeNames.has(token.text))
@@ -633,11 +662,12 @@ export function parse(source, file = 'memory'){
     /** @returns {StructDecl} */
     const parseStruct = ()=>{
         const keyword = next();
-        const name = expectIdent();
-        // An interface list, `struct A : B`, is a Shader Model 5 construct.
-        if (isPunct(':'))
+        const name = isPunct('{') ? { text: `<anonymous ${++anonymous}>` } : expectIdent();
+        /** @type {string | null} */
+        let base = null;
+        if (acceptPunct(':'))
         {
-            throw unexpected(peek());
+            base = expectIdent().text;
         }
         typeNames.add(name.text);
         expectPunct('{');
@@ -653,7 +683,7 @@ export function parse(source, file = 'memory'){
             expectPunct(';');
         }
         expectPunct('}');
-        return { kind: 'struct', name: name.text, members, pos: keyword.pos };
+        return { kind: 'struct', name: name.text, base, members, pos: keyword.pos };
     };
 
     /** @returns {Variable[]} */
@@ -802,17 +832,22 @@ export function parse(source, file = 'memory'){
                 return { kind: 'incdec', op: token.text, prefix: true, operand: unary(),
                     pos: token.pos };
             }
-            if (token.text === '(' && isTypeToken(peek(1)))
+            if (token.text === '(' && (isTypeToken(peek(1))
+                || (MODIFIERS.has(peek(1).text) && isTypeToken(peek(2)))))
             {
                 // A cast, if what is in the parentheses is exactly a type.
                 const saved = at;
                 next();
                 try
                 {
+                    parseModifiers();
                     const type = parseType();
+                    // `(float[2]) p`: a cast to an array type.
+                    const dims = parseDims();
                     if (acceptPunct(')'))
                     {
-                        return { kind: 'cast', type, operand: unary(), pos: token.pos };
+                        return { kind: 'cast', type, ...(dims.length ? { dims } : {}),
+                            operand: unary(), pos: token.pos };
                     }
                 }
                 catch (e){
@@ -977,6 +1012,11 @@ export function parse(source, file = 'memory'){
         const pos = peek().pos;
         const mods = parseModifiers();
         const type = parseType();
+        // A structure defined in a function with nothing declared of it.
+        if (acceptPunct(';'))
+        {
+            return { kind: 'empty', pos };
+        }
         return { kind: 'decl', vars: parseDeclarators(type, mods), pos };
     }
 
@@ -1189,7 +1229,7 @@ export function parse(source, file = 'memory'){
             next();
             return;
         }
-        if (token.type !== 'ident')
+        if (token.type !== 'ident' && !(token.type === 'punct' && token.text === '['))
         {
             throw unexpected(token);
         }
@@ -1279,7 +1319,9 @@ export function parse(source, file = 'memory'){
     const decls = [];
     while (peek().type !== 'eof')
     {
+        const before = decls.length;
         declaration(decls);
+        decls.splice(before, 0, ...hoisted.splice(0));
     }
     return { decls, pragmas };
 }

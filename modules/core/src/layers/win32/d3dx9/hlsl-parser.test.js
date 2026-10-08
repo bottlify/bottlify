@@ -408,9 +408,20 @@ test('syntax errors name the token and where it is', ()=>{
     assert.match(failure('float4 f(){ if x }').message, /unexpected token 'x'/);
     assert.match(failure('float f(').message, /unexpected end of file/);
     assert.match(failure('float4 f(){ return 1;').message, /unexpected end of file/);
-    assert.match(failure('struct A : B { };').message, /unexpected token ':'/);
+    assert.match(failure('struct A { float a } ;').message, /unexpected token '}'/);
     assert.match(failure('float x = 1 +;').message, /unexpected token ';'/);
     assert.match(failure('}').message, /unexpected token '}'/);
     const second = failure('float x;\nfloat y\nfloat z;');
     assert.deepEqual([second.pos.line, second.pos.col], [3, 1]);
+});
+
+test('a structure where a type is written, one extending another, a function attribute', ()=>{
+    // fxc reads all three in models 2 and 3: the structure is a type of the whole program.
+    const program = parse('struct A { float a; };\nstruct B : A { float b; };\n'
+        + 'static const struct { float f; } k = { 1 };\n[numthreads(1, 1, 1)]\n'
+        + 'float4 main() : COLOR { struct L { float l; } x; x.l = 2; return k.f + x.l; }');
+    const structs = program.decls.filter(d=>d.kind === 'struct');
+    assert.deepEqual(structs.map(d=>/** @type {any} */ (d).name),
+        ['A', 'B', '<anonymous 1>', 'L']);
+    assert.equal(/** @type {any} */ (structs[1]).base, 'A');
 });

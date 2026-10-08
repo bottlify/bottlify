@@ -345,7 +345,7 @@ export function numberValues(instrs, profile){
             case 'creg': base = `k${src.file}${src.index}.${comp}${at}`; break;
             case 'input': base = `i${objectId(src.input)}.${comp}`; break;
             case 'misc': base = `m${src.which}.${comp}`; break;
-            case 'sampler': base = `s${objectId(src.cst)}`; break;
+            case 'sampler': base = `s${objectId(src.cst)}+${src.offset ?? 0}`; break;
             default: base = `?${fresh++}`;
         }
         const one = /** @type {{ neg?: boolean, abs?: boolean, mod?: string }} */ (src);
@@ -672,7 +672,7 @@ export function assignConstants(constants, diagnostics){
     /** @type {Record<string, Set<number>>} */
     const taken = { f: new Set(), i: new Set(), b: new Set(), s: new Set() };
     /** @param {Const} c */
-    const size = c=>(c.set === 's' ? 1 : registersOf(c.type));
+    const size = c=>(c.set === 's' ? Math.max(1, c.type.elements) : registersOf(c.type));
     for (const c of constants)
     {
         if (c.explicit === undefined)
@@ -1139,6 +1139,10 @@ export function assemble(ir, options = {}){
         }
     }
     ir.inputs = ir.inputs.filter(input=>read.has(input));
+    // A sampler nothing reads takes no register: one read only through a texture of the
+    // pair (`sam+tex`) is that pair's.
+    ir.constants = ir.constants.filter(c=>c.set !== 's'
+        || instrs.some(i=>i.srcs.some(s=>s.kind === 'sampler' && s.cst === c)));
     const reserved = assignConstants(ir.constants, diagnostics);
     const defs = packLiterals(instrs, reserved);
     instrs = legalize(instrs, profile, newReg);
@@ -1226,7 +1230,7 @@ export function assemble(ir, options = {}){
                 operand = { type: REG.MISC, index: src.which === 'vpos' ? 0 : 1 };
                 break;
             case 'sampler':
-                operand = { type: REG.SAMPLER, index: src.cst.index ?? 0 };
+                operand = { type: REG.SAMPLER, index: (src.cst.index ?? 0) + (src.offset ?? 0) };
                 break;
             default:
                 throw new Error(`internal: unresolved ${src.kind} operand`);
@@ -1418,12 +1422,30 @@ export function assemble(ir, options = {}){
             }
         });
     }
+    // A sampler is declared at each register read: an array of them, only the elements read.
+    /** @type {Map<Const, Set<number>>} */
+    const samplersRead = new Map();
+    for (const instr of instrs)
+    {
+        for (const src of instr.srcs)
+        {
+            if (src.kind === 'sampler')
+            {
+                const offsets = samplersRead.get(src.cst) ?? new Set();
+                offsets.add(src.offset ?? 0);
+                samplersRead.set(src.cst, offsets);
+            }
+        }
+    }
     for (const cst of ir.constants)
     {
         if (cst.set === 's')
         {
-            decls.push({ samplerType: (cst.dim ?? 2) << 27,
-                dest: { type: REG.SAMPLER, index: cst.index ?? 0, mask: 0xf } });
+            for (const offset of [...(samplersRead.get(cst) ?? [0])].sort((x, y)=>x - y))
+            {
+                decls.push({ samplerType: (cst.dim ?? 2) << 27,
+                    dest: { type: REG.SAMPLER, index: (cst.index ?? 0) + offset, mask: 0xf } });
+            }
         }
     }
 
@@ -1448,44 +1470,48 @@ export function assemble(ir, options = {}){
     {
         if (stats.slots > profile.maxArith)
         {
-            diagnostics.push({ code: 'X5608', message: 'Compiled shader code uses too many '
+            diagnostics.push({ code: 'X5608', severity: 'warning',
+                message: 'Compiled shader code uses too many '
                 + `arithmetic instruction slots (${stats.slots}). Max. allowed by the target `
                 + `(${profile.name}) is ${profile.maxArith}.` });
         }
         if (stats.texture > profile.maxTex)
         {
-            diagnostics.push({ code: 'X5609', message: 'Compiled shader code uses too many '
+            diagnostics.push({ code: 'X5609', severity: 'warning',
+                message: 'Compiled shader code uses too many '
                 + `texture instruction slots (${stats.texture}). Max. allowed by the target `
                 + `(${profile.name}) is ${profile.maxTex}.` });
         }
     }
     else if (total > profile.maxArith)
     {
-        diagnostics.push({ code: 'X5608', message: 'Compiled shader code uses too many '
+        diagnostics.push({ code: 'X5608', severity: 'warning',
+            message: 'Compiled shader code uses too many '
             + `instruction slots (${total}). Max. allowed by the target (${profile.name}) is `
             + `${profile.maxArith}.` });
     }
     if (temps > profile.maxTemps)
     {
-        diagnostics.push({ code: 'X4505',
+        diagnostics.push({ code: 'X4505', severity: 'warning',
             message: `Temporary register limit of ${profile.maxTemps} exceeded; `
             + `${temps} registers needed to compile program` });
     }
-    const samplerCount = ir.constants.filter(c=>c.set === 's').length;
+    const samplerCount = ir.constants.filter(c=>c.set === 's')
+        .reduce((n, c)=>n + Math.max(1, c.type.elements), 0);
     if (profile.maxSamplers > 0 && samplerCount > profile.maxSamplers)
     {
-        diagnostics.push({ code: 'X4510',
+        diagnostics.push({ code: 'X4510', severity: 'warning',
             message: `Sampler register limit of ${profile.maxSamplers} exceeded; `
             + `${samplerCount} registers needed to compile program` });
     }
     const constantRegisters = reserved.size > 0 ? Math.max(...reserved) + 1 : 0;
     if (constantRegisters > profile.maxConsts)
     {
-        diagnostics.push({ code: 'X4507',
+        diagnostics.push({ code: 'X4507', severity: 'warning',
             message: `Constant register limit of ${profile.maxConsts} exceeded; `
             + `${constantRegisters} registers needed to compile program` });
     }
-    if (diagnostics.length > 0)
+    if (diagnostics.some(d=>d.severity !== 'warning'))
     {
         return { tokens: null, diagnostics, stats };
     }

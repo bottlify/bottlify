@@ -149,7 +149,8 @@ export function buildConstantTable(options){
         view.setUint32(at, record.name, true);
         view.setUint16(at + 4, SET[constant.set], true);
         view.setUint16(at + 6, constant.index ?? 0, true);
-        view.setUint16(at + 8, constant.set === 's' ? 1 : registersOf(constant.type), true);
+        view.setUint16(at + 8, constant.set === 's' ? Math.max(1, constant.type.elements)
+            : registersOf(constant.type), true);
         view.setUint16(at + 10, 0, true);
         view.setUint32(at + 12, record.type, true);
         view.setUint32(at + 16, record.defaults, true);

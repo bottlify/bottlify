@@ -175,7 +175,7 @@ test('temporaries share a register by component and by lifetime', ()=>{
     assert.equal(result.stats.temps, 1);
 });
 
-test('a limit the target has is reported with the numbers', ()=>{
+test('a limit the target has is reported with the numbers, as a warning', ()=>{
     const ir = program('ps_2_0');
     const out = { usage: USAGE.COLOR, index: 0, width: 4 };
     ir.outputs.push(out);
@@ -194,8 +194,10 @@ test('a limit the target has is reported with the numbers', ()=>{
     }
     ir.instrs.push({ op: 'mov', dest: { kind: 'out', out, mask: 15 },
         srcs: [{ kind: 'reg', reg: last, swz: [0, 1, 2, 3] }] });
+    // A warning: the program is still given, since it runs as WGSL, which holds it.
     const result = assemble(ir);
-    assert.equal(result.tokens, null);
+    assert.ok(result.tokens);
+    assert.equal(result.diagnostics[0].severity, 'warning');
     assert.match(result.diagnostics[0].message,
         /too many arithmetic instruction slots \(71\)\. Max\. allowed by the target \(ps_2_0\) is 64/);
     assert.equal(result.diagnostics[0].code, 'X5608');

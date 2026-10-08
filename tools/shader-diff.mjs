@@ -258,9 +258,10 @@ for (const file of files)
     let fault = null;
     try
     {
-        const ourProgram = decode(ours.tokens);
+        // Held to what the device runs, not to a card's limits: a compiler may go past those.
+        const ourProgram = decode(ours.tokens, { wide: true });
         const refProgram = decode(new Uint32Array(refBytes.buffer, refBytes.byteOffset,
-            refBytes.byteLength / 4));
+            refBytes.byteLength / 4), { wide: true });
         const pixel = ourProgram.kind === 'pixel';
         for (let trial = 0; trial < trials; trial++)
         {

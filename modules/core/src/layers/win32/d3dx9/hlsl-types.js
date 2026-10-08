@@ -353,6 +353,16 @@ export function conversionRank(from, to){
     {
         return RANK.EXACT;
     }
+    const aggregate = (/** @type {Type} */ t)=>t.kind === 'struct' || t.kind === 'array';
+    if (aggregate(from) && aggregate(to))
+    {
+        // Aggregates of the same components in the same order, objects among them, stand for
+        // each other (fxc's componentwise-equal structures and arrays).
+        const a = componentsOf(from);
+        const b = componentsOf(to);
+        return a.length === b.length && a.every((c, i)=>c === b[i]) ? RANK.CONVERSION
+            : RANK.IMPOSSIBLE;
+    }
     if (!isNumeric(from) || !isNumeric(to))
     {
         return RANK.IMPOSSIBLE;
@@ -468,6 +478,26 @@ export function flatBases(type){
         }
         case 'struct': return type.members.flatMap(m=>flatBases(m.type));
         default: return [];
+    }
+}
+
+/**
+ * The components of a type in order, as a cast between aggregates matches them: a number by
+ * its element type, an object by its kind.
+ *
+ * @param {Type} type
+ * @returns {string[]}
+ */
+export function componentsOf(type){
+    switch (type.kind)
+    {
+        case 'scalar':
+        case 'vector':
+        case 'matrix': return new Array(scalarCount(type)).fill(`n:${type.base}`);
+        case 'array':
+            return Array.from({ length: type.length }, ()=>componentsOf(type.elem)).flat();
+        case 'struct': return type.members.flatMap(m=>componentsOf(m.type));
+        default: return [type.kind];
     }
 }
 

@@ -218,14 +218,21 @@ function component(src, lane, homes){
 export function assembleLegacy(ir, options = {}){
     // Computing a value once keeps it alive until its last reader, and two temporaries
     // may not hold it: what does not fit is built again computing it where it is read.
+    // Past the model's limits is a warning -- the program runs in WGSL, which has none --
+    // so the build that fits is preferred, and one that does not is still given.
+    /** @param {AssembleResult} r */
+    const fits = r=>Boolean(r.tokens) && !r.diagnostics.some(d=>LIMITS.has(d.code));
     const numbered = assembleWith(ir, options, true);
-    if (numbered.tokens)
+    if (fits(numbered))
     {
         return numbered;
     }
     const plain = assembleWith(ir, options, false);
-    return plain.tokens ? plain : numbered;
+    return fits(plain) || !numbered.tokens ? plain : numbered;
 }
+
+/** The diagnostics of a program longer or wider than the model holds. */
+const LIMITS = new Set(['X5608', 'X5609', 'X4505', 'X4507', 'X4510']);
 
 /**
  * @param {IrProgram} ir @param {{ creator?: string, flags?: number }} options
@@ -747,7 +754,7 @@ function build(ir, options, diagnostics, stats, rewrites){
     const constantRegisters = reserved.size > 0 ? Math.max(...reserved) + 1 : 0;
     if (constantRegisters > profile.maxConsts)
     {
-        diagnostics.push({ code: 'X4507',
+        diagnostics.push({ code: 'X4507', severity: 'warning',
             message: `Constant register limit of ${profile.maxConsts} `
             + `exceeded; ${constantRegisters} registers needed to compile program` });
     }
@@ -861,7 +868,7 @@ function build(ir, options, diagnostics, stats, rewrites){
     stats.temps = temps;
     if (temps > profile.maxTemps)
     {
-        diagnostics.push({ code: 'X4505',
+        diagnostics.push({ code: 'X4505', severity: 'warning',
             message: `Temporary register limit of ${profile.maxTemps} `
             + `exceeded; ${temps} registers needed to compile program` });
     }
@@ -1104,13 +1111,15 @@ function build(ir, options, diagnostics, stats, rewrites){
     {
         if (counts.arith > profile.maxArith)
         {
-            diagnostics.push({ code: 'X5608', message: 'Compiled shader code uses too many '
+            diagnostics.push({ code: 'X5608', severity: 'warning',
+                message: 'Compiled shader code uses too many '
                 + `arithmetic instruction slots (${counts.arith}). Max. allowed by the target `
                 + `(${profile.name}) is ${profile.maxArith}.` });
         }
         if (counts.tex > profile.maxTex)
         {
-            diagnostics.push({ code: 'X5609', message: 'Compiled shader code uses too many '
+            diagnostics.push({ code: 'X5609', severity: 'warning',
+                message: 'Compiled shader code uses too many '
                 + `texture instruction slots (${counts.tex}). Max. allowed by the target `
                 + `(${profile.name}) is ${profile.maxTex}.` });
         }

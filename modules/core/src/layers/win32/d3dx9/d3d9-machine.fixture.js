@@ -395,6 +395,7 @@ const SCALAR_SOURCE_OPS = new Set(['rcp', 'rsq', 'exp', 'expp', 'log', 'logp']);
  *   the vs and the ps_1_x models, which test `ps1` first.
  * @property {string} name      "vs_2_0", "ps_2_x" ...
  * @property {Limits} limits
+ * @property {boolean} wide   Held to the device's register files, not a card's (decode's `wide`).
  */
 
 /**
@@ -421,7 +422,8 @@ function parseVersion(token){
     }
     return {
         kind: vs ? 'vertex' : 'pixel', vs, ps1: !vs && major === 1, major, minor,
-        num: major * 10 + minor, name, limits,
+        num: major * 10 + minor, name, limits: /** @type {Limits} */ (limits),
+        wide: false,
     };
 }
 
@@ -1341,7 +1343,8 @@ function checkPs1(v, ins, state){
     }
 
     // Order and size.
-    const limits = PS1_SLOT_LIMITS[/** @type {keyof typeof PS1_SLOT_LIMITS} */ (v.name)];
+    const limits = v.wide ? { texture: Infinity, arithmetic: Infinity }
+        : PS1_SLOT_LIMITS[/** @type {keyof typeof PS1_SLOT_LIMITS} */ (v.name)];
     if (spec.kind === 'tex')
     {
         if (state.sawArith)
@@ -1469,10 +1472,16 @@ function decodeDeclaration(v, usageToken, d, at){
  * Reads a shader's tokens into a Program, rejecting anything the version does
  * not allow.
  *
+ * `wide` holds a program to what Bottlify's device runs rather than to what a
+ * Direct3D 9 card of the version held: the register files of model 3, and no
+ * count of model 1's instruction slots -- the program runs as WGSL, which has
+ * neither limit, and a compiler may go past them with a warning.
+ *
  * @param {ArrayLike<number>} tokens
+ * @param {{ wide?: boolean }} [options]
  * @returns {Program}
  */
-export function decode(tokens){
+export function decode(tokens, options = {}){
     const t = tokens;
     const n = t.length;
     if (n < 2)
@@ -1480,6 +1489,13 @@ export function decode(tokens){
         throw new Error('decode: shader too short; it needs a version token and an END token');
     }
     const v = parseVersion(t[0] >>> 0);
+    if (options.wide)
+    {
+        const room = v.vs ? VERSION_LIMITS.vs_3_0 : VERSION_LIMITS.ps_3_0;
+        v.limits = { ...v.limits, temps: Math.max(v.limits.temps, room.temps),
+            floatConsts: Math.max(v.limits.floatConsts, room.floatConsts) };
+        v.wide = true;
+    }
     /** @type {Program} */
     const program = {
         kind: v.kind, major: v.major, minor: v.minor, version: v.name, info: v,
