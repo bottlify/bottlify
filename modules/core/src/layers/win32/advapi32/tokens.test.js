@@ -249,6 +249,29 @@ test('a privilege is looked up by its fixed number and granted on the process to
     assert.equal(fns.LookupPrivilegeValueA.argBytes, 12);
 });
 
+test('PrivilegeCheck finds every privilege held on the token it grants everything on', ()=>{
+    // A module that checks a privilege before it reads another process's
+    // memory goes on reading through whatever the check left behind when the
+    // name does not resolve.
+    const { bytes, errors, fns, dword } = setup();
+    const TOKEN_OUT = 0x300;
+    const SET = 0x400;
+    const RESULT = 0x500;
+    assert.equal(fns.OpenProcessToken.handler([0xffffffff, 0x8, TOKEN_OUT]), 1);
+    const token = dword(TOKEN_OUT);
+    // Two privileges, PRIVILEGE_SET_ALL_NECESSARY: SeDebugPrivilege (20), SeShutdownPrivilege (19).
+    bytes.set([2, 0, 0, 0, 1, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        19, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], SET);
+
+    assert.equal(fns.PrivilegeCheck.handler([token, SET, RESULT]), 1);
+    assert.equal(dword(RESULT), 1);
+    assert.equal(dword(SET + 16), 0x80000000, 'SE_PRIVILEGE_USED_FOR_ACCESS');
+    assert.equal(dword(SET + 28), 0x80000000);
+    assert.equal(fns.PrivilegeCheck.handler([0x7777, SET, RESULT]), 0);
+    assert.equal(errors.at(-1), 6, 'ERROR_INVALID_HANDLE');
+    assert.equal(fns.PrivilegeCheck.argBytes, 12);
+});
+
 test('a SID is laid out as Windows lays it out, and compared by its own length', ()=>{
     const { bytes, fns } = setup();
     assert.deepEqual([...ADMINISTRATORS_SID],

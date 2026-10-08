@@ -10,9 +10,10 @@
  * fix what stops it in the generic layer that is wrong.
  *
  * Sessions run on the Claude Agent SDK and bill the API key in
- * ANTHROPIC_API_KEY, or in tools/night-run/.api-key (not in git) -- a file, so
- * the key is not in the environment of every Claude Code session on the
- * machine, which would then bill it too. Never a subscription. They run one at a time because the
+ * ANTHROPIC_API_KEY, or in .api_key.txt beside the repository (outside it, so
+ * no commit can take it in) -- a file, so the key is not in the environment of
+ * every Claude Code session on the machine, which would then bill it too.
+ * Never a subscription. They run one at a time because the
  * harness drives one browser and the tree has one checkout; each starts with a
  * fresh context, so one title's hunt does not crowd out the next.
  *
@@ -135,10 +136,10 @@ whether the route is saved, the commits made (hashes), and what stops the title 
 
 async function main(){
     const key = process.env.ANTHROPIC_API_KEY
-        ?? (await readFile(new URL('./.api-key', import.meta.url), 'utf8').catch(()=>'')).trim();
+        ?? (await readFile(join(ROOT, '..', '.api_key.txt'), 'utf8').catch(()=>'')).trim();
     if (!key)
     {
-        throw new Error('no API key (ANTHROPIC_API_KEY or tools/night-run/.api-key): '
+        throw new Error('no API key (ANTHROPIC_API_KEY or ../.api_key.txt): '
             + 'the night run bills an API key, never a subscription');
     }
     await mkdir(OUT, { recursive: true });

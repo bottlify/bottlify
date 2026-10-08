@@ -59,6 +59,8 @@ const ERROR_ALLOTTED_SPACE_EXCEEDED = 1344;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 const ERROR_NONE_MAPPED = 1332;
 const ERROR_BAD_TOKEN_TYPE = 1349;
+const ERROR_NOACCESS = 998;
+const SE_PRIVILEGE_USED_FOR_ACCESS = 0x80000000;
 /** A machine named other than this one: there is no network to reach it over. */
 const RPC_S_SERVER_UNAVAILABLE = 1722;
 
@@ -1955,6 +1957,42 @@ export function createTokenFunctions(host){
                 {
                     return fail(code);
                 }
+                host.setLastError(ERROR_SUCCESS);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL PrivilegeCheck(HANDLE ClientToken, PPRIVILEGE_SET RequiredPrivileges,
+         *   LPBOOL pfResult)
+         *
+         * Held, every one: the same administrator's token AdjustTokenPrivileges
+         * grants everything on. Each privilege in the set (12 bytes past the
+         * count and the control word: its LUID and its attributes) is marked
+         * SE_PRIVILEGE_USED_FOR_ACCESS, as the check marks the ones it found.
+         */
+        PrivilegeCheck: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([token, set, result])=>{
+                if (!isToken(token))
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if ((set >>> 0) === 0 || (result >>> 0) === 0)
+                {
+                    return fail(ERROR_NOACCESS);
+                }
+                const view = new DataView(host.readMemory(set >>> 0, 4).slice().buffer);
+                const count = view.getUint32(0, true);
+                for (let at = 0; at < count; at++)
+                {
+                    const attributes = (set >>> 0) + 8 + 12 * at + 8;
+                    const old = new DataView(host.readMemory(attributes, 4).slice().buffer)
+                        .getUint32(0, true);
+                    writeDword(attributes, old | SE_PRIVILEGE_USED_FOR_ACCESS);
+                }
+                writeDword(result >>> 0, 1);
                 host.setLastError(ERROR_SUCCESS);
                 return 1;
             },
