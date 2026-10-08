@@ -21,11 +21,13 @@ import { characterOf } from './keys.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { createPaintFunctions, layoutText } from './paint.js';
 import { createMessageBoxFunctions } from './msgbox.js';
-import { HOVER_SIZE, HOVER_TIME, SYS_COLORS, createSystemFunctions } from './system.js';
+import { HOVER_SIZE, HOVER_TIME, createSystemColors, createSystemFunctions } from './system.js';
 import { createObjectFunctions } from './objects.js';
 import { createDialogFunctions } from './dialogs.js';
 import { createDesktopFunctions } from './desktops.js';
 import { createRawInput } from './rawinput.js';
+import { createCaret } from './caret.js';
+import { createDirectoryListFunctions } from './dlgdir.js';
 import { createMdi } from './mdi.js';
 import {
     WS_CHILD, WS_CLIPSIBLINGS, WS_DISABLED, contains, createGeometry, createdStyles, edgeFor,
@@ -552,6 +554,9 @@ const MAX_WINDOW_TEXT = 1 << 16;
  * @property {() => unknown} [callerThread]
  *           Whose call is being handled, read before an await for `dispatch`
  *           afterwards. Absent in a build with no bridge, and then unnamed.
+ * @property {<T>(thread: unknown, fn: () => T) => T} [answering]
+ *           Runs `fn` as the call of `thread`: what it reads as its caller,
+ *           and what it calls back into the guest, are that thread's.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {boolean} [unattended]
  *           Nobody is at the screen: a modal dialog waiting for input is
@@ -562,6 +567,9 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           Whether a thread identifier names a thread of this process, which
  *           is the whole of what PostThreadMessage validates. Absent in a build
  *           with no scheduler behind it, which then only refuses zero.
+ * @property {(id: number) => boolean} [processExists]
+ *           Whether a process identifier names a running process, which
+ *           AllowSetForegroundWindow validates. Absent, every id is taken.
  * @property {(code: number) => void} [setLastError]
  *           Where a refusal leaves its reason, for the caller that asks why.
  * @property {() => any} park   Stops the caller; returns the parked token.
@@ -579,6 +587,14 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           A bitmap for the display made from a packed DIB in guest memory
  *           (its header and colours at `info`, its pixels at `bits`), as
  *           CreateDIBitmap on a screen context makes one; zero when it cannot.
+ * @property {(handle: number) => { width: number, height: number } | null} [bitmapSize]
+ *           A GDI bitmap's size, or null for a handle that is no bitmap: the
+ *           size a bitmap caret and an icon made from bitmaps take.
+ * @property {(handle: number) => { width: number, height: number,
+ *     bgra: Uint8Array } | null} [bitmapPixels]
+ *           A GDI bitmap's pixels, top row first, four bytes each in blue,
+ *           green, red and a fourth byte: what CreateIconIndirect copies.
+ *           Absent, an icon made from bitmaps has its size and no picture.
  * @property {import('../kernel32/files.js').FileSystem} [files]
  *           The volume every file call uses, which an image loaded from a
  *           file is read from. Absent, no file is there to load.
@@ -1718,8 +1734,14 @@ export function createWindowFunctions(host){
             }
             else if (above && !each.destroyed && !isChild(each) && covering(each))
             {
-                covers.push(geometry.shapedRect(each));
+                covers.push(...geometry.shapeRects(each));
             }
+        }
+        // What a window region leaves out of it and its ancestors: nothing of
+        // it is shown there, and what is beneath shows instead.
+        for (let at = record; at; at = isChild(at) ? windows.get(at.parent) : null)
+        {
+            covers.push(...geometry.holesOf(at));
         }
         for (let at = record; at && isChild(at); at = windows.get(at.parent))
         {
@@ -1736,7 +1758,7 @@ export function createWindowFunctions(host){
                 }
                 if (covering(sibling))
                 {
-                    covers.push(geometry.shapedRect(sibling));
+                    covers.push(...geometry.shapeRects(sibling));
                 }
             }
         }
@@ -1746,7 +1768,7 @@ export function createWindowFunctions(host){
             {
                 if (shown(child))
                 {
-                    covers.push(geometry.shapedRect(child));
+                    covers.push(...geometry.shapeRects(child));
                 }
             }
         }
@@ -2276,11 +2298,12 @@ export function createWindowFunctions(host){
             return andThen(destroyChildren(0),
                 ()=>andThen(tell(WM_NCDESTROY), ()=>{
                     forget(record);
-                    if (covered)
+                    if (!covered)
                     {
-                        uncover(covered);
+                        return 1;
                     }
-                    return 1;
+                    uncover(covered);
+                    return andThen(eraseShown(on), ()=>1);
                 }));
         });
     };
@@ -3024,14 +3047,19 @@ export function createWindowFunctions(host){
                     {
                         return refuse();
                     }
-                    // A window created visible hears its own size, its place
-                    // and that it is shown inside this call, as the real
-                    // CreateWindowEx sends them once WM_CREATE has been
-                    // answered: a program that never calls ShowWindow
+                    // A child or a popup hears its own size and its place
+                    // once WM_CREATE has been answered, shown or not, as the
+                    // real CreateWindowEx sends them: a framework lays out
+                    // the controls inside a window when it is told its size,
+                    // and a page made hidden inside a notebook is sized then
+                    // or never. An overlapped window hears them when it is
+                    // first shown. A window created visible is then told it
+                    // is shown -- a program that never calls ShowWindow
                     // measures the screen it lays itself out and rasterises
-                    // its text for from the size it is told here. Then it
-                    // is activated.
-                    if ((style & WS_VISIBLE) === 0)
+                    // its text for from the size it is told here -- and is
+                    // activated.
+                    const visible = (style & WS_VISIBLE) !== 0;
+                    if (!visible && (record.style & (WS_CHILD | WS_POPUP)) === 0)
                     {
                         return done(record.hwnd);
                     }
@@ -3041,12 +3069,12 @@ export function createWindowFunctions(host){
                             | ((client.right - client.left) & 0xffff)) >>> 0, thread),
                     ()=>andThen(send(record.hwnd, WM_MOVE, 0,
                         (((y & 0xffff) << 16) | (x & 0xffff)) >>> 0, thread),
-                    ()=>andThen(send(record.hwnd, WM_SHOWWINDOW, 1, 0, thread),
-                        ()=>{
+                    ()=>(!visible ? done(record.hwnd)
+                        : andThen(send(record.hwnd, WM_SHOWWINDOW, 1, 0, thread), ()=>{
                             reveal();
                             return andThen(activateCreated(record, thread),
                                 ()=>andThen(eraseShown(thread), ()=>done(record.hwnd)));
-                        })));
+                        }))));
                 })));
         });
     };
@@ -3079,8 +3107,11 @@ export function createWindowFunctions(host){
         }
     };
 
+    /** The colours GetSysColor answers and SetSysColors changes. */
+    const systemColors = createSystemColors();
+
     /** @param {number} index  A system colour, as a COLORREF. */
-    const sysColor = index=>SYS_COLORS[index | 0] ?? 0;
+    const sysColor = index=>systemColors.get(index);
 
     /**
      * The window manager's drawing, over gdi32's, with the system colours
@@ -3126,7 +3157,8 @@ export function createWindowFunctions(host){
     const bubbledTo = record=>{
         const found = [];
         for (let up = isChild(record) ? live(record.parent) : null;
-            up && shown(up) && (up.style & WS_CLIPCHILDREN) === 0 && !up.inPaint;
+            up && shown(up) && (up.style & WS_CLIPCHILDREN) === 0 && !up.inPaint
+                && !(up.paintSent > 0);
             up = isChild(up) ? live(up.parent) : null)
         {
             found.push(up);
@@ -3185,16 +3217,38 @@ export function createWindowFunctions(host){
         const order = paintOrder();
         for (const other of order.slice(order.indexOf(base) + 1))
         {
-            if (shown(other) && !isEmpty(intersect(dirty, geometry.shapedRect(other))))
+            const overlap = shown(other) ? intersect(dirty, geometry.shapedRect(other)) : null;
+            if (overlap && !isEmpty(overlap))
             {
+                // Only where it was painted over: a window repainted whole
+                // paints over every sibling it overlaps beyond that area --
+                // a dialog's white panel over the labels on it -- and those
+                // are not repainted, being nowhere near what changed.
+                const client = geometry.clientRect(other);
                 const size = geometry.clientSize(other);
-                const whole = { left: 0, top: 0, right: size.width, bottom: size.height };
-                if (!record.updateRect || !other.updateRect
-                    || !sameRect(other.updateRect, whole))
+                const local = {
+                    left: Math.max(0, overlap.left - client.left),
+                    top: Math.max(0, overlap.top - client.top),
+                    right: Math.min(size.width, overlap.right - client.left),
+                    bottom: Math.min(size.height, overlap.bottom - client.top),
+                };
+                if (local.right > local.left && local.bottom > local.top)
+                {
+                    other.updateRect = other.updateRect ? {
+                        left: Math.min(other.updateRect.left, local.left),
+                        top: Math.min(other.updateRect.top, local.top),
+                        right: Math.max(other.updateRect.right, local.right),
+                        bottom: Math.max(other.updateRect.bottom, local.bottom),
+                    } : local;
+                    other.erase = true;
+                }
+                // Painted over past its client, the frame is painted again
+                // too: a parent's one rectangle around a label and a child
+                // beside it takes in the child's edge.
+                if (overlap.left < client.left || overlap.top < client.top
+                    || overlap.right > client.right || overlap.bottom > client.bottom)
                 {
                     other.ncDirty = true;
-                    other.updateRect = whole;
-                    other.erase = true;
                 }
             }
         }
@@ -3269,6 +3323,7 @@ export function createWindowFunctions(host){
             if (shown(each))
             {
                 repaint(each);
+                each.eraseRect = null;
                 unerased.add(each);
             }
         }
@@ -3496,7 +3551,10 @@ export function createWindowFunctions(host){
         {
             if (!record.destroyed && !isChild(record) && shown(record))
             {
-                bare = subtractFromArea(bare, geometry.shapedRect(record));
+                for (const piece of geometry.shapeRects(record))
+                {
+                    bare = subtractFromArea(bare, piece);
+                }
             }
         }
         const hdc = bare.length > 0 ? host.dc?.()?.get(0, null) ?? 0 : 0;
@@ -3540,6 +3598,22 @@ export function createWindowFunctions(host){
                 && !isEmpty(intersect(rect, geometry.shapedRect(other))))
             {
                 repaint(other);
+                // And erased there before the call returns, when it is the
+                // caller's -- XP's synchronous paint after a window is moved,
+                // hidden or destroyed; another thread's is erased when that
+                // thread looks at its queue (WM_SYNCPAINT). A program busy
+                // copying files shows its window's background where a
+                // dialog was, not the dialog.
+                const client = geometry.clientRect(other);
+                const left = { left: rect.left - client.left, top: rect.top - client.top,
+                    right: rect.right - client.left, bottom: rect.bottom - client.top };
+                other.eraseRect = other.eraseRect ? {
+                    left: Math.min(other.eraseRect.left, left.left),
+                    top: Math.min(other.eraseRect.top, left.top),
+                    right: Math.max(other.eraseRect.right, left.right),
+                    bottom: Math.max(other.eraseRect.bottom, left.bottom),
+                } : left;
+                unerased.add(other);
             }
         }
     };
@@ -3737,7 +3811,10 @@ export function createWindowFunctions(host){
         const width = record.width;
         const height = record.height;
         const face = sysColor(COLOR_3DFACE);
-        const isActive = topLevelOf(record).hwnd === activeWindow();
+        // FlashWindow's inverted caption lasts until the activation it
+        // inverted changes, as the flag WM_NCACTIVATE sets does.
+        const activeNow = topLevelOf(record).hwnd === activeWindow();
+        const isActive = record.flash?.active === activeNow ? record.flash.shown : activeNow;
         // The edge, one ring per pixel, each in the colours its part of the
         // frame is drawn in: raised, banded, bordered or sunken.
         const rings = frameRings(record.style, record.exStyle, isActive);
@@ -3765,28 +3842,31 @@ export function createWindowFunctions(host){
             draw.text(hdc, bar.left + 4, bar.top + Math.floor((frame.caption - metrics.height) / 2),
                 record.title, {
                     color: sysColor(isActive ? COLOR_CAPTIONTEXT : COLOR_INACTIVECAPTIONTEXT),
-                    clip: { ...bar, right: box.left - 2 },
+                    clip: { ...bar, right: box ? box.left - 2 : bar.right },
                 });
-            draw.fill(hdc, box, face);
-            draw.fill(hdc, { ...box, right: box.right - 1, bottom: box.top + 1 },
-                sysColor(COLOR_3DHILIGHT));
-            draw.fill(hdc, { ...box, right: box.left + 1, bottom: box.bottom - 1 },
-                sysColor(COLOR_3DHILIGHT));
-            draw.fill(hdc, { ...box, top: box.bottom - 1 }, sysColor(COLOR_3DDKSHADOW));
-            draw.fill(hdc, { ...box, left: box.right - 1 }, sysColor(COLOR_3DDKSHADOW));
-            draw.fill(hdc, { left: box.left + 1, top: box.bottom - 2, right: box.right - 1,
-                bottom: box.bottom - 1 }, sysColor(COLOR_3DSHADOW));
-            draw.fill(hdc, { left: box.right - 2, top: box.top + 1, right: box.right - 1,
-                bottom: box.bottom - 1 }, sysColor(COLOR_3DSHADOW));
-            // The cross: two diagonals, two pixels wide, drawn a pixel at a time.
-            const ink = sysColor(COLOR_BTNTEXT);
-            for (let step = 0; step < 7; step++)
+            if (box)
             {
-                const x = box.left + 3 + step;
-                const y = box.top + 3 + step;
-                draw.fill(hdc, { left: x, top: y, right: x + 2, bottom: y + 1 }, ink);
-                draw.fill(hdc, { left: box.right - 5 - step, top: y, right: box.right - 3 - step,
-                    bottom: y + 1 }, ink);
+                draw.fill(hdc, box, face);
+                draw.fill(hdc, { ...box, right: box.right - 1, bottom: box.top + 1 },
+                    sysColor(COLOR_3DHILIGHT));
+                draw.fill(hdc, { ...box, right: box.left + 1, bottom: box.bottom - 1 },
+                    sysColor(COLOR_3DHILIGHT));
+                draw.fill(hdc, { ...box, top: box.bottom - 1 }, sysColor(COLOR_3DDKSHADOW));
+                draw.fill(hdc, { ...box, left: box.right - 1 }, sysColor(COLOR_3DDKSHADOW));
+                draw.fill(hdc, { left: box.left + 1, top: box.bottom - 2, right: box.right - 1,
+                    bottom: box.bottom - 1 }, sysColor(COLOR_3DSHADOW));
+                draw.fill(hdc, { left: box.right - 2, top: box.top + 1, right: box.right - 1,
+                    bottom: box.bottom - 1 }, sysColor(COLOR_3DSHADOW));
+                // The cross: two diagonals, two pixels wide, drawn a pixel at a time.
+                const ink = sysColor(COLOR_BTNTEXT);
+                for (let step = 0; step < 7; step++)
+                {
+                    const x = box.left + 3 + step;
+                    const y = box.top + 3 + step;
+                    draw.fill(hdc, { left: x, top: y, right: x + 2, bottom: y + 1 }, ink);
+                    draw.fill(hdc, { left: box.right - 5 - step, top: y,
+                        right: box.right - 3 - step, bottom: y + 1 }, ink);
+                }
             }
         }
         if (frame.menu > 0)
@@ -3837,14 +3917,31 @@ export function createWindowFunctions(host){
                 right: record.width - frame.right, bottom: record.height - frame.edge };
     };
 
+    /** WS_SYSMENU: the caption's buttons, the close box among them. */
+    const WS_SYSMENU_STYLE = 0x00080000;
+
     /** The close box, in window coordinates. @param {any} record */
     const closeBox = record=>{
+        // Only a window with a system menu has caption buttons.
+        if ((record.style & WS_SYSMENU_STYLE) === 0)
+        {
+            return null;
+        }
         const frame = geometry.frame(record);
         const size = Math.min(CLOSE_BOX, frame.caption - 2 * CLOSE_GAP);
         const top = frame.edge + Math.floor((frame.caption - size) / 2);
         return { left: record.width - frame.edge - CLOSE_GAP - size, top,
             right: record.width - frame.edge - CLOSE_GAP, bottom: top + size };
     };
+
+    /**
+     * Whether a screen point is in a window's shape: its rectangle, or the
+     * rectangles of its window region.
+     *
+     * @param {any} record @param {number} x @param {number} y
+     */
+    const inShape = (record, x, y)=>geometry.shapeRects(record)
+        .some((/** @type {any} */ piece)=>contains(piece, x, y));
 
     /**
      * What part of a window a screen point is on: the client area, the
@@ -3854,7 +3951,7 @@ export function createWindowFunctions(host){
      */
     const hitTest = (record, x, y)=>{
         const rect = geometry.windowRect(record);
-        if (!contains(geometry.shapedRect(record), x, y))
+        if (!inShape(record, x, y))
         {
             return HTNOWHERE;
         }
@@ -3868,7 +3965,7 @@ export function createWindowFunctions(host){
             && local.x >= frame.edge && local.x < record.width - frame.edge)
         {
             const box = closeBox(record);
-            return contains(box, local.x, local.y) ? HTCLOSE : HTCAPTION;
+            return box && contains(box, local.x, local.y) ? HTCLOSE : HTCAPTION;
         }
         const barTop = frame.edge + frame.caption;
         if (frame.menu > 0 && local.y >= barTop && local.y < barTop + frame.menu
@@ -3904,7 +4001,7 @@ export function createWindowFunctions(host){
             for (const record of candidates)
             {
                 if ((record.style & WS_VISIBLE) === 0
-                    || !contains(geometry.shapedRect(record), x, y)
+                    || !inShape(record, x, y)
                     || (!disabledToo && (record.style & WS_DISABLED) !== 0))
                 {
                     continue;
@@ -4692,6 +4789,27 @@ export function createWindowFunctions(host){
      * @type {(args: number[], thread?: unknown) => any} */
     let placeWindow = ()=>0;
 
+    // The thread's caret, drawn into its window's client area and taken off
+    // while the window paints.
+    // Threads by their ids where the bridge gives them one: the same
+    // thread may reach here as more than one object.
+    const caret = createCaret({
+        live,
+        caller: ()=>{
+            const thread = host.callerThread?.();
+            return threadIdOf(thread) ?? thread;
+        },
+        threadOf: record=>threadIdOf(record.thread) ?? record.thread,
+        contextOn: record=>paint.contextOn(record),
+        release: (record, hdc)=>host.dc?.()?.release(record.hwnd, hdc),
+        draw,
+        painted,
+        bitmapSize: host.bitmapSize,
+        writeMemory: host.writeMemory,
+        setLastError: host.setLastError,
+        divergence: host.divergence,
+    });
+
     const paint = createPaintFunctions({
         // The drawing with the system colours on it, which FillRect needs
         // for a brush named as a colour index.
@@ -4706,6 +4824,7 @@ export function createWindowFunctions(host){
         frozen: (/** @type {any} */ record)=>frozen(record),
         desktop: ()=>desktopWindow().hwnd,
         covering: coveringOf,
+        caret,
     });
 
     /**
@@ -4802,7 +4921,21 @@ export function createWindowFunctions(host){
             paint.invalidate(record, { left: 0, top: 0, right: size.width, bottom: size.height },
                 true);
         },
-        update: record=>(shown(record) ? paint.updateNow(record, true) : 1),
+        // A control repainting itself as it handles a message -- its new
+        // text, its new position -- is the control alone: Windows sends its
+        // parent WM_CTLCOLOR* then (user32's WmSetTextButtonSeq), never
+        // WM_PAINT. What the change left the parent to paint waits for the
+        // parent's next look at its queue.
+        update: (record, thread)=>(shown(record)
+            ? paint.updateNow(record, true, thread, true) : 1),
+        // A control's own scroll bar moved: its frame, where the bar is drawn.
+        frameChanged: record=>{
+            record.ncDirty = true;
+            if (shown(record))
+            {
+                paintFrame(record);
+            }
+        },
         move: (hwnd, x, y, width, height)=>/** @type {any} */ (table).MoveWindow
             .handler([hwnd, x, y, width, height, 1]),
         setFocus,
@@ -4818,6 +4951,8 @@ export function createWindowFunctions(host){
         release: host.release,
         call: host.call,
         divergence: host.divergence,
+        caret: caret.table,
+        files: host.files,
     };
     const controls = createControlProcedures(controlHost);
     Object.assign(controlProcedures, controls.procedures);
@@ -5195,6 +5330,7 @@ export function createWindowFunctions(host){
         if (covered)
         {
             uncover(covered);
+            told = andThen(told, ()=>eraseShown(thread));
         }
         // The answer waits for the procedures that were sent to: returning it
         // before they have run is the stack the guest reuses under itself.
@@ -5209,6 +5345,63 @@ export function createWindowFunctions(host){
      *     => Promise<number>) | null}
      */
     let runModal = null;
+
+    /**
+     * BroadcastSystemMessage in either encoding: sent to each recipient in
+     * turn, or posted to all; under BSF_QUERY the first that answers
+     * BROADCAST_QUERY_DENY stops it and the answer is zero. Any answer else
+     * is positive.
+     *
+     * @param {number[]} args @param {boolean} unicode
+     * @returns {number | Promise<number>}
+     */
+    const broadcastSystem = ([flags, recipients, message, wParam, lParam], unicode)=>{
+        const BSF_QUERY = 0x0001;
+        const BSF_IGNORECURRENTTASK = 0x0002;
+        const BSF_POSTMESSAGE = 0x0010;
+        const BSF_SENDNOTIFYMESSAGE = 0x0100;
+        const BSM_APPLICATIONS = 0x0008;
+        const BSM_ALLDESKTOPS = 0x0010;
+        const BROADCAST_QUERY_DENY = 0x424d5144;
+        if ((flags & BSF_QUERY) !== 0 && (flags & (BSF_POSTMESSAGE | BSF_SENDNOTIFYMESSAGE)) !== 0)
+        {
+            // A query is answered one recipient at a time; one that is not
+            // waited for cannot answer it.
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        let asked = 0;
+        if ((recipients >>> 0) !== 0)
+        {
+            const bytes = host.readMemory(recipients >>> 0, 4);
+            asked = (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+            const reached = asked === 0 ? BSM_APPLICATIONS
+                : asked & (BSM_APPLICATIONS | BSM_ALLDESKTOPS);
+            host.writeMemory(recipients >>> 0, Uint8Array.of(reached & 0xff, reached >>> 8 & 0xff,
+                reached >>> 16 & 0xff, reached >>> 24 & 0xff));
+        }
+        if (asked !== 0 && (asked & (BSM_APPLICATIONS | BSM_ALLDESKTOPS)) === 0)
+        {
+            return 1;
+        }
+        const ours = (flags & BSF_IGNORECURRENTTASK) !== 0;
+        const targets = broadcastTargets().filter(hwnd=>!ours || !live(hwnd));
+        if ((flags & (BSF_POSTMESSAGE | BSF_SENDNOTIFYMESSAGE)) !== 0)
+        {
+            for (const hwnd of targets)
+            {
+                postTo([hwnd, message, wParam, lParam], unicode);
+            }
+            return 1;
+        }
+        const thread = host.callerThread?.();
+        /** @param {number} at @returns {number | Promise<number>} */
+        const next = at=>(at >= targets.length ? 1
+            : andThen(sendAcross(targets[at], message, wParam, lParam, thread, unicode),
+                answer=>((flags & BSF_QUERY) !== 0 && (answer >>> 0) === BROADCAST_QUERY_DENY
+                    ? 0 : next(at + 1))));
+        return next(0);
+    };
 
     /**
      * PostMessage and SendNotifyMessage, in either encoding.
@@ -5492,13 +5685,14 @@ export function createWindowFunctions(host){
     // handed to the default procedure in this table by `deliver` above.
     const table = {
         ...paint.table,
+        ...caret.table,
         // The focus, the capture and the geometry live with the windows, so
         // the system half answers from them through a view of the host that
         // carries them.
         ...createSystemFunctions({
             host: Object.assign(Object.create(host), {
                 focus: focusWindow, setFocus, active: activeWindow, activate,
-                capture: ()=>captured, setCapture, releaseCapture,
+                capture: ()=>captured, setCapture, releaseCapture, colors: systemColors,
                 send, sendAcross, callProcedure, geometry, windowFromPoint, askedFromPoint,
                 isChild, repaint,
                 appear, uncover, eraseShown, wholeOnScreen, moveBits, dragging, dragMove,
@@ -5510,7 +5704,7 @@ export function createWindowFunctions(host){
                 positions: place=>{
                     placeWindow = place;
                 },
-                shown, raise, restack, tell, desktop: desktopWindow,
+                shown, raise, restack, tell, desktop: desktopWindow, showWindow,
                 // What the run answers for every process's windows.
                 runForeground: ()=>directory.foreground?.() ?? 0,
                 /**
@@ -5559,7 +5753,7 @@ export function createWindowFunctions(host){
                 (/** @type {any} */ (table)).SetWindowPos.handler([hwnd, HWND_BOTTOM, 0, 0, 0, 0,
                     0x0001 | 0x0002 | 0x0010]);
             } }),
-        ...createObjectFunctions({ host, live,
+        ...createObjectFunctions({ host, live, send,
             clipboardService: service=>{
                 clipboardAccess = service;
             },
@@ -5591,16 +5785,21 @@ export function createWindowFunctions(host){
                 defDlgProc: controls.helpers.dialogProc, markDefault: controls.helpers.markDefault,
                 keyDown: (/** @type {number} */ key)=>
                     ((host.keyState?.(key) ?? 0) & 0x8000) !== 0,
-                show: (/** @type {number} */ hwnd)=>{
+                show: (/** @type {number} */ hwnd, /** @type {unknown} */ thread)=>{
                     const record = live(hwnd);
-                    return record ? showWindow(record, SW_SHOW) : 0;
+                    return record ? showWindow(record, SW_SHOW, thread) : 0;
                 },
-                hide: (/** @type {number} */ hwnd)=>{
+                hide: (/** @type {number} */ hwnd, /** @type {unknown} */ thread)=>{
                     const record = live(hwnd);
-                    return record ? showWindow(record, SW_HIDE) : 0;
+                    return record ? showWindow(record, SW_HIDE, thread) : 0;
                 },
-                enable: (/** @type {number} */ hwnd, /** @type {boolean} */ on)=>
-                    (/** @type {any} */ (table)).EnableWindow.handler([hwnd, on ? 1 : 0]),
+                /** @param {number} hwnd @param {boolean} on @param {unknown} thread */
+                enable: (hwnd, on, thread)=>{
+                    const enable = ()=>(/** @type {any} */ (table)).EnableWindow.handler(
+                        [hwnd, on ? 1 : 0]);
+                    return thread !== undefined && host.answering
+                        ? host.answering(thread, enable) : enable();
+                },
                 loadImage: (/** @type {number} */ instance, /** @type {number} */ name,
                     /** @type {number} */ type)=>table.LoadImageW.handler([instance, name, type,
                     0, 0, 0]),
@@ -5928,6 +6127,57 @@ export function createWindowFunctions(host){
             },
         },
 
+        /**
+         * BOOL OpenIcon(HWND hWnd)
+         *
+         * A minimised window restored and activated, as SW_SHOWNORMAL does;
+         * FALSE for one that is not minimised.
+         */
+        OpenIcon: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>{
+                const SW_SHOWNORMAL = 1;
+                const record = live(hwnd);
+                if (!record || (record.style & WS_MINIMIZE) === 0)
+                {
+                    return 0;
+                }
+                return andThen(showWindow(record, SW_SHOWNORMAL), ()=>1);
+            },
+        },
+
+        /**
+         * BOOL FlashWindow(HWND hWnd, BOOL bInvert)
+         *
+         * The caption drawn the other way about -- active as inactive, or
+         * back -- to catch the eye; FALSE puts it back as the activation
+         * has it. Answers whether it was drawn active before the call. The
+         * taskbar button a flash also lights is the host's, and not here.
+         */
+        FlashWindow: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, invert])=>{
+                const record = live(hwnd);
+                if (!record || record === desktop)
+                {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+                    return 0;
+                }
+                const activeNow = topLevelOf(record).hwnd === activeWindow();
+                const before = record.flash?.active === activeNow ? record.flash.shown : activeNow;
+                record.flash = (invert >>> 0) !== 0 ? { active: activeNow, shown: !before } : null;
+                const drawn = record.flash ? record.flash.shown : activeNow;
+                if (drawn !== before && shown(record))
+                {
+                    paintFrame(record);
+                    painted();
+                }
+                return before ? 1 : 0;
+            },
+        },
+
         /** BOOL IsWindow(HWND hWnd) */
         IsWindow: {
             argBytes: 4,
@@ -5973,13 +6223,14 @@ export function createWindowFunctions(host){
             handler: ([hwnd, string])=>{
                 // Sent, as Windows sends it: a control keeps its text through
                 // its own procedure, and a program that subclassed one sees
-                // the message.
+                // the message -- on the thread that made the window, which
+                // is where a skin keeps what it paints with.
                 const record = live(hwnd);
                 if (!record)
                 {
                     return 0;
                 }
-                return andThen(send(record.hwnd, WM_SETTEXT, 0, string >>> 0,
+                return andThen(sendAcross(record.hwnd, WM_SETTEXT, 0, string >>> 0,
                     host.callerThread?.()), ()=>1);
             },
         },
@@ -6000,8 +6251,8 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                return andThen(send(record.hwnd, WM_SETTEXT, 0, string >>> 0,
-                    host.callerThread?.(), true), (/** @type {number} */ set)=>(set ? 1 : 0));
+                return andThen(sendAcross(record.hwnd, WM_SETTEXT, 0, string >>> 0,
+                    host.callerThread?.(), true), (/** @type {number | null} */ set)=>(set ? 1 : 0));
             },
         },
 
@@ -6341,6 +6592,31 @@ export function createWindowFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: args=>postTo(args, false),
+        },
+
+        /**
+         * long BroadcastSystemMessageA(DWORD flags, LPDWORD lpdwRecipients, UINT uiMessage,
+         *                              WPARAM wParam, LPARAM lParam)
+         *
+         * A message to every top-level window, this process's and the
+         * others'. Only applications are here to receive it: drivers and
+         * network drivers asked for alone receive nothing, and the
+         * recipients written back say who did.
+         */
+        BroadcastSystemMessageA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>broadcastSystem(args, false),
+        },
+        BroadcastSystemMessage: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>broadcastSystem(args, false),
+        },
+        BroadcastSystemMessageW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>broadcastSystem(args, true),
         },
 
         /**
@@ -7062,12 +7338,25 @@ export function createWindowFunctions(host){
                 host.callerThread?.()),
         },
     };
+    /**
+     * One of the table's own calls, made as a program makes it: from
+     * `thread` when named, since past an await the thread on the processor
+     * is another.
+     *
+     * @param {string} name @param {number[]} args @param {unknown} [thread]
+     */
+    const callOwn = (name, args, thread)=>{
+        const run = ()=>/** @type {any} */ (table)[name].handler(args);
+        return thread !== undefined && host.answering ? host.answering(thread, run) : run();
+    };
+    // The directory list a dialog fills is made of the list box's messages.
+    Object.assign(table, createDirectoryListFunctions({ host, call: callOwn }));
     // A message box is a dialog user32 makes out of its own calls, so it is
     // built over the finished table.
     let messageBoxProcedures = 0;
     return Object.assign(table, createMessageBoxFunctions({
         host,
-        call: (name, args)=>/** @type {any} */ (table)[name].handler(args),
+        call: callOwn,
         procedure: (name, handler)=>{
             messageBoxProcedures++;
             /** @type {number} */

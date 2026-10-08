@@ -490,6 +490,76 @@ export function createCryptoFunctions(host){
         return 1;
     };
 
+    /**
+     * CryptSignHashA and CryptSignHashW. Signing needs a private key, which
+     * an installer verifying its media does not carry and this provider does
+     * not hold. It fails the way a caller with only a public key fails,
+     * rather than inventing a signature that would not verify anywhere.
+     *
+     * @param {string} name
+     */
+    const signHash = name=>({
+        argBytes: 24,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [hashHandle])=>{
+            if (!asHash(hashHandle))
+            {
+                return fail(NTE_BAD_HASH);
+            }
+            host.divergence?.(name, 'no private key is held here, so nothing can be signed');
+            return fail(NTE_BAD_KEY);
+        },
+    });
+
+    /**
+     * CryptVerifySignatureA and CryptVerifySignatureW: a real RSA PKCS#1
+     * v1.5 verification -- the signature raised to the public exponent over
+     * the modulus, the recovered DigestInfo compared with the hash's own.
+     */
+    const verifySignature = {
+        argBytes: 24,
+        /** @param {number[]} args */
+        handler: ([hashHandle, signature, sigLen, pubKeyHandle, , flags])=>{
+            const hash = asHash(hashHandle);
+            const pub = asKey(pubKeyHandle);
+            if (!hash)
+            {
+                return fail(NTE_BAD_HASH);
+            }
+            if (!pub || !pub.rsa)
+            {
+                return fail(NTE_BAD_KEY);
+            }
+            const dwFlags = flags >>> 0;
+            if ((dwFlags & ~(CRYPT_NOHASHOID | CRYPT_X931_FORMAT)) !== 0)
+            {
+                return fail(NTE_BAD_FLAGS);
+            }
+            const len = sigLen >>> 0;
+            if (len !== pub.keyLen)
+            {
+                return fail(NTE_BAD_SIGNATURE);
+            }
+            if ((signature >>> 0) === 0)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            const value = hashValue(hash);
+            const recovered = bigIntToBe(modPow(leToBigInt(readBytes(signature, len)),
+                pub.rsa.e, pub.rsa.n), len);
+            /** @param {boolean} noOid */
+            const matches = noOid=>{
+                const em = encodeEm(len, hash.algid, value, noOid);
+                return em !== null && em.every((byte, at)=>byte === recovered[at]);
+            };
+            if (matches(false) || ((dwFlags & CRYPT_NOHASHOID) === 0 && matches(true)))
+            {
+                return 1;
+            }
+            return fail(NTE_BAD_SIGNATURE);
+        },
+    };
+
     return {
         CryptAcquireContextA: {
             argBytes: 20,
@@ -1158,76 +1228,30 @@ export function createCryptoFunctions(host){
         /**
          * BOOL CryptSignHashA(hHash, dwKeySpec, sDescription, dwFlags,
          *   pbSignature, pdwSigLen)
-         *
-         * Signing needs a private key, which an installer verifying its media
-         * does not carry and this provider does not hold. It fails the way a
-         * caller with only a public key fails, rather than inventing a
-         * signature that would not verify anywhere.
          */
-        CryptSignHashA: {
-            argBytes: 24,
-            /** @param {number[]} args */
-            handler: ([hashHandle])=>{
-                if (!asHash(hashHandle))
-                {
-                    return fail(NTE_BAD_HASH);
-                }
-                host.divergence?.('CryptSignHashA',
-                    'no private key is held here, so nothing can be signed');
-                return fail(NTE_BAD_KEY);
-            },
-        },
+        CryptSignHashA: signHash('CryptSignHashA'),
+
+        /**
+         * BOOL CryptSignHashW(hHash, dwKeySpec, LPCWSTR szDescription, dwFlags,
+         *   pbSignature, pdwSigLen)
+         *
+         * The A form's answer: the description, the only text, is ignored by
+         * every provider since NT 4 and read by neither.
+         */
+        CryptSignHashW: signHash('CryptSignHashW'),
 
         /**
          * BOOL CryptVerifySignatureA(hHash, pbSignature, dwSigLen, hPubKey,
          *   sDescription, dwFlags)
-         *
-         * A real RSA PKCS#1 v1.5 verification: raise the signature to the
-         * public exponent over the modulus and compare the recovered
-         * DigestInfo with the hash's own.
          */
-        CryptVerifySignatureA: {
-            argBytes: 24,
-            /** @param {number[]} args */
-            handler: ([hashHandle, signature, sigLen, pubKeyHandle, , flags])=>{
-                const hash = asHash(hashHandle);
-                const pub = asKey(pubKeyHandle);
-                if (!hash)
-                {
-                    return fail(NTE_BAD_HASH);
-                }
-                if (!pub || !pub.rsa)
-                {
-                    return fail(NTE_BAD_KEY);
-                }
-                const dwFlags = flags >>> 0;
-                if ((dwFlags & ~(CRYPT_NOHASHOID | CRYPT_X931_FORMAT)) !== 0)
-                {
-                    return fail(NTE_BAD_FLAGS);
-                }
-                const len = sigLen >>> 0;
-                if (len !== pub.keyLen)
-                {
-                    return fail(NTE_BAD_SIGNATURE);
-                }
-                if ((signature >>> 0) === 0)
-                {
-                    return fail(ERROR_INVALID_PARAMETER);
-                }
-                const value = hashValue(hash);
-                const recovered = bigIntToBe(modPow(leToBigInt(readBytes(signature, len)),
-                    pub.rsa.e, pub.rsa.n), len);
-                /** @param {boolean} noOid */
-                const matches = noOid=>{
-                    const em = encodeEm(len, hash.algid, value, noOid);
-                    return em !== null && em.every((byte, at)=>byte === recovered[at]);
-                };
-                if (matches(false) || ((dwFlags & CRYPT_NOHASHOID) === 0 && matches(true)))
-                {
-                    return 1;
-                }
-                return fail(NTE_BAD_SIGNATURE);
-            },
-        },
+        CryptVerifySignatureA: verifySignature,
+
+        /**
+         * BOOL CryptVerifySignatureW(hHash, pbSignature, dwSigLen, hPubKey,
+         *   LPCWSTR szDescription, dwFlags)
+         *
+         * The same verification: the description is not read.
+         */
+        CryptVerifySignatureW: verifySignature,
     };
 }

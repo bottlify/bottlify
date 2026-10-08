@@ -25,8 +25,6 @@ export const slotOf = (/** @type {number} */ eip, shift = 16)=>Math.imul(eip, 0x
 
 const EMPTY = 0;
 const REMOVED = 0xffffffff;
-/** Past this many live slots, entries stay in the map alone. */
-const HASH_LOAD = Tables.HASH_SLOTS * 3 / 4;
 
 /**
  * @typedef {Object} Entry
@@ -47,9 +45,13 @@ const HASH_LOAD = Tables.HASH_SLOTS * 3 / 4;
  */
 export function createEntries({ memory, hashBase = -1, shift = 16 } = {}){
     const hashed = memory !== undefined && hashBase >= 0;
+    // As many slots as the shift leaves bits for; past three quarters of them
+    // live, entries stay in the map alone.
+    const slotCount = 2 ** (32 - shift);
+    const load = slotCount * 3 / 4;
     const view = ()=>new DataView(/** @type {WebAssembly.Memory} */ (memory).buffer);
     const clear = ()=>new Uint8Array(/** @type {WebAssembly.Memory} */ (memory).buffer)
-        .fill(0, hashBase, hashBase + Tables.HASH_SLOTS * Tables.HASH_SLOT);
+        .fill(0, hashBase, hashBase + slotCount * Tables.HASH_SLOT);
     let inHash = 0;
     let removed = 0;
     if (hashed)
@@ -58,7 +60,7 @@ export function createEntries({ memory, hashBase = -1, shift = 16 } = {}){
     }
     /** @param {number} eip @param {number} table @param {number} label @param {number} top */
     const insert = (eip, table, label, top)=>{
-        if (!hashed || table < 0 || inHash >= HASH_LOAD)
+        if (!hashed || table < 0 || inHash >= load)
         {
             return -1;
         }
@@ -81,7 +83,7 @@ export function createEntries({ memory, hashBase = -1, shift = 16 } = {}){
                 }
                 return slot;
             }
-            slot = (slot + 1) & (Tables.HASH_SLOTS - 1);
+            slot = (slot + 1) & (slotCount - 1);
         }
     };
     /** @type {(Entry | null)[]} */
@@ -224,7 +226,7 @@ export function createEntries({ memory, hashBase = -1, shift = 16 } = {}){
                 view().setUint32(hashBase + entry.slot * Tables.HASH_SLOT, REMOVED, true);
                 inHash--;
                 removed++;
-                if (removed > Tables.HASH_SLOTS / 4)
+                if (removed > slotCount / 4)
                 {
                     // Removed slots lengthen every probe: the hash is rebuilt
                     // from the live entries.

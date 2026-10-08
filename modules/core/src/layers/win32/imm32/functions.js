@@ -23,12 +23,72 @@
 /**
  * @typedef {Object} ImmHost
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(code: number) => void} [setLastError]  Where a refusal says why.
+ *           Without it the answers are the same and the thread's last error is
+ *           left as it was.
+ * @property {(hwnd: number, message: number, wParam: number, lParam: number)
+ *           => number | Promise<number>} [sendMessage]
+ *           SendMessage, for ImmIsUIMessage handing an IME message on to the
+ *           window it names. Absent, the message is only classified.
  */
+
+/** What a call on an input context answers in the last error when it was handed none. */
+const ERROR_INVALID_HANDLE = 6;
+
+/**
+ * The messages an input method's own window handles: the composition's
+ * start, progress and end, and the context, notification, overflow and
+ * selection messages, with the system one the IME window is sent besides.
+ */
+const IME_UI_MESSAGES = new Set([
+    0x010d, // WM_IME_STARTCOMPOSITION
+    0x010e, // WM_IME_ENDCOMPOSITION
+    0x010f, // WM_IME_COMPOSITION
+    0x0281, // WM_IME_SETCONTEXT
+    0x0282, // WM_IME_NOTIFY
+    0x0284, // WM_IME_COMPOSITIONFULL
+    0x0285, // WM_IME_SELECT
+    0x0287, // WM_IME_SYSTEM
+]);
 
 /**
  * @param {ImmHost} host
  */
 export function createImmFunctions(host){
+    /**
+     * A call that changes an input context, refused for the handle it was
+     * given: ImmGetContext hands out none, so a null one is no context and any
+     * other is not one of ours, and Windows answers FALSE with
+     * ERROR_INVALID_HANDLE for both.
+     *
+     * @param {number} argBytes
+     */
+    const noContext = argBytes=>({
+        argBytes,
+        handler: ()=>{
+            host.setLastError?.(ERROR_INVALID_HANDLE);
+            return 0;
+        },
+    });
+
+    /**
+     * ImmGetCompositionString for either width: nothing is being composed, so
+     * every part of the composition is zero bytes long and the buffer is not
+     * touched. A null context leaves the last error as it was; a handle that
+     * is not one of ours sets ERROR_INVALID_HANDLE, as Windows does.
+     */
+    const compositionString = {
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([himc])=>{
+            if ((himc >>> 0) !== 0)
+            {
+                host.setLastError?.(ERROR_INVALID_HANDLE);
+            }
+            return 0;
+        },
+    };
+
     return {
         /**
          * HIMC ImmAssociateContext(HWND hWnd, HIMC hIMC)
@@ -51,8 +111,29 @@ export function createImmFunctions(host){
         /** BOOL ImmReleaseContext(HWND hWnd, HIMC hIMC) */
         ImmReleaseContext: { argBytes: 8, handler: ()=>1 },
 
-        /** LONG ImmGetCompositionStringA(HIMC, DWORD, LPVOID, DWORD) */
-        ImmGetCompositionStringA: { argBytes: 16, handler: ()=>0 },
+        /**
+         * LONG ImmGetCompositionStringA(HIMC hIMC, DWORD dwIndex, LPVOID lpBuf, DWORD dwBufLen)
+         * LONG ImmGetCompositionStringW(HIMC, DWORD, LPVOID, DWORD)
+         */
+        ImmGetCompositionStringA: compositionString,
+        ImmGetCompositionStringW: compositionString,
+
+        /**
+         * BOOL ImmSetCompositionFontA(HIMC hIMC, LPLOGFONTA lplf)
+         * BOOL ImmSetCompositionFontW(HIMC hIMC, LPLOGFONTW lplf)
+         *
+         * A program sets the font its composition window would draw in; there
+         * is no window to draw, and no context to keep the font in.
+         */
+        ImmSetCompositionFontA: noContext(8),
+        ImmSetCompositionFontW: noContext(8),
+
+        /**
+         * BOOL ImmSetCompositionWindow(HIMC hIMC, LPCOMPOSITIONFORM lpCompForm)
+         *
+         * Where the composition window would stand, refused as the font is.
+         */
+        ImmSetCompositionWindow: noContext(8),
 
         /** DWORD ImmGetCandidateListA(HIMC, DWORD, LPCANDIDATELIST, DWORD) */
         ImmGetCandidateListA: { argBytes: 16, handler: ()=>0 },
@@ -136,7 +217,7 @@ export function createImmFunctions(host){
          * open one on -- ImmGetContext is null -- so, as on Windows for a null or
          * foreign handle, it fails.
          */
-        ImmSetOpenStatus: { argBytes: 8, handler: ()=>0 },
+        ImmSetOpenStatus: noContext(8),
 
         /**
          * BOOL ImmSimulateHotKey(HWND hWnd, DWORD dwHotKeyID)
@@ -160,5 +241,96 @@ export function createImmFunctions(host){
          * No context was ever handed out, so any handle given is not one.
          */
         ImmDestroyContext: { argBytes: 4, handler: ()=>0 },
+
+        /**
+         * HWND ImmGetDefaultIMEWnd(HWND hWnd)
+         *
+         * The window an input method draws its composition in. None runs
+         * here, so there is none: NULL, as on a Windows with no IME loaded.
+         */
+        ImmGetDefaultIMEWnd: { argBytes: 4, handler: ()=>0 },
+
+        /**
+         * BOOL ImmSetCandidateWindow(HIMC hIMC, LPCANDIDATEFORM lpCandidate)
+         *
+         * Where the candidate list would stand: refused for the context, as
+         * the composition window's place is.
+         */
+        ImmSetCandidateWindow: noContext(8),
+
+        /**
+         * BOOL ImmSetCompositionStringA(HIMC hIMC, DWORD dwIndex, LPVOID lpComp,
+         *   DWORD dwCompLen, LPVOID lpRead, DWORD dwReadLen)
+         */
+        ImmSetCompositionStringA: noContext(24),
+
+        /**
+         * LRESULT ImmEscapeA(HKL hKL, HIMC hIMC, UINT uEscape, LPVOID lpData)
+         *
+         * A request to the input method a layout is. No layout is one, so no
+         * escape is supported: zero.
+         */
+        ImmEscapeA: { argBytes: 16, handler: ()=>0 },
+
+        /**
+         * DWORD ImmGetCandidateListCountW(HIMC hIMC, LPDWORD lpdwListCount)
+         *
+         * The A form's answer: no lists, and the count written as zero.
+         */
+        ImmGetCandidateListCountW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, count])=>{
+                if ((count >>> 0) !== 0)
+                {
+                    host.writeMemory(count >>> 0, new Uint8Array(4));
+                }
+                return 0;
+            },
+        },
+
+        /** DWORD ImmGetCandidateListW(HIMC, DWORD, LPCANDIDATELIST, DWORD) */
+        ImmGetCandidateListW: { argBytes: 16, handler: ()=>0 },
+
+        /**
+         * UINT ImmGetDescriptionA(HKL hKL, LPSTR lpszDescription, UINT uBufLen)
+         *
+         * The input method's name. A layout that is none has no name: zero
+         * characters, and the buffer untouched.
+         */
+        ImmGetDescriptionA: { argBytes: 12, handler: ()=>0 },
+
+        /**
+         * DWORD ImmGetProperty(HKL hKL, DWORD fdwIndex)
+         *
+         * The input method's properties, version and capabilities: none of
+         * any, for a layout that is a plain keyboard.
+         */
+        ImmGetProperty: { argBytes: 8, handler: ()=>0 },
+
+        /**
+         * BOOL ImmIsUIMessageA(HWND hWndIME, UINT msg, WPARAM wParam, LPARAM lParam)
+         *
+         * Whether a message is one an input method's window handles -- and,
+         * given such a window, the message sent on to it. TRUE for the IME
+         * messages and FALSE for the rest, whether or not a window was given.
+         */
+        ImmIsUIMessageA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, message, wParam, lParam])=>{
+                if (!IME_UI_MESSAGES.has(message >>> 0))
+                {
+                    return 0;
+                }
+                if ((hwnd >>> 0) !== 0 && host.sendMessage)
+                {
+                    const sent = host.sendMessage(hwnd >>> 0, message >>> 0, wParam >>> 0,
+                        lParam >>> 0);
+                    return sent instanceof Promise ? sent.then(()=>1) : 1;
+                }
+                return 1;
+            },
+        },
     };
 }

@@ -42,6 +42,9 @@ export const INADDR_LOOPBACK = 0x7f000001;
 export const INADDR_BROADCAST = 0xffffffff;
 export const INADDR_NONE = 0xffffffff;
 
+/** protoent, for getprotobyname: the name, the aliases, then the number as a short. */
+export const PROTOENT = Object.freeze({ p_name: 0, p_aliases: 4, p_proto: 8, SIZE: 12 });
+
 /** shutdown(how). */
 export const SD_RECEIVE = 0;
 export const SD_SEND = 1;
@@ -80,7 +83,78 @@ export const WSAHOST_NOT_FOUND = 11001;
 export const WSATRY_AGAIN = 11002;
 export const WSANO_RECOVERY = 11003;
 export const WSANO_DATA = 11004;
+export const WSAESOCKTNOSUPPORT = 10044;
+export const WSATYPE_NOT_FOUND = 10109;
 export const WSA_IO_PENDING = 997;
+
+/**
+ * The codes the event and overlapped calls report. These are the Win32 errors
+ * under other names -- a WSAEVENT is a kernel event, and its failures are the
+ * kernel's -- which is why they sit far below the 10000 block.
+ */
+export const WSA_INVALID_HANDLE = 6;
+export const WSA_NOT_ENOUGH_MEMORY = 8;
+export const WSA_INVALID_PARAMETER = 87;
+export const WSA_OPERATION_ABORTED = 995;
+export const WSA_IO_INCOMPLETE = 996;
+
+/** WSAWaitForMultipleEvents: the most it takes, and what it answers when it fails. */
+export const WSA_MAXIMUM_WAIT_EVENTS = 64;
+export const WSA_WAIT_FAILED = 0xffffffff;
+
+/** The other families a caller may name; neither is served here. */
+export const AF_UNSPEC = 0;
+export const AF_INET6 = 23;
+
+/** WSASocket's "take this one from the protocol description" for af, type or protocol. */
+export const FROM_PROTOCOL_INFO = -1;
+
+/**
+ * WSAPROTOCOL_INFOA, as far as WSASocket reads it: the family, type and
+ * protocol, after four service flags, the provider flags, its GUID, the
+ * catalogue entry, the protocol chain and the version.
+ */
+export const WSAPROTOCOL_INFO = Object.freeze({
+    iAddressFamily: 76,
+    iSocketType: 88,
+    iProtocol: 92,
+});
+
+/**
+ * WSAOVERLAPPED: the status and the byte count the system keeps in the first
+ * two words, and the event it signals at completion.
+ */
+export const WSAOVERLAPPED = Object.freeze({ Internal: 0, InternalHigh: 4, hEvent: 16 });
+
+/** ADDRINFOA on 32-bit Windows, eight words; a node's address follows it here. */
+export const ADDRINFO = Object.freeze({
+    ai_flags: 0,
+    ai_family: 4,
+    ai_socktype: 8,
+    ai_protocol: 12,
+    ai_addrlen: 16,
+    ai_canonname: 20,
+    ai_addr: 24,
+    ai_next: 28,
+    SIZE: 32,
+});
+
+/** getaddrinfo's flags, as Windows XP takes them. */
+export const AI_PASSIVE = 0x1;
+export const AI_CANONNAME = 0x2;
+export const AI_NUMERICHOST = 0x4;
+
+/** getnameinfo's flags. */
+export const NI_NOFQDN = 0x01;
+export const NI_NUMERICHOST = 0x02;
+export const NI_NAMEREQD = 0x04;
+export const NI_NUMERICSERV = 0x08;
+export const NI_DGRAM = 0x10;
+
+/** The raw-type sockets a getaddrinfo hint may name, beside the two served. */
+export const SOCK_RAW = 3;
+export const SOCK_RDM = 4;
+export const SOCK_SEQPACKET = 5;
 
 /**
  * ioctlsocket commands. These are encoded IOCTLs rather than small integers, so

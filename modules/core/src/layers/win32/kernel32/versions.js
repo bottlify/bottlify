@@ -49,6 +49,19 @@ const VER_SUITE_SINGLEUSERTS = 0x100;
  */
 
 /**
+ * What a Windows release ships beside the system itself: its Internet
+ * Explorer and its Media Player, and the files of the system folder that
+ * carry their versions rather than the system's -- what a setup checks
+ * before it installs anything that needs either.
+ *
+ * @typedef {Object} SystemComponents
+ * @property {string} internetExplorer  The browser's version, dotted.
+ * @property {string} mediaPlayer       The player's version, dotted.
+ * @property {Readonly<Record<string, string>>} files
+ *           Each file, by its lower-case name, and the version it carries.
+ */
+
+/**
  * @typedef {Object} WindowsVersion
  * @property {WindowsName} name
  * @property {number} major
@@ -63,6 +76,9 @@ const VER_SUITE_SINGLEUSERTS = 0x100;
  * @property {string} productName   The registry's ProductName.
  * @property {ProfileRoots} profiles
  * @property {{ displayVersion: string, releaseId: string, ubr: number } | null} release
+ * @property {SystemComponents | null} [components]
+ *           The products the release ships beside the system, whose files
+ *           carry their own versions; null where none are described.
  *           How Windows 10 names a release and its update beyond the build:
  *           the registry's DisplayVersion, ReleaseId and UBR. Null before 10.
  */
@@ -105,6 +121,18 @@ export const WINDOWS_VERSIONS = Object.freeze({
         productName: 'Microsoft Windows XP',
         profiles: DOCUMENTS_AND_SETTINGS,
         release: null,
+        // Service Pack 3's own: Internet Explorer 6 SP3 and Media Player 9.
+        // Not measured against a machine; see decision A39.
+        components: Object.freeze({
+            internetExplorer: '6.0.2900.5512',
+            mediaPlayer: '9.0.0.4503',
+            files: Object.freeze({
+                'shdocvw.dll': '6.0.2900.5512', 'mshtml.dll': '6.0.2900.5512',
+                'urlmon.dll': '6.0.2900.5512', 'wininet.dll': '6.0.2900.5512',
+                'shlwapi.dll': '6.0.2900.5512', 'msdxm.ocx': '6.4.9.1133',
+                'wmp.dll': '9.0.0.4503',
+            }),
+        }),
     }),
     win7: Object.freeze({
         name: /** @type {WindowsName} */ ('win7'),

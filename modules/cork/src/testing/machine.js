@@ -18,7 +18,7 @@ import {
     TIER_SLOT, emitRegion, enterRegion, finishModule, prepareModule, mathImports,
 } from '../emit/region.js';
 import { buildHelpersModule } from '../emit/helpers.js';
-import { EXECUTOR_BYTES, PAGE, Tables, executorLayout, ownLayout, pagesFor }
+import { PAGE, Tables, executorBytes, executorLayout, ownLayout, pagesFor, tablesSize }
     from '../runtime/layout.js';
 import { createPageTable } from '../runtime/pages.js';
 import { ANY_TOP, createEntries } from '../runtime/entries.js';
@@ -32,7 +32,7 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  * @param {{ ramSize?: number, codePages?: boolean, trapPort?: number,
  *     trap?: (value: number) => number, rdtsc?: () => bigint,
  *     leaveOut?: string[], precise?: boolean, structure?: boolean,
- *     resume?: boolean, looseStacks?: boolean, executor?: number }} [given]
+ *     resume?: boolean, looseStacks?: boolean, executor?: number, hashSlots?: number }} [given]
  *     trapPort: `out dx, eax` to it calls
  *     `trap` from inside the region (answering 1 when it moved EIP), as under a host with
  *     a call channel; without `trap`, one that answers 0; precise: nothing relaxed -- on
@@ -52,13 +52,15 @@ export function createTestMachine(given = {}){
         ?? (forced === '1' ? true : forced === '0' ? false : undefined);
     // With `codePages`, the undo ring's area doubles as another executor's
     // byte-per-page code table, for the tests of a store into its pages.
-    const first = ownLayout({ ramSize });
-    const firstPages = pagesFor(first, Tables.SIZE);
+    // A small entry hash: a test's program has few block starts, and a machine
+    // per test zeroing the engine's default would be most of the suite's time.
+    const first = ownLayout({ ramSize, hashSlots: given.hashSlots ?? 1 << 16 });
+    const firstPages = pagesFor(first, tablesSize(first));
     const own = executor === 0 ? first
-        : executorLayout(first, firstPages * PAGE + (executor - 1) * EXECUTOR_BYTES);
+        : executorLayout(first, firstPages * PAGE + (executor - 1) * executorBytes(first));
     const layout = codePages ? { ...own, codePages: own.tables + Tables.UNDO_RING } : own;
     const memory = new WebAssembly.Memory({
-        initial: firstPages + executor * EXECUTOR_BYTES / PAGE });
+        initial: firstPages + executor * executorBytes(first) / PAGE });
     const pages = createPageTable(memory, layout);
     // The x87 as a fresh processor has it: every register empty, the
     // default control word.

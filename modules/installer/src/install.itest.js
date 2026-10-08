@@ -63,7 +63,8 @@ test('a distribution runs in a prefix and what it wrote comes back out', async t
         executable: prefix.executable,
         imagePath: prefix.imagePath,
         storage: prefix.storage,
-        ...disc ? { discs: disc.discs, commandLine: disc.commandLine } : {},
+        ...disc ? { discs: disc.discs, commandLine: disc.commandLine,
+            startDirectory: disc.startDirectory } : {},
         traceStrings: true,
     });
 

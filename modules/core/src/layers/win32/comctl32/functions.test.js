@@ -142,3 +142,31 @@ test('the ordinal-only entry point and the two drawing calls declare what they p
     assert.equal(fns.ImageList_GetImageInfo.argBytes, 12);
     assert.equal(fns.ImageList_GetImageInfo.handler(), 0);
 });
+
+test('DllGetVersion answers the 5.82 common controls of Windows XP SP3', ()=>{
+    // misc.c's test_comctl32_class and imagelist.c's test_imagelist_interop:
+    // the library a program gets without a version-6 manifest answers major
+    // version 5. The first field says which structure was passed.
+    const m = machine();
+    m.memory.fill(0xaa);
+    const view = new DataView(m.memory.buffer);
+    const E_INVALIDARG = 0x80070057 | 0;
+    assert.equal(m.comctl.DllGetVersion.argBytes, 4);
+
+    view.setUint32(0x10, 20, true);
+    assert.equal(m.comctl.DllGetVersion.handler([0x10]), 0);
+    assert.deepEqual([0x14, 0x18, 0x1c, 0x20].map(at=>view.getUint32(at, true)),
+        [5, 82, 2900, 2], 'major, minor, build and DLLVER_PLATFORM_NT');
+    assert.equal(m.memory[0x24], 0xaa, 'nothing past a DLLVERSIONINFO');
+
+    view.setUint32(0x40, 32, true);
+    assert.equal(m.comctl.DllGetVersion.handler([0x40]), 0);
+    assert.equal(view.getUint32(0x54, true), 0, 'no flags');
+    assert.equal(view.getBigUint64(0x58, true), (5n << 48n) | (82n << 32n) | (2900n << 16n)
+        | 5512n, 'ullVersion, a word each');
+
+    view.setUint32(0x80, 24, true);
+    assert.equal(m.comctl.DllGetVersion.handler([0x80]), E_INVALIDARG, 'a size of neither');
+    assert.equal(view.getUint32(0x84, true), 0xaaaaaaaa, 'and nothing written');
+    assert.equal(m.comctl.DllGetVersion.handler([0]), E_INVALIDARG, 'no structure');
+});

@@ -21,7 +21,7 @@
 
 import { blockState, interpret } from './interp.js';
 import { Fault, Unsupported } from './ir.js';
-import { Tables, ownLayout, pagesFor } from './runtime/layout.js';
+import { Tables, ownLayout, pagesFor, tablesSize } from './runtime/layout.js';
 import { createCorkRuntime } from './runtime/runtime.js';
 import { eflagsOf, setEflags } from './emit/flags.js';
 
@@ -58,9 +58,10 @@ const REGION_CHUNK = 1 << 24;
  *     `trap` (default none: every `out` is one)
  */
 export function createMachine({ ramSize = 16 << 20, config = {}, trapPort } = {}){
-    const layout = ownLayout({ ramSize });
+    const layout = ownLayout({ ramSize,
+        ...(config.hashSlots === undefined ? {} : { hashSlots: config.hashSlots }) });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout,
-        Tables.SIZE + (config.blockProfile === true ? Tables.BLOCK_PROFILE_SIZE : 0)) });
+        tablesSize(layout) + (config.blockProfile === true ? Tables.BLOCK_PROFILE_SIZE : 0)) });
     const view = ()=>new DataView(memory.buffer);
     const bytes = ()=>new Uint8Array(memory.buffer);
     // A processor as it comes out of reset: every x87 register empty, the

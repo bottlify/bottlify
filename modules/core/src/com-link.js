@@ -108,6 +108,13 @@ export function comHandlers(table, side){
             rotEntries: ()=>table.rotEntries(),
             /** @param {string} clsid */
             take: clsid=>table.take(clsid),
+            // The RPC endpoints processes listen on, the run's.
+            /** @param {string} key @param {number} endpoint */
+            rpcListen: (key, endpoint)=>table.rpcListen(key, endpoint),
+            /** @param {string} key */
+            rpcServer: key=>table.rpcServer(key),
+            /** @param {number} endpoint @param {string} [key] */
+            rpcUnlisten: (endpoint, key)=>table.rpcUnlisten(endpoint, key),
             /**
              * Starts a server, and names it by a number to wait on: 0 when the
              * run has no room for one.
@@ -230,6 +237,12 @@ export function remoteClassTable(link, hooks = {}){
         rotEntries: ()=>link.ask('rotEntries', []),
         /** @param {string} clsid */
         take: clsid=>link.ask('take', [clsid]),
+        /** @param {string} key @param {number} endpoint */
+        rpcListen: (key, endpoint)=>link.ask('rpcListen', [key, endpoint]),
+        /** @param {string} key */
+        rpcServer: key=>link.ask('rpcServer', [key]),
+        /** @param {number} endpoint @param {string} [key] */
+        rpcUnlisten: (endpoint, key)=>link.ask('rpcUnlisten', [endpoint, key]),
 
         /**
          * @param {string} clsid @param {Promise<unknown>} ended

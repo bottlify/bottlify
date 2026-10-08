@@ -1,0 +1,1875 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * The front half of the compiler: the checked tree of one entry point to
+ * straight-line code over virtual registers.
+ *
+ * The entry point is run symbolically. Every value is a handle on operands,
+ * not a number: a local variable holds what was last assigned to it, a
+ * function call runs its body in place, and a loop runs as many times as its
+ * test (which must be known) says. What cannot be settled at compile time
+ * becomes a select. `if (c) a = x; else a = y;` runs both branches on forks of
+ * the variables and joins them with `select(c, x, y)`, which is what a target
+ * without branching does and what a target with it may do as well.
+ *
+ * A `return` inside a branch splits the rest of the function into the two
+ * branches: `if (c) return a; rest` is `if (c) return a; else { rest }`, and
+ * the returned values are joined by the same select. A `break` or `continue`
+ * must be reached by a branch whose test is known; a loop whose test is not
+ * known is not unrolled, and is reported.
+ */
+
+import { createBuilder } from './hlsl-build.js';
+import { PC, PT, USAGE, registersOf } from './hlsl-ir.js';
+import { baseOf, flatBases, isNumeric, sameType, scalarCount, typeToString, vectorOf }
+    from './hlsl-types.js';
+import { lowerIntrinsic } from './hlsl-lower-intrinsics.js';
+
+/** @typedef {import('./hlsl-build.js').Vec} Vec */
+/** @typedef {import('./hlsl-types.js').Type} Type */
+/** @typedef {import('./hlsl-ir.js').Const} Const */
+/** @typedef {import('./hlsl-ir.js').Profile} Profile */
+/** @typedef {import('./hlsl-types.js').Symbol} Symbol */
+/** @typedef {import('./hlsl-types.js').Module} Module */
+/** @typedef {import('./hlsl-types.js').FunctionSymbol} FunctionSymbol */
+/** @typedef {import('./hlsl-lower-intrinsics.js').Value} Value */
+/** @typedef {import('./hlsl-lower-intrinsics.js').State} State */
+/** @typedef {import('./hlsl-lower-intrinsics.js').LowerContext} LowerContext */
+/**
+ * A loop or a switch a break may leave, and for a loop, where it was left or its iteration
+ * continued under a condition not known (and the variables there).
+ *
+ * @typedef {Object} Jumps
+ * @property {number} id
+ * @property {boolean} isSwitch
+ * @property {object} end                 Its marker at the end.
+ * @property {Vec | null} path            Where it runs.
+ * @property {Vec | null} broke
+ * @property {Map<any, Value> | null} brokeEnv
+ * @property {Vec | null} skipped
+ * @property {Map<any, Value> | null} skippedEnv
+ * @property {Map<any, Value>} [carried]   A loop run as a loop: its variables' registers.
+ */
+/** @typedef {import('./hlsl-lower-intrinsics.js').UniformArray} UniformArray */
+
+/** A diagnostic the lowering found. */
+export class LowerError extends Error {
+    /**
+     * @param {string} code @param {string} message @param {any} pos
+     */
+    constructor(code, message, pos){
+        super(message);
+        this.name = 'LowerError';
+        this.code = code;
+        this.pos = pos;
+        /** The loop that could not be unrolled, which a model 3 shader may run as a loop. */
+        this.loop = /** @type {any} */ (null);
+    }
+}
+
+/** The most iterations a loop is unrolled for, as fxc's limit. */
+const MAX_UNROLL = 1024;
+/** The most instructions a program may grow to before it is given up on. */
+const MAX_INSTRUCTIONS = 60000;
+
+/** Semantic names, to the usage a declaration gives them. @type {Record<string, number>} */
+const SEMANTICS = {
+    POSITION: USAGE.POSITION, SV_POSITION: USAGE.POSITION, POSITIONT: USAGE.POSITIONT,
+    BLENDWEIGHT: USAGE.BLENDWEIGHT, BLENDINDICES: USAGE.BLENDINDICES, NORMAL: USAGE.NORMAL,
+    PSIZE: USAGE.PSIZE, TEXCOORD: USAGE.TEXCOORD, TANGENT: USAGE.TANGENT,
+    BINORMAL: USAGE.BINORMAL, TESSFACTOR: USAGE.TESSFACTOR, COLOR: USAGE.COLOR,
+    SV_TARGET: USAGE.COLOR, FOG: USAGE.FOG, DEPTH: USAGE.DEPTH, SV_DEPTH: USAGE.DEPTH,
+    SAMPLE: USAGE.SAMPLE,
+};
+
+/**
+ * @param {string} semantic
+ * @returns {{ usage: number, index: number } | { special: 'vpos' | 'vface' } | null}
+ */
+export function parseSemantic(semantic){
+    const upper = semantic.toUpperCase();
+    if (upper === 'VPOS')
+    {
+        return { special: 'vpos' };
+    }
+    if (upper === 'VFACE')
+    {
+        return { special: 'vface' };
+    }
+    const match = /^(.*?)(\d*)$/.exec(upper);
+    const usage = match ? SEMANTICS[match[1]] : undefined;
+    if (!match || usage === undefined)
+    {
+        return null;
+    }
+    return { usage, index: match[2] === '' ? 0 : Number(match[2]) };
+}
+
+/**
+ * The semantic indices a shader input or output of a type takes: one a vector, one a column
+ * of a matrix, each element of an array its own.
+ *
+ * @param {Type} type @returns {number}
+ */
+function ioSlots(type){
+    switch (type.kind)
+    {
+        case 'matrix': return type.cols;
+        case 'array': return type.length * ioSlots(type.elem);
+        case 'struct': return type.members.reduce((n, m)=>n + ioSlots(m.type), 0);
+        default: return 1;
+    }
+}
+
+/** The semantic `offset` indices on: TEXCOORD1 and 2 give TEXCOORD3. @param {string} semantic @param {number} offset */
+function shiftSemantic(semantic, offset){
+    const match = /^(.*?)(\d*)$/.exec(semantic);
+    const stem = match ? match[1] : semantic;
+    const index = match && match[2] !== '' ? Number(match[2]) : 0;
+    return `${stem}${index + offset}`;
+}
+
+/** @param {Value} v @returns {Vec} */
+function vecOf(v){
+    if (v.k !== 'vec')
+    {
+        throw new Error(`internal: a ${v.k} where a vector was expected`);
+    }
+    return v.v;
+}
+
+/**
+ * Lowers the entry point of a checked module.
+ *
+ * @param {Module} module
+ * @param {FunctionSymbol} entry
+ * @param {Profile} profile
+ * @param {{ loops?: ReadonlySet<any> }} [options]   `loops`: the loops to run as loops rather
+ *     than unroll, which a model 3 shader can.
+ * @returns {{ ir: import('./hlsl-ir.js').IrProgram }}
+ * @throws {LowerError}
+ */
+export function lower(module, entry, profile, options = {}){
+    const b = createBuilder(profile);
+    const runAsLoops = options.loops ?? new Set();
+
+    /**
+     * @param {string} code @param {string} message @param {any} pos
+     * @returns {never}
+     */
+    const fail = (code, message, pos)=>{
+        throw new LowerError(code, message, pos);
+    };
+
+    /**
+     * A loop that does not unroll.
+     * @param {any} loop @param {string} message @returns {never}
+     */
+    const failLoop = (loop, message)=>{
+        const error = new LowerError('X3511', message, loop.pos);
+        error.loop = loop;
+        throw error;
+    };
+
+    // ---- values ------------------------------------------------------------------------
+
+    /** @param {Vec} v @returns {Value} */
+    const vec = v=>({ k: 'vec', v });
+
+    /**
+     * The scalars of a value, one operand each, in the order the type flattens.
+     *
+     * @param {Value} value @param {Type} type
+     * @returns {Vec[]}
+     */
+    const flatten = (value, type)=>{
+        switch (value.k)
+        {
+            case 'vec': return Array.from({ length: value.v.w }, (_, i)=>b.lane(value.v, i));
+            case 'mat': {
+                /** @type {Vec[]} */
+                const out = [];
+                for (let r = 0; r < value.rows; r++)
+                {
+                    for (let c = 0; c < value.cols; c++)
+                    {
+                        out.push(matrixElement(value, r, c));
+                    }
+                }
+                return out;
+            }
+            case 'struct': {
+                const members = /** @type {Extract<Type, { kind: 'struct' }>} */ (type).members;
+                return value.fields.flatMap((f, i)=>flatten(f, members[i].type));
+            }
+            case 'arr': {
+                const elem = /** @type {Extract<Type, { kind: 'array' }>} */ (type).elem;
+                return value.elems.flatMap(e=>flatten(e, elem));
+            }
+            default: return [];
+        }
+    };
+
+    /**
+     * A value of the type from scalar operands.
+     *
+     * @param {Type} type @param {Vec[]} scalars @param {{ at: number }} [cursor]
+     * @returns {Value}
+     */
+    const build = (type, scalars, cursor = { at: 0 })=>{
+        const take = (/** @type {number} */ n)=>{
+            const parts = scalars.slice(cursor.at, cursor.at + n);
+            cursor.at += n;
+            while (parts.length < n)
+            {
+                parts.push(b.num(0));
+            }
+            return b.cat(parts);
+        };
+        switch (type.kind)
+        {
+            case 'scalar': return vec(take(1));
+            case 'vector': return vec(take(type.n));
+            case 'matrix': {
+                const rowV = [];
+                for (let r = 0; r < type.rows; r++)
+                {
+                    rowV.push(take(type.cols));
+                }
+                return { k: 'mat', rows: type.rows, cols: type.cols, rowV, colV: null };
+            }
+            case 'struct': return { k: 'struct',
+                fields: type.members.map(m=>build(m.type, scalars, cursor)) };
+            case 'array': return { k: 'arr',
+                elems: Array.from({ length: type.length }, ()=>build(type.elem, scalars, cursor)) };
+            default: return { k: 'void' };
+        }
+    };
+
+    /** @param {Type} type @returns {Value} */
+    const zero = type=>build(type, new Array(scalarCount(type)).fill(b.num(0)));
+
+    /**
+     * What a variable holds before anything is assigned to it: zeros, marked,
+     * so that an output the program never set is not written at all.
+     *
+     * @param {Value} value @returns {Value}
+     */
+    const unset = value=>{
+        switch (value.k)
+        {
+            case 'vec': return { ...value, undef: true };
+            case 'struct': return { k: 'struct', fields: value.fields.map(unset) };
+            case 'arr': return { k: 'arr', elems: value.elems.map(unset) };
+            default: return value;
+        }
+    };
+
+    /**
+     * A value of the type from the numbers of a constant, flattened.
+     *
+     * @param {Type} type @param {import('./hlsl-types.js').Value} constant
+     */
+    const fromConstant = (type, constant)=>{
+        /** @type {number[]} */
+        const numbers = [];
+        const walk = (/** @type {Type} */ t, /** @type {any} */ v)=>{
+            switch (t.kind)
+            {
+                case 'scalar': numbers.push(v); break;
+                case 'vector': numbers.push(...v); break;
+                case 'matrix': numbers.push(...v.flat()); break;
+                case 'array': v.forEach((/** @type {any} */ e)=>walk(t.elem, e)); break;
+                case 'struct': t.members.forEach(m=>walk(m.type, v[m.name])); break;
+                default: break;
+            }
+        };
+        walk(type, constant);
+        return build(type, numbers.map(n=>b.num(n)));
+    };
+
+    /**
+     * The element at a row and column of a matrix.
+     *
+     * @param {Extract<Value, {k: 'mat'}>} m @param {number} r @param {number} c
+     */
+    const matrixElement = (m, r, c)=>(m.rowV ? b.lane(m.rowV[r], c)
+        : b.lane(/** @type {Vec[]} */ (m.colV)[c], r));
+
+    /** @param {Extract<Value, {k: 'mat'}>} m @returns {Vec[]} */
+    const rowsOf = m=>m.rowV ?? Array.from({ length: m.rows }, (_, r)=>
+        b.cat(Array.from({ length: m.cols }, (__, c)=>matrixElement(m, r, c))));
+
+    /** @param {Extract<Value, {k: 'mat'}>} m @returns {Vec[]} */
+    const colsOf = m=>m.colV ?? Array.from({ length: m.cols }, (_, c)=>
+        b.cat(Array.from({ length: m.rows }, (__, r)=>matrixElement(m, r, c))));
+
+    /**
+     * A new matrix from a function of the rows (or columns) of one or two.
+     *
+     * @param {Extract<Value, {k: 'mat'}>[]} ms
+     * @param {(...v: Vec[]) => Vec} f
+     * @returns {Value}
+     */
+    const zipMatrix = (ms, f)=>{
+        const [first] = ms;
+        if (ms.every(m=>m.rowV) || !ms.every(m=>m.colV))
+        {
+            const rows = ms.map(rowsOf);
+            return { k: 'mat', rows: first.rows, cols: first.cols, colV: null,
+                rowV: rows[0].map((_, r)=>f(...rows.map(m=>m[r]))) };
+        }
+        const cols = ms.map(colsOf);
+        return { k: 'mat', rows: first.rows, cols: first.cols, rowV: null,
+            colV: cols[0].map((_, c)=>f(...cols.map(m=>m[c]))) };
+    };
+
+    /**
+     * A function of the lanes of values of one shape: vectors, or matrices
+     * row by row.
+     *
+     * @param {Value[]} values @param {(...v: Vec[]) => Vec} f
+     * @returns {Value}
+     */
+    const zip = (values, f)=>{
+        if (values[0].k === 'mat')
+        {
+            return zipMatrix(/** @type {any} */ (values), f);
+        }
+        return vec(f(...values.map(vecOf)));
+    };
+
+    // ---- conversions --------------------------------------------------------------------
+
+    /**
+     * One operand from one element type to another.
+     *
+     * @param {Vec} v @param {string} from @param {string} to
+     * @returns {Vec}
+     */
+    const convertBase = (v, from, to)=>{
+        if (from === to)
+        {
+            return v;
+        }
+        if (to === 'bool')
+        {
+            return from === 'bool' ? v : b.nonzero(v);
+        }
+        if (to === 'int' && from === 'float')
+        {
+            return b.trunc(v);
+        }
+        return v;
+    };
+
+    /**
+     * A value converted from one type to another, as an implicit or explicit
+     * cast does: the element type changes, a scalar spreads, a vector or
+     * matrix keeps what fits.
+     *
+     * @param {Value} value @param {Type} from @param {Type} to
+     * @returns {Value}
+     */
+    const convert = (value, from, to)=>{
+        if ((to.kind === 'struct' || to.kind === 'array') && isNumeric(from))
+        {
+            // `(S)0`: the scalars fill the structure in order, one spread over all of it.
+            const filler = flatten(value, from);
+            return build(to, filler.length === 1 ? new Array(scalarCount(to)).fill(filler[0])
+                : filler);
+        }
+        if (!sameType(from, to) && (!isNumeric(from) || !isNumeric(to))
+            && (from.kind === 'struct' || from.kind === 'array'))
+        {
+            // Between aggregates, component by component, each number to its slot's type.
+            const fromBases = flatBases(from);
+            const toBases = flatBases(to);
+            return build(to, flatten(value, from).slice(0, toBases.length).map((l, i)=>
+                convertBase(l, fromBases[i], toBases[i])));
+        }
+        if (sameType(from, to) || !isNumeric(from) || !isNumeric(to))
+        {
+            return value;
+        }
+        const fromBase = /** @type {string} */ (baseOf(from));
+        const toBase = /** @type {string} */ (baseOf(to));
+        if (from.kind === 'matrix' && to.kind === 'matrix'
+            && (from.rows !== to.rows || from.cols !== to.cols))
+        {
+            const m = /** @type {Extract<Value, {k: 'mat'}>} */ (value);
+            if (fromBase === toBase && to.rows <= from.rows && to.cols <= from.cols)
+            {
+                // The corner of a matrix is the corner of its registers: no copying.
+                const lanes = (/** @type {number} */ n)=>Array.from({ length: n }, (_, i)=>i);
+                return { k: 'mat', rows: to.rows, cols: to.cols,
+                    rowV: m.rowV && m.rowV.slice(0, to.rows).map(r=>b.swizzle(r, lanes(to.cols))),
+                    colV: m.colV && m.colV.slice(0, to.cols).map(c=>b.swizzle(c, lanes(to.rows))) };
+            }
+            const scalars = [];
+            for (let r = 0; r < to.rows; r++)
+            {
+                for (let c = 0; c < to.cols; c++)
+                {
+                    scalars.push(convertBase(matrixElement(m, r, c), fromBase, toBase));
+                }
+            }
+            return build(to, scalars);
+        }
+        let scalars = flatten(value, from).map(l=>convertBase(l, fromBase, toBase));
+        const need = scalarCount(to);
+        if (scalars.length === 1 && need > 1)
+        {
+            scalars = new Array(need).fill(scalars[0]);
+        }
+        return build(to, scalars.slice(0, need));
+    };
+
+    // ---- joining the branches of a conditional ---------------------------------------------
+
+    /**
+     * `c ? a : b`, for any value.
+     *
+     * @param {Vec} c @param {Value} a @param {Value} bb
+     * @returns {Value}
+     */
+    const choose = (c, a, bb)=>{
+        if (a === bb)
+        {
+            return a;
+        }
+        switch (a.k)
+        {
+            case 'vec': return vec(b.select(c, a.v, vecOf(bb)));
+            case 'mat':
+                return zipMatrix([a, /** @type {any} */ (bb)], (x, y)=>b.select(c, x, y));
+            case 'struct':
+                return { k: 'struct', fields: a.fields.map((f, i)=>choose(c, f,
+                    /** @type {any} */ (bb).fields[i])) };
+            case 'arr':
+                return { k: 'arr', elems: a.elems.map((f, i)=>choose(c, f,
+                    /** @type {any} */ (bb).elems[i])) };
+            default: return a;
+        }
+    };
+
+    /** @param {State} st @param {Vec} c @returns {State} */
+    const fork = (st, c)=>({ env: new Map(st.env), path: st.path ? b.and(st.path, c) : c });
+
+    /**
+     * The variables after a conditional: what each branch left, chosen by the
+     * condition.
+     *
+     * @param {State} st @param {Vec} c @param {State} yes @param {State} no
+     */
+    const join = (st, c, yes, no)=>{
+        const env = new Map();
+        for (const key of new Set([...yes.env.keys(), ...no.env.keys()]))
+        {
+            const x = yes.env.get(key);
+            const y = no.env.get(key);
+            env.set(key, x !== undefined && y !== undefined ? choose(c, x, y) : x ?? y);
+        }
+        st.env = env;
+    };
+
+    // ---- constants -------------------------------------------------------------------------
+
+    /** @type {Map<Symbol, Value>} */
+    const uniforms = new Map();
+    /** The samplers of the pairs a texture is read through. @type {Map<string, Const>} */
+    const pairs = new Map();
+    /** D3DSAMPLER_TEXTURE_TYPE of a dimension. @param {string} dim */
+    const samplerDim = dim=>(dim === '1d' || dim === '2d' ? 2 : dim === '3d' ? 4
+        : dim === 'cube' ? 3 : 0);
+    /** @type {Map<Const, number>} */
+    const order = new Map();
+
+    /**
+     * How the constant table describes a type.
+     *
+     * @param {Type} type @param {boolean} rowMajor
+     * @returns {import('./hlsl-ir.js').CtabType}
+     */
+    const ctabType = (type, rowMajor)=>{
+        const pt = (/** @type {string} */ base)=>(base === 'bool' ? PT.BOOL : base === 'int'
+            ? PT.INT : PT.FLOAT);
+        switch (type.kind)
+        {
+            case 'scalar': return { cls: PC.SCALAR, type: pt(type.base), rows: 1, cols: 1,
+                elements: 1 };
+            case 'vector': return { cls: PC.VECTOR, type: pt(type.base), rows: 1, cols: type.n,
+                elements: 1 };
+            case 'matrix': return { cls: rowMajor ? PC.MATRIX_ROWS : PC.MATRIX_COLUMNS,
+                type: pt(type.base), rows: type.rows, cols: type.cols, elements: 1 };
+            case 'array': {
+                const inner = ctabType(type.elem, rowMajor);
+                return { ...inner, elements: type.length * Math.max(inner.elements, 1) };
+            }
+            case 'struct': {
+                const members = type.members.map(m=>({ name: m.name,
+                    type: ctabType(m.type, m.rowMajor ?? rowMajor) }));
+                return { cls: PC.STRUCT, type: PT.VOID, rows: 1,
+                    cols: members.reduce((n, m)=>n + registersOf(m.type), 0), elements: 1,
+                    members };
+            }
+            case 'sampler': return { cls: PC.OBJECT, type: type.dim === '1d' ? PT.SAMPLER1D
+                : type.dim === '2d' ? PT.SAMPLER2D : type.dim === '3d' ? PT.SAMPLER3D
+                    : type.dim === 'cube' ? PT.SAMPLERCUBE : PT.SAMPLER, rows: 1, cols: 1,
+            elements: 1 };
+            default: return { cls: PC.SCALAR, type: PT.FLOAT, rows: 1, cols: 1, elements: 1 };
+        }
+    };
+
+    /**
+     * The value of a type held in constant registers from `offset` on.
+     *
+     * @param {Type} type @param {Const} cst @param {number} offset
+     * @param {boolean} relative @param {boolean} rowMajor
+     * @returns {Value}
+     */
+    const constantValue = (type, cst, offset, relative, rowMajor)=>{
+        /** @param {number} at @param {number} width @returns {Vec} */
+        const register = (at, width)=>b.vec({ kind: 'const', cst, offset: at,
+            swz: Array.from({ length: width }, (_, i)=>i),
+            ...(relative ? { relative: true } : {}) });
+        switch (type.kind)
+        {
+            case 'scalar': return vec(register(offset, 1));
+            case 'vector': return vec(register(offset, type.n));
+            case 'matrix':
+                return rowMajor
+                    ? { k: 'mat', rows: type.rows, cols: type.cols, colV: null,
+                        rowV: Array.from({ length: type.rows }, (_, r)=>register(offset + r,
+                            type.cols)) }
+                    : { k: 'mat', rows: type.rows, cols: type.cols, rowV: null,
+                        colV: Array.from({ length: type.cols }, (_, c)=>register(offset + c,
+                            type.rows)) };
+            case 'array': {
+                const stride = registersOf(ctabType(type.elem, rowMajor));
+                return { k: 'arr', elems: Array.from({ length: type.length }, (_, i)=>
+                    constantValue(type.elem, cst, offset + i * stride, relative, rowMajor)),
+                uniform: { cst, base: offset, stride, elem: type.elem } };
+            }
+            case 'struct': {
+                let at = offset;
+                return { k: 'struct', fields: type.members.map(m=>{
+                    const field = constantValue(m.type, cst, at, relative, m.rowMajor ?? rowMajor);
+                    at += registersOf(ctabType(m.type, m.rowMajor ?? rowMajor));
+                    return field;
+                }) };
+            }
+            default: return { k: 'void' };
+        }
+    };
+
+    /**
+     * Writes a constant's default into register data, four floats a register.
+     *
+     * @param {Type} type @param {any} value @param {number[]} data @param {number} at
+     * @param {boolean} rowMajor
+     * @returns {number}   Registers used.
+     */
+    const defaultData = (type, value, data, at, rowMajor)=>{
+        /** @param {number} reg @param {number} lane @param {number} x */
+        const put = (reg, lane, x)=>{
+            data[reg * 4 + lane] = x;
+        };
+        switch (type.kind)
+        {
+            case 'scalar': put(at, 0, value); return 1;
+            case 'vector': value.forEach((/** @type {number} */ x, /** @type {number} */ i)=>
+                put(at, i, x)); return 1;
+            case 'matrix':
+                for (let r = 0; r < type.rows; r++)
+                {
+                    for (let c = 0; c < type.cols; c++)
+                    {
+                        if (rowMajor)
+                        {
+                            put(at + r, c, value[r][c]);
+                        }
+                        else
+                        {
+                            put(at + c, r, value[r][c]);
+                        }
+                    }
+                }
+                return rowMajor ? type.rows : type.cols;
+            case 'array': {
+                let used = 0;
+                for (const e of value)
+                {
+                    used += defaultData(type.elem, e, data, at + used, rowMajor);
+                }
+                return used;
+            }
+            case 'struct': {
+                let used = 0;
+                for (const m of type.members)
+                {
+                    used += defaultData(m.type, value[m.name], data, at + used,
+                        m.rowMajor ?? rowMajor);
+                }
+                return used;
+            }
+            default: return 0;
+        }
+    };
+
+    /**
+     * The value of a uniform (or a texture-free sampler), made when first read.
+     *
+     * @param {Symbol} sym
+     * @returns {Value}
+     */
+    const uniformValue = sym=>{
+        const known = uniforms.get(sym);
+        if (known)
+        {
+            return known;
+        }
+        const rowMajor = sym.rowMajor ?? module.rowMajor;
+        // fxc names a uniform parameter of the entry point with a $ before it.
+        const name = sym.kind === 'param' ? `$${sym.name}` : sym.name;
+        /** @type {Value} */
+        let value;
+        // An array of samplers or of textures is its elements, each the one at its place.
+        let inner = sym.type;
+        /** @type {number[]} */
+        const lengths = [];
+        while (inner.kind === 'array')
+        {
+            lengths.push(inner.length);
+            inner = inner.elem;
+        }
+        const total = lengths.reduce((n, l)=>n * l, 1);
+        /** @param {number[]} rest @param {(i: number) => Value} make @returns {Value} */
+        const nest = (rest, make)=>{
+            if (rest.length === 0)
+            {
+                return make(0);
+            }
+            const each = rest.slice(1).reduce((n, l)=>n * l, 1);
+            return { k: 'arr', elems: Array.from({ length: rest[0] }, (_, i)=>
+                nest(rest.slice(1), j=>make(i * each + j))) };
+        };
+        if (inner.kind === 'sampler')
+        {
+            const dim = samplerDim(inner.dim);
+            /** @type {Const} */
+            const cst = { name, set: 's', type: ctabType(sym.type, false), dim,
+                ...(sym.register && /^s\d+$/.test(sym.register.name)
+                    ? { explicit: Number(sym.register.name.slice(1)) } : {}) };
+            b.constants.push(cst);
+            order.set(cst, sym.order);
+            const samplerDimension = inner.dim;
+            value = nest(lengths, i=>({ k: 'sampler', cst, dim: samplerDimension,
+                ...(i ? { offset: i } : {}) }));
+        }
+        else if (inner.kind === 'texture')
+        {
+            // A texture takes no register: a sampler read through it is the pair's (`sam+tex`).
+            const textureDimension = inner.dim;
+            value = nest(lengths, i=>({ k: 'texture', name: sym.name, dim: textureDimension,
+                offset: i, count: total, order: sym.order }));
+        }
+        else
+        {
+            const type = ctabType(sym.type, rowMajor);
+            /** @type {Const} */
+            const cst = { name, set: 'f', type,
+                ...(sym.register && /^c\d+$/.test(sym.register.name)
+                    ? { explicit: Number(sym.register.name.slice(1)) } : {}) };
+            const initial = sym.init ? module.evaluateConstant(sym.init) : undefined;
+            if (initial !== undefined)
+            {
+                const data = new Array(registersOf(type) * 4).fill(0);
+                defaultData(sym.type, initial, data, 0, rowMajor);
+                cst.defaults = data;
+            }
+            b.constants.push(cst);
+            order.set(cst, sym.order);
+            value = constantValue(sym.type, cst, 0, false, rowMajor);
+        }
+        uniforms.set(sym, value);
+        return value;
+    };
+
+    // ---- the expression evaluator ----------------------------------------------------------
+
+    /** @type {Value} */
+    const VOID = { k: 'void' };
+
+    /**
+     * The literal numbers of a scalar condition, or null.
+     * @param {Vec} v
+     */
+    const known = v=>b.literal(v);
+
+    /**
+     * Reads a variable.
+     *
+     * @param {Symbol} sym @param {State} st
+     * @returns {Value}
+     */
+    const read = (sym, st)=>{
+        const local = st.env.get(sym);
+        if (local)
+        {
+            return local;
+        }
+        if (sym.constValue !== undefined && (sym.isStatic || sym.kind === 'local'))
+        {
+            return fromConstant(sym.type, sym.constValue);
+        }
+        if (sym.kind === 'global' && !sym.isStatic)
+        {
+            return uniformValue(sym);
+        }
+        if (sym.kind === 'param' && sym.isUniform)
+        {
+            return uniformValue(sym);
+        }
+        if (sym.kind === 'global')
+        {
+            // A static the entry has not set up yet.
+            const value = sym.init ? ev(sym.init, st) : zero(sym.type);
+            st.env.set(sym, value);
+            return value;
+        }
+        return zero(sym.type);
+    };
+
+    /**
+     * Sets a part of a vector to values.
+     *
+     * @param {Vec} old @param {number[]} indices @param {Vec} value
+     * @returns {Vec}
+     */
+    const withLanes = (old, indices, value)=>{
+        const parts = [];
+        for (let l = 0; l < old.w; l++)
+        {
+            const at = indices.lastIndexOf(l);
+            parts.push(at >= 0 ? b.lane(value, at) : b.lane(old, l));
+        }
+        return b.cat(parts);
+    };
+
+    /**
+     * A value copied into registers of its own, whatever it was read from.
+     *
+     * @param {Value} value
+     * @returns {Value}
+     */
+    const materialize = value=>{
+        switch (value.k)
+        {
+            case 'vec': return vec(b.copy(value.v));
+            case 'mat': return { ...value, rowV: value.rowV && value.rowV.map(b.copy),
+                colV: value.colV && value.colV.map(b.copy) };
+            case 'struct': return { k: 'struct', fields: value.fields.map(materialize) };
+            case 'arr': return { k: 'arr', elems: value.elems.map(materialize) };
+            default: return value;
+        }
+    };
+
+    /**
+     * The element of an array, a vector, a matrix row, picked by an operand.
+     *
+     * @param {Value} object @param {Type} type @param {Vec} index
+     * @returns {Value}
+     */
+    const pick = (object, type, index)=>{
+        const at = known(index);
+        const count = object.k === 'arr' ? object.elems.length : object.k === 'mat' ? object.rows
+            : object.k === 'vec' ? object.v.w : 0;
+        const element = (/** @type {number} */ i)=>{
+            const clamped = Math.max(0, Math.min(count - 1, i));
+            switch (object.k)
+            {
+                case 'arr': return object.elems[clamped];
+                case 'vec': return vec(b.lane(object.v, clamped));
+                case 'mat': return vec(rowsOf(object)[clamped]);
+                default: return VOID;
+            }
+        };
+        if (at)
+        {
+            return element(Math.trunc(at[0]));
+        }
+        if (object.k === 'arr' && object.uniform)
+        {
+            if (profile.kind !== 'vs')
+            {
+                fail('X3500', 'array reference cannot be used as an l-value; not natively '
+                    + 'addressable', null);
+            }
+            const u = object.uniform;
+            // The register the element lives at is picked by the address register.
+            const whole = u.stride === 1 ? b.lane(index, 0) : b.mul(b.lane(index, 0),
+                b.num(u.stride));
+            const address = profile.major >= 2 ? whole : b.sub(whole, b.frc(whole));
+            b.address(address);
+            const rowMajor = u.cst.type.cls === PC.MATRIX_ROWS
+                || (u.cst.type.members ?? []).length > 0 || u.cst.type.cls === PC.MATRIX_ROWS;
+            return materialize(constantValue(u.elem, u.cst, u.base, true, rowMajor));
+        }
+        // Not known and not in registers: each element in turn, chosen by the index.
+        let result = element(0);
+        for (let i = 1; i < count; i++)
+        {
+            result = choose(b.eq(index, b.num(i)), element(i), result);
+        }
+        return result;
+    };
+
+    /**
+     * Stores into the part of a variable an expression names.
+     *
+     * @param {any} target @param {Value} value @param {State} st
+     */
+    const store = (target, value, st)=>{
+        switch (target.kind)
+        {
+            case 'ident':
+                st.env.set(target.sym, value);
+                return;
+            case 'cast': {
+                // What the cast shows of the variable is written, each number converted back:
+                // the corner a matrix cast keeps, else the components in order.
+                const to = target.operand.type;
+                const from = target.type;
+                const old = ev(target.operand, st);
+                const oldScalars = flatten(old, to);
+                const newScalars = flatten(value, from);
+                const fromBases = flatBases(from);
+                const toBases = flatBases(to);
+                const scalars = oldScalars.slice();
+                if (from.kind === 'matrix' && to.kind === 'matrix')
+                {
+                    for (let r = 0; r < from.rows; r++)
+                    {
+                        for (let c = 0; c < from.cols; c++)
+                        {
+                            const at = r * to.cols + c;
+                            scalars[at] = convertBase(newScalars[r * from.cols + c],
+                                fromBases[0] ?? 'float', toBases[0] ?? 'float');
+                        }
+                    }
+                }
+                else
+                {
+                    newScalars.slice(0, scalars.length).forEach((l, i)=>{
+                        scalars[i] = convertBase(l, fromBases[i] ?? 'float', toBases[i] ?? 'float');
+                    });
+                }
+                store(target.operand, build(to, scalars), st);
+                return;
+            }
+            case 'member': {
+                const object = ev(target.object, st);
+                if (target.swizzle)
+                {
+                    const old = vecOf(object);
+                    store(target.object, vec(withLanes(old, target.swizzle, vecOf(value))), st);
+                }
+                else if (target.matrixSwizzle)
+                {
+                    const m = /** @type {Extract<Value, {k: 'mat'}>} */ (object);
+                    const rows = rowsOf(m).slice();
+                    /** @type {[number, number][]} */
+                    const picks = target.matrixSwizzle;
+                    const incoming = vecOf(value);
+                    picks.forEach(([r, c], i)=>{
+                        const indices = [c];
+                        rows[r] = withLanes(rows[r], indices, b.lane(incoming, i));
+                    });
+                    store(target.object, { k: 'mat', rows: m.rows, cols: m.cols, rowV: rows,
+                        colV: null }, st);
+                }
+                else
+                {
+                    const s = /** @type {Extract<Value, {k: 'struct'}>} */ (object);
+                    const fields = s.fields.slice();
+                    fields[target.field] = value;
+                    store(target.object, { k: 'struct', fields }, st);
+                }
+                return;
+            }
+            case 'index': {
+                const object = ev(target.object, st);
+                const at = known(vecOf(ev(target.index, st)));
+                const count = object.k === 'arr' ? object.elems.length
+                    : object.k === 'mat' ? object.rows : vecOf(object).w;
+                if (!at && object.k !== 'arr' && object.k !== 'mat' && object.k !== 'vec')
+                {
+                    fail('X3500', 'invalid index', target.pos);
+                }
+                /** @param {Value} base @param {number} i @param {Value} replacement @returns {Value} */
+                const replaceAt = (base, i, replacement)=>{
+                    if (base.k === 'arr')
+                    {
+                        const elems = base.elems.slice();
+                        elems[i] = replacement;
+                        return { k: 'arr', elems };
+                    }
+                    if (base.k === 'mat')
+                    {
+                        const rows = rowsOf(base).slice();
+                        rows[i] = vecOf(replacement);
+                        return { k: 'mat', rows: base.rows, cols: base.cols, rowV: rows,
+                            colV: null };
+                    }
+                    return vec(withLanes(vecOf(base), [i], vecOf(replacement)));
+                };
+                if (at)
+                {
+                    store(target.object, replaceAt(object, Math.max(0, Math.min(count - 1,
+                        Math.trunc(at[0]))), value), st);
+                    return;
+                }
+                // An index that is not known: every element takes the new value where it matches.
+                const index = vecOf(ev(target.index, st));
+                let updated = object;
+                for (let i = 0; i < count; i++)
+                {
+                    const current = pick(object, target.object.type, b.num(i));
+                    updated = replaceAt(updated, i, choose(b.eq(index, b.num(i)), value, current));
+                }
+                store(target.object, updated, st);
+                return;
+            }
+            default:
+                fail('X3025', 'l-value specifies const object', target.pos);
+        }
+    };
+
+    /**
+     * Operation on the lanes of values under an operator, in the type the
+     * operands were converted to.
+     *
+     * @param {string} op @param {Value} left @param {Value} right @param {Type} opType
+     * @returns {Value}
+     */
+    const arithmetic = (op, left, right, opType)=>{
+        const base = baseOf(opType);
+        /** @type {(x: Vec, y: Vec) => Vec} */
+        let f;
+        switch (op)
+        {
+            case '+': f = b.add; break;
+            case '-': f = b.sub; break;
+            case '*': f = b.mul; break;
+            case '/':
+                f = base === 'int' ? (x, y)=>b.trunc(b.div(x, y)) : b.div;
+                break;
+            case '%':
+                f = (x, y)=>b.mad(b.neg(y), b.trunc(b.div(x, y)), x);
+                break;
+            case '<': f = b.lt; break;
+            case '<=': f = b.le; break;
+            case '>': f = b.gt; break;
+            case '>=': f = b.ge; break;
+            case '==': f = b.eq; break;
+            case '!=': f = b.ne; break;
+            case '&&': f = b.and; break;
+            case '||': f = b.or; break;
+            default:
+                return fail('X3535', `the '${op}' operator is not available in ${profile.name}`,
+                    null);
+        }
+        return zip([left, right], f);
+    };
+
+    /** The operand of a condition. @param {Value} v */
+    const truth = v=>{
+        const x = vecOf(v);
+        return x.w === 1 ? x : b.lane(x, 0);
+    };
+
+    /** @param {any} e @param {State} st @returns {Value} */
+    function ev(e, st){
+        if (b.instrs.length > MAX_INSTRUCTIONS)
+        {
+            fail('X5608', 'the shader is too large to compile', e.pos);
+        }
+        switch (e.kind)
+        {
+            // An integer literal is 32 bits, as fxc reads it: 3000000000 is -1294967296 and
+            // 3000000000u itself; what is done with it after is done in floats.
+            case 'num': return vec(b.num(e.ntype === 'int' ? e.value | 0
+                : e.ntype === 'uint' ? e.value >>> 0 : e.value));
+            case 'bool': return vec(b.num(e.value ? 1 : 0));
+            case 'string': return VOID;
+            case 'ident': return read(e.sym, st);
+            case 'cast': return convert(ev(e.operand, st), e.operand.type, e.type);
+            case 'construct': return construct(e, st);
+            case 'unary': {
+                const x = ev(e.operand, st);
+                if (e.op === '+')
+                {
+                    return x;
+                }
+                if (e.op === '-')
+                {
+                    // -1u is 4294967295: an unsigned literal is negated in its own 32 bits.
+                    return e.operand.kind === 'num' && e.operand.ntype === 'uint'
+                        ? vec(b.num(-e.operand.value >>> 0)) : zip([x], b.neg);
+                }
+                if (e.op === '!')
+                {
+                    return zip([x], b.not);
+                }
+                return fail('X3535', `the '${e.op}' operator is not available in ${profile.name}`,
+                    e.pos);
+            }
+            case 'incdec': {
+                const old = ev(e.operand, st);
+                const one = vec(b.num(1));
+                const next = zip([old, splatTo(one, e.operand.type)],
+                    e.op === '++' ? b.add : b.sub);
+                store(e.operand, next, st);
+                return e.prefix ? next : old;
+            }
+            case 'binary': {
+                const left = ev(e.left, st);
+                const right = ev(e.right, st);
+                return arithmetic(e.op, left, right, e.opType);
+            }
+            case 'assign': {
+                let value = ev(e.value, st);
+                if (e.op !== '=')
+                {
+                    const current = ev(e.target, st);
+                    const target = e.target.type;
+                    const combined = arithmetic(e.op.slice(0, -1),
+                        convert(current, target, e.opType), value, e.opType);
+                    value = convert(combined, e.opType, target);
+                }
+                store(e.target, value, st);
+                return value;
+            }
+            case 'cond': {
+                if (e.componentwise)
+                {
+                    const c = flatten(ev(e.test, st), e.test.type);
+                    const a = flatten(ev(e.then, st), e.type);
+                    const bb = flatten(ev(e.else, st), e.type);
+                    return build(e.type, c.map((x, i)=>b.select(x, a[i], bb[i])));
+                }
+                const c = truth(ev(e.test, st));
+                const test = known(c);
+                if (test)
+                {
+                    return test[0] !== 0 ? ev(e.then, st) : ev(e.else, st);
+                }
+                return choose(c, ev(e.then, st), ev(e.else, st));
+            }
+            case 'comma': {
+                let last = VOID;
+                for (const part of e.exprs)
+                {
+                    last = ev(part, st);
+                }
+                return last;
+            }
+            case 'call': return call(e, st);
+            case 'combine': {
+                // fxc's sampler for a texture read through a sampler state: one for the pair,
+                // named `sampler+texture`, an element for each element of an array of textures.
+                const sampler = ev(e.sampler, st);
+                const texture = ev(e.texture, st);
+                if (sampler.k !== 'sampler' || texture.k !== 'texture')
+                {
+                    return fail('X3500', 'this sampler and texture cannot be read together',
+                        e.pos);
+                }
+                const name = `${sampler.cst.name}+${texture.name}`;
+                let cst = pairs.get(name);
+                if (!cst)
+                {
+                    /** @type {any} */
+                    const pairType = { kind: 'sampler', dim: texture.dim };
+                    cst = { name, set: 's', dim: samplerDim(texture.dim),
+                        type: { ...ctabType(pairType, false), elements: texture.count } };
+                    b.constants.push(cst);
+                    order.set(cst, texture.order);
+                    pairs.set(name, cst);
+                }
+                return { k: 'sampler', cst, dim: /** @type {any} */ (texture.dim),
+                    ...(texture.offset ? { offset: texture.offset } : {}) };
+            }
+            case 'index': {
+                // The subscript first: what it assigns is what the element is taken from.
+                const index = vecOf(ev(e.index, st));
+                const object = ev(e.object, st);
+                return pick(object, e.object.type, b.lane(index, 0));
+            }
+            case 'member': {
+                const object = ev(e.object, st);
+                if (e.swizzle)
+                {
+                    return vec(b.swizzle(vecOf(object), e.swizzle));
+                }
+                if (e.matrixSwizzle)
+                {
+                    const m = /** @type {Extract<Value, {k: 'mat'}>} */ (object);
+                    return vec(b.cat(e.matrixSwizzle.map((/** @type {[number, number]} */ [r, c])=>
+                        matrixElement(m, r, c))));
+                }
+                return /** @type {Extract<Value, {k: 'struct'}>} */ (object).fields[e.field];
+            }
+            case 'initlist': return build(e.type, e.leaves.flatMap((/** @type {any} */ leaf)=>
+                flatten(ev(leaf, st), leaf.type)));
+            case 'compile':
+                return fail('X3000', 'compile is not an expression of a shader', e.pos);
+            default:
+                return fail('X3000', `unsupported expression '${e.kind}'`, e.pos);
+        }
+    }
+
+    /**
+     * A value spread to a type's lanes.
+     * @param {Value} scalar @param {Type} type
+     */
+    const splatTo = (scalar, type)=>build(type, new Array(scalarCount(type))
+        .fill(vecOf(scalar)));
+
+    /** @param {any} e @param {State} st @returns {Value} */
+    function construct(e, st){
+        const type = e.type;
+        /** @type {Vec[]} */
+        const scalars = [];
+        const toBase = baseOf(type);
+        for (const arg of e.args)
+        {
+            const value = ev(arg, st);
+            const bases = flatBases(arg.type);
+            flatten(value, arg.type).forEach((l, i)=>{
+                scalars.push(convertBase(l, bases[i] ?? 'float', toBase ?? 'float'));
+            });
+        }
+        if (scalars.length === 1 && scalarCount(type) > 1)
+        {
+            return build(type, new Array(scalarCount(type)).fill(scalars[0]));
+        }
+        return build(type, scalars);
+    }
+
+    // ---- calls ---------------------------------------------------------------------------
+
+    /** @param {any} e @param {State} st @returns {Value} */
+    function call(e, st){
+        const target = e.target;
+        if (target.kind === 'user')
+        {
+            return callUser(e, target.fn, st);
+        }
+        const args = e.args.map((/** @type {any} */ a, /** @type {number} */ i)=>({
+            value: target.signature.outParams?.includes(i) ? VOID : ev(a, st), type: a.type,
+            expr: a, outType: target.signature.paramTypes[i] }));
+        return intrinsic(target.name, args, e.type, e, st);
+    }
+
+    /**
+     * @param {any} e @param {FunctionSymbol} fn @param {State} st
+     * @returns {Value}
+     */
+    function callUser(e, fn, st){
+        const values = e.args.map((/** @type {any} */ a, /** @type {number} */ i)=>{
+            const mode = fn.params[i].dir ?? 'in';
+            return mode === 'out' ? unset(zero(fn.params[i].type)) : ev(a, st);
+        });
+        fn.params.forEach((p, i)=>{
+            st.env.set(p, values[i]);
+        });
+        const body = /** @type {any} */ (fn.decl.body);
+        const result = execList([body], st);
+        fn.params.forEach((p, i)=>{
+            if ((p.dir ?? 'in') !== 'in')
+            {
+                store(e.args[i], convert(st.env.get(p) ?? zero(p.type), p.type, e.args[i].type),
+                    st);
+            }
+        });
+        return result.value ?? VOID;
+    }
+
+    // ---- statements -----------------------------------------------------------------------
+
+    /**
+     * Whether a statement can return from the function it is in.
+     * @param {any} s @returns {boolean}
+     */
+    const returns = s=>{
+        if (!s)
+        {
+            return false;
+        }
+        switch (s.kind)
+        {
+            case 'return': return true;
+            case 'block': return s.stmts.some(returns);
+            case 'if': return returns(s.then) || returns(s.else);
+            case 'for':
+            case 'while':
+            case 'do': return returns(s.body);
+            case 'switch': return s.cases.some((/** @type {any} */ c)=>c.body.some(returns));
+            default: return false;
+        }
+    };
+
+    /**
+     * Whether a statement breaks or continues out of a loop around it.
+     * @param {any} s @param {string[]} [kinds] @returns {boolean}
+     */
+    const jumps = (s, kinds = ['break', 'continue'])=>{
+        if (!s)
+        {
+            return false;
+        }
+        switch (s.kind)
+        {
+            case 'break':
+            case 'continue': return kinds.includes(s.kind);
+            case 'block': return s.stmts.some((/** @type {any} */ one)=>jumps(one, kinds));
+            // A branch of a switch ends at a break, where the switch ends, and an if in it
+            // that breaks on a value not known answers for itself when it runs.
+            case 'if': return s.ends ? jumps(s.then, ['continue']) || jumps(s.else, ['continue'])
+                : jumps(s.then, kinds) || jumps(s.else, kinds);
+            default: return false;
+        }
+    };
+
+    let loopId = 0;
+
+    /**
+     * Runs a list of statements to the end of the function or of the list.
+     *
+     * A break or a continue under a condition not known when the shader is compiled keeps
+     * the variables as they were where it was taken, and the code after it goes on where it
+     * was not -- the loop's counter as known as it was -- until the end of the iteration (of
+     * the loop, for a break) chooses between the two.
+     *
+     * @param {any[]} items   Statements and the markers loops leave in them.
+     * @param {State} st
+     * @param {Jumps[]} [around]   The loops and switches the list is in, the innermost last.
+     * @returns {{ value?: Value }}
+     */
+    function execList(items, st, around = []){
+        const stack = items.slice().reverse();
+        const loops = around.slice();
+        /** Forgets the loops and switches this list has left. */
+        const prune = ()=>{
+            while (loops.length > around.length
+                && !stack.includes(/** @type {Jumps} */ (loops.at(-1)).end))
+            {
+                loops.pop();
+            }
+        };
+        /** @param {Vec} c @param {Map<any, Value>} a @param {Map<any, Value>} other */
+        const merged = (c, a, other)=>{
+            /** @type {State} */
+            const into = { env: new Map(), path: null };
+            join(into, c, { env: a, path: null }, { env: other, path: null });
+            return into.env;
+        };
+        /** @param {Vec | null} path @param {Vec | null} gone */
+        const without = (path, gone)=>(!gone ? path
+            : path ? b.and(path, b.not(gone)) : b.not(gone));
+        /** At the end of an iteration, the variables of where it was continued. @param {Jumps} loop */
+        const settle = loop=>{
+            if (loop.skipped && loop.skippedEnv)
+            {
+                st.env = merged(loop.skipped, loop.skippedEnv, st.env);
+                loop.skipped = null;
+                loop.skippedEnv = null;
+                st.path = without(loop.path, loop.broke);
+            }
+        };
+        /** At the end of a loop, the variables of where it was left. @param {Jumps} loop */
+        const leave = loop=>{
+            if (loop.broke && loop.brokeEnv)
+            {
+                st.env = merged(loop.broke, loop.brokeEnv, st.env);
+                st.path = loop.path;
+            }
+        };
+        while (stack.length > 0)
+        {
+            const s = stack.pop();
+            switch (s.kind)
+            {
+                case 'mark': {
+                    const loop = loops.find(one=>one.id === s.id && !one.isSwitch);
+                    if (loop)
+                    {
+                        (s.what === 'cont' ? settle : leave)(loop);
+                    }
+                    prune();
+                    break;
+                }
+                case 'empty':
+                    break;
+                case 'block':
+                    for (let i = s.stmts.length - 1; i >= 0; i--)
+                    {
+                        stack.push(s.stmts[i]);
+                    }
+                    break;
+                case 'decl':
+                    for (const v of s.vars)
+                    {
+                        st.env.set(v.sym, v.init ? ev(v.init, st) : unset(zero(v.sym.type)));
+                    }
+                    break;
+                case 'expr':
+                    ev(s.expr, st);
+                    break;
+                case 'return':
+                    return { value: s.value ? ev(s.value, st) : VOID };
+                case 'discard':
+                    discard(st, b.num(-1), s.pos);
+                    break;
+                case 'break':
+                case 'continue': {
+                    // To the end of the iteration or of the loop: the markers say where.
+                    const want = s.kind === 'break' ? 'end' : 'cont';
+                    let at = stack.length - 1;
+                    while (at >= 0 && !(stack[at].kind === 'mark' && stack[at].what === want))
+                    {
+                        at--;
+                    }
+                    if (at < 0)
+                    {
+                        // The marker is outside this branch, which ends here: the loop keeps
+                        // the variables as they are where the jump was taken (the branch of a
+                        // switch simply ends).
+                        let i = loops.length - 1;
+                        if (want === 'cont')
+                        {
+                            while (i >= 0 && loops[i].isSwitch)
+                            {
+                                i--;
+                            }
+                        }
+                        const loop = loops[i];
+                        if (loop?.carried && want === 'end')
+                        {
+                            leaveLoop(loop, st);
+                        }
+                        else if (loop && !loop.isSwitch)
+                        {
+                            const here = st.path ?? b.num(1);
+                            if (want === 'end')
+                            {
+                                loop.brokeEnv = loop.broke && loop.brokeEnv
+                                    ? merged(here, st.env, loop.brokeEnv) : new Map(st.env);
+                                loop.broke = loop.broke ? b.or(loop.broke, here) : here;
+                            }
+                            else
+                            {
+                                loop.skippedEnv = loop.skipped && loop.skippedEnv
+                                    ? merged(here, st.env, loop.skippedEnv) : new Map(st.env);
+                                loop.skipped = loop.skipped ? b.or(loop.skipped, here) : here;
+                            }
+                        }
+                        stack.length = 0;
+                        break;
+                    }
+                    const top = stack[at];
+                    stack.length = want === 'cont' ? at + 1 : at;
+                    const left = loops.find(one=>one.end === top && !one.isSwitch);
+                    if (left)
+                    {
+                        leave(left);
+                    }
+                    prune();
+                    break;
+                }
+                case 'if': {
+                    const c = s.cond ?? truth(ev(s.test, st));
+                    const test = known(c);
+                    if (test)
+                    {
+                        const chosen = test[0] !== 0 ? s.then : s.else;
+                        if (chosen)
+                        {
+                            stack.push(chosen);
+                        }
+                        break;
+                    }
+                    const jumping = jumps(s);
+                    if (jumping && (loops.length === 0 || loops.at(-1)?.isSwitch))
+                    {
+                        fail('X3511', 'unable to unroll loop, a break or continue depends on a '
+                            + 'value that is not known when the shader is compiled', s.pos);
+                    }
+                    const rest = stack.slice().reverse();
+                    const yes = fork(st, c);
+                    const no = fork(st, b.not(c));
+                    if (returns(s.then) || returns(s.else))
+                    {
+                        const a = execList([s.then, ...rest], yes, loops);
+                        const o = execList([...(s.else ? [s.else] : []), ...rest], no, loops);
+                        join(st, c, yes, no);
+                        return { value: a.value && o.value ? choose(c, a.value, o.value)
+                            : a.value ?? o.value };
+                    }
+                    execList([s.then], yes, loops);
+                    if (s.else)
+                    {
+                        execList([s.else], no, loops);
+                    }
+                    join(st, c, yes, no);
+                    if (jumping)
+                    {
+                        // What follows runs where the loop was neither left nor continued.
+                        const loop = /** @type {Jumps} */ (loops.at(-1));
+                        st.path = without(st.path, loop.broke && loop.skipped
+                            ? b.or(loop.broke, loop.skipped) : loop.broke ?? loop.skipped);
+                    }
+                    break;
+                }
+                case 'exitUnless':
+                    stack.push({ kind: 'if', cond: b.not(truth(ev(s.test, st))),
+                        then: { kind: 'break', pos: s.pos }, else: null, pos: s.pos });
+                    break;
+                case 'for':
+                case 'while':
+                case 'do': {
+                    if (runAsLoops.has(s))
+                    {
+                        runLoop(s, st, loops);
+                        break;
+                    }
+                    const id = ++loopId;
+                    const end = { kind: 'mark', what: 'end', id };
+                    loops.push({ id, isSwitch: false, end, path: st.path, broke: null,
+                        brokeEnv: null, skipped: null, skippedEnv: null });
+                    stack.push(end);
+                    stack.push({ kind: 'iterate', id, stmt: s, count: 0, first: s.kind === 'do' });
+                    if (s.kind === 'for' && s.init)
+                    {
+                        stack.push(s.init);
+                    }
+                    break;
+                }
+                case 'iterate': {
+                    const loop = s.stmt;
+                    // [unroll(n)] lets a loop run n times however many that is.
+                    const told = loop.attributes?.find((/** @type {any} */ x)=>
+                        x.name.toLowerCase() === 'unroll')?.args[0];
+                    const most = told?.kind === 'num' ? told.value : MAX_UNROLL;
+                    let go = true;
+                    /** @type {any} */
+                    let exit = null;
+                    if (!s.first && loop.test)
+                    {
+                        const c = truth(ev(loop.test, st));
+                        const value = known(c);
+                        if (!value && profile.major >= 3)
+                        {
+                            failLoop(loop, 'unable to unroll loop, loop does not appear to '
+                                + 'terminate in a timely manner');
+                        }
+                        // A test not known is a break where it fails, the iterations as many
+                        // as what is known of it allows (i < 20 of i++ < n && i < 20).
+                        go = value ? value[0] !== 0 : true;
+                        exit = value ? null : { kind: 'if', cond: b.not(c),
+                            then: { kind: 'break', pos: loop.pos }, else: null, pos: loop.pos };
+                    }
+                    if (go && s.count >= most)
+                    {
+                        failLoop(loop, 'unable to unroll loop, loop does not appear to terminate '
+                            + `in a timely manner (${most} iterations)`);
+                    }
+                    if (go)
+                    {
+                        // The body, then the step, then the next iteration.
+                        stack.push({ ...s, count: s.count + 1, first: false });
+                        if (loop.kind === 'for' && loop.step)
+                        {
+                            stack.push({ kind: 'expr', expr: loop.step, pos: loop.pos });
+                        }
+                        stack.push({ kind: 'mark', what: 'cont', id: s.id });
+                        stack.push(loop.body);
+                        if (exit)
+                        {
+                            stack.push(exit);
+                        }
+                    }
+                    break;
+                }
+                case 'switch': {
+                    // An if for each case, the default the last else; a case runs on from
+                    // where it begins to a break, which goes to the mark after the switch.
+                    const selector = truth(ev(s.test, st));
+                    const from = (/** @type {number} */ i)=>({ kind: 'block',
+                        stmts: s.cases.slice(i).flatMap((/** @type {any} */ c)=>c.body) });
+                    const fallback = s.cases.findIndex((/** @type {any} */ c)=>!c.value);
+                    /** @type {any} */
+                    let chain = fallback < 0 ? null : from(fallback);
+                    for (let i = s.cases.length - 1; i >= 0; i--)
+                    {
+                        if (s.cases[i].value)
+                        {
+                            const cond = b.eq(selector, truth(ev(s.cases[i].value, st)));
+                            chain = { kind: 'if', cond, then: from(i), else: chain, ends: true,
+                                pos: s.pos };
+                        }
+                    }
+                    const id = ++loopId;
+                    const end = { kind: 'mark', what: 'end', id };
+                    loops.push({ id, isSwitch: true, end, path: st.path, broke: null,
+                        brokeEnv: null, skipped: null, skippedEnv: null });
+                    stack.push(end);
+                    if (chain)
+                    {
+                        stack.push(chain);
+                    }
+                    break;
+                }
+                default:
+                    fail('X3000', `unsupported statement '${s.kind}'`, s.pos);
+            }
+        }
+        return {};
+    }
+
+    /**
+     * A value with each of its vectors replaced.
+     * @param {Value} value @param {(v: Vec) => Vec} f @returns {Value}
+     */
+    const mapVecs = (value, f)=>{
+        switch (value.k)
+        {
+            case 'vec': return vec(f(value.v));
+            case 'mat': return { k: 'mat', rows: value.rows, cols: value.cols,
+                rowV: rowsOf(value).map(f), colV: null };
+            case 'struct': return { k: 'struct', fields: value.fields.map(x=>mapVecs(x, f)) };
+            case 'arr': return { ...value, elems: value.elems.map(x=>mapVecs(x, f)) };
+            default: return value;
+        }
+    };
+
+    /**
+     * Writes a value into the registers of a loop's variable.
+     * @param {Value} into @param {Value} value
+     */
+    const assignValue = (into, value)=>{
+        switch (into.k)
+        {
+            case 'vec': b.assign(into.v, vecOf(value)); break;
+            case 'mat': {
+                const rows = rowsOf(/** @type {Extract<Value, {k: 'mat'}>} */ (value));
+                rowsOf(into).forEach((row, r)=>b.assign(row, rows[r]));
+                break;
+            }
+            case 'struct':
+                into.fields.forEach((f, i)=>assignValue(f,
+                    /** @type {Extract<Value, {k: 'struct'}>} */ (value).fields[i]));
+                break;
+            case 'arr':
+                into.elems.forEach((e, i)=>assignValue(e,
+                    /** @type {Extract<Value, {k: 'arr'}>} */ (value).elems[i]));
+                break;
+            default:
+        }
+    };
+
+    /**
+     * A break out of a loop run as a loop: its variables take what they hold here, where
+     * the break is taken, and the loop is left.
+     * @param {Jumps} loop @param {State} st
+     */
+    const leaveLoop = (loop, st)=>{
+        const carried = /** @type {Map<any, Value>} */ (loop.carried);
+        const keep = ()=>{
+            for (const [key, into] of carried)
+            {
+                assignValue(into, /** @type {Value} */ (st.env.get(key)));
+            }
+        };
+        if (st.path === loop.path || !st.path)
+        {
+            keep();
+            b.control('break');
+            return;
+        }
+        const before = b.instrs.length;
+        b.control('ifc', [st.path, b.num(0)], { cmp: 'ne' });
+        keep();
+        if (b.instrs.length === before + 1)
+        {
+            b.instrs.pop();
+            b.control('breakc', [st.path, b.num(0)], { cmp: 'ne' });
+            return;
+        }
+        b.control('break');
+        b.control('endif');
+    };
+
+    /**
+     * A loop run as one -- rep to endrep, left by a break where its test fails -- for a
+     * model 3 shader whose loop does not unroll. The variables it changes live in registers
+     * of their own, written as it begins and at the end of each iteration; which those are
+     * is found by lowering the body until it changes no variable that has none.
+     *
+     * @param {any} s @param {State} st @param {Jumps[]} loops
+     */
+    const runLoop = (s, st, loops)=>{
+        if (returns(s.body))
+        {
+            fail('X3511', 'a return in a loop that does not unroll is not supported', s.pos);
+        }
+        if (s.kind === 'for' && s.init)
+        {
+            execList([s.init], st, loops);
+        }
+        const before = new Map(st.env);
+        const path = st.path;
+        /** @type {Set<any>} */
+        const changing = new Set();
+        for (;;)
+        {
+            const mark = b.checkpoint();
+            st.env = new Map(before);
+            st.path = path;
+            /** @type {Map<any, Value>} */
+            const carried = new Map();
+            for (const key of changing)
+            {
+                const value = mapVecs(/** @type {Value} */ (before.get(key)), b.carry);
+                carried.set(key, value);
+                st.env.set(key, value);
+            }
+            const id = ++loopId;
+            /** @type {Jumps} */
+            const loop = { id, isSwitch: false, end: {}, path, broke: null, brokeEnv: null,
+                skipped: null, skippedEnv: null, carried };
+            b.control('rep', [b.num(255)]);
+            const test = s.test ? [{ kind: 'exitUnless', test: s.test, pos: s.pos }] : [];
+            const cont = { kind: 'mark', what: 'cont', id };
+            const step = s.kind === 'for' && s.step
+                ? [{ kind: 'expr', expr: s.step, pos: s.pos }] : [];
+            execList(s.kind === 'do' ? [s.body, cont, ...test] : [...test, s.body, cont, ...step],
+                st, [...loops, loop]);
+            const more = [...before.keys()].filter(key=>!changing.has(key)
+                && st.env.get(key) !== before.get(key));
+            if (more.length === 0)
+            {
+                for (const [key, into] of carried)
+                {
+                    assignValue(into, /** @type {Value} */ (st.env.get(key)));
+                }
+                b.control('endrep');
+                st.env = new Map(before);
+                for (const [key, into] of carried)
+                {
+                    st.env.set(key, into);
+                }
+                st.path = path;
+                return;
+            }
+            more.forEach(key=>changing.add(key));
+            b.rollback(mark);
+        }
+    };
+
+    /**
+     * Kills the pixel where the code runs and the value is negative.
+     *
+     * @param {State} st @param {Vec} value @param {any} pos
+     */
+    const discard = (st, value, pos)=>{
+        if (profile.kind !== 'ps')
+        {
+            fail('X3000', 'discard is only available in a pixel shader', pos);
+        }
+        const x = st.path ? b.select(st.path, value, b.num(1)) : value;
+        b.kill(x);
+    };
+
+    // ---- intrinsics ------------------------------------------------------------------------
+
+    /**
+     * What the intrinsic functions are made of: the builder and the helpers
+     * on values, shared by the evaluator above and the library of functions.
+     *
+     * @type {LowerContext}
+     */
+    const ctx = { b, profile, fail, vec, vecOf, flatten, build, convert, zero, rowsOf, colsOf,
+        matrixElement, zip, zipMatrix, choose, discard, truth, known, store };
+
+    /**
+     * @param {string} name
+     * @param {{ value: Value, type: Type, expr: any }[]} args
+     * @param {Type} result @param {any} e @param {State} st
+     * @returns {Value}
+     */
+    function intrinsic(name, args, result, e, st){
+        return lowerIntrinsic(ctx, name, args, result, e, st);
+    }
+
+    // ---- the entry point ---------------------------------------------------------------------
+
+    /**
+     * The value arriving under a semantic.
+     *
+     * @param {Type} type @param {string | null} semantic @param {string} name @param {any} pos
+     * @returns {Value}
+     */
+    const inputOf = (type, semantic, name, pos)=>{
+        if (type.kind === 'struct')
+        {
+            return { k: 'struct', fields: type.members.map(m=>inputOf(m.type,
+                m.semantic ?? semantic, m.name, pos)) };
+        }
+        // An array, and a matrix a column at a time, take the semantic's indices in turn
+        // (COLOR for float4 c[2] is COLOR0 and COLOR1).
+        // With no semantic of its own, an array of structures is its members' inputs again
+        // for each element, as fxc reads it.
+        if (type.kind === 'array' && (semantic || type.elem.kind !== 'scalar'
+            && type.elem.kind !== 'vector'))
+        {
+            const per = ioSlots(type.elem);
+            return { k: 'arr', elems: Array.from({ length: type.length }, (_, i)=>
+                inputOf(type.elem, semantic ? shiftSemantic(semantic, i * per) : null, name,
+                    pos)) };
+        }
+        if (semantic && type.kind === 'matrix')
+        {
+            const colV = Array.from({ length: type.cols }, (_, c)=>vecOf(inputOf(
+                vectorOf(type.base, type.rows), shiftSemantic(semantic, c), name, pos)));
+            return { k: 'mat', rows: type.rows, cols: type.cols, rowV: null, colV };
+        }
+        if (!semantic)
+        {
+            return fail('X3502', `'${name}': input parameter '${name}' is missing a semantic`,
+                pos);
+        }
+        const parsed = parseSemantic(semantic);
+        if (!parsed)
+        {
+            return fail('X4502', `unknown semantic '${semantic}'`, pos);
+        }
+        const width = type.kind === 'vector' ? type.n : type.kind === 'scalar' ? 1 : 0;
+        if (width === 0)
+        {
+            return fail('X3000', `'${name}': a ${typeToString(type)} cannot be a shader input`,
+                pos);
+        }
+        if ('special' in parsed)
+        {
+            if (profile.kind !== 'ps' || profile.major < 3)
+            {
+                return fail('X3000', `${semantic} is not available in ${profile.name}`, pos);
+            }
+            return vec(b.vec({ kind: 'misc', which: parsed.special,
+                swz: Array.from({ length: parsed.special === 'vpos' ? Math.min(width, 2) : 1 },
+                    (_, i)=>i) }));
+        }
+        const input = b.input(parsed.usage, parsed.index, width);
+        return vec(b.vec({ kind: 'input', input, swz: Array.from({ length: width }, (_, i)=>i) }));
+    };
+
+    /**
+     * Sends a value to the output its semantic names.
+     *
+     * @param {Value} value @param {Type} type @param {string | null} semantic
+     * @param {string} name @param {any} pos
+     */
+    const outputOf = (value, type, semantic, name, pos)=>{
+        if (type.kind === 'struct')
+        {
+            const fields = /** @type {Extract<Value, {k: 'struct'}>} */ (value).fields;
+            type.members.forEach((m, i)=>outputOf(fields[i], m.type, m.semantic ?? semantic,
+                m.name, pos));
+            return;
+        }
+        if (type.kind === 'void')
+        {
+            return;
+        }
+        if (!semantic)
+        {
+            fail('X3503', `'${name}': output parameter '${name}' is missing a semantic`, pos);
+            return;
+        }
+        const parsed = parseSemantic(semantic);
+        if (!parsed || 'special' in parsed)
+        {
+            fail('X4503', `unknown output semantic '${semantic}'`, pos);
+            return;
+        }
+        if (type.kind === 'array')
+        {
+            const per = ioSlots(type.elem);
+            const elems = /** @type {Extract<Value, {k: 'arr'}>} */ (value).elems;
+            elems.forEach((one, i)=>outputOf(one, type.elem, shiftSemantic(semantic, i * per),
+                name, pos));
+            return;
+        }
+        if (type.kind === 'matrix')
+        {
+            const columns = colsOf(/** @type {Extract<Value, {k: 'mat'}>} */ (value));
+            columns.forEach((column, c)=>outputOf(vec(column), vectorOf(type.base, type.rows),
+                shiftSemantic(semantic, c), name, pos));
+            return;
+        }
+        if (type.kind !== 'scalar' && type.kind !== 'vector')
+        {
+            fail('X3000', `'${name}': a ${typeToString(type)} cannot be a shader output`, pos);
+            return;
+        }
+        if (value.k === 'vec' && value.undef)
+        {
+            return;
+        }
+        const x = vecOf(value);
+        b.write(b.output(parsed.usage, parsed.index, x.w), x);
+    };
+
+    /** @type {State} */
+    const st = { env: new Map(), path: null };
+    // Statics are set up in the order they were declared, as the entry begins.
+    for (const g of module.reachableGlobals(entry).filter(one=>one.isStatic)
+        .sort((x, y)=>x.order - y.order))
+    {
+        st.env.set(g, g.init ? ev(g.init, st) : zero(g.type));
+    }
+    for (const p of entry.params)
+    {
+        const dir = p.dir ?? 'in';
+        if (p.isUniform)
+        {
+            continue;
+        }
+        st.env.set(p, dir === 'out' ? unset(zero(p.type))
+            : inputOf(p.type, p.semantic, p.name, p.decl.pos));
+    }
+    const body = /** @type {any} */ (entry.decl.body);
+    const finished = execList([body], st);
+    if (entry.returnType.kind !== 'void')
+    {
+        outputOf(finished.value ?? zero(entry.returnType), entry.returnType, entry.semantic,
+            entry.name, entry.decl.pos);
+    }
+    for (const p of entry.params)
+    {
+        if ((p.dir ?? 'in') !== 'in' && !p.isUniform)
+        {
+            outputOf(st.env.get(p) ?? zero(p.type), p.type, p.semantic, p.name, p.decl.pos);
+        }
+    }
+    b.constants.sort((x, y)=>(order.get(x) ?? 0) - (order.get(y) ?? 0));
+    return { ir: { profile, instrs: b.instrs, inputs: b.inputs, outputs: b.outputs,
+        constants: b.constants, vregCount: b.vregCount } };
+}

@@ -11,7 +11,7 @@
  * bundle carries none of it.
  */
 
-import { Tables } from './layout.js';
+import { Tables, blockProfileAt } from './layout.js';
 
 /**
  * @typedef {{ entry: number, spans: [number, number][] }} ProfiledRegion
@@ -24,12 +24,12 @@ import { Tables } from './layout.js';
  * profile of the regions' functions divides by the instructions they ran.
  *
  * @param {DataView} data  over the memory the tables are in
- * @param {number} tables  where they start
+ * @param {{ tables: number, hashShift?: number }} layout
  * @param {Iterable<ProfiledRegion>} regions
  * @returns {[number, number, number, number][]}
  */
-export function blockCounts(data, tables, regions){
-    const base = tables + Tables.BLOCK_PROFILE;
+export function blockCounts(data, layout, regions){
+    const base = layout.tables + blockProfileAt(layout);
     /** @type {Map<number, number>} */
     const regionOf = new Map();
     for (const record of regions)
@@ -58,9 +58,9 @@ export function blockCounts(data, tables, regions){
     return out.sort((one, two)=>two[1] - one[1]);
 }
 
-/** @param {DataView} data @param {number} tables */
-export function resetBlockCounts(data, tables){
-    const base = tables + Tables.BLOCK_PROFILE;
+/** @param {DataView} data @param {{ tables: number, hashShift?: number }} layout */
+export function resetBlockCounts(data, layout){
+    const base = layout.tables + blockProfileAt(layout);
     for (let slot = 0; slot < Tables.BLOCK_SLOTS; slot++)
     {
         data.setUint32(base + slot * Tables.BLOCK_SLOT + 4, 0, true);

@@ -6,7 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ADMINISTRATORS_SID, createTokenFunctions } from './tokens.js';
+import {
+    ADMINISTRATORS_SID, TOKEN_NATIVES, createTokenFunctions, selfRelativeDescriptor,
+} from './tokens.js';
 
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_NO_TOKEN = 1008;
@@ -22,7 +24,7 @@ const NEEDED = 0x104;
 const BUFFER = 0x200;
 const SID = 0x600;
 
-function setup(){
+function setup(/** @type {{ currentThread?: () => any }} */ extra = {}){
     const bytes = new Uint8Array(0x1000);
     /** @type {number[]} */
     const errors = [];
@@ -62,6 +64,7 @@ function setup(){
                 return entry.object;
             },
         },
+        ...extra,
     });
     /** @param {number} at */
     const dword = at=>new DataView(bytes.buffer).getUint32(at, true);
@@ -131,6 +134,88 @@ test('the sequence an installer asks whether it is an administrator with', ()=>{
 
     assert.equal(fns.GetTokenInformation.handler([0x1234, TokenGroups, BUFFER, 0x100, NEEDED]), 0);
     assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
+});
+
+test('the owner, primary group, type and session of a token', ()=>{
+    // An update package asks for the owner first and the user after it, and
+    // copies each SID by its length; a class it is refused ends the package
+    // with ERROR_INVALID_PARAMETER as its exit code.
+    const TokenOwner = 4;
+    const TokenPrimaryGroup = 5;
+    const TokenType = 8;
+    const TokenSessionId = 12;
+    const ERROR_INVALID_PARAMETER = 87;
+    const { bytes, errors, fns, dword } = setup();
+    fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]);
+    const token = dword(OUT);
+
+    assert.equal(fns.GetTokenInformation.handler([token, TokenOwner, 0, 0, NEEDED]), 0);
+    assert.equal(errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+    assert.equal(dword(NEEDED), 4 + ADMINISTRATORS_SID.length, 'a pointer, then the SID');
+    assert.equal(fns.GetTokenInformation.handler([token, TokenOwner, BUFFER, 0x100, NEEDED]), 1);
+    assert.equal(dword(BUFFER), BUFFER + 4, 'the owner SID follows its pointer');
+    assert.equal(fns.GetLengthSid.handler([dword(BUFFER)]), ADMINISTRATORS_SID.length);
+    assert.deepEqual([...bytes.subarray(BUFFER + 4, BUFFER + 4 + ADMINISTRATORS_SID.length)],
+        [...ADMINISTRATORS_SID], 'an administrator\'s objects are owned by the Administrators');
+
+    assert.equal(fns.GetTokenInformation.handler([token, TokenPrimaryGroup, BUFFER, 0x100, NEEDED]),
+        1);
+    assert.equal(dword(BUFFER), BUFFER + 4);
+    assert.equal(dword(BUFFER + 4 + 8 + 16), 513, 'the domain\'s users');
+
+    assert.equal(fns.GetTokenInformation.handler([token, TokenType, BUFFER, 4, NEEDED]), 1);
+    assert.deepEqual([dword(BUFFER), dword(NEEDED)], [1, 4], 'TokenPrimary');
+    fns.DuplicateToken.handler([token, 2, OUT]);
+    assert.equal(fns.GetTokenInformation.handler([dword(OUT), TokenType, BUFFER, 4, NEEDED]), 1);
+    assert.equal(dword(BUFFER), 2, 'a duplicate impersonates');
+
+    bytes.fill(0xff, BUFFER, BUFFER + 4);
+    assert.equal(fns.GetTokenInformation.handler([token, TokenSessionId, BUFFER, 4, NEEDED]), 1);
+    assert.equal(dword(BUFFER), 0, 'the console session');
+
+    assert.equal(fns.GetTokenInformation.handler([token, 0x7f, BUFFER, 0x100, NEEDED]), 0);
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER, 'a class there is none of');
+});
+
+test('the native token calls open and adjust the same tokens, with statuses', ()=>{
+    // An update package opens its token through ntdll to take the shutdown
+    // privilege; the last error is not a native call's to touch.
+    const { errors, fns, dword, table } = setup();
+    const natives = fns[TOKEN_NATIVES];
+    assert.equal(natives.NtOpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]), 0);
+    const token = dword(OUT);
+    assert.equal(table.get(token)?.type, 'token');
+    assert.equal(natives.NtOpenProcessTokenEx.handler([CURRENT_PROCESS, TOKEN_QUERY, 0, NEEDED]),
+        0);
+    assert.notEqual(dword(NEEDED), token, 'a handle of its own');
+    assert.equal(natives.NtOpenProcessToken.handler([0x1234, TOKEN_QUERY, OUT]), 0xc0000008,
+        'STATUS_INVALID_HANDLE');
+    assert.equal(natives.NtOpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, 0]), 0xc0000005,
+        'nowhere to put it: STATUS_ACCESS_VIOLATION');
+
+    assert.equal(natives.NtAdjustPrivilegesToken.handler([token, 0, BUFFER, 0x10, SID, NEEDED]), 0);
+    assert.deepEqual([dword(SID), dword(NEEDED)], [0, 4], 'nothing was enabled before');
+    assert.equal(natives.NtAdjustPrivilegesToken.handler([0x1234, 0, BUFFER, 0, 0, 0]), 0xc0000008);
+    assert.deepEqual(errors, [], 'the last error is left alone');
+    assert.deepEqual(Object.fromEntries(Object.entries(natives)
+        .map(([name, entry])=>[name, entry.argBytes])),
+    { NtOpenProcessToken: 12, NtOpenProcessTokenEx: 16, NtAdjustPrivilegesToken: 24 });
+});
+
+test('CopySid copies a SID that fits and refuses one that does not', ()=>{
+    const { bytes, errors, fns } = setup();
+    bytes.set(ADMINISTRATORS_SID, SID);
+    const length = ADMINISTRATORS_SID.length;
+    bytes.fill(0xaa, BUFFER, BUFFER + 0x40);
+    assert.equal(fns.CopySid.handler([length, BUFFER, SID]), 1);
+    assert.deepEqual([...bytes.subarray(BUFFER, BUFFER + length)], [...ADMINISTRATORS_SID]);
+    assert.equal(bytes[BUFFER + length], 0xaa, 'no more than the SID');
+    bytes.fill(0xbb, BUFFER, BUFFER + 0x40);
+    assert.equal(fns.CopySid.handler([length - 1, BUFFER, SID]), 0);
+    assert.equal(errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+    assert.equal(bytes[BUFFER], 0xbb, 'and nothing was written');
+    assert.equal(fns.CopySid.handler([length, 0, SID]), 0);
+    assert.equal(fns.CopySid.argBytes, 12);
 });
 
 test('a privilege is looked up by its fixed number and granted on the process token', ()=>{
@@ -356,4 +441,497 @@ test('ConvertSidToStringSid refuses no SID and one that is not a SID', ()=>{
     bytes[SID] = 9;
     assert.equal(fns.ConvertSidToStringSidW.handler([SID, OUT]), 0);
     assert.deepEqual(errors, [87, 87]);
+});
+
+/** @param {Uint8Array} bytes @param {number} at @param {string} text */
+const putNarrow = (bytes, at, text)=>{
+    bytes.set([...text, '\0'].map(unit=>unit.charCodeAt(0)), at);
+    return at;
+};
+/** @param {Uint8Array} bytes @param {number} at @param {string} text */
+const putWide = (bytes, at, text)=>{
+    [...text, '\0'].forEach((unit, index)=>{
+        bytes[at + index * 2] = unit.charCodeAt(0) & 0xff;
+        bytes[at + index * 2 + 1] = unit.charCodeAt(0) >>> 8;
+    });
+    return at;
+};
+/** @param {Uint8Array} bytes @param {number} at @param {number} units */
+const wideAt = (bytes, at, units)=>String.fromCharCode(
+    ...new Uint16Array(bytes.slice(at, at + units * 2).buffer));
+
+/** S-1-<authority>-<subs>, laid out. @param {number} authority @param {number[]} subs */
+const sidOf = (authority, subs)=>{
+    const sid = new Uint8Array(8 + 4 * subs.length);
+    sid[0] = 1;
+    sid[1] = subs.length;
+    sid[7] = authority;
+    subs.forEach((sub, at)=>new DataView(sid.buffer).setUint32(8 + at * 4, sub, true));
+    return sid;
+};
+const EVERYONE = sidOf(1, [0]);
+const USERS = sidOf(5, [32, 545]);
+const SYSTEM = sidOf(5, [18]);
+
+test('LookupPrivilegeValueW finds what the A form finds, whatever the case', ()=>{
+    // advapi32's security tests (test_LookupPrivilegeValue): another machine
+    // is RPC_S_SERVER_UNAVAILABLE, a NULL name and a bogus one are
+    // ERROR_NO_SUCH_PRIVILEGE, and the case of the name does not matter.
+    const { bytes, errors, fns, dword } = setup();
+    const NAME = 0x300;
+    const MACHINE = 0x380;
+    const LUID = 0x3f0;
+    assert.equal(fns.LookupPrivilegeValueW.argBytes, 12);
+
+    putWide(bytes, NAME, 'SeShutdownPrivilege');
+    assert.equal(fns.LookupPrivilegeValueW.handler([0, NAME, LUID]), 1);
+    assert.deepEqual([dword(LUID), dword(LUID + 4)], [19, 0]);
+    putWide(bytes, NAME, 'sErESTOREpRIVILEGE');
+    assert.equal(fns.LookupPrivilegeValueW.handler([0, NAME, LUID]), 1);
+    assert.equal(dword(LUID), 18);
+    putNarrow(bytes, NAME, 'sEcREATEtOKENpRIVILEGE');
+    assert.equal(fns.LookupPrivilegeValueA.handler([0, NAME, LUID]), 1, 'and the A form too');
+    assert.equal(dword(LUID), 2);
+
+    errors.length = 0;
+    assert.equal(fns.LookupPrivilegeValueW.handler([0, 0, LUID]), 0);
+    assert.equal(fns.LookupPrivilegeValueA.handler([0, 0, LUID]), 0);
+    putWide(bytes, NAME, 'SeBogusPrivilege');
+    assert.equal(fns.LookupPrivilegeValueW.handler([0, NAME, LUID]), 0);
+    assert.deepEqual(errors, [1313, 1313, 1313], 'ERROR_NO_SUCH_PRIVILEGE');
+
+    putWide(bytes, NAME, 'SeShutdownPrivilege');
+    putWide(bytes, MACHINE, 'b0gu5.Nam3');
+    assert.equal(fns.LookupPrivilegeValueW.handler([MACHINE, NAME, LUID]), 0);
+    assert.equal(errors.at(-1), 1722, 'RPC_S_SERVER_UNAVAILABLE');
+    putWide(bytes, MACHINE, '\\\\bottlify');
+    assert.equal(fns.LookupPrivilegeValueW.handler([MACHINE, NAME, LUID]), 1,
+        'this machine by its own name');
+    putWide(bytes, MACHINE, '');
+    assert.equal(fns.LookupPrivilegeValueW.handler([MACHINE, NAME, LUID]), 1, 'or by none');
+});
+
+test('GetAce points into the ACL at the ACE asked for, and refuses one past the last', ()=>{
+    const { bytes, errors, fns, dword } = setup();
+    const ACL_AT = 0x400;
+    assert.equal(fns.GetAce.argBytes, 12);
+    bytes.set(USERS, SID);
+    assert.equal(fns.InitializeAcl.handler([ACL_AT, 0x80, 2]), 1);
+    assert.equal(fns.AddAccessAllowedAce.handler([ACL_AT, 2, 0x20019, SID]), 1);
+    bytes.set(EVERYONE, SID);
+    assert.equal(fns.AddAccessDeniedAce.handler([ACL_AT, 2, 0x10000, SID]), 1);
+
+    assert.equal(fns.GetAce.handler([ACL_AT, 0, OUT]), 1);
+    assert.equal(dword(OUT), ACL_AT + 8, 'the first ACE follows the header');
+    assert.equal(fns.GetAce.handler([ACL_AT, 1, OUT]), 1);
+    assert.equal(dword(OUT), ACL_AT + 8 + 8 + USERS.length, 'the second the first');
+    assert.deepEqual([bytes[dword(OUT)], dword(dword(OUT) + 4)], [1, 0x10000],
+        'a pointer into the ACL itself: the denied ACE, its mask');
+
+    assert.equal(fns.GetAce.handler([ACL_AT, 2, OUT]), 0, 'past the last');
+    bytes[ACL_AT] = 9;
+    assert.equal(fns.GetAce.handler([ACL_AT, 0, OUT]), 0, 'not an ACL revision');
+    assert.equal(fns.GetAce.handler([0, 0, OUT]), 0, 'no ACL');
+    assert.deepEqual(errors, [87, 87, 87], 'ERROR_INVALID_PARAMETER');
+});
+
+test('LookupAccountSid names the well-known SIDs as XP does, and sizes as Windows sizes', ()=>{
+    // advapi32's security tests (test_LookupAccountSid): what fits is
+    // written, its size then its length; what does not fit fails with
+    // ERROR_INSUFFICIENT_BUFFER and its size with the terminator.
+    const { bytes, errors, fns, dword } = setup();
+    const NAME = 0x300;
+    const DOMAIN = 0x380;
+    const NAME_SIZE = 0x3e0;
+    const DOMAIN_SIZE = 0x3e4;
+    const USE = 0x3e8;
+    const MACHINE = 0x3f0;
+    const view = new DataView(bytes.buffer);
+    /** @param {number} name @param {number} domain */
+    const room = (name, domain)=>{
+        view.setUint32(NAME_SIZE, name, true);
+        view.setUint32(DOMAIN_SIZE, domain, true);
+        view.setUint32(USE, 0, true);
+    };
+    /** @param {Uint8Array} sid @param {boolean} [wide] */
+    const lookUp = (sid, wide = false)=>{
+        bytes.set(sid, SID);
+        return (wide ? fns.LookupAccountSidW : fns.LookupAccountSidA).handler(
+            [0, SID, NAME, NAME_SIZE, DOMAIN, DOMAIN_SIZE, USE]);
+    };
+    /** @param {number} at */
+    const narrow = at=>String.fromCharCode(...bytes.subarray(at, bytes.indexOf(0, at)));
+    assert.equal(fns.LookupAccountSidA.argBytes, 28);
+    assert.equal(fns.LookupAccountSidW.argBytes, 28);
+
+    for (const [sid, name, domain, use] of /** @type {[Uint8Array, string, string, number][]} */ ([
+        [USERS, 'Users', 'BUILTIN', 4],
+        [sidOf(5, [32, 544]), 'Administrators', 'BUILTIN', 4],
+        [EVERYONE, 'Everyone', '', 5],
+        [SYSTEM, 'SYSTEM', 'NT AUTHORITY', 5],
+        [sidOf(5, [11]), 'Authenticated Users', 'NT AUTHORITY', 5],
+        [sidOf(3, [0]), 'CREATOR OWNER', '', 5],
+        [sidOf(5, [32]), 'BUILTIN', 'BUILTIN', 3],
+    ]))
+    {
+        room(260, 260);
+        assert.equal(lookUp(sid), 1, name);
+        assert.deepEqual([narrow(NAME), narrow(DOMAIN), dword(USE)], [name, domain, use]);
+        assert.deepEqual([dword(NAME_SIZE), dword(DOMAIN_SIZE)], [name.length, domain.length],
+            'the lengths, without terminators');
+        room(260, 260);
+        assert.equal(lookUp(sid, true), 1);
+        assert.equal(wideAt(bytes, NAME, name.length + 1), `${name}\0`);
+        assert.equal(wideAt(bytes, DOMAIN, domain.length + 1), `${domain}\0`);
+    }
+
+    // The account's own SID, as its token gives it, is the user GetUserName names.
+    fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]);
+    fns.GetTokenInformation.handler([dword(OUT), TokenUser, BUFFER, 0x100, NEEDED]);
+    room(260, 260);
+    assert.equal(fns.LookupAccountSidA.handler([0, dword(BUFFER), NAME, NAME_SIZE, DOMAIN,
+        DOMAIN_SIZE, USE]), 1);
+    assert.deepEqual([narrow(NAME), narrow(DOMAIN), dword(USE)], ['User', 'BOTTLIFY', 1]);
+
+    errors.length = 0;
+    room(1, 260);
+    assert.equal(lookUp(USERS), 0, 'a name buffer too small');
+    assert.deepEqual([dword(NAME_SIZE), dword(DOMAIN_SIZE), dword(USE)],
+        ['Users'.length + 1, 'BUILTIN'.length + 1, 0], 'both sizes, terminators counted');
+    room(260, 0);
+    assert.equal(lookUp(USERS, true), 0, 'a domain buffer of nothing');
+    assert.equal(dword(DOMAIN_SIZE), 'BUILTIN'.length + 1);
+    room(0, 0);
+    assert.equal(fns.LookupAccountSidW.handler([0, SID, 0, NAME_SIZE, 0, DOMAIN_SIZE, USE]), 0,
+        'the two-call way of learning the sizes');
+    assert.notEqual(dword(NAME_SIZE), 0);
+    assert.equal(dword(USE), 0, 'the use is not written for a failure');
+    assert.deepEqual(errors, [122, 122, 122], 'ERROR_INSUFFICIENT_BUFFER');
+
+    room(260, 260);
+    bytes.fill(0xee, NAME, NAME + 8);
+    assert.equal(fns.LookupAccountSidA.handler([0, SID, 0, NAME_SIZE, DOMAIN, DOMAIN_SIZE, USE]),
+        1, 'no name buffer: only the domain is written');
+    assert.equal(narrow(DOMAIN), 'BUILTIN');
+    assert.equal(bytes[NAME], 0xee);
+
+    room(260, 260);
+    assert.equal(lookUp(sidOf(5, [21, 0x1a2b3c4d, 0x2b3c4d5e, 0x3c4d5e6f, 1234])), 0);
+    assert.equal(errors.at(-1), 1332, 'ERROR_NONE_MAPPED: no such account here');
+    putNarrow(bytes, MACHINE, 'deepthought');
+    assert.equal(fns.LookupAccountSidA.handler([MACHINE, SID, NAME, NAME_SIZE, DOMAIN,
+        DOMAIN_SIZE, USE]), 0);
+    assert.equal(errors.at(-1), 1722, 'RPC_S_SERVER_UNAVAILABLE');
+    bytes[SID] = 2;
+    assert.equal(lookUp(bytes.slice(SID, SID + 12)), 0);
+    assert.equal(errors.at(-1), 1337, 'ERROR_INVALID_SID');
+});
+
+/**
+ * Lays out EXPLICIT_ACCESS entries at an address, 32 bytes each.
+ *
+ * @param {Uint8Array} bytes @param {number} at
+ * @param {{ rights: number, mode: number, inheritance?: number, form?: number,
+ *           operation?: number, name: number }[]} entries
+ */
+const putEntries = (bytes, at, entries)=>{
+    const view = new DataView(bytes.buffer);
+    entries.forEach((entry, index)=>{
+        const base = at + index * 32;
+        view.setUint32(base, entry.rights, true);
+        view.setUint32(base + 4, entry.mode, true);
+        view.setUint32(base + 8, entry.inheritance ?? 0, true);
+        view.setUint32(base + 12, entry.operation === undefined ? 0 : 0xdeadbeef, true);
+        view.setUint32(base + 16, entry.operation ?? 0, true);
+        view.setUint32(base + 20, entry.form ?? 0, true);
+        view.setUint32(base + 24, 0, true);
+        view.setUint32(base + 28, entry.name, true);
+    });
+    return at;
+};
+
+/**
+ * The ACEs of an ACL in guest memory: type, flags, mask, and the SID as bytes.
+ * One SetEntriesInAcl made is exactly as long as its ACEs; one InitializeAcl
+ * made has the room it was given.
+ *
+ * @param {Uint8Array} bytes @param {number} acl @param {boolean} [tight]
+ */
+const acesAt = (bytes, acl, tight = true)=>{
+    const view = new DataView(bytes.buffer);
+    const aces = [];
+    let at = acl + 8;
+    for (let index = 0; index < view.getUint16(acl + 4, true); index++)
+    {
+        const size = view.getUint16(at + 2, true);
+        aces.push({ type: bytes[at], flags: bytes[at + 1], mask: view.getUint32(at + 4, true),
+            sid: [...bytes.subarray(at + 8, at + size)] });
+        at += size;
+    }
+    if (tight)
+    {
+        assert.equal(at - acl, view.getUint16(acl + 2, true), 'the ACL is as long as its ACEs');
+    }
+    return aces;
+};
+
+test('SetEntriesInAcl merges grants, sets, denies and revokes into a new ACL of its own', ()=>{
+    // advapi32's security tests (test_SetEntriesInAclW/A): no entries and no
+    // ACL is a NULL ACL; a trustee by SID ignores the multiple-trustee
+    // fields; by name, "Everyone" and "CURRENT_USER" are found; a bad form
+    // or an impersonating multiple trustee is ERROR_INVALID_PARAMETER and
+    // leaves NULL behind.
+    const { bytes, errors, fns, dword } = setup();
+    const OLD = 0x300;
+    const ENTRIES = 0x400;
+    const TRUSTEE = 0x480;
+    const NAME = 0x4c0;
+    const NEW = 0x3fc;
+    const KEY_READ = 0x20019;
+    const KEY_WRITE = 0x20006;
+    const view = new DataView(bytes.buffer);
+    assert.equal(fns.SetEntriesInAclW.argBytes, 16);
+    assert.equal(fns.SetEntriesInAclA.argBytes, 16);
+
+    view.setUint32(NEW, 0xdeadbeef, true);
+    assert.equal(fns.SetEntriesInAclW.handler([0, 0, 0, NEW]), 0);
+    assert.equal(dword(NEW), 0, 'nothing in, nothing out');
+
+    bytes.set(USERS, SID);
+    fns.InitializeAcl.handler([OLD, 0x80, 2]);
+    fns.AddAccessAllowedAce.handler([OLD, 2, KEY_READ, SID]);
+    bytes.set(EVERYONE, TRUSTEE);
+
+    putEntries(bytes, ENTRIES, [{ rights: KEY_WRITE, mode: 1, name: TRUSTEE,
+        operation: 0xdeadbeef }]);
+    assert.equal(fns.SetEntriesInAclW.handler([1, ENTRIES, OLD, NEW]), 0);
+    const merged = dword(NEW);
+    assert.ok(merged >= 0x800, 'a block of its own');
+    assert.deepEqual(acesAt(bytes, merged), [
+        { type: 0, flags: 0, mask: KEY_READ, sid: [...USERS] },
+        { type: 0, flags: 0, mask: KEY_WRITE, sid: [...EVERYONE] },
+    ], 'the old ACE kept, the grant after it');
+    assert.equal(acesAt(bytes, OLD, false).length, 1, 'the old ACL is not changed');
+
+    putEntries(bytes, ENTRIES, [{ rights: KEY_WRITE, mode: 1, name: SID }]);
+    fns.SetEntriesInAclW.handler([1, ENTRIES, OLD, NEW]);
+    assert.deepEqual(acesAt(bytes, dword(NEW)), [
+        { type: 0, flags: 0, mask: KEY_READ | KEY_WRITE, sid: [...USERS] },
+    ], 'a grant to a trustee already allowed adds to its ACE');
+
+    putEntries(bytes, ENTRIES, [{ rights: 0x10000, mode: 2, name: SID, inheritance: 3 }]);
+    fns.SetEntriesInAclW.handler([1, ENTRIES, OLD, NEW]);
+    assert.deepEqual(acesAt(bytes, dword(NEW)), [
+        { type: 0, flags: 3, mask: 0x10000, sid: [...USERS] },
+    ], 'a set replaces what the trustee had, inherited by containers and objects');
+
+    putEntries(bytes, ENTRIES, [{ rights: 0, mode: 4, name: SID }]);
+    fns.SetEntriesInAclW.handler([1, ENTRIES, OLD, NEW]);
+    assert.deepEqual(acesAt(bytes, dword(NEW)), [], 'a revoke takes what it was allowed');
+
+    putEntries(bytes, ENTRIES, [
+        { rights: KEY_WRITE, mode: 1, name: putWide(bytes, NAME, 'everyone'), form: 1 },
+        { rights: 0x10000, mode: 3, name: TRUSTEE },
+    ]);
+    fns.SetEntriesInAclW.handler([2, ENTRIES, OLD, NEW]);
+    assert.deepEqual(acesAt(bytes, dword(NEW)), [
+        { type: 1, flags: 0, mask: 0x10000, sid: [...EVERYONE] },
+        { type: 0, flags: 0, mask: KEY_READ, sid: [...USERS] },
+        { type: 0, flags: 0, mask: KEY_WRITE, sid: [...EVERYONE] },
+    ], 'a trustee by name; the denied ACE ahead of every allowed one');
+
+    putEntries(bytes, ENTRIES, [{ rights: KEY_READ, mode: 2, form: 1,
+        name: putNarrow(bytes, NAME, 'CURRENT_USER') }]);
+    assert.equal(fns.SetEntriesInAclA.handler([1, ENTRIES, 0, NEW]), 0);
+    const user = acesAt(bytes, dword(NEW));
+    assert.equal(user.length, 1);
+    assert.deepEqual(user[0].sid.slice(-4), [0xe8, 0x03, 0, 0], 'the account itself, RID 1000');
+    putEntries(bytes, ENTRIES, [{ rights: KEY_READ, mode: 1, form: 1,
+        name: putNarrow(bytes, NAME, 'BUILTIN\\Administrators') }]);
+    fns.SetEntriesInAclA.handler([1, ENTRIES, 0, NEW]);
+    assert.deepEqual(acesAt(bytes, dword(NEW))[0].sid, [...ADMINISTRATORS_SID]);
+
+    for (const [entry, code] of /** @type {[any, number][]} */ ([
+        [{ rights: KEY_READ, mode: 1, form: 2, name: TRUSTEE }, 87],
+        [{ rights: KEY_READ, mode: 1, form: 1, name: putWide(bytes, NAME, 'Everyone'),
+            operation: 1 }, 87],
+        [{ rights: KEY_READ, mode: 9, name: TRUSTEE }, 87],
+        [{ rights: KEY_READ, mode: 1, form: 1, name: putWide(bytes, NAME, 'Nobody At All') },
+            1332],
+    ]))
+    {
+        putEntries(bytes, ENTRIES, [entry]);
+        view.setUint32(NEW, 0xdeadbeef, true);
+        assert.equal(fns.SetEntriesInAclW.handler([1, ENTRIES, OLD, NEW]), code);
+        assert.equal(dword(NEW), 0, 'a failure leaves NULL');
+    }
+    assert.equal(fns.SetEntriesInAclW.handler([1, ENTRIES, OLD, 0]), 87, 'nowhere to put it');
+    assert.deepEqual(errors, [], 'the answer is the return value, not the last error');
+});
+
+test('SetEntriesInAcl keeps inherited ACEs last, and audits for a SACL', ()=>{
+    const { bytes, fns, dword } = setup();
+    const OLD = 0x300;
+    const ENTRIES = 0x400;
+    const NEW = 0x3fc;
+    const ACE = 0x4c0;
+    // An ACE the ACL inherited, put in by hand: INHERITED_ACE, SYSTEM all.
+    bytes.set([0, 0x10, 8 + SYSTEM.length, 0, 0xff, 0x01, 0x1f, 0x00, ...SYSTEM], ACE);
+    fns.InitializeAcl.handler([OLD, 0x80, 2]);
+    fns.AddAce.handler([OLD, 2, 0, ACE, 8 + SYSTEM.length]);
+    bytes.set(USERS, SID);
+    putEntries(bytes, ENTRIES, [
+        { rights: 0x20019, mode: 1, name: SID },
+        { rights: 0x10000, mode: 5, name: SID },
+        { rights: 0x10000, mode: 6, name: SID },
+    ]);
+    assert.equal(fns.SetEntriesInAclW.handler([3, ENTRIES, OLD, NEW]), 0);
+    assert.deepEqual(acesAt(bytes, dword(NEW)).map(ace=>[ace.type, ace.flags, ace.mask]), [
+        [0, 0, 0x20019],
+        [2, 0x40, 0x10000],
+        [2, 0x80, 0x10000],
+        [0, 0x10, 0x1f01ff],
+    ], 'the explicit ones, then the inherited one as it was');
+
+    putEntries(bytes, ENTRIES, [{ rights: 0, mode: 4, name: SID }]);
+    fns.SetEntriesInAclW.handler([1, ENTRIES, dword(NEW), NEW]);
+    assert.deepEqual(acesAt(bytes, dword(NEW)).map(ace=>[ace.type, ace.flags]), [[0, 0x10]],
+        'a revoke takes the allowed and the audited, never the inherited');
+});
+
+test('AccessCheck reads an audit ACE as nothing to do with who is let in', ()=>{
+    const { bytes, fns, dword } = setup();
+    fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]);
+    const token = dword(OUT);
+    const DESCRIPTOR = 0x300;
+    const ACL_AT = 0x340;
+    const MAPPING = 0x400;
+    const LENGTH = 0x440;
+    const GRANTED = 0x444;
+    const STATUS = 0x448;
+    const ACE = 0x4c0;
+    // SYSTEM_AUDIT for Everyone, all rights, ahead of an allowed ACE.
+    bytes.set([2, 0x40, 8 + EVERYONE.length, 0, 0xff, 0xff, 0x1f, 0, ...EVERYONE], ACE);
+    fns.InitializeSecurityDescriptor.handler([DESCRIPTOR, 1]);
+    fns.InitializeAcl.handler([ACL_AT, 0x40, 2]);
+    fns.AddAce.handler([ACL_AT, 2, 0, ACE, 8 + EVERYONE.length]);
+    bytes.set(EVERYONE, SID);
+    fns.AddAccessAllowedAce.handler([ACL_AT, 2, 1, SID]);
+    fns.SetSecurityDescriptorDacl.handler([DESCRIPTOR, 1, ACL_AT, 0]);
+    new DataView(bytes.buffer).setUint32(MAPPING, 1, true);
+    new DataView(bytes.buffer).setUint32(LENGTH, 20, true);
+    assert.equal(fns.AccessCheck.handler([DESCRIPTOR, token, 1, MAPPING, 0, LENGTH, GRANTED,
+        STATUS]), 1);
+    assert.deepEqual([dword(STATUS), dword(GRANTED)], [1, 1], 'allowed, the audit not a denial');
+});
+
+test('the SID pointers point into the SID: the authority, a sub-authority, the count', ()=>{
+    const { bytes, errors, fns } = setup();
+    // S-1-5-32-544, laid out: revision, count, authority (big-endian), then the subs.
+    bytes.set([1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 2, 0, 0], SID);
+    assert.equal(fns.GetSidIdentifierAuthority.handler([SID]), SID + 2);
+    assert.equal(bytes[fns.GetSidIdentifierAuthority.handler([SID]) + 5], 5, 'NT authority');
+    assert.equal(fns.GetSidSubAuthorityCount.handler([SID]), SID + 1);
+    assert.equal(bytes[fns.GetSidSubAuthorityCount.handler([SID])], 2);
+    assert.equal(fns.GetSidSubAuthority.handler([SID, 0]), SID + 8);
+    assert.equal(fns.GetSidSubAuthority.handler([SID, 1]), SID + 12);
+    assert.deepEqual([...new Set(errors)], [0], 'success is said, as Windows says it');
+    assert.equal(fns.GetSidSubAuthority.argBytes, 8);
+    assert.equal(fns.GetSidIdentifierAuthority.argBytes, 4);
+    assert.equal(fns.GetSidSubAuthorityCount.argBytes, 4);
+});
+
+test('SetThreadToken gives a thread the impersonation token OpenThreadToken then opens', ()=>{
+    const { bytes, errors, fns, dword, table } = setup();
+    assert.equal(fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]), 1);
+    const primary = dword(OUT);
+    assert.equal(fns.SetThreadToken.handler([0, primary]), 0, 'a primary token is not one');
+    assert.deepEqual(errors, [1349], 'ERROR_BAD_TOKEN_TYPE');
+    assert.equal(fns.SetThreadToken.handler([0, 0x7777]), 0);
+    assert.deepEqual(errors, [1349, ERROR_INVALID_HANDLE]);
+
+    assert.equal(fns.DuplicateToken.handler([primary, 2, NEEDED]), 1);
+    const impersonation = dword(NEEDED);
+    assert.equal(fns.SetThreadToken.handler([0, impersonation]), 1);
+    assert.equal(fns.OpenThreadToken.handler([CURRENT_THREAD, TOKEN_QUERY, 0, OUT]), 1);
+    const opened = dword(OUT);
+    assert.notEqual(opened, impersonation, 'a handle of its own');
+    assert.equal(table.get(opened)?.object, table.get(impersonation)?.object, 'onto that token');
+
+    // A thread named through a pointer to its handle is the same thread.
+    new DataView(bytes.buffer).setUint32(BUFFER, CURRENT_THREAD, true);
+    assert.equal(fns.SetThreadToken.handler([BUFFER, 0]), 1, 'NULL reverts');
+    assert.equal(fns.OpenThreadToken.handler([CURRENT_THREAD, TOKEN_QUERY, 0, OUT]), 0);
+    assert.equal(errors.at(-1), ERROR_NO_TOKEN);
+});
+
+test('ImpersonateSelf gives the calling thread a token, RevertToSelf takes it away', ()=>{
+    let thread = { name: 'main' };
+    const { errors, fns, table, dword } = setup({ currentThread: ()=>thread });
+    assert.equal(fns.ImpersonateSelf.handler([2]), 1);
+    assert.equal(fns.OpenThreadToken.handler([CURRENT_THREAD, TOKEN_QUERY, 0, OUT]), 1);
+    assert.equal(table.get(dword(OUT))?.object.impersonationLevel, 2);
+
+    const main = thread;
+    thread = { name: 'worker' };
+    assert.equal(fns.OpenThreadToken.handler([CURRENT_THREAD, TOKEN_QUERY, 0, OUT]), 0,
+        'another thread impersonates nobody');
+    assert.equal(errors.at(-1), ERROR_NO_TOKEN);
+    assert.equal(fns.RevertToSelf.handler(), 1, 'reverting without impersonating is nothing');
+
+    thread = main;
+    assert.equal(fns.RevertToSelf.handler(), 1);
+    assert.equal(fns.OpenThreadToken.handler([CURRENT_THREAD, TOKEN_QUERY, 0, OUT]), 0);
+    assert.equal(fns.ImpersonateSelf.argBytes, 4);
+    assert.equal(fns.RevertToSelf.argBytes, 0);
+    assert.equal(fns.SetThreadToken.argBytes, 8);
+});
+
+test('a descriptor is read back through its getters, absolute or self-relative', ()=>{
+    // An installer copies a folder's security: it reads the descriptor
+    // GetFileSecurity filled in, which is self-relative, part by part.
+    const { bytes, errors, fns, dword } = setup();
+    const DESCRIPTOR = 0x300, ACL_AT = 0x340, OUTS = 0x500, RELATIVE = 0x700;
+    bytes.set(ADMINISTRATORS_SID, SID);
+    const aclSize = 8 + 8 + ADMINISTRATORS_SID.length;
+    assert.equal(fns.InitializeSecurityDescriptor.handler([DESCRIPTOR, 1]), 1);
+    assert.equal(fns.InitializeAcl.handler([ACL_AT, aclSize, 2]), 1);
+    assert.equal(fns.AddAccessAllowedAce.handler([ACL_AT, 2, 1, SID]), 1);
+    assert.equal(fns.SetSecurityDescriptorDacl.handler([DESCRIPTOR, 1, ACL_AT, 1]), 1);
+    assert.equal(fns.SetSecurityDescriptorOwner.handler([DESCRIPTOR, SID, 0]), 1);
+
+    assert.equal(fns.GetSecurityDescriptorControl.handler([DESCRIPTOR, OUTS, OUTS + 4]), 1);
+    assert.equal(bytes[OUTS] | bytes[OUTS + 1] << 8, 0x0004 | 0x0008, 'DACL present, defaulted');
+    assert.equal(dword(OUTS + 4), 1, 'revision');
+    assert.equal(fns.GetSecurityDescriptorOwner.handler([DESCRIPTOR, OUTS, OUTS + 4]), 1);
+    assert.equal(dword(OUTS), SID);
+    assert.equal(dword(OUTS + 4), 0);
+    assert.equal(fns.GetSecurityDescriptorGroup.handler([DESCRIPTOR, OUTS, OUTS + 4]), 1);
+    assert.equal(dword(OUTS), 0, 'no group');
+    assert.equal(fns.GetSecurityDescriptorDacl.handler([DESCRIPTOR, OUTS, OUTS + 4, OUTS + 8]),
+        1);
+    assert.deepEqual([dword(OUTS), dword(OUTS + 4), dword(OUTS + 8)], [1, ACL_AT, 1]);
+    new DataView(bytes.buffer).setUint32(OUTS + 4, 0xabcd, true);
+    assert.equal(fns.GetSecurityDescriptorSacl.handler([DESCRIPTOR, OUTS, OUTS + 4, OUTS + 8]),
+        1);
+    assert.equal(dword(OUTS), 0, 'no SACL');
+    assert.equal(dword(OUTS + 4), 0xabcd, 'and the list left as it was');
+    assert.equal(fns.GetSecurityDescriptorLength.handler([DESCRIPTOR]),
+        20 + ADMINISTRATORS_SID.length + aclSize);
+    assert.equal(fns.IsValidAcl.handler([ACL_AT]), 1);
+    assert.equal(fns.IsValidAcl.handler([SID]), 0, 'a SID is no ACL');
+
+    // The same parts laid out self-relative: offsets, not pointers.
+    const { bytes: relative } = selfRelativeDescriptor({ owner: ADMINISTRATORS_SID,
+        dacl: bytes.slice(ACL_AT, ACL_AT + aclSize) });
+    bytes.set(relative, RELATIVE);
+    assert.equal(fns.GetSecurityDescriptorOwner.handler([RELATIVE, OUTS, OUTS + 4]), 1);
+    assert.deepEqual([...bytes.subarray(dword(OUTS), dword(OUTS) + ADMINISTRATORS_SID.length)],
+        [...ADMINISTRATORS_SID]);
+    assert.equal(fns.GetSecurityDescriptorDacl.handler([RELATIVE, OUTS, OUTS + 4, OUTS + 8]), 1);
+    assert.equal(fns.IsValidAcl.handler([dword(OUTS + 4)]), 1, 'the pointer is into the block');
+    assert.equal(fns.GetSecurityDescriptorLength.handler([RELATIVE]), relative.length);
+
+    assert.equal(fns.GetSecurityDescriptorOwner.handler([0, OUTS, OUTS + 4]), 0);
+    assert.equal(errors.at(-1), 1338, 'ERROR_INVALID_SECURITY_DESCR');
 });

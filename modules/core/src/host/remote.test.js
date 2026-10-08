@@ -57,6 +57,9 @@ after(()=>{
     }
 });
 
+/** What the fake volume was asked to make, in order. @type {any[]} */
+const made = [];
+
 /**
  * An application, as far as the wire is concerned.
  *
@@ -189,6 +192,20 @@ function fakeApp({ capacity = 4096, shared = true, audioShared = false } = {}){
                 modified: 0 }],
             /** @param {string} path */
             read: path=>(path === 'C:\\a.txt' ? Uint8Array.of(1, 2) : new Uint8Array(0)),
+            /** @param {string} path */
+            createDirectory: path=>{
+                made.push(['directory', path]);
+                return path !== 'C:\\Windows';
+            },
+            /** @param {string} path @param {Uint8Array} bytes */
+            write: (path, bytes)=>{
+                made.push(['file', path, [...bytes]]);
+            },
+            /** @param {string} path */
+            remove: path=>{
+                made.push(['remove', path]);
+                return path === 'C:\\a.txt';
+            },
         },
         diagnostics: ()=>[
             { name: 'cpu', metrics: { instructions: 5, ring: ()=>0,
@@ -808,6 +825,21 @@ test('the page lists and reads the volume while the program runs', async()=>{
     assert.deepEqual(await remote.files.read('C:\\a.txt'), Uint8Array.of(1, 2));
     await remote.dispose();
 });
+
+test('the page makes a directory and writes a file in the volume while the program runs',
+    async()=>{
+        made.length = 0;
+        const { remote } = await connect();
+        assert.equal(await remote.files.createDirectory('C:\\Windows\\Fonts'), true);
+        assert.equal(await remote.files.createDirectory('C:\\Windows'), false, 'one that is there');
+        await remote.files.write('C:\\Windows\\Fonts\\a.fon', Uint8Array.of(7, 8));
+        assert.equal(await remote.files.remove('C:\\a.txt'), true);
+        assert.equal(await remote.files.remove('C:\\none.txt'), false, 'nothing there');
+        assert.deepEqual(made, [['directory', 'C:\\Windows\\Fonts'],
+            ['directory', 'C:\\Windows'], ['file', 'C:\\Windows\\Fonts\\a.fon', [7, 8]],
+            ['remove', 'C:\\a.txt'], ['remove', 'C:\\none.txt']]);
+        await remote.dispose();
+    });
 
 test('the page reads guest memory and the images mapped while the program runs', async()=>{
     const { remote } = await connect();

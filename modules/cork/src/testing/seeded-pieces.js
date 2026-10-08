@@ -13,13 +13,13 @@
  */
 
 import assert from 'node:assert/strict';
-import { Tables, ownLayout, pagesFor } from '../runtime/layout.js';
+import { ownLayout, pagesFor, tablesSize } from '../runtime/layout.js';
 import { createCorkRuntime } from '../runtime/runtime.js';
 
 /** @param {Record<string, unknown>} config */
 export function machine(config = {}){
-    const layout = ownLayout({ ramSize: 4 << 20 });
-    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const layout = ownLayout({ ramSize: 4 << 20, hashSlots: 1 << 16 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
     const bytes = ()=>new Uint8Array(memory.buffer);
     const view = ()=>new DataView(memory.buffer);
     view().setUint8(layout.x87Empty, 0xff);

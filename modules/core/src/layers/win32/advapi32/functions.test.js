@@ -7,7 +7,7 @@
 import { createRegistryService } from './registry-service.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { REGISTRY_NATIVES, createRegistryFunctions } from './functions.js';
+import { REGISTRY_NATIVES, USER_NAME, createRegistryFunctions } from './functions.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import {
     createHive,
@@ -752,7 +752,7 @@ test('the wide file security calls are refused like the narrow ones, popping wha
     assert.equal(fns.GetFileSecurityW.argBytes, 20);
 });
 
-test('impersonating oneself succeeds, and the file security calls refuse plainly', ()=>{
+test('the file security calls refuse plainly', ()=>{
     const memory = fakeMemory();
     /** @type {number[]} */
     const errors = [];
@@ -764,10 +764,6 @@ test('impersonating oneself succeeds, and the file security calls refuse plainly
         setLastError: code=>errors.push(code),
     });
     const ERROR_CALL_NOT_IMPLEMENTED = 120;
-    assert.equal(fns.ImpersonateSelf.handler(), 1, 'impersonating oneself always succeeds');
-    assert.equal(fns.RevertToSelf.handler(), 1);
-    assert.equal(fns.ImpersonateSelf.argBytes, 4);
-    assert.equal(fns.RevertToSelf.argBytes, 0);
     const expected = { GetFileSecurityA: 20, SetFileSecurityA: 12 };
     const table = /** @type {Record<string, { argBytes: number, handler: (args: number[]) => number }>} */ (
         /** @type {unknown} */ (fns));
@@ -777,6 +773,31 @@ test('impersonating oneself succeeds, and the file security calls refuse plainly
         assert.equal(table[name].handler([]), 0, name);
     }
     assert.deepEqual(errors, Object.keys(expected).map(()=>ERROR_CALL_NOT_IMPLEMENTED));
+});
+
+test('a restart is not implemented, as the consumer line answered, and says so', ()=>{
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errors = [];
+    /** @type {string[]} */
+    const diverged = [];
+    const fns = /** @type {Record<string, any>} */ (/** @type {unknown} */ (createRegistryFunctions({
+        readMemory: memory.readMemory,
+        writeMemory: memory.writeMemory,
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        hive: createRegistryService(createHive()),
+        setLastError: code=>errors.push(code),
+        divergence: api=>diverged.push(api),
+    })));
+    const expected = { InitiateSystemShutdownA: 20, InitiateSystemShutdownW: 20,
+        InitiateSystemShutdownExA: 24, InitiateSystemShutdownExW: 24 };
+    for (const [name, argBytes] of Object.entries(expected))
+    {
+        assert.equal(fns[name].argBytes, argBytes, name);
+        assert.equal(fns[name].handler([0, 0, 0, 1, 1]), 0, name);
+    }
+    assert.deepEqual(errors, [120, 120, 120, 120], 'ERROR_CALL_NOT_IMPLEMENTED');
+    assert.deepEqual(diverged, Object.keys(expected));
 });
 
 test('RegEnumKeyA is the enumeration with a buffer and a size and nothing else', ()=>{
@@ -1080,6 +1101,44 @@ function fakeFiles(){
     };
 }
 
+test('an object\'s security by name is read through the volume and the hive this table holds',
+    ()=>{
+        // The account GetUserName names is the one LookupAccountSid names,
+        // and the module reads its name from here.
+        assert.equal(USER_NAME, 'User');
+        const memory = fakeMemory();
+        const files = fakeFiles();
+        files.stored.set('c:\\setup.ini', new Uint8Array(1));
+        let heap = 0x800;
+        const fns = /** @type {any} */ (createRegistryFunctions({
+            readMemory: memory.readMemory,
+            writeMemory: memory.writeMemory,
+            readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+            hive: createRegistryService(createHive()),
+            // The drive's root, which the stand-in volume of files alone lacks.
+            files: { ...files, stat: path=>(path.toLowerCase() === 'c:\\'
+                ? { exists: true, isDirectory: true, size: 0 } : files.stat(path)) },
+            allocate: size=>{
+                heap += size + 7 & ~7;
+                return heap - (size + 7 & ~7);
+            },
+        }));
+        const SE_FILE_OBJECT = 1;
+        const SE_REGISTRY_KEY = 4;
+        const DACL = 0x4;
+        memory.putString(NAME, 'C:\\setup.ini');
+        assert.equal(fns.GetNamedSecurityInfoA.handler([NAME, SE_FILE_OBJECT, DACL, 0, 0,
+            OUT_HANDLE, 0, OUT_TYPE]), ERROR_SUCCESS);
+        assert.equal(memory.dword(OUT_HANDLE), 0, 'the null DACL of a volume that keeps none');
+        memory.putString(NAME, 'C:\\gone.ini');
+        assert.equal(fns.SetNamedSecurityInfoA.handler([NAME, SE_FILE_OBJECT, DACL, 0, 0, 0, 0]),
+            ERROR_FILE_NOT_FOUND);
+        memory.putString(NAME, 'CURRENT_USER\\Software');
+        assert.equal(fns.GetNamedSecurityInfoA.handler([NAME, SE_REGISTRY_KEY, DACL, 0, 0,
+            OUT_HANDLE, 0, OUT_TYPE]), ERROR_SUCCESS);
+        assert.notEqual(memory.dword(OUT_HANDLE), 0, 'a key has a DACL');
+    });
+
 test('a key saved to a file loads under a root, writes its changes back as it unloads, '
     + 'and opens as an app key', async()=>{
     // advapi32's registry test, test_reg_load_key and test_reg_load_app_key.
@@ -1364,4 +1423,29 @@ test('RegRenameKey gives a key or its subkey a new name, its values going with i
         'the handle still holds the key, under its new name');
     create('Software\\RenameParent\\Other');
     assert.equal(fns.RegRenameKey.handler([child, 0, wide(0x800, 'Other')]), ERROR_ALREADY_EXISTS);
+});
+
+test('IsTextUnicode reads the buffer, the tests asked for, and writes back which passed', ()=>{
+    const memory = fakeMemory();
+    const fns = createRegistryFunctions({
+        readMemory: memory.readMemory,
+        writeMemory: memory.writeMemory,
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        hive: createRegistryService(createHive()),
+        setLastError: ()=>{},
+    });
+    const text = new Uint8Array(Uint16Array.from('Hi there', c=>c.charCodeAt(0)).buffer);
+    const BUFFER = 0x400;
+    const RESULT = 0x500;
+    memory.writeMemory(BUFFER, text);
+    assert.equal(fns.IsTextUnicode.handler([BUFFER, text.length, 0]), 1);
+    memory.writeMemory(RESULT, new Uint8Array([1, 0, 0, 0]));
+    assert.equal(fns.IsTextUnicode.handler([BUFFER, text.length, RESULT]), 1);
+    assert.deepEqual([...memory.readMemory(RESULT, 4)], [1, 0, 0, 0], 'IS_TEXT_UNICODE_ASCII16');
+    memory.writeMemory(RESULT, new Uint8Array([8, 0, 0, 0]));
+    assert.equal(fns.IsTextUnicode.handler([BUFFER, text.length, RESULT]), 0,
+        'asked only for a signature, which it has not');
+    assert.deepEqual([...memory.readMemory(RESULT, 4)], [0, 0, 0, 0]);
+    assert.equal(fns.IsTextUnicode.handler([BUFFER, 1, 0]), 0, 'less than a character');
+    assert.equal(fns.IsTextUnicode.argBytes, 12);
 });

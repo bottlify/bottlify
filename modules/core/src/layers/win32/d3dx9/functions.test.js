@@ -157,19 +157,16 @@ test('a normal ignores translation where a coordinate does not', ()=>{
  * would have made.
  */
 const NOT_BUILT = {
-    D3DXAssembleShader: [7, 5, 6], D3DXAssembleShaderFromFileA: [6, 4, 5],
+    D3DXAssembleShaderFromFileA: [6, 4, 5],
     D3DXCleanMesh: [6, 3, 5], D3DXComputeNormalMap: [6],
     D3DXCreateBox: [6, 4, 5], D3DXCreateCubeTextureFromFileExA: [13, 12],
     D3DXCreateCubeTextureFromFileInMemoryEx: [14, 13], D3DXCreateCylinder: [8, 6, 7],
     D3DXCreateEffect: [9, 7, 8], D3DXCreateEffectCompiler: [7, 5, 6],
-    D3DXCreateEffectFromResourceA: [9, 7, 8], D3DXCreateEffectPool: [1, 0],
-    D3DXCreateFontA: [12, 11], D3DXCreateFontW: [12, 11], D3DXCreateMesh: [6, 5],
+    D3DXCreateEffectFromResourceA: [9, 7, 8], D3DXCreateEffectPool: [1, 0], D3DXCreateMesh: [6, 5],
     D3DXCreateMeshFVF: [6, 5], D3DXCreatePolygon: [5, 3, 4], D3DXCreateSphere: [6, 4, 5],
-    D3DXCreateSprite: [2, 1], D3DXCreateTeapot: [3, 1, 2], D3DXCreateTextA: [8, 5, 6],
-    D3DXCreateTextureFromFileExA: [14, 13], D3DXCreateTextureFromFileInMemoryEx: [15, 14],
+    D3DXCreateTeapot: [3, 1, 2], D3DXCreateTextA: [8, 5, 6],
+    D3DXCreateTextureFromFileExA: [14, 13],
     D3DXCreateTorus: [7, 5, 6], D3DXFilterTexture: [4], D3DXGetImageInfoFromFileA: [2],
-    D3DXGetImageInfoFromFileInMemory: [3],
-    D3DXLoadSurfaceFromSurface: [8],
     D3DXSaveSurfaceToFileInMemory: [5, 0], D3DXSaveTextureToFileInMemory: [4, 0],
     D3DXSimplifyMesh: [7, 6], D3DXUVAtlasPartition: [17, 11, 12, 13, 14], D3DXValidMesh: [3, 2],
 };

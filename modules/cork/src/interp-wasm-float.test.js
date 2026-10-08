@@ -22,7 +22,7 @@ import assert from 'node:assert/strict';
 import { Fault, Unsupported, blockState, interpret } from './interp.js';
 import { WASM_INTERPRETER_AREA, WASM_INTERPRETER_STATICS_AT, WasmExit, createWasmInterpreter }
     from './interp-wasm.js';
-import { ownLayout, pagesFor, Tables } from './runtime/layout.js';
+import { ownLayout, pagesFor, tablesSize } from './runtime/layout.js';
 import { createPageTable } from './runtime/pages.js';
 import { eflagsOf } from './emit/flags.js';
 import { fpremStatus, fpremValue } from './ir-x87.js';
@@ -36,9 +36,9 @@ const ARITH = 0x8d5;
 
 /** A machine in cork's own layout and the tier over it, `precise` unless asked not to be. */
 function machine({ precise = true } = {}){
-    const layout = ownLayout({ ramSize: RAM });
-    const area = layout.tables + Tables.SIZE;
-    const pages = pagesFor(layout, Tables.SIZE + WASM_INTERPRETER_AREA);
+    const layout = ownLayout({ ramSize: RAM, hashSlots: 1 << 16 });
+    const area = layout.tables + tablesSize(layout);
+    const pages = pagesFor(layout, tablesSize(layout) + WASM_INTERPRETER_AREA);
     const memory = new WebAssembly.Memory({ initial: pages, maximum: pages });
     const table = createPageTable(memory, layout);
     const tier = createWasmInterpreter({ memory, layout,

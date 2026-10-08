@@ -27,6 +27,16 @@
  */
 
 /**
+ * The FILE_NOTIFY_CHANGE_ kinds a change to a name is: its name (a file's or
+ * a directory's), its attributes, its size and its last write.
+ */
+const CHANGE_FILE_NAME = 0x001;
+const CHANGE_DIR_NAME = 0x002;
+const CHANGE_ATTRIBUTES = 0x004;
+const CHANGE_SIZE = 0x008;
+const CHANGE_LAST_WRITE = 0x010;
+
+/**
  * @param {any} fs  The filesystem layer's API.
  * @param {((blocks: any[]) => Promise<void>) | null} [fetchBlocks]
  *        Brings absent bundle blocks in. Absent itself when nothing is mounted
@@ -149,6 +159,65 @@ export function createVolume(fs, fetchBlocks = null){
         }
     };
 
+    /**
+     * The watches FindFirstChangeNotification set, each a directory, whether
+     * the names below its own children count, the FILE_NOTIFY_CHANGE_ kinds
+     * it asked for, what to tell, and whether anyone still holds it.
+     *
+     * @type {Set<{ directory: string, subtree: boolean, filter: number,
+     *     changed: () => void, alive: () => boolean }>}
+     */
+    const watches = new Set();
+
+    /**
+     * Where each open file is, so a write through it can be told to the
+     * directory watching it. Kept only while something watches.
+     *
+     * @type {WeakMap<any, string>}
+     */
+    const openedAt = new WeakMap();
+
+    /** @param {string} path  The volume's own spelling, folded, no trailing separator. */
+    const canonical = path=>attempt(()=>fs.resolve(path).path, path)
+        .replace(/\\+$/, '').toLowerCase();
+
+    /**
+     * A change to one name, told to every watch over the directory it is in
+     * -- or over any directory above it, for a watch of the subtree -- whose
+     * filter asks about it. Removing the watched directory itself is told
+     * too, as Windows tells it. Nothing is worked out while nothing watches.
+     *
+     * One operation is one change, whatever names it touches: a rename is
+     * told once to a watch that sees both its names.
+     *
+     * @param {string | string[]} paths @param {number} kind  FILE_NOTIFY_CHANGE_ flags.
+     */
+    const changed = (paths, kind)=>{
+        if (watches.size === 0)
+        {
+            return;
+        }
+        const names = (Array.isArray(paths) ? paths : [paths]).map(canonical);
+        for (const watch of [...watches])
+        {
+            if (!watch.alive())
+            {
+                watches.delete(watch);
+                continue;
+            }
+            const within = names.some(name=>{
+                const parent = name.slice(0, Math.max(name.lastIndexOf('\\'), 0));
+                return parent === watch.directory
+                    || (watch.subtree && parent.startsWith(`${watch.directory}\\`))
+                    || (name === watch.directory && kind === CHANGE_DIR_NAME);
+            });
+            if (within && (watch.filter & kind) !== 0)
+            {
+                watch.changed();
+            }
+        }
+    };
+
     return {
         /**
          * @param {string} path
@@ -176,6 +245,7 @@ export function createVolume(fs, fetchBlocks = null){
             {
                 return false;
             }
+            changed(path, CHANGE_ATTRIBUTES);
             if (attributes === null)
             {
                 recorded.delete(keyOf(path));
@@ -195,6 +265,7 @@ export function createVolume(fs, fetchBlocks = null){
         setModified(path, modified){
             return attempt(()=>{
                 fs.setModified(path, modified);
+                changed(path, CHANGE_LAST_WRITE);
                 return true;
             }, false);
         },
@@ -205,13 +276,28 @@ export function createVolume(fs, fetchBlocks = null){
          * @returns {any} an open file, or null
          */
         open(path, mode){
-            return attempt(()=>fs.open(path, {
+            const existed = watches.size > 0 && (mode.create || mode.truncate)
+                ? attempt(()=>fs.stat(path), null) !== null : null;
+            const node = attempt(()=>fs.open(path, {
                 read: mode.read !== false,
                 write: Boolean(mode.write),
                 shareWrite: mode.shareWrite === true,
                 disposition: dispositionOf(mode),
                 inherited: mode.inherited === true,
             }), null);
+            if (node && watches.size > 0)
+            {
+                openedAt.set(node, path);
+                if (existed === false)
+                {
+                    changed(path, CHANGE_FILE_NAME);
+                }
+                else if (existed && mode.truncate)
+                {
+                    changed(path, CHANGE_SIZE | CHANGE_LAST_WRITE);
+                }
+            }
+            return node;
         },
 
         /**
@@ -255,13 +341,24 @@ export function createVolume(fs, fetchBlocks = null){
         /** @param {any} node @param {number} offset @param {Uint8Array} bytes */
         write(node, offset, bytes){
             fs.seek(node, offset, SeekFrom.BEGIN);
-            return fs.write(node, bytes);
+            const written = fs.write(node, bytes);
+            const path = watches.size > 0 ? openedAt.get(node) : undefined;
+            if (path !== undefined && bytes.length > 0)
+            {
+                changed(path, CHANGE_SIZE | CHANGE_LAST_WRITE);
+            }
+            return written;
         },
 
         /** @param {any} node @param {number} size */
         truncate(node, size){
             fs.seek(node, size, SeekFrom.BEGIN);
             fs.setEndOfFile(node);
+            const path = watches.size > 0 ? openedAt.get(node) : undefined;
+            if (path !== undefined)
+            {
+                changed(path, CHANGE_SIZE | CHANGE_LAST_WRITE);
+            }
         },
 
         /**
@@ -311,19 +408,48 @@ export function createVolume(fs, fetchBlocks = null){
                     fs.deleteFile(path);
                 }
                 carry(path, null);
+                changed(path, entry.directory ? CHANGE_DIR_NAME : CHANGE_FILE_NAME);
                 return true;
             }, false);
         },
 
         /** @param {string} path @returns {boolean} */
-        mkdir: path=>attempt(()=>fs.createDirectory(path), false),
+        mkdir: path=>{
+            const made = attempt(()=>fs.createDirectory(path), false);
+            if (made !== false)
+            {
+                changed(path, CHANGE_DIR_NAME);
+            }
+            return made;
+        },
 
         /** @param {string} from @param {string} to @returns {boolean} */
         rename: (from, to)=>attempt(()=>{
             fs.rename(from, to);
             carry(from, to);
+            if (watches.size > 0)
+            {
+                const kind = attempt(()=>fs.stat(to), null)?.directory
+                    ? CHANGE_DIR_NAME : CHANGE_FILE_NAME;
+                changed([from, to], kind);
+            }
             return true;
         }, false),
+
+        /**
+         * Tells `notify` when a name under a directory changes in a way
+         * `filter` asks about, until the watch is closed or `alive` says
+         * nobody holds it any more.
+         *
+         * @param {string} path @param {boolean} subtree @param {number} filter
+         * @param {() => void} notify @param {() => boolean} alive
+         * @returns {{ close: () => void }}
+         */
+        watch(path, subtree, filter, notify, alive){
+            const watch = { directory: canonical(path), subtree, filter, changed: notify, alive };
+            watches.add(watch);
+            return { close: ()=>void watches.delete(watch) };
+        },
 
         /**
          * @param {string} path @param {string} [pattern]

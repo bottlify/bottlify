@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openIso } from '@bottlify/core/iso';
-import { buildIso } from '../../core/src/layers/filesystem/internal/iso/iso.fixture.js';
+import { buildIso } from '../../core/src/layers/filesystem/internal/iso/build.js';
 import {
     autorunText, discEntry, discOptions, isDiscImage, isDiscMedia, readAutorun, splitCommand,
 } from './disc.js';
@@ -118,6 +118,22 @@ test('installing from a disc starts its program from its own drive, the image mo
     assert.deepEqual(chosen.executable, SETUP);
     assert.equal(chosen.commandLine, '"D:\\Setup.exe"');
     await assert.rejects(discOptions(media, { entry: 'nothing.exe' }), /has no nothing\.exe/);
+});
+
+test('an autorun program starts in the disc root, a chosen one where it lives', async()=>{
+    // A launcher in a subfolder finds the setup beside autorun.inf by a
+    // relative name, which only resolves from the root.
+    const media = disc({
+        'AUTORUN.INF': '[autorun]\r\nopen=Extra\\menu.exe\r\n',
+        'Extra/menu.exe': PROGRAM,
+        'Setup.exe': SETUP,
+    });
+    const autorun = await discOptions(media);
+    assert.equal(autorun.imagePath, 'D:\\Extra\\menu.exe');
+    assert.equal(autorun.startDirectory, 'D:\\');
+    assert.equal((await discOptions(media, { entry: 'Extra\\menu.exe' })).startDirectory,
+        'D:\\Extra');
+    assert.equal((await discOptions(media, { entry: 'Setup.exe' })).startDirectory, 'D:\\');
     await assert.rejects(discOptions(disc({ 'readme.txt': 'x' })), /names no program to start/);
 });
 

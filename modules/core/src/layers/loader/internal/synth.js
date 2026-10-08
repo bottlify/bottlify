@@ -26,9 +26,15 @@ const PE_OFFSET = 0x40;
 const COFF_EXECUTABLE_IMAGE = 0x0002;
 const COFF_32BIT_MACHINE = 0x0100;
 const COFF_DLL = 0x2000;
+const COFF_RELOCS_STRIPPED = 0x0001;
 
 const OPTIONAL_HEADER_SIZE = 0xe0;
 const SUBSYSTEM_CONSOLE = 3;
+const SUBSYSTEM_WINDOWS_GUI = 2;
+/** What a program's linker asks for by default: a megabyte of stack, and of heap. */
+const PROGRAM_STACK_RESERVE = 0x100000;
+/** Where an executable asks to be loaded, the address every linker defaults to. */
+const PROGRAM_BASE = 0x00400000;
 
 const SECTION_CNT_CODE = 0x00000020;
 const SECTION_CNT_INITIALIZED_DATA = 0x00000040;
@@ -276,6 +282,105 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
     };
 }
 
+/** The size of an import descriptor, and of the table of them's terminator. */
+const IMPORT_DESCRIPTOR_SIZE = 20;
+const CALL_INDIRECT = [0xff, 0x15];
+const PUSH_EAX = 0x50;
+
+/**
+ * @typedef {Object} SynthesisedProgram
+ * @property {Uint8Array} bytes   The whole image: a file and its mapping alike.
+ * @property {number} base        Where it asks to be loaded.
+ * @property {number} entryPointRva
+ */
+
+/**
+ * An executable whose whole program is one routine of a library: its entry
+ * point calls `library!routine` and ends the process with what it answers,
+ * through kernel32's ExitProcess.
+ *
+ * What a program the system provides is made of when the system is this
+ * engine: the image is a real one -- loaded, bound and started as any other,
+ * its own process with its own name and command line -- and the work is the
+ * library's, which reads that command line as the program would. Both calls
+ * go through the image's import table, so the loader binds them as it binds
+ * any program's, and nothing here needs an address that exists only once a
+ * machine does.
+ *
+ * @param {Object} options
+ * @param {string} options.library  As an import descriptor names it.
+ * @param {string} options.routine  The export of `library` that is the program.
+ * @returns {SynthesisedProgram}
+ */
+export function synthesiseProgram({ library, routine }){
+    requireAscii(library, 'library name');
+    requireAscii(routine, 'routine name');
+    const base = PROGRAM_BASE;
+    const imports = [
+        { library, name: routine },
+        { library: 'KERNEL32.dll', name: 'ExitProcess' },
+    ];
+
+    // The tables the loader reads, on the writable page after the code: the
+    // address tables it writes the bound addresses into first and together,
+    // which is the range the IAT directory names; then the lookup tables,
+    // each name's hint and text, and the libraries' names.
+    const dataRva = SECTION_RVA + PAGE;
+    const descriptorsSize = (imports.length + 1) * IMPORT_DESCRIPTOR_SIZE;
+    const iatRva = dataRva + descriptorsSize;
+    const iltRva = iatRva + imports.length * 8;
+    let cursor = iltRva + imports.length * 8;
+    const hintRvas = imports.map(entry=>{
+        const at = align(cursor, 2);
+        cursor = at + 2 + entry.name.length + 1;
+        return at;
+    });
+    const libraryRvas = imports.map(entry=>{
+        const at = cursor;
+        cursor += entry.library.length + 1;
+        return at;
+    });
+    const dataSize = cursor - dataRva;
+
+    /** @param {number} index */
+    const iatSlot = index=>iatRva + index * 8;
+    const code = [
+        ...CALL_INDIRECT, ...le32(base + iatSlot(0)),
+        PUSH_EAX,
+        ...CALL_INDIRECT, ...le32(base + iatSlot(1)),
+        INT3,
+    ];
+
+    const size = dataRva + align(dataSize, PAGE);
+    const bytes = new Uint8Array(size);
+    const view = new DataView(bytes.buffer);
+    writeHeaders(bytes, view, {
+        base, size, sectionSize: code.length, dataRva, dataSize,
+        exportDirectoryRva: 0, exportDirectorySize: 0, entryPointRva: SECTION_RVA,
+        program: { base, importDirectoryRva: dataRva, importDirectorySize: descriptorsSize,
+            iatRva, iatSize: imports.length * 8 },
+    });
+    bytes.set(code, SECTION_RVA);
+
+    // One descriptor a routine, each its own library's: a lookup table and an
+    // address table of one entry and a terminator.
+    imports.forEach((entry, index)=>{
+        const descriptor = dataRva + index * IMPORT_DESCRIPTOR_SIZE;
+        view.setUint32(descriptor, iltRva + index * 8, true); // OriginalFirstThunk
+        view.setUint32(descriptor + 12, libraryRvas[index], true); // Name
+        view.setUint32(descriptor + 16, iatSlot(index), true); // FirstThunk
+        view.setUint32(iltRva + index * 8, hintRvas[index], true);
+        view.setUint32(iatSlot(index), hintRvas[index], true);
+        bytes.set(encoder.encode(entry.name), hintRvas[index] + 2);
+        bytes.set(encoder.encode(entry.library), libraryRvas[index]);
+    });
+
+    return { bytes, base, entryPointRva: SECTION_RVA };
+}
+
+/** @param {number} value @returns {number[]} */
+const le32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
+
 /**
  * @param {SynthExport[]} exports
  * @returns {number[]} the ordinal of each export, in declaration order
@@ -341,6 +446,10 @@ function assignOrdinals(exports){
  * @param {number} layout.exportDirectoryRva
  * @param {number} layout.exportDirectorySize
  * @param {number} layout.entryPointRva
+ * @param {{ base: number, importDirectoryRva: number, importDirectorySize: number,
+ *     iatRva: number, iatSize: number }} [layout.program]
+ *     A program rather than a library: loaded at `base` as an executable is,
+ *     a windowed one, its imports where these say.
  */
 function writeHeaders(bytes, view, layout){
     const rawSize = align(layout.sectionSize, PAGE);
@@ -353,7 +462,9 @@ function writeHeaders(bytes, view, layout){
     view.setUint16(coff, MACHINE_I386, true);
     view.setUint16(coff + 2, layout.dataRva === 0 ? 1 : 2, true); // NumberOfSections
     view.setUint16(coff + 16, OPTIONAL_HEADER_SIZE, true);
-    view.setUint16(coff + 18, COFF_EXECUTABLE_IMAGE | COFF_32BIT_MACHINE | COFF_DLL, true);
+    view.setUint16(coff + 18, layout.program
+        ? COFF_EXECUTABLE_IMAGE | COFF_32BIT_MACHINE | COFF_RELOCS_STRIPPED
+        : COFF_EXECUTABLE_IMAGE | COFF_32BIT_MACHINE | COFF_DLL, true);
 
     const optional = coff + 20;
     view.setUint16(optional, PE32_MAGIC, true);
@@ -368,10 +479,24 @@ function writeHeaders(bytes, view, layout){
     view.setUint16(optional + 48, 4, true); // MajorSubsystemVersion
     view.setUint32(optional + 56, layout.size, true); // SizeOfImage
     view.setUint32(optional + 60, HEADERS_SIZE, true); // SizeOfHeaders
-    view.setUint16(optional + 68, SUBSYSTEM_CONSOLE, true);
+    view.setUint16(optional + 68, layout.program ? SUBSYSTEM_WINDOWS_GUI : SUBSYSTEM_CONSOLE, true);
+    if (layout.program)
+    {
+        view.setUint32(optional + 72, PROGRAM_STACK_RESERVE, true); // SizeOfStackReserve
+        view.setUint32(optional + 76, PAGE, true); // SizeOfStackCommit
+        view.setUint32(optional + 80, PROGRAM_STACK_RESERVE, true); // SizeOfHeapReserve
+        view.setUint32(optional + 84, PAGE, true); // SizeOfHeapCommit
+    }
     view.setUint32(optional + 92, 16, true); // NumberOfRvaAndSizes
     view.setUint32(optional + 96, layout.exportDirectoryRva, true);
     view.setUint32(optional + 100, layout.exportDirectorySize, true);
+    if (layout.program)
+    {
+        view.setUint32(optional + 104, layout.program.importDirectoryRva, true);
+        view.setUint32(optional + 108, layout.program.importDirectorySize, true);
+        view.setUint32(optional + 192, layout.program.iatRva, true); // IAT directory
+        view.setUint32(optional + 196, layout.program.iatSize, true);
+    }
 
     const section = optional + OPTIONAL_HEADER_SIZE;
     bytes.set(encoder.encode('.text'), section);

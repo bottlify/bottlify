@@ -199,11 +199,15 @@ function fakeContexts(){
  * @param {(bytes: number) => number} [options.allocate]
  * @param {(address: number) => void} [options.release]
  * @param {(entry: number, args: number[]) => number} [options.call]
+ * @param {any} [options.draw]  What draws on a context, for a test that reads its clip.
+ * @param {() => unknown} [options.callerThread]  The thread a call is made on.
+ * @param {(id: number) => boolean} [options.processExists]  Which process ids are live.
  */
 function setup(
     { cursor, keyState, asyncKeyState, keyboardState, setKeyboardState,
         findResource, loadString, dispatch = ()=>0, screen, regionBox,
-        moduleBase, bitmapFromDib, files, allocate, release, call } = {})
+        moduleBase, bitmapFromDib, files, allocate, release, call, draw, callerThread,
+        processExists } = {})
 {
     screen ??= { ...SCREEN, displayWidth: SCREEN.width, displayHeight: SCREEN.height };
     const memory = fakeMemory();
@@ -254,6 +258,9 @@ function setup(
         call,
         loadString,
         regionBox,
+        draw,
+        callerThread,
+        processExists,
         /** @param {string} text */
         say: text=>said.push(text),
         /** @param {string} api @param {string} detail */
@@ -898,6 +905,7 @@ test('BeginPaint fills the struct the guest allocated', ()=>{
     const { memory, fns } = setup();
     const hwnd = makeWindow(memory, fns);
     memory.fill(PAINT_BUFFER, PAINTSTRUCT.SIZE / 4);
+    fns.InvalidateRect.handler([hwnd, 0, 0]);
 
     const hdc = fns.BeginPaint.handler([hwnd, PAINT_BUFFER]);
     assert.notEqual(hdc, 0, 'a DC was made for the window');
@@ -906,7 +914,7 @@ test('BeginPaint fills the struct the guest allocated', ()=>{
     const painted = [0, 4, 8, 12].map(at=>memory.u32(PAINT_BUFFER + PAINTSTRUCT.rcPaint + at));
     fns.GetClientRect.handler([hwnd, RECT_BUFFER]);
     assert.deepEqual(painted, [0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at)),
-        'a window with no partial damage paints all of its client area');
+        'a window invalidated whole paints all of its client area');
     assert.equal(memory.u32(PAINT_BUFFER + PAINTSTRUCT.fRestore), 0);
 });
 
@@ -930,6 +938,36 @@ test('BeginPaint clears the update region, so the next one has nothing to do', (
     memory.fill(RECT_BUFFER, 4);
     assert.equal(fns.GetUpdateRect.handler([hwnd, RECT_BUFFER, 0]), 0,
         'and afterwards there is nothing left dirty');
+});
+
+test('a BeginPaint with nothing to paint paints nowhere: the second of one WM_PAINT', ()=>{
+    // A skin paints the dialog in its own WM_PAINT, then hands the message to
+    // the procedure it subclassed, whose BeginPaint finds the window clean.
+    // Windows clips that one to the empty update region; one that drew
+    // everywhere filled the dialog grey over the skin.
+    /** @type {[number, any[]][]} */
+    const clips = [];
+    const { memory, fns } = setup({ draw: {
+        clip: (/** @type {number} */ hdc, /** @type {any[]} */ area)=>clips.push([hdc, area]),
+    } });
+    const hwnd = makeWindow(memory, fns, WS_OVERLAPPED | WS_VISIBLE);
+    fns.InvalidateRect.handler([hwnd, 0, 0]);
+    const rcPaint = ()=>[0, 4, 8, 12].map(at=>memory.u32(PAINT_BUFFER + PAINTSTRUCT.rcPaint + at));
+
+    const skin = fns.BeginPaint.handler([hwnd, PAINT_BUFFER]);
+    fns.GetClientRect.handler([hwnd, RECT_BUFFER]);
+    assert.deepEqual(rcPaint(), [0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at)),
+        'the first paints the client area');
+    assert.ok((clips.at(-1)?.[1].length ?? 0) > 0, 'and draws where the window shows');
+    fns.EndPaint.handler([hwnd, PAINT_BUFFER]);
+
+    const behind = fns.BeginPaint.handler([hwnd, PAINT_BUFFER]);
+    assert.notEqual(behind, 0, 'a context all the same');
+    assert.notEqual(skin, 0);
+    assert.deepEqual(rcPaint(), [0, 0, 0, 0], 'with nothing in rcPaint');
+    assert.deepEqual(clips.at(-1), [behind, []], 'and clipped to nothing');
+    assert.equal(memory.u32(PAINT_BUFFER + PAINTSTRUCT.fErase), 0, 'nor anything to erase');
+    fns.EndPaint.handler([hwnd, PAINT_BUFFER]);
 });
 
 test('a DC taken is a DC given back', ()=>{
@@ -3303,4 +3341,331 @@ test('LoadCursorFromFile loads a .cur or .ani; SetSystemCursor replaces a system
     assert.equal(cursors.at(-1).bgra[8], 100, 'the standard arrow is now the file\'s picture');
     assert.equal(fns.SetSystemCursor.handler([spin, 32512]), 0, 'the handle was destroyed');
     assert.equal(fns.SetSystemCursor.handler([arrow, 1]), 0, 'not a system cursor id');
+});
+
+// --- AnimateWindow, AllowSetForegroundWindow, ghosting and the legacy IME switch ---
+
+const AW_HOR_POSITIVE = 0x00000001;
+const AW_VER_NEGATIVE = 0x00000008;
+const AW_CENTER = 0x00000010;
+const AW_HIDE = 0x00010000;
+const AW_ACTIVATE = 0x00020000;
+const AW_SLIDE = 0x00040000;
+const AW_BLEND = 0x00080000;
+const ERROR_INVALID_PARAMETER = 87;
+
+test('AnimateWindow ends where the animation would: shown, activated or hidden', ()=>{
+    const { memory, fns, errors } = setup();
+    assert.equal(fns.AnimateWindow.argBytes, 12);
+    const hwnd = makeWindow(memory, fns);
+
+    assert.equal(fns.AnimateWindow.handler([hwnd, 200, AW_ACTIVATE | AW_BLEND]), 1);
+    assert.equal(fns.IsWindowVisible.handler([hwnd]), 1);
+    assert.equal(fns.GetActiveWindow.handler([]), hwnd, 'AW_ACTIVATE activates it');
+
+    errors.length = 0;
+    assert.equal(fns.AnimateWindow.handler([hwnd, 200, AW_ACTIVATE | AW_BLEND]), 0,
+        'showing a window that is visible is refused');
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER]);
+
+    assert.equal(fns.AnimateWindow.handler([hwnd, 200, AW_HIDE | AW_SLIDE | AW_VER_NEGATIVE]),
+        1);
+    assert.equal(fns.IsWindowVisible.handler([hwnd]), 0);
+    errors.length = 0;
+    assert.equal(fns.AnimateWindow.handler([hwnd, 200, AW_HIDE | AW_BLEND]), 0,
+        'and so is hiding one that is hidden');
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER]);
+});
+
+test('AnimateWindow without AW_ACTIVATE shows a window and leaves the active one active', ()=>{
+    const { memory, fns } = setup();
+    const active = makeWindow(memory, fns, WS_VISIBLE);
+    const other = makeWindow(memory, fns);
+    assert.equal(fns.GetActiveWindow.handler([]), active);
+
+    assert.equal(fns.AnimateWindow.handler([other, 150, AW_CENTER]), 1,
+        'AW_CENTER needs no direction');
+    assert.equal(fns.IsWindowVisible.handler([other]), 1);
+    assert.equal(fns.GetActiveWindow.handler([]), active);
+});
+
+test('AnimateWindow refuses what MSDN says it refuses, and changes nothing', ()=>{
+    const ERROR_INVALID_WINDOW_HANDLE = 1400;
+    const WS_CHILD = 0x40000000;
+    const { memory, fns, errors } = setup();
+    const hwnd = makeWindow(memory, fns);
+    const child = fns.CreateWindowExA.handler(
+        [0, CLASS_NAME, TITLE, WS_CHILD, 0, 0, 10, 10, hwnd, 0, HINSTANCE, 0]);
+    /** @type {[number, number, string][]} */
+    const refused = [
+        [hwnd, 0, 'a roll with no direction'],
+        [hwnd, AW_SLIDE, 'a slide with no direction'],
+        [hwnd, AW_ACTIVATE, 'activation is no effect, and a roll needs a direction'],
+        [child, AW_BLEND, 'a child does not fade'],
+        [hwnd, AW_HIDE | AW_ACTIVATE | AW_BLEND, 'nor is a window hidden and activated'],
+    ];
+    for (const [target, flags, reason] of refused)
+    {
+        errors.length = 0;
+        assert.equal(fns.AnimateWindow.handler([target, 200, flags]), 0, reason);
+        assert.deepEqual(errors, [ERROR_INVALID_PARAMETER], reason);
+    }
+    assert.equal(fns.IsWindowVisible.handler([hwnd]), 0, 'nothing was shown');
+
+    errors.length = 0;
+    assert.equal(fns.AnimateWindow.handler([0x9999, 200, AW_BLEND]), 0);
+    assert.deepEqual(errors, [ERROR_INVALID_WINDOW_HANDLE]);
+    assert.equal(fns.AnimateWindow.handler([hwnd, 200, AW_SLIDE | AW_HOR_POSITIVE]), 1,
+        'a slide with a direction is accepted');
+});
+
+test('AnimateWindow refuses another thread\'s window and leaves the last error clear', ()=>{
+    const caller = { current: { id: 7 } };
+    const { memory, fns, errors } = setup({ callerThread: ()=>caller.current });
+    const hwnd = makeWindow(memory, fns);
+    caller.current = { id: 8 };
+    errors.length = 0;
+    assert.equal(fns.AnimateWindow.handler([hwnd, 200, AW_BLEND]), 0);
+    assert.deepEqual(errors, [0], 'GetLastError answers ERROR_SUCCESS, as MSDN says');
+    assert.equal(fns.IsWindowVisible.handler([hwnd]), 0);
+    caller.current = { id: 7 };
+    assert.equal(fns.AnimateWindow.handler([hwnd, 200, AW_BLEND]), 1, 'its own thread may');
+});
+
+test('AllowSetForegroundWindow lends a right every caller has, to a process that exists', ()=>{
+    const ASFW_ANY = 0xffffffff;
+    const live = new Set([0x2000]);
+    const { fns, errors } = setup({ processExists: id=>live.has(id) });
+    assert.equal(fns.AllowSetForegroundWindow.argBytes, 4);
+    assert.equal(fns.AllowSetForegroundWindow.handler([ASFW_ANY]), 1, 'every process');
+    assert.equal(fns.AllowSetForegroundWindow.handler([0x2000]), 1, 'a process that runs');
+    assert.equal(fns.AllowSetForegroundWindow.handler([0x3000]), 0, 'one that does not');
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER]);
+
+    const unknowing = setup();
+    assert.equal(unknowing.fns.AllowSetForegroundWindow.handler([0x3000]), 1,
+        'a host that cannot tell which ids are live accepts every one');
+});
+
+test('DisableProcessWindowsGhosting takes nothing and changes nothing', ()=>{
+    const { memory, fns, errors } = setup();
+    const hwnd = makeWindow(memory, fns, WS_VISIBLE);
+    assert.equal(fns.DisableProcessWindowsGhosting.argBytes, 0);
+    assert.equal(fns.DisableProcessWindowsGhosting.handler([]), 0);
+    assert.equal(fns.IsWindowVisible.handler([hwnd]), 1);
+    assert.deepEqual(errors, []);
+});
+
+test('WINNLSEnableIME finds the input method off on a system that has none', ()=>{
+    // The legacy switch serves Japanese and Korean systems' input methods;
+    // on this en-US one there is none to turn on, so the state it answers
+    // having found stays off whatever was asked before.
+    const { fns } = setup();
+    assert.equal(fns.WINNLSEnableIME.argBytes, 8);
+    assert.equal(fns.WINNLSEnableIME.handler([0, 1]), 0);
+    assert.equal(fns.WINNLSEnableIME.handler([0, 0]), 0);
+    assert.equal(fns.WINNLSEnableIME.handler([0, 1]), 0);
+});
+
+// --- the colours, the caption's flash, a window opened from its icon ---
+
+/**
+ * A drawing that answers every call, writing down the colour of each fill:
+ * enough of one for the frame to be painted and its caption read back.
+ *
+ * @param {number[]} fills
+ */
+function recordingDraw(fills){
+    return new Proxy({}, {
+        get: (_, name)=>{
+            if (name === 'fill')
+            {
+                /** @param {number} hdc @param {any} rect @param {number} color */
+                return (hdc, rect, color)=>{
+                    fills.push(color);
+                    return true;
+                };
+            }
+            if (name === 'measure')
+            {
+                return ()=>({ width: 8, height: 16, ascent: 12 });
+            }
+            return ()=>1;
+        },
+    });
+}
+
+test('SetSysColors changes what GetSysColor answers, and every window is told', ()=>{
+    const WM_SYSCOLORCHANGE = 0x0015;
+    const COLOR_WINDOW = 5;
+    /** @type {number[]} */
+    const told = [];
+    const { memory, fns, errors } = setup({
+        dispatch: (/** @type {number} */ wndProc, /** @type {any} */ message)=>{
+            told.push(message.message);
+            return 0;
+        },
+    });
+    makeWindow(memory, fns, WS_OVERLAPPED | WS_VISIBLE);
+    const before = fns.GetSysColor.handler([COLOR_WINDOW]);
+    memory.putU32s(OUT_BUFFER, [COLOR_WINDOW, 99, 0x00123456, 0x00abcdef]);
+    assert.equal(fns.SetSysColors.handler([2, OUT_BUFFER, OUT_BUFFER + 8]), 1);
+    assert.equal(fns.GetSysColor.handler([COLOR_WINDOW]), 0x00123456);
+    assert.notEqual(before, 0x00123456);
+    assert.equal(fns.GetSysColor.handler([99]), 0, 'an index that names nothing is passed over');
+    assert.ok(told.includes(WM_SYSCOLORCHANGE), 'the window heard of it');
+
+    assert.equal(fns.SetSysColors.handler([1, 0, 0]), 0);
+    assert.deepEqual(errors, [998]);
+    assert.equal(fns.SetSysColors.handler([0, 0, 0]), 1, 'none to change is no fault');
+});
+
+test('FlashWindow draws the caption the other way about, and answers how it was', ()=>{
+    const COLOR_ACTIVE = 0x00800000;
+    const COLOR_INACTIVE = 0x00808080;
+    /** @type {number[]} */
+    const fills = [];
+    const { memory, fns, errors } = setup({ draw: recordingDraw(fills) });
+    const hwnd = makeWindow(memory, fns, WS_CAPTION | WS_VISIBLE);
+    fns.SetActiveWindow.handler([hwnd]);
+    assert.equal(fns.GetActiveWindow.handler([]), hwnd);
+
+    fills.length = 0;
+    assert.equal(fns.FlashWindow.handler([hwnd, 1]), 1, 'it was drawn active');
+    assert.ok(fills.includes(COLOR_INACTIVE) && !fills.includes(COLOR_ACTIVE),
+        'and is drawn inactive now');
+    fills.length = 0;
+    assert.equal(fns.FlashWindow.handler([hwnd, 1]), 0, 'drawn inactive before this one');
+    assert.ok(fills.includes(COLOR_ACTIVE));
+    fns.FlashWindow.handler([hwnd, 1]);
+    fills.length = 0;
+    assert.equal(fns.FlashWindow.handler([hwnd, 0]), 0);
+    assert.ok(fills.includes(COLOR_ACTIVE), 'FALSE puts it back as the activation has it');
+
+    assert.equal(fns.FlashWindow.handler([0x9999, 1]), 0);
+    assert.deepEqual(errors, [1400]);
+});
+
+test('OpenIcon restores a minimised window, and refuses one that is not', async()=>{
+    const { memory, fns } = setup();
+    const hwnd = makeWindow(memory, fns, WS_OVERLAPPED | WS_VISIBLE);
+    assert.equal(await fns.OpenIcon.handler([hwnd]), 0);
+    await fns.CloseWindow.handler([hwnd]);
+    assert.equal(fns.IsIconic.handler([hwnd]), 1);
+    assert.equal(await fns.OpenIcon.handler([hwnd]), 1);
+    assert.equal(fns.IsIconic.handler([hwnd]), 0);
+    assert.equal(fns.IsWindowVisible.handler([hwnd]), 1);
+    assert.equal(await fns.OpenIcon.handler([0x9999]), 0);
+});
+
+test('BroadcastSystemMessage sends to every top-level window, and a query can be denied', ()=>{
+    const WM_APP = 0x8000;
+    const BSF_QUERY = 0x0001;
+    const BSF_POSTMESSAGE = 0x0010;
+    const BSM_VXDS = 0x0001;
+    const BSM_APPLICATIONS = 0x0008;
+    const BROADCAST_QUERY_DENY = 0x424d5144;
+    /** @type {{ hwnd: number, message: number }[]} */
+    const told = [];
+    let deny = 0;
+    const { memory, fns, errors } = setup({
+        dispatch: (/** @type {number} */ wndProc, /** @type {any} */ message)=>{
+            if (message.message === WM_APP)
+            {
+                told.push({ hwnd: message.hwnd, message: message.message });
+                return message.hwnd === deny ? BROADCAST_QUERY_DENY : 1;
+            }
+            return 0;
+        },
+    });
+    const first = makeWindow(memory, fns, WS_OVERLAPPED);
+    const second = makeWindow(memory, fns, WS_OVERLAPPED);
+
+    memory.putU32s(OUT_BUFFER, [0]);
+    assert.equal(fns.BroadcastSystemMessageA.handler([0, OUT_BUFFER, WM_APP, 1, 2]), 1);
+    assert.deepEqual(told.map(each=>each.hwnd).sort(), [first, second].sort());
+    assert.equal(memory.u32(OUT_BUFFER), BSM_APPLICATIONS, 'all components: the applications');
+
+    told.length = 0;
+    deny = first;
+    assert.equal(fns.BroadcastSystemMessageW.handler([BSF_QUERY, 0, WM_APP, 0, 0]), 0,
+        'one denied the query');
+
+    told.length = 0;
+    memory.putU32s(OUT_BUFFER, [BSM_VXDS]);
+    assert.equal(fns.BroadcastSystemMessageA.handler([0, OUT_BUFFER, WM_APP, 0, 0]), 1);
+    assert.deepEqual(told, [], 'drivers alone: nobody here to tell');
+    assert.equal(memory.u32(OUT_BUFFER), 0);
+
+    assert.equal(fns.BroadcastSystemMessageA.handler([BSF_POSTMESSAGE, 0, WM_APP, 0, 0]), 1);
+    assert.deepEqual(told, [], 'posted, not sent');
+    assert.equal(fns.PeekMessageA.handler([OUT_BUFFER, 0, 0, 0, 1]), 1);
+    assert.equal(memory.u32(OUT_BUFFER + 4), WM_APP);
+
+    assert.equal(fns.BroadcastSystemMessageA.handler([BSF_QUERY | BSF_POSTMESSAGE, 0, WM_APP,
+        0, 0]), 0);
+    assert.deepEqual(errors, [87]);
+});
+
+test('ExcludeUpdateRgn keeps a context off what is still to be repainted', ()=>{
+    /** @type {[number, any[]][]} */
+    const clips = [];
+    const { memory, fns } = setup({ draw: {
+        clip: (/** @type {number} */ hdc, /** @type {any[]} */ area)=>clips.push([hdc, area]),
+    } });
+    const hwnd = makeWindow(memory, fns, WS_OVERLAPPED | WS_VISIBLE);
+    fns.ValidateRect.handler([hwnd, 0]);
+    const hdc = fns.GetDC.handler([hwnd]);
+    const SIMPLEREGION = 2;
+    const COMPLEXREGION = 3;
+    assert.equal(fns.ExcludeUpdateRgn.handler([hdc, hwnd]), SIMPLEREGION, 'nothing to leave out');
+    memory.putU32s(RECT_BUFFER, [0, 0, 10, 10]);
+    fns.InvalidateRect.handler([hwnd, RECT_BUFFER, 0]);
+    assert.equal(fns.ExcludeUpdateRgn.handler([hdc, hwnd]), COMPLEXREGION);
+    const [on, area] = /** @type {[number, any[]]} */ (clips.at(-1));
+    assert.equal(on, hdc);
+    assert.ok(area.every(piece=>piece.left >= 10 || piece.top >= 10),
+        'no piece left inside the update area');
+    assert.equal(fns.ExcludeUpdateRgn.handler([hdc, 0x9999]), 0, 'ERROR for no window');
+    fns.ReleaseDC.handler([hwnd, hdc]);
+});
+
+// --- characters, DDE and the old IME interface ---
+
+test('CharPrevW steps back one unit, and CharNextExA over a double-byte character', ()=>{
+    const { memory, fns } = setup();
+    assert.equal(fns.CharPrevW.handler([0x100, 0x104]), 0x102);
+    assert.equal(fns.CharPrevW.handler([0x100, 0x100]), 0x100);
+    assert.equal(fns.CharPrevW.handler([0x100, 0xfe]), 0xfe, 'not past the start: as it came');
+
+    memory.writeMemory(TEXT_BUFFER, Uint8Array.from([0x82, 0xa0, 0x41, 0x82, 0]));
+    assert.equal(fns.CharNextExA.handler([932, TEXT_BUFFER, 0]), TEXT_BUFFER + 2);
+    assert.equal(fns.CharNextExA.handler([0, TEXT_BUFFER, 0]), TEXT_BUFFER + 1,
+        'the process\'s own page is single-byte');
+    assert.equal(fns.CharNextExA.handler([936, TEXT_BUFFER + 2, 0]), TEXT_BUFFER + 3);
+    assert.equal(fns.CharNextExA.handler([932, TEXT_BUFFER + 3, 0]), TEXT_BUFFER + 4,
+        'a lead byte before the terminator is one character');
+    assert.equal(fns.CharNextExA.handler([932, TEXT_BUFFER + 4, 0]), TEXT_BUFFER + 4);
+    assert.equal(fns.CharNextExA.handler([932, 0, 0]), 0);
+    assert.equal(fns.CharNextExA.argBytes, 12);
+});
+
+test('with no DDE instance its handles are refused, and string handles still compare', ()=>{
+    const { fns, diverged } = setup();
+    for (const [name, args] of /** @type {[string, number[]][]} */ ([
+        ['DdeFreeDataHandle', [0x10]], ['DdeAbandonTransaction', [1, 2, 3]],
+        ['DdePostAdvise', [1, 2, 3]], ['DdeQueryConvInfo', [1, 2, 0x100]],
+        ['DdeSetUserHandle', [1, 2, 3]]]))
+    {
+        assert.equal(fns[name].handler(args), 0, name);
+        assert.equal(fns[name].argBytes, args.length * 4, name);
+    }
+    fns.DdeFreeDataHandle.handler([0x10]);
+    assert.equal(diverged.filter(line=>line.startsWith('DdeFreeDataHandle')).length, 1,
+        'said once');
+    assert.equal(fns.DdeCmpStringHandles.handler([1, 2]), 0xffffffff);
+    assert.equal(fns.DdeCmpStringHandles.handler([2, 1]), 1);
+    assert.equal(fns.DdeCmpStringHandles.handler([0, 0]), 0);
+    assert.equal(fns.SendIMEMessageExA.handler([0, 0]), 0, 'no IME to take the request');
+    assert.equal(fns.SendIMEMessageExW.argBytes, 8);
 });

@@ -70,6 +70,8 @@ import { decode } from './decode/decoder.js';
  * @property {number[]} entries          every block start
  * @property {number} bytes
  * @property {Set<number>} pages         4 KiB pages the code and its switch tables span
+ * @property {Set<number>} [reads]       every page forming read, `pages` among them: what a
+ *                                       worker forms the region again from
  * @property {SwitchTable[]} [tables]    the switch tables its jumps go through, read as data
  * @property {string} hash               of the decoded bytes, for the cache
  * @property {Map<string, number>} refused   opcode → times a refusal cut a block
@@ -441,6 +443,23 @@ export function formRegion(read, entry,
     { maxBlocks = 128, maxBytes = 8192, translatable = ()=>true, leafCalls = true,
         callTargets, shared, helpers = true } = {})
 {
+    // Every page forming reads decides what it forms -- an import slot a call is predicted
+    // through, a callee looked at for a leaf or a runtime helper -- so a worker forms the
+    // region again from copies of all of them (`reads`); only the pages its code is made
+    // of (`pages`) drop it when written.
+    /** @type {Set<number>} */
+    const touched = new Set();
+    let lastTouched = -1;
+    const source = read;
+    read = address=>{
+        const page = address >>> 12;
+        if (page !== lastTouched)
+        {
+            lastTouched = page;
+            touched.add(page);
+        }
+        return source(address);
+    };
     /** @param {number} address */
     const decodeAt = shared === undefined ? (/** @type {number} */ address)=>decode(read, address)
         : (/** @type {number} */ address)=>{
@@ -449,6 +468,16 @@ export function formRegion(read, entry,
             {
                 decoded = decode(read, address);
                 shared.decoded.set(address, decoded);
+            }
+            else
+            {
+                // Decoded for another region: its bytes are read here all the same.
+                for (let page = address >>> 12;
+                    page <= (address + ('length' in decoded ? Math.max(decoded.length, 1) : 1)
+                        - 1) >>> 12; page++)
+                {
+                    touched.add(page);
+                }
             }
             return decoded;
         };
@@ -775,12 +804,17 @@ export function formRegion(read, entry,
             pages.add(page);
         }
     }
+    for (const page of pages)
+    {
+        touched.add(page);
+    }
     return {
         entry,
         blocks: ordered,
         entries: ordered.map(block=>block.start),
         bytes,
         pages,
+        reads: touched,
         tables,
         hash: hashRegion(read, { blocks: ordered, tables }),
         refused,

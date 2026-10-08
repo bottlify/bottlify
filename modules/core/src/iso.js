@@ -13,6 +13,7 @@
 
 export { SECTOR_SIZE, isIsoImage, openIso }
     from './layers/filesystem/internal/iso/iso9660.js';
+export { buildIso } from './layers/filesystem/internal/iso/build.js';
 
 /**
  * A range reader over whatever holds an image: a `Blob` (a file the person

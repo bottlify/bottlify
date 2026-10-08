@@ -11,18 +11,26 @@ import { createConstantTables, registerValues } from './constants.js';
 /**
  * A vertex shader's bytecode as a compiler writes it: the version token, then
  * the CTAB comment -- a matrix packed by column at c0, a colour at c4, an array
- * of two vectors at c5 with a default, a sampler at s0 -- then the end token.
+ * of two vectors at c5 with a default, a sampler at s0, unless told other
+ * constants -- then the end token.
+ *
+ * @param {(string | number)[][]} [constants]   name, set, index, count, type record, default.
+ * @param {number[][]} [types]   class, type, rows, columns, elements.
  */
-function shader(){
+function shader(constants, types){
     /** @type {number[]} */
     const block = [];
     const strings = new Map();
-    // D3DXSHADER_CONSTANTTABLE, then four CONSTANTINFO, four TYPEINFO, the
-    // names and the default; offsets from the block's start.
+    // A default of 1 is the block of eight floats after the names.
+    const listed = constants ?? [['WorldViewProj', 2, 0, 4, 0, 0], ['Color', 2, 4, 1, 1, 0],
+        ['Lights', 2, 5, 2, 2, 1], ['Diffuse', 3, 0, 1, 3, 0]];
+    const records = types ?? [[3, 3, 4, 4, 1], [1, 3, 1, 4, 1], [1, 3, 1, 4, 2], [4, 12, 1, 1, 1]];
+    // D3DXSHADER_CONSTANTTABLE, then the CONSTANTINFO, the TYPEINFO, the names and the
+    // default; offsets from the block's start.
     const infos = 28;
-    const types = infos + 4 * 20;
-    const names = types + 4 * 16;
-    const text = ['WorldViewProj', 'Color', 'Lights', 'Diffuse', 'test compiler', 'vs_3_0'];
+    const typesAt = infos + listed.length * 20;
+    const names = typesAt + records.length * 16;
+    const text = [...new Set(listed.map(one=>String(one[0]))), 'test compiler', 'vs_3_0'];
     let at = names;
     for (const name of text)
     {
@@ -32,22 +40,18 @@ function shader(){
     at = (at + 3) & ~3;
     const defaults = at;
     const word = (/** @type {number} */ value)=>block.push(value >>> 0);
-    word(28); word(strings.get('test compiler')); word(0xfffe0300); word(4); word(infos);
-    word(0); word(strings.get('vs_3_0'));
-    /** name, set, index, count, type record, default */
-    const constants = [['WorldViewProj', 2, 0, 4, 0, 0], ['Color', 2, 4, 1, 1, 0],
-        ['Lights', 2, 5, 2, 2, defaults], ['Diffuse', 3, 0, 1, 3, 0]];
-    for (const [name, set, index, count, type, fallback] of constants)
+    word(28); word(strings.get('test compiler')); word(0xfffe0300); word(listed.length);
+    word(infos); word(0); word(strings.get('vs_3_0'));
+    for (const [name, set, index, count, type, fallback] of listed)
     {
         word(strings.get(name));
         word(Number(set) | Number(index) << 16);
         word(Number(count));
-        word(types + Number(type) * 16);
-        word(Number(fallback));
+        word(typesAt + Number(type) * 16);
+        word(fallback ? defaults : 0);
     }
     /** class, type, rows, columns, elements, members */
-    for (const [cls, type, rows, columns, elements] of [[3, 3, 4, 4, 1], [1, 3, 1, 4, 1],
-        [1, 3, 1, 4, 2], [4, 12, 1, 1, 1]])
+    for (const [cls, type, rows, columns, elements] of records)
     {
         word(cls | type << 16);
         word(rows | columns << 16);
@@ -69,7 +73,8 @@ function shader(){
     return new Uint8Array([...head, ...bytes, ...end]);
 }
 
-function machine(){
+/** @param {Uint8Array} [code] */
+function machine(code = shader()){
     const memory = new Uint8Array(0x10000);
     const view = new DataView(memory.buffer);
     let free = 0x4000;
@@ -105,7 +110,6 @@ function machine(){
             return Promise.resolve(0);
         },
     });
-    const code = shader();
     memory.set(code, 0x1000);
     /** @param {string} text */
     const put = (text, at = 0x3000)=>{
@@ -196,4 +200,17 @@ test('values take the shape of the constant: scalars, vectors, matrices by row a
         count: 3 }, [1, 2, 3, 4, 5, 6]).registers, [1, 4, 0, 0, 2, 5, 0, 0, 3, 6, 0, 0]);
     assert.equal(registerValues({ ...base, cls: 1, rows: 1, columns: 4, elements: 2,
         count: 2 }, [1, 2, 3, 4]).count, 1, 'only the registers the values fill');
+});
+
+test('a name in two register sets is set in both, as a model 3 loop count needs it', async()=>{
+    // fxc puts `int limit` that a loop counts by in c0, for arithmetic, and in i0, for rep.
+    const m = machine(shader([['limit', 2, 0, 1, 0, 0], ['limit', 1, 0, 1, 0, 0]],
+        [[0, 2, 1, 1, 1]]));
+    m.tables.D3DXGetShaderConstantTable.handler([0x1000, 0x50]);
+    const [table] = m.published;
+    const methods = table.interfaceFor('{AB3C758F-093E-4356-B762-4DB18F1B3A01}').methods;
+    const setInt = methods.find((/** @type {any} */ one)=>one.name === 'SetInt');
+    assert.equal(await setInt.invoke(table, [m.DEVICE, m.put('limit'), 7]), 0);
+    assert.deepEqual(m.calls.map(c=>[c.slot, c.args[1], c.data[0]]), [[94, 0, 7], [96, 0, 7]],
+        'SetVertexShaderConstantF and SetVertexShaderConstantI');
 });

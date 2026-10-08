@@ -32,6 +32,7 @@
 import { CHECK_MARK, RADIO_DOT, RADIO_RING_DARK, RADIO_RING_LIGHT, layoutText } from './paint.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { createTabWalk } from './tabwalk.js';
+import { directoryItems } from './dlgdir.js';
 
 /** Messages the controls answer. */
 export const WM_CREATE = 0x0001;
@@ -188,6 +189,8 @@ const SS_ETCHEDFRAME = 0x12;
 const SS_NOPREFIX = 0x80;
 const SS_NOTIFY = 0x100;
 const SS_CENTERIMAGE = 0x200;
+/** A static control's image stretched to the control rather than the control to it. */
+const SS_REALSIZECONTROL = 0x40;
 const SS_SUNKEN = 0x1000;
 const STM_SETICON = 0x170;
 const STM_GETICON = 0x171;
@@ -208,6 +211,8 @@ const WS_VISIBLE = 0x10000000;
 const ES_MULTILINE = 0x0004;
 const ES_PASSWORD = 0x0020;
 const ES_AUTOHSCROLL = 0x0080;
+/** A rich edit's bars kept, disabled, when there is nothing to scroll. */
+const ES_DISABLENOSCROLL = 0x2000;
 const ES_READONLY = 0x0800;
 const ES_WANTRETURN = 0x1000;
 const EM_GETSEL = 0x00b0;
@@ -272,6 +277,7 @@ const LB_GETCURSEL = 0x0188;
 const LB_GETTEXT = 0x0189;
 const LB_GETTEXTLEN = 0x018a;
 const LB_GETCOUNT = 0x018b;
+const LB_DIR = 0x018d;
 const LB_GETTOPINDEX = 0x018e;
 const LB_FINDSTRING = 0x018f;
 const LB_GETSELCOUNT = 0x0190;
@@ -294,6 +300,8 @@ const LBN_KILLFOCUS = 5;
 const CBS_TYPEMASK = 0x0003;
 /** The scroll bars a combo box is given, which are its list's. */
 const WS_VSCROLL = 0x00200000;
+/** A window's own vertical bar, as GetScrollInfo names it. */
+const SB_VERT_BAR = 1;
 const WS_HSCROLL = 0x00100000;
 const CBS_SIMPLE = 0x0001;
 const CBS_DROPDOWN = 0x0002;
@@ -305,6 +313,7 @@ const CB_LIMITTEXT = 0x0141;
 const CB_SETEDITSEL = 0x0142;
 const CB_ADDSTRING = 0x0143;
 const CB_DELETESTRING = 0x0144;
+const CB_DIR = 0x0145;
 const CB_GETCOUNT = 0x0146;
 const CB_GETCURSEL = 0x0147;
 const CB_GETLBTEXT = 0x0148;
@@ -437,7 +446,7 @@ const OPAQUE = 2;
  * @property {(hdc: number, rect: Rect, color: number) => boolean} fill
  * @property {(hdc: number, rect: Rect, brush: number) => boolean} fillWith
  * @property {(hdc: number, rect: Rect, brush: number) => boolean} frame
- * @property {(hdc: number, rect: Rect) => boolean} invert
+ * @property {(hdc: number, rect: Rect, halftone?: boolean) => boolean} invert
  * @property {(hdc: number, rect: Rect, dx: number, dy: number, clip: Rect) => boolean} [scroll]
  *           The pixels of a rectangle moved within the context, only what
  *           lands inside `clip` changing.
@@ -452,12 +461,44 @@ const OPAQUE = 2;
  *           colour, in its own mode; otherwise over what is there.
  * @property {(hdc: number, text: string) => { width: number, height: number,
  *     ascent: number }} measure
- * @property {(hdc: number, x: number, y: number, bitmap: number) => boolean} bitmap
+ * @property {(hdc: number, x: number, y: number, bitmap: number, width?: number,
+ *     height?: number) => boolean} bitmap  Stretched to a size when one is given.
+ * @property {(bitmap: number) => { width: number, height: number, corner: number } | null}
+ *     [bitmapShape]  A bitmap's size and its top-left pixel's colour.
  * @property {(hdc: number, x: number, y: number,
  *     picture: { width: number, height: number, bgra: Uint8Array },
  *     width?: number, height?: number) => boolean} [picture]
  *           A decoded icon drawn at a point, its transparent pixels left out.
  */
+
+/**
+ * Where a static control's image goes, as its styles say: SS_CENTERIMAGE
+ * centres it, clipped when it is larger; SS_REALSIZECONTROL alone
+ * stretches it to the control; otherwise it sits at the top left at its
+ * own size.
+ *
+ * @param {{ style: number }} record @param {Rect} rect
+ * @param {{ width: number, height: number } | null} shape
+ * @returns {{ x: number, y: number, width?: number, height?: number, centred: boolean }}
+ */
+export const imagePlace = (record, rect, shape)=>{
+    if (!shape)
+    {
+        return { x: rect.left, y: rect.top, centred: false };
+    }
+    if ((record.style & SS_CENTERIMAGE) !== 0)
+    {
+        return { x: rect.left + Math.floor((rect.right - rect.left - shape.width) / 2),
+            y: rect.top + Math.floor((rect.bottom - rect.top - shape.height) / 2),
+            centred: true };
+    }
+    if ((record.style & SS_REALSIZECONTROL) !== 0)
+    {
+        return { x: rect.left, y: rect.top, width: rect.right - rect.left,
+            height: rect.bottom - rect.top, centred: false };
+    }
+    return { x: rect.left, y: rect.top, centred: false };
+};
 
 /**
  * What the procedures need from the window manager around them.
@@ -492,7 +533,11 @@ const OPAQUE = 2;
  *           measuring with; given back through endPaint.
  * @property {(record: any, hdc: number) => void} endPaint
  * @property {(record: any) => void} invalidate   The whole client area, erased.
- * @property {(record: any) => number | Promise<number>} [update]
+ * @property {(record: any, thread?: unknown) => number | Promise<number>} [update]
+ *           Paints it now, as the call of `thread` -- the control's caller's,
+ *           not whichever thread holds the processor past an await.
+ * @property {(record: any) => void} [frameChanged]
+ *           Its frame changed -- a scroll bar of its own moved -- and is drawn again.
  *           UpdateWindow: what is to paint painted now, when it is shown.
  * @property {(hwnd: number, x: number, y: number, width: number, height: number)
  *     => number | Promise<number>} [move]
@@ -516,6 +561,12 @@ const OPAQUE = 2;
  * @property {import('./objects.js').ClipboardService} [clipboard]
  *           The clipboard an edit copies to and pastes from. Absent, the
  *           clipboard messages do nothing.
+ * @property {Record<'CreateCaret' | 'DestroyCaret' | 'ShowCaret' | 'SetCaretPos',
+ *     { handler: (args: number[]) => number }>} [caret]
+ *           The thread's caret, which an edit takes while it has the focus.
+ *           Absent, an edit draws its own bar where typing goes.
+ * @property {import('../kernel32/files.js').FileSystem} [files]
+ *           The volume LB_DIR and CB_DIR list. Absent, they list nothing.
  */
 
 /**
@@ -816,7 +867,7 @@ export function createControlProcedures(host){
                 // labels its progress from a loop that never pumps shows it.
                 return after(host.defWindowProc(record, message, thread), answer=>{
                     host.invalidate(record);
-                    return after(host.update?.(record) ?? 1, ()=>answer);
+                    return after(host.update?.(record, thread) ?? 1, ()=>answer);
                 });
             case WM_ENABLE:
                 return after(host.defWindowProc(record, message, thread), answer=>{
@@ -1251,6 +1302,22 @@ export function createControlProcedures(host){
     // --- Static -------------------------------------------------------------
 
     /**
+     * An image's size: an icon's or cursor's picture, or a bitmap's. Null for
+     * a handle with nothing this build can measure.
+     *
+     * @param {number} image
+     * @returns {{ width: number, height: number } | null}
+     */
+    const imageSize = image=>{
+        if (image === 0)
+        {
+            return null;
+        }
+        const picture = host.picture?.(image) ?? null;
+        return picture ?? host.draw?.bitmapShape?.(image) ?? null;
+    };
+
+    /**
      * @param {any} record @param {number} hdc @param {Rect} rect @param {number} brush
      */
     const paintStatic = (record, hdc, rect, brush)=>{
@@ -1278,12 +1345,24 @@ export function createControlProcedures(host){
                 return etchedFrame(hdc, rect);
             case SS_ICON:
             case SS_BITMAP: {
-                background(hdc, rect, brush, COLOR_3DFACE);
                 const image = state.image ?? 0;
                 const picture = image !== 0 ? host.picture?.(image) ?? null : null;
+                const shape = picture ?? (image !== 0 ? draw.bitmapShape?.(image) ?? null : null);
+                const place = imagePlace(record, rect, shape);
+                // A bitmap centred leaves the rest of the control its top-left
+                // pixel's colour, as the static control fills it.
+                if (place.centred && !picture && shape && 'corner' in shape)
+                {
+                    draw.fill(hdc, rect, shape.corner);
+                }
+                else
+                {
+                    background(hdc, rect, brush, COLOR_3DFACE);
+                }
                 const drawn = picture
-                    ? draw.picture?.(hdc, rect.left, rect.top, picture) === true
-                    : draw.bitmap(hdc, rect.left, rect.top, image);
+                    ? draw.picture?.(hdc, place.x, place.y, picture, place.width, place.height)
+                        === true
+                    : draw.bitmap(hdc, place.x, place.y, image, place.width, place.height);
                 if (image !== 0 && !drawn && !state.imageDivergenceSaid)
                 {
                     state.imageDivergenceSaid = true;
@@ -1350,7 +1429,16 @@ export function createControlProcedures(host){
                 state.imageType = message.message === STM_SETICON
                     ? IMAGE_ICON : message.wParam & 0xffff;
                 host.invalidate(record);
-                return previous;
+                // Neither centred nor stretched, the image is the control's
+                // size: it ignores the size it was made with and takes the
+                // image's, so what lies beside it in the template shows.
+                const sized = (record.style & (SS_CENTERIMAGE | SS_REALSIZECONTROL)) === 0
+                    ? imageSize(state.image) : null;
+                return sized && host.move
+                    && (sized.width !== record.width || sized.height !== record.height)
+                    ? after(host.move(record.hwnd, record.x, record.y, sized.width, sized.height),
+                        ()=>previous)
+                    : previous;
             }
             case STM_GETICON:
                 return state.imageType === IMAGE_ICON ? state.image ?? 0 : 0;
@@ -1456,6 +1544,9 @@ export function createControlProcedures(host){
     const paintEdit = (record, hdc, rect, brush)=>{
         const draw = /** @type {Drawing} */ (host.draw);
         const state = editState(record);
+        // Whatever moved its lines since -- an insertion, a stream, a new
+        // size or font -- the bar is drawn with what is drawn here.
+        syncEditBar(record);
         const readOnly = (record.style & ES_READONLY) !== 0 || disabled(record);
         if (state.richBackground !== undefined)
         {
@@ -1509,15 +1600,79 @@ export function createControlProcedures(host){
             {
                 draw.text(hdc, x, y, text, { color: ink, clip: rect });
             }
-            // The caret: a bar before the character the selection ends at.
+            // The caret, where there is no thread caret to take: a bar
+            // before the character the selection ends at.
             const caret = state.selEnd - line.start - scrolled;
-            if (focused && !readOnly && caret >= 0 && caret <= text.length
+            if (!host.caret && focused && !readOnly && caret >= 0 && caret <= text.length
                 && (state.selEnd < line.start + line.text.length || first + row === lines.length - 1
                     || state.selEnd === line.start + line.text.length))
             {
                 draw.fill(hdc, { left: xOf(caret), top: y, right: xOf(caret) + 1,
                     bottom: y + grid.cellHeight }, ink);
             }
+        }
+        if (host.caret && focused)
+        {
+            const at = caretPoint(record, hdc, rect);
+            host.caret.SetCaretPos.handler([at.x, at.y]);
+        }
+    };
+
+    /**
+     * Where an edit's caret goes: before the character its selection ends
+     * at, on the line that character is on, measured as the text is drawn --
+     * and outside the client area when that line is scrolled out of view,
+     * where the caret is clipped away rather than moved to an edge.
+     *
+     * @param {any} record @param {number} hdc @param {Rect} rect
+     * @returns {{ x: number, y: number, height: number }}
+     */
+    const caretPoint = (record, hdc, rect)=>{
+        const draw = /** @type {Drawing} */ (host.draw);
+        const state = editState(record);
+        const grid = editGrid(record, hdc);
+        const lines = editLines(record, grid.columns);
+        const top = multiline(record)
+            ? rect.top + EDIT_MARGIN
+            : rect.top + Math.max(0, Math.floor((rect.bottom - rect.top - grid.cellHeight) / 2));
+        const first = multiline(record) ? Math.min(state.firstLine, lines.length - 1) : 0;
+        const scrolled = multiline(record) ? 0 : state.firstColumn ?? 0;
+        const found = lines.findIndex(line=>state.selEnd >= line.start
+            && state.selEnd <= line.start + line.text.length);
+        const index = found === -1 ? lines.length - 1 : found;
+        const line = lines[index];
+        const text = shown(record, line.text);
+        const column = Math.max(0, Math.min(text.length, state.selEnd - line.start));
+        const x = rect.left + EDIT_MARGIN + (column >= scrolled
+            ? draw.measure(hdc, text.slice(scrolled, column)).width
+            : -draw.measure(hdc, text.slice(column, scrolled)).width);
+        return { x, y: top + (index - first) * grid.cellHeight, height: grid.cellHeight };
+    };
+
+    /**
+     * An edit gaining the focus takes the thread's caret, as the real one
+     * does: a bar one pixel wide and a line high, placed and shown.
+     *
+     * @param {any} record
+     */
+    const takeCaret = record=>{
+        const caret = host.caret;
+        if (!caret || !host.draw)
+        {
+            return;
+        }
+        const { hdc, rect } = host.contextOn(record);
+        if (hdc === 0)
+        {
+            host.endPaint(record, hdc);
+            return;
+        }
+        const at = caretPoint(record, hdc, rect);
+        host.endPaint(record, hdc);
+        if (caret.CreateCaret.handler([record.hwnd, 0, 1, at.height]) !== 0)
+        {
+            caret.SetCaretPos.handler([at.x, at.y]);
+            caret.ShowCaret.handler([record.hwnd]);
         }
     };
 
@@ -1730,7 +1885,73 @@ export function createControlProcedures(host){
         {
             host.invalidate(record);
         }
+        syncEditBar(record);
         return moved;
+    };
+
+    /**
+     * A multi-line edit's own vertical scroll bar, kept as the edit keeps it:
+     * its range the lines, its page the lines that show, its position the
+     * first that does -- what GetScrollInfo answers about it, and where its
+     * thumb is drawn. A licence page that enables "I accept" only once the
+     * bar says the text is read to its end reads it there.
+     *
+     * @param {any} record
+     */
+    const syncEditBar = record=>{
+        const state = editState(record);
+        // The bars it was made with, which a rich edit shows and hides.
+        state.bars ??= record.style & (WS_VSCROLL | WS_HSCROLL);
+        if (!multiline(record) || (state.bars & WS_VSCROLL) === 0)
+        {
+            return;
+        }
+        if (state.rich && (record.style & ES_DISABLENOSCROLL) === 0 && showRichBars(record))
+        {
+            return;
+        }
+        if ((record.style & WS_VSCROLL) === 0)
+        {
+            return;
+        }
+        const total = editLines(record, editGridColumns(record)).length;
+        const held = scrollOf(record, SB_VERT_BAR);
+        const next = { min: 0, max: Math.max(0, total - 1), page: editGridRows(record),
+            pos: state.firstLine };
+        if (held.min === next.min && held.max === next.max && held.page === next.page
+            && held.pos === next.pos)
+        {
+            return;
+        }
+        Object.assign(held, next, { trackPos: next.pos });
+        host.frameChanged?.(record);
+    };
+
+    /**
+     * A rich edit's bars without ES_DISABLENOSCROLL: the vertical one there
+     * only while there are more lines than show, the horizontal one only
+     * when lines run on rather than wrap -- as the rich edit hides a bar it
+     * has no use for, where a plain edit keeps it, disabled. A setup's
+     * welcome text that fits showed both bars, empty. Answers whether the
+     * style changed, the frame redrawn and the bar set on the next paint.
+     *
+     * @param {any} record
+     */
+    const showRichBars = record=>{
+        const state = editState(record);
+        const total = editLines(record, editGridColumns(record)).length;
+        const vertical = total > editGridRows(record) ? WS_VSCROLL : 0;
+        const horizontal = (state.bars & WS_HSCROLL) !== 0
+            && (record.style & ES_AUTOHSCROLL) !== 0 ? WS_HSCROLL : 0;
+        const style = ((record.style & ~(WS_VSCROLL | WS_HSCROLL)) | vertical | horizontal) >>> 0;
+        if (style === record.style)
+        {
+            return false;
+        }
+        record.style = style;
+        host.frameChanged?.(record);
+        host.invalidate(record);
+        return true;
     };
 
     /** Columns across the client without a context to measure with. @param {any} record */
@@ -1782,9 +2003,11 @@ export function createControlProcedures(host){
                     | (multiline(record) && (record.style & ES_WANTRETURN) !== 0
                         ? DLGC_WANTALLKEYS : 0);
             case WM_SETFOCUS:
+                takeCaret(record);
                 host.invalidate(record);
                 return notify(record, EN_SETFOCUS, thread);
             case WM_KILLFOCUS:
+                host.caret?.DestroyCaret.handler([]);
                 host.invalidate(record);
                 return notify(record, EN_KILLFOCUS, thread);
             case WM_LBUTTONDOWN:
@@ -1880,6 +2103,7 @@ export function createControlProcedures(host){
                 state.undo = null;
                 state.typingRun = false;
                 host.invalidate(record);
+                syncEditBar(record);
                 return after(notify(record, EN_UPDATE, thread),
                     ()=>after(notify(record, EN_CHANGE, thread), ()=>1));
             }
@@ -2218,6 +2442,20 @@ export function createControlProcedures(host){
         switch (message.message){
             case LB_ADDSTRING:
                 return strings ? addItem(record, sorted, text()) : addData(record, message.lParam);
+            case LB_DIR: {
+                // The entries a directory holds, added as LB_ADDSTRING adds
+                // them; the answer is the last one's index, or LB_ERR when
+                // the search found nothing at all.
+                const listed = host.files && strings
+                    ? directoryItems(host.files, message.wParam, text())
+                    : { found: false, items: [] };
+                let last = listed.found ? 0 : LB_ERR;
+                for (const item of listed.items)
+                {
+                    last = addItem(record, sorted, item);
+                }
+                return last;
+            }
             case LB_INSERTSTRING: {
                 const at = (message.wParam | 0) === -1 ? items.length : message.wParam | 0;
                 return strings ? addItem(record, sorted, text(), at)
@@ -2544,6 +2782,7 @@ export function createControlProcedures(host){
     const comboAsList = message=>{
         switch (message){
             case CB_ADDSTRING: return LB_ADDSTRING;
+            case CB_DIR: return LB_DIR;
             case CB_INSERTSTRING: return LB_INSERTSTRING;
             case CB_DELETESTRING: return LB_DELETESTRING;
             case CB_RESETCONTENT: return LB_RESETCONTENT;

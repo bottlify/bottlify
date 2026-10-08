@@ -71,3 +71,62 @@ export function faceNamed(name){
     const wanted = name.toLowerCase();
     return FACES.find(entry=>entry.name.toLowerCase() === wanted) ?? null;
 }
+
+/**
+ * What Windows measures for the faces dialogs are laid out in, at the sizes
+ * they are laid out at (96 DPI): GetTextMetrics' answer, and the cell a
+ * template's dialog units count in -- the alphabet's average width as the
+ * dialog manager takes it, and the cell's height.
+ *
+ * The browser draws these faces with whatever it has in their place, and a
+ * substitute's proportions are its own: a dialog sized from them is wider or
+ * taller than the program drew its pictures for, and a skin painted for
+ * Windows' size leaves the rest of the window bare. So for these requests the
+ * measurements are Windows', whatever face draws the glyphs -- as Wine ships
+ * faces made to Windows' metrics for the same reason. MS Sans Serif is a
+ * bitmap face whose 8-point size is 13 pixels high; MS Shell Dlg and MS Shell
+ * Dlg 2 are the TrueType faces of that size the shell's dialogs use, with the
+ * same cell; the System font is the one a dialog without a font of its own
+ * is counted in.
+ *
+ * @typedef {Object} WindowsMetrics
+ * @property {number} height
+ * @property {number} ascent
+ * @property {number} descent
+ * @property {number} internalLeading
+ * @property {number} aveCharWidth
+ * @property {{ width: number, height: number }} cell
+ */
+
+/** @type {WindowsMetrics} */
+const DIALOG_8PT = Object.freeze({ height: 13, ascent: 11, descent: 2, internalLeading: 2,
+    aveCharWidth: 5, cell: Object.freeze({ width: 6, height: 13 }) });
+/** @type {WindowsMetrics} */
+const SYSTEM_CELL = Object.freeze({ height: 16, ascent: 13, descent: 3, internalLeading: 3,
+    aveCharWidth: 7, cell: Object.freeze({ width: 8, height: 16 }) });
+
+/** The faces of DIALOG_8PT, substitutes resolved. */
+const DIALOG_FACES = new Set(['ms sans serif', 'microsoft sans serif', 'tahoma']);
+
+/**
+ * Windows' measurements of a font, for the requests whose Windows answer is
+ * known; null for every other, which the font engine or the estimate answers.
+ *
+ * @param {{ faceName: string, height: number, weight: number }} font
+ * @returns {WindowsMetrics | null}
+ */
+export function windowsMetrics(font){
+    const named = faceNamed(font.faceName ?? '');
+    const resolved = (named?.substitute ?? named?.name ?? '').toLowerCase();
+    const height = font.height | 0;
+    const weight = font.weight || 400;
+    if (DIALOG_FACES.has(resolved) && weight < 600 && (height === -11 || height === 13))
+    {
+        return DIALOG_8PT;
+    }
+    if (resolved === 'system' && (height === 16 || height === -13))
+    {
+        return SYSTEM_CELL;
+    }
+    return null;
+}

@@ -179,7 +179,8 @@ test('a title\'s hundred thousand entries spread over the whole hash, with no lo
     const memory = new WebAssembly.Memory({
         initial: Math.ceil(Tables.HASH_SLOTS * Tables.HASH_SLOT / 65536) + 1,
     });
-    const entries = createEntries({ memory, hashBase: 0, shift: 14 });
+    const entries = createEntries({ memory, hashBase: 0,
+        shift: 32 - Math.log2(Tables.HASH_SLOTS) });
     for (let i = 0; i < 100_000; i++)
     {
         // Block starts of a real image: 0x401000 on, a few bytes apart.
@@ -211,7 +212,8 @@ test('retable moves an entry to another function-table index, in the map and in 
         const memory = new WebAssembly.Memory({
             initial: Math.ceil(Tables.HASH_SLOTS * Tables.HASH_SLOT / 65536) + 1,
         });
-        const entries = createEntries({ memory, hashBase: 0, shift: 14 });
+        const entries = createEntries({ memory, hashBase: 0,
+            shift: 32 - Math.log2(Tables.HASH_SLOTS) });
         const before = ()=>1;
         const after = ()=>2;
         const index = entries.add(0x401000, before, 3, 8, 17);

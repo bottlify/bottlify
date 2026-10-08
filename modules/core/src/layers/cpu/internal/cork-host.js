@@ -103,7 +103,8 @@ const NEW_TARGET_WORK = 128;
 /** The names an engine module must export for this host. */
 const ENGINE_EXPORTS = Object.freeze([
     'createEngine', 'ownLayout', 'pagesFor', 'Tables', 'STATE_BLOCK_SIZE',
-    'interpret', 'blockState', 'eflagsOf', 'setEflags', 'executorLayout', 'EXECUTOR_BYTES',
+    'interpret', 'blockState', 'eflagsOf', 'setEflags', 'executorLayout', 'executorBytes',
+    'tablesSize',
     'SHARED_CODE_BYTES',
 ]);
 
@@ -163,7 +164,7 @@ export function createCorkHost(config){
         }
     }
     const { createEngine, ownLayout, pagesFor, Tables, STATE_BLOCK_SIZE, interpret, blockState,
-        eflagsOf, setEflags, WasmExit, executorLayout, EXECUTOR_BYTES } = engine;
+        eflagsOf, setEflags, WasmExit, executorLayout, executorBytes, tablesSize } = engine;
     if (!(executor >= 0 && executor < executors))
     {
         throw new Error(`cpu: executor ${executor} of ${executors}`);
@@ -174,23 +175,26 @@ export function createCorkHost(config){
     // the first executor's layout, which is also where every field lies from
     // the start of any executor's state block: the block's views, and a
     // thread's context taken from them, are the same on every executor.
-    const own = ownLayout({ ramSize: memorySize });
+    // The entry hash's slots are the engine's own unless the config names a size.
+    const own = ownLayout({ ramSize: memorySize,
+        ...(corkConfig?.hashSlots ? { hashSlots: corkConfig.hashSlots } : {}) });
+    const tables = tablesSize(own);
     // A profiling run (`blockProfile`) has the block profile past the tables,
     // and the interpreter tier in wasm its hot counts past that.
     const profileSize = import.meta.BOTTLIFY_DIAGNOSTICS !== false && corkConfig?.blockProfile
         ? Tables.BLOCK_PROFILE_SIZE : 0;
     const wasmWanted = typeof engine.createWasmInterpreter === 'function'
         && corkConfig?.wasmInterpreter !== false;
-    const past = Tables.SIZE + profileSize + (wasmWanted ? engine.WASM_INTERPRETER_AREA : 0);
+    const past = tables + profileSize + (wasmWanted ? engine.WASM_INTERPRETER_AREA : 0);
     const firstPages = pagesFor(own, past);
     // Every other executor's: its state page, its tables and what lies past them.
-    const executorPages = Math.ceil((EXECUTOR_BYTES - Tables.SIZE + past) / 65536);
+    const executorPages = Math.ceil((executorBytes(own) - tables + past) / 65536);
     /** Where an executor's state page begins. @param {number} index */
     const executorBase = index=>(index === 0 ? 0
         : (firstPages + (index - 1) * executorPages) * 65536);
     const stateBase = executorBase(executor);
     const layout = executor === 0 ? own : executorLayout(own, stateBase);
-    const wasmArea = layout.tables + Tables.SIZE + profileSize;
+    const wasmArea = layout.tables + tables + profileSize;
     // Past every executor's pages, the record they keep together of who holds
     // code where and which stores reached it (`shared-code.js`).
     const sharedAt = executors > 1 ? (firstPages + (executors - 1) * executorPages) * 65536 : -1;

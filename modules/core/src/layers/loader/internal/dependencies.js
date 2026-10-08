@@ -36,6 +36,7 @@
  */
 
 import { parsePe, readImports } from './pe.js';
+import { readDelayImports } from './delayload.js';
 
 /**
  * @typedef {Object} Dependency
@@ -79,12 +80,18 @@ export async function planDependencies({ entry, entryName, readLibrary, isSystem
     const seen = new Set(entryName ? [entryName.toLowerCase()] : []);
 
     /**
+     * The libraries this image imports, the delay-loaded ones with them: the
+     * loader binds a delay-load table up front, before the program runs, so
+     * a library the program brought for it has to be mapped by then -- or
+     * its slots are bound to nothing while the file sits beside the program.
+     *
      * @param {Uint8Array} file
-     * @returns {string[]} the libraries this image imports
+     * @returns {string[]}
      */
     const importsOf = file=>{
         const image = parsePe(file);
-        return readImports(file, image).map(entry_=>entry_.dll);
+        return [...readImports(file, image), ...readDelayImports(file, image)]
+            .map(entry_=>entry_.dll);
     };
 
     /** @param {Uint8Array} file */

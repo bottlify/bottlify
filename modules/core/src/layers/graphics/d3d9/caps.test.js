@@ -105,7 +105,8 @@ test('what the renderer does not do is not claimed', ()=>{
     assert.equal(words.VolumeTextureAddressCaps, words.TextureAddressCaps);
     assert.equal(words.MaxVolumeExtent, 256);
     assert.equal(words.NumSimultaneousRTs, 1);
-    assert.equal(words.StretchRectFilterCaps, 0);
+    assert.equal(words.StretchRectFilterCaps, 0x03000300,
+        'point and linear, minifying and magnifying');
     assert.equal(words.MaxAnisotropy, 1);
     assert.equal(words.Caps2 & 0x00020000, 0, 'no full-screen gamma');
     assert.equal(words.Caps2 & 0x40000000, 0x40000000,

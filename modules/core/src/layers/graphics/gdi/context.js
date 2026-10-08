@@ -33,15 +33,19 @@
 
 import { BS_SOLID, OPAQUE, createPattern, solidPattern } from './brush.js';
 import {
-    BLACKONWHITE, STRETCH_MODES, bitBlt, patBlt, sourceConversion, stretchBlt,
+    BLACKONWHITE, STRETCH_MODES, alphaBlend, bitBlt, patBlt, sourceConversion, stretchBlt,
+    transparentBlt,
 } from './blit.js';
-import { DSTINVERT, PATCOPY, R2_COPYPEN } from './rop.js';
-import { PS_SOLID, createPainter, ellipse, fillRect, frameRect, line, polygon, rectangle }
-    from './shapes.js';
-import { colorToPixel, intersectRect, isEmptyRect, pixelToColor, surfaceBounds }
+import { DSTINVERT, PATCOPY, PATINVERT, R2_COPYPEN } from './rop.js';
+import {
+    PS_SOLID, createPainter, ellipse, fillRect, frameRect, line, polyPolygon, polygon, rectangle,
+} from './shapes.js';
+import { MONOCHROME, colorToPixel, intersectRect, isEmptyRect, pixelToColor, surfaceBounds }
     from './surface.js';
 import { encodeDib, setDIBitsToDevice, stretchDIBits } from './dib.js';
 import { extTextOut, textExtent } from './text.js';
+import { FLOODFILLSURFACE, floodFill } from './flood.js';
+import { gradientFill } from './gradient.js';
 import { paletteEntryToPixel } from '../../win32/gdi32/structs.js';
 
 /** What a call that should have returned a COLORREF says when it failed. */
@@ -472,6 +476,261 @@ export function createGdiDrawing(options = {}){
         },
 
         /**
+         * BOOL MaskBlt(HDC, int, int, int, int, HDC, int, int, HBITMAP, int, int, DWORD)
+         *
+         * BitBlt with two raster operations, chosen pixel by pixel by a
+         * monochrome bitmap laid over the destination from the mask's own
+         * corner: a set bit takes the operation `rop` names, a clear one the
+         * background operation in its high byte. A pixel past the mask's edge
+         * has no bit, and takes the background operation.
+         *
+         * @param {number} hdc @param {number} x @param {number} y
+         * @param {number} width @param {number} height
+         * @param {number} source  The source HDC, or zero when neither operation reads one.
+         * @param {number} srcX @param {number} srcY
+         * @param {number} mask  A context with the mask bitmap's pixels.
+         * @param {number} maskX @param {number} maskY
+         * @param {number} rop  MAKEROP4 of the two.
+         * @returns {boolean}
+         */
+        maskBlt(hdc, x, y, width, height, source, srcX, srcY, mask, maskX, maskY, rop){
+            const context = contextOf(hdc);
+            const bits = contextOf(mask);
+            if (!context || !bits)
+            {
+                return false;
+            }
+            const from = contextOf(source);
+            const picture = /** @type {any} */ (bits.surface);
+            // A bit is set where the pixel is the colour a 1 means: white in a
+            // monochrome bitmap, the second entry of a one-bit section's table.
+            const one = ((picture.palette?.[1] ?? MONOCHROME[1]) & 0xffffff) >>> 0;
+            const shiftX = (maskX | 0) - (x | 0);
+            const shiftY = (maskY | 0) - (y | 0);
+            /** @param {number} px @param {number} py */
+            const set = (px, py)=>{
+                const mx = px + shiftX;
+                const my = py + shiftY;
+                return mx >= 0 && my >= 0 && mx < picture.width && my < picture.height
+                    && ((picture.read(mx, my) & 0xffffff) >>> 0) === one;
+            };
+            return clipped(context, ()=>bitBlt({
+                dest: context.surface,
+                clip: context.clip,
+                x, y, width, height,
+                src: from ? from.surface : undefined,
+                srcX, srcY,
+                rop,
+                pattern: patternOf(context),
+                convert: from ? conversionOf(context, from) : null,
+                mask: set,
+            }), { x: x - srcX, y: y - srcY });
+        },
+
+        /**
+         * BOOL GdiAlphaBlend(HDC, int, int, int, int, HDC, int, int, int, int, BLENDFUNCTION)
+         *
+         * The rectangles are the device's, each extent with its sign; the
+         * caller has checked them against the source.
+         *
+         * @param {number} hdc @param {number} x @param {number} y
+         * @param {number} width @param {number} height
+         * @param {number} source
+         * @param {number} srcX @param {number} srcY
+         * @param {number} srcWidth @param {number} srcHeight
+         * @param {{ constantAlpha: number, perPixel: boolean }} blend
+         * @returns {boolean}
+         */
+        alphaBlend(hdc, x, y, width, height, source, srcX, srcY, srcWidth, srcHeight, blend){
+            const context = contextOf(hdc);
+            const from = contextOf(source);
+            if (!context || !from)
+            {
+                return false;
+            }
+            return clipped(context, ()=>alphaBlend({
+                dest: context.surface,
+                clip: context.clip,
+                x, y, width, height,
+                src: from.surface,
+                srcX, srcY, srcWidth, srcHeight,
+                constantAlpha: blend.constantAlpha,
+                perPixel: blend.perPixel,
+                convert: conversionOf(context, from),
+            }));
+        },
+
+        /**
+         * BOOL GdiTransparentBlt(HDC, int, int, int, int, HDC, int, int, int, int, UINT)
+         *
+         * The rectangles are the device's, as AlphaBlend's are. The key is a
+         * COLORREF, compared as the source would store it: a 16-bit or
+         * indexed source cannot hold every colour, and its pixels of the key
+         * hold the nearest one it can.
+         *
+         * @param {number} hdc @param {number} x @param {number} y
+         * @param {number} width @param {number} height
+         * @param {number} source
+         * @param {number} srcX @param {number} srcY
+         * @param {number} srcWidth @param {number} srcHeight
+         * @param {number} color  The transparent colour.
+         * @returns {boolean}
+         */
+        transparentBlt(hdc, x, y, width, height, source, srcX, srcY, srcWidth, srcHeight, color){
+            const context = contextOf(hdc);
+            const from = contextOf(source);
+            if (!context || !from)
+            {
+                return false;
+            }
+            const pixel = colorToPixel(color);
+            const key = from.surface.nearest ? from.surface.nearest(pixel) : pixel;
+            return clipped(context, ()=>transparentBlt({
+                dest: context.surface,
+                clip: context.clip,
+                x, y, width, height,
+                src: from.surface,
+                srcX, srcY, srcWidth, srcHeight,
+                key,
+                convert: conversionOf(context, from),
+            }));
+        },
+
+        /**
+         * BOOL PlgBlt(HDC, const POINT *, HDC, int, int, int, int, HBITMAP, int, int)
+         *
+         * The source rectangle copied onto a parallelogram: its top left
+         * corner to the first point, its top right to the second, its bottom
+         * left to the third, every pixel between carried along. Each
+         * destination pixel whose centre the parallelogram holds takes the
+         * source pixel its centre maps back to -- and, with a mask, only
+         * where the mask's bit for that source pixel is set. The points and
+         * the rectangle are the devices'.
+         *
+         * @param {number} hdc
+         * @param {{ x: number, y: number }[]} corners  Three.
+         * @param {number} source
+         * @param {{ x: number, y: number, width: number, height: number }} from
+         * @param {number} [mask]  A context with the monochrome mask's pixels.
+         * @param {{ x: number, y: number }} [maskAt]  The mask's corner for the rectangle's.
+         * @returns {boolean}
+         */
+        plgBlt(hdc, corners, source, from, mask, maskAt = { x: 0, y: 0 }){
+            const context = contextOf(hdc);
+            const origin = contextOf(source);
+            const bits = mask ? contextOf(mask) : null;
+            if (!context || !origin || (mask && !bits) || corners.length < 3)
+            {
+                return false;
+            }
+            const [p0, p1, p2] = corners;
+            const ax = p1.x - p0.x;
+            const ay = p1.y - p0.y;
+            const bx = p2.x - p0.x;
+            const by = p2.y - p0.y;
+            const det = ax * by - ay * bx;
+            if (det === 0 || from.width === 0 || from.height === 0)
+            {
+                return false;
+            }
+            const convert = conversionOf(context, origin) ?? (pixel=>pixel);
+            const picture = /** @type {any} */ (bits?.surface ?? null);
+            const one = ((picture?.palette?.[1] ?? MONOCHROME[1]) & 0xffffff) >>> 0;
+            const xs = [p0.x, p1.x, p2.x, p1.x + bx];
+            const ys = [p0.y, p1.y, p2.y, p1.y + by];
+            const box = {
+                left: Math.min(...xs), top: Math.min(...ys),
+                right: Math.max(...xs) + 1, bottom: Math.max(...ys) + 1,
+            };
+            clipped(context, ()=>{
+                const area = intersectRect(intersectRect(box, context.clip),
+                    surfaceBounds(context.surface));
+                for (let y = area.top; y < area.bottom; y++)
+                {
+                    for (let x = area.left; x < area.right; x++)
+                    {
+                        // Where the pixel's centre is across the source and
+                        // down it, each from 0 to 1 inside.
+                        const dx = x + 0.5 - p0.x;
+                        const dy = y + 0.5 - p0.y;
+                        const across = (dx * by - dy * bx) / det;
+                        const down = (ax * dy - ay * dx) / det;
+                        if (across < 0 || across >= 1 || down < 0 || down >= 1)
+                        {
+                            continue;
+                        }
+                        const u = Math.floor(across * Math.abs(from.width));
+                        const v = Math.floor(down * Math.abs(from.height));
+                        const sx = from.width < 0 ? from.x - 1 - u : from.x + u;
+                        const sy = from.height < 0 ? from.y - 1 - v : from.y + v;
+                        if (sx < 0 || sy < 0 || sx >= origin.surface.width
+                            || sy >= origin.surface.height)
+                        {
+                            continue;
+                        }
+                        if (picture)
+                        {
+                            const mx = maskAt.x + u;
+                            const my = maskAt.y + v;
+                            if (mx < 0 || my < 0 || mx >= picture.width || my >= picture.height
+                                || ((picture.read(mx, my) & 0xffffff) >>> 0) !== one)
+                            {
+                                continue;
+                            }
+                        }
+                        context.surface.write(x, y, convert(origin.surface.read(sx, sy)));
+                    }
+                }
+            });
+            return true;
+        },
+
+        /**
+         * BOOL GdiGradientFill(HDC, PTRIVERTEX, ULONG, PVOID, ULONG, ULONG)
+         *
+         * The vertices are in device coordinates and the mesh's indices are
+         * the caller's to have checked. The pixels are written, not combined:
+         * the binary raster operation does not apply.
+         *
+         * @param {number} hdc
+         * @param {import("./gradient.js").Vertex[]} vertices
+         * @param {number[][]} mesh
+         * @param {number} mode
+         * @returns {boolean}
+         */
+        gradientFill(hdc, vertices, mesh, mode){
+            const context = contextOf(hdc);
+            if (!context)
+            {
+                return false;
+            }
+            clipped(context, ()=>gradientFill(createPainter(context.surface, context.clip),
+                vertices, mesh, mode));
+            return true;
+        },
+
+        /**
+         * BOOL ExtFloodFill(HDC, int, int, COLORREF, UINT)
+         *
+         * Fills with the selected brush, under the binary raster operation as
+         * any brush fill is.
+         *
+         * @param {number} hdc @param {number} x @param {number} y
+         * @param {number} color
+         * @param {number} type  FLOODFILLBORDER or FLOODFILLSURFACE.
+         * @returns {boolean} false when the fill could not start
+         */
+        floodFill(hdc, x, y, color, type){
+            const context = contextOf(hdc);
+            if (!context)
+            {
+                return false;
+            }
+            return floodFill(painterOf(context), context.clipRects ?? [context.clip], x | 0,
+                y | 0, colorToPixel(color), type === FLOODFILLSURFACE, patternOf(context));
+        },
+
+        /**
          * BOOL PatBlt(HDC, int, int, int, int, DWORD)
          *
          * @param {number} hdc
@@ -540,18 +799,24 @@ export function createGdiDrawing(options = {}){
         /**
          * BOOL InvertRect(HDC, const RECT *)
          *
-         * Which is exactly a PatBlt with DSTINVERT, so it is one.
+         * Which is exactly a PatBlt with DSTINVERT, so it is one. Halftone, it
+         * is the PatBlt with PATINVERT and the system's gray brush that
+         * DrawFocusRect paints with: every other pixel inverted, a
+         * checkerboard from the brush origin, so a focus rectangle shows
+         * dotted over any picture and drawing it again still takes it away.
          *
          * @param {number} hdc
          * @param {import("./contract.js").Rect} rect
+         * @param {boolean} [halftone]
          * @returns {boolean}
          */
-        invertRect(hdc, rect){
+        invertRect(hdc, rect, halftone = false){
             const context = contextOf(hdc);
             if (!context)
             {
                 return false;
             }
+            const origin = context.brushOrigin;
             return clipped(context, ()=>patBlt({
                 dest: context.surface,
                 clip: context.clip,
@@ -559,7 +824,12 @@ export function createGdiDrawing(options = {}){
                 y: rect.top,
                 width: rect.right - rect.left,
                 height: rect.bottom - rect.top,
-                rop: DSTINVERT,
+                rop: halftone ? PATINVERT : DSTINVERT,
+                // The gray brush's bitmap is 0x55 over 0xAA: its set bits,
+                // the background white that inverts, where x + y is odd.
+                pattern: halftone
+                    ? (x, y)=>((x - origin.x + y - origin.y) & 1 ? 0xffffffff : 0)
+                    : undefined,
             }));
         },
 
@@ -626,6 +896,31 @@ export function createGdiDrawing(options = {}){
             const pen = penOf(context);
             const pattern = patternOf(context);
             clipped(context, ()=>polygon(painterOf(context), points, pen, pattern, fillMode));
+            return true;
+        },
+
+        /**
+         * BOOL PolyPolygon(HDC, const POINT *, const INT *, int), and the
+         * paths FillPath and StrokeAndFillPath draw: the polygons filled
+         * together with the brush, so one inside another can be a hole, and
+         * each outlined with the pen -- or only one of the two.
+         *
+         * @param {number} hdc
+         * @param {import("./shapes.js").Point[][]} rings
+         * @param {number} [fillMode]
+         * @param {{ fill?: boolean, stroke?: boolean }} [parts]
+         * @returns {boolean}
+         */
+        polyPolygon(hdc, rings, fillMode, parts){
+            const context = contextOf(hdc);
+            if (!context)
+            {
+                return false;
+            }
+            const pen = penOf(context);
+            const pattern = patternOf(context);
+            clipped(context, ()=>polyPolygon(painterOf(context), rings, pen, pattern, fillMode,
+                parts));
             return true;
         },
 

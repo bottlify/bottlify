@@ -318,6 +318,7 @@ const mciString = command=>{
 
 /** joyGetDevCaps/joyGetPosEx on an id no device answers to. */
 const JOYERR_PARMS = 165;
+const JOYERR_NOERROR = 0;
 
 /**
  * WAVEHDR, the structure the caller owns and this reads and writes in place.
@@ -1793,6 +1794,12 @@ export function createWinmmFunctions(host){
         joyGetDevCapsA: { argBytes: 12, handler: ()=>JOYERR_PARMS },
         joyGetPosEx: { argBytes: 8, handler: ()=>JOYERR_PARMS },
         joyGetPos: { argBytes: 8, handler: ()=>JOYERR_PARMS },
+        /**
+         * MMRESULT joyConfigChanged(DWORD dwFlags): the control panel telling
+         * the driver its settings moved. With no joystick there is nothing to
+         * reread, and the notice is taken.
+         */
+        joyConfigChanged: { argBytes: 4, handler: ()=>JOYERR_NOERROR },
     };
 
     return {

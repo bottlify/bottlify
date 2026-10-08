@@ -28,7 +28,7 @@ import { Fault, blockState, interpret } from '../interp.js';
 import { WASM_INTERPRETER_AREA, WASM_INTERPRETER_STATICS_AT, WasmExit, createWasmInterpreter }
     from '../interp-wasm.js';
 import { PageFlag, createPageTable } from '../runtime/pages.js';
-import { Tables, ownLayout, pagesFor } from '../runtime/layout.js';
+import { ownLayout, pagesFor, tablesSize } from '../runtime/layout.js';
 import { Exit } from './region.js';
 
 const CODE = 0x1000;
@@ -684,11 +684,11 @@ function againstElements(program, prepare, what, random){
     };
 
     // The wasm tier over a memory of its own, in the same layout.
-    const layout = ownLayout({ ramSize: 1 << 20 });
-    const pages = pagesFor(layout, Tables.SIZE + WASM_INTERPRETER_AREA);
+    const layout = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16 });
+    const pages = pagesFor(layout, tablesSize(layout) + WASM_INTERPRETER_AREA);
     const memory = new WebAssembly.Memory({ initial: pages, maximum: pages });
     const tier = createWasmInterpreter({ memory, layout,
-        statics: WASM_INTERPRETER_STATICS_AT, area: layout.tables + Tables.SIZE,
+        statics: WASM_INTERPRETER_STATICS_AT, area: layout.tables + tablesSize(layout),
         hotThreshold: 1 << 30, trapPort: 0xb077, parkBase: 0x100000 });
     assert.ok(tier);
     const view = new DataView(memory.buffer);

@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createVersionFunctions, systemVersionResource } from './functions.js';
 import { WINDOWS_VERSIONS } from '../kernel32/versions.js';
+import { HKEY_LOCAL_MACHINE, createHive } from '../advapi32/registry.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 
 /**
@@ -691,4 +692,56 @@ test('a DirectX library\'s file names the DirectX the bottle reports', ()=>{
         .find(word=>fixed.getUint32(word * 4, true) === 0xfeef04bd) ?? -1;
     assert.equal(fixed.getUint32(signature * 4 + 8, true), 0x00040007,
         'the fixed block\'s file version, too');
+});
+
+test('the browser\'s and the player\'s files carry their versions, as the registry says them',
+    ()=>{
+        // A setup's IExpress package checks shdocvw.dll for Internet Explorer
+        // 4.71 or later and msdxm.ocx for Media Player 5.1; neither was a
+        // file the engine answers for, so both read as missing and the setup
+        // refused with "This install requires IE 4.0 or greater".
+        const xp = WINDOWS_VERSIONS.winxp;
+        /** @param {string} name */
+        const fileVersion = name=>{
+            const resource = systemVersionResource(name, xp);
+            const fixed = new DataView(resource.buffer, resource.byteOffset);
+            const signature = [...Array(resource.length >> 2).keys()]
+                .find(word=>fixed.getUint32(word * 4, true) === 0xfeef04bd) ?? -1;
+            const most = fixed.getUint32(signature * 4 + 8, true);
+            const least = fixed.getUint32(signature * 4 + 12, true);
+            return [most >>> 16, most & 0xffff, least >>> 16, least & 0xffff].join('.');
+        };
+        assert.equal(fileVersion('SHDOCVW.DLL'), xp.components?.internetExplorer);
+        assert.equal(fileVersion('wmp.dll'), xp.components?.mediaPlayer);
+        assert.equal(fileVersion('msdxm.ocx'), '6.4.9.1133', 'above the 5.1.701.52 a setup asks');
+        assert.equal(fileVersion('kernel32.dll'), '5.1.2600.0', 'the system\'s own, as before');
+
+        const hive = createHive({ windows: xp });
+        const local = /** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE));
+        /** @param {string} path @param {string} name */
+        const text = (path, name)=>{
+            const key = hive.open(local, path);
+            assert.ok(key, path);
+            return String.fromCharCode(...(hive.getValue(key, name)?.data ?? []))
+                .replace(/\0+$/, '');
+        };
+        assert.equal(text('SOFTWARE\\Microsoft\\Internet Explorer', 'Version'),
+            fileVersion('shdocvw.dll'), 'the registry and the file agree');
+        assert.equal(text('SOFTWARE\\Microsoft\\MediaPlayer\\PlayerUpgrade', 'PlayerVersion'),
+            fileVersion('wmp.dll').replaceAll('.', ','));
+    });
+
+test('VerLanguageName names the language a translation is in, as kernel32\'s call does', ()=>{
+    const { memory, version, readString } = machine();
+    assert.equal(version.VerLanguageNameA.argBytes, 12);
+    assert.equal(version.VerLanguageNameW.argBytes, 12);
+    assert.equal(version.VerLanguageNameA.handler([0x0409, 0x100, 64]), 23);
+    assert.equal(readString(0x100), 'English (United States)');
+    assert.equal(version.VerLanguageNameA.handler([0x0411, 0x100, 4]), 8, 'Japanese, cut');
+    assert.equal(readString(0x100), 'Jap');
+    assert.equal(version.VerLanguageNameW.handler([0x0000, 0x200, 64]), 16);
+    assert.equal(String.fromCharCode(...new Uint16Array(memory.slice(0x200, 0x222).buffer)),
+        'Language Neutral\0');
+    assert.equal(version.VerLanguageNameA.handler([0x7777, 0x100, 64]), 16,
+        'a language not in the table is named as the neutral one');
 });

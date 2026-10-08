@@ -54,6 +54,8 @@ import {
 } from '../d3d9/wgsl.js';
 import { D3DDECLUSAGE } from '../d3d9/declaration.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
+import { toHalf } from '../d3d9/half.js';
+import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
 import {
     fixedFragmentStage, generates, generationOf, readsNormal,
 } from '../webgpu/internal/fixedfunction.js';
@@ -606,6 +608,18 @@ const TEXEL_EXPANSION = Object.freeze({
         return out;
     },
     [D3DFMT.Q8W8V8U8]: pixels=>pixels,
+    // The floating-point formats go to `r16float` as numbers: R16F as it lies,
+    // R32F narrowed to half precision.
+    [D3DFMT.R16F]: (pixels, count)=>pixels.slice(0, count * 2),
+    [D3DFMT.R32F]: (pixels, count)=>{
+        const floats = new Float32Array(pixels.slice(0, count * 4).buffer);
+        const out = new Uint16Array(count);
+        for (let index = 0; index < count; index++)
+        {
+            out[index] = toHalf(floats[index]);
+        }
+        return new Uint8Array(out.buffer);
+    },
 });
 
 /** @param {number} value five bits @returns {number} eight */
@@ -653,6 +667,14 @@ export function expandTexels(format, pixels, count){
 export const COLOR_FORMAT = 'bgra8unorm';
 /** What a signed format is sampled from: its channels come back -1..1. */
 const SIGNED_FORMAT = 'rgba8snorm';
+/**
+ * What a floating-point format is drawn into and sampled from: rendered,
+ * filtered and blended on every WebGPU device, where 32-bit floats are each an
+ * optional feature.
+ */
+// ponytail: R32F at half precision; `r32float` where the device has float32-filterable
+// and float32-blendable, when a picture shows the steps.
+const FLOAT_FORMAT = 'r16float';
 
 /**
  * The block-compressed formats, by the D3DFMT they arrive as.
@@ -760,6 +782,10 @@ export function gpuFormatOf(format, width, height, compressedTextures){
     if (info.signed)
     {
         return SIGNED_FORMAT;
+    }
+    if (info.float)
+    {
+        return FLOAT_FORMAT;
     }
     if (!info.depth)
     {
@@ -2023,6 +2049,35 @@ fn fs_main(in: Corner) -> @location(0) vec4f {
 `;
 
 /**
+ * A rectangle of one surface drawn over a rectangle of another, at any scale: the viewport
+ * is the destination's rectangle, and the uniform block the source's in texture coordinates
+ * (left, top, right, bottom).
+ */
+const STRETCH_SHADER = `@group(0) @binding(0) var source: texture_2d<f32>;
+@group(0) @binding(1) var sourceSampler: sampler;
+@group(0) @binding(2) var<uniform> area: vec4f;
+
+struct Corner {
+    @builtin(position) position: vec4f,
+    @location(0) uv: vec2f,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) index: u32) -> Corner {
+    let corner = vec2f(f32((index << 1u) & 2u), f32(index & 2u));
+    var out: Corner;
+    out.position = vec4f(corner * 2.0 - 1.0, 0.0, 1.0);
+    out.uv = mix(area.xy, area.zw, vec2f(corner.x, 1.0 - corner.y));
+    return out;
+}
+
+@fragment
+fn fs_main(in: Corner) -> @location(0) vec4f {
+    return textureSampleLevel(source, sourceSampler, in.uv, 0.0);
+}
+`;
+
+/**
  * @param {Map<number, number>} states  one stage's states
  * @param {boolean} [mips]  False pins every sample to the top level.
  * @param {number} [lod]  The bound texture's own level of detail.
@@ -2220,6 +2275,20 @@ export function createRenderer(options){
     const skipTextures = new Set((options.skipTexture ?? '').split(',').filter(Boolean));
     const probeTexture = options.probeTexture ?? null;
     const compressedTextures = options.compressedTextures === true;
+    /**
+     * Nothing to add to a surface's description; said once, the first time a
+     * format is kept at less precision than it has.
+     *
+     * @param {number} format
+     * @returns {{}}
+     */
+    const narrowed = format=>{
+        if (format === D3DFMT.R32F)
+        {
+            divergence?.('Direct3D', 'an R32F surface is kept at half precision (r16float)');
+        }
+        return {};
+    };
     const fogApplied = options.fog !== false;
     const mipsApplied = options.mips !== false;
     const { LockFlags, BufferUsage, TextureUsage } = backend;
@@ -2308,9 +2377,30 @@ export function createRenderer(options){
      * its set goes to, and the counts it holds a part of. Null in a frame
      * that counts nothing.
      *
-     * @type {{ slots: any[], touched: Set<any> } | null}
+     * @type {{ slots: any[], areas: number[], touched: Set<any> } | null}
      */
     let frameOcclusion = null;
+    /**
+     * The pixels a draw can touch where replay stands: its target's, narrowed by the
+     * viewport and then the scissor (which is recorded cut to the viewport).
+     */
+    let drawArea = 0;
+    let assumedCountReported = false;
+    /**
+     * The samples a draw passed, as the program is told them (see occlusion.js).
+     *
+     * @param {number} answered @param {number} area
+     */
+    const countedSamples = (answered, area)=>{
+        const { samples, assumed } = passedSamples(answered, area);
+        if (assumed && divergence && !assumedCountReported)
+        {
+            assumedCountReported = true;
+            divergence('Direct3D', 'an occlusion query counts every pixel its draws could'
+                + ' cover: the GPU said only that some sample passed, not how many');
+        }
+        return samples;
+    };
     /** @param {any} count  An occlusion count every counter of which is back. */
     const settleOcclusion = count=>{
         count.value = count.total;
@@ -3004,6 +3094,13 @@ export function createRenderer(options){
             + ` blend=${state.blend ? `${state.srcBlend},${state.destBlend}` : '-'}`
             + ` aTest=${state.alphaTest
                 ? `${state.alphaFunc}/${model.renderStates.get(D3DRS.ALPHAREF) ?? 0}` : '-'}`
+            // The depth test and the bias a layer leans on to stay in front of the surface it
+            // lies on, as a fixed-function draw's line says them: two coplanar layers without
+            // it take turns as the camera moves.
+            + ` z=${state.depthTest ? state.depthFunc : '-'}/${state.depthWrite ? 1 : 0}`
+            + `/bias${dwordToFloat(model.renderStates.get(D3DRS9.DEPTHBIAS) ?? 0)}`
+            + `,${dwordToFloat(model.renderStates.get(D3DRS9.SLOPESCALEDEPTHBIAS) ?? 0)}`
+            + ` cull=${model.renderStates.get(D3DRS.CULLMODE) ?? '-'}`
             + (state.pixelShader === -1 && state.stages
                 ? ` stages=${state.stages.map((/** @type {any} */ stage)=>
                     `${stage.colorOp}(${stage.colorArg1},${stage.colorArg2})`
@@ -3563,6 +3660,12 @@ export function createRenderer(options){
 
     /** @type {any} a buffer of zeros for a stream with nothing bound */
     let zeroStream = null;
+    /** The buffer of zeros, made at its first use. */
+    const zeroBuffer = ()=>(zeroStream ??= backend.createDynamicBuffer({
+        size: ZERO_STREAM_BYTES,
+        usage: BufferUsage.VERTEX | BufferUsage.COPY_DST,
+        label: 'zero-stream',
+    }));
 
     /**
      * How many vertices stream zero's offset was folded into the first
@@ -3627,12 +3730,7 @@ export function createRenderer(options){
             const source = model.streamAt?.(stream);
             if (!source?.buffer)
             {
-                zeroStream ??= backend.createDynamicBuffer({
-                    size: ZERO_STREAM_BYTES,
-                    usage: BufferUsage.VERTEX | BufferUsage.COPY_DST,
-                    label: 'zero-stream',
-                });
-                bound.push({ slot: index + 1, gpu: zeroStream.gpu, offset: 0 });
+                bound.push({ slot: index + 1, gpu: zeroBuffer().gpu, offset: 0 });
                 continue;
             }
             // Stream zero's first vertex moves the streams that step with it;
@@ -3776,6 +3874,7 @@ export function createRenderer(options){
                 height: desc.Height,
                 format: gpuFormatOf(desc.Format, desc.Width, desc.Height, compressedTextures),
                 label: depth ? 'depth' : 'target',
+                ...narrowed(desc.Format),
                 // A colour target is copied into as well as out of: a program
                 // that blits a decoded frame onto its target, or locks the
                 // target and writes it, puts bytes into it that a draw never
@@ -4159,6 +4258,7 @@ export function createRenderer(options){
                 width: record.width,
                 height: record.height,
                 format: gpuFormatOf(record.format, record.width, record.height, compressedTextures),
+                ...narrowed(record.format),
                 mipLevelCount: record.gpuLevels,
                 ...(record.faces === 6 ? { layers: 6, dimension: 'cube' } : {}),
                 ...(record.volume ? { depth: record.depth, dimension: '3d' } : {}),
@@ -5622,6 +5722,79 @@ export function createRenderer(options){
 
     /** @type {Map<string, any>} */
     const mipSamplers = new Map();
+    /** The stretch pipelines, by destination format. @type {Map<string, Promise<any>>} */
+    const stretchPipelines = new Map();
+
+    /**
+     * A sampler that clamps, filtering as asked: what a level is made through and what a
+     * stretch reads with.
+     *
+     * @param {'linear' | 'nearest'} filter
+     */
+    const clampedSampler = filter=>{
+        let sampler = mipSamplers.get(filter);
+        if (!sampler)
+        {
+            if (!createSampler)
+            {
+                throw new Error('graphics/d3d8: levels and stretches are made through a sampler,'
+                    + ' and this renderer was given no way to make one');
+            }
+            sampler = createSampler({
+                label: `mips:${filter}`, magFilter: filter, minFilter: filter,
+                addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
+            });
+            mipSamplers.set(filter, sampler);
+        }
+        return sampler;
+    };
+
+    /**
+     * The pipeline that draws a rectangle of one surface over another's, any scale.
+     *
+     * @param {string} format
+     */
+    const stretchPipeline = async format=>{
+        const layout = backend.createBindGroupLayout({
+            label: 'stretch',
+            entries: [
+                { binding: 0, visibility: FRAGMENT_VISIBILITY, texture: {} },
+                { binding: 1, visibility: FRAGMENT_VISIBILITY, sampler: {} },
+                { binding: 2, visibility: 1, buffer: { type: 'uniform', hasDynamicOffset: true } },
+            ],
+        });
+        const module = await backend.createShaderModule({ label: 'stretch', code: STRETCH_SHADER });
+        const gpu = await backend.createRenderPipelineAsync({
+            label: `stretch:${format}`,
+            layout: backend.createPipelineLayout({ label: 'stretch', bindGroupLayouts: [layout] }),
+            vertex: { module, entryPoint: 'vs_main' },
+            fragment: { module, entryPoint: 'fs_main', targets: [{ format }] },
+            primitive: { topology: 'triangle-list' },
+        });
+        return { gpu, layout };
+    };
+
+    /**
+     * A recorded stretch: the destination's rectangle drawn from the source's.
+     *
+     * @param {any} frame @param {any} pipeline @param {any} command
+     */
+    const replayStretch = (frame, pipeline, command)=>{
+        const { source, destination, rect, destRect } = command;
+        const pass = frame.beginPass({ target: destination, clear: false, label: 'stretch' });
+        pass.setViewport({ x: destRect.left, y: destRect.top,
+            width: destRect.right - destRect.left, height: destRect.bottom - destRect.top,
+            minDepth: 0, maxDepth: 1 });
+        pass.setPipeline(pipeline.gpu);
+        const slot = pass.uniforms(Float32Array.of(rect.left / source.width,
+            rect.top / source.height, rect.right / source.width, rect.bottom / source.height));
+        pass.setBindings(0, pipeline.layout, [
+            { binding: 0, resource: source.view },
+            { binding: 1, resource: clampedSampler(command.linear ? 'linear' : 'nearest') },
+            { binding: 2, resource: slot },
+        ]);
+        pass.draw(3);
+    };
 
     /**
      * A draw counts for the occlusion query open where it stands: a query of
@@ -5655,6 +5828,7 @@ export function createRenderer(options){
         }
         pass.endOcclusionQuery();
         occlusion.slots[slot] = countingQuery;
+        occlusion.areas[slot] = drawArea;
         if (!occlusion.touched.has(countingQuery))
         {
             occlusion.touched.add(countingQuery);
@@ -5671,21 +5845,7 @@ export function createRenderer(options){
      */
     function replayMips(frame, pipeline, command){
         const record = command.record;
-        const filter = command.linear ? 'linear' : 'nearest';
-        let sampler = mipSamplers.get(filter);
-        if (!sampler)
-        {
-            if (!createSampler)
-            {
-                throw new Error('graphics/d3d8: levels are made through a sampler, and this'
-                    + ' renderer was given no way to make one');
-            }
-            sampler = createSampler({
-                label: `mips:${filter}`, magFilter: filter, minFilter: filter,
-                addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
-            });
-            mipSamplers.set(filter, sampler);
-        }
+        const sampler = clampedSampler(command.linear ? 'linear' : 'nearest');
         for (let face = 0; face < record.faces; face++)
         {
             for (let level = 1; level < record.gpuLevels; level++)
@@ -7197,6 +7357,52 @@ export function createRenderer(options){
         },
 
         /**
+         * A rectangle of one surface drawn over a rectangle of another on the GPU, at any
+         * scale and between any two colour formats it renders -- StretchRect's stretch,
+         * point or linear as the program asked. False when either side is not the GPU's,
+         * or both are one texture, and the caller says it cannot.
+         *
+         * @param {any} source
+         * @param {{ left: number, top: number, right: number, bottom: number }} rect
+         * @param {any} destination
+         * @param {{ left: number, top: number, right: number, bottom: number }} destRect
+         * @param {boolean} linear
+         * @returns {boolean}
+         */
+        stretchSurface(source, rect, destination, destRect, linear){
+            if (!onGpu(source) || !onGpu(destination))
+            {
+                return false;
+            }
+            const from = surfaceFor(source);
+            const into = surfaceFor(destination);
+            if (from.texture === into.texture || !from.view)
+            {
+                return false;
+            }
+            const tracked = textures.get(destination);
+            if (tracked)
+            {
+                tracked.ordered = true;
+                if ((surfaceLevels.get(destination) ?? 0) === 0)
+                {
+                    markMips(tracked);
+                }
+            }
+            let pipeline = stretchPipelines.get(into.format);
+            if (!pipeline)
+            {
+                pipeline = stretchPipeline(into.format);
+                stretchPipelines.set(into.format, pipeline);
+            }
+            const frame = ensureFrame();
+            frame.pipelines.push(pipeline);
+            frame.commands.push({ kind: 'stretch', source: from, destination: into, rect,
+                destRect, linear, pipeline: frame.pipelines.length - 1 });
+            return true;
+        },
+
+        /**
          * What has been recorded so far goes to the GPU with nothing shown:
          * the frame of a swap chain whose picture has nowhere to go is still
          * drawn, into targets that later draws and reads find as it left them.
@@ -7446,21 +7652,23 @@ export function createRenderer(options){
             const count = vertexCountOf(type, primitiveCount);
             const fill = fillOf(model, type);
             const rewrite = fill !== D3DFILL.SOLID || listed(model, type);
-            const prepared = prepare(model, stream.stride,
+            // A declaration that reads nothing from stream zero draws with it empty: zeros,
+            // at a stride of nothing.
+            const prepared = prepare(model, stream.buffer ? stream.stride : 0,
                 FILLED[fill] ?? (rewrite ? LIST_OF[type] : TOPOLOGY[type]));
             if (!prepared)
             {
                 return;
             }
-            const streamBuffer = bufferFor(stream.buffer).gpu;
+            const streamBuffer = stream.buffer ? bufferFor(stream.buffer).gpu : null;
             // The bytes this draw reads must survive a later lock of the same
             // buffer in this frame, which is what makes such a lock rename.
             // Stream zero's offset is in the first vertex here, as the
             // binding below starts the buffer at zero.
             const from = startVertex * stream.stride;
-            streamBuffer.markRead(from, from + count * stream.stride);
+            streamBuffer?.markRead(from, from + count * stream.stride);
             record(model, prepared, {
-                vertices: { gpu: streamBuffer.gpu, offset: 0 },
+                vertices: { gpu: streamBuffer?.gpu ?? zeroBuffer().gpu, offset: 0 },
                 ...(rewrite
                     ? expandedGeometry(type, ascending(count), startVertex, fill)
                     : { indices: null, count, first: startVertex }),
@@ -7500,13 +7708,30 @@ export function createRenderer(options){
             // A list drawn solid binds the program's own indices; anything
             // else is rewritten from them.
             const list = fill === D3DFILL.SOLID ? LIST_OF[type] : FILLED[fill];
-            const prepared = prepare(model, stream.stride,
+            const prepared = prepare(model, stream.buffer ? stream.stride : 0,
                 list === undefined ? TOPOLOGY[type] : list);
             if (!prepared)
             {
                 return;
             }
             const byteOffset = startIndex * format.bytes;
+            if (!stream.buffer)
+            {
+                // Nothing read from stream zero (the device allows only that): its zeros,
+                // and the program's own indices.
+                const indexBuffer = bufferFor(model.indices).gpu;
+                indexBuffer.markRead(byteOffset, byteOffset + count * format.bytes);
+                record(model, prepared, list === undefined ? {
+                    vertices: { gpu: zeroBuffer().gpu, offset: 0 },
+                    indices: indexBinding(indexBuffer.gpu, byteOffset, format.gpu),
+                    count, first: 0, baseVertex: 0,
+                } : {
+                    vertices: { gpu: zeroBuffer().gpu, offset: 0 },
+                    ...expandedGeometry(type, indicesFrom(indexBuffer.bytes(byteOffset,
+                        count * format.bytes), format.bytes), 0, fill),
+                }, true, 0);
+                return;
+            }
             if (prepared.state.points)
             {
                 if (hasFurtherStreams(prepared))
@@ -7925,8 +8150,8 @@ export function createRenderer(options){
         // and then every pass of it can: a BEGIN may land in any of them.
         const counts = countingQuery !== null
             || recorded.commands.some((/** @type {any} */ command)=>command.kind === 'occlusion');
-        /** @type {{ slots: any[], touched: Set<any> } | null} */
-        const occlusion = counts ? { slots: [], touched: new Set() } : null;
+        /** @type {{ slots: any[], areas: number[], touched: Set<any> } | null} */
+        const occlusion = counts ? { slots: [], areas: [], touched: new Set() } : null;
         frameOcclusion = occlusion;
         /** @type {(() => Promise<number[]>) | null} */
         let counted = null;
@@ -8002,12 +8227,12 @@ export function createRenderer(options){
         {
             // Not waited for: the next frame replays while these come back,
             // and a count is settled once every frame it counted in has.
-            const { slots, touched } = occlusion;
+            const { slots, areas, touched } = occlusion;
             counted().then(samples=>{
                 samples.forEach((value, slot)=>{
                     if (slots[slot])
                     {
-                        slots[slot].total += value;
+                        slots[slot].total += countedSamples(value, areas[slot] ?? 0);
                     }
                 });
                 for (const count of touched)
@@ -8170,6 +8395,7 @@ export function createRenderer(options){
             if (command.kind === 'pass')
             {
                 opened = command;
+                drawArea = reachableArea(command.target);
                 pass = countingPass({
                     target: command.target,
                     clear: command.clearColor !== undefined,
@@ -8210,6 +8436,20 @@ export function createRenderer(options){
                 pass = null;
                 continue;
             }
+            if (command.kind === 'stretch')
+            {
+                const made = pipelines[command.pipeline];
+                if (made.status === 'rejected')
+                {
+                    failure(made.reason);
+                }
+                else
+                {
+                    replayStretch(frame, made.value, command);
+                }
+                pass = null;
+                continue;
+            }
             if (command.kind === 'copy')
             {
                 frame.copyTexture(
@@ -8230,12 +8470,14 @@ export function createRenderer(options){
                 // reopened after this must not bring back an older scissor.
                 viewport = command.rect;
                 scissor = null;
+                drawArea = reachableArea(command.rect);
                 pass.setViewport(command.rect);
                 continue;
             }
             if (command.kind === 'scissor')
             {
                 scissor = command.rect;
+                drawArea = reachableArea(command.rect);
                 pass.setScissor(command.rect);
                 continue;
             }

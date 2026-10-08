@@ -23,6 +23,7 @@
 
 import { lstrcpyCode, lstrlenCode } from './lstr.js';
 import { assemble } from '../msvcrt/guest-code.js';
+import { createWin9xFunctions } from './win9x.js';
 import {
     PROCESSOR, PROCESSOR_FEATURES, PROCESSOR_LEVEL, PROCESSOR_REVISION,
 } from './processor.js';
@@ -152,13 +153,25 @@ const MAX_STRING = 0x7fffffff;
 /** Codes this surface can also report. */
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
+/** A pointer the call cannot write through. */
+const ERROR_NOACCESS = 998;
 /** What DeactivateActCtx answers for a cookie that is not the innermost. */
 const ERROR_SXS_INVALID_DEACTIVATION = 14065;
 /** What CreateActCtx sets when it cannot build a context from a manifest. */
 const ERROR_SXS_CANT_GEN_ACTCTX = 14001;
 const INVALID_HANDLE_VALUE = 0xffffffff;
-/** No activation context has this section: what a process without a manifest is told. */
 
+/**
+ * SetThreadExecutionState's requests: the system, the display, a user, and
+ * whether the request lasts. These four are the whole of what Windows XP
+ * takes; away mode came later and is refused here as it is there.
+ */
+const ES_SYSTEM_REQUIRED = 0x00000001;
+const ES_DISPLAY_REQUIRED = 0x00000002;
+const ES_USER_PRESENT = 0x00000004;
+const ES_CONTINUOUS = 0x80000000;
+const EXECUTION_STATES = ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED | ES_USER_PRESENT
+    | ES_CONTINUOUS;
 
 /**
  * What FormatMessage says about a code, for the codes this build produces.
@@ -339,23 +352,6 @@ export function createSystemFunctions(host){
         host.writeMemory(address, bytes);
     };
 
-    /**
-     * The buffer protocol these two share: nothing written and the length
-     * reported when there is no room, the length written otherwise -- in both
-     * cases without the terminator, which is what FormatMessage and
-     * GetProfileString both document.
-     *
-     * @param {number} buffer @param {number} size @param {string} text
-     */
-    const writeAnsiTo = (buffer, size, text)=>{
-        if (buffer === 0 || text.length + 1 > size)
-        {
-            return 0;
-        }
-        writeAnsi(buffer, text);
-        return text.length;
-    };
-
     /** @param {number} address @param {number} value */
     const writeDword = (address, value)=>{
         host.writeMemory(address, new Uint8Array([
@@ -368,6 +364,15 @@ export function createSystemFunctions(host){
         const bytes = host.readMemory(address, 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
+
+    /**
+     * What SetThreadExecutionState holds for each thread, by its record; a
+     * call with no thread to name is the process's own, under this map.
+     *
+     * @type {WeakMap<object, number>}
+     */
+    const executionStates = new WeakMap();
+
 
     /** @type {number[]} What ActivateActCtx put on the stack, innermost last. */
     const activations = [];
@@ -717,11 +722,22 @@ export function createSystemFunctions(host){
         },
     };
 
+    /** GetSystemWow64Directory in either form: the buffer is never written. */
+    const wow64Directory = {
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: args=>{
+            void args;
+            host.setLastError(ERROR_CALL_NOT_IMPLEMENTED);
+            return 0;
+        },
+    };
+
     /** Both time queries answer the same thing; see GetLocalTime. */
     const nowAsSystemTime = ()=>systemTimeFrom(
         BigInt(Math.trunc(host.systemTimeMs())) * 10_000n + FILETIME_AT_UNIX_EPOCH);
 
-    return {
+    const table = {
         /**
          * BOOL IsProcessorFeaturePresent(DWORD ProcessorFeature)
          *
@@ -765,6 +781,17 @@ export function createSystemFunctions(host){
                 return 1;
             },
         },
+
+        /**
+         * UINT GetSystemWow64DirectoryA(LPSTR lpBuffer, UINT uSize)
+         * UINT GetSystemWow64DirectoryW(LPWSTR lpBuffer, UINT uSize)
+         *
+         * Exported by a 32-bit Windows, which has no WOW64 directory: always
+         * zero, and ERROR_CALL_NOT_IMPLEMENTED -- the documented answer a
+         * program takes for "this is not a 64-bit system".
+         */
+        GetSystemWow64DirectoryA: wow64Directory,
+        GetSystemWow64DirectoryW: wow64Directory,
 
         /**
          * int MulDiv(int nNumber, int nNumerator, int nDenominator)
@@ -966,6 +993,10 @@ export function createSystemFunctions(host){
                 new DataView(bytes.buffer).setUint32(
                     0, child ? child.exitCode : STILL_ACTIVE, true);
                 host.writeMemory(code >>> 0, bytes);
+                if (child && child.exitCode === STILL_ACTIVE && !child.started)
+                {
+                    child.polled = true;
+                }
                 return 1;
             },
         },
@@ -1117,6 +1148,10 @@ export function createSystemFunctions(host){
         AddRefActCtx: { argBytes: 4, handler: ()=>0 },
         ReleaseActCtx: { argBytes: 4, handler: ()=>0 },
 
+        // FindActCtxSectionStringA/W are absent on purpose (decisions.md): no activation
+        // context is built here, and a C runtime that finds the lookup present takes its
+        // "not found" for a load without its manifest and stops the program with R6034.
+
         /**
          * UINT SetErrorMode(UINT uMode)
          *
@@ -1186,21 +1221,75 @@ export function createSystemFunctions(host){
         },
 
         /**
-         * DWORD GetProfileStringA(LPCSTR lpAppName, LPCSTR lpKeyName,
-         *   LPCSTR lpDefault, LPSTR lpReturnedString, DWORD nSize)
+         * BOOL SetThreadPriorityBoost(HANDLE hThread, BOOL DisablePriorityBoost)
+         * BOOL GetThreadPriorityBoost(HANDLE hThread, PBOOL pDisablePriorityBoost)
          *
-         * Reads win.ini, which does not exist, so every key is absent and the
-         * caller's own default is what comes back. That is the documented
-         * behaviour for a missing key and is exactly what a caller passing a
-         * default is prepared for -- inventing a value instead would override a
-         * choice the program already made.
+         * Kept on the thread and read back. The boost is the dynamic one the
+         * scheduler gives a thread that has waited, and this scheduler gives
+         * none, so the setting changes nothing a thread can measure -- but a
+         * caller that sets it and reads it back finds what it set.
          */
-        GetProfileStringA: {
-            argBytes: 20,
+        SetThreadPriorityBoost: {
+            argBytes: 8,
             /** @param {number[]} args */
-            handler: ([, , fallback, buffer, size])=>{
-                const text = fallback === 0 ? '' : readAnsi(fallback >>> 0, MAX_STRING);
-                return writeAnsiTo(buffer >>> 0, size >>> 0, text);
+            handler: ([handle, disable])=>{
+                const target = thread(handle);
+                if (!target)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                target.priorityBoostDisabled = (disable >>> 0) !== 0;
+                return 1;
+            },
+        },
+        GetThreadPriorityBoost: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                const target = thread(handle);
+                if (!target)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                if ((out >>> 0) === 0)
+                {
+                    host.setLastError(ERROR_NOACCESS);
+                    return 0;
+                }
+                writeDword(out >>> 0, target.priorityBoostDisabled ? 1 : 0);
+                return 1;
+            },
+        },
+
+        /**
+         * EXECUTION_STATE SetThreadExecutionState(EXECUTION_STATE esFlags)
+         *
+         * The thread's lasting request is replaced only by one that says
+         * ES_CONTINUOUS; one without it is a single nudge of the idle timer
+         * and leaves the lasting request as it was. The answer is the request
+         * before the call, a thread that never asked holding ES_CONTINUOUS
+         * alone. A flag outside the four is refused with NULL. Nothing here
+         * sleeps or blanks a display, so the request is kept, not acted on.
+         */
+        SetThreadExecutionState: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([flags])=>{
+                const asked = flags >>> 0;
+                if ((asked & ~EXECUTION_STATES) !== 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const key = host.currentThread() ?? executionStates;
+                const previous = executionStates.get(key) ?? ES_CONTINUOUS;
+                if ((asked & ES_CONTINUOUS) !== 0)
+                {
+                    executionStates.set(key, asked);
+                }
+                return previous >>> 0;
             },
         },
 
@@ -1439,5 +1528,20 @@ export function createSystemFunctions(host){
                 readWide(first >>> 0, MAX_STRING).toLowerCase(),
                 readWide(second >>> 0, MAX_STRING).toLowerCase())),
         },
+    };
+
+    // The undecorated names are kernel32's own exports beside the ANSI ones
+    // -- a program written before the A and W suffixes looks them up by these
+    // -- and the same entries rather than copies, so the two cannot drift.
+    return {
+        ...table,
+        // Windows 95's own calls, which find nothing of what they reach for.
+        ...createWin9xFunctions(host),
+        lstrcat: table.lstrcatA,
+        lstrcmp: table.lstrcmpA,
+        lstrcmpi: table.lstrcmpiA,
+        lstrcpy: table.lstrcpyA,
+        lstrcpyn: table.lstrcpynA,
+        lstrlen: table.lstrlenA,
     };
 }

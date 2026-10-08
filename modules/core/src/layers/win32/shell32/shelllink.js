@@ -5,29 +5,35 @@
  */
 
 /**
- * CLSID_ShellLink: the smallest object that lets an installer finish.
+ * CLSID_ShellLink: IShellLinkA, IShellLinkW and IPersistFile over one link.
  *
  * An installer makes a Start Menu shortcut by asking COM for this class,
- * setting a target through IShellLink, and saving it through IPersistFile. A
- * build that refuses the class turns every shortcut into "Access is denied"
- * and ends the install in a warning dialog, so the class has to exist and the
- * save has to leave something a later "is the link there" check finds.
+ * setting a target through IShellLink and saving it through IPersistFile; a
+ * launcher or an uninstaller later loads one and asks where it points. Save
+ * writes a real `.lnk` through the shared [MS-SHLLINK] encoder and Load reads
+ * one back through its decoder, so a link this object saved, one the installer
+ * engine's CreateShortcuts wrote, and one some other writer of the format left
+ * on a disc all answer the getters the same way.
  *
- * What it does not do is write a real `.lnk`. A shortcut nobody can see -- the
- * guest's Start Menu is never drawn, and the launcher starts the game's
- * executable directly -- has no contents to get right. So `Save` creates an
- * empty file at the path, which is enough for the existence check to pass, and
- * every method whose answer stands in for work this build does not do says so
- * through the divergence reporter rather than pretending silently. The strings
- * a program sets are kept and handed back verbatim, because a program that
- * reads back what it wrote is the one thing here that must not be surprised.
+ * The id lists a program hands in and gets back are the shell namespace's
+ * own (see namespace.js); the file holds the shapes the shell writes for a
+ * path, made from the target, so the guest only ever sees one kind and the
+ * file only the other. The strings a program sets are kept and handed back
+ * verbatim, because a program that reads back what it wrote is the one thing
+ * here that must not be surprised.
  */
 
 import { writeGuid } from '../ole32/guid.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { fileAttributes, msToFileTime } from '../kernel32/filetime.js';
+import { WIN32_FIND_DATAA } from '../kernel32/files.js';
+import {
+    CLSID_SHELL_LINK, SW_SHOWNORMAL, decodeShellLink, writeShellLink,
+} from '../common/shell-link.js';
+import { listBytes, pathOfList } from './namespace.js';
 
 /** CLSID_ShellLink, and the interfaces the object answers to. */
-export const CLSID_SHELL_LINK = '{00021401-0000-0000-C000-000000000046}';
+export { CLSID_SHELL_LINK };
 export const IID_ISHELL_LINK_A = '{000214EE-0000-0000-C000-000000000046}';
 export const IID_ISHELL_LINK_W = '{000214F9-0000-0000-C000-000000000046}';
 export const IID_IPERSIST_FILE = '{0000010B-0000-0000-C000-000000000046}';
@@ -35,10 +41,10 @@ export const IID_IPERSIST_FILE = '{0000010B-0000-0000-C000-000000000046}';
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
 const E_FAIL = 0x80004005 | 0;
+const E_INVALIDARG = 0x80070057 | 0;
 const STG_E_FILENOTFOUND = 0x80030002 | 0;
-
-/** SW_SHOWNORMAL: what a link nobody set a show command answers with. */
-const SW_SHOWNORMAL = 1;
+/** HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND): a save into a directory that is not there. */
+const E_PATH_NOT_FOUND = 0x80070003 | 0;
 
 /**
  * How far a link string is scanned. Paths top out at MAX_PATH, but arguments
@@ -47,10 +53,11 @@ const SW_SHOWNORMAL = 1;
  */
 const MAX_LINK_STRING = 2048;
 
-/** WIN32_FIND_DATA: cFileName sits at this offset in both the A and W forms. */
-const FIND_DATA_NAME = 44;
-const FIND_DATA_A_SIZE = 318;
+/** WIN32_FIND_DATAW: the A layout up to cFileName, whose 260 characters are wide. */
 const FIND_DATA_W_SIZE = 592;
+
+/** How many items an id list from the guest is walked for, against a stray pointer. */
+const MAX_LIST_ITEMS = 64;
 
 /**
  * IShellLink's slots after IUnknown's three, as `[name, dwords]`, in the
@@ -105,6 +112,10 @@ const IPERSIST_FILE_SLOTS = [
  * @property {number} iconIndex
  * @property {number} showCmd
  * @property {number} hotkey
+ * @property {Uint8Array | null} idList  The list SetIDList or Load gave, in the
+ *           namespace's encoding; null when the target is a path or nothing.
+ * @property {{ signature: number, bytes: Uint8Array }[]} blocks
+ *           Extra data a loaded link carried, saved back with it.
  * @property {string | null} curFile  The path Save or Load last named.
  * @property {boolean} dirty          Whether a Set* ran since the last save.
  */
@@ -114,7 +125,7 @@ function newLinkState(){
     return {
         path: '', relativePath: '', arguments: '', description: '', workingDirectory: '',
         iconLocation: '', iconIndex: 0, showCmd: SW_SHOWNORMAL, hotkey: 0,
-        curFile: null, dirty: false,
+        idList: null, blocks: [], curFile: null, dirty: false,
     };
 }
 
@@ -127,7 +138,7 @@ function newLinkState(){
  * A shell link method as the bridge calls it: the object's state, and the
  * guest arguments with the interface pointer already removed.
  *
- * @typedef {(state: ShellLinkState, args: number[]) => number} LinkMethod
+ * @typedef {(state: ShellLinkState, args: number[]) => number | Promise<number>} LinkMethod
  */
 
 /**
@@ -143,12 +154,14 @@ function newLinkState(){
  *           Task memory, the heap CoTaskMemAlloc uses: a string GetCurFile
  *           hands back is the caller's to free with CoTaskMemFree, so it comes
  *           from here rather than from storage this file keeps.
- * @property {{ stat: (path: string) => { exists: boolean, isDirectory: boolean } | null,
- *              open: (path: string, mode: { write?: boolean, create?: boolean,
- *                     truncate?: boolean }) => unknown,
- *              close: (node: unknown) => void }} [files]
- *           The volume a link is saved on. Absent, Save cannot leave a file and
- *           says so rather than answering success.
+ * @property {import('../common/shell-link.js').LinkVolume & {
+ *     read: (node: any, offset: number, length: number)
+ *         => Uint8Array | Promise<Uint8Array> }} [files]
+ *           The volume a link is saved on and loaded from. Absent, Save cannot
+ *           leave a file and says so rather than answering success.
+ * @property {(text: string) => string} [expand]
+ *           Expands %VARIABLES%, so a target given with them is saved with the
+ *           path it names as well as the form it was given in.
  * @property {(api: string, detail: string) => void} [divergence]
  *           Where a method that stands in for work this build does not do says
  *           so, once per distinct difference.
@@ -198,9 +211,10 @@ function writeStringBuffer(host, buffer, cch, text, wide){
 }
 
 /**
- * Fills a WIN32_FIND_DATA the caller passed to GetPath. Only the name is set;
- * the sizes and times a real shell would stat the target for are left zero,
- * which is the divergence GetPath reports.
+ * Fills a WIN32_FIND_DATA the caller passed to GetPath: the target's name --
+ * the last component, as a directory listing gives it -- and what the volume
+ * knows of it. A target that is not there, or no target, leaves the rest
+ * zero, as Windows leaves it.
  *
  * @param {ShellLinkHost} host
  * @param {number} findData
@@ -208,23 +222,79 @@ function writeStringBuffer(host, buffer, cch, text, wide){
  * @param {boolean} wide
  */
 function writeFindData(host, findData, path, wide){
-    const bytes = new Uint8Array(wide ? FIND_DATA_W_SIZE : FIND_DATA_A_SIZE);
-    const name = path.slice(0, 259);
+    const bytes = new Uint8Array(wide ? FIND_DATA_W_SIZE : WIN32_FIND_DATAA.SIZE);
+    const view = new DataView(bytes.buffer);
+    const entry = path === '' ? null : host.files?.stat(path) ?? null;
+    if (entry && entry.exists !== false)
+    {
+        view.setUint32(WIN32_FIND_DATAA.dwFileAttributes, fileAttributes(entry), true);
+        // One time for all three, as the file calls report them: the volume
+        // records when a name was last written and nothing else.
+        const time = entry.modified === undefined ? 0n : msToFileTime(entry.modified);
+        view.setBigUint64(WIN32_FIND_DATAA.ftCreationTime, time, true);
+        view.setBigUint64(WIN32_FIND_DATAA.ftLastAccessTime, time, true);
+        view.setBigUint64(WIN32_FIND_DATAA.ftLastWriteTime, time, true);
+        const size = entry.isDirectory ? 0 : entry.size ?? 0;
+        view.setUint32(WIN32_FIND_DATAA.nFileSizeHigh, Math.floor(size / 0x100000000), true);
+        view.setUint32(WIN32_FIND_DATAA.nFileSizeLow, size >>> 0, true);
+    }
+    const name = (path.replace(/\\+$/, '').split('\\').pop() ?? '').slice(0, 259);
     if (wide)
     {
         for (let at = 0; at < name.length; at++)
         {
-            const unit = name.charCodeAt(at);
-            bytes[FIND_DATA_NAME + at * 2] = unit & 0xff;
-            bytes[FIND_DATA_NAME + at * 2 + 1] = (unit >>> 8) & 0xff;
+            view.setUint16(WIN32_FIND_DATAA.cFileName + at * 2, name.charCodeAt(at), true);
         }
     }
     else
     {
-        bytes.set(encodeAnsi(name), FIND_DATA_NAME);
+        bytes.set(encodeAnsi(name), WIN32_FIND_DATAA.cFileName);
     }
     host.writeMemory(findData, bytes);
 }
+
+/**
+ * The bytes of an id list in guest memory, its terminating zero word
+ * included, walked by its own `cb` fields.
+ *
+ * @param {ShellLinkHost} host
+ * @param {number} list
+ * @returns {Uint8Array}
+ */
+function readList(host, list){
+    let length = 0;
+    for (let n = 0; n < MAX_LIST_ITEMS; n++)
+    {
+        const head = host.readMemory(list + length, 2);
+        const item = head[0] | (head[1] << 8);
+        if (item < 3)
+        {
+            break;
+        }
+        length += item;
+    }
+    return host.readMemory(list, length + 2).slice();
+}
+
+/**
+ * A path a program set, as the shell keeps it: a quoted path without its
+ * quotes, and no trailing separator but a drive root's.
+ *
+ * @param {string} text
+ */
+function cleanPath(text){
+    const unquoted = /^"[^"]*"$/.test(text) ? text.slice(1, -1) : text;
+    return /^[A-Za-z]:\\?$/.test(unquoted)
+        ? `${unquoted.slice(0, 2)}\\` : unquoted.replace(/\\+$/, '');
+}
+
+/** @param {string} path */
+const isDrivePath = path=>/^[A-Za-z]:\\/.test(path);
+
+/** @param {number} value */
+const dword = value=>new Uint8Array([
+    value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
+]);
 
 /**
  * Builds an interface descriptor from `[name, dwords]` slots. The count is the
@@ -271,9 +341,14 @@ export function createShellLink(host){
      * @param {boolean} wide
      */
     const stringMethods = (reader, wide)=>{
-        /** @param {StringKey} key @returns {LinkMethod} */
+        /**
+         * A null string clears the field, as Windows answers a null
+         * description with an empty one.
+         *
+         * @param {StringKey} key @returns {LinkMethod}
+         */
         const setter = key=>(state, args)=>{
-            state[key] = reader.read(args[0] >>> 0);
+            state[key] = (args[0] >>> 0) === 0 ? '' : reader.read(args[0] >>> 0);
             state.dirty = true;
             return S_OK;
         };
@@ -284,7 +359,6 @@ export function createShellLink(host){
         };
         /** @type {Record<string, LinkMethod>} */
         const methods = {
-            SetPath: setter('path'),
             SetArguments: setter('arguments'),
             SetDescription: setter('description'),
             SetWorkingDirectory: setter('workingDirectory'),
@@ -293,13 +367,31 @@ export function createShellLink(host){
             GetWorkingDirectory: getter('workingDirectory'),
 
             /**
+             * HRESULT SetPath(LPCSTR pszFile)
+             *
+             * The target as the shell keeps it -- unquoted, with no trailing
+             * separator -- and the id list given before it dropped: the last
+             * of the two to be set is the target.
+             */
+            SetPath: (state, [address])=>{
+                if ((address >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                state.path = cleanPath(reader.read(address >>> 0));
+                state.idList = null;
+                state.dirty = true;
+                return S_OK;
+            },
+
+            /**
              * HRESULT GetPath(LPSTR pszFile, int cch, WIN32_FIND_DATA *pfd, DWORD fFlags)
              *
-             * The target string back, and the find data filled as far as this
-             * build can -- the name, with no sizes or times, which is the
-             * divergence named here. A link that was only given a relative
-             * path answers with it as it was set: nothing here resolves one
-             * against the link's own directory.
+             * The target string back, and the find data filled from the
+             * volume. S_FALSE with an empty string for a link with no target,
+             * or one whose id list names no path. A link that was only given
+             * a relative path answers with it as it was set: nothing here
+             * resolves one against the link's own directory.
              */
             GetPath: (state, [buffer, cch, findData])=>{
                 const path = state.path !== '' ? state.path : state.relativePath;
@@ -307,10 +399,8 @@ export function createShellLink(host){
                 if ((findData >>> 0) !== 0)
                 {
                     writeFindData(host, findData >>> 0, path, wide);
-                    diverge('IShellLink::GetPath',
-                        'the find data carries the name only, not the target\'s sizes or times');
                 }
-                return S_OK;
+                return path === '' ? S_FALSE : S_OK;
             },
 
             /**
@@ -334,69 +424,161 @@ export function createShellLink(host){
                 writeStringBuffer(host, buffer >>> 0, cch | 0, state.iconLocation, wide);
                 if ((iconIndex >>> 0) !== 0)
                 {
-                    host.writeMemory(iconIndex >>> 0, new Uint8Array([
-                        state.iconIndex & 0xff, (state.iconIndex >>> 8) & 0xff,
-                        (state.iconIndex >>> 16) & 0xff, (state.iconIndex >>> 24) & 0xff,
-                    ]));
+                    host.writeMemory(iconIndex >>> 0, dword(state.iconIndex));
                 }
                 return S_OK;
             },
 
             /** HRESULT SetIconLocation(LPCSTR pszPath, int iIcon) */
             SetIconLocation: (state, [address, iconIndex])=>{
-                state.iconLocation = reader.read(address >>> 0);
+                state.iconLocation = (address >>> 0) === 0 ? '' : reader.read(address >>> 0);
                 state.iconIndex = iconIndex | 0;
                 state.dirty = true;
                 return S_OK;
             },
-
-            /** HRESULT SetShowCmd(int iShowCmd) */
-            SetShowCmd: (state, [showCmd])=>{
-                state.showCmd = showCmd | 0;
-                state.dirty = true;
-                return S_OK;
-            },
-            /** HRESULT GetShowCmd(int *piShowCmd) */
-            GetShowCmd: (state, [out])=>{
-                if ((out >>> 0) !== 0)
-                {
-                    host.writeMemory(out >>> 0, new Uint8Array([
-                        state.showCmd & 0xff, (state.showCmd >>> 8) & 0xff,
-                        (state.showCmd >>> 16) & 0xff, (state.showCmd >>> 24) & 0xff,
-                    ]));
-                }
-                return S_OK;
-            },
-            /** HRESULT SetHotkey(WORD wHotkey) */
-            SetHotkey: (state, [hotkey])=>{
-                state.hotkey = hotkey & 0xffff;
-                state.dirty = true;
-                return S_OK;
-            },
-            /** HRESULT GetHotkey(WORD *pwHotkey) */
-            GetHotkey: (state, [out])=>{
-                if ((out >>> 0) !== 0)
-                {
-                    host.writeMemory(out >>> 0,
-                        new Uint8Array([state.hotkey & 0xff, (state.hotkey >>> 8) & 0xff]));
-                }
-                return S_OK;
-            },
-
-            /**
-             * HRESULT Resolve(HWND hwnd, DWORD fFlags)
-             *
-             * Answered S_OK without searching: the target is whatever the
-             * program set, and there is no shell here to re-find a moved one.
-             * An installer calls this before Save and proceeds on success.
-             */
-            Resolve: ()=>{
-                diverge('IShellLink::Resolve',
-                    'no search runs; the link answers as already resolved');
-                return S_OK;
-            },
         };
         return methods;
+    };
+
+    /**
+     * The methods whose arguments carry no string, the same in both spellings.
+     *
+     * @type {Record<string, LinkMethod>}
+     */
+    const common = {
+        /** HRESULT SetShowCmd(int iShowCmd) */
+        SetShowCmd: (state, [showCmd])=>{
+            state.showCmd = showCmd | 0;
+            state.dirty = true;
+            return S_OK;
+        },
+        /** HRESULT GetShowCmd(int *piShowCmd) */
+        GetShowCmd: (state, [out])=>{
+            if ((out >>> 0) !== 0)
+            {
+                host.writeMemory(out >>> 0, dword(state.showCmd));
+            }
+            return S_OK;
+        },
+        /** HRESULT SetHotkey(WORD wHotkey) */
+        SetHotkey: (state, [hotkey])=>{
+            state.hotkey = hotkey & 0xffff;
+            state.dirty = true;
+            return S_OK;
+        },
+        /** HRESULT GetHotkey(WORD *pwHotkey) */
+        GetHotkey: (state, [out])=>{
+            if ((out >>> 0) !== 0)
+            {
+                host.writeMemory(out >>> 0,
+                    new Uint8Array([state.hotkey & 0xff, (state.hotkey >>> 8) & 0xff]));
+            }
+            return S_OK;
+        },
+
+        /**
+         * HRESULT SetIDList(PCIDLIST_ABSOLUTE pidl)
+         *
+         * The list is kept as given, so GetIDList hands back an equal one,
+         * and the path it names becomes the target -- or no target, for a
+         * list that names no place on a drive.
+         */
+        SetIDList: (state, [list])=>{
+            if ((list >>> 0) === 0)
+            {
+                state.idList = null;
+                state.path = '';
+            }
+            else
+            {
+                state.idList = readList(host, list >>> 0);
+                state.path = pathOfList(host, list >>> 0) ?? '';
+            }
+            state.dirty = true;
+            return S_OK;
+        },
+
+        /**
+         * HRESULT GetIDList(PIDLIST_ABSOLUTE *ppidl)
+         *
+         * A fresh copy in task memory, the caller's to free: the list that
+         * was set, or the namespace's list for a target path. S_FALSE with a
+         * null for a link with neither.
+         */
+        GetIDList: (state, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            const bytes = state.idList
+                ?? (isDrivePath(state.path) ? listBytes(state.path) : null);
+            const block = bytes ? host.allocate(bytes.length) : 0;
+            if (!bytes || block === 0)
+            {
+                host.writeMemory(out >>> 0, dword(0));
+                return bytes ? E_FAIL : S_FALSE;
+            }
+            host.writeMemory(block, bytes);
+            host.writeMemory(out >>> 0, dword(block));
+            return S_OK;
+        },
+
+        /**
+         * HRESULT Resolve(HWND hwnd, DWORD fFlags)
+         *
+         * Answered S_OK without searching: the target is whatever the
+         * program set, and there is no shell here to re-find a moved one.
+         * An installer calls this before Save and proceeds on success.
+         */
+        Resolve: ()=>{
+            diverge('IShellLink::Resolve',
+                'no search runs; the link answers as already resolved');
+            return S_OK;
+        },
+    };
+
+    /**
+     * What the link file is written from. An id list that names a path is
+     * written as the shell's shapes for that path, made from the target; one
+     * that names no path goes in as the program gave it.
+     *
+     * @param {ShellLinkState} state
+     * @returns {import('../common/shell-link.js').ShellLinkFields}
+     */
+    const fieldsOf = state=>({
+        target: state.path,
+        idList: state.idList && state.path === '' ? state.idList : null,
+        description: state.description,
+        relativePath: state.relativePath,
+        workingDirectory: state.workingDirectory,
+        arguments: state.arguments,
+        iconLocation: state.iconLocation,
+        iconIndex: state.iconIndex,
+        showCommand: state.showCmd,
+        hotkey: state.hotkey,
+        expand: host.expand,
+        blocks: state.blocks,
+    });
+
+    /**
+     * The state a loaded link answers from.
+     *
+     * @param {ShellLinkState} state
+     * @param {import('../common/shell-link.js').ShellLink} link
+     */
+    const adopt = (state, link)=>{
+        state.path = link.target;
+        state.relativePath = link.relativePath;
+        state.description = link.description;
+        state.workingDirectory = link.workingDirectory;
+        state.arguments = link.arguments;
+        state.iconLocation = link.environmentIcon ?? link.iconLocation;
+        state.iconIndex = link.iconIndex;
+        state.showCmd = link.showCommand;
+        state.hotkey = link.hotkey;
+        state.idList = link.idListPath !== null ? listBytes(link.idListPath)
+            : link.idList?.slice() ?? null;
+        state.blocks = link.blocks;
     };
 
     /** The IPersistFile half, which is wide like every OLE path.
@@ -413,47 +595,83 @@ export function createShellLink(host){
         /**
          * HRESULT Load(LPCOLESTR pszFileName, DWORD dwMode)
          *
-         * S_OK when the file is there, which is all an installer's "does my
-         * shortcut still exist" check needs; the bytes are not parsed as a
-         * shell link, and the state keeps whatever it already held.
+         * Reads the link and answers every getter from it. A file that is
+         * there but is no link fails, and leaves the state as it was.
          */
         Load: (state, [name])=>{
             const path = host.readWideString(name >>> 0, MAX_LINK_STRING);
-            const entry = host.files?.stat(path);
-            if (!entry || !entry.exists || entry.isDirectory)
+            const files = host.files;
+            const entry = files?.stat(path);
+            if (!files || !entry || entry.exists === false || entry.isDirectory)
             {
                 return STG_E_FILENOTFOUND;
             }
-            state.curFile = path;
-            state.dirty = false;
-            diverge('IPersistFile::Load', 'the file is checked for, not read as a shell link');
-            return S_OK;
+            const node = files.open(path, { read: true });
+            if (!node)
+            {
+                return STG_E_FILENOTFOUND;
+            }
+            /** @param {Uint8Array} bytes */
+            const finish = bytes=>{
+                const link = decodeShellLink(bytes);
+                if (!link)
+                {
+                    return E_FAIL;
+                }
+                adopt(state, link);
+                state.curFile = path;
+                state.dirty = false;
+                return S_OK;
+            };
+            /** @type {Uint8Array | Promise<Uint8Array>} */
+            let read;
+            try
+            {
+                read = files.read(node, 0, entry.size ?? 0);
+            }
+            catch (e){
+                files.close(node);
+                throw e;
+            }
+            if (read instanceof Uint8Array)
+            {
+                files.close(node);
+                return finish(read);
+            }
+            return read.then(finish).finally(()=>files.close(node));
         },
 
         /**
          * HRESULT Save(LPCOLESTR pszFileName, BOOL fRemember)
          *
-         * Leaves an empty file at the path, so the shortcut exists for whoever
-         * looks next, and remembers the path when asked. A real `.lnk` is not
-         * written -- there is no Start Menu to read it -- and that is said.
+         * Writes the link at the path, or at the current file for a null
+         * one. Remembering makes the path current and the link clean; a copy
+         * saved elsewhere changes neither.
          */
         Save: (state, [name, remember])=>{
-            const path = host.readWideString(name >>> 0, MAX_LINK_STRING);
-            const node = host.files?.open(path, { write: true, create: true, truncate: true });
-            if (!node)
+            const given = (name >>> 0) === 0
+                ? null : host.readWideString(name >>> 0, MAX_LINK_STRING);
+            const path = given ?? state.curFile;
+            if (path === null)
+            {
+                return E_INVALIDARG;
+            }
+            if (!host.files)
             {
                 diverge('IPersistFile::Save',
                     `no volume to save ${path} on; the link is not written`);
                 return E_FAIL;
             }
-            host.files?.close(node);
-            if ((remember | 0) !== 0)
+            if (!writeShellLink(host.files, path, fieldsOf(state)))
+            {
+                const parent = path.slice(0, path.lastIndexOf('\\'));
+                return host.files.stat(parent)?.isDirectory ? E_FAIL : E_PATH_NOT_FOUND;
+            }
+            if (given === null || (remember | 0) !== 0)
             {
                 state.curFile = path;
+                state.dirty = false;
             }
-            state.dirty = false;
-            diverge('IPersistFile::Save',
-                'an empty file stands in for the shell link; no .lnk is written');
             return S_OK;
         },
 
@@ -479,7 +697,7 @@ export function createShellLink(host){
             }
             if (state.curFile === null)
             {
-                host.writeMemory(slot, new Uint8Array(4));
+                host.writeMemory(slot, dword(0));
                 return S_FALSE;
             }
             const bytes = new Uint8Array((state.curFile.length + 1) * 2);
@@ -492,19 +710,17 @@ export function createShellLink(host){
             const block = host.allocate(bytes.length);
             if (block === 0)
             {
-                host.writeMemory(slot, new Uint8Array(4));
+                host.writeMemory(slot, dword(0));
                 return E_FAIL;
             }
             host.writeMemory(block, bytes);
-            host.writeMemory(slot, new Uint8Array([
-                block & 0xff, (block >>> 8) & 0xff, (block >>> 16) & 0xff, (block >>> 24) & 0xff,
-            ]));
+            host.writeMemory(slot, dword(block));
             return S_OK;
         },
     };
 
-    const ansi = stringMethods(ansiReader(host), false);
-    const wide = stringMethods(wideReader(host), true);
+    const ansi = { ...common, ...stringMethods(ansiReader(host), false) };
+    const wide = { ...common, ...stringMethods(wideReader(host), true) };
 
     return ()=>({
         state: newLinkState(),

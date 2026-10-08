@@ -16,7 +16,7 @@ import {
     REG_DWORD,
     REG_MULTI_SZ,
     REG_SZ,
-    profileDirectories,
+    shellFolderDirectories,
     shellFolders,
 } from './registry.js';
 import { WINDOWS_VERSIONS } from '../kernel32/versions.js';
@@ -493,14 +493,14 @@ test('the classes root is saved as the two roots it shows, and an older save fol
         'Registered\0');
 });
 
-test('the profile\'s directories are every folder under it, each parent before its children', ()=>{
+test('every shell folder is a directory, each parent before its children', ()=>{
     for (const windows of Object.values(WINDOWS_VERSIONS))
     {
-        const directories = profileDirectories(windows);
+        const directories = shellFolderDirectories(windows);
         const folders = shellFolders(windows);
         for (const name of ['Profile', 'Desktop', 'Startup', 'Personal', 'AppData',
             'Local AppData', 'Common Desktop', 'Common Startup', 'Common Documents',
-            'Common AppData'])
+            'Common AppData', 'Fonts', 'System', 'ProgramFiles', 'CommonFiles'])
         {
             assert.ok(directories.includes(folders[name]), `${windows.name}: ${name}`);
         }
@@ -509,11 +509,11 @@ test('the profile\'s directories are every folder under it, each parent before i
             assert.ok(parent === 'C:' || directories.indexOf(parent) < index,
                 `${windows.name}: ${parent} before ${path}`);
         });
-        assert.ok(!directories.some(path=>/^C:\\(WINDOWS|Program Files)/i.test(path)),
-            'the system\'s own directories are not the profile\'s');
+        assert.ok(directories.indexOf('C:\\WINDOWS') < directories.indexOf('C:\\WINDOWS\\Fonts'),
+            'the machine\'s folders too, which a setup copies fonts into unmade');
     }
-    assert.ok(profileDirectories(WINDOWS_VERSIONS.win7).includes('C:\\Users\\Public'));
-    assert.ok(profileDirectories(WINDOWS_VERSIONS.winxp)
+    assert.ok(shellFolderDirectories(WINDOWS_VERSIONS.win7).includes('C:\\Users\\Public'));
+    assert.ok(shellFolderDirectories(WINDOWS_VERSIONS.winxp)
         .includes('C:\\Documents and Settings\\User\\Local Settings'));
 });
 

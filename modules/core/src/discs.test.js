@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { discReader, freeLetter, mountDiscs } from './discs.js';
 import { filesystemModule } from './layers/filesystem/module.js';
-import { buildIso } from './layers/filesystem/internal/iso/iso.fixture.js';
+import { buildIso } from './layers/filesystem/internal/iso/build.js';
 
 const IMAGE = buildIso({ label: 'DEMO', files: {
     'SETUP.EXE': 'MZ', 'Data/a.cab': 'cab', 'Data/big.cab': new Uint8Array(1 << 20),

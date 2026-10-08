@@ -421,19 +421,23 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
  *
  * @param {{ jobs: { entry: number, entryTop: number, hash: string, checked?: boolean,
  *         copies?: boolean, targets?: [number, number[]][] }[],
- *     pages: [number, Uint8Array][],
+ *     pages: [number, Uint8Array][], formable?: number[],
  *     form: { maxBlocks: number, maxBytes: number, leafCalls?: boolean,
- *         helpers?: boolean } }} relink
+ *         helpers?: boolean } }} relink   `pages` copies of every page forming read,
+ *     `formable` the ones a region may span (all of `pages` when absent)
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {Parameters<typeof emitBatch>[3]} [options]
  * @param {EmitCache} [cache]
  * @returns {BuiltBatch}
  */
-export function relinkBatch({ jobs, pages, form }, layout, features, options = {},
+export function relinkBatch({ jobs, pages, form, formable }, layout, features, options = {},
     cache = undefined)
 {
     const byPage = new Map(pages);
+    // The pages a region may be formed over: the regions' own, when the copies hold more
+    // that forming only read.
+    const formablePages = formable === undefined ? byPage : new Set(formable);
     // The page read last, kept: forming reads a region's bytes in runs.
     let lastPage = -1;
     /** @type {Uint8Array | undefined} */
@@ -451,7 +455,7 @@ export function relinkBatch({ jobs, pages, form }, layout, features, options = {
     // The pages the regions were formed over are the translatable ones: a page
     // one of them was refused at is not among any region's pages.
     /** @param {number} address */
-    const translatable = address=>byPage.has(address >>> 12);
+    const translatable = address=>formablePages.has(address >>> 12);
     const shared = formShared();
     const formed = jobs.map(job=>{
         const region = formRegion(read, job.entry, { ...form, translatable, shared,

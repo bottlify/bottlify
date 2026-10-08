@@ -38,6 +38,9 @@ import { createPropVariantFunctions } from './propvariant.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { createClassTable, createRemoting } from './remote.js';
 import { createMonikerFunctions } from './monikers.js';
+import { createOle2Functions } from './ole2.js';
+import { createAdviseFunctions } from './advise.js';
+import { createClipboardFunctions } from './clipboard.js';
 import { parseCompoundFile } from './cfb.js';
 import {
     OBJREF_BYTES, OBJREF_CUSTOM, OBJREF_CUSTOM_BYTES, OBJREF_HEADER_BYTES, OBJREF_STANDARD,
@@ -152,6 +155,10 @@ const IID_ICONTEXTCALLBACK = '{000001DA-0000-0000-C000-000000000046}';
 const THDTYPE_BLOCKMESSAGES = 0;
 const THDTYPE_PROCESSMESSAGES = 1;
 
+/** IForegroundTransfer, and its one method. */
+const IID_IFOREGROUNDTRANSFER = '{00000145-0000-0000-C000-000000000046}';
+const SLOT_ALLOW_FOREGROUND_TRANSFER = 3;
+
 /** IMarshal::DisconnectObject. */
 const SLOT_MARSHAL_DISCONNECT = 8;
 
@@ -262,6 +269,7 @@ const MAX_PROGID = 255;
  *           as an allocation failure would.
  * @property {{ root: (id: number) => any, open: (key: any, path: string) => any,
  *              getValue: (key: any, name: string) => { data: Uint8Array } | null,
+ *              subkeys?: (key: any) => string[],
  *              create?: (key: any, path: string) => { key: any },
  *              setValue?: (key: any, name: string, type: number, data: Uint8Array) => void,
  *              remove?: (key: any, path: string) => string }} [hive]
@@ -348,6 +356,13 @@ const MAX_PROGID = 255;
  *           [offerMarshaler]  Where the OBJREFs of this process are made and
  *           read, handed to the NDR runtime, whose interface pointers cross as
  *           them.
+ * @property {(library: string, name: string, args: number[], thread?: unknown)
+ *     => number | Promise<number> | null} [system]
+ *           Another library's export, called as ole32's import of it is:
+ *           user32's clipboard, accelerator tables and key state, gdi32's
+ *           deletions and metafile copies, kernel32's DeleteFileW. The thread
+ *           is whose call it is once a call has awaited. Null for an export
+ *           that is not there; absent, none is, and what needed one says so.
  */
 
 /**
@@ -2614,6 +2629,79 @@ export function createOleFunctions(host){
         divergence: host.divergence,
     };
 
+    /**
+     * What CoSetState and CoSwitchCallContext keep for a thread: a state
+     * object it holds a reference on, and a call context it does not.
+     *
+     * @type {WeakMap<object, { state: number, callContext: number }>}
+     */
+    const threadStates = new WeakMap();
+    /** @param {any} thread */
+    const threadState = thread=>{
+        const key = thread ?? threadStates;
+        let state = threadStates.get(key);
+        if (!state)
+        {
+            state = { state: 0, callContext: 0 };
+            threadStates.set(key, state);
+        }
+        return state;
+    };
+
+    /**
+     * gdi32's deletions and kernel32's DeleteFileW through `system`, for a
+     * medium ReleaseStgMedium frees; undefined with nothing to call.
+     */
+    const systemGdi = ()=>{
+        const system = host.system;
+        if (!system)
+        {
+            return undefined;
+        }
+        /** @param {string} name */
+        const deleter = name=>(/** @type {number} */ handle)=>
+            system('GDI32.dll', name, [handle], host.callerThread?.());
+        return {
+            deleteObject: deleter('DeleteObject'),
+            deleteMetaFile: deleter('DeleteMetaFile'),
+            deleteEnhMetaFile: deleter('DeleteEnhMetaFile'),
+        };
+    };
+    const systemDeleteFile = ()=>{
+        const system = host.system;
+        return system
+            ? (/** @type {number} */ name)=>system('KERNEL32.dll', 'DeleteFileW', [name],
+                host.callerThread?.())
+            : undefined;
+    };
+
+    /**
+     * The OLE half: what the helpers, the advise holders and the clipboard
+     * reach of the rest of COM, all as this layer's own exports answer.
+     *
+     * @type {import('./oleutil.js').OleEnv}
+     */
+    const oleEnv = {
+        readMemory: host.readMemory,
+        writeMemory: host.writeMemory,
+        heap: host.heap,
+        callMethod,
+        queryPointer,
+        callerThread: ()=>host.callerThread?.(),
+        currentThread: ()=>host.currentThread(),
+        makeObject: (clsid, definition)=>makeHostObject(clsid, definition),
+        publish: (object, iid)=>host.vtables.publish(object, iid),
+        createInstance: (clsid, outer, context, iid, out)=>callWithGuids('CoCreateInstance',
+            [clsid, iid], ([classId, interfaceId])=>[classId, outer, context, interfaceId, out]),
+        releaseMedium: medium=>/** @type {Record<string, any>} */ (functions)
+            .ReleaseStgMedium.handler([medium]),
+        oleInitialized: thread=>(thread?.ole32?.oleDepth ?? 0) > 0,
+        hive: host.hive,
+        system: host.system,
+        divergence: host.divergence,
+    };
+    const clipboard = createClipboardFunctions(oleEnv);
+
     const functions = {
         /** HRESULT CoInitialize(LPVOID pvReserved) */
         CoInitialize: {
@@ -2901,6 +2989,13 @@ export function createOleFunctions(host){
             handler: ()=>{
                 const answer = enterApartment(COINIT_APARTMENTTHREADED);
                 oleStarted ||= answer === S_OK || answer === S_FALSE;
+                if (answer === S_OK || answer === S_FALSE)
+                {
+                    // Counted apart from the apartment: the clipboard and a
+                    // drag need OleInitialize, not only CoInitialize.
+                    const apartment = host.currentThread().ole32;
+                    apartment.oleDepth = (apartment.oleDepth ?? 0) + 1;
+                }
                 return answer;
             },
         },
@@ -2972,26 +3067,26 @@ export function createOleFunctions(host){
         },
 
         /**
-         * HRESULT OleFlushClipboard(void)
-         * HRESULT OleIsCurrentClipboard(LPDATAOBJECT pDataObject)
+         * void OleUninitialize(void)
          *
-         * Only OleSetClipboard puts an object on the clipboard, and this
-         * build does not export it: no object is ever current, and flushing
-         * has nothing to render or release. A thread that never entered an
-         * apartment is refused the flush, as Windows refuses it.
+         * The last one of a thread takes its data object off the clipboard
+         * as OleFlushClipboard does, then leaves the apartment.
          */
-        OleFlushClipboard: {
-            argBytes: 0,
-            handler: ()=>(host.currentThread()?.ole32 ? S_OK : E_FAIL),
-        },
-        OleIsCurrentClipboard: {
-            argBytes: 4,
-            handler: ()=>S_FALSE,
-        },
-
         OleUninitialize: {
             argBytes: 0,
-            handler: leaveApartment,
+            handler: ()=>{
+                const thread = host.currentThread();
+                const apartment = thread?.ole32;
+                if (apartment?.oleDepth > 0)
+                {
+                    apartment.oleDepth--;
+                    if (apartment.oleDepth === 0)
+                    {
+                        return andThen(clipboard.uninitialize(thread), leaveApartment);
+                    }
+                }
+                return leaveApartment();
+            },
         },
 
         /**
@@ -3422,6 +3517,12 @@ export function createOleFunctions(host){
                     return E_INVALIDARG;
                 }
                 writeU32(out >>> 0, 0);
+                const switched = threadState(host.currentThread()).callContext;
+                if (switched !== 0)
+                {
+                    return callMethod(switched, SLOT_QUERY_INTERFACE, [iid, out],
+                        host.callerThread?.());
+                }
                 if (!remote()?.serving())
                 {
                     return RPC_E_CALL_COMPLETE;
@@ -3848,6 +3949,7 @@ export function createOleFunctions(host){
         // What a MIDL proxy or stub calls to carry a handle, a block of
         // memory, a storage medium or an interface pointer to another process.
         ...createUserMarshalFunctions({ ...host, marshaler: ()=>marshaler,
+            ...(host.system ? { gdi: systemGdi(), deleteFile: systemDeleteFile() } : {}),
             raise: host.raise ?? (code=>{
                 throw Object.assign(new Error(`RpcRaiseException 0x${(code >>> 0).toString(16)}`),
                     { code });
@@ -4476,6 +4578,150 @@ export function createOleFunctions(host){
                 return left !== null && left === right ? 1 : 0;
             },
         },
+
+        /**
+         * HRESULT CLSIDFromProgIDEx(LPCOLESTR lpszProgID, LPCLSID lpclsid)
+         *
+         * CLSIDFromProgID, which on Windows also looks in the activation
+         * context's manifests first; none is ever active here.
+         */
+        CLSIDFromProgIDEx: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>functions.CLSIDFromProgID.handler(args),
+        },
+
+        /**
+         * BOOL CoIsOle1Class(REFCLSID rclsid)
+         *
+         * No OLE 1 server is ever registered here, so no class is one.
+         */
+        CoIsOle1Class: {
+            argBytes: 4,
+            handler: ()=>0,
+        },
+
+        /**
+         * HRESULT CoFileTimeNow(FILETIME *lpFileTime)
+         *
+         * The current time as UTC FILETIME, the time stamps of the running
+         * object table use.
+         */
+        CoFileTimeNow: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const [low, high] = fileTimeNow();
+                writeU32(out >>> 0, low);
+                writeU32((out >>> 0) + 4, high);
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT CoAllowSetForegroundWindow(IUnknown *pUnk, LPVOID lpvReserved)
+         *
+         * Passed to the object's IForegroundTransfer, which a proxy to a
+         * local server has; an object without one cannot take the
+         * foreground (E_NOINTERFACE), and the reserved word must be NULL.
+         */
+        CoAllowSetForegroundWindow: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: async([unknown, reserved])=>{
+                if ((reserved >>> 0) !== 0 || (unknown >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const thread = host.callerThread?.();
+                const transfer = await queryPointer(unknown >>> 0, IID_IFOREGROUNDTRANSFER,
+                    thread);
+                if (transfer === 0)
+                {
+                    return E_NOINTERFACE;
+                }
+                const hr = (await callMethod(transfer, SLOT_ALLOW_FOREGROUND_TRANSFER, [0],
+                    thread)) | 0;
+                await callMethod(transfer, SLOT_RELEASE, [], thread);
+                return hr;
+            },
+        },
+
+        /**
+         * HRESULT CoSetState(IUnknown *pv)
+         * HRESULT CoGetState(IUnknown **ppv)
+         *
+         * One object per thread that the thread holds a reference on until
+         * it is replaced; CoGetState hands it out with a reference of the
+         * caller's, or S_FALSE and NULL with none set.
+         */
+        CoSetState: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: async([pv])=>{
+                const state = threadState(host.currentThread());
+                const thread = host.callerThread?.();
+                const previous = state.state;
+                if ((pv >>> 0) !== 0)
+                {
+                    await callMethod(pv >>> 0, SLOT_ADD_REF, [], thread);
+                }
+                state.state = pv >>> 0;
+                if (previous !== 0)
+                {
+                    await callMethod(previous, SLOT_RELEASE, [], thread);
+                }
+                return S_OK;
+            },
+        },
+        CoGetState: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: async([out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const held = threadState(host.currentThread()).state;
+                writeU32(out >>> 0, held);
+                if (held === 0)
+                {
+                    return S_FALSE;
+                }
+                await callMethod(held, SLOT_ADD_REF, [], host.callerThread?.());
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT CoSwitchCallContext(IUnknown *pNewObject, IUnknown **ppOldObject)
+         *
+         * The thread's call context, as CoGetCallContext then answers it,
+         * switched without a reference taken or given (compobj.c
+         * test_CoGetCallContext); the previous one handed back.
+         */
+        CoSwitchCallContext: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([context, old])=>{
+                if ((old >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const state = threadState(host.currentThread());
+                writeU32(old >>> 0, state.callContext);
+                state.callContext = context >>> 0;
+                return S_OK;
+            },
+        },
+
+        ...createOle2Functions(oleEnv),
+        ...createAdviseFunctions(oleEnv),
+        ...clipboard.table,
     };
 
     return functions;

@@ -396,6 +396,9 @@ export function tabbedWidth(text, widthOf, stops, interval){
  *        what its visible region leaves out.
  * @param {(record: any) => boolean} [options.frozen]
  *        Whether a window is held as it is, being dragged: it draws nowhere.
+ * @param {{ paintStarts: (record: any) => void, paintEnds: (record: any) => void }}
+ *        [options.caret]  The caret, taken off a window while it paints and
+ *        put back after, as BeginPaint and EndPaint hide and show it.
  */
 export function createPaintFunctions(options){
     const { host, live, WM_PAINT, geometry, send, invalidated, painted, descendants } = options;
@@ -496,11 +499,26 @@ export function createPaintFunctions(options){
      * BeginPaint; one that does not is sent it once, not in a loop.
      *
      * @param {any} record
+     * @param {unknown} [thread]  Whose call it is: the caller's when it named
+     *        one, as a control painting itself does from a dialog's loop.
      * @returns {number | Promise<number>}
      */
-    const paintNow = record=>(record.updateRect
-        ? after(send(record.hwnd, WM_PAINT, 0, 0, host.callerThread?.()), ()=>1)
-        : 1);
+    const paintNow = (record, thread)=>{
+        if (!record.updateRect)
+        {
+            return 1;
+        }
+        // In the middle of painting from the moment it is sent WM_PAINT, not
+        // only from its BeginPaint: a handler that changes a child before it
+        // begins -- relabels a button -- would otherwise have the child's
+        // paint start from this window again, and be sent WM_PAINT inside its
+        // own WM_PAINT for as long as the stack lasted.
+        record.paintSent = (record.paintSent ?? 0) + 1;
+        return after(send(record.hwnd, WM_PAINT, 0, 0, thread ?? host.callerThread?.()), ()=>{
+            record.paintSent--;
+            return 1;
+        });
+    };
 
     /**
      * WM_PAINT sent now to a window and, with `children`, to each of its
@@ -508,19 +526,24 @@ export function createPaintFunctions(options){
      * children, as the screen shows them. RDW_UPDATENOW, with or without
      * RDW_ALLCHILDREN.
      *
-     * @param {any} record @param {boolean} children
+     * @param {any} record @param {boolean} children @param {unknown} [thread]
+     * @param {boolean} [alone]  Itself and its children only, never from an
+     *        ancestor: a control that repaints itself as it handles a message.
      * @returns {number | Promise<number>}
      */
-    const updateNow = (record, children)=>{
+    const updateNow = (record, children, thread, alone = false)=>{
+        // Named once, here: past the first window's paint the thread on the
+        // processor may be any other.
+        const on = thread ?? host.callerThread?.();
         // Under an area an ancestor still has to paint, a window paints after
         // it: painted first, it would be painted over.
-        const from = options.paintsFirst?.(record) ?? record;
+        const from = alone ? record : options.paintsFirst?.(record) ?? record;
         const order = children || from !== record
             ? [from, ...(descendants?.(from) ?? [])] : [record];
         /** @param {number} index @returns {number | Promise<number>} */
         const next = index=>(index >= order.length
             ? 1
-            : after(paintNow(order[index]), ()=>next(index + 1)));
+            : after(paintNow(order[index], on), ()=>next(index + 1)));
         return next(0);
     };
 
@@ -539,8 +562,17 @@ export function createPaintFunctions(options){
     const eraseNow = (record, thread)=>{
         const frame = record.ncDirty === true;
         const erase = record.erase === true && Boolean(record.updateRect);
+        // A window another one left is erased only where it was left: the
+        // rest of it still shows what it painted, and its WM_PAINT is to come.
+        const area = record.eraseRect && record.updateRect
+            ? { left: Math.max(record.eraseRect.left, record.updateRect.left),
+                top: Math.max(record.eraseRect.top, record.updateRect.top),
+                right: Math.min(record.eraseRect.right, record.updateRect.right),
+                bottom: Math.min(record.eraseRect.bottom, record.updateRect.bottom) }
+            : record.updateRect;
         record.ncDirty = false;
         record.erase = false;
+        record.eraseRect = null;
         return after(frame ? send(record.hwnd, WM_NCPAINT, 1, 0, thread) : 0, ()=>{
             const hdc = erase ? contextOn(record) : 0;
             if (hdc === 0)
@@ -549,7 +581,7 @@ export function createPaintFunctions(options){
             }
             host.draw?.clip?.(hdc, intersectArea(
                 visibleArea(record, false, geometry.clientRect(record)),
-                record.updateRect ?? clientArea(record)));
+                area ?? clientArea(record)));
             // Shown only when it erased, which the answer says: a window
             // with no background leaves the screen as it was, and that is
             // not a picture to present.
@@ -649,7 +681,12 @@ export function createPaintFunctions(options){
         {
             return { hdc, rect: clientArea(record) };
         }
-        const dirty = record.updateRect ?? clientArea(record);
+        // With nothing to paint, the paint is of nothing: rcPaint empty and
+        // every pixel clipped, as Windows clips to an empty update region. A
+        // skin that paints in its own WM_PAINT and then hands the message to
+        // the procedure it subclassed has that procedure's BeginPaint find
+        // the window clean; drawing everywhere, it painted over the skin.
+        const dirty = record.updateRect ?? { left: 0, top: 0, right: 0, bottom: 0 };
         // Cleared before the guest paints, not after: a program that
         // invalidates from inside its own WM_PAINT expects that request to
         // survive, and clearing afterwards would swallow it.
@@ -660,10 +697,12 @@ export function createPaintFunctions(options){
         record.inPaint = true;
         const erase = record.erase === true;
         record.erase = false;
+        record.eraseRect = null;
         const frame = record.ncDirty === true;
         record.ncDirty = false;
         if (hdc !== 0)
         {
+            options.caret?.paintStarts(record);
             host.draw?.clip?.(hdc,
                 intersectArea(visibleArea(record, false, geometry.clientRect(record)), dirty));
         }
@@ -690,6 +729,7 @@ export function createPaintFunctions(options){
         if (record.painting === hdc)
         {
             record.painting = 0;
+            options.caret?.paintEnds(record);
         }
     };
 
@@ -1579,9 +1619,11 @@ export function createPaintFunctions(options){
          * BOOL DrawFocusRect(HDC hDC, const RECT *lprc)
          *
          * The focus rectangle is drawn by inverting, which is what makes
-         * drawing it twice erase it. Without somewhere to invert, failing is
-         * the only answer that does not leave a program believing it has a
-         * rectangle it must later remove.
+         * drawing it twice erase it -- a one-pixel border inverted through the
+         * system's gray brush, so every other pixel: dotted, over whatever a
+         * skin painted. Without somewhere to invert, failing is the only
+         * answer that does not leave a program believing it has a rectangle
+         * it must later remove.
          */
         DrawFocusRect: {
             argBytes: 8,
@@ -1594,12 +1636,12 @@ export function createPaintFunctions(options){
                 }
                 const area = readRect(host, rect);
                 const h = hdc >>> 0;
-                return draw.invert(h, { ...area, bottom: area.top + 1 })
-                    && draw.invert(h, { ...area, top: area.bottom - 1 })
+                return draw.invert(h, { ...area, bottom: area.top + 1 }, true)
+                    && draw.invert(h, { ...area, top: area.bottom - 1 }, true)
                     && draw.invert(h, { ...area, top: area.top + 1, bottom: area.bottom - 1,
-                        right: area.left + 1 })
+                        right: area.left + 1 }, true)
                     && draw.invert(h, { ...area, top: area.top + 1, bottom: area.bottom - 1,
-                        left: area.right - 1 }) ? 1 : 0;
+                        left: area.right - 1 }, true) ? 1 : 0;
             },
         },
 
@@ -1667,6 +1709,37 @@ export function createPaintFunctions(options){
                     ? null
                     : host.regionBox?.(region >>> 0) ?? null);
                 return 1;
+            },
+        },
+
+        /**
+         * int ExcludeUpdateRgn(HDC hDC, HWND hWnd)
+         *
+         * A context on the window's client area made to leave alone what is
+         * still to be repainted: a program drawing outside WM_PAINT keeps off
+         * the area its paint will cover anyway. Answers the kind of region
+         * left to draw in -- none, one rectangle or more -- or ERROR for no
+         * window.
+         */
+        ExcludeUpdateRgn: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hdc, hwnd])=>{
+                const ERROR = 0;
+                const NULLREGION = 1;
+                const SIMPLEREGION = 2;
+                const COMPLEXREGION = 3;
+                const record = live(hwnd);
+                if (!record || (hdc >>> 0) === 0)
+                {
+                    return ERROR;
+                }
+                const visible = visibleArea(record, false, geometry.clientRect(record));
+                const area = record.updateRect
+                    ? subtractFromArea(visible, record.updateRect) : visible;
+                host.draw?.clip?.(hdc >>> 0, area);
+                return area.length === 0 ? NULLREGION
+                    : area.length === 1 ? SIMPLEREGION : COMPLEXREGION;
             },
         },
     };

@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createImageLists } from './imagelist.js';
+import { createImageListIcons } from './imagelist-icon.js';
 import { createGdiFunctions } from '../gdi32/functions.js';
 import { createGdiDrawing } from '../../graphics/gdi/context.js';
 import { surfaceForDdb, surfaceForDibSection } from '../../graphics/gdi/surface.js';
@@ -118,7 +119,7 @@ function machine(wired = {}){
                 true)),
         };
     };
-    return { bytes, view, gdi32, fns, section, mono, target };
+    return { bytes, view, gdi32, fns, section, mono, target, lists };
 }
 
 test('a list loaded out of a bitmap resource is cut into images cx wide', ()=>{
@@ -329,4 +330,244 @@ test('removing an image moves the later ones down, and -1 removes them all', ()=
     assert.equal(m.fns.ImageList_Remove.handler([list, -1]), 1);
     assert.equal(m.fns.ImageList_GetImageCount.handler([list]), 0);
     assert.equal(m.fns.ImageList_Draw.handler([list, 0, dest.dc, 0, 0, ILD_NORMAL]), 0);
+});
+
+test('ImageList_SetIconSize empties the list and takes images of the new size', ()=>{
+    // test_ImageList_DrawIndirect: a list of 32-bit images resized to 4x4
+    // takes a 4x4 bitmap as its first image.
+    const m = machine();
+    const list = m.fns.ImageList_Create.handler([2, 1, ILC_COLOR32 | ILC_MASK, 1, 1]);
+    m.fns.ImageList_Add.handler([list, m.section(4, 1, [1, 2, 3, 4]).bitmap, 0]);
+    assert.equal(m.fns.ImageList_GetImageCount.handler([list]), 2);
+    assert.equal(m.fns.ImageList_SetIconSize.argBytes, 12);
+
+    assert.equal(m.fns.ImageList_SetIconSize.handler([list, 4, 1]), 1);
+    assert.equal(m.fns.ImageList_GetImageCount.handler([list]), 0, 'every image went');
+    assert.equal(m.fns.ImageList_GetIconSize.handler([list, OUT, OUT + 4]), 1);
+    assert.deepEqual([m.view.getInt32(OUT, true), m.view.getInt32(OUT + 4, true)], [4, 1]);
+    const wide = [0x010203, 0x040506, 0x070809, 0x0a0b0c];
+    assert.equal(m.fns.ImageList_Add.handler([list, m.section(4, 1, wide).bitmap, 0]), 0,
+        'one image four wide');
+    assert.equal(m.fns.ImageList_GetImageCount.handler([list]), 1);
+    const dest = m.target(4);
+    assert.equal(m.fns.ImageList_Draw.handler([list, 0, dest.dc, 0, 0, ILD_NORMAL]), 1);
+    assert.deepEqual(dest.pixels(), wide);
+
+    assert.equal(m.fns.ImageList_SetIconSize.handler([list, 0, 4]), 0, 'no width');
+    assert.equal(m.fns.ImageList_SetIconSize.handler([list, 4, -1]), 0, 'a negative height');
+    assert.equal(m.fns.ImageList_GetImageCount.handler([list]), 1, 'and nothing changed');
+    assert.equal(m.fns.ImageList_SetIconSize.handler([0xdeadbeef, 4, 4]), 0, 'no list');
+});
+
+test('ImageList_SetImageCount grows and cuts the list, keeping the images it keeps', ()=>{
+    // test_imagecount: 84x84 at 16 bits, grown to three and cut to one and
+    // to none; the first image survives both ways.
+    const m = machine();
+    const big = m.fns.ImageList_Create.handler([84, 84, ILC_COLOR16, 0, 3]);
+    assert.equal(m.fns.ImageList_SetImageCount.argBytes, 8);
+    for (const count of [3, 1, 0])
+    {
+        assert.equal(m.fns.ImageList_SetImageCount.handler([big, count]), 1);
+        assert.equal(m.fns.ImageList_GetImageCount.handler([big]), count);
+    }
+    assert.equal(m.fns.ImageList_SetImageCount.handler([0xdeadbeef, 3]), 0, 'no list');
+
+    const list = m.fns.ImageList_Create.handler([1, 1, ILC_COLOR32, 0, 1]);
+    m.fns.ImageList_Add.handler([list, m.section(2, 1, [0x111111, 0x222222]).bitmap, 0]);
+    const dest = m.target(1);
+    const drawn = (/** @type {number} */ index)=>{
+        dest.fill(0x777777);
+        return m.fns.ImageList_Draw.handler([list, index, dest.dc, 0, 0, ILD_NORMAL]) === 1
+            ? dest.pixels()[0] : null;
+    };
+    assert.equal(m.fns.ImageList_SetImageCount.handler([list, 5]), 1);
+    assert.deepEqual([0, 1, 4, 5].map(drawn), [0x111111, 0x222222, 0, null],
+        'the images kept, the new places blank, none past them');
+    assert.equal(m.fns.ImageList_SetImageCount.handler([list, 1]), 1);
+    assert.deepEqual([0, 1].map(drawn), [0x111111, null]);
+    // test_DrawIndirect: a place SetImageCount made is replaced like any other.
+    assert.equal(m.fns.ImageList_SetImageCount.handler([list, 2]), 1);
+    assert.equal(m.fns.ImageList_Replace.handler([list, 1, m.section(1, 1, [0x333333]).bitmap,
+        0]), 1);
+    assert.equal(drawn(1), 0x333333);
+});
+
+/**
+ * A masked list of 2x1 images, each given as its two pixels and which of
+ * them are transparent.
+ *
+ * @param {ReturnType<typeof machine>} m @param {[number[], boolean[]][]} images
+ */
+function maskedList(m, images){
+    const list = m.fns.ImageList_Create.handler([images[0][0].length, 1,
+        ILC_COLOR32 | ILC_MASK, 4, 4]);
+    for (const [pixels, clear] of images)
+    {
+        const bits = clear.reduce((byte, on, at)=>byte | (on ? 0x80 >>> at : 0), 0);
+        assert.notEqual(m.fns.ImageList_Add.handler([list, m.section(pixels.length, 1,
+            pixels).bitmap, m.mono(pixels.length, [bits, 0])]), -1);
+    }
+    return list;
+}
+
+test('ImageList_Merge lays the second image over the first, offset, in a list of its own', ()=>{
+    const m = machine();
+    const first = maskedList(m, [[[0x111111, 0x222222], [true, false]]]);
+    const second = maskedList(m, [[[0x333333, 0x444444], [false, true]]]);
+    const merged = m.fns.ImageList_Merge.handler([first, 0, second, 0, 1, 0]);
+    assert.notEqual(merged, 0);
+    assert.equal(m.fns.ImageList_GetImageCount.handler([merged]), 1);
+    assert.equal(m.fns.ImageList_GetIconSize.handler([merged, OUT, OUT + 4]), 1);
+    assert.deepEqual([m.view.getInt32(OUT, true), m.view.getInt32(OUT + 4, true)], [3, 1],
+        'as wide as both');
+    const screen = m.target(3);
+    screen.fill(0x777777);
+    assert.equal(m.fns.ImageList_Draw.handler([merged, 0, screen.dc, 0, 0, ILD_TRANSPARENT]), 1);
+    assert.deepEqual(screen.pixels().map(pixel=>pixel & 0xffffff), [0x777777, 0x333333, 0x777777],
+        'transparent where both are, the second over the first');
+
+    const behind = m.fns.ImageList_Merge.handler([first, 0, second, 0, -1, 0]);
+    screen.fill(0x777777);
+    m.fns.ImageList_Draw.handler([behind, 0, screen.dc, 0, 0, ILD_TRANSPARENT]);
+    assert.deepEqual(screen.pixels().map(pixel=>pixel & 0xffffff), [0x333333, 0x777777, 0x222222],
+        'a negative offset moves the first image instead');
+
+    // Wine's test_merge: an image a list does not have is left out, not refused.
+    const empty = m.fns.ImageList_Create.handler([2, 1, ILC_COLOR32, 0, 3]);
+    assert.notEqual(m.fns.ImageList_Merge.handler([empty, -1, second, 0, 0, 0]), 0);
+    assert.notEqual(m.fns.ImageList_Merge.handler([empty, 0, empty, -1, 0, 0]), 0);
+    assert.equal(m.fns.ImageList_Merge.handler([0xdeadbeef, 0, second, 0, 0, 0]), 0);
+    assert.equal(m.fns.ImageList_Merge.argBytes, 24);
+});
+
+test('ImageList_SetDragCursorImage merges the cursor into the drag, its hot spot kept', ()=>{
+    // Wine's test_hotspot.
+    const m = machine();
+    const [x1, y1, x2, y2] = [47, 31, 11, 17];
+    const dragged = m.fns.ImageList_Create.handler([x1, y1, ILC_COLOR32 | ILC_MASK, 1, 1]);
+    const cursor = m.fns.ImageList_Create.handler([x2, y2, ILC_COLOR32 | ILC_MASK, 1, 1]);
+    m.fns.ImageList_SetImageCount.handler([dragged, 1]);
+    m.fns.ImageList_SetImageCount.handler([cursor, 1]);
+    const spots = [[10, 7], [x1, y1], [-9, -8], [-7, 35]];
+    assert.equal(m.fns.ImageList_SetDragCursorImage.handler([cursor, 0, 0, 0]), 0, 'no drag');
+    for (const [dx1, dy1] of spots)
+    {
+        for (const [dx2, dy2] of spots)
+        {
+            assert.equal(m.fns.ImageList_BeginDrag.handler([dragged, 0, dx1, dy1]), 1);
+            assert.equal(m.fns.ImageList_SetDragCursorImage.handler([cursor, 0, dx2, dy2]), 1);
+            const image = m.fns.ImageList_GetDragImage.handler([0, OUT]);
+            assert.deepEqual([m.view.getInt32(OUT, true), m.view.getInt32(OUT + 4, true)],
+                [dx1, dy1], 'the hot spot is where it was');
+            m.fns.ImageList_GetIconSize.handler([image, OUT, OUT + 4]);
+            assert.deepEqual([m.view.getInt32(OUT, true), m.view.getInt32(OUT + 4, true)],
+                [Math.max(x1, x2 + dx2, x1 - dx2), Math.max(y1, y2 + dy2, y1 - dy2)]);
+            m.fns.ImageList_EndDrag.handler([]);
+            assert.equal(m.fns.ImageList_GetImageCount.handler([image]), 0,
+                'the merged list goes with the drag');
+        }
+    }
+    assert.equal(m.fns.ImageList_SetDragCursorImage.argBytes, 16);
+});
+
+test('an overlay image is drawn over the image a style names it for', ()=>{
+    const m = machine();
+    const list = maskedList(m, [[[0x111111, 0x111111], [false, false]],
+        [[0x222222, 0x333333], [false, true]]]);
+    assert.equal(m.fns.ImageList_SetOverlayImage.handler([list, 1, 1]), 1);
+    const screen = m.target(2);
+    const INDEXTOOVERLAYMASK_1 = 0x100;
+    m.fns.ImageList_Draw.handler([list, 0, screen.dc, 0, 0, ILD_NORMAL | INDEXTOOVERLAYMASK_1]);
+    assert.deepEqual(screen.pixels().map(pixel=>pixel & 0xffffff), [0x222222, 0x111111],
+        'the overlay through its own mask');
+    m.fns.ImageList_Draw.handler([list, 0, screen.dc, 0, 0, ILD_NORMAL | 0x200]);
+    assert.deepEqual(screen.pixels().map(pixel=>pixel & 0xffffff), [0x111111, 0x111111],
+        'an overlay not set draws nothing');
+    assert.equal(m.fns.ImageList_SetOverlayImage.handler([list, -1, 1]), 1, 'cleared');
+    m.fns.ImageList_Draw.handler([list, 0, screen.dc, 0, 0, INDEXTOOVERLAYMASK_1]);
+    assert.deepEqual(screen.pixels().map(pixel=>pixel & 0xffffff), [0x111111, 0x111111]);
+    assert.equal(m.fns.ImageList_SetOverlayImage.handler([list, 0, 15]), 1, 'up to fifteen');
+    for (const [image, overlay] of [[0, 0], [0, 16], [2, 1], [-2, 1]])
+    {
+        assert.equal(m.fns.ImageList_SetOverlayImage.handler([list, image, overlay]), 0,
+            `${image} as ${overlay}`);
+    }
+    assert.equal(m.fns.ImageList_SetOverlayImage.handler([0xdeadbeef, 0, 1]), 0);
+    assert.equal(m.fns.ImageList_SetOverlayImage.argBytes, 12);
+});
+
+test('ImageList_Duplicate is a list of its own with the same images', ()=>{
+    const m = machine();
+    const list = maskedList(m, [[[0x111111, 0x222222], [false, true]],
+        [[0x333333, 0x444444], [false, false]]]);
+    m.fns.ImageList_SetBkColor.handler([list, 0x123456]);
+    const copy = m.fns.ImageList_Duplicate.handler([list]);
+    assert.notEqual(copy, 0);
+    assert.notEqual(copy, list);
+    assert.equal(m.fns.ImageList_GetImageCount.handler([copy]), 2);
+    assert.equal(m.fns.ImageList_GetBkColor.handler([copy]), 0x123456);
+    m.fns.ImageList_Destroy.handler([list]);
+    const screen = m.target(2);
+    screen.fill(0x777777);
+    assert.equal(m.fns.ImageList_Draw.handler([copy, 0, screen.dc, 0, 0, ILD_TRANSPARENT]), 1);
+    assert.deepEqual(screen.pixels().map(pixel=>pixel & 0xffffff), [0x111111, 0x777777]);
+    m.fns.ImageList_Draw.handler([copy, 1, screen.dc, 0, 0, ILD_TRANSPARENT]);
+    assert.deepEqual(screen.pixels().map(pixel=>pixel & 0xffffff), [0x333333, 0x444444]);
+    assert.equal(m.fns.ImageList_Duplicate.handler([0xdeadbeef]), 0);
+    assert.equal(m.fns.ImageList_Duplicate.argBytes, 4);
+});
+
+test('ImageList_LoadImageW loads through user32\'s wide LoadImage', ()=>{
+    /** @type {string[]} */
+    const asked = [];
+    /** @type {any} */
+    let made = null;
+    made = machine({
+        user32: name=>{
+            asked.push(name);
+            return name === 'LoadImageW'
+                ? { handler: ()=>made.section(4, 2, Array(8).fill(0x00ff00ff)).bitmap }
+                : undefined;
+        },
+    });
+    const list = made.fns.ImageList_LoadImageW.handler([0x400000, 0x71, 2, 10, 0xff00ff, 0, 0]);
+    assert.notEqual(list, 0);
+    assert.deepEqual(asked, ['LoadImageW']);
+    assert.equal(made.fns.ImageList_GetImageCount.handler([list]), 2);
+    assert.equal(made.fns.ImageList_LoadImageW.argBytes, 28);
+});
+
+test('ImageList_GetIcon makes an icon of the image and its mask through CreateIcon', ()=>{
+    const m = machine();
+    const list = maskedList(m, [[[0x112233, 0x445566], [true, false]]]);
+    /** @type {{ args: number[], and: number[], xor: number[] }[]} */
+    const icons = [];
+    let next = 0x30000;
+    /** @type {number[]} */
+    const released = [];
+    const icon = createImageListIcons({
+        readMemory: (address, length)=>m.bytes.slice(address, address + length),
+        writeMemory: (address, data)=>m.bytes.set(data, address),
+        allocate: bytes=>{
+            const at = next;
+            next += (bytes + 15) & ~15;
+            return at;
+        },
+        release: address=>released.push(address),
+        user32: name=>(name === 'CreateIcon' ? { handler: args=>{
+            icons.push({ args, and: [...m.bytes.slice(args[5], args[5] + 2)],
+                xor: [...m.bytes.slice(args[6], args[6] + 8)] });
+            return 0x7777;
+        } } : undefined),
+    }, m.lists).ImageList_GetIcon;
+    assert.equal(icon.handler([list, 0, 0]), 0x7777);
+    const [made] = icons;
+    assert.deepEqual(made.args.slice(1, 5), [2, 1, 1, 32]);
+    assert.equal(made.and[0] & 0xc0, 0x80, 'transparent, then opaque');
+    assert.deepEqual(made.xor.slice(0, 3), [0, 0, 0], 'black where it is transparent');
+    assert.deepEqual(made.xor.slice(4, 7), [0x66, 0x55, 0x44]);
+    assert.equal(released.length, 2, 'the guest memory given back');
+    assert.equal(icon.handler([list, 1, 0]), 0, 'no such image');
+    assert.equal(icon.handler([0xdeadbeef, 0, 0]), 0);
+    assert.equal(icon.argBytes, 12);
 });

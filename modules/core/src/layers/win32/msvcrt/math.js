@@ -128,7 +128,7 @@ const BINARY = {
 
 /** The code each name is, where two names share one: `hypot` is `_hypot`, `_scalb` `ldexp`. */
 const CODE_OF = /** @type {Record<string, string>} */ ({ hypot: '_hypot', _CIhypot: '_CI_hypot',
-    _scalb: 'ldexp' });
+    _scalb: 'ldexp', _cabs: '_hypot' });
 
 /**
  * @param {MathHost} host
@@ -222,6 +222,13 @@ export function createMathFunctions(host){
 
     /** double _scalb(double value, long exponent): ldexp under another name. */
     handlers._scalb = handlers.ldexp;
+
+    /**
+     * double _cabs(struct _complex z): the magnitude, _hypot of the two parts.
+     * The structure is passed by value, its two doubles on the stack where
+     * _hypot's two arguments are, so the one code serves both.
+     */
+    handlers._cabs = handlers._hypot;
 
     /** double _logb(double x): only a zero comes here, -infinity and ERANGE. */
     handlers._logb = returningDouble(fpu, 8, args=>{

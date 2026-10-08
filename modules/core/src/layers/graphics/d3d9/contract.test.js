@@ -752,6 +752,8 @@ test('a reset rebuilds the implicit surfaces at the new size and puts state back
 /** A device whose guest memory is a flat buffer, so copies and fills can be checked. */
 function makeWithMemory(){
     const memory = new Uint8Array(1 << 20);
+    /** @type {string[]} */
+    const divergences = [];
     let next = 0x1000;
     const services = {
         /** @param {number} bytes */
@@ -764,9 +766,11 @@ function makeWithMemory(){
         readMemory: (address, length)=>memory.slice(address, address + length),
         /** @param {number} address @param {Uint8Array} bytes */
         writeMemory: (address, bytes)=>memory.set(bytes, address),
+        /** @param {string} api @param {string} detail */
+        divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
     };
     const made = make({ services });
-    return { ...made, memory };
+    return { ...made, memory, divergences };
 }
 
 test('UpdateSurface moves a rectangle from system memory into the default pool', ()=>{
@@ -996,6 +1000,62 @@ test('StretchRect copies equal rectangles and refuses a stretch, saying why', ()
     assert.equal(device.StretchRect(system.surface, null, target.surface, null, 1),
         D3DERR_INVALIDCALL, 'system memory is not a source');
     system.surface.release();
+    source.surface.release();
+    target.surface.release();
+    assert.equal(device.release(), 0);
+});
+
+test('a draw whose declaration reads nothing from stream zero needs no buffer there', ()=>{
+    // Direct3D draws what the declaration reads; stream zero unbound is a draw's own
+    // business when no element is there. One that reads it and has nothing there is refused,
+    // saying so.
+    /** @type {string[]} */
+    const reports = [];
+    const { device } = make({ services: { divergence: (/** @type {string} */ _api,
+        /** @type {string} */ detail)=>reports.push(detail) } });
+    /** @type {{ declaration?: any }} */
+    const elsewhere = {};
+    device.CreateVertexDeclaration([{ ...element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0),
+        Stream: 1 }], elsewhere);
+    /** @type {{ buffer?: any }} */
+    const held = {};
+    device.CreateVertexBuffer(12 * 3, 0, 0, D3DPOOL.MANAGED, held);
+    device.SetStreamSource(1, held.buffer, 0, 12);
+    device.SetVertexDeclaration(elsewhere.declaration);
+    device.BeginScene();
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    /** @type {{ declaration?: any }} */
+    const here = {};
+    device.CreateVertexDeclaration([element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0)],
+        here);
+    device.SetVertexDeclaration(here.declaration);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3DERR_INVALIDCALL);
+    device.EndScene();
+    assert.ok(reports.some(line=>/no vertex buffer on stream 0 was refused; its declaration reads streams 0/
+        .test(line)), reports.join(' | '));
+});
+
+test('StretchRect converts between a format and its alpha twin, and says why it refuses', ()=>{
+    // A scene drawn into an A8R8G8B8 target is copied onto an X8R8G8B8 back buffer: Direct3D
+    // converts between colour formats, and a program refused goes on without its picture.
+    const { device, memory, divergences } = makeWithMemory();
+    /** @type {{ surface?: any }} */
+    const source = {};
+    device.CreateRenderTarget(4, 4, D3DFMT.A8R8G8B8, false, source);
+    /** @type {{ surface?: any }} */
+    const target = {};
+    device.CreateRenderTarget(4, 4, D3DFMT.X8R8G8B8, false, target);
+    memory.fill(9, source.surface.base, source.surface.base + 64);
+    assert.equal(device.StretchRect(source.surface, null, target.surface, null, 1), D3D_OK);
+    assert.equal(memory[target.surface.base + 20], 9, 'the bytes moved');
+    /** @type {{ surface?: any }} */
+    const narrow = {};
+    device.CreateRenderTarget(4, 4, D3DFMT.R5G6B5, false, narrow);
+    assert.equal(device.StretchRect(source.surface, null, narrow.surface, null, 1),
+        D3DERR_INVALIDCALL, 'a conversion this device does not make');
+    assert.ok(divergences.some(line=>/StretchRect from format 21 to 23 refused/.test(line)),
+        divergences.join(' | '));
+    narrow.surface.release();
     source.surface.release();
     target.surface.release();
     assert.equal(device.release(), 0);

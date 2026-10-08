@@ -79,6 +79,8 @@ import {
 } from './shadow.js';
 import { D3DTSS9 } from '../d3d9/samplerstates.js';
 import { COMMANDS, commandObjects, commandSlot } from '../d3d9/commands.js';
+import { loudRefusals } from './refusals.js';
+
 
 /** Direct3D 9's stage state types below 32, a bit each: what the guest routine takes. */
 const STAGE_STATE_TYPES_9 = Object.values(D3DTSS9)
@@ -2599,6 +2601,8 @@ export function createDirect3D9Seam(
         return texture.volume ? volumeTextureInterfaces : textureInterfaces;
     };
 
+    /** A device method's failure, said once as a divergence (refusals.js). */
+    const refusedLoudly = loudRefusals('Direct3D 9', divergence);
     /**
      * Every method first makes what the guest did since the host last looked
      * -- the buffers it let go of, then the calls in the command ring -- so a
@@ -2610,8 +2614,9 @@ export function createDirect3D9Seam(
      * @returns {Record<string, any>}
      */
     const synced = methods=>Object.fromEntries(Object.entries(methods)
-        .map(([name, method])=>[name, (/** @type {any} */ device, /** @type {number[]} */ args)=>
-            settledAfter(shadowOf(device), ()=>method(device, args))]));
+        .map(([name, method])=>[name, (/** @type {any} */ device, /** @type {number[]} */ args)=>{
+            return refusedLoudly(name, settledAfter(shadowOf(device), ()=>method(device, args)));
+        }]));
     /** @type {Record<string, (builder: { trap: number }) => number>} */
     const deviceGuests = guestsBut(deviceGroup, allocate
         ? {

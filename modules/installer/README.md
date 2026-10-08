@@ -134,8 +134,10 @@ The program is the disc's own answer, the one AutoPlay reads: `open=` in the
 root, taken apart the way CreateProcess takes apart an unquoted one (the shortest
 run of words that names a file on the disc, `.exe` added to a bare name); then
 `shellexecute=` when it names a program rather than a document; then `setup.exe`
-at the root. It starts as `D:\<program>` with the arguments the disc gives it, and
-`entry` names another program on the disc instead. Anything it starts in turn --
+at the root. It starts as `D:\<program>` with the arguments the disc gives it, in
+the disc's root as AutoPlay starts it (`startDirectory`, `D:\`, which a menu in a
+subfolder relies on to find the setup by a relative name), and `entry` names
+another program on the disc instead, started where it lives. Anything it starts in turn --
 an autorun menu starting the setup -- runs on the same machine, with the disc still
 in its drive.
 

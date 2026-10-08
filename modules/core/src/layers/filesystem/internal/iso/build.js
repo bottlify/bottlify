@@ -5,14 +5,19 @@
  */
 
 /**
- * A small disc image, written for the tests: a primary volume descriptor, a
+ * A disc image built from a tree of files: a primary volume descriptor, a
  * Joliet one when asked for, a terminator, both directory trees and the files'
  * bytes, laid out the way a mastering program lays a disc out. The primary
  * tree carries upper-case short names with a version, the Joliet tree the
  * names as given, and both point at the same bytes.
  *
- * Path tables are left empty: the reader under test walks directories and
- * never looks at them.
+ * What a disc image is to the engine, for files that came as something else:
+ * an archive a setup was shipped in is mounted as the disc it stands in for.
+ * The tests build their discs with it too, with the layouts a real mastering
+ * program leaves (split and interleaved files, hidden entries).
+ *
+ * Path tables are left empty: the engine's reader walks directories and never
+ * looks at them.
  */
 
 const SECTOR = 2048;

@@ -129,3 +129,23 @@ test('a process gone without saying so takes its classes with it', async()=>{
     await server.side.gone();
     assert.equal(table.take(CLSID), null);
 });
+
+test('an RPC endpoint is claimed and found through the run\'s table, and a process that is gone'
+    + ' loses it', async()=>{
+    const table = createClassTable();
+    const server = processOn(table);
+    const client = processOn(table);
+    const id = server.table.attach(endpointOf('server'));
+    assert.equal(server.table.rpcListen('ncalrpc:midl', id), true);
+    assert.equal(client.table.rpcServer('ncalrpc:midl'), id);
+    assert.equal(client.table.rpcListen('ncalrpc:midl', client.table.attach(endpointOf('client'))),
+        false);
+    const reply = await client.table.endpoint(id)?.deliver({ kind: 'rpc', proc: 1 });
+    assert.deepEqual(reply, { hr: 0, reply: ['rpc', new Uint8Array([1, 2, 3])] });
+
+    server.table.rpcUnlisten(id, 'ncalrpc:midl');
+    assert.equal(client.table.rpcServer('ncalrpc:midl'), null);
+    assert.equal(server.table.rpcListen('ncalrpc:again', id), true);
+    await server.side.gone();
+    assert.equal(client.table.rpcServer('ncalrpc:again'), null);
+});

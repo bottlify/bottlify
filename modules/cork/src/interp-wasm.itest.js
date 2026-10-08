@@ -24,7 +24,7 @@ import { Fault, Unsupported, blockState, interpret } from './interp.js';
 import { WASM_INTERPRETER_AREA, WASM_INTERPRETER_STATICS_AT, WasmExit, createWasmInterpreter }
     from './interp-wasm.js';
 import { eflagsOf } from './emit/flags.js';
-import { ownLayout, pagesFor, Tables } from './runtime/layout.js';
+import { ownLayout, pagesFor, tablesSize } from './runtime/layout.js';
 import { createPageTable } from './runtime/pages.js';
 import { BSS, BSS_SIZE, VECTOR_NAMES, diffFixture, loadCorpus } from './testing/corpus.js';
 
@@ -39,9 +39,9 @@ test('the wasm tier leaves what the hardware left, on every case the interpreter
     async()=>{
         const { cases } = loadCorpus(await readFile(CORPUS));
         const selected = cases.filter(one=>ONLY.test(one.name));
-        const layout = ownLayout({ ramSize: RAM });
-        const area = layout.tables + Tables.SIZE;
-        const pages = pagesFor(layout, Tables.SIZE + WASM_INTERPRETER_AREA);
+        const layout = ownLayout({ ramSize: RAM, hashSlots: 1 << 16 });
+        const area = layout.tables + tablesSize(layout);
+        const pages = pagesFor(layout, tablesSize(layout) + WASM_INTERPRETER_AREA);
         const memory = new WebAssembly.Memory({ initial: pages, maximum: pages });
         createPageTable(memory, layout);
         const bytes = new Uint8Array(memory.buffer);

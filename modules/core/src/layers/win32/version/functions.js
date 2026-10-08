@@ -8,6 +8,7 @@ import { expand } from '../lz32/expand.js';
 import { windowsVersion } from '../kernel32/versions.js';
 import { DIRECTX_VERSION } from '../advapi32/registry.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { verLanguageName } from '../kernel32/languages.js';
 
 /**
  * version — what a file says about itself.
@@ -187,9 +188,11 @@ export function systemVersionResource(
 )
 {
     const directX = DIRECTX_LIBRARY.test(name);
+    const component = windows.components?.files[name.toLowerCase()] ?? null;
     const system = [windows.major, windows.minor, windows.build, 0];
-    const quad = directX ? directx.split('.').map(part=>Number(part)) : system;
-    const spelled = directX ? directx : system.join('.');
+    const own = directX ? directx : component;
+    const quad = own !== null ? own.split('.').map(part=>Number(part)) : system;
+    const spelled = own ?? system.join('.');
     const fixed = new Uint8Array(FIXED_FILE_INFO_SIZE);
     const view = new DataView(fixed.buffer);
     const most = (quad[0] << 16 | quad[1]) >>> 0;
@@ -383,7 +386,9 @@ export function createVersionFunctions(host){
         const file = path.slice(slash + 1);
         const name = file.includes('.') ? file : `${file}.dll`;
         return (directory === '' || directory.toLowerCase() === SYSTEM_DIRECTORY.toLowerCase())
-            && file !== '' && (host.systemLibrary?.(name) || WIN16_SYSTEM_FILE.test(name))
+            && file !== '' && (host.systemLibrary?.(name) || WIN16_SYSTEM_FILE.test(name)
+                || (host.windows ?? windowsVersion()).components?.files[name.toLowerCase()]
+                    !== undefined)
             ? name : null;
     };
 
@@ -562,6 +567,24 @@ export function createVersionFunctions(host){
     };
 
     return {
+        /**
+         * DWORD VerLanguageNameA/W(DWORD wLang, LPSTR szLang, DWORD cchLang):
+         * the same answer as kernel32's call of the name, from the same table
+         * (`kernel32/languages.js`) -- the language a VerQueryValue
+         * translation names, spelled for the user.
+         */
+        VerLanguageNameA: verLanguageName((address, text)=>
+            host.writeMemory(address, encodeAnsi(text))),
+        VerLanguageNameW: verLanguageName((address, text)=>{
+            const bytes = new Uint8Array(text.length * 2);
+            for (let at = 0; at < text.length; at++)
+            {
+                bytes[at * 2] = text.charCodeAt(at) & 0xff;
+                bytes[at * 2 + 1] = text.charCodeAt(at) >> 8;
+            }
+            host.writeMemory(address, bytes);
+        }),
+
         /**
          * DWORD VerFindFileA(DWORD uFlags, LPCSTR szFileName, LPCSTR szWinDir,
          *   LPCSTR szAppDir, LPSTR szCurDir, PUINT puCurDirLen,

@@ -169,3 +169,15 @@ test('a UTF-16 INF is read after its byte-order mark', ()=>{
     assert.equal(infText(bytes), text);
     assert.equal(infText(Uint8Array.from([0x61, 0xe9])), 'a\u00e9');
 });
+
+test('strings a caller adds stand beside [Strings] and over its own of the same name, taken'
+    + ' as written', ()=>{
+    const added = parseInf('[Version]\nSignature="$Chicago$"\n[S]\nk=%Mine%,%Theirs%,%Path%\n'
+        + '[Strings]\nTheirs="file"\nMine="file"\n', {
+        strings: new Map([['MINE', 'caller'], ['Path', '%SystemRoot%\\x.dll']]),
+    });
+    assert.ok('inf' in added);
+    assert.deepEqual(added.inf.section('S')?.lines[0].fields,
+        ['caller', 'file', '%SystemRoot%\\x.dll'],
+        'the names fold case, and a value holding %...% is not read again');
+});

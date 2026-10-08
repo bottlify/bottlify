@@ -13,6 +13,7 @@ import { DEFAULT_ENGINE, DEFAULT_MEMORY_SIZE } from './layers/cpu/module.js';
 import { CORK_TSC_MHZ } from './layers/cpu/internal/cork-host.js';
 import { SETTINGS, processorName } from './settings.js';
 import { createPresenter } from './layers/graphics/webgpu/internal/presenter.js';
+import { baseOf, compositionPlan, needsComposing } from './layers/graphics/webgpu/internal/compose.js';
 import { connectGraphicsWorker, portEnd } from './layers/graphics/remote/connect.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
 import { parsePe, readExports, readImports, rvaToFileOffset } from './layers/loader/internal/pe.js';
@@ -49,6 +50,7 @@ import { storeHandlers } from './layers/cpu/internal/store-link.js';
 import { eventFrom } from './system/events-across.js';
 import { defaultModules } from './layers/index.js';
 import { createRunRegistry } from './layers/win32/module.js';
+import { systemProgramImage } from './layers/win32/programs/table.js';
 import { createWindowDirectory } from './layers/win32/user32/directory.js';
 import { createMixer } from './layers/audio/output/mixer.js';
 import { objectHandlers } from './system-objects.js';
@@ -203,7 +205,9 @@ import { createTranslatorPool, portTranslator } from './host/pool/pool.js';
  * @property {(record: any) => void} [onCall]
  *           Every host call as it returns. The ring kept for a failure holds
  *           the end of a run; this holds all of it, for a tool willing to
- *           write it somewhere.
+ *           write it somewhere. Each of the run's processes calls it, and a
+ *           record names the process's image (`image`) and the calling
+ *           thread (`thread`).
  * @property {Record<string, number>} [jit]
  *     The emulator's compiler budgets, by config index. For measurement.
  * @property {'emulator' | 'cork'} [engine]
@@ -236,6 +240,10 @@ import { createTranslatorPool, portTranslator } from './host/pool/pool.js';
  *           What the program believes it was started with. argv[0] ends at the
  *           first space unless it is quoted, so a line composed by hand must
  *           quote it. Defaults to the image path, quoted.
+ * @property {string} [startDirectory]
+ *           The current directory the program starts in, where its starter
+ *           chose one -- a system program, whose paths are its parent's to
+ *           mean. Its own image's directory otherwise.
  * @property {number} [processId]    What GetCurrentProcessId answers: for a child, the
  *           identifier its parent was handed when it started it.
  * @property {any} [system]  The run's system half -- registry, volume, windows, ids, named
@@ -938,6 +946,7 @@ export function timedWait({ hidden, macrotask, timer }){
  * host decides how, because the answer depends on whose thread it is.
  *
  * @typedef {Object} RunPacing
+ * @property {() => Record<string, number>} [counts]  What the pacing counted, for a report.
  * @property {(pending: YieldPending) => Promise<void> | null} yield
  *     At every turn boundary: a promise to await before the next turn, or
  *     null to go straight on. `pending` says what the host may have an answer
@@ -1006,13 +1015,23 @@ export const PAGE_YIELD_MS = 2;
  * @param {() => number} deps.now             Wall milliseconds.
  * @param {number} deps.intervalMs
  * @param {() => boolean} [deps.signalled]    Whether a message is known to be waiting.
+ * @param {Record<string, number>} [deps.counts]  Counted into: each turn, by why it went to
+ *     the event loop (`suspended`, `fetching`, `spun`, `signalled`, `interval`) or `kept`.
  * @returns {RunPacing['yield']}
  */
-export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false }){
+export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false, counts }){
     let rested = now();
     return pending=>{
-        if (pending.suspended === 0 && pending.fetching === 0
-            && pending.spun === 0 && !signalled() && now() - rested < intervalMs)
+        // Why the turn went to the event loop, the first reason that held -- what a report
+        // reads when the trips are many.
+        const why = pending.suspended > 0 ? 'suspended' : pending.fetching > 0 ? 'fetching'
+            : pending.spun > 0 ? 'spun' : signalled() ? 'signalled'
+                : now() - rested >= intervalMs ? 'interval' : null;
+        if (counts)
+        {
+            counts[why ?? 'kept'] = (counts[why ?? 'kept'] ?? 0) + 1;
+        }
+        if (why === null)
         {
             return null;
         }
@@ -1039,8 +1058,11 @@ export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false }
 export function pagePacing({ macrotask, hidden, lookMs = IDLE_LOOK_MS, yieldMs = PAGE_YIELD_MS,
     now = ()=>performance.now(), signalled })
 {
+    /** Turns kept on the thread and trips to the event loop, by why. @type {Record<string, number>} */
+    const counts = {};
     return {
-        yield: pacedYield({ macrotask, now, intervalMs: yieldMs, signalled }),
+        counts: ()=>({ ...counts }),
+        yield: pacedYield({ macrotask, now, intervalMs: yieldMs, signalled, counts }),
         wait({ timer, wakes }){
             if (!timer)
             {
@@ -1879,6 +1901,21 @@ export function compatibilityOf(executable){
     const bytes = executable.subarray(at, at + found.size);
     const encoding = bytes[0] === 0xff && bytes[1] === 0xfe ? 'utf-16le' : 'utf-8';
     return { supportedOS: supportedOsOf(new TextDecoder(encoding).decode(bytes)), imageVersion };
+}
+
+/**
+ * A child's image: its file on the volume, or -- for a program of the system
+ * folder the volume has no file for -- the image the engine makes for it
+ * (`win32/programs/table.js`). Every way a child is started reads it here, so
+ * a system program is a process in each of them.
+ *
+ * @param {any} filesystem
+ * @param {any} blocks
+ * @param {string} path
+ * @returns {Promise<Uint8Array | null>}
+ */
+async function readProgramImage(filesystem, blocks, path){
+    return await readWholeFile(filesystem, blocks, path) ?? systemProgramImage(path);
 }
 
 /**
@@ -3273,8 +3310,8 @@ async function buildApp(options){
     const tracedCalls = new Map();
     // Every process of a run names its first thread "main", so in the run's one
     // journal a later process's threads carry its image name as well.
-    const callerTag = options.log?.journal
-        ? `${String(options.imagePath ?? '').split(/[\\/]/).pop()}:` : '';
+    const callerImage = String(options.imagePath ?? '').split(/[\\/]/).pop() ?? '';
+    const callerTag = options.log?.journal ? `${callerImage}:` : '';
     // The cursor the page shows: what the program last said of it -- user32's
     // count and SetCursor, or a device cursor; the last report wins -- hidden
     // while it holds the mouse exclusively through DirectInput, as Windows does.
@@ -3421,7 +3458,14 @@ async function buildApp(options){
             record: options.record ?? 0,
             onCall: (/** @type {any} */ call)=>{
                 journalCall(call);
-                options.onCall?.(call);
+                if (options.onCall)
+                {
+                    // Every process of a run hands its calls to the one sink,
+                    // and names its first thread "main": a call says whose
+                    // image made it, beside the thread the bridge names.
+                    call.image = callerImage;
+                    options.onCall(call);
+                }
             },
             // Which calls the sink above keeps: every one for a caller's own
             // sink, the traced ones otherwise. The bridge asks once for each
@@ -3903,6 +3947,11 @@ async function buildApp(options){
                 /** @param {import('./layers/win32/gdi32/structs.js').LogFontFields} font */
                 fontMetrics: font=>core.api('graphics').gdiDrawing().fontMetrics(font),
                 /**
+                 * @param {number} code
+                 * @param {import('./layers/win32/gdi32/structs.js').LogFontFields} font
+                 */
+                glyph: (code, font)=>core.api('graphics').gdiDrawing().glyph(code, font),
+                /**
                  * @param {import('./layers/win32/gdi32/structs.js').LogFontFields} font
                  * @param {string} text
                  */
@@ -3974,11 +4023,25 @@ async function buildApp(options){
             // accepts a flag it does not act on owes the reader the same
             // warning as a Direct3D state that is stored and unused.
             divergence: reportDivergence,
+            // Each shader the program compiled, its source beside what came
+            // out, for a tool that asks: a picture wrong in a shader is read
+            // there and nowhere else.
+            shaderCompiled: (/** @type {any} */ record)=>events.emit('shader-compiled', record),
             // Text a program copied, for the page to put on the browser's
             // clipboard: the copy button of an error console is useless if
             // what it copied cannot leave the engine.
             /** @param {string} text */
             onClipboard: text=>events.emit('clipboard', { text }),
+            // An address the program asked the shell to open -- a setup's
+            // "visit our site", a readme's link -- for the page to open, as
+            // XP's browser would. Taken whether or not anyone opens it: the
+            // machine reports a browser installed, and its ShellExecute
+            // answers success.
+            /** @param {string} url */
+            openUrl: url=>{
+                events.emit('open-url', { url });
+                return true;
+            },
             /** @param {number} handle @param {string} text */
             onOutput: (handle, text)=>events.emit('output', { handle, text }),
             /** @param {string} text */
@@ -4254,7 +4317,8 @@ async function buildApp(options){
     // nothing at its path on the volume, starts at the root as before.
     try
     {
-        filesystem.setCurrentDirectory(startDirectoryOf(options.imagePath ?? 'C:\\app.exe'));
+        filesystem.setCurrentDirectory(options.startDirectory
+            ?? startDirectoryOf(options.imagePath ?? 'C:\\app.exe'));
     }
     catch (e){
         void e;
@@ -4794,17 +4858,21 @@ async function buildApp(options){
      *
      * @param {string} name
      * @param {number} [flags]
+     * @param {any} [thread]  Whose LoadLibrary this answers, for a library loaded
+     *     as another's dependency: by then the processor is someone else's.
      * @returns {number | Promise<number>}
      */
-    const loadLibraryAtRuntime = (name, flags = 0)=>{
+    const loadLibraryAtRuntime = (name, flags = 0, thread = undefined)=>{
         if ((flags & LOAD_AS_DATA) !== 0)
         {
             return loadAsData(name, flags);
         }
         // Read now, before anything is awaited: this is the thread whose
         // LoadLibrary call is being answered, and it is the one whose stack the
-        // library's entry point has to run on.
-        const asked = kernel.currentThread();
+        // library's entry point has to run on -- the dependencies' entry points
+        // too, which are loaded after awaits, when the thread on the processor
+        // is any other.
+        const asked = thread ?? kernel.currentThread();
         const unresolved = (flags & DONT_RESOLVE_DLL_REFERENCES) !== 0;
         const key = name.toLowerCase().replace(/\.dll$/, '');
         if (absentLibraries.has(key))
@@ -4947,7 +5015,7 @@ async function buildApp(options){
                         {
                             if (findModule(dependency.dll) === null)
                             {
-                                await loadLibraryAtRuntime(dependency.dll);
+                                await loadLibraryAtRuntime(dependency.dll, 0, asked);
                             }
                         }
 
@@ -6168,6 +6236,19 @@ async function buildApp(options){
                         throw fail('guest-fault', error);
                     }
 
+                    // A parent polling a child that has not run -- its exit
+                    // code, a wait that does not block -- in a loop that never
+                    // blocks is waiting on it: the child runs now, beside it,
+                    // as it would once the parent blocked on its handle.
+                    if (replacing?.polled && win32.childWaitedOn(replacing))
+                    {
+                        events.emit('process-child', {
+                            image: replacing.imagePath,
+                            commandLine: replacing.commandLine,
+                        });
+                        return 0;
+                    }
+
                     let step;
                     try
                     {
@@ -6800,6 +6881,64 @@ async function buildApp(options){
                     filesystem.close(handle);
                 }
             },
+            /**
+             * A directory made from outside, as a person makes one in Explorer
+             * beside the running program: what an installer expects to find
+             * and a disc or an earlier step did not leave.
+             *
+             * @param {string} path
+             * @returns {boolean} true when it was made, false when it was there.
+             */
+            createDirectory: path=>filesystem.createDirectory(path),
+            /**
+             * A file or a directory with everything in it, removed from outside: a
+             * setting the program saved and would read back, taken away so it asks
+             * again.
+             *
+             * @param {string} path
+             * @returns {boolean} true when there was something to remove.
+             */
+            remove: function remove(path){
+                const entry = filesystem.stat(path);
+                if (!entry)
+                {
+                    return false;
+                }
+                if (entry.directory)
+                {
+                    for (const child of filesystem.list(path))
+                    {
+                        remove(child.path);
+                    }
+                    filesystem.removeDirectory(path);
+                }
+                else
+                {
+                    filesystem.deleteFile(path);
+                }
+                return true;
+            },
+            /**
+             * A file written whole from outside, replacing one of that name.
+             *
+             * @param {string} path @param {Uint8Array} bytes
+             */
+            write: (path, bytes)=>{
+                const handle = filesystem.open(path,
+                    { read: false, write: true, disposition: 'create-always' });
+                if (!handle)
+                {
+                    throw new Error(`${path} could not be created`);
+                }
+                try
+                {
+                    filesystem.write(handle, bytes);
+                }
+                finally
+                {
+                    filesystem.close(handle);
+                }
+            },
         },
 
         /**
@@ -6876,7 +7015,7 @@ async function buildApp(options){
          *
          * @param {string} path
          */
-        readImage: path=>readWholeFile(filesystem, blocks, path),
+        readImage: path=>readProgramImage(filesystem, blocks, path),
 
         diagnostics: ()=>[
             ...core.diagnostics(),
@@ -7339,7 +7478,7 @@ async function buildSystemHost(deps){
             },
         },
         /** @param {string} path */
-        readImage: path=>readWholeFile(filesystem, blocks, path),
+        readImage: path=>readProgramImage(filesystem, blocks, path),
         /**
          * The program's tables as it last answered -- asked again now, for the
          * next reader -- with the journal and the sound output this thread
@@ -7980,6 +8119,7 @@ export async function createApp(options){
             processId: request.id,
             mainThreadId: request.threadId,
             standardFiles: request.standardFiles,
+            startDirectory: request.startDirectory,
         });
         replayLogLevels();
         stand(line.current);
@@ -8093,13 +8233,111 @@ export async function createApp(options){
     });
 
     /**
-     * The facade speaks for this process from now on, its input routed.
+     * The run's windows as a tool reads them (`debug.windows`): every
+     * process's, as the run's window manager has them, the topmost top-level
+     * window first and each followed by its children -- where the facade's
+     * one process would show only its own. Null where the run keeps none.
+     */
+    const runWindows = ()=>{
+        const manager = system.windows?.manager;
+        if (!manager)
+        {
+            return null;
+        }
+        /** @param {number} value */
+        const hex = value=>`0x${(value >>> 0).toString(16)}`;
+        /** @type {any[]} */
+        const listed = [];
+        /** @param {any} state */
+        const add = state=>{
+            listed.push({
+                hwnd: hex(state.hwnd), processId: state.processId,
+                x: state.rect.left, y: state.rect.top, width: state.rect.right - state.rect.left,
+                height: state.rect.bottom - state.rect.top,
+                rect: state.rect, client: state.client, region: state.region,
+                visible: state.visible, enabled: state.enabled, className: state.className,
+                title: state.title,
+                parent: state.parent || state.owner ? hex(state.parent || state.owner) : null,
+                child: state.parent !== 0, style: hex(state.style), exStyle: hex(state.exStyle),
+            });
+            manager.children(state.hwnd).forEach(add);
+        };
+        manager.topLevel().forEach(add);
+        return listed;
+    };
+
+    /**
+     * The screen as a tool reads it (`debug.desktop`), as the presenter shows
+     * it: while windows of more than one process show, every process on this
+     * thread's desktop composed by the run's windows (`compose.js`); while one
+     * process's do, that process's desktop. Its own for the facade's process
+     * when the run keeps no windows, or the picture is not on this thread --
+     * a process in a worker of its own sends its picture to the presenter.
+     *
+     * @param {() => any} own  the desktop of the process the facade speaks for
+     */
+    const runDesktop = own=>{
+        const manager = system.windows?.manager;
+        const placed = manager ? manager.topLevel() : [];
+        if (!manager)
+        {
+            return own();
+        }
+        /** @type {Map<number, { width: number, height: number, pitch: number, bytes: Uint8Array }>} */
+        const layers = new Map();
+        for (const built of standing)
+        {
+            const id = processIds.get(built);
+            const picture = id === undefined ? null : built.debug?.desktop?.() ?? null;
+            if (id !== undefined && picture && typeof picture.then !== 'function')
+            {
+                layers.set(id, picture);
+            }
+        }
+        if (!needsComposing(placed))
+        {
+            const showing = placed.find((/** @type {any} */ state)=>state.visible
+                && layers.has(state.processId))?.processId;
+            return (showing === undefined ? null : layers.get(showing)) ?? own();
+        }
+        const foreground = manager.get(manager.foreground() ?? 0)?.processId ?? null;
+        const base = baseOf(placed, layers, foreground);
+        const first = base === null ? null : layers.get(base);
+        if (base === null || !first)
+        {
+            return own();
+        }
+        const screen = { width: first.width, height: first.height, pitch: first.width * 4,
+            bytes: new Uint8Array(first.width * first.height * 4) };
+        for (const copy of compositionPlan({ windows: placed, layers, base, screen }))
+        {
+            const layer = /** @type {{ pitch: number, bytes: Uint8Array }} */ (
+                layers.get(copy.source));
+            for (let row = 0; row < copy.height; row++)
+            {
+                const from = (copy.y + row) * layer.pitch + copy.x * 4;
+                screen.bytes.set(layer.bytes.subarray(from, from + copy.width * 4),
+                    (copy.toY + row) * screen.pitch + copy.toX * 4);
+            }
+        }
+        return screen;
+    };
+
+    /**
+     * The facade speaks for this process from now on, its input routed and a
+     * tool's view of the windows and the screen the run's.
      *
      * @param {any} speaking
      */
     const stand = speaking=>{
         Object.assign(facade, speaking, own);
         facade.input = routedInput(speaking.input);
+        if (speaking.debug)
+        {
+            facade.debug = { ...speaking.debug,
+                windows: ()=>runWindows() ?? speaking.debug.windows(),
+                desktop: ()=>runDesktop(()=>speaking.debug.desktop()) };
+        }
     };
 
     /**
@@ -8236,6 +8474,7 @@ export async function createApp(options){
                         executable: image,
                         imagePath: request.imagePath,
                         commandLine: request.commandLine,
+                        startDirectory: request.startDirectory,
                         patches: request.patches,
                         processId: request.id,
                         mainThreadId: request.threadId,
@@ -8486,6 +8725,7 @@ export async function createApp(options){
             const placed = processesAcross.start({
                 imagePath: request.imagePath,
                 commandLine: request.commandLine,
+                startDirectory: request.startDirectory,
                 patches: request.patches,
                 id: request.id,
                 threadId: request.threadId,
@@ -8529,6 +8769,7 @@ export async function createApp(options){
                         processId: request.id,
                         mainThreadId: request.threadId,
                         standardFiles: request.standardFiles,
+                        startDirectory: request.startDirectory,
                         audio: sound.options,
                     });
                 }
@@ -8668,6 +8909,7 @@ export async function createApp(options){
                 executable: child,
                 imagePath: request.imagePath,
                 commandLine: request.commandLine,
+                startDirectory: request.startDirectory,
                 patches: request.patches,
                 processId: request.id,
                 mainThreadId: request.threadId,

@@ -89,6 +89,10 @@ const I_IMAGECALLBACK = -1;
 
 /** Insert-after positions. */
 const TVI_ROOT = 0xffff0000;
+/** TVITEM.mask's flag for a valid hItem, which is all a deleted item is said to have. */
+const TVIF_HANDLE = 0x0010;
+/** The window message a tree hands its items to the parent for the last time on. */
+const WM_DESTROY = 0x0002;
 const TVI_FIRST = 0xffff0001;
 const TVI_LAST = 0xffff0002;
 const TVI_SORT = 0xffff0003;
@@ -122,6 +126,7 @@ export const TVN_SELCHANGEDA = TVN_FIRST - 2;
 export const TVN_GETDISPINFOA = TVN_FIRST - 3;
 export const TVN_ITEMEXPANDINGA = TVN_FIRST - 5;
 export const TVN_ITEMEXPANDEDA = TVN_FIRST - 6;
+export const TVN_DELETEITEMA = TVN_FIRST - 9;
 
 /** Structure layouts, in bytes, as the guest compiled them. */
 export const TVITEM = Object.freeze({
@@ -158,8 +163,17 @@ const DEFAULT_INDENT = 16;
 const BUTTON = 9;
 const CHECK = 13;
 const GAP = 3;
-/** TVHT_ flag for "on the item's text or icon". */
-const TVHT_ONITEM = 0x0040;
+/** TVHT_ flags: where a point falls, against the row it is in. */
+const TVHT_NOWHERE = 0x0001;
+const TVHT_ONITEMLABEL = 0x0004;
+const TVHT_ONITEMINDENT = 0x0008;
+const TVHT_ONITEMBUTTON = 0x0010;
+const TVHT_ONITEMRIGHT = 0x0020;
+const TVHT_ONITEMSTATEICON = 0x0040;
+const TVHT_ABOVE = 0x0100;
+const TVHT_BELOW = 0x0200;
+const TVHT_TORIGHT = 0x0400;
+const TVHT_TOLEFT = 0x0800;
 
 /**
  * @typedef {import('../user32/controls.js').ControlHost} ControlHost
@@ -274,6 +288,18 @@ export function createTreeViewProcedure(host, tk){
         const measured = hdc !== 0 ? host.draw.measure(hdc, 'M') : null;
         host.endPaint(record, hdc);
         return measured ? measured.height : 16;
+    };
+
+    /** A row's text width, measured the same way. @param {any} record @param {string} text */
+    const measureWidth = (record, text)=>{
+        if (!host.draw)
+        {
+            return 8 * text.length;
+        }
+        const { hdc } = host.contextOn(record);
+        const measured = hdc !== 0 ? host.draw.measure(hdc, text) : null;
+        host.endPaint(record, hdc);
+        return measured ? measured.width : 8 * text.length;
     };
 
     /** How many rows fit the client area. @param {any} record */
@@ -540,6 +566,67 @@ export function createTreeViewProcedure(host, tk){
         {
             held.caret = 0;
         }
+    };
+
+    /**
+     * Deletes an item and its subtree, telling the parent of each with
+     * TVN_DELETEITEM -- children before their parent, each while it is still
+     * in the tree -- as the control does: the notification is where a program
+     * frees what its lParam holds, and a program that is never told keeps the
+     * data, or a pointer into a library it has since unloaded.
+     *
+     * @param {any} record @param {number} handle @param {unknown} [thread]
+     * @returns {number | Promise<number>}
+     */
+    const deleteItem = (record, handle, thread)=>{
+        const item = node(record, handle);
+        if (!item)
+        {
+            return 1;
+        }
+        const children = [...item.children];
+        /** @param {number} index @returns {number | Promise<number>} */
+        const next = index=>{
+            if (index < children.length)
+            {
+                return after(deleteItem(record, children[index], thread), ()=>next(index + 1));
+            }
+            const bytes = new Uint8Array(NMTREEVIEW.SIZE);
+            const view = new DataView(bytes.buffer);
+            // TVC_UNKNOWN, and of the old item only its handle and lParam.
+            view.setUint32(NMTREEVIEW.itemOld + TVITEM.mask, TVIF_HANDLE | TVIF_PARAM, true);
+            view.setUint32(NMTREEVIEW.itemOld + TVITEM.hItem, item.handle >>> 0, true);
+            view.setUint32(NMTREEVIEW.itemOld + TVITEM.lParam, item.param >>> 0, true);
+            return after(notify(record, TVN_DELETEITEMA, bytes, thread), ()=>{
+                remove(record, item.handle);
+                host.invalidate(record);
+                return 1;
+            });
+        };
+        return next(0);
+    };
+
+    /**
+     * Deletes every item, each told to the parent.
+     *
+     * @param {any} record @param {unknown} [thread]
+     * @returns {number | Promise<number>}
+     */
+    const deleteAll = (record, thread)=>{
+        const held = state(record);
+        const roots = [...held.roots];
+        /** @param {number} index @returns {number | Promise<number>} */
+        const next = index=>{
+            if (index < roots.length)
+            {
+                return after(deleteItem(record, roots[index], thread), ()=>next(index + 1));
+            }
+            held.caret = 0;
+            held.top = 0;
+            host.invalidate(record);
+            return 1;
+        };
+        return next(0);
     };
 
     /**
@@ -938,22 +1025,18 @@ export function createTreeViewProcedure(host, tk){
             case TVM_DELETEITEM: {
                 if ((message.lParam >>> 0) === TVI_ROOT)
                 {
-                    held.roots.length = 0;
-                    held.nodes.clear();
-                    held.caret = 0;
-                    held.top = 0;
-                    host.invalidate(record);
-                    return 1;
+                    return deleteAll(record, thread);
                 }
                 const item = node(record, message.lParam);
                 if (!item)
                 {
                     return 0;
                 }
-                remove(record, item.handle);
-                host.invalidate(record);
-                return 1;
+                return deleteItem(record, item.handle, thread);
             }
+            case WM_DESTROY:
+                // A tree that goes away gives its items back the same way.
+                return after(deleteAll(record, thread), ()=>tk.common(record, message, thread));
             case TVM_EXPAND: {
                 const item = node(record, message.lParam);
                 if (!item)
@@ -1105,15 +1188,34 @@ export function createTreeViewProcedure(host, tk){
                 {
                     return 0;
                 }
-                const hit = rowAtPoint(record, readI32(at + TVHT.y), measureHeight(record));
+                const x = readI32(at + TVHT.x);
+                const y = readI32(at + TVHT.y);
+                const area = tk.clientRect(record);
+                const outside = (x < 0 ? TVHT_TOLEFT : 0)
+                    | (x >= area.right - area.left ? TVHT_TORIGHT : 0)
+                    | (y < 0 ? TVHT_ABOVE : 0) | (y >= area.bottom - area.top ? TVHT_BELOW : 0);
+                const height = measureHeight(record);
+                const hit = outside === 0 ? rowAtPoint(record, y, height) : null;
                 if (!hit)
                 {
                     writeU32(at + TVHT.hItem, 0);
-                    writeU32(at + TVHT.flags, 0);
+                    writeU32(at + TVHT.flags, outside || TVHT_NOWHERE);
                     return 0;
                 }
+                // The parts of the row as the paint lays them out: the
+                // indent, the [+] / [-], the check box, the text and what is
+                // right of it.
+                const row = clientRow(record, hit.index, hit.depth, height);
+                const check = checkX(record, row, hit.item);
+                const label = check + ((record.style & TVS_CHECKBOXES) !== 0 ? CHECK + GAP : 0);
+                const flags = x < row.x ? TVHT_ONITEMINDENT
+                    : x < check ? ((record.style & TVS_HASBUTTONS) !== 0 && x < row.x + BUTTON
+                        ? TVHT_ONITEMBUTTON : TVHT_ONITEMINDENT)
+                        : x < label ? TVHT_ONITEMSTATEICON
+                            : x < label + measureWidth(record, hit.item.text) + 2
+                                ? TVHT_ONITEMLABEL : TVHT_ONITEMRIGHT;
                 writeU32(at + TVHT.hItem, hit.item.handle);
-                writeU32(at + TVHT.flags, TVHT_ONITEM);
+                writeU32(at + TVHT.flags, flags);
                 return hit.item.handle;
             }
             case TVM_ENSUREVISIBLE: {

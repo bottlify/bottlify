@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { createJudge } from '../testing/sequences-judge.js';
 import { LOCKED_POOL } from '../testing/locked-sequences.js';
 import { bodyOf, namesOf, preambleOf, random } from '../testing/sequences.js';
-import { EXECUTOR_BYTES, PAGE, Tables, executorLayout, ownLayout } from './layout.js';
+import { PAGE, executorBytes, executorLayout, ownLayout, tablesSize } from './layout.js';
 
 const COUNT = Number(process.env.EXECUTOR_SEQUENCES ?? 2000);
 const THIRD = { executors: 3, executor: 2 };
@@ -61,8 +61,8 @@ async function judgeAll(judge, count, draw, pool){
 }
 
 test('an executor\'s layout moves its state and tables, and only those', ()=>{
-    const own = ownLayout({ ramSize: 1 << 20 });
-    const base = Math.ceil((own.tables + Tables.SIZE) / PAGE) * PAGE + EXECUTOR_BYTES;
+    const own = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16 });
+    const base = Math.ceil((own.tables + tablesSize(own)) / PAGE) * PAGE + executorBytes(own);
     const moved = executorLayout(own, base);
     assert.equal(moved.regs, base + own.regs);
     assert.equal(moved.eflags, base + own.eflags);

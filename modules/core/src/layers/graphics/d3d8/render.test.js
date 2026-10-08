@@ -3954,3 +3954,13 @@ test('a signed bump map is sampled from rgba8snorm, U and V as they lie and the 
     assert.deepEqual([...expandTexels(D3DFMT.V8U8, Uint8Array.from([0x80, 0x7f, 0x01, 0xff]), 2)],
         [0x80, 0x7f, 0x7f, 0x7f, 0x01, 0xff, 0x7f, 0x7f]);
 });
+
+test('a floating-point surface is an r16float, R32F narrowed to half precision on upload', ()=>{
+    assert.equal(gpuFormatOf(D3DFMT.R16F, 64, 64, false), 'r16float');
+    assert.equal(gpuFormatOf(D3DFMT.R32F, 64, 64, true), 'r16float');
+    const floats = new Uint8Array(Float32Array.from([1, 0.5, -2, 65504]).buffer);
+    assert.deepEqual([...new Uint16Array(expandTexels(D3DFMT.R32F, floats, 4).buffer)],
+        [0x3c00, 0x3800, 0xc000, 0x7bff]);
+    const halves = Uint8Array.from([0x00, 0x3c, 0x00, 0x38]);
+    assert.deepEqual([...expandTexels(D3DFMT.R16F, halves, 2)], [...halves]);
+});

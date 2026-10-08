@@ -260,6 +260,24 @@ test('InvertRect is exactly a DSTINVERT over the half-open rectangle', ()=>{
     assert.equal(again.read(1, 1), surface.read(1, 1));
 });
 
+test('a halftone InvertRect inverts every other pixel from the brush origin, and again'
+    + ' restores them', ()=>{
+    const { drawing, surface } = fixture();
+    const inverted = (~BACKGROUND) >>> 0;
+    const rows = ()=>[0, 1].map(y=>[0, 1, 2, 3].map(x=>surface.read(x, y)));
+    assert.equal(drawing.invertRect(HDC, { left: 0, top: 0, right: 4, bottom: 2 }, true), true);
+    assert.deepEqual(rows(), [[BACKGROUND, inverted, BACKGROUND, inverted],
+        [inverted, BACKGROUND, inverted, BACKGROUND]], 'the gray brush\'s 0x55 over 0xAA');
+    drawing.invertRect(HDC, { left: 0, top: 0, right: 4, bottom: 2 }, true);
+    assert.deepEqual(rows(), [[BACKGROUND, BACKGROUND, BACKGROUND, BACKGROUND],
+        [BACKGROUND, BACKGROUND, BACKGROUND, BACKGROUND]]);
+
+    drawing.setBrushOrgEx(HDC, 1, 0);
+    drawing.invertRect(HDC, { left: 0, top: 0, right: 4, bottom: 1 }, true);
+    assert.deepEqual(rows()[0], [inverted, BACKGROUND, inverted, BACKGROUND],
+        'the checkerboard moves with the origin');
+});
+
 test('FillRect and FrameRect use the brush the call names, not the selected one', ()=>{
     const { objects, drawing, surface, context } = fixture();
     context.state.brush = objects.create('brush', {
@@ -1892,3 +1910,70 @@ test('the text alignment is the context\'s own, and a new surface does not reset
     state.textAlign = 0;
     assert.equal(drawing.getTextAlign(HDC), 0, 'and a RestoreDC of the state is seen');
 });
+
+// --- MaskBlt, AlphaBlend, GradientFill and ExtFloodFill through a context ---
+
+const MASK_HDC = 0x3000;
+
+test('MaskBlt reads its mask\'s bits from the mask\'s own corner', ()=>{
+    const { drawing, surface } = fixture({ width: 8, height: 1 });
+    drawing.bind(SOURCE_HDC, createSurface({ width: 8, height: 1 }));
+    drawing.clear(SOURCE_HDC, RED_COLOR);
+    // A monochrome bitmap: the bits 0xa5, white where they are set.
+    const mask = surfaceForDdb({ width: 8, height: 1, bitCount: 1,
+        pixels: Uint8Array.of(0xa5, 0) });
+    drawing.bind(MASK_HDC, /** @type {any} */ (mask));
+    const DSTCOPY = 0x00aa0029;
+    const rop = (((DSTCOPY << 8) & 0xff000000) | SRCCOPY) >>> 0;
+    assert.equal(drawing.maskBlt(HDC, 0, 0, 8, 1, SOURCE_HDC, 0, 0, MASK_HDC, 0, 0, rop), true);
+    assert.deepEqual([...Array(8).keys()].map(x=>surface.read(x, 0) === RED_PIXEL ? 1 : 0),
+        [1, 0, 1, 0, 0, 1, 0, 1]);
+
+    clearSurface(surface, BACKGROUND);
+    drawing.maskBlt(HDC, 2, 0, 6, 1, SOURCE_HDC, 0, 0, MASK_HDC, 4, 0, rop);
+    assert.deepEqual([...Array(8).keys()].map(x=>surface.read(x, 0) === RED_PIXEL ? 1 : 0),
+        [0, 0, 0, 1, 0, 1, 0, 0], 'the mask from its fifth bit, and none past its end');
+    assert.equal(drawing.maskBlt(HDC, 0, 0, 1, 1, SOURCE_HDC, 0, 0, 0x7777, 0, 0, rop), false,
+        'a mask with no pixels');
+});
+
+test('AlphaBlend between two contexts blends under the destination\'s clip', ()=>{
+    const { drawing, surface } = fixture({ width: 4, height: 1 });
+    drawing.bind(SOURCE_HDC, createSurface({ width: 2, height: 1 }));
+    drawing.clear(SOURCE_HDC, RED_COLOR);
+    drawing.setClipRect(HDC, { left: 0, top: 0, right: 3, bottom: 1 });
+    assert.equal(drawing.alphaBlend(HDC, 0, 0, 4, 1, SOURCE_HDC, 0, 0, 2, 1,
+        { constantAlpha: 255, perPixel: false }), true);
+    assert.deepEqual([0, 1, 2, 3].map(x=>surface.read(x, 0)),
+        [RED_PIXEL, RED_PIXEL, RED_PIXEL, BACKGROUND]);
+    assert.equal(drawing.alphaBlend(HDC, 0, 0, 1, 1, 0x7777, 0, 0, 1, 1,
+        { constantAlpha: 255, perPixel: false }), false, 'no source');
+});
+
+test('a gradient is written as it is, whatever the binary raster operation', ()=>{
+    const { drawing, surface, context } = fixture({ width: 2, height: 1 });
+    context.state.rop2 = 7;
+    const red = { x: 0, y: 0, red: 0xff00, green: 0, blue: 0, alpha: 0 };
+    assert.equal(drawing.gradientFill(HDC, [red, { ...red, x: 2, y: 1 }], [[0, 1]], 0), true);
+    assert.equal(surface.read(0, 0), RED_PIXEL, 'R2_XORPEN would have mixed it in');
+    assert.equal(drawing.gradientFill(0x7777, [], [], 0), false);
+});
+
+test('a flood fill is bounded by the clip region and painted with the selected brush', ()=>{
+    const { objects, drawing, surface, context } = fixture({ width: 8, height: 2 });
+    context.state.brush = objects.create('brush', { style: BS_SOLID, color: RED_COLOR, hatch: 0 });
+    drawing.setClipRegion(HDC, [
+        { left: 0, top: 0, right: 3, bottom: 2 },
+        { left: 4, top: 0, right: 8, bottom: 2 },
+    ]);
+    assert.equal(drawing.floodFill(HDC, 5, 1, colorOf(BACKGROUND), 1), true);
+    assert.deepEqual([0, 3, 4, 7].map(x=>surface.read(x, 1)),
+        [BACKGROUND, BACKGROUND, RED_PIXEL, RED_PIXEL], 'the gap in the clip is a border');
+    assert.equal(drawing.floodFill(HDC, 3, 0, colorOf(BACKGROUND), 1), false, 'in the gap');
+    assert.equal(drawing.floodFill(0x7777, 0, 0, 0, 0), false);
+});
+
+/** The COLORREF of a pixel. @param {number} pixel */
+function colorOf(pixel){
+    return ((pixel & 0xff) << 16) | (pixel & 0xff00) | ((pixel >>> 16) & 0xff);
+}

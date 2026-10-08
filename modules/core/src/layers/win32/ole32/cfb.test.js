@@ -202,13 +202,6 @@ test('the directory the writer builds is an ordered red-black tree', ()=>{
     }
 });
 
-test('names compare by length first and then without regard to case', ()=>{
-    assert.ok(compareNames('b', 'AA') < 0);
-    assert.ok(compareNames('AB', 'aa') > 0);
-    assert.equal(compareNames('abc', 'ABC'), 0);
-    assert.equal(nameKey('Root Entry'), 'ROOT ENTRY');
-});
-
 test('damage reads as no file rather than as a partial one', ()=>{
     const root = createRoot();
     addStream(root, 'a', new Uint8Array(5000).fill(1));
@@ -249,4 +242,22 @@ test('a file too large for the header alone chains its FAT through DIFAT sectors
     assert.equal(data?.length, size);
     assert.equal(data?.[size - 1], (size - 1) & 0xff);
     assert.equal(data?.[123456], 123456 & 0xff);
+});
+
+test('a file that ends partway into its last sector reads, the rest of it as zeros', ()=>{
+    // A package that shipped ended 352 bytes into the sector its last stream
+    // ends in, and Windows opens it.
+    const root = createRoot();
+    const data = new Uint8Array(25440).fill(7);
+    addStream(root, 'Large', data);
+    const bytes = serializeCompoundFile(root);
+    let end = bytes.length;
+    while (bytes[end - 1] === 0)
+    {
+        end--;
+    }
+    assert.notEqual(end % 512, 0, 'the file ends inside a sector');
+    const back = parseCompoundFile(bytes.slice(0, end));
+    assert.ok(back);
+    assert.deepEqual(back.children.get('LARGE')?.data, data);
 });

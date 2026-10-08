@@ -141,6 +141,8 @@ const D3DGETDATA_FLUSH = 1;
 
 /** The last D3DTEXTUREFILTERTYPE StretchRect accepts. */
 const D3DTEXF_ANISOTROPIC = 3;
+/** D3DTEXF_LINEAR: a stretch filtered between texels; POINT and NONE take the nearest. */
+const D3DTEXF_LINEAR = 2;
 
 /** D3DSTREAMSOURCE_INDEXEDDATA and D3DSTREAMSOURCE_INSTANCEDATA. */
 const STREAMSOURCE_INDEXEDDATA = 0x40000000;
@@ -398,6 +400,15 @@ function normalisePresentParameters(parameters){
 
 /** @param {number} format */
 const isColourFormat = format=>FORMAT_INFO[format] !== undefined && !FORMAT_INFO[format].depth;
+
+/** The same layout with or without its alpha: A8R8G8B8 for X8R8G8B8 and back. @type {Map<number, number>} */
+const ALPHA_TWINS = new Map([
+    [D3DFMT.A8R8G8B8, D3DFMT.X8R8G8B8], [D3DFMT.X8R8G8B8, D3DFMT.A8R8G8B8],
+    [D3DFMT.A1R5G5B5, D3DFMT.X1R5G5B5], [D3DFMT.X1R5G5B5, D3DFMT.A1R5G5B5],
+    [D3DFMT.A4R4G4B4, D3DFMT.X4R4G4B4], [D3DFMT.X4R4G4B4, D3DFMT.A4R4G4B4],
+]);
+/** @param {number} format @returns {number | undefined} */
+const alphaTwin = format=>ALPHA_TWINS.get(format);
 /** @param {number} format */
 const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[format].depth;
 
@@ -1520,9 +1531,21 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * @returns {number} D3D_OK, or the refusal
      */
     const drawPreconditions = (type, primitiveCount)=>{
-        if (!inScene || vertexCountOf(type, primitiveCount) === 0
-            || !vertexDeclaration.declaration)
+        // Each refusal says which: the draw is simply missing from the picture otherwise.
+        if (!inScene)
         {
+            report('draw-scene', 'a draw outside BeginScene and EndScene was refused');
+            return D3DERR_INVALIDCALL;
+        }
+        if (vertexCountOf(type, primitiveCount) === 0)
+        {
+            report('draw-count', `a draw of no vertices (type ${type}, ${primitiveCount}`
+                + ' primitives) was refused');
+            return D3DERR_INVALIDCALL;
+        }
+        if (!vertexDeclaration.declaration)
+        {
+            report('draw-declaration', 'a draw with no vertex declaration or FVF was refused');
             return D3DERR_INVALIDCALL;
         }
         // A format without one of the three position bits is not a format: a
@@ -1530,6 +1553,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         // has no position is drawing something this device reports instead.
         if (vertexDeclaration.fvf !== 0 && (vertexDeclaration.fvf & 0xe) === 0)
         {
+            report('draw-fvf', `a draw through FVF 0x${vertexDeclaration.fvf.toString(16)},`
+                + ' which has no position, was refused');
             return D3DERR_INVALIDCALL;
         }
         return D3D_OK;
@@ -1572,8 +1597,27 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         // Read, not made: `stream` keeps an entry for the index it is asked,
         // and a state block of everything captures every entry there is.
         const source = streams.get(0);
-        if (!source?.buffer || !(source.stride > 0) || source.offset % source.stride !== 0)
+        // A declaration that reads nothing from stream zero -- none of its elements there, as
+        // a vertex shader that makes its vertices from constants has it -- draws whatever
+        // stream zero holds, nothing included, as Direct3D does.
+        const elements = vertexDeclaration.declaration?.elements ?? [];
+        if (vertexDeclaration.fvf === 0 && !elements.some((/** @type {any} */ e)=>e.Stream === 0))
         {
+            return 0;
+        }
+        if (!source?.buffer || !(source.stride > 0))
+        {
+            const read = [...new Set(elements.map((/** @type {any} */ e)=>e.Stream))].join(',');
+            report(`draw-stream-${source?.buffer ? 'stride' : 'buffer'}-${read}`,
+                `a draw with ${source?.buffer ? `stride ${source.stride}` : 'no vertex buffer'}`
+                + ` on stream 0 was refused; its declaration reads streams ${read || 'none'}`
+                + ` (FVF 0x${(vertexDeclaration.fvf ?? 0).toString(16)})`);
+            return null;
+        }
+        if (source.offset % source.stride !== 0)
+        {
+            report('draw-offset', `a draw from stream 0 at offset ${source.offset}, not a whole`
+                + ` vertex of stride ${source.stride}, was refused`);
             return null;
         }
         return source.offset / source.stride;
@@ -4021,34 +4065,69 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         StretchRect(source, sourceRect, destination, destinationRect, filter, out = {}){
             if (!source || !destination || filter > D3DTEXF_ANISOTROPIC)
             {
+                report('stretch-arguments', `StretchRect refused: ${!source ? 'no source surface'
+                    : !destination ? 'no destination surface' : `filter ${filter}`}`);
                 return D3DERR_INVALIDCALL;
             }
             const from = describe(source);
             const to = describe(destination);
-            if (from.Pool !== D3DPOOL.DEFAULT || to.Pool !== D3DPOOL.DEFAULT
-                || from.Format !== to.Format
-                || FORMAT_INFO[from.Format].depth !== FORMAT_INFO[to.Format].depth)
-            {
+            // Every refusal says why: a program told INVALIDCALL here carries on without the
+            // copy, and the picture it meant to show is simply not there.
+            const refuse = (/** @type {string} */ key, /** @type {string} */ why)=>{
+                report(`stretch-${key}`, `StretchRect from format ${from.Format} to ${
+                    to.Format} refused: ${why}`);
                 return D3DERR_INVALIDCALL;
+            };
+            if (from.Pool !== D3DPOOL.DEFAULT || to.Pool !== D3DPOOL.DEFAULT)
+            {
+                return refuse('pool', 'a surface outside the default pool');
+            }
+            const depth = FORMAT_INFO[from.Format].depth;
+            if (depth !== FORMAT_INFO[to.Format].depth || (depth && from.Format !== to.Format))
+            {
+                return refuse('depth', 'a depth surface with a colour one, or two depth formats');
             }
             const rect = sourceRect ?? wholeOf(from);
             const target = destinationRect ?? wholeOf(to);
             if (!rectWithin(rect, from) || !rectWithin(target, to))
             {
-                return D3DERR_INVALIDCALL;
+                return refuse('rect', 'a rectangle outside its surface');
             }
-            if (rect.right - rect.left !== target.right - target.left
-                || rect.bottom - rect.top !== target.bottom - target.top)
+            const stretched = rect.right - rect.left !== target.right - target.left
+                || rect.bottom - rect.top !== target.bottom - target.top;
+            // A stretch, or two formats the GPU stores apart, is drawn on the GPU: a program
+            // that renders its interface small and stretches it over the screen is shown it
+            // there, filtered as it asked.
+            if (stretched || from.Format !== to.Format)
             {
-                report('stretch', 'a StretchRect between rectangles of different sizes was'
-                    + ' refused: this device copies and does not scale');
-                return D3DERR_INVALIDCALL;
+                if ((!stretched && renderer?.copySurface?.(source, rect, destination,
+                    { x: target.left, y: target.top }))
+                    || renderer?.stretchSurface?.(source, rect, destination, target,
+                        filter >= D3DTEXF_LINEAR))
+                {
+                    out.moves = [];
+                    return D3D_OK;
+                }
+                if (stretched)
+                {
+                    return refuse('scale', 'rectangles of different sizes, which only the GPU'
+                        + ' scales here, and one of these surfaces is not on it');
+                }
             }
+            // Between colour formats a device converts, as CheckDeviceFormatConversion says it
+            // can: a scene drawn into an A8R8G8B8 target is copied onto the X8R8G8B8 back
+            // buffer this way. On the GPU two formats stored alike copy as they are (the
+            // destination's alpha, undefined in Direct3D, then holds the source's); in guest
+            // bytes only formats that differ in whether they keep an alpha do.
             if (renderer?.copySurface?.(source, rect, destination,
                 { x: target.left, y: target.top }))
             {
                 out.moves = [];
                 return D3D_OK;
+            }
+            if (from.Format !== to.Format && alphaTwin(from.Format) !== to.Format)
+            {
+                return refuse('convert', 'a conversion between these formats is not made here');
             }
             if (isGpuResident(source))
             {

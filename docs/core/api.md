@@ -123,6 +123,7 @@ Everything below crosses to the engine's worker by `postMessage`, so every value
 | `output` | `{ handle, text }` | The program wrote to a standard handle. |
 | `cursor` | `{ width, height, hotSpot, bgra, shown }` | The program's cursor changed. |
 | `clipboard` | `{ text }` | The program put text on the clipboard. |
+| `open-url` | `{ url }` | The program asked the shell to open an address (a link, a `.url` shortcut); the page decides whether to open it. |
 | `divergence` | `{ api, detail }` | A call answered differently from Windows. |
 | `error` | the failure | A failure inside the engine. |
 | `fallback` | `{ asked, detail, mode, concurrency }` | The run could not have what it asked for (`concurrency` without shared memory) and runs as `mode` and `concurrency` say; `detail` says why. |

@@ -936,6 +936,44 @@ export function createUserMarshalFunctions(host){
             }
         } }],
     ]);
+    /**
+     * A GDI object a medium holds, which has no wire form but is freed like
+     * the rest: deleted when nobody was named to release it.
+     *
+     * @param {number} value @param {boolean} owned
+     */
+    const disposeGdi = (value, owned)=>{
+        if (!owned)
+        {
+            return;
+        }
+        if (host.gdi?.deleteObject)
+        {
+            host.gdi.deleteObject(value);
+        }
+        else
+        {
+            host.divergence?.('ReleaseStgMedium', 'the GDI object a medium holds is not deleted');
+        }
+    };
+
+    /**
+     * What ReleaseStgMedium does with a STGMEDIUM: its value disposed of as
+     * its tymed says, then pUnkForRelease released.
+     *
+     * @param {number} medium @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const releaseMedium = (medium, thread)=>{
+        const tymed = readU32(medium);
+        const value = readU32(medium + MEDIUM_VALUE);
+        const unknown = readU32(medium + MEDIUM_RELEASE);
+        const disposed = tymed === TYMED_NULL || value === 0 ? 0
+            : tymed === TYMED_GDI ? disposeGdi(value, unknown === 0)
+                : arms.get(tymed)?.dispose(value, unknown === 0, thread);
+        return after(disposed, ()=>(unknown === 0 ? 0 : release(unknown, thread)));
+    };
+
     /** @param {number} tymed */
     const holdsInterface = tymed=>tymed === TYMED_ISTREAM || tymed === TYMED_ISTORAGE;
     /** @param {number} tymed */
@@ -1011,14 +1049,7 @@ export function createUserMarshalFunctions(host){
             return after(released, next=>(unknown === 0 ? next
                 : pointerUnmarshal(next, medium + MEDIUM_RELEASE, 0, thread)));
         },
-        free: (flags, medium, thread)=>{
-            const tymed = readU32(medium);
-            const value = readU32(medium + MEDIUM_VALUE);
-            const unknown = readU32(medium + MEDIUM_RELEASE);
-            const disposed = tymed === TYMED_NULL || value === 0 ? 0
-                : arms.get(tymed)?.dispose(value, unknown === 0, thread);
-            return after(disposed, ()=>(unknown === 0 ? 0 : release(unknown, thread)));
-        },
+        free: (flags, medium, thread)=>releaseMedium(medium, thread),
     };
 
     /**
@@ -1202,5 +1233,22 @@ export function createUserMarshalFunctions(host){
         /** void WdtpInterfacePointer_UserFree(IUnknown *punk) */
         WdtpInterfacePointer_UserFree: entry(4, ([unknown], thread)=>
             (unknown === 0 ? 0 : release(unknown, thread).then(()=>0))),
+
+        /**
+         * void ReleaseStgMedium(STGMEDIUM *pmedium)
+         *
+         * The same release STGMEDIUM_UserFree makes, from the one table: an
+         * interface is always released; an HGLOBAL, a GDI object, a metafile
+         * picture and an enhanced metafile are freed, and a file deleted,
+         * only when pUnkForRelease is NULL, since otherwise its release is
+         * what frees them; a file's name is task memory and always goes.
+         * The medium is TYMED_NULL afterwards, so a second release of it
+         * frees nothing twice. NULL is nothing to release.
+         */
+        ReleaseStgMedium: entry(4, ([medium], thread)=>(medium === 0 ? 0
+            : after(releaseMedium(medium, thread), ()=>{
+                putWords(medium, [TYMED_NULL, 0, 0]);
+                return 0;
+            }))),
     };
 }

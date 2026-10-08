@@ -599,3 +599,149 @@ test('StrCatBuffA appends to what the buffer holds, terminator included', ()=>{
     assert.equal(fns.StrCatBuffA.handler([AT, 0x300, 20]), AT);
     assert.equal(String.fromCharCode(...memory.subarray(AT, AT + 9)), 'abcdefgh ');
 });
+
+/** A machine with both widths of string and the reads DllGetVersion makes. */
+function wideMachine(){
+    const memory = new Uint8Array(0x400).fill(0xaa);
+    const fns = /** @type {any} */ (createShlwapiFunctions({
+        readCString: (address, maxLength)=>{
+            let text = '';
+            for (let at = address; at < address + maxLength && memory[at] !== 0; at++)
+            {
+                text += String.fromCharCode(memory[at]);
+            }
+            return text;
+        },
+        readWideString: (address, maxLength)=>{
+            let text = '';
+            for (let at = address; at < address + maxLength * 2
+                && (memory[at] | memory[at + 1] << 8) !== 0; at += 2)
+            {
+                text += String.fromCharCode(memory[at] | memory[at + 1] << 8);
+            }
+            return text;
+        },
+        readMemory: (address, length)=>memory.slice(address, address + length),
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+    }));
+    /** @param {string} text */
+    const put = text=>{
+        memory.fill(0, AT, AT + 0x100);
+        memory.set(Uint8Array.from(text, char=>char.charCodeAt(0)), AT);
+        return AT;
+    };
+    /** @param {string} text */
+    const putWide = text=>{
+        memory.fill(0, AT, AT + 0x100);
+        for (let at = 0; at < text.length; at++)
+        {
+            memory[AT + at * 2] = text.charCodeAt(at) & 0xff;
+            memory[AT + at * 2 + 1] = text.charCodeAt(at) >>> 8;
+        }
+        return AT;
+    };
+    return { fns, put, putWide, memory, view: new DataView(memory.buffer) };
+}
+
+/**
+ * Windows's answers (shlwapi's string tests): the string, then what StrToInt
+ * gives, StrToInt64Ex without flags, and StrToInt64Ex with STIF_SUPPORT_HEX --
+ * null where StrToInt64Ex fails.
+ *
+ * @type {[string, number, bigint | null, bigint | null][]}
+ */
+const STR_TO_INT = [
+    ['1099', 1099, 1099n, 1099n],
+    ['4294967319', 23, (1n << 32n) | 23n, (1n << 32n) | 23n],
+    ['+88987', 0, 88987n, 88987n],
+    ['012', 12, 12n, 12n],
+    ['-55', -55, -55n, -55n],
+    ['-0', 0, 0n, 0n],
+    ['0x44ff', 0, 0n, 0x44ffn],
+    ['0x2bdc546291f4b1', 0, 0n, 0x2bdc546291f4b1n],
+    ['+0x44f4', 0, 0n, 0x44f4n],
+    ['-0x44fd', 0, 0n, 0x44fdn],
+    ['+ 88987', 0, null, null],
+    ['- 55', 0, null, null],
+    ['- 0', 0, null, null],
+    ['+ 0x44f4', 0, null, null],
+    ['--0x44fd', 0, null, null],
+    [' 1999', 0, 1999n, 1999n],
+    [' +88987', 0, 88987n, 88987n],
+    [' 012', 0, 12n, 12n],
+    [' -55', 0, -55n, -55n],
+    [' 0x44ff', 0, 0n, 0x44ffn],
+    [' +0x44f4', 0, 0n, 0x44f4n],
+    [' -0x44fd', 0, 0n, 0x44fdn],
+    ['\t\n +3', 0, 3n, 3n],
+    ['\v+4', 0, null, null],
+    ['\f+5', 0, null, null],
+    ['\r+6', 0, null, null],
+];
+
+test('StrToInt reads only what starts with a digit or a minus, to 32 bits', ()=>{
+    const { fns, put, putWide } = wideMachine();
+    for (const [text, expected] of STR_TO_INT)
+    {
+        assert.equal(fns.StrToIntA.handler([put(text)]), expected, JSON.stringify(text));
+        assert.equal(fns.StrToIntW.handler([putWide(text)]), expected, JSON.stringify(text));
+    }
+    assert.equal(fns.StrToIntA.handler([0]), 0);
+    assert.equal(fns.StrToIntW.argBytes, 4);
+});
+
+test('StrToInt64Ex and StrToIntEx skip some spaces, take a sign, and 0x when asked', ()=>{
+    const { fns, put, putWide, view } = wideMachine();
+    const OUT = 0x300;
+    for (const [text, , plain, hex] of STR_TO_INT)
+    {
+        for (const [flags, expected] of /** @type {[number, bigint | null][]} */ ([[0, plain],
+            [1, hex]]))
+        {
+            for (const name of ['StrToInt64ExA', 'StrToInt64ExW'])
+            {
+                view.setBigInt64(OUT, -1n, true);
+                const at = name.endsWith('W') ? putWide(text) : put(text);
+                const result = fns[name].handler([at, flags, OUT]);
+                assert.equal(result, expected === null ? 0 : 1, `${name} ${JSON.stringify(text)}`);
+                assert.equal(view.getBigInt64(OUT, true), expected ?? -1n,
+                    `${name} ${JSON.stringify(text)} ${flags}`);
+            }
+            view.setBigInt64(OUT, -1n, true);
+            assert.equal(fns.StrToIntExW.handler([putWide(text), flags, OUT]),
+                expected === null ? 0 : 1);
+            assert.equal(view.getInt32(OUT, true),
+                expected === null ? -1 : Number(BigInt.asIntN(32, expected)));
+            assert.equal(view.getInt32(OUT + 4, true), -1, 'an int is four bytes');
+        }
+    }
+    assert.equal(fns.StrToIntExW.handler([putWide('١٢'), 0, OUT]), 0,
+        'other scripts\' digits are no digits');
+    assert.equal(fns.StrToIntExW.handler([putWide(' -2'), 0, OUT]), 0,
+        'a no-break space is no space');
+    view.setBigInt64(OUT, -1n, true);
+    assert.equal(fns.StrToIntExA.handler([put('4294967319'), 0, OUT]), 1);
+    assert.deepEqual([view.getInt32(OUT, true), view.getInt32(OUT + 4, true)], [23, -1]);
+    assert.equal(fns.StrToInt64ExA.handler([0, 0, OUT]), 0);
+    assert.equal(fns.StrToInt64ExA.handler([put('5'), 0, 0]), 0);
+    assert.equal(fns.StrToInt64ExW.argBytes, 12);
+});
+
+test('DllGetVersion answers shlwapi of Windows XP SP3 in either structure', ()=>{
+    const { fns, memory, view } = wideMachine();
+    const E_INVALIDARG = 0x80070057;
+    view.setUint32(0x10, 20, true);
+    assert.equal(fns.DllGetVersion.handler([0x10]), 0);
+    assert.deepEqual([0x14, 0x18, 0x1c, 0x20].map(at=>view.getUint32(at, true)), [6, 0, 2900, 2]);
+    assert.equal(memory[0x24], 0xaa, 'nothing past a DLLVERSIONINFO');
+
+    view.setUint32(0x40, 32, true);
+    assert.equal(fns.DllGetVersion.handler([0x40]), 0);
+    assert.equal(view.getUint32(0x54, true), 0, 'no flags');
+    assert.equal(view.getBigUint64(0x58, true), (6n << 48n) | (2900n << 16n) | 5512n);
+
+    view.setUint32(0x80, 24, true);
+    assert.equal(fns.DllGetVersion.handler([0x80]), E_INVALIDARG);
+    assert.equal(fns.DllGetVersion.handler([0]), E_INVALIDARG);
+    assert.equal(fns.DllGetVersion.argBytes, 4);
+});

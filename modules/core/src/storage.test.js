@@ -72,7 +72,7 @@ function fakeDirectory(){
                     here.set(name, new Uint8Array(0));
                 }
                 return {
-                    getFile: async()=>({ arrayBuffer: async()=>here.get(name).slice().buffer }),
+                    getFile: async()=>new Blob([here.get(name)]),
                     createWritable: async()=>{
                         let written = new Uint8Array(0);
                         return {
@@ -176,6 +176,31 @@ test('a session left as one packed file is read, and gone after the first save',
     const back = await store.load();
     assert.deepEqual(back.files.map(file=>[file.path, [...file.bytes]]), [['C:\\old.sav', [9]]]);
     assert.deepEqual(back.registry, { r: 1 });
+});
+
+test('a session is edited while no machine holds it: listed, read, written, removed', async()=>{
+    // The launcher's file editor, before a run: a setting the game saved, taken away
+    // so it asks again, and a file put where the game will find it.
+    const disk = fakeDirectory();
+    const old = await packSession({ files: [{ path: 'C:\\Profile\\Options.ini',
+        bytes: new Uint8Array([1, 2, 3]) }], registry: { r: 1 } });
+    const handle = await disk.root.getFileHandle('game.session', { create: true });
+    const stream = await handle.createWritable();
+    await stream.write(old);
+    await stream.close();
+    const store = opfsSession('game', async()=>disk.root);
+    assert.deepEqual(await store.list(), [{ path: 'C:\\Profile\\Options.ini', size: 3 }],
+        'a session in the one-file form is listed too');
+    await store.write('C:\\App\\added.txt', new Uint8Array([7]));
+    assert.equal(disk.root.here.has('game.session'), false, 'moved into the folder by an edit');
+    assert.deepEqual((await store.list()).map(file=>[file.path, file.size]).sort(),
+        [['C:\\App\\added.txt', 1], ['C:\\Profile\\Options.ini', 3]]);
+    assert.deepEqual([...await store.read('C:\\Profile\\Options.ini') ?? []], [1, 2, 3]);
+    await store.remove('C:\\Profile\\Options.ini');
+    assert.equal(await store.read('C:\\Profile\\Options.ini'), null);
+    const loaded = await store.load();
+    assert.deepEqual(loaded.files.map(file=>file.path), ['C:\\App\\added.txt']);
+    assert.deepEqual(loaded.registry, { r: 1 }, 'the registry kept through the move');
 });
 
 test('a session is compressed, and as one stream', async()=>{

@@ -1010,13 +1010,57 @@ test('recorded: an additional swap chain shows its own back buffer in the device
         assert.equal(device.Reset(), D3D_OK);
     });
 
+test('recorded: a GPU that says only that a sample passed is answered with what the draw reaches',
+    async()=>{
+        // WebGPU promises zero when no sample passed and something else when some did;
+        // Dawn on D3D12 answers 1 whatever the number. A 1 stands for every pixel the
+        // draw could reach -- its viewport, cut to the scissor -- so a program that
+        // weighs the count against a threshold of a few pixels still sees what it
+        // drew, and a 0 stays 0.
+        const h = harness({ width: 8, height: 8, occlusionSamples: slot=>(slot === 2 ? 0 : 1) });
+        const { device } = h;
+        const queries = [0, 1, 2].map(()=>{
+            /** @type {{ query?: any }} */
+            const out = {};
+            assert.equal(device.CreateQuery(D3DQUERYTYPE.OCCLUSION, out), D3D_OK);
+            return out.query;
+        });
+        const triangle = new Uint8Array(3 * TRIANGLE_STRIDE);
+        assert.equal(device.SetFVF(FVF_TRIANGLE), D3D_OK);
+        /** @param {any} query */
+        const counted = query=>{
+            assert.equal(query.Issue(D3DISSUE.BEGIN), D3D_OK);
+            assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, triangle,
+                TRIANGLE_STRIDE), D3D_OK);
+            assert.equal(query.Issue(D3DISSUE.END), D3D_OK);
+        };
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetViewport({ X: 1, Y: 1, Width: 6, Height: 5, MinZ: 0, MaxZ: 1 }),
+            D3D_OK);
+        counted(queries[0]);
+        assert.equal(device.SetScissorRect({ left: 2, top: 2, right: 4, bottom: 5 }), D3D_OK);
+        assert.equal(device.SetRenderState(D3DRS.SCISSORTESTENABLE, 1), D3D_OK);
+        counted(queries[1]);
+        counted(queries[2]);
+        assert.equal(device.EndScene(), D3D_OK);
+        const values = [];
+        for (const query of queries)
+        {
+            /** @type {{ value?: number }} */
+            const data = {};
+            assert.equal(await query.GetData(data, 4, 1), D3D_OK);
+            values.push(data.value);
+        }
+        assert.deepEqual(values, [30, 6, 0], 'the viewport, the scissor inside it, and nothing');
+    });
+
 test('recorded: an occlusion query counts the samples of the draws between its BEGIN and END',
     async()=>{
         // Wine's d3d9 test_occlusion_query: S_FALSE while the answer is on
         // its way, and a flush that waits for it. The recording GPU's query
-        // at slot n of a frame counts 10 to the n, so a count says which
+        // at slot n of a frame counts 10 to the n + 1, so a count says which
         // draws it took in.
-        const h = harness({ occlusionSamples: slot=>10 ** slot });
+        const h = harness({ occlusionSamples: slot=>10 ** (slot + 1) });
         const { device, gpu } = h;
         /** @type {{ query?: any }} */
         const out = {};
@@ -1041,10 +1085,10 @@ test('recorded: an occlusion query counts the samples of the draws between its B
         const flushed = query.GetData(data, 4, 1);
         assert.ok(flushed instanceof Promise, 'a flush has the caller wait');
         assert.equal(await flushed, D3D_OK);
-        assert.equal(data.value, 11, 'the two draws inside, not the two outside');
+        assert.equal(data.value, 110, 'the two draws inside, not the two outside');
         assert.equal(gpu.of('createQuerySet')[0].descriptor.type, 'occlusion');
         assert.equal(query.GetData(data, 4, 0), D3D_OK, 'and it stays answered');
-        assert.equal(data.value, 11);
+        assert.equal(data.value, 110);
 
         // Across a change of target and across a present, one count.
         /** @type {{ surface?: any }} */
@@ -1068,7 +1112,8 @@ test('recorded: an occlusion query counts the samples of the draws between its B
         assert.equal(device.EndScene(), D3D_OK);
         await h.present();
         assert.equal(await query.GetData(data, 4, 1), D3D_OK);
-        assert.equal(data.value, 12, 'three draws, in two passes of one frame and one of the next');
+        assert.equal(data.value, 120,
+            'three draws, in two passes of one frame and one of the next');
         const begun = gpu.of('beginOcclusionQuery').map((/** @type {any} */ call)=>call.index);
         assert.deepEqual(begun, [0, 1, 0, 1, 0], 'a query a draw, from the first slot each frame');
         assert.equal(gpu.count('endOcclusionQuery'), 5);
@@ -1077,3 +1122,30 @@ test('recorded: an occlusion query counts the samples of the draws between its B
         back.surface.release();
         assert.equal(query.release(), 0);
     });
+
+test('StretchRect scales one target over another on the GPU, filtered as asked', async()=>{
+    // A program that draws its interface into a small target and stretches it over the
+    // back buffer: the stretch is drawn, its viewport the destination's rectangle.
+    const h = harness({ width: 8, height: 8 });
+    const { device } = h;
+    /** @type {{ surface?: any }} */
+    const small = {};
+    assert.equal(device.CreateRenderTarget(4, 4, D3DFMT.A8R8G8B8, false, small), D3D_OK);
+    /** @type {{ surface?: any }} */
+    const back = {};
+    assert.equal(device.GetBackBuffer(0, 0, 0, back), D3D_OK);
+    assert.equal(device.SetRenderTarget(0, small.surface), D3D_OK);
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, argb(4, 5, 6), 1, 0), D3D_OK);
+    assert.equal(device.SetRenderTarget(0, back.surface), D3D_OK);
+    assert.equal(device.StretchRect(small.surface, null, back.surface,
+        { left: 0, top: 0, right: 8, bottom: 6 }, D3DTEXF.LINEAR), D3D_OK);
+    await h.present();
+    const stretch = h.device.diagnostics().lastFrame
+        .find((/** @type {any} */ command)=>command.kind === 'stretch');
+    assert.ok(stretch, 'a stretch was recorded');
+    assert.deepEqual([stretch.destRect, stretch.linear],
+        [{ left: 0, top: 0, right: 8, bottom: 6 }, true]);
+    const viewports = h.gpu.of('setViewport').map((/** @type {any} */ call)=>call.rect ?? call);
+    assert.ok(viewports.some((/** @type {any} */ v)=>JSON.stringify(v).includes('8')
+        && JSON.stringify(v).includes('6')), JSON.stringify(viewports));
+});

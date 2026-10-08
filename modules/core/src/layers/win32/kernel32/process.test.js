@@ -8,9 +8,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { TEB } from './teb.js';
 import {
-    CLOCK, TLS_SLOTS, createProcessFunctions, getLastErrorCode, queryPerformanceCounterCode,
-    queryPerformanceFrequencyCode, setLastErrorCode, tickCountCode, tlsGetValueCode,
-    tlsSetValueCode,
+    CLOCK, TLS_SLOTS, createProcessFunctions, getCurrentThreadIdCode, getLastErrorCode,
+    queryPerformanceCounterCode, queryPerformanceFrequencyCode, setLastErrorCode, tickCountCode,
+    tlsGetValueCode, tlsSetValueCode,
 } from './process.js';
 import { VER, WINDOWS_VERSIONS, setCondition } from './versions.js';
 
@@ -744,6 +744,36 @@ test('the priority and affinity calls pop their own stdcall bytes', ()=>{
     assert.equal(fns.SetProcessAffinityMask.argBytes, 8);
 });
 
+test('a process starts at shutdown level 0x280 and reads back the place it moved to', ()=>{
+    const { fns, host } = setup();
+    const LEVEL = 0x200;
+    const FLAGS = 0x204;
+    host.view.setUint32(FLAGS, 0xdeadbeef, true);
+    assert.equal(fns.GetProcessShutdownParameters.handler([LEVEL, FLAGS]), 1);
+    assert.deepEqual([host.view.getUint32(LEVEL, true), host.view.getUint32(FLAGS, true)],
+        [0x280, 0], 'every process starts in the middle, with no flags');
+
+    assert.equal(fns.SetProcessShutdownParameters.handler([0x100, 1]), 1,
+        'the last application range, SHUTDOWN_NORETRY');
+    fns.GetProcessShutdownParameters.handler([LEVEL, FLAGS]);
+    assert.deepEqual([host.view.getUint32(LEVEL, true), host.view.getUint32(FLAGS, true)],
+        [0x100, 1]);
+    assert.equal(fns.SetProcessShutdownParameters.handler([0x4ff, 0]), 1, 'the highest level');
+
+    fns.SetLastError.handler([0]);
+    assert.equal(fns.SetProcessShutdownParameters.handler([0x500, 0]), 0, 'past every range');
+    assert.equal(fns.GetLastError.handler(), 87, 'ERROR_INVALID_PARAMETER');
+    assert.equal(fns.SetProcessShutdownParameters.handler([0x300, 2]), 0, 'no such flag');
+    fns.GetProcessShutdownParameters.handler([LEVEL, FLAGS]);
+    assert.deepEqual([host.view.getUint32(LEVEL, true), host.view.getUint32(FLAGS, true)],
+        [0x4ff, 0], 'a refused setting leaves the last one');
+
+    assert.equal(fns.GetProcessShutdownParameters.handler([0, FLAGS]), 0);
+    assert.equal(fns.GetLastError.handler(), 998, 'ERROR_NOACCESS');
+    assert.equal(fns.SetProcessShutdownParameters.argBytes, 8);
+    assert.equal(fns.GetProcessShutdownParameters.argBytes, 8);
+});
+
 test('a working-set request is accepted and pops its three arguments', ()=>{
     const { fns } = setup();
     assert.equal(fns.SetProcessWorkingSetSize.handler([0xffffffff, 0x100000, 0x800000]), 1);
@@ -1010,4 +1040,12 @@ test('the performance frequency is the host\'s to choose, and a bad one is refus
     {
         assert.throws(()=>setup({ performanceFrequency: bad }), /performance frequency/);
     }
+});
+
+test('GetCurrentThreadId is the field of the block the host fills with the id', ()=>{
+    // fs:[0x24]: teb.test.js holds the block to carry the id the thread was made with, and
+    // the export offers this routine rather than its trap.
+    assert.deepEqual([...getCurrentThreadIdCode()], [0x64, 0xa1, 0x24, 0, 0, 0, 0xc3]);
+    assert.ok(createProcessFunctions(fakeHost()).GetCurrentThreadId.guest,
+        'offered as guest code');
 });

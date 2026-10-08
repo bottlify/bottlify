@@ -27,7 +27,8 @@ import { createCorkRuntime, translatorWorkerUrl } from './runtime/runtime.js';
 import { replaySlice } from './testing/differential.js';
 
 export {
-    ownLayout, executorLayout, EXECUTOR_BYTES, pagesFor, layoutId, Tables, STATE_BLOCK_SIZE, PAGE,
+    ownLayout, executorLayout, executorBytes, pagesFor, layoutId, Tables, tablesSize,
+    STATE_BLOCK_SIZE, PAGE,
 } from './runtime/layout.js';
 export { interpret, blockState } from './interp.js';
 export {

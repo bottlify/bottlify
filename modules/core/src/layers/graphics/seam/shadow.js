@@ -164,7 +164,13 @@ export const BUFFER = {
     LOCK_FLAGS: 24,
     /** The device's block, for the counters and the ring. */
     DEVICE: 28,
-    SIZE: 32,
+    /**
+     * Set by the host when what was unlocked may be lent to the graphics
+     * worker (`remote/lending.js`) and read there later: a lock that may
+     * write over it is the host's, which claims the bytes first.
+     */
+    LENT: 32,
+    SIZE: 36,
 };
 
 /**
@@ -538,7 +544,9 @@ export function getRenderStateCode(at, trap){
  * while the device's command ring holds a draw the host has not made, any
  * lock but NOOVERWRITE alone: the bytes that draw reads are the buffer's until
  * then, and the host makes it before it takes the lock. A DISCARD with it
- * promises nothing about those bytes, and the buffer has one storage.
+ * promises nothing about those bytes, and the buffer has one storage. So too
+ * while what was unlocked may be lent to the graphics worker: the host
+ * claims it before the program writes over it.
  *
  *     cmp dword [ecx+LOCKED], 0
  *     jne slow
@@ -546,7 +554,10 @@ export function getRenderStateCode(at, trap){
  *     jnz slow
  *     mov edx, [ecx+DEVICE]
  *     cmp dword [edx+DRAWS_PENDING], 0
+ *     jne guarded
+ *     cmp dword [ecx+LENT], 0
  *     je free
+ *   guarded:
  *     mov eax, [esp+20]
  *     and eax, NOOVERWRITE | DISCARD
  *     cmp eax, NOOVERWRITE
@@ -611,7 +622,10 @@ export function lockCode(at, trap){
         { jcc: 0x75, to: 'hop' },                                // jnz hop
         [0x8b, 0x51, BUFFER.DEVICE],                             // mov edx, [ecx+28]
         [0x83, 0xba, ...dword(SHADOW.DRAWS_PENDING), 0x00],      // cmp dword [edx+disp], 0
+        { jcc: 0x75, to: 'guarded' },                            // jne guarded
+        [0x83, 0x79, BUFFER.LENT, 0x00],                         // cmp dword [ecx+32], 0
         { jcc: 0x74, to: 'free' },                               // je free
+        { label: 'guarded' },
         [0x8b, 0x44, 0x24, 0x14],                                // mov eax, [esp+20]
         [0x25, ...dword(D3DLOCK_NOOVERWRITE | D3DLOCK_DISCARD)], // and eax, 0x3000
         [0x3d, ...dword(D3DLOCK_NOOVERWRITE)],                   // cmp eax, 0x1000
@@ -1714,6 +1728,8 @@ export function settledAfter(shadow, call){
  * @property {number} levels
  *
  * @typedef {Object} ShadowDevice
+ * @property {boolean} [lendsMemory]  a recording for the graphics worker that lends what is
+ *     unlocked rather than copying it (`remote/replay.js`)
  * @property {(state: number, out: { value?: number }) => number} GetRenderState
  * @property {(type: number, out: { matrix?: ArrayLike<number> }) => number} GetTransform
  * @property {(stage: number, type: number, out: { value?: number }) => number
@@ -2022,6 +2038,19 @@ export function createShadow(deps){
     };
 
     /**
+     * What was just unlocked on the host may be lent to the graphics worker:
+     * the guest's next lock that may write over it comes to the host.
+     *
+     * @param {number} block
+     */
+    const markLent = block=>{
+        if (device.lendsMemory === true)
+        {
+            deps.writeMemory(block + BUFFER.LENT, dwordBytes(1));
+        }
+    };
+
+    /**
      * Replays what the guest did to one buffer against the real one. The
      * block says whether a lock is held and what range was locked since the
      * host last looked; the host's own lock mirrors the guest's, so that the
@@ -2075,6 +2104,7 @@ export function createShadow(deps){
                     + ' the buffer refuses it');
             }
             deps.writeMemory(block + BUFFER.FROM, new Uint8Array(12));
+            markLent(block);
         }
         if (entry.hostLocked && !locked)
         {
@@ -2304,7 +2334,7 @@ export function createShadow(deps){
                 return 0;
             }
             deps.writeMemory(block,
-                dwordsBytes([0, buffer.base, buffer.length, 0, 0, 0, 0, owner]));
+                dwordsBytes([0, buffer.base, buffer.length, 0, 0, 0, 0, owner, 0]));
             blocks.set(block, { buffer, hostLocked: false });
             blockOf.set(buffer, block);
             return block;
@@ -2408,6 +2438,14 @@ export function createShadow(deps){
             }
             entry.hostLocked = locked;
             deps.writeMemory(block + BUFFER.LOCKED, dwordBytes(locked ? 1 : 0));
+            // Never cleared: a lock claims only its own range, and what was
+            // lent elsewhere in the buffer may still be unread.
+            // ponytail: a lending device's DISCARD and plain locks all come to the host; clear
+            // it after a lock of the whole buffer if those traps show up in a profile.
+            if (!locked)
+            {
+                markLent(block);
+            }
         },
 
         diagnostics: ()=>({

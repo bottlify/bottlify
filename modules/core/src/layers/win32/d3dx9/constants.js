@@ -232,11 +232,12 @@ export function registerValues(constant, values){
  */
 
 /**
- * D3DXGetShaderConstantTable, and the table it hands out.
+ * D3DXGetShaderConstantTable, and the table it hands out; `publish` makes a
+ * table over a CTAB block for whoever has just compiled the shader.
  *
  * @param {ConstantTableHost} host
  */
-export function createConstantTables(host){
+export function createConstantTableObjects(host){
     const u32 = (/** @type {number} */ address)=>{
         const bytes = host.readMemory(address >>> 0, 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
@@ -353,6 +354,26 @@ export function createConstantTables(host){
      * @param {any} [thread]  Whose call it is, when it comes after an await.
      */
     const store = (table, device, constant, values, thread)=>{
+        // fxc gives a model 3 loop's int count a second entry of the same name in the integer
+        // registers, which rep reads, beside the float one arithmetic reads: both are set.
+        const twins = constant && table.constants.includes(constant)
+            ? table.constants.filter(one=>one !== constant && one.name === constant.name
+                && one.set !== constant.set) : [];
+        if (twins.length === 0)
+        {
+            return storeSet(table, device, constant, values, thread);
+        }
+        const who = thread ?? host.currentThread?.();
+        return twins.reduce((chain, twin)=>Promise.resolve(chain).then(answer=>(answer !== D3D_OK
+            ? answer : storeSet(table, device, twin, values, who))),
+        storeSet(table, device, constant, values, thread));
+    };
+
+    /**
+     * @param {TableState} table @param {number} device @param {Constant | null} constant
+     * @param {number[]} values @param {any} [thread]
+     */
+    const storeSet = (table, device, constant, values, thread)=>{
         if (!constant || (device >>> 0) === 0 || !host.callGuest || !host.heap)
         {
             return D3DERR_INVALIDCALL;
@@ -587,7 +608,55 @@ export function createConstantTables(host){
         ],
     };
 
-    return {
+    /**
+     * An ID3DXConstantTable over a CTAB block, its pointer written to `out`.
+     *
+     * @param {Uint8Array} block   The block as `findConstantTable` locates it, copied.
+     * @param {number} version     The version token of the shader the block came from.
+     * @param {number} out
+     * @returns {number}  An HRESULT.
+     */
+    const publish = (block, version, out)=>{
+        const { heap, vtables } = host;
+        if (!heap || !vtables)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        const size = block.length;
+        const base = heap.allocate(Math.max(size, 4));
+        if (base === 0)
+        {
+            return E_OUTOFMEMORY;
+        }
+        host.writeMemory(base, block);
+        const parsed = parseConstantTable(new DataView(block.buffer, block.byteOffset, size),
+            base);
+        /** @type {TableState} */
+        const table = { base, size, creatorAt: parsed.creatorAt, version: parsed.version,
+            pixel: ((version & 0xffff0000) >>> 0) === 0xffff0000,
+            constants: parsed.constants, handles: new Map(), handleOf: new Map(),
+            owned: [base] };
+        // A constant the table lists is named by its record's address.
+        const infos = new DataView(block.buffer, block.byteOffset, size).getUint32(16, true);
+        parsed.constants.forEach((constant, c)=>{
+            table.handles.set(base + infos + c * 20, constant);
+            table.handleOf.set(constant, base + infos + c * 20);
+        });
+        const object = createComObject(IID_ID3DXCONSTANTTABLE, {
+            interfaces: [constantTable], state: table,
+            destroy: ()=>table.owned.forEach(address=>heap.free(address)),
+        });
+        const pointer = vtables.publish(object, IID_ID3DXCONSTANTTABLE) >>> 0;
+        if (pointer === 0)
+        {
+            object.release();
+            return E_OUTOFMEMORY;
+        }
+        host.writeMemory(out >>> 0, dword(pointer));
+        return D3D_OK;
+    };
+
+    const exports = {
         /**
          * HRESULT D3DXGetShaderConstantTable(const DWORD *pFunction,
          *     LPD3DXCONSTANTTABLE *ppConstantTable)
@@ -605,8 +674,7 @@ export function createConstantTables(host){
                     return D3DERR_INVALIDCALL;
                 }
                 host.writeMemory(out >>> 0, new Uint8Array(4));
-                const { heap, vtables } = host;
-                if (!heap || !vtables)
+                if (!host.heap || !host.vtables)
                 {
                     return D3DERR_INVALIDCALL;
                 }
@@ -615,39 +683,20 @@ export function createConstantTables(host){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                const base = heap.allocate(Math.max(found.size, 4));
-                if (base === 0)
-                {
-                    return E_OUTOFMEMORY;
-                }
-                const block = host.readMemory(found.at, found.size).slice();
-                host.writeMemory(base, block);
-                const parsed = parseConstantTable(new DataView(block.buffer), base);
-                /** @type {TableState} */
-                const table = { base, size: found.size, creatorAt: parsed.creatorAt,
-                    version: parsed.version,
-                    pixel: ((found.version & 0xffff0000) >>> 0) === 0xffff0000,
-                    constants: parsed.constants, handles: new Map(), handleOf: new Map(),
-                    owned: [base] };
-                // A constant the table lists is named by its record's address.
-                const infos = new DataView(block.buffer).getUint32(16, true);
-                parsed.constants.forEach((constant, c)=>{
-                    table.handles.set(base + infos + c * 20, constant);
-                    table.handleOf.set(constant, base + infos + c * 20);
-                });
-                const object = createComObject(IID_ID3DXCONSTANTTABLE, {
-                    interfaces: [constantTable], state: table,
-                    destroy: ()=>table.owned.forEach(address=>heap.free(address)),
-                });
-                const pointer = vtables.publish(object, IID_ID3DXCONSTANTTABLE) >>> 0;
-                if (pointer === 0)
-                {
-                    object.release();
-                    return E_OUTOFMEMORY;
-                }
-                host.writeMemory(out >>> 0, dword(pointer));
-                return D3D_OK;
+                return publish(host.readMemory(found.at, found.size).slice(), found.version,
+                    out);
             },
         },
     };
+
+    return { exports, publish };
+}
+
+/**
+ * D3DXGetShaderConstantTable, and the table it hands out.
+ *
+ * @param {ConstantTableHost} host
+ */
+export function createConstantTables(host){
+    return createConstantTableObjects(host).exports;
 }

@@ -319,11 +319,6 @@ export function ellipse(painter, rect, pen, pattern){
 /**
  * Polygon: scanline fill, then the edges stroked with the pen.
  *
- * Each scanline is sampled at its centre and a span runs from the first pixel
- * centre at or after the left crossing to the last one strictly before the
- * right crossing -- half-open, the same rule as every other filled figure here,
- * so two polygons sharing an edge do not paint it twice.
- *
  * @param {Painter} painter
  * @param {Point[]} points
  * @param {Pen} pen
@@ -335,18 +330,78 @@ export function polygon(painter, points, pen, pattern, fillMode){
     {
         return;
     }
-    const winding = (fillMode ?? ALTERNATE) === WINDING;
-    const top = Math.max(painter.clip.top, Math.min(...points.map(point=>point.y)));
-    const bottom = Math.min(painter.clip.bottom, Math.max(...points.map(point=>point.y)) + 1);
+    polyPolygon(painter, [points], pen, pattern, fillMode);
+}
+
+/**
+ * Several polygons filled as one figure and each outlined: scanline fill,
+ * then the edges stroked with the pen.
+ *
+ * Each scanline is sampled at its centre and a span runs from the first pixel
+ * centre at or after the left crossing to the last one strictly before the
+ * right crossing -- half-open, the same rule as every other filled figure here,
+ * so two polygons sharing an edge do not paint it twice. The crossings of every
+ * polygon are counted together, which is what makes one polygon inside another
+ * a hole under ALTERNATE and not under WINDING when they wind the same way.
+ *
+ * @param {Painter} painter
+ * @param {Point[][]} rings  Each closed, its last point joined to its first.
+ * @param {Pen} pen
+ * @param {import("./contract.js").PatternSource} pattern
+ * @param {number} [fillMode]
+ * @param {{ fill?: boolean, stroke?: boolean }} [parts]  Which of the two to draw.
+ */
+export function polyPolygon(painter, rings, pen, pattern, fillMode,
+    { fill = true, stroke = true } = {})
+{
+    const figures = rings.filter(points=>points.length >= 2);
+    if (figures.length === 0)
+    {
+        return;
+    }
+    if (fill)
+    {
+        fillRings(painter, figures, pattern, (fillMode ?? ALTERNATE) === WINDING);
+    }
+    if (!stroke)
+    {
+        return;
+    }
+    for (const points of figures)
+    {
+        for (let index = 0; index < points.length; index++)
+        {
+            const from = points[index];
+            const to = points[(index + 1) % points.length];
+            line(painter, from.x, from.y, to.x, to.y, pen);
+        }
+    }
+}
+
+/**
+ * @param {Painter} painter @param {Point[][]} rings
+ * @param {import("./contract.js").PatternSource} pattern @param {boolean} winding
+ */
+function fillRings(painter, rings, pattern, winding){
+    /** @type {{ from: Point, to: Point }[]} */
+    const edges = rings.flatMap(points=>points.map((from, index)=>
+        ({ from, to: points[(index + 1) % points.length] })))
+        .filter(edge=>edge.from.y !== edge.to.y);
+    if (edges.length === 0)
+    {
+        return;
+    }
+    const top = Math.max(painter.clip.top, edges.reduce((least, edge)=>
+        Math.min(least, edge.from.y, edge.to.y), Infinity));
+    const bottom = Math.min(painter.clip.bottom, edges.reduce((most, edge)=>
+        Math.max(most, edge.from.y, edge.to.y), -Infinity) + 1);
     for (let y = top; y < bottom; y++)
     {
         const sample = y + 0.5;
         /** @type {{ x: number, direction: number }[]} */
         const crossings = [];
-        for (let index = 0; index < points.length; index++)
+        for (const { from, to } of edges)
         {
-            const from = points[index];
-            const to = points[(index + 1) % points.length];
             if ((from.y <= sample) === (to.y <= sample))
             {
                 continue;
@@ -375,11 +430,5 @@ export function polygon(painter, points, pen, pattern, fillMode){
                 painter.plot(x, y, pattern(x, y));
             }
         }
-    }
-    for (let index = 0; index < points.length; index++)
-    {
-        const from = points[index];
-        const to = points[(index + 1) % points.length];
-        line(painter, from.x, from.y, to.x, to.y, pen);
     }
 }

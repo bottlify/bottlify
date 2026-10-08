@@ -351,6 +351,20 @@ test('IsWow64Process answers FALSE for this process and a child, and fails a str
     assert.equal(fns.IsWow64Process.argBytes, 8);
 });
 
+test('a 32-bit system has no WOW64 directory, and says the call is not implemented', ()=>{
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+    host.bytes.fill(0x55, 0x200, 0x300);
+    for (const call of [fns.GetSystemWow64DirectoryA, fns.GetSystemWow64DirectoryW])
+    {
+        assert.equal(call.handler([0x200, 0x80]), 0);
+        assert.equal(call.handler([0, 0]), 0, 'sized or not');
+        assert.equal(call.argBytes, 8);
+    }
+    assert.deepEqual(host.errors, [120, 120, 120, 120], 'ERROR_CALL_NOT_IMPLEMENTED');
+    assert.ok(host.bytes.subarray(0x200, 0x300).every(byte=>byte === 0x55), 'nothing written');
+});
+
 test('a child process reports its own exit code, not this process\'s', ()=>{
     // The engine only ever answers STILL_ACTIVE for a child -- a child takes
     // this process's place rather than running beside it -- but the value has
@@ -708,4 +722,78 @@ test('activations stack by cookie, and the current context is always none', ()=>
     assert.equal(fns.DeactivateActCtx.handler([0, inner]), 1);
     assert.equal(fns.DeactivateActCtx.handler([0, host.view.getUint32(0x304, true)]), 1);
     assert.equal(fns.ActivateActCtx.handler([0, 0]), 0, 'no cookie to hand back');
+});
+
+test('the undecorated lstr names are the ANSI entries themselves', ()=>{
+    const fns = /** @type {any} */ (createSystemFunctions(fakeHost()));
+    for (const name of ['lstrcat', 'lstrcmp', 'lstrcmpi', 'lstrcpy', 'lstrcpyn', 'lstrlen'])
+    {
+        assert.equal(fns[name], fns[`${name}A`], name);
+    }
+    const host = fakeHost();
+    const own = /** @type {any} */ (createSystemFunctions(host));
+    host.bytes.set([0x61, 0x62, 0x63, 0], 0x200);
+    assert.equal(own.lstrlen.handler([0x200]), 3);
+    assert.equal(own.lstrcpy.handler([0x300, 0x200]), 0x300);
+    assert.equal(own.lstrcmp.handler([0x300, 0x200]), 0);
+});
+
+test('the priority boost a thread disables is the one it reads back', ()=>{
+    const host = fakeHost();
+    const fns = /** @type {any} */ (createSystemFunctions(host));
+    const CURRENT_THREAD = 0xfffffffe;
+    assert.equal(fns.SetThreadPriorityBoost.argBytes, 8);
+    assert.equal(fns.GetThreadPriorityBoost.handler([CURRENT_THREAD, 0x200]), 1);
+    assert.equal(host.view.getUint32(0x200, true), 0, 'boosted until asked otherwise');
+    assert.equal(fns.SetThreadPriorityBoost.handler([CURRENT_THREAD, 1]), 1);
+    assert.equal(fns.GetThreadPriorityBoost.handler([CURRENT_THREAD, 0x200]), 1);
+    assert.equal(host.view.getUint32(0x200, true), 1);
+
+    assert.equal(fns.SetThreadPriorityBoost.handler([0x55, 1]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INVALID_HANDLE);
+    assert.equal(fns.GetThreadPriorityBoost.handler([CURRENT_THREAD, 0]), 0);
+    assert.equal(host.errors.at(-1), 998, 'ERROR_NOACCESS for no place to write');
+});
+
+test('SetThreadExecutionState answers the lasting request before the call', ()=>{
+    const host = fakeHost();
+    const fns = /** @type {any} */ (createSystemFunctions(host));
+    const ES_SYSTEM_REQUIRED = 1;
+    const ES_DISPLAY_REQUIRED = 2;
+    const ES_CONTINUOUS = 0x80000000;
+    const call = (/** @type {number} */ flags)=>fns.SetThreadExecutionState.handler([flags]);
+    assert.equal(call(ES_CONTINUOUS | ES_DISPLAY_REQUIRED), ES_CONTINUOUS >>> 0,
+        'a thread that never asked holds ES_CONTINUOUS alone');
+    assert.equal(call(ES_SYSTEM_REQUIRED), (ES_CONTINUOUS | ES_DISPLAY_REQUIRED) >>> 0);
+    assert.equal(call(ES_CONTINUOUS), (ES_CONTINUOUS | ES_DISPLAY_REQUIRED) >>> 0,
+        'a nudge without ES_CONTINUOUS left the lasting request alone');
+    assert.equal(call(ES_CONTINUOUS), ES_CONTINUOUS >>> 0);
+
+    assert.equal(call(0x40), 0, 'away mode is not Windows XP\'s');
+    assert.equal(host.errors.at(-1), 87);
+});
+
+test('FindActCtxSectionString is absent, as no activation context is built', ()=>{
+    // Twice now a lookup answering "not found" stopped programs before their first
+    // instruction: the Visual C++ 2005 runtime (msvcr80, vcomp) finds the function through
+    // GetProcAddress, takes the answer for a load without its manifest and raises R6034 --
+    // Gothic 3 at vcomp.dll. Absent, the runtime takes the system for one without
+    // side-by-side support and goes on. Building activation contexts from manifests is
+    // what would let it be present.
+    const fns = /** @type {any} */ (createSystemFunctions(fakeHost()));
+    for (const name of ['FindActCtxSectionStringA', 'FindActCtxSectionStringW'])
+    {
+        assert.equal(fns[name], undefined, `${name} is not exported`);
+    }
+});
+
+test('the Windows 95 calls are kernel32\'s exports here too', ()=>{
+    const fns = /** @type {any} */ (createSystemFunctions(fakeHost()));
+    for (const name of ['ThunkConnect32', 'MapLS', 'SMapLS_IP_EBP_8', 'FT_Exit20', 'FT_Thunk',
+        'RegisterServiceProcess', 'ConvertToGlobalHandle'])
+    {
+        assert.ok(fns[name], name);
+    }
+    assert.equal(fns.GetProfileStringA, undefined,
+        'win.ini is the profile functions\' to answer, not a fixed default here');
 });

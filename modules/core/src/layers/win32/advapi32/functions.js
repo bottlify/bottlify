@@ -29,6 +29,9 @@ import {
     HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS,
 } from './registry.js';
 import { STATUS } from '../ntdll/status.js';
+import { USER_NAME } from './tokens.js';
+import { createNamedSecurityFunctions } from './named-security.js';
+import { isTextUnicode } from './text.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -138,13 +141,8 @@ const HANDLE_LIMIT = 0x7ffffffc;
  */
 const FIRST_KEY_HANDLE = 0x40000004;
 
-/**
- * Who the program is running as. There is one account and no way to become
- * another, so this is a constant rather than something to configure -- but it
- * has to be answered, because a program that cannot learn its own user name
- * often refuses to start rather than carrying on without one.
- */
-const USER_NAME = 'User';
+/** The one account's name, kept beside its SID and read from here by the module. */
+export { USER_NAME };
 
 /**
  * @typedef {Object} RegistryHost
@@ -1811,16 +1809,52 @@ export function createRegistryFunctions(host){
         GetFileSecurityW: { argBytes: 20, handler: notImplemented },
 
         /**
-         * BOOL ImpersonateSelf(SECURITY_IMPERSONATION_LEVEL)
-         * BOOL RevertToSelf(VOID)
+         * BOOL IsTextUnicode(const VOID *lpv, int iSize, LPINT lpiResult)
          *
-         * Impersonating oneself is the one impersonation that always
-         * succeeds, and reverting from it is nothing. Both answer TRUE, so a
-         * program that impersonates before opening its token goes on to open
-         * it rather than stopping at a refusal Windows would not give.
+         * Whether a buffer reads as UTF-16, by the documented tests
+         * (`text.js`): those lpiResult names, or all of them without it, and
+         * through it which of those passed.
          */
-        ImpersonateSelf: { argBytes: 4, handler: ()=>1 },
-        RevertToSelf: { argBytes: 0, handler: ()=>1 },
+        IsTextUnicode: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([buffer, size, result])=>{
+                const length = Math.max(size | 0, 0);
+                const asked = (result >>> 0) === 0 ? undefined
+                    : new DataView(host.readMemory(result >>> 0, 4).slice().buffer)
+                        .getUint32(0, true);
+                const answer = (buffer >>> 0) === 0
+                    ? { unicode: false, passed: 0 }
+                    : isTextUnicode(host.readMemory(buffer >>> 0, length).slice(), asked);
+                if ((result >>> 0) !== 0)
+                {
+                    const out = new Uint8Array(4);
+                    new DataView(out.buffer).setUint32(0, answer.passed, true);
+                    host.writeMemory(result >>> 0, out);
+                }
+                return answer.unicode ? 1 : 0;
+            },
+        },
+
+        /**
+         * BOOL InitiateSystemShutdownA(LPSTR lpMachineName, LPSTR lpMessage,
+         *   DWORD dwTimeout, BOOL bForceAppsClosed, BOOL bRebootAfterShutdown)
+         * BOOL InitiateSystemShutdownExA(..., DWORD dwReason)
+         *
+         * There is no machine to restart, and the call answers as the
+         * consumer line of Windows did, which never had it: not implemented.
+         * A setup asks only when what it replaced needs a restart, and the
+         * user is the one to give it.
+         */
+        ...Object.fromEntries([['InitiateSystemShutdownA', 20], ['InitiateSystemShutdownW', 20],
+            ['InitiateSystemShutdownExA', 24], ['InitiateSystemShutdownExW', 24]]
+            .map(([name, argBytes])=>[name, {
+                argBytes,
+                handler: ()=>{
+                    host.divergence?.(String(name), 'there is no machine to restart');
+                    return notImplemented();
+                },
+            }])),
 
         SetFileSecurityW: {
             argBytes: 12,
@@ -2271,6 +2305,10 @@ export function createRegistryFunctions(host){
                     : result === 'taken' ? ERROR_ALREADY_EXISTS : ERROR_FILE_NOT_FOUND;
             },
         },
+
+        // Named by a path or a key's name, an object's security needs the
+        // volume and the hive this library already holds.
+        ...createNamedSecurityFunctions(host),
 
         [UNLOAD_KEY]: unload,
         [REGISTRY_NATIVES]: nativeRegistry(),

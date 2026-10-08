@@ -123,8 +123,12 @@ import { isParkedCall } from './parking.js';
  */
 const CALL_RING = 4096;
 
-/** How many of a call's arguments the ring keeps. */
-const KEPT_ARGS = 6;
+/**
+ * How many of a call's arguments the ring keeps: enough for a Direct3D method's
+ * (CreateTexture has nine with its object, CheckDeviceFormat seven -- the one
+ * that names the format is the last) and CreateWindowEx's twelve.
+ */
+const KEPT_ARGS = 12;
 
 /** How a call ended, as the ring keeps it, by the number it keeps. */
 const KINDS = ['threw', 'answered', 'fellThrough', 'parked', 'waiting', 'forwarded'];
@@ -167,6 +171,8 @@ const hookClock = import.meta.BOTTLIFY_DIAGNOSTICS !== false && typeof performan
  * @property {string} kind     How the call ended: 'answered', 'parked', 'waiting',
  *     'forwarded' or 'threw'.
  * @property {string} result   The answer as a reader wants it, made when read.
+ * @property {string | null} [thread]  The calling thread's name, for a sink: a
+ *     waiting call's answer is reported while another thread runs.
  */
 
 /**
@@ -231,6 +237,8 @@ function makeRecord(){
         error: 0,
         answer: 0,
         kind: 'threw',
+        /** @type {string | null} */
+        thread: null,
     };
     return /** @type {CallRecord} */ (Object.defineProperty(record, 'result', RESULT));
 }
@@ -905,7 +913,7 @@ class Dispatcher {
         const onCall = this.onCall;
         if (onCall !== null && this.sinks(entry))
         {
-            const asked = this.recordAt(at);
+            const asked = { ...this.recordAt(at), thread: frame.thread?.name ?? null };
             result.then((/** @type {number} */ value)=>{
                 asked.result = `0x${(value >>> 0).toString(16)} (was waiting)`;
                 onCall(asked);
@@ -1135,7 +1143,7 @@ class Dispatcher {
                 // for them. Peeking every argument for a sink that does
                 // not read the strings cost more than the whole dispatch:
                 // measured at 1.6 of 2.3 microseconds per call.
-                this.onCall(this.sinkRecordOf(at));
+                this.onCall(this.sinkRecordOf(at, frame.thread));
             }
         }
 
@@ -1408,9 +1416,9 @@ class Dispatcher {
      * the next call: a sink has it for the length of its call and nothing
      * longer.
      *
-     * @param {number} at
+     * @param {number} at @param {{ name?: string } | null} thread  whose call it was
      */
-    sinkRecordOf(at){
+    sinkRecordOf(at, thread){
         const record = this.sinkRecord;
         const kept = this.argCounts[at];
         const args = this.sinkArgs[kept] ??= new Array(kept);
@@ -1425,6 +1433,7 @@ class Dispatcher {
         record.error = this.errors[at];
         record.answer = this.answers[at];
         record.kind = KINDS[this.kinds[at]];
+        record.thread = thread?.name ?? null;
         return record;
     }
 

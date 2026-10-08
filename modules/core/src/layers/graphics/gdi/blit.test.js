@@ -11,10 +11,13 @@ import {
     COLORONCOLOR,
     HALFTONE,
     WHITEONBLACK,
+    alphaBlend,
     bitBlt,
+    blendPixel,
     patBlt,
     sourceConversion,
     stretchBlt,
+    transparentBlt,
 } from './blit.js';
 import { BLACKNESS, DSTINVERT, PATCOPY, SRCCOPY, SRCINVERT, WHITENESS } from './rop.js';
 import { MONOCHROME, clearSurface, createSurface } from './surface.js';
@@ -357,4 +360,99 @@ test('between two monochrome bitmaps, and between two colour ones, the bits are 
     const indexed = createSurface({ width: 8, height: 1, bitCount: 1, palette: [0, 0xffffff] });
     assert.equal(sourceConversion({ src: indexed, dest: surfaceFilled(1, 1, 0), textColor: 0x00ff,
         bkColor: 0xff00, srcBkColor: 0 }), null, 'a one-bit DIB reads through its own table');
+});
+
+// --- MaskBlt: two operations, chosen by a mask ---
+
+/**
+ * MAKEROP4: the background operation's table in the high byte.
+ *
+ * @param {number} fore @param {number} back
+ */
+const makeRop4 = (fore, back)=>(((back << 8) & 0xff000000) | fore) >>> 0;
+
+/** The destination left as it is, as a ROP3. */
+const DSTCOPY = 0x00aa0029;
+
+test('a mask picks the foreground operation where it is set and the background one elsewhere',
+    ()=>{
+        const dest = surfaceFilled(4, 1, BACKGROUND);
+        const src = surfaceFilled(4, 1, RED);
+        /** @param {number} x */
+        const mask = x=>x === 1 || x === 2;
+        assert.equal(bitBlt({ dest, x: 0, y: 0, width: 4, height: 1, src, rop: makeRop4(SRCCOPY,
+            DSTCOPY), mask }), true);
+        assert.deepEqual([0, 1, 2, 3].map(x=>dest.read(x, 0)), [BACKGROUND, RED, RED, BACKGROUND]);
+
+        // SRCCOPY alone in a MaskBlt has BLACKNESS, table zero, in its high byte.
+        const plain = surfaceFilled(4, 1, BACKGROUND);
+        bitBlt({ dest: plain, x: 0, y: 0, width: 4, height: 1, src, rop: SRCCOPY, mask });
+        assert.deepEqual([0, 1, 2, 3].map(x=>plain.read(x, 0)), [0, RED, RED, 0]);
+
+        // The background operation is the one that reads the source here,
+        // and a blit without one cannot do it.
+        assert.equal(bitBlt({ dest, x: 0, y: 0, width: 4, height: 1,
+            rop: makeRop4(PATCOPY, SRCCOPY), pattern: solid(GREEN), mask }), false);
+        assert.equal(bitBlt({ dest, x: 0, y: 0, width: 4, height: 1,
+            rop: makeRop4(PATCOPY, DSTCOPY), pattern: solid(GREEN), mask }), true,
+        'neither reads a source, so none is needed');
+        assert.deepEqual([0, 1, 2, 3].map(x=>dest.read(x, 0)), [BACKGROUND, GREEN, GREEN,
+            BACKGROUND]);
+    });
+
+// --- AlphaBlend ---
+
+test('a blended pixel is MSDN\'s sum with the rounding Windows answers with', ()=>{
+    // Wine's test_32bit_ddb: 0x40201008 over 0x80808080 at a constant 128.
+    assert.equal(blendPixel(0x40201008, 0x80808080, 128, false), 0x60504844);
+    assert.equal(blendPixel(0x40201008, 0x80808080, 128, true), 0x90807874,
+        'premultiplied, every byte of the source scaled first, its alpha too');
+    assert.equal(blendPixel(0x12345678, 0x9abcdef0, 255, false), 0x12345678, 'opaque is a copy');
+    assert.equal(blendPixel(0x12345678, 0x9abcdef0, 0, false), 0x9abcdef0, 'clear leaves it');
+    assert.equal(blendPixel(0xff102030, 0x00ffffff, 255, true), 0xff102030,
+        'a source pixel of full alpha covers what is under it');
+    assert.equal(blendPixel(0x00000000, 0x00405060, 255, true), 0x00405060,
+        'one of none leaves it');
+    assert.equal(blendPixel(0x80ffffff, 0x00ffffff, 255, true), 0x80ffffff,
+        'a source that was not premultiplied saturates rather than wrapping');
+});
+
+test('AlphaBlend stretches as StretchBlt does, one source pixel to each it covers', ()=>{
+    const src = surfaceFilled(2, 1, 0);
+    src.write(0, 0, RED);
+    src.write(1, 0, BLUE);
+    const dest = surfaceFilled(4, 2, 0x00ffffff);
+    assert.equal(alphaBlend({ dest, x: 0, y: 0, width: 4, height: 2, src, srcX: 0, srcY: 0,
+        srcWidth: 2, srcHeight: 1, constantAlpha: 255 }), true);
+    assert.deepEqual([0, 1, 2, 3].map(x=>dest.read(x, 1)), [RED, RED, BLUE, BLUE]);
+
+    const mirrored = surfaceFilled(2, 1, 0);
+    alphaBlend({ dest: mirrored, x: 2, y: 0, width: -2, height: 1, src, srcX: 0, srcY: 0,
+        srcWidth: 2, srcHeight: 1, constantAlpha: 255 });
+    assert.deepEqual([0, 1].map(x=>mirrored.read(x, 0)), [BLUE, RED], 'a flipped extent mirrors');
+
+    const half = surfaceFilled(2, 1, 0);
+    alphaBlend({ dest: half, clip: { left: 1, top: 0, right: 2, bottom: 1 }, x: 0, y: 0,
+        width: 2, height: 1, src, srcX: 0, srcY: 0, srcWidth: 2, srcHeight: 1,
+        constantAlpha: 128 });
+    assert.deepEqual([0, 1].map(x=>half.read(x, 0)), [0, 0x00000080],
+        'clipped, and blended where it lands');
+});
+
+// --- TransparentBlt ---
+
+test('TransparentBlt leaves the key out by its colour alone, one source pixel per pixel', ()=>{
+    const src = surfaceFilled(2, 1, 0);
+    src.write(0, 0, 0xff00ff00);
+    src.write(1, 0, RED);
+    const dest = surfaceFilled(4, 1, BACKGROUND);
+    assert.equal(transparentBlt({ dest, x: 0, y: 0, width: 4, height: 1, src, srcX: 0, srcY: 0,
+        srcWidth: 2, srcHeight: 1, key: GREEN }), true);
+    assert.deepEqual([0, 1, 2, 3].map(x=>dest.read(x, 0)), [BACKGROUND, BACKGROUND, RED, RED],
+        'the green left out whatever its unused byte holds');
+
+    const shrunk = surfaceFilled(1, 1, BACKGROUND);
+    transparentBlt({ dest: shrunk, x: 0, y: 0, width: 1, height: 1, src, srcX: 0, srcY: 0,
+        srcWidth: 2, srcHeight: 1, key: GREEN });
+    assert.equal(shrunk.read(0, 0), BACKGROUND, 'shrunk, the first pixel of the box decides');
 });

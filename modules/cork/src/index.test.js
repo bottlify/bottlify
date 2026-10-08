@@ -6,12 +6,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createEngine } from './index.js';
-import { Tables, ownLayout, pagesFor } from './runtime/layout.js';
+import { createEngine, tablesSize } from './index.js';
+import { ownLayout, pagesFor } from './runtime/layout.js';
 
 test('the engine factory answers a runtime with every name of the contract', ()=>{
-    const layout = ownLayout({ ramSize: 1 << 20 });
-    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const layout = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
     const runtime = createEngine({
         memory, layout, config: {}, read: ()=>0xf4,
         imports: { trap: ()=>0, getEflags: ()=>0, x87Read: ()=>0, rdtsc: ()=>0n },

@@ -22,7 +22,8 @@ import {
     HOT_SLOTS, WASM_INTERPRETER_AREA, WASM_INTERPRETER_STATICS_AT, WasmExit, createWasmInterpreter,
 } from './interp-wasm.js';
 import { SOURCE_SHA256 } from './interp-wasm.bytes.js';
-import { EXECUTOR_BYTES, PAGE, executorLayout, ownLayout, pagesFor, Tables } from './runtime/layout.js';
+import { PAGE, Tables, executorBytes, executorLayout, ownLayout, pagesFor, tablesSize }
+    from './runtime/layout.js';
 import { PageFlag, createPageTable } from './runtime/pages.js';
 import { Kind, eflagsOf, kindOf } from './emit/flags.js';
 
@@ -44,9 +45,9 @@ test('the module is built from the source beside it', ()=>{
 
 /** A machine in cork's own layout, the tier over it, and the JavaScript interpreter's state. */
 function machine(){
-    const layout = ownLayout({ ramSize: RAM });
-    const area = layout.tables + Tables.SIZE;
-    const pages = pagesFor(layout, Tables.SIZE + WASM_INTERPRETER_AREA);
+    const layout = ownLayout({ ramSize: RAM, hashSlots: 1 << 16 });
+    const area = layout.tables + tablesSize(layout);
+    const pages = pagesFor(layout, tablesSize(layout) + WASM_INTERPRETER_AREA);
     const memory = new WebAssembly.Memory({ initial: pages, maximum: pages });
     const table = createPageTable(memory, layout);
     const tier = createWasmInterpreter({ memory, layout,
@@ -64,11 +65,11 @@ function machine(){
  * its program, data and stack `off` bytes into guest RAM.
  */
 function executors(){
-    const own = ownLayout({ ramSize: RAM });
-    const first = pagesFor(own, Tables.SIZE + WASM_INTERPRETER_AREA);
+    const own = ownLayout({ ramSize: RAM, hashSlots: 1 << 16 });
+    const first = pagesFor(own, tablesSize(own) + WASM_INTERPRETER_AREA);
     const base = first * PAGE;
     const second = executorLayout(own, base);
-    const pages = first + Math.ceil((EXECUTOR_BYTES + WASM_INTERPRETER_AREA) / PAGE);
+    const pages = first + Math.ceil((executorBytes(own) + WASM_INTERPRETER_AREA) / PAGE);
     const memory = new WebAssembly.Memory({ initial: pages, maximum: pages });
     const bytes = new Uint8Array(memory.buffer);
     const view = new DataView(memory.buffer);
@@ -76,7 +77,7 @@ function executors(){
     // changes the data's pointer by its bh alone, which keeps it in its own.
     return [[own, 0, 0], [second, base, 0x40000]].map(([layout, stateBase, off])=>{
         const at = /** @type {import('../../core/src/layers/cpu/engine.js').StateLayout} */ (layout);
-        const area = at.tables + Tables.SIZE;
+        const area = at.tables + tablesSize(at);
         const tier = createWasmInterpreter({ memory, layout: at, area, hotThreshold: 2,
             statics: /** @type {number} */ (stateBase) + WASM_INTERPRETER_STATICS_AT,
             trapPort: TRAP_PORT, parkBase: 0x100000 });

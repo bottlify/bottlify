@@ -77,6 +77,27 @@ test('the volume is read from outside while it runs: a file saved by an earlier 
         .some((/** @type {any} */ e)=>e.name === 'save' && e.directory));
 });
 
+test('a file or a directory is removed from outside, and stays gone from the session', async t=>{
+    // A setting the program saved, taken away so it asks again at the next start.
+    const options = 'C:\\Profile\\game\\Options.ini';
+    const save = 'C:\\App\\save\\slot1.sav';
+    const app = await startApp(t, {
+        storage: { load: async()=>({
+            files: [{ path: options, bytes: Uint8Array.of(1) },
+                { path: save, bytes: Uint8Array.of(2) }],
+            registry: null,
+        }) },
+    });
+    assert.equal(app.files.remove(options), true);
+    assert.equal(app.files.remove(options), false, 'nothing left to remove');
+    assert.equal(app.files.remove('C:\\App\\save'), true, 'a directory, its file with it');
+    assert.equal(app.files.list('C:\\App').some((/** @type {any} */ e)=>e.name === 'save'), false);
+    assert.equal(app.files.list('C:\\Profile\\game').length, 0);
+    const kept = app.session.export().map((/** @type {any} */ file)=>file.path);
+    assert.equal(kept.includes(options), false);
+    assert.equal(kept.includes(save), false);
+});
+
 test('hello.exe prints what it prints on Windows, then exits cleanly',
     { timeout: 15000 }, async t=>{
         const app = await startApp(t);

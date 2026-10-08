@@ -55,6 +55,7 @@ import { HWND_BROADCAST, createWindowDirectory } from './directory.js';
 import { LOGFONTA, LOGFONTW_SIZE, logFontBytes } from '../gdi32/structs.js';
 import { ANY_WINDOW, threadIdOf } from './messages.js';
 import { VIDEO_ADAPTER_NAME } from '../devices.js';
+import { createRefusals } from '../common/refusal.js';
 
 /** GetSystemMetrics indices this build has a real answer for. */
 /** How many argument slots a `va_list` is read for, since it carries no count. */
@@ -191,6 +192,35 @@ export const SYS_COLORS = Object.freeze({
     23: 0x00000000,
     24: 0x00e1ffff,
 });
+
+/**
+ * The colours a process paints with: the classic scheme until SetSysColors
+ * changes one. One table that GetSysColor reads and the window manager draws
+ * from, so a changed colour is the one both see.
+ *
+ * They are the process's, where Windows keeps them for the whole session: a
+ * change reaches the other processes' windows as WM_SYSCOLORCHANGE, and
+ * their own tables are left as they were.
+ */
+export function createSystemColors(){
+    /** The last index SetSysColors takes: COLOR_MENUBAR. */
+    const LAST = 30;
+    /** @type {Map<number, number>} */
+    const changed = new Map();
+    return {
+        /** @param {number} index @returns {number} 0x00BBGGRR */
+        get: index=>changed.get(index | 0) ?? SYS_COLORS[index | 0] ?? 0,
+        /** @param {number} index @param {number} color @returns {boolean} whether it was one */
+        set: (index, color)=>{
+            if ((index | 0) < 0 || (index | 0) > LAST)
+            {
+                return false;
+            }
+            changed.set(index | 0, color & 0xffffff);
+            return true;
+        },
+    };
+}
 
 /** MonitorFromRect and friends answer with this, there being one display. */
 /** What SetClassWord answers for the atom, or a word past the extra bytes. */
@@ -464,6 +494,28 @@ const ENUM_REGISTRY_SETTINGS = -2;
 const DMLERR_SYS_ERROR = 0x400f;
 /** DdeGetLastError with no instance to report on: nothing has gone wrong in it. */
 const DMLERR_NO_ERROR = 0;
+/** Why the calls on a DDE instance fail: DdeInitialize never makes one. */
+const NO_DDE = 'no DDE instance: DdeInitialize refuses, so none of its handles exist';
+
+/**
+ * Whether a byte begins a two-byte character in a double-byte code page:
+ * Japanese (932), and simplified Chinese, Korean and traditional Chinese
+ * (936, 949, 950), whose lead bytes are the ranges their tables give.
+ *
+ * @param {number} codePage @param {number} byte
+ */
+const isLeadByte = (codePage, byte)=>{
+    switch (codePage){
+        case 932:
+            return (byte >= 0x81 && byte <= 0x9f) || (byte >= 0xe0 && byte <= 0xfc);
+        case 936:
+        case 949:
+        case 950:
+            return byte >= 0x81 && byte <= 0xfe;
+        default:
+            return false;
+    }
+};
 
 /** Where RegisterWindowMessage numbers start: 0xc000 to 0xffff is theirs. */
 
@@ -481,6 +533,20 @@ const ERROR_HOTKEY_NOT_REGISTERED = 1410;
 
 /** The one deferred-placement batch there ever is, as the handle a caller holds. */
 const DEFER_TOKEN = 0x4d50;
+
+/** AllowSetForegroundWindow's process id that names every process. */
+const ASFW_ANY = 0xffffffff;
+
+/** AnimateWindow's flags: the four directions, then the kinds of effect. */
+const AW_DIRECTIONS = 0x0000000f;
+const AW_CENTER = 0x00000010;
+const AW_HIDE = 0x00010000;
+const AW_ACTIVATE = 0x00020000;
+const AW_BLEND = 0x00080000;
+/** What ShowWindow is asked for to reach AnimateWindow's end state. */
+const SW_HIDE = 0;
+const SW_SHOW = 5;
+const SW_SHOWNA = 8;
 
 /**
  * Builds the system-query half of user32, over the window records the
@@ -533,6 +599,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             unit === 2 ? character >>> 8 : 0]));
         return 1;
     };
+
+    const refuse = createRefusals(host);
 
     // Ids handed to a timer with no window, kept clear of the small numbers a
     // program picks for its own.
@@ -2142,7 +2210,51 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         GetSysColor: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([index])=>SYS_COLORS[index | 0] ?? 0,
+            handler: ([index])=>(host.colors ? host.colors.get(index | 0)
+                : SYS_COLORS[index | 0] ?? 0),
+        },
+
+        /**
+         * BOOL SetSysColors(int cElements, const INT *lpaElements,
+         *                   const COLORREF *lpaRgbValues)
+         *
+         * New colours for the elements named, an index that names none
+         * passed over. Every window is told WM_SYSCOLORCHANGE and painted
+         * again, frame and all, in the new colours.
+         */
+        SetSysColors: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([count, elements, values])=>{
+                const WM_SYSCOLORCHANGE = 0x0015;
+                const MAX_ELEMENTS = 0x400;
+                const many = Math.min(count | 0, MAX_ELEMENTS);
+                if (many > 0 && ((elements >>> 0) === 0 || (values >>> 0) === 0))
+                {
+                    host.setLastError?.(ERROR_NOACCESS);
+                    return 0;
+                }
+                if (many > 0)
+                {
+                    const indices = new DataView(host.readMemory(elements >>> 0, many * 4).buffer);
+                    const colours = new DataView(host.readMemory(values >>> 0, many * 4).buffer);
+                    for (let at = 0; at < many; at++)
+                    {
+                        host.colors?.set(indices.getInt32(at * 4, true),
+                            colours.getUint32(at * 4, true));
+                    }
+                }
+                for (const record of windows.values())
+                {
+                    if (!record.destroyed && live(record.hwnd))
+                    {
+                        host.repaint?.(record);
+                    }
+                }
+                const told = /** @type {any} */ (host.sendAcross?.(HWND_BROADCAST,
+                    WM_SYSCOLORCHANGE, 0, 0, host.callerThread?.()) ?? 0);
+                return typeof told?.then === 'function' ? told.then(()=>1) : 1;
+            },
         },
 
         /**
@@ -3225,6 +3337,45 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         },
 
         /**
+         * LPWSTR CharPrevW(LPCWSTR lpszStart, LPCWSTR lpszCurrent)
+         *
+         * One UTF-16 unit back, and the pointer as it came when it is not
+         * past the start -- not the start, as the ANSI call answers.
+         */
+        CharPrevW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([start, current])=>(
+                (current >>> 0) > (start >>> 0) ? (current >>> 0) - 2 : current >>> 0),
+        },
+
+        /**
+         * LPSTR CharNextExA(WORD CodePage, LPCSTR lpCurrentChar, DWORD dwFlags)
+         *
+         * CharNextA in a code page the caller names: past a lead byte and
+         * its trail in one of the double-byte pages, one byte otherwise.
+         * The process's own pages are single-byte; the terminator is not
+         * stepped over.
+         */
+        CharNextExA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([codePage, text])=>{
+                const at = text >>> 0;
+                if (at === 0)
+                {
+                    return 0;
+                }
+                const [lead, trail] = host.readMemory(at, 2);
+                if (lead === 0)
+                {
+                    return at;
+                }
+                return isLeadByte(codePage & 0xffff, lead) && trail !== 0 ? at + 2 : at + 1;
+            },
+        },
+
+        /**
          * int wsprintfA(LPSTR lpOut, LPCSTR lpFmt, ...)
          *
          * cdecl, which is the part that matters: the caller pops the arguments,
@@ -3428,8 +3579,9 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                     return 0;
                 }
                 const took = redraw && host.shown(record) ? host.geometry.shapedRect(record) : null;
-                // A rectangle, as every region here is; GetWindowRgn and
-                // GetWindowRgnBox answer it too.
+                // The rectangle around it and, for a region of more than one,
+                // its rectangles: the window's shape (frame.js `shapeRects`).
+                // GetWindowRgn and GetWindowRgnBox answer the rectangle.
                 record.regionBox = (hRgn >>> 0) === 0 ? null : host.regionBox?.(hRgn >>> 0) ?? null;
                 if (took)
                 {
@@ -3753,6 +3905,51 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 4,
             handler: ()=>DMLERR_NO_ERROR,
         },
+
+        /**
+         * With no instance, nothing these name was ever handed out -- no
+         * data handle, no conversation, no transaction, no advise loop --
+         * so each answers the failure it documents for one it does not
+         * know: FALSE, or no bytes copied.
+         *
+         * BOOL DdeFreeDataHandle(HDDEDATA hData)
+         */
+        DdeFreeDataHandle: refuse('DdeFreeDataHandle', { argBytes: 4, why: NO_DDE }),
+        /** BOOL DdeAbandonTransaction(DWORD idInst, HCONV hConv, DWORD idTransaction) */
+        DdeAbandonTransaction: refuse('DdeAbandonTransaction', { argBytes: 12, why: NO_DDE }),
+        /** BOOL DdePostAdvise(DWORD idInst, HSZ hszTopic, HSZ hszItem) */
+        DdePostAdvise: refuse('DdePostAdvise', { argBytes: 12, why: NO_DDE }),
+        /** UINT DdeQueryConvInfo(HCONV hConv, DWORD idTransaction, PCONVINFO pConvInfo) */
+        DdeQueryConvInfo: refuse('DdeQueryConvInfo', { argBytes: 12, why: NO_DDE }),
+        /** BOOL DdeSetUserHandle(HCONV hConv, DWORD id, DWORD_PTR hUser) */
+        DdeSetUserHandle: refuse('DdeSetUserHandle', { argBytes: 12, why: NO_DDE }),
+
+        /**
+         * int DdeCmpStringHandles(HSZ hsz1, HSZ hsz2)
+         *
+         * The handles' values compared, which is all the call compares: the
+         * documented way to compare the strings themselves is DdeQueryString.
+         * Needs no instance, and two null handles are equal.
+         */
+        DdeCmpStringHandles: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([first, second])=>{
+                const a = first >>> 0;
+                const b = second >>> 0;
+                return a === b ? 0 : (a < b ? -1 >>> 0 : 1);
+            },
+        },
+
+        /**
+         * LRESULT SendIMEMessageExA(HWND hWnd, LPARAM lParam)
+         * LRESULT SendIMEMessageExW(HWND hWnd, LPARAM lParam)
+         *
+         * The Windows 3.1 input method interface, which answers zero when no
+         * input method is there to take the request.
+         */
+        SendIMEMessageExA: refuse('SendIMEMessageExA', { argBytes: 8, why: 'no IME' }),
+        SendIMEMessageExW: refuse('SendIMEMessageExW', { argBytes: 8, why: 'no IME' }),
 
         /**
          * HANDLE LoadImageA(HINSTANCE hInst, LPCSTR name, UINT type, int cx,
@@ -4961,6 +5158,115 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 return andThen(host.activate?.(hwnd >>> 0,
                     { thread: host.callerThread?.(), sent: true }), ()=>1);
             },
+        },
+
+        /**
+         * BOOL AllowSetForegroundWindow(DWORD dwProcessId)
+         *
+         * Lends the caller's right to set the foreground to another process,
+         * or to all of them for ASFW_ANY. It fails only for a caller that has
+         * no such right, and here every SetForegroundWindow succeeds, so every
+         * caller has it. A process id that names no process is refused with
+         * ERROR_INVALID_PARAMETER when the host can say which ids are live;
+         * a host that cannot leaves every id accepted.
+         */
+        AllowSetForegroundWindow: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([processId])=>{
+                const id = processId >>> 0;
+                if (id !== ASFW_ANY && id !== (host.processId ?? 0)
+                    && host.processExists?.(id) === false)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL AnimateWindow(HWND hWnd, DWORD dwTime, DWORD dwFlags)
+         *
+         * The effect is not played: the window reaches the state the
+         * animation ends in at once rather than after dwTime, hidden for
+         * AW_HIDE and otherwise shown, activated only for AW_ACTIVATE --
+         * ShowWindow's SW_HIDE, SW_SHOW or SW_SHOWNA. What MSDN says the call
+         * refuses is refused, with ERROR_INVALID_PARAMETER: showing a window
+         * that is visible or hiding one that is not (its own WS_VISIBLE,
+         * which is what ShowWindow reports), a roll or slide with no
+         * direction -- only a fade or AW_CENTER needs none -- and a fade of a
+         * child window; so is AW_ACTIVATE with AW_HIDE, which MSDN forbids. A
+         * window another thread owns is refused with the last error
+         * ERROR_SUCCESS, as documented.
+         */
+        AnimateWindow: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hwnd, , flags])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+                    return 0;
+                }
+                const thread = host.callerThread?.();
+                const owner = threadIdOf(record.thread);
+                const caller = threadIdOf(thread);
+                if (owner !== null && caller !== null && owner !== caller)
+                {
+                    host.setLastError?.(0);
+                    return 0;
+                }
+                const asked = flags >>> 0;
+                const hide = (asked & AW_HIDE) !== 0;
+                const visible = (record.style & WS_VISIBLE) !== 0;
+                const directionless = (asked & (AW_BLEND | AW_CENTER)) === 0
+                    && (asked & AW_DIRECTIONS) === 0;
+                const childFade = (asked & AW_BLEND) !== 0 && (record.style & WS_CHILD) !== 0;
+                if (hide === !visible || directionless || childFade
+                    || (hide && (asked & AW_ACTIVATE) !== 0))
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                let command = SW_SHOWNA;
+                if (hide)
+                {
+                    command = SW_HIDE;
+                }
+                else if ((asked & AW_ACTIVATE) !== 0)
+                {
+                    command = SW_SHOW;
+                }
+                return andThen(host.showWindow(record, command, thread), ()=>1);
+            },
+        },
+
+        /**
+         * void DisableProcessWindowsGhosting(void)
+         *
+         * Ghosting puts a stand-in frame over a window whose thread has
+         * stopped reading its messages. No window is ghosted here, so there
+         * is nothing to turn off.
+         */
+        DisableProcessWindowsGhosting: {
+            argBytes: 0,
+            handler: ()=>0,
+        },
+
+        /**
+         * BOOL WINNLSEnableIME(HWND hWnd, BOOL fEnable)
+         *
+         * Turns the input method on or off and answers the state it found.
+         * The call belongs to the Japanese and Korean systems' input methods
+         * and does nothing elsewhere; this system is en-US and has no input
+         * method at all -- imm32 reports none -- so the state found is always
+         * off and the answer FALSE whatever is asked.
+         */
+        WINNLSEnableIME: {
+            argBytes: 8,
+            handler: ()=>0,
         },
 
         /**

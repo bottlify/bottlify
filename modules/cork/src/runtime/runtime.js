@@ -41,7 +41,7 @@ import { openTranslationWorker } from './translator.js';
 import { ANY_TOP, createEntries } from './entries.js';
 import { PageFlag, createPageTable } from './pages.js';
 import { createSharedCode } from './shared-code.js';
-import { Tables } from './layout.js';
+import { Tables, tablesSize } from './layout.js';
 import { blockCounts, resetBlockCounts, topBlocks } from './block-profile.js';
 import {
     CACHE_VERSION, cacheKey, moduleKey, packRegion, seedRecords, unpackRegion,
@@ -312,10 +312,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         helpers: settings.runtimeHelpers !== false };
     /** @type {Set<string>} instruction classes left to the other executor */
     const leaveOut = new Set(settings.leaveOut ?? []);
-    if (layout.tables + Tables.SIZE > memory.buffer.byteLength)
+    if (layout.tables + tablesSize(layout) > memory.buffer.byteLength)
     {
         throw new Error(`cork: the memory ends at ${memory.buffer.byteLength}, before the tables`
-            + ` at ${layout.tables} + ${Tables.SIZE}`);
+            + ` at ${layout.tables} + ${tablesSize(layout)}`);
     }
     const found = features ?? probeFeatures();
     // A shared memory links only to modules whose import says so, with a
@@ -549,7 +549,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     // candidates, but what the translator never reached is exactly what this
     // is read for. Bounded like `misses`; the coldest target makes room. With
     // the count, the tops its exits were at, a bit each.
-    /** @type {Map<number, { count: number, tops: number }>} */
+    /** @type {Map<number, { count: number, held: number, tops: number }>} */
     const exitTargets = new Map();
     const EXIT_TARGETS_CAP = 4096;
     /**
@@ -587,6 +587,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @typedef {Object} RegionRecord
      * @property {number} entry
      * @property {Set<number>} pages
+     * @property {Set<number>} [reads]   every page forming read: what a worker forms it from
      * @property {number[]} slots   entry indices
      * @property {number} table     the function's index in the table, or -1
      * @property {[number, number][]} spans   the blocks' [start, end)
@@ -742,6 +743,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     /** @type {Record<ExitKind, number>} */
     const exits = { untranslated: 0, budget: 0, trap: 0, halt: 0, fault: 0, stale: 0,
         interpreted: 0 };
+    // The untranslated exits by what left: a bare one (nothing at the target
+    // in the region), or one a region made to the host on purpose -- a window
+    // its accesses would fault on or a store into code (HELD), the x87
+    // precision it was not formed for (PRECISION), a stack shape it was not
+    // checked for (SHAPE). One count read alone mixes them, and the held ones
+    // land on addresses that are translated, which reads as a link not made.
+    const untranslatedBy = { bare: 0, held: 0, precision: 0, shape: 0, other: 0 };
+    /** @type {Record<number, keyof typeof untranslatedBy>} */
+    const VECTOR_NAMES = { 0: 'bare', [HELD]: 'held', [PRECISION]: 'precision', [SHAPE]: 'shape' };
     /** @type {import('../../../core/src/layers/cpu/engine.js').ExitRecord} */
     const exit = { retired: 0, kind: 'untranslated', vector: 0 };
     /** @type {Record<string, number>} */
@@ -1493,7 +1503,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
         /** @type {RegionRecord} */
         const record = {
-            entry: region.entry, pages: region.pages, slots: [], table: -1,
+            entry: region.entry, pages: region.pages, reads: region.reads, slots: [], table: -1,
             spans: region.blocks.map(block=>[block.start, block.end]), extents,
             entryTop: one.entryTop, hash: region.hash, labels: JSON.stringify(built.labels),
             linked: built.linked === true, wide: one.wide === true, loose: one.loose === true,
@@ -1830,7 +1840,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     const at = layout.ramBase + page * 4096;
                     // A copy of its own: a slice of a shared memory's buffer is
                     // shared too, and cannot be transferred to the translator.
-                    copies.set(page, new Uint8Array(memory.buffer, at, 4096).slice());
+                    // A page forming read past the memory -- an import slot that
+                    // names nowhere -- read as zeros there, and is zeros here.
+                    copies.set(page, at + 4096 <= memory.buffer.byteLength
+                        ? new Uint8Array(memory.buffer, at, 4096).slice() : new Uint8Array(4096));
                 }
             }
         }
@@ -2220,12 +2233,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         {
             return false;
         }
-        const copies = copyPages(chunk.map(record=>record.pages));
+        const copies = copyPages(chunk.map(record=>record.reads ?? record.pages));
         const relink = {
             jobs: chunk.map(record=>({ entry: record.entry, entryTop: record.entryTop,
                 hash: record.hash, checked: record.checked === true, copies: record.copies === true,
                 ...(record.targets === undefined ? {} : { targets: record.targets }) })),
             pages: [...copies],
+            formable: chunk.flatMap(record=>[...record.pages]),
             form: formOptions,
         };
         const translator = freeTranslator();
@@ -2582,7 +2596,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 one.waited = true;
             }
-            const copies = copyPages(unbuilt.map(one=>one.region.pages));
+            const copies = copyPages(unbuilt.map(one=>one.region.reads ?? one.region.pages));
             translator.adapter.post({
                 id: pending.id,
                 relink: {
@@ -2590,6 +2604,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                         hash: one.region.hash, checked: one.checked, copies: one.copies === true,
                         ...(one.targets === undefined ? {} : { targets: one.targets }) })),
                     pages: [...copies],
+                    formable: unbuilt.flatMap(one=>[...one.region.pages]),
                     form: formOptions,
                 },
                 layout, features: found, options: emitOptions(),
@@ -2933,7 +2948,18 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 && performance.now() >= profileResetAt)
             {
                 profileResetAt = null;
-                resetBlockCounts(view(), layout.tables);
+                resetBlockCounts(view(), layout);
+                // The exits are counted over the same window as the blocks.
+                for (const name of /** @type {(keyof typeof exits)[]} */ (Object.keys(exits)))
+                {
+                    exits[name] = 0;
+                }
+                for (const name of /** @type {(keyof typeof untranslatedBy)[]} */ (
+                    Object.keys(untranslatedBy)))
+                {
+                    untranslatedBy[name] = 0;
+                }
+                exitTargets.clear();
             }
             // One record, rewritten per run: a call-heavy program leaves
             // and re-enters per call, and an object per leave was the
@@ -2946,6 +2972,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 : retired - ((tierEntered() - tierBefore) >>> 0);
             const kind = KINDS[code & 0xff] ?? 'untranslated';
             exits[kind]++;
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && kind === 'untranslated')
+            {
+                untranslatedBy[VECTOR_NAMES[code >>> 8] ?? 'other']++;
+            }
             if (kind === 'untranslated' && code >>> 8 === PRECISION)
             {
                 precisionSeen();
@@ -3005,10 +3035,14 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             let target = exitTargets.get(address);
             if (target === undefined)
             {
-                target = { count: 0, tops: 0 };
+                target = { count: 0, held: 0, tops: 0 };
                 exitTargets.set(address, target);
             }
             target.count++;
+            if (held)
+            {
+                target.held++;
+            }
             target.tops |= 1 << at;
             if (exitTargets.size > EXIT_TARGETS_CAP)
             {
@@ -3254,7 +3288,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         diagnostics(){
             fold();
             const blocks = import.meta.BOTTLIFY_DIAGNOSTICS !== false && profiling
-                ? blockCounts(view(), layout.tables, regions) : null;
+                ? blockCounts(view(), layout, regions) : null;
             return {
                 ...(import.meta.BOTTLIFY_DIAGNOSTICS !== false && blocks
                     ? { blockCounts: blocks, topBlocks: topBlocks(blocks, regions) } : {}),
@@ -3274,6 +3308,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 // The function table's length: what the regions' indices span.
                 tableSize: table ? table.length : 0,
                 entries: table ? entries.hashed() : entries.count(),
+                // Every entry, hashed or not: past the hash's room the rest are
+                // reached from translated code only through the host.
+                entriesAll: entries.count(),
                 translateMs: counts.formingMs + counts.lookupMs + counts.emitMs
                     + counts.encodeMs + counts.storeMs + counts.instantiateMs + counts.publishMs,
                 formingMs: counts.formingMs,
@@ -3334,10 +3371,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 queueEvictions: counts.queueEvictions,
                 volatilePages: counts.volatilePages,
                 exits: { ...exits },
-                // The top untranslated-exit targets over the whole run, and
-                // why each has no entry: what a loading phase leaves behind.
+                untranslatedBy: { ...untranslatedBy },
+                // The top untranslated-exit targets over the whole run (or the
+                // block profile's window), and why each has no entry: what a
+                // loading phase leaves behind. One only ever left on purpose
+                // (HELD) is `held` -- its address is translated and no link is
+                // missing; the reason of the rest is read now, not at the exit.
                 exitsByTarget: [...exitTargets].sort((a, b)=>b[1].count - a[1].count).slice(0, 32)
-                    .map(([address, { count }])=>({ address, count, reason: missReason(address) })),
+                    .map(([address, { count, held }])=>({ address, count, held,
+                        reason: held === count ? 'held' : missReason(address) })),
                 refused: { ...refused },
                 refusedWhy: { ...refusedWhy },
                 // Where a program reads what `precise: false` leaves: a title that

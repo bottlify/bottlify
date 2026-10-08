@@ -67,6 +67,7 @@ import {
 } from './shadow.js';
 import { D3D8_COMMANDS, materialOf } from '../d3d8/commands.js';
 import { D3DTSS } from '../d3d8/constants.js';
+import { loudRefusals } from './refusals.js';
 
 /** Direct3D 8's stage state types below 32, a bit each: what the block keeps for them. */
 const STAGE_STATE_TYPES_8 = Object.values(D3DTSS)
@@ -2249,10 +2250,11 @@ export function createDirect3D8Seam(
     // program set last, through the same methods a trap would have called,
     // which is where validation and invalidation live; and after it, what
     // the guest's routines check a call against is the device's again.
+    const refusedLoudly = loudRefusals('Direct3D 8', divergence);
     /** @type {Record<string, (device: any, args: number[]) => number | Promise<number>>} */
     const syncedMethods = Object.fromEntries(Object.entries(deviceMethods)
         .map(([name, method])=>[name, (/** @type {any} */ device, /** @type {number[]} */ args)=>
-            settledAfter(shadowOf(device), ()=>method(device, args))]));
+            refusedLoudly(name, settledAfter(shadowOf(device), ()=>method(device, args)))]));
     /** @type {Record<string, (builder: { trap: number }) => number>} */
     const deviceGuests = guestsBut(deviceGroup, allocate
         ? {

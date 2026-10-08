@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createShellFunctions } from './functions.js';
+import { SHELL32_ORDINALS, createShellFunctions } from './functions.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from '../kernel32/vfs.js';
 import { decodeAnsi } from '../kernel32/locale.js';
@@ -157,8 +157,9 @@ test('launching nothing is refused, not quietly succeeded', ()=>{
  * command line, and the test reads back both.
  *
  * @param {string[]} files  The images the launcher finds, by full or bare name.
+ * @param {object} [extra]  More of the host.
  */
-function machineWithLauncher(files){
+function machineWithLauncher(files, extra){
     /** @type {{ named: string, line: string, flags: number }[]} */
     const launched = [];
     /** @type {string[]} */
@@ -183,6 +184,7 @@ function machineWithLauncher(files){
         },
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>diverged.push(`${api}: ${detail}`),
+        ...extra,
     });
     return { ...m, launched, diverged };
 }
@@ -227,6 +229,55 @@ test('a document, and a verb that needs one, are refused as having no handler', 
     assert.equal(m.shell.ShellExecuteA.handler([0, 0x180, 0x140, 0, 0, 1]), 31,
         'and "print" names a handler rather than the file itself');
     assert.deepEqual(m.launched, [], 'nothing was started for either');
+});
+
+test('a text file opens in Notepad, as XP\'s registry has it', ()=>{
+    const m = machineWithLauncher(['C:\\App\\readme.txt', 'C:\\WINDOWS\\system32\\notepad.exe']);
+    m.put('readme.txt', 0x100);
+    m.put('open', 0x140);
+
+    assert.equal(m.shell.ShellExecuteA.handler([0, 0x140, 0x100, 0, 0, 1]), 33);
+    const notepad = 'C:\\WINDOWS\\system32\\notepad.exe';
+    assert.deepEqual(m.launched,
+        [{ named: notepad, line: `${notepad} C:\\App\\readme.txt`, flags: 0 }],
+        'the file after the program, unquoted, as %1 is in the command');
+
+    m.put('missing.log', 0x180);
+    assert.equal(m.shell.ShellExecuteA.handler([0, 0, 0x180, 0, 0, 1]), 2,
+        'a text file that is not there is not found, rather than opened empty');
+    assert.equal(m.launched.length, 1);
+});
+
+test('FindExecutable names Notepad for a text file, and not one that is not there', ()=>{
+    // A setup asks before it starts the program on its readme.
+    const m = machineWithLauncher(['C:\\App\\readme.txt', 'C:\\WINDOWS\\system32\\notepad.exe']);
+    m.put('readme.txt', 0x100);
+    assert.equal(m.shell.FindExecutableA.handler([0x100, 0, 0x200]), 33);
+    assert.equal(m.string(0x200), 'C:\\WINDOWS\\system32\\notepad.exe');
+    m.put('gone.txt', 0x100);
+    assert.equal(m.shell.FindExecutableA.handler([0x100, 0, 0x200]), 2, 'SE_ERR_FNF');
+});
+
+test('an address goes to whoever is in front of the run, and is refused without one', ()=>{
+    /** @type {string[]} */
+    const opened = [];
+    const m = machineWithLauncher([], { openUrl: (/** @type {string} */ url)=>{
+        opened.push(url);
+        return true;
+    } });
+    m.put('http://www.example.com/', 0x100);
+    m.put('mailto:someone@example.com', 0x180);
+
+    assert.equal(m.shell.ShellExecuteA.handler([0, 0, 0x100, 0, 0, 1]), 33);
+    assert.equal(m.shell.ShellExecuteA.handler([0, 0, 0x180, 0, 0, 1]), 33);
+    assert.deepEqual(opened, ['http://www.example.com/', 'mailto:someone@example.com']);
+    assert.deepEqual(m.launched, [], 'no program of the machine\'s was started for them');
+
+    const none = machineWithLauncher([]);
+    none.put('http://www.example.com/', 0x100);
+    assert.equal(none.shell.ShellExecuteA.handler([0, 0, 0x100, 0, 0, 1]), 31,
+        'nothing took it: no association');
+    assert.equal(none.diverged.length, 1);
 });
 
 test('a program that is not on the volume is reported missing, not started', ()=>{
@@ -281,19 +332,48 @@ test('the extended launch answers in the record, and hands over the child', ()=>
     assert.equal(m.launched[0].line, '"C:\\App\\setup.exe"');
 });
 
-test('the extended launch refuses a record that names a list rather than a file', ()=>{
-    const m = machineWithLauncher(['C:\\App\\setup.exe']);
-    m.put('setup.exe', 0x200);
-    const view = new DataView(m.memory.buffer);
-    const SEE_MASK_IDLIST = 0x4;
-    m.memory.fill(0, 0x100, 0x140);
-    view.setUint32(0x104, SEE_MASK_IDLIST, true);
-    view.setUint32(0x110, 0x200, true);
+test('the extended launch starts the program whatever the flags that change nothing here',
+    ()=>{
+        // A setup starting its redistributable asks for no error boxes, no
+        // asynchronous launch and the variables expanded; none of them makes
+        // the file anything but the program to run.
+        const SEE_MASK_NOCLOSEPROCESS = 0x40;
+        const SEE_MASK_FLAG_NO_UI = 0x400;
+        const SEE_MASK_NOASYNC = 0x100;
+        const SEE_MASK_DOENVSUBST = 0x200;
+        for (const mask of [SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_DOENVSUBST])
+        {
+            const m = machineWithLauncher(['C:\\WINDOWS\\TEMP\\DPLAY61A.EXE']);
+            m.put('C:\\WINDOWS\\TEMP\\DPLAY61A.EXE', 0x200);
+            m.put('/Q:A /R:N', 0x280);
+            const view = new DataView(m.memory.buffer);
+            m.memory.fill(0, 0x100, 0x140);
+            view.setUint32(0x104, mask | SEE_MASK_NOCLOSEPROCESS, true);
+            view.setUint32(0x110, 0x200, true);
+            view.setUint32(0x114, 0x280, true);
 
-    assert.equal(m.shell.ShellExecuteExA.handler([0x100]), 0);
-    assert.equal(view.getUint32(0x120, true), 31);
-    assert.deepEqual(m.launched, []);
-});
+            assert.equal(m.shell.ShellExecuteExA.handler([0x100]), 1, `mask ${mask}`);
+            assert.equal(view.getUint32(0x120, true), 33);
+            assert.equal(m.launched[0].line, '"C:\\WINDOWS\\TEMP\\DPLAY61A.EXE" /Q:A /R:N');
+        }
+    });
+
+test('the extended launch refuses a record that names a list or a class rather than a file',
+    ()=>{
+        for (const mask of [0x4, 0x1])
+        {
+            const m = machineWithLauncher(['C:\\App\\setup.exe']);
+            m.put('setup.exe', 0x200);
+            const view = new DataView(m.memory.buffer);
+            m.memory.fill(0, 0x100, 0x140);
+            view.setUint32(0x104, mask, true);
+            view.setUint32(0x110, 0x200, true);
+
+            assert.equal(m.shell.ShellExecuteExA.handler([0x100]), 0, `mask ${mask}`);
+            assert.equal(view.getUint32(0x120, true), 31);
+            assert.deepEqual(m.launched, []);
+        }
+    });
 
 /**
  * The machine above with an ANSI string reader and a path resolver, which is
@@ -444,8 +524,10 @@ test('DragFinish pops the drop it is handed', ()=>{
 /**
  * A shell over a real volume, with guest memory for a SHFILEOPSTRUCT and the
  * lists it points at.
+ *
+ * @param {Record<string, any>} [extra]  More of the host, laid over the rest.
  */
-async function machineWithVolume(){
+async function machineWithVolume(extra = {}){
     const fs = await filesystemModule.create({});
     const volume = /** @type {any} */ (createVolume(fs));
     volume.mkdir('C:\\work');
@@ -474,6 +556,7 @@ async function machineWithVolume(){
         },
         resolve: path=>fs.resolve(path).path,
         volume: { ...volume, drives: ()=>['C'] },
+        ...extra,
     }));
     /** A list of names, each terminated, and one more terminator. @param {string[]} names @param {boolean} wide */
     const list = (names, wide)=>{
@@ -600,4 +683,206 @@ test('SHCreateDirectoryEx makes the whole path, and says when it was there', asy
     assert.ok(m.volume.stat('C:\\work\\\u00e9t\u00e9\\three')?.isDirectory);
     assert.deepEqual([m.shell.SHCreateDirectoryExA.argBytes, m.shell.SHCreateDirectoryExW.argBytes],
         [12, 12]);
+});
+
+test('SHCreateDirectory is the wide one with no attributes, and is shell32\'s ordinal 165',
+    async()=>{
+        // A game's voice setup saves its settings into a folder it makes this
+        // way, imported by number alone.
+        const m = await machineWithVolume();
+        const path = m.list(['C:\\work\\voice'], true);
+        assert.equal(m.shell.SHCreateDirectory.handler([0, path]), 0);
+        assert.ok(m.volume.stat('C:\\work\\voice')?.isDirectory);
+        assert.equal(m.shell.SHCreateDirectory.argBytes, 8);
+        assert.equal(SHELL32_ORDINALS[165], 'SHCreateDirectory');
+    });
+
+/** @param {Uint8Array} memory @param {string} text @param {number} at */
+function putWide(memory, text, at){
+    const view = new DataView(memory.buffer);
+    [...text, '\0'].forEach((unit, index)=>
+        view.setUint16(at + index * 2, unit.charCodeAt(0), true));
+    return at;
+}
+
+test('the wide launch reads its strings wide, and starts the same program', ()=>{
+    const m = machineWithLauncher(['C:\\App\\setup.exe']);
+    putWide(m.memory, 'setup.exe', 0x100);
+    putWide(m.memory, '/s', 0x140);
+
+    assert.equal(m.shell.ShellExecuteW.handler([0, 0, 0x100, 0x140, 0, 1]), 33);
+    assert.deepEqual(m.launched,
+        [{ named: 'C:\\App\\setup.exe', line: '"C:\\App\\setup.exe" /s', flags: 0 }]);
+    putWide(m.memory, 'readme.txt', 0x100);
+    assert.equal(m.shell.ShellExecuteW.handler([0, 0, 0x100, 0, 0, 1]), 31,
+        'a document is refused in either spelling');
+    assert.equal(m.shell.ShellExecuteW.argBytes, 24);
+});
+
+test('the wide extended launch reads the same record with wide strings', ()=>{
+    // SHELLEXECUTEINFOW is SHELLEXECUTEINFOA field for field.
+    const m = machineWithLauncher(['C:\\App\\setup.exe']);
+    putWide(m.memory, 'setup.exe', 0x200);
+    putWide(m.memory, '/VERYSILENT', 0x240);
+    const view = new DataView(m.memory.buffer);
+    m.memory.fill(0, 0x100, 0x140);
+    view.setUint32(0x100, 60, true);                        // cbSize
+    view.setUint32(0x104, 0x40, true);                      // SEE_MASK_NOCLOSEPROCESS
+    view.setUint32(0x110, 0x200, true);                     // lpFile
+    view.setUint32(0x114, 0x240, true);                     // lpParameters
+
+    assert.equal(m.shell.ShellExecuteExW.handler([0x100]), 1);
+    assert.equal(view.getUint32(0x120, true), 33);
+    assert.equal(view.getUint32(0x138, true), 0x40);
+    assert.equal(m.launched[0].line, '"C:\\App\\setup.exe" /VERYSILENT');
+
+    view.setUint32(0x104, 0x4, true);                       // SEE_MASK_IDLIST
+    assert.equal(m.shell.ShellExecuteExW.handler([0x100]), 0);
+    assert.equal(view.getUint32(0x120, true), 31);
+    assert.equal(m.shell.ShellExecuteExW.handler([0]), 0);
+    assert.equal(m.shell.ShellExecuteExW.argBytes, 4);
+});
+
+test('a list turns back into its path in UTF-16, and the wide browse is cancelled too', ()=>{
+    const m = machineWithFolders();
+    const CSIDL_PROGRAM_FILES = 0x26;
+    const PATH = 'C:\\Program Files';
+    assert.equal(m.shell.SHGetSpecialFolderLocation.handler([0, CSIDL_PROGRAM_FILES, 0x100]), 0);
+    const list = new DataView(m.memory.buffer).getUint32(0x100, true);
+
+    assert.equal(m.shell.SHGetPathFromIDListW.handler([list, 0x200]), 1);
+    assert.equal(new TextDecoder('utf-16le').decode(
+        m.memory.subarray(0x200, 0x200 + PATH.length * 2 + 2)), `${PATH}\0`);
+    assert.equal(m.shell.SHGetPathFromIDListW.handler([0, 0x300]), 0);
+    assert.deepEqual([...m.memory.subarray(0x300, 0x302)], [0, 0], 'a wide empty path');
+
+    assert.equal(m.shell.SHBrowseForFolderW.handler([0x100]), 0);
+    assert.deepEqual([m.shell.SHGetPathFromIDListW.argBytes, m.shell.SHBrowseForFolderW.argBytes],
+        [8, 4]);
+});
+
+test('SHGetFileInfoW refuses as its ANSI twin does, and leaves the wider record alone', ()=>{
+    // SHFILEINFOW is 692 bytes to SHFILEINFOA's 352; neither is written.
+    const SHGFI_SYSICONINDEX = 0x4000;
+    const SHGFI_SMALLICON = 0x1;
+    const memory = new Uint8Array(0x400).fill(0xaa);
+    const shell = /** @type {any} */ (createShellFunctions({
+        readMemory: (address, length)=>memory.slice(address, address + length),
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+    }));
+    putWide(memory, 'C:\\App', 0x10);
+    assert.equal(shell.SHGetFileInfoW.handler([0x10, 0, 0x40, 692,
+        SHGFI_SYSICONINDEX | SHGFI_SMALLICON]), 0);
+    assert.ok(memory.subarray(0x40, 0x40 + 692).every(byte=>byte === 0xaa));
+    assert.equal(shell.SHGetFileInfoW.argBytes, 20);
+});
+
+test('SHPathPrepareForWrite finds a directory, refuses a file, makes one asked for', async()=>{
+    /** @type {string[]} */
+    const diverged = [];
+    const m = await machineWithVolume({
+        divergence: (/** @type {string} */ api, /** @type {string} */ detail)=>
+            diverged.push(`${api}: ${detail}`),
+    });
+    const SHPPFW_NONE = 0;
+    const SHPPFW_DIRCREATE = 1;
+    const SHPPFW_ASKDIRCREATE = 2;
+    const SHPPFW_IGNOREFILENAME = 4;
+    const S_OK = 0;
+    const PATH_NOT_FOUND = 0x80070003 | 0;
+    const DIRECTORY = 0x8007010b | 0;
+    /** @param {string} path @param {number} flags @param {boolean} [wide] */
+    const prepare = (path, flags, wide = false)=>m.shell[
+        wide ? 'SHPathPrepareForWriteW' : 'SHPathPrepareForWriteA'].handler(
+        [0, 0, m.list([path], wide), flags]);
+
+    assert.equal(prepare('C:\\work', SHPPFW_NONE), S_OK);
+    assert.equal(prepare('C:\\work\\', SHPPFW_NONE), S_OK, 'a trailing separator');
+    assert.equal(prepare('C:\\', SHPPFW_NONE), S_OK, 'the root');
+    assert.equal(prepare('a.txt', SHPPFW_NONE), DIRECTORY, 'a file where a directory should be');
+    assert.equal(prepare('a.txt\\', SHPPFW_DIRCREATE), DIRECTORY, 'and not made over it');
+    assert.equal(prepare('a.txt', SHPPFW_IGNOREFILENAME), S_OK,
+        'a bare file name is in the current directory');
+
+    assert.equal(prepare('C:\\work\\missing\\file.txt', SHPPFW_IGNOREFILENAME), PATH_NOT_FOUND);
+    assert.equal(m.volume.stat('missing'), null, 'and nothing was made');
+    assert.equal(prepare('C:\\work\\missing\\file.txt',
+        SHPPFW_IGNOREFILENAME | SHPPFW_DIRCREATE), S_OK);
+    assert.ok(m.volume.stat('C:\\work\\missing')?.isDirectory);
+    assert.equal(m.volume.stat('C:\\work\\missing\\file.txt'), null, 'the file name is not made');
+    assert.equal(prepare('C:\\work\\whole\\', SHPPFW_IGNOREFILENAME | SHPPFW_DIRCREATE), S_OK,
+        'a trailing separator leaves no file name to ignore');
+    assert.ok(m.volume.stat('C:\\work\\whole')?.isDirectory);
+
+    // Wine's conformance test: a relative path is found, but not made.
+    assert.equal(prepare('.\\missing', SHPPFW_DIRCREATE), S_OK);
+    assert.equal(prepare('.\\relative\\dir', SHPPFW_DIRCREATE), PATH_NOT_FOUND);
+    assert.equal(m.volume.stat('relative'), null);
+
+    assert.equal(prepare('C:\\work\\one\\two', SHPPFW_DIRCREATE, true), S_OK);
+    assert.ok(m.volume.stat('C:\\work\\one\\two')?.isDirectory, 'every directory of the path');
+    assert.equal(prepare('C:\\work\\\u00e9t\u00e9', SHPPFW_NONE, true), PATH_NOT_FOUND);
+    assert.deepEqual(diverged, []);
+
+    assert.equal(prepare('C:\\work\\asked', SHPPFW_ASKDIRCREATE), S_OK);
+    assert.ok(m.volume.stat('C:\\work\\asked')?.isDirectory);
+    assert.equal(diverged.length, 1, 'made without asking, which is said');
+
+    assert.equal(m.shell.SHPathPrepareForWriteW.handler([0, 0, 0, SHPPFW_DIRCREATE]) | 0,
+        0x80070057 | 0, 'no path is E_INVALIDARG');
+    assert.deepEqual(
+        [m.shell.SHPathPrepareForWriteA.argBytes, m.shell.SHPathPrepareForWriteW.argBytes],
+        [16, 16]);
+});
+
+test('SHPathPrepareForWrite with no volume finds no path', ()=>{
+    const m = machineWithPaths('C:\\App');
+    m.put('C:\\App', 0x100);
+    assert.equal(m.shell.SHPathPrepareForWriteA.handler([0, 0, 0x100, 1]) | 0, 0x80070003 | 0);
+});
+
+test('FindExecutableW is the same association in UTF-16, and DragQueryFileW no drop', ()=>{
+    const m = machineWithPaths('C:\\App');
+    /** @param {string} text @param {number} at */
+    const wide = (text, at)=>{
+        [...text, '\0'].forEach((c, i)=>{
+            m.memory[at + i * 2] = c.charCodeAt(0) & 0xff;
+            m.memory[at + i * 2 + 1] = c.charCodeAt(0) >>> 8;
+        });
+    };
+    /** @param {number} at */
+    const read = at=>{
+        let text = '';
+        for (let i = at; m.memory[i] !== 0 || m.memory[i + 1] !== 0; i += 2)
+        {
+            text += String.fromCharCode(m.memory[i] | m.memory[i + 1] << 8);
+        }
+        return text;
+    };
+    wide('setup.exe', 0x100);
+    assert.equal(m.shell.FindExecutableW.handler([0x100, 0, 0x200]), 33);
+    assert.equal(read(0x200), 'C:\\App\\setup.exe');
+    wide('readme.txt', 0x100);
+    assert.equal(m.shell.FindExecutableW.handler([0x100, 0, 0x200]), 31);
+    assert.equal(read(0x200), '', 'cleared');
+    assert.equal(m.shell.FindExecutableW.argBytes, 12);
+
+    assert.equal(m.shell.DragQueryFileW.handler([0, 0xffffffff, 0, 0]), 0);
+    assert.equal(m.shell.DragQueryFileW.argBytes, 16);
+    assert.equal(m.shell.DragQueryFile, m.shell.DragQueryFileA, 'the bare name is the ANSI one');
+    assert.equal(m.shell.ShellExecuteEx, m.shell.ShellExecuteExA);
+});
+
+test('a name without an extension is looked for as a program', ()=>{
+    const m = machineWithLauncher(['C:\\WINDOWS\\system32\\msiexec.exe']);
+    m.put('msiexec', 0x100);
+    m.put('/i setup.msi', 0x140);
+    m.put('readme', 0x180);
+
+    assert.equal(m.shell.ShellExecuteA.handler([0, 0, 0x100, 0x140, 0, 1]), 33,
+        'the shell searches with ".exe" as the default extension');
+    assert.deepEqual(m.launched, [{ named: 'C:\\WINDOWS\\system32\\msiexec.exe',
+        line: '"C:\\WINDOWS\\system32\\msiexec.exe" /i setup.msi', flags: 0 }]);
+    assert.equal(m.shell.ShellExecuteA.handler([0, 0, 0x180, 0, 0, 1]), 2,
+        'and a name with no program by it is a file not found');
 });

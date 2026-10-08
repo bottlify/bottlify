@@ -320,6 +320,42 @@ export function createStringFunctions(host){
         },
 
         /**
+         * int strcoll(const char *left, const char *right)
+         *
+         * Under the C locale the collation is the bytes' order, so this is
+         * strcmp: the bytes compared as unsigned chars, answered -1, 0 or 1 as
+         * msvcrt's strcmp answers. No string is _NLSCMPERROR and EINVAL.
+         */
+        strcoll: {
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([left, right])=>{
+                if ((left >>> 0) === 0 || (right >>> 0) === 0)
+                {
+                    host.errno?.(EINVAL);
+                    return NLS_COMPARE_ERROR;
+                }
+                /** @param {number} at */
+                const bytesOf = at=>host.readMemory(at,
+                    host.scanCString(at, MAX_STRING, scanTable.fill(0)).index + 1).slice();
+                const a = bytesOf(left >>> 0);
+                const b = bytesOf(right >>> 0);
+                for (let at = 0; ; at++)
+                {
+                    if (a[at] !== b[at])
+                    {
+                        return a[at] < b[at] ? -1 >>> 0 : 1;
+                    }
+                    if (a[at] === 0)
+                    {
+                        return 0;
+                    }
+                }
+            },
+        },
+
+        /**
          * size_t strxfrm(char *destination, const char *source, size_t count)
          *
          * Under the C locale a string is its own collation key: as much of
@@ -475,6 +511,19 @@ export function createStringFunctions(host){
      * segment of its own to hold it; the exported address is the table's
      * second element, so `_pctype[-1]` reads the EOF slot before it.
      */
+    /**
+     * const unsigned short _ctype[257]
+     *
+     * The same table as a variable of its own: msvcrt exports the array
+     * itself, EOF's slot first, and `_pctype` points one element into it.
+     * Placed in the runtime's own data, where a program that imported it by
+     * address reads it.
+     */
+    table._ctype = {
+        data: ()=>new Uint8Array(ctypeTable.buffer.slice(ctypeTable.byteOffset,
+            ctypeTable.byteOffset + ctypeTable.byteLength)),
+    };
+
     table._pctype = {
         data: ()=>{
             const address = host.allocate(ctypeTable.byteLength);

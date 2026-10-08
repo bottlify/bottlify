@@ -16,6 +16,7 @@ import { decodeAnsi } from '../kernel32/locale.js';
 import {
     PBM_SETRANGE, PBM_SETPOS, PBM_DELTAPOS, PBM_SETSTEP, PBM_STEPIT, PBM_SETRANGE32,
     PBM_GETRANGE, PBM_GETPOS, PBM_SETBARCOLOR, PBM_SETBKCOLOR, PBS_SMOOTH, PBS_VERTICAL,
+    createProgressProcedure,
 } from './progress.js';
 
 /**
@@ -181,9 +182,9 @@ function setup(){
     };
 
     /** A progress bar as a child of a bare top-level window. @param {number} style */
-    const bar = async(style, x = 8, y = 8, width = 100, height = 16)=>{
+    const bar = async(style, x = 8, y = 8, width = 100, height = 16, exStyle = 0)=>{
         memory.putString(TEXT, 'msctls_progress32');
-        return table.CreateWindowExA.handler([0, TEXT, 0, WS_CHILD | WS_VISIBLE | style,
+        return table.CreateWindowExA.handler([exStyle, TEXT, 0, WS_CHILD | WS_VISIBLE | style,
             x, y, width, height, host_window.hwnd, 700, HINSTANCE, 0]);
     };
 
@@ -224,18 +225,19 @@ function setup(){
 
     const host_window = { hwnd: 0 };
     return { memory, desktop, gdi, fns: table, pump, bar, barRow, barColumn, barPixel,
-        makeHost: async()=>{
+        makeHost: async(visible = true, background = 0)=>{
             const name = TEXT + 64;
             memory.putString(name, 'host');
             const CLASS = name + 64;
-            [0, DIALOGPROC, 0, 0, HINSTANCE, 0, 0, 0, 0, name].forEach((value, index)=>{
+            [0, DIALOGPROC, 0, 0, HINSTANCE, 0, 0, background, 0, name].forEach((value, index)=>{
                 const bytes = new Uint8Array(4);
                 new DataView(bytes.buffer).setUint32(0, value, true);
                 memory.writeMemory(CLASS + index * 4, bytes);
             });
             table.RegisterClassA.handler([CLASS]);
             host_window.hwnd = await table.CreateWindowExA.handler([0, name, name,
-                WS_POPUP | WS_CAPTION | WS_VISIBLE, 0, 0, 220, 150, 0, 0, HINSTANCE, 0]);
+                WS_POPUP | WS_CAPTION | (visible ? WS_VISIBLE : 0), 0, 0, 220, 150, 0, 0,
+                HINSTANCE, 0]);
             await pump();
             return host_window.hwnd;
         } };
@@ -266,6 +268,21 @@ test('SETRANGE keeps the previous range and SETPOS the previous position', async
     // A position past the top is clamped to it, not stored as asked.
     assert.equal(context.fns.SendMessageA.handler([bar, PBM_SETPOS, 90, 0]), 25);
     assert.equal(context.fns.SendMessageA.handler([bar, PBM_GETPOS, 0, 0]), 50);
+});
+
+test('SETRANGE\'s words are unsigned: a range up to 65535 is that range', async()=>{
+    const context = setup();
+    await context.makeHost();
+    const bar = await context.bar(PBS_SMOOTH);
+    context.fns.SendMessageA.handler([bar, PBM_SETRANGE, 0, (0xffff << 16) >>> 0]);
+    context.memory.writeMemory(OUT, new Uint8Array(8));
+    context.fns.SendMessageA.handler([bar, PBM_GETRANGE, 0, OUT]);
+    assert.deepEqual([context.memory.u32(OUT), context.memory.u32(OUT + 4)], [0, 65535]);
+    context.fns.SendMessageA.handler([bar, PBM_SETPOS, 32768, 0]);
+    assert.equal(context.fns.SendMessageA.handler([bar, PBM_GETPOS, 0, 0]), 32768,
+        'a position past 32767 is inside it');
+    await context.pump();
+    assert.equal(context.barPixel(bar, 0.25, 0.5), COLOR_HIGHLIGHT, 'and half the bar is filled');
 });
 
 test('SETRANGE32 takes two full widths where SETRANGE takes one packed pair', async()=>{
@@ -393,4 +410,110 @@ test('a bar paints its track and fill on WM_PAINT', async()=>{
     await context.pump();
     const row = context.barRow(bar);
     assert.ok(row.includes(COLOR_HIGHLIGHT), 'a full bar shows its fill');
+});
+
+test('a bar is framed by a static edge with a pixel of track inside, and fills in whole blocks',
+    async()=>{
+        const WS_EX_CLIENTEDGE = 0x200;
+        const WS_EX_STATICEDGE = 0x20000;
+        const GWL_EXSTYLE = -20;
+        const SHADOW = 0x00808080;
+        const LIGHT = 0x00ffffff;
+        const context = setup();
+        await context.makeHost();
+        const bar = await context.bar(0, 8, 8, 100, 16, 0);
+        const exStyle = context.fns.GetWindowLongA.handler([bar, GWL_EXSTYLE]) >>> 0;
+        assert.equal(exStyle & (WS_EX_CLIENTEDGE | WS_EX_STATICEDGE), WS_EX_STATICEDGE,
+            'the static edge in place of the client edge it was made with');
+        context.fns.GetClientRect.handler([bar, OUT]);
+        assert.deepEqual([context.memory.u32(OUT + 8), context.memory.u32(OUT + 12)], [98, 14],
+            'a pixel of frame all round');
+
+        // One hundredth of 96 pixels of track is one pixel, and the fill
+        // ends on the block that pixel is in: a block of 8 (two thirds of
+        // 12), then the track.
+        context.fns.SendMessageA.handler([bar, PBM_SETPOS, 1, 0]);
+        await context.pump();
+        context.fns.GetWindowRect.handler([bar, OUT]);
+        const [left, top] = [context.memory.u32(OUT), context.memory.u32(OUT + 4)];
+        const row = Array.from({ length: 24 }, (_, x)=>context.desktop.read(left + x, top + 8));
+        assert.deepEqual(row.slice(0, 12), [SHADOW, COLOR_3DFACE,
+            ...Array(8).fill(COLOR_HIGHLIGHT), COLOR_3DFACE, COLOR_3DFACE]);
+        assert.ok(row.slice(12).every(pixel=>pixel === COLOR_3DFACE), 'and no more');
+        assert.equal(context.desktop.read(left, top), SHADOW, 'the edge sunken: dark above');
+        assert.equal(context.desktop.read(left + 50, top + 15), LIGHT, 'light below');
+        assert.equal(context.desktop.read(left + 50, top + 1), COLOR_3DFACE,
+            'the track\'s pixel inside it');
+
+        // Full, the blocks run to the end of the track, the last cut off.
+        context.fns.SendMessageA.handler([bar, PBM_SETPOS, 100, 0]);
+        await context.pump();
+        assert.equal(context.desktop.read(left + 97, top + 8), COLOR_HIGHLIGHT,
+            'the last block meets the track\'s end');
+        assert.equal(context.desktop.read(left + 98, top + 8), COLOR_3DFACE);
+    });
+
+test('a bar made inside a window not yet shown has its edge once the window shows', async()=>{
+    // A dialog makes its controls before it is shown, and a window that does
+    // not clip its children paints its background over theirs: the bar's
+    // edge, in its frame, is painted again after, as its client area is.
+    const SW_SHOW = 5;
+    const SHADOW = 0x00808080;
+    const context = setup();
+    const host = await context.makeHost(false);
+    const bar = await context.bar(0, 8, 8, 100, 16);
+    context.fns.SendMessageA.handler([bar, PBM_SETPOS, 50, 0]);
+    await context.fns.ShowWindow.handler([host, SW_SHOW]);
+    await context.pump();
+    context.fns.GetWindowRect.handler([bar, OUT]);
+    const [left, top] = [context.memory.u32(OUT), context.memory.u32(OUT + 4)];
+    assert.equal(context.desktop.read(left + 50, top), SHADOW, 'the edge above');
+    assert.equal(context.desktop.read(left, top + 8), SHADOW, 'and to the left');
+});
+
+test('a parent that paints over a bar\'s edge has the edge painted again after it', async()=>{
+    // A dialog that does not clip its children erases one rectangle around
+    // everything in it to repaint -- a label's text and the bar's fill
+    // together take in the bar's edge between them. The bar already had its
+    // whole client to repaint; its frame has to be repainted as well.
+    const COLOR_3DFACE_BRUSH = 15 + 1;
+    const SHADOW = 0x00808080;
+    const context = setup();
+    const host = await context.makeHost(true, COLOR_3DFACE_BRUSH);
+    const bar = await context.bar(0, 8, 8, 100, 16);
+    await context.pump();
+    context.fns.GetWindowRect.handler([bar, OUT]);
+    const [left, top] = [context.memory.u32(OUT), context.memory.u32(OUT + 4)];
+    assert.equal(context.desktop.read(left, top + 8), SHADOW, 'the edge, to begin with');
+
+    context.fns.InvalidateRect.handler([bar, 0, 1]);
+    const AREA = 0x13400;
+    [0, 0, 120, 40].forEach((side, index)=>context.memory.writeMemory(AREA + index * 4,
+        new Uint8Array(new Int32Array([side]).buffer)));
+    context.fns.InvalidateRect.handler([host, AREA, 1]);
+    await context.pump();
+    assert.equal(context.desktop.read(left, top + 8), SHADOW, 'the edge, after the parent');
+    assert.equal(context.desktop.read(left + 50, top), SHADOW);
+});
+
+test('a bar that moves paints itself as the call of the thread that moved it', ()=>{
+    // A dialog's modal loop hands the bar a position a worker thread posted;
+    // past the loop's await the thread on the processor is that worker, which
+    // is in no call to run the dialog's procedure on. The bar painted as
+    // whichever thread held the processor, and the paint asked a thread with
+    // no stack at rest to run guest code.
+    /** @type {unknown[]} */
+    const painted = [];
+    const procedure = createProgressProcedure(/** @type {any} */ ({
+        invalidate: ()=>{},
+        update: (/** @type {any} */ _record, /** @type {unknown} */ thread)=>{
+            painted.push(thread);
+            return 1;
+        },
+    }), { stateOf: (/** @type {any} */ record)=>(record.state ??= {}) });
+    const record = { hwnd: 0x10040, style: 0, exStyle: 0 };
+    const caller = { id: 'main' };
+    assert.equal(procedure(record, { hwnd: record.hwnd, message: PBM_SETPOS, wParam: 40,
+        lParam: 0 }, caller), 0);
+    assert.deepEqual(painted, [caller], 'painted once, as the thread whose call it is');
 });

@@ -441,12 +441,17 @@ test('an RSA public key verifies a real signature and rejects a tampered one', (
     putBytes(DATA, signature);
     assert.equal(fns.CryptVerifySignatureA.handler(
         [hash, DATA, 64, pub, 0, 0]), 1);
+    assert.equal(fns.CryptVerifySignatureW.handler([hash, DATA, 64, pub, 0x1234, 0]), 1,
+        'the wide form, its description not read');
 
     const tampered = signature.slice();
     tampered[10] ^= 0xff;
     putBytes(DATA, tampered);
     assert.equal(fns.CryptVerifySignatureA.handler([hash, DATA, 64, pub, 0, 0]), 0);
     assert.equal(state.lastError, NTE_BAD_SIGNATURE);
+    assert.equal(fns.CryptVerifySignatureW.handler([hash, DATA, 64, pub, 0, 0]), 0);
+    assert.equal(state.lastError, NTE_BAD_SIGNATURE);
+    assert.equal(fns.CryptVerifySignatureW.argBytes, 24);
 });
 
 test('a public key blob exports back the way it was imported', ()=>{
@@ -481,6 +486,12 @@ test('signing without a private key fails, and a bad blob is refused', ()=>{
     putDword(SIZE, 64);
     assert.equal(fns.CryptSignHashA.handler([hash, 2, 0, 0, BUFFER, SIZE]), 0);
     assert.equal(state.lastError, NTE_BAD_KEY);
+    state.lastError = 0;
+    assert.equal(fns.CryptSignHashW.handler([hash, 2, 0, 0, BUFFER, SIZE]), 0);
+    assert.equal(state.lastError, NTE_BAD_KEY, 'the wide form fails alike');
+    assert.equal(fns.CryptSignHashW.handler([0x9999, 2, 0, 0, BUFFER, SIZE]), 0);
+    assert.equal(state.lastError, NTE_BAD_HASH);
+    assert.equal(fns.CryptSignHashW.argBytes, 24);
 
     // An unknown blob type is refused outright.
     putBytes(BLOB, new Uint8Array([9, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));

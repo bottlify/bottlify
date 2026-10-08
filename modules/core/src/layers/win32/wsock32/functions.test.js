@@ -43,8 +43,8 @@ const TIMEVAL = 0x600;
  * `readMemory` hands back a view rather than a copy, exactly as the real memory
  * layer may, so anything that keeps what it read has to say so.
  */
-function fixture(){
-    const bytes = new Uint8Array(0x1000);
+function fixture(/** @type {Record<string, any>} */ extra = {}){
+    const bytes = new Uint8Array(0x40000);
     let nextHeap = 0x800;
     let thread = { name: 'main' };
     /** @type {{ hwnd: number, message: number, wParam: number, lParam: number }[]} */
@@ -85,6 +85,7 @@ function fixture(){
         post: message=>posted.push(message),
         /** @param {number} handle */
         signalEvent: handle=>signalled.push(handle),
+        ...extra,
     };
 
     const winsock = createWinsockFunctions(host);
@@ -793,4 +794,516 @@ test('WSACancelAsyncRequest stops the reply from ever being posted', async()=>{
     await Promise.resolve();
     await Promise.resolve();
     assert.equal(fx.posted.length, 0, 'the cancelled task never posts');
+});
+
+/**
+ * The kernel32 calls winsock reaches through its host: the events it makes
+ * and waits on, and a file ReadFile reads from.
+ *
+ * @param {Uint8Array} [file]
+ */
+function fakeKernel(file = new Uint8Array(0)){
+    /** @type {Map<number, { manual: boolean, signalled: boolean }>} */
+    const events = new Map();
+    /** @type {number[][]} */
+    const waits = [];
+    let next = 0x40;
+    let lastError = 0;
+    let position = 0;
+    /** @type {any} */
+    let memory = null;
+    /** @type {any} */
+    let waitAnswer = 0;
+    /** @param {number} handle */
+    const known = handle=>{
+        if (!events.has(handle))
+        {
+            lastError = 6;
+            return null;
+        }
+        return /** @type {{ manual: boolean, signalled: boolean }} */ (events.get(handle));
+    };
+    /** @type {Record<string, (args: number[]) => any>} */
+    const table = {
+        CreateEventA: ([, manual, initial])=>{
+            next += 4;
+            events.set(next, { manual: manual !== 0, signalled: initial !== 0 });
+            return next;
+        },
+        CloseHandle: ([handle])=>(known(handle) && events.delete(handle) ? 1 : 0),
+        SetEvent: ([handle])=>{
+            const event = known(handle);
+            return event ? (event.signalled = true, 1) : 0;
+        },
+        ResetEvent: ([handle])=>{
+            const event = known(handle);
+            return event ? (event.signalled = false, 1) : 0;
+        },
+        WaitForMultipleObjectsEx: args=>{
+            waits.push(args);
+            if (waitAnswer === 0xffffffff)
+            {
+                lastError = 6;
+            }
+            return waitAnswer;
+        },
+        GetLastError: ()=>lastError,
+        ReadFile: ([handle, buffer, wanted, read])=>{
+            if (handle !== 0x77)
+            {
+                lastError = 6;
+                return 0;
+            }
+            const bytes = file.subarray(position, position + wanted);
+            position += bytes.length;
+            memory.writeMemory(buffer, bytes);
+            memory.writeMemory(read, new Uint8Array(new Uint32Array([bytes.length]).buffer));
+            return 1;
+        },
+    };
+    return {
+        events,
+        waits,
+        kernel32: (/** @type {string} */ name)=>table[name],
+        /** @param {any} host */
+        attach(host){
+            memory = host;
+        },
+        /** @param {any} value */
+        answerWaits(value){
+            waitAnswer = value;
+        },
+    };
+}
+
+const WSA_INVALID_HANDLE = 6;
+const WSA_NOT_ENOUGH_MEMORY = 8;
+const WSA_INVALID_PARAMETER = 87;
+const WSA_OPERATION_ABORTED = 995;
+const WSA_IO_INCOMPLETE = 996;
+const WSAEAFNOSUPPORT = 10047;
+const WSAEFAULT = 10014;
+const WSAEOPNOTSUPP = 10045;
+const WSAESOCKTNOSUPPORT = 10044;
+const WSANO_DATA = 11004;
+const WSANO_RECOVERY = 11003;
+const WSATYPE_NOT_FOUND = 10109;
+const STATUS_PENDING = 0x103;
+/** A WSAOVERLAPPED, and the event it names. */
+const OVERLAPPED = 0x30000;
+const EVENT = 0x1234;
+/** Where the heap cannot reach in these tests: ADDRINFOA results, hints, a WSAPROTOCOL_INFO. */
+const RESULT = 0x30100;
+const HINTS = 0x30200;
+const INFO = 0x30300;
+const TEXT = 0x30400;
+const TEXT2 = 0x30480;
+
+/** @param {ReturnType<typeof fixture>} fx @param {number} hEvent */
+function overlapped(fx, hEvent = EVENT){
+    fx.bytes.fill(0xcc, OVERLAPPED, OVERLAPPED + 20);
+    fx.setDword(OVERLAPPED + 16, hEvent);
+    return OVERLAPPED;
+}
+
+/** @param {ReturnType<typeof fixture>} fx @param {number} address @param {string} text */
+function cstring(fx, address, text){
+    fx.bytes.set([...new TextEncoder().encode(text), 0], address);
+    return address;
+}
+
+test('the WSA event calls are the kernel\'s event calls, a manual-reset event made', ()=>{
+    const kernel = fakeKernel();
+    const fx = fixture({ kernel32: kernel.kernel32 });
+    const event = fx.call('WSACreateEvent');
+    assert.notEqual(event, 0);
+    assert.deepEqual(kernel.events.get(event), { manual: true, signalled: false },
+        'manual reset and not signalled, as WSACreateEvent documents');
+    assert.equal(fx.call('WSASetEvent', [event]), 1);
+    assert.equal(kernel.events.get(event)?.signalled, true);
+    assert.equal(fx.call('WSAResetEvent', [event]), 1);
+    assert.equal(kernel.events.get(event)?.signalled, false);
+    assert.equal(fx.call('WSACloseEvent', [event]), 1);
+
+    // The kernel's reason is the one WSAGetLastError reports: one slot on Windows.
+    assert.equal(fx.call('WSACloseEvent', [event]), 0);
+    assert.equal(fx.call('WSAGetLastError'), WSA_INVALID_HANDLE);
+    assert.equal(fx.call('WSASetEvent', [0x999]), 0);
+    assert.equal(fx.call('WSAResetEvent', [0x999]), 0);
+    assert.equal(fx.winsock.sockets.WSACreateEvent.argBytes, 0);
+    assert.equal(fx.winsock.sockets.WSACloseEvent.argBytes, 4);
+});
+
+test('WSAWaitForMultipleEvents is WaitForMultipleObjectsEx with the same five arguments', async()=>{
+    const kernel = fakeKernel();
+    const fx = fixture({ kernel32: kernel.kernel32 });
+    kernel.answerWaits(1);
+    assert.equal(fx.call('WSAWaitForMultipleEvents', [2, 0x500, 0, 100, 1]), 1);
+    assert.deepEqual(kernel.waits[0], [2, 0x500, 0, 100, 1]);
+
+    kernel.answerWaits(Promise.resolve(0x102));
+    assert.equal(await fx.call('WSAWaitForMultipleEvents', [1, 0x500, 1, 5, 0]), 0x102,
+        'a wait that blocks answers when the kernel does');
+
+    kernel.answerWaits(0xffffffff);
+    assert.equal(fx.call('WSAWaitForMultipleEvents', [1, 0x500, 0, 0, 0]), 0xffffffff);
+    assert.equal(fx.call('WSAGetLastError'), WSA_INVALID_HANDLE);
+
+    for (const count of [0, 65])
+    {
+        assert.equal(fx.call('WSAWaitForMultipleEvents', [count, 0x500, 0, 0, 0]), 0xffffffff);
+        assert.equal(fx.call('WSAGetLastError'), WSA_INVALID_PARAMETER);
+    }
+    assert.equal(kernel.waits.length, 3, 'a refused count never reaches the kernel');
+});
+
+test('without a kernel to reach, the event calls and TransmitFile are refused soundly', ()=>{
+    /** @type {string[]} */
+    const said = [];
+    const fx = fixture({ divergence: (/** @type {string} */ api)=>said.push(api) });
+    assert.equal(fx.call('WSACreateEvent'), 0, 'WSA_INVALID_EVENT');
+    assert.equal(fx.call('WSAGetLastError'), WSA_NOT_ENOUGH_MEMORY);
+    assert.equal(fx.call('WSACloseEvent', [0x40]), 0);
+    assert.equal(fx.call('WSAGetLastError'), WSA_INVALID_HANDLE);
+    assert.equal(fx.call('WSAWaitForMultipleEvents', [1, 0x500, 0, 0, 0]), 0xffffffff);
+    assert.equal(fx.call('TransmitFile', [1, 0, 0, 0, 0, 0, 0]), 0);
+    assert.equal(fx.call('WSAGetLastError'), WSAEOPNOTSUPP);
+    assert.equal(fx.winsock.sockets.TransmitFile.argBytes, 28);
+    assert.ok(said.includes('WSACreateEvent') && said.includes('TransmitFile'));
+});
+
+test('an overlapped WSARecv that waits completes in its WSAOVERLAPPED when bytes arrive',
+    async()=>{
+        const fx = fixture();
+        const { client, accepted } = connected(fx);
+        fx.setDword(WSABUF, 16);
+        fx.setDword(WSABUF + 4, BUFFER);
+        const ov = overlapped(fx);
+
+        assert.equal(fx.call('WSARecv', [accepted, WSABUF, 1, OUT, OUT2, ov, 0]), SOCKET_ERROR);
+        assert.equal(fx.call('WSAGetLastError'), WSA_IO_PENDING);
+        assert.equal(fx.dword(ov), STATUS_PENDING, 'Internal says pending while it lasts');
+        assert.equal(fx.call('WSAGetOverlappedResult', [accepted, ov, OUT, 0, OUT2]), 0);
+        assert.equal(fx.call('WSAGetLastError'), WSA_IO_INCOMPLETE);
+        const waited = fx.call('WSAGetOverlappedResult', [accepted, ov, OUT, 1, OUT2]);
+        assert.ok(waited instanceof Promise, 'fWait waits for the completion');
+
+        fx.put(TEXT, 'hello');
+        fx.setDword(WSABUF + 8, 5);
+        fx.setDword(WSABUF + 12, TEXT);
+        assert.equal(fx.call('WSASend', [client, WSABUF + 8, 1, OUT2, 0, 0, 0]), 0);
+        assert.equal(await waited, 1);
+        assert.equal(fx.dword(OUT), 5, 'the count the completion carried');
+        assert.equal(fx.read(BUFFER, 5), 'hello', 'into the buffers taken at the call');
+        assert.equal(fx.dword(ov), 0, 'Internal: STATUS_SUCCESS');
+        assert.equal(fx.dword(ov + 4), 5, 'InternalHigh: the bytes');
+        assert.deepEqual(fx.signalled, [EVENT], 'and its event signalled');
+        assert.equal(fx.registry.get(accepted).pending.length, 0, 'nothing left pending');
+    });
+
+test('an overlapped send completes at once, its event signalled as Windows does', ()=>{
+    const fx = fixture();
+    const { client } = connected(fx);
+    fx.put(TEXT, 'abc');
+    fx.setDword(WSABUF, 3);
+    fx.setDword(WSABUF + 4, TEXT);
+    const ov = overlapped(fx, EVENT | 1);
+    assert.equal(fx.call('WSASend', [client, WSABUF, 1, OUT, 0, ov, 0]), 0);
+    assert.equal(fx.dword(OUT), 3);
+    assert.equal(fx.dword(ov), 0);
+    assert.equal(fx.dword(ov + 4), 3);
+    assert.deepEqual(fx.signalled, [EVENT], 'the low bit is not part of the handle');
+    assert.equal(fx.call('WSAGetOverlappedResult', [client, ov, OUT2, 0, 0]), 1);
+    assert.equal(fx.dword(OUT2), 3);
+});
+
+test('a socket closed under a pending receive aborts it', async()=>{
+    const fx = fixture();
+    const { accepted } = connected(fx);
+    fx.setDword(WSABUF, 16);
+    fx.setDword(WSABUF + 4, BUFFER);
+    const ov = overlapped(fx);
+    fx.call('WSARecv', [accepted, WSABUF, 1, OUT, OUT2, ov, 0]);
+    const waited = fx.call('WSAGetOverlappedResult', [accepted, ov, OUT, 1, 0]);
+    assert.equal(fx.call('closesocket', [accepted]), 0);
+    // The socket is gone, so the result is asked about through the promise taken before.
+    await waited.catch(()=>0);
+    assert.notEqual(fx.dword(ov), STATUS_PENDING);
+    assert.notEqual(fx.dword(ov), 0, 'not a success');
+    assert.deepEqual(fx.signalled, [EVENT]);
+    const other = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+    assert.equal(fx.call('WSAGetOverlappedResult', [other, ov, OUT, 0, 0]), 0);
+    assert.equal(fx.call('WSAGetLastError'), WSA_OPERATION_ABORTED);
+});
+
+test('WSASendTo and WSARecvFrom carry a datagram and who sent it', async()=>{
+    const fx = fixture();
+    const receiver = fx.call('socket', [AF_INET, SOCK_DGRAM, 0]);
+    writeSockaddr(fx.host.writeMemory, NAME, { host: 0x7f000001, port: PORT });
+    assert.equal(fx.call('bind', [receiver, NAME, SOCKADDR_IN_SIZE]), 0);
+    const sender = fx.call('socket', [AF_INET, SOCK_DGRAM, 0]);
+
+    fx.put(TEXT, 'ping');
+    fx.setDword(WSABUF, 4);
+    fx.setDword(WSABUF + 4, TEXT);
+    assert.equal(fx.call('WSASendTo', [sender, WSABUF, 1, OUT, 0, NAME, 8, 0, 0]), SOCKET_ERROR,
+        'a length that cannot hold a sockaddr_in');
+    assert.equal(fx.call('WSAGetLastError'), WSAEFAULT);
+    assert.equal(fx.call('WSASendTo', [sender, WSABUF, 1, OUT, 0, NAME, SOCKADDR_IN_SIZE, 0, 0]),
+        0);
+    assert.equal(fx.dword(OUT), 4);
+
+    fx.setDword(WSABUF + 8, 16);
+    fx.setDword(WSABUF + 12, BUFFER);
+    fx.setDword(OUT2, 4);
+    assert.equal(fx.call('WSARecvFrom', [receiver, WSABUF + 8, 1, OUT, 0, NAME2, OUT2, 0, 0]),
+        SOCKET_ERROR, 'a from-length too short is refused before anything is taken');
+    assert.equal(fx.call('WSAGetLastError'), WSAEFAULT);
+    fx.setDword(OUT2, SOCKADDR_IN_SIZE);
+    fx.setDword(TIMEVAL, 0xdead);
+    assert.equal(fx.call('WSARecvFrom',
+        [receiver, WSABUF + 8, 1, OUT, TIMEVAL, NAME2, OUT2, 0, 0]), 0);
+    assert.equal(fx.dword(OUT), 4);
+    assert.equal(fx.dword(TIMEVAL), 0, 'the flags come back empty');
+    assert.equal(fx.read(BUFFER, 4), 'ping');
+    assert.equal(fx.bytes[NAME2], AF_INET);
+    assert.equal(fx.dword(OUT2), SOCKADDR_IN_SIZE);
+    assert.equal(fx.winsock.sockets.WSARecvFrom.argBytes, 36);
+    assert.equal(fx.winsock.sockets.WSASendTo.argBytes, 36);
+});
+
+test('a completion routine is refused, never accepted and left unrun', ()=>{
+    const fx = fixture();
+    const { client, accepted } = connected(fx);
+    fx.setDword(WSABUF, 1);
+    fx.setDword(WSABUF + 4, BUFFER);
+    for (const [name, args] of /** @type {[string, number[]][]} */ ([
+        ['WSARecv', [accepted, WSABUF, 1, OUT, OUT2, OVERLAPPED, 0x401000]],
+        ['WSASend', [client, WSABUF, 1, OUT, 0, OVERLAPPED, 0x401000]],
+        ['WSARecvFrom', [accepted, WSABUF, 1, OUT, OUT2, 0, 0, OVERLAPPED, 0x401000]],
+        ['WSASendTo', [client, WSABUF, 1, OUT, 0, 0, 0, OVERLAPPED, 0x401000]],
+    ]))
+    {
+        assert.equal(fx.call(name, args), SOCKET_ERROR, name);
+        assert.equal(fx.call('WSAGetLastError'), WSAEOPNOTSUPP, name);
+    }
+});
+
+test('WSAConnect connects and hands back no callee data', ()=>{
+    const fx = fixture();
+    const server = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+    writeSockaddr(fx.host.writeMemory, NAME, { host: 0, port: PORT });
+    fx.call('bind', [server, NAME, SOCKADDR_IN_SIZE]);
+    fx.call('listen', [server, 5]);
+    const client = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+    fx.setDword(WSABUF, 99);
+    assert.equal(fx.call('WSAConnect', [client, NAME, SOCKADDR_IN_SIZE, 0, WSABUF, 0, 0]), 0);
+    assert.equal(fx.dword(WSABUF), 0, 'the WSABUF\'s length is zero');
+    assert.notEqual(fx.call('accept', [server, 0, 0]), INVALID_SOCKET);
+    assert.equal(fx.call('WSAConnect', [0x999, NAME, SOCKADDR_IN_SIZE, 0, 0, 0, 0]),
+        SOCKET_ERROR);
+    assert.equal(fx.call('WSAGetLastError'), WSAENOTSOCK);
+});
+
+test('WSASocketA takes FROM_PROTOCOL_INFO from the description it is handed', ()=>{
+    const fx = fixture();
+    fx.setDword(INFO + 76, AF_INET);
+    fx.setDword(INFO + 88, SOCK_DGRAM);
+    fx.setDword(INFO + 92, 17);
+    const made = fx.call('WSASocketA', [0xffffffff, 0xffffffff, 0xffffffff, INFO, 0, 1]);
+    assert.notEqual(made, INVALID_SOCKET);
+    assert.equal(fx.registry.get(made).type, SOCK_DGRAM);
+    const plain = fx.call('WSASocketA', [AF_INET, SOCK_STREAM, 6, 0, 0, 1]);
+    assert.equal(fx.registry.get(plain).type, SOCK_STREAM);
+    assert.equal(fx.call('WSASocketA', [AF_INET, SOCK_STREAM, 6, 0, 1, 0]), INVALID_SOCKET,
+        'a socket group is not one this stack forms');
+    assert.equal(fx.call('WSAGetLastError'), WSAEINVAL);
+    assert.equal(fx.call('WSASocketA', [23, SOCK_STREAM, 0, 0, 0, 0]), INVALID_SOCKET);
+    assert.equal(fx.call('WSAGetLastError'), WSAEAFNOSUPPORT);
+});
+
+/** @param {ReturnType<typeof fixture>} fx @param {number} node */
+function addrinfoAt(fx, node){
+    return {
+        flags: fx.dword(node), family: fx.dword(node + 4), socktype: fx.dword(node + 8),
+        protocol: fx.dword(node + 12), addrlen: fx.dword(node + 16),
+        canonname: fx.dword(node + 20), addr: fx.dword(node + 24), next: fx.dword(node + 28),
+    };
+}
+
+test('getaddrinfo answers a list of ADDRINFOA in guest memory, and freeaddrinfo takes it back',
+    ()=>{
+        /** @type {number[]} */
+        const freed = [];
+        const fx = fixture();
+        /** @type {any} */ (fx.host.heap).free = (/** @type {number} */ address)=>
+            freed.push(address);
+        cstring(fx, TEXT, 'localhost');
+        cstring(fx, TEXT2, 'http');
+        fx.bytes.fill(0, HINTS, HINTS + 32);
+        fx.setDword(HINTS, 2);
+        fx.setDword(HINTS + 8, SOCK_STREAM);
+        fx.setDword(HINTS + 12, 6);
+        assert.equal(fx.call('getaddrinfo', [TEXT, TEXT2, HINTS, RESULT]), 0);
+        const node = fx.dword(RESULT);
+        const info = addrinfoAt(fx, node);
+        assert.deepEqual({ ...info, canonname: info.canonname !== 0, addr: info.addr !== 0 }, {
+            flags: 0, family: AF_INET, socktype: SOCK_STREAM, protocol: 6,
+            addrlen: SOCKADDR_IN_SIZE, canonname: true, addr: true, next: 0,
+        });
+        assert.equal(fx.host.readCString(info.canonname, 64), 'localhost', 'AI_CANONNAME');
+        assert.equal(fx.bytes[info.addr], AF_INET);
+        assert.deepEqual([...fx.bytes.subarray(info.addr + 2, info.addr + 8)],
+            [0, 80, 127, 0, 0, 1], 'the port and the address in network order');
+
+        fx.call('freeaddrinfo', [node]);
+        assert.deepEqual(freed, [node]);
+        fx.call('freeaddrinfo', [node]);
+        fx.call('freeaddrinfo', [0x1234]);
+        assert.deepEqual(freed, [node], 'a node it did not make, or made and took back, is left');
+    });
+
+test('getaddrinfo with no node is the loopback, or any address with AI_PASSIVE', ()=>{
+    const fx = fixture();
+    cstring(fx, TEXT2, '6112');
+    assert.equal(fx.call('getaddrinfo', [0, TEXT2, 0, RESULT]), 0);
+    let info = addrinfoAt(fx, fx.dword(RESULT));
+    assert.deepEqual([...fx.bytes.subarray(info.addr + 2, info.addr + 8)],
+        [0x17, 0xe0, 127, 0, 0, 1]);
+    assert.equal(info.canonname, 0);
+    assert.equal(info.socktype, 0, 'the hints\' type, which was none');
+
+    fx.bytes.fill(0, HINTS, HINTS + 32);
+    fx.setDword(HINTS, 1);
+    assert.equal(fx.call('getaddrinfo', [0, TEXT2, HINTS, RESULT]), 0);
+    info = addrinfoAt(fx, fx.dword(RESULT));
+    assert.equal(fx.dword(info.addr + 4), 0, 'INADDR_ANY');
+});
+
+test('getaddrinfo refuses what Windows refuses, with the code as its answer', ()=>{
+    const fx = fixture();
+    cstring(fx, TEXT, 'example.invalid');
+    cstring(fx, TEXT2, 'no-such-service');
+    const name = cstring(fx, TEXT + 0x20, '10.0.0.1');
+    /** @param {number[]} hints @returns {number} */
+    const hinted = hints=>{
+        fx.bytes.fill(0, HINTS, HINTS + 32);
+        hints.forEach((value, at)=>fx.setDword(HINTS + at * 4, value));
+        return HINTS;
+    };
+    fx.setDword(RESULT, 0xdead);
+    assert.equal(fx.call('getaddrinfo', [TEXT, 0, 0, RESULT]), WSAHOST_NOT_FOUND,
+        'a name with no resolver to ask');
+    assert.equal(fx.dword(RESULT), 0, 'and the result is NULL');
+    assert.equal(fx.call('WSAGetLastError'), WSAHOST_NOT_FOUND, 'the slot holds it too');
+    assert.equal(fx.call('getaddrinfo', [0, 0, 0, RESULT]), WSAHOST_NOT_FOUND);
+    assert.equal(fx.call('getaddrinfo', [name, TEXT2, 0, RESULT]), WSATYPE_NOT_FOUND);
+    assert.equal(fx.call('getaddrinfo', [name, 0, hinted([0, 23]), RESULT]), WSAEAFNOSUPPORT,
+        'no IPv6 stack, as on an XP that did not install one');
+    assert.equal(fx.call('getaddrinfo', [name, 0, hinted([0, 0, 9]), RESULT]), WSAESOCKTNOSUPPORT);
+    assert.equal(fx.call('getaddrinfo', [name, 0, hinted([0x100]), RESULT]), WSAEINVAL);
+    assert.equal(fx.call('getaddrinfo', [0, cstring(fx, TEXT2, '80'), hinted([2]), RESULT]),
+        WSAEINVAL, 'AI_CANONNAME with no node');
+    assert.equal(fx.call('getaddrinfo', [name, 0, hinted([0, 0, 0, 0, 16]), RESULT]),
+        WSANO_RECOVERY, 'a hint whose other members are not zero');
+    cstring(fx, TEXT, 'localhost');
+    assert.equal(fx.call('getaddrinfo', [TEXT, 0, hinted([4]), RESULT]), WSAHOST_NOT_FOUND,
+        'AI_NUMERICHOST and a name');
+    assert.equal(fx.call('getaddrinfo', [name, 0, hinted([4]), RESULT]), 0);
+
+    fx.call('WSACleanup');
+    assert.equal(fx.call('getaddrinfo', [name, 0, 0, RESULT]), WSANOTINITIALISED);
+});
+
+test('getaddrinfo asks the transport\'s resolver and lists every address it gave', async()=>{
+    const fx = fixture();
+    fx.registry.resolve = ()=>Promise.resolve([0x0a000001, 0x0a000002]);
+    cstring(fx, TEXT, 'server.example');
+    const answered = fx.call('getaddrinfo', [TEXT, 0, 0, RESULT]);
+    assert.ok(answered instanceof Promise);
+    assert.equal(await answered, 0);
+    const first = addrinfoAt(fx, fx.dword(RESULT));
+    const second = addrinfoAt(fx, first.next);
+    assert.equal(fx.dword(first.addr + 4), 0x0100000a);
+    assert.equal(fx.dword(second.addr + 4), 0x0200000a);
+    assert.equal(second.next, 0);
+
+    fx.registry.resolve = ()=>Promise.resolve([]);
+    assert.equal(await fx.call('getaddrinfo', [TEXT, 0, 0, RESULT]), WSAHOST_NOT_FOUND);
+});
+
+test('getnameinfo names the loopback and the services file\'s ports, numbers otherwise', ()=>{
+    const fx = fixture();
+    writeSockaddr(fx.host.writeMemory, NAME, { host: 0x7f000001, port: 80 });
+    assert.equal(fx.call('getnameinfo', [NAME, SOCKADDR_IN_SIZE, TEXT, 64, TEXT2, 32, 0]), 0);
+    assert.equal(fx.host.readCString(TEXT, 64), 'bottlify');
+    assert.equal(fx.host.readCString(TEXT2, 32), 'http');
+    assert.equal(fx.call('getnameinfo', [NAME, SOCKADDR_IN_SIZE, TEXT, 64, TEXT2, 32, 0x0a]), 0);
+    assert.equal(fx.host.readCString(TEXT, 64), '127.0.0.1', 'NI_NUMERICHOST');
+    assert.equal(fx.host.readCString(TEXT2, 32), '80', 'NI_NUMERICSERV');
+
+    writeSockaddr(fx.host.writeMemory, NAME, { host: 0x0a000001, port: 6112 });
+    assert.equal(fx.call('getnameinfo', [NAME, SOCKADDR_IN_SIZE, TEXT, 64, TEXT2, 32, 0]), 0);
+    assert.equal(fx.host.readCString(TEXT, 64), '10.0.0.1');
+    assert.equal(fx.host.readCString(TEXT2, 32), '6112');
+    assert.equal(fx.call('getnameinfo', [NAME, SOCKADDR_IN_SIZE, TEXT, 64, 0, 0, 4]),
+        WSAHOST_NOT_FOUND, 'NI_NAMEREQD and no name');
+    assert.equal(fx.call('getnameinfo', [NAME, SOCKADDR_IN_SIZE, TEXT, 4, 0, 0, 0]), WSAEFAULT,
+        'a buffer too small');
+    assert.equal(fx.call('getnameinfo', [NAME, 8, TEXT, 64, 0, 0, 0]), WSAEFAULT);
+    assert.equal(fx.call('getnameinfo', [NAME, SOCKADDR_IN_SIZE, 0, 0, 0, 0, 0]),
+        WSAHOST_NOT_FOUND, 'nothing asked for');
+    fx.bytes[NAME] = 23;
+    assert.equal(fx.call('getnameinfo', [NAME, 28, TEXT, 64, 0, 0, 0]), WSAEAFNOSUPPORT);
+});
+
+test('getprotobyname and getprotobynumber read the protocol file, and wsock32 #53 is one', ()=>{
+    const fx = fixture();
+    /** @param {number} entry */
+    const protoent = entry=>({
+        name: fx.host.readCString(fx.dword(entry), 32),
+        alias: fx.host.readCString(fx.dword(fx.dword(entry + 4)), 32),
+        aliasesEnd: fx.dword(fx.dword(entry + 4) + 4),
+        number: fx.dword(entry + 8) & 0xffff,
+    });
+    const tcp = fx.call('getprotobyname', [cstring(fx, TEXT, 'tcp')]);
+    assert.deepEqual(protoent(tcp), { name: 'tcp', alias: 'TCP', aliasesEnd: 0, number: 6 });
+    const udp = fx.call('getprotobyname', [cstring(fx, TEXT, 'UDP')]);
+    assert.deepEqual(protoent(udp).number, 17, 'by its alias, in any case');
+    assert.deepEqual(protoent(fx.call('getprotobynumber', [1])).name, 'icmp');
+    assert.equal(fx.call('getprotobyname', [cstring(fx, TEXT, 'sctp')]), 0);
+    assert.equal(fx.call('WSAGetLastError'), WSANO_DATA);
+    assert.equal(fx.call('getprotobynumber', [132]), 0);
+    assert.equal(fx.winsock.ordinals.wsock32[53], 'getprotobyname');
+    assert.equal(fx.winsock.ordinals.wsock32[54], 'getprotobynumber');
+});
+
+test('TransmitFile sends the head, the file through ReadFile, and the tail as one', async()=>{
+    const body = new TextEncoder().encode('-file-');
+    const kernel = fakeKernel(body);
+    const fx = fixture({ kernel32: kernel.kernel32 });
+    kernel.attach(fx.host);
+    const { client, accepted } = connected(fx);
+    fx.put(TEXT, '<');
+    fx.put(TEXT2, '>');
+    fx.setDword(INFO, TEXT);
+    fx.setDword(INFO + 4, 1);
+    fx.setDword(INFO + 8, TEXT2);
+    fx.setDword(INFO + 12, 1);
+    const ov = overlapped(fx);
+    assert.equal(fx.call('TransmitFile', [client, 0x77, 0, 0, ov, INFO, 0]), 1);
+    assert.equal(fx.dword(ov + 4), 8);
+    assert.deepEqual(fx.signalled, [EVENT]);
+    assert.equal(await fx.call('recv', [accepted, BUFFER, 64, 0]), 8);
+    assert.equal(fx.read(BUFFER, 8), '<-file->');
+
+    assert.equal(fx.call('TransmitFile', [client, 0x66, 0, 0, 0, 0, 0]), 0,
+        'a handle ReadFile refuses');
+    assert.equal(fx.call('WSAGetLastError'), WSA_INVALID_HANDLE);
+    assert.equal(fx.call('TransmitFile', [client, 0, 0, 0, 0, 0, 2]), 0,
+        'TF_REUSE_SOCKET needs TF_DISCONNECT');
+    assert.equal(fx.call('WSAGetLastError'), WSAEINVAL);
+    assert.equal(fx.call('TransmitFile', [client, 0, 0, 0, 0, INFO, 1]), 1,
+        'the buffers alone, then the disconnect');
+    assert.equal(fx.call('send', [client, TEXT, 1, 0]), SOCKET_ERROR, 'shut down after');
 });

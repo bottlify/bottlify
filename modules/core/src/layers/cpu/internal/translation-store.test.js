@@ -17,7 +17,8 @@ import {
  * replaces what is there, and, when asked for, the synchronous access handle a
  * worker gets from the origin's file system.
  *
- * @param {{ probes: number, syncReads: number, writes?: number, writeMs?: number }} [counter]
+ * @param {{ probes: number, syncReads: number, writes?: number, writeMs?: number,
+ *     writables?: number }} [counter]
  * @param {boolean} [sync]
  */
 function fakeDirectory(counter = { probes: 0, syncReads: 0 }, sync = false){
@@ -72,6 +73,7 @@ function fakeDirectory(counter = { probes: 0, syncReads: 0 }, sync = false){
                     },
                     /** @param {{ keepExistingData?: boolean }} [how] */
                     async createWritable(how = {}){
+                        counter.writables = (counter.writables ?? 0) + 1;
                         let draft = how.keepExistingData
                             ? new Uint8Array(file.bytes) : new Uint8Array(0);
                         return {
@@ -541,6 +543,30 @@ test('a page\'s store, with no synchronous handle, answers only through get', as
     await store.prepare();
     assert.equal(store.getNow('cork/1/a'), undefined);
     assert.deepEqual([...await store.get('cork/1/a') ?? []], [5]);
+});
+
+test('a page\'s store opens one stream for the puts that arrive while one is queued', async()=>{
+    // Each stream copies the whole records file: one per put made a run's
+    // thousands of regions a copy of a growing file each.
+    const root = fakeDirectory();
+    const store = await createDirectoryTranslationStore(root, 'bundle');
+    await store.prepare();
+    const before = root.counter.writables ?? 0;
+    const COUNT = 64;
+    await Promise.all(Array.from({ length: COUNT },
+        (_, i)=>store.put(`cork/1/many/${i}`, new Uint8Array([i, 255 - i]))));
+    await store.flush();
+    const bundle = root.children.get('cork').children.get(`bundle.v${STORE_VERSION}`);
+    const records = bundle.children.get('records') ?? bundle.children.get('records.1');
+    assert.equal(records.bytes.length, COUNT * 2, 'every record landed');
+    // The index takes its own streams; the records take one for the batch.
+    assert.ok((root.counter.writables ?? 0) - before <= 4,
+        `${(root.counter.writables ?? 0) - before} streams for ${COUNT} puts`);
+    const reopened = await createDirectoryTranslationStore(root, 'bundle');
+    for (let i = 0; i < COUNT; i++)
+    {
+        assert.deepEqual([...await reopened.get(`cork/1/many/${i}`) ?? []], [i, 255 - i]);
+    }
 });
 
 test('while a seed is on its way a lookup is not answered at once', async()=>{

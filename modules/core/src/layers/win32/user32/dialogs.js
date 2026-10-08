@@ -293,12 +293,15 @@ const MAX_RESOURCE_NAME = 256;
  *           The dialog class's procedure: DWLP_DLGPROC first, then the default.
  * @property {() => number} focus
  * @property {(hwnd: number, thread?: unknown) => number | Promise<number>} setFocus
- * @property {(hwnd: number) => number | Promise<number>} [show]
+ * @property {(hwnd: number, thread?: unknown) => number | Promise<number>} [show]
  *           Shows a window as ShowWindow(SW_SHOW) would, answering once the
- *           procedures it sent to have.
- * @property {(hwnd: number) => number | Promise<number>} [hide]  And hides one.
- * @property {(hwnd: number, enable: boolean) => number | Promise<number>} [enable]
- *           EnableWindow, as the program would call it.
+ *           procedures it sent to have. `thread` is whose call it answers:
+ *           past an await the thread on the processor is another, and what
+ *           the show sends would be built on that one's stack.
+ * @property {(hwnd: number, thread?: unknown) => number | Promise<number>} [hide]
+ *           And hides one.
+ * @property {(hwnd: number, enable: boolean, thread?: unknown) => number | Promise<number>}
+ *     [enable]  EnableWindow, as the program would call it.
  * @property {(instance: number, name: number, type: number) => number | Promise<number>
  *     } [loadImage]  LoadImage of a module's resource, by ordinal or by a
  *     UTF-16 name in guest memory.
@@ -565,6 +568,19 @@ export function createDialogFunctions(options){
     };
 
     /**
+     * A message a program's own call sends, as SendMessage sends it: to a
+     * control of another thread's dialog it waits for that thread to run the
+     * control's procedure -- a skinned control keeps what it paints with on
+     * the thread that made it.
+     *
+     * @param {number} hwnd @param {number} message @param {number} wParam
+     * @param {number} lParam
+     * @returns {number | Promise<number | null>}
+     */
+    const programSend = (hwnd, message, wParam, lParam)=>(host.sendAcross ?? host.send)(hwnd,
+        message, wParam, lParam, host.callerThread?.());
+
+    /**
      * A control by identifier: an immediate child first, then any deeper
      * one, which is where a control inside a group or a page lives.
      *
@@ -616,8 +632,16 @@ export function createDialogFunctions(options){
      * @param {number} dialogFunc @param {number} initParam
      * @param {boolean} [unicode]  Made through a wide call: the dialog is a
      *     Unicode window, and its procedure reads wide text.
+     * @param {unknown} [caller]  Whose call makes it, and so whose windows the
+     *     dialog and its controls are: named by a caller that awaited before
+     *     making it -- DialogBox waits on its owner's thread to take
+     *     WM_ENABLE -- or the windows are the thread's then on the processor,
+     *     and the modal loop never takes their messages.
      */
-    const createDialog = (instance, template, parent, dialogFunc, initParam, unicode = false)=>{
+    const createDialog = (instance, template, parent, dialogFunc, initParam, unicode = false,
+        caller = undefined)=>
+    {
+        const thread = caller ?? host.callerThread?.();
         const described = (template >>> 0) === 0
             ? null
             : parseTemplate(template >>> 0);
@@ -683,6 +707,7 @@ export function createDialogFunctions(options){
         const wantsVisible = (described.style & WS_VISIBLE) !== 0;
         const dialog = makeWindow({
             className: '#32770',
+            thread,
             unicode,
             title: described.title,
             style: (dialogStyle & ~WS_VISIBLE) >>> 0,
@@ -744,6 +769,7 @@ export function createDialogFunctions(options){
                 };
                 const record = makeWindow({
                     className: control.className,
+                    thread,
                     title: control.title,
                     style,
                     exStyle: extended,
@@ -776,7 +802,6 @@ export function createDialogFunctions(options){
             // Every control is told the dialog's font once it exists and has
             // set itself up, as the dialog manager tells it: before
             // WM_INITDIALOG, and after the program's own WM_CREATE.
-            const thread = host.callerThread?.();
             // One control at a time, for the reason they are made one at a time.
             /** @param {number} index @returns {any} */
             const setFonts = (index = 0)=>(font === 0 || index >= controls.length ? 0
@@ -798,7 +823,7 @@ export function createDialogFunctions(options){
                     const standing = live(dialog.hwnd);
                     if (wantsVisible && standing && !standing.dialogEnded)
                     {
-                        return after(host.show?.(dialog.hwnd) ?? 0, ()=>dialog.hwnd);
+                        return after(host.show?.(dialog.hwnd, thread) ?? 0, ()=>dialog.hwnd);
                     }
                     return dialog.hwnd;
                 });
@@ -809,7 +834,7 @@ export function createDialogFunctions(options){
             return after(after(createFrom(0), ()=>setFonts()), initialise);
         };
         return after(announce(dialog, [exStyle, 0, 0, dialog.style, x, y, width, height,
-            parent >>> 0, 0, instance >>> 0, initParam >>> 0]),
+            parent >>> 0, 0, instance >>> 0, initParam >>> 0], false, thread),
         (/** @type {number} */ made)=>(made === 0 ? 0 : build()));
     };
 
@@ -1018,7 +1043,7 @@ export function createDialogFunctions(options){
         // One its WM_INITDIALOG already ended is not shown at all.
         if (!record.dialogEnded)
         {
-            await host.show?.(hwnd);
+            await host.show?.(hwnd, thread);
         }
         // Unattended, a dialog waiting for input is put to whoever answers for
         // the run, and the button chosen is pressed as a click presses it; one
@@ -1146,9 +1171,9 @@ export function createDialogFunctions(options){
         const owner = modalOwner(parent);
         const disabled = owner && (owner.style & WS_DISABLED) === 0 ? owner.hwnd : 0;
         /** @param {boolean} on */
-        const enable = on=>(disabled !== 0 ? host.enable?.(disabled, on) ?? 0 : 0);
+        const enable = on=>(disabled !== 0 ? host.enable?.(disabled, on, thread) ?? 0 : 0);
         return once(after(enable(false), ()=>createDialog(instance, template,
-            owner ? owner.hwnd : parent, dialogFunc, initParam, unicode)),
+            owner ? owner.hwnd : parent, dialogFunc, initParam, unicode, thread)),
         hwnd=>(hwnd === 0 ? after(enable(true), ()=>DIALOG_FAILED)
             : runModal(hwnd, thread, undefined, owner?.hwnd ?? 0)));
     };
@@ -1224,6 +1249,29 @@ export function createDialogFunctions(options){
             handler: ([instance, name, parent, dialogFunc, initParam])=>
                 dialogBox(instance, templateAddress(instance, name), parent, dialogFunc,
                     initParam),
+        },
+
+        /**
+         * HWND CreateDialogIndirectParamAorW(HINSTANCE hInstance, LPCVOID lpTemplate,
+         *   HWND hWndParent, DLGPROC lpDialogFunc, LPARAM dwInitParam, DWORD flags)
+         * INT_PTR DialogBoxIndirectParamAorW(..., DWORD flags)
+         *
+         * The two calls the A and W forms are made of: a flags of zero is
+         * the Unicode dialog, any other (DLG_ISANSI) the ANSI one -- which
+         * decides what its procedure is handed, not how the template reads.
+         */
+        CreateDialogIndirectParamAorW: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([instance, template, parent, dialogFunc, initParam, flags])=>
+                createDialog(instance, template, parent, dialogFunc, initParam,
+                    (flags >>> 0) === 0),
+        },
+        DialogBoxIndirectParamAorW: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([instance, template, parent, dialogFunc, initParam, flags])=>
+                dialogBox(instance, template, parent, dialogFunc, initParam, (flags >>> 0) === 0),
         },
 
         /** HWND CreateDialogIndirectParamW(...), a Unicode dialog. */
@@ -1332,8 +1380,9 @@ export function createDialogFunctions(options){
                 // The window it belongs to -- its parent, or the owner of one
                 // on the desktop -- is enabled, whoever disabled it.
                 const above = record.parent !== 0 ? record.parent : record.owner ?? 0;
-                return after(live(above) ? host.enable?.(above, true) ?? 0 : 0,
-                    ()=>after(host.hide?.(hwnd >>> 0) ?? 0, ()=>1));
+                const thread = host.callerThread?.();
+                return after(live(above) ? host.enable?.(above, true, thread) ?? 0 : 0,
+                    ()=>after(host.hide?.(hwnd >>> 0, thread) ?? 0, ()=>1));
             },
         },
 
@@ -1361,9 +1410,7 @@ export function createDialogFunctions(options){
                 {
                     return 0;
                 }
-                const told = host.send(control.hwnd, BM_SETCHECK, check >>> 0, 0,
-                    host.callerThread?.());
-                return typeof told === 'number' ? 1 : Promise.resolve(told).then(()=>1);
+                return after(programSend(control.hwnd, BM_SETCHECK, check >>> 0, 0), ()=>1);
             },
         },
 
@@ -1382,9 +1429,8 @@ export function createDialogFunctions(options){
                 {
                     return 0;
                 }
-                const told = host.send(control.hwnd, BM_GETCHECK, 0, 0, host.callerThread?.());
-                return typeof told === 'number'
-                    ? told >>> 0 : Promise.resolve(told).then(state=>Number(state) >>> 0);
+                return after(programSend(control.hwnd, BM_GETCHECK, 0, 0),
+                    state=>Number(state) >>> 0);
             },
         },
 
@@ -1405,11 +1451,10 @@ export function createDialogFunctions(options){
                 {
                     return 0;
                 }
-                const thread = host.callerThread?.();
                 const told = host.children(dialog)
                     .filter(record=>(record.id | 0) >= (first | 0) && (record.id | 0) <= (last | 0))
-                    .map(record=>host.send(record.hwnd, BM_SETCHECK,
-                        (record.id | 0) === (check | 0) ? BST_CHECKED : BST_UNCHECKED, 0, thread));
+                    .map(record=>programSend(record.hwnd, BM_SETCHECK,
+                        (record.id | 0) === (check | 0) ? BST_CHECKED : BST_UNCHECKED, 0));
                 return told.some(answer=>typeof answer !== 'number')
                     ? Promise.all(told).then(()=>1)
                     : 1;
@@ -1474,8 +1519,7 @@ export function createDialogFunctions(options){
                 {
                     return 0;
                 }
-                return after(host.send(control.hwnd, WM_SETTEXT, 0, text >>> 0,
-                    host.callerThread?.()), ()=>1);
+                return after(programSend(control.hwnd, WM_SETTEXT, 0, text >>> 0), ()=>1);
             },
         },
 
@@ -1565,8 +1609,7 @@ export function createDialogFunctions(options){
                     return 0;
                 }
                 writeString(address, text, text.length + 1);
-                return after(host.send(control.hwnd, WM_SETTEXT, 0, address,
-                    host.callerThread?.()), ()=>{
+                return after(programSend(control.hwnd, WM_SETTEXT, 0, address), ()=>{
                     host.release?.(address);
                     return 1;
                 });

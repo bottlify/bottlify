@@ -963,9 +963,13 @@ test('a control of a class the program registered is the window of that class', 
     const meter = fns.GetDlgItem.handler([dialog, 201]);
     assert.notEqual(meter, 0);
     const WM_CREATE = 0x0001;
+    const WM_SIZE = 0x0005;
+    const WM_MOVE = 0x0003;
     assert.deepEqual(seen.map(call=>[call.wndProc, call.message]),
-        [[METER_PROC, WM_NCCREATE], [METER_PROC, WM_CREATE], [DIALOGPROC, WM_INITDIALOG]],
-        'the control was told it exists, then the dialog initialised, all during the call');
+        [[METER_PROC, WM_NCCREATE], [METER_PROC, WM_CREATE], [METER_PROC, WM_SIZE],
+            [METER_PROC, WM_MOVE], [DIALOGPROC, WM_INITDIALOG]],
+        'the control was told it exists and its size, then the dialog initialised, all'
+        + ' during the call');
     assert.equal(memory.u32(seen[0].lParam + 12), dialog, 'CREATESTRUCT.hwndParent');
     assert.equal(memory.u32(seen[0].lParam + 8), 201, 'CREATESTRUCT.hMenu is the id');
     assert.equal(fns.SetWindowWord.handler([meter, 0, 7]), 0, 'and it has the extra bytes');
@@ -1581,8 +1585,13 @@ test('a template\'s controls are made one after another, each handed its creatio
     const dialog = await creating;
     assert.notEqual(dialog, 0);
     const [first, second] = [301, 302].map(id=>fns.GetDlgItem.handler([dialog, id]));
+    // Each, as CreateWindowEx tells a child, then hears its size and place.
+    const WM_SIZE = 0x0005;
+    const WM_MOVE = 0x0003;
     assert.deepEqual(order, [`${first}:${WM_NCCREATE}`, `${first}:${WM_CREATE}`,
-        `${second}:${WM_NCCREATE}`, `${second}:${WM_CREATE}`]);
+        `${first}:${WM_SIZE}`, `${first}:${WM_MOVE}`,
+        `${second}:${WM_NCCREATE}`, `${second}:${WM_CREATE}`,
+        `${second}:${WM_SIZE}`, `${second}:${WM_MOVE}`]);
     assert.deepEqual(data, [[6, 7, 8], []], 'the size word, then the data; NULL for none');
 });
 
@@ -1832,4 +1841,39 @@ test('SetDlgItemInt sets the number as text, signed when asked', ()=>{
     assert.equal(set(-5, 0), '4294967291', 'unsigned, the same bits are a large number');
     assert.equal(fns.GetDlgItemInt.handler([dialog, 300, 0, 0]), 4294967291);
     assert.equal(fns.SetDlgItemInt.handler([dialog, 999, 1, 0]), 0, 'no such control');
+});
+
+test('the AorW calls make the Unicode dialog for flags zero and the ANSI one otherwise', async()=>{
+    // DLG_ISANSI is the 2 CreateDialogIndirectParamA passes on; zero is
+    // the W form. What differs is the encoding the procedure is handed.
+    const DLG_ISANSI = 2;
+    /** @type {any} */
+    let table = null;
+    const { memory, fns } = setup({
+        dispatch: (wndProc, message)=>{
+            if (message.message === 0x0110)
+            {
+                table.EndDialog.handler([message.hwnd, table.IsWindowUnicode.handler([
+                    message.hwnd]) + 40]);
+            }
+            return 0;
+        },
+    });
+    table = fns;
+    putTemplate(memory, [{ id: 100, x: 4, y: 8, cx: 20, cy: 6, title: 'OK' }]);
+    const wide = fns.CreateDialogIndirectParamAorW.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0, 0]);
+    assert.notEqual(wide, 0);
+    assert.equal(fns.IsWindowUnicode.handler([wide]), 1);
+    const ansi = fns.CreateDialogIndirectParamAorW.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0, DLG_ISANSI]);
+    assert.equal(fns.IsWindowUnicode.handler([ansi]), 0);
+    assert.equal(fns.CreateDialogIndirectParamAorW.argBytes, 24);
+
+    assert.equal(await fns.DialogBoxIndirectParamAorW.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0, 0]), 41, 'modal and Unicode');
+    assert.equal(await fns.DialogBoxIndirectParamAorW.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0, DLG_ISANSI]), 40, 'modal and ANSI');
+    assert.equal(fns.DialogBoxIndirectParamAorW.handler([HINSTANCE, 0, 0, DIALOGPROC, 0, 0]), -1);
+    assert.equal(fns.DialogBoxIndirectParamAorW.argBytes, 24);
 });

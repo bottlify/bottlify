@@ -1037,3 +1037,38 @@ test('a docfile written by hand is what the objects read', ()=>{
     assert.equal(call(host.u32(OUT), 'OpenStream', [NAME, 0, RO, 0, OUT2]), S_OK);
     assert.deepEqual(read(host.u32(OUT2), 10), Uint8Array.of(9, 8, 7));
 });
+
+test('StgOpenStorageEx opens a docfile as StgOpenStorage does, in the formats that are one', ()=>{
+    // A compound file opens in STGFMT_STORAGE, STGFMT_DOCFILE and STGFMT_ANY;
+    // STGFMT_FILE and an interface that is no IStorage are what is refused.
+    const { host, fns, call, createDocfile } = setup();
+    const root = createDocfile();
+    assert.equal(host.release(root), 0);
+    const IID_AT = 0x3300;
+    host.putGuid(IID_AT, IID_ISTORAGE);
+    host.putWide(NAME, PATH);
+    const open = fns.StgOpenStorageEx;
+    assert.equal(open.argBytes, 32);
+    for (const format of [0, 4, 5])
+    {
+        host.putU32(OUT, 0xdeadbeef);
+        assert.equal(open.handler([NAME, RO, format, 0, 0, 0, IID_AT, OUT]), S_OK, `${format}`);
+        const storage = host.u32(OUT);
+        assert.equal(call(storage, 'Stat', [STAT, STATFLAG_NONAME]), S_OK);
+        assert.equal(host.u32(STAT + 4), STGTY_STORAGE);
+        assert.equal(host.release(storage), 0);
+    }
+    host.putU32(OUT, 0xdeadbeef);
+    assert.equal(open.handler([NAME, RO, 3, 0, 0, 0, IID_AT, OUT]), 0x80030057 | 0,
+        'STGFMT_FILE: STG_E_INVALIDPARAMETER');
+    assert.equal(host.u32(OUT), 0, 'the out-parameter is zeroed on failure');
+    assert.equal(host.reported.length, 1);
+    host.putGuid(IID_AT, IID_ISTREAM);
+    assert.equal(open.handler([NAME, RO, 5, 0, 0, 0, IID_AT, OUT]), 0x80004002 | 0,
+        'E_NOINTERFACE');
+    host.putGuid(IID_AT, IID_ISTORAGE);
+    host.putWide(NAME, 'C:\\App\\missing.stg');
+    assert.equal(open.handler([NAME, RO, 5, 0, 0, 0, IID_AT, OUT]), STG_E_FILENOTFOUND);
+    assert.equal(open.handler([NAME, RO, 5, 0, 0, 0, IID_AT, 0]), 0x80030009 | 0,
+        'STG_E_INVALIDPOINTER');
+});

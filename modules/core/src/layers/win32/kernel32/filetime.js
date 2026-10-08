@@ -175,6 +175,34 @@ function biasAt(zone, utc){
     return bias + (daylight ? daylightBias : standardBias);
 }
 
+/**
+ * The bias a zone gives a moment on its own clock: the transitions compared
+ * as the zone writes them, each on the clock in force just before it.
+ *
+ * @param {DataView} zone  A TIME_ZONE_INFORMATION.
+ * @param {number} local  The wall clock, as milliseconds read as UTC.
+ */
+function biasOnLocalClock(zone, local){
+    const bias = zone.getInt32(TIME_ZONE_INFORMATION.Bias, true);
+    const standardBias = zone.getInt32(TIME_ZONE_INFORMATION.StandardBias, true);
+    const daylightBias = zone.getInt32(TIME_ZONE_INFORMATION.DaylightBias, true);
+    const standardRule = new DataView(zone.buffer,
+        zone.byteOffset + TIME_ZONE_INFORMATION.StandardDate, SYSTEMTIME_SIZE);
+    const daylightRule = new DataView(zone.buffer,
+        zone.byteOffset + TIME_ZONE_INFORMATION.DaylightDate, SYSTEMTIME_SIZE);
+    if (standardRule.getUint16(2, true) === 0 || daylightRule.getUint16(2, true) === 0)
+    {
+        return bias;
+    }
+    const year = new Date(local).getUTCFullYear();
+    const daylightStarts = transitionIn(daylightRule, year);
+    const daylightEnds = transitionIn(standardRule, year);
+    const daylight = daylightStarts < daylightEnds
+        ? local >= daylightStarts && local < daylightEnds
+        : !(local >= daylightEnds && local < daylightStarts);
+    return bias + (daylight ? daylightBias : standardBias);
+}
+
 /** The volume every file here reports belonging to. */
 const VOLUME_SERIAL = 0xb0771f42;
 
@@ -705,6 +733,40 @@ export function createFileTimeFunctions(host){
                     : host.readMemory(zone >>> 0, TIME_ZONE_INFORMATION.SIZE).slice();
                 const bias = biasAt(new DataView(data.buffer), utc);
                 host.writeMemory(local >>> 0, msToSystemTime(utc - bias * 60_000));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL TzSpecificLocalTimeToSystemTime(
+         *   const TIME_ZONE_INFORMATION *lpTimeZoneInformation,
+         *   const SYSTEMTIME *lpLocalTime, LPSYSTEMTIME lpUniversalTime)
+         *
+         * The way back. Which bias applies is read off the local clock, as
+         * the zone's rules are written: daylight from the daylight date's hour
+         * on the standard clock until the standard date's hour on the daylight
+         * clock. So the hour the clock repeats in autumn is taken as daylight
+         * time, and the hour it skips in spring as daylight time too, as
+         * Windows takes them (kernel32's time tests pin both).
+         */
+        TzSpecificLocalTimeToSystemTime: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([zone, local, universal])=>{
+                if (local === 0 || universal === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const wall = systemTimeToMs(host.readMemory(local >>> 0, SYSTEMTIME_SIZE));
+                if (wall === null)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const data = zone === 0
+                    ? currentZone()
+                    : host.readMemory(zone >>> 0, TIME_ZONE_INFORMATION.SIZE).slice();
+                const bias = biasOnLocalClock(new DataView(data.buffer), wall);
+                host.writeMemory(universal >>> 0, msToSystemTime(wall + bias * 60_000));
                 return 1;
             },
         },

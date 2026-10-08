@@ -359,7 +359,8 @@ test('a launcher waiting on its game or the event the game sets is woken by the 
  * STILL_ACTIVE, sleeping a millisecond between, and exits with the helper's
  * code plus one. The helper exits with 7.
  */
-function buildPoller(){
+/** @param {boolean} [sleeps]  Whether it sleeps between polls, or spins. */
+function buildPoller(sleeps = true){
     const parent = buildExe({
         imports: { 'KERNEL32.dll': ['CreateProcessA', 'GetExitCodeProcess', 'Sleep',
             'ExitProcess'] },
@@ -381,7 +382,8 @@ function buildPoller(){
             0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
             0x81, 0x3d, ...u32(at('code')), ...u32(259),               // cmp code, STILL_ACTIVE
             0x75, 0x0a,                                                // jne done
-            0x6a, 1, 0xff, 0x15, ...u32(iat('Sleep')),                 // Sleep(1)
+            ...sleeps ? [0x6a, 1, 0xff, 0x15, ...u32(iat('Sleep'))]    // Sleep(1)
+                : new Array(8).fill(0x90),
             0xeb, 0xd9,                                                // jmp poll
             // done: ExitProcess(code + 1)
             0xa1, ...u32(at('code')), 0x40, 0x50,
@@ -404,6 +406,35 @@ test('a parent that polls its child\'s exit code goes on after it, as one waitin
         // run ended with the helper's exit: an installer vanished once a
         // shortcut helper it started had finished.
         const { parent, helper } = buildPoller();
+        const app = await createApp({
+            executable: parent,
+            imagePath: 'C:\\App\\setup.exe',
+            engine: 'cork',
+            storage: { load: async()=>({
+                files: [{ path: 'C:\\App\\helper.exe', bytes: helper }],
+            }) },
+        });
+        t.after(()=>app.dispose());
+        /** @type {string[]} */
+        const lifecycle = [];
+        app.on('process-child', (/** @type {any} */ event)=>
+            lifecycle.push(`child ${event.image}`));
+        app.on('process-replace', (/** @type {any} */ event)=>
+            lifecycle.push(`replaced by ${event.image}`));
+        app.on('process-resumed', (/** @type {any} */ event)=>
+            lifecycle.push(`resumed ${event.code}`));
+        assert.equal(await app.run({ timeoutMs: 30000 }), 8,
+            'the helper\'s 7, plus the parent\'s one');
+        assert.deepEqual(lifecycle, ['child C:\\App\\helper.exe', 'resumed 7']);
+    });
+
+test('a parent that polls its child\'s exit code without ever blocking still lets it run',
+    { timeout: 60000 }, async t=>{
+        // A setup that pumps its messages and asks the exit code between
+        // them never blocks, so a child waiting for its parent to have
+        // nothing left to run never ran: the setup polled for ever. The poll
+        // is the wait.
+        const { parent, helper } = buildPoller(false);
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\App\\setup.exe',

@@ -384,6 +384,8 @@ export function createRichEditControls(host, toolkit){
         const state = stateOf(record);
         // Painted in its own background, not one its parent is asked for.
         state.richBackground ??= host.sysColor(COLOR_WINDOW);
+        // Its scroll bars show only while there is something to scroll.
+        state.rich = true;
         const { wParam, lParam } = message;
         switch (message.message){
             case EM_STREAMIN:

@@ -9,6 +9,7 @@ import { INTERLOCKED } from './interlocked.js';
 import { createSlimSync } from './slimsync.js';
 import { createSListFunctions } from './slist.js';
 import { isStandardHandle, untagged } from './handle-tags.js';
+import { createChangeNotifications } from './changes.js';
 
 /**
  * What the export binding hands an entry that is guest code rather than a
@@ -89,6 +90,8 @@ const ERROR_GEN_FAILURE = 31;
 const ERROR_NOACCESS = 998;
 const ERROR_INVALID_THREAD_ID = 1444;
 const ERROR_SEM_TIMEOUT = 121;
+/** The pseudo-handle for the running process. */
+const OWN_PROCESS = 0xffffffff;
 
 /** The debug events a child reports here, and the size of the record they fill. */
 const CREATE_PROCESS_DEBUG_EVENT = 3;
@@ -128,6 +131,9 @@ const FILETIME_EPOCH_MS = 11644473600000;
  * @property {(code: number) => void} [setLastError]
  * @property {() => Record<string, number>} [registers]  the running thread's
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {import('./changes.js').WatchedVolume} [volume]
+ *           The volume, for the directories a change notification watches;
+ *           without it FindFirstChangeNotification is refused.
  */
 
 /**
@@ -472,6 +478,114 @@ export function createSyncFunctions(host){
         /** BOOL ContinueDebugEvent(DWORD dwProcessId, DWORD dwThreadId, DWORD dwContinueStatus) */
         ContinueDebugEvent: { argBytes: 12, handler: ()=>1 },
 
+        /**
+         * BOOL DebugActiveProcessStop(DWORD dwProcessId)
+         *
+         * A child this process debugs stops reporting to it and goes on. A
+         * process it does not debug is refused as one with no debug object
+         * between them, and an id naming no process as a bad parameter.
+         */
+        DebugActiveProcessStop: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([id])=>{
+                const child = (kernel.processes?.all() ?? []).find(
+                    (/** @type {any} */ made)=>(made.id >>> 0) === (id >>> 0));
+                if (!child)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                if (!child.debugEvents)
+                {
+                    host.setLastError?.(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                child.debugEvents = null;
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL DebugSetProcessKillOnExit(BOOL KillOnExit)
+         *
+         * Whether the children this thread debugs end when it does. A caller
+         * that debugs none has no debug object to set it on, and is refused
+         * as such. The choice is kept on each child; no child of a debugger
+         * outlives its parent here, since a child runs only when the parent
+         * hands over to it.
+         */
+        DebugSetProcessKillOnExit: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([kill])=>{
+                const debugged = (kernel.processes?.all() ?? []).filter(
+                    (/** @type {any} */ made)=>made.debugEvents);
+                if (debugged.length === 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                for (const child of debugged)
+                {
+                    child.killOnExit = (kill >>> 0) !== 0;
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL DebugBreakProcess(HANDLE Process)
+         *
+         * On Windows the target gets a thread that breaks only if a debugger
+         * is attached and otherwise just ends, and the call succeeds either
+         * way. Neither this process nor a child it does not debug has one,
+         * so nothing happens and the call succeeds; a child it debugs would
+         * report a breakpoint, which the debug events here do not carry, and
+         * that is said. A handle that is no process is refused.
+         */
+        DebugBreakProcess: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                if ((handle >>> 0) === OWN_PROCESS)
+                {
+                    return 1;
+                }
+                const plain = untagged(handle);
+                const child = kernel.handles.typeOf?.(plain) === 'process' ? object(plain) : null;
+                if (!child)
+                {
+                    host.setLastError?.(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                if (child.debugEvents)
+                {
+                    host.divergence?.('DebugBreakProcess',
+                        'a debugged child\'s breakpoint is not reported as a debug event');
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * VOID ReinitializeCriticalSection(LPCRITICAL_SECTION lpCriticalSection):
+         * the section made new again, as InitializeCriticalSection makes it,
+         * whatever was waiting on it forgotten with it.
+         */
+        ReinitializeCriticalSection: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                initialise(pointer >>> 0, 0);
+                return 0;
+            },
+        },
+
+        // Directory change notifications (`changes.js`): waitable handles of
+        // their own kind over the kernel's events.
+        ...createChangeNotifications(host),
+
         /** VOID InitializeCriticalSection(LPCRITICAL_SECTION lpCriticalSection) */
         InitializeCriticalSection: {
             argBytes: 4,
@@ -649,6 +763,11 @@ export function createSyncFunctions(host){
                 // child's own index. A wait for all of a set with more in it
                 // than the child cannot be satisfied by the child alone, and
                 // stays the old handover: the parent is replaced.
+                if (child !== null && (timeout >>> 0) === 0 && !child.started
+                    && !kernel.processes?.finished?.(child))
+                {
+                    child.polled = true;
+                }
                 if (child !== null && (timeout >>> 0) !== 0)
                 {
                     if (waitAll === 0 || objects.length === 0)

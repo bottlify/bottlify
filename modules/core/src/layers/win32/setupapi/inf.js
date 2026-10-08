@@ -210,8 +210,11 @@ function tokenize(lines, index){
  * Parses an INF's text.
  *
  * @param {string} source
- * @param {{ dirid?: (id: number) => string | null }} [options]
- *        What a numeric `%N%` stands for, when no [Strings] entry says.
+ * @param {{ dirid?: (id: number) => string | null, strings?: Map<string, string> }} [options]
+ *        `dirid`: what a numeric `%N%` stands for, when no [Strings] entry
+ *        says. `strings`: entries the caller adds to [Strings], over the
+ *        file's own of the same name -- as advpack writes the strings a
+ *        library hands RegInstall into the INF before it reads it.
  * @returns {{ inf: Inf } | { error: number, line: number }}
  */
 export function parseInf(source, options = {}){
@@ -289,6 +292,10 @@ export function parseInf(source, options = {}){
                 strings.set(entry.key.toLowerCase(), entry.fields[0].slice(0, MAX_STRING_VALUE));
             }
         }
+    }
+    for (const [name, value] of options.strings ?? [])
+    {
+        strings.set(name.toLowerCase(), value.slice(0, MAX_STRING_VALUE));
     }
 
     /** @param {string} value */

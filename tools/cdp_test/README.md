@@ -61,6 +61,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--probe tN` | off | with `--dump-draws`: copy the colour target out right after each dumped draw that samples this texture, and put a few of its pixels on the draw's line. What a draw painted is otherwise only knowable from the finished frame, where every later draw has had its say |
 | `--pointer x,y[,down]` | off | hold the pointer at a position in the program's own pixels, optionally with the button down |
 | `--click-at x,y,ms`, `--key-at Code,ms` | off | a click, or a key tap, at a wall-clock moment: `ms` after the run starts, held 120 ms. For a screen that waits without presenting -- a dialog box, a film waiting on its first click -- where a click counted in presented frames is never sent, because the frame it waits for never comes. Repeatable |
+| `--press LABEL\|LABEL...` | off | for an installer: whenever the windows on the screen change and have had `--press-settle MS` (1500) to paint, the first of the labels an enabled button on the screen carries is clicked at its centre -- without its `&`, in any case; a check box or radio button once. A wizard's pages come when its work is done, which no frame count or moment foretells; pair it with `--watch S` for the desktop it paints |
 | `--click x,y[,after]` | off | a click in the program's own pixels after that many presented frames (30 by default): pressed on one frame, released on the next, with the motion that brings a pointer there from where the last click left it, for a program that reads the mouse as relative motion. Repeatable, for a path through several screens |
 | `--screen WxH` | 640x480 | the display the program is told it has. The launcher names the person's own screen, which is rarely a size a program of this era lists, and what a title does on one is a path of its own |
 | `--run-seconds N` | off | how long the engine itself runs before it stops and reports. A title that reaches its loop runs out the turns hours later; this ends the run while the page can still be asked |
@@ -92,7 +93,10 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--entry PATH` | the manifest's | another program of the bundle to start, with `--command-line` for its arguments: `--entry tool.exe --command-line '"C:\App\tool.exe" -x'` |
 | `--trace` | off | peek every pointer argument of every host call for a string. Off by default: a title's draws pay for it and a measurement run should not without asking |
 | `--hook SPEC` | none | a watch in front of a routine inside one of the program's own modules, `module:offset:label:argBytes:len,len[:what+what]` as the launcher's `?hook=` takes it (instruction lengths from a disassembly; no relative branch among them). Each call goes to `--log`, and its answer as `label -> result ...` with what `what` named: a stack slot or `ecx`/`edx` read as a C string, `ecx*104` as that many bytes of the object, `[ecx.88]*64` as the bytes of the object a field points at, `@hex` for an absolute address. A library the program imports is watched as well as one it loads later. Repeatable |
+| `--watch-import LIB[#ord+ord]` | none | every import from that library -- `binkw32.dll`, or only those ordinals -- goes to `--log` with its arguments and, as `name -> result`, its answer: what a program does with a library of its own that the engine does not implement. Repeatable |
+| `--record N` | 0 | the bridge's last N events -- each host call that parked and finished, each call into the guest, each callback that returned -- written as `game-<stamp>-bridge.jsonl`: how a thread's stack got to where a failure found it |
 | `--peek address:length` | none | guest memory as the run left it, printed as hex bytes in the report: a flag, a counter or a table a program decides on without calling anything -- a middleware's timer slots, a driver's state -- that no call log shows. Repeatable |
+| `--headed` | headless | a browser window on the machine's own GPU, as the launcher has it: a headless browser's adapter is not the one a person plays on, so a question about speed or about what the screen shows is asked headed |
 | `--worker` | page thread | run the engine in a worker with the page's canvas transferred to it, which is how the launcher runs it |
 | `--pacing page\|event` | `page` | with `--worker`: how the loop waits -- a look every few milliseconds, or sleep until something happens |
 | `--coi` | off | serve with the cross-origin isolation headers, so the page comes up `crossOriginIsolated` and `SharedArrayBuffer` exists -- what the shared-table audio backend and its worklet need |
@@ -102,7 +106,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--prefetch` | off | with `--store local`: fill the rest of the cache from the bundle in the background beyond whatever the run itself reads, for a fuller warm-up between runs at the cost of the bandwidth to do it |
 | `--export-translations FILE` | off | once the run ends, what the translator made of the title (`app.exportTranslations()`, the store kept to what its lookups can reach) is written to FILE as the seed a bundle carries; `node tools/make-btl.mjs translations <bundle-id> FILE` puts it into the bundle, so every first run of it starts from those translations. The store is the origin's file system (`--worker` for its synchronous handles), so a run on a kept profile (`--user-data-dir`, `--port`) exports what earlier runs made as well |
 
-The run is headless, on a fresh profile unless `--user-data-dir` names one.
+The run is headless unless `--headed`, on a fresh profile unless `--user-data-dir` names one.
 The browser flags it needs are in `browser.mjs` (below).
 
 ## `live/` -- watching a title a person is playing
@@ -238,6 +242,8 @@ Every file is range-addressable, because one of the things served is a game
 bundle: a gigabyte that must never be read whole to answer one block.
 
 ## What comes back
+
+The report opens with what the engine did not do -- an `E_NOTIMPL`, a stub, a refused shader -- and then what it did otherwise than Windows, each counted once with how often, taken from a list of their own so the events' cap cannot hide them. Every shader the program compiled is written to `game-<stamp>-shaders/`: the source with the program's macros and flags at the top, the files its includes handed over, and what the compiler made of it disassembled; `node tools/shader-diff.mjs <that directory>` compiles the same sources with the system's `D3DCompiler_47` and runs both programs on the reference machine with the same inputs (Windows only; pixel shader model 1 is compared with Microsoft's ps_2_0).
 
 `tools/cdp_test/reports/game-<stamp>.txt` is the report, beside it
 `game-<stamp>.png` (the screenshot), `game-<stamp>-draws.txt` when draws were

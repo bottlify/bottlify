@@ -1128,6 +1128,9 @@ test("a page's pacing yields on its own clock and looks again on its timer or on
     assert.ok(pacing.yield(nothing) instanceof Promise, "the page's bound is a few milliseconds");
     await pacing.wait({ timer: false, sleep: true, deadlineMs: 0, wakes: [] });
     assert.deepEqual(took, ['macrotask', 'macrotask']);
+    await pacing.yield({ ...nothing, spun: 1 });
+    assert.deepEqual(pacing.counts?.(), { kept: 1, interval: 1, spun: 1 },
+        'each turn is counted by why it went to the event loop, or kept');
 
     let woke = false;
     await pacing.wait({ timer: true, sleep: true, deadlineMs: 1000,

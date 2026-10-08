@@ -267,3 +267,57 @@ test('SystemTimeToTzSpecificLocalTime refuses a time that names no moment', ()=>
     assert.equal(fns.SystemTimeToTzSpecificLocalTime.handler([0, 0, 0x120]), 0);
     assert.deepEqual(errors, [87, 87]);
 });
+
+test('TzSpecificLocalTimeToSystemTime reads daylight off the local clock, as Windows does', ()=>{
+    // Kernel32's time tests' three zones, in 2004: the hour each answer is
+    // the UTC hour Windows gives, the transition hours included -- the hour
+    // skipped in spring and the hour repeated in autumn both daylight time.
+    const { fns, bytes, errors } = setup();
+    const view = new DataView(bytes.buffer);
+    /** @param {number} at @param {number[]} zone [bias, standard, daylight] dates */
+    const zoneAt = (at, zone)=>{
+        const [bias, standardMonth, standardDay, standardHour,
+            daylightMonth, daylightDay, daylightHour] = zone;
+        view.setInt32(at + TIME_ZONE_INFORMATION.Bias, bias, true);
+        view.setInt32(at + TIME_ZONE_INFORMATION.DaylightBias, -60, true);
+        putWords(bytes, at + TIME_ZONE_INFORMATION.StandardDate,
+            [0, standardMonth, 0, standardDay, standardHour, 0, 0, 0]);
+        putWords(bytes, at + TIME_ZONE_INFORMATION.DaylightDate,
+            [0, daylightMonth, 0, daylightDay, daylightHour, 0, 0, 0]);
+        return at;
+    };
+    const east = zoneAt(0x600, [-600, 10, 5, 3, 3, 5, 2]);
+    const west = zoneAt(0x700, [240, 10, 4, 2, 4, 1, 2]);
+    const south = zoneAt(0x800, [240, 4, 1, 2, 10, 4, 2]);
+    const cases = [
+        [east, 3, 28, 1, 0, 15], [east, 3, 28, 1, 59, 15], [east, 3, 28, 2, 0, 15],
+        [east, 10, 31, 2, 0, 15], [east, 10, 31, 2, 59, 15], [east, 10, 31, 3, 0, 17],
+        [west, 4, 4, 1, 0, 5], [west, 4, 4, 1, 59, 5], [west, 4, 4, 2, 0, 5],
+        [west, 10, 24, 1, 0, 4], [west, 10, 24, 1, 59, 4], [west, 10, 24, 2, 0, 6],
+        [south, 4, 4, 1, 0, 4], [south, 4, 4, 1, 59, 4], [south, 4, 4, 2, 0, 6],
+        [south, 10, 24, 1, 0, 5], [south, 10, 24, 1, 59, 5], [south, 10, 24, 2, 0, 5],
+    ];
+    assert.equal(fns.TzSpecificLocalTimeToSystemTime.argBytes, 12);
+    for (const [zone, month, day, hour, minute, expected] of cases)
+    {
+        putWords(bytes, 0x100, [2004, month, 0, day, hour, minute, 0, 0]);
+        assert.equal(fns.TzSpecificLocalTimeToSystemTime.handler([zone, 0x100, 0x120]), 1);
+        assert.equal(words(bytes, 0x120)[4], expected,
+            `${month}/${day} ${hour}:${minute} in the zone at ${zone.toString(16)}`);
+    }
+
+    // The way there and back again agree away from the transitions.
+    putWords(bytes, 0x100, [2004, 7, 0, 14, 9, 30, 15, 500]);
+    fns.SystemTimeToTzSpecificLocalTime.handler([east, 0x100, 0x140]);
+    fns.TzSpecificLocalTimeToSystemTime.handler([east, 0x140, 0x160]);
+    assert.deepEqual(words(bytes, 0x160), [2004, 7, 3, 14, 9, 30, 15, 500]);
+
+    putWords(bytes, 0x100, [2026, 10, 0, 4, 13, 45, 30, 250]);
+    assert.equal(fns.TzSpecificLocalTimeToSystemTime.handler([0, 0x100, 0x120]), 1);
+    assert.deepEqual(words(bytes, 0x120), [2026, 10, 0, 4, 13, 45, 30, 250],
+        'no zone is this machine\'s, UTC');
+    putWords(bytes, 0x100, [2026, 2, 0, 30, 0, 0, 0, 0]);
+    assert.equal(fns.TzSpecificLocalTimeToSystemTime.handler([0, 0x100, 0x120]), 0);
+    assert.equal(fns.TzSpecificLocalTimeToSystemTime.handler([0, 0x100, 0]), 0);
+    assert.deepEqual(errors, [87, 87]);
+});

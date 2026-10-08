@@ -204,12 +204,14 @@ export function createThreadingFunctions(host){
 
     /**
      * One step of a snapshot's walk: the first entry, or the next, written
-     * into the caller's PROCESSENTRY32 or THREADENTRY32.
+     * into the caller's PROCESSENTRY32 or THREADENTRY32. The wide process
+     * entry is the same structure with the image name in UTF-16, which makes
+     * it longer, and its dwSize is checked against that length.
      *
      * @param {number} handle @param {number} entry
-     * @param {boolean} processes @param {boolean} first
+     * @param {boolean} processes @param {boolean} first @param {boolean} [wide]
      */
-    const walkSnapshot = (handle, entry, processes, first)=>{
+    const walkSnapshot = (handle, entry, processes, first, wide = false)=>{
         const snapshot = snapshotOf(handle);
         if (!snapshot)
         {
@@ -217,6 +219,8 @@ export function createThreadingFunctions(host){
             return 0;
         }
         const layout = processes ? PROCESSENTRY32 : THREADENTRY32;
+        const size = processes && wide
+            ? PROCESSENTRY32.szExeFile + MAX_PATH * 2 : layout.SIZE;
         const list = processes ? snapshot.processes : snapshot.threads;
         const at = first ? 0 : (processes ? snapshot.process : snapshot.thread);
         if ((snapshot.flags & (processes ? TH32CS_SNAPPROCESS : TH32CS_SNAPTHREAD)) === 0
@@ -225,14 +229,14 @@ export function createThreadingFunctions(host){
             host.setLastError(ERROR_NO_MORE_FILES);
             return 0;
         }
-        if (readU32(host.readMemory(entry >>> 0, 4), 0) < layout.SIZE)
+        if (readU32(host.readMemory(entry >>> 0, 4), 0) < size)
         {
             host.setLastError(ERROR_INSUFFICIENT_BUFFER);
             return 0;
         }
-        const bytes = new Uint8Array(layout.SIZE);
+        const bytes = new Uint8Array(size);
         const view = new DataView(bytes.buffer);
-        view.setUint32(0, layout.SIZE, true);
+        view.setUint32(0, size, true);
         if (processes)
         {
             const process = snapshot.processes[at];
@@ -242,7 +246,17 @@ export function createThreadingFunctions(host){
             view.setUint32(PROCESSENTRY32.pcPriClassBase, NORMAL_PRIORITY_BASE, true);
             const name = process.path.slice(process.path.lastIndexOf('\\') + 1)
                 .slice(0, MAX_PATH - 1);
-            bytes.set(encodeAnsi(name), PROCESSENTRY32.szExeFile);
+            if (wide)
+            {
+                for (let i = 0; i < name.length; i++)
+                {
+                    view.setUint16(PROCESSENTRY32.szExeFile + i * 2, name.charCodeAt(i), true);
+                }
+            }
+            else
+            {
+                bytes.set(encodeAnsi(name), PROCESSENTRY32.szExeFile);
+            }
             snapshot.process = at + 1;
         }
         else
@@ -840,9 +854,14 @@ export function createThreadingFunctions(host){
                     // wait's answer, and the parent goes on after its child as
                     // on Windows. A timeout is not armed -- nothing of the
                     // parent's runs while the child does, so no time of its
-                    // passes to run out.
+                    // passes to run out. A poll is noted too: a parent that
+                    // polls in a loop that never blocks waits all the same.
                     if (wait === 0)
                     {
+                        if (!target.started)
+                        {
+                            target.polled = true;
+                        }
                         return WAIT_TIMEOUT;
                     }
                     (target.waiters ??= []).push({ thread, result: WAIT_OBJECT_0 });
@@ -1312,6 +1331,17 @@ export function createThreadingFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, entry])=>walkSnapshot(handle, entry, true, false),
+        },
+        /** Process32FirstW and Process32NextW: the same, into a PROCESSENTRY32W. */
+        Process32FirstW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, entry])=>walkSnapshot(handle, entry, true, true, true),
+        },
+        Process32NextW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, entry])=>walkSnapshot(handle, entry, true, false, true),
         },
 
         /**

@@ -425,6 +425,12 @@ export async function createRemoteApp(wiring){
             list: path=>request('files.list', [path]),
             /** @param {string} path @returns {Promise<Uint8Array>} */
             read: path=>request('files.read', [path]),
+            /** @param {string} path @returns {Promise<boolean>} */
+            createDirectory: path=>request('files.createDirectory', [path]),
+            /** @param {string} path @returns {Promise<boolean>} */
+            remove: path=>request('files.remove', [path]),
+            /** @param {string} path @param {Uint8Array} bytes @returns {Promise<void>} */
+            write: (path, bytes)=>request('files.write', [path, bytes]),
         },
         /** Guest memory and the images mapped (the local controller's `debug`), asked of the worker. */
         debug: {

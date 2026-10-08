@@ -37,6 +37,7 @@ import {
     surfaceBytes, surfacePitch,
 } from './constants.js';
 import { SURFACE_TYPE, surfaceIsLockable } from './validity.js';
+import { fromHalf } from './half.js';
 
 /**
  * D3DLOCK_READONLY, which is the same number in both versions of the API. Here
@@ -761,6 +762,11 @@ export function writePixels(surface, pixels, writeMemory){
     const desc = /** @type {SurfaceDesc} */ (out.desc);
     const bytesPerPixel = FORMAT_INFO[desc.Format].bytesPerPixel;
     const pitch = surfacePitch(desc.Format, desc.Width);
+    if (FORMAT_INFO[desc.Format].float)
+    {
+        writeFloatPixels(surface.base, desc, pitch, pixels, writeMemory);
+        return;
+    }
     // A four-byte surface is laid out exactly as the read-back is, rows at
     // the pitch and pixels blue first, so the read-back is written as it is.
     if (bytesPerPixel === 4 && pitch === desc.Width * 4)
@@ -782,6 +788,34 @@ export function writePixels(surface, pixels, writeMemory){
             }
         }
         writeMemory(surface.base + y * pitch, row);
+    }
+}
+
+/**
+ * A floating-point target read back -- half-precision floats, one a pixel, as
+ * its `r16float` holds them -- into the surface's own format.
+ *
+ * @param {number} base @param {SurfaceDesc} desc @param {number} pitch
+ * @param {Uint8Array} pixels @param {(address: number, bytes: Uint8Array) => void} writeMemory
+ */
+function writeFloatPixels(base, desc, pitch, pixels, writeMemory){
+    const halves = new Uint16Array(pixels.slice(0, desc.Width * desc.Height * 2).buffer);
+    const row = new DataView(new ArrayBuffer(pitch));
+    for (let y = 0; y < desc.Height; y++)
+    {
+        for (let x = 0; x < desc.Width; x++)
+        {
+            const half = halves[y * desc.Width + x];
+            if (desc.Format === D3DFMT.R16F)
+            {
+                row.setUint16(x * 2, half, true);
+            }
+            else
+            {
+                row.setFloat32(x * 4, fromHalf(half), true);
+            }
+        }
+        writeMemory(base + y * pitch, new Uint8Array(row.buffer));
     }
 }
 

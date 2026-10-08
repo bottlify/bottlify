@@ -124,6 +124,18 @@ const MAX_MODULE_NAME = 260;
 const NORMAL_PRIORITY_CLASS = 0x20;
 
 /**
+ * Where a process stands in the order the system shuts processes down in: the
+ * level every process starts at, the highest there is (the system's own first
+ * range ends there), and the one flag -- SHUTDOWN_NORETRY -- a process may set.
+ */
+const SHUTDOWN_DEFAULT_LEVEL = 0x280;
+const SHUTDOWN_HIGHEST_LEVEL = 0x4ff;
+const SHUTDOWN_NORETRY = 0x1;
+
+/** An out-pointer of NULL: the address cannot be written. */
+const ERROR_NOACCESS = 998;
+
+/**
  * @typedef {Object} ProcessHost
  * @property {number} [performanceFrequency]  Ticks a second of the performance counter
  *     (`PERFORMANCE_FREQUENCY` by default); a whole number a 32-bit immediate holds.
@@ -244,6 +256,18 @@ const dword = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, val
 export function getLastErrorCode(){
     return new Uint8Array([
         0x64, 0xa1, ...dword(TEB.LAST_ERROR),                        // mov eax, fs:[0x34]
+        0xc3,                                                        // ret
+    ]);
+}
+
+/**
+ * GetCurrentThreadId as guest code: the block's field, through FS -- the id the host writes
+ * there as it makes the block, and answers itself. A C runtime asks it for every lock it
+ * takes, and in a title's world load it was three host calls in five.
+ */
+export function getCurrentThreadIdCode(){
+    return new Uint8Array([
+        0x64, 0xa1, ...dword(TEB.THREAD_ID),                         // mov eax, fs:[0x24]
         0xc3,                                                        // ret
     ]);
 }
@@ -461,6 +485,9 @@ export function createProcessFunctions(host){
     };
     const { stateOf, setError, lastErrorOf } = createThreadState(host.currentThread, memory);
 
+    /** The process's place in the shutdown order, which it may move. */
+    const shutdown = { level: SHUTDOWN_DEFAULT_LEVEL, flags: 0 };
+
     /**
      * GetModuleHandle's answer for a name already read, null for the running
      * image; nothing is loaded by asking.
@@ -520,7 +547,7 @@ export function createProcessFunctions(host){
      * slot.
      *
      * @type {{ getLastError: number, setLastError: number, tlsGetValue: number,
-     *     tlsSetValue: number } | null}
+     *     tlsSetValue: number, getCurrentThreadId: number } | null}
      */
     let fastPaths = null;
     /** @param {import('./sync.js').GuestBuilder} builder */
@@ -552,6 +579,7 @@ export function createProcessFunctions(host){
         };
         fastPaths = {
             getLastError: place(()=>getLastErrorCode()),
+            getCurrentThreadId: place(()=>getCurrentThreadIdCode()),
             setLastError: place(()=>setLastErrorCode()),
             tlsGetValue: place(at=>tlsGetValueCode(at, getTrap)),
             tlsSetValue: place(at=>tlsSetValueCode(at, setTrap)),
@@ -859,6 +887,8 @@ export function createProcessFunctions(host){
         GetCurrentThreadId: {
             argBytes: 0,
             handler: ()=>host.currentThread().id >>> 0,
+            /** @param {import('./sync.js').GuestBuilder} builder */
+            guest: builder=>placed(builder).getCurrentThreadId,
         },
 
         /** DWORD GetCurrentProcessId(VOID) */
@@ -1152,6 +1182,46 @@ export function createProcessFunctions(host){
         SetProcessWorkingSetSize: {
             argBytes: 12,
             handler: ()=>1,
+        },
+
+        /**
+         * BOOL SetProcessShutdownParameters(DWORD dwLevel, DWORD dwFlags)
+         * BOOL GetProcessShutdownParameters(LPDWORD lpdwLevel, LPDWORD lpdwFlags)
+         *
+         * Kept and read back, though nothing here shuts the system down: a
+         * program that sets its place in the order may read it back to check,
+         * and one that reads it first expects the level every process starts
+         * at. A level past the documented ranges or a flag that is not
+         * SHUTDOWN_NORETRY is refused, and the setting stays as it was.
+         */
+        SetProcessShutdownParameters: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([level, flags])=>{
+                if ((level >>> 0) > SHUTDOWN_HIGHEST_LEVEL || (flags & ~SHUTDOWN_NORETRY) !== 0)
+                {
+                    setError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                shutdown.level = level >>> 0;
+                shutdown.flags = flags >>> 0;
+                return 1;
+            },
+        },
+
+        GetProcessShutdownParameters: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([level, flags])=>{
+                if ((level >>> 0) === 0 || (flags >>> 0) === 0)
+                {
+                    setError(ERROR_NOACCESS);
+                    return 0;
+                }
+                memory.writeU32(level >>> 0, shutdown.level);
+                memory.writeU32(flags >>> 0, shutdown.flags);
+                return 1;
+            },
         },
 
         /**

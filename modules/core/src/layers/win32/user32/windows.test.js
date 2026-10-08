@@ -319,6 +319,20 @@ function setup({
             return hookReply ? hookReply(entry, args) : 0;
         },
         callerThread: ()=>caller.current,
+        // As the bridge answers: the thread named is the caller for what
+        // `fn` runs before it awaits.
+        answering: (thread, fn)=>{
+            const before = caller.current;
+            caller.current = thread;
+            try
+            {
+                return fn();
+            }
+            finally
+            {
+                caller.current = before;
+            }
+        },
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         threadExists,
         /** @param {number} code */
@@ -1950,6 +1964,45 @@ test('a window shaped to an empty region takes none of the screen, and the deskt
         assert.deepEqual(desktop(), [], 'not redrawn, the screen is left until something paints');
     });
 
+test('a window shaped by a region of many rectangles shows, covers and is hit only there',
+    ()=>{
+        // A launcher cuts its region out of a picture around the picture's
+        // transparent colour. Only the rectangle around the region was kept:
+        // the window showed whole, the transparent colour with it, and took
+        // the clicks and the screen of its corners.
+        let clock = 0;
+        const SHAPE = 0x5000;
+        const shape = { left: 0, top: 0, right: 200, bottom: 100, rects: [
+            { left: 0, top: 0, right: 200, bottom: 50 },
+            { left: 0, top: 50, right: 100, bottom: 100 }] };
+        const { fns, memory, fills } = setup({ paint: true, queueNow: ()=>clock,
+            regionBox: region=>(region === SHAPE ? shape : null) });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const WS_POPUP = 0x80000000;
+        const drain = ()=>{
+            while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) !== 0)
+            {
+                fns.ValidateRect.handler([memory.u32(MSG_BUFFER + MSG.hwnd), 0]);
+            }
+        };
+        const desktop = ()=>fills.filter(fill=>fill.color === 0x808080 && !fill.quiet)
+            .map(fill=>fill.rect);
+        const launcher = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+            x: 0, y: 0, width: 200, height: 100 });
+        drain();
+        fills.length = 0;
+
+        assert.equal(fns.SetWindowRgn.handler([launcher, SHAPE, 1]), 1);
+        clock += 1000;
+        drain();
+        assert.deepEqual(desktop(), [{ left: 100, top: 50, right: 200, bottom: 100 }],
+            'the corner its region leaves out is the desktop\'s');
+        assert.equal(fns.WindowFromPoint.handler([150, 75]), 0, 'and is not on it');
+        assert.equal(fns.WindowFromPoint.handler([50, 75]), launcher, 'its shape is');
+        assert.equal(fns.WindowFromPoint.handler([150, 25]), launcher);
+    });
+
 test('the desktop paints what a window left on the system\'s clock, with no queue looked at',
     ()=>{
         // The desktop is no thread of the program's: on Windows its own thread
@@ -1975,6 +2028,77 @@ test('the desktop paints what a window left on the system\'s clock, with no queu
         assert.deepEqual(desktop(), [{ left: 10, top: 20, right: 310, bottom: 220 }],
             'then, with no message looked at');
     });
+
+test('a window hidden or destroyed has the caller\'s windows under it erased before it returns',
+    ()=>{
+        // XP's synchronous paint: the windows a hide or a destroy uncovers are
+        // framed and erased at once when they are the caller's, their client
+        // left to WM_PAINT. A setup that closes a page and copies files
+        // without looking at its queue shows its window's background where
+        // the page was, not the page.
+        const WM_ERASEBKGND = 0x0014;
+        const WS_POPUP = 0x80000000;
+        const { fns, memory, dispatched } = setup({ paint: true });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const drain = ()=>{
+            while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) !== 0)
+            {
+                fns.ValidateRect.handler([memory.u32(MSG_BUFFER + MSG.hwnd), 0]);
+            }
+        };
+        const under = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+            x: 0, y: 0, width: 300, height: 200 });
+        const page = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+            x: 50, y: 50, width: 100, height: 50 });
+        const other = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+            x: 50, y: 120, width: 100, height: 50 });
+        drain();
+        /** @param {number} hwnd */
+        const erased = hwnd=>dispatched.filter(message=>message.hwnd === hwnd
+            && message.message === WM_ERASEBKGND).length;
+
+        dispatched.length = 0;
+        fns.ShowWindow.handler([page, SW_HIDE]);
+        assert.equal(erased(under), 1, 'the window under it was erased before the call returned');
+        assert.equal(fns.GetUpdateRect.handler([under, 0, 0]), 1, 'its client is still to paint');
+        drain();
+
+        dispatched.length = 0;
+        fns.DestroyWindow.handler([other]);
+        assert.equal(erased(under), 1, 'and the same for a window destroyed');
+    });
+
+test('a sibling painted over by a change repaints only where it was painted over', ()=>{
+    // A wizard page's white panel is its first control, under the labels and
+    // check boxes laid on it. A check box that repaints itself takes the
+    // panel along under it -- and the panel repainted whole painted over
+    // every label, none of which had changed or was repainted after it.
+    const WS_POPUP = 0x80000000;
+    const { fns, memory } = setup({ paint: true });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const page = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+        x: 0, y: 0, width: 400, height: 300 });
+    const panel = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: page,
+        x: 100, y: 0, width: 300, height: 300 });
+    const label = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: page,
+        x: 110, y: 20, width: 200, height: 20 });
+    const box = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: page,
+        x: 110, y: 120, width: 200, height: 20 });
+    while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) !== 0)
+    {
+        fns.ValidateRect.handler([memory.u32(MSG_BUFFER + MSG.hwnd), 0]);
+    }
+    void panel;
+
+    fns.InvalidateRect.handler([box, 0, 1]);
+    const RECT_AT = 0x7f00;
+    assert.equal(fns.GetUpdateRect.handler([panel, RECT_AT, 0]), 1);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RECT_AT + at)), [10, 120, 210, 140],
+        'the panel repaints under the check box and nowhere else');
+    assert.equal(fns.GetUpdateRect.handler([label, 0, 0]), 0, 'the label is left as it is');
+});
 
 test('a window that moves takes its pixels with it, and only what it left is painted', ()=>{
     // As SetWindowPos copies a window's bits. A launcher that moves itself on
@@ -2702,13 +2826,13 @@ test('a window created hidden hears only that it is being created', ()=>{
 
 test('CreateWindowEx tells the hook, then the procedure, in the order user32\'s message '
     + 'tests pin', ()=>{
-    // WmCreateOverlappedSeq and WmCreatePopupSeq, less what this layer does
-    // not send (WM_GETMINMAXINFO, WM_NCCALCSIZE, the WM_WINDOWPOS pair, the
-    // painting): HCBT_CREATEWND, WM_NCCREATE, WM_CREATE, and for a window
-    // created visible WM_SIZE (SIZE_RESTORED), WM_MOVE, WM_SHOWWINDOW(1) and
-    // the activation -- HCBT_ACTIVATE, WM_ACTIVATEAPP to each of the
-    // application's top-level windows, the hidden one too, and HCBT_SETFOCUS
-    // before the focus follows.
+    // WmCreateInvisiblePopupSeq and WmCreatePopupSeq, less what this layer
+    // does not send (WM_GETMINMAXINFO, WM_NCCALCSIZE, the WM_WINDOWPOS pair,
+    // the painting): HCBT_CREATEWND, WM_NCCREATE, WM_CREATE, WM_SIZE
+    // (SIZE_RESTORED) and WM_MOVE, shown or not; and for a window created
+    // visible WM_SHOWWINDOW(1) and the activation -- HCBT_ACTIVATE,
+    // WM_ACTIVATEAPP to each of the application's top-level windows, the
+    // hidden one too, and HCBT_SETFOCUS before the focus follows.
     /** @type {string[]} */
     const log = [];
     const { memory, fns } = setup({
@@ -2727,7 +2851,8 @@ test('CreateWindowEx tells the hook, then the procedure, in the order user32\'s 
     fns.RegisterClassA.handler([CLASS_STRUCT]);
 
     createWindow(fns, memory, { style: 0x80000000 });
-    assert.deepEqual(log, [`hook:${HCBT_CREATEWND}`, '0x81:0', '0x1:0'], 'hidden');
+    assert.deepEqual(log, [`hook:${HCBT_CREATEWND}`, '0x81:0', '0x1:0', '0x5:0', '0x3:0'],
+        'hidden');
 
     log.length = 0;
     createWindow(fns, memory, { style: 0x80000000 | WS_VISIBLE });
@@ -3385,6 +3510,90 @@ test('a thread inside a modal loop answers what another thread sends its windows
         await tick();
     }
     assert.equal(answered.value, 0x55, 'answered from inside the modal loop');
+});
+
+test('SetWindowText and SetDlgItemText to another thread\'s window wait for that thread to'
+    + ' run its procedure', async()=>{
+    // An installer's worker thread writes the progress text of the wizard its
+    // main thread made. The control is subclassed by a skin that keeps what
+    // it paints with on the thread that made it: run on the worker, it found
+    // nothing and the page was left unpainted.
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (main) };
+    const { fns, memory, dispatched, tick } = setup({ caller });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const dialog = createWindow(fns, memory);
+    const control = createWindow(fns, memory, { style: WS_CHILD, parent: dialog, menu: 0x5aa });
+    memory.putString(TEXT_BUFFER, 'Copying new files');
+    const WM_SETTEXT = 0x000c;
+
+    caller.current = worker;
+    for (const [call, args, target] of /** @type {const} */ ([
+        ['SetWindowTextA', [dialog, TEXT_BUFFER], dialog],
+        ['SetDlgItemTextA', [dialog, 0x5aa, TEXT_BUFFER], control],
+    ]))
+    {
+        const told = dispatched.length;
+        const answer = fns[call].handler([...args]);
+        assert.ok(answer instanceof Promise, `${call}: the worker waits`);
+        assert.equal(dispatched.length, told, `${call}: and nothing has run on it`);
+
+        caller.current = main;
+        fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+        const ran = dispatched.slice(told).find(m=>m.message === WM_SETTEXT);
+        assert.equal(ran?.hwnd, target, `${call}: WM_SETTEXT reached the window`);
+        assert.equal(ran?.thread, main, `${call}: on the thread that made it`);
+        caller.current = worker;
+        await tick();
+        await tick();
+        assert.equal(await answer, 1);
+    }
+});
+
+test('a message box a worker raises over another thread\'s window is shown as the worker\'s,'
+    + ' whoever is on the processor by then', async()=>{
+    // Disabling the owner waits for the owner's thread to take WM_ENABLE, and
+    // by the time the box is shown the thread on the processor is that one.
+    // Shown as that thread's, the activation it sends was started on it in
+    // the middle of its own loop, which then had nothing to go back to.
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (main) };
+    const WM_ENABLE = 0x000a, WM_ACTIVATE = 0x0006;
+    const { fns, memory, dispatched, tick } = setup({ caller, heap: true,
+        reply: message=>message.message === WM_NCCREATE });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const owner = createWindow(fns, memory, { style: WS_VISIBLE });
+
+    caller.current = worker;
+    const answer = fns.MessageBoxA.handler([owner, 0, 0, 0]);
+    assert.ok(answer instanceof Promise, 'the worker waits on the owner\'s thread');
+    caller.current = main;
+    const told = dispatched.length;
+    for (let turn = 0; turn < 20 && !dispatched.slice(told).some(m=>m.message === WM_ACTIVATE);
+        turn++)
+    {
+        fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+        await tick();
+    }
+    const enabled = dispatched.slice(told).find(m=>m.message === WM_ENABLE);
+    assert.equal(enabled?.thread, main, 'WM_ENABLE was taken by the owner\'s thread');
+    const activation = dispatched.slice(told)
+        .filter(m=>m.hwnd === owner && (m.message === WM_NCACTIVATE || m.message === WM_ACTIVATE));
+    assert.ok(activation.length > 0, 'the owner was told it lost the activation');
+    assert.deepEqual([...new Set(activation.map(m=>m.thread))], [worker],
+        'by the worker, whose call raised the box');
+    // And the box is the worker's, its controls too: the worker's modal loop
+    // takes their WM_PAINT, which a box of the owner's thread never had.
+    const box = activation.find(m=>m.message === WM_ACTIVATE)?.lParam ?? 0;
+    const GW_CHILD = 5;
+    const control = fns.GetWindow.handler([box, GW_CHILD]);
+    assert.notEqual(control, 0);
+    assert.deepEqual([box, control].map(hwnd=>fns.GetWindowThreadProcessId.handler([hwnd, 0])),
+        [worker.id, worker.id]);
 });
 
 test('what the window manager sends another thread\'s window runs on the sender, and says so',

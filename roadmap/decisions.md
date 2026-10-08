@@ -252,6 +252,111 @@ single-threaded apartment the caller is not in: several threads may each have on
 alone does not say which is meant. An unknown type answers `E_INVALIDARG`. Wine leaves the call
 a stub, and no conformance test pins down any of these answers. *2026-10-05.*
 
+**A33 — An installation's progress bar counts a file as its size in bytes, a registry value as
+13200 ticks and a component as 24000, and its total is what this installation will do.** Windows
+documents `INSTALLMESSAGE_PROGRESS` -- a reset to a total, reports of ticks, the direction -- but
+not what anything is worth; the two fixed amounts are Wine's, and no published source gives
+others. `InstallValidate` resets the bar to the files, values and components the
+installation puts down, rather than the package's whole as Wine does, so a setup's own page
+reaches its end when the installation does. A page shows the ratio of what is done to the total,
+which these amounts set; revisit them if a program is found reading the ticks themselves.
+*2026-10-07.*
+
+**A34 — A file's security is the descriptor Windows XP answers for a volume that keeps none.**
+The volume has no ACLs, as FAT32 has none, and reports no `FILE_PERSISTENT_ACLS`: so
+`GetNamedSecurityInfo` of a file answers a made-up descriptor whose owner and group are Everyone
+and whose DACL is present and null, and `SetNamedSecurityInfo` succeeds and keeps nothing, so the
+next read answers the same. A setup that reads a folder's DACL, merges an entry with
+`SetEntriesInAcl` and writes it back goes through and changes nothing it could see. Not measured
+against XP; revisit if a program is found that checks the DACL it wrote. *2026-10-07.*
+
+**A35 — kernel32 exports the Windows 95 family's own calls, and each fails as it does when what it
+reaches for is absent.** XP's kernel32 is believed (not checked against an XP export table) not to
+export the flat-thunk helpers (`ThunkConnect32`, `FT_Thunk`, `FT_Exit*`, `MapLS`, `MapSL`,
+`SMapLS*`, `SUnMapLS*`, `UnMapLS`), `RegisterServiceProcess`, `OpenVxDHandle`,
+`CreateSocketHandle`, `SetHandleContext`, `ConvertToGlobalHandle` and
+`MakeCriticalSectionGlobal`. Programs written for both families import them statically all the
+same, and an image with an import the loader cannot bind does not start at all; so they are
+exported, and answer as Windows 95 does without the 16-bit subsystem, the selector or the VxD they
+need: the thunk does not connect, a pointer past 64 KiB gets no selector, no ring-0 handle is
+made. A program that probes `GetProcAddress` for one of them to tell the families apart finds it
+here and is told the failure when it calls; revisit if such a program is found to take a 9x path it
+cannot finish. *2026-10-07.*
+
+**A36 — A removal that takes the last key out of an INI section takes the section too, and a
+file it leaves empty goes.** The IniFile and RemoveIniFile tables say which line or tag to take
+out, not what becomes of a heading left with nothing under it. Leaving it would keep the file,
+and with it the folder the product made, after a removal that otherwise leaves nothing; so the
+empty heading goes with its last key, and a file with nothing left in it is deleted. Not measured
+against Windows; revisit if a program is found reading an empty section its setup left.
+*2026-10-08.*
+
+**A37 — An imported archive replaces a table whole; a merge leaves out only the tables that
+conflict.** `MsiDatabaseImport` of a table the database already has replaces it, its columns
+included, as the archive describes them; Wine keeps the old columns and replaces only the rows,
+and no published source settles which Windows does. `MsiDatabaseMerge` checks every table's
+schema before changing anything, merges each table without conflicting rows, and counts the
+conflicts of the others in the error table; the two databases' code pages are not compared,
+though the SDK says they should match. The summary's dates in an archive are read and written as
+UTC. A session's read-only database refuses both. Not measured against Windows. *2026-10-08.*
+
+**A38 — The system folder's programs (msiexec, rundll32, regsvr32) are processes whose images
+the engine makes, and the volume does not show them as files.** Installers, bootstrappers and
+uninstall strings start them by name, and a bottle has no Microsoft binaries. A request for one in
+`C:\WINDOWS\system32` (by full path, or by bare name through CreateProcess's documented search)
+that the volume cannot answer starts a real process, whose image is a synthesised executable: its
+entry point calls a routine of the engine's own library (`bottlify.dll`) and exits with the
+answer. Each routine drives only the process's own exports (msi.dll's install calls,
+LoadLibrary/GetProcAddress, MessageBox), so what it does is what those exports do. Such a program
+starts in the directory its parent asked for, or else in the parent's current directory, as
+Windows starts every child, since the paths on its command line are the parent's to mean; other
+children keep starting in their own image's directory. The volume reports no file at those paths
+-- `GetFileAttributes`, `FindFirstFile`, `SearchPath`, `GetFileVersionInfo` and `CreateFile` on
+`system32\msiexec.exe` fail -- because an entry would need bytes to read and a version resource
+to answer, and no measured program has needed either. Revisit if a bootstrapper is found that
+checks for msiexec.exe, or reads its version, before starting it; the answer then is a read-only
+entry served from the synthesised image, not a file written to the volume. A file a bundle does
+carry at that path always wins. *2026-10-08.*
+
+**A39 -- Windows XP's Internet Explorer and Media Player are there, at Service Pack 3's versions,
+without files.** Setups check them before installing what needs either: an IExpress package's
+version check reads `shdocvw.dll` or `msdxm.ocx` in the system folder, others read the registry.
+The XP description carries the browser's and the player's versions and the files that carry them
+(`kernel32/versions.js`, `components`): GetFileVersionInfo answers those files with their own
+versions, as it answers the engine's libraries with the system's, and the registry's `Internet
+Explorer\Version` and `MediaPlayer\PlayerUpgrade\PlayerVersion` say the same, from the same
+table. As with the system programs (A38), the volume shows no file at those paths. The numbers
+are Service Pack 3's as published (IE 6.0.2900.5512, WMP 9.0.0.4503, msdxm.ocx 6.4.9.1133) and
+were not read off a machine; the other Windows releases describe no components and answer as
+before. *2026-10-08.*
+
+**A40 -- Notepad is a system program, and the shell opens text files in it and hands addresses
+to the page.** Setups show a readme by starting `C:\WINDOWS\Notepad.exe readme.txt` or by
+asking ShellExecute to open the `.txt`, and a "visit our site" button by opening an address. On
+the model of A38, `notepad.exe` in the Windows directory and the system folder is a synthesised
+image whose routine reads the file through CreateFile/ReadFile (a UTF-16 or UTF-8 byte order
+mark decides the encoding, the ANSI code page otherwise), shows it in a frame filled by a
+multi-line edit control, and runs a message loop until the frame is closed; editing, saving and
+printing (`/p`) are not offered. ShellExecute's open verb opens `.txt`, `.log`, `.ini`, `.inf`,
+`.nfo` and `.diz` as XP's registry has them -- `%SystemRoot%\system32\NOTEPAD.EXE %1`, the
+file unquoted -- and an `http`, `https`, `ftp` or `mailto` address, or the address a `.url`
+shortcut holds, is handed to the page as an `open-url` event and answered with success, since
+the machine reports a browser installed (A39). The frame is a class of the program's own, named
+`Notepad` as the real one's is, whose procedure is DefWindowProcW's own address -- so it is
+moved, activated and closed as any window is -- because the routine drives only exports a program
+could call and writes no window procedure in guest code. *2026-10-08.*
+
+**A41 -- The libraries the engine implements stand in the system folder as files, for the
+questions asked before loading one.** A38 left the system folder empty of what the engine
+supplies, to be revisited when a setup checked first; InstallShield 9's `UseDLL` does, with
+FindFirstFile on `system32\Shell32.dll`, and stopped at "UseDLL failed". In the system folder a
+name that is one of the engine's libraries, and is not a file on the volume, now answers
+GetFileAttributes(Ex) and a FindFirstFile for that exact name as a file: archive, 64 KiB, dated
+as Windows XP SP3's build (2008-04-14). A search with a wildcard lists the folder as it is, and
+the name cannot be opened -- what it holds is the engine's, not bytes; GetFileVersionInfo answers
+such a library already (A39). The system programs stay as A38 has them. Revisit if a program
+reads a system library's bytes or enumerates the folder to find one. *2026-10-08.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
@@ -553,3 +658,20 @@ and puts the `d3dx`/`d3dcompiler` libraries in `system32`, where the loader alre
 engine's `d3dx9_*` stub tables answer a program whose installer never ran. The Visual C++ and
 .NET redistributables are still answered as already run, since the engine carries the C runtime
 itself. *2026-09-26.*
+
+**A constant table entry whose name another entry in a different register set shares is set
+with it.** fxc compiles a model 3 loop over an `int` uniform to `rep i#` and lists the uniform
+twice in the CTAB, once in the float registers arithmetic reads and once in the integer register
+`rep` reads; Wine's conformance tests cover each register set's layout but never such a pair. A
+setter given the name (`SetInt`, `SetValue`, ...) writes both, each in its own set's layout,
+so the loop counts what the program set rather than what the integer register happened to hold.
+*2026-10-08.*
+
+**FindActCtxSectionStringA/W are not exported until activation contexts are built from
+manifests.** No context exists here, so the only answer the lookup can give is "not found",
+and the Visual C++ 2005 runtime (msvcr80, vcomp -- reached through GetProcAddress) takes that
+answer for a load without its manifest and stops the program with R6034 before the program's
+first instruction. Absent, the runtime treats the system as one without side-by-side support
+and runs. Removed on 2026-09-09 (16110a45), added back by an export audit on 2026-10-08
+(884102c9) and Gothic 3 met R6034 at vcomp.dll that day; kernel32's system.test.js now fails
+if the names come back. *2026-10-08.*

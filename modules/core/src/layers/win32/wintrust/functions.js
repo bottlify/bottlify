@@ -50,6 +50,17 @@ const WTD_HASH_ONLY_FLAG = 0x200;
 const WTD_LIFETIME_SIGNING_FLAG = 0x800;
 
 /**
+ * CRYPT_PROVIDER_DATA's signer count and array, CRYPT_PROVIDER_SGNR's
+ * certificate chain and countersigners, and the two element sizes the
+ * arrays are laid out in (the 32-bit structures, as wintrust.h declares them).
+ */
+const PROVIDER_DATA = Object.freeze({ SIGNERS: 64, SIGNER_ARRAY: 68 });
+const PROVIDER_SIGNER = Object.freeze({
+    CERTS: 12, CERT_ARRAY: 16, COUNTER_SIGNERS: 32, COUNTER_SIGNER_ARRAY: 36, SIZE: 44,
+});
+const PROVIDER_CERT_SIZE = 60;
+
+/**
  * @typedef {Object} WintrustHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -101,6 +112,9 @@ export function createWintrustFunctions(host){
 
     /** @type {{ from: any, roots: Certificate[] } | null} */
     let parsedRoots = null;
+
+    /** Whether a program has been told once that no provider data is kept. */
+    let saidNoProviderData = false;
 
     /** The root store as certificates, parsed once per configuration. */
     const roots = ()=>{
@@ -233,6 +247,20 @@ export function createWintrustFunctions(host){
         return bytes instanceof Promise ? bytes.then(judge) : judge(bytes);
     };
 
+    /**
+     * Element `index` of an array of `size`-byte structures whose count and
+     * pointer are at `countAt` and `arrayAt`: 0 past its end or when there
+     * is no array, which is how the helpers below say "none".
+     *
+     * @param {number} countAt @param {number} arrayAt @param {number} index
+     * @param {number} size
+     */
+    const element = (countAt, arrayAt, index, size)=>{
+        const array = readU32(arrayAt);
+        return (index >>> 0) < readU32(countAt) && array !== 0
+            ? (array + (index >>> 0) * size) >>> 0 : 0;
+    };
+
     return {
         WinVerifyTrust: { argBytes: 12, handler: verifyTrust },
 
@@ -269,6 +297,76 @@ export function createWintrustFunctions(host){
                 }
                 return host.handles.open('wintrust-catalog', { path, flags: flags >>> 0 });
             },
+        },
+
+        /**
+         * CRYPT_PROVIDER_DATA *WTHelperProvDataFromStateData(HANDLE hStateData)
+         *
+         * On Windows the state WTD_STATEACTION_VERIFY hands back is the
+         * provider's data itself. Here it is a handle over the verdict and
+         * nothing more -- no signer or chain is laid out in guest memory --
+         * so there is no provider data to hand back, and NULL is what a
+         * caller is documented to check for. Said once, so a program that
+         * wanted its publisher's name is seen not to get it.
+         */
+        WTHelperProvDataFromStateData: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([state])=>{
+                if ((state >>> 0) !== 0 && isState(state >>> 0) && !saidNoProviderData)
+                {
+                    saidNoProviderData = true;
+                    host.divergence?.('WTHelperProvDataFromStateData',
+                        'verification keeps no provider data (signers, certificate chain); '
+                        + 'NULL answered');
+                }
+                return 0;
+            },
+        },
+
+        /**
+         * CRYPT_PROVIDER_SGNR *WTHelperGetProvSignerFromChain(
+         *     CRYPT_PROVIDER_DATA *pProvData, DWORD idxSigner, BOOL fCounterSigner,
+         *     DWORD idxCounterSigner)
+         *
+         * The signer at idxSigner, or that signer's countersigner, read from
+         * the structure the caller passes; NULL past either array's end. A
+         * NULL pProvData -- what WTHelperProvDataFromStateData answers here
+         * -- is NULL rather than the fault it would be on Windows.
+         */
+        WTHelperGetProvSignerFromChain: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([data, index, counter, counterIndex])=>{
+                if ((data >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const signer = element((data >>> 0) + PROVIDER_DATA.SIGNERS,
+                    (data >>> 0) + PROVIDER_DATA.SIGNER_ARRAY, index, PROVIDER_SIGNER.SIZE);
+                if (signer === 0 || counter === 0)
+                {
+                    return signer;
+                }
+                return element(signer + PROVIDER_SIGNER.COUNTER_SIGNERS,
+                    signer + PROVIDER_SIGNER.COUNTER_SIGNER_ARRAY, counterIndex,
+                    PROVIDER_SIGNER.SIZE);
+            },
+        },
+
+        /**
+         * CRYPT_PROVIDER_CERT *WTHelperGetProvCertFromChain(
+         *     CRYPT_PROVIDER_SGNR *pSgnr, DWORD idxCert)
+         *
+         * The certificate at idxCert of the signer's chain, the signer's own
+         * first; NULL for no signer or past the chain's end.
+         */
+        WTHelperGetProvCertFromChain: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([signer, index])=>((signer >>> 0) === 0 ? 0
+                : element((signer >>> 0) + PROVIDER_SIGNER.CERTS,
+                    (signer >>> 0) + PROVIDER_SIGNER.CERT_ARRAY, index, PROVIDER_CERT_SIZE)),
         },
 
         /** BOOL CryptCATClose(HANDLE hCatalog) */

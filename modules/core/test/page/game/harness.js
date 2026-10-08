@@ -24,7 +24,7 @@
  */
 
 import { createApp } from '../../../src/app.js';
-import { placeHooks } from '../../../src/host/serve.js';
+import { placeHooks, watchFrom } from '../../../src/host/serve.js';
 import {
     SLOTS, GLOBAL_HEADER_INT32, SLOT_HEADER_INT32, SLOT_BYTES, ARENA_OFFSET, ARENA_BYTES,
     slotHeaderOffset, slotPcmOffset, createSeam, mixBlock,
@@ -34,7 +34,7 @@ import {
 const LIMITS = {
     // Output whole: a conformance test prints three pieces per failed check,
     // and 400 ended Wine's d3d8 visual at its 130th.
-    events: 400, output: 20000, calls: 200,
+    events: 400, output: 20000, calls: 200, shaders: 2000, divergences: 2000,
     // Whole files, not a tail. A game of this age writes its own crash report,
     // and it names the exception, the address and the module -- all of which
     // are at the top of the file, which is exactly what a tail throws away.
@@ -645,6 +645,29 @@ export function bundleStoreOptions(request){
  * @param {any} collected
  */
 export function listen(app, collected){
+    // Each shader the program compiled, source and bytecode, for the driver
+    // to write out beside the report.
+    // Every divergence, in a list of its own: the events' cap is spent on the
+    // libraries a program loads first, and what it was refused later was lost.
+    for (const name of ['divergence', 'unimplemented', 'warning'])
+    {
+        app.on(name, (/** @type {any} */ payload)=>{
+            if (collected.divergences.length < LIMITS.divergences)
+            {
+                collected.divergences.push({ kind: name, payload });
+            }
+        });
+    }
+    app.on('shader-compiled', (/** @type {any} */ record)=>{
+        if (collected.shaders.length < LIMITS.shaders)
+        {
+            collected.shaders.push({ api: record.api, profile: record.profile,
+                entry: record.entry, defines: record.defines, flags: record.flags,
+                source: record.source, included: record.included, messages: record.messages,
+                tokens: record.tokens ? toBase64(new Uint8Array(record.tokens.buffer,
+                    record.tokens.byteOffset, record.tokens.byteLength)) : null });
+        }
+    });
     app.on('error', (/** @type {any} */ payload)=>{
         collected.failures.push({
             reason: payload.reason ?? payload.error?.reason,
@@ -725,6 +748,116 @@ export function scheduleKeyTimes(app, request){
         setTimeout(()=>app.input.send({ kind: 'key', code: key.code, down: false }),
             key.atMs + (key.holdMs ?? 120));
     }
+}
+
+/**
+ * Presses the buttons a wizard shows, by their labels, as a person reading
+ * the screen would: whenever the windows shown change, once they have had
+ * `settleMs` to paint, the first label of the list that an enabled button on
+ * the screen carries is clicked at the button's centre. An installer's pages
+ * come at moments no wall clock or frame count foretells -- a copy takes as
+ * long as it takes -- and a page names its way on.
+ *
+ * Labels compare without their mnemonic `&` and without regard to case. A
+ * check box or a radio button is pressed once, as it toggles. Returns the
+ * function that stops it.
+ *
+ * @param {any} app
+ * @param {{ presses?: string[], pressSettleMs?: number, pressEveryMs?: number }} request
+ * @param {(line: string) => void} [say]  each press, as it is made
+ */
+export function schedulePresses(app, request, say = ()=>{}){
+    const labels = (request.presses ?? []).map(label=>label.replace(/&/g, '').toLowerCase());
+    if (labels.length === 0)
+    {
+        return ()=>{};
+    }
+    /** @param {any} window */
+    const labelOf = window=>String(window.title ?? '').replace(/&/g, '').trim().toLowerCase();
+    /** The windows on the screen, and a key that changes when they do. */
+    const current = ()=>{
+        /** @type {any[]} */
+        let windows;
+        try
+        {
+            windows = app.debug?.windows?.() ?? [];
+        }
+        catch {
+            windows = [];
+        }
+        const byHwnd = new Map(windows.map(window=>[window.hwnd, window]));
+        /** @param {any} window @returns {boolean} */
+        const shown = window=>window.visible && (!window.child
+            || (byHwnd.has(window.parent) && shown(byHwnd.get(window.parent))));
+        const showing = windows.filter(shown);
+        // A button takes a click only while every window it is inside does:
+        // a modal box disables its owner, and the owner's buttons with it.
+        /** @param {any} window @returns {boolean} */
+        const usable = window=>window.enabled !== false && (!window.child
+            || (byHwnd.has(window.parent) && usable(byHwnd.get(window.parent))));
+        return { showing: showing.map(window=>({ ...window, enabled: usable(window) })),
+            key: showing.map(window=>`${window.hwnd}:${window.title}:${usable(window)}`)
+                .join('|') };
+    };
+    const toggled = new Set();
+    let seenKey = '';
+    let settling = false;
+    let stopped = false;
+    const look = ()=>{
+        if (settling || stopped)
+        {
+            return;
+        }
+        const { key } = current();
+        if (key === seenKey)
+        {
+            return;
+        }
+        seenKey = key;
+        settling = true;
+        setTimeout(()=>{
+            settling = false;
+            const now = current();
+            // A screen that changed while it settled settles again first.
+            if (stopped || now.key !== key)
+            {
+                return;
+            }
+            const buttons = now.showing.filter(window=>/button$/i.test(String(window.className))
+                && window.enabled !== false && window.rect && !toggled.has(window.hwnd));
+            for (const label of labels)
+            {
+                const button = buttons.find(window=>labelOf(window) === label);
+                if (!button)
+                {
+                    continue;
+                }
+                const style = parseInt(String(button.style ?? '0'), 16) & 0xf;
+                // BS_CHECKBOX through BS_AUTORADIOBUTTON toggle; a push
+                // button is pressed again whenever it shows again.
+                if (style >= 2 && style <= 9)
+                {
+                    toggled.add(button.hwnd);
+                }
+                const x = (button.rect.left + button.rect.right) >> 1;
+                const y = (button.rect.top + button.rect.bottom) >> 1;
+                say(`press "${button.title}" at ${x},${y}`);
+                app.input.send({ kind: 'pointerMove', x, y, dx: 0, dy: 0 });
+                app.input.send({ kind: 'pointerButton', button: 'left', down: true });
+                setTimeout(()=>app.input.send(
+                    { kind: 'pointerButton', button: 'left', down: false }), 100);
+                // Looked at afresh: a press the program did not take is made
+                // again once the screen has settled.
+                seenKey = '';
+                return;
+            }
+        }, request.pressSettleMs ?? 1500);
+    };
+    const timer = setInterval(look, request.pressEveryMs ?? 250);
+    return ()=>{
+        stopped = true;
+        clearInterval(timer);
+    };
 }
 
 /**
@@ -1187,6 +1320,38 @@ function filesUnder(app, directory){
  * @returns {Harness}
  */
 export function createHarness(canvas, how = {}){
+    /** @type {any} */
+    let liveContext = null;
+    let liveFormat = '';
+    /**
+     * A presented frame onto the page's canvas as it comes, for a run a person watches
+     * (`--headed`): a copy on the GPU, the canvas in the frame's own format and size.
+     *
+     * @param {any} device @param {any} frame
+     */
+    const showLive = (device, frame)=>{
+        const surface = frame?.surface;
+        if (!surface?.texture
+            || (surface.format !== 'bgra8unorm' && surface.format !== 'rgba8unorm'))
+        {
+            return;
+        }
+        liveContext ??= canvas.getContext('webgpu');
+        if (canvas.width !== surface.width || canvas.height !== surface.height
+            || liveFormat !== surface.format)
+        {
+            canvas.width = surface.width;
+            canvas.height = surface.height;
+            liveContext.configure({ device, format: surface.format, alphaMode: 'opaque',
+                usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT });
+            liveFormat = surface.format;
+        }
+        const encoder = device.createCommandEncoder({ label: 'live view' });
+        encoder.copyTextureToTexture({ texture: surface.texture },
+            { texture: liveContext.getCurrentTexture() },
+            { width: surface.width, height: surface.height, depthOrArrayLayers: 1 });
+        device.queue.submit([encoder.finish()]);
+    };
     /** @type {string[]} */
     const errors = [];
     const opened = openDevice(errors);
@@ -1228,7 +1393,9 @@ export function createHarness(canvas, how = {}){
      *           files?: { path: string, base64: string }[],
      *           wholeFiles?: boolean,
      *           sampling?: boolean,
-     *           store?: string, prefetch?: boolean, bundleId?: string }} request
+     *           store?: string, prefetch?: boolean, bundleId?: string,
+     *           watch?: { libraries: Record<string, number[] | null>,
+     *               strings: number[] }, record?: number, memorySize?: number }} request
      * @returns {Promise<any>}
      */
     async function run(request){
@@ -1253,7 +1420,8 @@ export function createHarness(canvas, how = {}){
         presentState.pointerDown = false;
         presentState.pointerAt = { x: 0, y: 0 };
         /** @type {any} */
-        const collected = { failures: [], missing: [], output: [], events: [] };
+        const collected = { failures: [], missing: [], output: [], events: [], shaders: [],
+            divergences: [] };
 
         frameReport = ()=>{
             if (!running)
@@ -1390,6 +1558,11 @@ export function createHarness(canvas, how = {}){
             // started this run from beside the bundle -- never from the
             // bundle itself.
             sidecarHooks: request.sidecarHooks,
+            // Imports from the libraries `--watch-import` named, each call and
+            // its answer in the log, as the launcher's `?watch=` puts them.
+            watchImport: request.watch ? watchFrom(request.watch) : undefined,
+            record: request.record || 0,
+            ...(request.memorySize ? { memorySize: request.memorySize } : {}),
             // Journal categories on from the first instruction -- a call area
             // a run wants to read back afterwards through `journalRecent`.
             // `logCapacity`/`logBytes` raise the ring above its default when
@@ -1474,6 +1647,10 @@ export function createHarness(canvas, how = {}){
                 /** @param {any} frame */
                 presentTo: frame=>{
                     presentFrame(app, request, presentState, frame);
+                    if (request.live)
+                    {
+                        showLive(handle.device, frame);
+                    }
                     // The frame `snapFrame` frames after the last long stall, read
                     // back as it was presented; a later stall takes it again, so a
                     // demo's frame N is the same frame in every run.
@@ -1516,7 +1693,7 @@ export function createHarness(canvas, how = {}){
         // one that replaces it.
         // What a watched routine was handed and what it answered, in the log
         // beside the calls around it.
-        if ((request.hooks ?? []).length > 0 && request.log)
+        if (((request.hooks ?? []).length > 0 || request.watch) && request.log)
         {
             app.on('guest-return', (/** @type {any} */ back)=>{
                 const line = `${back.name} -> ${JSON.stringify(back.result)} `
@@ -1548,6 +1725,12 @@ export function createHarness(canvas, how = {}){
         listen(app, collected);
         runningEvents = collected.events;
         scheduleKeyTimes(app, request);
+        const stopPresses = schedulePresses(app, request, line=>{
+            if (collected.events.length < LIMITS.events)
+            {
+                collected.events.push(`[press] ${line}`);
+            }
+        });
 
         /** @type {any} */
         const result = { ok: false, gpu: true, adapter: handle.adapter };
@@ -1599,7 +1782,11 @@ export function createHarness(canvas, how = {}){
         if (presentState.presented)
         {
             const image = await readBack(handle.device, presentState.presented.surface);
-            show(canvas, image);
+            // A live canvas is WebGPU's already and has the frame; a 2D context cannot be had.
+            if (!request.live)
+            {
+                show(canvas, image);
+            }
             result.frame = {
                 index: presentState.presented.frameIndex,
                 width: image.width,
@@ -1750,6 +1937,9 @@ export function createHarness(canvas, how = {}){
         result.missing = [...new Set(collected.missing)];
         result.output = collected.output;
         result.events = collected.events;
+        result.shaders = collected.shaders;
+        result.recorded = request.record ? app.recordedSession?.().events ?? [] : [];
+        result.divergences = collected.divergences;
         result.errors = errors;
         result.presentGaps = presentState.gaps.slice();
         result.presentTimes = presentState.times.slice();
@@ -1774,6 +1964,7 @@ export function createHarness(canvas, how = {}){
             }
         });
 
+        stopPresses();
         await app.dispose();
         // Nothing is running any more, and a report asked for now must say
         // so: left set, `frameReport` reaches into a disposed machine and

@@ -18,20 +18,22 @@
  *
  *     node tools/cdp_test/game.mjs <bundle-id> [--turns N] [--wait SECONDS] [--run-seconds N]
  *                                  [--dump-draws] [--skip-texture tN] [--no-video] [--no-hooks]
- *                                  [--keep-images N,M]
+ *                                  [--keep-images N,M] [--watch-import LIB.dll[#ord+ord]]
  *                                  [--click x,y[,after]] [--key Code[,after]] [--coi]
  *                                  [--command-line STRING] [--windows NAME]
  *                                  [--file HOST=GUEST] [--save-files]
  *                                  [--user-data-dir DIR] [--port N] [--store local] [--prefetch]
  *                                  [--cpu-profile SECONDS] [--heap-profile [old]]
  *                                  [--export-translations FILE]
- *                                  [--watch SECONDS]
+ *                                  [--watch SECONDS] [--press LABEL|LABEL... [--press-settle MS]]
  *
  * `--watch S` is for a program that does not present, an installer above
  * all: every S seconds the desktop it paints with GDI is written as a PNG,
  * the events since the last look are printed, and every process standing
  * says what its threads wait on, which call is parked, which windows show and
- * where its processor last ran.
+ * where its processor last ran. `--press` walks its wizard: whenever the
+ * screen changes and settles, the first of the labels an enabled button
+ * carries is pressed.
  */
 
 import { deflateSync } from 'node:zlib';
@@ -50,6 +52,7 @@ import { describeDevice, watchDevice } from './device-lag.mjs';
 import { openBundle } from '../btl.mjs';
 import { placementOf } from '../../modules/installer/src/prefix.js';
 import { windowsVersion } from '../../modules/core/src/layers/win32/kernel32/versions.js';
+import { disassemble } from '../../modules/core/src/layers/win32/d3dx9/d3d9-machine.fixture.js';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 
@@ -146,7 +149,9 @@ function parse(argv){
     };
     return {
         id,
-        turns: number('--turns', 200000),
+        // A run given a time is bounded by that time: the turn cap alone ended a
+        // loading title's run within seconds of the minutes it was given.
+        turns: number('--turns', argv.includes('--run-seconds') ? Number.MAX_SAFE_INTEGER : 200000),
         // The arguments the title believes it was started with, so a run can
         // set one cvar (`+set logFile 1`) without editing its files.
         commandLine: argv.includes('--command-line')
@@ -201,6 +206,14 @@ function parse(argv){
         // title that reaches its loop and would otherwise run out the turns
         // hours later. Zero means the turns alone decide.
         runSeconds: number('--run-seconds', 0),
+        // The bridge's own record of its last N events -- each host call that
+        // parked and finished, each call into the guest, each callback that
+        // returned -- written out with the report: how a thread's stack got
+        // to where a failure found it.
+        record: number('--record', 0),
+        // The machine's memory in megabytes, as the launcher's setting gives it;
+        // the engine's default without it.
+        memory: number('--memory', 0),
         watch: number('--watch', 0),
         // With --watch: the files under this directory of the volume, counted
         // at every look and listed whenever they change.
@@ -331,6 +344,13 @@ function parse(argv){
             const [x, y, atMs] = argv[index + 1].split(',').map(Number);
             return [{ x, y, atMs }];
         }),
+        // The buttons a wizard shows, pressed by label as each screen
+        // settles, as `next >|install|finish`: the first label an enabled
+        // button on the screen carries. An installer's pages come when its
+        // work is done, which no frame count or moment foretells.
+        presses: argv.includes('--press')
+            ? argv[argv.indexOf('--press') + 1].split('|') : [],
+        pressSettleMs: number('--press-settle', 1500),
         keyTimes: argv.flatMap((flag, index)=>{
             if (flag !== '--key-at')
             {
@@ -361,6 +381,11 @@ function parse(argv){
             const [address, length] = argv[index + 1].split(':');
             return [{ address: Number(address), length: Number(length) }];
         }),
+        // Every import from a library, `lib.dll` or `lib.dll#268+279` for
+        // only those ordinals, as the launcher's `?watch=` takes it: each call
+        // and its answer join the log.
+        watchImports: argv.flatMap((flag, index)=>(flag === '--watch-import'
+            ? [argv[index + 1]] : [])),
         // A watch in front of a routine inside one of the program's own
         // modules, `module:offset:label:argBytes:len,len[:strings]` as the
         // launcher's `?hook=` takes it: its calls and answers join the log.
@@ -453,6 +478,7 @@ function parse(argv){
         // The engine in a worker, with the page's canvas transferred to it;
         // otherwise on the page's own thread.
         worker: argv.includes('--worker'),
+        headed: argv.includes('--headed'),
         // How the loop waits in the worker: `page` (a look every few
         // milliseconds) or `event` (sleep until something happens).
         pacing: argv.includes('--pacing') ? argv[argv.indexOf('--pacing') + 1] : 'page',
@@ -806,6 +832,39 @@ function describe(result, context, calls, symbols){
     }
     say('');
 
+    // What the engine did not do and what it did otherwise than Windows, at
+    // the top: a program told no -- E_NOTIMPL, a stub, a refused shader --
+    // takes another path silently, and the line saying so was a thousand
+    // lines down or past the events' cap. Errors first, then the messages.
+    /** @type {Map<string, number>} */
+    const errors = new Map();
+    /** @type {Map<string, number>} */
+    const notes = new Map();
+    for (const { kind, payload } of result.divergences ?? [])
+    {
+        const line = kind === 'unimplemented'
+            ? `${payload.import}: not implemented, answered with nothing`
+            : kind === 'divergence' ? `${payload.api}: ${payload.detail}`
+                : `${kind}: ${JSON.stringify(payload).slice(0, 300)}`;
+        const failed = kind === 'unimplemented'
+            || /E_NOTIMPL|refused|not implemented|not supported|error X\d/i.test(line);
+        const into = failed ? errors : notes;
+        into.set(line, (into.get(line) ?? 0) + 1);
+    }
+    for (const [title, entries] of [['errors -- what the engine did not do:', errors],
+        ['messages -- what it did otherwise than Windows:', notes]])
+    {
+        if (/** @type {Map<string, number>} */ (entries).size > 0)
+        {
+            say(/** @type {string} */ (title));
+            for (const [line, count] of /** @type {Map<string, number>} */ (entries))
+            {
+                say(`  ${count > 1 ? `${count}x ` : ''}${line}`);
+            }
+            say('');
+        }
+    }
+
     for (const peek of result.peeks ?? [])
     {
         say(`peek 0x${(peek.address >>> 0).toString(16)}: ${peek.bytes}`);
@@ -836,6 +895,7 @@ function describe(result, context, calls, symbols){
         }
         say('');
     }
+
 
     for (const layer of result.layers ?? [])
     {
@@ -1321,6 +1381,7 @@ export async function game(options){
         port: options.port,
     });
     const browser = await launchWithGpu({ profileDir: options.userDataDir ?? undefined,
+        headed: options.headed,
         extraFlags: options.jsFlags ? [`--js-flags=${options.jsFlags}`] : [] });
     mkdirSync(REPORTS_DIR, { recursive: true });
 
@@ -1374,6 +1435,14 @@ export async function game(options){
             windows,
             sidecarHooks,
             hooks: options.watches,
+            record: options.record,
+            memorySize: options.memory > 0 ? options.memory * 1024 * 1024 : undefined,
+            watch: options.watchImports.length > 0
+                ? { libraries: Object.fromEntries(options.watchImports.map(spec=>{
+                    const [dll, ordinals] = spec.toLowerCase().split('#');
+                    return [dll, ordinals ? ordinals.split('+').map(Number) : null];
+                })), strings: [] }
+                : undefined,
             peeks: options.peeks,
             maxTurns: options.turns,
             concurrency: options.concurrency,
@@ -1387,6 +1456,8 @@ export async function game(options){
             logLines: options.logLines,
             video: options.video,
             dumpDraws: options.dumpDraws,
+            // A window a person watches shows every frame as it comes, not the last at the end.
+            live: options.headed,
             dumpEvery: options.dumpEvery || undefined,
             profileCalls: options.profileCalls,
             maxDraws: options.maxDraws,
@@ -1408,6 +1479,8 @@ export async function game(options){
             snapEvery: options.snapEvery,
             clicks: options.clicks,
             clickTimes: options.clickTimes,
+            presses: options.presses,
+            pressSettleMs: options.pressSettleMs,
             keyTimes: options.keyTimes,
             typed: options.typed,
             looks: options.looks,
@@ -1564,7 +1637,9 @@ export async function game(options){
                         writeFileSync(path, toPng(desktop.width, desktop.height, packed));
                         console.log(`${at} s  desktop ${path}`);
                     }
-                }, ()=>{});
+                }, (/** @type {any} */ e)=>{
+                    console.log(`${at} s  no answer: ${e?.message ?? e}`);
+                });
             }, options.watch * 1000)
             : null;
 
@@ -1854,6 +1929,43 @@ the run as it stands: ${path}`;
         {
             drawsPath = join(REPORTS_DIR, `game-${stamp}-draws.txt`);
             writeFileSync(drawsPath, `${drawn.join('\n')}\n`);
+        }
+        if ((result.recorded ?? []).length > 0)
+        {
+            const path = join(REPORTS_DIR, `game-${stamp}-bridge.jsonl`);
+            writeFileSync(path, `${result.recorded.map((/** @type {any} */ event)=>
+                JSON.stringify(event)).join('\n')}\n`);
+            console.log(`bridge:     ${result.recorded.length} events in ${path}`);
+        }
+        // Every shader the program compiled: its source and, beside it, what
+        // the compiler made of it, disassembled -- a picture wrong in a shader
+        // is read by comparing the two.
+        if ((result.shaders ?? []).length > 0)
+        {
+            const shaderDirectory = join(REPORTS_DIR, `game-${stamp}-shaders`);
+            mkdirSync(shaderDirectory, { recursive: true });
+            result.shaders.forEach((/** @type {any} */ shader, /** @type {number} */ index)=>{
+                const name = `${String(index).padStart(3, '0')}-${shader.profile}-${
+                    String(shader.entry).replace(/[^\w]/g, '_')}`;
+                // The program's macros and flags first, as the defines the
+                // source was compiled under: the same text is many shaders.
+                writeFileSync(join(shaderDirectory, `${name}.hlsl`), `${(shader.defines ?? [])
+                    .map((/** @type {string[]} */ [key, value])=>`#define ${key} ${value}\n`)
+                    .join('')}// flags 0x${(shader.flags ?? 0).toString(16)}\n${shader.source}`);
+                // What its includes handed over, under their own names, so a
+                // reference compiler can read the same tree.
+                for (const [file, body] of Object.entries(shader.included ?? {}))
+                {
+                    writeFileSync(join(shaderDirectory, String(file).replace(/[\\/:*?"<>|]/g, '_')),
+                        String(body));
+                }
+                const bytes = shader.tokens ? Buffer.from(shader.tokens, 'base64') : null;
+                writeFileSync(join(shaderDirectory, `${name}.txt`), `${shader.messages}${bytes
+                    ? disassemble(new Uint32Array(bytes.buffer, bytes.byteOffset,
+                        bytes.byteLength / 4))
+                    : 'no bytecode\n'}`);
+            });
+            console.log(`shaders:    ${result.shaders.length} in ${shaderDirectory}`);
         }
         // The texels behind those draws, as images. A rectangle in a frame is
         // either something a draw put there or something already in what it

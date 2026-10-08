@@ -1075,6 +1075,14 @@ export function createGraphicsModule(){
                  */
                 fontMetrics: font=>fonts.metrics(font),
                 /**
+                 * One character's coverage in a font, or null without an engine:
+                 * what D3DX's font draws its text from, as GDI does.
+                 *
+                 * @param {number} code
+                 * @param {import('../win32/gdi32/structs.js').LogFontFields} font
+                 */
+                glyph: (code, font)=>fonts.glyph(code, font),
+                /**
                  * How wide a string is in a font, or null without an engine.
                  *
                  * @param {import('../win32/gdi32/structs.js').LogFontFields} font
