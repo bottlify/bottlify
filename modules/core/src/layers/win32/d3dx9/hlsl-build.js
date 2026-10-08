@@ -700,7 +700,7 @@ export function createBuilder(profile){
     /** @param {Vec} a @returns {Vec} */
     const not = a=>sub(num(1), a);
     /** @param {Vec} a @param {Vec} b @returns {Vec} */
-    const and = (a, b)=>mul(a, b);
+    const and = (a, b)=>(isZero(a) || isZero(b) ? num(0, Math.max(a.w, b.w)) : mul(a, b));
     /** @param {Vec} a @param {Vec} b @returns {Vec} */
     const or = (a, b)=>max(a, b);
 
@@ -940,7 +940,58 @@ export function createBuilder(profile){
         instrs.push({ op: 'mova', dest: { kind: 'addr' }, srcs: [lane(v, 0).src] });
     };
 
+    /**
+     * A flow control instruction. What was built before it is forgotten unless it is the
+     * start of a loop: past a break or the end of a loop, a register may hold another value.
+     *
+     * @param {'rep' | 'endrep' | 'ifc' | 'endif' | 'break' | 'breakc'} op
+     * @param {Vec[]} [args] @param {Partial<Instr>} [extra]
+     */
+    const control = (op, args = [], extra = {})=>{
+        instrs.push({ op, dest: { kind: 'none' }, srcs: args.map(a=>lane(a, 0).src), ...extra });
+        if (op !== 'rep')
+        {
+            known.clear();
+        }
+    };
+
+    /** A register a loop's variable lives in, holding `v` as the loop begins. @param {Vec} v */
+    const carry = v=>{
+        const reg = newReg(v.w);
+        reg.carried = true;
+        const into = vec({ kind: 'reg', reg, swz: Array.from({ length: v.w }, (_, i)=>i) });
+        assign(into, v);
+        return into;
+    };
+
+    /** Writes `v` into the register `into` reads, a loop's variable. @param {Vec} into @param {Vec} v */
+    const assign = (into, v)=>{
+        const { src } = into;
+        const from = v.src;
+        if (src.kind !== 'reg' || (from.kind === 'reg' && from.reg === src.reg && !from.neg
+            && !from.abs && from.swz.every((c, i)=>c === src.swz[i])))
+        {
+            return;
+        }
+        instrs.push({ op: 'mov', dest: { kind: 'reg', reg: src.reg, mask: (1 << into.w) - 1 },
+            srcs: [fit(v.src, into.w)] });
+    };
+
+    /** Where the code is now, to come back to: the instructions after it are dropped. */
+    const checkpoint = ()=>({ count: instrs.length, known: new Map(known) });
+
+    /** @param {ReturnType<typeof checkpoint>} mark */
+    const rollback = mark=>{
+        instrs.length = mark.count;
+        known.clear();
+        for (const [key, value] of mark.known)
+        {
+            known.set(key, value);
+        }
+    };
+
     return {
+        control, carry, assign, checkpoint, rollback,
         profile, instrs, inputs, outputs, constants, newReg, get vregCount(){
             return vregCount;
         },

@@ -571,3 +571,11 @@ and puts the `d3dx`/`d3dcompiler` libraries in `system32`, where the loader alre
 engine's `d3dx9_*` stub tables answer a program whose installer never ran. The Visual C++ and
 .NET redistributables are still answered as already run, since the engine carries the C runtime
 itself. *2026-09-26.*
+
+**A constant table entry whose name another entry in a different register set shares is set
+with it.** fxc compiles a model 3 loop over an `int` uniform to `rep i#` and lists the uniform
+twice in the CTAB, once in the float registers arithmetic reads and once in the integer register
+`rep` reads; Wine's conformance tests cover each register set's layout but never such a pair. A
+setter given the name (`SetInt`, `SetValue`, ...) writes both, each in its own set's layout,
+so the loop counts what the program set rather than what the integer register happened to hold.
+*2026-10-08.*

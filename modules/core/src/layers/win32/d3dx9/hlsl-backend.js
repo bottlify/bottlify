@@ -24,7 +24,7 @@
  */
 
 import { USAGE, registersOf } from './hlsl-ir.js';
-import { OPCODES, REG, MOD, encodeProgram } from './hlsl-encode.js';
+import { COMPARISON, OPCODES, REG, MOD, encodeProgram } from './hlsl-encode.js';
 import { constantTableComment } from './hlsl-ctab.js';
 
 /** @typedef {import('./hlsl-ir.js').IrProgram} IrProgram */
@@ -61,7 +61,24 @@ const SINCOS_TAYLOR = [
 ];
 
 /** Instruction slots an instruction takes when it is not one. @type {Record<string, number>} */
-const SLOT_COST = { sincos: 8, lrp: 2, pow: 3, dsx: 2, dsy: 2 };
+const SLOT_COST = { sincos: 8, lrp: 2, pow: 3, dsx: 2, dsy: 2, rep: 3, endrep: 2, ifc: 3,
+    breakc: 3 };
+
+/** Whether an instruction is flow control. @param {Instr} instr */
+const isControl = instr=>/** @type {Record<string, { cls: string }>} */ (OPCODES)[instr.op]
+    ?.cls === 'control';
+
+/**
+ * For each instruction, how many flow control instructions come before it: two
+ * instructions with the same number have nothing between them a pass may not
+ * move a write across.
+ *
+ * @param {Instr[]} instrs @returns {number[]}
+ */
+function regions(instrs){
+    let n = 0;
+    return instrs.map(instr=>(isControl(instr) ? ++n : n));
+}
 
 const TEXTURE_OPS = new Set(['texld', 'texldl', 'texldd', 'texkill']);
 
@@ -80,7 +97,7 @@ export function lanesRead(instr, k){
     const src = instr.srcs[k];
     const cls = /** @type {Record<string, { cls: string }>} */ (OPCODES)[instr.op].cls;
     const count = laneCount(src);
-    if (cls === 'scalar')
+    if (cls === 'scalar' || cls === 'control')
     {
         return [0];
     }
@@ -116,7 +133,8 @@ export function prune(instrs){
         const instr = instrs[i];
         if (instr.dest.kind === 'reg')
         {
-            if (!live.has(instr.dest.reg.id))
+            // A loop's variable is read by the next iteration, which comes before it here.
+            if (!live.has(instr.dest.reg.id) && !instr.dest.reg.carried)
             {
                 continue;
             }
@@ -205,6 +223,7 @@ export function reselect(src, lanes, negate){
  */
 export function fuseMultiplyAdd(instrs, profile){
     const { writers, reads } = usage(instrs);
+    const region = regions(instrs);
     /** @type {Set<number>} */
     const removed = new Set();
     const result = instrs.map(instr=>({ ...instr, srcs: instr.srcs.slice() }));
@@ -234,7 +253,8 @@ export function fuseMultiplyAdd(instrs, profile){
             }
             const maker = result[made[0]];
             if (maker.op !== 'mul' || maker.dest.kind !== 'reg'
-                || maker.dest.mask !== (1 << product.reg.width) - 1)
+                || maker.dest.mask !== (1 << product.reg.width) - 1
+                || region[made[0]] !== region[j] || product.reg.carried)
             {
                 continue;
             }
@@ -453,6 +473,12 @@ export function numberValues(instrs, profile){
         }
         if (instr.dest.kind !== 'reg' && instr.dest.kind !== 'out')
         {
+            if (cls === 'control')
+            {
+                // Where the code may go back or around, what a register holds is not known.
+                held.clear();
+                home.clear();
+            }
             out.push(instr);
             continue;
         }
@@ -537,25 +563,28 @@ export function numberValues(instrs, profile){
  */
 export function coalesceMoves(instrs){
     const { writers, reads } = usage(instrs);
+    const region = regions(instrs);
     /** @type {Map<number, Instr>} */
     const replaced = new Map();
     /** @type {Set<number>} */
     const dropped = new Set();
     instrs.forEach((move, j)=>{
         if (move.op !== 'mov' || move.dest.kind !== 'reg' || move.shift !== undefined
-            || move.dest.reg.pin || move.dest.reg.fixed)
+            || move.dest.reg.pin || move.dest.reg.fixed || move.dest.reg.carried)
         {
             return;
         }
         const src = move.srcs[0];
-        if (src.kind !== 'reg' || src.neg || src.abs || src.mod || reads.get(src.reg) !== 1)
+        if (src.kind !== 'reg' || src.neg || src.abs || src.mod || reads.get(src.reg) !== 1
+            || src.reg.carried)
         {
             return;
         }
         const made = writers.get(src.reg);
         // A maker already merged into the move after it is gone: a chain of moves is
         // merged one link at a time.
-        if (!made || made.length !== 1 || replaced.has(made[0]) || dropped.has(made[0]))
+        if (!made || made.length !== 1 || replaced.has(made[0]) || dropped.has(made[0])
+            || region[made[0]] !== region[j])
         {
             return;
         }
@@ -603,6 +632,7 @@ export function coalesceMoves(instrs){
  */
 export function forwardOutputs(instrs, writable = ()=>true){
     const { writers, reads } = usage(instrs);
+    const region = regions(instrs);
     /** @type {Map<number, Instr>} */
     const replaced = new Map();
     /** @type {Set<number>} */
@@ -618,7 +648,8 @@ export function forwardOutputs(instrs, writable = ()=>true){
             return;
         }
         const made = writers.get(src.reg);
-        if (!made || made.some(i=>i > j || replaced.has(i)))
+        if (!made || src.reg.carried || made.some(i=>i > j || replaced.has(i)
+            || region[i] !== region[j]))
         {
             return;
         }
@@ -980,6 +1011,26 @@ function allocate(instrs){
             }
         }
     });
+    // A register live into a loop is live to its end: the next iteration reads it again.
+    /** @type {number[]} */
+    const opened = [];
+    instrs.forEach((instr, i)=>{
+        if (instr.op === 'rep')
+        {
+            opened.push(i);
+        }
+        else if (instr.op === 'endrep')
+        {
+            const start = /** @type {number} */ (opened.pop());
+            for (const range of ranges.values())
+            {
+                if (range.start < start && range.end > start)
+                {
+                    range.end = Math.max(range.end, i);
+                }
+            }
+        }
+    });
     const order = [...ranges.entries()].sort((a, b)=>a[1].start - b[1].start);
     /** @type {number[][]} The instruction until which each component is taken. */
     const busy = [];
@@ -1144,6 +1195,23 @@ export function assemble(ir, options = {}){
     ir.constants = ir.constants.filter(c=>c.set !== 's'
         || instrs.some(i=>i.srcs.some(s=>s.kind === 'sampler' && s.cst === c)));
     const reserved = assignConstants(ir.constants, diagnostics);
+    // A loop runs at most 255 times, the count of an integer register: its breakc leaves it.
+    /** @type {{ index: number, values: number[] }[]} */
+    const intDefs = [];
+    if (instrs.some(i=>i.op === 'rep'))
+    {
+        const ints = new Set(ir.constants.filter(c=>c.set === 'i').flatMap(c=>
+            Array.from({ length: registersOf(c.type) }, (_, r)=>(c.index ?? 0) + r)));
+        let index = 0;
+        while (ints.has(index))
+        {
+            index++;
+        }
+        intDefs.push({ index, values: [255, 0, 0, 0] });
+        instrs = instrs.map(instr=>(instr.op === 'rep' ? { ...instr, srcs: [
+            /** @type {Src} */ ({ kind: 'creg', file: 'i', index, swz: [0, 1, 2, 3] })] }
+            : instr));
+    }
     const defs = packLiterals(instrs, reserved);
     instrs = legalize(instrs, profile, newReg);
     const { homes, temps } = allocate(instrs);
@@ -1296,6 +1364,13 @@ export function assemble(ir, options = {}){
             dest.pp = true;
         }
 
+        if (info.cls === 'control')
+        {
+            physical.push({ op: instr.op, dest: null, srcs: instr.srcs.map(src=>physicalSource(
+                src, instr.op === 'rep' ? [0, 1, 2, 3] : [0, 0, 0, 0])),
+            control: instr.cmp ? COMPARISON[instr.cmp] : 0 });
+            continue;
+        }
         if (instr.op === 'texkill')
         {
             // The register itself is named; its x, y and z decide.
@@ -1523,6 +1598,6 @@ export function assemble(ir, options = {}){
             | profile.tokenMinor) >>> 0,
         flags: options.flags ?? 0,
     });
-    const tokens = encodeProgram({ profile, decls, defs, instrs: physical, comment });
+    const tokens = encodeProgram({ profile, decls, defs, intDefs, instrs: physical, comment });
     return { tokens, diagnostics, stats };
 }

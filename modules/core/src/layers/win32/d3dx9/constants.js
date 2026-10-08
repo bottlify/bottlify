@@ -354,6 +354,26 @@ export function createConstantTableObjects(host){
      * @param {any} [thread]  Whose call it is, when it comes after an await.
      */
     const store = (table, device, constant, values, thread)=>{
+        // fxc gives a model 3 loop's int count a second entry of the same name in the integer
+        // registers, which rep reads, beside the float one arithmetic reads: both are set.
+        const twins = constant && table.constants.includes(constant)
+            ? table.constants.filter(one=>one !== constant && one.name === constant.name
+                && one.set !== constant.set) : [];
+        if (twins.length === 0)
+        {
+            return storeSet(table, device, constant, values, thread);
+        }
+        const who = thread ?? host.currentThread?.();
+        return twins.reduce((chain, twin)=>Promise.resolve(chain).then(answer=>(answer !== D3D_OK
+            ? answer : storeSet(table, device, twin, values, who))),
+        storeSet(table, device, constant, values, thread));
+    };
+
+    /**
+     * @param {TableState} table @param {number} device @param {Constant | null} constant
+     * @param {number[]} values @param {any} [thread]
+     */
+    const storeSet = (table, device, constant, values, thread)=>{
         if (!constant || (device >>> 0) === 0 || !host.callGuest || !host.heap)
         {
             return D3DERR_INVALIDCALL;

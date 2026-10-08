@@ -172,7 +172,25 @@ async function compile(source, options){
     let ir;
     try
     {
-        ({ ir } = lower(module, entry, profile));
+        // A loop that does not unroll is run as a loop where the model has them, and the
+        // entry lowered again; a loop in it may not unroll either.
+        const loops = new Set();
+        for (;;)
+        {
+            try
+            {
+                ({ ir } = lower(module, entry, profile, { loops }));
+                break;
+            }
+            catch (e){
+                if (!(e instanceof LowerError) || !e.loop || profile.major < 3
+                    || loops.has(e.loop))
+                {
+                    throw e;
+                }
+                loops.add(e.loop);
+            }
+        }
     }
     catch (e){
         if (!(e instanceof LowerError) && !(e instanceof TargetError))

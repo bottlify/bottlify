@@ -52,6 +52,7 @@ import { lowerIntrinsic } from './hlsl-lower-intrinsics.js';
  * @property {Map<any, Value> | null} brokeEnv
  * @property {Vec | null} skipped
  * @property {Map<any, Value> | null} skippedEnv
+ * @property {Map<any, Value>} [carried]   A loop run as a loop: its variables' registers.
  */
 /** @typedef {import('./hlsl-lower-intrinsics.js').UniformArray} UniformArray */
 
@@ -65,6 +66,8 @@ export class LowerError extends Error {
         this.name = 'LowerError';
         this.code = code;
         this.pos = pos;
+        /** The loop that could not be unrolled, which a model 3 shader may run as a loop. */
+        this.loop = /** @type {any} */ (null);
     }
 }
 
@@ -145,11 +148,14 @@ function vecOf(v){
  * @param {Module} module
  * @param {FunctionSymbol} entry
  * @param {Profile} profile
+ * @param {{ loops?: ReadonlySet<any> }} [options]   `loops`: the loops to run as loops rather
+ *     than unroll, which a model 3 shader can.
  * @returns {{ ir: import('./hlsl-ir.js').IrProgram }}
  * @throws {LowerError}
  */
-export function lower(module, entry, profile){
+export function lower(module, entry, profile, options = {}){
     const b = createBuilder(profile);
+    const runAsLoops = options.loops ?? new Set();
 
     /**
      * @param {string} code @param {string} message @param {any} pos
@@ -157,6 +163,16 @@ export function lower(module, entry, profile){
      */
     const fail = (code, message, pos)=>{
         throw new LowerError(code, message, pos);
+    };
+
+    /**
+     * A loop that does not unroll.
+     * @param {any} loop @param {string} message @returns {never}
+     */
+    const failLoop = (loop, message)=>{
+        const error = new LowerError('X3511', message, loop.pos);
+        error.loop = loop;
+        throw error;
     };
 
     // ---- values ------------------------------------------------------------------------
@@ -1337,7 +1353,11 @@ export function lower(module, entry, profile){
                             }
                         }
                         const loop = loops[i];
-                        if (loop && !loop.isSwitch)
+                        if (loop?.carried && want === 'end')
+                        {
+                            leaveLoop(loop, st);
+                        }
+                        else if (loop && !loop.isSwitch)
                         {
                             const here = st.path ?? b.num(1);
                             if (want === 'end')
@@ -1410,9 +1430,18 @@ export function lower(module, entry, profile){
                     }
                     break;
                 }
+                case 'exitUnless':
+                    stack.push({ kind: 'if', cond: b.not(truth(ev(s.test, st))),
+                        then: { kind: 'break', pos: s.pos }, else: null, pos: s.pos });
+                    break;
                 case 'for':
                 case 'while':
                 case 'do': {
+                    if (runAsLoops.has(s))
+                    {
+                        runLoop(s, st, loops);
+                        break;
+                    }
                     const id = ++loopId;
                     const end = { kind: 'mark', what: 'end', id };
                     loops.push({ id, isSwitch: false, end, path: st.path, broke: null,
@@ -1432,21 +1461,27 @@ export function lower(module, entry, profile){
                         x.name.toLowerCase() === 'unroll')?.args[0];
                     const most = told?.kind === 'num' ? told.value : MAX_UNROLL;
                     let go = true;
+                    /** @type {any} */
+                    let exit = null;
                     if (!s.first && loop.test)
                     {
                         const c = truth(ev(loop.test, st));
                         const value = known(c);
-                        if (!value)
+                        if (!value && profile.major >= 3)
                         {
-                            fail('X3511', 'unable to unroll loop, loop does not appear to '
-                                + 'terminate in a timely manner', loop.pos);
+                            failLoop(loop, 'unable to unroll loop, loop does not appear to '
+                                + 'terminate in a timely manner');
                         }
-                        go = value[0] !== 0;
+                        // A test not known is a break where it fails, the iterations as many
+                        // as what is known of it allows (i < 20 of i++ < n && i < 20).
+                        go = value ? value[0] !== 0 : true;
+                        exit = value ? null : { kind: 'if', cond: b.not(c),
+                            then: { kind: 'break', pos: loop.pos }, else: null, pos: loop.pos };
                     }
                     if (go && s.count >= most)
                     {
-                        fail('X3511', 'unable to unroll loop, loop does not appear to terminate '
-                            + `in a timely manner (${most} iterations)`, loop.pos);
+                        failLoop(loop, 'unable to unroll loop, loop does not appear to terminate '
+                            + `in a timely manner (${most} iterations)`);
                     }
                     if (go)
                     {
@@ -1458,6 +1493,10 @@ export function lower(module, entry, profile){
                         }
                         stack.push({ kind: 'mark', what: 'cont', id: s.id });
                         stack.push(loop.body);
+                        if (exit)
+                        {
+                            stack.push(exit);
+                        }
                     }
                     break;
                 }
@@ -1496,6 +1535,146 @@ export function lower(module, entry, profile){
         }
         return {};
     }
+
+    /**
+     * A value with each of its vectors replaced.
+     * @param {Value} value @param {(v: Vec) => Vec} f @returns {Value}
+     */
+    const mapVecs = (value, f)=>{
+        switch (value.k)
+        {
+            case 'vec': return vec(f(value.v));
+            case 'mat': return { k: 'mat', rows: value.rows, cols: value.cols,
+                rowV: rowsOf(value).map(f), colV: null };
+            case 'struct': return { k: 'struct', fields: value.fields.map(x=>mapVecs(x, f)) };
+            case 'arr': return { ...value, elems: value.elems.map(x=>mapVecs(x, f)) };
+            default: return value;
+        }
+    };
+
+    /**
+     * Writes a value into the registers of a loop's variable.
+     * @param {Value} into @param {Value} value
+     */
+    const assignValue = (into, value)=>{
+        switch (into.k)
+        {
+            case 'vec': b.assign(into.v, vecOf(value)); break;
+            case 'mat': {
+                const rows = rowsOf(/** @type {Extract<Value, {k: 'mat'}>} */ (value));
+                rowsOf(into).forEach((row, r)=>b.assign(row, rows[r]));
+                break;
+            }
+            case 'struct':
+                into.fields.forEach((f, i)=>assignValue(f,
+                    /** @type {Extract<Value, {k: 'struct'}>} */ (value).fields[i]));
+                break;
+            case 'arr':
+                into.elems.forEach((e, i)=>assignValue(e,
+                    /** @type {Extract<Value, {k: 'arr'}>} */ (value).elems[i]));
+                break;
+            default:
+        }
+    };
+
+    /**
+     * A break out of a loop run as a loop: its variables take what they hold here, where
+     * the break is taken, and the loop is left.
+     * @param {Jumps} loop @param {State} st
+     */
+    const leaveLoop = (loop, st)=>{
+        const carried = /** @type {Map<any, Value>} */ (loop.carried);
+        const keep = ()=>{
+            for (const [key, into] of carried)
+            {
+                assignValue(into, /** @type {Value} */ (st.env.get(key)));
+            }
+        };
+        if (st.path === loop.path || !st.path)
+        {
+            keep();
+            b.control('break');
+            return;
+        }
+        const before = b.instrs.length;
+        b.control('ifc', [st.path, b.num(0)], { cmp: 'ne' });
+        keep();
+        if (b.instrs.length === before + 1)
+        {
+            b.instrs.pop();
+            b.control('breakc', [st.path, b.num(0)], { cmp: 'ne' });
+            return;
+        }
+        b.control('break');
+        b.control('endif');
+    };
+
+    /**
+     * A loop run as one -- rep to endrep, left by a break where its test fails -- for a
+     * model 3 shader whose loop does not unroll. The variables it changes live in registers
+     * of their own, written as it begins and at the end of each iteration; which those are
+     * is found by lowering the body until it changes no variable that has none.
+     *
+     * @param {any} s @param {State} st @param {Jumps[]} loops
+     */
+    const runLoop = (s, st, loops)=>{
+        if (returns(s.body))
+        {
+            fail('X3511', 'a return in a loop that does not unroll is not supported', s.pos);
+        }
+        if (s.kind === 'for' && s.init)
+        {
+            execList([s.init], st, loops);
+        }
+        const before = new Map(st.env);
+        const path = st.path;
+        /** @type {Set<any>} */
+        const changing = new Set();
+        for (;;)
+        {
+            const mark = b.checkpoint();
+            st.env = new Map(before);
+            st.path = path;
+            /** @type {Map<any, Value>} */
+            const carried = new Map();
+            for (const key of changing)
+            {
+                const value = mapVecs(/** @type {Value} */ (before.get(key)), b.carry);
+                carried.set(key, value);
+                st.env.set(key, value);
+            }
+            const id = ++loopId;
+            /** @type {Jumps} */
+            const loop = { id, isSwitch: false, end: {}, path, broke: null, brokeEnv: null,
+                skipped: null, skippedEnv: null, carried };
+            b.control('rep', [b.num(255)]);
+            const test = s.test ? [{ kind: 'exitUnless', test: s.test, pos: s.pos }] : [];
+            const cont = { kind: 'mark', what: 'cont', id };
+            const step = s.kind === 'for' && s.step
+                ? [{ kind: 'expr', expr: s.step, pos: s.pos }] : [];
+            execList(s.kind === 'do' ? [s.body, cont, ...test] : [...test, s.body, cont, ...step],
+                st, [...loops, loop]);
+            const more = [...before.keys()].filter(key=>!changing.has(key)
+                && st.env.get(key) !== before.get(key));
+            if (more.length === 0)
+            {
+                for (const [key, into] of carried)
+                {
+                    assignValue(into, /** @type {Value} */ (st.env.get(key)));
+                }
+                b.control('endrep');
+                st.env = new Map(before);
+                for (const [key, into] of carried)
+                {
+                    st.env.set(key, into);
+                }
+                st.path = path;
+                return;
+            }
+            more.forEach(key=>changing.add(key));
+            b.rollback(mark);
+        }
+    };
 
     /**
      * Kills the pixel where the code runs and the value is negative.

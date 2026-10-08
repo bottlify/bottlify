@@ -70,10 +70,20 @@ export const OPCODES = Object.freeze({
     dsy: { code: 92, cls: 'comp', srcs: 1 },
     texldd: { code: 93, cls: 'texture', srcs: 4 },
     texldl: { code: 95, cls: 'texture', srcs: 2 },
+    rep: { code: 38, cls: 'control', srcs: 1 },
+    endrep: { code: 39, cls: 'control', srcs: 0 },
+    ifc: { code: 41, cls: 'control', srcs: 2 },
+    endif: { code: 43, cls: 'control', srcs: 0 },
+    break: { code: 44, cls: 'control', srcs: 0 },
+    breakc: { code: 45, cls: 'control', srcs: 2 },
 });
+
+/** D3DSHADER_COMPARISON, the control field of ifc and breakc. */
+export const COMPARISON = Object.freeze({ gt: 1, eq: 2, ge: 3, lt: 4, ne: 5, le: 6 });
 
 const OP_DCL = 31;
 const OP_DEF = 81;
+const OP_DEFI = 48;
 const OP_COMMENT = 0xfffe;
 const END = 0x0000ffff;
 
@@ -113,6 +123,7 @@ const END = 0x0000ffff;
  * @property {import('./hlsl-ir.js').Profile} profile
  * @property {PhysDcl[]} decls
  * @property {{ index: number, values: number[] }[]} defs
+ * @property {{ index: number, values: number[] }[]} [intDefs]   defi: an integer register.
  * @property {PhysInstr[]} instrs
  * @property {number[]} [comment]   Whole comment tokens, written before the declarations.
  */
@@ -184,6 +195,11 @@ export function encodeProgram(program){
     {
         instruction(OP_DEF, 0, [destToken({ type: REG.CONST, index: def.index, mask: 0xf }),
             ...def.values.map(bitsOf)]);
+    }
+    for (const def of program.intDefs ?? [])
+    {
+        instruction(OP_DEFI, 0, [destToken({ type: REG.CONSTINT, index: def.index, mask: 0xf }),
+            ...def.values.map(v=>v >>> 0)]);
     }
     for (const dcl of program.decls)
     {

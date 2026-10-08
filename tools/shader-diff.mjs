@@ -62,10 +62,16 @@ function unit(key){
     return ((h ^ h >>> 15) >>> 0) / 4294967296;
 }
 
-/** Name to registers, from the CTAB block in a program's tokens. @param {any} program */
+/**
+ * Name to registers, from the CTAB block in a program's tokens. A name may stand in two
+ * register sets -- fxc gives a model 3 loop's int count both an i# and a c# -- and is
+ * listed once for each, holding the same values in both.
+ *
+ * @param {any} program
+ */
 function constantsOf(program){
-    /** @type {Map<string, { set: number, index: number, count: number, type: number }>} */
-    const named = new Map();
+    /** @type {[string, { set: number, index: number, count: number, type: number }][]} */
+    const named = [];
     const block = program.constantTable;
     if (!block)
     {
@@ -77,7 +83,7 @@ function constantsOf(program){
         new DataView(body.buffer, body.byteOffset, body.byteLength), 0);
     for (const c of table.constants)
     {
-        named.set(c.name, { set: c.set, index: c.index, count: c.count, type: c.type });
+        named.push([c.name, { set: c.set, index: c.index, count: c.count, type: c.type }]);
     }
     return named;
 }

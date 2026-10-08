@@ -150,11 +150,35 @@ test('a shader longer than the target holds compiles, with the numbers as a warn
     assert.doesNotMatch(roomy.messages ?? '', /X5608/);
 });
 
-test('a loop that cannot be unrolled is reported', async()=>{
+test('a loop that cannot be unrolled is reported where the model has no loops', async()=>{
     const result = await compile('int n;\nfloat4 main(float4 c : COLOR0) : COLOR0 '
-        + '{ float4 r = 0; for (int i = 0; i < n; i++) r += c; return r; }', 'ps_3_0');
+        + '{ float4 r = 0; for (int i = 0; i < n; i++) r += c; return r; }', 'ps_2_0');
     assert.equal(result.ok, false);
     assert.match(result.messages, /error X3511: unable to unroll loop/);
+});
+
+test('a model 3 loop that does not unroll runs as a loop, left where its test fails', async()=>{
+    // rep to endrep with break_ne, as fxc compiles it; i and r are carried from one
+    // iteration to the next, and a break on a value read in the loop leaves it there.
+    const result = await compile(`int n; float k;
+        float4 main(float4 c : COLOR0) : COLOR0
+        { float4 r = 0; int i;
+          for (i = 0; i < n; i++) { r = r * 10 + c; if (r.x > k) break; }
+          return float4(r.xy, i, 0); }`, 'ps_3_0');
+    assert.equal(result.ok, true, result.messages);
+    const program = decode(/** @type {Uint32Array} */ (result.tokens));
+    assert.ok(program.instructions.some((/** @type {any} */ i)=>i.name === 'rep'));
+    const table = Object.fromEntries(constants(result).map(c=>[c.name, c.index]));
+    const run = (/** @type {number} */ n, /** @type {number} */ k)=>{
+        const f = new Float32Array(32 * 4);
+        f[table.n * 4] = n;
+        f[table.k * 4] = k;
+        return [...execute(program, { inputs: { v: [[1, 2, 0, 0]], t: [] }, constants: { f } })
+            .outputs.oC0].slice(0, 3);
+    };
+    assert.deepEqual(run(0, 1000), [0, 0, 0]);
+    assert.deepEqual(run(3, 1000), [111, 222, 3]);
+    assert.deepEqual(run(3, 5), [11, 22, 1]);
 });
 
 test('a profile the compiler does not target is refused', async()=>{

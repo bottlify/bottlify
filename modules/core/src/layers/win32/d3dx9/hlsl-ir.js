@@ -11,7 +11,11 @@
  * The front half (`hlsl-lower.js`) turns the checked tree of one entry point
  * into straight-line code over *virtual registers*: functions are inlined,
  * loops unrolled, branches turned into selects, so there is no control flow to
- * reason about and a register's lifetime is an interval. The back half
+ * reason about and a register's lifetime is an interval. A loop that cannot be
+ * unrolled in a model 3 shader is the exception: `rep` to `endrep`, left by
+ * `breakc` (or `ifc` ... `break` ... `endif`), with its variables in `carried`
+ * registers. Every control instruction is a barrier the passes do not move or
+ * merge anything across, and a register live into a loop is live to its end. The back half
  * (`hlsl-backend.js`) gives the virtual registers physical ones, the constants
  * and literals their registers, and writes the token stream.
  *
@@ -124,6 +128,9 @@ export function registersOf(type){
  *                                shader reads it through any swizzle as it stands.
  * @property {{ file: 't' | 'r', index?: number, sampler?: Const }} [pin]   Must live in this
  *           register of a model 1 pixel shader: where a texture read leaves its texel.
+ * @property {boolean} [carried]  A variable a loop changes: written before it and at the end
+ *                                of each iteration, read in the next, so it is never merged with
+ *                                another register nor its writes moved.
  */
 
 /**
@@ -192,6 +199,7 @@ export function registersOf(type){
  * @property {'project' | 'bias' | undefined} [texMode]   For texld.
  * @property {boolean} [pp]   Partial precision.
  * @property {number} [shift]  A scale of the result, as the token holds it (model 1 only).
+ * @property {'gt' | 'eq' | 'ge' | 'lt' | 'ne' | 'le'} [cmp]   For ifc and breakc.
  */
 
 /**
