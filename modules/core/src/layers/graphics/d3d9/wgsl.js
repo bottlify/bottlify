@@ -471,6 +471,8 @@ export function translateShader(parsed, options = {}){
     const semantics = new Map();
     /** @type {Map<number, string>} def'd constants, as WGSL literals */
     const defined = new Map();
+    /** Whether an indexed constant read may land on a def'd register. */
+    let relativeDefs = false;
     /** @type {Map<number, string>} */
     const definedInts = new Map();
     /** @type {Map<number, string>} */
@@ -529,9 +531,11 @@ export function translateShader(parsed, options = {}){
      */
     const registerName = (operand, writing)=>{
         const index = operand.index;
-        const relative = operand.relative
-            ? ` + i32(${registerName(operand.relative, false)}${swizzleOf(operand.relative)}.x)`
-            : '';
+        // aL is a scalar counter: it takes no swizzle, where a0 is a vector.
+        const relative = !operand.relative ? ''
+            : operand.relative.type === REGISTER.LOOP
+                ? ` + ${registerName(operand.relative, false)}`
+                : ` + i32(${registerName(operand.relative, false)}${swizzleOf(operand.relative)}.x)`;
         switch (operand.type)
         {
             case REGISTER.TEMP:
@@ -551,6 +555,13 @@ export function translateShader(parsed, options = {}){
                     return `k${index}`;
                 }
                 constants = relative ? Infinity : Math.max(constants, index + 1);
+                // A def'd register is the shader's own whichever way it is
+                // read, so an indexed read that lands on one sees the def.
+                if (relative && defined.size > 0)
+                {
+                    relativeDefs = true;
+                    return `cAt(${index}${relative})`;
+                }
                 // A 1.x pixel shader's constants are held to the range of
                 // its registers, [-1, 1], however they were set.
                 return legacy
@@ -614,8 +625,11 @@ export function translateShader(parsed, options = {}){
                 used.add('aL');
                 return 'aL';
             case REGISTER.MISCTYPE:
+                // Direct3D 9 puts a pixel's centre on whole coordinates, the
+                // first pixel's vPos being (0, 0); WebGPU's position is the
+                // centre half a pixel on.
                 return index === 0
-                    ? 'vec4f(in.vPos.xy, 0.0, 1.0)'
+                    ? 'vec4f(in.vPos.xy - 0.5, 0.0, 1.0)'
                     : 'vec4f(select(-1.0, 1.0, in.vFace))';
             case REGISTER.PREDICATE:
                 fail('predicated execution is not translated');
@@ -1651,6 +1665,14 @@ export function translateShader(parsed, options = {}){
         }),
         D3D_MATH,
         ...fogCurve,
+        ...(relativeDefs ? [
+            'fn cAt(i: i32) -> vec4f {',
+            '    switch i {',
+            ...[...defined].map(([index, value])=>`        case ${index}i: { return ${value}; }`),
+            '        default: { return c[i]; }',
+            '    }',
+            '}',
+        ] : []),
         ...(usesParts.has('exp') && vertex && major < 2 ? [EXP_PARTS] : []),
         ...(usesParts.has('log') && vertex && major < 2 ? [LOG_PARTS] : []),
         ...(bumpRegister === undefined ? [] : [`const _bump = ${bumpRegister};`]),

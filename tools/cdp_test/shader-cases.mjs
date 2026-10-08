@@ -62,6 +62,8 @@ export const SAMPLER_BYTES = [[64, 128, 192, 255], [255, 32, 96, 160], [16, 240,
  * @property {((next: () => number, r: string, s: string) => string)[]} sourceForms
  * @property {string[]} tail         Writes the outputs.
  * @property {number} [samplers]
+ * @property {string[]} [special]    Instructions with forms of their own, by name.
+ * @property {boolean} [flow]        Whether to try if, rep and loop blocks.
  */
 
 /** @param {() => number} next @param {string} r @param {string} s */
@@ -75,10 +77,14 @@ const SWIZZLES = ['', '.x', '.y', '.z', '.w', '.yzxw', '.wzyx', '.xxyy', '.zwxy'
 const SCALARS = ['.x', '.y', '.z', '.w'];
 const MASKS = ['', '.x', '.y', '.xy', '.xz', '.yzw', '.w', '.xyz'];
 
+/** The documented D3DSINCOSCONST1 and 2 a 2.x sincos names as its extra operands. */
+const SINCOS_DEFS = ['def c20, -1.5500992e-006, -2.1701389e-005, 0.0026041667, 0.00026041668',
+    'def c21, -0.020833334, -0.125, 1.0, 0.5'];
+
 /** @type {Record<string, Profile>} */
 export const PROFILES = {
     vs_1_1: {
-        name: 'vs_1_1', vertex: true,
+        name: 'vs_1_1', vertex: true, special: ['lit', 'm4x4', 'm3x3'],
         head: ['dcl_position v0', 'dcl_texcoord0 v1', 'dcl_color v2'],
         init: ['mov r0, v0', 'mov r1, v1', 'mov r2, c0', 'mov r3, v2'],
         temps: ['r0', 'r1', 'r2', 'r3'], reads: ['v0', 'v1', 'v2', 'c1', 'c2', 'c3', 'c9'],
@@ -89,8 +95,9 @@ export const PROFILES = {
         tail: ['mov oPos, r0', 'mov oT0, r1', 'mov oD0, r3'],
     },
     vs_2_0: {
-        name: 'vs_2_0', vertex: true,
-        head: ['dcl_position v0', 'dcl_texcoord0 v1', 'dcl_color v2'],
+        name: 'vs_2_0', vertex: true, flow: true,
+        special: ['pow', 'lit', 'm4x4', 'm3x3', 'sincos2'],
+        head: [...SINCOS_DEFS, 'dcl_position v0', 'dcl_texcoord0 v1', 'dcl_color v2'],
         init: ['mov r0, v0', 'mov r1, v1', 'mov r2, c0', 'mov r3, v2'],
         temps: ['r0', 'r1', 'r2', 'r3'], reads: ['v0', 'v1', 'v2', 'c1', 'c2', 'c3', 'c9'],
         masks: MASKS, swizzles: SWIZZLES, scalars: SCALARS,
@@ -100,7 +107,8 @@ export const PROFILES = {
         tail: ['mov oPos, r0', 'mov oT0, r1', 'mov oD0, r3'],
     },
     vs_3_0: {
-        name: 'vs_3_0', vertex: true,
+        name: 'vs_3_0', vertex: true, flow: true,
+        special: ['pow', 'lit', 'm4x4', 'm3x3', 'sincos3'],
         head: ['dcl_position v0', 'dcl_texcoord0 v1', 'dcl_color v2', 'dcl_position o0',
             'dcl_texcoord0 o1', 'dcl_color o2'],
         init: ['mov r0, v0', 'mov r1, v1', 'mov r2, c0', 'mov r3, v2'],
@@ -113,8 +121,8 @@ export const PROFILES = {
         tail: ['mov o0, r0', 'mov o1, r1', 'mov o2, r3'],
     },
     ps_2_0: {
-        name: 'ps_2_0', vertex: false, samplers: 2,
-        head: ['dcl t0', 'dcl t1', 'dcl v0', 'dcl_2d s0', 'dcl_2d s1'],
+        name: 'ps_2_0', vertex: false, samplers: 2, special: ['pow', 'sincos2', 'texkill'],
+        head: [...SINCOS_DEFS, 'dcl t0', 'dcl t1', 'dcl v0', 'dcl_2d s0', 'dcl_2d s1'],
         init: ['texld r0, t0, s0', 'mov r1, t1', 'mov r2, c0', 'texld r3, t1, s1',
             'add r3, r3, v0'],
         temps: ['r0', 'r1', 'r2', 'r3'], reads: ['t0', 't1', 'v0', 'c1', 'c2', 'c3', 'c9'],
@@ -125,8 +133,10 @@ export const PROFILES = {
         sourceForms: [plain, plain, negated], tail: ['mov oC0, r0'],
     },
     ps_3_0: {
-        name: 'ps_3_0', vertex: false, samplers: 2,
-        head: ['dcl_texcoord0 v0', 'dcl_texcoord1 v1', 'dcl_color0 v2', 'dcl_2d s0', 'dcl_2d s1'],
+        name: 'ps_3_0', vertex: false, samplers: 2, flow: true,
+        special: ['pow', 'sincos3', 'texkill', 'dsx', 'dsy', 'vpos', 'vface'],
+        head: ['dcl_texcoord0 v0', 'dcl_texcoord1 v1', 'dcl_color0 v2', 'dcl vPos.xy', 'dcl vFace',
+            'dcl_2d s0', 'dcl_2d s1'],
         init: ['texld r0, v0, s0', 'mov r1, v1', 'mov r2, c0', 'texld r3, v1, s1',
             'add r3, r3, v2'],
         temps: ['r0', 'r1', 'r2', 'r3'], reads: ['v0', 'v1', 'v2', 'c1', 'c2', 'c3', 'c9'],
@@ -187,6 +197,14 @@ function instruction(p, next){
         ...(p.unary.length ? ['unary'] : []), ...(p.scalar.length ? ['scalar'] : []),
         'binary', 'binary', 'ternary',
     ];
+    if (p.special && next() < 0.2)
+    {
+        return special(p, next, pick(next, p.special), source, dest);
+    }
+    if (p.flow && next() < 0.12)
+    {
+        return block(p, next);
+    }
     const kind = pick(next, kinds);
     const op = pick(next, /** @type {any} */ (p)[kind]);
     const mod = pick(next, p.dmods);
@@ -196,6 +214,66 @@ function instruction(p, next){
     const line = `${op}${mod} ${dest()}, ${sources.join(', ')}`;
     const paired = `+${pick(next, ['mov', 'add', 'mul'])} r0.a, ${source(false)}`;
     return coissue ? [line, paired] : [line];
+}
+
+/**
+ * An instruction with a form of its own.
+ *
+ * @param {Profile} p @param {() => number} next @param {string} name
+ * @param {(scalar: boolean) => string} source @param {() => string} dest
+ * @returns {string[]}
+ */
+function special(p, next, name, source, dest){
+    const temp = ()=>pick(next, p.temps);
+    switch (name)
+    {
+        case 'pow': return [`pow ${temp()}${pick(next, ['.x', '.y', ''])}, ${source(true)}, ${source(true)}`];
+        case 'lit': return [`lit ${dest()}, ${source(false)}`];
+        case 'm4x4': return [`m4x4 ${temp()}, ${source(false)}, c${pick(next, [4, 8])}`];
+        case 'm3x3': return [`m3x3 ${temp()}.xyz, ${source(false)}, c${pick(next, [4, 8])}`];
+        case 'sincos2':
+            return [`sincos ${temp()}${pick(next, ['.x', '.y', '.xy'])}, ${source(true)}, c20, c21`];
+        case 'sincos3': return [`sincos ${temp()}${pick(next, ['.x', '.y', '.xy'])}, ${source(true)}`];
+        case 'texkill': return [`texkill ${pick(next, p.temps)}`];
+        case 'dsx': return [`dsx ${dest()}, ${source(false)}`];
+        case 'dsy': return [`dsy ${dest()}, ${source(false)}`];
+        case 'vpos': return [`add ${dest()}, vPos.xyxy, ${source(false)}`];
+        case 'vface': return [`mul ${dest()}, vFace, ${source(false)}`];
+        default: return [];
+    }
+}
+
+/**
+ * A block of flow control around a few ordinary instructions: a branch on a
+ * boolean or on a comparison, a counted repeat, or a loop whose counter
+ * addresses the constants.
+ *
+ * @param {Profile} p @param {() => number} next
+ * @returns {string[]}
+ */
+function block(p, next){
+    const inner = ()=>{
+        const lines = [];
+        const count = 1 + Math.floor(next() * 3);
+        for (let k = 0; k < count; k++)
+        {
+            const one = instruction({ ...p, flow: false, special: [] }, next);
+            lines.push(...one.filter(line=>!line.startsWith('+')));
+        }
+        return lines;
+    };
+    const temp = pick(next, p.temps);
+    switch (Math.floor(next() * 5))
+    {
+        case 0: return [`if b${Math.floor(next() * 4)}`, ...inner(), 'endif'];
+        case 1: return [`if b${Math.floor(next() * 4)}`, ...inner(), 'else', ...inner(), 'endif'];
+        case 2:
+            return [`if_${pick(next, ['gt', 'lt', 'ge', 'le', 'eq', 'ne'])} ${temp}.x, c1.y`, ...inner(),
+                'endif'];
+        case 3: return ['rep i0', ...inner(), 'endrep'];
+        default:
+            return ['loop aL, i1', `add ${temp}, ${temp}, c[aL + 10]`, ...inner(), 'endloop'];
+    }
 }
 
 /**
@@ -219,6 +297,7 @@ const programText = (p, body)=>[p.name, ...p.head, ...p.init, ...body, ...p.tail
  * @property {Record<string, number[]>} expected  By output name, unwritten components NaN.
  * @property {Record<string, number>} written
  * @property {number | undefined} viewportRegister
+ * @property {boolean} killed
  * @property {string | null} error
  */
 
@@ -250,8 +329,9 @@ export function buildCase(profile, seed, length = 10){
 
     const ps1 = profile.startsWith('ps_1_');
     const reach = ps1 ? 1.5 : 2;
-    const constants = Array.from({ length: 16 * 4 }, ()=>between(next, -reach, reach));
-    const ints = Array.from({ length: 16 * 4 }, ()=>Math.floor(next() * 8));
+    const constants = Array.from({ length: 64 * 4 }, ()=>between(next, -reach, reach));
+    // Counts up to 7, starts and steps up to 3: a loop's c[aL + 10] stays below c32.
+    const ints = Array.from({ length: 16 * 4 }, (_, at)=>Math.floor(next() * (at % 4 === 0 ? 8 : 4)));
     const bools = Array.from({ length: 16 }, ()=>(next() < 0.5 ? 1 : 0));
     /** @type {Record<string, number[]>} */
     const inputs = {};
@@ -277,6 +357,7 @@ export function buildCase(profile, seed, length = 10){
         expected: Object.fromEntries(Object.entries(result.outputs)
             .map(([name, values])=>[name, Array.from(values, Number)])),
         written: result.written, viewportRegister: translated.viewportRegister,
+        killed: result.killed,
         error: translated.error,
     };
 }

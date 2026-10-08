@@ -266,7 +266,7 @@ test('flow control maps onto WGSL\'s own, and the loop register steps', ()=>{
     assertLine(translated.wgsl, 'if (r0.x < c[2].x) { break; }');
     assertLine(translated.wgsl, 'aL = ci[1].y;');
     assertLine(translated.wgsl, 'for (var _loop0 = 0; _loop0 < ci[1].x; _loop0++) {');
-    assertLine(translated.wgsl, 'r1 = c[10 + i32(aL.xxxx.x)];');
+    assertLine(translated.wgsl, 'r1 = c[10 + aL];');
     assertLine(translated.wgsl, 'break;');
     assertLine(translated.wgsl, 'aL += ci[1].z;');
     const fnBody = translated.wgsl.slice(translated.wgsl.indexOf('fn vs_main'));

@@ -40,6 +40,8 @@ const REPORTS_DIR = join(TOOL_ROOT, 'reports');
 
 /** A component passes within this share of its size, or of one below one. */
 export const TOLERANCE = 2e-3;
+/** What the target holds where no pixel was written. */
+const CLEARED = -7;
 /** Beyond this the reference is an infinity in all but name. */
 const HUGE = 1e30;
 
@@ -446,6 +448,16 @@ function compare(c, result){
     if (result.error)
     {
         return { ok: false, error: result.error, mismatches: [], undefinedCount: 0 };
+    }
+    // A killed pixel leaves the target as it was cleared; a pixel the machine
+    // kept and the GPU dropped is as wrong as the reverse.
+    const dropped = (result.values.oC0 ?? []).every((/** @type {number} */ x)=>x === CLEARED);
+    if (!c.vertex && (c.killed || dropped))
+    {
+        return c.killed === dropped
+            ? { ok: true, error: null, mismatches: [], undefinedCount: 0 }
+            : { ok: false, error: c.killed ? 'the machine killed the pixel, the GPU drew it'
+                : 'the GPU dropped a pixel the machine kept', mismatches: [], undefinedCount: 0 };
     }
     /** @type {{ output: string, component: number, expected: number, got: number }[]} */
     const mismatches = [];
