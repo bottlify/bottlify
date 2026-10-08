@@ -1008,6 +1008,19 @@ export function createShellFunctions(host){
         handler: (/** @type {number[]} */ [file, directory, result])=>{
             const name = textOf(file, wide);
             const write = wide ? writeWidePath : writePath;
+            // A text document's program is Notepad, as the registry has it:
+            // a setup asks this before it starts the program on its readme.
+            if (name !== null && TEXT_DOCUMENTS.has(extensionOf(name)) && host.launcher
+                && host.launcher.imageOf(NOTEPAD) !== null)
+            {
+                if (host.launcher.imageOf(name) === null)
+                {
+                    write(result >>> 0, '');
+                    return SE_ERR_FNF;
+                }
+                write(result >>> 0, NOTEPAD);
+                return LAUNCH_SUCCESS;
+            }
             if (name === null || !host.resolve || !SELF_EXECUTABLE.has(extensionOf(name)))
             {
                 write(result >>> 0, '');

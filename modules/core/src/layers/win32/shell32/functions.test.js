@@ -248,6 +248,16 @@ test('a text file opens in Notepad, as XP\'s registry has it', ()=>{
     assert.equal(m.launched.length, 1);
 });
 
+test('FindExecutable names Notepad for a text file, and not one that is not there', ()=>{
+    // A setup asks before it starts the program on its readme.
+    const m = machineWithLauncher(['C:\\App\\readme.txt', 'C:\\WINDOWS\\system32\\notepad.exe']);
+    m.put('readme.txt', 0x100);
+    assert.equal(m.shell.FindExecutableA.handler([0x100, 0, 0x200]), 33);
+    assert.equal(m.string(0x200), 'C:\\WINDOWS\\system32\\notepad.exe');
+    m.put('gone.txt', 0x100);
+    assert.equal(m.shell.FindExecutableA.handler([0x100, 0, 0x200]), 2, 'SE_ERR_FNF');
+});
+
 test('an address goes to whoever is in front of the run, and is refused without one', ()=>{
     /** @type {string[]} */
     const opened = [];
