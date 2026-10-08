@@ -5,21 +5,28 @@
  */
 
 /**
- * shlwapi — the path helpers, and the colour-space pair a colour picker uses.
+ * shlwapi — the path helpers, and the colour-space pair a colour picker uses;
+ * the rest of the path functions, the string and URL functions and the
+ * registry helpers that read a value as something else are in `path.js`,
+ * `strings.js`, `url.js` and `registry.js`.
  *
- * Pure string functions over the caller's own buffer. Two of them answer with
- * a pointer into that buffer rather than a copy, so what is returned is an
+ * Pure string functions over the caller's own buffer. Some answer with a
+ * pointer into that buffer rather than a copy, so what is returned is an
  * address computed from where the text was read, never the text itself.
  */
 
 import { encodeAnsi } from '../kernel32/locale.js';
 import { createForwards } from './forwards.js';
+import { MAX_PATH, canonical, createPathFunctions, extensionIndex, isSeparator, rootOf }
+    from './path.js';
+import { createRegistryHelpers } from './registry.js';
+import { createStringFunctions } from './strings.js';
+import { createWidths } from './text.js';
+import { createUrlFunctions } from './url.js';
+import { createRefusals } from '../common/refusal.js';
 
 /** As long as a path a program hands these may be, terminator included. */
 const MAX_LENGTH = 0x1000;
-
-/** What PathCombine may produce, terminator included. */
-const MAX_PATH = 260;
 
 const FILE_ATTRIBUTE_DIRECTORY = 0x10;
 
@@ -30,60 +37,7 @@ const ERROR_KEY_HAS_CHILDREN = 1020;
 const KEY_READ = 0x20019;
 
 const S_OK = 0;
-const E_POINTER = 0x80004003;
 const E_INVALIDARG = 0x80070057;
-const URL_UNESCAPE_INPLACE = 0x00100000;
-const URL_DONT_UNESCAPE_EXTRA_INFO = 0x02000000;
-
-/**
- * Where a path's extension begins: the last dot of its last component, or the
- * end of the path when that component has none -- a dot in a directory's name
- * is not an extension of the file inside it.
- *
- * @param {string} path
- */
-const extensionIndex = path=>{
-    let dot = path.length;
-    for (let at = 0; at < path.length; at++)
-    {
-        if (path[at] === '.')
-        {
-            dot = at;
-        }
-        else if (isSeparator(path[at]) || path[at] === ':')
-        {
-            dot = path.length;
-        }
-    }
-    return dot;
-};
-
-/**
- * A URL with its %XX escapes decoded; with `extraInfo` false, what follows the
- * first ? or # is left as it is.
- *
- * @param {string} url @param {boolean} extraInfo
- */
-const unescapeUrl = (url, extraInfo)=>{
-    let out = '';
-    let escaping = true;
-    for (let at = 0; at < url.length; at++)
-    {
-        const char = url[at];
-        if (!extraInfo && (char === '?' || char === '#'))
-        {
-            escaping = false;
-        }
-        if (escaping && char === '%' && /^[0-9A-Fa-f]{2}$/.test(url.slice(at + 1, at + 3)))
-        {
-            out += String.fromCharCode(parseInt(url.slice(at + 1, at + 3), 16));
-            at += 2;
-            continue;
-        }
-        out += char;
-    }
-    return out;
-};
 
 /**
  * Hue, luminance and saturation each run from 0 to 240 here, against 255 for
@@ -93,9 +47,6 @@ const unescapeUrl = (url, extraInfo)=>{
 const HLSMAX = 240;
 const RGBMAX = 255;
 const HUE_UNDEFINED = HLSMAX * 2 / 3;
-
-/** @param {string} c */
-const isSeparator = c=>c === '\\' || c === '/';
 
 /** StrToIntEx and StrToInt64Ex read a 0x number only when asked. */
 const STIF_SUPPORT_HEX = 0x1;
@@ -205,47 +156,10 @@ const SHLWAPI_VERSION = /** @type {[number, number, number, number]} */ ([6, 0, 
  *     [library]  Another library's exports, for the exports that are only another library's
  *           function under a number (`forwards.js`). Absent, those are not bound.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(code: number) => void} [setLastError]
+ *           For the calls that set one: PathCanonicalize refusing a missing
+ *           argument. Absent, the last error is left as it was.
  */
-
-/**
- * The root a path starts with -- a drive and its backslash, a UNC server and
- * share, or a lone backslash -- or nothing. A forward slash is not a
- * separator to PathCombine and its canonicalisation, only to the finders.
- *
- * @param {string} path
- */
-const rootOf = path=>(/^[A-Za-z]:\\/.exec(path)
-    ?? /^\\\\[^\\]+\\[^\\]+\\?/.exec(path)
-    ?? /^\\/.exec(path))?.[0] ?? '';
-
-/**
- * A path with its `.` components dropped and each `..` taking the component
- * before it, never the root; an empty path is the root of the current drive,
- * a lone backslash.
- *
- * @param {string} path
- */
-const canonical = path=>{
-    if (path === '')
-    {
-        return '\\';
-    }
-    const root = rootOf(path);
-    /** @type {string[]} */
-    const kept = [];
-    for (const part of path.slice(root.length).split('\\'))
-    {
-        if (part === '..')
-        {
-            kept.pop();
-        }
-        else if (part !== '.')
-        {
-            kept.push(part);
-        }
-    }
-    return root + kept.join('\\');
-};
 
 /**
  * PathCombine's answer, or null when there is none: both parts missing, or a
@@ -366,6 +280,9 @@ const hueToChannel = (low, high, hue)=>{
 
 /**
  * @param {ShlwapiHost} host
+ * @returns {Record<string, { argBytes: number, handler: (args: number[]) => any }>}
+ *     Every export by name: the table is built from parts whose names are made
+ *     from a stem and a spelling, which no narrower type can list.
  */
 export function createShlwapiFunctions(host){
     /** @param {number} address */
@@ -489,13 +406,6 @@ export function createShlwapiFunctions(host){
         },
     });
 
-    /** @param {string} text */
-    const bytesOf = text=>Uint8Array.from(text, char=>char.charCodeAt(0) & 0xff);
-
-    /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>host.writeMemory(address,
-        Uint8Array.of(value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff));
-
     /** @param {number} address @param {number} value */
     const writeWord = (address, value)=>{
         if ((address >>> 0) !== 0)
@@ -618,8 +528,33 @@ export function createShlwapiFunctions(host){
         },
     });
 
+    const widths = createWidths(host);
+    const unattached = createRefusals(host)('SHAutoComplete', { argBytes: 8, answer: S_OK,
+        why: 'no autocompletion: the edit control is left as it is' });
+
     return {
         ...(host.library ? createForwards(host.library, host.divergence) : {}),
+        ...createPathFunctions(host, widths),
+        ...createStringFunctions(host, widths),
+        ...createUrlFunctions(host, widths),
+        ...createRegistryHelpers(host),
+
+        /**
+         * HRESULT SHAutoComplete(HWND hwndEdit, DWORD dwFlags)
+         *
+         * Attaches the shell's autocompletion to an edit control. There is
+         * no autocompletion object here to attach, and the edit control works
+         * as it did: the call is answered S_OK, as an attachment that never
+         * proposes anything, which is what the program sees on a real system
+         * when the sources hold nothing to propose. A program checks the
+         * HRESULT only to decide whether to go on without autocompletion,
+         * which is what it does either way. No window is E_INVALIDARG.
+         */
+        SHAutoComplete: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([window])=>((window >>> 0) === 0 ? E_INVALIDARG : unattached.handler()),
+        },
 
         /**
          * int StrToIntA(LPCSTR pszSrc)
@@ -687,166 +622,11 @@ export function createShlwapiFunctions(host){
         PathFindFileNameW: pathFindFileName(widePathAt, 2),
 
         /**
-         * BOOL PathStripToRootA(LPSTR pszPath)
-         *
-         * Cuts the path down to its root in place: a drive with its backslash,
-         * or a UNC server and share. A path with no root is cut to nothing and
-         * refused, which is what removing one component at a time until only a
-         * root is left does when there was never a root to reach.
-         */
-        PathStripToRootA: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([pointer])=>{
-                const path = pathAt(pointer);
-                if (path === null)
-                {
-                    return 0;
-                }
-                const root = /^[A-Za-z]:[\\/]?/.exec(path)
-                    ?? /^[\\/]{2}[^\\/]+(?:[\\/][^\\/]+)?/.exec(path)
-                    ?? /^[\\/]/.exec(path);
-                const keep = root ? root[0].length : 0;
-                if (keep < path.length)
-                {
-                    host.writeMemory((pointer >>> 0) + keep, new Uint8Array([0]));
-                }
-                return root ? 1 : 0;
-            },
-        },
-
-        /**
-         * LPSTR PathAddBackslashA(LPSTR pszPath)
-         *
-         * A backslash after the last character unless one is there, answering
-         * where the terminator now is; an empty path is left empty, and one of
-         * MAX_PATH characters or more is refused untouched.
-         */
-        PathAddBackslashA: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([pointer])=>{
-                const path = pathAt(pointer);
-                if (path === null || path.length >= MAX_PATH)
-                {
-                    return 0;
-                }
-                if (path === '' || path.endsWith('\\'))
-                {
-                    return (pointer >>> 0) + path.length;
-                }
-                host.writeMemory((pointer >>> 0) + path.length, Uint8Array.of(0x5c, 0));
-                return (pointer >>> 0) + path.length + 1;
-            },
-        },
-
-        /** BOOL PathFileExistsA(LPCSTR pszPath): a file or a directory there. */
-        PathFileExistsA: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([pointer])=>{
-                const path = pathAt(pointer);
-                return path && host.files && host.fullPath
-                    && host.files.stat(host.fullPath(path))?.exists ? 1 : 0;
-            },
-        },
-
-        /** void PathRemoveExtensionA(LPSTR pszPath): cut at the extension. */
-        PathRemoveExtensionA: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([pointer])=>{
-                const path = pathAt(pointer);
-                const dot = path === null ? 0 : extensionIndex(path);
-                if (path !== null && dot < path.length)
-                {
-                    host.writeMemory((pointer >>> 0) + dot, Uint8Array.of(0));
-                }
-                return 0;
-            },
-        },
-
-        /**
-         * HRESULT UrlUnescapeA(LPSTR pszUrl, LPSTR pszUnescaped,
-         *                      LPDWORD pcchUnescaped, DWORD dwFlags)
-         *
-         * In place with URL_UNESCAPE_INPLACE. Otherwise into the buffer while
-         * it has room: the count is then the characters written, or with
-         * E_POINTER the room the whole answer and its terminator need.
-         */
-        UrlUnescapeA: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([pointer, output, count, flags])=>{
-                const url = pathAt(pointer);
-                if (url === null)
-                {
-                    return E_INVALIDARG;
-                }
-                const answer = unescapeUrl(url, !((flags >>> 0) & URL_DONT_UNESCAPE_EXTRA_INFO));
-                if ((flags >>> 0) & URL_UNESCAPE_INPLACE)
-                {
-                    host.writeMemory(pointer >>> 0, bytesOf(`${answer}\0`));
-                    return S_OK;
-                }
-                if ((output >>> 0) === 0 || (count >>> 0) === 0 || !host.readMemory)
-                {
-                    return E_INVALIDARG;
-                }
-                const word = host.readMemory(count >>> 0, 4);
-                const room = (word[0] | word[1] << 8 | word[2] << 16 | word[3] << 24) >>> 0;
-                if (answer.length < room)
-                {
-                    host.writeMemory(output >>> 0, bytesOf(`${answer}\0`));
-                    writeDword(count >>> 0, answer.length);
-                    return S_OK;
-                }
-                host.writeMemory(output >>> 0, bytesOf(answer.slice(0, room)));
-                writeDword(count >>> 0, answer.length + 1);
-                return E_POINTER;
-            },
-        },
-
-        /**
          * BOOL PathIsDirectoryA(LPCSTR pszPath)
          * BOOL PathIsDirectoryW(LPCWSTR pszPath)
          */
         PathIsDirectoryA: pathIsDirectory(pathAt),
         PathIsDirectoryW: pathIsDirectory(widePathAt),
-
-        /**
-         * PSTR StrCatBuffA(PSTR pszDest, PCSTR pszSrc, int cchDestBuffSize)
-         *
-         * pszSrc appended, cut to what the buffer holds with its terminator.
-         */
-        StrCatBuffA: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([dest, source, size])=>{
-                const head = pathAt(dest);
-                const tail = pathAt(source);
-                if (head === null || tail === null || size <= head.length)
-                {
-                    return dest;
-                }
-                const bytes = encodeAnsi(`${head}${tail} `);
-                const keep = Math.min(bytes.length, size);
-                bytes[keep - 1] = 0;
-                host.writeMemory((dest >>> 0) + head.length, bytes.subarray(head.length, keep));
-                return dest;
-            },
-        },
-
-        /** BOOL PathIsUNCA(LPCSTR pszPath) */
-        PathIsUNCA: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([pointer])=>{
-                const path = pathAt(pointer);
-                return path !== null && path.length > 1
-                    && isSeparator(path[0]) && isSeparator(path[1]) ? 1 : 0;
-            },
-        },
 
         /**
          * LPSTR PathCombineA(LPSTR pszDest, LPCSTR pszDir, LPCSTR pszFile)

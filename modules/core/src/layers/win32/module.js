@@ -1882,6 +1882,7 @@ export function createWin32Module(){
 
                 'SHLWAPI.dll': createShlwapiFunctions({
                     readCString, readWideString, readMemory, writeMemory,
+                    setLastError: setError,
                     files: volume,
                     /** @param {string} path */
                     fullPath: path=>filesystem.resolve(path).path,
