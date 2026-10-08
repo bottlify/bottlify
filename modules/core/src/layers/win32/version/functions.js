@@ -8,6 +8,7 @@ import { expand } from '../lz32/expand.js';
 import { windowsVersion } from '../kernel32/versions.js';
 import { DIRECTX_VERSION } from '../advapi32/registry.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { verLanguageName } from '../kernel32/languages.js';
 
 /**
  * version — what a file says about itself.
@@ -562,6 +563,24 @@ export function createVersionFunctions(host){
     };
 
     return {
+        /**
+         * DWORD VerLanguageNameA/W(DWORD wLang, LPSTR szLang, DWORD cchLang):
+         * the same answer as kernel32's call of the name, from the same table
+         * (`kernel32/languages.js`) -- the language a VerQueryValue
+         * translation names, spelled for the user.
+         */
+        VerLanguageNameA: verLanguageName((address, text)=>
+            host.writeMemory(address, encodeAnsi(text))),
+        VerLanguageNameW: verLanguageName((address, text)=>{
+            const bytes = new Uint8Array(text.length * 2);
+            for (let at = 0; at < text.length; at++)
+            {
+                bytes[at * 2] = text.charCodeAt(at) & 0xff;
+                bytes[at * 2 + 1] = text.charCodeAt(at) >> 8;
+            }
+            host.writeMemory(address, bytes);
+        }),
+
         /**
          * DWORD VerFindFileA(DWORD uFlags, LPCSTR szFileName, LPCSTR szWinDir,
          *   LPCSTR szAppDir, LPSTR szCurDir, PUINT puCurDirLen,
