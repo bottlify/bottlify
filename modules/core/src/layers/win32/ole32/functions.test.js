@@ -998,6 +998,55 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         OleFlushClipboard: 0,
         OleIsCurrentClipboard: 4,
         OleSetMenuDescriptor: 20,
+        FreePropVariantArray: 8,
+        ReleaseStgMedium: 4,
+        StgOpenStorageEx: 32,
+        CLSIDFromProgIDEx: 8,
+        CoIsOle1Class: 4,
+        CoFileTimeNow: 4,
+        CoAllowSetForegroundWindow: 8,
+        CoSetState: 4,
+        CoGetState: 4,
+        CoSwitchCallContext: 8,
+        OleRun: 4,
+        OleIsRunning: 4,
+        OleLockRunning: 12,
+        OleSetContainedObject: 8,
+        OleDraw: 16,
+        OleSave: 12,
+        OleCreate: 28,
+        OleLoad: 16,
+        OleRegGetUserType: 12,
+        OleRegGetMiscStatus: 12,
+        OleRegEnumVerbs: 8,
+        OleGetAutoConvert: 8,
+        OleDoAutoConvert: 8,
+        WriteFmtUserTypeStg: 12,
+        ReadFmtUserTypeStg: 12,
+        SetConvertStg: 8,
+        GetConvertStg: 4,
+        IsAccelerator: 16,
+        OleTranslateAccelerator: 12,
+        OleCreateMenuDescriptor: 8,
+        OleDestroyMenuDescriptor: 4,
+        DoDragDrop: 16,
+        OleQueryCreateFromData: 4,
+        OleQueryLinkFromData: 4,
+        OleCreateFromData: 28,
+        OleCreateLinkFromData: 28,
+        OleCreateStaticFromData: 28,
+        OleDuplicateData: 12,
+        OleCreateFromFile: 32,
+        OleCreateLinkToFile: 28,
+        OleCreateLink: 28,
+        CreateDataCache: 16,
+        OleGetIconOfClass: 12,
+        OleConvertIStorageToOLESTREAM: 8,
+        OleConvertOLESTREAMToIStorage: 12,
+        CreateDataAdviseHolder: 4,
+        CreateOleAdviseHolder: 4,
+        OleSetClipboard: 4,
+        OleGetClipboard: 4,
         CoCreateInstanceEx: 24,
         CoRegisterMessageFilter: 8,
         PropVariantCopy: 8,
@@ -1414,16 +1463,18 @@ test('once OLE has run, a thread without an apartment is told it is not initiali
         'any apartment will do');
 });
 
-test('the OLE clipboard never holds an object, and flushing it needs OLE', ()=>{
-    // clipboard.c: OleFlushClipboard is E_FAIL before COM is initialised and
-    // S_OK after, and OleIsCurrentClipboard is S_FALSE for what was never set.
-    const { fns } = withWindow();
-    assert.equal(fns.OleFlushClipboard.handler(), E_FAIL);
-    assert.equal(fns.OleIsCurrentClipboard.handler(), S_FALSE);
-    assert.equal(fns.OleInitialize.handler(), S_OK);
-    assert.equal(fns.OleFlushClipboard.handler(), S_OK);
-    assert.equal(fns.OleIsCurrentClipboard.handler(), S_FALSE, 'whatever the object');
-});
+test('flushing the OLE clipboard needs an apartment, and what was never set is not current',
+    async()=>{
+        // clipboard.c: OleFlushClipboard is E_FAIL before COM is initialised
+        // and S_OK after, and OleIsCurrentClipboard is S_FALSE for what was
+        // never set.
+        const { fns } = withWindow();
+        assert.equal((await fns.OleFlushClipboard.handler()) >>> 0, E_FAIL);
+        assert.equal(fns.OleIsCurrentClipboard.handler([GUEST_OBJECT]), S_FALSE);
+        assert.equal(fns.OleInitialize.handler(), S_OK);
+        assert.equal(await fns.OleFlushClipboard.handler(), S_OK);
+        assert.equal(fns.OleIsCurrentClipboard.handler([0]), S_FALSE);
+    });
 
 test('CoTreatAsClass writes the emulation into the registry, and GUID_NULL takes it away', ()=>{
     const { host } = setup();
@@ -1474,4 +1525,136 @@ test('CoGetPSClsid reads the proxy/stub class the registry names for an interfac
     assert.equal(fns.CoGetPSClsid.handler([IID_ARG, OUT]), S_OK);
     assert.equal(formatGuid(host.bytes.subarray(OUT, OUT + GUID_SIZE)), own);
     assert.equal(fns.CoRegisterPSClsid.handler([IID_ARG, 0]) >>> 0, 0x80070057, 'E_INVALIDARG');
+});
+
+test('CoSwitchCallContext sets what CoGetCallContext answers, without references',
+    async()=>{
+        // compobj.c test_CoGetCallContext.
+        const { fns, calls, host } = withGuestCalls();
+        const RPC_E_CALL_COMPLETE = 0x80010117;
+        const OUT = 0x1600;
+        assert.equal((await fns.CoGetCallContext.handler([IID_ARG, OUT])) >>> 0,
+            RPC_E_CALL_COMPLETE);
+        new DataView(host.bytes.buffer).setUint32(OUT, 0xdeadbeef, true);
+        assert.equal(fns.CoSwitchCallContext.handler([GUEST_OBJECT, OUT]), S_OK);
+        assert.equal(host.u32(OUT), 0, 'there was none');
+        assert.equal(calls.length, 0, 'no reference taken');
+        assert.equal(await fns.CoGetCallContext.handler([IID_ARG, OUT]), S_OK);
+        assert.deepEqual(calls.map(call=>[call.slot, call.args[1]]), [[0, IID_ARG]],
+            'asked of the context itself');
+        assert.equal(fns.CoSwitchCallContext.handler([0, OUT]), S_OK);
+        assert.equal(host.u32(OUT), GUEST_OBJECT, 'the previous one handed back');
+        assert.equal((await fns.CoGetCallContext.handler([IID_ARG, OUT])) >>> 0,
+            RPC_E_CALL_COMPLETE);
+        assert.equal(fns.CoSwitchCallContext.handler([0, 0]) >>> 0, E_INVALIDARG);
+    });
+
+test('CoSetState holds one object per thread, which CoGetState hands out', async()=>{
+    const { fns, calls, host } = withGuestCalls();
+    const OUT = 0x1600;
+    assert.equal(await fns.CoGetState.handler([OUT]), S_FALSE);
+    assert.equal(host.u32(OUT), 0);
+    assert.equal(await fns.CoSetState.handler([GUEST_OBJECT]), S_OK);
+    assert.equal(await fns.CoGetState.handler([OUT]), S_OK);
+    assert.equal(host.u32(OUT), GUEST_OBJECT);
+    host.run(host.threads.second);
+    assert.equal(await fns.CoGetState.handler([OUT]), S_FALSE, 'another thread has its own');
+    host.run(host.threads.first);
+    assert.equal(await fns.CoSetState.handler([0]), S_OK);
+    assert.deepEqual(calls.map(call=>call.slot), [1, 1, 2], 'AddRef, AddRef, Release');
+    assert.equal((await fns.CoGetState.handler([0])) >>> 0, E_INVALIDARG);
+});
+
+test('CoIsOle1Class, CoFileTimeNow and CLSIDFromProgIDEx answer as their documentation says',
+    ()=>{
+        const { fns, host } = setup();
+        assert.equal(fns.CoIsOle1Class.handler(), 0);
+        const OUT = 0x1600;
+        const before = (BigInt(Date.now()) + 11644473600000n) * 10000n;
+        assert.equal(fns.CoFileTimeNow.handler([OUT]), S_OK);
+        const stamp = BigInt(host.u32(OUT)) | (BigInt(host.u32(OUT + 4)) << 32n);
+        assert.ok(stamp >= before && stamp - before < 100000000n, 'now, in 100ns from 1601');
+        assert.equal(fns.CoFileTimeNow.handler([0]) >>> 0, E_INVALIDARG);
+        host.putWide(STRING_BUFFER, 'No.Such.Class');
+        assert.equal(fns.CLSIDFromProgIDEx.handler([STRING_BUFFER, GUID_OUT]) >>> 0,
+            CO_E_CLASSSTRING);
+        assert.deepEqual([fns.CoIsOle1Class.argBytes, fns.CoFileTimeNow.argBytes,
+            fns.CLSIDFromProgIDEx.argBytes], [4, 4, 8]);
+    });
+
+test('CoAllowSetForegroundWindow goes through IForegroundTransfer', async()=>{
+    const { host } = setup();
+    const view = new DataView(host.bytes.buffer);
+    view.setUint32(GUEST_OBJECT, GUEST_VTABLE, true);
+    for (let slot = 0; slot < 4; slot++)
+    {
+        view.setUint32(GUEST_VTABLE + slot * 4, METHOD_BASE + slot * 0x10, true);
+    }
+    let transfers = true;
+    /** @type {number[]} */
+    const slots = [];
+    /** @param {number} entry @param {number[]} args */
+    const call = async(entry, args)=>{
+        const slot = (entry - METHOD_BASE) / 0x10;
+        slots.push(slot);
+        if (slot === 0)
+        {
+            view.setUint32(args[2], transfers ? GUEST_OBJECT : 0, true);
+            return transfers ? S_OK : E_NOINTERFACE | 0;
+        }
+        return slot === 3 ? 0x1234 : 0;
+    };
+    /** @type {any} */ (host).call = call;
+    const fns = createOleFunctions(host);
+    assert.equal(fns.CoAllowSetForegroundWindow.argBytes, 8);
+    assert.equal(await fns.CoAllowSetForegroundWindow.handler([GUEST_OBJECT, 0]), 0x1234,
+        'AllowForegroundTransfer\'s answer');
+    assert.deepEqual(slots, [0, 3, 2]);
+    transfers = false;
+    assert.equal((await fns.CoAllowSetForegroundWindow.handler([GUEST_OBJECT, 0])) >>> 0,
+        E_NOINTERFACE);
+    assert.equal((await fns.CoAllowSetForegroundWindow.handler([GUEST_OBJECT, 1])) >>> 0,
+        E_INVALIDARG);
+});
+
+test('the clipboard needs OleInitialize, and the last OleUninitialize takes the source off',
+    async()=>{
+        // clipboard.c test_set_clipboard: CoInitialize is not enough.
+        const { fns, calls, host } = withGuestCalls();
+        assert.equal((await fns.OleSetClipboard.handler([GUEST_OBJECT])) >>> 0,
+            CO_E_NOTINITIALIZED);
+        assert.equal(fns.OleInitialize.handler(), S_FALSE);
+        calls.length = 0;
+        assert.equal(await fns.OleSetClipboard.handler([GUEST_OBJECT]), S_OK);
+        assert.equal(fns.OleIsCurrentClipboard.handler([GUEST_OBJECT]), S_OK);
+        assert.ok(host.reported.some(line=>line.startsWith('OleSetClipboard')),
+            'no user32 clipboard here, and that is said');
+        calls.length = 0;
+        await fns.OleUninitialize.handler();
+        assert.deepEqual(calls.map(call=>call.slot), [2], 'released');
+        assert.equal(fns.OleIsCurrentClipboard.handler([GUEST_OBJECT]), S_FALSE);
+    });
+
+test('ReleaseStgMedium deletes a GDI object through gdi32 when ole32 can call it', async()=>{
+    const { host } = setup();
+    /** @type {string[]} */
+    const called = [];
+    /** @param {string} library @param {string} name @param {number[]} args */
+    const system = (library, name, args)=>{
+        called.push(`${library}!${name}(${args.join(',')})`);
+        return 1;
+    };
+    /** @type {any} */ (host).system = system;
+    const fns = /** @type {any} */ (createOleFunctions(host));
+    const MEDIUM = 0x1700;
+    const view = new DataView(host.bytes.buffer);
+    view.setUint32(MEDIUM, 16, true);
+    view.setUint32(MEDIUM + 4, 0x6000, true);
+    view.setUint32(MEDIUM + 8, 0, true);
+    await fns.ReleaseStgMedium.handler([MEDIUM]);
+    view.setUint32(MEDIUM, 2, true);
+    view.setUint32(MEDIUM + 4, host.heap.allocate(4), true);
+    await fns.ReleaseStgMedium.handler([MEDIUM]);
+    assert.equal(called[0], `GDI32.dll!DeleteObject(${0x6000})`);
+    assert.match(called[1], /^KERNEL32\.dll!DeleteFileW\(/);
 });

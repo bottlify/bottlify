@@ -622,7 +622,7 @@ export function createPropVariantFunctions(host){
     const settle = (owed, thread, api)=>after(waited(owed),
         ()=>after(destroyAll(owed.arrays ?? []), ()=>reference(owed, thread, api)));
 
-    return {
+    const table = {
         /**
          * HRESULT PropVariantCopy(PROPVARIANT *pvarDest, const PROPVARIANT *pvarSrc)
          *
@@ -682,5 +682,31 @@ export function createPropVariantFunctions(host){
                 return settle(owed, thread, 'PropVariantClear');
             },
         },
+
+        /**
+         * HRESULT FreePropVariantArray(ULONG cVariants, PROPVARIANT *rgvars)
+         *
+         * PropVariantClear on each, one after another: a clear that has to
+         * release an interface answers only once the program's Release has,
+         * and the next waits for it. A record PropVariantClear refuses is
+         * zeroed all the same and does not stop the rest, and the answer is
+         * S_OK whatever the records held; only a NULL array is refused.
+         */
+        FreePropVariantArray: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([count, rgvars])=>{
+                if ((rgvars >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                /** @param {number} index @returns {number | Promise<number>} */
+                const clear = index=>(index >= (count >>> 0) ? S_OK
+                    : after(table.PropVariantClear.handler(
+                        [(rgvars >>> 0) + index * PROPVARIANT_SIZE]), ()=>clear(index + 1)));
+                return clear(0);
+            },
+        },
     };
+    return table;
 }

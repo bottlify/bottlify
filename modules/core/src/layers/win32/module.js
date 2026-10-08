@@ -2426,6 +2426,20 @@ export function createWin32Module(){
                 'ole32.dll': createOleFunctions({
                     readMemory,
                     writeMemory,
+                    // Another library's export, as it is when called -- the
+                    // clipboard, accelerators and the GDI deletions a medium's
+                    // release makes are user32's, gdi32's and kernel32's. The
+                    // table is still being built here.
+                    /** @param {string} library @param {string} name @param {number[]} args @param {any} [thread] */
+                    system: (library, name, args, thread)=>{
+                        const entry = libraries[library]?.[name];
+                        if (!entry)
+                        {
+                            return null;
+                        }
+                        return thread ? bridge.answering(thread, ()=>entry.handler(args))
+                            : entry.handler(args);
+                    },
                     fillMemory,
                     currentThread: ()=>kernel.currentThread(),
                     heap,
