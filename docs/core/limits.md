@@ -101,6 +101,26 @@ differently raises a `divergence` event naming the API.
 - Only keyboard, mouse and gamepads reach the program. The page's focus, visibility and lifecycle
   never do.
 
+## Installer
+
+- The Windows Installer is the engine's own (`msi.dll`, version 3.1 on Windows XP SP3): it
+  installs, repairs, changes and removes products, applies transforms and patches, advertises,
+  and keeps each installed package's copy in `C:\WINDOWS\Installer` with its embedded cabinets
+  left out. Calls added by Windows Installer 4.5 and 5.0 are not exported.
+- A package's own dialogs are never drawn: an installation runs without the internal user
+  interface, as a setup that drives its own does. `MsiCollectUserInfo` and the dialog previews
+  show nothing.
+- Script custom actions (VBScript, JScript) do not run; the action fails.
+- A patch's deltas (the `Patch` table) are not applied: only a patch that delivers its files whole
+  installs.
+- No service runs: a service a package installs is registered with the service manager and
+  stays stopped. ODBC drivers and data sources, COM+ applications and side-by-side or global
+  assembly cache assemblies are not installed.
+- An advertise script cannot be written or read (`MsiAdvertiseScript`,
+  `MsiProcessAdvertiseScript`, `MsiGetProductInfoFromScript`, `MsiAdvertiseProduct` to a file).
+- There is no `msiexec.exe`: a program that starts it to install a package does not find it.
+- Nothing is rolled back: an installation that fails leaves what it had done.
+
 ## Network
 
 - No raw TCP or UDP. Sockets go through the relay over WebSocket; without `network` only the
