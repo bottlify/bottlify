@@ -231,7 +231,17 @@ const OBJECT_TYPES = new Map(/** @type {[string, [TypeRef['cls'], TypeRef['dim']
     ['Texture1D', ['texture', '1d']], ['Texture2D', ['texture', '2d']],
     ['Texture3D', ['texture', '3d']], ['TextureCube', ['texture', 'cube']],
     ['SamplerState', ['sampler', 'any']], ['SamplerComparisonState', ['sampler', 'any']],
+    // Effect files write the Direct3D 9 texture capitalised as often as not.
+    ['Texture', ['texture', 'any']],
 ]));
+
+/**
+ * The objects of an effect file that a compile of one entry point reads past: a declaration
+ * of one, its initialiser or state block with it, is skipped whole.
+ */
+const EFFECT_OBJECTS = new Set(['GeometryShader', 'DepthStencilState', 'BlendState',
+    'RasterizerState', 'ComputeShader', 'DomainShader', 'HullShader', 'fxgroup',
+    'RenderTargetView', 'DepthStencilView', 'InputPatch', 'OutputPatch']);
 
 /** Modifiers that stand before a type and are always modifiers. */
 const MODIFIERS = new Set(['const', 'static', 'uniform', 'volatile', 'row_major', 'column_major',
@@ -255,6 +265,15 @@ const ASSIGNMENT = new Set(['=', '+=', '-=', '*=', '/=', '%=', '<<=', '>>=', '&=
  */
 function builtinType(word){
     const none = /** @type {Position} */ ({ file: '', line: 0, col: 0 });
+    // fxc takes string in any case, and DWORD as well as dword.
+    if (word.toLowerCase() === 'string')
+    {
+        return { cls: 'string', name: 'string', pos: none };
+    }
+    if (word === 'DWORD')
+    {
+        return { cls: 'scalar', scalar: 'uint', rows: 1, cols: 1, pos: none };
+    }
     const object = OBJECT_TYPES.get(word);
     if (object)
     {
@@ -358,6 +377,17 @@ export function parse(source, file = 'memory'){
      * @returns {TypeRef}
      */
     const parseType = ()=>{
+        if (isWord('unsigned'))
+        {
+            // `unsigned int2`: the integer type, unsigned.
+            next();
+            const type = parseType();
+            if (type.scalar === 'int')
+            {
+                type.scalar = 'uint';
+            }
+            return type;
+        }
         const token = expectIdent();
         if (token.text === 'struct')
         {
@@ -622,8 +652,34 @@ export function parse(source, file = 'memory'){
         {
             init = parseInitializer();
         }
+        else if (isPunct('{'))
+        {
+            // `sampler s { Filter = ...; }`, `float a {}`: a state block of Direct3D 10 effects,
+            // which a compile of one entry point reads past.
+            skipBalanced();
+        }
         return { kind: 'var', name: name.text, type, mods, dims, ...merged, annotations, init,
             pos: name.pos };
+    };
+
+    /** Past a `{ ... }` and what it holds, nested ones too. */
+    const skipBalanced = ()=>{
+        let depth = 0;
+        do {
+            const token = next();
+            if (token.type === 'eof')
+            {
+                throw unexpected(token);
+            }
+            if (token.type === 'punct' && token.text === '{')
+            {
+                depth++;
+            }
+            else if (token.type === 'punct' && token.text === '}')
+            {
+                depth--;
+            }
+        } while (depth > 0);
     };
 
     /**
@@ -1233,10 +1289,42 @@ export function parse(source, file = 'memory'){
         {
             throw unexpected(token);
         }
+        if (EFFECT_OBJECTS.has(token.text))
+        {
+            // To the end of the declaration: its `;`, or the `}` of a block that ends it.
+            next();
+            while (!isPunct(';'))
+            {
+                if (isPunct('{'))
+                {
+                    skipBalanced();
+                    if (!isPunct('=') && !isPunct(','))
+                    {
+                        acceptPunct(';');
+                        return;
+                    }
+                    continue;
+                }
+                if (peek().type === 'eof')
+                {
+                    throw unexpected(peek());
+                }
+                next();
+            }
+            next();
+            return;
+        }
         const lower = token.text.toLowerCase();
         if (lower === 'technique' || lower === 'technique10' || lower === 'technique11')
         {
             decls.push(technique());
+            return;
+        }
+        // `single cbuffer`: a word only fx_5_0 gives a meaning.
+        if (token.text === 'single' && (isWord('cbuffer', 1) || isWord('tbuffer', 1)))
+        {
+            next();
+            declaration(decls);
             return;
         }
         if (token.text === 'cbuffer' || token.text === 'tbuffer')
@@ -1244,6 +1332,7 @@ export function parse(source, file = 'memory'){
             next();
             const name = expectIdent();
             const semantics = parseSemantics();
+            parseAnnotations();
             expectPunct('{');
             /** @type {Variable[]} */
             const members = [];

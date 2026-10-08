@@ -269,6 +269,8 @@ export function lowerIntrinsic(L, name, args, result, e, st){
         case 'fmod': return each2((x, y)=>b.mad(b.neg(y), b.trunc(b.div(x, y)), x));
         case 'clamp': return zip([a[0], a[1], a[2]], (x, lo, hi)=>b.min(b.max(x, lo), hi));
         case 'lerp': return zip([a[0], a[1], a[2]], (x, y, t)=>b.lrp(t, y, x));
+        case 'mad': return zip([a[0], a[1], a[2]], (x, y, z)=>b.mad(x, y, z));
+        case 'rcp': return each(b.rcp);
         case 'smoothstep': return zip([a[0], a[1], a[2]], (lo, hi, x)=>{
             const t = sat(b.mul(b.sub(x, lo), b.rcp(b.sub(hi, lo))));
             return b.mul(b.mul(t, t), b.mad(t, num(-2), num(3)));
@@ -365,10 +367,14 @@ export function lowerIntrinsic(L, name, args, result, e, st){
         case 'isinf': return each(x=>b.eq(b.abs(x), num(Infinity)));
         case 'mul': return multiply(L, a, args.map(x=>x.type));
         case 'transpose': {
+            if (a[0].k !== 'mat')
+            {
+                return a[0];
+            }
             const m = /** @type {Extract<Value, {k: 'mat'}>} */ (a[0]);
             return { k: 'mat', rows: m.cols, cols: m.rows, rowV: m.colV, colV: m.rowV };
         }
-        case 'determinant': return vec(determinant(L, a[0]));
+        case 'determinant': return a[0].k === 'mat' ? vec(determinant(L, a[0])) : a[0];
         case 'tex1D': return texture(2, args.length === 4 ? 'grad' : 'plain', 1);
         case 'tex2D': return texture(2, args.length === 4 ? 'grad' : 'plain', 2);
         case 'tex3D': return texture(4, args.length === 4 ? 'grad' : 'plain', 3);

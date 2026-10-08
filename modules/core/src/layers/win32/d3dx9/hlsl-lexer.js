@@ -114,14 +114,16 @@ function readNumber(text, at){
         i += exponent[0].length;
     }
     const value = Number(text.slice(at, i));
-    const suffix = /^[fFhHlLuU]/.test(text[i] ?? '') && !IDENT_PART.test(text[i + 1] ?? '')
-        ? text[i].toLowerCase()
-        : '';
+    // f, h, l, u, and l and u together in either order (3lu).
+    const written = /^(?:[uU][lL]|[lL][uU]|[fFhHlLuU])/.exec(text.slice(i, i + 2))?.[0] ?? '';
+    const ends = written !== '' && !IDENT_PART.test(text[i + written.length] ?? '');
+    const lower = ends ? written.toLowerCase() : '';
+    const suffix = lower.includes('u') ? 'u' : lower;
     if (suffix === 'f' || suffix === 'h')
     {
         isFloat = true;
     }
-    return { end: i + suffix.length, isFloat, value, suffix };
+    return { end: i + lower.length, isFloat, value, suffix };
 }
 
 /**

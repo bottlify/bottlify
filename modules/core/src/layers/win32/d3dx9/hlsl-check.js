@@ -260,6 +260,22 @@ export function check(program, options = {}){
         {
             return withBase(tb, base);
         }
+        // A vector and a matrix of one row or one column meet as two vectors; a vector and
+        // any matrix of as many components, component by component (fxc's float4 + float2x2).
+        const v = ta.kind === 'vector' ? ta : tb.kind === 'vector' ? tb : null;
+        const m = ta.kind === 'matrix' ? ta : tb.kind === 'matrix' ? tb : null;
+        if (v && m && v.kind === 'vector' && m.kind === 'matrix')
+        {
+            const count = m.rows * m.cols;
+            if (m.rows === 1 || m.cols === 1)
+            {
+                return vectorOf(base, Math.min(v.n, count));
+            }
+            if (v.n === count)
+            {
+                return vectorOf(base, count);
+            }
+        }
         return fail('X3020', 'type mismatch', pos);
     }
 
@@ -465,6 +481,8 @@ export function check(program, options = {}){
         const { type } = declaredType(v.type, v.dims);
         const dir = v.mods.includes('inout') ? 'inout' : v.mods.includes('out') ? 'out' : 'in';
         const sym = makeSymbol({ kind: 'param', name: v.name, type, decl: v, dir });
+        // A default, as written: each call that leaves the parameter out checks a copy of it.
+        sym.defaultValue = v.init ? structuredClone(v.init) : null;
         sym.isUniform = v.mods.includes('uniform') || (entry && dir === 'in' && !v.semantic
             && (isNumeric(type) || type.kind === 'array' || type.kind === 'sampler'
                 || type.kind === 'texture'));
@@ -1042,9 +1060,12 @@ export function check(program, options = {}){
         e.args = e.args.map(expr);
         const args = e.args;
         const visible = (functions.get(name) ?? []).filter(f=>f.order < limit);
-        const sameArity = visible.filter(f=>f.params.length === args.length);
-        const viable = sameArity.map(f=>({ f, ranks: f.params.map((p, i)=>paramRank(p,
-            args[i].type)) })).filter(v=>v.ranks.every((/** @type {number} */ r)=>
+        // Parameters left out at the end take their defaults.
+        const sameArity = visible.filter(f=>f.params.length === args.length
+            || (f.params.length > args.length
+                && f.params.slice(args.length).every(p=>p.defaultValue)));
+        const viable = sameArity.map(f=>({ f, ranks: f.params.slice(0, args.length).map((p, i)=>
+            paramRank(p, args[i].type)) })).filter(v=>v.ranks.every((/** @type {number} */ r)=>
             r < RANK.IMPOSSIBLE));
         if (viable.length > 0)
         {
@@ -1053,8 +1074,9 @@ export function check(program, options = {}){
             if (best.length > 1)
             {
                 // Equal ranks everywhere: the overload that drops fewer components is nearer.
-                const lost = (/** @type {typeof viable[number]} */ v)=>v.f.params.reduce((n, p, i)=>
-                    n + Math.max(0, scalarCount(args[i].type) - scalarCount(p.type)), 0);
+                const lost = (/** @type {typeof viable[number]} */ v)=>v.f.params
+                    .slice(0, args.length).reduce((n, p, i)=>
+                        n + Math.max(0, scalarCount(args[i].type) - scalarCount(p.type)), 0);
                 const least = Math.min(...best.map(lost));
                 best = best.filter(v=>lost(v) === least);
             }
@@ -1136,6 +1158,10 @@ export function check(program, options = {}){
 
     /** @param {any} e @param {FunctionSymbol} fn @returns {any} */
     function userCall(e, fn){
+        for (let i = e.args.length; i < fn.params.length; i++)
+        {
+            e.args.push(initialiser(fn.params[i].type, structuredClone(fn.params[i].defaultValue)));
+        }
         /** @type {string[]} */
         const modes = [];
         fn.params.forEach((p, i)=>{

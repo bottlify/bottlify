@@ -101,7 +101,8 @@ test('every intrinsic of the language resolves', ()=>{
         faceforward: [f3, f3, f3],
         floor: [f3], fmod: [f3, f3], frac: [f3], frexp: [f3, f3], fwidth: [f3], isfinite: [f3],
         isinf: [f3], isnan: [f3], ldexp: [f3, f3], length: [f3], lerp: [f3, f3, f3], lit: [FLOAT,
-            FLOAT, FLOAT], log: [f3], log10: [f3], log2: [f3], max: [f3, f3], min: [f3, f3],
+            FLOAT, FLOAT], log: [f3], log10: [f3], log2: [f3], mad: [f3, f3, f3], max: [f3, f3],
+        min: [f3, f3], rcp: [f3],
         modf: [f3, f3], mul: [m(4, 4), f4], noise: [f3], normalize: [f3], pow: [f3, f3],
         radians: [f3], reflect: [f3, f3], refract: [f3, f3, FLOAT], round: [f3], rsqrt: [f3],
         saturate: [f3], sign: [f3], sin: [f3], sincos: [f3, f3, f3], sinh: [f3],
@@ -218,7 +219,8 @@ test('cross takes 3-vectors and cuts longer ones', ()=>{
     assert.equal(sigText('cross', v(3), v(3)), 'float3,float3->float3');
     assert.equal(sigText('cross', v(4), v(3)), 'float3,float3->float3');
     assert.equal(sigText('cross', v(2), v(3)), null);
-    assert.equal(sigText('cross', FLOAT, FLOAT), null);
+    // fxc spreads a scalar over the three components (cross(u, 4)).
+    assert.equal(sigText('cross', FLOAT, FLOAT), 'float3,float3->float3');
 });
 
 test('lit, D3DCOLORtoUBYTE4, determinant, transpose', ()=>{
@@ -228,7 +230,9 @@ test('lit, D3DCOLORtoUBYTE4, determinant, transpose', ()=>{
     assert.equal(sigText('D3DCOLORtoUBYTE4', v(4)), 'float4->int4');
     assert.equal(sigText('D3DCOLORtoUBYTE4', v(3)), null);
     assert.equal(sigText('determinant', m(3, 3)), 'float3x3->float');
-    assert.equal(sigText('determinant', m(2, 3)), null);
+    // fxc takes the square corner of a matrix that is not square, and a scalar as itself.
+    assert.equal(sigText('determinant', m(2, 3)), 'float2x2->float');
+    assert.equal(sigText('determinant', FLOAT), 'float->float');
     assert.equal(sigText('determinant', v(3)), null);
     assert.equal(sigText('transpose', m(2, 3)), 'float2x3->float3x2');
     assert.equal(sigText('transpose', matrixOf('int', 1, 4)), 'float1x4->float4x1');

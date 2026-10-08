@@ -170,6 +170,9 @@ for (const n of ['atan2', 'fmod', 'ldexp', 'pow', 'step'])
 componentwise('max', 2, { ints: true });
 componentwise('min', 2, { ints: true });
 componentwise('lerp', 3);
+// Model 5's, which fxc takes for models 2 and 3 as well.
+componentwise('mad', 3, { ints: true });
+componentwise('rcp', 1);
 componentwise('smoothstep', 3);
 componentwise('clamp', 3, { ints: true });
 for (const n of ['isfinite', 'isinf', 'isnan'])
@@ -238,9 +241,10 @@ SPECS.set('refract', (n, args)=>{
     return accept({ name: n, paramTypes: [shape, shape, FLOAT], resultType: shape }, args);
 });
 
+// A scalar argument is spread over the three or four components; a wider vector is cut.
 SPECS.set('cross', (n, args)=>{
     if (args.length !== 2 || !args.every(a=>isNumeric(a) && a.kind !== 'matrix'
-        && scalarCount(a) >= 3))
+        && (scalarCount(a) >= 3 || a.kind === 'scalar')))
     {
         return null;
     }
@@ -251,7 +255,8 @@ SPECS.set('cross', (n, args)=>{
 SPECS.set('dst', (n, args)=>{
     const v4 = vectorOf('float', 4);
     return args.length === 2 && args.every(a=>isNumeric(a) && a.kind !== 'matrix'
-        && scalarCount(a) >= 4) ? accept({ name: n, paramTypes: [v4, v4], resultType: v4 }, args)
+        && (scalarCount(a) >= 4 || a.kind === 'scalar'))
+        ? accept({ name: n, paramTypes: [v4, v4], resultType: v4 }, args)
         : null;
 });
 
@@ -265,14 +270,29 @@ SPECS.set('D3DCOLORtoUBYTE4', (n, args)=>{
         ? accept({ name: n, paramTypes: [v4], resultType: vectorOf('int', 4) }, args) : null;
 });
 
+// A scalar is a 1x1 matrix: its own determinant and its own transpose.
 SPECS.set('determinant', (n, args)=>{
     const m = args[0];
-    return args.length === 1 && m.kind === 'matrix' && m.rows === m.cols
-        ? { name: n, paramTypes: [withBase(m, 'float')], resultType: FLOAT } : null;
+    if (args.length === 1 && m.kind === 'scalar')
+    {
+        return accept({ name: n, paramTypes: [FLOAT], resultType: FLOAT }, args);
+    }
+    if (args.length !== 1 || m.kind !== 'matrix')
+    {
+        return null;
+    }
+    // A matrix not square gives the determinant of its square corner, as fxc computes it.
+    const k = Math.min(m.rows, m.cols);
+    return accept({ name: n, paramTypes: [k === 1 ? FLOAT : matrixOf('float', k, k)],
+        resultType: FLOAT }, args);
 });
 
 SPECS.set('transpose', (n, args)=>{
     const m = args[0];
+    if (args.length === 1 && m.kind === 'scalar')
+    {
+        return { name: n, paramTypes: [m], resultType: m };
+    }
     return args.length === 1 && m.kind === 'matrix'
         ? { name: n, paramTypes: [withBase(m, 'float')],
             resultType: matrixOf('float', m.cols, m.rows) } : null;
@@ -451,6 +471,8 @@ const LANE = new Map(/** @type {[string, Lane][]} */ ([
     ['fmod', { f: fmodFloat }],
     ['max', { f: fmax, i: Math.max }], ['min', { f: fmin, i: Math.min }],
     ['lerp', { f: (a, b, t)=>f32(a + f32(t * f32(b - a))) }],
+    ['mad', { f: (a, b, c)=>f32(f32(a * b) + c), i: (a, b, c)=>a * b + c }],
+    ['rcp', { f: x=>f32(1 / x) }],
     ['smoothstep', { f: (a, b, x)=>{
         const t = f32(sat(f32(f32(x - a) / f32(b - a))));
         return f32(f32(t * t) * f32(3 - f32(2 * t)));
@@ -634,8 +656,13 @@ export function evaluateIntrinsic(name, args, argTypes, resultType, hooks = {}, 
                 return toBase(v, 'int');
             });
         }
-        case 'determinant': return det(/** @type {number[][]} */ (args[0]));
+        case 'determinant': return typeof args[0] === 'number' ? args[0]
+            : det(/** @type {number[][]} */ (args[0]));
         case 'transpose': {
+            if (typeof args[0] === 'number')
+            {
+                return args[0];
+            }
             const m = /** @type {number[][]} */ (args[0]);
             return m[0].map((_, c)=>m.map(row=>row[c]));
         }

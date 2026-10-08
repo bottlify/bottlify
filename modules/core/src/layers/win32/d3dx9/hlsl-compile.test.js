@@ -470,3 +470,19 @@ test('a cast is an l-value that writes back what it shows', async()=>{
         { inputs: { v: [], t: [] }, constants: { f } }).outputs)[0]];
     assert.deepEqual(out, [0.25 - 3, 4, 12, 0]);
 });
+
+test('an array or a matrix in and out of a shader takes the semantic\'s indices in turn', async()=>{
+    // fxc: c[2] : COLOR0 is v0 and v1, a float4x2 at TEXCOORD0 a column each in t0 and t1,
+    // and o[2] : COLOR0 the colours oC0 and oC1.
+    const result = await compile(`struct O { float4 o[2] : COLOR0; };
+        O main(float4 c[2] : COLOR0, float4x2 m : TEXCOORD0)
+        { O r; r.o[0] = c[1] * 10 + c[0]; r.o[1] = float4(m[0][0], m[0][1], m[3][0], m[3][1]);
+          return r; }`, 'ps_2_0');
+    assert.equal(result.ok, true, result.messages);
+    const { outputs } = execute(decode(/** @type {Uint32Array} */ (result.tokens)), {
+        inputs: { v: [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]],
+            t: [[1, 2, 3, 4], [5, 6, 7, 8]] },
+        constants: { f: new Float32Array(32 * 4) } });
+    assert.deepEqual([...outputs.oC0].map(x=>Math.round(x * 1000) / 1000), [5.1, 6.2, 7.3, 8.4]);
+    assert.deepEqual([...outputs.oC1], [1, 5, 4, 8]);
+});

@@ -25,7 +25,8 @@
 
 import { createBuilder } from './hlsl-build.js';
 import { PC, PT, USAGE, registersOf } from './hlsl-ir.js';
-import { baseOf, flatBases, isNumeric, sameType, scalarCount, typeToString } from './hlsl-types.js';
+import { baseOf, flatBases, isNumeric, sameType, scalarCount, typeToString, vectorOf }
+    from './hlsl-types.js';
 import { lowerIntrinsic } from './hlsl-lower-intrinsics.js';
 
 /** @typedef {import('./hlsl-build.js').Vec} Vec */
@@ -89,6 +90,30 @@ export function parseSemantic(semantic){
         return null;
     }
     return { usage, index: match[2] === '' ? 0 : Number(match[2]) };
+}
+
+/**
+ * The semantic indices a shader input or output of a type takes: one a vector, one a column
+ * of a matrix, each element of an array its own.
+ *
+ * @param {Type} type @returns {number}
+ */
+function ioSlots(type){
+    switch (type.kind)
+    {
+        case 'matrix': return type.cols;
+        case 'array': return type.length * ioSlots(type.elem);
+        case 'struct': return type.members.reduce((n, m)=>n + ioSlots(m.type), 0);
+        default: return 1;
+    }
+}
+
+/** The semantic `offset` indices on: TEXCOORD1 and 2 give TEXCOORD3. @param {string} semantic @param {number} offset */
+function shiftSemantic(semantic, offset){
+    const match = /^(.*?)(\d*)$/.exec(semantic);
+    const stem = match ? match[1] : semantic;
+    const index = match && match[2] !== '' ? Number(match[2]) : 0;
+    return `${stem}${index + offset}`;
 }
 
 /** @param {Value} v @returns {Vec} */
@@ -1381,6 +1406,20 @@ export function lower(module, entry, profile){
             return { k: 'struct', fields: type.members.map(m=>inputOf(m.type,
                 m.semantic ?? semantic, m.name, pos)) };
         }
+        // An array, and a matrix a column at a time, take the semantic's indices in turn
+        // (COLOR for float4 c[2] is COLOR0 and COLOR1).
+        if (semantic && type.kind === 'array')
+        {
+            const per = ioSlots(type.elem);
+            return { k: 'arr', elems: Array.from({ length: type.length }, (_, i)=>
+                inputOf(type.elem, shiftSemantic(semantic, i * per), name, pos)) };
+        }
+        if (semantic && type.kind === 'matrix')
+        {
+            const colV = Array.from({ length: type.cols }, (_, c)=>vecOf(inputOf(
+                vectorOf(type.base, type.rows), shiftSemantic(semantic, c), name, pos)));
+            return { k: 'mat', rows: type.rows, cols: type.cols, rowV: null, colV };
+        }
         if (!semantic)
         {
             return fail('X3502', `'${name}': input parameter '${name}' is missing a semantic`,
@@ -1438,6 +1477,21 @@ export function lower(module, entry, profile){
         if (!parsed || 'special' in parsed)
         {
             fail('X4503', `unknown output semantic '${semantic}'`, pos);
+            return;
+        }
+        if (type.kind === 'array')
+        {
+            const per = ioSlots(type.elem);
+            const elems = /** @type {Extract<Value, {k: 'arr'}>} */ (value).elems;
+            elems.forEach((one, i)=>outputOf(one, type.elem, shiftSemantic(semantic, i * per),
+                name, pos));
+            return;
+        }
+        if (type.kind === 'matrix')
+        {
+            const columns = colsOf(/** @type {Extract<Value, {k: 'mat'}>} */ (value));
+            columns.forEach((column, c)=>outputOf(vec(column), vectorOf(type.base, type.rows),
+                shiftSemantic(semantic, c), name, pos));
             return;
         }
         if (type.kind !== 'scalar' && type.kind !== 'vector')
