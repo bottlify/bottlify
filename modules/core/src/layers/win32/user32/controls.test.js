@@ -1776,6 +1776,61 @@ test('an unread message for a hidden window paints nothing and the desktop stays
     void MSG;
 });
 
+test('a window that relabels its button in its WM_PAINT is not painted again inside it',
+    async()=>{
+        // A launcher re-applies its language from WM_PAINT, before BeginPaint:
+        // it sets its buttons' text. A button repaints itself at once, and
+        // Windows sends the parent WM_CTLCOLORBTN then, never WM_PAINT
+        // (user32's WmSetTextButtonSeq). Started from the parent, which still
+        // had its area to paint, the button's repaint sent the parent WM_PAINT
+        // inside its own WM_PAINT until the stack ran out.
+        let parent = 0;
+        let button = 0;
+        let depth = 0;
+        let deepest = 0;
+        let paints = 0;
+        const context = setup({
+            reply: message=>{
+                const passOn = ()=>context.fns.DefWindowProcA.handler(
+                    [message.hwnd, message.message, message.wParam, message.lParam]);
+                if (message.message !== WM_PAINT || message.hwnd !== parent || button === 0
+                    || depth > 3)
+                {
+                    return passOn();
+                }
+                paints++;
+                depth++;
+                deepest = Math.max(deepest, depth);
+                context.memory.putString(TEXT + 32, '&Next >');
+                return Promise.resolve(context.fns.SetWindowTextA.handler([button, TEXT + 32]))
+                    .then(()=>{
+                        depth--;
+                        return passOn();
+                    });
+            },
+        });
+        context.memory.putString(TEXT, 'Launcher');
+        const CLASS = OUT + 64;
+        [0, GUEST_PROC, 0, 0, HINSTANCE, 0, 0, 5 + 1, 0, TEXT].forEach((value, index)=>{
+            const bytes = new Uint8Array(4);
+            new DataView(bytes.buffer).setUint32(0, value, true);
+            context.memory.writeMemory(CLASS + index * 4, bytes);
+        });
+        assert.notEqual(context.fns.RegisterClassA.handler([CLASS]), 0);
+        parent = await context.fns.CreateWindowExA.handler([0, TEXT, TEXT,
+            WS_POPUP | WS_CAPTION | WS_VISIBLE, 20, 30, 200, 120, 0, 0, HINSTANCE, 0]);
+        context.memory.putString(TEXT + 64, 'Button');
+        button = await context.fns.CreateWindowExA.handler([0, TEXT + 64, TEXT + 64,
+            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 100, 70, 75, 23, parent, 1, HINSTANCE, 0]);
+        await context.pump();
+        paints = 0;
+        deepest = 0;
+        context.fns.InvalidateRect.handler([parent, 0, 1]);
+        await context.fns.UpdateWindow.handler([parent]);
+        assert.equal(deepest, 1, 'no WM_PAINT inside the WM_PAINT');
+        assert.equal(paints, 1);
+    });
+
 test('a MoveWindow that leaves a control where it was repaints nothing', async()=>{
     // MoveWindow is SetWindowPos with the z-order left alone, and a placement
     // that changes neither the position nor the size uncovers nothing: the

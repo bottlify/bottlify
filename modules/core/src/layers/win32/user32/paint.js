@@ -503,9 +503,22 @@ export function createPaintFunctions(options){
      *        one, as a control painting itself does from a dialog's loop.
      * @returns {number | Promise<number>}
      */
-    const paintNow = (record, thread)=>(record.updateRect
-        ? after(send(record.hwnd, WM_PAINT, 0, 0, thread ?? host.callerThread?.()), ()=>1)
-        : 1);
+    const paintNow = (record, thread)=>{
+        if (!record.updateRect)
+        {
+            return 1;
+        }
+        // In the middle of painting from the moment it is sent WM_PAINT, not
+        // only from its BeginPaint: a handler that changes a child before it
+        // begins -- relabels a button -- would otherwise have the child's
+        // paint start from this window again, and be sent WM_PAINT inside its
+        // own WM_PAINT for as long as the stack lasted.
+        record.paintSent = (record.paintSent ?? 0) + 1;
+        return after(send(record.hwnd, WM_PAINT, 0, 0, thread ?? host.callerThread?.()), ()=>{
+            record.paintSent--;
+            return 1;
+        });
+    };
 
     /**
      * WM_PAINT sent now to a window and, with `children`, to each of its
@@ -514,15 +527,17 @@ export function createPaintFunctions(options){
      * RDW_ALLCHILDREN.
      *
      * @param {any} record @param {boolean} children @param {unknown} [thread]
+     * @param {boolean} [alone]  Itself and its children only, never from an
+     *        ancestor: a control that repaints itself as it handles a message.
      * @returns {number | Promise<number>}
      */
-    const updateNow = (record, children, thread)=>{
+    const updateNow = (record, children, thread, alone = false)=>{
         // Named once, here: past the first window's paint the thread on the
         // processor may be any other.
         const on = thread ?? host.callerThread?.();
         // Under an area an ancestor still has to paint, a window paints after
         // it: painted first, it would be painted over.
-        const from = options.paintsFirst?.(record) ?? record;
+        const from = alone ? record : options.paintsFirst?.(record) ?? record;
         const order = children || from !== record
             ? [from, ...(descendants?.(from) ?? [])] : [record];
         /** @param {number} index @returns {number | Promise<number>} */

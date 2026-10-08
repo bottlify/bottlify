@@ -3157,7 +3157,8 @@ export function createWindowFunctions(host){
     const bubbledTo = record=>{
         const found = [];
         for (let up = isChild(record) ? live(record.parent) : null;
-            up && shown(up) && (up.style & WS_CLIPCHILDREN) === 0 && !up.inPaint;
+            up && shown(up) && (up.style & WS_CLIPCHILDREN) === 0 && !up.inPaint
+                && !(up.paintSent > 0);
             up = isChild(up) ? live(up.parent) : null)
         {
             found.push(up);
@@ -4920,7 +4921,13 @@ export function createWindowFunctions(host){
             paint.invalidate(record, { left: 0, top: 0, right: size.width, bottom: size.height },
                 true);
         },
-        update: (record, thread)=>(shown(record) ? paint.updateNow(record, true, thread) : 1),
+        // A control repainting itself as it handles a message -- its new
+        // text, its new position -- is the control alone: Windows sends its
+        // parent WM_CTLCOLOR* then (user32's WmSetTextButtonSeq), never
+        // WM_PAINT. What the change left the parent to paint waits for the
+        // parent's next look at its queue.
+        update: (record, thread)=>(shown(record)
+            ? paint.updateNow(record, true, thread, true) : 1),
         // A control's own scroll bar moved: its frame, where the bar is drawn.
         frameChanged: record=>{
             record.ncDirty = true;
