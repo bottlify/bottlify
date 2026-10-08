@@ -508,6 +508,17 @@ export function check(program, options = {}){
         {
             fail('X3005', 'illegal variable type', v.pos);
         }
+        /** @type {any} */
+        let t = type;
+        while (t.kind === 'array')
+        {
+            if (t.length < 0)
+            {
+                fail('X3072', `'${v.name}': array dimensions of structure members must be explicit`,
+                    v.pos);
+            }
+            t = t.elem;
+        }
         return type;
     }
 

@@ -520,7 +520,7 @@ export function createBuilder(profile){
     const derivative = (/** @type {'x' | 'y'} */ axis, /** @type {Vec} */ a)=>{
         if (!profile.derivatives)
         {
-            throw new Error(`${profile.name} has no derivative instruction`);
+            throw new TargetError('X4532', `ddx and ddy are not available in ${profile.name}`);
         }
         return emit(axis === 'x' ? 'dsx' : 'dsy', a.w, [a.src]);
     };

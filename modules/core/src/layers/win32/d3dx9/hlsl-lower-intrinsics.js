@@ -184,6 +184,11 @@ export function lowerIntrinsic(L, name, args, result, e, st){
      */
     const texture = (dim, mode, lanes)=>{
         const sampler = /** @type {Extract<Value, {k: 'sampler'}>} */ (a[0]);
+        if (sampler?.k !== 'sampler')
+        {
+            L.fail('X3500', `'${name}': an element of an array of samplers is not supported`,
+                e.pos);
+        }
         if (sampler.cst.dim === 0 || sampler.cst.dim === undefined)
         {
             sampler.cst.dim = dim;
