@@ -18,12 +18,9 @@
  * or which has none: the source is copied into the container and the module
  * copied out, so nothing depends on a volume shared with the host.
  *
- * The module imports cork's memory and is position-independent: its data lies
- * at the `__memory_base` and its stack below the `__stack_pointer` it is
- * given, so every executor of a process runs an instance of its own over the
- * one memory, its statics and stack in its own state page
- * (`WASM_INTERPRETER_STATICS` bytes from 4096 past its state block). The build
- * fails if the data and the stack would not fit there.
+ * The module imports cork's memory and places its data and stack at 4096, in
+ * the page cork's layout keeps for the state block (512 bytes) below guest RAM;
+ * the build fails if they would reach past 16 KiB.
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -32,7 +29,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { WASM_INTERPRETER_STACK, WASM_INTERPRETER_STATICS } from '../src/interp-wasm.js';
+import { HOST_MATH } from '../src/interp-wasm.js';
 
 const args = process.argv.slice(2);
 const docker = args.includes('--docker');
@@ -90,41 +87,10 @@ function compileInDocker(flags, out){
         spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore' });
     }
 }
-/**
- * The memory-info subsection of a `dylink.0` section.
- *
- * @param {Uint8Array} section
- */
-function dylinkMemory(section){
-    let at = 0;
-    const leb = ()=>{
-        let value = 0;
-        let shift = 0;
-        let byte = 0x80;
-        while (byte & 0x80)
-        {
-            byte = section[at++];
-            value |= (byte & 0x7f) << shift;
-            shift += 7;
-        }
-        return value >>> 0;
-    };
-    while (at < section.length)
-    {
-        const kind = section[at++];
-        const size = leb();
-        const end = at + size;
-        if (kind === 1)
-        {
-            return { memorySize: leb(), memoryAlign: leb(), tableSize: leb(), tableAlign: leb() };
-        }
-        at = end;
-    }
-    return { memorySize: 0, memoryAlign: 0, tableSize: 0, tableAlign: 0 };
-}
-
 const source = new URL('../src/interp-wasm.c', import.meta.url);
 const target = new URL('../src/interp-wasm.bytes.js', import.meta.url);
+/** Where the module's own data and stack must end: below this, above the state block. */
+const LIMIT = 16384;
 
 const dir = mkdtempSync(join(tmpdir(), 'interp-wasm-'));
 try
@@ -138,9 +104,8 @@ try
         // as translated code does them.
         '-mbulk-memory',
         '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter',
-        // Position-independent: data and stack where each instance is told.
-        '-fPIC', '-Wl,--experimental-pic', '-Wl,-shared',
-        '-Wl,--no-entry', '-Wl,--import-memory',
+        '-Wl,--no-entry', '-Wl,--import-memory', '-Wl,--global-base=4096',
+        '-Wl,-z,stack-size=8192', '-Wl,--export=__heap_base',
     ];
     const compiled = docker ? compileInDocker(flags, out) : null;
     if (!docker)
@@ -149,19 +114,12 @@ try
     }
     const bytes = readFileSync(out);
     const module = new WebAssembly.Module(bytes);
-    // The dylink section's memory info: the data's size and alignment, then the table's.
-    const [dylink] = WebAssembly.Module.customSections(module, 'dylink.0');
-    const info = dylinkMemory(new Uint8Array(dylink));
-    if (info.tableSize !== 0)
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const { exports } = new WebAssembly.Instance(module, { env: { memory, ...HOST_MATH } });
+    const end = /** @type {WebAssembly.Global} */ (exports.__heap_base).value;
+    if (end > LIMIT)
     {
-        throw new Error('interp-wasm: the module wants a function table; the loader gives none');
-    }
-    const end = info.memorySize + WASM_INTERPRETER_STACK;
-    if (end > WASM_INTERPRETER_STATICS || info.memoryAlign > 4)
-    {
-        throw new Error(`interp-wasm: data (${info.memorySize}, aligned to 2^${info.memoryAlign})`
-            + ` and a stack of ${WASM_INTERPRETER_STACK} need ${end} of the`
-            + ` ${WASM_INTERPRETER_STATICS} bytes an executor keeps`);
+        throw new Error(`interp-wasm: data and stack end at ${end}, past ${LIMIT}`);
     }
     const compiler = compiled
         ?? execFileSync(clang, ['--version']).toString().split('\n')[0].trim();
@@ -197,7 +155,7 @@ try
         "].join('');",
         '',
     ].join('\n'));
-    console.log(`interp-wasm: ${bytes.length} bytes, data and stack take ${end}, ${compiler}`);
+    console.log(`interp-wasm: ${bytes.length} bytes, data and stack end at ${end}, ${compiler}`);
 }
 finally
 {

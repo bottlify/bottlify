@@ -18,8 +18,7 @@ import {
     TIER_SLOT, emitRegion, enterRegion, finishModule, prepareModule, mathImports,
 } from '../emit/region.js';
 import { buildHelpersModule } from '../emit/helpers.js';
-import { EXECUTOR_BYTES, PAGE, Tables, executorLayout, ownLayout, pagesFor }
-    from '../runtime/layout.js';
+import { Tables, ownLayout, pagesFor } from '../runtime/layout.js';
 import { createPageTable } from '../runtime/pages.js';
 import { ANY_TOP, createEntries } from '../runtime/entries.js';
 import { SHAPE, isX87 } from '../emit/x87.js';
@@ -32,7 +31,7 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  * @param {{ ramSize?: number, codePages?: boolean, trapPort?: number,
  *     trap?: (value: number) => number, rdtsc?: () => bigint,
  *     leaveOut?: string[], precise?: boolean, structure?: boolean,
- *     resume?: boolean, looseStacks?: boolean, executor?: number }} [given]
+ *     resume?: boolean, looseStacks?: boolean }} [given]
  *     trapPort: `out dx, eax` to it calls
  *     `trap` from inside the region (answering 1 when it moved EIP), as under a host with
  *     a call channel; without `trap`, one that answers 0; precise: nothing relaxed -- on
@@ -41,24 +40,19 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  *     unless a test asks or `CORK_STRUCTURE` in the environment says 0 or 1, so a suite can
  *     be run under the other form; resume: a miss of the hash calls what `setTier` put in the
  *     table's `TIER_SLOT`; looseStacks: a store through esp alone tests no page, outside
- *     precise (`prepareModule`); executor: the machine is that executor of a memory with room
- *     for it, its state page and tables past the first's (`executorLayout`), 0 by default
+ *     precise (`prepareModule`)
  */
 export function createTestMachine(given = {}){
     const { ramSize = 1 << 20, codePages = false, trapPort, trap, rdtsc, leaveOut = [],
-        precise = true, resume = false, looseStacks = false, executor = 0 } = given;
+        precise = true, resume = false, looseStacks = false } = given;
     const forced = globalThis.process?.env?.CORK_STRUCTURE;
     const structure = given.structure
         ?? (forced === '1' ? true : forced === '0' ? false : undefined);
     // With `codePages`, the undo ring's area doubles as another executor's
     // byte-per-page code table, for the tests of a store into its pages.
-    const first = ownLayout({ ramSize });
-    const firstPages = pagesFor(first, Tables.SIZE);
-    const own = executor === 0 ? first
-        : executorLayout(first, firstPages * PAGE + (executor - 1) * EXECUTOR_BYTES);
+    const own = ownLayout({ ramSize });
     const layout = codePages ? { ...own, codePages: own.tables + Tables.UNDO_RING } : own;
-    const memory = new WebAssembly.Memory({
-        initial: firstPages + executor * EXECUTOR_BYTES / PAGE });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
     const pages = createPageTable(memory, layout);
     // The x87 as a fresh processor has it: every register empty, the
     // default control word.

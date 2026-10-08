@@ -25,8 +25,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestMachine } from '../testing/machine.js';
 import { Fault, blockState, interpret } from '../interp.js';
-import { WASM_INTERPRETER_AREA, WASM_INTERPRETER_STATICS_AT, WasmExit, createWasmInterpreter }
-    from '../interp-wasm.js';
+import { WASM_INTERPRETER_AREA, WasmExit, createWasmInterpreter } from '../interp-wasm.js';
 import { PageFlag, createPageTable } from '../runtime/pages.js';
 import { Tables, ownLayout, pagesFor } from '../runtime/layout.js';
 import { Exit } from './region.js';
@@ -687,8 +686,7 @@ function againstElements(program, prepare, what, random){
     const layout = ownLayout({ ramSize: 1 << 20 });
     const pages = pagesFor(layout, Tables.SIZE + WASM_INTERPRETER_AREA);
     const memory = new WebAssembly.Memory({ initial: pages, maximum: pages });
-    const tier = createWasmInterpreter({ memory, layout,
-        statics: WASM_INTERPRETER_STATICS_AT, area: layout.tables + Tables.SIZE,
+    const tier = createWasmInterpreter({ memory, layout, area: layout.tables + Tables.SIZE,
         hotThreshold: 1 << 30, trapPort: 0xb077, parkBase: 0x100000 });
     assert.ok(tier);
     const view = new DataView(memory.buffer);

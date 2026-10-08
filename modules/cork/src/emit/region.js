@@ -221,7 +221,6 @@ const LOCAL_TYPES = [
  * @property {boolean} [narrow]  compiled for single precision: every rounding instruction
  *     rounds to single with no test of its own, and a block leaves with `PRECISION` if it
  *     finds another precision set
- * @property {boolean} [atomic]  locked instructions as wasm atomics (`locked.js`)
  * @property {boolean} [precise]  every relaxation off (the runtime's `precise`): the x87
  *     exception flags, the signalling-NaN tests, the underflow test and C1 kept as the processor
  *     keeps them, the flags an instruction leaves undefined keeping the values the emulator
@@ -272,12 +271,9 @@ const LOCAL_TYPES = [
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string>,
  *     countTransfers?: boolean, wide?: boolean, narrow?: boolean, blockProfile?: boolean,
  *     structure?: boolean, precise?: boolean, place?: number, profileCalls?: boolean,
- *     resume?: boolean, callReturn?: boolean, looseStacks?: boolean,
- *     atomic?: boolean }}
- *     [options]  atomic: locked instructions as wasm atomics (`locked.js`), for a process
- *     whose threads run on more than one executor; looseStacks: a store through esp alone
- *     tests no page (`emitGroupChecks`), which holds while no translated code lies on a
- *     thread's stack (the runtime's
+ *     resume?: boolean, callReturn?: boolean, looseStacks?: boolean }}
+ *     [options]  looseStacks: a store through esp alone tests no page (`emitGroupChecks`),
+ *     which holds while no translated code lies on a thread's stack (the runtime's
  *     `noteStack`); undoLog:
  *     record every store's old bytes (differential builds only; part of the cache key);
  *     hash: import the host's function table and transfer through the entry hash (needs
@@ -295,7 +291,7 @@ export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
         wide = false, narrow = false, blockProfile = false, structure = true, precise = false,
         place = 0, profileCalls = false, resume = false, callReturn = false,
-        looseStacks = false, atomic = false } = {})
+        looseStacks = false } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -386,10 +382,6 @@ export function prepareModule(m, layout, features, memory = {},
     else if (looseStacks && undoLog !== true)
     {
         context.looseStacks = true;
-    }
-    if (atomic)
-    {
-        context.atomic = true;
     }
     if (profileCalls && (layout.callProfile ?? -1) >= 0)
     {

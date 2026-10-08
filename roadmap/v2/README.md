@@ -5,9 +5,7 @@
 **Status:** proposed 2026-10-03, revised against `main` 6554baf0; the workers of stage 2 and the
 translation cache arena decided 2026-10-07 on `cork2`, where the translation pool, its driver and
 the arena landed the same day; zstd stays on the coordinator, measured not worth moving yet
-(`negative-results.md`, 2026-10-08). Stage 3's atomic variant and the executors' layouts (a state
-page, tables and interpreter statics of each executor's own over one guest RAM) landed on `cork2`
-on 2026-10-08; running threads on them is the work in progress. How the engine works today is in
+(`negative-results.md`, 2026-10-08). How the engine works today is in
 [`docs/architecture.md`](../../docs/architecture.md); this document is where it goes next.
 
 v2 turns the engine from one thread that does everything into a platform of workers whose number
@@ -310,14 +308,10 @@ measurement before stage 1 says that pays.
 
 - **The atomic variant.**
   - *plain* — today's code.
-  - *atomic* (landed, `emit/locked.js`) — `lock`-prefixed instructions and `xchg` with memory
-    become wasm atomics: the threads proposal's read-modify-write where it has one, a
-    compare-and-swap loop where it has none (adc, sbb, neg). A misaligned wasm atomic traps where
-    x86 does not, so an access off its alignment inside one aligned qword is a compare-and-swap of
-    the qword, and one across two qwords (a split lock, which hardware too makes the slow
-    exception) a plain read-modify-write, not indivisible against another executor. Plain loads
-    and stores stay plain: on an x86 host they keep the processor's order; elsewhere what they
-    promise another thread is the atomic tax's question.
+  - *atomic* — `lock`-prefixed instructions become wasm atomic read-modify-writes, loads and stores
+    are ordered as x86 orders them, and an atomic access to an address that is not naturally
+    aligned takes a fallback path (a lock held across the access), since a misaligned wasm atomic
+    traps where x86 does not.
 
   The store's key already carries a variant (`runtime/cache.js`); the two are kept side by side.
   The interpreters, JavaScript and wasm, get the same variant: the host runs them where no region
@@ -407,14 +401,8 @@ one executor.
   x86 and on ARM hosts, and whether ordering can be limited to fewer than every load and store
   without breaking programs that rely on x86's order. Wasm offers no acquire and release
   orderings yet; the proposal that adds them would change the answer.
-- **Executor state: a base or translations per executor** — decided 2026-10-08: translations per
-  executor. Each executor's layout moves its state block, its tables and the wasm interpreter's
-  statics into a state page of its own (`executorLayout`), so its translations carry its
-  addresses as constants and cost nothing at run time; the price is a translation per executor.
-  The base was measured at +23 to +37 % per turn on a worst-case loop of state accesses (node,
-  three runs; not measured on the benchmarks). The wasm interpreter is built position-independent
-  for it: measured 0 to 7 % slower on interpreted-only runs of the cork bench (node, x87,
-  `translate: false`, three alternations; noise about ±6 %).
+- **Executor state: a base or translations per executor** (stage 1), decided by measuring the add
+  per access against a cache per executor.
 - **Memory shared between processes** (stage 2): which mechanism for named mappings, shared
   sections and cross-process reads and writes, and which programs need them coherent rather than
   copied at a wait.

@@ -21,8 +21,7 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { Fault, Unsupported, blockState, interpret } from './interp.js';
-import { WASM_INTERPRETER_AREA, WASM_INTERPRETER_STATICS_AT, WasmExit, createWasmInterpreter }
-    from './interp-wasm.js';
+import { WASM_INTERPRETER_AREA, WasmExit, createWasmInterpreter } from './interp-wasm.js';
 import { eflagsOf } from './emit/flags.js';
 import { ownLayout, pagesFor, Tables } from './runtime/layout.js';
 import { createPageTable } from './runtime/pages.js';
@@ -46,8 +45,7 @@ test('the wasm tier leaves what the hardware left, on every case the interpreter
         createPageTable(memory, layout);
         const bytes = new Uint8Array(memory.buffer);
         const view = new DataView(memory.buffer);
-        const tier = createWasmInterpreter({ memory, layout,
-            statics: WASM_INTERPRETER_STATICS_AT, area, hotThreshold: 2,
+        const tier = createWasmInterpreter({ memory, layout, area, hotThreshold: 2,
             trapPort: 0xb077, parkBase: 0x100000, precise: true });
         assert.ok(tier);
         /** @type {string[]} */

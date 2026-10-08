@@ -28,13 +28,6 @@ not for a worker: an arena of shared memory (`runtime/arena.js`) every translato
 reads and adds to, so a relink takes again what any of them emitted. Their gates are
 `runtime/translators.test.js` and `runtime/arena.test.js`.
 
-The atomic variant (`atomic`, `emit/locked.js`) emits every `lock`-prefixed read-modify-write and
-`xchg` with memory as a wasm atomic, for a process whose threads run on more than one executor:
-the threads proposal's own operation where it has one, a compare-and-swap loop where it does not
-(adc, sbb, neg), and an access off its width's alignment as a compare-and-swap of its aligned
-qword, or, across two qwords, as a plain read-modify-write. Its gate, `emit/locked.test.js`,
-judges seeded sequences of every locked form against the instruction model.
-
 Where it goes next: `roadmap/v2/`. Zero runtime
 dependencies; vanilla ES modules with JSDoc; tests are `node:test`, colocated (`*.test.js` for
 units, `*.itest.js` for the corpus suites).

@@ -103,7 +103,7 @@ const NEW_TARGET_WORK = 128;
 /** The names an engine module must export for this host. */
 const ENGINE_EXPORTS = Object.freeze([
     'createEngine', 'ownLayout', 'pagesFor', 'Tables', 'STATE_BLOCK_SIZE',
-    'interpret', 'blockState', 'eflagsOf', 'setEflags', 'executorLayout', 'EXECUTOR_BYTES',
+    'interpret', 'blockState', 'eflagsOf', 'setEflags',
 ]);
 
 /**
@@ -127,10 +127,6 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  *     they answer.
  * @property {number} [closedBelow]  Addresses below this are no-access: a fetch, a
  *           store or an interpreted read there faults. Zero, the default, closes none.
- * @property {number} [executors]  Executors the memory has room for, each a state page and
- *     tables of its own past the first's (`executorLayout`). Default 1.
- * @property {number} [executor]   Which of them this host is. Default 0, the first, whose state
- *     block is at the start of the memory.
  */
 
 /**
@@ -149,7 +145,7 @@ export const CORK_TSC_MHZ = 3000;
  */
 export function createCorkHost(config){
     const { engine, memorySize, trapPort, entryVector, initialStack, cork: corkConfig,
-        closedBelow = 0, noExecuteBelow = 0, executors = 1, executor = 0 } = config;
+        closedBelow = 0, noExecuteBelow = 0 } = config;
     // Where code may run from: a closed range runs nothing either.
     const runsFrom = Math.max(closedBelow, noExecuteBelow) >>> 0;
     for (const name of ENGINE_EXPORTS)
@@ -160,32 +156,20 @@ export function createCorkHost(config){
         }
     }
     const { createEngine, ownLayout, pagesFor, Tables, STATE_BLOCK_SIZE, interpret, blockState,
-        eflagsOf, setEflags, WasmExit, executorLayout, EXECUTOR_BYTES } = engine;
-    if (!(executor >= 0 && executor < executors))
-    {
-        throw new Error(`cpu: executor ${executor} of ${executors}`);
-    }
+        eflagsOf, setEflags, WasmExit } = engine;
 
     // The guest RAM is the whole memorySize; the tables and the state block are
-    // memory of cork's own beside it, not carved out of the guest's. `own` is
-    // the first executor's layout, which is also where every field lies from
-    // the start of any executor's state block: the block's views, and a
-    // thread's context taken from them, are the same on every executor.
-    const own = ownLayout({ ramSize: memorySize });
+    // memory of cork's own beside it, not carved out of the guest's.
+    const layout = ownLayout({ ramSize: memorySize });
     // A profiling run (`blockProfile`) has the block profile past the tables,
     // and the interpreter tier in wasm its hot counts past that.
     const profileSize = import.meta.BOTTLIFY_DIAGNOSTICS !== false && corkConfig?.blockProfile
         ? Tables.BLOCK_PROFILE_SIZE : 0;
     const wasmWanted = typeof engine.createWasmInterpreter === 'function'
         && corkConfig?.wasmInterpreter !== false;
-    const past = Tables.SIZE + profileSize + (wasmWanted ? engine.WASM_INTERPRETER_AREA : 0);
-    const firstPages = pagesFor(own, past);
-    // Every other executor's: its state page, its tables and what lies past them.
-    const executorPages = Math.ceil((EXECUTOR_BYTES - Tables.SIZE + past) / 65536);
-    const stateBase = executor === 0 ? 0 : (firstPages + (executor - 1) * executorPages) * 65536;
-    const layout = executor === 0 ? own : executorLayout(own, stateBase);
     const wasmArea = layout.tables + Tables.SIZE + profileSize;
-    const pages = firstPages + (executors - 1) * executorPages;
+    const pages = pagesFor(layout, Tables.SIZE + profileSize
+        + (wasmWanted ? engine.WASM_INTERPRETER_AREA : 0));
     // Shared where the host can share it -- a page that is cross-origin
     // isolated, or node -- so another worker can read and write guest memory
     // in place; the translated code runs as fast on either.
@@ -195,25 +179,25 @@ export function createCorkHost(config){
 
     // The memory is fixed (initial === maximum), so the buffer never detaches
     // and the views are taken once.
-    const block = new Uint8Array(memory.buffer, stateBase, STATE_BLOCK_SIZE);
-    const blockView = new DataView(memory.buffer, stateBase, STATE_BLOCK_SIZE);
+    const block = new Uint8Array(memory.buffer, 0, STATE_BLOCK_SIZE);
+    const blockView = new DataView(memory.buffer, 0, STATE_BLOCK_SIZE);
     const reg32 = new Int32Array(memory.buffer, layout.regs, 8);
     const xmm = new Uint32Array(memory.buffer, layout.xmm, 32);
     const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
     const whole = new DataView(memory.buffer);
 
     /** The flags word, whole: the record a region left is folded into it first. */
-    const eflagsWord = ()=>eflagsOf(blockView, own) >>> 0;
+    const eflagsWord = ()=>eflagsOf(blockView, layout) >>> 0;
     /** @param {number} address  A guest address. */
     const ramOffset = address=>layout.ramBase + address;
 
     // The boot state: the registers the ROM would have left, and nothing run.
     block.fill(0);
     reg32[4] = initialStack | 0; // ESP
-    blockView.setUint32(own.eflags, DEFAULT_EFLAGS, true);
-    blockView.setUint16(own.x87Control, DEFAULT_CONTROL_WORD, true);
-    block[own.x87Empty] = 0xff; // every register empty
-    blockView.setUint32(own.mxcsr, DEFAULT_MXCSR, true);
+    blockView.setUint32(layout.eflags, DEFAULT_EFLAGS, true);
+    blockView.setUint16(layout.x87Control, DEFAULT_CONTROL_WORD, true);
+    block[layout.x87Empty] = 0xff; // every register empty
+    blockView.setUint32(layout.mxcsr, DEFAULT_MXCSR, true);
 
     /** @type {((value: number) => void) | null} */
     let trapHandler = null;
@@ -243,7 +227,6 @@ export function createCorkHost(config){
      */
     const wasmTier = wasmWanted
         ? engine.createWasmInterpreter({ memory, layout, area: wasmArea,
-            statics: stateBase + engine.WASM_INTERPRETER_STATICS_AT,
             hotThreshold: corkConfig?.hotThreshold ?? 2, trapPort, parkBase,
             precise: corkConfig?.precise === true })
         : null;
@@ -322,15 +305,15 @@ export function createCorkHost(config){
     let counted = 0;
     let lastWord = 0;
 
-    const eip = ()=>blockView.getUint32(own.eip, true) >>> 0;
+    const eip = ()=>blockView.getUint32(layout.eip, true) >>> 0;
     /** @param {number} value */
     const setEip = value=>{
-        blockView.setUint32(own.eip, value >>> 0, true);
+        blockView.setUint32(layout.eip, value >>> 0, true);
         entered = true;
     };
-    const x87Top = ()=>block[own.x87Top] & 7;
+    const x87Top = ()=>block[layout.x87Top] & 7;
     /** @param {number} index */
-    const x87At = index=>own.x87 + (index & 7) * 16;
+    const x87At = index=>layout.x87 + (index & 7) * 16;
 
     /** The trap the call channel reaches: run the handler, answer whether to leave
      * -- 1 where the handler moved EIP, 2 where the turn is to end (a stop, a halt),
@@ -535,7 +518,7 @@ export function createCorkHost(config){
 
     /** Fold the block's 32-bit counter word into the exact count. */
     const fold = ()=>{
-        const word = blockView.getUint32(own.counter, true) >>> 0;
+        const word = blockView.getUint32(layout.counter, true) >>> 0;
         counted += (word - lastWord) >>> 0;
         lastWord = word;
     };
@@ -709,14 +692,14 @@ export function createCorkHost(config){
             tierInstalled = true;
             runtime.interpretWith?.(tier.entry(), tier.entered);
         }
-        blockView.setUint32(own.eip, address >>> 0, true);
+        blockView.setUint32(layout.eip, address >>> 0, true);
         lastStart = address;
         if (jumpedIn)
         {
             countHot(address);
         }
         let retired = 0;
-        let tierRetired = 0;
+        let own = 0;
         // The first instruction runs whatever is due, as the JavaScript
         // interpreter's first run does: the jump that brought the range here
         // may have made its start hot and the feed due, and a range that
@@ -733,7 +716,7 @@ export function createCorkHost(config){
                 first = false;
                 const ran = tier.retired();
                 retired += ran;
-                tierRetired += ran;
+                own += ran;
                 wasmRetired += ran;
                 const at = eip();
                 if (notedSinceFeed && interpretedSoFar() - retiredAtFeed >= FEED_MIN_STEPS)
@@ -803,10 +786,10 @@ export function createCorkHost(config){
             // The wasm tier's instructions count in the block's word as the
             // JavaScript interpreter's do, a range that dies on a no-tier
             // instruction included.
-            if (tierRetired > 0)
+            if (own > 0)
             {
-                const word = blockView.getUint32(own.counter, true);
-                blockView.setUint32(own.counter, (word + tierRetired) >>> 0, true);
+                const word = blockView.getUint32(layout.counter, true);
+                blockView.setUint32(layout.counter, (word + own) >>> 0, true);
             }
         }
         return retired;
@@ -872,8 +855,8 @@ export function createCorkHost(config){
         // run rather than only over what the translator ran.
         if (retired > 0)
         {
-            const word = blockView.getUint32(own.counter, true);
-            blockView.setUint32(own.counter, (word + retired) >>> 0, true);
+            const word = blockView.getUint32(layout.counter, true);
+            blockView.setUint32(layout.counter, (word + retired) >>> 0, true);
         }
         if (thrown !== null)
         {
@@ -1112,37 +1095,37 @@ export function createCorkHost(config){
     const dropExact = mask=>{
         if (layout.x87Exact !== undefined && layout.x87Exact >= 0)
         {
-            block[own.x87Exact] &= ~mask;
+            block[layout.x87Exact] &= ~mask;
         }
     };
 
     const fpu = {
         /** @param {number} value */
         setResult(value){
-            const top = (block[own.x87Top] - 1) & 7;
-            const empty = block[own.x87Empty];
+            const top = (block[layout.x87Top] - 1) & 7;
+            const empty = block[layout.x87Empty];
             const held = (empty >>> top & 1) === 0;
-            block[own.x87Top] = top;
-            block[own.x87Empty] = empty & ~(1 << top);
+            block[layout.x87Top] = top;
+            block[layout.x87Empty] = empty & ~(1 << top);
             if (held)
             {
-                const status = blockView.getUint16(own.x87Status, true);
-                blockView.setUint16(own.x87Status, status | 0x201, true);
+                const status = blockView.getUint16(layout.x87Status, true);
+                blockView.setUint16(layout.x87Status, status | 0x201, true);
             }
             blockView.setFloat64(x87At(top), held ? -Infinity : value, true);
             dropExact(1 << top);
         },
         /** @param {number} index */
         get(index){
-            return blockView.getFloat64(x87At(block[own.x87Top] + index), true);
+            return blockView.getFloat64(x87At(block[layout.x87Top] + index), true);
         },
         pop(){
-            const top = block[own.x87Top];
-            block[own.x87Empty] |= 1 << top;
-            block[own.x87Top] = (top + 1) & 7;
+            const top = block[layout.x87Top];
+            block[layout.x87Empty] |= 1 << top;
+            block[layout.x87Top] = (top + 1) & 7;
         },
         depth(){
-            const empty = block[own.x87Empty];
+            const empty = block[layout.x87Empty];
             let held = 0;
             for (let index = 0; index < 8; index++)
             {
@@ -1150,7 +1133,7 @@ export function createCorkHost(config){
             }
             return held;
         },
-        controlWord: ()=>blockView.getUint16(own.x87Control, true),
+        controlWord: ()=>blockView.getUint16(layout.x87Control, true),
     };
 
     /** @type {Record<string, any>} */
@@ -1295,7 +1278,7 @@ export function createCorkHost(config){
             }
             if (name === 'eflags')
             {
-                setEflags(blockView, own, value);
+                setEflags(blockView, layout, value);
                 return;
             }
             const index = REGISTERS.indexOf(name);
@@ -1314,7 +1297,7 @@ export function createCorkHost(config){
         ramView: ()=>ram,
         /** The state block, for the block-based context capture and the tests. */
         block: ()=>block,
-        blockLayout: ()=>own,
+        blockLayout: ()=>layout,
         /** The host-built fault record, or null. */
         fault: ()=>lastFault,
         /**
@@ -1340,10 +1323,10 @@ export function createCorkHost(config){
         writeXmm(index, words){
             xmm.set(Uint32Array.from(words, word=>word >>> 0), index * 4);
         },
-        readMxcsr: ()=>blockView.getUint32(own.mxcsr, true) >>> 0,
+        readMxcsr: ()=>blockView.getUint32(layout.mxcsr, true) >>> 0,
         /** @param {number} value */
         writeMxcsr(value){
-            blockView.setUint32(own.mxcsr, value >>> 0, true);
+            blockView.setUint32(layout.mxcsr, value >>> 0, true);
         },
         x87State(){
             const registers = new Float64Array(8);
@@ -1357,9 +1340,9 @@ export function createCorkHost(config){
             const top = x87Top();
             return {
                 top,
-                empty: block[own.x87Empty],
-                control: blockView.getUint16(own.x87Control, true),
-                status: (blockView.getUint16(own.x87Status, true) & ~0x3800
+                empty: block[layout.x87Empty],
+                control: blockView.getUint16(layout.x87Control, true),
+                status: (blockView.getUint16(layout.x87Status, true) & ~0x3800
                     | top << 11) & 0xffff,
                 registers,
                 raw,
@@ -1370,12 +1353,12 @@ export function createCorkHost(config){
          *     raw: Uint8Array }} state
          */
         restoreX87State(state){
-            block.set(state.raw, own.x87);
+            block.set(state.raw, layout.x87);
             dropExact(0xff);
-            block[own.x87Top] = state.top & 7;
-            block[own.x87Empty] = state.empty & 0xff;
-            blockView.setUint16(own.x87Control, state.control, true);
-            blockView.setUint16(own.x87Status, state.status & ~0x3800, true);
+            block[layout.x87Top] = state.top & 7;
+            block[layout.x87Empty] = state.empty & 0xff;
+            blockView.setUint16(layout.x87Control, state.control, true);
+            blockView.setUint16(layout.x87Status, state.status & ~0x3800, true);
         },
 
         /** @returns {number} instructions retired since boot */

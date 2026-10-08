@@ -72,26 +72,18 @@ const MEMORY = 4 << 20;
 
 /**
  * @param {import('../../../core/src/layers/cpu/engine.js').EngineConfig} cork
- * @param {{ executors?: number, executor?: number }} [where]  which executor of a memory
- *     shared by several the host is (the first by default)
  * @returns {CorkHost}
  */
-const hostOf = (cork, where = {})=>/** @type {CorkHost} */ (createCorkHost({
+const hostOf = cork=>/** @type {CorkHost} */ (createCorkHost({
     engine, memorySize: MEMORY, trapPort: 0xb077, entryVector: 0x7000,
-    initialStack: REGISTERS.esp, cork, ...where,
+    initialStack: REGISTERS.esp, cork,
 }));
 
 /**
  * Makes the model and the translator, each over a host of its own, and answers
  * a judge that runs one sequence on both from one state.
- *
- * @param {{ pool?: import('./sequences.js').Form[], cork?: Record<string, unknown>,
- *     executor?: { executors: number, executor: number } }} [given]
- *     pool: the forms the sequences index (`POOL` by default); cork: the translator's
- *     settings besides the judge's own (the atomic variant's judge sets `atomic`); executor:
- *     which executor of a shared memory the translator's host is (the executors' judge)
  */
-export function createJudge({ pool = undefined, cork = {}, executor = undefined } = {}){
+function createJudge(){
     // The model is the JavaScript interpreter alone: the wasm tier is an
     // implementation of the instructions of its own, not their description.
     const model = hostOf({ translate: false, wasmInterpreter: false });
@@ -107,8 +99,7 @@ export function createJudge({ pool = undefined, cork = {}, executor = undefined 
         missThreshold: Number.POSITIVE_INFINITY,
         hotThreshold: Number.POSITIVE_INFINITY,
         wasmInterpreter: false,
-        ...cork,
-    }, executor);
+    });
     const runtime = translator.cork();
 
     // A fresh FPU with its registers zeros, so an MMX read of one is a known
@@ -159,14 +150,14 @@ export function createJudge({ pool = undefined, cork = {}, executor = undefined 
                 const key = setup.join(',');
                 if (key !== written)
                 {
-                    model.writePhysical(SETUP, programBytes(setup, pool));
+                    model.writePhysical(SETUP, programBytes(setup));
                     written = key;
                 }
                 model.writeReg32('eip', SETUP);
                 model.wake();
                 retireExactly(model.runSlice, model.halted, LIMIT);
             }
-            const code = programBytes(body, pool);
+            const code = programBytes(body);
             model.writePhysical(CODE, code);
             model.writeReg32('eip', CODE);
             const state = snapshot(model, SPANS);
