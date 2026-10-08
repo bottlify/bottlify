@@ -420,3 +420,52 @@ test('frexp, ldexp and isinf compile, and fold when their arguments are known', 
     assert.equal(folded.ok, true, folded.messages);
     assert.doesNotMatch(disassemble(/** @type {Uint32Array} */ (folded.tokens)), /\b(log|exp)\b/);
 });
+
+test('a Direct3D 10 texture read and an array of samplers, as fxc compiles them for model 2', async()=>{
+    // tex.Sample(sam, uv) reads a sampler of the pair, named sam+tex; texB[1] is the second
+    // of the pair's; sam[1] is the second register of the array, the only one declared.
+    const result = await compile(`Texture2D tex; Texture2D texB[2]; sampler sam; sampler arr[2];
+        float4 main(float2 uv : TEXCOORD0) : COLOR0
+        { return tex.Sample(sam, uv) + 10 * texB[1].SampleLevel(sam, uv, 0)
+            + 100 * tex2D(arr[1], uv); }`, 'ps_3_0');
+    assert.equal(result.ok, true, result.messages);
+    const table = Object.fromEntries(constants(result).map(c=>[c.name, [c.index, c.count]]));
+    assert.deepEqual(Object.keys(table).sort(), ['arr', 'sam+tex', 'sam+texB']);
+    assert.equal(table['sam+texB'][1], 2);
+    assert.equal(table.arr[1], 2);
+    const program = decode(/** @type {Uint32Array} */ (result.tokens));
+    const read = (/** @type {number} */ s)=>[s, s, s, s];
+    const out = [...Object.values(execute(program, { inputs: { v: [[0.5, 0.5, 0, 0]], t: [] },
+        constants: { f: new Float32Array(32 * 4) }, sample: read }).outputs)[0]];
+    const expected = table['sam+tex'][0] + 10 * (table['sam+texB'][0] + 1) + 100 * (table.arr[0] + 1);
+    assert.deepEqual(out, [expected, expected, expected, expected]);
+    assert.deepEqual([...program.samplers.keys()].sort((a, b)=>a - b),
+        [table['sam+tex'][0], table['sam+texB'][0] + 1, table.arr[0] + 1].sort((a, b)=>a - b),
+        'a sampler is declared where it is read');
+});
+
+test('a cast is an l-value that writes back what it shows', async()=>{
+    // fxc: (float2) p = v writes p.xy; ((int4) f).xy = v truncates on the way; the corner of a
+    // matrix through a smaller one.
+    const result = await compile(`float4 a; float3x4 m;
+        float4 main() : COLOR0
+        { float4 p = {-1, -2, -3, -4}; (float2) p = a.yz;
+          float4 f = 0; ((int4) f).xy = float2(1.4, 3.8);
+          float4x4 g = 0; (float2x3) g = m;
+          return float4(p.x + p.z, f.x + f.y, g[1][2], g[2][0]); }`, 'ps_2_0');
+    assert.equal(result.ok, true, result.messages);
+    const f = new Float32Array(32 * 4);
+    const table = Object.fromEntries(constants(result).map(c=>[c.name, c.index]));
+    f.set([0, 0.25, 0.5, 0], table.a * 4);
+    for (let r = 0; r < 3; r++)
+    {
+        for (let c = 0; c < 4; c++)
+        {
+            // Column-major: register c holds column c.
+            f[(table.m + c) * 4 + r] = r * 10 + c;
+        }
+    }
+    const out = [...Object.values(execute(decode(/** @type {Uint32Array} */ (result.tokens)),
+        { inputs: { v: [], t: [] }, constants: { f } }).outputs)[0]];
+    assert.deepEqual(out, [0.25 - 3, 4, 12, 0]);
+});
