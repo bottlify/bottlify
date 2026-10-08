@@ -151,6 +151,8 @@ const OWN = Symbol('guest heap');
  * @property {(address: number) => boolean} free
  * @property {(address: number) => BlockInfo | null} block
  * @property {(address: number) => BlockInfo | null} blockContaining
+ * @property {(address: number) => BlockInfo | null} blockAtOrBefore
+ * @property {(address: number) => Generator<BlockInfo>} blocksAbove
  * @property {(address: number, bytes: number) => boolean} resize
  * @property {() => { base: number, size: number }[]} freeSpans
  * @property {(owner: any) => number[]} owned
@@ -613,6 +615,8 @@ export function createGuestHeap({ allocator, arena, memory }){
                     return cell === null ? allocator.block(address) : blockOfCell(cell);
                 },
                 blockContaining: address=>allocator.blockContaining(address),
+                blockAtOrBefore: address=>allocator.blockAtOrBefore(address),
+                blocksAbove: address=>allocator.blocksAbove(address),
                 resize(address, bytes){
                     const cell = cellAt(address);
                     if (cell === null)

@@ -40,6 +40,9 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
     let calls = 0;
     let deepest = 0;
     let pending = 0;
+    /** How often each host call suspended, by name: what keeps the run loop going to the
+     * event loop turn after turn. @type {Map<string, number>} */
+    const suspendedBy = new Map();
     /**
      * Counts suspensions. A host call that calls the guest back builds the
      * callback's frame before it suspends, so a frame stamped with the count
@@ -199,6 +202,10 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             const callingBack = frames.length > 0 && frames[frames.length - 1].epoch === epoch;
             epoch++;
             pending++;
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+            {
+                suspendedBy.set(call.name, (suspendedBy.get(call.name) ?? 0) + 1);
+            }
             // A thread whose host call has not answered has nothing to run: it
             // is parked on `hlt` and retires the park loop and nothing else.
             // Left counted as runnable, it keeps the scheduler from ever
@@ -485,6 +492,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          */
         pendingCalls: ()=>pending,
 
+
         /**
          * Settles when the next suspended host call answers. The one thing
          * that can change a machine whose every thread is parked on the host,
@@ -508,6 +516,10 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             callbacks: calls,
             deepestCallback: deepest,
             suspended: pending,
+            // Every call that suspended over the run, by name: the turns the run loop
+            // gave to the event loop for them.
+            suspendedBy: [...suspendedBy].sort((x, y)=>y[1] - x[1]).slice(0, 16)
+                .map(([name, count])=>`${name} ${count}`),
             // Named, not merely counted. A count above zero says the run loop
             // has to keep handing the thread back to the host; it does not say
             // which call is holding the machine, and that is the only question
