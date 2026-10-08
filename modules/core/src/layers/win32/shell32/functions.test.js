@@ -780,3 +780,17 @@ test('FindExecutableW is the same association in UTF-16, and DragQueryFileW no d
     assert.equal(m.shell.DragQueryFile, m.shell.DragQueryFileA, 'the bare name is the ANSI one');
     assert.equal(m.shell.ShellExecuteEx, m.shell.ShellExecuteExA);
 });
+
+test('a name without an extension is looked for as a program', ()=>{
+    const m = machineWithLauncher(['C:\\WINDOWS\\system32\\msiexec.exe']);
+    m.put('msiexec', 0x100);
+    m.put('/i setup.msi', 0x140);
+    m.put('readme', 0x180);
+
+    assert.equal(m.shell.ShellExecuteA.handler([0, 0, 0x100, 0x140, 0, 1]), 33,
+        'the shell searches with ".exe" as the default extension');
+    assert.deepEqual(m.launched, [{ named: 'C:\\WINDOWS\\system32\\msiexec.exe',
+        line: '"C:\\WINDOWS\\system32\\msiexec.exe" /i setup.msi', flags: 0 }]);
+    assert.equal(m.shell.ShellExecuteA.handler([0, 0, 0x180, 0, 0, 1]), 2,
+        'and a name with no program by it is a file not found');
+});

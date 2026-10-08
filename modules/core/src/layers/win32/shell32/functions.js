@@ -591,7 +591,12 @@ export function createShellFunctions(host){
      * @returns {{ answer: number, record: any }}
      */
     const start = (verb, file, parameters, directory)=>{
-        const name = unquote((file ?? '').trim());
+        const typed = unquote((file ?? '').trim());
+        // A name with no extension is looked for as a program, as the shell
+        // searches with ".exe" as the default extension: `msiexec` is
+        // msiexec.exe.
+        const name = typed !== '' && extensionOf(typed) === '' && !/[\\/]$/.test(typed)
+            ? `${typed}.exe` : typed;
         if (name === '')
         {
             // Nothing was named, which is also what a build with no string
