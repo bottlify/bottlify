@@ -1320,6 +1320,38 @@ function filesUnder(app, directory){
  * @returns {Harness}
  */
 export function createHarness(canvas, how = {}){
+    /** @type {any} */
+    let liveContext = null;
+    let liveFormat = '';
+    /**
+     * A presented frame onto the page's canvas as it comes, for a run a person watches
+     * (`--headed`): a copy on the GPU, the canvas in the frame's own format and size.
+     *
+     * @param {any} device @param {any} frame
+     */
+    const showLive = (device, frame)=>{
+        const surface = frame?.surface;
+        if (!surface?.texture
+            || (surface.format !== 'bgra8unorm' && surface.format !== 'rgba8unorm'))
+        {
+            return;
+        }
+        liveContext ??= canvas.getContext('webgpu');
+        if (canvas.width !== surface.width || canvas.height !== surface.height
+            || liveFormat !== surface.format)
+        {
+            canvas.width = surface.width;
+            canvas.height = surface.height;
+            liveContext.configure({ device, format: surface.format, alphaMode: 'opaque',
+                usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT });
+            liveFormat = surface.format;
+        }
+        const encoder = device.createCommandEncoder({ label: 'live view' });
+        encoder.copyTextureToTexture({ texture: surface.texture },
+            { texture: liveContext.getCurrentTexture() },
+            { width: surface.width, height: surface.height, depthOrArrayLayers: 1 });
+        device.queue.submit([encoder.finish()]);
+    };
     /** @type {string[]} */
     const errors = [];
     const opened = openDevice(errors);
@@ -1615,6 +1647,10 @@ export function createHarness(canvas, how = {}){
                 /** @param {any} frame */
                 presentTo: frame=>{
                     presentFrame(app, request, presentState, frame);
+                    if (request.live)
+                    {
+                        showLive(handle.device, frame);
+                    }
                     // The frame `snapFrame` frames after the last long stall, read
                     // back as it was presented; a later stall takes it again, so a
                     // demo's frame N is the same frame in every run.
@@ -1746,7 +1782,11 @@ export function createHarness(canvas, how = {}){
         if (presentState.presented)
         {
             const image = await readBack(handle.device, presentState.presented.surface);
-            show(canvas, image);
+            // A live canvas is WebGPU's already and has the frame; a 2D context cannot be had.
+            if (!request.live)
+            {
+                show(canvas, image);
+            }
             result.frame = {
                 index: presentState.presented.frameIndex,
                 width: image.width,
