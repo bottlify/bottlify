@@ -20,6 +20,7 @@
  */
 
 import { drive } from '../script/drive.js';
+import { ScriptError } from '../script/engine.js';
 import { ExternalObject } from '../script/external.js';
 import { installArray } from './builtins-array.js';
 import { installCore } from './builtins-core.js';
@@ -74,32 +75,12 @@ export const JSCRIPT_5_6 = Object.freeze({ major: 5, minor: 6, build: 8835 });
  */
 
 /** A script that failed: what JScript would report of it. */
-export class JScriptError extends Error
+export class JScriptError extends ScriptError
 {
-    /**
-     * @param {Object} fields
-     * @param {number} fields.number  The signed HRESULT a script reads as `e.number`.
-     * @param {string} fields.description
-     * @param {string} fields.source  "Microsoft JScript runtime error" or "... compilation error".
-     * @param {boolean} fields.syntax  Whether the text did not parse.
-     * @param {number} fields.line  From 0, counting from the text's own first line.
-     * @param {number} fields.column  From 0.
-     * @param {string} fields.lineText
-     * @param {number} fields.context  The host's cookie for the text.
-     * @param {Value} [fields.value]  What the script threw.
-     */
+    /** @param {import('../script/engine.js').ScriptErrorFields} fields */
     constructor(fields){
-        super(fields.description || fields.source);
+        super(fields);
         this.name = 'JScriptError';
-        this.number = fields.number;
-        this.description = fields.description;
-        this.source = fields.source;
-        this.syntax = fields.syntax;
-        this.line = fields.line;
-        this.column = fields.column;
-        this.lineText = fields.lineText;
-        this.context = fields.context;
-        this.value = fields.value;
     }
 }
 

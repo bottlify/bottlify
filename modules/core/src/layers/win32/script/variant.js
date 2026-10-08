@@ -30,7 +30,7 @@ import {
     VT_UI2, VT_UI4, VT_UI8, VT_UINT, VT_UNKNOWN, VT_VARIANT,
 } from '../oleaut32/vartypes.js';
 import { ExternalError } from './external.js';
-import { ForeignValue, arrayValue, dateValue, errorValue } from './values.js';
+import { ForeignValue, NOTHING, arrayValue, dateValue, errorValue } from './values.js';
 
 export const VARIANT_SIZE = 16;
 const E_OUTOFMEMORY = 0x8007000e | 0;
@@ -68,6 +68,11 @@ const VARIANT_TRUE = 0xffff;
  * @property {(value: Value) => number | Promise<number>} export
  * @property {(value: Value) => Value} [prepare]  What a value is written as:
  *     a language's own wrapper of a VARIANT unwrapped, for one.
+ * @property {(vt: number, value: Value) => Value} [adopt]  What a value read
+ *     out of a VARIANT becomes, given its VARTYPE: a language that keeps a
+ *     number's subtype wraps it (`values.js`), and one that tells Nothing
+ *     from null says what a null interface pointer is. Not asked of an
+ *     array, nor of an interface that points at something.
  */
 
 /** Little-endian reads and writes of guest memory. @param {GuestCom} com */
@@ -198,6 +203,20 @@ export function createVariantCodec(com, interfaces){
      * @returns {Promise<Value>}
      */
     const readTyped = async(vt, at, variant, owned)=>{
+        const adopt = interfaces.adopt;
+        if (adopt && (vt & VT_ARRAY) === 0
+            && ((vt !== VT_DISPATCH && vt !== VT_UNKNOWN) || memory.u32(at) === 0))
+        {
+            return adopt(vt, await readScalar(vt, at, variant, owned));
+        }
+        return readScalar(vt, at, variant, owned);
+    };
+
+    /**
+     * @param {number} vt @param {number} at @param {number} variant @param {boolean} owned
+     * @returns {Promise<Value>}
+     */
+    const readScalar = async(vt, at, variant, owned)=>{
         if ((vt & VT_ARRAY) !== 0)
         {
             const array = memory.u32(at);
@@ -424,6 +443,11 @@ export function createVariantCodec(com, interfaces){
             type(VT_NULL);
             return;
         }
+        if (value === NOTHING)
+        {
+            type(VT_DISPATCH);
+            return;
+        }
         if (value instanceof ForeignValue)
         {
             if (value.isArray)
@@ -444,6 +468,28 @@ export function createVariantCodec(com, interfaces){
                     memory.writeF64(address + 8, value.value);
                     type(VT_R8);
                     return;
+                // A number held with its subtype is written as that type.
+                case VT_I1: case VT_UI1:
+                    com.writeMemory(address + 8, Uint8Array.of(value.value & 0xff));
+                    break;
+                case VT_I2: case VT_UI2:
+                    memory.writeU16(address + 8, value.value & 0xffff);
+                    break;
+                case VT_I4: case VT_UI4: case VT_INT: case VT_UINT:
+                    memory.writeU32(address + 8, value.value);
+                    break;
+                case VT_R4:
+                    writeF32(address + 8, value.value);
+                    break;
+                case VT_R8:
+                    memory.writeF64(address + 8, value.value);
+                    break;
+                case VT_CY:
+                    writeI64(address + 8, BigInt(Math.round(value.value * 10000)));
+                    break;
+                case VT_DECIMAL:
+                    writeDecimal(address, value.value);
+                    return;
                 case VT_UNKNOWN:
                     memory.writeU32(address + 8, await interfaces.export(value));
                     break;
@@ -456,6 +502,52 @@ export function createVariantCodec(com, interfaces){
         const pointer = await interfaces.export(value);
         memory.writeU32(address + 8, pointer);
         type(VT_DISPATCH);
+    };
+
+    /** @param {number} at @param {number} number */
+    const writeF32 = (at, number)=>{
+        const bytes = new Uint8Array(4);
+        new DataView(bytes.buffer).setFloat32(0, number, true);
+        com.writeMemory(at, bytes);
+    };
+
+    /** @param {number} at @param {bigint} whole */
+    const writeI64 = (at, whole)=>{
+        const bytes = new Uint8Array(8);
+        new DataView(bytes.buffer).setBigInt64(0, whole, true);
+        com.writeMemory(at, bytes);
+    };
+
+    /**
+     * A number as the DECIMAL filling the VARIANT at `variant`, its vt
+     * included: the digits a double spells, scaled to a whole number.
+     *
+     * @param {number} variant @param {number} number
+     */
+    const writeDecimal = (variant, number)=>{
+        const [mantissa, exponent = '0'] = Math.abs(number).toPrecision(15).split('e');
+        const [whole, fraction = ''] = mantissa.split('.');
+        let digits = `${whole}${fraction}`.replace(/^0+(?=\d)/, '');
+        let scale = fraction.length - Number(exponent);
+        while (scale < 0)
+        {
+            digits += '0';
+            scale++;
+        }
+        while (scale > 0 && digits.endsWith('0'))
+        {
+            digits = digits.slice(0, -1);
+            scale--;
+        }
+        const magnitude = BigInt(digits || '0');
+        const bytes = new Uint8Array(VARIANT_SIZE);
+        const view = new DataView(bytes.buffer);
+        view.setUint16(0, VT_DECIMAL, true);
+        view.setUint8(2, Math.min(scale, 28));
+        view.setUint8(3, number < 0 ? 0x80 : 0);
+        view.setUint32(4, Number((magnitude >> 64n) & 0xffffffffn), true);
+        view.setBigUint64(8, magnitude & 0xffffffffffffffffn, true);
+        com.writeMemory(variant, bytes);
     };
 
     return { read, write, readBstr, allocateBstr, memory };

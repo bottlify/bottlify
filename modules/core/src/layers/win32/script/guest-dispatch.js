@@ -24,7 +24,7 @@
  */
 
 import { GUID_SIZE, parseGuid } from '../ole32/guid.js';
-import { VT_DISPATCH, VT_UNKNOWN } from '../oleaut32/vartypes.js';
+import { VT_BYREF, VT_DISPATCH, VT_UNKNOWN, VT_VARIANT } from '../oleaut32/vartypes.js';
 import {
     DISP_E_EXCEPTION, DISP_E_UNKNOWNNAME, ExternalError, ExternalObject,
 } from './external.js';
@@ -84,6 +84,8 @@ const DEFAULT_LCID = 0x0409;
  *     The script value behind a pointer this engine published, so that an
  *     object that went out and came back is the same object.
  * @property {(value: Value) => Value} [prepare]  What a value is written as.
+ * @property {(vt: number, value: Value) => Value} [adopt]  What a value read
+ *     out of a VARIANT becomes (`variant.js`).
  */
 
 /**
@@ -219,6 +221,7 @@ export function createGuestBridge(com, hooks){
 
     const codec = createVariantCodec(com, {
         import: importInterface, export: exportInterface, prepare: hooks.prepare,
+        adopt: hooks.adopt,
     });
     const memory = codec.memory;
 
@@ -246,19 +249,26 @@ export function createGuestBridge(com, hooks){
 
     /**
      * Invoke: the arguments first first, a put's value as the named
-     * argument, the answer read when one is wanted.
+     * argument, the answer read when one is wanted. An argument `refs`
+     * marks is passed as VT_BYREF|VT_VARIANT to a VARIANT of its own, and
+     * what the object left there replaces it in `args`.
      *
      * @param {number} pointer @param {number} dispid @param {number} flags
      * @param {Value[]} args @param {{ value: Value } | null} put
+     * @param {boolean[]} [refs]
      * @returns {Promise<Value>}
      */
-    const invoke = (pointer, dispid, flags, args, put)=>{
+    const invoke = (pointer, dispid, flags, args, put, refs)=>{
         const count = args.length + (put ? 1 : 0);
-        const size = 16 + VARIANT_SIZE * count + 4 + VARIANT_SIZE + EXCEPINFO_SIZE + 4 + GUID_SIZE;
+        const byRef = args.map((_arg, i)=>refs?.[i] === true);
+        const referents = byRef.filter(Boolean).length;
+        const size = 16 + VARIANT_SIZE * (count + referents) + 4 + VARIANT_SIZE + EXCEPINFO_SIZE
+            + 4 + GUID_SIZE;
         return withBlock(size, async block=>{
             const params = block;
             const variants = params + 16;
-            const named = variants + VARIANT_SIZE * count;
+            const referred = variants + VARIANT_SIZE * count;
+            const named = referred + VARIANT_SIZE * referents;
             const result = named + 4;
             const excepinfo = result + VARIANT_SIZE;
             const argErr = excepinfo + EXCEPINFO_SIZE;
@@ -269,6 +279,8 @@ export function createGuestBridge(com, hooks){
             let slot = 0;
             /** @type {number[]} */
             const written = [];
+            /** @type {Map<number, number>} each by-reference argument's own VARIANT */
+            const referentOf = new Map();
             try
             {
                 if (put)
@@ -280,6 +292,15 @@ export function createGuestBridge(com, hooks){
                 for (let i = args.length - 1; i >= 0; i--)
                 {
                     const at = variants + VARIANT_SIZE * slot++;
+                    if (byRef[i])
+                    {
+                        const target = referred + VARIANT_SIZE * referentOf.size;
+                        await codec.write(target, args[i]);
+                        referentOf.set(i, target);
+                        memory.writeU16(at, VT_BYREF | VT_VARIANT);
+                        memory.writeU32(at + 8, target);
+                        continue;
+                    }
                     await codec.write(at, args[i]);
                     written.push(at);
                 }
@@ -298,11 +319,16 @@ export function createGuestBridge(com, hooks){
                 {
                     throw new ExternalError(hr);
                 }
+                for (const [i, target] of referentOf)
+                {
+                    referentOf.delete(i);
+                    args[i] = await codec.read(target, true);
+                }
                 return put ? undefined : await codec.read(result, true);
             }
             finally
             {
-                for (const at of written)
+                for (const at of [...written, ...referentOf.values()])
                 {
                     await com.oleaut32('VariantClear', [at]);
                 }
@@ -512,10 +538,18 @@ export class GuestDispatch extends ExternalObject
             { value });
     }
 
-    /** @param {string | null} name @param {Value[]} args */
-    async call(name, args){
+    /** @param {string | null} name @param {Value} value @param {Value[]} args */
+    async putRef(name, value, args){
+        await this.bridge.invoke(this.pointer, await this.id(name), DISPATCH_PROPERTYPUTREF,
+            args, { value });
+    }
+
+    /**
+     * @param {string | null} name @param {Value[]} args @param {boolean[]} [refs]
+     */
+    async call(name, args, refs){
         return this.bridge.invoke(this.pointer, await this.id(name),
-            DISPATCH_METHOD | DISPATCH_PROPERTYGET, args, null);
+            DISPATCH_METHOD | DISPATCH_PROPERTYGET, args, null, refs);
     }
 
     /** @param {string} name */

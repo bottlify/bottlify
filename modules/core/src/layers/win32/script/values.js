@@ -16,11 +16,18 @@
  * language decides what such a value does when it is used; JScript, for one,
  * calls a date's type "date" and anything else it cannot read "unknown".
  *
+ * A language that keeps a number's subtype -- VBScript, whose 1 is an
+ * Integer and 1.5 a Double -- holds it as a ForeignValue of the numeric
+ * VARTYPE, which a VARIANT is written from as that type. A host object reads
+ * such a value with {@link plainValue}, and so sees the same plain numbers
+ * from every language.
+ *
  * @typedef {any} Value
  */
 
 import {
-    VT_ARRAY, VT_DATE, VT_ERROR, VT_TYPEMASK, VT_UNKNOWN, VT_VARIANT,
+    VT_ARRAY, VT_CY, VT_DATE, VT_DECIMAL, VT_ERROR, VT_I1, VT_I2, VT_I4, VT_INT, VT_R4, VT_R8,
+    VT_TYPEMASK, VT_UI1, VT_UI2, VT_UI4, VT_UINT, VT_UNKNOWN, VT_VARIANT,
 } from '../oleaut32/vartypes.js';
 
 /**
@@ -57,6 +64,32 @@ export class ForeignValue
         return (this.vt & VT_ARRAY) !== 0;
     }
 }
+
+/**
+ * An object reference to nothing: a VT_DISPATCH holding no pointer, which a
+ * language that tells it from null keeps apart (VBScript's Nothing).
+ */
+export const NOTHING = Object.freeze({ nothing: true });
+
+/** The VARTYPEs a number with a subtype is held in. */
+const NUMERIC = new Set([VT_I1, VT_I2, VT_I4, VT_INT, VT_R4, VT_R8, VT_CY, VT_DECIMAL, VT_UI1,
+    VT_UI2, VT_UI4, VT_UINT]);
+
+/**
+ * Whether a value is a number held with its subtype.
+ *
+ * @param {Value} value @returns {value is ForeignValue}
+ */
+export const isTypedNumber = value=>value instanceof ForeignValue && NUMERIC.has(value.vt);
+
+/**
+ * A value as a host reads it: a number held with its subtype as the plain
+ * number, Nothing as null, anything else as it is.
+ *
+ * @param {Value} value @returns {Value}
+ */
+export const plainValue = value=>(isTypedNumber(value) ? value.value
+    : value === NOTHING ? null : value);
 
 /** @param {number} oleDate @returns {ForeignValue} */
 export const dateValue = oleDate=>new ForeignValue(VT_DATE, oleDate);

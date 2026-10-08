@@ -335,6 +335,8 @@ export function createFakeGuest(size = 1 << 22){
         const vt = memory.u16(variant);
         switch (vt)
         {
+            // An argument passed by reference, as VBScript passes a variable.
+            case 0x400c: return readVariant(memory.u32(variant + 8));
             case 0: return undefined;
             case 1: return null;
             case 2: return view.getInt16(variant + 8, true);

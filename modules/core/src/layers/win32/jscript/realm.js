@@ -22,7 +22,7 @@ import {
     DEFAULT_MEMBER, DISP_E_BADPARAMCOUNT, DISP_E_MEMBERNOTFOUND, DISP_E_PARAMNOTFOUND,
     DISP_E_TYPEMISMATCH, DISP_E_UNKNOWNNAME, ExternalError, ExternalObject,
 } from '../script/external.js';
-import { ForeignValue, oleDateToWallTime } from '../script/values.js';
+import { ForeignValue, NOTHING, oleDateToWallTime } from '../script/values.js';
 import { VT_DATE, VT_ERROR } from '../oleaut32/vartypes.js';
 import { MESSAGES, errorNumber } from './errors.js';
 import {
@@ -313,7 +313,9 @@ export class Realm
             {
                 answer = yield answer;
             }
-            return answer;
+            // An object reference to nothing is null to JScript, which has
+            // no Nothing of its own.
+            return answer === NOTHING ? null : answer;
         }
         catch (e){
             throw this.fromExternal(e);

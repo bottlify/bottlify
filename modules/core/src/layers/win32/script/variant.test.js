@@ -8,7 +8,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createFakeGuest } from './guest.fixture.js';
 import { createVariantCodec } from './variant.js';
-import { ForeignValue, arrayValue, dateValue, errorValue, variantArray } from './values.js';
+import {
+    ForeignValue, NOTHING, arrayValue, dateValue, errorValue, variantArray,
+} from './values.js';
 
 /** A codec over a fake guest whose interfaces are tagged plain objects. */
 function setup(){
@@ -145,4 +147,59 @@ test('a language\'s wrapper is unwrapped before it is written', async()=>{
     const variant = guest.allocate(16);
     await codec.write(variant, { wrapped: 'inside' });
     assert.equal(guest.readVariant(variant), 'inside');
+});
+
+test('a number held with its subtype is written as that VARTYPE, Nothing as no object',
+    async()=>{
+        const { guest, codec, variant } = setup();
+        /** @type {[any, number, number][]} value, vt, the bytes read back */
+        const cases = [
+            [new ForeignValue(2, -2), 2, 0xfffe], [new ForeignValue(3, 70000), 3, 70000],
+            [new ForeignValue(17, 200), 17, 200],
+        ];
+        for (const [value, vt, bits] of cases)
+        {
+            await codec.write(variant, value);
+            assert.equal(guest.memory.u16(variant), vt);
+            assert.equal(guest.memory.u32(variant + 8) & (vt === 17 ? 0xff : vt === 2 ? 0xffff
+                : 0xffffffff), bits);
+        }
+        await codec.write(variant, new ForeignValue(5, 2));
+        assert.equal(guest.memory.u16(variant), 5, 'a whole double stays VT_R8');
+        assert.equal(guest.memory.f64(variant + 8), 2);
+        await codec.write(variant, new ForeignValue(4, 1.5));
+        assert.equal(guest.memory.u16(variant), 4);
+        assert.equal(new DataView(guest.bytes.buffer).getFloat32(variant + 8, true), 1.5);
+        await codec.write(variant, new ForeignValue(6, 12.3456));
+        assert.equal(guest.memory.u16(variant), 6);
+        assert.equal(new DataView(guest.bytes.buffer).getBigInt64(variant + 8, true), 123456n);
+        await codec.write(variant, new ForeignValue(14, -1.25));
+        assert.equal(guest.memory.u16(variant), 14);
+        assert.equal(await codec.read(variant, false), -1.25);
+        await codec.write(variant, NOTHING);
+        assert.deepEqual([guest.memory.u16(variant), guest.memory.u32(variant + 8)], [9, 0]);
+    });
+
+test('adopt says what a scalar read out of a VARIANT is to the language', async()=>{
+    const guest = createFakeGuest();
+    /** @type {[number, any][]} */
+    const adopted = [];
+    const codec = createVariantCodec(guest.com, {
+        import: pointer=>({ imported: pointer }),
+        export: ()=>0,
+        adopt: (vt, value)=>{
+            adopted.push([vt, value]);
+            return { vt, value };
+        },
+    });
+    const variant = guest.allocate(16);
+    await guest.writeVariant(variant, 7);
+    assert.deepEqual(await codec.read(variant, false), { vt: 3, value: 7 });
+    guest.memory.setU16(variant, 9);
+    guest.memory.setU32(variant + 8, 0);
+    assert.deepEqual(await codec.read(variant, false), { vt: 9, value: null });
+    guest.memory.setU32(variant + 8, 0x4444);
+    assert.deepEqual(await codec.read(variant, false), { imported: 0x4444 },
+        'an interface that points at something is the interface codec\'s');
+    assert.deepEqual(adopted, [[3, 7], [9, null]]);
 });

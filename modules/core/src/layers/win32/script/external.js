@@ -18,7 +18,13 @@
  * - `get(name, args)`  DISPATCH_PROPERTYGET; a property that takes arguments
  *   (Session.Property("X")) has them in `args`.
  * - `put(name, value, args)`  DISPATCH_PROPERTYPUT.
- * - `call(name, args)`  DISPATCH_METHOD, its result wanted.
+ * - `putRef(name, value, args)`  DISPATCH_PROPERTYPUTREF, an object
+ *   assigned by reference (VBScript's Set); a put unless the object tells
+ *   the two apart.
+ * - `call(name, args, refs)`  DISPATCH_METHOD, its result wanted. `refs`,
+ *   where given, marks the arguments the caller passed by reference (a
+ *   VBScript variable): the object may replace those entries of `args`, and
+ *   the caller writes the new values back.
  * - `has(name)`  whether the object knows the name, as GetIDsOfNames answers.
  * - `keys()`  the names a for-in walks, where the object can list them.
  * - `enumerate()`  the collection's items in order, as DISPID_NEWENUM's
@@ -27,12 +33,19 @@
  * A null name is the object's default member, DISPID_VALUE: calling the
  * object itself, or reading it as a value.
  *
+ * A number may arrive held with its subtype (`values.js`); a host object
+ * made with {@link hostObject} reads every argument as a plain value, so its
+ * members see the same values from every language.
+ *
  * A failure is an {@link ExternalError} carrying the HRESULT the call
  * answered and, for DISP_E_EXCEPTION, the description and source the object
  * filled in; the engine turns it into the language's own error.
  *
  * @typedef {import('./values.js').Value} Value
  */
+
+import { isThenable } from './drive.js';
+import { plainValue } from './values.js';
 
 /** HRESULTs the protocol answers in. */
 export const DISP_E_MEMBERNOTFOUND = 0x80020003 | 0;
@@ -118,11 +131,20 @@ export class ExternalObject
     }
 
     /**
+     * @param {string | null} name @param {Value} value @param {Value[]} args
+     * @returns {void | Promise<void>}
+     */
+    putRef(name, value, args){
+        return this.put(name, value, args);
+    }
+
+    /**
      * @param {string | null} name @param {Value[]} args
+     * @param {boolean[]} [refs]  The arguments passed by reference.
      * @returns {Value | Promise<Value>}
      */
-    call(name, args){
-        throw refused('called', name, args);
+    call(name, args, refs){
+        throw refused(refs?.includes(true) ? 'called by reference' : 'called', name, args);
     }
 
     /**
@@ -153,6 +175,10 @@ export class ExternalObject
  * by being read with the call's arguments -- METHOD|PROPERTYGET, which is how
  * a script calls a parameterised property -- and a member with only a `call`
  * is not a property: reading it without calling it is refused.
+ *
+ * Every argument and value a member is handed is plain (`plainValue`). A
+ * `call` that stores into its arguments array answers an argument the caller
+ * passed by reference: the new value goes back to the caller's variable.
  *
  * @typedef {Object} HostMember
  * @property {(args: Value[]) => Value | Promise<Value>} [get]
@@ -202,7 +228,7 @@ class HostObject extends ExternalObject
         {
             throw new ExternalError(DISP_E_MEMBERNOTFOUND);
         }
-        return member.get(args);
+        return member.get(args.map(plainValue));
     }
 
     /** @param {string | null} name @param {Value} value @param {Value[]} args */
@@ -212,18 +238,43 @@ class HostObject extends ExternalObject
         {
             throw new ExternalError(DISP_E_MEMBERNOTFOUND);
         }
-        return member.put(value, args);
+        return member.put(plainValue(value), args.map(plainValue));
     }
 
-    /** @param {string | null} name @param {Value[]} args */
-    call(name, args){
+    /**
+     * @param {string | null} name @param {Value[]} args @param {boolean[]} [refs]
+     */
+    call(name, args, refs){
         const member = this.member(name);
         const answer = member.call ?? member.get;
         if (!answer)
         {
             throw new ExternalError(DISP_E_MEMBERNOTFOUND);
         }
-        return answer(args);
+        const given = args.map(plainValue);
+        const passed = [...given];
+        const result = answer(passed);
+        if (!refs?.includes(true))
+        {
+            return result;
+        }
+        // What the member stored into its arguments goes back to the
+        // caller's variables, once the call has settled.
+        const writeBack = ()=>refs.forEach((ref, i)=>{
+            if (ref && passed[i] !== given[i])
+            {
+                args[i] = passed[i];
+            }
+        });
+        if (isThenable(result))
+        {
+            return Promise.resolve(result).then(value=>{
+                writeBack();
+                return value;
+            });
+        }
+        writeBack();
+        return result;
     }
 
     /** @param {string} name */
@@ -328,9 +379,16 @@ export function deferredExternal(load){
             return (await object()).put(name, value, args);
         }
 
-        /** @param {string | null} name @param {Value[]} args */
-        async call(name, args){
-            return (await object()).call(name, args);
+        /** @param {string | null} name @param {Value} value @param {Value[]} args */
+        async putRef(name, value, args){
+            return (await object()).putRef(name, value, args);
+        }
+
+        /**
+         * @param {string | null} name @param {Value[]} args @param {boolean[]} [refs]
+         */
+        async call(name, args, refs){
+            return (await object()).call(name, args, refs);
         }
 
         /** @param {string} name */

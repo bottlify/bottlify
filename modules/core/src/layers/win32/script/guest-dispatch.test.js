@@ -110,3 +110,53 @@ test('the default member is DISPID_VALUE', async()=>{
     const proxy = await bridge.importInterface(object.pointer, 'dispatch', false);
     assert.equal(await proxy.get(null, []), 'default');
 });
+
+test('arguments passed by reference go as VT_BYREF and come back changed; Set is PUTREF',
+    async()=>{
+        const { guest, bridge } = setup();
+        const { memory } = guest;
+        /** @type {number[]} */
+        const flags = [];
+        // An object whose one method doubles its by-reference argument.
+        const object = guest.guestObject([
+            ([self, , out])=>{
+                memory.setU32(out, self);
+                return 0;
+            },
+            ()=>1,
+            ()=>1,
+            ()=>0,
+            ()=>0,
+            ([, , , , , out])=>{
+                memory.setU32(out, 1);
+                return 0;
+            },
+            async([, , , , flag, params])=>{
+                flags.push(flag);
+                const variants = memory.u32(params);
+                const count = memory.u32(params + 8);
+                for (let i = 0; i < count; i++)
+                {
+                    const at = variants + i * 16;
+                    if (memory.u16(at) === (0x4000 | 12))
+                    {
+                        const target = memory.u32(at + 8);
+                        const was = guest.readVariant(target);
+                        await guest.com.oleaut32('VariantClear', [target]);
+                        await guest.writeVariant(target, `${was}${was}`);
+                    }
+                }
+                return 0;
+            },
+        ]);
+        const proxy = /** @type {GuestDispatch} */ (await bridge.importInterface(object,
+            'dispatch', false));
+        const args = ['ab', 'kept'];
+        const before = guest.live.size;
+        await proxy.call('Double', args, [true, false]);
+        assert.deepEqual(args, ['abab', 'kept']);
+        assert.equal(guest.live.size, before, 'every BSTR the call made is freed');
+        await proxy.putRef('Partner', 'x', []);
+        await proxy.put('Partner', 'x', []);
+        assert.deepEqual(flags, [DISPATCH_METHOD | DISPATCH_PROPERTYGET, 8, DISPATCH_PROPERTYPUT]);
+    });

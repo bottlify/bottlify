@@ -42,18 +42,9 @@ export class ScriptThrow
     }
 }
 
-/**
- * A stop the embedder asked for (an interrupted script): not an exception a
- * script can catch, and not a failure of the script.
- */
-export class ScriptAbort extends Error
-{
-    /** @param {string} [reason] */
-    constructor(reason = 'script interrupted'){
-        super(reason);
-        this.name = 'ScriptAbort';
-    }
-}
+// The embedder's stop is every engine's, so that it is told apart the same
+// way whichever language a host runs.
+export { ScriptAbort } from '../script/engine.js';
 
 export class JSObject
 {
