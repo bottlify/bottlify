@@ -295,3 +295,27 @@ test('D3DXDisassembleShader lists what D3DXAssembleShader wrote, and refuses wha
         assert.equal(g.fns.D3DXDisassembleShader.handler([0x1f00, 0, 0, listing]) >>> 0,
             D3DERR_INVALIDCALL);
     });
+
+test('a compile asked again answers as before, until a file it included changes', async()=>{
+    /** @type {Record<string, string>} */
+    const files = { 'k.h': '#define K 0.25' };
+    const g = guest(files);
+    const source = '#include "k.h"\nfloat4 main() : COLOR { return K; }';
+    const bytes = async()=>{
+        const { answer, shader } = await g.compile(source, 'main', 'ps_2_0', { include: true });
+        assert.equal(answer, 0);
+        return words(g.buffer(shader), g.memory);
+    };
+    const first = await bytes();
+    assert.deepEqual(await bytes(), first);
+    assert.deepEqual(g.opened, ['k.h', 'k.h'], 'the include is asked for again and compared');
+    files['k.h'] = '#define K 0.5';
+    assert.notDeepEqual(await bytes(), first, 'a changed include is compiled anew');
+    // A refusal answers the same each time, its message with it.
+    for (let i = 0; i < 2; i++)
+    {
+        const refused = await g.compile('float4 main() : COLOR { return x; }', 'main', 'ps_2_0');
+        assert.equal(refused.answer, E_FAIL);
+        assert.match(String(g.text(refused.errors)), /X3004: undeclared identifier 'x'/);
+    }
+});

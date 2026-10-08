@@ -359,6 +359,18 @@ export function createD3dxFunctions(host){
 
     const constantTables = createConstantTableObjects(host);
 
+    /**
+     * Compiles already done, by source, entry, profile, flags and macros, each with the files
+     * it included: a program that asks for the same compile again -- every frame, as some do
+     * after a refusal -- is given the same answer once its includes are found the same.
+     *
+     * @type {Map<string, { included: { name: string, system: boolean, text: string }[],
+     *     result: Awaited<ReturnType<typeof compileShader>> }>}
+     */
+    const compiles = new Map();
+    /** The most compiles kept; the oldest goes first. */
+    const COMPILES_KEPT = 512;
+
     return {
         ...Object.fromEntries(IN_GUEST.flatMap(([source, compiled])=>Object.keys(compiled)
             .map(name=>[name, guestEntry(source[name], compiled[name], host)]))),
@@ -564,27 +576,64 @@ export function createD3dxFunctions(host){
                 /** What the program's ID3DXInclude handed over, by name, for the record. */
                 /** @type {Record<string, string>} */
                 const included = {};
+                /** @type {{ name: string, system: boolean, text: string }[]} */
+                const opened = [];
                 const opener = (include >>> 0) === 0 ? undefined : includer(include >>> 0);
                 /** @param {string} name @param {boolean} system */
                 const recorded = async(name, system)=>{
-                    const opened = await /** @type {NonNullable<typeof opener>} */ (opener)(name,
+                    const file = await /** @type {NonNullable<typeof opener>} */ (opener)(name,
                         system);
-                    if (opened !== null)
+                    if (file !== null)
                     {
-                        included[name] = opened;
+                        included[name] = file;
+                        opened.push({ name, system, text: file });
                     }
-                    return opened;
+                    return file;
                 };
-                return compileShader(text, {
-                    entry: (entry >>> 0) === 0 ? 'main' : latin1(cString(entry)),
-                    profile: latin1(cString(profile)),
-                    flags: flags >>> 0,
-                    defines: macros,
-                    include: opener && recorded,
+                const entryName = (entry >>> 0) === 0 ? 'main' : latin1(cString(entry));
+                const key = JSON.stringify([text, entryName, latin1(cString(profile)),
+                    flags >>> 0, macros, (include >>> 0) !== 0]);
+                /** The answer of an earlier compile, if its includes are still the same. */
+                const earlier = async()=>{
+                    const known = compiles.get(key);
+                    if (!known)
+                    {
+                        return null;
+                    }
+                    for (const file of known.included)
+                    {
+                        if (await recorded(file.name, file.system) !== file.text)
+                        {
+                            return null;
+                        }
+                    }
+                    return known.result;
+                };
+                return earlier().then(async known=>{
+                    if (known)
+                    {
+                        return known;
+                    }
+                    Object.keys(included).forEach(name=>delete included[name]);
+                    opened.length = 0;
+                    const result = await compileShader(text, {
+                        entry: entryName,
+                        profile: latin1(cString(profile)),
+                        flags: flags >>> 0,
+                        defines: macros,
+                        include: opener && recorded,
+                    });
+                    compiles.delete(key);
+                    compiles.set(key, { included: opened.slice(), result });
+                    if (compiles.size > COMPILES_KEPT)
+                    {
+                        compiles.delete(/** @type {string} */ (compiles.keys().next().value));
+                    }
+                    return result;
                 }).then(result=>{
                     host.shaderCompiled?.({ api: 'D3DXCompileShader',
                         profile: latin1(cString(profile)),
-                        entry: (entry >>> 0) === 0 ? 'main' : latin1(cString(entry)),
+                        entry: entryName,
                         defines: macros, flags: flags >>> 0, source: text, included,
                         messages: result.messages, tokens: result.tokens });
                     if ((errorsOut >>> 0) !== 0 && result.messages !== '')
