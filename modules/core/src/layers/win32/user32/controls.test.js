@@ -1918,3 +1918,36 @@ test('a static control\'s image is centred, stretched or left at its corner as i
         assert.deepEqual(imagePlace({ style: SS_BITMAP }, rect, picture),
             { x: 10, y: 20, centred: false });
     });
+
+test('a static given a bitmap takes the bitmap\'s size, unless it centres or stretches it',
+    async()=>{
+        // A setup's page lays its picture static over the whole page and its
+        // radio buttons inside it. Kept at the template's size, the static
+        // painted its background over them and they could not be seen.
+        const STM_SETIMAGE = 0x0172;
+        const IMAGE_BITMAP = 0;
+        const SS_BITMAP = 0x0e;
+        const SS_CENTERIMAGE = 0x200;
+        const context = setup();
+        const dialog = await openDialog(context);
+        const bitmap = context.gdi.table.CreateBitmap.handler([20, 10, 1, 32, 0]);
+        assert.notEqual(bitmap, 0);
+        /** @param {number} style */
+        const make = style=>{
+            context.memory.putString(TEXT, 'Static');
+            return context.fns.CreateWindowExA.handler([0, TEXT, 0,
+                WS_CHILD | WS_VISIBLE | style, 8, 8, 120, 90, dialog, 0, HINSTANCE, 0]);
+        };
+        /** @param {number} hwnd */
+        const size = hwnd=>{
+            context.fns.GetWindowRect.handler([hwnd, OUT]);
+            return [context.memory.u32(OUT + 8) - context.memory.u32(OUT),
+                context.memory.u32(OUT + 12) - context.memory.u32(OUT + 4)];
+        };
+        const corner = make(SS_BITMAP);
+        await context.fns.SendMessageA.handler([corner, STM_SETIMAGE, IMAGE_BITMAP, bitmap]);
+        assert.deepEqual(size(corner), [20, 10], 'the bitmap\'s size');
+        const centred = make(SS_BITMAP | SS_CENTERIMAGE);
+        await context.fns.SendMessageA.handler([centred, STM_SETIMAGE, IMAGE_BITMAP, bitmap]);
+        assert.deepEqual(size(centred), [120, 90], 'its own size, the bitmap centred in it');
+    });

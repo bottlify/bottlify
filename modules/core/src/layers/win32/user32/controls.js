@@ -1300,6 +1300,22 @@ export function createControlProcedures(host){
     // --- Static -------------------------------------------------------------
 
     /**
+     * An image's size: an icon's or cursor's picture, or a bitmap's. Null for
+     * a handle with nothing this build can measure.
+     *
+     * @param {number} image
+     * @returns {{ width: number, height: number } | null}
+     */
+    const imageSize = image=>{
+        if (image === 0)
+        {
+            return null;
+        }
+        const picture = host.picture?.(image) ?? null;
+        return picture ?? host.draw?.bitmapShape?.(image) ?? null;
+    };
+
+    /**
      * @param {any} record @param {number} hdc @param {Rect} rect @param {number} brush
      */
     const paintStatic = (record, hdc, rect, brush)=>{
@@ -1411,7 +1427,15 @@ export function createControlProcedures(host){
                 state.imageType = message.message === STM_SETICON
                     ? IMAGE_ICON : message.wParam & 0xffff;
                 host.invalidate(record);
-                return previous;
+                // Neither centred nor stretched, the image is the control's
+                // size: it ignores the size it was made with and takes the
+                // image's, so what lies beside it in the template shows.
+                const sized = (record.style & (SS_CENTERIMAGE | SS_REALSIZECONTROL)) === 0
+                    ? imageSize(state.image) : null;
+                return sized && (sized.width !== record.width || sized.height !== record.height)
+                    ? after(host.move(record.hwnd, record.x, record.y, sized.width, sized.height),
+                        ()=>previous)
+                    : previous;
             }
             case STM_GETICON:
                 return state.imageType === IMAGE_ICON ? state.image ?? 0 : 0;
