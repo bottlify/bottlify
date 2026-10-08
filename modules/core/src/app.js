@@ -215,6 +215,10 @@ import { createTranslatorPool, portTranslator } from './host/pool/pool.js';
  *     rather than the guest's code.
  * @property {number} [quantum]  Guest instructions per scheduler turn. Lowering
  *           it is what makes `sample` a profile rather than a rumour.
+ * @property {number} [executors]  Executors of the program's process under cork: past
+ *           the process's own thread, each a worker running one of its threads at once
+ *           with the others, the locked instructions atomic (roadmap/v2, stage 3).
+ *           Default 1, every thread on the process's own.
  * @property {boolean} [preemption]  End a slice early when a thread of higher
  *           priority comes due, as Windows preempts (the kernel's option; off).
  * @property {(eip: number, instructions: number) => void} [sample]
@@ -3392,6 +3396,7 @@ async function buildApp(options){
             // faults, as on Windows, rather than sliding through the zeroes.
             noExecuteBelow: 0x10000,
             engine: options.engine ?? DEFAULT_ENGINE,
+            executors: options.executors ?? 1,
             engineUrl: (options.engine ?? DEFAULT_ENGINE) !== 'emulator'
                 ? corkArtifacts(options.cork).moduleUrl : null,
             cork: {

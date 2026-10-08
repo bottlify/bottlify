@@ -5,9 +5,11 @@
 **Status:** proposed 2026-10-03, revised against `main` 6554baf0; the workers of stage 2 and the
 translation cache arena decided 2026-10-07 on `cork2`, where the translation pool, its driver and
 the arena landed the same day; zstd stays on the coordinator, measured not worth moving yet
-(`negative-results.md`, 2026-10-08). Stage 3's atomic variant and the executors' layouts (a state
-page, tables and interpreter statics of each executor's own over one guest RAM) landed on `cork2`
-on 2026-10-08; running threads on them is the work in progress. How the engine works today is in
+(`negative-results.md`, 2026-10-08). Stage 3's atomic variant, the executors' layouts (a state
+page, tables and interpreter statics of each executor's own over one guest RAM), executors in
+workers of their own and the kernel running a process's threads on them at once landed on
+`cork2` on 2026-10-08 (`createApp`'s `executors`); choosing the mode per process, and the host's
+unbroken routines (below), are open. How the engine works today is in
 [`docs/architecture.md`](../../docs/architecture.md); this document is where it goes next.
 
 v2 turns the engine from one thread that does everything into a platform of workers whose number
@@ -415,6 +417,12 @@ one executor.
   three runs; not measured on the benchmarks). The wasm interpreter is built position-independent
   for it: measured 0 to 7 % slower on interpreted-only runs of the cork bench (node, x87,
   `translate: false`, three alternations; noise about ±6 %).
+- **The host's unbroken routines under several executors** (stage 3). Guest code the host writes
+  -- the seams that record Direct3D and OpenGL calls -- is marked so that no slice ends inside it,
+  because another thread's call into the host reads what it writes. With threads running at once
+  that holds no more: one thread can be inside such a routine while another's call is answered.
+  Until the routines are made safe against that (a host call around them, or records each
+  thread owns), a process that runs them is one to keep on one executor.
 - **Memory shared between processes** (stage 2): which mechanism for named mappings, shared
   sections and cross-process reads and writes, and which programs need them coherent rather than
   copied at a wait.

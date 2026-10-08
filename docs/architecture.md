@@ -416,8 +416,11 @@ flowchart LR
   dropped. The bounds of the code are kept to 32 bytes, so a write to data next to code does not count
   as a write into code. A page that has lost its translations 8 times is marked volatile
   (`VOLATILE`), and its code is only interpreted from then on.
-- **Several executors of a process** (stage 3 of `roadmap/v2/`, not yet scheduled by the kernel).
-  An executor past the first is a cork host in a worker of its own over the process's memory
+- **Several executors of a process** (stage 3 of `roadmap/v2/`, `createApp`'s `executors`). The
+  kernel gives every idle executor the next ready thread, and the process's own thread, which
+  then runs no program code, answers the calls their threads make, each as the current thread
+  while it is answered. An executor past the first is a cork host in a worker of its own over the
+  process's memory
   (`core/src/layers/cpu/internal/executor.worker.js`), with its own state page, entry hash and
   translations. The page flags and the code bounds are the process's: a write on any executor into
   code any of them translated is found, the finder drops its own translations and puts the range in

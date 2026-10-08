@@ -6,6 +6,7 @@
 
 import { createV86Host } from './internal/v86-host.js';
 import { createCorkHost } from './internal/cork-host.js';
+import { createBell, createRemoteExecutor } from './internal/executor.js';
 import { createFpu } from './internal/fpu.js';
 import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
 import {
@@ -162,13 +163,16 @@ export function createCpuModule(){
              *          faultHandler: ((fault: any) => boolean) | null,
              *          guestClock: (() => number) | null,
              *          yieldCheck: (() => boolean) | null, stacks: [number, number][],
-             *          lent: import('./engine.js').TranslatorPort[] }}
+             *          lent: import('./engine.js').TranslatorPort[], remotes: any[],
+             *          bell: ReturnType<typeof createBell> | null }}
              */
             const state = {
                 host: null, thunks: null, running: false, tableWritten: false,
                 worstInterpreted: 0, worstInterpretedAt: 0, interpretedBefore: 0,
                 lastFault: null, disposed: false, samples: createSampleTable(), engine,
                 cork: null,
+                remotes: [],
+                bell: null,
                 faultHandler: null,
                 // The guest's clock once the kernel gives it (`useGuestClock`).
                 guestClock: null,
@@ -324,6 +328,12 @@ export function createCpuModule(){
                 // defaults are small, and a program that leaves generated code
                 // every few dozen instructions pays the dispatch walk each time.
                 jit: config?.jit,
+                // Executors of the process: the process's own thread, and each
+                // past the first a worker running its threads at once with the
+                // others (`internal/executor.js`); under cork, and with the atomic
+                // variant, which more than one needs. The kernel gives them the
+                // threads (`executors`).
+                executors: Math.max(1, config?.executors ?? 1),
             };
 
             /** @type {(id: number) => void} */
@@ -429,16 +439,34 @@ export function createCpuModule(){
                             throw new Error('cpu: engine "cork" needs an engineUrl');
                         }
                         const engineModule = await import(settings.engineUrl);
-                        state.host = createCorkHost({
-                            engine: engineModule,
+                        const several = settings.executors > 1;
+                        const hostConfig = {
                             memorySize: settings.memorySize,
                             trapPort: settings.trapPort,
                             entryVector: settings.entryVector,
                             initialStack: settings.initialStack,
-                            cork: settings.cork,
+                            thunkBase: settings.thunkBase,
+                            cork: several ? { ...settings.cork, atomic: true } : settings.cork,
                             closedBelow: settings.closedBelow,
                             noExecuteBelow: settings.noExecuteBelow,
-                        });
+                            executors: settings.executors,
+                        };
+                        state.host = createCorkHost({ ...hostConfig, engine: engineModule });
+                        if (several)
+                        {
+                            // What crosses to a worker is data: the translation store
+                            // and anything callable stay with the process's own.
+                            const cork = Object.fromEntries(Object.entries(hostConfig.cork)
+                                .filter(([key, value])=>key !== 'store'
+                                    && typeof value !== 'function'));
+                            const bell = createBell();
+                            state.bell = bell;
+                            state.remotes = await Promise.all(Array.from(
+                                { length: settings.executors - 1 },
+                                (_, i)=>createRemoteExecutor({ host: state.host, index: i + 1,
+                                    engineUrl: settings.engineUrl, bell,
+                                    config: { ...hostConfig, cork } })));
+                        }
                         state.cork = state.host.cork();
                         for (const adapter of state.lent.splice(0))
                         {
@@ -770,6 +798,39 @@ export function createCpuModule(){
                 /** @param {(id: number) => void} handler */
                 onTrap(handler){
                     dispatch = handler;
+                },
+
+                /**
+                 * The process's executors past its own, each running a thread at
+                 * once with the others: empty where there is one.
+                 *
+                 * @returns {any[]}
+                 */
+                executors: ()=>state.remotes,
+                /** The word their turns ring: one wait for all of them. */
+                executorBell: ()=>state.bell,
+                /**
+                 * Runs `work` with executor `index`'s state as the processor's:
+                 * a thread put on it or taken off it, through this layer as ever.
+                 *
+                 * @param {number} index @param {() => void} work
+                 */
+                onExecutor(index, work){
+                    const remote = state.remotes.find((/** @type {any} */ one)=>one.index === index);
+                    if (!remote)
+                    {
+                        throw new Error(`cpu: no executor ${index}`);
+                    }
+                    remote.onBlock(work);
+                },
+                /**
+                 * A fault another executor took that no handler did: the
+                 * processor's fault, as one of its own would be.
+                 *
+                 * @param {any} fault
+                 */
+                remoteFault(fault){
+                    state.lastFault ??= fault;
                 },
 
                 /**
@@ -1135,6 +1196,12 @@ export function createCpuModule(){
                 {
                     current.host.stop();
                 }
+                for (const remote of current.remotes)
+                {
+                    remote.close();
+                }
+                current.remotes = [];
+                current.bell = null;
                 current.host = null;
                 current.thunks = null;
                 current.running = false;

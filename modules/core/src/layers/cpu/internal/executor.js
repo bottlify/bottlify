@@ -177,7 +177,7 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
             }
             if (running)
             {
-                throw new Error(`executor ${index}: a slice is already out`);
+                throw new Error(`executor ${index}: busy with a slice`);
             }
             running = true;
             mine = Turn.RUN;
