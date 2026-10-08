@@ -318,6 +318,18 @@ checks for msiexec.exe, or reads its version, before starting it; the answer the
 entry served from the synthesised image, not a file written to the volume. A file a bundle does
 carry at that path always wins. *2026-10-08.*
 
+**A39 -- Windows XP's Internet Explorer and Media Player are there, at Service Pack 3's versions,
+without files.** Setups check them before installing what needs either: an IExpress package's
+version check reads `shdocvw.dll` or `msdxm.ocx` in the system folder, others read the registry.
+The XP description carries the browser's and the player's versions and the files that carry them
+(`kernel32/versions.js`, `components`): GetFileVersionInfo answers those files with their own
+versions, as it answers the engine's libraries with the system's, and the registry's `Internet
+Explorer\Version` and `MediaPlayer\PlayerUpgrade\PlayerVersion` say the same, from the same
+table. As with the system programs (A38), the volume shows no file at those paths. The numbers
+are Service Pack 3's as published (IE 6.0.2900.5512, WMP 9.0.0.4503, msdxm.ocx 6.4.9.1133) and
+were not read off a machine; the other Windows releases describe no components and answer as
+before. *2026-10-08.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

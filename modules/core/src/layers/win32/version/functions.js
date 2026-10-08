@@ -188,9 +188,11 @@ export function systemVersionResource(
 )
 {
     const directX = DIRECTX_LIBRARY.test(name);
+    const component = windows.components?.files[name.toLowerCase()] ?? null;
     const system = [windows.major, windows.minor, windows.build, 0];
-    const quad = directX ? directx.split('.').map(part=>Number(part)) : system;
-    const spelled = directX ? directx : system.join('.');
+    const own = directX ? directx : component;
+    const quad = own !== null ? own.split('.').map(part=>Number(part)) : system;
+    const spelled = own ?? system.join('.');
     const fixed = new Uint8Array(FIXED_FILE_INFO_SIZE);
     const view = new DataView(fixed.buffer);
     const most = (quad[0] << 16 | quad[1]) >>> 0;
@@ -384,7 +386,9 @@ export function createVersionFunctions(host){
         const file = path.slice(slash + 1);
         const name = file.includes('.') ? file : `${file}.dll`;
         return (directory === '' || directory.toLowerCase() === SYSTEM_DIRECTORY.toLowerCase())
-            && file !== '' && (host.systemLibrary?.(name) || WIN16_SYSTEM_FILE.test(name))
+            && file !== '' && (host.systemLibrary?.(name) || WIN16_SYSTEM_FILE.test(name)
+                || (host.windows ?? windowsVersion()).components?.files[name.toLowerCase()]
+                    !== undefined)
             ? name : null;
     };
 

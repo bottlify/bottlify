@@ -459,6 +459,16 @@ const machineKeys = (windows, directx)=>{
             SystemRoot: folders.Windows,
             MediaPath: 'C:\\WINDOWS\\Media',
         } },
+        // The browser and the player the release ships, as their own setups
+        // record them: what a setup reads beside the files' versions, which
+        // say the same (version/functions.js).
+        ...windows.components ? [
+            { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Internet Explorer',
+                values: { Version: windows.components.internetExplorer } },
+            { root: HKEY_LOCAL_MACHINE,
+                path: 'SOFTWARE\\Microsoft\\MediaPlayer\\PlayerUpgrade',
+                values: { PlayerVersion: windows.components.mediaPlayer.replaceAll('.', ',') } },
+        ] : [],
         { root: HKEY_LOCAL_MACHINE, path: `${windowsKey}\\SharedDLLs` },
         { root: HKEY_LOCAL_MACHINE, path: `${windowsKey}\\Setup` },
         { root: HKEY_LOCAL_MACHINE, path: `${windowsKey}\\Uninstall` },
