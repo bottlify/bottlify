@@ -2049,6 +2049,35 @@ fn fs_main(in: Corner) -> @location(0) vec4f {
 `;
 
 /**
+ * A rectangle of one surface drawn over a rectangle of another, at any scale: the viewport
+ * is the destination's rectangle, and the uniform block the source's in texture coordinates
+ * (left, top, right, bottom).
+ */
+const STRETCH_SHADER = `@group(0) @binding(0) var source: texture_2d<f32>;
+@group(0) @binding(1) var sourceSampler: sampler;
+@group(0) @binding(2) var<uniform> area: vec4f;
+
+struct Corner {
+    @builtin(position) position: vec4f,
+    @location(0) uv: vec2f,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) index: u32) -> Corner {
+    let corner = vec2f(f32((index << 1u) & 2u), f32(index & 2u));
+    var out: Corner;
+    out.position = vec4f(corner * 2.0 - 1.0, 0.0, 1.0);
+    out.uv = mix(area.xy, area.zw, vec2f(corner.x, 1.0 - corner.y));
+    return out;
+}
+
+@fragment
+fn fs_main(in: Corner) -> @location(0) vec4f {
+    return textureSampleLevel(source, sourceSampler, in.uv, 0.0);
+}
+`;
+
+/**
  * @param {Map<number, number>} states  one stage's states
  * @param {boolean} [mips]  False pins every sample to the top level.
  * @param {number} [lod]  The bound texture's own level of detail.
@@ -3065,6 +3094,13 @@ export function createRenderer(options){
             + ` blend=${state.blend ? `${state.srcBlend},${state.destBlend}` : '-'}`
             + ` aTest=${state.alphaTest
                 ? `${state.alphaFunc}/${model.renderStates.get(D3DRS.ALPHAREF) ?? 0}` : '-'}`
+            // The depth test and the bias a layer leans on to stay in front of the surface it
+            // lies on, as a fixed-function draw's line says them: two coplanar layers without
+            // it take turns as the camera moves.
+            + ` z=${state.depthTest ? state.depthFunc : '-'}/${state.depthWrite ? 1 : 0}`
+            + `/bias${dwordToFloat(model.renderStates.get(D3DRS9.DEPTHBIAS) ?? 0)}`
+            + `,${dwordToFloat(model.renderStates.get(D3DRS9.SLOPESCALEDEPTHBIAS) ?? 0)}`
+            + ` cull=${model.renderStates.get(D3DRS.CULLMODE) ?? '-'}`
             + (state.pixelShader === -1 && state.stages
                 ? ` stages=${state.stages.map((/** @type {any} */ stage)=>
                     `${stage.colorOp}(${stage.colorArg1},${stage.colorArg2})`
@@ -5686,6 +5722,79 @@ export function createRenderer(options){
 
     /** @type {Map<string, any>} */
     const mipSamplers = new Map();
+    /** The stretch pipelines, by destination format. @type {Map<string, Promise<any>>} */
+    const stretchPipelines = new Map();
+
+    /**
+     * A sampler that clamps, filtering as asked: what a level is made through and what a
+     * stretch reads with.
+     *
+     * @param {'linear' | 'nearest'} filter
+     */
+    const clampedSampler = filter=>{
+        let sampler = mipSamplers.get(filter);
+        if (!sampler)
+        {
+            if (!createSampler)
+            {
+                throw new Error('graphics/d3d8: levels and stretches are made through a sampler,'
+                    + ' and this renderer was given no way to make one');
+            }
+            sampler = createSampler({
+                label: `mips:${filter}`, magFilter: filter, minFilter: filter,
+                addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
+            });
+            mipSamplers.set(filter, sampler);
+        }
+        return sampler;
+    };
+
+    /**
+     * The pipeline that draws a rectangle of one surface over another's, any scale.
+     *
+     * @param {string} format
+     */
+    const stretchPipeline = async format=>{
+        const layout = backend.createBindGroupLayout({
+            label: 'stretch',
+            entries: [
+                { binding: 0, visibility: FRAGMENT_VISIBILITY, texture: {} },
+                { binding: 1, visibility: FRAGMENT_VISIBILITY, sampler: {} },
+                { binding: 2, visibility: 1, buffer: { type: 'uniform', hasDynamicOffset: true } },
+            ],
+        });
+        const module = await backend.createShaderModule({ label: 'stretch', code: STRETCH_SHADER });
+        const gpu = await backend.createRenderPipelineAsync({
+            label: `stretch:${format}`,
+            layout: backend.createPipelineLayout({ label: 'stretch', bindGroupLayouts: [layout] }),
+            vertex: { module, entryPoint: 'vs_main' },
+            fragment: { module, entryPoint: 'fs_main', targets: [{ format }] },
+            primitive: { topology: 'triangle-list' },
+        });
+        return { gpu, layout };
+    };
+
+    /**
+     * A recorded stretch: the destination's rectangle drawn from the source's.
+     *
+     * @param {any} frame @param {any} pipeline @param {any} command
+     */
+    const replayStretch = (frame, pipeline, command)=>{
+        const { source, destination, rect, destRect } = command;
+        const pass = frame.beginPass({ target: destination, clear: false, label: 'stretch' });
+        pass.setViewport({ x: destRect.left, y: destRect.top,
+            width: destRect.right - destRect.left, height: destRect.bottom - destRect.top,
+            minDepth: 0, maxDepth: 1 });
+        pass.setPipeline(pipeline.gpu);
+        const slot = pass.uniforms(Float32Array.of(rect.left / source.width,
+            rect.top / source.height, rect.right / source.width, rect.bottom / source.height));
+        pass.setBindings(0, pipeline.layout, [
+            { binding: 0, resource: source.view },
+            { binding: 1, resource: clampedSampler(command.linear ? 'linear' : 'nearest') },
+            { binding: 2, resource: slot },
+        ]);
+        pass.draw(3);
+    };
 
     /**
      * A draw counts for the occlusion query open where it stands: a query of
@@ -5736,21 +5845,7 @@ export function createRenderer(options){
      */
     function replayMips(frame, pipeline, command){
         const record = command.record;
-        const filter = command.linear ? 'linear' : 'nearest';
-        let sampler = mipSamplers.get(filter);
-        if (!sampler)
-        {
-            if (!createSampler)
-            {
-                throw new Error('graphics/d3d8: levels are made through a sampler, and this'
-                    + ' renderer was given no way to make one');
-            }
-            sampler = createSampler({
-                label: `mips:${filter}`, magFilter: filter, minFilter: filter,
-                addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
-            });
-            mipSamplers.set(filter, sampler);
-        }
+        const sampler = clampedSampler(command.linear ? 'linear' : 'nearest');
         for (let face = 0; face < record.faces; face++)
         {
             for (let level = 1; level < record.gpuLevels; level++)
@@ -7262,6 +7357,52 @@ export function createRenderer(options){
         },
 
         /**
+         * A rectangle of one surface drawn over a rectangle of another on the GPU, at any
+         * scale and between any two colour formats it renders -- StretchRect's stretch,
+         * point or linear as the program asked. False when either side is not the GPU's,
+         * or both are one texture, and the caller says it cannot.
+         *
+         * @param {any} source
+         * @param {{ left: number, top: number, right: number, bottom: number }} rect
+         * @param {any} destination
+         * @param {{ left: number, top: number, right: number, bottom: number }} destRect
+         * @param {boolean} linear
+         * @returns {boolean}
+         */
+        stretchSurface(source, rect, destination, destRect, linear){
+            if (!onGpu(source) || !onGpu(destination))
+            {
+                return false;
+            }
+            const from = surfaceFor(source);
+            const into = surfaceFor(destination);
+            if (from.texture === into.texture || !from.view)
+            {
+                return false;
+            }
+            const tracked = textures.get(destination);
+            if (tracked)
+            {
+                tracked.ordered = true;
+                if ((surfaceLevels.get(destination) ?? 0) === 0)
+                {
+                    markMips(tracked);
+                }
+            }
+            let pipeline = stretchPipelines.get(into.format);
+            if (!pipeline)
+            {
+                pipeline = stretchPipeline(into.format);
+                stretchPipelines.set(into.format, pipeline);
+            }
+            const frame = ensureFrame();
+            frame.pipelines.push(pipeline);
+            frame.commands.push({ kind: 'stretch', source: from, destination: into, rect,
+                destRect, linear, pipeline: frame.pipelines.length - 1 });
+            return true;
+        },
+
+        /**
          * What has been recorded so far goes to the GPU with nothing shown:
          * the frame of a swap chain whose picture has nowhere to go is still
          * drawn, into targets that later draws and reads find as it left them.
@@ -8291,6 +8432,20 @@ export function createRenderer(options){
                 else
                 {
                     replayMips(frame, made.value, command);
+                }
+                pass = null;
+                continue;
+            }
+            if (command.kind === 'stretch')
+            {
+                const made = pipelines[command.pipeline];
+                if (made.status === 'rejected')
+                {
+                    failure(made.reason);
+                }
+                else
+                {
+                    replayStretch(frame, made.value, command);
                 }
                 pass = null;
                 continue;

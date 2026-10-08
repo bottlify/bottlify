@@ -141,6 +141,8 @@ const D3DGETDATA_FLUSH = 1;
 
 /** The last D3DTEXTUREFILTERTYPE StretchRect accepts. */
 const D3DTEXF_ANISOTROPIC = 3;
+/** D3DTEXF_LINEAR: a stretch filtered between texels; POINT and NONE take the nearest. */
+const D3DTEXF_LINEAR = 2;
 
 /** D3DSTREAMSOURCE_INDEXEDDATA and D3DSTREAMSOURCE_INSTANCEDATA. */
 const STREAMSOURCE_INDEXEDDATA = 0x40000000;
@@ -4089,12 +4091,26 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return refuse('rect', 'a rectangle outside its surface');
             }
-            if (rect.right - rect.left !== target.right - target.left
-                || rect.bottom - rect.top !== target.bottom - target.top)
+            const stretched = rect.right - rect.left !== target.right - target.left
+                || rect.bottom - rect.top !== target.bottom - target.top;
+            // A stretch, or two formats the GPU stores apart, is drawn on the GPU: a program
+            // that renders its interface small and stretches it over the screen is shown it
+            // there, filtered as it asked.
+            if (stretched || from.Format !== to.Format)
             {
-                report('stretch', 'a StretchRect between rectangles of different sizes was'
-                    + ' refused: this device copies and does not scale');
-                return D3DERR_INVALIDCALL;
+                if ((!stretched && renderer?.copySurface?.(source, rect, destination,
+                    { x: target.left, y: target.top }))
+                    || renderer?.stretchSurface?.(source, rect, destination, target,
+                        filter >= D3DTEXF_LINEAR))
+                {
+                    out.moves = [];
+                    return D3D_OK;
+                }
+                if (stretched)
+                {
+                    return refuse('scale', 'rectangles of different sizes, which only the GPU'
+                        + ' scales here, and one of these surfaces is not on it');
+                }
             }
             // Between colour formats a device converts, as CheckDeviceFormatConversion says it
             // can: a scene drawn into an A8R8G8B8 target is copied onto the X8R8G8B8 back

@@ -229,8 +229,9 @@ export function capabilityWords(caps, identity = {}){
         // because the renderer reads formats.
         DeclTypes: 0,
         NumSimultaneousRTs: 1,
-        // StretchRect copies and never filters, so no filter is offered.
-        StretchRectFilterCaps: 0,
+        // StretchRect stretches on the GPU, point or linear: D3DPTFILTERCAPS_MINFPOINT,
+        // MINFLINEAR, MAGFPOINT and MAGFLINEAR.
+        StretchRectFilterCaps: 0x00000100 | 0x00000200 | 0x01000000 | 0x02000000,
         VS20Caps_Caps: 0,
         VS20Caps_DynamicFlowControlDepth: 0,
         VS20Caps_NumTemps: vs.major >= 2 ? 32 : 0,

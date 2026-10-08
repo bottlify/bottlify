@@ -1122,3 +1122,30 @@ test('recorded: an occlusion query counts the samples of the draws between its B
         back.surface.release();
         assert.equal(query.release(), 0);
     });
+
+test('StretchRect scales one target over another on the GPU, filtered as asked', async()=>{
+    // A program that draws its interface into a small target and stretches it over the
+    // back buffer: the stretch is drawn, its viewport the destination's rectangle.
+    const h = harness({ width: 8, height: 8 });
+    const { device } = h;
+    /** @type {{ surface?: any }} */
+    const small = {};
+    assert.equal(device.CreateRenderTarget(4, 4, D3DFMT.A8R8G8B8, false, small), D3D_OK);
+    /** @type {{ surface?: any }} */
+    const back = {};
+    assert.equal(device.GetBackBuffer(0, 0, 0, back), D3D_OK);
+    assert.equal(device.SetRenderTarget(0, small.surface), D3D_OK);
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, argb(4, 5, 6), 1, 0), D3D_OK);
+    assert.equal(device.SetRenderTarget(0, back.surface), D3D_OK);
+    assert.equal(device.StretchRect(small.surface, null, back.surface,
+        { left: 0, top: 0, right: 8, bottom: 6 }, D3DTEXF.LINEAR), D3D_OK);
+    await h.present();
+    const stretch = h.device.diagnostics().lastFrame
+        .find((/** @type {any} */ command)=>command.kind === 'stretch');
+    assert.ok(stretch, 'a stretch was recorded');
+    assert.deepEqual([stretch.destRect, stretch.linear],
+        [{ left: 0, top: 0, right: 8, bottom: 6 }, true]);
+    const viewports = h.gpu.of('setViewport').map((/** @type {any} */ call)=>call.rect ?? call);
+    assert.ok(viewports.some((/** @type {any} */ v)=>JSON.stringify(v).includes('8')
+        && JSON.stringify(v).includes('6')), JSON.stringify(viewports));
+});
