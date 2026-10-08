@@ -281,6 +281,16 @@ export function createHeapFunctions(host){
             },
         },
 
+        /**
+         * int _heapchk(void) -- _HEAPOK (-2): the heap is the host's, and a
+         * guest write past a block cannot corrupt anything the check walks.
+         */
+        _heapchk: {
+            convention: 'cdecl',
+            argBytes: 0,
+            handler: ()=>0xfffffffe,
+        },
+
         /** size_t _msize(void *block) */
         _msize: {
             convention: 'cdecl',

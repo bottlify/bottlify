@@ -71,3 +71,12 @@ test('_spawnl checks its arguments as the runtime does, then starts nothing', ()
     assert.deepEqual(said, ['_spawnl']);
     assert.equal(fns._spawnl.convention, 'cdecl');
 });
+
+test('_spawnv answers as _spawnl does, its arguments in an array', ()=>{
+    const { fns, errno } = build();
+    assert.equal(fns._spawnv.handler([5, 0x1000, 0x2000]), 0xffffffff, 'no such mode');
+    assert.equal(fns._spawnv.handler([0, 0, 0x2000]), 0xffffffff, 'no image');
+    assert.equal(fns._spawnv.handler([0, 0x1000, 0x2000]), 0xffffffff);
+    assert.deepEqual(errno, [EINVAL, EINVAL, ENOENT]);
+    assert.equal(fns._spawnv.argBytes, 12);
+});

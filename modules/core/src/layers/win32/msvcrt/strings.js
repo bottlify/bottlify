@@ -443,7 +443,7 @@ export function createStringFunctions(host){
         // The classifiers, under the C locale, in the guest (`inguest.js`):
         // 1 for a byte of the class, 0 for anything else, EOF included.
         ...Object.fromEntries(['isalpha', 'isdigit', 'isalnum', 'isspace', 'isupper', 'islower',
-            'ispunct', 'isxdigit', 'isprint', 'iscntrl'].map(name=>[name, guestEntry(
+            'ispunct', 'isxdigit', 'isprint', 'isgraph', 'iscntrl'].map(name=>[name, guestEntry(
             /** @type {Function} */ (inGuest[/** @type {'isalpha'} */ (name)]),
             COMPILED[/** @type {'isalpha'} */ (name)], host)])),
     };

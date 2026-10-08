@@ -281,3 +281,9 @@ test('malloc calls the new handler only in new mode 1, and _callnewh calls it on
     assert.deepEqual(errno, [22]);
     assert.equal(table['?_query_new_mode@@YAHXZ'].handler([]), 1, 'the mode kept');
 });
+
+test('_heapchk finds the heap whole: _HEAPOK', ()=>{
+    const { table } = build();
+    table.malloc.handler([16]);
+    assert.equal(table._heapchk.handler([]) | 0, -2);
+});

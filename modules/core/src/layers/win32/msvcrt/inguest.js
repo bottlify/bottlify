@@ -394,6 +394,18 @@ export function isprint(c){
 }
 
 /**
+ * int isgraph(int c) -- printable but not the space: a letter, a digit or
+ * punctuation.
+ *
+ * @guestCode cdecl
+ * @param {u32} c
+ * @returns {i32}
+ */
+export function isgraph(c){
+    return inClass(c, W_ALPHA | W_DIGIT | W_PUNCT);
+}
+
+/**
  * int iscntrl(int c)
  *
  * @guestCode cdecl

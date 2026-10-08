@@ -169,7 +169,7 @@ function characters(seed){
 
 test('the classifiers and the case functions, narrow and wide', ()=>{
     const names = ['tolower', 'isalpha', 'isdigit', 'isalnum', 'isspace', 'isupper', 'islower',
-        'ispunct', 'isxdigit', 'isprint', 'iscntrl', 'iswalpha', 'iswdigit', 'iswalnum',
+        'ispunct', 'isxdigit', 'isprint', 'isgraph', 'iscntrl', 'iswalpha', 'iswdigit', 'iswalnum',
         'iswspace', 'iswupper', 'iswlower', 'iswpunct', 'iswxdigit', 'iswcntrl', 'iswprint',
         'iswgraph', 'iswascii', 'towupper', 'towlower'];
     const values = characters(6);

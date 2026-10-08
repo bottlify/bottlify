@@ -120,6 +120,9 @@ test('the classifiers answer one or zero, under the C locale', ()=>{
     assert.equal(table.isxdigit.handler(['F'.charCodeAt(0)]), 1);
     assert.equal(table.ispunct.handler(['!'.charCodeAt(0)]), 1);
     assert.equal(table.isprint.handler([0x20]), 1);
+    assert.equal(table.isgraph.handler([0x20]), 0);
+    assert.equal(table.isgraph.handler(['~'.charCodeAt(0)]), 1);
+    assert.equal(table.isgraph.handler([0x7f]), 0);
 });
 
 test('iscntrl covers both control ranges and nothing between them', ()=>{

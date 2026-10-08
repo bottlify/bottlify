@@ -134,5 +134,24 @@ export function createProcessFunctions(host){
                 return noProcess.handler();
             },
         },
+
+        /**
+         * intptr_t _spawnv(int mode, const char *cmdname, const char *const *argv)
+         *
+         * _spawnl's answers, the arguments in an array rather than on the stack.
+         */
+        _spawnv: {
+            convention: 'cdecl',
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([mode, name])=>{
+                if ((mode >>> 0) >= SPAWN_MODES || (name >>> 0) === 0)
+                {
+                    host.errno(EINVAL);
+                    return 0xffffffff;
+                }
+                return noProcess.handler();
+            },
+        },
     };
 }

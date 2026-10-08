@@ -919,6 +919,15 @@ export function createPathFunctions(host){
         _access: operation(8, ([path])=>(exists(readString(path)) ? 0 : ENOENT)),
 
         /**
+         * int _chmod(const char *path, int mode)
+         *
+         * ENOENT when the path is not there. The read-only bit the mode asks
+         * for has nowhere to go -- the filesystem carries no permissions, as
+         * _access says -- so a path that exists takes it and answers 0.
+         */
+        _chmod: operation(8, ([path])=>(exists(readString(path)) ? 0 : ENOENT)),
+
+        /**
          * unsigned long _getdrives(void)
          *
          * A bit per letter, A first, and the same set GetLogicalDrives reports.

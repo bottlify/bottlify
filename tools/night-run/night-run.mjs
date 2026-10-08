@@ -99,6 +99,12 @@ How:
 --specs dbg/specs, and implement every missing entry point the main executable reaches.
 - Run it: node tools/cdp_test/game.mjs ${bottle.id} --headed --worker --coi --wait 240 (more if \
 the title loads slowly). Read the report and the files the game itself wrote before theorising.
+- Many titles open a launcher, a settings dialog or a menu before they load. Look at the \
+screenshots (read the PNGs) and get past them: walk the screens a step at a time with \
+tools/cdp_test/live/drive.mjs (/shot, /click, /key, /type -- see tools/cdp_test/README.md), then \
+replay the route in game.mjs with --click x,y,Ns, --key Code,Ns, --click-at x,y,ms or \
+--press "Play|OK" so the run that proves it is repeatable. Reaching the loading screen means \
+getting through those screens, not stopping at them.
 - Fix the generic contract that is wrong -- never branch on a program's name, executable or hash, \
 never hardcode an offset for one title. Every fix carries a test in the same change.
 - Run only the touched layer's tests and gates (the table in CLAUDE.md), npm run typecheck and \
