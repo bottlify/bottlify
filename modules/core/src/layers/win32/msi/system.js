@@ -186,7 +186,7 @@ async function unregisterFonts(engine){
 }
 
 /** The characters a descriptor writes a GUID in, five for each 32 bits. */
-const BASE85 = '!$%&\'()*+,-.0123456789=?@ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+export const BASE85 = '!$%&\'()*+,-.0123456789=?@ABCDEFGHIJKLMNOPQRSTUVWXYZ'
     + '[]^_`abcdefghijklmnopqrstuvwxyz{}~';
 
 /**

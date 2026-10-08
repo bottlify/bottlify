@@ -42,6 +42,7 @@ import { finishAsync } from './custom.js';
 import { createRegistration, squashGuid } from './registration.js';
 import { installerVersion } from './version.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { createProductFunctions } from './products.js';
 import { parseGuid } from '../ole32/guid.js';
 
 const ERROR_SUCCESS = 0;
@@ -927,7 +928,36 @@ export function createMsiFunctions(host){
     /** @param {number} handle @returns {import('./record.js').Record | null} */
     const recordOf = handle=>get(handle, 'record');
 
+    /**
+     * A string into a buffer the caller sized for it, as the calls that hand
+     * back a GUID or a feature's name take one: the text and its terminator.
+     *
+     * @param {boolean} wide @param {string} text @param {number} buffer
+     */
+    const putFixed = (wide, text, buffer)=>{
+        host.writeMemory(buffer >>> 0, wide ? utf16(`${text}\0`) : encodeAnsi(`${text}\0`));
+    };
+
     return {
+        ...createProductFunctions({
+            registration, hive: host.hive, files: host.files, fullPath: host.fullPath, reader,
+            putString, putFixed, readU32, writeU32, get,
+            writeMemory: (address, bytes)=>host.writeMemory(address, bytes),
+            readFile: path=>readFile(host.files, path),
+            openPackage: async path=>{
+                const db = await loadDatabase(path);
+                return db ? { compound: db.compound } : null;
+            },
+            maintain: (productCode, request)=>maintain(productCode, request),
+            openProduct: async productCode=>{
+                const local = localPackage(productCode);
+                return typeof local === 'number' ? local : openSession(local);
+            },
+            messageBox: host.messageBox
+                ? (text, caption, type)=>/** @type {any} */ (host.messageBox)(text, caption, type)
+                : undefined,
+            divergence: host.divergence,
+        }),
         // ----- handles and records -----
         MsiCloseHandle: {
             argBytes: 4,

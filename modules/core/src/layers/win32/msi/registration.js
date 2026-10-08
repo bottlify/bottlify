@@ -273,6 +273,15 @@ export function createRegistration(hive){
                 }
             }
             const advertised = create(keys.advertised);
+            // Where the package came from, for a repair that needs its source:
+            // the folder as the first network source and the last one used.
+            const sources = create(`${keys.advertised}\\SourceList`);
+            const folder = product.installSource;
+            hive.setValue(sources, 'PackageName', REG_SZ, sz(product.localPackage
+                .slice(product.localPackage.lastIndexOf('\\') + 1)));
+            hive.setValue(sources, 'LastUsedSource', REG_EXPAND_SZ, sz(`n;1;${folder}`));
+            hive.setValue(create(`${keys.advertised}\\SourceList\\Net`), '1', REG_EXPAND_SZ,
+                sz(folder));
             hive.setValue(advertised, 'ProductName', REG_SZ, sz(product.name));
             hive.setValue(advertised, 'PackageCode', REG_SZ,
                 sz(squashGuid(product.packageCode) ?? ''));
@@ -333,15 +342,69 @@ export function createRegistration(hive){
                 !== product));
         },
 
-        /** @param {string} productCode @param {string} feature @param {string} components */
-        registerFeature: (productCode, feature, components)=>{
+        /**
+         * Records an installed feature: its components for the product, and
+         * its parent where the advertised features are listed.
+         *
+         * @param {string} productCode @param {string} feature @param {string} components
+         * @param {string | null} [parent]
+         */
+        registerFeature: (productCode, feature, components, parent = null)=>{
             const keys = productKeys(productCode);
             if (keys)
             {
                 hive.setValue(create(keys.features), feature, REG_SZ, sz(components));
                 hive.setValue(create(`${CLASSES}\\Features\\${keys.squashed}`), feature, REG_SZ,
-                    sz(''));
+                    sz(parent ?? ''));
             }
+        },
+
+        /**
+         * A product's features as the machine lists them, each with its parent.
+         *
+         * @param {string} productCode @returns {{ feature: string, parent: string }[] | null}
+         *     null for a product the machine has no record of
+         */
+        productFeatures: productCode=>{
+            const keys = productKeys(productCode);
+            const key = keys ? open(`${CLASSES}\\Features\\${keys.squashed}`) : null;
+            if (!keys || (!key && !open(keys.properties)))
+            {
+                return null;
+            }
+            return key ? hive.values(key).map(value=>({ feature: value.name,
+                parent: valueText(value) ?? '' })) : [];
+        },
+
+        /** @returns {string[]} every component some product has registered */
+        components: ()=>{
+            const key = open(`${USER_DATA}\\Components`);
+            return key ? hive.subkeys(key).filter(name=>/^[0-9A-F]{32}$/i.test(name))
+                .map(unsquashGuid) : [];
+        },
+
+        /** @param {string} componentId @returns {string[]} the products that have it */
+        clients: componentId=>{
+            const component = squashGuid(componentId);
+            const key = component ? open(`${USER_DATA}\\Components\\${component}`) : null;
+            return key ? hive.values(key).filter(value=>/^[0-9A-F]{32}$/i.test(value.name))
+                .map(value=>unsquashGuid(value.name)) : [];
+        },
+
+        /**
+         * A product's source list: where its package can be found again --
+         * network or local folders, URLs, media -- and the package's name.
+         *
+         * @param {string} productCode @param {boolean} [make]
+         */
+        sourceList: (productCode, make = false)=>{
+            const keys = productKeys(productCode);
+            if (!keys || !open(keys.advertised))
+            {
+                return null;
+            }
+            const path = `${keys.advertised}\\SourceList`;
+            return make ? create(path) : open(path);
         },
 
         /** @param {string} productCode @param {string} feature @returns {boolean} */
@@ -435,6 +498,9 @@ export function createRegistration(hive){
                 }
             }
         },
+
+        /** @returns {any} the machine's root, for callers that keep keys of their own */
+        machine: ()=>machine,
 
         /** @param {string} upgradeCode @returns {string[]} the products filed under it */
         relatedProducts: upgradeCode=>{

@@ -642,7 +642,7 @@ async function publishFeatures(engine){
         }
         const list = feature.components.join('');
         await schedule(engine, 'PublishFeatures', async()=>{
-            host.registration.registerFeature(productCode, feature.key, list);
+            host.registration.registerFeature(productCode, feature.key, list, feature.parent);
             feature.installed = feature.action;
         });
     }
