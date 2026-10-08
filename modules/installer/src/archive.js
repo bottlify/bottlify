@@ -107,22 +107,45 @@ async function directoryOf(blob){
 const nameOf = (bytes, utf8)=>new TextDecoder(utf8 ? 'utf-8' : 'windows-1252').decode(bytes);
 
 /**
- * @param {Uint8Array} bytes @param {string} path
+ * An entry's bytes, read and inflated as a stream into one buffer of the size
+ * the directory records: Chrome refuses to read a slice of a file past about
+ * 2 GB in one piece, and an archive of an installed game holds entries that
+ * large.
+ *
+ * @param {Blob} blob @param {number} dataAt @param {number} packed
+ * @param {number} size @param {number} method @param {string} path
  * @returns {Promise<Uint8Array>}
  */
-async function inflate(bytes, path){
+async function unpack(blob, dataAt, packed, size, method, path){
+    let stream = blob.slice(dataAt, dataAt + packed).stream();
+    if (method === DEFLATED)
+    {
+        stream = stream.pipeThrough(new DecompressionStream('deflate-raw'));
+    }
+    const bytes = new Uint8Array(size);
+    let filled = 0;
+    const reader = stream.getReader();
     try
     {
-        // An ArrayBuffer's view, which Blob takes whatever the declarations say.
-        const part = /** @type {BlobPart} */ (/** @type {unknown} */ (bytes));
-        const stream = new Blob([part]).stream()
-            .pipeThrough(new DecompressionStream('deflate-raw'));
-        return new Uint8Array(await new Response(stream).arrayBuffer());
+        for (let read = await reader.read(); !read.done; read = await reader.read())
+        {
+            if (filled + read.value.length > size)
+            {
+                throw new Error(`unpacked past the ${size} bytes it records`);
+            }
+            bytes.set(read.value, filled);
+            filled += read.value.length;
+        }
     }
     catch (e){
-        throw new Error(`${path} could not be inflated: ${/** @type {Error} */ (e).message}`,
+        throw new Error(`${path} could not be unpacked: ${/** @type {Error} */ (e).message}`,
             { cause: e });
     }
+    if (filled !== size)
+    {
+        throw new Error(`${path} unpacked to ${filled} bytes, not the ${size} it records`);
+    }
+    return bytes;
 }
 
 /**
@@ -206,14 +229,7 @@ export async function readZip(blob, progress){
             throw new Error(`${path}: no local header where the directory says`);
         }
         const dataAt = local + 30 + header.getUint16(26, true) + header.getUint16(28, true);
-        const data = await slice(blob, dataAt, packed);
-        const bytes = method === STORED ? data : await inflate(data, path);
-        if (bytes.length !== size)
-        {
-            throw new Error(
-                `${path} unpacked to ${bytes.length} bytes, not the ${size} it records`);
-        }
-        entries.push({ path, bytes });
+        entries.push({ path, bytes: await unpack(blob, dataAt, packed, size, method, path) });
         progress?.(index + 1, count);
     }
     return entries;
