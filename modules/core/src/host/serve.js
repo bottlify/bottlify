@@ -729,7 +729,10 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             app.on('process-started',
                 (/** @type {{ image: string, sequenceBase: number }} */ payload)=>{
                     const memory = app.log.memory();
-                    if (memory.journal instanceof SharedArrayBuffer)
+                    // A page that is not cross-origin isolated has no
+                    // SharedArrayBuffer at all: naming it there throws.
+                    if (typeof SharedArrayBuffer === 'function'
+                        && memory.journal instanceof SharedArrayBuffer)
                     {
                         post({ type: 'log-memory', memory, sequenceBase: payload.sequenceBase });
                     }

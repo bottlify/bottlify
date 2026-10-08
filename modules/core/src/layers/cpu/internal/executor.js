@@ -102,7 +102,7 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
     workerUrl = new URL('./executor.worker.js', import.meta.url), bell = createBell() })
 {
     const memory = host.wasmMemory();
-    if (!(memory.buffer instanceof SharedArrayBuffer))
+    if (typeof SharedArrayBuffer !== 'function' || !(memory.buffer instanceof SharedArrayBuffer))
     {
         throw new Error('executor: another executor needs the process\'s memory shared');
     }

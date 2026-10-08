@@ -8,13 +8,18 @@
   "engines": {
     "node": ">=22"
   },
+  "bin": {
+    "cork": "./bin/cork.mjs"
+  },
   "exports": {
     ".": "./src/index.js",
     "./wasm": "./src/wasm/encoder.js",
-    "./runtime": "./src/runtime/runtime.js"
+    "./runtime": "./src/runtime/runtime.js",
+    "./machine": "./src/machine.js"
   },
   "files": [
-    "src"
+    "src",
+    "bin"
   ],
   "scripts": {
     "test": "node --test --test-timeout=60000 \"src/**/*.test.js\"",

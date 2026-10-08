@@ -8462,6 +8462,7 @@ export async function createApp(options){
      */
     const startBeside = (parent, request)=>{
         const shared = audioMemory && 'table' in audioMemory
+            && typeof SharedArrayBuffer === 'function'
             && audioMemory.table instanceof SharedArrayBuffer;
         if (inWorker())
         {

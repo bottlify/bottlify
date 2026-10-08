@@ -76,7 +76,9 @@ function connection(send){
         if (data?.ready === true)
         {
             const given = data.doorbell;
-            if (data.arena instanceof SharedArrayBuffer)
+            // A worker of a page that is not cross-origin isolated has no
+            // SharedArrayBuffer to name: there is no arena there either.
+            if (typeof SharedArrayBuffer === 'function' && data.arena instanceof SharedArrayBuffer)
             {
                 cache = arenaEmitCache(data.arena);
             }

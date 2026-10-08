@@ -79,8 +79,9 @@ export function features(){
         sharedMemory: (()=>{
             try
             {
-                return new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true })
-                    .buffer instanceof SharedArrayBuffer;
+                return typeof SharedArrayBuffer === 'function'
+                    && new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true })
+                        .buffer instanceof SharedArrayBuffer;
             }
             catch (e){
                 void e;
