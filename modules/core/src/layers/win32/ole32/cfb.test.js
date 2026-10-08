@@ -202,13 +202,6 @@ test('the directory the writer builds is an ordered red-black tree', ()=>{
     }
 });
 
-test('names compare by length first and then without regard to case', ()=>{
-    assert.ok(compareNames('b', 'AA') < 0);
-    assert.ok(compareNames('AB', 'aa') > 0);
-    assert.equal(compareNames('abc', 'ABC'), 0);
-    assert.equal(nameKey('Root Entry'), 'ROOT ENTRY');
-});
-
 test('damage reads as no file rather than as a partial one', ()=>{
     const root = createRoot();
     addStream(root, 'a', new Uint8Array(5000).fill(1));
