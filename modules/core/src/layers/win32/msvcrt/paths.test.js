@@ -598,6 +598,6 @@ test('_wfullpath resolves as _fullpath does, its size in characters', ()=>{
 
 test('_chmod takes a path that exists and is ENOENT for one that does not', ()=>{
     const { memory, table } = build();
-    assert.equal(table._chmod.handler([memory.put('C:\game\data.mpq'), 0x80]), 0);
-    assert.equal(table._chmod.handler([memory.put('C:\game\none.mpq'), 0x80]), -1);
+    assert.equal(table._chmod.handler([memory.put('C:\\game\\data.mpq'), 0x80]), 0);
+    assert.equal(table._chmod.handler([memory.put('C:\\game\\none.mpq'), 0x80]), -1);
 });
