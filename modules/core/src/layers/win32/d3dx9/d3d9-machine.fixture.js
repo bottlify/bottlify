@@ -3237,8 +3237,37 @@ export function execute(subject, io){
             }
             case 'rcp': scalar(x=>x === 0 ? Infinity : f32(1 / x)); break;
             case 'rsq': scalar(rsq); break;
-            case 'exp': case 'expp': scalar(x=>f32(Math.pow(2, x))); break;
-            case 'log': case 'logp': scalar(x=>f32(Math.log2(Math.abs(x)))); break;
+            case 'expp':
+                if (v.vs && v.major < 2)
+                {
+                    // vs_1_x: 2^floor(w), the fraction of w, 2^w and one.
+                    const x = src(cur.sources[0], 0);
+                    const whole = Math.floor(x);
+                    const parts = [f32(Math.pow(2, whole)), f32(x - whole), f32(Math.pow(2, x)), 1];
+                    perComponent(c=>parts[c]);
+                    break;
+                }
+                scalar(x=>f32(Math.pow(2, x)));
+                break;
+            case 'exp': scalar(x=>f32(Math.pow(2, x))); break;
+            case 'logp':
+                if (v.vs && v.major < 2)
+                {
+                    // vs_1_x: the exponent of |w|, its mantissa in [1, 2), log2 |w| and
+                    // one; of zero, minus infinity twice around a mantissa of one.
+                    const magnitude = Math.abs(src(cur.sources[0], 0));
+                    const bits = new DataView(new ArrayBuffer(4));
+                    bits.setFloat32(0, magnitude);
+                    const word = bits.getUint32(0);
+                    bits.setUint32(0, (word & 0x7fffff) | 0x3f800000);
+                    const parts = magnitude === 0 ? [-Infinity, 1, -Infinity, 1]
+                        : [(word >>> 23) - 127, bits.getFloat32(0), f32(Math.log2(magnitude)), 1];
+                    perComponent(c=>parts[c]);
+                    break;
+                }
+                scalar(x=>f32(Math.log2(Math.abs(x))));
+                break;
+            case 'log': scalar(x=>f32(Math.log2(Math.abs(x)))); break;
             case 'pow': {
                 const base = Math.abs(src(s[0], 0));
                 const exponent = src(s[1], 0);

@@ -181,6 +181,11 @@ function pageRunner(){
     const VERTEX = 1;
     const FRAGMENT = 2;
     const COMPUTE = 4;
+    // A texture's usage bits are not a buffer's.
+    const TEXTURE_COPY_SRC = 0x01;
+    const TEXTURE_COPY_DST = 0x02;
+    const TEXTURE_BINDING = 0x04;
+    const RENDER_ATTACHMENT = 0x10;
     gateWindow.gateDevice = (async()=>{
         const gpu = /** @type {any} */ (navigator).gpu;
         if (!gpu)
@@ -225,6 +230,12 @@ function pageRunner(){
         for (let at = 0; at < Math.min(given.length, floats.length); at++)
         {
             floats[at] = given[at];
+        }
+        // The half-pixel move a vertex stage makes reads the viewport's scale
+        // here; zero leaves the position as the shader wrote it.
+        if (plan.viewportRegister !== undefined && plan.viewportRegister * 4 < floats.length)
+        {
+            floats.fill(0, plan.viewportRegister * 4, plan.viewportRegister * 4 + 4);
         }
         const bools = [];
         for (const b of plan.bools)
@@ -322,13 +333,14 @@ function pageRunner(){
             primitive: { topology: 'triangle-list' },
         });
         const target = device.createTexture({ size: [1, 1], format: 'rgba32float',
-            usage: 0x10 | COPY_SRC });
+            usage: RENDER_ATTACHMENT | TEXTURE_COPY_SRC });
         const samplerResources = plan.samplers.flatMap((/** @type {any} */ s)=>{
             const dimension = dims[s.type] ?? '2d';
             const layers = dimension === 'cube' ? 6 : 1;
             const texture = device.createTexture({
                 size: [1, 1, layers], format: 'rgba8unorm',
-                dimension: dimension === '3d' ? '3d' : '2d', usage: 0x04 | COPY_DST,
+                dimension: dimension === '3d' ? '3d' : '2d',
+                usage: TEXTURE_BINDING | TEXTURE_COPY_DST,
             });
             const bytes = plan.samplerBytes[s.index % plan.samplerBytes.length];
             for (let layer = 0; layer < layers; layer++)
@@ -415,6 +427,19 @@ export function judge(expected, got){
 }
 
 /**
+ * What Direct3D hands on for an output component: below model 3 the colour
+ * outputs oD# are held to [0, 1] on their way to the rasteriser, which the
+ * machine, reporting the register, does not do.
+ *
+ * @param {import('./shader-cases.mjs').GateCase} c @param {string} name @param {number} component
+ */
+function expectedOf(c, name, component){
+    const value = c.expected[name][component];
+    return c.vertex && /^oD\d$/.test(name) && !c.profile.startsWith('vs_3')
+        ? Math.min(1, Math.max(0, value)) : value;
+}
+
+/**
  * @param {import('./shader-cases.mjs').GateCase} c @param {any} result
  */
 function compare(c, result){
@@ -438,7 +463,7 @@ function compare(c, result){
             {
                 continue;
             }
-            const verdict = judge(c.expected[name][component], got[component]);
+            const verdict = judge(expectedOf(c, name, component), got[component]);
             if (verdict === 'undefined')
             {
                 undefinedCount++;
@@ -478,7 +503,7 @@ async function main(){
         cdp = new CdpEndpoint(browser.browserWs);
         await cdp.open();
         const { targetId } = await cdp.send('Target.createTarget',
-            { url: `http://127.0.0.1:${server.port}/sandbox/README.md` });
+            { url: `http://127.0.0.1:${server.port}/sandbox/shader-gate.html` });
         const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
         await cdp.send('Runtime.enable', {}, sessionId);
         await cdp.send('Runtime.evaluate', { expression: `(${pageRunner.toString()})(); null` },
@@ -489,6 +514,7 @@ async function main(){
                 (_, k)=>buildCase(profile, seed * 1000003 + k, length));
             const plans = cases.map(c=>({ ...pagePlan(c), entry: c.entry, samplers: c.samplers,
                 constants: c.constants, ints: c.ints, bools: c.bools,
+                viewportRegister: c.viewportRegister,
                 samplerBytes: SAMPLER_BYTES }));
             const answer = await cdp.send('Runtime.evaluate', {
                 expression: `gateRun(${JSON.stringify(plans)}).then(r => JSON.stringify(r))`,

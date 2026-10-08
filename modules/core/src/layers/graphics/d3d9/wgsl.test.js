@@ -126,7 +126,7 @@ test('the arithmetic instructions become the statements they mean', ()=>{
             'r0 = sign(c[1]);'],
         ['abs', [op(OPCODE.ABS, 2), dst(r, 0), src(c, 1)], 'r0 = abs(c[1]);'],
         ['nrm', [op(OPCODE.NRM, 2), dst(r, 0), src(c, 1)],
-            'r0 = vec4f(d3dNrm(c[1].xyz), 0.0);'],
+            'r0 = d3dNrm4(c[1]);'],
         ['sincos', [op(OPCODE.SINCOS, 4), dst(r, 0), src(c, 1), src(c, 2), src(c, 3)],
             'r0 = vec4f(cos(c[1].x), sin(c[1].x), 0.0, 0.0);'],
         ['mova', [op(OPCODE.MOVA, 2), dst(REGISTER.ADDR, 0), src(c, 1)], 'a0 = round(c[1]);'],

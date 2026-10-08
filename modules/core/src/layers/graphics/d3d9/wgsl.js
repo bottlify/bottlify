@@ -154,7 +154,7 @@ const LOG_PARTS = `fn logParts(x: f32) -> vec4f {
  * no exponent overflows to an infinity either; nrm is the vector times the
  * rsq of its length squared, so the zero vector stays zero.
  */
-const D3D_MATH = `const d3dMax = 3.4028235e38;
+const D3D_MATH = `const d3dMax = 0x1.fffffep+127f;
 fn d3dRcp(x: f32) -> f32 {
     return select(clamp(1.0 / x, -d3dMax, d3dMax), d3dMax, x == 0.0);
 }
@@ -169,6 +169,9 @@ fn d3dPow(x: f32, y: f32) -> f32 {
 }
 fn d3dNrm(v: vec3f) -> vec3f {
     return v * d3dRsq(dot(v, v));
+}
+fn d3dNrm4(v: vec4f) -> vec4f {
+    return v * d3dRsq(dot(v.xyz, v.xyz));
 }`;
 
 /** Whether a varying location carries a coordinate set. @param {number} location */
@@ -1067,7 +1070,9 @@ export function translateShader(parsed, options = {}){
                 write(instruction, `abs(${src(instruction, 0)})`);
                 break;
             case OPCODE.NRM:
-                write(instruction, `vec4f(d3dNrm(${src(instruction, 0)}.xyz), 0.0)`);
+                // All four scaled by the rsq of the length of xyz, w too, as the
+                // reference pseudo-code writes it.
+                write(instruction, `d3dNrm4(${src(instruction, 0)})`);
                 break;
             case OPCODE.SINCOS: {
                 const s = src(instruction, 0);

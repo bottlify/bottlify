@@ -313,4 +313,4 @@ test('recorded: Direct3D 9 frames of lit and shader draws ask the same of the GP
         assert.deepEqual(frames, EXPECTED);
     });
 
-const EXPECTED = ['d78e161b', 'fc294022', '1710935d'];
+const EXPECTED = ['ec70cdd9', 'fc294022', '1710935d'];

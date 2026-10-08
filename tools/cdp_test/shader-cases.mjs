@@ -218,6 +218,7 @@ const programText = (p, body)=>[p.name, ...p.head, ...p.init, ...body, ...p.tail
  * @property {Record<string, number[]>} inputs   By register name: v0, t1 ...
  * @property {Record<string, number[]>} expected  By output name, unwritten components NaN.
  * @property {Record<string, number>} written
+ * @property {number | undefined} viewportRegister
  * @property {string | null} error
  */
 
@@ -275,7 +276,7 @@ export function buildCase(profile, seed, length = 10){
         constants, ints, bools, inputs,
         expected: Object.fromEntries(Object.entries(result.outputs)
             .map(([name, values])=>[name, Array.from(values, Number)])),
-        written: result.written,
+        written: result.written, viewportRegister: translated.viewportRegister,
         error: translated.error,
     };
 }
