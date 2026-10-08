@@ -43,6 +43,12 @@ import { fileAttributes, msToFileTime } from '../kernel32/filetime.js';
 import { WIN32_FIND_DATAA } from '../kernel32/files.js';
 import { urlOfShortcut } from './internet-shortcut.js';
 
+/**
+ * The exports a program imports from shell32 by number alone, by their XP
+ * ordinals.
+ */
+export const SHELL32_ORDINALS = Object.freeze({ 165: 'SHCreateDirectory' });
+
 /** ShellExecute reports failure as a value of 32 or less, not as zero. */
 const SE_ERR_FNF = 2;
 const SE_ERR_ACCESSDENIED = 5;
@@ -561,8 +567,8 @@ export function createShellFunctions(host){
      *
      * @param {boolean} wide
      */
-    const createDirectory = wide=>({
-        argBytes: 12,
+    const createDirectory = (wide, argBytes = 12)=>({
+        argBytes,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [, path])=>{
             const volume = fileVolume();
@@ -1452,6 +1458,14 @@ export function createShellFunctions(host){
          */
         SHCreateDirectoryExA: createDirectory(false),
         SHCreateDirectoryExW: createDirectory(true),
+
+        /**
+         * int SHCreateDirectory(HWND hwnd, LPCWSTR pszPath)
+         *
+         * The same, with no security attributes, and exported by number
+         * alone (SHELL32_ORDINALS).
+         */
+        SHCreateDirectory: createDirectory(true, 8),
 
         /**
          * void SHChangeNotify(LONG wEventId, UINT uFlags, LPCVOID dwItem1, LPCVOID dwItem2)

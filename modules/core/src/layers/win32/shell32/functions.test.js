@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createShellFunctions } from './functions.js';
+import { SHELL32_ORDINALS, createShellFunctions } from './functions.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from '../kernel32/vfs.js';
 import { decodeAnsi } from '../kernel32/locale.js';
@@ -674,6 +674,18 @@ test('SHCreateDirectoryEx makes the whole path, and says when it was there', asy
     assert.deepEqual([m.shell.SHCreateDirectoryExA.argBytes, m.shell.SHCreateDirectoryExW.argBytes],
         [12, 12]);
 });
+
+test('SHCreateDirectory is the wide one with no attributes, and is shell32\'s ordinal 165',
+    async()=>{
+        // A game's voice setup saves its settings into a folder it makes this
+        // way, imported by number alone.
+        const m = await machineWithVolume();
+        const path = m.list(['C:\\work\\voice'], true);
+        assert.equal(m.shell.SHCreateDirectory.handler([0, path]), 0);
+        assert.ok(m.volume.stat('C:\\work\\voice')?.isDirectory);
+        assert.equal(m.shell.SHCreateDirectory.argBytes, 8);
+        assert.equal(SHELL32_ORDINALS[165], 'SHCreateDirectory');
+    });
 
 /** @param {Uint8Array} memory @param {string} text @param {number} at */
 function putWide(memory, text, at){

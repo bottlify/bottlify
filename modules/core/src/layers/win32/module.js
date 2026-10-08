@@ -65,7 +65,7 @@ import { createTimerService } from './winmm/timers.js';
 import { COMCTL32_ORDINALS, createComctlFunctions } from './comctl32/functions.js';
 import { createCommonControls } from './comctl32/controls.js';
 import { createImageLists } from './comctl32/imagelist.js';
-import { createShellFunctions } from './shell32/functions.js';
+import { SHELL32_ORDINALS, createShellFunctions } from './shell32/functions.js';
 import { registerShellLinkClasses } from './shell32/shelllink.js';
 import { registerInternetShortcutClass } from './shell32/internet-shortcut.js';
 import { registerWbemClasses } from './ole32/wbem.js';
@@ -2975,6 +2975,7 @@ export function createWin32Module(){
                     // A program of the 9x era imports shlwapi's wide-character
                     // wrappers by number alone.
                     'SHLWAPI.dll': SHLWAPI_ORDINALS,
+                    'SHELL32.dll': SHELL32_ORDINALS,
                 }),
 
                 /**
