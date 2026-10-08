@@ -571,6 +571,16 @@ async function registerProduct(engine){
     const date = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`
         + `${String(now.getDate()).padStart(2, '0')}`;
     return schedule(engine, 'RegisterProduct', async()=>{
+        // The machine keeps its own copy of the package, for a repair or a
+        // removal once the source is gone; a maintenance run keeps the one
+        // it already has.
+        const installer = `${normalize(session.getProperty('WindowsFolder'))}Installer\\`;
+        const recorded = host.registration.productInfo(productCode, 'LocalPackage');
+        const kept = 'value' in recorded && recorded.value.toLowerCase()
+            .startsWith(installer.toLowerCase()) ? recorded.value : null;
+        const localPackage = kept ?? (session.packagePath.toLowerCase()
+            .startsWith(installer.toLowerCase()) ? session.packagePath
+            : await host.cachePackage?.(session.packagePath, installer) ?? session.packagePath);
         host.registration.registerProduct({
             productCode,
             packageCode: session.getProperty('PackageCode'),
@@ -581,7 +591,8 @@ async function registerProduct(engine){
             language: Number(session.getProperty('ProductLanguage')) || 0,
             installLocation: session.getProperty('ARPINSTALLLOCATION'),
             installSource: session.sourceDir,
-            localPackage: session.packagePath,
+            localPackage,
+            packageName: session.packagePath.slice(session.packagePath.lastIndexOf('\\') + 1),
             date,
             extras: Object.fromEntries([['HelpLink', 'ARPHELPLINK'],
                 ['URLInfoAbout', 'ARPURLINFOABOUT'], ['URLUpdateInfo', 'ARPURLUPDATEINFO'],

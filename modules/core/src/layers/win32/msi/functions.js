@@ -36,8 +36,9 @@ import { PID_TYPES, VT, readSummary } from './summary.js';
 import { INSTALLMESSAGE, doAction, readFile, runSequence, writeFile } from './actions.js';
 import {
     ERROR_INSTALL_TRANSFORM_FAILURE, applyTransform, applyTransformList, createTransformSummary,
-    generateTransform,
+    generateTransform, writeSummaryStream,
 } from './transform.js';
+import { embeddedCabinets, writeDatabase } from './database-writer.js';
 import { finishAsync } from './custom.js';
 import { createRegistration, squashGuid } from './registration.js';
 import { installerVersion } from './version.js';
@@ -117,6 +118,7 @@ const INSTALLUILEVEL = Object.freeze({
 
 /** MsiOpenDatabase's persistence modes; a larger value is an output path. */
 const MSIDBOPEN_READONLY = 0;
+const MSIDBOPEN_TRANSACT = 1;
 const MSIDBOPEN_CREATE = 3;
 const MSIDBOPEN_CREATEDIRECT = 4;
 const MSIDBOPEN_PATCHFILE = 32;
@@ -409,6 +411,7 @@ export function createMsiFunctions(host){
                         `REMOVE=${quoted(features)}`, made.thread),
                     installNested: (kind, source, commandLine)=>installNested(session, kind,
                         source, commandLine, made.thread),
+                    cachePackage,
                     divergence: host.divergence,
                     log: host.log,
                 },
@@ -596,6 +599,111 @@ export function createMsiFunctions(host){
     };
 
     /**
+     * The file each opened database reads its streams from.
+     *
+     * @type {WeakMap<import('./database.js').Database, any>}
+     */
+    const readers = new WeakMap();
+
+    /**
+     * What a summary information handle belongs to: its database, the file
+     * when it was opened by path, whether it was opened for changes and
+     * whether any were made.
+     *
+     * @type {WeakMap<Map<number, any>, { db: import('./database.js').Database,
+     *     path: string | null, changed: boolean, readOnly: boolean }>}
+     */
+    const summaries = new WeakMap();
+
+    /**
+     * Writes a database to a file: into a new file beside it first, then in
+     * its place -- the database still reads its streams from the file it
+     * replaces -- and the database then reads from the new one. Its tables,
+     * which open views hold, and its string numbers stay as they were.
+     *
+     * @param {import('./database.js').Database} db @param {string} target
+     * @param {Parameters<typeof writeDatabase>[2]} [options]
+     * @returns {Promise<number>}
+     */
+    const saveDatabase = async(db, target, options)=>{
+        const temporary = `${target}.tmp`;
+        const node = host.files.open(temporary,
+            { read: false, write: true, create: true, truncate: true });
+        if (!node)
+        {
+            return ERROR_FUNCTION_FAILED;
+        }
+        try
+        {
+            await writeDatabase(db,
+                { write: (offset, bytes)=>host.files.write(node, offset, bytes) }, options);
+        }
+        catch (e){
+            host.files.close(node);
+            host.files.remove(temporary);
+            host.log?.(`${target}: ${/** @type {Error} */ (e).message}`);
+            return ERROR_FUNCTION_FAILED;
+        }
+        host.files.close(node);
+        const old = readers.get(db);
+        if (old)
+        {
+            host.files.close(old);
+            readers.delete(db);
+        }
+        if (host.files.stat(target))
+        {
+            host.files.remove(target);
+        }
+        if (!host.files.rename(temporary, target))
+        {
+            return ERROR_FUNCTION_FAILED;
+        }
+        const fresh = await loadDatabase(target);
+        if (fresh)
+        {
+            for (const name of /** @type {const} */ (['hasStream', 'streamSize', 'readStream',
+                'readStreamRange', 'writeStream', 'streamNames', 'compound', 'summaryStream',
+                'setSummaryStream']))
+            {
+                /** @type {any} */ (db)[name] = /** @type {any} */ (fresh)[name];
+            }
+            readers.set(db, readers.get(fresh));
+        }
+        return ERROR_SUCCESS;
+    };
+
+    /**
+     * A copy of an installed package for the machine to keep, as Windows
+     * keeps one in its Installer folder for a repair or a removal: the
+     * package as it shipped, its embedded cabinets left out. Null when it
+     * could not be written.
+     *
+     * @param {string} packagePath @param {string} folder  The machine's Installer folder.
+     * @returns {Promise<string | null>}
+     */
+    const cachePackage = async(packagePath, folder)=>{
+        const db = await loadDatabase(packagePath);
+        if (!db)
+        {
+            return null;
+        }
+        if (!host.files.stat(folder)?.isDirectory)
+        {
+            host.files.mkdir(folder);
+        }
+        const name = `${folder.replace(/\\$/, '')}\\${Math.floor(Math.random() * 0x100000000).toString(16)}.msi`;
+        const cabinets = embeddedCabinets(db);
+        const code = await saveDatabase(db, name, { omitStreams: stream=>cabinets.has(stream) });
+        const node = readers.get(db);
+        if (node)
+        {
+            host.files.close(node);
+        }
+        return code === ERROR_SUCCESS ? name : null;
+    };
+
+    /**
      * A database out of a file on the volume, read where it lies.
      *
      * @param {string} path
@@ -615,10 +723,13 @@ export function createMsiFunctions(host){
         }
         try
         {
-            return await openDatabase(await openCompound({
+            const db = await openDatabase(await openCompound({
                 size: stat.size,
                 read: (offset, length)=>host.files.read(node, offset, length),
             }));
+            // Read where it lies, the file stays open until a commit replaces it.
+            readers.set(db, node);
+            return db;
         }
         catch (e){
             host.files.close(node);
@@ -1141,7 +1252,11 @@ export function createMsiFunctions(host){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            const mode = (persist >>> 0) > 0xffff ? 1 : (persist >>> 0) & ~MSIDBOPEN_PATCHFILE;
+            // A persist value past the modes is a pointer: the file a commit
+            // writes to, the database opened for changes.
+            const outPath = (persist >>> 0) > 0xffff ? reader(wide)(persist) : null;
+            const mode = outPath !== null ? MSIDBOPEN_TRANSACT
+                : (persist >>> 0) & ~MSIDBOPEN_PATCHFILE;
             let db;
             if (mode === MSIDBOPEN_CREATE || mode === MSIDBOPEN_CREATEDIRECT)
             {
@@ -1157,7 +1272,8 @@ export function createMsiFunctions(host){
                 }
                 db.readOnly = mode === MSIDBOPEN_READONLY;
             }
-            writeU32(out, open('database', { db, path: host.fullPath(name) }));
+            writeU32(out, open('database', { db, path: host.fullPath(name), mode,
+                outPath: outPath === null ? null : host.fullPath(outPath) }));
             return ERROR_SUCCESS;
         }),
         ...both('MsiDatabaseOpenView', 12, wide=>([database, query, out])=>{
@@ -1268,8 +1384,19 @@ export function createMsiFunctions(host){
         }),
         MsiDatabaseCommit: {
             argBytes: 4,
-            handler: ([database])=>(get(database, 'database') ? ERROR_SUCCESS
-                : ERROR_INVALID_HANDLE),
+            /** @param {number[]} args */
+            handler: async([database])=>{
+                const opened = get(database, 'database');
+                if (!opened)
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                if (opened.mode === MSIDBOPEN_READONLY || opened.db.readOnly)
+                {
+                    return ERROR_SUCCESS;
+                }
+                return saveDatabase(opened.db, opened.outPath ?? opened.path);
+            },
         },
         ...both('MsiDatabaseGetPrimaryKeys', 12, wide=>([database, table, out])=>{
             const opened = get(database, 'database');
@@ -1318,8 +1445,8 @@ export function createMsiFunctions(host){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            void count;
-            let db = get(database, 'database')?.db ?? null;
+            const opened = get(database, 'database');
+            let db = opened?.db ?? null;
             if (!db && (database >>> 0) !== 0)
             {
                 return ERROR_INVALID_HANDLE;
@@ -1333,7 +1460,10 @@ export function createMsiFunctions(host){
                     return ERROR_INSTALL_PACKAGE_INVALID;
                 }
             }
-            writeU32(out, open('summary', readSummary(db.summaryStream())));
+            const summary = readSummary(db.summaryStream());
+            summaries.set(summary, { db, path: opened ? null : reader(wide)(path), changed: false,
+                readOnly: Boolean(opened?.db.readOnly ?? (count | 0) === 0) });
+            writeU32(out, open('summary', summary));
             return ERROR_SUCCESS;
         }),
         MsiSummaryInfoGetPropertyCount: {
@@ -1410,11 +1540,38 @@ export function createMsiFunctions(host){
                 : wanted === VT.FILETIME ? new DataView(host.readMemory(filetime >>> 0, 8)
                     .slice().buffer).getBigUint64(0, true) : integer | 0;
             summary.set(property >>> 0, { type: wanted, value });
+            const owner = summaries.get(summary);
+            if (owner)
+            {
+                owner.changed = true;
+            }
             return ERROR_SUCCESS;
         }),
         MsiSummaryInfoPersist: {
             argBytes: 4,
-            handler: ([handle])=>(get(handle, 'summary') ? ERROR_SUCCESS : ERROR_INVALID_HANDLE),
+            /** @param {number[]} args */
+            handler: async([handle])=>{
+                const summary = get(handle, 'summary');
+                const owner = summary ? summaries.get(summary) : null;
+                if (!summary || !owner)
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                if (owner.readOnly)
+                {
+                    return ERROR_FUNCTION_FAILED;
+                }
+                if (!owner.changed)
+                {
+                    return ERROR_SUCCESS;
+                }
+                owner.db.setSummaryStream(writeSummaryStream(summary));
+                owner.changed = false;
+                // Through a database handle, the file changes at its commit;
+                // a summary opened by path is its file's alone, written now.
+                return owner.path === null ? ERROR_SUCCESS
+                    : saveDatabase(owner.db, host.fullPath(owner.path));
+            },
         },
 
         // ----- sessions -----

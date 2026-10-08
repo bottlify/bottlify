@@ -233,6 +233,7 @@ export function createRegistration(hive){
          * @param {{ productCode: string, packageCode: string, upgradeCode: string | null,
          *     name: string, version: string, manufacturer: string, language: number,
          *     installLocation: string, installSource: string, localPackage: string,
+ *     packageName: string,
          *     date: string, extras: Record<string, string> }} product
          */
         registerProduct: product=>{
@@ -277,8 +278,7 @@ export function createRegistration(hive){
             // the folder as the first network source and the last one used.
             const sources = create(`${keys.advertised}\\SourceList`);
             const folder = product.installSource;
-            hive.setValue(sources, 'PackageName', REG_SZ, sz(product.localPackage
-                .slice(product.localPackage.lastIndexOf('\\') + 1)));
+            hive.setValue(sources, 'PackageName', REG_SZ, sz(product.packageName));
             hive.setValue(sources, 'LastUsedSource', REG_EXPAND_SZ, sz(`n;1;${folder}`));
             hive.setValue(create(`${keys.advertised}\\SourceList\\Net`), '1', REG_EXPAND_SZ,
                 sz(folder));

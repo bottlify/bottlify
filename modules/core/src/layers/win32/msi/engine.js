@@ -45,6 +45,8 @@
  *     => Promise<number>} [installNested]
  *     A nested installation: a package stored in this one, one beside its source, or an
  *     installed product; answers as MsiInstallProduct does.
+ * @property {(packagePath: string, folder: string) => Promise<string | null>} [cachePackage]
+ *     The package copied where the machine keeps installed packages; its path, or null.
  * @property {(productCode: string, features: string) => Promise<number>} [removeProduct]
  *     Another installed product's removal, from the package the machine kept for it.
  * @property {(api: string, detail: string) => void} [divergence]
