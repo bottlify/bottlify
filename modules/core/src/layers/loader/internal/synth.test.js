@@ -12,7 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { synthesiseModule } from './synth.js';
+import { synthesiseModule, synthesiseProgram } from './synth.js';
 import { parsePe, readImports, rvaToFileOffset } from './pe.js';
 
 const BASE = 0x70000000;
@@ -483,4 +483,35 @@ test('a variable may hold other exports\' addresses, and be exported part way in
         base: BASE,
         exports: [{ name: 'vtable', data: new Uint8Array(4), pointers: [{ at: 0, to: 'none' }] }],
     }), /points at "none"/);
+});
+
+test('a program is an executable whose entry calls one routine and exits with its answer', ()=>{
+    const program = synthesiseProgram({ library: 'bottlify.dll', routine: 'msiexec' });
+    const image = parsePe(program.bytes);
+    assert.equal(image.library, false, 'an executable, not a library');
+    assert.equal(image.imageBase, 0x400000);
+    assert.equal(image.subsystem, 2, 'a windowed program, as the system\'s own are');
+    assert.ok(image.stackReserve >= 0x10000);
+    assert.equal(image.sizeOfImage, program.bytes.length, 'the file is its own mapping');
+    assert.deepEqual(readImports(program.bytes, image).map(dll=>[dll.dll,
+        dll.entries.map(entry=>entry.name)]),
+    [['bottlify.dll', ['msiexec']], ['KERNEL32.dll', ['ExitProcess']]]);
+    const [routine, exit] = readImports(program.bytes, image).map(dll=>dll.entries[0].iatRva);
+    const iat = image.directories[12];
+    assert.ok(routine >= iat.address && exit + 4 <= iat.address + iat.size,
+        'both address tables lie in the range the IAT directory names');
+    const text = image.sections.find(section=>section.name === '.text');
+    const data = image.sections.find(section=>section.name === '.data');
+    assert.ok(text?.executable && !text.writable, 'the code is read-only');
+    assert.ok(data?.writable && !data.executable, 'and what the loader binds is not code');
+
+    // call [routine]; push eax; call [ExitProcess]
+    const entry = rvaToFileOffset(image, image.entryPointRva);
+    const view = new DataView(program.bytes.buffer);
+    assert.deepEqual([...program.bytes.subarray(entry, entry + 2)], [0xff, 0x15]);
+    assert.equal(view.getUint32(entry + 2, true), image.imageBase + routine);
+    assert.equal(program.bytes[entry + 6], 0x50);
+    assert.deepEqual([...program.bytes.subarray(entry + 7, entry + 9)], [0xff, 0x15]);
+    assert.equal(view.getUint32(entry + 9, true), image.imageBase + exit);
+    assert.throws(()=>synthesiseProgram({ library: '', routine: 'x' }), /ASCII/);
 });
