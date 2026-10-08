@@ -826,6 +826,7 @@ export function createScheduler(options){
             return { ran: null, instructions: 0, switched: false };
         }
         const bell = cpu.executorBell();
+        bell.goOn?.(ready().length === 0);
         let ran = null;
         let instructions = 0;
         for (;;)
@@ -870,6 +871,8 @@ export function createScheduler(options){
                 ran = on.thread;
                 instructions += ended.instructions;
             }
+            // What the calls answered may have made a thread ready: it waits.
+            bell.goOn?.(ready().length === 0);
             if (ran !== null)
             {
                 // The last to end is the one a caller reading `current` between turns finds.

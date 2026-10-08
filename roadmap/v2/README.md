@@ -339,6 +339,17 @@ measurement before stage 1 says that pays.
 | --- | --- | --- | --- | --- |
 | Executors of a process | 1 | `hardwareConcurrency`, at most the process's thread count | two or more of its threads are ready most of the time | rarely, after a long quiet spell: it is a mode switch |
 
+**Measured** (2026-10-08, `tools/executor-sweep.mjs`, node 22.22.0, a 4-core VM, no browser;
+three runs a point, medians): a synthetic program of T threads, each on its own data, with a
+`lock add` every 256 iterations or none and a host call every 4 096 or 65 536 or none, ran
+x1.53 to x1.91 faster with two threads on three or four executors than on one, and x1.88 to
+x2.58 with three threads on four; the more locks and host calls, the larger the gain. It ran
+slower -- x0.64 to x0.86 -- with more threads than executors past the process's own, and never
+faster with two executors in all (`negative-results.md`). One thread lost nothing on any count
+(x0.94 to x1.10). Doom 3, one executor, against `728d9672` before this stage: loading to the same
+mark in 17 s against 18 s (medians of six runs), the rate after it 14.56 against 14.78 M/s
+(three 70 s runs each, spread about 7 %): not distinguishable.
+
 **What it costs, and when it pays.** The atomic variant makes every executor slower by the tax *t*
 measured before stage 1. Two executors win when their speedup *S* satisfies *S* × (1 − *t*) > 1.
 At *t* = 20 % that is *S* > 1.25, which by Amdahl's law needs more than 40 % of the work to run in

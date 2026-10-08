@@ -19,7 +19,7 @@
  * stacks need no carrying.
  */
 
-import { CHANNEL_BYTES, Said, Turn, channelOf } from './executor-channel.js';
+import { CHANNEL_BYTES, Said, Turn, channelOf, waitWhile } from './executor-channel.js';
 
 /**
  * A worker, as a page's `Worker` or Node's `worker_threads` makes one.
@@ -60,7 +60,9 @@ async function openWorker(url){
  * of every turn of its own, so one wait covers every channel.
  */
 export function createBell(){
-    const buffer = new SharedArrayBuffer(4);
+    // The count of turns rung, then whether an executor may go on with its
+    // thread past a slice (`goOn`).
+    const buffer = new SharedArrayBuffer(8);
     const word = new Int32Array(buffer);
     return {
         buffer,
@@ -71,7 +73,18 @@ export function createBell(){
          * @param {number} seen @param {number} [ms]
          */
         wait(seen, ms = Infinity){
-            Atomics.wait(word, 0, seen, ms);
+            waitWhile(word, 0, seen, ms);
+        },
+        /**
+         * Whether no ready thread waits for an executor: then one whose slice
+         * ends with its thread still running goes on with it, a slice after
+         * another, without a word to the process -- which a round trip a
+         * quantum cost as much as the quantum's own work.
+         *
+         * @param {boolean} on
+         */
+        goOn(on){
+            Atomics.store(word, 1, on ? 1 : 0);
         },
     };
 }

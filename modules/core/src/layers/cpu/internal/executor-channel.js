@@ -29,6 +29,31 @@ export const Turn = Object.freeze({
  * is to end, the process's handler took the fault, a fault no handler took is in the text. */
 export const Said = Object.freeze({ HALTED: 1, STOPPED: 2, CLAIMED: 4, FAULTED: 8 });
 
+/**
+ * How long a side looks at a word before it sleeps on it, in ms: the other side
+ * mostly answers within microseconds, and a sleeping thread's wake costs tens
+ * of them on a loaded machine -- two a slice, two a host call.
+ */
+export const SPIN_MS = 0.05;
+
+/**
+ * Waits until `word[index]` is no longer `value`: a look for `SPIN_MS`, then a
+ * sleep for at most `ms`.
+ *
+ * @param {Int32Array} word @param {number} index @param {number} value @param {number} [ms]
+ */
+export function waitWhile(word, index, value, ms = Infinity){
+    const began = performance.now();
+    while (Atomics.load(word, index) === value)
+    {
+        if (performance.now() - began >= SPIN_MS)
+        {
+            Atomics.wait(word, index, value, ms);
+            return;
+        }
+    }
+}
+
 /** Bytes before the text, and the text's room. */
 const TEXT_AT = 64;
 const TEXT_BYTES = 4096;
@@ -68,7 +93,7 @@ export function channelOf(buffer, bell = null){
         await(state){
             while (Atomics.load(words, Word.STATE) === state)
             {
-                Atomics.wait(words, Word.STATE, state);
+                waitWhile(words, Word.STATE, state);
             }
             return Atomics.load(words, Word.STATE);
         },

@@ -118,3 +118,46 @@ None yet.
 - **Correctness.** Not applicable: only counted.
 - **Decision.** Not built. The counts stay in the diagnostics, to be looked at again for a title
   that reads more of its bundle compressed.
+
+### 2026-10-08 -- an executor waiting in place for its next slice, rather than through its event loop
+
+- **Idea.** Roadmap v2, stage 3: a remote executor (`executor.worker.js`) waited for the process's
+  next slice with `Atomics.waitAsync`, its wake going through the worker's event loop; waiting
+  with `Atomics.wait` for up to 2 ms first would take the slice the moment it is asked for, which
+  was thought to be the cost that made a thread on another executor slower than on the process's.
+- **Workload.** `tools/executor-sweep.mjs`, two threads, 400 M iterations of its kernel in all, no
+  lock, no host call, `executors` 1, 2 and 3, the kernel's quanta 100 000 and 1 000 000; `cork2`
+  at `b497c50e` with and without the wait in place.
+- **Values.** One run each (s): quantum 100 000 -- before E=1 1.23 (1.17 in a second series),
+  E=2 2.77 (2.83), E=3 1.69 (1.74); after 1.23, 2.78, 1.76. Quantum 1 000 000 -- before 1.00,
+  1.40, 0.77; after 0.98, 1.57, 0.82. Spread: not measured beyond the repeat of the first row.
+- **Machine.** Node 22.22.0, a 4-core x86-64 Linux VM (Firecracker). No browser. Power plan:
+  not recorded.
+- **Why it did not pay.** The wake was not the cost. Timed apart (a remote executor alone, 14 000
+  slices of 100 000): the worker spent 598 ms inside its slices against 505 ms for the same work
+  on the process's own host, and about 38 us a slice went to the two handoffs of each round trip
+  -- whichever way the worker waited. What paid was making fewer round trips: an executor goes on
+  with its thread slice after slice while no ready thread waits for one (`goOn`), and a short look
+  at the word before sleeping on it. Measured in the sweep's entry in `roadmap/v2/README.md`.
+- **Correctness.** Unchanged: the executors' tests passed either way.
+- **Decision.** Kept as the first wait of the idle loop (it costs nothing), not counted as the fix.
+
+### 2026-10-08 -- more threads than other executors, or one other executor
+
+- **Idea.** Roadmap v2, stage 3: any number of executors past the process's own would be at least
+  as fast as one.
+- **Workload.** `tools/executor-sweep.mjs` at `cork2` `b497c50e` plus the slice chaining (the
+  commit that adds the tool), 400 M iterations in all over T threads, every combination of T 1-3,
+  `executors` E 1-4, a `lock add` every 256 iterations or never, a host call every 65 536 or 4 096
+  or never; three runs each, E alternating.
+- **Values.** Medians against E=1 for the same T: E=2 with T=2 or 3, x0.64 to x0.86 in every
+  combination (e.g. T=2, no lock, no call: 1.20 s against 1.55 s, raw 1.55 1.53 1.62); T=3 on E=3
+  x1.18 to x1.47, below T=3 on E=4 (x1.88 to x2.58).
+- **Machine.** Node 22.22.0, a 4-core x86-64 Linux VM (Firecracker). No browser. Power plan:
+  not recorded.
+- **Why it did not pay.** The process's own executor runs no thread, so E=2 is one executor taking
+  turns; and an executor with more threads than one to run hands each quantum back to the
+  process for the switch, a round trip each, where the process's own executor switches in place.
+- **Correctness.** Every run of the sweep exited with the same checksum.
+- **Decision.** The mode choice (stage 3) gives a process one executor or one past the process's
+  own for each thread it keeps ready at once, never two in all.
