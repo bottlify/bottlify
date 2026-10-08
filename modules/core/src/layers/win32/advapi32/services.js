@@ -23,7 +23,7 @@
  */
 
 import { HKEY_LOCAL_MACHINE, REG_SZ, REG_EXPAND_SZ, REG_DWORD } from './registry.js';
-import { encodeAnsi } from '../kernel32/locale.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_NAME = 123;
@@ -34,6 +34,24 @@ const ERROR_SERVICE_MARKED_FOR_DELETE = 1072;
 const ERROR_SERVICE_EXISTS = 1073;
 const ERROR_FAILED_SERVICE_CONTROLLER_CONNECT = 1063;
 const ERROR_SERVICE_NOT_IN_EXE = 1083;
+const ERROR_INVALID_PARAMETER = 87;
+const ERROR_INVALID_LEVEL = 124;
+const ERROR_MORE_DATA = 234;
+
+/** EnumServicesStatusEx's one information level, and the record it writes per service. */
+const SC_ENUM_PROCESS_INFO = 0;
+const ENUM_SERVICE_STATUS_PROCESS_SIZE = 44;
+
+/** Service types: the drivers, the programs, and the bit a program may add to either. */
+const SERVICE_DRIVER = 0x0b;
+const SERVICE_WIN32 = 0x30;
+const SERVICE_INTERACTIVE_PROCESS = 0x100;
+const SERVICE_WIN32_OWN_PROCESS = 0x10;
+
+/** Which services by state: running ones, stopped ones, or both. */
+const SERVICE_ACTIVE = 1;
+const SERVICE_STATE_ALL = 3;
+const SERVICE_STOPPED = 1;
 
 /** Where the manager keeps every service it knows. */
 const SERVICES_PATH = 'SYSTEM\\CurrentControlSet\\Services';
@@ -61,6 +79,10 @@ const HANDLE_STRIDE = 4;
  * @property {ReturnType<typeof import('./registry-service.js').createRegistryService>} hive
  * @property {(code: number) => void} [setLastError]
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ *           What EnumServicesStatusEx reads a resume handle and a wide group
+ *           name with. Absent, every enumeration starts at the first service,
+ *           and a wide group name matches none.
  */
 
 /**
@@ -180,6 +202,166 @@ export function createServiceFunctions(host){
         return object && object.kind === kind ? object : null;
     };
 
+    /** @param {number} address @param {number} value */
+    const writeDword = (address, value)=>host.writeMemory?.(address >>> 0, dword(value));
+
+    /** @param {number} address */
+    const readDword = address=>{
+        const bytes = host.readMemory?.(address >>> 0, 4);
+        return bytes ? new DataView(bytes.slice().buffer).getUint32(0, true) : 0;
+    };
+
+    /** A value of a service's key as a number, or `fallback`. @param {number} key @param {string} name @param {number} fallback */
+    const numberOf = (key, name, fallback)=>{
+        const value = hive.getValue(key, name);
+        return value && value.data.length >= 4
+            ? new DataView(value.data.buffer, value.data.byteOffset).getUint32(0, true)
+            : fallback;
+    };
+
+    /** A value of a service's key as text, or null. @param {number} key @param {string} name */
+    const textOf = (key, name)=>{
+        const value = hive.getValue(key, name);
+        if (!value || value.data.length === 0)
+        {
+            return null;
+        }
+        const end = value.data.indexOf(0);
+        return decodeAnsi(value.data.subarray(0, end < 0 ? value.data.length : end));
+    };
+
+    /**
+     * The group name an enumeration was asked for: null for none, the text
+     * otherwise -- undefined when it is wide and nothing here can read it.
+     *
+     * @param {number} pointer @param {boolean} wide
+     */
+    const groupNamed = (pointer, wide)=>{
+        if ((pointer >>> 0) === 0)
+        {
+            return null;
+        }
+        if (!wide)
+        {
+            return host.readCString(pointer >>> 0, MAX_SERVICE_NAME);
+        }
+        if (!host.readMemory)
+        {
+            return undefined;
+        }
+        let named = '';
+        for (let at = pointer >>> 0; named.length < MAX_SERVICE_NAME; at += 2)
+        {
+            const unit = host.readMemory(at, 2);
+            const code = unit[0] | unit[1] << 8;
+            if (code === 0)
+            {
+                break;
+            }
+            named += String.fromCharCode(code);
+        }
+        return named;
+    };
+
+    /**
+     * EnumServicesStatusExA and W: the services the database holds, in name
+     * order, each with its type and -- no service ever runs here -- stopped.
+     * As many as fit are written, their names after the records; with room
+     * for fewer than all, FALSE and ERROR_MORE_DATA, the bytes the rest need
+     * and the resume handle where the next call takes up.
+     *
+     * @param {boolean} wide
+     */
+    const enumServices = wide=>({
+        argBytes: 40,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [manager, level, typeMask, stateMask, buffer, size,
+            needed, returned, resume, groupPointer])=>{
+            if (!held(manager, 'manager'))
+            {
+                return fail(ERROR_INVALID_HANDLE);
+            }
+            if ((level >>> 0) !== SC_ENUM_PROCESS_INFO)
+            {
+                return fail(ERROR_INVALID_LEVEL);
+            }
+            const types = typeMask >>> 0;
+            const states = stateMask >>> 0;
+            if ((types & (SERVICE_DRIVER | SERVICE_WIN32)) === 0
+                || (types & ~(SERVICE_DRIVER | SERVICE_WIN32 | SERVICE_INTERACTIVE_PROCESS)) !== 0
+                || states === 0 || states > SERVICE_STATE_ALL
+                || (needed >>> 0) === 0 || (returned >>> 0) === 0)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            const group = groupNamed(groupPointer, wide);
+            /** @param {string} words */
+            const encode = words=>(wide
+                ? new Uint8Array(Uint16Array.from(`${words}\0`, c=>c.charCodeAt(0)).buffer)
+                : sz(words));
+
+            const all = (states & ~SERVICE_ACTIVE) === 0 ? [] : hive.subkeys(servicesKey())
+                .slice()
+                .sort((a, b)=>a.toUpperCase().localeCompare(b.toUpperCase()))
+                .flatMap(name=>{
+                    const key = serviceKey(name);
+                    if (!key)
+                    {
+                        return [];
+                    }
+                    const type = numberOf(key, 'Type', SERVICE_WIN32_OWN_PROCESS);
+                    const own = textOf(key, 'Group') ?? '';
+                    const inGroup = group === null
+                        || (group !== undefined && own.toUpperCase() === group.toUpperCase());
+                    return (type & types) !== 0 && inGroup
+                        ? [{ name, display: textOf(key, 'DisplayName') ?? name, type }]
+                        : [];
+                });
+
+            const first = (resume >>> 0) === 0 ? 0 : Math.min(readDword(resume), all.length);
+            const rest = all.slice(first);
+            const costOf = (/** @type {{ name: string, display: string }} */ entry)=>
+                ENUM_SERVICE_STATUS_PROCESS_SIZE + encode(entry.name).length
+                + encode(entry.display).length;
+            let room = size >>> 0;
+            let fitting = 0;
+            while (fitting < rest.length && costOf(rest[fitting]) <= room)
+            {
+                room -= costOf(rest[fitting]);
+                fitting++;
+            }
+
+            const base = buffer >>> 0;
+            let strings = base + fitting * ENUM_SERVICE_STATUS_PROCESS_SIZE;
+            rest.slice(0, fitting).forEach((entry, at)=>{
+                const record = new DataView(new ArrayBuffer(ENUM_SERVICE_STATUS_PROCESS_SIZE));
+                const name = encode(entry.name);
+                const display = encode(entry.display);
+                host.writeMemory?.(strings, name);
+                record.setUint32(0, strings, true);
+                strings += name.length;
+                host.writeMemory?.(strings, display);
+                record.setUint32(4, strings, true);
+                strings += display.length;
+                // SERVICE_STATUS_PROCESS: the type, stopped, nothing accepted,
+                // no exit codes, no process -- every other word zero.
+                record.setUint32(8, entry.type, true);
+                record.setUint32(12, SERVICE_STOPPED, true);
+                host.writeMemory?.(base + at * ENUM_SERVICE_STATUS_PROCESS_SIZE,
+                    new Uint8Array(record.buffer));
+            });
+
+            writeDword(returned, fitting);
+            const left = rest.slice(fitting).reduce((sum, entry)=>sum + costOf(entry), 0);
+            writeDword(needed, left);
+            if ((resume >>> 0) !== 0)
+            {
+                writeDword(resume, fitting === rest.length ? 0 : first + fitting);
+            }
+            return fitting === rest.length ? 1 : fail(ERROR_MORE_DATA);
+        },
+    });
+
     return {
         /**
          * SC_HANDLE OpenSCManagerA(LPCSTR lpMachineName, LPCSTR lpDatabaseName,
@@ -191,6 +373,28 @@ export function createServiceFunctions(host){
             argBytes: 12,
             handler: ()=>open({ kind: 'manager' }),
         },
+
+        /**
+         * SC_HANDLE OpenSCManagerW(LPCWSTR lpMachineName, LPCWSTR lpDatabaseName,
+         *                          DWORD dwDesiredAccess)
+         *
+         * The A form's manager: the names are this machine's and its one
+         * database, whichever width they come in.
+         */
+        OpenSCManagerW: {
+            argBytes: 12,
+            handler: ()=>open({ kind: 'manager' }),
+        },
+
+        /**
+         * BOOL EnumServicesStatusExA(SC_HANDLE hSCManager, SC_ENUM_TYPE InfoLevel,
+         *   DWORD dwServiceType, DWORD dwServiceState, LPBYTE lpServices,
+         *   DWORD cbBufSize, LPDWORD pcbBytesNeeded, LPDWORD lpServicesReturned,
+         *   LPDWORD lpResumeHandle, LPCSTR pszGroupName)
+         * BOOL EnumServicesStatusExW(..., LPCWSTR pszGroupName)
+         */
+        EnumServicesStatusExA: enumServices(false),
+        EnumServicesStatusExW: enumServices(true),
 
         /** SC_HANDLE OpenServiceA(SC_HANDLE hSCManager, LPCSTR lpServiceName, DWORD dwDesiredAccess) */
         OpenServiceA: {
@@ -328,8 +532,6 @@ export function createServiceFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([service, status])=>{
-                const SERVICE_WIN32_OWN_PROCESS = 0x10;
-                const SERVICE_STOPPED = 1;
                 const ERROR_SERVICE_NEVER_STARTED = 1077;
                 const object = held(service, 'service');
                 if (!object)

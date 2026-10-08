@@ -2402,6 +2402,8 @@ export function createWin32Module(){
                     }),
                     ...createTokenFunctions({
                         readMemory,
+                        // Impersonation is the thread's, not the process's.
+                        currentThread: ()=>kernel.currentThread(),
                         writeMemory,
                         readCString,
                         setLastError: setError,
@@ -2410,6 +2412,7 @@ export function createWin32Module(){
                     }),
                     ...createServiceFunctions({
                         readCString,
+                        readMemory,
                         writeMemory,
                         hive,
                         setLastError: setError,

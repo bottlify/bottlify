@@ -44,6 +44,7 @@ function setup(){
             return decodeAnsi(bytes.subarray(address, end));
         },
         writeMemory: (address, data)=>bytes.set(data, address),
+        readMemory: (address, length)=>bytes.subarray(address, address + length),
         hive,
         setLastError: code=>{
             lastError = code;
@@ -227,4 +228,134 @@ test('a process the manager did not start has no manager to connect to', ()=>{
     assert.equal(fns.SetServiceStatus.argBytes, 8);
     assert.equal(fns.SetServiceStatus.handler([0x1234, 0x500]), 0);
     assert.equal(lastError(), ERROR_INVALID_HANDLE);
+});
+
+const ERROR_MORE_DATA = 234;
+const ERROR_INVALID_LEVEL = 124;
+const ERROR_INVALID_PARAMETER = 87;
+const SERVICE_WIN32 = 0x30;
+const SERVICE_DRIVER = 0x0b;
+const SERVICE_ACTIVE = 1;
+const SERVICE_INACTIVE = 2;
+const SERVICE_STATE_ALL = 3;
+const ENUM_BUFFER = 0x600;
+const NEEDED = 0x500;
+const RETURNED = 0x504;
+const RESUME = 0x508;
+
+/** @param {ReturnType<typeof setup>} env @param {string} name @param {number} [type] */
+function makeService(env, name, type = SERVICE_WIN32_OWN_PROCESS){
+    const manager = env.fns.OpenSCManagerA.handler([0, 0, 0xf003f]);
+    const made = env.fns.CreateServiceA.handler([manager, env.put(NAME, name),
+        env.put(DISPLAY, `${name} display`), 0, type, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
+        env.put(PATH, 'C:\\svc.exe'), 0, 0, 0, 0, 0]);
+    assert.notEqual(made, 0);
+    env.fns.CloseServiceHandle.handler([made]);
+    env.fns.CloseServiceHandle.handler([manager]);
+}
+
+/** @param {Uint8Array} bytes @param {number} at */
+const dwordAt = (bytes, at)=>new DataView(bytes.buffer).getUint32(at, true);
+
+test('OpenSCManagerW opens the same manager the A form does', ()=>{
+    const env = setup();
+    const manager = env.fns.OpenSCManagerW.handler([0, 0, 0xf003f]);
+    assert.notEqual(manager, 0);
+    assert.equal(env.fns.OpenServiceA.handler([manager, env.put(NAME, 'Nothing'), 0x10]), 0);
+    assert.equal(env.lastError(), ERROR_SERVICE_DOES_NOT_EXIST, 'a manager, not a bad handle');
+    assert.equal(env.fns.CloseServiceHandle.handler([manager]), 1);
+    assert.equal(env.fns.OpenSCManagerW.argBytes, 12);
+});
+
+test('EnumServicesStatusEx lists the database, every service stopped, and no running one', ()=>{
+    const env = setup();
+    makeService(env, 'Beta');
+    makeService(env, 'alpha');
+    makeService(env, 'Driver', 1);
+    const manager = env.fns.OpenSCManagerA.handler([0, 0, 0xf003f]);
+    const enumerate = (/** @type {number} */ state, /** @type {number} */ size)=>
+        env.fns.EnumServicesStatusExA.handler([manager, 0, SERVICE_WIN32, state, ENUM_BUFFER, size,
+            NEEDED, RETURNED, 0, 0]);
+
+    assert.equal(enumerate(SERVICE_ACTIVE, 0x400), 1, 'nothing runs, so nothing is active');
+    assert.equal(dwordAt(env.bytes, RETURNED), 0);
+    assert.equal(dwordAt(env.bytes, NEEDED), 0);
+
+    assert.equal(enumerate(SERVICE_INACTIVE, 0x400), 1);
+    assert.equal(dwordAt(env.bytes, RETURNED), 2, 'the two programs, not the driver');
+    const names = [0, 1].map(at=>env.bytes.subarray(dwordAt(env.bytes, ENUM_BUFFER + at * 44)))
+        .map(from=>decodeAnsi(from.subarray(0, from.indexOf(0))));
+    assert.deepEqual(names, ['alpha', 'Beta'], 'in name order, case folded');
+    const display = env.bytes.subarray(dwordAt(env.bytes, ENUM_BUFFER + 4));
+    assert.equal(decodeAnsi(display.subarray(0, display.indexOf(0))), 'alpha display');
+    assert.equal(dwordAt(env.bytes, ENUM_BUFFER + 8), SERVICE_WIN32_OWN_PROCESS);
+    assert.equal(dwordAt(env.bytes, ENUM_BUFFER + 12), 1, 'SERVICE_STOPPED');
+    assert.equal(dwordAt(env.bytes, ENUM_BUFFER + 36), 0, 'no process');
+
+    assert.equal(env.fns.EnumServicesStatusExA.handler([manager, 0, SERVICE_DRIVER,
+        SERVICE_STATE_ALL, ENUM_BUFFER, 0x400, NEEDED, RETURNED, 0, 0]), 1);
+    assert.equal(dwordAt(env.bytes, RETURNED), 1, 'the driver alone');
+});
+
+test('EnumServicesStatusEx with too little room says how much, and resumes', ()=>{
+    const env = setup();
+    makeService(env, 'One');
+    makeService(env, 'Two');
+    const manager = env.fns.OpenSCManagerA.handler([0, 0, 0xf003f]);
+    env.bytes.set([0, 0, 0, 0], RESUME);
+    const call = (/** @type {number} */ size)=>env.fns.EnumServicesStatusExA.handler([manager, 0,
+        SERVICE_WIN32, SERVICE_STATE_ALL, ENUM_BUFFER, size, NEEDED, RETURNED, RESUME, 0]);
+    const one = 44 + 'One'.length + 1 + 'One display'.length + 1;
+    const two = 44 + 'Two'.length + 1 + 'Two display'.length + 1;
+    assert.equal(call(0), 0);
+    assert.equal(env.lastError(), ERROR_MORE_DATA);
+    assert.equal(dwordAt(env.bytes, NEEDED), one + two);
+    assert.equal(dwordAt(env.bytes, RETURNED), 0);
+
+    assert.equal(call(one), 0, 'room for the first');
+    assert.equal(dwordAt(env.bytes, RETURNED), 1);
+    assert.equal(dwordAt(env.bytes, NEEDED), two);
+    assert.equal(dwordAt(env.bytes, RESUME), 1, 'where the next call takes up');
+    assert.equal(call(two), 1);
+    assert.equal(dwordAt(env.bytes, RETURNED), 1);
+    const name = env.bytes.subarray(dwordAt(env.bytes, ENUM_BUFFER));
+    assert.equal(decodeAnsi(name.subarray(0, name.indexOf(0))), 'Two');
+    assert.equal(dwordAt(env.bytes, RESUME), 0, 'and at the end it is reset');
+});
+
+test('EnumServicesStatusExW writes the names wide; a group nobody is in lists nothing', ()=>{
+    const env = setup();
+    makeService(env, 'Wide');
+    const manager = env.fns.OpenSCManagerW.handler([0, 0, 0xf003f]);
+    assert.equal(env.fns.EnumServicesStatusExW.handler([manager, 0, SERVICE_WIN32,
+        SERVICE_STATE_ALL, ENUM_BUFFER, 0x400, NEEDED, RETURNED, 0, 0]), 1);
+    assert.equal(dwordAt(env.bytes, RETURNED), 1);
+    const at = dwordAt(env.bytes, ENUM_BUFFER);
+    assert.deepEqual([...env.bytes.subarray(at, at + 10)],
+        [0x57, 0, 0x69, 0, 0x64, 0, 0x65, 0, 0, 0], 'W i d e, terminated');
+
+    env.bytes.set([0x47, 0, 0x31, 0, 0, 0], 0x700);
+    assert.equal(env.fns.EnumServicesStatusExW.handler([manager, 0, SERVICE_WIN32,
+        SERVICE_STATE_ALL, ENUM_BUFFER, 0x400, NEEDED, RETURNED, 0, 0x700]), 1);
+    assert.equal(dwordAt(env.bytes, RETURNED), 0, 'group G1 holds nothing');
+    env.bytes.set([0, 0], 0x700);
+    assert.equal(env.fns.EnumServicesStatusExW.handler([manager, 0, SERVICE_WIN32,
+        SERVICE_STATE_ALL, ENUM_BUFFER, 0x400, NEEDED, RETURNED, 0, 0x700]), 1);
+    assert.equal(dwordAt(env.bytes, RETURNED), 1, 'the empty group: services in none');
+});
+
+test('EnumServicesStatusEx refuses a bad handle, level, type or state', ()=>{
+    const env = setup();
+    const manager = env.fns.OpenSCManagerA.handler([0, 0, 0xf003f]);
+    const call = (/** @type {number[]} */ args)=>env.fns.EnumServicesStatusExA.handler(args);
+    assert.equal(call([0x1234, 0, SERVICE_WIN32, 3, ENUM_BUFFER, 0, NEEDED, RETURNED, 0, 0]), 0);
+    assert.equal(env.lastError(), ERROR_INVALID_HANDLE);
+    assert.equal(call([manager, 1, SERVICE_WIN32, 3, ENUM_BUFFER, 0, NEEDED, RETURNED, 0, 0]), 0);
+    assert.equal(env.lastError(), ERROR_INVALID_LEVEL);
+    assert.equal(call([manager, 0, 0, 3, ENUM_BUFFER, 0, NEEDED, RETURNED, 0, 0]), 0);
+    assert.equal(env.lastError(), ERROR_INVALID_PARAMETER);
+    assert.equal(call([manager, 0, SERVICE_WIN32, 4, ENUM_BUFFER, 0, NEEDED, RETURNED, 0, 0]), 0);
+    assert.equal(env.lastError(), ERROR_INVALID_PARAMETER);
+    assert.equal(env.fns.EnumServicesStatusExA.argBytes, 40);
+    assert.equal(env.fns.EnumServicesStatusExW.argBytes, 40);
 });
