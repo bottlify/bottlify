@@ -30,10 +30,12 @@
  * A wizard waits in its own message loop rather than in a modal dialog an
  * unattended run answers, so a route through one is given as input: `--key
  * Enter@40` presses a key (a `KeyboardEvent.code`) forty seconds in, `--click
- * 320,400@55` clicks at a point of the screen. Each goes to the process the
- * facade stands for, which is the newest one standing. Every status line is
- * followed by that process's visible windows, one a line, children indented:
- * what a person would have seen at that moment. `--shots DIR` writes the
+ * 320,400@55` clicks at a point of the screen, and `--press 'Next >|Finish'`
+ * presses buttons by their titles in turn, each once it has stood a whole
+ * look. Each goes to the process the facade stands for, which is the newest
+ * one standing. Every status line is followed by that process's visible
+ * windows, one a line, children indented: what a person would have seen at
+ * that moment. `--shots DIR` writes the
  * desktop the facade's process paints into as a PNG at every status, which is
  * what a person would have seen, pixel for pixel. `--list DIR` prints the
  * files under a directory of the volume once the run is over -- what an
@@ -357,6 +359,61 @@ for (const { what, at } of all('--key').map(timed))
         app.input.send({ kind: 'key', code: what, down: true });
         setTimeout(()=>app.input.send({ kind: 'key', code: what, down: false }), 150);
     }, at * 1000);
+}
+// `--press 'Next >|I &accept|Finish'`: the buttons pressed in turn, each by
+// its title once it has stood visible, enabled and in a dialog other than the
+// last one pressed, for a whole look -- a wizard's pages driven without
+// guessing when each will come, which drifts from run to run.
+const pressing = argv.includes('--press') ? argv[argv.indexOf('--press') + 1].split('|') : [];
+if (pressing.length > 0)
+{
+    let step = 0;
+    let lastDialog = '';
+    let seen = '';
+    let looking = false;
+    const WS_DISABLED = 0x08000000;
+    const look = setInterval(async()=>{
+        if (looking || step >= pressing.length)
+        {
+            return;
+        }
+        looking = true;
+        try
+        {
+            for (const { diagnostics } of await app.standing())
+            {
+                const win32 = diagnostics.find((/** @type {any} */ entry)=>entry.name === 'win32')
+                    ?.metrics ?? {};
+                const button = (win32.windows ?? []).find((/** @type {any} */ w)=>w.visible
+                    && w.className === 'Button' && w.title === pressing[step]
+                    && w.parent !== lastDialog && (parseInt(w.style, 16) & WS_DISABLED) === 0);
+                if (!button)
+                {
+                    continue;
+                }
+                if (seen !== button.hwnd)
+                {
+                    seen = button.hwnd;
+                    break;
+                }
+                const x = Math.round((button.rect.left + button.rect.right) / 2);
+                const y = Math.round((button.rect.top + button.rect.bottom) / 2);
+                console.log(seconds(), 'PRESS', pressing[step], x, y);
+                lastDialog = button.parent;
+                step++;
+                app.input.send({ kind: 'pointerMove', x, y });
+                app.input.send({ kind: 'pointerButton', button: 'left', down: true });
+                setTimeout(()=>app.input.send({ kind: 'pointerButton', button: 'left',
+                    down: false }), 150);
+                break;
+            }
+        }
+        finally
+        {
+            looking = false;
+        }
+    }, 2000);
+    look.unref?.();
 }
 for (const { what, at } of all('--click').map(timed))
 {
