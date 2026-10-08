@@ -1890,7 +1890,18 @@ export function createWin32Module(){
                     divergence: config?.divergence,
                 }),
 
-                'IMM32.dll': createImmFunctions({ writeMemory, setLastError: setError }),
+                'IMM32.dll': createImmFunctions({
+                    writeMemory, setLastError: setError,
+                    // ImmIsUIMessage hands an IME message to the window named,
+                    // through user32's SendMessageA, looked up when called.
+                    /**
+                     * @param {number} hwnd @param {number} message
+                     * @param {number} wParam @param {number} lParam
+                     */
+                    sendMessage: (hwnd, message, wParam, lParam)=>
+                        libraries['USER32.dll'].SendMessageA
+                            .handler([hwnd, message, wParam, lParam]),
+                }),
 
                 'SHLWAPI.dll': createShlwapiFunctions({
                     readCString, readWideString, readMemory, writeMemory,
