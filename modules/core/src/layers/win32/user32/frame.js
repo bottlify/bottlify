@@ -16,6 +16,8 @@
  * cannot disagree about how wide a border is.
  */
 
+import { subtractFromArea } from '../gdi32/rects.js';
+
 /** Window styles that decide how much frame a window has. */
 export const WS_BORDER = 0x00800000;
 export const WS_DLGFRAME = 0x00400000;
@@ -244,8 +246,9 @@ const NO_FRAME = Object.freeze({
  *           A window a fullscreen device took over: it covers the display,
  *           and the frame its style describes is not drawn and takes no room.
  * @property {number} [menu]  The menu a window that is not a child has, or zero.
- * @property {Rect | null} [regionBox]
- *           The region SetWindowRgn shaped it with, in window coordinates.
+ * @property {(Rect & { rects?: Rect[] }) | null} [regionBox]
+ *           The region SetWindowRgn shaped it with, in window coordinates: the
+ *           rectangle around it, and its rectangles when it is more than one.
  */
 
 /**
@@ -345,6 +348,40 @@ export function createGeometry(windowOf){
             : rect;
     };
 
+    /**
+     * The window's shape on the screen: the rectangles of its window region,
+     * placed and cut to the window, or its rectangle when it has none. What
+     * it covers and is hit in; a region of many rectangles -- one cut from a
+     * picture around its transparent colour -- shows the window only there.
+     *
+     * @param {PlacedWindow} record
+     * @returns {Rect[]}
+     */
+    const shapeRects = record=>{
+        const pieces = record.regionBox?.rects;
+        if (!pieces)
+        {
+            const rect = shapedRect(record);
+            return isEmpty(rect) ? [] : [rect];
+        }
+        const rect = windowRect(record);
+        return pieces.map(piece=>intersect(rect, { left: rect.left + piece.left,
+            top: rect.top + piece.top, right: rect.left + piece.right,
+            bottom: rect.top + piece.bottom })).filter(piece=>!isEmpty(piece));
+    };
+
+    /**
+     * The parts of the rectangle around a window's shape that its region
+     * leaves out: where it draws nothing and what is beneath shows.
+     *
+     * @param {PlacedWindow} record
+     * @returns {Rect[]}
+     */
+    const holesOf = record=>(record.regionBox?.rects
+        ? shapeRects(record).reduce((area, piece)=>subtractFromArea(area, piece),
+            [shapedRect(record)])
+        : []);
+
     /** @param {PlacedWindow} record @returns {Rect} the client area on the screen */
     const clientRect = record=>{
         const origin = clientOrigin(record);
@@ -392,7 +429,7 @@ export function createGeometry(windowOf){
 
     return {
         frame, container, clientSize, windowOrigin, clientOrigin, windowRect, shapedRect,
-        clientRect, visibleClientRect, visibleWindowRect,
+        shapeRects, holesOf, clientRect, visibleClientRect, visibleWindowRect,
     };
 }
 

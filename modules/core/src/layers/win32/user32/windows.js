@@ -1734,8 +1734,14 @@ export function createWindowFunctions(host){
             }
             else if (above && !each.destroyed && !isChild(each) && covering(each))
             {
-                covers.push(geometry.shapedRect(each));
+                covers.push(...geometry.shapeRects(each));
             }
+        }
+        // What a window region leaves out of it and its ancestors: nothing of
+        // it is shown there, and what is beneath shows instead.
+        for (let at = record; at; at = isChild(at) ? windows.get(at.parent) : null)
+        {
+            covers.push(...geometry.holesOf(at));
         }
         for (let at = record; at && isChild(at); at = windows.get(at.parent))
         {
@@ -1752,7 +1758,7 @@ export function createWindowFunctions(host){
                 }
                 if (covering(sibling))
                 {
-                    covers.push(geometry.shapedRect(sibling));
+                    covers.push(...geometry.shapeRects(sibling));
                 }
             }
         }
@@ -1762,7 +1768,7 @@ export function createWindowFunctions(host){
             {
                 if (shown(child))
                 {
-                    covers.push(geometry.shapedRect(child));
+                    covers.push(...geometry.shapeRects(child));
                 }
             }
         }
@@ -3530,7 +3536,10 @@ export function createWindowFunctions(host){
         {
             if (!record.destroyed && !isChild(record) && shown(record))
             {
-                bare = subtractFromArea(bare, geometry.shapedRect(record));
+                for (const piece of geometry.shapeRects(record))
+                {
+                    bare = subtractFromArea(bare, piece);
+                }
             }
         }
         const hdc = bare.length > 0 ? host.dc?.()?.get(0, null) ?? 0 : 0;
@@ -3884,6 +3893,15 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * Whether a screen point is in a window's shape: its rectangle, or the
+     * rectangles of its window region.
+     *
+     * @param {any} record @param {number} x @param {number} y
+     */
+    const inShape = (record, x, y)=>geometry.shapeRects(record)
+        .some((/** @type {any} */ piece)=>contains(piece, x, y));
+
+    /**
      * What part of a window a screen point is on: the client area, the
      * caption, its close box, the border, or nowhere.
      *
@@ -3891,7 +3909,7 @@ export function createWindowFunctions(host){
      */
     const hitTest = (record, x, y)=>{
         const rect = geometry.windowRect(record);
-        if (!contains(geometry.shapedRect(record), x, y))
+        if (!inShape(record, x, y))
         {
             return HTNOWHERE;
         }
@@ -3941,7 +3959,7 @@ export function createWindowFunctions(host){
             for (const record of candidates)
             {
                 if ((record.style & WS_VISIBLE) === 0
-                    || !contains(geometry.shapedRect(record), x, y)
+                    || !inShape(record, x, y)
                     || (!disabledToo && (record.style & WS_DISABLED) !== 0))
                 {
                     continue;

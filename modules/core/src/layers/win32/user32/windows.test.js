@@ -1964,6 +1964,45 @@ test('a window shaped to an empty region takes none of the screen, and the deskt
         assert.deepEqual(desktop(), [], 'not redrawn, the screen is left until something paints');
     });
 
+test('a window shaped by a region of many rectangles shows, covers and is hit only there',
+    ()=>{
+        // A launcher cuts its region out of a picture around the picture's
+        // transparent colour. Only the rectangle around the region was kept:
+        // the window showed whole, the transparent colour with it, and took
+        // the clicks and the screen of its corners.
+        let clock = 0;
+        const SHAPE = 0x5000;
+        const shape = { left: 0, top: 0, right: 200, bottom: 100, rects: [
+            { left: 0, top: 0, right: 200, bottom: 50 },
+            { left: 0, top: 50, right: 100, bottom: 100 }] };
+        const { fns, memory, fills } = setup({ paint: true, queueNow: ()=>clock,
+            regionBox: region=>(region === SHAPE ? shape : null) });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const WS_POPUP = 0x80000000;
+        const drain = ()=>{
+            while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) !== 0)
+            {
+                fns.ValidateRect.handler([memory.u32(MSG_BUFFER + MSG.hwnd), 0]);
+            }
+        };
+        const desktop = ()=>fills.filter(fill=>fill.color === 0x808080 && !fill.quiet)
+            .map(fill=>fill.rect);
+        const launcher = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+            x: 0, y: 0, width: 200, height: 100 });
+        drain();
+        fills.length = 0;
+
+        assert.equal(fns.SetWindowRgn.handler([launcher, SHAPE, 1]), 1);
+        clock += 1000;
+        drain();
+        assert.deepEqual(desktop(), [{ left: 100, top: 50, right: 200, bottom: 100 }],
+            'the corner its region leaves out is the desktop\'s');
+        assert.equal(fns.WindowFromPoint.handler([150, 75]), 0, 'and is not on it');
+        assert.equal(fns.WindowFromPoint.handler([50, 75]), launcher, 'its shape is');
+        assert.equal(fns.WindowFromPoint.handler([150, 25]), launcher);
+    });
+
 test('the desktop paints what a window left on the system\'s clock, with no queue looked at',
     ()=>{
         // The desktop is no thread of the program's: on Windows its own thread
