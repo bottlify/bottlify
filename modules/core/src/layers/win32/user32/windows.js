@@ -2298,11 +2298,12 @@ export function createWindowFunctions(host){
             return andThen(destroyChildren(0),
                 ()=>andThen(tell(WM_NCDESTROY), ()=>{
                     forget(record);
-                    if (covered)
+                    if (!covered)
                     {
-                        uncover(covered);
+                        return 1;
                     }
-                    return 1;
+                    uncover(covered);
+                    return andThen(eraseShown(on), ()=>1);
                 }));
         });
     };
@@ -3309,6 +3310,7 @@ export function createWindowFunctions(host){
             if (shown(each))
             {
                 repaint(each);
+                each.eraseRect = null;
                 unerased.add(each);
             }
         }
@@ -3583,6 +3585,22 @@ export function createWindowFunctions(host){
                 && !isEmpty(intersect(rect, geometry.shapedRect(other))))
             {
                 repaint(other);
+                // And erased there before the call returns, when it is the
+                // caller's -- XP's synchronous paint after a window is moved,
+                // hidden or destroyed; another thread's is erased when that
+                // thread looks at its queue (WM_SYNCPAINT). A program busy
+                // copying files shows its window's background where a
+                // dialog was, not the dialog.
+                const client = geometry.clientRect(other);
+                const left = { left: rect.left - client.left, top: rect.top - client.top,
+                    right: rect.right - client.left, bottom: rect.bottom - client.top };
+                other.eraseRect = other.eraseRect ? {
+                    left: Math.min(other.eraseRect.left, left.left),
+                    top: Math.min(other.eraseRect.top, left.top),
+                    right: Math.max(other.eraseRect.right, left.right),
+                    bottom: Math.max(other.eraseRect.bottom, left.bottom),
+                } : left;
+                unerased.add(other);
             }
         }
     };
@@ -5293,6 +5311,7 @@ export function createWindowFunctions(host){
         if (covered)
         {
             uncover(covered);
+            told = andThen(told, ()=>eraseShown(thread));
         }
         // The answer waits for the procedures that were sent to: returning it
         // before they have run is the stack the guest reuses under itself.

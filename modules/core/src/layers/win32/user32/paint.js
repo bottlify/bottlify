@@ -547,8 +547,17 @@ export function createPaintFunctions(options){
     const eraseNow = (record, thread)=>{
         const frame = record.ncDirty === true;
         const erase = record.erase === true && Boolean(record.updateRect);
+        // A window another one left is erased only where it was left: the
+        // rest of it still shows what it painted, and its WM_PAINT is to come.
+        const area = record.eraseRect && record.updateRect
+            ? { left: Math.max(record.eraseRect.left, record.updateRect.left),
+                top: Math.max(record.eraseRect.top, record.updateRect.top),
+                right: Math.min(record.eraseRect.right, record.updateRect.right),
+                bottom: Math.min(record.eraseRect.bottom, record.updateRect.bottom) }
+            : record.updateRect;
         record.ncDirty = false;
         record.erase = false;
+        record.eraseRect = null;
         return after(frame ? send(record.hwnd, WM_NCPAINT, 1, 0, thread) : 0, ()=>{
             const hdc = erase ? contextOn(record) : 0;
             if (hdc === 0)
@@ -557,7 +566,7 @@ export function createPaintFunctions(options){
             }
             host.draw?.clip?.(hdc, intersectArea(
                 visibleArea(record, false, geometry.clientRect(record)),
-                record.updateRect ?? clientArea(record)));
+                area ?? clientArea(record)));
             // Shown only when it erased, which the answer says: a window
             // with no background leaves the screen as it was, and that is
             // not a picture to present.
@@ -673,6 +682,7 @@ export function createPaintFunctions(options){
         record.inPaint = true;
         const erase = record.erase === true;
         record.erase = false;
+        record.eraseRect = null;
         const frame = record.ncDirty === true;
         record.ncDirty = false;
         if (hdc !== 0)
