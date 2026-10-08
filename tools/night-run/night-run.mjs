@@ -23,9 +23,9 @@
  *
  * A bottle is broken unless its manifest labels it playable; the Wine test
  * bottles (labelled test) are not titles and are left out.
- * start-only ones go first: they are the closest to working. The budget is
- * shared out evenly over the bottles not yet run, so an early long hunt leaves
- * less for the rest rather than running the key dry. Every session's messages
+ * They go in alphabetical order of title. The budget is shared out evenly
+ * over the bottles not yet run, so an early long hunt leaves less for the rest
+ * rather than running the key dry. Every session's messages
  * go to dbg/night/<id>.log and a line per bottle to dbg/night/summary.md.
  */
 
@@ -76,16 +76,14 @@ async function brokenBottles(){
         const manifest = JSON.parse(text);
         const labels = Array.isArray(manifest.labels) ? manifest.labels : [];
         const chosen = only.length ? only.includes(id)
-            : !labels.some((/** @type {string} */ label)=>
+            : !id.startsWith('wine-') && !labels.some((/** @type {string} */ label)=>
                 ['playable', 'test'].includes(label));
         if (chosen && !skip.includes(id))
         {
             bottles.push({ id, title: String(manifest.title ?? id).trim(), labels });
         }
     }
-    const rank = (/** @type {{ labels: string[] }} */ bottle)=>
-        (bottle.labels.includes('start-only') ? 0 : 1);
-    return bottles.sort((a, b)=>rank(a) - rank(b) || a.title.localeCompare(b.title));
+    return bottles.sort((a, b)=>a.title.localeCompare(b.title));
 }
 
 /** @param {{ id: string, title: string, labels: string[] }} bottle @param {number} dollars */
@@ -105,10 +103,21 @@ there, start with it (game.mjs ${bottle.id} --route ...). If it is not, find the
 it there before you finish -- even when nothing needed fixing -- with "reaches" saying what screen \
 it ends on. A route that no longer gets in is corrected, not worked around.
 
+The steps, in order:
+1. Read CLAUDE.md, tools/cdp_test/README.md and the bringup skill (.claude/skills/bringup).
+2. What is missing from the start: node tools/import-audit.mjs bundles/${bottle.id}/bundle.btl \
+--dynamic --specs dbg/specs.
+3. Add it: implement every missing entry point the title's own executables reach, by contract, \
+with tests.
+4. Run the title and fix everything up to its first start in the game (below).
+5. Commit each fix to review and push it; the message says what was fixed and why -- the \
+contract that was wrong and what the title did because of it.
+6. When the title reaches its game, label it playable: add "playable" to "labels" in \
+bundles/${bottle.id}/manifest.json (that file is not in git; keep the rest of it as it is). \
+Not before.
+7. Leave the test's route beside the game: bundles/${bottle.id}/route.json.
+
 How:
-- Read CLAUDE.md, tools/cdp_test/README.md and the bringup skill (.claude/skills/bringup) first.
-- Audit before the first run: node tools/import-audit.mjs bundles/${bottle.id}/bundle.btl --dynamic \
---specs dbg/specs, and implement every missing entry point the main executable reaches.
 - Run it: node tools/cdp_test/game.mjs ${bottle.id} --headed --worker --coi --wait 240 (more if \
 the title loads slowly). Read the report and the files the game itself wrote before theorising.
 - Find the way in by looking: read the screenshots (the PNGs) and walk the screens a step at a \
