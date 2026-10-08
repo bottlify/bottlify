@@ -96,6 +96,15 @@ twenty-five years, and this entry records that debt.
 What is not taken: no code, no test structure, no helper, no assertion text, no ordering. Every
 test in this repository is written independently, against this project's own conventions.
 
+## mulberry32 -- a seeded pseudo-random generator for tests
+
+- Source: mulberry32, by Tommy Ettinger (2017), released into the public domain.
+- Location in this repository: the seeded test generators of
+  `modules/cork/src/testing/` and `modules/cork/src/runtime/arena.test.js`, and the gate
+  `modules/core/src/layers/win32/jscript/fast-paths.itest.js` -- test code only.
+- What is used: its few lines of integer arithmetic, so a seed names one random sequence that a
+  failing case can be run again from.
+
 ## Wine's Windows Installer transform test vectors
 
 - Source: Wine, `dlls/msi/tests/db.c` (`test_try_transform`, `generate_transform`), LGPL-2.1-or-later.

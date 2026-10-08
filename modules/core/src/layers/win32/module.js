@@ -69,6 +69,7 @@ import { createShellFunctions } from './shell32/functions.js';
 import { registerShellLinkClasses } from './shell32/shelllink.js';
 import { registerWbemClasses } from './ole32/wbem.js';
 import { registerDxDiagClasses } from './ole32/dxdiag.js';
+import { registerJScriptClass } from './jscript/active-script.js';
 import { createRpcFunctions } from './rpcrt4/functions.js';
 import { createVersionFunctions } from './version/functions.js';
 import { createLzFunctions } from './lz32/functions.js';
@@ -1092,6 +1093,40 @@ export function createWin32Module(){
             registerDxDiagClasses({
                 registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
                 windows, directx, screen: config?.screen, divergence: config?.divergence,
+            });
+
+            // JScript, the Active Scripting engine a host -- an installer's
+            // script, a page, a configuration tool -- asks COM for.
+            registerJScriptClass({
+                registry: com,
+                publish: (object, iid)=>bridge.publishInterface(object, iid),
+                com: {
+                    call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    callerThread: ()=>bridge.callerThread(),
+                    readMemory, writeMemory,
+                    /** @param {number} bytes */
+                    allocate: bytes=>heap.allocate(bytes),
+                    /** @param {number} address */
+                    free: address=>heap.free(address),
+                    /** @param {string} name @param {number[]} args */
+                    oleaut32: (name, args)=>libraries['OLEAUT32.dll'][name].handler(args),
+                },
+                /**
+                 * @param {string} library @param {string} name @param {number[]} args
+                 * @param {unknown} [thread]
+                 */
+                system: (library, name, args, thread)=>{
+                    const entry = libraries[library]?.[name];
+                    if (!entry)
+                    {
+                        return null;
+                    }
+                    return thread ? bridge.answering(thread, ()=>entry.handler(args))
+                        : entry.handler(args);
+                },
+                threadId: ()=>kernel.currentThread().id >>> 0,
+                now: ()=>kernel.clock.wallClock(),
+                divergence: config?.divergence,
             });
 
             // One way of starting a program, behind three spellings of asking for
