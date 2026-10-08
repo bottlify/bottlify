@@ -699,6 +699,12 @@ export function createWin32Module(){
             });
             const winsock = createWinsockFunctions({
                 readMemory,
+                // The WSA events are kernel32's events, and TransmitFile reads
+                // its file through ReadFile: kernel32's own exports, looked up
+                // when called, as the table is built below.
+                /** @param {string} name */
+                kernel32: name=>libraries['KERNEL32.dll']?.[name]?.handler,
+                divergence: config?.divergence,
                 writeMemory,
                 readCString,
                 heap,
@@ -1754,8 +1760,11 @@ export function createWin32Module(){
                 'IPHLPAPI.dll': createIphlpapiFunctions({
                     readMemory, writeMemory, localAddress: ()=>sockets.localAddress(),
                 }),
-                'WS2_32.dll': winsock.sockets,
-                'MSWSOCK.dll': winsock.extensions,
+                // TransmitFile is wsock32's and mswsock's, never ws2_32's.
+                'WS2_32.dll': Object.fromEntries(Object.entries(winsock.sockets)
+                    .filter(([name])=>name !== 'TransmitFile')),
+                'MSWSOCK.dll': { ...winsock.extensions,
+                    TransmitFile: winsock.sockets.TransmitFile },
 
                 'WINMM.dll': {
                     ...winmm.table,
