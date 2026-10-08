@@ -195,6 +195,8 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          */
         suspended(thread, call){
             abandonBelow(thread, call.restingStack >>> 0);
+            const frames = callbackFrames(thread);
+            const callingBack = frames.length > 0 && frames[frames.length - 1].epoch === epoch;
             epoch++;
             pending++;
             // A thread whose host call has not answered has nothing to run: it
@@ -205,10 +207,14 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             // crossed in steps of however long the host loop takes to come
             // round, which measured at a fifth to a third of a whole run.
             //
-            // Unless it is running a callback. Then the very same suspension is
-            // what sends it into guest code, and it is the most runnable thread
-            // there is.
-            thread.awaitingHost = callbackFrames(thread).length === 0;
+            // Unless this call is running a callback. Then the very same
+            // suspension is what sends it into guest code, and it is the most
+            // runnable thread there is. Only this call's: a wait made inside a
+            // callback some outer call is running -- a modal loop inside a
+            // window procedure, a script's message loop inside a COM call --
+            // is a wait like any other, and counted runnable it spun the park
+            // loop for as long as the wait lasted.
+            thread.awaitingHost = !callingBack;
             // Stamped so a report can say how long it has been waiting. A call
             // that suspends and never answers stops the whole machine -- every
             // thread of it -- and from outside that is indistinguishable from a

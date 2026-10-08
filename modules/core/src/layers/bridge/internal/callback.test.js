@@ -388,7 +388,8 @@ test('a catch the guest jumped to itself is seen at the thread\'s next wait', ()
         ['USER32.dll!DispatchMessageA', 'USER32.dll!GetMessageA'],
         'the throw is gone, the dispatch the procedure runs under is not');
     assert.equal(made.pendingCalls(), 2);
-    assert.equal(main.awaitingHost, false, 'still inside the procedure the dispatch called');
+    assert.equal(main.awaitingHost, true,
+        'a wait inside the procedure the dispatch called is a wait, not a callback to run');
 
     made.finish(main, 1);
     assert.equal(made.returned(main), true, 'whose frame is the one left');
@@ -417,7 +418,8 @@ test('a call made on a fiber\'s stack leaves the thread\'s own frames alone', ()
     made.suspended(main, { name: 'on the fiber', restingStack: 0x5ff000, hostReturn: 0x404000 });
     assert.deepEqual(made.diagnostics().suspendedCalls.map((/** @type {any} */ call)=>call.name),
         ['outer', 'on the fiber']);
-    assert.equal(main.awaitingHost, false);
+    made.finish(main, 0);
+    assert.equal(made.returned(main), true, 'the frame below is still there to return to');
 });
 
 test('a call that builds its callback before it suspends keeps it', ()=>{
