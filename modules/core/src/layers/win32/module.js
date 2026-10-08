@@ -1894,6 +1894,8 @@ export function createWin32Module(){
                     resolve: path=>filesystem.resolve(path).path,
                     // And a launch starts the program kernel32 would have started.
                     launcher: spawner,
+                    /** @param {string} url */
+                    openUrl: url=>config?.openUrl?.(url) ?? false,
                     divergence: config?.divergence,
                     taskAllocator,
                     // The task allocator's memory: a caller frees an item id list
@@ -2820,6 +2822,7 @@ export function createWin32Module(){
                 free: address=>heap.free(address),
                 writeMemory,
                 readWideString,
+                readMemory,
             });
 
             libraries['SHFOLDER.dll'] = {

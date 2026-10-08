@@ -16,7 +16,7 @@ test('a program is one of the system folder\'s, however its path is spelled', ()
     assert.equal(systemProgramAt(' C:\\Windows\\System32\\regsvr32.exe'), 'regsvr32');
     assert.equal(systemProgramAt('C:\\App\\msiexec.exe'), null, 'only there');
     assert.equal(systemProgramAt('C:\\WINDOWS\\system32\\sub\\msiexec.exe'), null);
-    assert.equal(systemProgramAt('C:\\WINDOWS\\system32\\notepad.exe'), null);
+    assert.equal(systemProgramAt('C:\\WINDOWS\\system32\\calc.exe'), null);
     assert.equal(systemProgramAt('msiexec.exe'), null, 'a bare name is the spawner\'s to find');
 });
 

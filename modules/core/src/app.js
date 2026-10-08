@@ -3972,6 +3972,16 @@ async function buildApp(options){
             // what it copied cannot leave the engine.
             /** @param {string} text */
             onClipboard: text=>events.emit('clipboard', { text }),
+            // An address the program asked the shell to open -- a setup's
+            // "visit our site", a readme's link -- for the page to open, as
+            // XP's browser would. Taken whether or not anyone opens it: the
+            // machine reports a browser installed, and its ShellExecute
+            // answers success.
+            /** @param {string} url */
+            openUrl: url=>{
+                events.emit('open-url', { url });
+                return true;
+            },
             /** @param {number} handle @param {string} text */
             onOutput: (handle, text)=>events.emit('output', { handle, text }),
             /** @param {string} text */

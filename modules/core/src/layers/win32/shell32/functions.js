@@ -41,6 +41,7 @@ import { createDesktopFunctions } from './desktop.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { fileAttributes, msToFileTime } from '../kernel32/filetime.js';
 import { WIN32_FIND_DATAA } from '../kernel32/files.js';
+import { urlOfShortcut } from './internet-shortcut.js';
 
 /** ShellExecute reports failure as a value of 32 or less, not as zero. */
 const SE_ERR_FNF = 2;
@@ -63,6 +64,16 @@ const RUNNABLE_VERBS = Object.freeze(new Set(['', 'open', 'runas']));
  * handler would come from an association registry this build does not have.
  */
 const SELF_EXECUTABLE = Object.freeze(new Set(['exe', 'com', 'bat', 'cmd', 'pif', 'scr']));
+
+/** The text documents Windows XP opens in Notepad. */
+const TEXT_DOCUMENTS = Object.freeze(new Set(['txt', 'log', 'ini', 'inf', 'nfo', 'diz']));
+/**
+ * The command XP's registry gives a text file: Notepad in the system folder,
+ * the file after it unquoted, as `%SystemRoot%\system32\NOTEPAD.EXE %1` reads.
+ */
+const NOTEPAD = 'C:\\WINDOWS\\system32\\notepad.exe';
+/** An address the browser opens rather than a file. */
+const ADDRESS = /^(https?|ftp|mailto):/i;
 
 /** E_NOTIMPL, for the allocator this build does not hand out. */
 const E_NOTIMPL = 0x80004001 | 0;
@@ -199,6 +210,10 @@ const CSIDL_FOLDERS = Object.freeze({
  *           CreateProcess or it is a different program. Without it a launch is
  *           refused, and a record's handle is what ShellExecuteEx hands a caller
  *           that asked to wait on the child.
+ * @property {(url: string) => boolean} [openUrl]
+ *           Hands an address to whoever is in front of the run -- a page opens
+ *           it in a tab of its own -- and says whether anything took it: the
+ *           browser Windows starts for an http link, a .url or a mailto.
  * @property {(bytes: number) => number} [allocate]
  *           The task allocator's memory, which is what a caller frees an item
  *           id list with -- and LocalFree frees the block CommandLineToArgvW
@@ -592,6 +607,12 @@ export function createShellFunctions(host){
      */
     const start = (verb, file, parameters, directory)=>{
         const typed = unquote((file ?? '').trim());
+        // An address is not a file name, whatever its last dot is followed by:
+        // `http://example.com` is not a .com program.
+        if (ADDRESS.test(typed) && RUNNABLE_VERBS.has((verb ?? 'open').trim().toLowerCase()))
+        {
+            return openDocument(typed, parameters) ?? { answer: SE_ERR_NOASSOC, record: null };
+        }
         // A name with no extension is looked for as a program, as the shell
         // searches with ".exe" as the default extension: `msiexec` is
         // msiexec.exe.
@@ -604,6 +625,14 @@ export function createShellFunctions(host){
             return { answer: SE_ERR_ACCESSDENIED, record: null };
         }
         const wanted = (verb ?? 'open').trim().toLowerCase();
+        if (RUNNABLE_VERBS.has(wanted) && !SELF_EXECUTABLE.has(extensionOf(name)))
+        {
+            const document = openDocument(name, parameters);
+            if (document)
+            {
+                return document;
+            }
+        }
         if (!RUNNABLE_VERBS.has(wanted) || !SELF_EXECUTABLE.has(extensionOf(name)))
         {
             // A verb is a handler, and a document is a handler: both come from
@@ -640,6 +669,78 @@ export function createShellFunctions(host){
         return record
             ? { answer: LAUNCH_SUCCESS, record }
             : { answer: SE_ERR_FNF, record: null };
+    };
+
+    /**
+     * A small file's bytes when the volume has them at hand -- a shortcut a
+     * setup just wrote -- or null for one still to be fetched.
+     *
+     * @param {import('./icons.js').IconVolume} volume @param {string} path
+     * @returns {Uint8Array | null}
+     */
+    const readNow = (volume, path)=>{
+        const node = volume.open(path, { read: true });
+        if (!node)
+        {
+            return null;
+        }
+        try
+        {
+            const bytes = volume.read(node, 0, volume.stat(path)?.size ?? 0);
+            return bytes instanceof Uint8Array ? bytes : null;
+        }
+        finally
+        {
+            volume.close(node);
+        }
+    };
+
+    /**
+     * A document the shell opens with the program its type is registered to,
+     * as Windows XP has them: text in Notepad, an address -- an http, ftp or
+     * mailto link, or a .url shortcut's -- in the browser, which here is
+     * whoever is in front of the run. Null for any other document, which has
+     * no handler on this machine.
+     *
+     * @param {string} name @param {string | null} parameters
+     * @returns {{ answer: number, record: any } | null}
+     */
+    const openDocument = (name, parameters)=>{
+        const extension = extensionOf(name);
+        if (ADDRESS.test(name) || extension === 'url')
+        {
+            const volume = readableVolume();
+            const found = extension === 'url' && volume ? locate(volume, name) : null;
+            const bytes = found && volume ? readNow(volume, found) : null;
+            const url = ADDRESS.test(name) ? name : bytes ? urlOfShortcut(decodeAnsi(bytes)) : null;
+            if (url === null)
+            {
+                return extension === 'url' ? { answer: SE_ERR_FNF, record: null } : null;
+            }
+            if (!host.openUrl?.(url))
+            {
+                host.divergence?.('ShellExecute', `${url} is not opened: there is no browser`);
+                return { answer: SE_ERR_NOASSOC, record: null };
+            }
+            return { answer: LAUNCH_SUCCESS, record: null };
+        }
+        if (!TEXT_DOCUMENTS.has(extension) || !host.launcher)
+        {
+            return null;
+        }
+        const notepad = host.launcher.imageOf(NOTEPAD);
+        if (notepad === null)
+        {
+            return null;
+        }
+        const file = host.launcher.imageOf(name);
+        if (file === null)
+        {
+            return { answer: SE_ERR_FNF, record: null };
+        }
+        void parameters;
+        const record = host.launcher.launch(notepad, `${notepad} ${file}`, 0);
+        return record ? { answer: LAUNCH_SUCCESS, record } : { answer: SE_ERR_FNF, record: null };
     };
 
     /**

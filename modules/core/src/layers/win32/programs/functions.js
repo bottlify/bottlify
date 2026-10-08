@@ -35,6 +35,7 @@ const MAX_COMMAND_LINE = 32768;
  * @property {(address: number) => void} free
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readWideString
+ * @property {(address: number, length: number) => Uint8Array} [readMemory]
  */
 
 /** @param {string} text */
@@ -88,6 +89,8 @@ export function createProgramFunctions(host){
                 call,
                 callGuest: (entry, args)=>host.callGuest(entry, args, thread),
                 wide,
+                read: (at, length)=>host.readMemory?.(at, length).slice() ?? new Uint8Array(0),
+                block: size=>place(new Uint8Array(size)),
                 ansi: text=>place(encodeAnsi(`${text}\0`)),
                 message: (text, caption, type)=>call('USER32.dll', 'MessageBoxW',
                     [0, wide(text), wide(caption), type]),

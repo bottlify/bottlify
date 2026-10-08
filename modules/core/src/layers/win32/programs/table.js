@@ -26,6 +26,7 @@ import { synthesiseProgram } from '../../loader/internal/synth.js';
 import { runMsiexec } from './msiexec.js';
 import { runRundll32 } from './rundll32.js';
 import { runRegsvr32 } from './regsvr32.js';
+import { runNotepad } from './notepad.js';
 
 /** Where the programs are: GetSystemDirectory's answer. */
 export const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
@@ -36,16 +37,23 @@ export const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
  */
 export const PROGRAMS_LIBRARY = 'bottlify.dll';
 
+/** The Windows directory, where Notepad is too. */
+export const WINDOWS_DIRECTORY = 'C:\\WINDOWS';
+
 /**
- * Each program by its file name, lower case, with the routine that is it.
+ * Each program by its file name, lower case, with the routine that is it and
+ * the directories Windows keeps it in -- the system folder, and for Notepad
+ * the Windows directory as well, where setups name it.
  *
- * @type {ReadonlyMap<string, { routine: string,
+ * @type {ReadonlyMap<string, { routine: string, directories?: string[],
  *     run: (context: import('./msiexec.js').ProgramContext) => Promise<number> }>}
  */
 export const SYSTEM_PROGRAMS = new Map([
     ['msiexec.exe', { routine: 'msiexec', run: runMsiexec }],
     ['rundll32.exe', { routine: 'rundll32', run: runRundll32 }],
     ['regsvr32.exe', { routine: 'regsvr32', run: runRegsvr32 }],
+    ['notepad.exe', { routine: 'notepad', run: runNotepad,
+        directories: [WINDOWS_DIRECTORY, SYSTEM_DIRECTORY] }],
 ]);
 
 /**
@@ -59,11 +67,10 @@ export const SYSTEM_PROGRAMS = new Map([
 export function systemProgramAt(path){
     const normal = path.trim().replaceAll('/', '\\').replace(/\\+/g, '\\').toLowerCase();
     const cut = normal.lastIndexOf('\\');
-    if (normal.slice(0, cut) !== SYSTEM_DIRECTORY.toLowerCase())
-    {
-        return null;
-    }
-    return SYSTEM_PROGRAMS.get(normal.slice(cut + 1))?.routine ?? null;
+    const program = SYSTEM_PROGRAMS.get(normal.slice(cut + 1));
+    const directories = program?.directories ?? [SYSTEM_DIRECTORY];
+    return program && directories.some(each=>each.toLowerCase() === normal.slice(0, cut))
+        ? program.routine : null;
 }
 
 /**

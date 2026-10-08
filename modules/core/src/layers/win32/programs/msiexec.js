@@ -423,6 +423,10 @@ export function parseMsiexec(line){
  * @property {(text: string) => number} wide  A copy of a string in the guest, as
  *     UTF-16, held until the program ends.
  * @property {(text: string) => number} ansi  The same, in the ANSI code page.
+ * @property {(address: number, length: number) => Uint8Array} read
+ *     A copy of guest memory: what a call the program made wrote there.
+ * @property {(size: number) => number} block
+ *     Zeroed guest memory for a call to write into, held until the program ends.
  * @property {(text: string, caption: string, type: number) => Promise<number>} message
  *     A message box, as the program shows one.
  */

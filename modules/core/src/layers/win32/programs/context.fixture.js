@@ -39,6 +39,8 @@ export function fakeContext(commandLine, answer = ()=>0){
         calls.push(call);
         return answer(call) ?? 0;
     };
+    /** What the test's answers wrote into the guest, by address. @type {Map<number, Uint8Array>} */
+    const memory = new Map();
     /** @type {import('./msiexec.js').ProgramContext} */
     const context = {
         commandLine,
@@ -46,7 +48,17 @@ export function fakeContext(commandLine, answer = ()=>0){
         callGuest: async(entry, args)=>answered({ guest: entry, args: shown(args) }),
         wide: text=>place(`L"${text}"`),
         ansi: text=>place(`"${text}"`),
+        read: (at, length)=>{
+            const bytes = new Uint8Array(length);
+            bytes.set((memory.get(at) ?? new Uint8Array(0)).subarray(0, length));
+            return bytes;
+        },
+        block: size=>{
+            const at = next;
+            next += Math.max(0x100, size + 0x10);
+            return at;
+        },
         message: async(message, caption, type)=>answered({ message, caption, type }),
     };
-    return { context, calls };
+    return { context, calls, memory };
 }

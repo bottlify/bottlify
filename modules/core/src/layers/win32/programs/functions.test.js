@@ -99,7 +99,7 @@ test('a routine reads the process\'s command line, calls as its thread, and free
         USER32: { CreateWindowExW: { handler: ()=>0 }, DestroyWindow: { handler: ()=>1 } },
     });
     const table = createProgramFunctions(host);
-    assert.deepEqual(Object.keys(table), ['msiexec', 'rundll32', 'regsvr32']);
+    assert.deepEqual(Object.keys(table), ['msiexec', 'rundll32', 'regsvr32', 'notepad']);
     assert.equal(table.rundll32.argBytes, 0);
     assert.equal(await table.rundll32.handler(), 0);
     assert.deepEqual(host.seen[0], { load: 'x.dll', thread: host.thread },

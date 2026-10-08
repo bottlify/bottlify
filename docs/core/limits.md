@@ -127,6 +127,11 @@ differently raises a `divergence` event naming the API.
   own: a program that starts one gets a process that drives `msi.dll`, the named library's entry
   point or its registration exports, and exits with what Windows' program would. The volume shows
   no file at those paths, so a setup that checks for one before starting it does not find it.
+- `notepad.exe` (in `C:\WINDOWS` and `C:\WINDOWS\system32`) is the engine's too: it shows a
+  text file read-only and exits when its window is closed; it does not edit, save or print.
+  ShellExecute opens `.txt`, `.log`, `.ini`, `.inf`, `.nfo` and `.diz` files in it; an address
+  (`http`, `https`, `ftp`, `mailto`, a `.url` shortcut) becomes an `open-url` event for the page.
+  Other documents have no handler (`SE_ERR_NOASSOC`).
 - An installation's log (`MsiEnableLog`, `msiexec /l`) has its messages, its actions and, when
   asked, its properties; the verbose trace of the engine's own decisions (`/lv`) is not written.
 - Nothing is rolled back: an installation that fails leaves what it had done.

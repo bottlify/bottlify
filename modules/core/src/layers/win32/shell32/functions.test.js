@@ -157,8 +157,9 @@ test('launching nothing is refused, not quietly succeeded', ()=>{
  * command line, and the test reads back both.
  *
  * @param {string[]} files  The images the launcher finds, by full or bare name.
+ * @param {object} [extra]  More of the host.
  */
-function machineWithLauncher(files){
+function machineWithLauncher(files, extra){
     /** @type {{ named: string, line: string, flags: number }[]} */
     const launched = [];
     /** @type {string[]} */
@@ -183,6 +184,7 @@ function machineWithLauncher(files){
         },
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>diverged.push(`${api}: ${detail}`),
+        ...extra,
     });
     return { ...m, launched, diverged };
 }
@@ -227,6 +229,45 @@ test('a document, and a verb that needs one, are refused as having no handler', 
     assert.equal(m.shell.ShellExecuteA.handler([0, 0x180, 0x140, 0, 0, 1]), 31,
         'and "print" names a handler rather than the file itself');
     assert.deepEqual(m.launched, [], 'nothing was started for either');
+});
+
+test('a text file opens in Notepad, as XP\'s registry has it', ()=>{
+    const m = machineWithLauncher(['C:\\App\\readme.txt', 'C:\\WINDOWS\\system32\\notepad.exe']);
+    m.put('readme.txt', 0x100);
+    m.put('open', 0x140);
+
+    assert.equal(m.shell.ShellExecuteA.handler([0, 0x140, 0x100, 0, 0, 1]), 33);
+    const notepad = 'C:\\WINDOWS\\system32\\notepad.exe';
+    assert.deepEqual(m.launched,
+        [{ named: notepad, line: `${notepad} C:\\App\\readme.txt`, flags: 0 }],
+        'the file after the program, unquoted, as %1 is in the command');
+
+    m.put('missing.log', 0x180);
+    assert.equal(m.shell.ShellExecuteA.handler([0, 0, 0x180, 0, 0, 1]), 2,
+        'a text file that is not there is not found, rather than opened empty');
+    assert.equal(m.launched.length, 1);
+});
+
+test('an address goes to whoever is in front of the run, and is refused without one', ()=>{
+    /** @type {string[]} */
+    const opened = [];
+    const m = machineWithLauncher([], { openUrl: (/** @type {string} */ url)=>{
+        opened.push(url);
+        return true;
+    } });
+    m.put('http://www.example.com/', 0x100);
+    m.put('mailto:someone@example.com', 0x180);
+
+    assert.equal(m.shell.ShellExecuteA.handler([0, 0, 0x100, 0, 0, 1]), 33);
+    assert.equal(m.shell.ShellExecuteA.handler([0, 0, 0x180, 0, 0, 1]), 33);
+    assert.deepEqual(opened, ['http://www.example.com/', 'mailto:someone@example.com']);
+    assert.deepEqual(m.launched, [], 'no program of the machine\'s was started for them');
+
+    const none = machineWithLauncher([]);
+    none.put('http://www.example.com/', 0x100);
+    assert.equal(none.shell.ShellExecuteA.handler([0, 0, 0x100, 0, 0, 1]), 31,
+        'nothing took it: no association');
+    assert.equal(none.diverged.length, 1);
 });
 
 test('a program that is not on the volume is reported missing, not started', ()=>{

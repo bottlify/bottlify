@@ -330,6 +330,21 @@ are Service Pack 3's as published (IE 6.0.2900.5512, WMP 9.0.0.4503, msdxm.ocx 6
 were not read off a machine; the other Windows releases describe no components and answer as
 before. *2026-10-08.*
 
+**A40 -- Notepad is a system program, and the shell opens text files in it and hands addresses
+to the page.** Setups show a readme by starting `C:\WINDOWS\Notepad.exe readme.txt` or by
+asking ShellExecute to open the `.txt`, and a "visit our site" button by opening an address. On
+the model of A38, `notepad.exe` in the Windows directory and the system folder is a synthesised
+image whose routine reads the file through CreateFile/ReadFile (a UTF-16 or UTF-8 byte order
+mark decides the encoding, the ANSI code page otherwise), shows it in a frame filled by a
+multi-line edit control, and runs a message loop until the frame is closed; editing, saving and
+printing (`/p`) are not offered. ShellExecute's open verb opens `.txt`, `.log`, `.ini`, `.inf`,
+`.nfo` and `.diz` as XP's registry has them -- `%SystemRoot%\system32\NOTEPAD.EXE %1`, the
+file unquoted -- and an `http`, `https`, `ftp` or `mailto` address, or the address a `.url`
+shortcut holds, is handed to the page as an `open-url` event and answered with success, since
+the machine reports a browser installed (A39). The frame is a STATIC window with the overlapped
+style, not a class of its own, because the routine drives only exports a program could call and
+none registers a window procedure in guest code. *2026-10-08.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
