@@ -246,7 +246,7 @@ export function encoderFor(codepage){
 const encoderTables = new Map();
 
 /** The tables the format describes itself. */
-const SYSTEM_COLUMNS = Object.freeze({
+export const SYSTEM_COLUMNS = Object.freeze({
     _Tables: [{ name: 'Name', type: MSITYPE.VALID | MSITYPE.STRING | MSITYPE.KEY | 64 }],
     _Columns: [
         { name: 'Table', type: MSITYPE.VALID | MSITYPE.STRING | MSITYPE.KEY | 64 },
@@ -435,11 +435,9 @@ export function readTableRows(bytes, columns, strings, longRefs, tableName){
         .filter(index=>index >= 0);
     if (binary.length > 0)
     {
-        const keys = columns.map((column, index)=>((column.type & MSITYPE.KEY) !== 0 ? index : -1))
-            .filter(index=>index >= 0);
         for (const row of rows)
         {
-            const name = [tableName, ...keys.map(index=>String(row[index] ?? ''))].join('.');
+            const name = rowStreamName(tableName, columns, row);
             for (const index of binary)
             {
                 if (row[index] === '')
@@ -451,6 +449,75 @@ export function readTableRows(bytes, columns, strings, longRefs, tableName){
     }
     return rows;
 }
+
+/**
+ * The stream a binary column of a row is kept in: the table's name and the
+ * row's keys, joined by dots.
+ *
+ * @param {string} tableName @param {{ type: number }[]} columns
+ * @param {readonly unknown[]} row
+ */
+export const rowStreamName = (tableName, columns, row)=>[tableName, ...columns
+    .flatMap((column, index)=>((column.type & MSITYPE.KEY) !== 0 ? [String(row[index] ?? '')]
+        : []))].join('.');
+
+/**
+ * A table's stream, the inverse of `readTableRows`: column by column, a string
+ * as its number, an integer biased so that zero is null, a binary column as
+ * whether the row has a stream.
+ *
+ * @param {Row[]} rows @param {{ type: number }[]} columns
+ * @param {(text: string) => number} idOf  A string's number in the pool being written.
+ * @param {boolean} longRefs
+ * @returns {Uint8Array}
+ */
+export function writeTableRows(rows, columns, idOf, longRefs){
+    const widths = columns.map(column=>columnWidth(column.type, longRefs));
+    const out = new Uint8Array(rows.length * widths.reduce((sum, width)=>sum + width, 0));
+    let at = 0;
+    columns.forEach((column, index)=>{
+        const width = widths[index];
+        for (const row of rows)
+        {
+            const value = row[index] ?? null;
+            const raw = value === null ? 0
+                : isBinaryType(column.type) ? 1
+                    : (column.type & MSITYPE.STRING) !== 0 ? (value === '' ? 0 : idOf(`${value}`))
+                        : width === 2 ? Number(value) + 0x8000 & 0xffff
+                            : (Number(value) ^ 0x80000000) >>> 0;
+            for (let byte = 0; byte < width; byte++)
+            {
+                out[at++] = raw >>> byte * 8 & 0xff;
+            }
+        }
+    });
+    return out;
+}
+
+/**
+ * What of a table is saved: its rows but the temporary ones, in its columns
+ * but the temporary ones.
+ *
+ * @param {Table} table @returns {{ columns: Column[], rows: Row[] }}
+ */
+export const persistentPart = table=>{
+    const kept = table.columns.flatMap((column, index)=>
+        ((column.type & MSITYPE.TEMPORARY) === 0 ? [index] : []));
+    return {
+        columns: kept.map(index=>table.columns[index]),
+        rows: table.rows.filter(row=>!table.temporaryRows.has(row))
+            .map(row=>kept.map(index=>row[index] ?? null)),
+    };
+};
+
+/**
+ * The tables a database saves, but `_Tables` and `_Columns`, which describe
+ * the others rather than being listed among them.
+ *
+ * @param {Database} db @returns {Map<string, Table>}
+ */
+export const persistentTables = db=>new Map([...db.tables].filter(([name, table])=>
+    !table.temporary && name !== '_Tables' && name !== '_Columns'));
 
 /**
  * @typedef {Object} Database
@@ -466,6 +533,8 @@ export function readTableRows(bytes, columns, strings, longRefs, tableName){
  *           Replaces, adds or (with null) removes a stream, in memory.
  * @property {() => string[]} streamNames   Every stream that is not a table's.
  * @property {() => Uint8Array | null} summaryStream
+ * @property {(bytes: Uint8Array | null) => void} setSummaryStream
+ *           Replaces the summary information stream, in memory.
  * @property {(text: string) => number} stringId
  *           The string's number in the pool, a new one past the last for a
  *           string the pool does not hold: what a stored table orders by.
@@ -541,7 +610,7 @@ export async function openDatabase(compound){
     const written = new Map();
     const stringId = poolIds(strings);
     const summaryNode = summary;
-    const summaryBytes = summaryNode ? await compound.readAll(summaryNode) : null;
+    let summaryBytes = summaryNode ? await compound.readAll(summaryNode) : null;
 
     return {
         codepage,
@@ -590,6 +659,9 @@ export async function openDatabase(compound){
             return [...names];
         },
         summaryStream: ()=>summaryBytes,
+        setSummaryStream: bytes=>{
+            summaryBytes = bytes;
+        },
         stringId,
         readOnly: false,
         compound,
@@ -642,6 +714,8 @@ export function createEmptyDatabase(){
     }
     /** @type {Map<string, Uint8Array | null>} */
     const written = new Map();
+    /** @type {Uint8Array | null} */
+    let summaryBytes = null;
     return {
         codepage: 0,
         tables,
@@ -655,7 +729,10 @@ export function createEmptyDatabase(){
             written.set(name, bytes);
         },
         streamNames: ()=>[...written].filter(([, bytes])=>bytes !== null).map(([name])=>name),
-        summaryStream: ()=>null,
+        summaryStream: ()=>summaryBytes,
+        setSummaryStream: bytes=>{
+            summaryBytes = bytes;
+        },
         stringId: poolIds([null]),
         readOnly: false,
     };

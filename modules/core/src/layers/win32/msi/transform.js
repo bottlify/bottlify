@@ -47,7 +47,8 @@ import { parseGuid } from '../ole32/guid.js';
 import { openCompound } from './compound.js';
 import {
     MSITYPE, columnWidth, decodeStreamName, encodeStreamName, encoderFor, isBinaryType, isKey,
-    isStringType, readStringPool, writeStringPool,
+    isStringType, persistentPart, persistentTables, readStringPool, rowStreamName,
+    writeStringPool,
 } from './database.js';
 import { insertRow } from './query.js';
 import { PID, VT, readSummary } from './summary.js';
@@ -258,15 +259,6 @@ const sameValue = (column, left, right)=>(isStringType(column.type)
 const keyText = (columns, values)=>columns.flatMap((column, index)=>(isKey(column)
     ? [JSON.stringify(isStringType(column.type) ? values[index] ?? '' : values[index] ?? null)]
     : [])).join('\u0000');
-
-/**
- * The name a row's stream is stored under: the table's, then each key's.
- *
- * @param {string} table @param {Column[]} columns @param {readonly unknown[]} values
- */
-const streamNameOf = (table, columns, values)=>[table, ...columns
-    .map((column, index)=>(isKey(column) ? String(values[index] ?? '') : null))
-    .filter(text=>text !== null)].join('.');
 
 /** @param {unknown} value @returns {string | null} */
 const textOf = value=>(value === null || value === undefined || value === '' ? null
@@ -581,7 +573,7 @@ function applyLoaded(db, loaded, errorConditions){
         {
             // A stream column's value is the name of the row's stream, and
             // the transform's stream of that name its bytes.
-            const streamName = streamNameOf(table.name, table.columns, record.values);
+            const streamName = rowStreamName(table.name, table.columns, record.values);
             /** @param {number} index @returns {string | number | null} */
             const valueAt = index=>{
                 const value = record.values[index];
@@ -1031,23 +1023,6 @@ export async function applyTransformList(db, list, options){
 
 // ----- generating a transform ------------------------------------------------
 
-/**
- * A table as it would be saved: neither temporary nor its temporary rows and
- * columns.
- *
- * @param {Table} table
- */
-const persistentPart = table=>{
-    const columns = table.columns.filter(column=>(column.type & MSITYPE.TEMPORARY) === 0);
-    const rows = table.rows.filter(row=>!table.temporaryRows.has(row))
-        .map(row=>row.slice(0, columns.length));
-    return { columns, rows };
-};
-
-/** @param {Database} db */
-const persistentTables = db=>new Map([...db.tables].filter(([name, table])=>!table.temporary
-    && name !== '_Tables' && name !== '_Columns'));
-
 /** @param {Uint8Array | null} left @param {Uint8Array | null} right */
 const sameBytes = (left, right)=>left === right || (left !== null && right !== null
     && left.length === right.length && left.every((byte, index)=>byte === right[index]));
@@ -1166,7 +1141,7 @@ export async function generateTransform(db, reference){
             {
                 if (isBinaryType(column.type) && row[index] !== null)
                 {
-                    payloads.set(streamNameOf(name, columns, row),
+                    payloads.set(rowStreamName(name, columns, row),
                         await db.readStream(String(row[index])) ?? new Uint8Array(0));
                 }
             }
@@ -1222,7 +1197,7 @@ export async function generateTransform(db, reference){
             {
                 if (isBinaryType(columns[index].type) && row[index] !== null)
                 {
-                    payloads.set(streamNameOf(name, columns, row),
+                    payloads.set(rowStreamName(name, columns, row),
                         await db.readStream(String(row[index])) ?? new Uint8Array(0));
                 }
             }
