@@ -18,6 +18,7 @@
  */
 
 import { hostObject, ExternalError, DISP_E_TYPEMISMATCH, E_FAIL } from '../script/external.js';
+import { NOTHING } from '../script/values.js';
 import { MSICONDITION } from './condition.js';
 import { INSTALLSTATE } from './session.js';
 import {
@@ -124,7 +125,7 @@ function viewObject(view, format){
             Fetch: { call: ()=>{
                 const record = view.fetch();
                 // Past the last row a script is handed Nothing, not an error.
-                return record ? recordObject(record, format) : null;
+                return record ? recordObject(record, format) : NOTHING;
             } },
             Modify: { call: ([mode, record])=>{
                 const target = recordOf(record);

@@ -111,9 +111,15 @@ differently raises a `divergence` event naming the API.
 - A package's own dialogs are never drawn: an installation runs without the internal user
   interface, as a setup that drives its own does. `MsiCollectUserInfo` and the dialog previews
   show nothing.
-- JScript custom actions run in the engine's own JScript, with the installer's Session,
-  Installer, Database, View and Record objects; a script asking `ActiveXObject` for any other
-  class is told it cannot be made. VBScript custom actions do not run yet; the action fails.
+- JScript and VBScript custom actions run in the engine's own script engines, with the
+  installer's Session, Installer, Database, View and Record objects; a script asking
+  `ActiveXObject` or `CreateObject` for any other class is told it cannot be made. VBScript's
+  `MsgBox` shows the installation's message box; `InputBox` fails with error 70.
+- The script engines are also COM classes (`JScript`, `VBScript`) for a program that hosts
+  Active Scripting itself. VBScript does not import a type library's constants
+  (`AddTypeLib`), keeps English formats whatever `SetLocale` asks, has no `Escape`,
+  `Unescape` or encoded scripts, and names a program's own objects `Object` in `TypeName`.
+  Deep recursion fails sooner than on Windows, at a few hundred levels.
 - A patch's deltas are applied (the Patch API, `mspatcha.dll`), except a delta made against a
   32-bit executable with the executable transforms -- that layout is not public -- or against an
   old file only Windows' PE normalisation would match; such a patch fails with

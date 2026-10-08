@@ -49,6 +49,7 @@ import { encodeAnsi } from '../kernel32/locale.js';
 import { createProductFunctions } from './products.js';
 import { installerObject, sessionObject } from './automation.js';
 import { createJScriptEngine } from '../jscript/engine.js';
+import { createVBScriptEngine } from '../vbscript/engine.js';
 import { ExternalError } from '../script/external.js';
 import { applyPatch as applyDeltaPatch } from '../mspatcha/pa19.js';
 import {
@@ -89,6 +90,7 @@ const ERROR_INSTALL_FAILURE = 1603;
 /** The script engines a script custom action runs in, by its language. */
 const SCRIPT_ENGINES = /** @type {Record<string, ((options: any) => any) | undefined>} */ ({
     jscript: createJScriptEngine,
+    vbscript: createVBScriptEngine,
 });
 
 /**
@@ -629,6 +631,11 @@ export function createMsiFunctions(host){
                 throw new ExternalError(CTL_E_CANTCREATEOBJECT,
                     `ActiveX component can't create object: ${progId}`);
             },
+            // VBScript's MsgBox, which an installer's script shows as any
+            // other box of the installation's.
+            msgBox: host.messageBox ? (/** @type {string} */ prompt,
+                /** @type {number} */ buttons, /** @type {string} */ title)=>
+                /** @type {any} */ (host.messageBox)(prompt, title, buttons) : undefined,
             divergence: host.divergence,
         });
         scripting.addNamedItem('Session', sessionObject(engine, {

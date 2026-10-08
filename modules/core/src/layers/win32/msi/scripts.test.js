@@ -5,10 +5,10 @@
  */
 
 /**
- * Script custom actions through msi.dll: JScript in the action's Target, in
- * the Binary table with a function to call, and deferred with only its
- * CustomActionData -- each working the Session object, and the installation
- * reading back what the scripts set.
+ * Script custom actions through msi.dll: JScript and VBScript in the action's
+ * Target, in the Binary table with a function to call, and deferred with only
+ * its CustomActionData -- each working the Session object, and the
+ * installation reading back what the scripts set.
  */
 
 import { test } from 'node:test';
@@ -36,6 +36,23 @@ function Check()
     view.Close();
     return 1;
 }`;
+
+/** CHECK in VBScript: the same calls, with a Function's answer as its name assigned. */
+const CHECK_VB = `
+Function Check()
+    Dim record, view, row
+    Set record = Session.Installer.CreateRecord(1)
+    record.StringData(0) = "[1]"
+    record.StringData(1) = Session.Property("ProductName")
+    Session.Property("NAME") = Session.FormatRecord(record) & "!"
+    Set view = Session.Database.OpenView("SELECT \`Directory\` FROM \`Directory\` " & _
+        "WHERE \`Directory_Parent\` = 'ProgramFilesFolder'")
+    view.Execute
+    Set row = view.Fetch
+    Session.Property("FOLDER") = row.StringData(1) & ":" & LCase(CStr(view.Fetch Is Nothing))
+    view.Close
+    Check = 1
+End Function`;
 
 /**
  * A package whose execute sequence runs the scripts given, then writes three
@@ -75,11 +92,11 @@ const tables = actions=>/** @type {import('./install.fixture.js').Tables} */ ({
 });
 
 /** Installs the package through msi.dll; its answer and the machine. */
-async function install(/** @type {Parameters<typeof tables>[0]} */ actions){
+async function install(/** @type {Parameters<typeof tables>[0]} */ actions, binary = CHECK){
     const host = await machine(['C:\\src']);
     const node = host.files.open('C:\\src\\game.msi', { write: true, create: true });
     host.files.write(node, 0, await databaseBytes(typed(packageDatabase(tables(actions),
-        { 'Binary.Script': encodeAnsi(CHECK) }))));
+        { 'Binary.Script': encodeAnsi(binary) }))));
     host.files.close(node);
     const memory = new Uint8Array(0x40000);
     let next = 0x20000;
@@ -133,3 +150,36 @@ test('a script that fails fails its action, unless the action ignores it', async
     const aborted = await install([['Check', 5, 'Script', 'Missing']]);
     assert.equal(aborted.code, 1603, 'a function the script does not have');
 });
+
+test('VBScript actions work the Session as JScript\'s do', async()=>{
+    const { code, value, said } = await install([
+        ['Inline', 38, null, 'Session.Property("INLINE") = "set " & (1 + 2)'],
+        ['Check', 6, 'Script', 'Check'],
+        ['SetData', 51, 'Deferred', 'payload'],
+        ['Deferred', 38 | 0x400, null,
+            'If Session.Property("CustomActionData") <> "payload" Or '
+            + 'Session.Property("ProductName") <> "" Then Err.Raise 5'],
+    ], CHECK_VB);
+    assert.equal(code, 0, said.join('\n'));
+    assert.equal(value('Inline'), 'set 3');
+    assert.equal(value('Name'), 'Game!', 'a record formatted by the session');
+    assert.equal(value('Folder'), 'INSTALLDIR:true', 'a view fetched to its end');
+});
+
+test('a VBScript action fails as a JScript one does: on an error, or a 3 from its function',
+    async()=>{
+        const broken = await install([['Inline', 38, null, 'If Then Else']]);
+        assert.equal(broken.code, 1603);
+        assert.ok(broken.said.some(line=>/script error 10\d\d/.test(line)),
+            'a compilation error, by its number');
+        const raised = await install([['Inline', 38, null, 'Err.Raise 13']]);
+        assert.equal(raised.code, 1603);
+        assert.ok(raised.said.some(line=>/script error 13 Type mismatch/.test(line)));
+        const resumed = await install([['Inline', 38, null,
+            'On Error Resume Next\nErr.Raise 13\nSession.Property("INLINE") = Err.Number']]);
+        assert.equal(resumed.code, 0, 'an error the script handles is its own');
+        assert.equal(resumed.value('Inline'), '13');
+        const failed = await install([['Check', 6, 'Script', 'Check']],
+            'Function Check()\n    Check = 3\nEnd Function');
+        assert.equal(failed.code, 1603, 'IDABORT from the function');
+    });
