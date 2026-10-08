@@ -719,8 +719,12 @@ test('the browser\'s and the player\'s files carry their versions, as the regist
         const hive = createHive({ windows: xp });
         const local = /** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE));
         /** @param {string} path @param {string} name */
-        const text = (path, name)=>String.fromCharCode(...(hive.getValue(hive.open(local, path),
-            name)?.data ?? [])).replace(/\0+$/, '');
+        const text = (path, name)=>{
+            const key = hive.open(local, path);
+            assert.ok(key, path);
+            return String.fromCharCode(...(hive.getValue(key, name)?.data ?? []))
+                .replace(/\0+$/, '');
+        };
         assert.equal(text('SOFTWARE\\Microsoft\\Internet Explorer', 'Version'),
             fileVersion('shdocvw.dll'), 'the registry and the file agree');
         assert.equal(text('SOFTWARE\\Microsoft\\MediaPlayer\\PlayerUpgrade', 'PlayerVersion'),

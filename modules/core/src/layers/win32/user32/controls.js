@@ -1432,7 +1432,8 @@ export function createControlProcedures(host){
                 // image's, so what lies beside it in the template shows.
                 const sized = (record.style & (SS_CENTERIMAGE | SS_REALSIZECONTROL)) === 0
                     ? imageSize(state.image) : null;
-                return sized && (sized.width !== record.width || sized.height !== record.height)
+                return sized && host.move
+                    && (sized.width !== record.width || sized.height !== record.height)
                     ? after(host.move(record.hwnd, record.x, record.y, sized.width, sized.height),
                         ()=>previous)
                     : previous;
