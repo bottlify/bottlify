@@ -97,3 +97,24 @@ None yet.
 - **Decision.** Kept, for machines with cores to spare: the pool lends a process more workers
   only where the median rule says they are busy and a check of the yield after each join says the
   process's translation went faster -- on this machine, a joined worker leaves again.
+
+### 2026-10-08 -- bundle blocks decoded in the pool rather than on the reading thread
+
+- **Idea.** Roadmap v2, stage 2: the zstd blocks a guest read waits for are decoded synchronously
+  on the thread that mounted the bundle; decoded in the pool's workers, ahead of the reads, they
+  would cost that thread nothing.
+- **Workload.** `doom-3-demo` (`Doom3.exe`) and `tron-demo` (`Lithtech.exe`), the manifests' command
+  lines, each started cold in node with an empty in-memory translation store, one translator,
+  40 s, `cork2` at `aadc3621`; the counts are the app layer's `decoded`, `decodedBytes` and
+  `decodeMs` (the JavaScript decoder, which cork uses: `zstd.wasm` is not pinned in this
+  checkout).
+- **Values.** One run each. Doom 3: 36 blocks, 8.7 MB decoded, 183 ms of the 40 s (0.5 %). Tron:
+  207 blocks, 52.5 MB, 460 ms (1.2 %). Spread and noise floor: not recorded.
+- **Machine.** Node 22.22.0, a 4-core x86-64 Linux VM (Firecracker). No browser, no GPU. Power
+  plan: not recorded.
+- **Why it would not pay.** At most about one percent of the reading thread's time while these
+  games load, against a read path that answers synchronously today and would have to wait for a
+  worker or guess what is read next.
+- **Correctness.** Not applicable: only counted.
+- **Decision.** Not built. The counts stay in the diagnostics, to be looked at again for a title
+  that reads more of its bundle compressed.

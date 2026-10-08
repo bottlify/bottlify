@@ -4,7 +4,8 @@
 
 **Status:** proposed 2026-10-03, revised against `main` 6554baf0; the workers of stage 2 and the
 translation cache arena decided 2026-10-07 on `cork2`, where the translation pool, its driver and
-the arena landed the same day (zstd still on the coordinator). How the engine works today is in
+the arena landed the same day; zstd stays on the coordinator, measured not worth moving yet
+(`negative-results.md`, 2026-10-08). How the engine works today is in
 [`docs/architecture.md`](../../docs/architecture.md); this document is where it goes next.
 
 v2 turns the engine from one thread that does everything into a platform of workers whose number
