@@ -31,9 +31,13 @@ import {
 } from './record.js';
 import { MSICONDITION } from './condition.js';
 import { formatRecord } from './format.js';
-import { INSTALLSTATE, createSession } from './session.js';
+import { INSTALLSTATE, createSession, parseCommandLine } from './session.js';
 import { PID_TYPES, VT, readSummary } from './summary.js';
-import { INSTALLMESSAGE, doAction, readFile, runSequence } from './actions.js';
+import { INSTALLMESSAGE, doAction, readFile, runSequence, writeFile } from './actions.js';
+import {
+    ERROR_INSTALL_TRANSFORM_FAILURE, applyTransform, applyTransformList, createTransformSummary,
+    generateTransform,
+} from './transform.js';
 import { finishAsync } from './custom.js';
 import { createRegistration, squashGuid } from './registration.js';
 import { installerVersion } from './version.js';
@@ -60,12 +64,12 @@ const ERROR_UNKNOWN_FEATURE = 1606;
 const ERROR_UNKNOWN_COMPONENT = 1607;
 const ERROR_UNKNOWN_PROPERTY = 1608;
 const ERROR_INVALID_TABLE = 1628;
-const ERROR_CALL_NOT_IMPLEMENTED = 120;
 const ERROR_DATATYPE_MISMATCH = 1629;
 const ERROR_ACCESS_DENIED = 5;
 const ERROR_UNKNOWN_PRODUCT = 1605;
 const ERROR_INSTALL_SOURCE_ABSENT = 1612;
 const ERROR_SUCCESS_REBOOT_REQUIRED = 3010;
+const ERROR_CREATE_FAILED = 1631;
 
 /** LoadTypeLibEx: load without registering; UnRegisterTypeLib: a 32-bit library. */
 const REGKIND_NONE = 2;
@@ -550,6 +554,45 @@ export function createMsiFunctions(host){
     }
 
     /**
+     * Lends `use` a way to open files on the volume as byte sources, and
+     * closes every one it opened once `use` is done with them.
+     *
+     * @template T
+     * @param {(openFile: (path: string) => import('./compound.js').ByteSource | null)
+     *     => Promise<T>} use
+     * @returns {Promise<T>}
+     */
+    const withFiles = async use=>{
+        /** @type {any[]} */
+        const nodes = [];
+        /** @param {string} path */
+        const openFile = path=>{
+            const full = host.fullPath(path);
+            const stat = host.files.stat(full);
+            const node = stat && !stat.isDirectory
+                ? host.files.open(full, { read: true, shareWrite: true }) : null;
+            if (!node)
+            {
+                return null;
+            }
+            nodes.push(node);
+            return { size: stat.size, read: (/** @type {number} */ offset,
+                /** @type {number} */ length)=>host.files.read(node, offset, length) };
+        };
+        try
+        {
+            return await use(openFile);
+        }
+        finally
+        {
+            for (const node of nodes)
+            {
+                host.files.close(node);
+            }
+        }
+    };
+
+    /**
      * A database out of a file on the volume, read where it lies.
      *
      * @param {string} path
@@ -594,7 +637,23 @@ export function createMsiFunctions(host){
         const db = byHandle ? opened?.db ?? null : await loadDatabase(packagePath);
         if (!db)
         {
-            return null;
+            return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
+        }
+        // The transforms the installation names, applied to the package before
+        // anything is read from it. A database handed over by handle is the
+        // caller's, transformed already if it wanted that.
+        const transforms = byHandle ? '' : parseCommandLine(commandLine).get('TRANSFORMS')
+            ?? String(db.table('Property')?.rows
+                .find((/** @type {any[]} */ row)=>row[0] === 'TRANSFORMS')?.[1] ?? '');
+        if (transforms !== '')
+        {
+            const applied = await withFiles(openFile=>applyTransformList(db, transforms,
+                { packagePath, openFile, log: host.log }));
+            if (applied.code !== ERROR_SUCCESS)
+            {
+                host.log?.(`${packagePath}: transforms ${transforms} answered ${applied.code}.`);
+                return ERROR_INSTALL_TRANSFORM_FAILURE;
+            }
         }
         db.readOnly = true;
         const session = createSession({
@@ -619,9 +678,9 @@ export function createMsiFunctions(host){
      */
     const installPackage = async(path, commandLine, thread = host.callerThread())=>{
         const session = await openSession(path, commandLine);
-        if (!session)
+        if (typeof session === 'number')
         {
-            return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
+            return session;
         }
         session.setProperty('ACTION', session.getProperty('ACTION') || 'INSTALL');
         session.setProperty('EXECUTEACTION', 'INSTALL');
@@ -1293,9 +1352,9 @@ export function createMsiFunctions(host){
                 return ERROR_INVALID_PARAMETER;
             }
             const session = await openSession(name);
-            if (!session)
+            if (typeof session === 'number')
             {
-                return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
+                return session;
             }
             writeU32(out, open('session', { session, deferred: null }));
             return ERROR_SUCCESS;
@@ -1308,9 +1367,9 @@ export function createMsiFunctions(host){
                 return ERROR_INVALID_PARAMETER;
             }
             const session = await openSession(name);
-            if (!session)
+            if (typeof session === 'number')
             {
-                return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
+                return session;
             }
             writeU32(out, open('session', { session, deferred: null }));
             return ERROR_SUCCESS;
@@ -1691,16 +1750,74 @@ export function createMsiFunctions(host){
                 return local;
             }
             const session = await openSession(local);
-            if (!session)
+            if (typeof session === 'number')
             {
-                return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
+                return session;
             }
             writeU32(out, open('session', { session, deferred: null }));
             return ERROR_SUCCESS;
         }),
-        ...both('MsiDatabaseApplyTransform', 12, ()=>()=>{
-            host.divergence?.('MsiDatabaseApplyTransform', 'a transform is not applied');
-            return ERROR_CALL_NOT_IMPLEMENTED;
+        ...both('MsiDatabaseApplyTransform', 12, wide=>async([database, transform, conditions])=>{
+            const opened = get(database, 'database');
+            const name = reader(wide)(transform);
+            if (!opened)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            if (name === null)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            return withFiles(openFile=>applyTransform(opened.db, name, conditions | 0, openFile,
+                host.log));
+        }),
+        ...both('MsiDatabaseGenerateTransform', 20, wide=>async([database, reference, file])=>{
+            const opened = get(database, 'database');
+            const base = get(reference, 'database');
+            if (!opened || !base)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const { code, bytes } = await generateTransform(opened.db, base.db);
+            if (code !== ERROR_SUCCESS)
+            {
+                return code;
+            }
+            const name = reader(wide)(file);
+            // With no file named, the call answers only whether the two differ.
+            if (name === null || bytes === null)
+            {
+                return ERROR_SUCCESS;
+            }
+            return writeFile(host.files, host.fullPath(name), bytes) ? ERROR_SUCCESS
+                : ERROR_CREATE_FAILED;
+        }),
+        ...both('MsiCreateTransformSummaryInfo', 20, wide=>async([database, reference, file,
+            conditions, validation])=>{
+            const opened = get(database, 'database');
+            const base = get(reference, 'database');
+            const name = reader(wide)(file);
+            if (!opened || !base)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            if (name === null)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            const bytes = await readFile(host.files, host.fullPath(name));
+            if (!bytes)
+            {
+                return ERROR_OPEN_FAILED;
+            }
+            const made = createTransformSummary(bytes, opened.db, base.db, conditions | 0,
+                validation | 0);
+            if (made.code !== ERROR_SUCCESS || !made.bytes)
+            {
+                return made.code;
+            }
+            return writeFile(host.files, host.fullPath(name), made.bytes) ? ERROR_SUCCESS
+                : ERROR_CREATE_FAILED;
         }),
         ...both('MsiQueryProductState', 4, wide=>([product])=>
             registration.productState(reader(wide)(product) ?? '')),
