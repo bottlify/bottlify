@@ -364,3 +364,73 @@ test('a callback whose handler jumped to its catch is passed over by the one tha
         assert.equal(handlerAnswered, false, 'the abandoned handler call is never answered');
         assert.equal(made.pendingCalls(), 0, 'nor is the throw it was dispatched from');
     });
+
+test('a catch the guest jumped to itself is seen at the thread\'s next wait', ()=>{
+    // The runtime's frame handler is guest code: it runs the catch and jumps
+    // to the continuation, and neither the throw nor the handler's callback
+    // returns. The thread's next host call stands above both, and a wait
+    // there is a wait for the host -- not a callback the scheduler runs.
+    const main = /** @type {any} */ ({ name: 'main', stackLimit: 0x200000, stackTop: 0x300000 });
+    const { made } = callbacks([main]);
+    made.reserve();
+    // Each handler builds its callback's frame, then suspends.
+    made.call({ thread: main, entry: 0x402000, args: [1, 2, 3, 4], stackAtRest: 0x2ff7f0 });
+    made.suspended(main, { name: 'USER32.dll!DispatchMessageA', restingStack: 0x2ff800,
+        hostReturn: 0x401000 });
+    made.call({ thread: main, entry: 0x403000, args: [1, 2, 3, 4], stackAtRest: 0x2ff100 });
+    made.suspended(main, { name: 'KERNEL32.dll!RaiseException', restingStack: 0x2ff400,
+        hostReturn: 0x402100 });
+
+    made.suspended(main, { name: 'USER32.dll!GetMessageA', restingStack: 0x2ff600,
+        hostReturn: 0x402200 });
+
+    assert.deepEqual(made.diagnostics().suspendedCalls.map((/** @type {any} */ call)=>call.name),
+        ['USER32.dll!DispatchMessageA', 'USER32.dll!GetMessageA'],
+        'the throw is gone, the dispatch the procedure runs under is not');
+    assert.equal(made.pendingCalls(), 2);
+    assert.equal(main.awaitingHost, false, 'still inside the procedure the dispatch called');
+
+    made.finish(main, 1);
+    assert.equal(made.returned(main), true, 'whose frame is the one left');
+    assert.equal(made.returned(main), false);
+});
+
+test('a wait made with nothing open but abandoned frames is a wait for the host', ()=>{
+    const main = /** @type {any} */ ({ name: 'main', stackLimit: 0x200000, stackTop: 0x300000 });
+    const { made } = callbacks([main]);
+    made.reserve();
+    made.call({ thread: main, entry: 0x403000, args: [1, 2], stackAtRest: 0x2ff100 });
+    made.suspended(main, { name: 'KERNEL32.dll!RaiseException', restingStack: 0x2ff120,
+        hostReturn: 0x402100 });
+    made.suspended(main, { name: 'USER32.dll!GetMessageA', restingStack: 0x2ff800,
+        hostReturn: 0x401000 });
+    assert.equal(main.awaitingHost, true, 'the thread is parked, not sent to run');
+    assert.equal(made.pendingCalls(), 1, 'on the one call it is in');
+});
+
+test('a call made on a fiber\'s stack leaves the thread\'s own frames alone', ()=>{
+    const main = /** @type {any} */ ({ name: 'main', stackLimit: 0x200000, stackTop: 0x300000 });
+    const { made } = callbacks([main]);
+    made.reserve();
+    made.call({ thread: main, entry: 0x403000, args: [1], stackAtRest: 0x2ff100 });
+    made.suspended(main, { name: 'outer', restingStack: 0x2ff120, hostReturn: 0x401000 });
+    made.suspended(main, { name: 'on the fiber', restingStack: 0x5ff000, hostReturn: 0x404000 });
+    assert.deepEqual(made.diagnostics().suspendedCalls.map((/** @type {any} */ call)=>call.name),
+        ['outer', 'on the fiber']);
+    assert.equal(main.awaitingHost, false);
+});
+
+test('a call that builds its callback before it suspends keeps it', ()=>{
+    // An enumeration calls the guest back from its handler, and only then
+    // is it suspended: the frame stands below the call's own stack, and it
+    // is the callback the thread is about to run, not one it jumped out of.
+    const main = /** @type {any} */ ({ name: 'main', stackLimit: 0x200000, stackTop: 0x300000 });
+    const { made } = callbacks([main]);
+    made.reserve();
+    made.call({ thread: main, entry: 0x403000, args: [1, 2, 3, 4], stackAtRest: 0x2ff7e0 });
+    made.suspended(main, { name: 'GDI32.dll!EnumFontFamiliesExA', restingStack: 0x2ff800,
+        hostReturn: 0x401000 });
+
+    assert.equal(main.awaitingHost, false, 'the thread is sent to run the callback');
+    assert.equal(made.returned(main), true, 'whose frame is still there to return to');
+});
