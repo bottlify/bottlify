@@ -1,0 +1,12 @@
+{
+  "name": "bottlify-night-run",
+  "private": true,
+  "type": "module",
+  "description": "The night run: an agent session per broken bottle, on the Claude Agent SDK and an API key",
+  "scripts": {
+    "start": "node night-run.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.295"
+  }
+}
