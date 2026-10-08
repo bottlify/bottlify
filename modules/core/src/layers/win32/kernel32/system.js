@@ -160,15 +160,6 @@ const ERROR_SXS_INVALID_DEACTIVATION = 14065;
 /** What CreateActCtx sets when it cannot build a context from a manifest. */
 const ERROR_SXS_CANT_GEN_ACTCTX = 14001;
 const INVALID_HANDLE_VALUE = 0xffffffff;
-/** No activation context has this section: what a process without a manifest is told. */
-const ERROR_SXS_SECTION_NOT_FOUND = 14004;
-/**
- * The least ACTCTX_SECTION_KEYED_DATA a section lookup writes into: up to
- * the context handle, without the assembly roster index the later layouts add.
- */
-const SECTION_KEYED_DATA_LEAST = 36;
-/** FIND_ACTCTX_SECTION_KEY_RETURN_HACTCTX, the one flag a lookup takes. */
-const FIND_ACTCTX_SECTION_KEY_RETURN_HACTCTX = 1;
 
 /**
  * SetThreadExecutionState's requests: the system, the display, a user, and
@@ -382,22 +373,6 @@ export function createSystemFunctions(host){
      */
     const executionStates = new WeakMap();
 
-    /** Both FindActCtxSectionString forms; the string itself is never read. */
-    const findActCtxSectionString = {
-        argBytes: 20,
-        /** @param {number[]} args */
-        handler: ([flags, , , text, data])=>{
-            if ((flags & ~FIND_ACTCTX_SECTION_KEY_RETURN_HACTCTX) !== 0
-                || (text >>> 0) === 0 || (data >>> 0) === 0
-                || readDword(data >>> 0) < SECTION_KEYED_DATA_LEAST)
-            {
-                host.setLastError(ERROR_INVALID_PARAMETER);
-                return 0;
-            }
-            host.setLastError(ERROR_SXS_SECTION_NOT_FOUND);
-            return 0;
-        },
-    };
 
     /** @type {number[]} What ActivateActCtx put on the stack, innermost last. */
     const activations = [];
@@ -1169,19 +1144,9 @@ export function createSystemFunctions(host){
         AddRefActCtx: { argBytes: 4, handler: ()=>0 },
         ReleaseActCtx: { argBytes: 4, handler: ()=>0 },
 
-        /**
-         * BOOL FindActCtxSectionStringA/W(DWORD dwFlags, const GUID *lpExtensionGuid,
-         *     ULONG ulSectionId, LPCSTR lpStringToFind,
-         *     PACTCTX_SECTION_KEYED_DATA ReturnedData)
-         *
-         * No context is built here (CreateActCtx above), so no section is in
-         * any, and a lookup that is well formed answers that -- the answer a
-         * caller probing for a redirection takes its default path on. A
-         * missing string, a missing or short structure, or a flag other than
-         * the one a lookup takes is a bad parameter first, as it is there.
-         */
-        FindActCtxSectionStringA: findActCtxSectionString,
-        FindActCtxSectionStringW: findActCtxSectionString,
+        // FindActCtxSectionStringA/W are absent on purpose (decisions.md): no activation
+        // context is built here, and a C runtime that finds the lookup present takes its
+        // "not found" for a load without its manifest and stops the program with R6034.
 
         /**
          * UINT SetErrorMode(UINT uMode)

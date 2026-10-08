@@ -627,3 +627,12 @@ twice in the CTAB, once in the float registers arithmetic reads and once in the 
 setter given the name (`SetInt`, `SetValue`, ...) writes both, each in its own set's layout,
 so the loop counts what the program set rather than what the integer register happened to hold.
 *2026-10-08.*
+
+**FindActCtxSectionStringA/W are not exported until activation contexts are built from
+manifests.** No context exists here, so the only answer the lookup can give is "not found",
+and the Visual C++ 2005 runtime (msvcr80, vcomp -- reached through GetProcAddress) takes that
+answer for a load without its manifest and stops the program with R6034 before the program's
+first instruction. Absent, the runtime treats the system as one without side-by-side support
+and runs. Removed on 2026-09-09 (16110a45), added back by an export audit on 2026-10-08
+(884102c9) and Gothic 3 met R6034 at vcomp.dll that day; kernel32's system.test.js now fails
+if the names come back. *2026-10-08.*

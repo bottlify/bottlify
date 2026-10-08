@@ -773,32 +773,17 @@ test('SetThreadExecutionState answers the lasting request before the call', ()=>
     assert.equal(host.errors.at(-1), 87);
 });
 
-test('FindActCtxSectionString finds no section, after checking its parameters', ()=>{
-    const host = fakeHost();
-    const fns = /** @type {any} */ (createSystemFunctions(host));
-    const ERROR_SXS_SECTION_NOT_FOUND = 14004;
-    const DLL_REDIRECTION = 2;
-    host.view.setUint32(0x300, 64, true);
+test('FindActCtxSectionString is absent, as no activation context is built', ()=>{
+    // Twice now a lookup answering "not found" stopped programs before their first
+    // instruction: the Visual C++ 2005 runtime (msvcr80, vcomp) finds the function through
+    // GetProcAddress, takes the answer for a load without its manifest and raises R6034 --
+    // Gothic 3 at vcomp.dll. Absent, the runtime takes the system for one without
+    // side-by-side support and goes on. Building activation contexts from manifests is
+    // what would let it be present.
+    const fns = /** @type {any} */ (createSystemFunctions(fakeHost()));
     for (const name of ['FindActCtxSectionStringA', 'FindActCtxSectionStringW'])
     {
-        const find = fns[name];
-        assert.equal(find.argBytes, 20);
-        assert.equal(find.handler([0, 0, DLL_REDIRECTION, 0x200, 0x300]), 0);
-        assert.equal(host.errors.at(-1), ERROR_SXS_SECTION_NOT_FOUND, name);
-        assert.equal(find.handler([1, 0, DLL_REDIRECTION, 0x200, 0x300]), 0);
-        assert.equal(host.errors.at(-1), ERROR_SXS_SECTION_NOT_FOUND,
-            'FIND_ACTCTX_SECTION_KEY_RETURN_HACTCTX is a flag it takes');
-
-        for (const args of [[0, 0, DLL_REDIRECTION, 0x200, 0], [0, 0, DLL_REDIRECTION, 0, 0x300],
-            [2, 0, DLL_REDIRECTION, 0x200, 0x300]])
-        {
-            assert.equal(find.handler(args), 0);
-            assert.equal(host.errors.at(-1), 87, `${name} ${args}`);
-        }
-        host.view.setUint32(0x300, 35, true);
-        assert.equal(find.handler([0, 0, DLL_REDIRECTION, 0x200, 0x300]), 0);
-        assert.equal(host.errors.at(-1), 87, 'a structure too short to be one');
-        host.view.setUint32(0x300, 64, true);
+        assert.equal(fns[name], undefined, `${name} is not exported`);
     }
 });
 
