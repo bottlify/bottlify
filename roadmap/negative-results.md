@@ -161,3 +161,23 @@ None yet.
 - **Correctness.** Every run of the sweep exited with the same checksum.
 - **Decision.** The mode choice (stage 3) gives a process one executor or one past the process's
   own for each thread it keeps ready at once, never two in all.
+
+### 2026-10-08 -- a loop with a call out stays a loop under callReturn
+
+- **Idea.** `planStructure` makes the return address of a call that leaves the region a root, so
+  a loop holding such a call on a cold path is no natural loop and each turn of it goes through
+  the region's dispatch (`br_table`). Under `callReturn` the call is a wasm call and comes back
+  inside the function, from outside only when the turn ended under it; taking its return address
+  as `reentered` (the copies enter it, as a predicted call's) would keep the loop a wasm loop.
+- **Workload.** `dbg/g3/hotloop.mjs` (not committed): the bytes of the Engine.dll linear search at
+  0x305FBF4D (Gothic 3 demo; 9 instructions an iteration, two calls on the found path) in an outer
+  loop, 2100 records, 200 000 searches, 4.2 G iterations, through `createMachine` at `cork2`
+  `e8fbb0cc`.
+- **Values.** ns an iteration, base then change, three pairs alternating: 3.98 / 6.00, 4.12 /
+  5.19, 3.82 / 5.58. Medians 3.98 against 5.58.
+- **Machine.** Node 22.22.0, a 4-core x86-64 Linux VM (Firecracker); a headless Chromium run of
+  the game was going on beside it on the same cores for both arms. Power plan: not recorded.
+- **Why it did not pay.** Not found: the module grew from 3256 to 5666 bytes (the copies), and
+  the change was not looked into further.
+- **Correctness.** Not run beyond the timing harness.
+- **Decision.** Reverted; the dispatch stays.
