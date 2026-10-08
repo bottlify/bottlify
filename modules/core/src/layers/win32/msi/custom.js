@@ -18,7 +18,8 @@
  * A library action is the program's code, given the session's handle and
  * answering an error code; its library is written to the temporary folder
  * from the Binary table first, as Windows does. Scripts in VBScript or
- * JScript need a script engine this machine does not have.
+ * JScript need a script engine this machine does not have. A nested installation
+ * is a package of its own, installed as MsiInstallProduct installs one.
  */
 
 /** The type's low bits: what the action is. */
@@ -51,6 +52,7 @@ const ERROR_INSTALL_USEREXIT = 1602;
 const ERROR_INSTALL_SUSPEND = 1604;
 const ERROR_NO_MORE_ITEMS = 259;
 const ERROR_MORE_DATA = 234;
+const ERROR_SUCCESS_REBOOT_REQUIRED = 3010;
 /** What a library action answers to say "the action did nothing". */
 const ERROR_CREATE_FAILED = 1631;
 
@@ -291,9 +293,18 @@ async function execute(engine, row, kind, flags, data){
     }
     if (type === TYPE_INSTALL)
     {
-        host.divergence?.(`custom action ${row.action}`,
-            'a nested installation is not run');
-        return answer(ERROR_INSTALL_FAILURE);
+        // Type 7 names a storage in this package, 23 a package by its path
+        // from this one's source, 39 an installed product by its code.
+        const where = source === SOURCE_BINARY ? 'storage' : source === SOURCE_FILE ? 'path'
+            : source === SOURCE_DIRECTORY ? 'product' : null;
+        if (where === null || !host.installNested)
+        {
+            return answer(ERROR_INSTALL_FAILURE);
+        }
+        const code = await host.installNested(where, row.source ?? '', format(row.target ?? ''));
+        host.log?.(`Nested installation ${row.action} answered ${code}.`);
+        return answer(code === ERROR_SUCCESS || code === ERROR_SUCCESS_REBOOT_REQUIRED
+            ? ERROR_SUCCESS : ERROR_INSTALL_FAILURE);
     }
     return answer(ERROR_FUNCTION_NOT_CALLED);
 }

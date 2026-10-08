@@ -41,6 +41,10 @@
  *     HRESULT, or null with no oleaut32 to ask.
  * @property {(libId: string, major: number, minor: number, language: number)
  *     => Promise<number | null>} [unregisterTypeLib]
+ * @property {(kind: 'storage' | 'path' | 'product', source: string, commandLine: string)
+ *     => Promise<number>} [installNested]
+ *     A nested installation: a package stored in this one, one beside its source, or an
+ *     installed product; answers as MsiInstallProduct does.
  * @property {(productCode: string, features: string) => Promise<number>} [removeProduct]
  *     Another installed product's removal, from the package the machine kept for it.
  * @property {(api: string, detail: string) => void} [divergence]

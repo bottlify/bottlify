@@ -406,6 +406,8 @@ export function createMsiFunctions(host){
                         unregisterTypeLib(libId, major, minor, language, made.thread),
                     removeProduct: (product, features)=>maintain(product,
                         `REMOVE=${quoted(features)}`, made.thread),
+                    installNested: (kind, source, commandLine)=>installNested(session, kind,
+                        source, commandLine, made.thread),
                     divergence: host.divergence,
                     log: host.log,
                 },
@@ -629,12 +631,15 @@ export function createMsiFunctions(host){
      * already open.
      *
      * @param {string} path @param {string} [commandLine]
+     * @param {{ db: import('./database.js').Database, packagePath: string }} [given]
+     *     A package already open -- one nested in another's storage.
      */
-    const openSession = async(path, commandLine = '')=>{
-        const byHandle = /^#(\d+)$/.exec(path);
+    const openSession = async(path, commandLine = '', given)=>{
+        const byHandle = given ? null : /^#(\d+)$/.exec(path);
         const opened = byHandle ? get(Number(byHandle[1]), 'database') : null;
-        const packagePath = byHandle ? opened?.path ?? '' : host.fullPath(path);
-        const db = byHandle ? opened?.db ?? null : await loadDatabase(packagePath);
+        const packagePath = given?.packagePath ?? (byHandle ? opened?.path ?? ''
+            : host.fullPath(path));
+        const db = given?.db ?? (byHandle ? opened?.db ?? null : await loadDatabase(packagePath));
         if (!db)
         {
             return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
@@ -675,9 +680,12 @@ export function createMsiFunctions(host){
      * execute sequence alone otherwise.
      *
      * @param {string} path @param {string} commandLine
+     * @param {unknown} [thread]  Whose call the installation answers.
+     * @param {{ db: import('./database.js').Database, packagePath: string }} [given]
+     *     The package already open, for one nested in another's storage.
      */
-    const installPackage = async(path, commandLine, thread = host.callerThread())=>{
-        const session = await openSession(path, commandLine);
+    const installPackage = async(path, commandLine, thread = host.callerThread(), given)=>{
+        const session = await openSession(path, commandLine, given);
         if (typeof session === 'number')
         {
             return session;
@@ -748,6 +756,41 @@ export function createMsiFunctions(host){
     const maintain = async(productCode, request, thread = host.callerThread())=>{
         const local = localPackage(productCode);
         return typeof local === 'number' ? local : installPackage(local, request, thread);
+    };
+
+    /**
+     * A nested installation a custom action runs: a package stored in this
+     * one's own file, a package beside this one's source, or an installed
+     * product configured again -- each an installation of its own, answering
+     * as MsiInstallProduct does.
+     *
+     * @param {import('./session.js').Session} parent
+     * @param {'storage' | 'path' | 'product'} kind @param {string} source
+     * @param {string} commandLine @param {unknown} thread
+     */
+    const installNested = async(parent, kind, source, commandLine, thread)=>{
+        if (kind === 'product')
+        {
+            return maintain(source, commandLine, thread);
+        }
+        if (kind === 'path')
+        {
+            const path = /^[A-Za-z]:\\|^\\\\/.test(source) ? source
+                : `${parent.sourceDir}${source}`;
+            return installPackage(path, commandLine, thread);
+        }
+        const compound = parent.db.compound;
+        const storage = compound ? [...compound.root.children.values()]
+            .find(node=>node.kind === 'storage' && node.name === source) : null;
+        if (!compound || !storage)
+        {
+            return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
+        }
+        const db = await openDatabase({ ...compound, root: storage }).catch(()=>null);
+        return db ? installPackage(source, commandLine, thread,
+            { db, packagePath: `${parent.packagePath.slice(0,
+                parent.packagePath.lastIndexOf('\\') + 1)}${source}.msi` })
+            : ERROR_INSTALL_PACKAGE_INVALID;
     };
 
     /**
