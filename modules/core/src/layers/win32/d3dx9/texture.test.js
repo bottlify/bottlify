@@ -76,6 +76,32 @@ function rig(){
             });
             return 0;
         }
+        if (self.surface && slot === 12)
+        {
+            const [, desc] = args;
+            [self.format, 1, 0, self.pool, 0, 0, self.width, self.height]
+                .forEach((value, i)=>view.setUint32(desc + i * 4, value, true));
+            return 0;
+        }
+        if (self.surface && slot === 13)
+        {
+            const [, locked, rect, flags] = args;
+            calls.push(['LockRect', rect === 0 ? 'whole' : 'rect', flags]);
+            if (self.pool === 0)
+            {
+                return 0x8876086c;
+            }
+            const left = rect === 0 ? 0 : view.getUint32(rect, true);
+            const top = rect === 0 ? 0 : view.getUint32(rect + 4, true);
+            view.setUint32(locked, self.width * 4, true);
+            view.setUint32(locked + 4, self.data + top * self.width * 4 + left * 4, true);
+            return 0;
+        }
+        if (self.surface && slot === 14)
+        {
+            calls.push(['UnlockRect']);
+            return 0;
+        }
         if (slot === 19)
         {
             const [, level, locked] = args;
@@ -120,14 +146,33 @@ function rig(){
             }
         },
         imageInfo: created.imageInfo,
+        /** @param {number[]} args */
+        loadSurface: args=>{
+            inHandler = true;
+            try
+            {
+                return created.loadSurface(args);
+            }
+            finally
+            {
+                inHandler = false;
+            }
+        },
     };
+    /**
+     * A surface of 32-bit texels.
+     *
+     * @param {number} width @param {number} height @param {number} format @param {number} pool
+     */
+    const surface = (width, height, format, pool = 1)=>object({ surface: true, width, height,
+        format, pool, data: heap.allocate(width * height * 4) });
     /** @param {number[]} bytes */
     const place = bytes=>{
         const at = heap.allocate(bytes.length);
         memory.set(bytes, at);
         return at;
     };
-    return { memory, view, heap, device, textures, calls, diverged, loader, place };
+    return { memory, view, heap, device, textures, calls, diverged, loader, place, surface };
 }
 
 /** A 2x2 TGA, 24 bits, top row first. @param {number[][]} texels  b, g, r each */
@@ -237,4 +282,26 @@ test('a colour key clears its texels; an unreadable file is refused and said', a
     const info = heap.allocate(28);
     assert.equal(loader.imageInfo([data, file.length, info]), 0);
     assert.deepEqual([view.getUint32(info, true), view.getUint32(info + 24, true)], [2, 2]);
+});
+
+test('D3DXLoadSurfaceFromSurface copies a whole surface into a rectangle of another, in its'
+    + ' format; a surface that will not lock is answered as its lock was, and said', async()=>{
+    const { textures, calls, diverged, loader, place, surface, memory } = rig();
+    const source = surface(2, 2, FMT.X8R8G8B8);
+    const dest = surface(4, 2, FMT.A8R8G8B8);
+    memory.set([1, 2, 3, 0, 4, 5, 6, 0, 7, 8, 9, 0, 10, 11, 12, 0], textures.get(source).data);
+    const rect = place([2, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 2, 0, 0, 0]);
+    // dest, its palette and rectangle, source, its palette and rectangle, FILTER_NONE, no key
+    assert.equal(await loader.loadSurface([dest, 0, rect, source, 0, 0, 1, 0]), 0);
+    const at = textures.get(dest).data;
+    assert.deepEqual([...memory.subarray(at, at + 32)], [
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 255, 4, 5, 6, 255,
+        0, 0, 0, 0, 0, 0, 0, 0, 7, 8, 9, 255, 10, 11, 12, 255,
+    ], 'X8R8G8B8 read as opaque, written at the rectangle');
+    assert.deepEqual(calls, [['LockRect', 'whole', 0x10], ['UnlockRect'], ['LockRect', 'rect', 0],
+        ['UnlockRect']]);
+
+    const target = surface(2, 2, FMT.A8R8G8B8, 0);
+    assert.equal(await loader.loadSurface([dest, 0, 0, target, 0, 0, 1, 0]), 0x8876086c);
+    assert.match(diverged.join(' | '), /D3DXLoadSurfaceFromSurface: the source would not lock/);
 });

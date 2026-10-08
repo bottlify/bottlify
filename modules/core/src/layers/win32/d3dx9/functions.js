@@ -117,7 +117,6 @@ const NOT_BUILT = {
     D3DXCreateTorus: [28, 5, 6],
     D3DXFilterTexture: [16],
     D3DXGetImageInfoFromFileA: [8],
-    D3DXLoadSurfaceFromSurface: [32],
     D3DXSaveSurfaceToFileInMemory: [20, 0],
     D3DXSaveTextureToFileInMemory: [16, 0],
     D3DXSimplifyMesh: [28, 6],
@@ -411,6 +410,7 @@ export function createD3dxFunctions(host){
 
         /** See texture.js. */
         D3DXCreateTextureFromFileInMemoryEx: { argBytes: 60, handler: textures.fromMemory },
+        D3DXLoadSurfaceFromSurface: { argBytes: 32, handler: textures.loadSurface },
 
         /** HRESULT D3DXCreateSprite(LPDIRECT3DDEVICE9 pDevice, LPD3DXSPRITE *ppSprite) */
         D3DXCreateSprite: {

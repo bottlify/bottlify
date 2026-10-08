@@ -31,6 +31,9 @@ export const STATEBLOCK_APPLY = 5;
 /** IDirect3DTexture9's slots. */
 export const TEXTURE = Object.freeze({ GetLevelDesc: 17, LockRect: 19, UnlockRect: 20 });
 
+/** IDirect3DSurface9's slots. */
+export const SURFACE = Object.freeze({ GetDesc: 12, LockRect: 13, UnlockRect: 14 });
+
 /**
  * @typedef {Object} DeviceHost
  * @property {(address: number, length: number) => Uint8Array} readMemory

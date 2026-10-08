@@ -4065,6 +4065,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         StretchRect(source, sourceRect, destination, destinationRect, filter, out = {}){
             if (!source || !destination || filter > D3DTEXF_ANISOTROPIC)
             {
+                report('stretch-arguments', `StretchRect refused: ${!source ? 'no source surface'
+                    : !destination ? 'no destination surface' : `filter ${filter}`}`);
                 return D3DERR_INVALIDCALL;
             }
             const from = describe(source);
