@@ -64,7 +64,7 @@ function unit(key){
 
 /** Name to registers, from the CTAB block in a program's tokens. @param {any} program */
 function constantsOf(program){
-    /** @type {Map<string, { set: number, index: number, count: number }>} */
+    /** @type {Map<string, { set: number, index: number, count: number, type: number }>} */
     const named = new Map();
     const block = program.constantTable;
     if (!block)
@@ -77,7 +77,7 @@ function constantsOf(program){
         new DataView(body.buffer, body.byteOffset, body.byteLength), 0);
     for (const c of table.constants)
     {
-        named.set(c.name, { set: c.set, index: c.index, count: c.count });
+        named.set(c.name, { set: c.set, index: c.index, count: c.count, type: c.type });
     }
     return named;
 }
@@ -90,6 +90,8 @@ function constantsOf(program){
  */
 function ioFor(program, trial){
     const f = new Float32Array(256 * 4);
+    const ints = new Int32Array(16 * 4);
+    const bools = new Array(16).fill(false);
     const named = constantsOf(program);
     /** @type {Map<number, string>} */
     const samplerName = new Map();
@@ -103,9 +105,28 @@ function ioFor(program, trial){
             }
             continue;
         }
+        // An int or a bool holds a whole number wherever it lives, as a program sets it: a
+        // fraction there is a value no program gives, which two compilers may read apart.
+        const whole = c.type === 1 || c.type === 2;
         for (let r = 0; r < c.count * 4; r++)
         {
-            f[c.index * 4 + r] = unit(`${trial}:${name}:${r}`);
+            const x = unit(`${trial}:${name}:${r}`);
+            const value = !whole ? x : c.type === 1 ? (x < 0.5 ? 0 : 1) : Math.floor(x * 4);
+            if (c.set === 1)
+            {
+                ints[c.index * 4 + r] = value;
+            }
+            else if (c.set === 0)
+            {
+                if (r % 4 === 0)
+                {
+                    bools[c.index + r / 4] = value !== 0;
+                }
+            }
+            else
+            {
+                f[c.index * 4 + r] = value;
+            }
         }
     }
     for (const [index, values] of program.defs.f)
@@ -135,7 +156,7 @@ function ioFor(program, trial){
         }
     }
     return {
-        constants: { f, i: new Int32Array(16 * 4), b: new Array(16).fill(false) },
+        constants: { f, i: ints, b: bools },
         inputs: { v, t },
         position: /** @type {[number, number]} */ ([0.5, 0.5]),
         frontFacing: true,
