@@ -5,296 +5,17 @@
  */
 
 /**
- * The LZX decoder against streams built here by a small encoder that
- * follows the Cabinet SDK's format description: 16-bit little-endian words
- * read most significant bit first, canonical trees sent as pre-tree coded
- * deltas, and matches as a main-tree element, a length-tree element and a
- * position footer.
+ * The LZX decoder against streams built by the small encoder in
+ * `lzx.fixture.js`: a cabinet's frames, and LZXD's chunks over a reference.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FRAME_SIZE, LzxError, createLzxDecoder, positionSlots } from './lzx.js';
+import { FRAME_SIZE, LzxError, createLzxDecoder, decodeLzxd, positionSlots } from './lzx.js';
+import { encoder as slotEncoder, literals, lzxdStream, text, writer } from './lzx.fixture.js';
 
-/** Position footer bits per slot, from the format's position slot table. */
-const EXTRA = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10,
-    11, 11, 12, 12, 13, 13, 14, 14, 15, 15, 16, 16, ...new Array(14).fill(17)];
-const BASE = EXTRA.reduce((bases, bits, slot)=>
-    [...bases, slot === 0 ? 0 : bases[slot - 1] + 2 ** EXTRA[slot - 1]], /** @type {number[]} */ ([]));
-
-/** Bits as LZX packs them: into 16-bit words, most significant bit first. */
-function writer(){
-    /** @type {number[]} */
-    const out = [];
-    let word = 0;
-    let count = 0;
-    /** @param {number} value @param {number} n */
-    const bits = (value, n)=>{
-        for (let i = n - 1; i >= 0; i--)
-        {
-            word = (word << 1) | (Math.floor(value / 2 ** i) & 1);
-            if (++count === 16)
-            {
-                out.push(word & 0xff, word >> 8);
-                word = 0;
-                count = 0;
-            }
-        }
-    };
-    return {
-        bits,
-        /** The 1-16 bits of padding before raw bytes, then the bytes themselves. */
-        raw(/** @type {number[]} */ values){
-            bits(0, 16 - count);
-            out.push(...values);
-            if (values.length & 1)
-            {
-                out.push(0);
-            }
-        },
-        /** A frame ends on a 16-bit boundary. */
-        done(){
-            if (count)
-            {
-                bits(0, 16 - count);
-            }
-            return Uint8Array.from(out);
-        },
-    };
-}
-
-/**
- * Path lengths for the symbols given, from their counts: a plain Huffman
- * merge, with a second symbol added when only one is used.
- *
- * @param {number} size @param {Map<number, number>} counts
- */
-function lengthsFor(size, counts){
-    const used = [...counts.keys()];
-    if (used.length === 1)
-    {
-        counts.set(used[0] === 0 ? 1 : 0, 1);
-    }
-    /** @type {{ weight: number, symbols: number[] }[]} */
-    let nodes = [...counts].map(([symbol, weight])=>({ weight, symbols: [symbol] }));
-    const lengths = new Uint8Array(size);
-    while (nodes.length > 1)
-    {
-        nodes.sort((a, b)=>a.weight - b.weight);
-        const [a, b] = nodes;
-        for (const symbol of [...a.symbols, ...b.symbols])
-        {
-            lengths[symbol]++;
-        }
-        nodes = [{ weight: a.weight + b.weight, symbols: [...a.symbols, ...b.symbols] },
-            ...nodes.slice(2)];
-    }
-    return lengths;
-}
-
-/**
- * Canonical codes: shorter first, and within a length by symbol.
- *
- * @param {Uint8Array} lengths
- * @returns {Map<number, { code: number, length: number }>}
- */
-function canonical(lengths){
-    const order = [...lengths.keys()].filter(s=>lengths[s] > 0)
-        .sort((a, b)=>lengths[a] - lengths[b] || a - b);
-    const codes = new Map();
-    let code = 0;
-    let previous = 0;
-    for (const symbol of order)
-    {
-        code <<= lengths[symbol] - previous;
-        previous = lengths[symbol];
-        codes.set(symbol, { code, length: lengths[symbol] });
-        code++;
-    }
-    return codes;
-}
-
-/**
- * One tree code as sent: a delta or run code, the extra bits some carry, and
- * the delta that follows a 19.
- *
- * @typedef {{ code: number, extra?: number, bits?: number, delta?: number }} Step
- */
-
-/**
- * What a token is sent as.
- *
- * @typedef {{ main: number, footerLength?: number | null, verbatim?: number,
- *     verbatimBits?: number, aligned?: number }} Shaped
- */
-
-/**
- * Sends `lengths[first..last)` as deltas from `previous`, through a
- * pre-tree. `plan` may give explicit tree codes (17, 18, 19 runs) instead of
- * one delta per element.
- *
- * @param {ReturnType<typeof writer>} w
- * @param {Uint8Array} previous @param {Uint8Array} lengths
- * @param {number} first @param {number} last
- * @param {Step[]} [plan]
- */
-function sendLengths(w, previous, lengths, first, last, plan){
-    /** @type {Step[]} */
-    const steps = plan ?? [...lengths.subarray(first, last)].map((length, i)=>
-        ({ code: (previous[first + i] - length + 17) % 17 }));
-    const counts = new Map();
-    for (const step of steps)
-    {
-        counts.set(step.code, (counts.get(step.code) ?? 0) + 1);
-        if (step.delta !== undefined)
-        {
-            counts.set(step.delta, (counts.get(step.delta) ?? 0) + 1);
-        }
-    }
-    const pre = lengthsFor(20, counts);
-    for (let i = 0; i < 20; i++)
-    {
-        w.bits(pre[i], 4);
-    }
-    const codes = canonical(pre);
-    /** @param {number} symbol */
-    const put = symbol=>{
-        const entry = /** @type {{ code: number, length: number }} */ (codes.get(symbol));
-        w.bits(entry.code, entry.length);
-    };
-    for (const step of steps)
-    {
-        put(step.code);
-        if (step.bits !== undefined)
-        {
-            w.bits(/** @type {number} */ (step.extra), step.bits);
-        }
-        if (step.delta !== undefined)
-        {
-            put(step.delta);
-        }
-    }
-    previous.set(lengths.subarray(first, last), first);
-}
-
-/**
- * @typedef {{ literal: number } | { length: number, offset?: number, repeat?: number }} Token
- */
-
-/**
- * An encoder holding what the decoder holds across blocks: the previous
- * trees, to send deltas against.
- *
- * @param {number} windowBits
- */
-function encoder(windowBits){
-    const mainElements = 256 + positionSlots(windowBits) * 8;
-    const previousMain = new Uint8Array(mainElements);
-    const previousLength = new Uint8Array(249);
-
-    /** @param {Token} token @param {boolean} aligned @returns {Shaped} */
-    const shape = (token, aligned)=>{
-        if ('literal' in token)
-        {
-            return { main: token.literal };
-        }
-        const header = token.length <= 8 ? token.length - 2 : 7;
-        const footerLength = token.length <= 8 ? null : token.length - 9;
-        if (token.repeat !== undefined)
-        {
-            return { main: 256 + token.repeat * 8 + header, footerLength };
-        }
-        const formatted = /** @type {number} */ (token.offset) + 2;
-        let slot = 3;
-        while (BASE[slot + 1] <= formatted)
-        {
-            slot++;
-        }
-        const footer = formatted - BASE[slot];
-        const extra = EXTRA[slot];
-        return {
-            main: 256 + slot * 8 + header, footerLength,
-            ...aligned && extra >= 3
-                ? { verbatim: footer >> 3, verbatimBits: extra - 3, aligned: footer & 7 }
-                : { verbatim: footer, verbatimBits: extra },
-        };
-    };
-
-    return {
-        /**
-         * Starts a verbatim or aligned block: its header and trees, sized
-         * for the tokens it will carry, and a function that writes tokens.
-         *
-         * @param {ReturnType<typeof writer>} w
-         * @param {1 | 2} type @param {number} size @param {Token[]} tokens
-         * @param {{ mainPlan?: any[], lengthPlan?: any[] }} [plans]
-         */
-        block(w, type, size, tokens, plans = {}){
-            const shaped = tokens.map(token=>shape(token, type === 2));
-            const mainCounts = new Map();
-            const lengthCounts = new Map([[0, 1]]);
-            const alignedCounts = new Map([[0, 1]]);
-            for (const s of shaped)
-            {
-                mainCounts.set(s.main, (mainCounts.get(s.main) ?? 0) + 1);
-                if (s.footerLength != null)
-                {
-                    lengthCounts.set(s.footerLength, (lengthCounts.get(s.footerLength) ?? 0) + 1);
-                }
-                if (s.aligned !== undefined)
-                {
-                    alignedCounts.set(s.aligned, (alignedCounts.get(s.aligned) ?? 0) + 1);
-                }
-            }
-            const main = lengthsFor(mainElements, mainCounts);
-            const length = lengthsFor(249, lengthCounts);
-            const alignedLengths = lengthsFor(8, alignedCounts);
-            w.bits(type, 3);
-            w.bits(size, 24);
-            if (type === 2)
-            {
-                for (let i = 0; i < 8; i++)
-                {
-                    w.bits(alignedLengths[i], 3);
-                }
-            }
-            sendLengths(w, previousMain, main, 0, 256, plans.mainPlan);
-            sendLengths(w, previousMain, main, 256, mainElements);
-            sendLengths(w, previousLength, length, 0, 249, plans.lengthPlan);
-            const mainCodes = canonical(main);
-            const lengthCodes = canonical(length);
-            const alignedCodes = canonical(alignedLengths);
-            /** @param {ReturnType<typeof writer>} into @param {Token[]} some */
-            return (into, some)=>{
-                for (const token of some)
-                {
-                    const s = shape(token, type === 2);
-                    const m = /** @type {any} */ (mainCodes.get(s.main));
-                    into.bits(m.code, m.length);
-                    if (s.footerLength != null)
-                    {
-                        const l = /** @type {any} */ (lengthCodes.get(s.footerLength));
-                        into.bits(l.code, l.length);
-                    }
-                    if (s.verbatimBits)
-                    {
-                        into.bits(/** @type {number} */ (s.verbatim), s.verbatimBits);
-                    }
-                    if (s.aligned !== undefined)
-                    {
-                        const a = /** @type {any} */ (alignedCodes.get(s.aligned));
-                        into.bits(a.code, a.length);
-                    }
-                }
-            };
-        },
-    };
-}
-
-/** @param {string} text */
-const literals = text=>[...text].map(c=>({ literal: c.charCodeAt(0) }));
-/** @param {Uint8Array} bytes */
-const text = bytes=>String.fromCharCode(...bytes);
+/** An encoder for a cabinet window of `2^bits` bytes. @param {number} bits */
+const encoder = bits=>slotEncoder(positionSlots(bits));
 
 test('the window sizes and their position slots', ()=>{
     assert.deepEqual([15, 16, 17, 18, 19, 20, 21].map(positionSlots),
@@ -486,4 +207,184 @@ test('an undefined block type, or a tree used with no elements, is an error', ()
     const tokens = literals('abc');
     enc.block(v, 1, 3, tokens)(v, tokens);
     assert.throws(()=>createLzxDecoder(15).decodeFrame(v.done(), 4), LzxError);
+});
+
+/** The position slots of an LZXD window of 128 KiB, the smallest it has. */
+const LZXD_SLOTS = positionSlots(17);
+
+/** @param {string} value */
+const ascii = value=>Uint8Array.from([...value].map(c=>c.charCodeAt(0)));
+
+/**
+ * One chunk of LZXD: no CALL translation, then one verbatim block of the
+ * tokens given.
+ *
+ * @param {import('./lzx.fixture.js').Token[]} tokens @param {number} size
+ */
+const oneChunk = (tokens, size)=>{
+    const w = writer();
+    w.bits(0, 1);
+    encoder17().block(w, 1, size, tokens)(w, tokens);
+    return lzxdStream([w.done()]);
+};
+const encoder17 = ()=>slotEncoder(LZXD_SLOTS, { delta: true });
+
+test('LZXD windows reach 32 MiB, with up to 290 position slots', ()=>{
+    assert.deepEqual([22, 23, 24, 25].map(positionSlots), [66, 98, 162, 290]);
+});
+
+test('an LZXD match reaches back into the reference before the output', ()=>{
+    const reference = ascii('the quick brown fox ');
+    // "quick " from 16 back, "fox" from 10 back, then "x qu" across the
+    // reference's end into the output's own first bytes.
+    const tokens = [{ length: 6, offset: 16 }, { length: 3, offset: 10 },
+        ...literals('!'), { length: 4, offset: 12 }];
+    const out = decodeLzxd(oneChunk(tokens, 14), reference, 14);
+    assert.equal(text(out), 'quick fox!x qu');
+});
+
+test('what a match reaches before the reference reads as zeros', ()=>{
+    const out = decodeLzxd(oneChunk([{ length: 12, offset: 10 }], 12), ascii('abc'), 12);
+    assert.deepEqual([...out], [0, 0, 0, 0, 0, 0, 0, 0x61, 0x62, 0x63, 0, 0]);
+});
+
+test('with no reference, the output is its own window', ()=>{
+    const tokens = [...literals('ab'), { length: 10, offset: 2 }];
+    assert.equal(text(decodeLzxd(oneChunk(tokens, 12), new Uint8Array(0), 12)), 'abababababab');
+});
+
+test('a match of the longest length is lengthened by one of four prefixed codes', ()=>{
+    const reference = Uint8Array.from({ length: 300 }, (_, i)=>(i * 31 + 7) & 0xff);
+    const lengths = [257 + 5, 257 + 0x100 + 3, 257 + 0x500 + 7, 257 + 0x1600];
+    const tokens = lengths.map(length=>({ length, offset: 300 }));
+    const size = lengths.reduce((sum, length)=>sum + length, 0);
+    const out = decodeLzxd(oneChunk(tokens, size), reference, size);
+    const expected = new Uint8Array(300 + size);
+    expected.set(reference);
+    for (let i = 300; i < expected.length; i++)
+    {
+        expected[i] = expected[i - 300];
+    }
+    assert.deepEqual(out, expected.subarray(300));
+});
+
+/**
+ * An uncompressed block whose header ends on a word boundary, behind a
+ * verbatim block of one repeated literal sized to put it there.
+ *
+ * @param {boolean} padAligned
+ */
+const alignedUncompressed = padAligned=>{
+    for (let count = 1; count < 40; count++)
+    {
+        const w = writer();
+        w.bits(0, 1);
+        const tokens = literals('x'.repeat(count));
+        encoder17().block(w, 1, count, tokens)(w, tokens);
+        w.bits(3, 3);
+        w.bits(4, 24);
+        if (w.pending !== 0)
+        {
+            continue;
+        }
+        w.raw([3, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, ...ascii('abcd')], { padAligned });
+        return { stream: lzxdStream([w.done()]), size: count + 4, count };
+    }
+    throw new Error('no literal count puts the header on a boundary');
+};
+
+test('an LZXD uncompressed block on a word boundary: a zero word is padding, else an offset', ()=>{
+    for (const padAligned of [true, false])
+    {
+        const { stream, size, count } = alignedUncompressed(padAligned);
+        assert.equal(text(decodeLzxd(stream, new Uint8Array(0), size)),
+            `${'x'.repeat(count)}abcd`, `padded: ${padAligned}`);
+    }
+});
+
+test('a block, a match and an uncompressed run go on from one chunk into the next', ()=>{
+    const reference = Uint8Array.from({ length: 1000 }, (_, i)=>(i * 7) & 0xff);
+    // Chunk one: 32763 literals, then a match of ten that ends five bytes into
+    // the second chunk's output; chunk two: the rest of the block.
+    const head = Array.from({ length: FRAME_SIZE - 5 }, (_, i)=>({ literal: (i * 13) & 0xff }));
+    const crossing = { length: 10, offset: FRAME_SIZE + 500 };
+    const tail = [...literals('end'), { length: 20, offset: 40000 }];
+    const size = FRAME_SIZE - 5 + 10 + 3 + 20;
+    const enc = encoder17();
+    const one = writer();
+    one.bits(0, 1);
+    const write = enc.block(one, 1, size, [...head, crossing, ...tail]);
+    write(one, [...head, crossing]);
+    const two = writer();
+    write(two, tail);
+    const out = decodeLzxd(lzxdStream([one.done(), two.done()]), reference, size);
+
+    const expected = new Uint8Array(1000 + size);
+    expected.set(reference);
+    let at = 1000;
+    for (const token of [...head, crossing, ...tail])
+    {
+        if ('literal' in token)
+        {
+            expected[at++] = token.literal;
+            continue;
+        }
+        for (let i = 0; i < token.length; i++, at++)
+        {
+            expected[at] = expected[at - /** @type {number} */ (token.offset)];
+        }
+    }
+    assert.deepEqual(out, expected.subarray(1000));
+
+    // An uncompressed block of a chunk and a hundred bytes: the raw bytes
+    // run on into the second chunk, which then carries a verbatim block.
+    const raw = Array.from({ length: FRAME_SIZE + 100 }, (_, i)=>(i * 5 + 1) & 0xff);
+    const first = writer();
+    first.bits(0, 1);
+    first.bits(3, 3);
+    first.bits(raw.length, 24);
+    first.raw([1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, ...raw.slice(0, FRAME_SIZE)]);
+    const second = writer();
+    second.bytes(raw.slice(FRAME_SIZE));
+    const after = literals('ok');
+    encoder17().block(second, 1, 2, after)(second, after);
+    const decoded = decodeLzxd(lzxdStream([first.done(), second.done()]), new Uint8Array(0),
+        raw.length + 2);
+    assert.deepEqual([...decoded.subarray(0, raw.length)], raw);
+    assert.equal(text(decoded.subarray(raw.length)), 'ok');
+});
+
+test('LZXD CALL translation is undone relative to the output, not the reference', ()=>{
+    const bytes = new Uint8Array(64).fill(0x90);
+    bytes[8] = 0xe8;
+    new DataView(bytes.buffer).setInt32(9, 0x30, true);
+    const w = writer();
+    w.bits(1, 1);
+    w.bits(0, 16);
+    w.bits(0x1000, 16);
+    const tokens = [...bytes].map(literal=>({ literal }));
+    encoder17().block(w, 1, 64, tokens)(w, tokens);
+    const out = decodeLzxd(lzxdStream([w.done()]), new Uint8Array(500), 64);
+    assert.equal(new DataView(out.buffer, out.byteOffset).getInt32(9, true), 0x30 - 8);
+});
+
+test('a truncated LZXD stream, a zero repeated offset or bits past a chunk are errors', ()=>{
+    const good = oneChunk(literals('hello'), 5);
+    assert.throws(()=>decodeLzxd(good.subarray(0, good.length - 1), new Uint8Array(0), 5),
+        LzxError, 'a chunk longer than the stream');
+    assert.throws(()=>decodeLzxd(good, new Uint8Array(0), 6), LzxError,
+        'output asked for past the stream');
+
+    const w = writer();
+    w.bits(0, 1);
+    w.bits(3, 3);
+    w.bits(2, 24);
+    w.raw([0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0x61, 0x62]);
+    assert.throws(()=>decodeLzxd(lzxdStream([w.done()]), new Uint8Array(0), 2), LzxError);
+
+    // A block of ten literals whose chunk is cut to its first word: the
+    // decoder would have to read the padding as the rest.
+    const cut = oneChunk(literals('abcdefghij'), 10);
+    const short = lzxdStream([cut.subarray(2, 6)]);
+    assert.throws(()=>decodeLzxd(short, new Uint8Array(0), 10), LzxError);
 });
