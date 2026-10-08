@@ -126,7 +126,8 @@ function program({ threads, work, sync, host }){
 }
 
 /**
- * One run: seconds from the first instruction to the exit, and the exit code.
+ * One run: seconds from the first instruction to the exit, the exit code, and
+ * the guest instructions every thread retired, as the scheduler counted them.
  *
  * @param {Uint8Array} executable @param {number} executors
  */
@@ -137,7 +138,14 @@ async function run(executable, executors){
     {
         const began = performance.now();
         const code = await app.run({ timeoutMs: 600_000, maxTurns: Number.MAX_SAFE_INTEGER });
-        return { seconds: (performance.now() - began) / 1000, code: code >>> 0 };
+        const seconds = (performance.now() - began) / 1000;
+        const tables = await app.diagnostics();
+        const kernel = (Array.isArray(tables) ? tables : []).find(table=>table.name === 'kernel');
+        const scheduler = kernel?.metrics?.scheduler ?? kernel?.metrics ?? {};
+        // "name instructions state ..." per thread, " | " between.
+        const retired = String(scheduler.byThread ?? '').split(' | ')
+            .reduce((sum, row)=>sum + (Number(row.split(' ')[1]) || 0), 0);
+        return { seconds, code: code >>> 0, retired };
     }
     finally
     {
@@ -159,6 +167,8 @@ for (const threads of THREADS)
             const executable = program(point);
             /** @type {Map<number, number[]>} */
             const times = new Map(EXECUTORS.map(count=>[count, []]));
+            /** Instructions retired a run, by executor count (the same every run). @type {Map<number, number>} */
+            const retiredBy = new Map();
             /** @type {Set<number>} */
             const codes = new Set();
             // The executor counts alternate within each rep, so a drift of the
@@ -168,8 +178,9 @@ for (const threads of THREADS)
                 const order = rep % 2 === 0 ? EXECUTORS : [...EXECUTORS].reverse();
                 for (const executors of order)
                 {
-                    const { seconds, code } = await run(executable, executors);
+                    const { seconds, code, retired } = await run(executable, executors);
                     /** @type {number[]} */ (times.get(executors)).push(seconds);
+                    retiredBy.set(executors, retired);
                     codes.add(code);
                 }
             }
@@ -177,9 +188,12 @@ for (const threads of THREADS)
             for (const executors of EXECUTORS)
             {
                 const raw = /** @type {number[]} */ (times.get(executors));
+                const retired = retiredBy.get(executors) ?? 0;
                 const row = { threads, sync, host, executors, median: median(raw),
                     min: Math.min(...raw), max: Math.max(...raw), raw,
-                    speedup: one / median(raw), sameResult: codes.size === 1 };
+                    speedup: one / median(raw), sameResult: codes.size === 1,
+                    // Millions of guest instructions a second, every thread together.
+                    mips: retired / median(raw) / 1e6 };
                 rows.push(row);
                 if (JSON_OUT)
                 {
@@ -190,6 +204,7 @@ for (const threads of THREADS)
                     console.log(`T=${threads} K=${sync || '-'} H=${host || '-'} E=${executors}`
                         + `  median ${row.median.toFixed(2)}s [${raw.map(t=>t.toFixed(2))
                             .join(' ')}]  x${row.speedup.toFixed(2)} vs E=${EXECUTORS[0]}`
+                        + `  ${Math.round(row.mips)} MIPS (${(retired / 1e9).toFixed(2)} G)`
                         + `${row.sameResult ? '' : '  RESULTS DIFFER'}`);
                 }
             }
