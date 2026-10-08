@@ -72,18 +72,26 @@ const MEMORY = 4 << 20;
 
 /**
  * @param {import('../../../core/src/layers/cpu/engine.js').EngineConfig} cork
+ * @param {{ executors?: number, executor?: number }} [where]  which executor of a memory
+ *     shared by several the host is (the first by default)
  * @returns {CorkHost}
  */
-const hostOf = cork=>/** @type {CorkHost} */ (createCorkHost({
+const hostOf = (cork, where = {})=>/** @type {CorkHost} */ (createCorkHost({
     engine, memorySize: MEMORY, trapPort: 0xb077, entryVector: 0x7000,
-    initialStack: REGISTERS.esp, cork,
+    initialStack: REGISTERS.esp, cork, ...where,
 }));
 
 /**
  * Makes the model and the translator, each over a host of its own, and answers
  * a judge that runs one sequence on both from one state.
+ *
+ * @param {{ pool?: import('./sequences.js').Form[], cork?: Record<string, unknown>,
+ *     executor?: { executors: number, executor: number } }} [given]
+ *     pool: the forms the sequences index (`POOL` by default); cork: the translator's
+ *     settings besides the judge's own (the atomic variant's judge sets `atomic`); executor:
+ *     which executor of a shared memory the translator's host is (the executors' judge)
  */
-function createJudge(){
+export function createJudge({ pool = undefined, cork = {}, executor = undefined } = {}){
     // The model is the JavaScript interpreter alone: the wasm tier is an
     // implementation of the instructions of its own, not their description.
     const model = hostOf({ translate: false, wasmInterpreter: false });
@@ -99,7 +107,8 @@ function createJudge(){
         missThreshold: Number.POSITIVE_INFINITY,
         hotThreshold: Number.POSITIVE_INFINITY,
         wasmInterpreter: false,
-    });
+        ...cork,
+    }, executor);
     const runtime = translator.cork();
 
     // A fresh FPU with its registers zeros, so an MMX read of one is a known
@@ -150,14 +159,14 @@ function createJudge(){
                 const key = setup.join(',');
                 if (key !== written)
                 {
-                    model.writePhysical(SETUP, programBytes(setup));
+                    model.writePhysical(SETUP, programBytes(setup, pool));
                     written = key;
                 }
                 model.writeReg32('eip', SETUP);
                 model.wake();
                 retireExactly(model.runSlice, model.halted, LIMIT);
             }
-            const code = programBytes(body);
+            const code = programBytes(body, pool);
             model.writePhysical(CODE, code);
             model.writeReg32('eip', CODE);
             const state = snapshot(model, SPANS);

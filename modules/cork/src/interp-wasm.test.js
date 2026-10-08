@@ -19,10 +19,10 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { Fault, Unsupported, blockState, interpret } from './interp.js';
 import {
-    HOT_SLOTS, WASM_INTERPRETER_AREA, WasmExit, createWasmInterpreter,
+    HOT_SLOTS, WASM_INTERPRETER_AREA, WASM_INTERPRETER_STATICS_AT, WasmExit, createWasmInterpreter,
 } from './interp-wasm.js';
 import { SOURCE_SHA256 } from './interp-wasm.bytes.js';
-import { ownLayout, pagesFor, Tables } from './runtime/layout.js';
+import { EXECUTOR_BYTES, PAGE, executorLayout, ownLayout, pagesFor, Tables } from './runtime/layout.js';
 import { PageFlag, createPageTable } from './runtime/pages.js';
 import { Kind, eflagsOf, kindOf } from './emit/flags.js';
 
@@ -49,12 +49,41 @@ function machine(){
     const pages = pagesFor(layout, Tables.SIZE + WASM_INTERPRETER_AREA);
     const memory = new WebAssembly.Memory({ initial: pages, maximum: pages });
     const table = createPageTable(memory, layout);
-    const tier = createWasmInterpreter({ memory, layout, area, hotThreshold: 2,
+    const tier = createWasmInterpreter({ memory, layout,
+        statics: WASM_INTERPRETER_STATICS_AT, area, hotThreshold: 2,
         trapPort: TRAP_PORT, parkBase: 0x100000 });
     assert.ok(tier, 'the tier runs over cork\'s own layout');
     const bytes = new Uint8Array(memory.buffer);
     const view = new DataView(memory.buffer);
-    return { layout, memory, table, tier, bytes, view, area };
+    return { layout, memory, table, tier, bytes, view, area, off: 0 };
+}
+
+/**
+ * Two executors over one memory: the first in cork's own layout, the second
+ * in its state page past the first's areas, each with a tier of its own and
+ * its program, data and stack `off` bytes into guest RAM.
+ */
+function executors(){
+    const own = ownLayout({ ramSize: RAM });
+    const first = pagesFor(own, Tables.SIZE + WASM_INTERPRETER_AREA);
+    const base = first * PAGE;
+    const second = executorLayout(own, base);
+    const pages = first + Math.ceil((EXECUTOR_BYTES + WASM_INTERPRETER_AREA) / PAGE);
+    const memory = new WebAssembly.Memory({ initial: pages, maximum: pages });
+    const bytes = new Uint8Array(memory.buffer);
+    const view = new DataView(memory.buffer);
+    // The second's program, data and stack in another 64 KiB of RAM: a program
+    // changes the data's pointer by its bh alone, which keeps it in its own.
+    return [[own, 0, 0], [second, base, 0x40000]].map(([layout, stateBase, off])=>{
+        const at = /** @type {import('../../core/src/layers/cpu/engine.js').StateLayout} */ (layout);
+        const area = at.tables + Tables.SIZE;
+        const tier = createWasmInterpreter({ memory, layout: at, area, hotThreshold: 2,
+            statics: /** @type {number} */ (stateBase) + WASM_INTERPRETER_STATICS_AT,
+            trapPort: TRAP_PORT, parkBase: 0x100000 });
+        assert.ok(tier);
+        return { layout: at, memory, table: createPageTable(memory, at), tier, bytes, view, area,
+            off: /** @type {number} */ (off) };
+    });
 }
 
 /** @param {number} value */
@@ -190,37 +219,43 @@ function instruction(next){
  * @param {ReturnType<typeof machine>} m @param {number[]} code
  * @param {(n: number) => number} next
  */
-function reset(m, code, next){
-    const { bytes, view, layout } = m;
-    bytes.fill(0, 0, 512);
-    bytes.fill(0, layout.ramBase, layout.ramBase + RAM);
-    bytes.set(code, layout.ramBase + CODE);
+function reset(m, code, next, { clear = true } = {}){
+    const { bytes, view, layout, off } = m;
+    bytes.fill(0, layout.regs, layout.regs + 512);
+    if (clear)
+    {
+        bytes.fill(0, layout.ramBase, layout.ramBase + RAM);
+    }
+    bytes.set(code, layout.ramBase + CODE + off);
     for (let i = 0; i < 64; i += 4)
     {
-        view.setUint32(layout.ramBase + DATA + i, EDGES[next(EDGES.length)] ^ next(1 << 20), true);
+        view.setUint32(layout.ramBase + DATA + off + i, EDGES[next(EDGES.length)] ^ next(1 << 20),
+            true);
     }
     for (let r = 0; r < 8; r++)
     {
         view.setUint32(layout.regs + r * 4, EDGES[next(EDGES.length)] ^ next(4), true);
     }
-    view.setUint32(layout.regs + 3 * 4, DATA, true);
-    view.setUint32(layout.regs + 4 * 4, STACK, true);
+    view.setUint32(layout.regs + 3 * 4, DATA + off, true);
+    view.setUint32(layout.regs + 4 * 4, STACK + off, true);
     view.setUint32(layout.eflags, 2 | next(0x1000) & ARITH, true);
     view.setUint16(layout.x87Control, 0x37f, true);
     view.setUint8(layout.x87Empty, 0xff);
-    view.setUint32(layout.eip, CODE, true);
+    view.setUint32(layout.eip, CODE + off, true);
 }
 
 /** What a run leaves: registers, eip, the arithmetic flags, the data, the stack's top. */
 function outcome(/** @type {ReturnType<typeof machine>} */ m, /** @type {string} */ ended){
-    const { view, layout, bytes } = m;
+    const { view, layout, bytes, off } = m;
+    const data = layout.ramBase + DATA + off;
+    const stack = layout.ramBase + STACK + off;
     return {
         ended,
         regs: Array.from({ length: 8 }, (_, r)=>view.getUint32(layout.regs + r * 4, true)),
         eip: view.getUint32(layout.eip, true),
         flags: eflagsOf(view, layout) & ARITH,
-        data: Array.from(bytes.subarray(layout.ramBase + DATA, layout.ramBase + DATA + 128)),
-        stack: Array.from(bytes.subarray(layout.ramBase + STACK - 64, layout.ramBase + STACK)),
+        data: Array.from(bytes.subarray(data, data + 128)),
+        stack: Array.from(bytes.subarray(stack - 64, stack)),
     };
 }
 
@@ -262,11 +297,28 @@ function runJs(/** @type {ReturnType<typeof machine>} */ m){
 
 /** Runs to the halt on the wasm tier, the JavaScript interpreter taking what it leaves. */
 function runWasm(/** @type {ReturnType<typeof machine>} */ m){
-    const state = blockState({ memory: m.memory, layout: m.layout });
-    let left = 10_000;
+    const step = wasmSteps(m, 10_000);
     for (;;)
     {
-        const code = m.tier.run(left);
+        const result = step();
+        if (result !== null)
+        {
+            return result;
+        }
+    }
+}
+
+/**
+ * The same run a tier's run at a time, each of at most `slice` instructions:
+ * a step answers the outcome once the run is over, null till then.
+ *
+ * @param {ReturnType<typeof machine>} m @param {number} slice
+ */
+function wasmSteps(m, slice){
+    const state = blockState({ memory: m.memory, layout: m.layout });
+    let left = 10_000;
+    return ()=>{
+        const code = m.tier.run(Math.min(left, slice));
         left -= m.tier.retired();
         if (code === WasmExit.HALT)
         {
@@ -301,7 +353,8 @@ function runWasm(/** @type {ReturnType<typeof machine>} */ m){
         {
             return outcome(m, 'budget');
         }
-    }
+        return null;
+    };
 }
 
 test('generated integer programs leave what the JavaScript interpreter leaves', ()=>{
@@ -330,6 +383,43 @@ test('generated integer programs leave what the JavaScript interpreter leaves', 
             .padStart(2, '0')).join(' ')}`);
     }
     assert.ok(faulted < count / 2, `${faulted} of ${count} faulted: the programs mostly run`);
+});
+
+test('two executors\' tiers over one memory, run by turns, each leave what the JavaScript '
+    + 'interpreter leaves', ()=>{
+    const pair = executors();
+    const next = random(0xe8ec);
+    for (let index = 0; index < 1500; index++)
+    {
+        const programs = pair.map(()=>{
+            /** @type {number[]} */
+            const code = [];
+            const length = 1 + next(12);
+            for (let i = 0; i < length; i++)
+            {
+                code.push(...instruction(next));
+            }
+            return { code: [...code, 0xf4], seed: next(1 << 30) };
+        });
+        /** @param {boolean} clear */
+        const place = clear=>pair.forEach((m, i)=>reset(m, programs[i].code,
+            random(programs[i].seed), { clear: clear && i === 0 }));
+        place(true);
+        // Each alone, the JavaScript interpreter's; then the tiers a few instructions at a turn.
+        const expected = pair.map(m=>runJs(m));
+        place(true);
+        const steps = pair.map(m=>wasmSteps(m, 1 + next(4)));
+        /** @type {(ReturnType<typeof outcome> | null)[]} */
+        const actual = [null, null];
+        while (actual.includes(null))
+        {
+            steps.forEach((step, i)=>{
+                actual[i] ??= step();
+            });
+        }
+        assert.deepEqual(actual, expected, `programs ${index}: ${programs.map(one=>one.code
+            .map(b=>b.toString(16).padStart(2, '0')).join(' ')).join(' | ')}`);
+    }
 });
 
 test('the string instructions repeat, compare and stop as the JavaScript interpreter does', ()=>{

@@ -194,6 +194,7 @@ function contextKey(layout, features, options, leaveOut){
         options.trapPort ?? null, options.countTransfers === true, options.blockProfile === true,
         options.wide === true, options.narrow === true, options.structure !== false,
         options.precise === true, options.place === true, options.profileCalls === true,
+        options.atomic === true,
         options.resume === true, options.callReturn === true, options.looseStacks === true,
         [...leaveOut].sort()]);
 }
@@ -289,6 +290,7 @@ function sameShape(kept, shape){
  *     blockProfile?: boolean, timings?: boolean, place?: boolean,
  *     leaveOut?: Set<string> | string[], wide?: boolean, narrow?: boolean,
  *     structure?: boolean, precise?: boolean, profileCalls?: boolean, resume?: boolean,
+ *     atomic?: boolean,
  *     callReturn?: boolean, looseStacks?: boolean,
  *     memory?: { shared?: boolean, maxPages?: number } }}
  *     [options]
@@ -317,6 +319,7 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
         narrow: options.narrow === true,
         structure: options.structure !== false,
         precise: options.precise === true,
+        atomic: options.atomic === true,
         place: options.place === true ? jobs.length : 0,
         profileCalls: options.profileCalls === true,
         resume: options.resume === true,
