@@ -197,7 +197,7 @@ export async function serveProcess(start){
                 doorbell: { posted, bell: link.bell } } },
             pacing: ringPacing({ inbound: { bell: link.bell, drain: link.pump },
                 macrotask: createMacrotask(), now: ()=>performance.now(), intervalMs: YIELD_MS,
-                posted }),
+                posted, pendingMs: options.pendingYieldMs }),
         });
     }
     catch (e){

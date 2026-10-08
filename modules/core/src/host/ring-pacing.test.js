@@ -112,8 +112,11 @@ test('a thread still running gives the event loop a turn when the interval is up
         clock = 5;
         await pacing.yield(quiet);
         assert.equal(macrotasks(), 1);
+        assert.equal(pacing.yield({ ...quiet, fetching: 1 }), null,
+            'a fetch in flight waits a millisecond while the thread still runs');
+        clock = 6;
         await pacing.yield({ ...quiet, fetching: 1 });
-        assert.equal(macrotasks(), 2, 'a fetch in flight is answered on the event loop');
+        assert.equal(macrotasks(), 2, 'and is then answered on the event loop');
     });
 
 test('with another machine on the thread an idle wait never blocks it: the other goes on',

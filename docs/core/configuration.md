@@ -49,6 +49,7 @@ publishing). The tables list only the settings that are data. `memory` and `load
 | --- | --- | --- |
 | `quantum` | 100 000 | Guest instructions per scheduler turn. |
 | `preemption` | `false` | End a turn early when a thread of higher priority is due. |
+| `pendingYieldMs` | 1 | While a host answer is outstanding and other threads still run, how often the loop leaves for the event loop to hear it. |
 | `stacks` | set by `createApp` | Where thread stacks are carved from and how big each is: `base`, `size`, `limit`. |
 
 ## bridge

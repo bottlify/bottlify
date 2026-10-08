@@ -87,6 +87,7 @@ Everything below crosses to the engine's worker by `postMessage`, so every value
 | `sampling` | boolean | `true` | The cpu layer's guest sampler. |
 | `device.*` | | | `dumpDraws`, `dumpEvery`, `maxDraws`, `skipTexture`, `probeTexture`, `keepImages`, `fog`, `mips`: per-draw dumps and one-variable-off runs of the graphics layer. |
 | `pacing` | `'page'` \| `'event'` | `'page'` | How the run loop waits in a worker: a short look every turn, or sleep until something is due. |
+| `pendingYieldMs` | number | `1` | How often, in milliseconds, the run loop gives its thread to the event loop to hear an outstanding host answer (a call parked on the device, a range in flight) while other guest threads still have work. A turn that ran nothing looks at once. Lower hears answers sooner at the cost of more trips round the event loop. |
 
 ## The controller
 

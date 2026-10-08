@@ -76,11 +76,12 @@ export const WORKER_YIELD_MS = 4;
  * @param {() => Promise<void>} deps.poke   Settles on the next message from the page.
  * @param {() => boolean} deps.signalled    Whether the page has posted since the last look.
  * @param {() => number} deps.now
+ * @param {number} [deps.pendingMs]
  * @returns {import('../app.js').RunPacing}
  */
-export function workerPacing({ macrotask, poke, signalled, now }){
+export function workerPacing({ macrotask, poke, signalled, now, pendingMs }){
     return {
-        yield: pacedYield({ macrotask, now, intervalMs: WORKER_YIELD_MS, signalled }),
+        yield: pacedYield({ macrotask, now, intervalMs: WORKER_YIELD_MS, signalled, pendingMs }),
         wait({ sleep, deadlineMs, wakes }){
             if (!sleep)
             {
@@ -648,14 +649,17 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 {
                     inboundReader = createInboundReader(ring, receive);
                     return ringPacing({ inbound: inboundReader, macrotask: breathe, now: clock,
-                        intervalMs: threaded ? WORKER_YIELD_MS : PAGE_YIELD_MS, posted });
+                        intervalMs: threaded ? WORKER_YIELD_MS : PAGE_YIELD_MS, posted,
+                        pendingMs: options.pendingYieldMs });
                 }
                 if (threaded && asked === 'event')
                 {
-                    return workerPacing({ macrotask: breathe, poke, signalled, now: clock });
+                    return workerPacing({ macrotask: breathe, poke, signalled, now: clock,
+                        pendingMs: options.pendingYieldMs });
                 }
                 return pagePacing({ macrotask: breathe, hidden: ()=>hidden, now: clock, signalled,
-                    yieldMs: threaded ? WORKER_YIELD_MS : undefined });
+                    yieldMs: threaded ? WORKER_YIELD_MS : undefined,
+                    pendingMs: options.pendingYieldMs });
             };
             // What the translation worker raises and rings after each batch it
             // posts, where the engine is fed through the ring: the batch is

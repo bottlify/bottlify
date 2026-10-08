@@ -234,6 +234,10 @@ import { createTranslatorPool, portTranslator } from './host/pool/pool.js';
  *           Called with the guest's instruction pointer at every turn boundary.
  *           This is the only view of what a program is doing between host calls,
  *           which is where a program that fails on its own computed state fails.
+ * @property {number} [pendingYieldMs]  How often, in milliseconds, the run
+ *     loop gives its thread away to hear an outstanding host answer while
+ *     other threads still run. Default 1; lower hears answers sooner at more
+ *     trips round the event loop.
  * @property {RunPacing} [pacing]
  *     How the run loop gives the thread away, and how it waits when the guest
  *     has nothing to run. The default is a page's: it cannot block, so it
@@ -1001,6 +1005,15 @@ export function timedWait({ hidden, macrotask, timer }){
 export const PAGE_YIELD_MS = 2;
 
 /**
+ * How often an outstanding host answer -- a call suspended on the host, a
+ * range in flight -- is looked for while other guest threads still have work.
+ * It bounds how late the parked thread hears its answer; a trip costs tens of
+ * microseconds, a turn a few hundred, so one look a millisecond keeps the
+ * trips a small share of the run.
+ */
+export const PENDING_YIELD_MS = 1;
+
+/**
  * A yield by need and by time, not by turn.
  *
  * The loop leaves the microtask queue when the host may have something to
@@ -1020,18 +1033,29 @@ export const PAGE_YIELD_MS = 2;
  * @param {() => number} deps.now             Wall milliseconds.
  * @param {number} deps.intervalMs
  * @param {() => boolean} [deps.signalled]    Whether a message is known to be waiting.
+ * @param {number} [deps.pendingMs]  How long after the last trip an outstanding host
+ *     answer or range is looked for again while other threads still run.
  * @param {Record<string, number>} [deps.counts]  Counted into: each turn, by why it went to
  *     the event loop (`suspended`, `fetching`, `spun`, `signalled`, `interval`) or `kept`.
  * @returns {RunPacing['yield']}
  */
-export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false, counts }){
+export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false,
+    pendingMs = PENDING_YIELD_MS, counts })
+{
     let rested = now();
     return pending=>{
+        // An answer outstanding is looked for at once only when the turn ran
+        // nothing; while other threads run it waits out pendingMs, since a
+        // trip a turn behind a loader running beside a thread parked on
+        // Present was the largest host phase of a run (2.46 M trips in 1500 s).
+        const since = now() - rested;
+        const look = pending.spun > 0 || since >= pendingMs;
         // Why the turn went to the event loop, the first reason that held -- what a report
         // reads when the trips are many.
-        const why = pending.suspended > 0 ? 'suspended' : pending.fetching > 0 ? 'fetching'
-            : pending.spun > 0 ? 'spun' : signalled() ? 'signalled'
-                : now() - rested >= intervalMs ? 'interval' : null;
+        const why = pending.suspended > 0 && look ? 'suspended'
+            : pending.fetching > 0 && look ? 'fetching'
+                : pending.spun > 0 ? 'spun' : signalled() ? 'signalled'
+                    : since >= intervalMs ? 'interval' : null;
         if (counts)
         {
             counts[why ?? 'kept'] = (counts[why ?? 'kept'] ?? 0) + 1;
@@ -1058,16 +1082,17 @@ export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false, 
  * @param {number} [deps.yieldMs]
  * @param {() => number} [deps.now]
  * @param {() => boolean} [deps.signalled]
+ * @param {number} [deps.pendingMs]
  * @returns {RunPacing}
  */
 export function pagePacing({ macrotask, hidden, lookMs = IDLE_LOOK_MS, yieldMs = PAGE_YIELD_MS,
-    now = ()=>performance.now(), signalled })
+    now = ()=>performance.now(), signalled, pendingMs })
 {
     /** Turns kept on the thread and trips to the event loop, by why. @type {Record<string, number>} */
     const counts = {};
     return {
         counts: ()=>({ ...counts }),
-        yield: pacedYield({ macrotask, now, intervalMs: yieldMs, signalled, counts }),
+        yield: pacedYield({ macrotask, now, intervalMs: yieldMs, signalled, pendingMs, counts }),
         wait({ timer, wakes }){
             if (!timer)
             {
@@ -5870,6 +5895,7 @@ async function buildApp(options){
     const pacing = options.pacing ?? pagePacing({
         macrotask: breathe,
         hidden: options.pageHidden ?? pageIsHidden,
+        pendingMs: options.pendingYieldMs,
     });
 
     /**

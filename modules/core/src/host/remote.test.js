@@ -927,11 +927,13 @@ test('a worker runs turns back to back and yields for something pending or on it
     const nothing = { suspended: 0, fetching: 0, idlers: 0, spun: 0 };
     assert.equal(pacing.yield(nothing), null);
     assert.equal(pacing.yield(nothing), null);
+    now += 1;
     await pacing.yield({ ...nothing, suspended: 1 });
+    now += 1;
     await pacing.yield({ ...nothing, fetching: 1 });
     await pacing.yield({ ...nothing, spun: 1 });
-    assert.equal(yields, 3, 'a call suspended, a range in flight and a turn that retired '
-        + 'nothing each yield at once');
+    assert.equal(yields, 3, 'a call suspended and a range in flight each yield once a '
+        + 'millisecond is up, a turn that retired nothing at once');
     assert.equal(pacing.yield({ ...nothing, idlers: 1 }), null,
         "a caller on the guest's own queue looks again without the host");
     signalled = true;
