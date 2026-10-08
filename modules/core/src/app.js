@@ -54,6 +54,7 @@ import { createWindowDirectory } from './layers/win32/user32/directory.js';
 import { createMixer } from './layers/audio/output/mixer.js';
 import { objectHandlers } from './system-objects.js';
 import { openProcessWorker } from './host/process-worker.js';
+import { createTranslatorPool, portTranslator } from './host/pool/pool.js';
 
 /**
  * createApp — the consumer-facing entry point: run a Win32 application.
@@ -81,6 +82,11 @@ import { openProcessWorker } from './host/process-worker.js';
  * @property {import('./layers/cpu/engine.js').EngineConfig} [cork.config]  Its settings;
  *     `store` here is a request -- `'local'` (the default) for the origin's private file
  *     system, a store of your own when the app runs in this thread, `null` for none.
+ * @property {boolean} [cork.pool]  The run's pool of translation workers, lent to its
+ *     processes as their translation needs (roadmap/v2): on by default wherever a machine's
+ *     translator would open a worker of its own, unless `cork.config.translators` is set.
+ * @property {number} [cork.poolPerProcess]  Workers of the pool at most for one process:
+ *     `navigator.hardwareConcurrency` by default.
  * @property {Object} [zstd]              The bundle decoder's wasm build, when the package's
  *           own is not wanted: `vendor/zstd.wasm` beside this module by default; absent
  *           there, the JavaScript decoder (or the emulator's, while it is loaded) decodes.
@@ -1318,6 +1324,44 @@ export function corkArtifacts(asked, here = import.meta.url){
 }
 
 /**
+ * The run's pool of translation workers (roadmap/v2, stage 2), where every
+ * machine's translator would otherwise open a worker of its own: on cork, with
+ * shared memory and ports to lend through, and unless the caller turned it off
+ * (`cork.pool: false`) or set the translators a machine opens itself
+ * (`cork.config.translators`). A process in a worker of its own is lent its
+ * workers by the run's system, and makes no pool.
+ *
+ * @param {AppOptions} options
+ * @returns {Promise<ReturnType<typeof createTranslatorPool> | null>}
+ */
+async function openTranslationPool(options){
+    const cork = options.cork ?? {};
+    const config = /** @type {any} */ (cork.config ?? {});
+    if ((options.engine ?? DEFAULT_ENGINE) !== 'cork' || options.system || cork.pool === false
+        || typeof SharedArrayBuffer !== 'function' || typeof MessageChannel !== 'function')
+    {
+        return null;
+    }
+    const wanted = cork.pool === true || (config.translators === undefined
+        && (config.worker ?? (config.feed !== 'slice' && typeof globalThis.Worker === 'function')));
+    if (!wanted)
+    {
+        return null;
+    }
+    const engine = await import(corkArtifacts(cork).moduleUrl);
+    const url = config.workerUrl ?? engine.translatorWorkerUrl?.() ?? null;
+    if (url === null)
+    {
+        return null;
+    }
+    return createTranslatorPool({
+        open: ()=>openProcessWorker(url),
+        perProcess: cork.poolPerProcess
+            ?? Math.max(1, globalThis.navigator?.hardwareConcurrency ?? 4),
+    });
+}
+
+/**
  * The emulator the caller brought, for `engine: 'emulator'`; null for any other
  * engine. The package carries no emulator, so a launch that names it without
  * handing one in is refused before anything is built.
@@ -2179,6 +2223,7 @@ export async function zstdWasmFor(options, here = import.meta.url){
  *                     stop: () => void, ahead: () => number,
  *                     refetched: () => { blocks: number, bytes: number },
  *                     ranges: () => { requests: number, bytes: number },
+ *                     decoded: () => { blocks: number, bytes: number, ms: number },
  *                     registry: Promise<any> } | null>}
  */
 async function mountBundle({ options, cpu, events, translationStore }){
@@ -2214,10 +2259,18 @@ async function mountBundle({ options, cpu, events, translationStore }){
     const decode = (codec, bytes, expectedLength)=>{
         if (codec === 2)
         {
-            return zstdForEngine(bytes, expectedLength ?? 0);
+            // Counted: the decoding a guest read waits for is what a pool
+            // worker would take off this thread (roadmap/v2, stage 2).
+            const startedAt = performance.now();
+            const plain = zstdForEngine(bytes, expectedLength ?? 0);
+            decoded.blocks++;
+            decoded.bytes += plain.length;
+            decoded.ms += performance.now() - startedAt;
+            return plain;
         }
         return bytes;
     };
+    const decoded = { blocks: 0, bytes: 0, ms: 0 };
 
     // The index is deflated, and opening is asynchronous anyway, so it may use
     // the decoder a guest read cannot.
@@ -2593,6 +2646,7 @@ async function mountBundle({ options, cpu, events, translationStore }){
         /** Blocks a request went out for that were already here: the number
          *  that has to stay at zero. */
         refetched: ()=>({ ...refetched }),
+        decoded: ()=>({ ...decoded }),
         /** Range requests made and bytes asked for, ever. */
         ranges: ()=>({ ...ranges }),
         stop(){
@@ -3110,6 +3164,7 @@ async function buildApp(options){
      *          ahead: () => number,
      *          refetched: () => { blocks: number, bytes: number },
      *          ranges: () => { requests: number, bytes: number },
+     *          decoded?: () => { blocks: number, bytes: number, ms: number },
      *          registry: Promise<any> } | null} */
     let blocks = null;
     /**
@@ -4128,6 +4183,9 @@ async function buildApp(options){
     }
 
     const cpu = core.api('cpu');
+    /** The workers of the run's translation pool lent to this machine, by the pool's token.
+     * @type {Map<number, import('./layers/cpu/engine.js').TranslatorPort>} */
+    const lentTranslators = new Map();
     const memory = core.api('memory');
     const kernel = core.api('kernel');
     const loader = core.api('loader');
@@ -6759,6 +6817,36 @@ async function buildApp(options){
          */
         exportTranslations: ()=>cpu.exportTranslations(),
 
+        /**
+         * A worker of the run's translation pool, lent to this process: the
+         * port is the process's end of the worker's, and the token names it
+         * when the pool asks for it back (`recallTranslator`). A machine whose
+         * engine takes none tells the worker so at once.
+         *
+         * @param {MessagePort} port @param {number} token
+         */
+        lendTranslator(port, token){
+            const adapter = portTranslator(port);
+            if (cpu.attachTranslator(adapter))
+            {
+                lentTranslators.set(token, adapter);
+            }
+            else
+            {
+                adapter.terminate();
+            }
+        },
+
+        /** @param {number} token */
+        recallTranslator(token){
+            const adapter = lentTranslators.get(token);
+            if (adapter !== undefined)
+            {
+                lentTranslators.delete(token);
+                cpu.detachTranslator(adapter);
+            }
+        },
+
         exitCode: ()=>win32.exitCode(),
 
         /**
@@ -6812,6 +6900,12 @@ async function buildApp(options){
                         refetchedBytes: blocks?.refetched().bytes ?? 0,
                         ranges: blocks?.ranges().requests ?? 0,
                         rangeBytes: blocks?.ranges().bytes ?? 0,
+                        // zstd blocks decoded for guest reads, and the time it took:
+                        // a bundle mounted on this thread's; one a process in a
+                        // worker reads across its link decodes on the system's.
+                        decoded: blocks?.decoded?.().blocks ?? 0,
+                        decodedBytes: blocks?.decoded?.().bytes ?? 0,
+                        decodeMs: Math.round(blocks?.decoded?.().ms ?? 0),
                     },
                     film: { ...film },
                     // Which of the program's own code the machine is spent on
@@ -7475,10 +7569,15 @@ export async function createApp(options){
     const translationStore = await resolveTranslationStore(runStoreSpec,
         options.bundle?.id ?? options.id ?? 'bundle');
 
+    const translationPool = await openTranslationPool(options);
+    /** What a machine's translator is told where the run lends it its translators. */
+    const lentConfig = translationPool ? { worker: true, translators: 0 } : {};
+
     /** @param {any} [extra] */
     const machine = extra=>({
         ...options,
-        cork: { ...options.cork, config: { ...options.cork?.config, store: translationStore } },
+        cork: { ...options.cork, config: { ...options.cork?.config, store: translationStore,
+            ...lentConfig } },
         events,
         spawned: remember,
         logSinks,
@@ -7580,6 +7679,10 @@ export async function createApp(options){
         names.set(built, process);
         images.set(built, extra?.imagePath ?? '');
         processIds.set(built, extra?.processId ?? FIRST_PROCESS_ID);
+        translationPool?.addProcess(extra?.processId ?? FIRST_PROCESS_ID, {
+            lend: (port, token)=>built.lendTranslator(port, token),
+            recall: token=>built.recallTranslator(token),
+        }).catch(()=>{});
         return built;
     };
 
@@ -7591,6 +7694,7 @@ export async function createApp(options){
      */
     const retire = async ended=>{
         standing.delete(ended);
+        translationPool?.removeProcess(processIds.get(ended) ?? FIRST_PROCESS_ID);
         await classTable.ended(names.get(ended));
         processes.delete(names.get(ended));
         names.delete(ended);
@@ -8190,6 +8294,10 @@ export async function createApp(options){
         // the run's sound is mixed on this thread, and the child has none.
         const sound = from.sound();
         const worker = await openProcessWorker();
+        translationPool?.addProcess(request.id, {
+            lend: (port, token)=>worker.post({ type: 'translator', port, token }, [port]),
+            recall: token=>worker.post({ type: 'recall', token }),
+        }).catch(()=>{});
         // The page's input reaches it as the run routes it (`routedInput`).
         const asked = { image: request.imagePath, id: request.id, link,
             diagnostics: ()=>link.call('report', 'diagnostics', []) };
@@ -8247,7 +8355,7 @@ export async function createApp(options){
                             .filter(([, value])=>typeof value !== 'function')) : undefined,
                         // The translator's store is the run's, asked across the
                         // link; the doorbell is this thread's.
-                        cork: { config: { ...options.cork?.config,
+                        cork: { config: { ...options.cork?.config, ...lentConfig,
                             store: translationStore ? 'run' : null, doorbell: undefined } },
                     },
                     run: { maxTurns: runOptionsNow?.maxTurns, timeoutMs: runOptionsNow?.timeoutMs },
@@ -8257,6 +8365,7 @@ export async function createApp(options){
         finally
         {
             standingAcross.delete(asked);
+            translationPool?.removeProcess(request.id);
             forgetObjects();
             await com.gone();
             link.close();
@@ -8716,6 +8825,12 @@ export async function createApp(options){
 
     const own = {
         /**
+         * The run's translation pool as it stands: its workers, the idle ones,
+         * how many work for each process, and its journal of joins and leaves;
+         * null where the run has none.
+         */
+        translationPool: ()=>translationPool?.diagnostics() ?? null,
+        /**
          * Every process standing, each with its image and its own diagnostics:
          * the facade speaks for one of them, and an install several processes
          * deep that waits on itself shows nothing through one.
@@ -8770,6 +8885,7 @@ export async function createApp(options){
             .finally(()=>{
                 shownHere?.dispose();
                 presenter?.dispose?.();
+                translationPool?.dispose();
             }),
 
         /**

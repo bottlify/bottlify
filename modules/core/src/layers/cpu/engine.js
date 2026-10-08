@@ -361,6 +361,18 @@
  */
 
 /**
+ * A connection to a translation worker: a worker of the runtime's own, or one
+ * a pool lends it, whose messages run over a port of their own.
+ *
+ * @typedef {Object} TranslatorPort
+ * @property {(message: any, transfer: any[]) => void} post
+ * @property {(handler: (data: any) => void) => void} onMessage
+ * @property {(handler: (reason: string) => void) => void} onLost
+ * @property {() => void} terminate  Ends the connection: the runtime's own worker ends with
+ *     it, a lent one goes back to its pool.
+ */
+
+/**
  * What a runtime answers to the host that composes it.
  *
  * @typedef {Object} Runtime
@@ -381,6 +393,10 @@
  * @property {(records: [string, Uint8Array][], nameOf: (key: string) => string)
  *     => [string, Uint8Array][]} [seedRecords]  Of a store's records (name, bytes), the ones
  *     a seed for this translator needs: its region records and the modules they name.
+ * @property {(adapter: TranslatorPort) => void} [attachTranslator]  A translation worker lent
+ *     by the host's pool: it takes batches of its own once it has answered its first message.
+ * @property {(adapter: TranslatorPort) => void} [detachTranslator]  The same worker asked
+ *     back: it takes no batch from then on, and goes once the one it holds is answered.
  * @property {(page: number) => void} invalidatePage  A host or guest write into code.
  * @property {(entry: (budget: number) => number, entered: () => number) => boolean}
  *     [interpretWith]  Cork alone: the interpreter tier in wasm's `entry`, which translated

@@ -3,9 +3,10 @@
 Русская версия: [README.ru.md](README.ru.md).
 
 **Status:** proposed 2026-10-03, revised against `main` 6554baf0; the workers of stage 2 and the
-translation cache arena decided 2026-10-07 on `cork2` (no pool code yet). How the engine works
-today is in [`docs/architecture.md`](../../docs/architecture.md); this document is where it goes
-next.
+translation cache arena decided 2026-10-07 on `cork2`, where the translation pool, its driver and
+the arena landed the same day; zstd stays on the coordinator, measured not worth moving yet
+(`negative-results.md`, 2026-10-08). How the engine works today is in
+[`docs/architecture.md`](../../docs/architecture.md); this document is where it goes next.
 
 v2 turns the engine from one thread that does everything into a platform of workers whose number
 follows the load: one worker while one copes, four when two are choking, never four held idle. On
@@ -235,6 +236,14 @@ off the thread that runs the program, not from running the program's threads at 
     holds at most hc × n. These count workers, not cores: a process that waits keeps none of its
     joined workers busy, so the ceiling of the whole is not what limits the machine — the median
     rule is, as each process asks only for what it can use.
+  - **The trial** (added 2026-10-07, measured). A busy worker is not yet a worker that helps: on
+    four cores one translator already leaves no core free while a game loads -- the engine's thread,
+    the translator and the browser's own threads take 2.5-3.6 of them -- and two or three
+    translators for one process loaded Doom 3 and Tron slower than one (`negative-results.md`,
+    2026-10-07). So each join is weighed: unless the regions the process's workers emit a second,
+    over the next two windows in which its work lasts, rise by half of what one more worker adds at
+    best, the worker leaves and the process keeps that many as its ceiling for the run. No other
+    worker joins it while a join is being weighed.
   - **Leaving.** Joined workers leave a process lazily, after seconds of its median well below the
     mark, and at once when the process stops translating to wait; they go back to the pool and
     sleep. Joining is quick (a window of a few hundred milliseconds), leaving slow, so the pool

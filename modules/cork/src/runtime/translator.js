@@ -16,11 +16,7 @@
  * reports that later, as an error event -- so the adapter passes its errors
  * and its exit on (`onLost`), and the runtime goes back to emitting inline.
  *
- * @typedef {Object} WorkerAdapter
- * @property {(message: any, transfer: any[]) => void} post
- * @property {(handler: (data: any) => void) => void} onMessage
- * @property {(handler: (reason: string) => void) => void} onLost
- * @property {() => void} terminate
+ * @typedef {import('../../../core/src/layers/cpu/engine.js').TranslatorPort} WorkerAdapter
  */
 
 /**
