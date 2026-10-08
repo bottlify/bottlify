@@ -86,6 +86,8 @@ import { createDsetupFunctions } from './dsetup/functions.js';
 import { createDpnhpastFunctions } from './dpnhpast/functions.js';
 import { createSetupapiFunctions } from './setupapi/functions.js';
 import { createMsiFunctions } from './msi/functions.js';
+import { createProgramFunctions } from './programs/functions.js';
+import { PROGRAMS_LIBRARY } from './programs/table.js';
 import { createEventLogFunctions } from './advapi32/eventlog.js';
 import { createCabinetFunctions } from './cabinet/functions.js';
 import { MSI_ORDINALS } from './msi/ordinals.js';
@@ -1148,6 +1150,7 @@ export function createWin32Module(){
                 // run that asked for it produced.
                 /** @param {any} request */
                 spawned: request=>config?.spawned?.(request),
+                currentDirectory: ()=>filesystem.currentDirectory(),
             });
 
             // Routines queued to a thread and run by it when it waits alertably:
@@ -2752,6 +2755,22 @@ export function createWin32Module(){
                 libraries['OLEAUT32.dll'][name] = libraries['ole32.dll'][name];
                 delete libraries['ole32.dll'][name];
             }
+
+            // The programs the system folder holds and this engine provides,
+            // each a routine of one library of its own (`programs/table.js`).
+            libraries[PROGRAMS_LIBRARY] = createProgramFunctions({
+                /** @param {string} library */
+                exports: library=>libraries[library],
+                callerThread: ()=>bridge.callerThread(),
+                answering: (thread, fn)=>bridge.answering(thread, fn),
+                callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                /** @param {number} bytes */
+                allocate: bytes=>heap.allocate(bytes),
+                /** @param {number} address */
+                free: address=>heap.free(address),
+                writeMemory,
+                readWideString,
+            });
 
             libraries['SHFOLDER.dll'] = {
                 SHGetFolderPathA: libraries['SHELL32.dll'].SHGetFolderPathA,
