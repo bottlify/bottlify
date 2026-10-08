@@ -33,6 +33,8 @@ import { createIntegerFunctions } from './integer.js';
 import { createWaitFunctions } from './waits.js';
 import { createPathFunctions } from './paths.js';
 import { MEMORY_ENTRIES, createMemoryFunctions } from './memory.js';
+import { createDebugFunctions } from './debug.js';
+import { createProcessFunctions } from './process.js';
 import { STATUS, toDosError } from './status.js';
 import { REGISTRY_NATIVES, UNLOAD_KEY } from '../advapi32/functions.js';
 import { TOKEN_NATIVES } from '../advapi32/tokens.js';
@@ -144,6 +146,13 @@ const alias = (table, names)=>Object.fromEntries(
     Object.entries(names)
         .filter(([, from])=>table[from] !== undefined)
         .map(([to, from])=>[to, table[from]]));
+
+/**
+ * The kernel32 calls the native process calls are made of. A table without
+ * them -- a host that assembled no processes -- leaves those unexported.
+ */
+const PROCESS_ENTRIES = ['ResumeThread', 'OpenProcess', 'FindResourceExW', 'LoadResource',
+    'SizeofResource'];
 
 /** Where a thread block keeps its process's block. */
 const TEB_PEB = 0x30;
@@ -330,6 +339,29 @@ export function createNtdllFunctions(host){
             : {}),
 
         ...(kernel32.HeapValidate ? createUserInfoFunctions(kernel32, host.writeMemory) : {}),
+
+        ...createDebugFunctions({
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            readCString: host.readCString,
+            kernel32,
+            crt,
+            teb: host.teb,
+            allocate,
+            free,
+            ...host.divergence ? { divergence: host.divergence } : {},
+        }),
+
+        ...(PROCESS_ENTRIES.every(name=>kernel32[name])
+            ? createProcessFunctions({
+                readMemory: host.readMemory,
+                writeMemory: host.writeMemory,
+                kernel32,
+                teb: host.teb,
+                allocate,
+                free,
+            })
+            : {}),
 
         /**
          * NTSTATUS NtQuerySystemTime(PLARGE_INTEGER SystemTime)

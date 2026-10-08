@@ -368,3 +368,27 @@ test('a heap block keeps a user value and user flags, and a pointer no block is 
         'no block there');
     assert.deepEqual(errors, [87, 87]);
 });
+
+test('the debugging calls are in the table, and the process calls only over kernel32\'s', ()=>{
+    const host = fakeHost();
+    const fns = /** @type {Record<string, any>} */ (createNtdllFunctions(host));
+    assert.deepEqual([...fns.DbgBreakPoint.code()], [0xcc, 0xc3], 'code of its own');
+    assert.equal(fns.ZwCreateDebugObject, fns.NtCreateDebugObject);
+    assert.equal(fns.ZwWaitForDebugEvent, fns.NtWaitForDebugEvent);
+    assert.equal(fns.DbgPrint.convention, 'cdecl');
+    assert.equal(fns.NtResumeThread, undefined, 'no ResumeThread to answer with');
+
+    const more = /** @type {Record<string, any>} */ (host.kernel32);
+    for (const name of ['ResumeThread', 'OpenProcess', 'FindResourceExW', 'LoadResource',
+        'SizeofResource'])
+    {
+        more[name] = { argBytes: 4, handler: ()=>0 };
+    }
+    const full = /** @type {Record<string, any>} */ (createNtdllFunctions(host));
+    for (const name of ['NtResumeThread', 'ZwResumeThread', 'NtOpenProcess', 'ZwOpenProcess',
+        'RtlFindMessage', 'RtlCreateProcessParameters', 'RtlDestroyProcessParameters',
+        'RtlCreateUserProcess'])
+    {
+        assert.equal(typeof full[name]?.handler, 'function', name);
+    }
+});

@@ -63,6 +63,17 @@ export const STATUS = Object.freeze({
     SECTION_NOT_IMAGE: 0xc0000049,
     MAPPED_FILE_SIZE_ZERO: 0xc000011e,
     INVALID_IMAGE_NOT_MZ: 0xc000012f,
+    /** A client id that names no process or thread. */
+    INVALID_CID: 0xc000000b,
+    /** Two ways of naming one object given together, or neither given. */
+    INVALID_PARAMETER_MIX: 0xc0000030,
+    /** What a resource lookup is refused with, by the part that was missing. */
+    RESOURCE_DATA_NOT_FOUND: 0xc0000089,
+    RESOURCE_TYPE_NOT_FOUND: 0xc000008a,
+    RESOURCE_NAME_NOT_FOUND: 0xc000008b,
+    RESOURCE_LANG_NOT_FOUND: 0xc0000204,
+    /** A message table that holds no message by that number. */
+    MESSAGE_NOT_FOUND: 0xc0000109,
 });
 
 /** The Win32 errors this table produces. */
@@ -93,6 +104,10 @@ const ERROR = Object.freeze({
     BAD_EXE_FORMAT: 193,
     MR_MID_NOT_FOUND: 317,
     INVALID_ADDRESS: 487,
+    RESOURCE_DATA_NOT_FOUND: 1812,
+    RESOURCE_TYPE_NOT_FOUND: 1813,
+    RESOURCE_NAME_NOT_FOUND: 1814,
+    RESOURCE_LANG_NOT_FOUND: 1815,
     IO_PENDING: 997,
     NOACCESS: 998,
     FILE_INVALID: 1006,
@@ -149,6 +164,13 @@ const TO_DOS_ERROR = new Map([
     [STATUS.SECTION_NOT_IMAGE, ERROR.INVALID_PARAMETER],
     [STATUS.MAPPED_FILE_SIZE_ZERO, ERROR.FILE_INVALID],
     [STATUS.INVALID_IMAGE_NOT_MZ, ERROR.BAD_EXE_FORMAT],
+    [STATUS.INVALID_CID, ERROR.INVALID_PARAMETER],
+    [STATUS.INVALID_PARAMETER_MIX, ERROR.INVALID_PARAMETER],
+    [STATUS.RESOURCE_DATA_NOT_FOUND, ERROR.RESOURCE_DATA_NOT_FOUND],
+    [STATUS.RESOURCE_TYPE_NOT_FOUND, ERROR.RESOURCE_TYPE_NOT_FOUND],
+    [STATUS.RESOURCE_NAME_NOT_FOUND, ERROR.RESOURCE_NAME_NOT_FOUND],
+    [STATUS.RESOURCE_LANG_NOT_FOUND, ERROR.RESOURCE_LANG_NOT_FOUND],
+    [STATUS.MESSAGE_NOT_FOUND, ERROR.MR_MID_NOT_FOUND],
 ]);
 
 /** What an unmapped status becomes, and the one code that means "no mapping". */
