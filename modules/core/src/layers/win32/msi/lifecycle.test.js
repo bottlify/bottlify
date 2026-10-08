@@ -97,6 +97,14 @@ test('installed from a package, kept by the machine, removed after its source is
             'the machine\'s own copy');
         assert.ok(files.stat(kept)?.size > 0);
 
+        // A repair of a file that went missing, from the source still there.
+        files.remove('C:\\Program Files\\Game\\game.exe');
+        const REINSTALLMODE_FILEMISSING = 0x2;
+        assert.equal(await fns.MsiReinstallProductA.handler([put(0x300, PRODUCT),
+            REINSTALLMODE_FILEMISSING]), 0);
+        assert.equal(await readFile(files, 'C:\\Program Files\\Game\\game.exe') !== null, true,
+            'put back from the source the product was installed from');
+
         files.remove('C:\\src\\game.msi');
         assert.equal(await fns.MsiConfigureProductA.handler([put(0x300, PRODUCT), 0,
             INSTALLSTATE_ABSENT]), 0);

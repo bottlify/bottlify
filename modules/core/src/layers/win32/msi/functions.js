@@ -40,7 +40,7 @@ import {
 } from './transform.js';
 import { embeddedCabinets, writeDatabase } from './database-writer.js';
 import { finishAsync } from './custom.js';
-import { createRegistration, squashGuid } from './registration.js';
+import { createRegistration, squashGuid, valueText } from './registration.js';
 import { installerVersion } from './version.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { createProductFunctions } from './products.js';
@@ -415,6 +415,20 @@ export function createMsiFunctions(host){
                     installNested: (kind, source, commandLine)=>installNested(session, kind,
                         source, commandLine, made.thread),
                     cachePackage,
+                    fileVersion: async path=>{
+                        const block = await host.versionInfo?.(path) ?? null;
+                        const fixed = block ? fixedInfo(block) : null;
+                        return fixed ? `${fixed.ms >>> 16}.${fixed.ms & 0xffff}.`
+                            + `${fixed.ls >>> 16}.${fixed.ls & 0xffff}` : null;
+                    },
+                    sourcePackage: async()=>{
+                        const product = session.getProperty('ProductCode');
+                        const list = registration.sourceList(product);
+                        const name = list ? valueText(host.hive.getValue(list, 'PackageName'))
+                            : null;
+                        const folder = session.getProperty('SourceDir');
+                        return name && folder ? loadDatabase(`${folder}${name}`) : null;
+                    },
                     divergence: host.divergence,
                     log: host.log,
                 },
@@ -786,6 +800,17 @@ export function createMsiFunctions(host){
             },
         });
         session.setProperty('UILevel', String(uiLevel & 0x0f || INSTALLUILEVEL.BASIC));
+        // Run from the machine's own copy, the package's source is where it
+        // was installed from, as the product's records say.
+        const product = session.getProperty('ProductCode');
+        const kept = registration.productInfo(product, 'LocalPackage');
+        const source = registration.productInfo(product, 'InstallSource');
+        if ('value' in kept && kept.value.toLowerCase() === packagePath.toLowerCase()
+            && 'value' in source && source.value !== '')
+        {
+            session.setProperty('SourceDir', source.value);
+            session.setProperty('SOURCEDIR', source.value);
+        }
         return session;
     };
 

@@ -28,6 +28,8 @@ import { encodeAnsi } from '../kernel32/locale.js';
 import { runCustomAction } from './custom.js';
 import { PID } from './summary.js';
 import { editIni } from './ini.js';
+import { replaces } from './versioning.js';
+import { createMd5 } from '../crypto/digest.js';
 import { REMOVAL_ACTIONS, productGone, unpublishProduct } from './removal.js';
 import { CLASS_ACTIONS, iconPath, publishIcons } from './classes.js';
 import { SW_SHOWNORMAL, encodeShellLink } from '../common/shell-link.js';
@@ -200,6 +202,52 @@ const filesToInstall = engine=>[...engine.session.files.values()]
     });
 
 /**
+ * The files to install that the versioning rules say to copy over what is
+ * already at their targets, as REINSTALLMODE has them ("omus" when unset).
+ *
+ * @param {Engine} engine
+ */
+async function filesToCopy(engine){
+    const { session, host } = engine;
+    const mode = session.getProperty('REINSTALLMODE') || 'omus';
+    /** @type {Map<string, Uint8Array>} */
+    const hashes = new Map();
+    for (const row of session.db.table('MsiFileHash')?.rows ?? [])
+    {
+        const words = [row[2], row[3], row[4], row[5]].map(word=>Number(word ?? 0) >>> 0);
+        hashes.set(String(row[0]), new Uint8Array(Uint32Array.from(words).buffer));
+    }
+    const chosen = [];
+    for (const file of filesToInstall(engine))
+    {
+        const target = /** @type {string} */ (file.target);
+        const stat = host.files.stat(target);
+        const there = stat && stat.exists !== false && !stat.isDirectory;
+        // A companion file's Version names the file whose version it shares.
+        const version = file.version !== null && session.files.has(file.version)
+            ? session.files.get(file.version)?.version ?? null : file.version;
+        const existing = there ? {
+            version: await host.fileVersion?.(target) ?? null,
+            md5: async()=>{
+                const bytes = await readFile(host.files, target);
+                if (!bytes)
+                {
+                    return null;
+                }
+                const md5 = createMd5();
+                md5.update(bytes);
+                return md5.digest();
+            },
+        } : null;
+        if (await replaces({ version, hash: hashes.get(file.key) ?? null }, existing, mode))
+        {
+            chosen.push(file);
+        }
+    }
+    return chosen;
+}
+
+/**
  * InstallFiles: the files are put down as the script is carried out, so a
  * removal written into the script before them -- an earlier product's, a
  * file the RemoveFile table names -- happens first, as on Windows.
@@ -224,7 +272,7 @@ async function copyFiles(engine){
     const wordCount = Number(session.summary.get(PID.WORDCOUNT)?.value ?? 0);
     const compressedByDefault = (wordCount & 2) !== 0;
     const shortSourceNames = (wordCount & 1) !== 0;
-    const wanted = filesToInstall(engine);
+    const wanted = await filesToCopy(engine);
     /** @param {import('./session.js').PackageFile} file */
     const begun = file=>{
         const target = /** @type {string} */ (file.target);
@@ -290,11 +338,15 @@ async function copyFiles(engine){
         if (cabinet.startsWith('#'))
         {
             const name = cabinet.slice(1);
-            const size = session.db.streamSize(name);
-            if (size !== null)
+            // The machine's copy of a package carries no cabinets: a repair
+            // reads them from the package it was installed from.
+            const holder = session.db.streamSize(name) !== null ? session.db
+                : await engine.host.sourcePackage?.() ?? null;
+            const size = holder?.streamSize(name) ?? null;
+            if (holder && size !== null)
             {
                 source = { size, read: async(offset, length)=>
-                    (await session.db.readStreamRange(name, offset, length)) ?? new Uint8Array(0) };
+                    (await holder.readStreamRange(name, offset, length)) ?? new Uint8Array(0) };
             }
         }
         else if (cabinet !== '')

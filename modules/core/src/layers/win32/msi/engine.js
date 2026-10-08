@@ -49,6 +49,11 @@
  *     The package copied where the machine keeps installed packages; its path, or null.
  * @property {(productCode: string, features: string) => Promise<number>} [removeProduct]
  *     Another installed product's removal, from the package the machine kept for it.
+ * @property {(path: string) => Promise<string | null>} [fileVersion]
+ *     A file's version resource's version, "1.2.3.4"; null for a file without one.
+ * @property {() => Promise<import('./database.js').Database | null>} [sourcePackage]
+ *     The package the product was installed from, found through its source list, for
+ *     what the machine's own copy of it left out.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(text: string) => void} [log]
  */
