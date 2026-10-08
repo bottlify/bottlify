@@ -427,6 +427,8 @@ export function parseMsiexec(line){
  *     A copy of guest memory: what a call the program made wrote there.
  * @property {(size: number) => number} block
  *     Zeroed guest memory for a call to write into, held until the program ends.
+ * @property {(data: Uint8Array) => number} bytes
+ *     A copy of a structure in the guest, for a call to read, held the same way.
  * @property {(text: string, caption: string, type: number) => Promise<number>} message
  *     A message box, as the program shows one.
  */

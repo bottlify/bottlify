@@ -58,6 +58,12 @@ export function fakeContext(commandLine, answer = ()=>0){
             next += Math.max(0x100, size + 0x10);
             return at;
         },
+        bytes: data=>{
+            const at = next;
+            next += Math.max(0x100, data.length + 0x10);
+            memory.set(at, data.slice());
+            return at;
+        },
         message: async(message, caption, type)=>answered({ message, caption, type }),
     };
     return { context, calls, memory };

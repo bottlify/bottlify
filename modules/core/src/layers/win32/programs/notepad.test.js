@@ -56,12 +56,19 @@ test('Notepad shows the file in a window of its own and ends when the window goe
                     return 1;
                 }
                 case 'IsWindow': return alive-- > 0 ? 1 : 0;
+                case 'GetProcAddress': return call.args?.[1] === '"DefWindowProcW"' ? 0x7700 : 0;
                 default: return undefined;
             }
         });
     assert.equal(await runNotepad(context), 0);
     const made = calls.filter(call=>call.name === 'CreateWindowExW');
+    assert.equal(made[0].args?.[1], 'L"Notepad"', 'of Notepad\'s own class');
     assert.equal(made[0].args?.[2], 'L"readme.txt - Notepad"', 'titled as Notepad titles it');
+    const registered = calls.find(call=>call.name === 'RegisterClassW');
+    const fields = new DataView(/** @type {Uint8Array} */ (memory.get(
+        /** @type {number} */ (registered?.args?.[0]))).buffer);
+    assert.equal(fields.getUint32(4, true), 0x7700, 'DefWindowProcW its procedure');
+    assert.equal(fields.getUint32(28, true), 6, 'the window colour its background');
     assert.equal(made[1].args?.[1], 'L"EDIT"');
     assert.deepEqual(made[1].args?.slice(6, 8), [600, 400], 'filling the frame\'s client area');
     const text = calls.find(call=>call.name === 'SendMessageW' && call.args?.[1] === 0x000c);

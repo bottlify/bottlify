@@ -341,9 +341,10 @@ printing (`/p`) are not offered. ShellExecute's open verb opens `.txt`, `.log`, 
 `.nfo` and `.diz` as XP's registry has them -- `%SystemRoot%\system32\NOTEPAD.EXE %1`, the
 file unquoted -- and an `http`, `https`, `ftp` or `mailto` address, or the address a `.url`
 shortcut holds, is handed to the page as an `open-url` event and answered with success, since
-the machine reports a browser installed (A39). The frame is a STATIC window with the overlapped
-style, not a class of its own, because the routine drives only exports a program could call and
-none registers a window procedure in guest code. *2026-10-08.*
+the machine reports a browser installed (A39). The frame is a class of the program's own, named
+`Notepad` as the real one's is, whose procedure is DefWindowProcW's own address -- so it is
+moved, activated and closed as any window is -- because the routine drives only exports a program
+could call and writes no window procedure in guest code. *2026-10-08.*
 
 ## B. From measured optimisation work
 

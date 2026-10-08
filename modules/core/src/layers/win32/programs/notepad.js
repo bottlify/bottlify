@@ -15,8 +15,9 @@
  * then, which a setup waiting on it goes on after.
  *
  * Everything is a call a program could make: the file read through CreateFile
- * and ReadFile, the window a frame with an edit control filling its client
- * area, and a message loop that runs until the frame is gone. Editing, saving
+ * and ReadFile, the window a frame of its own class -- DefWindowProc its
+ * procedure -- with an edit control filling its client area, and a message
+ * loop that runs until the frame is gone. Editing, saving
  * and printing are not offered; `/p` (print) is refused by name.
  */
 
@@ -37,8 +38,13 @@ const WS_EX_CLIENTEDGE = 0x00000200;
 const ES_MULTILINE = 0x0004;
 const ES_AUTOVSCROLL = 0x0040;
 const ES_AUTOHSCROLL = 0x0080;
-/** The frame's own class: a white rectangle, which shows no text of its own. */
-const SS_WHITERECT = 0x0006;
+/** The frame's class, as Notepad names it. */
+const FRAME_CLASS = 'Notepad';
+/** WNDCLASSW, as RegisterClassW reads it. */
+const WNDCLASSW = Object.freeze({ lpfnWndProc: 4, hInstance: 16, hCursor: 24,
+    hbrBackground: 28, lpszClassName: 36, SIZE: 40 });
+const IDC_ARROW = 32512;
+const COLOR_WINDOW = 5;
 const CW_USEDEFAULT = 0x80000000;
 const EM_SETLIMITTEXT = 0x00c5;
 const WM_SETTEXT = 0x000c;
@@ -131,9 +137,25 @@ export async function runNotepad(context){
         }
     }
 
-    const frame = await call('USER32.dll', 'CreateWindowExW', [0, wide('STATIC'),
-        wide(`${title} - Notepad`), WS_OVERLAPPEDWINDOW | WS_VISIBLE | SS_WHITERECT,
-        CW_USEDEFAULT, CW_USEDEFAULT, 640, 480, 0, 0, 0, 0]);
+    // The frame's class is the program's own, with DefWindowProc for its
+    // procedure: the frame is moved, activated and closed as any window is,
+    // and nothing in it is the program's to answer -- the edit control is.
+    const instance = await call('KERNEL32.dll', 'GetModuleHandleW', [0]);
+    // Loaded rather than looked up: the image imports nothing but the
+    // engine's own library, so USER32 may not be in the process yet.
+    const user32 = await call('KERNEL32.dll', 'LoadLibraryW', [wide('USER32.dll')]);
+    const fields = new DataView(new ArrayBuffer(WNDCLASSW.SIZE));
+    fields.setUint32(WNDCLASSW.lpfnWndProc, await call('KERNEL32.dll', 'GetProcAddress',
+        [user32, context.ansi('DefWindowProcW')]), true);
+    fields.setUint32(WNDCLASSW.hInstance, instance, true);
+    fields.setUint32(WNDCLASSW.hCursor, await call('USER32.dll', 'LoadCursorW',
+        [0, IDC_ARROW]), true);
+    fields.setUint32(WNDCLASSW.hbrBackground, COLOR_WINDOW + 1, true);
+    fields.setUint32(WNDCLASSW.lpszClassName, wide(FRAME_CLASS), true);
+    await call('USER32.dll', 'RegisterClassW', [context.bytes(new Uint8Array(fields.buffer))]);
+    const frame = await call('USER32.dll', 'CreateWindowExW', [0, wide(FRAME_CLASS),
+        wide(`${title} - Notepad`), WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+        CW_USEDEFAULT, CW_USEDEFAULT, 640, 480, 0, 0, instance, 0]);
     if (frame === 0)
     {
         return 1;

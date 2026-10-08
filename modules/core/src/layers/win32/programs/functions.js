@@ -91,6 +91,7 @@ export function createProgramFunctions(host){
                 wide,
                 read: (at, length)=>host.readMemory?.(at, length).slice() ?? new Uint8Array(0),
                 block: size=>place(new Uint8Array(size)),
+                bytes: data=>place(data.slice()),
                 ansi: text=>place(encodeAnsi(`${text}\0`)),
                 message: (text, caption, type)=>call('USER32.dll', 'MessageBoxW',
                     [0, wide(text), wide(caption), type]),
