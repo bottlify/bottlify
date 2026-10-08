@@ -273,24 +273,21 @@ export function shellFolders(windows = windowsVersion()){
 }
 
 /**
- * The directories a Windows's profile folders need on the volume, each parent
- * before its children: every shell folder under the user's, the shared and the
- * public profile, and the directories that hold them.
+ * The directories a Windows's shell folders need on the volume, each parent
+ * before its children: every folder the registry and SHGetFolderPath name --
+ * the user's, the shared and the public profile's, and the machine's own, the
+ * fonts folder among them -- and the directories that hold them. A setup
+ * copies into a folder it was told of without making it first, and a folder
+ * promised and absent fails that copy.
  *
  * @param {WindowsVersion} [windows]
  * @returns {string[]}
  */
-export function profileDirectories(windows = windowsVersion()){
-    const { user, allUsers, public: shared } = windows.profiles;
-    const roots = [user, allUsers, shared].filter(root=>root !== null);
+export function shellFolderDirectories(windows = windowsVersion()){
     /** @type {Set<string>} */
     const directories = new Set();
     for (const folder of Object.values(shellFolders(windows)))
     {
-        if (!roots.some(root=>folder === root || folder.startsWith(`${root}\\`)))
-        {
-            continue;
-        }
         const parts = folder.split('\\');
         for (let depth = 2; depth <= parts.length; depth++)
         {

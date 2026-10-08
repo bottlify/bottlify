@@ -51,7 +51,7 @@ import {
 import { createServiceFunctions } from './advapi32/services.js';
 import { createCryptoFunctions } from './advapi32/crypto.js';
 import {
-    DIRECTX_RELEASES, createHive, profileDirectories, shellFolders,
+    DIRECTX_RELEASES, createHive, shellFolderDirectories, shellFolders,
 } from './advapi32/registry.js';
 import { createGdiFunctions } from './gdi32/functions.js';
 import { createWinsockFunctions } from './wsock32/functions.js';
@@ -1638,7 +1638,7 @@ export function createWin32Module(){
                         readCString,
                         readWideString,
                         files: volume,
-                        directories: profileDirectories(windows),
+                        directories: shellFolderDirectories(windows),
                         imagePath: ()=>modules.imagePath(),
                         setLastError: setError,
                         writeConsole: (handle, text)=>sink(handle, text),

@@ -347,8 +347,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
  *           Queues a routine to a thread, to run at its next alertable wait:
  *           how ReadFileEx and WriteFileEx deliver their completion routines.
  * @property {string[]} [directories]
- *           The profile's folders the configured Windows names (the registry's
- *           `profileDirectories`), parents first, made at start beside the
+ *           The shell folders the configured Windows names (the registry's
+ *           `shellFolderDirectories`), parents first, made at start beside the
  *           system's own. Absent, only the system's are made.
  * @property {() => string} [imagePath]
  *           The running program, whose directory is the first place a search
