@@ -303,3 +303,63 @@ test('a value computed twice is computed once, and model 1 fits what fxc fits', 
     assert.match(ps11, /mad_sat/, ps11);
     assert.doesNotMatch(ps11, /mov_sat/, ps11);
 });
+
+/**
+ * A model 1 program and the ps_2_0 one of the same source, run on the reference machine
+ * with one set of inputs: what the model 1 back half rearranged to fit must compute the
+ * same colour.
+ *
+ * @param {string} source @param {string} profile
+ * @returns {Promise<{ text: string, model1: number[], model2: number[] }>}
+ */
+async function againstModel2(source, profile){
+    const io = {
+        inputs: {
+            v: [[0.3, 0.5, 0.7, 0.6], [0.2, 0.4, 0.6, 0.8]],
+            t: [0, 1, 2, 3, 4, 5].map(n=>[0.1 * n + 0.2, 0.5, 0.3, 1]),
+        },
+        constants: { f: new Float32Array(32 * 4).map((_, i)=>0.3 + (i % 5) * 0.1) },
+        sample: (/** @type {number} */ sampler)=>[0.2 + 0.1 * sampler, 0.6, 0.4, 0.7 - 0.1 * sampler],
+    };
+    /** @param {string} target */
+    const run = async target=>{
+        const result = await compile(source, target);
+        assert.equal(result.ok, true, `${target}: ${result.messages}`);
+        const tokens = /** @type {Uint32Array} */ (result.tokens);
+        const colour = [...Object.values(execute(decode(tokens), io).outputs)[0]];
+        return { text: disassemble(tokens), colour: colour.map(x=>Math.round(x * 1e4) / 1e4) };
+    };
+    const one = await run(profile);
+    const two = await run('ps_2_0');
+    return { text: one.text, model1: one.colour, model2: two.colour };
+}
+
+test('a model 1 program fits as fxc fits it, computing what ps_2_0 computes', async()=>{
+    // Longer than ps_1_4's eight arithmetic instructions: the tail runs in phase two.
+    const phase = await againstModel2(`sampler2D a; sampler2D b; float4 k0; float4 k1;
+        float4 main(float2 t0 : TEXCOORD0, float2 t1 : TEXCOORD1, float4 v : COLOR0) : COLOR0
+        { float4 x = tex2D(a, t0); float4 y = tex2D(b, t1);
+          float4 r = x * y; r = r * k0; r = r * v; r = lerp(r, x, k1.a); r = r * y; r = r * k1;
+          r = lerp(r, v, k0.a); r = r * x; r = r * k0; r = lerp(r, y, v.a); return r; }`,
+    'ps_1_4');
+    assert.match(phase.text, /\bphase\b/, phase.text);
+    assert.deepEqual(phase.model1, phase.model2);
+
+    // Three values at once before 1.4: one waits in a texture register its stage is done with.
+    const spill = await againstModel2(`sampler2D s0; sampler2D s1; float4 k;
+        float4 main(float2 a : TEXCOORD0, float2 b : TEXCOORD1, float3 h : TEXCOORD3,
+            float4 c : COLOR0) : COLOR0
+        { float r = (tex2D(s0, a) + tex2D(s1, b)).r; float f = saturate(r * k.a - 0.2);
+          float4 o; o.rgb = lerp(c.rgb, r.xxx, f); o.a = f * h.y; return o; }`, 'ps_1_1');
+    assert.match(spill.text, /^(dp3|mul|mad|add|mov|lrp)\w* t\d/m, spill.text);
+    assert.deepEqual(spill.model1, spill.model2);
+
+    // The texel 1.4 leaves in r0 is read after the result's alpha is known: the result waits
+    // in a temporary and is moved into r0 at the end, the texture read once.
+    const texel = await againstModel2(`sampler2D s; float4 k;
+        float4 main(float3 t : TEXCOORD0, float3 u : TEXCOORD5, float3 c : COLOR1) : COLOR0
+        { float4 x = tex2D(s, t.xy); float4 o; o.a = x.a * t.z;
+          o.rgb = x.rgb * u + x.a * k.rgb * c; return o; }`, 'ps_1_4');
+    assert.equal(texel.text.match(/texld/g)?.length, 1, texel.text);
+    assert.deepEqual(texel.model1, texel.model2);
+});
