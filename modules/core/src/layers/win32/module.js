@@ -2107,7 +2107,8 @@ export function createWin32Module(){
                     callGuest: call=>bridge.callGuest(call),
                     currentThread: ()=>kernel.currentThread() })),
 
-                'WINSPOOL.DRV': createSpoolerFunctions({ setLastError: setError, writeMemory }),
+                'WINSPOOL.DRV': createSpoolerFunctions({ setLastError: setError, readMemory,
+                    writeMemory }),
 
                 'MPR.dll': createNetworkFunctions({ setLastError: setError, writeMemory }),
 
