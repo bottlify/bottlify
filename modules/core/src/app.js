@@ -931,6 +931,7 @@ export function timedWait({ hidden, macrotask, timer }){
  * host decides how, because the answer depends on whose thread it is.
  *
  * @typedef {Object} RunPacing
+ * @property {() => Record<string, number>} [counts]  What the pacing counted, for a report.
  * @property {(pending: YieldPending) => Promise<void> | null} yield
  *     At every turn boundary: a promise to await before the next turn, or
  *     null to go straight on. `pending` says what the host may have an answer
@@ -999,13 +1000,23 @@ export const PAGE_YIELD_MS = 2;
  * @param {() => number} deps.now             Wall milliseconds.
  * @param {number} deps.intervalMs
  * @param {() => boolean} [deps.signalled]    Whether a message is known to be waiting.
+ * @param {Record<string, number>} [deps.counts]  Counted into: each turn, by why it went to
+ *     the event loop (`suspended`, `fetching`, `spun`, `signalled`, `interval`) or `kept`.
  * @returns {RunPacing['yield']}
  */
-export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false }){
+export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false, counts }){
     let rested = now();
     return pending=>{
-        if (pending.suspended === 0 && pending.fetching === 0
-            && pending.spun === 0 && !signalled() && now() - rested < intervalMs)
+        // Why the turn went to the event loop, the first reason that held -- what a report
+        // reads when the trips are many.
+        const why = pending.suspended > 0 ? 'suspended' : pending.fetching > 0 ? 'fetching'
+            : pending.spun > 0 ? 'spun' : signalled() ? 'signalled'
+                : now() - rested >= intervalMs ? 'interval' : null;
+        if (counts)
+        {
+            counts[why ?? 'kept'] = (counts[why ?? 'kept'] ?? 0) + 1;
+        }
+        if (why === null)
         {
             return null;
         }
@@ -1032,8 +1043,11 @@ export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false }
 export function pagePacing({ macrotask, hidden, lookMs = IDLE_LOOK_MS, yieldMs = PAGE_YIELD_MS,
     now = ()=>performance.now(), signalled })
 {
+    /** Turns kept on the thread and trips to the event loop, by why. @type {Record<string, number>} */
+    const counts = {};
     return {
-        yield: pacedYield({ macrotask, now, intervalMs: yieldMs, signalled }),
+        counts: ()=>({ ...counts }),
+        yield: pacedYield({ macrotask, now, intervalMs: yieldMs, signalled, counts }),
         wait({ timer, wakes }){
             if (!timer)
             {
