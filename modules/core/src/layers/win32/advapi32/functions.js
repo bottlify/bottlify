@@ -31,6 +31,7 @@ import {
 import { STATUS } from '../ntdll/status.js';
 import { USER_NAME } from './tokens.js';
 import { createNamedSecurityFunctions } from './named-security.js';
+import { isTextUnicode } from './text.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -1808,16 +1809,32 @@ export function createRegistryFunctions(host){
         GetFileSecurityW: { argBytes: 20, handler: notImplemented },
 
         /**
-         * BOOL ImpersonateSelf(SECURITY_IMPERSONATION_LEVEL)
-         * BOOL RevertToSelf(VOID)
+         * BOOL IsTextUnicode(const VOID *lpv, int iSize, LPINT lpiResult)
          *
-         * Impersonating oneself is the one impersonation that always
-         * succeeds, and reverting from it is nothing. Both answer TRUE, so a
-         * program that impersonates before opening its token goes on to open
-         * it rather than stopping at a refusal Windows would not give.
+         * Whether a buffer reads as UTF-16, by the documented tests
+         * (`text.js`): those lpiResult names, or all of them without it, and
+         * through it which of those passed.
          */
-        ImpersonateSelf: { argBytes: 4, handler: ()=>1 },
-        RevertToSelf: { argBytes: 0, handler: ()=>1 },
+        IsTextUnicode: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([buffer, size, result])=>{
+                const length = Math.max(size | 0, 0);
+                const asked = (result >>> 0) === 0 ? undefined
+                    : new DataView(host.readMemory(result >>> 0, 4).slice().buffer)
+                        .getUint32(0, true);
+                const answer = (buffer >>> 0) === 0
+                    ? { unicode: false, passed: 0 }
+                    : isTextUnicode(host.readMemory(buffer >>> 0, length).slice(), asked);
+                if ((result >>> 0) !== 0)
+                {
+                    const out = new Uint8Array(4);
+                    new DataView(out.buffer).setUint32(0, answer.passed, true);
+                    host.writeMemory(result >>> 0, out);
+                }
+                return answer.unicode ? 1 : 0;
+            },
+        },
 
         /**
          * BOOL InitiateSystemShutdownA(LPSTR lpMachineName, LPSTR lpMessage,

@@ -296,3 +296,37 @@ test('_memicmp folds the ASCII letters and answers the difference of the bytes',
     assert.equal(table._memicmp.handler([left, 0, 1]), 0x7fffffff);
     assert.deepEqual(errno, [22]);
 });
+
+test('strcoll under the C locale is the bytes\' order, as strcmp answers it', ()=>{
+    const { memory, table } = build();
+    /** @param {string} a @param {string} b */
+    const coll = (a, b)=>table.strcoll.handler([memory.put(a), memory.put(b)]) | 0;
+    assert.equal(coll('apple', 'apple'), 0);
+    assert.equal(coll('apple', 'banana'), -1);
+    assert.equal(coll('b', 'a'), 1);
+    assert.equal(coll('ab', 'a'), 1, 'the longer, where one is the other\'s start');
+    assert.equal(coll('B', 'a'), -1, 'upper case first: bytes, not a dictionary');
+    const high = memory.allocate(4);
+    memory.bytes.set([0xe9, 0], high);
+    assert.equal(table.strcoll.handler([high, memory.put('z')]) | 0, 1,
+        'a byte past 0x7f is unsigned');
+    assert.equal(table.strcoll.handler([0, memory.put('z')]), 0x7fffffff, '_NLSCMPERROR');
+    assert.equal(table.strcoll.convention, 'cdecl');
+});
+
+test('_ctype is the classification array itself, EOF\'s slot first', ()=>{
+    const { table } = build();
+    const bytes = table._ctype.data();
+    assert.equal(bytes.length, 257 * 2);
+    const view = new DataView(bytes.buffer, bytes.byteOffset);
+    /** @param {number} code */
+    const maskOf = code=>view.getUint16((code + 1) * 2, true);
+    assert.equal(view.getUint16(0, true), 0, 'EOF has no class');
+    assert.equal(maskOf('A'.charCodeAt(0)), 0x0181, '_UPPER | _HEX | the alpha mark');
+    assert.equal(maskOf('a'.charCodeAt(0)), 0x0182);
+    assert.equal(maskOf('5'.charCodeAt(0)), 0x0084, '_DIGIT | _HEX');
+    assert.equal(maskOf(' '.charCodeAt(0)), 0x0048, '_SPACE | _BLANK');
+    assert.equal(maskOf('\t'.charCodeAt(0)), 0x0068, '_SPACE | _CONTROL | _BLANK');
+    assert.equal(maskOf('!'.charCodeAt(0)), 0x0010, '_PUNCT');
+    assert.equal(maskOf(0xe9), 0, 'nothing above 0x7f under the C locale');
+});

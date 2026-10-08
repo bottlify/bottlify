@@ -822,3 +822,12 @@ test('D3D9.dll\'s profiler markers and DebugSetMute are there for a program buil
         'D3DPERF_SetRegion', 'D3DPERF_SetOptions', 'DebugSetMute']
         .map(name=>d3d9[name].argBytes), [8, 0, 8, 8, 4, 0]);
 });
+
+test('D3D8.dll\'s DebugSetMute is there, a call that does nothing', ()=>{
+    // The retail runtime exports it with no arguments; a program asks
+    // GetProcAddress for it and calls it whatever the runtime is.
+    const { libraries } = seamed();
+    const entry = libraries.libraries['D3D8.dll'].DebugSetMute;
+    assert.equal(entry.argBytes, 0);
+    assert.equal(entry.handler([]), 0);
+});

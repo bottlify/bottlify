@@ -318,3 +318,85 @@ function combine(m, lists){
     m.memory[at + 1] = 0;
     return out;
 }
+
+test('SHBindToParent binds the folder a list ends in, and points at its last item', ()=>{
+    // Wine's shlfolder tests: the child is a pointer into the caller's list,
+    // an empty list is the desktop and itself, and no list fails.
+    const m = machine();
+    assert.equal(m.shell.SHGetSpecialFolderLocation.handler([0, CSIDL_DRIVES, 0x100]), S_OK);
+    const computer = m.u32(0x100);
+    assert.equal(m.shell.SHGetDesktopFolder.handler([0x104]), S_OK);
+    const desktop = m.u32(0x104);
+    const iid = guid(m, IID_ISHELLFOLDER);
+    assert.equal(m.call(desktop, FOLDER.ParseDisplayName, [0, 0, m.wide('C:\\Program Files'),
+        0, 0x108, 0]), S_OK);
+    const path = combine(m, [computer, m.u32(0x108)]);
+
+    assert.equal(m.shell.SHBindToParent.handler([path, iid, 0x110, 0x114]), S_OK);
+    const parent = m.u32(0x110);
+    assert.equal(m.published.get(parent)?.iid, IID_ISHELLFOLDER);
+    const last = m.u32(0x114);
+    assert.equal(last, path + (m.memory[path] | m.memory[path + 1] << 8),
+        'the last item, inside the list given');
+    assert.equal(m.call(parent, FOLDER.GetDisplayNameOf, [last, SHGDN_FORPARSING, 0x200]), S_OK);
+    assert.equal(m.string(0x204), 'C:\\Program Files');
+    assert.deepEqual(children(m, parent, SHCONTF_FOLDERS).map(list=>m.texts(list).at(-1)),
+        ['C:\\Program Files'], 'the parent is the drive');
+
+    const empty = 0x1d00;
+    m.put(empty, 0);
+    assert.equal(m.shell.SHBindToParent.handler([empty, iid, 0x110, 0x114]), S_OK);
+    assert.equal(m.u32(0x114), empty, 'an empty list is its own last item');
+    assert.deepEqual(children(m, m.u32(0x110), SHCONTF_FOLDERS).map(list=>m.texts(list)),
+        [[MY_COMPUTER]], 'and its folder the desktop');
+
+    m.put(0x114, 0xdeadbeef);
+    assert.equal(m.shell.SHBindToParent.handler([0, iid, 0x110, 0x114]) | 0, 0x80070057 | 0);
+    assert.equal(m.u32(0x114), 0, 'no list: a null child');
+    assert.equal(m.shell.SHBindToParent.handler([path, guid(m,
+        '{00000000-0000-0000-0000-000000000001}'), 0x110, 0]) | 0, 0x80004002 | 0,
+    'an interface a folder does not have');
+    assert.equal(m.u32(0x110), 0);
+    assert.equal(m.shell.SHBindToParent.argBytes, 16);
+});
+
+test('SHGetDataFromIDList fills the find data of what a list names', ()=>{
+    const m = machine();
+    assert.equal(m.shell.SHGetDesktopFolder.handler([0x104]), S_OK);
+    assert.equal(m.call(m.u32(0x104), FOLDER.ParseDisplayName, [0, 0, m.wide('C:\\readme.txt'),
+        0, 0x108, 0]), S_OK);
+    const file = m.u32(0x108);
+    const out = 0x2c00;
+    m.memory.fill(0xaa, out, out + 0x300);
+    assert.equal(m.shell.SHGetDataFromIDListA.handler([0, file, 1, out, 320]), S_OK);
+    assert.equal(m.u32(out), 0x20, 'FILE_ATTRIBUTE_ARCHIVE, a file');
+    assert.equal(m.string(out + 44), 'readme.txt');
+    assert.equal(m.memory[out + 304], 0, 'no short name');
+    assert.equal(m.shell.SHGetDataFromIDListW.handler([0, file, 1, out, 592]), S_OK);
+    assert.equal(String.fromCharCode(...new Uint16Array(m.memory.slice(out + 44, out + 64)
+        .buffer)), 'readme.txt');
+    assert.equal(m.shell.SHGetDataFromIDListA.handler([0, file, 3, out, 20]), S_OK);
+    assert.equal(m.u32(out), 2, 'SHDID_FS_FILE');
+    assert.equal(m.shell.SHGetDataFromIDListA.handler([0, file, 1, out, 319]) | 0,
+        0x80070057 | 0, 'a buffer too small');
+    assert.equal(m.shell.SHGetDataFromIDListA.handler([0, file, 2, out, 1024]) | 0,
+        0x80070057 | 0, 'no network resource');
+    assert.equal(m.shell.SHGetSpecialFolderLocation.handler([0, CSIDL_DRIVES, 0x100]), S_OK);
+    assert.equal(m.shell.SHGetDataFromIDListA.handler([0, m.u32(0x100), 1, out, 320]) | 0,
+        0x80070057 | 0, 'the computer is no path');
+    assert.equal(m.shell.SHGetDataFromIDListW.argBytes, 20);
+});
+
+test('SHGetFolderLocation is SHGetSpecialFolderLocation, its reserved word zero', ()=>{
+    const m = machine();
+    assert.equal(m.shell.SHGetFolderLocation.handler([0, CSIDL_DRIVES, 0, 0, 0x100]), S_OK);
+    assert.deepEqual(m.texts(m.u32(0x100)), [MY_COMPUTER]);
+    assert.equal(m.shell.SHGetFolderLocation.handler([0, 0x10, 0, 0, 0x100]), S_OK);
+    assert.deepEqual(m.texts(m.u32(0x100)), ['C:\\Desk']);
+    assert.equal(m.shell.SHGetFolderLocation.handler([0, 0xeeee, 0, 0, 0x100]) | 0,
+        0x80070057 | 0, 'a folder this machine does not have');
+    assert.equal(m.u32(0x100), 0);
+    assert.equal(m.shell.SHGetFolderLocation.handler([0, 0x10, 0, 1, 0x100]) | 0,
+        0x80070057 | 0, 'a reserved word that is not zero');
+    assert.equal(m.shell.SHGetFolderLocation.argBytes, 20);
+});

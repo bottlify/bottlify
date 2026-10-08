@@ -273,6 +273,7 @@ test('every export of the spec is there, with its argument bytes', ()=>{
         WdtpInterfacePointer_UserMarshal: 20,
         WdtpInterfacePointer_UserUnmarshal: 16,
         WdtpInterfacePointer_UserFree: 4,
+        ReleaseStgMedium: 4,
     };
     for (const type of types)
     {
@@ -908,4 +909,67 @@ test('SNB: with a bare flags word the block is task memory', ()=>{
     assert.notEqual(p.heap.block(snb), null);
     assert.equal(p.calls.allocate, 0);
     assert.equal(p.u32(snb + 4), 0);
+});
+
+test('ReleaseStgMedium frees what nobody else releases, and always releases an interface',
+    async()=>{
+        // ole2.c test_ReleaseStgMedium: NULL is nothing. MSDN's table: with
+        // pUnkForRelease NULL the value is freed as its tymed says; with one,
+        // only an interface is released, then pUnkForRelease.
+        const p = setup();
+        assert.equal(p.run('ReleaseStgMedium', [0]), 0);
+
+        const hglobal = p.heap.allocate(8);
+        medium(p, MEDIUM, [TYMED_HGLOBAL, hglobal, 0]);
+        p.run('ReleaseStgMedium', [MEDIUM]);
+        assert.equal(p.heap.block(hglobal), null, 'GlobalFree');
+        assert.deepEqual([0, 4, 8].map(at=>p.u32(MEDIUM + at)), [TYMED_NULL, 0, 0]);
+
+        const UNKNOWN = 0x2000;
+        const unknown = p.object(UNKNOWN, [IID_IUNKNOWN]);
+        const kept = p.heap.allocate(8);
+        medium(p, MEDIUM, [TYMED_HGLOBAL, kept, UNKNOWN]);
+        await p.run('ReleaseStgMedium', [MEDIUM]);
+        assert.notEqual(p.heap.block(kept), null, 'pUnkForRelease frees it, not this');
+        assert.equal(unknown.refs, 0, 'pUnkForRelease released');
+
+        const STREAM = 0x2080;
+        const stream = p.object(STREAM, [IID_IUNKNOWN, IID_ISTREAM]);
+        const unknown2 = p.object(0x2040, [IID_IUNKNOWN]);
+        medium(p, MEDIUM, [TYMED_ISTREAM, STREAM, 0x2040]);
+        await p.run('ReleaseStgMedium', [MEDIUM]);
+        assert.deepEqual([stream.refs, unknown2.refs], [0, 0], 'both released');
+
+        const bitmap = 0x5100;
+        p.bitmaps.set(bitmap, { header: new Uint8Array(20), bits: new Uint8Array(0) });
+        medium(p, MEDIUM, [TYMED_GDI, bitmap, 0]);
+        p.run('ReleaseStgMedium', [MEDIUM]);
+        assert.equal(p.bitmaps.has(bitmap), false, 'DeleteObject');
+
+        const emf = p.keep(new Uint8Array(4));
+        medium(p, MEDIUM, [64, emf, 0]);
+        p.run('ReleaseStgMedium', [MEDIUM]);
+        assert.equal(p.metafiles.has(emf), false, 'DeleteEnhMetaFile');
+
+        const wmf = p.keep(new Uint8Array(4));
+        const picture = p.heap.allocate(16);
+        p.set32(picture + 12, wmf);
+        medium(p, MEDIUM, [32, picture, 0]);
+        p.run('ReleaseStgMedium', [MEDIUM]);
+        assert.equal(p.metafiles.has(wmf), false, 'DeleteMetaFile of the picture\'s hMF');
+        assert.equal(p.heap.block(picture), null, 'and GlobalFree of the picture');
+
+        const name = p.heap.allocate(4);
+        medium(p, MEDIUM, [TYMED_FILE, name, 0]);
+        p.run('ReleaseStgMedium', [MEDIUM]);
+        assert.equal(p.heap.block(name), null, 'the name is CoTaskMemFree\'d');
+        assert.equal(p.divergences.length, 1, 'the file is not deleted with no DeleteFileW');
+    });
+
+test('ReleaseStgMedium with no gdi32 to delete through says the object is kept', ()=>{
+    const p = setup({ gdi: false });
+    medium(p, MEDIUM, [TYMED_GDI, 0x5100, 0]);
+    p.run('ReleaseStgMedium', [MEDIUM]);
+    assert.equal(p.divergences.length, 1);
+    assert.equal(p.u32(MEDIUM), TYMED_NULL);
 });

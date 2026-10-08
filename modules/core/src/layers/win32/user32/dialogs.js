@@ -1251,6 +1251,29 @@ export function createDialogFunctions(options){
                     initParam),
         },
 
+        /**
+         * HWND CreateDialogIndirectParamAorW(HINSTANCE hInstance, LPCVOID lpTemplate,
+         *   HWND hWndParent, DLGPROC lpDialogFunc, LPARAM dwInitParam, DWORD flags)
+         * INT_PTR DialogBoxIndirectParamAorW(..., DWORD flags)
+         *
+         * The two calls the A and W forms are made of: a flags of zero is
+         * the Unicode dialog, any other (DLG_ISANSI) the ANSI one -- which
+         * decides what its procedure is handed, not how the template reads.
+         */
+        CreateDialogIndirectParamAorW: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([instance, template, parent, dialogFunc, initParam, flags])=>
+                createDialog(instance, template, parent, dialogFunc, initParam,
+                    (flags >>> 0) === 0),
+        },
+        DialogBoxIndirectParamAorW: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([instance, template, parent, dialogFunc, initParam, flags])=>
+                dialogBox(instance, template, parent, dialogFunc, initParam, (flags >>> 0) === 0),
+        },
+
         /** HWND CreateDialogIndirectParamW(...), a Unicode dialog. */
         CreateDialogIndirectParamW: {
             argBytes: 20,

@@ -752,7 +752,7 @@ test('the wide file security calls are refused like the narrow ones, popping wha
     assert.equal(fns.GetFileSecurityW.argBytes, 20);
 });
 
-test('impersonating oneself succeeds, and the file security calls refuse plainly', ()=>{
+test('the file security calls refuse plainly', ()=>{
     const memory = fakeMemory();
     /** @type {number[]} */
     const errors = [];
@@ -764,10 +764,6 @@ test('impersonating oneself succeeds, and the file security calls refuse plainly
         setLastError: code=>errors.push(code),
     });
     const ERROR_CALL_NOT_IMPLEMENTED = 120;
-    assert.equal(fns.ImpersonateSelf.handler(), 1, 'impersonating oneself always succeeds');
-    assert.equal(fns.RevertToSelf.handler(), 1);
-    assert.equal(fns.ImpersonateSelf.argBytes, 4);
-    assert.equal(fns.RevertToSelf.argBytes, 0);
     const expected = { GetFileSecurityA: 20, SetFileSecurityA: 12 };
     const table = /** @type {Record<string, { argBytes: number, handler: (args: number[]) => number }>} */ (
         /** @type {unknown} */ (fns));
@@ -1427,4 +1423,29 @@ test('RegRenameKey gives a key or its subkey a new name, its values going with i
         'the handle still holds the key, under its new name');
     create('Software\\RenameParent\\Other');
     assert.equal(fns.RegRenameKey.handler([child, 0, wide(0x800, 'Other')]), ERROR_ALREADY_EXISTS);
+});
+
+test('IsTextUnicode reads the buffer, the tests asked for, and writes back which passed', ()=>{
+    const memory = fakeMemory();
+    const fns = createRegistryFunctions({
+        readMemory: memory.readMemory,
+        writeMemory: memory.writeMemory,
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        hive: createRegistryService(createHive()),
+        setLastError: ()=>{},
+    });
+    const text = new Uint8Array(Uint16Array.from('Hi there', c=>c.charCodeAt(0)).buffer);
+    const BUFFER = 0x400;
+    const RESULT = 0x500;
+    memory.writeMemory(BUFFER, text);
+    assert.equal(fns.IsTextUnicode.handler([BUFFER, text.length, 0]), 1);
+    memory.writeMemory(RESULT, new Uint8Array([1, 0, 0, 0]));
+    assert.equal(fns.IsTextUnicode.handler([BUFFER, text.length, RESULT]), 1);
+    assert.deepEqual([...memory.readMemory(RESULT, 4)], [1, 0, 0, 0], 'IS_TEXT_UNICODE_ASCII16');
+    memory.writeMemory(RESULT, new Uint8Array([8, 0, 0, 0]));
+    assert.equal(fns.IsTextUnicode.handler([BUFFER, text.length, RESULT]), 0,
+        'asked only for a signature, which it has not');
+    assert.deepEqual([...memory.readMemory(RESULT, 4)], [0, 0, 0, 0]);
+    assert.equal(fns.IsTextUnicode.handler([BUFFER, 1, 0]), 0, 'less than a character');
+    assert.equal(fns.IsTextUnicode.argBytes, 12);
 });

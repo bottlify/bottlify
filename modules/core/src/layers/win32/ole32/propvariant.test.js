@@ -18,7 +18,9 @@ const S_OK = 0;
 const E_OUTOFMEMORY = 0x8007000e | 0;
 const DISP_E_BADVARTYPE = 0x80020008 | 0;
 const STG_E_INVALIDPARAMETER = 0x80030057 | 0;
+const E_INVALIDARG = 0x80070057 | 0;
 
+const VT_I4 = 3;
 const VT_BSTR = 8;
 const VT_UNKNOWN = 13;
 const VT_UI1 = 17;
@@ -475,3 +477,26 @@ test('without calls into the program an interface is copied without its referenc
         assert.equal(m.fns.PropVariantClear.handler([DEST]), S_OK);
         assert.equal(m.reported.length, 2);
     });
+
+test('FreePropVariantArray clears each record in turn, and refuses only a NULL array', async()=>{
+    // propvariant.c: what the array held is let go of, whatever its type,
+    // and every record is zero afterwards.
+    const m = build();
+    const unknown = m.object(0x2800, 2);
+    const text = m.heap.allocate(8);
+    m.set(SOURCE, VT_UNKNOWN, unknown);
+    m.set(SOURCE + 16, VT_LPSTR, text);
+    m.set(SOURCE + 32, VT_I4, 7);
+    m.set(SOURCE + 48, 0x7fff, 1);
+    assert.equal(m.fns.FreePropVariantArray.argBytes, 8);
+    assert.equal(await m.fns.FreePropVariantArray.handler([4, SOURCE]), S_OK,
+        'a type it does not know is zeroed and passed over');
+    assert.equal(m.references.get(unknown), 1);
+    assert.equal(m.heap.live.has(text), false);
+    for (let index = 0; index < 4; index++)
+    {
+        assert.deepEqual(m.read(SOURCE + index * 16), [0, 0, 0]);
+    }
+    assert.equal(await m.fns.FreePropVariantArray.handler([0, SOURCE]), S_OK);
+    assert.equal(m.fns.FreePropVariantArray.handler([3, 0]), E_INVALIDARG);
+});

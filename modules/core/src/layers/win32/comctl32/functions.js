@@ -6,10 +6,12 @@
 
 /**
  * comctl32 — image lists (imagelist.js), the mouse-tracking request,
- * property sheets (propsheet.js) and flat scroll bars (flatsb.js).
+ * property sheets (propsheet.js), flat scroll bars (flatsb.js), and the
+ * toolbar, mapped-bitmap and drag-list helpers (helpers.js).
  */
 
 import { createFlatScrollBarFunctions } from './flatsb.js';
+import { createHelperFunctions } from './helpers.js';
 import { createImageListFunctions } from './imagelist-stream.js';
 import { createPropertySheetFunctions } from './propsheet.js';
 
@@ -26,6 +28,10 @@ import { createPropertySheetFunctions } from './propsheet.js';
  * @property {ReturnType<typeof import('./imagelist.js').createImageLists>} [imageLists]
  *           The image lists to export, built by the host to share with the
  *           tab control; without them this host's own are made.
+ * @property {(name: string) => ({ handler: (args: number[]) => any } | undefined)} [gdi32]
+ *           gdi32's exports, which CreateMappedBitmap reaches a bitmap's bits
+ *           through. Absent, the bitmap is handed out with its colours as
+ *           they were, and the call says so.
  * @property {(request: number) => number} [trackMouseEvent]
  *           user32's TrackMouseEvent, given the request's address. Absent in
  *           a build without user32 behind it, and then a request of the right
@@ -63,13 +69,17 @@ const DLLVERSIONINFO2_SIZE = 32;
 
 /**
  * Which ordinal is which export, for a program that links this library by
- * number. Only the one that is implemented and is imported that way: an
- * ordinal exported while pointing at nothing is a call that binds and then
- * jumps into nowhere.
+ * number: the numbers of the 5.82 library (Wine's comctl32.spec agrees).
+ * Only the ones that are implemented and are imported that way: an ordinal
+ * exported while pointing at nothing is a call that binds and then jumps
+ * into nowhere.
  *
  * @type {Readonly<Record<number, string>>}
  */
 export const COMCTL32_ORDINALS = Object.freeze({
+    8: 'CreateMappedBitmap',
+    13: 'MakeDragList',
+    14: 'LBItemFromPt',
     17: 'InitCommonControls',
 });
 
@@ -77,6 +87,8 @@ export const COMCTL32_ORDINALS = Object.freeze({
  * @param {ComctlHost} host
  */
 export function createComctlFunctions(host){
+    const sheets = createPropertySheetFunctions(host);
+    const images = createImageListFunctions(host);
     return {
         /**
          * void InitCommonControls(void)
@@ -171,8 +183,15 @@ export function createComctlFunctions(host){
             },
         },
 
-        ...createImageListFunctions(host),
-        ...createPropertySheetFunctions(host),
+        ...images,
+        ...sheets,
         ...createFlatScrollBarFunctions(host),
+        ...createHelperFunctions(host),
+
+        // The undecorated names the library exports for the ANSI forms, which
+        // a program that looks a call up by hand may ask for.
+        PropertySheet: sheets.PropertySheetA,
+        CreatePropertySheetPage: sheets.CreatePropertySheetPageA,
+        ImageList_LoadImage: images.ImageList_LoadImageA,
     };
 }

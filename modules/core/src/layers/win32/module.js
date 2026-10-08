@@ -69,9 +69,12 @@ import { createShellFunctions } from './shell32/functions.js';
 import { registerShellLinkClasses } from './shell32/shelllink.js';
 import { registerWbemClasses } from './ole32/wbem.js';
 import { registerDxDiagClasses } from './ole32/dxdiag.js';
+import { registerJScriptClass } from './jscript/active-script.js';
+import { registerVBScriptClass } from './vbscript/active-script.js';
 import { createRpcFunctions } from './rpcrt4/functions.js';
 import { createVersionFunctions } from './version/functions.js';
 import { createLzFunctions } from './lz32/functions.js';
+import { createMspatchaFunctions } from './mspatcha/functions.js';
 import { createCommonDialogFunctions } from './comdlg32/functions.js';
 import { createImmFunctions } from './imm32/functions.js';
 import { createShlwapiFunctions } from './shlwapi/functions.js';
@@ -84,6 +87,8 @@ import { createDsetupFunctions } from './dsetup/functions.js';
 import { createDpnhpastFunctions } from './dpnhpast/functions.js';
 import { createSetupapiFunctions } from './setupapi/functions.js';
 import { createMsiFunctions } from './msi/functions.js';
+import { createProgramFunctions } from './programs/functions.js';
+import { PROGRAMS_LIBRARY } from './programs/table.js';
 import { createEventLogFunctions } from './advapi32/eventlog.js';
 import { createCabinetFunctions } from './cabinet/functions.js';
 import { MSI_ORDINALS } from './msi/ordinals.js';
@@ -699,6 +704,12 @@ export function createWin32Module(){
             });
             const winsock = createWinsockFunctions({
                 readMemory,
+                // The WSA events are kernel32's events, and TransmitFile reads
+                // its file through ReadFile: kernel32's own exports, looked up
+                // when called, as the table is built below.
+                /** @param {string} name */
+                kernel32: name=>libraries['KERNEL32.dll']?.[name]?.handler,
+                divergence: config?.divergence,
                 writeMemory,
                 readCString,
                 heap,
@@ -1087,6 +1098,44 @@ export function createWin32Module(){
                 windows, directx, screen: config?.screen, divergence: config?.divergence,
             });
 
+            // JScript and VBScript, the Active Scripting engines a host -- an
+            // installer's script, a page, a configuration tool -- asks COM for,
+            // both on one host of the scripting interfaces.
+            /** @type {Parameters<typeof registerJScriptClass>[0]} */
+            const scriptHost = {
+                registry: com,
+                publish: (object, iid)=>bridge.publishInterface(object, iid),
+                com: {
+                    call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    callerThread: ()=>bridge.callerThread(),
+                    readMemory, writeMemory,
+                    /** @param {number} bytes */
+                    allocate: bytes=>heap.allocate(bytes),
+                    /** @param {number} address */
+                    free: address=>heap.free(address),
+                    /** @param {string} name @param {number[]} args */
+                    oleaut32: (name, args)=>libraries['OLEAUT32.dll'][name].handler(args),
+                },
+                /**
+                 * @param {string} library @param {string} name @param {number[]} args
+                 * @param {unknown} [thread]
+                 */
+                system: (library, name, args, thread)=>{
+                    const entry = libraries[library]?.[name];
+                    if (!entry)
+                    {
+                        return null;
+                    }
+                    return thread ? bridge.answering(thread, ()=>entry.handler(args))
+                        : entry.handler(args);
+                },
+                threadId: ()=>kernel.currentThread().id >>> 0,
+                now: ()=>kernel.clock.wallClock(),
+                divergence: config?.divergence,
+            };
+            registerJScriptClass(scriptHost);
+            registerVBScriptClass(scriptHost);
+
             // One way of starting a program, behind three spellings of asking for
             // one: kernel32's CreateProcess and WinExec, and the shell's launch. A
             // program a self-extractor starts through ShellExecute has to be the one
@@ -1106,6 +1155,7 @@ export function createWin32Module(){
                 // run that asked for it produced.
                 /** @param {any} request */
                 spawned: request=>config?.spawned?.(request),
+                currentDirectory: ()=>filesystem.currentDirectory(),
             });
 
             // Routines queued to a thread and run by it when it waits alertably:
@@ -1371,6 +1421,9 @@ export function createWin32Module(){
                     }),
                     ...createSyncFunctions({
                         kernel,
+                        // A change notification watches a directory on the
+                        // same volume every file call writes through.
+                        volume,
                         readMemory,
                         writeMemory,
                         currentThread: ()=>kernel.currentThread(),
@@ -1389,6 +1442,7 @@ export function createWin32Module(){
                     ...createLocaleFunctions({
                         readMemory, writeMemory, stringLength,
                         setLastError: setError,
+                        divergence: config?.divergence,
                         systemTimeMs: ()=>kernel.clock.wallClock(),
                         /** @param {number} entry @param {number[]} args @param {unknown} [thread] */
                         call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
@@ -1750,8 +1804,11 @@ export function createWin32Module(){
                 'IPHLPAPI.dll': createIphlpapiFunctions({
                     readMemory, writeMemory, localAddress: ()=>sockets.localAddress(),
                 }),
-                'WS2_32.dll': winsock.sockets,
-                'MSWSOCK.dll': winsock.extensions,
+                // TransmitFile is wsock32's and mswsock's, never ws2_32's.
+                'WS2_32.dll': Object.fromEntries(Object.entries(winsock.sockets)
+                    .filter(([name])=>name !== 'TransmitFile')),
+                'MSWSOCK.dll': { ...winsock.extensions,
+                    TransmitFile: winsock.sockets.TransmitFile },
 
                 'WINMM.dll': {
                     ...winmm.table,
@@ -1799,6 +1856,9 @@ export function createWin32Module(){
                     // as a program would make one, around a dialog procedure the
                     // bridge gives an address.
                     user32: name=>libraries['USER32.dll'][name],
+                    // CreateMappedBitmap reads and writes a bitmap's bits
+                    // through gdi32's own calls, looked up when called.
+                    gdi32: name=>libraries['GDI32.dll']?.[name],
                     allocate: bytes=>heap.allocate(bytes),
                     release: address=>heap.free(address),
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
@@ -1865,13 +1925,62 @@ export function createWin32Module(){
 
                 'LZ32.dll': createLzFunctions({ readCString, writeMemory, files: volume }),
 
-                'COMDLG32.dll': createCommonDialogFunctions(
-                    { readMemory, readCString, writeMemory }),
+                // The Patch API's applying half: the delta patches a Windows
+                // Installer patch's PatchFiles action and setups apply.
+                'MSPATCHA.dll': createMspatchaFunctions({
+                    readMemory, writeMemory, readCString, readWideString,
+                    setLastError: setError,
+                    setLastErrorFor: setErrorOn,
+                    files: volume,
+                    handles: {
+                        /** @param {number} handle */
+                        file: handle=>{
+                            try
+                            {
+                                return handles.resolve(handle, 'file') ?? null;
+                            }
+                            catch (e){
+                                void e;
+                                return null;
+                            }
+                        },
+                    },
+                    // ApplyPatchToFileByBuffers' own buffer, which the program
+                    // frees with VirtualFree.
+                    /** @param {number} bytes */
+                    virtualAlloc: bytes=>libraries['KERNEL32.dll'].VirtualAlloc
+                        .handler([0, bytes, 0x3000, 0x04]) >>> 0,
+                    /** @param {number} entry @param {number[]} args @param {unknown} [thread] */
+                    call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    callerThread: ()=>bridge.callerThread(),
+                    divergence: config?.divergence,
+                }),
 
-                'IMM32.dll': createImmFunctions({ writeMemory, setLastError: setError }),
+                'COMDLG32.dll': createCommonDialogFunctions({
+                    readMemory, readCString, writeMemory,
+                    // Whether a dialog's owner is a window, asked when it is
+                    // called: user32's table is built after this one.
+                    /** @param {number} hwnd */
+                    isWindow: hwnd=>libraries['USER32.dll'].IsWindow.handler([hwnd]) === 1,
+                    divergence: config?.divergence,
+                }),
+
+                'IMM32.dll': createImmFunctions({
+                    writeMemory, setLastError: setError,
+                    // ImmIsUIMessage hands an IME message to the window named,
+                    // through user32's SendMessageA, looked up when called.
+                    /**
+                     * @param {number} hwnd @param {number} message
+                     * @param {number} wParam @param {number} lParam
+                     */
+                    sendMessage: (hwnd, message, wParam, lParam)=>
+                        libraries['USER32.dll'].SendMessageA
+                            .handler([hwnd, message, wParam, lParam]),
+                }),
 
                 'SHLWAPI.dll': createShlwapiFunctions({
                     readCString, readWideString, readMemory, writeMemory,
+                    setLastError: setError,
                     files: volume,
                     /** @param {string} path */
                     fullPath: path=>filesystem.resolve(path).path,
@@ -2099,7 +2208,8 @@ export function createWin32Module(){
                     callGuest: call=>bridge.callGuest(call),
                     currentThread: ()=>kernel.currentThread() })),
 
-                'WINSPOOL.DRV': createSpoolerFunctions({ setLastError: setError, writeMemory }),
+                'WINSPOOL.DRV': createSpoolerFunctions({ setLastError: setError, readMemory,
+                    writeMemory }),
 
                 'MPR.dll': createNetworkFunctions({ setLastError: setError, writeMemory }),
 
@@ -2134,6 +2244,10 @@ export function createWin32Module(){
                 'WININET.dll': createWininetFunctions({
                     readMemory, writeMemory, readCString, setLastError: setError,
                     request: config?.http ?? null,
+                    // The guest's wall clock, which a cookie's expiry is read
+                    // against: the host's would disagree with what the
+                    // program's own GetSystemTime says.
+                    now: ()=>kernel.clock.wallClock(),
                     divergence: config?.divergence,
                 }),
 
@@ -2286,6 +2400,9 @@ export function createWin32Module(){
                     regionBox: region=>gdi.regionBox(region),
                     /** @param {number} region @param {any} rect */
                     setRegion: (region, rect)=>gdi.setRegion(region, rect),
+                    // A bitmap's size, for a caret drawn in it and an icon made from it.
+                    /** @param {number} bitmap */
+                    bitmapSize: bitmap=>gdi.bitmapSize(bitmap),
                     // Shows the desktop once a paint pass has finished. The
                     // graphics layer is above this one and is reached the way the
                     // drawing engine is: through what the assembling caller hands
@@ -2377,6 +2494,8 @@ export function createWin32Module(){
                     }),
                     ...createTokenFunctions({
                         readMemory,
+                        // Impersonation is the thread's, not the process's.
+                        currentThread: ()=>kernel.currentThread(),
                         writeMemory,
                         readCString,
                         setLastError: setError,
@@ -2385,6 +2504,7 @@ export function createWin32Module(){
                     }),
                     ...createServiceFunctions({
                         readCString,
+                        readMemory,
                         writeMemory,
                         hive,
                         setLastError: setError,
@@ -2419,6 +2539,20 @@ export function createWin32Module(){
                 'ole32.dll': createOleFunctions({
                     readMemory,
                     writeMemory,
+                    // Another library's export, as it is when called -- the
+                    // clipboard, accelerators and the GDI deletions a medium's
+                    // release makes are user32's, gdi32's and kernel32's. The
+                    // table is still being built here.
+                    /** @param {string} library @param {string} name @param {number[]} args @param {any} [thread] */
+                    system: (library, name, args, thread)=>{
+                        const entry = libraries[library]?.[name];
+                        if (!entry)
+                        {
+                            return null;
+                        }
+                        return thread ? bridge.answering(thread, ()=>entry.handler(args))
+                            : entry.handler(args);
+                    },
                     fillMemory,
                     currentThread: ()=>kernel.currentThread(),
                     heap,
@@ -2632,6 +2766,22 @@ export function createWin32Module(){
                 libraries['OLEAUT32.dll'][name] = libraries['ole32.dll'][name];
                 delete libraries['ole32.dll'][name];
             }
+
+            // The programs the system folder holds and this engine provides,
+            // each a routine of one library of its own (`programs/table.js`).
+            libraries[PROGRAMS_LIBRARY] = createProgramFunctions({
+                /** @param {string} library */
+                exports: library=>libraries[library],
+                callerThread: ()=>bridge.callerThread(),
+                answering: (thread, fn)=>bridge.answering(thread, fn),
+                callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                /** @param {number} bytes */
+                allocate: bytes=>heap.allocate(bytes),
+                /** @param {number} address */
+                free: address=>heap.free(address),
+                writeMemory,
+                readWideString,
+            });
 
             libraries['SHFOLDER.dll'] = {
                 SHGetFolderPathA: libraries['SHELL32.dll'].SHGetFolderPathA,

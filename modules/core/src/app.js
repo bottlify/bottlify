@@ -50,6 +50,7 @@ import { storeHandlers } from './layers/cpu/internal/store-link.js';
 import { eventFrom } from './system/events-across.js';
 import { defaultModules } from './layers/index.js';
 import { createRunRegistry } from './layers/win32/module.js';
+import { systemProgramImage } from './layers/win32/programs/table.js';
 import { createWindowDirectory } from './layers/win32/user32/directory.js';
 import { createMixer } from './layers/audio/output/mixer.js';
 import { objectHandlers } from './system-objects.js';
@@ -229,6 +230,10 @@ import { openProcessWorker } from './host/process-worker.js';
  *           What the program believes it was started with. argv[0] ends at the
  *           first space unless it is quoted, so a line composed by hand must
  *           quote it. Defaults to the image path, quoted.
+ * @property {string} [startDirectory]
+ *           The current directory the program starts in, where its starter
+ *           chose one -- a system program, whose paths are its parent's to
+ *           mean. Its own image's directory otherwise.
  * @property {number} [processId]    What GetCurrentProcessId answers: for a child, the
  *           identifier its parent was handed when it started it.
  * @property {any} [system]  The run's system half -- registry, volume, windows, ids, named
@@ -1848,6 +1853,21 @@ export function compatibilityOf(executable){
     const bytes = executable.subarray(at, at + found.size);
     const encoding = bytes[0] === 0xff && bytes[1] === 0xfe ? 'utf-16le' : 'utf-8';
     return { supportedOS: supportedOsOf(new TextDecoder(encoding).decode(bytes)), imageVersion };
+}
+
+/**
+ * A child's image: its file on the volume, or -- for a program of the system
+ * folder the volume has no file for -- the image the engine makes for it
+ * (`win32/programs/table.js`). Every way a child is started reads it here, so
+ * a system program is a process in each of them.
+ *
+ * @param {any} filesystem
+ * @param {any} blocks
+ * @param {string} path
+ * @returns {Promise<Uint8Array | null>}
+ */
+async function readProgramImage(filesystem, blocks, path){
+    return await readWholeFile(filesystem, blocks, path) ?? systemProgramImage(path);
 }
 
 /**
@@ -4224,7 +4244,8 @@ async function buildApp(options){
     // nothing at its path on the volume, starts at the root as before.
     try
     {
-        filesystem.setCurrentDirectory(startDirectoryOf(options.imagePath ?? 'C:\\app.exe'));
+        filesystem.setCurrentDirectory(options.startDirectory
+            ?? startDirectoryOf(options.imagePath ?? 'C:\\app.exe'));
     }
     catch (e){
         void e;
@@ -6878,7 +6899,7 @@ async function buildApp(options){
          *
          * @param {string} path
          */
-        readImage: path=>readWholeFile(filesystem, blocks, path),
+        readImage: path=>readProgramImage(filesystem, blocks, path),
 
         diagnostics: ()=>[
             ...core.diagnostics(),
@@ -7335,7 +7356,7 @@ async function buildSystemHost(deps){
             },
         },
         /** @param {string} path */
-        readImage: path=>readWholeFile(filesystem, blocks, path),
+        readImage: path=>readProgramImage(filesystem, blocks, path),
         /**
          * The program's tables as it last answered -- asked again now, for the
          * next reader -- with the journal and the sound output this thread
@@ -7966,6 +7987,7 @@ export async function createApp(options){
             processId: request.id,
             mainThreadId: request.threadId,
             standardFiles: request.standardFiles,
+            startDirectory: request.startDirectory,
         });
         replayLogLevels();
         stand(line.current);
@@ -8316,6 +8338,7 @@ export async function createApp(options){
                         executable: image,
                         imagePath: request.imagePath,
                         commandLine: request.commandLine,
+                        startDirectory: request.startDirectory,
                         patches: request.patches,
                         processId: request.id,
                         mainThreadId: request.threadId,
@@ -8564,6 +8587,7 @@ export async function createApp(options){
             const placed = processesAcross.start({
                 imagePath: request.imagePath,
                 commandLine: request.commandLine,
+                startDirectory: request.startDirectory,
                 patches: request.patches,
                 id: request.id,
                 threadId: request.threadId,
@@ -8607,6 +8631,7 @@ export async function createApp(options){
                         processId: request.id,
                         mainThreadId: request.threadId,
                         standardFiles: request.standardFiles,
+                        startDirectory: request.startDirectory,
                         audio: sound.options,
                     });
                 }
@@ -8746,6 +8771,7 @@ export async function createApp(options){
                 executable: child,
                 imagePath: request.imagePath,
                 commandLine: request.commandLine,
+                startDirectory: request.startDirectory,
                 patches: request.patches,
                 processId: request.id,
                 mainThreadId: request.threadId,

@@ -101,6 +101,20 @@ const MF_SEPARATOR = 0x0800;
 const CHECK_MARK_SIZE = 13;
 /** What a call handed a handle that names no menu leaves for GetLastError. */
 const ERROR_INVALID_MENU_HANDLE = 1401;
+/** And one handed a handle that names no window, or a bad argument. */
+const ERROR_INVALID_WINDOW_HANDLE = 1400;
+const ERROR_INVALID_PARAMETER = 87;
+
+/** The item SetMenuDefaultItem marks, and the bullet CheckMenuRadioItem gives one. */
+const MFS_DEFAULT = 0x1000;
+const MFT_RADIOCHECK = 0x0200;
+/** GetMenuDefaultItem: a disabled default counts; a default popup is looked into. */
+const GMDI_USEDISABLED = 0x0001;
+const GMDI_GOINTOPOPUPS = 0x0002;
+
+/** What the clipboard viewer chain is told: the contents changed, a viewer left. */
+const WM_DRAWCLIPBOARD = 0x0308;
+const WM_CHANGECBCHAIN = 0x030d;
 
 /**
  * The system menu every window has by default: the commands the frame's own
@@ -243,6 +257,7 @@ function destroyObjectHandle(host, handle){
  * @property {number} state
  * @property {ParsedMenuItem[] | null} popup  The items a popup holds, else null.
  * @property {string} text
+ * @property {number} [help]  An extended popup's help id, its submenu's.
  */
 
 /**
@@ -367,22 +382,109 @@ const parseMenuLevel = (bytes, start, depth, topLevel)=>{
 };
 
 /**
- * A whole RT_MENU resource: the two-word header, then the top level.
+ * One menu level of an extended (MENUEX) template, and where the level after
+ * it starts.
  *
- * The header is a version that is always zero and a count of the bytes that
- * come after it before the first item, which is how a resource says where its
- * items start rather than assuming they follow at once.
+ * Each item is a DWORD type, state and id and a WORD of flags, its text
+ * after them, padded to a DWORD; a popup (flag 0x01) carries its help id
+ * next and then its own items, and flag 0x80 marks the last item of a
+ * level. Offsets are counted from the template's start, which is where the
+ * DWORD alignment is reckoned from.
  *
- * @param {Uint8Array} bytes
- * @returns {ParsedMenuItem[] | null}
+ * @param {Uint8Array} bytes @param {number} start @param {number} depth
+ * @returns {{ items: ParsedMenuItem[], end: number } | null}
  */
-const parseMenuTemplate = bytes=>{
-    if (bytes.length < 4 || (bytes[0] | bytes[1] << 8) !== 0)
+const parseMenuExLevel = (bytes, start, depth)=>{
+    const POPUP = 0x01;
+    const LAST = 0x80;
+    if (depth > MAX_MENU_DEPTH)
     {
         return null;
     }
-    const parsed = parseMenuLevel(bytes, 4 + (bytes[2] | bytes[3] << 8), 0, true);
-    return parsed?.items ?? null;
+    /** @param {number} at */
+    const dword = at=>(bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16
+        | bytes[at + 3] << 24) >>> 0;
+    /** @type {ParsedMenuItem[]} */
+    const items = [];
+    let at = start;
+    for (;;)
+    {
+        if (at + 14 > bytes.length)
+        {
+            return null;
+        }
+        const type = dword(at);
+        const state = dword(at + 4);
+        const id = dword(at + 8);
+        const flags = bytes[at + 12] | bytes[at + 13] << 8;
+        const named = wideText(bytes, at + 14);
+        if (named === null)
+        {
+            return null;
+        }
+        at = (named.end + 3) & ~3;
+        /** @type {ParsedMenuItem} */
+        const item = {
+            id, type, state, popup: null,
+            text: (type & (MF_BITMAP | MF_OWNERDRAW | MFT_SEPARATOR)) !== 0 ? '' : named.text,
+        };
+        if ((flags & POPUP) !== 0)
+        {
+            if (at + 4 > bytes.length)
+            {
+                return null;
+            }
+            item.help = dword(at);
+            const inner = parseMenuExLevel(bytes, at + 4, depth + 1);
+            if (inner === null)
+            {
+                return null;
+            }
+            item.popup = inner.items;
+            at = inner.end;
+        }
+        items.push(item);
+        if ((flags & LAST) !== 0)
+        {
+            return { items, end: at };
+        }
+    }
+};
+
+/**
+ * A whole menu template, as a resource carries it or LoadMenuIndirect is
+ * handed it: a version word, then the items.
+ *
+ * Version 0 is the original template, whose second word counts the bytes
+ * between the header and the first item. Version 1 is the extended one,
+ * whose second word counts from itself to the first item and whose help id
+ * the menu takes. A resource's top level ends where the resource does
+ * (`bounded`); a template in memory has only its last item's flag to say
+ * where it ends, and a template cut short of it is not a menu.
+ *
+ * @param {Uint8Array} bytes @param {boolean} [bounded]
+ * @returns {{ items: ParsedMenuItem[], help: number } | null}
+ */
+const parseMenuTemplate = (bytes, bounded = true)=>{
+    if (bytes.length < 4)
+    {
+        return null;
+    }
+    const version = bytes[0] | bytes[1] << 8;
+    const offset = bytes[2] | bytes[3] << 8;
+    if (version === 1)
+    {
+        const help = bytes.length < 8 ? 0
+            : (bytes[4] | bytes[5] << 8 | bytes[6] << 16 | bytes[7] << 24) >>> 0;
+        const parsed = parseMenuExLevel(bytes, 4 + offset, 0);
+        return parsed ? { items: parsed.items, help } : null;
+    }
+    if (version !== 0)
+    {
+        return null;
+    }
+    const parsed = parseMenuLevel(bytes, 4 + offset, 0, bounded);
+    return parsed ? { items: parsed.items, help: 0 } : null;
 };
 
 
@@ -416,8 +518,12 @@ const ERROR_INVALID_CURSOR_HANDLE = 1402;
  * @param {(record: any, previous: number) => number | Promise<number>} [options.menuChanged]
  *        Told a window's menu changed, which moves its client area when a bar
  *        comes or goes; answers what SetMenu answers once the window is told.
+ * @param {(hwnd: number, message: number, wParam: number, lParam: number,
+ *     thread?: unknown) => number | Promise<number>} [options.send]
+ *        SendMessage, for what the clipboard viewer chain is told. Absent,
+ *        the chain is kept and told nothing.
  */
-export function createObjectFunctions({ host, live, clipboardService, menuChanged }){
+export function createObjectFunctions({ host, live, clipboardService, menuChanged, send }){
     /** @type {Map<number, any>} */
     const menus = new Map();
     /** @type {Map<number, any>} */
@@ -432,6 +538,38 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
      * flag of its own rather than a non-zero owner.
      */
     const clipboard = { open: false, owner: 0, formats: new Map(), changed: false, emptiedAt: 0 };
+
+    /**
+     * Who the clipboard belongs to, which is the window that had it open
+     * when it was emptied, and how often its contents changed, which
+     * GetClipboardSequenceNumber counts with the host's pastes.
+     */
+    const ownership = { window: 0, changes: 0 };
+
+    /**
+     * The first window of the clipboard viewer chain, the one told when the
+     * contents change; each viewer passes the news on to the one SetClipboardViewer
+     * answered it with. Zero for none, and a viewer destroyed without leaving
+     * the chain is none.
+     */
+    let viewer = 0;
+    const viewerNow = ()=>(viewer !== 0 && live(viewer) ? viewer : 0);
+
+    /**
+     * The chain told the contents changed, as CloseClipboard tells it.
+     *
+     * @returns {number | Promise<number>}
+     */
+    const drawClipboard = ()=>{
+        const first = viewerNow();
+        return first !== 0 && send
+            ? send(first, WM_DRAWCLIPBOARD, ownerNow(), 0, host.callerThread?.())
+            : 0;
+    };
+
+    /** The clipboard's owner, unless the host's paste has replaced what it put there. */
+    const ownerNow = ()=>(hostText() === null && ownership.window !== 0
+        && live(ownership.window) ? ownership.window : 0);
 
     /** The text formats a host paste answers for. */
     const TEXT_FORMATS = new Set([CF_TEXT, CF_OEMTEXT, CF_UNICODETEXT]);
@@ -609,6 +747,8 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
             releaseControlCopies();
             clipboard.formats.clear();
             clipboard.emptiedAt = host.pasteboard?.version ?? 0;
+            ownership.window = 0;
+            ownership.changes++;
             if (host.allocate)
             {
                 const handle = layDown(CF_TEXT, text);
@@ -616,6 +756,9 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                 controlCopies.add(handle);
             }
             host.clipboard?.(text);
+            // Told as a program's CloseClipboard would tell it; what the
+            // viewer answers changes nothing about the copy.
+            void drawClipboard();
             return true;
         },
     });
@@ -737,6 +880,56 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
     const menuOf = handle=>menus.get(handle >>> 0) ?? null;
 
     /**
+     * A popup menu shown and waited on until the person using it chooses.
+     * There is nobody to choose, so it is dismissed without a selection --
+     * zero, which every caller already handles because dismissing a menu is
+     * ordinary, and which TPM_RETURNCMD reads as "no command". A handle that
+     * is no menu is refused with its reason.
+     *
+     * @param {number} handle
+     */
+    const trackPopup = handle=>{
+        if (!menuOf(handle))
+        {
+            host.setLastError?.(ERROR_INVALID_MENU_HANDLE);
+        }
+        return 0;
+    };
+
+    /**
+     * GetMenuDefaultItem, following a default popup down at most as deep
+     * as a menu may nest.
+     *
+     * @param {number} handle @param {boolean} byPosition @param {number} flags
+     * @param {number} depth
+     * @returns {number}
+     */
+    const defaultItem = (handle, byPosition, flags, depth)=>{
+        const NONE = -1 >>> 0;
+        const menu = menuOf(handle);
+        const at = menu ? menu.items.findIndex(
+            (/** @type {any} */ item)=>(item.state & MFS_DEFAULT) !== 0) : -1;
+        if (!menu || at === -1)
+        {
+            return NONE;
+        }
+        const item = menu.items[at];
+        if ((flags & GMDI_USEDISABLED) === 0 && (item.state & (MF_GRAYED | MF_DISABLED)) !== 0)
+        {
+            return NONE;
+        }
+        if ((flags & GMDI_GOINTOPOPUPS) !== 0 && menuOf(item.submenu) && depth < MAX_MENU_DEPTH)
+        {
+            const inner = defaultItem(item.submenu, byPosition, flags, depth + 1);
+            if (inner !== NONE)
+            {
+                return inner;
+            }
+        }
+        return byPosition ? at : item.id >>> 0;
+    };
+
+    /**
      * The item a call means. MF_BYPOSITION indexes the list; the default,
      * MF_BYCOMMAND, searches it -- and searches submenus too, which is why a
      * program can delete a nested item without naming the menu it is in.
@@ -821,21 +1014,58 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
      * this walks past is one GetSubMenu and DestroyMenu already know.
      *
      * @param {ParsedMenuItem[]} parsed @param {boolean} popup
+     * @param {number} [help]  The menu's context help id, which an extended
+     *     template gives.
      * @returns {number} the new menu's handle
      */
-    const materializeMenu = (parsed, popup)=>{
-        /** @type {{ handle: number, popup: boolean, items: any[] }} */
-        const record = { handle: 0, popup, items: [] };
+    const materializeMenu = (parsed, popup, help = 0)=>{
+        /** @type {{ handle: number, popup: boolean, items: any[], help: number }} */
+        const record = { handle: 0, popup, items: [], help };
         record.handle = host.handles.open('menu', record);
         menus.set(record.handle, record);
         for (const item of parsed)
         {
             record.items.push({
                 id: item.id, type: item.type, state: item.state, data: 0, text: item.text,
-                submenu: item.popup === null ? 0 : materializeMenu(item.popup, true),
+                submenu: item.popup === null ? 0 : materializeMenu(item.popup, true, item.help),
             });
         }
         return record.handle;
+    };
+
+    /**
+     * A menu template a program built in its own memory, which only its last
+     * item's flag ends: read a piece at a time until it parses, so a short
+     * template does not cost the ceiling and the read never runs past what
+     * is mapped further than a piece.
+     *
+     * @param {number} address
+     * @returns {number} the new menu's handle, or zero
+     */
+    const loadMenuIndirect = address=>{
+        const MAX_TEMPLATE = 0x10000;
+        for (let size = 0x400; size <= MAX_TEMPLATE; size *= 2)
+        {
+            /** @type {Uint8Array} */
+            let bytes;
+            try
+            {
+                bytes = host.readMemory(address >>> 0, size);
+            }
+            catch {
+                return 0;
+            }
+            const parsed = parseMenuTemplate(bytes, false);
+            if (parsed)
+            {
+                return materializeMenu(parsed.items, false, parsed.help);
+            }
+            if (bytes.length < size)
+            {
+                return 0;
+            }
+        }
+        return 0;
     };
 
     /**
@@ -860,9 +1090,9 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         {
             return 0;
         }
-        const items = parseMenuTemplate(
+        const parsed = parseMenuTemplate(
             host.readMemory((base + found.rva) >>> 0, found.size));
-        return items === null ? 0 : materializeMenu(items, false);
+        return parsed === null ? 0 : materializeMenu(parsed.items, false, parsed.help);
     };
 
     /**
@@ -1683,7 +1913,218 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
          */
         TrackPopupMenu: {
             argBytes: 28,
-            handler: ()=>0,
+            /** @param {number[]} args */
+            handler: ([handle])=>trackPopup(handle),
+        },
+
+        /**
+         * BOOL TrackPopupMenuEx(HMENU hMenu, UINT uFlags, int x, int y, HWND hwnd,
+         *                      LPTPMPARAMS lptpm)
+         *
+         * TrackPopupMenu with an area to keep clear of instead of the
+         * reserved argument: the same menu, dismissed the same way.
+         */
+        TrackPopupMenuEx: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([handle])=>trackPopup(handle),
+        },
+
+        /**
+         * BOOL SetMenuDefaultItem(HMENU hMenu, UINT uItem, UINT fByPos)
+         *
+         * One item of a menu is its default, drawn bold and chosen by a
+         * double click; marking one unmarks the rest of that menu. -1 leaves
+         * none. By command only the menu's own items are looked at, not its
+         * submenus': the default is a property of one menu.
+         */
+        SetMenuDefaultItem: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, item, byPosition])=>{
+                const menu = menuOf(handle);
+                if (!menu)
+                {
+                    host.setLastError?.(ERROR_INVALID_MENU_HANDLE);
+                    return 0;
+                }
+                let at = -1;
+                if ((item | 0) !== -1)
+                {
+                    at = (byPosition >>> 0) !== 0
+                        ? ((item >>> 0) < menu.items.length ? item >>> 0 : -1)
+                        : menu.items.findIndex((/** @type {any} */ each)=>each.id === (item >>> 0));
+                    if (at === -1)
+                    {
+                        return 0;
+                    }
+                }
+                for (const each of menu.items)
+                {
+                    each.state &= ~MFS_DEFAULT;
+                }
+                if (at >= 0)
+                {
+                    menu.items[at].state |= MFS_DEFAULT;
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * UINT GetMenuDefaultItem(HMENU hMenu, UINT fByPos, UINT gmdiFlags)
+         *
+         * The default item's command or place, or -1 for none -- and for a
+         * disabled one unless GMDI_USEDISABLED. With GMDI_GOINTOPOPUPS a
+         * default that opens a submenu answers that submenu's default, and
+         * itself when the submenu has none.
+         */
+        GetMenuDefaultItem: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, byPosition, flags])=>defaultItem(handle, byPosition >>> 0 !== 0,
+                flags >>> 0, 0),
+        },
+
+        /**
+         * BOOL CheckMenuRadioItem(HMENU hmenu, UINT first, UINT last, UINT check,
+         *                        UINT flags)
+         *
+         * The items from first to last are a group of which one is chosen:
+         * that one is checked with the radio bullet, the others unchecked.
+         * By command the group is the items of the menu the first id found
+         * is in; separators are no part of it. FALSE when `check` was not
+         * among them.
+         */
+        CheckMenuRadioItem: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, first, last, check, flags])=>{
+                const menu = menuOf(handle);
+                if (!menu)
+                {
+                    host.setLastError?.(ERROR_INVALID_MENU_HANDLE);
+                    return 0;
+                }
+                const from = first >>> 0;
+                const to = last >>> 0;
+                // The ids the range could name are the ones the menu holds:
+                // walking every number between two ids may be four billion
+                // steps for a group of three.
+                /** @type {number[]} */
+                let names = [];
+                if ((flags & MF_BYPOSITION) !== 0)
+                {
+                    for (let at = from; at <= Math.min(to, menu.items.length - 1); at++)
+                    {
+                        names.push(at);
+                    }
+                }
+                else
+                {
+                    /** @param {any} level */
+                    const ids = level=>level.items.flatMap((/** @type {any} */ item)=>
+                        [item.id, ...(menuOf(item.submenu) ? ids(menuOf(item.submenu)) : [])]);
+                    names = [...new Set(ids(menu))].filter(id=>id >= from && id <= to)
+                        .sort((a, b)=>a - b);
+                }
+                let group = null;
+                let done = 0;
+                for (const name of names)
+                {
+                    const found = findItem(menu, name, flags);
+                    if (!found)
+                    {
+                        continue;
+                    }
+                    group ??= found.menu;
+                    const item = found.menu.items[found.at];
+                    if (found.menu !== group || (item.type & MFT_SEPARATOR) !== 0)
+                    {
+                        continue;
+                    }
+                    if (name === (check >>> 0))
+                    {
+                        item.type |= MFT_RADIOCHECK;
+                        item.state |= MF_CHECKED;
+                        done = 1;
+                    }
+                    else
+                    {
+                        item.state &= ~MF_CHECKED;
+                    }
+                }
+                return done;
+            },
+        },
+
+        /**
+         * BOOL HiliteMenuItem(HWND hWnd, HMENU hMenu, UINT uIDHiliteItem, UINT uHilite)
+         *
+         * The item drawn highlighted in a menu bar, or not: MF_HILITE in its
+         * state, which GetMenuState reads back. FALSE for no such item.
+         */
+        HiliteMenuItem: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([, handle, id, flags])=>{
+                const menu = menuOf(handle);
+                const found = menu ? findItem(menu, id, flags) : null;
+                if (!found)
+                {
+                    return 0;
+                }
+                const item = found.menu.items[found.at];
+                item.state = (flags & MF_HILITE) !== 0
+                    ? item.state | MF_HILITE : item.state & ~MF_HILITE;
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL SetMenuContextHelpId(HMENU hmenu, DWORD dwContextHelpId)
+         * DWORD GetMenuContextHelpId(HMENU hmenu)
+         *
+         * A number the program hangs on a menu for its help to find, as it
+         * hangs one on a window; it dies with the menu.
+         */
+        SetMenuContextHelpId: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, id])=>{
+                const menu = menuOf(handle);
+                if (!menu)
+                {
+                    host.setLastError?.(ERROR_INVALID_MENU_HANDLE);
+                    return 0;
+                }
+                menu.help = id >>> 0;
+                return 1;
+            },
+        },
+        GetMenuContextHelpId: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>menuOf(handle)?.help ?? 0,
+        },
+
+        /**
+         * HMENU LoadMenuIndirectA(const MENUTEMPLATE *lpMenuTemplate)
+         * HMENU LoadMenuIndirectW(const MENUTEMPLATE *lpMenuTemplate)
+         *
+         * A menu out of a template in the program's memory rather than its
+         * resources, either version of the template; the text in a template
+         * is UTF-16 either way, so the two spellings are one call.
+         */
+        LoadMenuIndirectA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([template])=>((template >>> 0) === 0 ? 0 : loadMenuIndirect(template)),
+        },
+        LoadMenuIndirectW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([template])=>((template >>> 0) === 0 ? 0 : loadMenuIndirect(template)),
         },
 
         /**
@@ -1824,6 +2265,8 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                     {
                         host.clipboard?.(text);
                     }
+                    const told = /** @type {any} */ (drawClipboard());
+                    return typeof told?.then === 'function' ? told.then(()=>1) : 1;
                 }
                 return wasOpen ? 1 : 0;
             },
@@ -1847,6 +2290,8 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                 clipboard.formats.clear();
                 clipboard.changed = true;
                 clipboard.emptiedAt = host.pasteboard?.version ?? 0;
+                ownership.window = clipboard.owner;
+                ownership.changes++;
                 return 1;
             },
         },
@@ -1895,6 +2340,7 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                 }
                 clipboard.formats.set(format >>> 0, memory >>> 0);
                 clipboard.changed = true;
+                ownership.changes++;
                 return memory >>> 0;
             },
         },
@@ -1913,6 +2359,101 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
             handler: ([format])=>(clipboard.open
                 ? clipboard.formats.get(format >>> 0) ?? pastedHandle(format >>> 0)
                 : 0),
+        },
+
+        /**
+         * HWND GetClipboardOwner(void)
+         *
+         * The window that had the clipboard open when it was last emptied --
+         * none once the host's paste has replaced what it put there, or once
+         * it is destroyed.
+         */
+        GetClipboardOwner: {
+            argBytes: 0,
+            handler: ()=>ownerNow(),
+        },
+
+        /** HWND GetOpenClipboardWindow(void): who has it open now, if anyone. */
+        GetOpenClipboardWindow: {
+            argBytes: 0,
+            handler: ()=>(clipboard.open ? clipboard.owner : 0),
+        },
+
+        /**
+         * DWORD GetClipboardSequenceNumber(void)
+         *
+         * A count that rises whenever the contents change: emptied, set, or
+         * pasted into by the host. Only that it changed means anything.
+         */
+        GetClipboardSequenceNumber: {
+            argBytes: 0,
+            handler: ()=>(ownership.changes + (host.pasteboard?.version ?? 0)) >>> 0,
+        },
+
+        /**
+         * HWND SetClipboardViewer(HWND hWndNewViewer)
+         *
+         * The window joins the front of the viewer chain and is told the
+         * contents at once, as WM_DRAWCLIPBOARD; the answer is the viewer
+         * it now passes the news on to.
+         */
+        SetClipboardViewer: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+                    return 0;
+                }
+                const next = viewerNow();
+                viewer = record.hwnd >>> 0;
+                const told = /** @type {any} */ (send?.(viewer, WM_DRAWCLIPBOARD, ownerNow(), 0,
+                    host.callerThread?.()));
+                return typeof told?.then === 'function' ? told.then(()=>next) : next;
+            },
+        },
+
+        /** HWND GetClipboardViewer(void): the first window of the chain. */
+        GetClipboardViewer: {
+            argBytes: 0,
+            handler: ()=>viewerNow(),
+        },
+
+        /**
+         * BOOL ChangeClipboardChain(HWND hWndRemove, HWND hWndNewNext)
+         *
+         * A viewer leaves the chain. The first one leaving hands the front
+         * to the one after it; any other is removed by the viewers before
+         * it, so the first is told WM_CHANGECBCHAIN to pass along -- and the
+         * answer is whether that went unanswered, which is success.
+         */
+        ChangeClipboardChain: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([remove, next])=>{
+                const first = viewerNow();
+                if (first === 0)
+                {
+                    viewer = 0;
+                    return 1;
+                }
+                if (first === (remove >>> 0))
+                {
+                    viewer = next >>> 0;
+                    return 1;
+                }
+                if (!send)
+                {
+                    return 1;
+                }
+                const told = /** @type {any} */ (send(first, WM_CHANGECBCHAIN, remove >>> 0,
+                    next >>> 0, host.callerThread?.()));
+                return typeof told?.then === 'function'
+                    ? told.then((/** @type {number} */ answer)=>(answer === 0 ? 1 : 0))
+                    : (told === 0 ? 1 : 0);
+            },
         },
 
         /**
@@ -1979,6 +2520,127 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                     picture: { width: across, height: down, hotSpot,
                         bgra: ddbToBgra(across, down, depth, mask, colour) },
                 });
+            },
+        },
+
+        /**
+         * HICON CreateIconIndirect(PICONINFO piconinfo)
+         *
+         * An icon or cursor made of two bitmaps the program owns, copied now
+         * as the call documents: the mask, and the colour drawn where the
+         * mask is clear. Without a colour bitmap the mask is twice the
+         * icon's height, its AND half on top and its XOR half below. An
+         * icon's hot spot is its centre whatever the structure says.
+         *
+         * Pixels the mask lets through come out transparent, and that
+         * includes where the screen would be inverted, which a picture
+         * cannot say. With no way to read a bitmap's pixels, the icon has
+         * its size and no picture, and drawing it says so.
+         */
+        CreateIconIndirect: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([info])=>{
+                if ((info >>> 0) === 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const isIcon = readU32(info) !== 0;
+                const hotX = readU32(info + 4);
+                const hotY = readU32(info + 8);
+                const maskHandle = readU32(info + 12);
+                const colourHandle = readU32(info + 16);
+                const mono = colourHandle === 0;
+                // A build that cannot measure a bitmap takes the standard
+                // icon's size rather than refusing the icon.
+                const maskSize = maskHandle === 0 ? null
+                    : host.bitmapSize?.(maskHandle) ?? (host.bitmapSize ? null
+                        : { width: 32, height: mono ? 64 : 32 });
+                if (!maskSize)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const width = maskSize.width;
+                const height = mono ? maskSize.height >> 1 : maskSize.height;
+                if (width <= 0 || height <= 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const hotSpot = isIcon ? { x: width >> 1, y: height >> 1 }
+                    : { x: hotX, y: hotY };
+                const mask = host.bitmapPixels?.(maskHandle) ?? null;
+                const colour = mono ? mask : host.bitmapPixels?.(colourHandle) ?? null;
+                /** @type {any} */
+                let picture = null;
+                if (mask && colour)
+                {
+                    const bgra = new Uint8Array(width * height * 4);
+                    /** @param {any} from @param {number} x @param {number} y */
+                    const set = (from, x, y)=>{
+                        const at = (y * from.width + x) * 4;
+                        return x < from.width && y < from.height
+                            && (from.bgra[at] | from.bgra[at + 1] | from.bgra[at + 2]) !== 0;
+                    };
+                    for (let y = 0; y < height; y++)
+                    {
+                        for (let x = 0; x < width; x++)
+                        {
+                            const to = (y * width + x) * 4;
+                            if (set(mask, x, y))
+                            {
+                                continue;
+                            }
+                            if (mono)
+                            {
+                                const white = set(mask, x, y + height) ? 0xff : 0;
+                                bgra.set([white, white, white, 0xff], to);
+                            }
+                            else
+                            {
+                                const from = (y * colour.width + x) * 4;
+                                bgra.set([colour.bgra[from] ?? 0, colour.bgra[from + 1] ?? 0,
+                                    colour.bgra[from + 2] ?? 0, 0xff], to);
+                            }
+                        }
+                    }
+                    picture = { width, height, hotSpot, bgra };
+                }
+                return host.handles.open(isIcon ? 'icon' : 'cursor',
+                    { hotSpot, width, height, picture });
+            },
+        },
+
+        /**
+         * HICON CopyIcon(HICON hIcon)
+         *
+         * A new handle to the same picture, the program's to destroy; a
+         * shared system icon copies to one too.
+         */
+        CopyIcon: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const raw = handle >>> 0;
+                const kind = host.handles.typeOf?.(raw) ?? null;
+                if (kind === 'icon' || kind === 'cursor')
+                {
+                    const object = host.handles.resolve?.(raw, kind) ?? null;
+                    if (object)
+                    {
+                        return host.handles.open('icon', { ...object });
+                    }
+                }
+                // A standard icon is its own number and in no table.
+                if (kind === null && raw !== 0 && raw < MAX_INTEGER_RESOURCE)
+                {
+                    return host.handles.open('icon', { standard: raw, width: 32, height: 32,
+                        hotSpot: { x: 16, y: 16 } });
+                }
+                host.setLastError?.(ERROR_INVALID_CURSOR_HANDLE);
+                return 0;
             },
         },
 

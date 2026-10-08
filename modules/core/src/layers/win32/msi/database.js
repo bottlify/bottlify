@@ -27,7 +27,7 @@
  * database was opened to be written.
  */
 
-import { decodeAnsi } from '../kernel32/locale.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
 /** The bits of a column's type. */
 export const MSITYPE = Object.freeze({
@@ -149,10 +149,9 @@ export function decoderFor(codepage){
     {
         return decodeAnsi;
     }
-    const label = codepage === 65001 ? 'utf-8' : `windows-${codepage}`;
     try
     {
-        const decoder = new TextDecoder(label);
+        const decoder = new TextDecoder(encodingLabel(codepage));
         return bytes=>decoder.decode(bytes);
     }
     catch {
@@ -160,8 +159,94 @@ export function decoderFor(codepage){
     }
 }
 
+/**
+ * The Encoding standard's label for a Windows code page: most are
+ * "windows-N", but the Japanese and Traditional Chinese pages are known by
+ * their own names there.
+ *
+ * @param {number} codepage
+ */
+const encodingLabel = codepage=>(codepage === 65001 ? 'utf-8' : codepage === 932 ? 'shift_jis'
+    : codepage === 950 ? 'big5' : `windows-${codepage}`);
+
+/**
+ * Text into a code page, the inverse of `decoderFor`: a character the page
+ * cannot hold becomes "?", as WideCharToMultiByte's default character.
+ *
+ * The Encoding standard decodes every page but encodes only UTF-8, so a
+ * page's table is built once by decoding each of its byte sequences -- every
+ * byte, and every lead byte with every trail byte where the page has them.
+ *
+ * @param {number} codepage @returns {(text: string) => Uint8Array}
+ */
+export function encoderFor(codepage){
+    if (codepage === 0 || codepage === 1252)
+    {
+        return encodeAnsi;
+    }
+    if (codepage === 65001)
+    {
+        const encoder = new TextEncoder();
+        return text=>encoder.encode(text);
+    }
+    let table = encoderTables.get(codepage);
+    if (!table)
+    {
+        let decoder;
+        try
+        {
+            decoder = new TextDecoder(encodingLabel(codepage), { fatal: true });
+        }
+        catch {
+            return encodeAnsi;
+        }
+        /** @type {Map<string, number[]>} */
+        const built = new Map();
+        /** @param {number[]} sequence */
+        const learn = sequence=>{
+            try
+            {
+                const text = decoder.decode(Uint8Array.from(sequence));
+                if (text.length > 0 && !built.has(text))
+                {
+                    built.set(text, sequence);
+                }
+                return true;
+            }
+            catch {
+                return false;
+            }
+        };
+        for (let lead = 0; lead < 0x100; lead++)
+        {
+            if (!learn([lead]) && lead >= 0x80)
+            {
+                for (let trail = 0x40; trail < 0x100; trail++)
+                {
+                    learn([lead, trail]);
+                }
+            }
+        }
+        table = built;
+        encoderTables.set(codepage, table);
+    }
+    const known = table;
+    return text=>{
+        /** @type {number[]} */
+        const out = [];
+        for (const character of text)
+        {
+            out.push(...(known.get(character) ?? [0x3f]));
+        }
+        return Uint8Array.from(out);
+    };
+}
+
+/** @type {Map<number, Map<string, number[]>>} */
+const encoderTables = new Map();
+
 /** The tables the format describes itself. */
-const SYSTEM_COLUMNS = Object.freeze({
+export const SYSTEM_COLUMNS = Object.freeze({
     _Tables: [{ name: 'Name', type: MSITYPE.VALID | MSITYPE.STRING | MSITYPE.KEY | 64 }],
     _Columns: [
         { name: 'Table', type: MSITYPE.VALID | MSITYPE.STRING | MSITYPE.KEY | 64 },
@@ -222,6 +307,69 @@ export function readStringPool(pool, data){
 }
 
 /**
+ * A string pool written out, the inverse of `readStringPool`: each string
+ * numbered by its place in `strings` (0 being null and never written), with
+ * the reference count `refs` gives it.
+ *
+ * @param {(string | null)[]} strings @param {number[]} refs @param {number} codepage
+ * @returns {{ pool: Uint8Array, data: Uint8Array, longRefs: boolean }}
+ */
+export function writeStringPool(strings, refs, codepage){
+    const encode = encoderFor(codepage);
+    // A number past what two bytes hold makes every reference three bytes.
+    const longRefs = strings.length - 1 > 0xffff;
+    /** @type {number[]} */
+    const words = [codepage & 0xffff, (codepage >>> 16 & 0x7fff) | (longRefs ? 0x8000 : 0)];
+    /** @type {Uint8Array[]} */
+    const chunks = [];
+    let size = 0;
+    for (let id = 1; id < strings.length; id++)
+    {
+        const text = strings[id];
+        const bytes = text ? encode(text) : new Uint8Array(0);
+        if (bytes.length === 0)
+        {
+            words.push(0, 0);
+            continue;
+        }
+        const count = Math.min(refs[id] ?? 1, 0xffff);
+        if (bytes.length > 0xffff)
+        {
+            words.push(0, count, bytes.length & 0xffff, bytes.length >>> 16);
+        }
+        else
+        {
+            words.push(bytes.length, count);
+        }
+        chunks.push(bytes);
+        size += bytes.length;
+    }
+    const data = new Uint8Array(size);
+    let at = 0;
+    for (const chunk of chunks)
+    {
+        data.set(chunk, at);
+        at += chunk.length;
+    }
+    const pool = new Uint8Array(words.length * 2);
+    words.forEach((word, index)=>{
+        pool[index * 2] = word & 0xff;
+        pool[index * 2 + 1] = word >>> 8;
+    });
+    return { pool, data, longRefs };
+}
+
+/**
+ * The bytes one value of a column takes in a stored row: a string's number in
+ * two bytes or, in a pool that says so, three; a stream's presence in two;
+ * an integer in two or four as its size says.
+ *
+ * @param {number} type @param {boolean} longRefs
+ */
+export const columnWidth = (type, longRefs)=>(isBinaryType(type) ? 2
+    : (type & MSITYPE.STRING) !== 0 ? (longRefs ? 3 : 2) : (type & MSITYPE.SIZE) <= 2 ? 2 : 4);
+
+/**
  * A table's rows out of its stream: column by column, each column's width
  * fixed by its type.
  *
@@ -232,8 +380,7 @@ export function readStringPool(pool, data){
  */
 export function readTableRows(bytes, columns, strings, longRefs, tableName){
     /** @param {number} type */
-    const widthOf = type=>(isBinaryType(type) ? 2 : (type & MSITYPE.STRING) !== 0
-        ? (longRefs ? 3 : 2) : (type & MSITYPE.SIZE) <= 2 ? 2 : 4);
+    const widthOf = type=>columnWidth(type, longRefs);
     let rowSize = columns.reduce((sum, column)=>sum + widthOf(column.type), 0);
     let widths = columns.map(column=>widthOf(column.type));
     if (rowSize === 0)
@@ -288,11 +435,9 @@ export function readTableRows(bytes, columns, strings, longRefs, tableName){
         .filter(index=>index >= 0);
     if (binary.length > 0)
     {
-        const keys = columns.map((column, index)=>((column.type & MSITYPE.KEY) !== 0 ? index : -1))
-            .filter(index=>index >= 0);
         for (const row of rows)
         {
-            const name = [tableName, ...keys.map(index=>String(row[index] ?? ''))].join('.');
+            const name = rowStreamName(tableName, columns, row);
             for (const index of binary)
             {
                 if (row[index] === '')
@@ -304,6 +449,75 @@ export function readTableRows(bytes, columns, strings, longRefs, tableName){
     }
     return rows;
 }
+
+/**
+ * The stream a binary column of a row is kept in: the table's name and the
+ * row's keys, joined by dots.
+ *
+ * @param {string} tableName @param {{ type: number }[]} columns
+ * @param {readonly unknown[]} row
+ */
+export const rowStreamName = (tableName, columns, row)=>[tableName, ...columns
+    .flatMap((column, index)=>((column.type & MSITYPE.KEY) !== 0 ? [String(row[index] ?? '')]
+        : []))].join('.');
+
+/**
+ * A table's stream, the inverse of `readTableRows`: column by column, a string
+ * as its number, an integer biased so that zero is null, a binary column as
+ * whether the row has a stream.
+ *
+ * @param {Row[]} rows @param {{ type: number }[]} columns
+ * @param {(text: string) => number} idOf  A string's number in the pool being written.
+ * @param {boolean} longRefs
+ * @returns {Uint8Array}
+ */
+export function writeTableRows(rows, columns, idOf, longRefs){
+    const widths = columns.map(column=>columnWidth(column.type, longRefs));
+    const out = new Uint8Array(rows.length * widths.reduce((sum, width)=>sum + width, 0));
+    let at = 0;
+    columns.forEach((column, index)=>{
+        const width = widths[index];
+        for (const row of rows)
+        {
+            const value = row[index] ?? null;
+            const raw = value === null ? 0
+                : isBinaryType(column.type) ? 1
+                    : (column.type & MSITYPE.STRING) !== 0 ? (value === '' ? 0 : idOf(`${value}`))
+                        : width === 2 ? Number(value) + 0x8000 & 0xffff
+                            : (Number(value) ^ 0x80000000) >>> 0;
+            for (let byte = 0; byte < width; byte++)
+            {
+                out[at++] = raw >>> byte * 8 & 0xff;
+            }
+        }
+    });
+    return out;
+}
+
+/**
+ * What of a table is saved: its rows but the temporary ones, in its columns
+ * but the temporary ones.
+ *
+ * @param {Table} table @returns {{ columns: Column[], rows: Row[] }}
+ */
+export const persistentPart = table=>{
+    const kept = table.columns.flatMap((column, index)=>
+        ((column.type & MSITYPE.TEMPORARY) === 0 ? [index] : []));
+    return {
+        columns: kept.map(index=>table.columns[index]),
+        rows: table.rows.filter(row=>!table.temporaryRows.has(row))
+            .map(row=>kept.map(index=>row[index] ?? null)),
+    };
+};
+
+/**
+ * The tables a database saves, but `_Tables` and `_Columns`, which describe
+ * the others rather than being listed among them.
+ *
+ * @param {Database} db @returns {Map<string, Table>}
+ */
+export const persistentTables = db=>new Map([...db.tables].filter(([name, table])=>
+    !table.temporary && name !== '_Tables' && name !== '_Columns'));
 
 /**
  * @typedef {Object} Database
@@ -319,10 +533,15 @@ export function readTableRows(bytes, columns, strings, longRefs, tableName){
  *           Replaces, adds or (with null) removes a stream, in memory.
  * @property {() => string[]} streamNames   Every stream that is not a table's.
  * @property {() => Uint8Array | null} summaryStream
+ * @property {(bytes: Uint8Array | null) => void} setSummaryStream
+ *           Replaces the summary information stream, in memory.
  * @property {(text: string) => number} stringId
  *           The string's number in the pool, a new one past the last for a
  *           string the pool does not hold: what a stored table orders by.
  * @property {boolean} readOnly  A session's database: only temporary rows change.
+ * @property {import('./compound.js').CompoundFile | null} [compound]
+ *           The file it was read from, for the storages a package embeds
+ *           (transforms named ":name"); none for a database made in memory.
  */
 
 /**
@@ -391,7 +610,7 @@ export async function openDatabase(compound){
     const written = new Map();
     const stringId = poolIds(strings);
     const summaryNode = summary;
-    const summaryBytes = summaryNode ? await compound.readAll(summaryNode) : null;
+    let summaryBytes = summaryNode ? await compound.readAll(summaryNode) : null;
 
     return {
         codepage,
@@ -440,8 +659,12 @@ export async function openDatabase(compound){
             return [...names];
         },
         summaryStream: ()=>summaryBytes,
+        setSummaryStream: bytes=>{
+            summaryBytes = bytes;
+        },
         stringId,
         readOnly: false,
+        compound,
     };
 }
 
@@ -491,6 +714,8 @@ export function createEmptyDatabase(){
     }
     /** @type {Map<string, Uint8Array | null>} */
     const written = new Map();
+    /** @type {Uint8Array | null} */
+    let summaryBytes = null;
     return {
         codepage: 0,
         tables,
@@ -504,7 +729,10 @@ export function createEmptyDatabase(){
             written.set(name, bytes);
         },
         streamNames: ()=>[...written].filter(([, bytes])=>bytes !== null).map(([name])=>name),
-        summaryStream: ()=>null,
+        summaryStream: ()=>summaryBytes,
+        setSummaryStream: bytes=>{
+            summaryBytes = bytes;
+        },
         stringId: poolIds([null]),
         readOnly: false,
     };

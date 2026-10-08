@@ -692,3 +692,18 @@ test('a DirectX library\'s file names the DirectX the bottle reports', ()=>{
     assert.equal(fixed.getUint32(signature * 4 + 8, true), 0x00040007,
         'the fixed block\'s file version, too');
 });
+
+test('VerLanguageName names the language a translation is in, as kernel32\'s call does', ()=>{
+    const { memory, version, readString } = machine();
+    assert.equal(version.VerLanguageNameA.argBytes, 12);
+    assert.equal(version.VerLanguageNameW.argBytes, 12);
+    assert.equal(version.VerLanguageNameA.handler([0x0409, 0x100, 64]), 23);
+    assert.equal(readString(0x100), 'English (United States)');
+    assert.equal(version.VerLanguageNameA.handler([0x0411, 0x100, 4]), 8, 'Japanese, cut');
+    assert.equal(readString(0x100), 'Jap');
+    assert.equal(version.VerLanguageNameW.handler([0x0000, 0x200, 64]), 16);
+    assert.equal(String.fromCharCode(...new Uint16Array(memory.slice(0x200, 0x222).buffer)),
+        'Language Neutral\0');
+    assert.equal(version.VerLanguageNameA.handler([0x7777, 0x100, 64]), 16,
+        'a language not in the table is named as the neutral one');
+});

@@ -5,6 +5,8 @@
  */
 
 import { UI_LANGUAGE } from '../../loader/internal/resources.js';
+import { createRefusals } from '../common/refusal.js';
+import { verLanguageName } from './languages.js';
 import { STATUS } from '../ntdll/status.js';
 
 /**
@@ -394,6 +396,33 @@ const LOCALE_STRINGS = Object.freeze({
  */
 const LANGUAGE_NAMES = new Map([[UI_LANGUAGE, LOCALE_STRINGS[0x0000005C]]]);
 
+/** CAL_RETURN_NUMBER, and the CALTYPEs that are numbers: ICALINTVALUE, ITWODIGITYEARMAX. */
+const CAL_RETURN_NUMBER = 0x20000000;
+const CALENDAR_NUMBERS = [1, 48];
+
+/** The GEOTYPEs Windows XP answers. */
+const GEO_NATION = 1;
+const GEO_LATITUDE = 2;
+const GEO_LONGITUDE = 3;
+const GEO_ISO2 = 4;
+const GEO_ISO3 = 5;
+const GEO_RFC1766 = 6;
+const GEO_LCID = 7;
+const GEO_FRIENDLYNAME = 8;
+const GEO_OFFICIALNAME = 9;
+const GEO_TIMEZONES = 10;
+const GEO_OFFICIALLANGUAGES = 11;
+
+/**
+ * The locations GetGeoInfo knows: the one GetUserGeoID says this machine is
+ * in. Any other GEOID is answered as one Windows does not assign.
+ *
+ * @type {ReadonlyMap<number, { iso2: string, iso3: string, name: string, official: string }>}
+ */
+const GEO_LOCATIONS = new Map([[GEOID_UNITED_STATES, {
+    iso2: 'US', iso3: 'USA', name: 'United States', official: 'United States of America',
+}]]);
+
 /** EnumCalendarInfo's calendars: every one, and the one this locale has. */
 const ENUM_ALL_CALENDARS = 0xffffffff;
 const CAL_GREGORIAN = 1;
@@ -678,6 +707,7 @@ const characterType = code=>{
  * @property {(bytes: number) => number} [allocate]  Guest memory for a format
  *           string the callback reads; absent, enumerations do not call.
  * @property {(address: number) => void} [free]
+ * @property {(api: string, detail: string) => void} [divergence]
  */
 
 /**
@@ -1389,6 +1419,134 @@ export function createLocaleFunctions(host){
             const wanted = calendar >>> 0;
             return wanted !== ENUM_ALL_CALENDARS && wanted !== CAL_GREGORIAN ? 1
                 : enumerateFormats(proc, [text], wide, ex ? [CAL_GREGORIAN] : []);
+        },
+    });
+
+    /** @param {boolean} wide */
+    const enumUILanguages = wide=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [proc, flags, parameter])=>{
+            if ((proc >>> 0) === 0)
+            {
+                return refuse(ERROR_INVALID_PARAMETER);
+            }
+            const asked = flags >>> 0;
+            if (asked !== 0 && asked !== MUI_LANGUAGE_ID && asked !== MUI_LANGUAGE_NAME)
+            {
+                return refuse(ERROR_INVALID_FLAGS);
+            }
+            const text = asked === MUI_LANGUAGE_NAME
+                ? /** @type {string} */ (LANGUAGE_NAMES.get(UI_LANGUAGE))
+                : UI_LANGUAGE.toString(16).toUpperCase().padStart(4, '0');
+            const ran = enumerateFormats(proc, [text], wide, [parameter >>> 0]);
+            // A number back means the callback was never run -- no bridge to
+            // run it, or no memory for its text -- and the call says so.
+            return ran instanceof Promise ? ran.then(()=>1) : refuse(ERROR_CALL_NOT_IMPLEMENTED);
+        },
+    });
+
+    /** @param {boolean} wide */
+    const calendarValue = wide=>({
+        argBytes: 24,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [locale, calendar, type, buffer, count, value])=>{
+            if (!isOurLocale(locale >>> 0) || (calendar >>> 0) !== CAL_GREGORIAN)
+            {
+                return refuse(ERROR_INVALID_PARAMETER);
+            }
+            const kind = (type >>> 0) & ~CAL_FLAGS;
+            const text = CALENDAR_INFO[kind];
+            if (text === undefined)
+            {
+                return refuse(ERROR_INVALID_FLAGS);
+            }
+            if (((type >>> 0) & CAL_RETURN_NUMBER) === 0)
+            {
+                return writeAnswer(text, buffer >>> 0, count | 0, wide);
+            }
+            if (!CALENDAR_NUMBERS.includes(kind))
+            {
+                return refuse(ERROR_INVALID_FLAGS);
+            }
+            if ((value >>> 0) === 0)
+            {
+                return refuse(ERROR_INVALID_PARAMETER);
+            }
+            const bytes = new Uint8Array(4);
+            new DataView(bytes.buffer).setUint32(0, Number(text), true);
+            host.writeMemory(value >>> 0, bytes);
+            return wide ? 2 : 4;
+        },
+    });
+
+    const noCoordinates = createRefusals(host)('GetGeoInfo', {
+        argBytes: 20, lastError: ERROR_INVALID_PARAMETER,
+        why: 'the location table holds no coordinates',
+    });
+
+    /** @param {boolean} wide */
+    const geoInfo = wide=>({
+        argBytes: 20,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [location, type, buffer, count, language])=>{
+            const place = GEO_LOCATIONS.get(location | 0);
+            if (!place)
+            {
+                return refuse(ERROR_INVALID_PARAMETER);
+            }
+            const kind = type >>> 0;
+            if (kind === GEO_LATITUDE || kind === GEO_LONGITUDE)
+            {
+                return noCoordinates.handler();
+            }
+            if (kind === GEO_TIMEZONES || kind === GEO_OFFICIALLANGUAGES)
+            {
+                return 0;
+            }
+            const asked = (language & 0xffff) || LANGID_EN_US;
+            if ((kind === GEO_RFC1766 || kind === GEO_LCID) && asked !== LANGID_EN_US)
+            {
+                return refuse(ERROR_INVALID_PARAMETER);
+            }
+            const answers = {
+                [GEO_NATION]: String(location | 0),
+                [GEO_ISO2]: place.iso2,
+                [GEO_ISO3]: place.iso3,
+                [GEO_RFC1766]: `${LOCALE_STRINGS[0x00000059]}-${place.iso2}`.toLowerCase(),
+                [GEO_LCID]: asked.toString(16).toUpperCase().padStart(8, '0'),
+                [GEO_FRIENDLYNAME]: place.name,
+                [GEO_OFFICIALNAME]: place.official,
+            };
+            const text = /** @type {Record<number, string>} */ (answers)[kind];
+            if (text === undefined)
+            {
+                return refuse(ERROR_INVALID_FLAGS);
+            }
+            const needed = text.length + 1;
+            const room = count | 0;
+            if (room === 0)
+            {
+                return needed;
+            }
+            const written = needed > room ? text.slice(0, Math.max(room, 0)) : `${text}\0`;
+            if ((buffer >>> 0) !== 0 && written !== '')
+            {
+                if (wide)
+                {
+                    writeWide(buffer >>> 0, written);
+                }
+                else
+                {
+                    host.writeMemory(buffer >>> 0,
+                        encodeSingleByte(written, ANSI_CODE_PAGE).bytes);
+                }
+            }
+            if (needed > room || (buffer >>> 0) === 0)
+            {
+                return refuse(ERROR_INSUFFICIENT_BUFFER);
+            }
+            return needed;
         },
     });
 
@@ -2234,6 +2392,51 @@ export function createLocaleFunctions(host){
         FoldStringW: foldString(true),
 
         /** EnumCalendarInfoA/W and EnumCalendarInfoExA/W: see calendarInfo. */
+        /**
+         * DWORD VerLanguageNameA/W(DWORD wLang, LPSTR szLang, DWORD cchLang):
+         * the language's name (`languages.js`), version.dll's call as well.
+         */
+        VerLanguageNameA: verLanguageName((address, text)=>
+            host.writeMemory(address, encodeSingleByte(text, ANSI_CODE_PAGE).bytes)),
+        VerLanguageNameW: verLanguageName(writeWide),
+
+        /**
+         * BOOL EnumUILanguagesA/W(UILANGUAGE_ENUMPROC lpUILanguageEnumProc,
+         *     DWORD dwFlags, LONG_PTR lParam)
+         *
+         * The one UI language, to the callback with lParam after it: as its
+         * LANGID in four hex digits, or with MUI_LANGUAGE_NAME as its name.
+         * The call succeeds whatever the callback answers, as Windows' does;
+         * a missing callback is a bad parameter before a bad flag is looked at.
+         */
+        EnumUILanguagesA: enumUILanguages(false),
+        EnumUILanguagesW: enumUILanguages(true),
+
+        /**
+         * int GetCalendarInfoA/W(LCID Locale, CALID Calendar, CALTYPE CalType,
+         *     LPSTR lpCalData, int cchData, LPDWORD lpValue)
+         *
+         * The Gregorian calendar's answers (CALENDAR_INFO), with the two-call
+         * protocol of GetLocaleInfo; CAL_RETURN_NUMBER puts a number's value
+         * in lpValue instead and answers a DWORD's size in characters of the
+         * form asked. Another calendar is not this locale's.
+         */
+        GetCalendarInfoA: calendarValue(false),
+        GetCalendarInfoW: calendarValue(true),
+
+        /**
+         * int GetGeoInfoA/W(GEOID Location, GEOTYPE GeoType, LPSTR lpGeoData,
+         *     int cchData, LANGID LangId)
+         *
+         * The machine's own location (GetUserGeoID) by the nine types
+         * Windows XP answers: zero room asks the size, terminator counted;
+         * too little gets what fits and ERROR_INSUFFICIENT_BUFFER. Time zones
+         * and official languages are answered with nothing, as Windows
+         * answers them, and a type past those is a bad flag.
+         */
+        GetGeoInfoA: geoInfo(false),
+        GetGeoInfoW: geoInfo(true),
+
         EnumCalendarInfoA: calendarInfo(false, false),
         EnumCalendarInfoW: calendarInfo(true, false),
         EnumCalendarInfoExA: calendarInfo(false, true),

@@ -31,15 +31,36 @@ import {
 } from './record.js';
 import { MSICONDITION } from './condition.js';
 import { formatRecord } from './format.js';
-import { INSTALLSTATE, createSession } from './session.js';
+import { INSTALLSTATE, createSession, parseCommandLine } from './session.js';
 import { PID_TYPES, VT, readSummary } from './summary.js';
-import { INSTALLMESSAGE, doAction, readFile, runSequence } from './actions.js';
+import { INSTALLMESSAGE, doAction, readFile, runSequence, writeFile } from './actions.js';
+import {
+    ERROR_INSTALL_TRANSFORM_FAILURE, applyTransform, applyTransformList, createTransformSummary,
+    generateTransform, writeSummaryStream,
+} from './transform.js';
+import { embeddedCabinets, writeDatabase } from './database-writer.js';
+import {
+    ERROR_PATCH_PACKAGE_OPEN_FAILED, applyPatch, effectivePatches, openPatch,
+} from './patch.js';
 import { finishAsync } from './custom.js';
-import { createRegistration } from './registration.js';
+import { createRegistration, squashGuid, valueText } from './registration.js';
 import { installerVersion } from './version.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { createProductFunctions } from './products.js';
+import { installerObject, sessionObject } from './automation.js';
+import { createJScriptEngine } from '../jscript/engine.js';
+import { createVBScriptEngine } from '../vbscript/engine.js';
+import { ExternalError } from '../script/external.js';
+import { applyPatch as applyDeltaPatch } from '../mspatcha/pa19.js';
+import {
+    ERROR_BAD_PATHNAME, exportTable, importTable, mergeDatabases, streamFolder,
+} from './archive.js';
+import { parseGuid } from '../ole32/guid.js';
 
 const ERROR_SUCCESS = 0;
+/** MsiEnableLog: the bit that lists the properties at the end, and appending to the file. */
+const INSTALLLOGMODE_PROPERTYDUMP = 0x400;
+const INSTALLLOGATTRIBUTES_APPEND = 0x1;
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_OPEN_FAILED = 110;
 const ERROR_INVALID_HANDLE = 6;
@@ -59,9 +80,66 @@ const ERROR_UNKNOWN_FEATURE = 1606;
 const ERROR_UNKNOWN_COMPONENT = 1607;
 const ERROR_UNKNOWN_PROPERTY = 1608;
 const ERROR_INVALID_TABLE = 1628;
-const ERROR_CALL_NOT_IMPLEMENTED = 120;
 const ERROR_DATATYPE_MISMATCH = 1629;
 const ERROR_ACCESS_DENIED = 5;
+const ERROR_UNKNOWN_PRODUCT = 1605;
+const ERROR_INSTALL_SOURCE_ABSENT = 1612;
+const ERROR_SUCCESS_REBOOT_REQUIRED = 3010;
+const ERROR_INSTALL_FAILURE = 1603;
+
+/** The script engines a script custom action runs in, by its language. */
+const SCRIPT_ENGINES = /** @type {Record<string, ((options: any) => any) | undefined>} */ ({
+    jscript: createJScriptEngine,
+    vbscript: createVBScriptEngine,
+});
+
+/**
+ * What a script action's function answers, as the sequence reads it: IDOK
+ * (or nothing) success, IDCANCEL the user's exit, IDABORT failure, IDRETRY a
+ * suspension, IDIGNORE the rest of the sequence skipped.
+ */
+const SCRIPT_ANSWERS = new Map([[1, 0], [2, 1602], [3, 1603], [4, 1604], [5, 259]]);
+
+/** "ActiveX component can't create object", as a script reports it (error 429). */
+const CTL_E_CANTCREATEOBJECT = 0x800a01ad | 0;
+const ERROR_CREATE_FAILED = 1631;
+
+/** LoadTypeLibEx: load without registering; UnRegisterTypeLib: a 32-bit library. */
+const REGKIND_NONE = 2;
+const SYS_WIN32 = 1;
+
+/** MsiConfigureProduct's install levels with a meaning of their own. */
+const INSTALLLEVEL_DEFAULT = 0;
+const INSTALLLEVEL_MAXIMUM = 0xffff;
+
+/**
+ * What MsiConfigureProduct's state asks the installation for: the whole
+ * product removed, every feature local or from source, or as it stands.
+ *
+ * @type {Map<number, string>}
+ */
+const PRODUCT_REQUESTS = new Map([
+    [2, 'REMOVE=ALL'], [3, 'ADDLOCAL=ALL'], [4, 'ADDSOURCE=ALL'], [5, ''],
+]);
+
+/** And MsiConfigureFeature's, for one feature. @type {Map<number, string>} */
+const FEATURE_REQUESTS = new Map([
+    [2, 'REMOVE'], [3, 'ADDLOCAL'], [4, 'ADDSOURCE'], [5, 'ADDDEFAULT'],
+]);
+
+/**
+ * REINSTALLMODE's letters for MsiReinstallProduct's flags, lowest bit first:
+ * repair, missing, older, equal, exact, checksum, all, machine data, user
+ * data, shortcuts, package.
+ */
+const REINSTALL_LETTERS = 'rpoedcamusv';
+
+/** @param {number} flags @returns {string} the REINSTALLMODE the flags spell */
+const reinstallMode = flags=>[...REINSTALL_LETTERS]
+    .filter((_, bit)=>((flags >>> 0) & (1 << bit)) !== 0).join('');
+
+/** @param {string} value a property value quoted for a command line */
+const quoted = value=>`"${value.replace(/"/g, '""')}"`;
 
 /** INSTALLUILEVEL values. */
 const INSTALLUILEVEL = Object.freeze({
@@ -71,6 +149,7 @@ const INSTALLUILEVEL = Object.freeze({
 
 /** MsiOpenDatabase's persistence modes; a larger value is an output path. */
 const MSIDBOPEN_READONLY = 0;
+const MSIDBOPEN_TRANSACT = 1;
 const MSIDBOPEN_CREATE = 3;
 const MSIDBOPEN_CREATEDIRECT = 4;
 const MSIDBOPEN_PATCHFILE = 32;
@@ -224,6 +303,91 @@ export function createMsiFunctions(host){
     let externalUi = null;
     /** @type {{ handler: number, filter: number, context: number } | null} */
     let recordUi = null;
+    /**
+     * Where MsiEnableLog asked the installations of this process to be
+     * logged: which kinds of message, and whether the file is started afresh
+     * at its first line or added to.
+     *
+     * @type {{ mode: number, path: string, fresh: boolean } | null}
+     */
+    let log = null;
+
+    /**
+     * Adds lines to the log. The file is ANSI, as the installer writes it
+     * unless a policy asks for Unicode, and is opened for each line, so a
+     * line is on the volume once it is written, whatever happens next --
+     * which is what the flush-each-line attribute asks for and what any
+     * reader of a failed installation's log needs.
+     *
+     * @param {string[]} lines
+     */
+    const writeLog = lines=>{
+        if (!log)
+        {
+            return;
+        }
+        const files = host.files;
+        const path = host.fullPath(log.path);
+        try
+        {
+            const node = files.open(path, { write: true, create: true, truncate: log.fresh });
+            if (!node)
+            {
+                return;
+            }
+            const at = log.fresh ? 0 : files.stat(path)?.size ?? 0;
+            files.write(node, at, encodeAnsi(lines.map(line=>`${line}\r\n`).join('')));
+            files.close(node);
+            log.fresh = false;
+        }
+        catch (e){
+            host.log?.(`The installer's log ${path} could not be written: ${e}`);
+        }
+    };
+
+    /** "10/8/2026  9:05:12", as the log's opening and closing lines give the time. */
+    const logTime = ()=>{
+        const now = new Date();
+        const two = (/** @type {number} */ value)=>String(value).padStart(2, '0');
+        return `${now.getMonth() + 1}/${now.getDate()}/${now.getFullYear()}  `
+            + `${now.getHours()}:${two(now.getMinutes())}:${two(now.getSeconds())}`;
+    };
+
+    /**
+     * A message's lines in the log, when the log takes its kind. A session's
+     * start and end open and close it; a progress message is never a line,
+     * since INSTALLLOGMODE_PROGRESS is the bit that asks for the properties
+     * to be listed at the end instead.
+     *
+     * @param {number} type @param {string} text
+     * @param {import('./session.js').Session | null} session
+     */
+    const logMessage = (type, text, session)=>{
+        if (!log)
+        {
+            return;
+        }
+        const kind = type & 0xff000000;
+        if (kind === INSTALLMESSAGE.INITIALIZE)
+        {
+            writeLog([`=== Logging started: ${logTime()} ===`]);
+            return;
+        }
+        if (kind === INSTALLMESSAGE.TERMINATE)
+        {
+            const lines = (log.mode & INSTALLLOGMODE_PROPERTYDUMP) !== 0 && session
+                ? [...session.properties].sort(([a], [b])=>(a < b ? -1 : a > b ? 1 : 0))
+                    .map(([name, value])=>`Property(S): ${name} = ${value}`) : [];
+            writeLog([...lines, `=== Logging stopped: ${logTime()} ===`]);
+            return;
+        }
+        if (kind === INSTALLMESSAGE.PROGRESS || text === ''
+            || (log.mode & (1 << ((type >>> 24) & 0xff))) === 0)
+        {
+            return;
+        }
+        writeLog(text.split(/\r?\n/));
+    };
 
     /**
      * A message's text: an action's start as "Action time: name. description",
@@ -265,6 +429,9 @@ export function createMsiFunctions(host){
     const deliver = async(type, record, session, thread = host.callerThread())=>{
         const kind = (type >>> 24) & 0xff;
         const bit = 1 << kind;
+        // The log takes every message, whoever answers it.
+        const text = messageText(type, record, session);
+        logMessage(type, text, session);
         if (recordUi && (recordUi.filter & bit) !== 0)
         {
             const handle = open('record', record);
@@ -282,7 +449,6 @@ export function createMsiFunctions(host){
                 handles.delete(handle);
             }
         }
-        const text = messageText(type, record, session);
         if (externalUi && (externalUi.filter & bit) !== 0)
         {
             const bytes = externalUi.wide ? utf16(`${text}\0`) : encodeAnsi(`${text}\0`);
@@ -356,6 +522,55 @@ export function createMsiFunctions(host){
                     startDll: (path, entry, args)=>startDll(path, entry, args, made.thread),
                     runExe: async(commandLine, directory, wait)=>
                         host.runExe?.(commandLine, directory, wait) ?? null,
+                    registerTypeLib: (path, helpDir)=>registerTypeLib(path, helpDir, made.thread),
+                    unregisterTypeLib: (libId, major, minor, language)=>
+                        unregisterTypeLib(libId, major, minor, language, made.thread),
+                    removeProduct: (product, features)=>maintain(product,
+                        `REMOVE=${quoted(features)}`, made.thread),
+                    installNested: (kind, source, commandLine)=>installNested(session, kind,
+                        source, commandLine, made.thread),
+                    cachePackage,
+                    runScript: script=>runScript(made, script),
+                    applyDelta: async(old, delta)=>{
+                        const result = applyDeltaPatch(old, delta);
+                        return { code: result.code, bytes: result.bytes ?? null };
+                    },
+                    registerPatches: async(productCode, folder)=>{
+                        for (const entry of sessionPatches.get(session) ?? [])
+                        {
+                            const kept = entry.fresh
+                                ? await keepCopy(entry.path, folder, '.msp') : entry.path;
+                            registration.registerPatch(productCode, entry.patch.code,
+                                kept ?? entry.path, entry.transforms);
+                        }
+                        const removed = session.getProperty('MSIPATCHREMOVE').split(';')
+                            .map(entry=>entry.trim()).filter(Boolean);
+                        for (const code of removed)
+                        {
+                            const local = registration.patches(productCode)
+                                .find(item=>item.code.toUpperCase() === code.toUpperCase());
+                            registration.unregisterPatch(productCode, code);
+                            if (local && local.localPackage.toLowerCase()
+                                .startsWith(folder.toLowerCase()))
+                            {
+                                host.files.remove(local.localPackage);
+                            }
+                        }
+                    },
+                    fileVersion: async path=>{
+                        const block = await host.versionInfo?.(path) ?? null;
+                        const fixed = block ? fixedInfo(block) : null;
+                        return fixed ? `${fixed.ms >>> 16}.${fixed.ms & 0xffff}.`
+                            + `${fixed.ls >>> 16}.${fixed.ls & 0xffff}` : null;
+                    },
+                    sourcePackage: async()=>{
+                        const product = session.getProperty('ProductCode');
+                        const list = registration.sourceList(product);
+                        const name = list ? valueText(host.hive.getValue(list, 'PackageName'))
+                            : null;
+                        const folder = session.getProperty('SourceDir');
+                        return name && folder ? loadDatabase(`${folder}${name}`) : null;
+                    },
                     divergence: host.divergence,
                     log: host.log,
                 },
@@ -364,6 +579,93 @@ export function createMsiFunctions(host){
             engines.set(session, engine);
         }
         return engine;
+    };
+
+    /**
+     * A script custom action: the script run in the engine's own script
+     * engine with the Session object named, then -- when the action names
+     * one -- its function called, whose answer is read as a library action's
+     * (IDOK success, IDCANCEL the user's exit, IDABORT failure). A script
+     * that fails fails the action; one in a language no engine is offered
+     * for says so.
+     *
+     * @param {import('./engine.js').Engine} engine
+     * @param {{ language: 'jscript' | 'vbscript', text: string, entry: string | null,
+     *     data: string | null, action: string }} script
+     * @returns {Promise<number>}
+     */
+    const runScript = async(engine, script)=>{
+        const make = SCRIPT_ENGINES[script.language];
+        if (!make)
+        {
+            host.divergence?.(`custom action ${script.action}`,
+                `no ${script.language} engine to run it`);
+            return ERROR_INSTALL_FAILURE;
+        }
+        const { session } = engine;
+        const owner = { session, deferred: script.data };
+        const installer = installerObject({
+            windows: host.machine().windows, registration,
+            environment: name=>host.machine().environment(name),
+            fileVersion: async path=>{
+                const block = await host.versionInfo?.(host.fullPath(path)) ?? null;
+                const fixed = block ? fixedInfo(block) : null;
+                return fixed ? `${fixed.ms >>> 16}.${fixed.ms & 0xffff}.`
+                    + `${fixed.ls >>> 16}.${fixed.ls & 0xffff}` : null;
+            },
+            fileSize: path=>{
+                const stat = host.files.stat(host.fullPath(path));
+                return stat && !stat.isDirectory ? stat.size : null;
+            },
+            format: record=>session.format(record),
+        });
+        const scripting = make({
+            // The one class an installer's script asks for that this machine
+            // has a server for: the installer's own object model.
+            /** @param {string} progId */
+            createObject: progId=>{
+                if (/^WindowsInstaller\.Installer(\.\d+)?$/i.test(progId))
+                {
+                    return installer;
+                }
+                throw new ExternalError(CTL_E_CANTCREATEOBJECT,
+                    `ActiveX component can't create object: ${progId}`);
+            },
+            // VBScript's MsgBox, which an installer's script shows as any
+            // other box of the installation's.
+            msgBox: host.messageBox ? (/** @type {string} */ prompt,
+                /** @type {number} */ buttons, /** @type {string} */ title)=>
+                /** @type {any} */ (host.messageBox)(prompt, title, buttons) : undefined,
+            divergence: host.divergence,
+        });
+        scripting.addNamedItem('Session', sessionObject(engine, {
+            property: name=>propertyOf(owner, name),
+            // A deferred action's Session reads its data; it sets nothing.
+            setProperty: (name, value)=>{
+                if (script.data === null)
+                {
+                    session.setProperty(name, value);
+                }
+            },
+            doAction: action=>doAction(engine, action),
+            sequence: table=>runSequence(engine, table),
+            message: (kind, record)=>deliver(kind, record, session, engine.thread),
+            installer,
+        }));
+        try
+        {
+            await scripting.run(script.text);
+            const answer = script.entry ? await scripting.call(script.entry, []) : undefined;
+            const status = typeof answer === 'number' ? answer : IDOK;
+            return SCRIPT_ANSWERS.get(status) ?? ERROR_SUCCESS;
+        }
+        catch (e){
+            const error = /** @type {any} */ (e);
+            host.log?.(`Custom action ${script.action}: script error ${error?.number ?? ''} `
+                + `${error?.description ?? error?.message ?? String(e)}`
+                + `${error?.line ? ` at line ${error.line}` : ''}.`);
+            return ERROR_INSTALL_FAILURE;
+        }
     };
 
     /**
@@ -504,6 +806,171 @@ export function createMsiFunctions(host){
     }
 
     /**
+     * Lends `use` a way to open files on the volume as byte sources, and
+     * closes every one it opened once `use` is done with them.
+     *
+     * @template T
+     * @param {(openFile: (path: string) => import('./compound.js').ByteSource | null)
+     *     => Promise<T>} use
+     * @returns {Promise<T>}
+     */
+    const withFiles = async use=>{
+        /** @type {any[]} */
+        const nodes = [];
+        /** @param {string} path */
+        const openFile = path=>{
+            const full = host.fullPath(path);
+            const stat = host.files.stat(full);
+            const node = stat && !stat.isDirectory
+                ? host.files.open(full, { read: true, shareWrite: true }) : null;
+            if (!node)
+            {
+                return null;
+            }
+            nodes.push(node);
+            return { size: stat.size, read: (/** @type {number} */ offset,
+                /** @type {number} */ length)=>host.files.read(node, offset, length) };
+        };
+        try
+        {
+            return await use(openFile);
+        }
+        finally
+        {
+            for (const node of nodes)
+            {
+                host.files.close(node);
+            }
+        }
+    };
+
+    /**
+     * The file each opened database reads its streams from.
+     *
+     * @type {WeakMap<import('./database.js').Database, any>}
+     */
+    const readers = new WeakMap();
+
+    /**
+     * What a summary information handle belongs to: its database, the file
+     * when it was opened by path, whether it was opened for changes and
+     * whether any were made.
+     *
+     * @type {WeakMap<Map<number, any>, { db: import('./database.js').Database,
+     *     path: string | null, changed: boolean, readOnly: boolean }>}
+     */
+    const summaries = new WeakMap();
+
+    /**
+     * Writes a database to a file: into a new file beside it first, then in
+     * its place -- the database still reads its streams from the file it
+     * replaces -- and the database then reads from the new one. Its tables,
+     * which open views hold, and its string numbers stay as they were.
+     *
+     * @param {import('./database.js').Database} db @param {string} target
+     * @param {Parameters<typeof writeDatabase>[2]} [options]
+     * @returns {Promise<number>}
+     */
+    const saveDatabase = async(db, target, options)=>{
+        const temporary = `${target}.tmp`;
+        const node = host.files.open(temporary,
+            { read: false, write: true, create: true, truncate: true });
+        if (!node)
+        {
+            return ERROR_FUNCTION_FAILED;
+        }
+        try
+        {
+            await writeDatabase(db,
+                { write: (offset, bytes)=>host.files.write(node, offset, bytes) }, options);
+        }
+        catch (e){
+            host.files.close(node);
+            host.files.remove(temporary);
+            host.log?.(`${target}: ${/** @type {Error} */ (e).message}`);
+            return ERROR_FUNCTION_FAILED;
+        }
+        host.files.close(node);
+        const old = readers.get(db);
+        if (old)
+        {
+            host.files.close(old);
+            readers.delete(db);
+        }
+        if (host.files.stat(target))
+        {
+            host.files.remove(target);
+        }
+        if (!host.files.rename(temporary, target))
+        {
+            return ERROR_FUNCTION_FAILED;
+        }
+        const fresh = await loadDatabase(target);
+        if (fresh)
+        {
+            for (const name of /** @type {const} */ (['hasStream', 'streamSize', 'readStream',
+                'readStreamRange', 'writeStream', 'streamNames', 'compound', 'summaryStream',
+                'setSummaryStream']))
+            {
+                /** @type {any} */ (db)[name] = /** @type {any} */ (fresh)[name];
+            }
+            readers.set(db, readers.get(fresh));
+        }
+        return ERROR_SUCCESS;
+    };
+
+    /**
+     * A file copied whole into the machine's Installer folder under a name
+     * of its own; its path, or null when it could not be copied.
+     *
+     * @param {string} path @param {string} folder @param {string} extension
+     */
+    const keepCopy = async(path, folder, extension)=>{
+        const bytes = await readFile(host.files, host.fullPath(path));
+        if (!bytes)
+        {
+            return null;
+        }
+        if (!host.files.stat(folder.replace(/\\$/, ''))?.isDirectory)
+        {
+            host.files.mkdir(folder.replace(/\\$/, ''));
+        }
+        const name = `${folder.replace(/\\$/, '')}\\`
+            + `${Math.floor(Math.random() * 0x100000000).toString(16)}${extension}`;
+        return writeFile(host.files, name, bytes) ? name : null;
+    };
+
+    /**
+     * A copy of an installed package for the machine to keep, as Windows
+     * keeps one in its Installer folder for a repair or a removal: the
+     * package as it shipped, its embedded cabinets left out. Null when it
+     * could not be written.
+     *
+     * @param {string} packagePath @param {string} folder  The machine's Installer folder.
+     * @returns {Promise<string | null>}
+     */
+    const cachePackage = async(packagePath, folder)=>{
+        const db = await loadDatabase(packagePath);
+        if (!db)
+        {
+            return null;
+        }
+        if (!host.files.stat(folder)?.isDirectory)
+        {
+            host.files.mkdir(folder);
+        }
+        const name = `${folder.replace(/\\$/, '')}\\${Math.floor(Math.random() * 0x100000000).toString(16)}.msi`;
+        const cabinets = embeddedCabinets(db);
+        const code = await saveDatabase(db, name, { omitStreams: stream=>cabinets.has(stream) });
+        const node = readers.get(db);
+        if (node)
+        {
+            host.files.close(node);
+        }
+        return code === ERROR_SUCCESS ? name : null;
+    };
+
+    /**
      * A database out of a file on the volume, read where it lies.
      *
      * @param {string} path
@@ -523,10 +990,13 @@ export function createMsiFunctions(host){
         }
         try
         {
-            return await openDatabase(await openCompound({
+            const db = await openDatabase(await openCompound({
                 size: stat.size,
                 read: (offset, length)=>host.files.read(node, offset, length),
             }));
+            // Read where it lies, the file stays open until a commit replaces it.
+            readers.set(db, node);
+            return db;
         }
         catch (e){
             host.files.close(node);
@@ -536,26 +1006,157 @@ export function createMsiFunctions(host){
     };
 
     /**
+     * A patch file opened for as long as an installation reads the cabinets
+     * inside it; the patch, or the error the patch calls answer.
+     *
+     * @param {string} path @returns {Promise<import('./patch.js').Patch | number>}
+     */
+    const loadPatch = async path=>{
+        const full = host.fullPath(path);
+        const stat = host.files.stat(full);
+        const node = stat && !stat.isDirectory
+            ? host.files.open(full, { read: true, shareWrite: true }) : null;
+        if (!node)
+        {
+            return ERROR_PATCH_PACKAGE_OPEN_FAILED;
+        }
+        const patch = await openPatch({ size: stat.size,
+            read: (offset, length)=>host.files.read(node, offset, length) });
+        if (typeof patch === 'number')
+        {
+            host.files.close(node);
+        }
+        return patch;
+    };
+
+    /**
+     * The patches an installation applies, with where each came from: those
+     * its PATCH property names and those already applied to the product,
+     * less the ones MSIPATCHREMOVE takes away.
+     *
+     * @type {WeakMap<import('./session.js').Session, { patch: import('./patch.js').Patch,
+     *     path: string, fresh: boolean, transforms: string }[]>}
+     */
+    const sessionPatches = new WeakMap();
+
+    /**
+     * Applies an installation's patches to its package before the session
+     * reads it.
+     *
+     * @param {import('./database.js').Database} db @param {string} commandLine
+     */
+    const patchesFor = async(db, commandLine)=>{
+        const properties = parseCommandLine(commandLine);
+        const productCode = String(db.table('Property')?.rows
+            .find((/** @type {any[]} */ row)=>row[0] === 'ProductCode')?.[1] ?? '');
+        const removing = new Set((properties.get('MSIPATCHREMOVE') ?? '').split(';')
+            .map(entry=>entry.trim().toUpperCase()).filter(Boolean));
+        /** @type {{ patch: import('./patch.js').Patch, path: string, fresh: boolean }[]} */
+        const found = [];
+        for (const path of (properties.get('PATCH') ?? '').split(';').map(entry=>entry.trim())
+            .filter(Boolean))
+        {
+            const patch = await loadPatch(path);
+            if (typeof patch === 'number')
+            {
+                return patch;
+            }
+            found.push({ patch, path: host.fullPath(path), fresh: true });
+        }
+        for (const installed of registration.patches(productCode))
+        {
+            if (removing.has(installed.code.toUpperCase()) || removing.has(installed.localPackage
+                .toUpperCase()))
+            {
+                continue;
+            }
+            const patch = await loadPatch(installed.localPackage);
+            if (typeof patch !== 'number')
+            {
+                found.push({ patch, path: installed.localPackage, fresh: false });
+            }
+        }
+        const chosen = effectivePatches(found.map(entry=>entry.patch));
+        const applied = [];
+        for (const entry of found.filter(item=>chosen.includes(item.patch)))
+        {
+            const code = await applyPatch(db, entry.patch, { productCode, log: host.log });
+            if (code !== ERROR_SUCCESS)
+            {
+                if (entry.fresh)
+                {
+                    return code;
+                }
+                continue;
+            }
+            applied.push({ ...entry, transforms: entry.patch.transforms
+                .map(name=>`:${name}`).join(';') });
+        }
+        return applied;
+    };
+
+    /**
      * A package opened as a session: a path, or "#n" for a database handle
      * already open.
      *
      * @param {string} path @param {string} [commandLine]
+     * @param {{ db: import('./database.js').Database, packagePath: string }} [given]
+     *     A package already open -- one nested in another's storage.
      */
-    const openSession = async(path, commandLine = '')=>{
-        const byHandle = /^#(\d+)$/.exec(path);
+    const openSession = async(path, commandLine = '', given)=>{
+        const byHandle = given ? null : /^#(\d+)$/.exec(path);
         const opened = byHandle ? get(Number(byHandle[1]), 'database') : null;
-        const packagePath = byHandle ? opened?.path ?? '' : host.fullPath(path);
-        const db = byHandle ? opened?.db ?? null : await loadDatabase(packagePath);
+        const packagePath = given?.packagePath ?? (byHandle ? opened?.path ?? ''
+            : host.fullPath(path));
+        const db = given?.db ?? (byHandle ? opened?.db ?? null : await loadDatabase(packagePath));
         if (!db)
         {
-            return null;
+            return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
+        }
+        // The transforms the installation names, applied to the package before
+        // anything is read from it. A database handed over by handle is the
+        // caller's, transformed already if it wanted that.
+        const transforms = byHandle ? '' : parseCommandLine(commandLine).get('TRANSFORMS')
+            ?? String(db.table('Property')?.rows
+                .find((/** @type {any[]} */ row)=>row[0] === 'TRANSFORMS')?.[1] ?? '');
+        if (transforms !== '')
+        {
+            const applied = await withFiles(openFile=>applyTransformList(db, transforms,
+                { packagePath, openFile, log: host.log }));
+            if (applied.code !== ERROR_SUCCESS)
+            {
+                host.log?.(`${packagePath}: transforms ${transforms} answered ${applied.code}.`);
+                return ERROR_INSTALL_TRANSFORM_FAILURE;
+            }
+        }
+        const patched = byHandle ? [] : await patchesFor(db, commandLine);
+        if (typeof patched === 'number')
+        {
+            return patched;
         }
         db.readOnly = true;
         const session = createSession({
             db, packagePath, machine: host.machine(), commandLine,
             isInstalled: code=>registration.productState(code) === INSTALLSTATE.DEFAULT,
+            installed: {
+                feature: registration.featureInstalled,
+                component: (product, id)=>registration.componentPath(product, id) !== null,
+                sharedWith: registration.sharedWith,
+            },
         });
         session.setProperty('UILevel', String(uiLevel & 0x0f || INSTALLUILEVEL.BASIC));
+        sessionPatches.set(session, patched);
+        // Run from the machine's own copy, the package's source is where it
+        // was installed from, as the product's records say.
+        const product = session.getProperty('ProductCode');
+        const kept = registration.productInfo(product, 'LocalPackage');
+        const source = registration.productInfo(product, 'InstallSource');
+        if ('value' in kept && kept.value.toLowerCase() === packagePath.toLowerCase()
+            && 'value' in source && source.value !== '')
+        {
+            session.setProperty('SourceDir', source.value);
+            session.setProperty('SOURCEDIR', source.value);
+        }
         return session;
     };
 
@@ -565,16 +1166,23 @@ export function createMsiFunctions(host){
      * execute sequence alone otherwise.
      *
      * @param {string} path @param {string} commandLine
+     * @param {unknown} [thread]  Whose call the installation answers.
+     * @param {{ db: import('./database.js').Database, packagePath: string }} [given]
+     *     The package already open, for one nested in another's storage.
      */
-    const installPackage = async(path, commandLine)=>{
-        const thread = host.callerThread();
-        const session = await openSession(path, commandLine);
-        if (!session)
+    const installPackage = async(path, commandLine, thread = host.callerThread(), given)=>{
+        const session = await openSession(path, commandLine, given);
+        if (typeof session === 'number')
         {
-            return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
+            return session;
         }
         session.setProperty('ACTION', session.getProperty('ACTION') || 'INSTALL');
-        session.setProperty('EXECUTEACTION', 'INSTALL');
+        const advertising = session.getProperty('ACTION') === 'ADVERTISE';
+        if (advertising && session.getProperty('ADVERTISE') === '')
+        {
+            session.setProperty('ADVERTISE', 'ALL');
+        }
+        session.setProperty('EXECUTEACTION', advertising ? 'ADVERTISE' : 'INSTALL');
         const engine = engineFor(session, thread);
         await deliver(INSTALLMESSAGE.INITIALIZE, createRecord(0), session, thread);
         const level = uiLevel & 0x0f;
@@ -582,9 +1190,10 @@ export function createMsiFunctions(host){
         let code;
         try
         {
-            code = ui ? await runSequence(engine, 'InstallUISequence')
-                : await runSequence(engine, 'InstallExecuteSequence');
-            if (ui && code === ERROR_SUCCESS && !engine.ran.has('ExecuteAction')
+            code = advertising ? await runSequence(engine, 'AdvertiseExecuteSequence')
+                : ui ? await runSequence(engine, 'InstallUISequence')
+                    : await runSequence(engine, 'InstallExecuteSequence');
+            if (!advertising && ui && code === ERROR_SUCCESS && !engine.ran.has('ExecuteAction')
                 && session.script.length === 0 && session.getProperty('CostingComplete') !== '1')
             {
                 code = await doAction(engine, 'ExecuteAction');
@@ -600,8 +1209,197 @@ export function createMsiFunctions(host){
             await deliver(INSTALLMESSAGE.TERMINATE, createRecord(0), session, thread);
             engines.delete(session);
         }
+        if (code === ERROR_SUCCESS && session.mode.rebootAtEnd)
+        {
+            code = ERROR_SUCCESS_REBOOT_REQUIRED;
+        }
         host.log?.(`Installation of ${path} answered ${code}.`);
         return code;
+    };
+
+    // ----- an installed product ---------------------------------------------
+
+    /**
+     * The copy of its package the machine kept for an installed product, or
+     * the error a call on a product that is not installed answers.
+     *
+     * @param {string | null} productCode @returns {string | number}
+     */
+    const localPackage = productCode=>{
+        if (productCode === null || squashGuid(productCode) === null)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        const state = registration.productState(productCode);
+        if (state === INSTALLSTATE.ADVERTISED)
+        {
+            // Only advertised: its first use installs it from its source.
+            const list = registration.sourceList(productCode);
+            const net = list ? host.hive.open(list, 'Net') : null;
+            const folder = net ? valueText(host.hive.getValue(net, '1')) : null;
+            const name = list ? valueText(host.hive.getValue(list, 'PackageName')) : null;
+            return folder && name ? `${folder}${name}` : ERROR_INSTALL_SOURCE_ABSENT;
+        }
+        if (state !== INSTALLSTATE.DEFAULT)
+        {
+            return ERROR_UNKNOWN_PRODUCT;
+        }
+        const info = registration.productInfo(productCode, 'LocalPackage');
+        return 'value' in info && info.value !== '' ? info.value : ERROR_INSTALL_SOURCE_ABSENT;
+    };
+
+    /**
+     * An installed product's package run again with the properties that ask
+     * for a change: a removal, a repair, a feature added or taken away.
+     *
+     * @param {string | null} productCode @param {string} request
+     * @param {unknown} [thread]  Whose call the installation answers.
+     */
+    const maintain = async(productCode, request, thread = host.callerThread())=>{
+        const local = localPackage(productCode);
+        return typeof local === 'number' ? local : installPackage(local, request, thread);
+    };
+
+    /**
+     * A nested installation a custom action runs: a package stored in this
+     * one's own file, a package beside this one's source, or an installed
+     * product configured again -- each an installation of its own, answering
+     * as MsiInstallProduct does.
+     *
+     * @param {import('./session.js').Session} parent
+     * @param {'storage' | 'path' | 'product'} kind @param {string} source
+     * @param {string} commandLine @param {unknown} thread
+     */
+    const installNested = async(parent, kind, source, commandLine, thread)=>{
+        if (kind === 'product')
+        {
+            return maintain(source, commandLine, thread);
+        }
+        if (kind === 'path')
+        {
+            const path = /^[A-Za-z]:\\|^\\\\/.test(source) ? source
+                : `${parent.sourceDir}${source}`;
+            return installPackage(path, commandLine, thread);
+        }
+        const compound = parent.db.compound;
+        const storage = compound ? [...compound.root.children.values()]
+            .find(node=>node.kind === 'storage' && node.name === source) : null;
+        if (!compound || !storage)
+        {
+            return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
+        }
+        const db = await openDatabase({ ...compound, root: storage }).catch(()=>null);
+        return db ? installPackage(source, commandLine, thread,
+            { db, packagePath: `${parent.packagePath.slice(0,
+                parent.packagePath.lastIndexOf('\\') + 1)}${source}.msi` })
+            : ERROR_INSTALL_PACKAGE_INVALID;
+    };
+
+    /**
+     * Calls one of oleaut32's exports from the installation, with the strings
+     * and out-pointers it takes laid out in the guest for the call.
+     *
+     * @param {string} entry @param {(block: number) => number[]} args
+     * @param {Uint8Array} data  Copied to the block first.
+     * @param {unknown} thread
+     * @returns {Promise<{ answer: number, block: Uint8Array } | null>}
+     */
+    const callOleaut = async(entry, args, data, thread)=>{
+        const module = await withString('oleaut32.dll',
+            name=>on(thread, ()=>host.libraries.loadAnsi(name)));
+        if (!module)
+        {
+            return null;
+        }
+        const block = host.allocate(data.length);
+        host.writeMemory(block, data);
+        try
+        {
+            const address = await withString(entry,
+                name=>on(thread, ()=>host.libraries.procAddress(module >>> 0, name)));
+            if (!address)
+            {
+                return null;
+            }
+            const answer = (await host.call(address >>> 0, args(block), thread)) >>> 0;
+            return { answer, block: host.readMemory(block, data.length).slice() };
+        }
+        finally
+        {
+            host.free(block);
+            await on(thread, ()=>host.libraries.free(module >>> 0));
+        }
+    };
+
+    /**
+     * RegisterTypeLibraries' registration of one file: loaded by oleaut32,
+     * registered with the help folder the row names, released.
+     *
+     * @param {string} path @param {string | null} helpDir @param {unknown} thread
+     */
+    const registerTypeLib = async(path, helpDir, thread)=>{
+        const name = utf16(`${path}\0`);
+        const help = helpDir === null ? new Uint8Array(0) : utf16(`${helpDir}\0`);
+        // The out-pointer first, then the path and the help folder.
+        const data = new Uint8Array(4 + name.length + help.length);
+        data.set(name, 4);
+        data.set(help, 4 + name.length);
+        const loaded = await callOleaut('LoadTypeLibEx',
+            block=>[block + 4, REGKIND_NONE, block], data, thread);
+        if (!loaded || loaded.answer !== 0)
+        {
+            return loaded?.answer ?? null;
+        }
+        const library = new DataView(loaded.block.buffer).getUint32(0, true);
+        try
+        {
+            const registered = await callOleaut('RegisterTypeLib', block=>[library, block,
+                helpDir === null ? 0 : block + name.length], data.subarray(4), thread);
+            return registered?.answer ?? null;
+        }
+        finally
+        {
+            const table = readU32(library);
+            await host.call(readU32(table + 8), [library], thread);
+        }
+    };
+
+    /**
+     * UnregisterTypeLibraries' undoing of one: UnRegisterTypeLib for the
+     * library's GUID, version and language.
+     *
+     * @param {string} libId @param {number} major @param {number} minor
+     * @param {number} language @param {unknown} thread
+     */
+    const unregisterTypeLib = async(libId, major, minor, language, thread)=>{
+        const guid = parseGuid(libId);
+        if (guid === null)
+        {
+            return null;
+        }
+        const done = await callOleaut('UnRegisterTypeLib',
+            block=>[block, major, minor, language, SYS_WIN32], guid, thread);
+        return done?.answer ?? null;
+    };
+
+    /**
+     * MsiConfigureProduct(Ex): the whole product put in a state -- removed,
+     * every feature local or run from source, or reconfigured as it is --
+     * at an install level, the caller's own properties after.
+     *
+     * @param {string | null} productCode @param {number} level @param {number} state
+     * @param {string} commandLine
+     */
+    const configureProduct = async(productCode, level, state, commandLine)=>{
+        const request = PRODUCT_REQUESTS.get(state | 0);
+        if (request === undefined)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        const levelText = (level | 0) === INSTALLLEVEL_DEFAULT ? ''
+            : `INSTALLLEVEL=${(level | 0) === INSTALLLEVEL_MAXIMUM ? 32767 : level | 0}`;
+        return maintain(productCode, [request, levelText, commandLine]
+            .filter(part=>part !== '').join(' '));
     };
 
     // ----- sessions: what a custom action calls ---------------------------
@@ -631,7 +1429,50 @@ export function createMsiFunctions(host){
     /** @param {number} handle @returns {import('./record.js').Record | null} */
     const recordOf = handle=>get(handle, 'record');
 
+    /**
+     * A string into a buffer the caller sized for it, as the calls that hand
+     * back a GUID or a feature's name take one: the text and its terminator.
+     *
+     * @param {boolean} wide @param {string} text @param {number} buffer
+     */
+    const putFixed = (wide, text, buffer)=>{
+        host.writeMemory(buffer >>> 0, wide ? utf16(`${text}\0`) : encodeAnsi(`${text}\0`));
+    };
+
     return {
+        ...createProductFunctions({
+            registration, hive: host.hive, files: host.files, fullPath: host.fullPath, reader,
+            putString, putFixed, readU32, writeU32, get,
+            writeMemory: (address, bytes)=>host.writeMemory(address, bytes),
+            readFile: path=>readFile(host.files, path),
+            openPackage: async path=>{
+                const db = await loadDatabase(path);
+                return db ? { compound: db.compound } : null;
+            },
+            maintain: (productCode, request)=>maintain(productCode, request),
+            openProduct: async productCode=>{
+                const local = localPackage(productCode);
+                return typeof local === 'number' ? local : openSession(local);
+            },
+            messageBox: host.messageBox
+                ? (text, caption, type)=>/** @type {any} */ (host.messageBox)(text, caption, type)
+                : undefined,
+            openHandle: (kind, object)=>open(kind, object),
+            advertise: (path, transforms)=>installPackage(path,
+                `ACTION=ADVERTISE${transforms ? ` TRANSFORMS="${transforms}"` : ''}`),
+            inspectPatch: async path=>{
+                const patch = await loadPatch(path);
+                return typeof patch === 'number' ? patch
+                    : { code: patch.code, targets: patch.targets };
+            },
+            productCodeOf: async path=>{
+                const db = await loadDatabase(path);
+                const row = db?.table('Property')?.rows
+                    .find((/** @type {any[]} */ entry)=>entry[0] === 'ProductCode');
+                return row ? String(row[1]) : null;
+            },
+            divergence: host.divergence,
+        }),
         // ----- handles and records -----
         MsiCloseHandle: {
             argBytes: 4,
@@ -815,7 +1656,11 @@ export function createMsiFunctions(host){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            const mode = (persist >>> 0) > 0xffff ? 1 : (persist >>> 0) & ~MSIDBOPEN_PATCHFILE;
+            // A persist value past the modes is a pointer: the file a commit
+            // writes to, the database opened for changes.
+            const outPath = (persist >>> 0) > 0xffff ? reader(wide)(persist) : null;
+            const mode = outPath !== null ? MSIDBOPEN_TRANSACT
+                : (persist >>> 0) & ~MSIDBOPEN_PATCHFILE;
             let db;
             if (mode === MSIDBOPEN_CREATE || mode === MSIDBOPEN_CREATEDIRECT)
             {
@@ -831,7 +1676,8 @@ export function createMsiFunctions(host){
                 }
                 db.readOnly = mode === MSIDBOPEN_READONLY;
             }
-            writeU32(out, open('database', { db, path: host.fullPath(name) }));
+            writeU32(out, open('database', { db, path: host.fullPath(name), mode,
+                outPath: outPath === null ? null : host.fullPath(outPath) }));
             return ERROR_SUCCESS;
         }),
         ...both('MsiDatabaseOpenView', 12, wide=>([database, query, out])=>{
@@ -942,8 +1788,19 @@ export function createMsiFunctions(host){
         }),
         MsiDatabaseCommit: {
             argBytes: 4,
-            handler: ([database])=>(get(database, 'database') ? ERROR_SUCCESS
-                : ERROR_INVALID_HANDLE),
+            /** @param {number[]} args */
+            handler: async([database])=>{
+                const opened = get(database, 'database');
+                if (!opened)
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                if (opened.mode === MSIDBOPEN_READONLY || opened.db.readOnly)
+                {
+                    return ERROR_SUCCESS;
+                }
+                return saveDatabase(opened.db, opened.outPath ?? opened.path);
+            },
         },
         ...both('MsiDatabaseGetPrimaryKeys', 12, wide=>([database, table, out])=>{
             const opened = get(database, 'database');
@@ -992,8 +1849,8 @@ export function createMsiFunctions(host){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            void count;
-            let db = get(database, 'database')?.db ?? null;
+            const opened = get(database, 'database');
+            let db = opened?.db ?? null;
             if (!db && (database >>> 0) !== 0)
             {
                 return ERROR_INVALID_HANDLE;
@@ -1007,7 +1864,10 @@ export function createMsiFunctions(host){
                     return ERROR_INSTALL_PACKAGE_INVALID;
                 }
             }
-            writeU32(out, open('summary', readSummary(db.summaryStream())));
+            const summary = readSummary(db.summaryStream());
+            summaries.set(summary, { db, path: opened ? null : reader(wide)(path), changed: false,
+                readOnly: Boolean(opened?.db.readOnly ?? (count | 0) === 0) });
+            writeU32(out, open('summary', summary));
             return ERROR_SUCCESS;
         }),
         MsiSummaryInfoGetPropertyCount: {
@@ -1084,11 +1944,38 @@ export function createMsiFunctions(host){
                 : wanted === VT.FILETIME ? new DataView(host.readMemory(filetime >>> 0, 8)
                     .slice().buffer).getBigUint64(0, true) : integer | 0;
             summary.set(property >>> 0, { type: wanted, value });
+            const owner = summaries.get(summary);
+            if (owner)
+            {
+                owner.changed = true;
+            }
             return ERROR_SUCCESS;
         }),
         MsiSummaryInfoPersist: {
             argBytes: 4,
-            handler: ([handle])=>(get(handle, 'summary') ? ERROR_SUCCESS : ERROR_INVALID_HANDLE),
+            /** @param {number[]} args */
+            handler: async([handle])=>{
+                const summary = get(handle, 'summary');
+                const owner = summary ? summaries.get(summary) : null;
+                if (!summary || !owner)
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                if (owner.readOnly)
+                {
+                    return ERROR_FUNCTION_FAILED;
+                }
+                if (!owner.changed)
+                {
+                    return ERROR_SUCCESS;
+                }
+                owner.db.setSummaryStream(writeSummaryStream(summary));
+                owner.changed = false;
+                // Through a database handle, the file changes at its commit;
+                // a summary opened by path is its file's alone, written now.
+                return owner.path === null ? ERROR_SUCCESS
+                    : saveDatabase(owner.db, host.fullPath(owner.path));
+            },
         },
 
         // ----- sessions -----
@@ -1099,9 +1986,9 @@ export function createMsiFunctions(host){
                 return ERROR_INVALID_PARAMETER;
             }
             const session = await openSession(name);
-            if (!session)
+            if (typeof session === 'number')
             {
-                return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
+                return session;
             }
             writeU32(out, open('session', { session, deferred: null }));
             return ERROR_SUCCESS;
@@ -1114,9 +2001,9 @@ export function createMsiFunctions(host){
                 return ERROR_INVALID_PARAMETER;
             }
             const session = await openSession(name);
-            if (!session)
+            if (typeof session === 'number')
             {
-                return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
+                return session;
             }
             writeU32(out, open('session', { session, deferred: null }));
             return ERROR_SUCCESS;
@@ -1451,7 +2338,15 @@ export function createMsiFunctions(host){
                 return ERROR_SUCCESS;
             },
         },
-        ...both('MsiEnableLog', 12, ()=>()=>ERROR_SUCCESS),
+        // A log file and no kinds of message, or kinds and no file, is
+        // logging turned off.
+        ...both('MsiEnableLog', 12, wide=>([mode, file, attributes])=>{
+            const path = reader(wide)(file);
+            log = path === null || path.trim() === '' || (mode >>> 0) === 0 ? null
+                : { mode: mode >>> 0, path: path.trim(),
+                    fresh: ((attributes >>> 0) & INSTALLLOGATTRIBUTES_APPEND) === 0 };
+            return ERROR_SUCCESS;
+        }),
         ...both('MsiInstallProduct', 8, wide=>async([path, commandLine])=>{
             const name = reader(wide)(path);
             if (name === null)
@@ -1460,21 +2355,187 @@ export function createMsiFunctions(host){
             }
             return installPackage(name, reader(wide)(commandLine) ?? '');
         }),
-        ...both('MsiConfigureProduct', 12, ()=>()=>{
-            host.divergence?.('MsiConfigureProduct', 'an installed product is not reconfigured');
-            return ERROR_CALL_NOT_IMPLEMENTED;
+        ...both('MsiConfigureProduct', 12, wide=>async([product, level, state])=>
+            configureProduct(reader(wide)(product), level, state, '')),
+        ...both('MsiConfigureProductEx', 16, wide=>async([product, level, state, commandLine])=>
+            configureProduct(reader(wide)(product), level, state,
+                reader(wide)(commandLine) ?? '')),
+        ...both('MsiConfigureFeature', 12, wide=>async([product, feature, state])=>{
+            const name = reader(wide)(feature);
+            const request = name === null ? null : FEATURE_REQUESTS.get(state | 0);
+            if (request === undefined || name === null)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            return maintain(reader(wide)(product), `${request}=${quoted(name)}`);
         }),
-        ...both('MsiConfigureProductEx', 16, ()=>()=>{
-            host.divergence?.('MsiConfigureProductEx', 'an installed product is not reconfigured');
-            return ERROR_CALL_NOT_IMPLEMENTED;
+        ...both('MsiReinstallProduct', 8, wide=>async([product, mode])=>
+            maintain(reader(wide)(product), `REINSTALL=ALL REINSTALLMODE=${reinstallMode(mode)}`)),
+        ...both('MsiReinstallFeature', 12, wide=>async([product, feature, mode])=>{
+            const name = reader(wide)(feature);
+            if (name === null)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            return maintain(reader(wide)(product),
+                `REINSTALL=${quoted(name)} REINSTALLMODE=${reinstallMode(mode)}`);
         }),
-        ...both('MsiOpenProduct', 8, ()=>()=>{
-            host.divergence?.('MsiOpenProduct', 'an installed product is not opened as a session');
-            return ERROR_CALL_NOT_IMPLEMENTED;
+        ...both('MsiOpenProduct', 8, wide=>async([product, out])=>{
+            const code = reader(wide)(product);
+            if (code === null || (out >>> 0) === 0)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            const local = localPackage(code);
+            if (typeof local === 'number')
+            {
+                return local;
+            }
+            const session = await openSession(local);
+            if (typeof session === 'number')
+            {
+                return session;
+            }
+            writeU32(out, open('session', { session, deferred: null }));
+            return ERROR_SUCCESS;
         }),
-        ...both('MsiDatabaseApplyTransform', 12, ()=>()=>{
-            host.divergence?.('MsiDatabaseApplyTransform', 'a transform is not applied');
-            return ERROR_CALL_NOT_IMPLEMENTED;
+        ...both('MsiDatabaseApplyTransform', 12, wide=>async([database, transform, conditions])=>{
+            const opened = get(database, 'database');
+            const name = reader(wide)(transform);
+            if (!opened)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            if (name === null)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            return withFiles(openFile=>applyTransform(opened.db, name, conditions | 0, openFile,
+                host.log));
+        }),
+        ...both('MsiDatabaseGenerateTransform', 20, wide=>async([database, reference, file])=>{
+            const opened = get(database, 'database');
+            const base = get(reference, 'database');
+            if (!opened || !base)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const { code, bytes } = await generateTransform(opened.db, base.db);
+            if (code !== ERROR_SUCCESS)
+            {
+                return code;
+            }
+            const name = reader(wide)(file);
+            // With no file named, the call answers only whether the two differ.
+            if (name === null || bytes === null)
+            {
+                return ERROR_SUCCESS;
+            }
+            return writeFile(host.files, host.fullPath(name), bytes) ? ERROR_SUCCESS
+                : ERROR_CREATE_FAILED;
+        }),
+        ...both('MsiDatabaseExport', 16, wide=>async([database, table, folder, file])=>{
+            const opened = get(database, 'database');
+            if (!opened)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const read = reader(wide);
+            const name = read(table);
+            const directory = read(folder);
+            const target = read(file);
+            if (name === null || directory === null || target === null)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            if (!host.files.stat(host.fullPath(directory))?.isDirectory)
+            {
+                return ERROR_BAD_PATHNAME;
+            }
+            /** @param {string} path */
+            const at = path=>host.fullPath(`${directory.replace(/[\\/]+$/, '')}\\${path}`);
+            const made = await exportTable(opened.db, name);
+            if (made.code !== ERROR_SUCCESS)
+            {
+                return made.code;
+            }
+            for (const stream of made.streams)
+            {
+                const folderOf = at(stream.path.slice(0, stream.path.lastIndexOf('\\')));
+                if (!host.files.stat(folderOf)?.isDirectory)
+                {
+                    host.files.mkdir(folderOf);
+                }
+                if (!writeFile(host.files, at(stream.path), stream.bytes))
+                {
+                    return ERROR_FUNCTION_FAILED;
+                }
+            }
+            return writeFile(host.files, at(target), made.bytes) ? ERROR_SUCCESS
+                : ERROR_FUNCTION_FAILED;
+        }),
+        ...both('MsiDatabaseImport', 12, wide=>async([database, folder, file])=>{
+            const opened = get(database, 'database');
+            if (!opened)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const directory = reader(wide)(folder);
+            const name = reader(wide)(file);
+            if (directory === null || name === null)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            if (!host.files.stat(host.fullPath(directory))?.isDirectory)
+            {
+                return ERROR_BAD_PATHNAME;
+            }
+            /** @param {string} path */
+            const at = path=>host.fullPath(`${directory.replace(/[\\/]+$/, '')}\\${path}`);
+            const bytes = await readFile(host.files, at(name));
+            if (!bytes)
+            {
+                return ERROR_FUNCTION_FAILED;
+            }
+            const streams = streamFolder(name);
+            return importTable(opened.db, bytes, stream=>(streams === null ? null
+                : readFile(host.files, at(`${streams}\\${stream}`))));
+        }),
+        ...both('MsiDatabaseMerge', 12, wide=>async([database, merge, table])=>{
+            const opened = get(database, 'database');
+            const other = get(merge, 'database');
+            if (!opened || !other)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            return mergeDatabases(opened.db, other.db, reader(wide)(table));
+        }),
+        ...both('MsiCreateTransformSummaryInfo', 20, wide=>async([database, reference, file,
+            conditions, validation])=>{
+            const opened = get(database, 'database');
+            const base = get(reference, 'database');
+            const name = reader(wide)(file);
+            if (!opened || !base)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            if (name === null)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            const bytes = await readFile(host.files, host.fullPath(name));
+            if (!bytes)
+            {
+                return ERROR_OPEN_FAILED;
+            }
+            const made = createTransformSummary(bytes, opened.db, base.db, conditions | 0,
+                validation | 0);
+            if (made.code !== ERROR_SUCCESS || !made.bytes)
+            {
+                return made.code;
+            }
+            return writeFile(host.files, host.fullPath(name), made.bytes) ? ERROR_SUCCESS
+                : ERROR_CREATE_FAILED;
         }),
         ...both('MsiQueryProductState', 4, wide=>([product])=>
             registration.productState(reader(wide)(product) ?? '')),

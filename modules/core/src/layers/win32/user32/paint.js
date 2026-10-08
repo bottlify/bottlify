@@ -396,6 +396,9 @@ export function tabbedWidth(text, widthOf, stops, interval){
  *        what its visible region leaves out.
  * @param {(record: any) => boolean} [options.frozen]
  *        Whether a window is held as it is, being dragged: it draws nowhere.
+ * @param {{ paintStarts: (record: any) => void, paintEnds: (record: any) => void }}
+ *        [options.caret]  The caret, taken off a window while it paints and
+ *        put back after, as BeginPaint and EndPaint hide and show it.
  */
 export function createPaintFunctions(options){
     const { host, live, WM_PAINT, geometry, send, invalidated, painted, descendants } = options;
@@ -669,6 +672,7 @@ export function createPaintFunctions(options){
         record.ncDirty = false;
         if (hdc !== 0)
         {
+            options.caret?.paintStarts(record);
             host.draw?.clip?.(hdc,
                 intersectArea(visibleArea(record, false, geometry.clientRect(record)), dirty));
         }
@@ -695,6 +699,7 @@ export function createPaintFunctions(options){
         if (record.painting === hdc)
         {
             record.painting = 0;
+            options.caret?.paintEnds(record);
         }
     };
 
@@ -1674,6 +1679,37 @@ export function createPaintFunctions(options){
                     ? null
                     : host.regionBox?.(region >>> 0) ?? null);
                 return 1;
+            },
+        },
+
+        /**
+         * int ExcludeUpdateRgn(HDC hDC, HWND hWnd)
+         *
+         * A context on the window's client area made to leave alone what is
+         * still to be repainted: a program drawing outside WM_PAINT keeps off
+         * the area its paint will cover anyway. Answers the kind of region
+         * left to draw in -- none, one rectangle or more -- or ERROR for no
+         * window.
+         */
+        ExcludeUpdateRgn: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hdc, hwnd])=>{
+                const ERROR = 0;
+                const NULLREGION = 1;
+                const SIMPLEREGION = 2;
+                const COMPLEXREGION = 3;
+                const record = live(hwnd);
+                if (!record || (hdc >>> 0) === 0)
+                {
+                    return ERROR;
+                }
+                const visible = visibleArea(record, false, geometry.clientRect(record));
+                const area = record.updateRect
+                    ? subtractFromArea(visible, record.updateRect) : visible;
+                host.draw?.clip?.(hdc >>> 0, area);
+                return area.length === 0 ? NULLREGION
+                    : area.length === 1 ? SIMPLEREGION : COMPLEXREGION;
             },
         },
     };

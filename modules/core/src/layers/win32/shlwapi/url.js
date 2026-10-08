@@ -1,0 +1,592 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * shlwapi's URL functions: escapes, the parts of a URL, a URL made from a
+ * path, and the canonical and combined forms a browser control or an update
+ * check builds its addresses with.
+ *
+ * The rules are written from MSDN and from Wine's shlwapi URL tests, which
+ * record Windows' answers. Those tables come from a later shlwapi than this
+ * machine's, and only their common cases are followed: the scheme and an
+ * http-like host in lower case, backslashes read as slashes in the schemes
+ * that read them so, `.` and `..` resolved before any `?` or `#` and never
+ * past the host or a drive, a drive or UNC path made a `file:` URL with its
+ * unsafe characters escaped, and the escape flags. What the tables record
+ * past that -- a `#` after an `.htm` file, `mk:` compound stores, the
+ * URL_FILE_USE_PATHURL and URL_WININET_COMPATIBILITY forms, reordering a
+ * `?` after a `#` -- is not followed.
+ */
+
+import { hasScheme } from './path.js';
+import { dword, u32 } from './text.js';
+
+const S_OK = 0;
+const S_FALSE = 1;
+const E_POINTER = 0x80004003;
+const E_INVALIDARG = 0x80070057;
+
+const URL_ESCAPE_PERCENT = 0x00001000;
+const URL_UNESCAPE_INPLACE = 0x00100000;
+const URL_DONT_ESCAPE_EXTRA_INFO = 0x02000000;
+const URL_ESCAPE_SPACES_ONLY = 0x04000000;
+const URL_DONT_SIMPLIFY = 0x08000000;
+const URL_UNESCAPE = 0x10000000;
+const URL_ESCAPE_UNSAFE = 0x20000000;
+
+/** UrlIs's questions. */
+const URLIS_URL = 0;
+const URLIS_OPAQUE = 1;
+const URLIS_NOHISTORY = 2;
+const URLIS_FILEURL = 3;
+const URLIS_APPLIABLE = 4;
+const URLIS_DIRECTORY = 5;
+const URLIS_HASQUERY = 6;
+
+/** The schemes whose rest is no path, and is left as it is. */
+const OPAQUE = new Set(['about', 'javascript', 'mailto', 'shell', 'vbscript']);
+
+/** The schemes with a host, whose host is case-insensitive and lowered. */
+const HOSTED = new Set(['ftp', 'gopher', 'http', 'https', 'local', 'news', 'nntp', 'res',
+    'snews', 'telnet', 'wais']);
+
+/** Of those, the ones that keep a backslash as it is rather than read it as a slash. */
+const KEEPS_BACKSLASH = new Set(['ftp', 'local', 'res', 'wais']);
+
+/**
+ * What URL_ESCAPE_UNSAFE escapes (Wine's url tests, against Windows): space
+ * and the control characters, and `"&<>[]^`{|}`. A `%` is escaped as well
+ * where a path becomes a URL, and with URL_ESCAPE_PERCENT.
+ */
+const UNSAFE_MARKS = new Set([...'"&<>[]^`{|}']);
+
+/** @param {string} c */
+const isUnsafe = c=>c.charCodeAt(0) <= 0x20 || c.charCodeAt(0) === 0x7f || UNSAFE_MARKS.has(c);
+
+/** @param {string} char */
+const escapeOf = char=>`%${char.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`;
+
+/**
+ * A string with its %XX escapes decoded; with `extraInfo` false, what follows
+ * the first ? or # is left as it is. `char` turns a code into a character of
+ * the caller's spelling: a byte of the ANSI page, or a UTF-16 unit.
+ *
+ * @param {string} url @param {boolean} extraInfo @param {(code: number) => string} char
+ */
+export const unescapeUrl = (url, extraInfo, char)=>{
+    let out = '';
+    let escaping = true;
+    for (let at = 0; at < url.length; at++)
+    {
+        const c = url[at];
+        if (!extraInfo && (c === '?' || c === '#'))
+        {
+            escaping = false;
+        }
+        if (escaping && c === '%' && /^[0-9A-Fa-f]{2}$/.test(url.slice(at + 1, at + 3)))
+        {
+            out += char(parseInt(url.slice(at + 1, at + 3), 16));
+            at += 2;
+            continue;
+        }
+        out += c;
+    }
+    return out;
+};
+
+/**
+ * Characters escaped where `test` says.
+ *
+ * @param {string} text @param {(c: string) => boolean} test
+ */
+const escapeWhere = (text, test)=>[...text].map(c=>(test(c) ? escapeOf(c) : c)).join('');
+
+/** @param {string} c */
+const unsafeOrPercent = c=>isUnsafe(c) || c === '%';
+
+/** @param {string} text */
+const trimmed = text=>{
+    let start = 0;
+    let end = text.length;
+    while (start < end && text.charCodeAt(start) <= 0x20)
+    {
+        start++;
+    }
+    while (end > start && text.charCodeAt(end - 1) <= 0x20)
+    {
+        end--;
+    }
+    return text.slice(start, end);
+};
+
+/**
+ * A drive or a UNC path, which a URL function reads as a file.
+ *
+ * @param {string} text
+ */
+const isDosPath = text=>/^[A-Za-z]:/.test(text) || text.startsWith('\\\\');
+
+/**
+ * The scheme of a URL, lowered, and what follows its colon; null when it
+ * has none.
+ *
+ * @param {string} url
+ * @returns {{ scheme: string, rest: string } | null}
+ */
+export const parseScheme = url=>{
+    if (!hasScheme(url))
+    {
+        return null;
+    }
+    const colon = url.indexOf(':');
+    return { scheme: url.slice(0, colon).toLowerCase(), rest: url.slice(colon + 1) };
+};
+
+/**
+ * A path with its `.` segments dropped and each `..` taking the segment before
+ * it, never what `root` names; a path that ends in a dot segment keeps the
+ * slash after the last segment left.
+ *
+ * @param {string} path @param {RegExp} root
+ */
+const simplify = (path, root)=>{
+    const lead = root.exec(path)?.[0] ?? '';
+    const parts = path.slice(lead.length).split('/');
+    /** @type {string[]} */
+    const kept = [];
+    parts.forEach((part, index)=>{
+        if (part === '.' || part === '..')
+        {
+            if (part === '..')
+            {
+                kept.pop();
+            }
+            if (index === parts.length - 1)
+            {
+                kept.push('');
+            }
+            return;
+        }
+        kept.push(part);
+    });
+    return lead + kept.join('/');
+};
+
+/** A slash, or a drive and the slash after it, are what a path is rooted in. */
+const SLASH_ROOT = /^\//;
+const DRIVE_ROOT = /^\/[A-Za-z][:|](?:\/|$)|^\//;
+const NO_ROOT = /^(?!)/;
+
+/**
+ * A URL made of a drive or UNC path: its backslashes slashes, a drive after
+ * `file:///` and a server after `file://`, a relative path after `file:`.
+ * Unsafe characters and the percent sign are escaped unless `escape` is
+ * false.
+ *
+ * @param {string} path @param {boolean} escape
+ */
+export const fileUrlOf = (path, escape)=>{
+    const slashed = path.replace(/\\/g, '/');
+    const body = escape ? escapeWhere(slashed, unsafeOrPercent) : slashed;
+    if (/^[A-Za-z]:/.test(path))
+    {
+        return `file:///${body}`;
+    }
+    if (path.startsWith('\\\\'))
+    {
+        return `file:${body}`;
+    }
+    return path.startsWith('\\') ? `file://${body}` : `file:${body}`;
+};
+
+/**
+ * UrlCanonicalize's answer.
+ *
+ * @param {string} input @param {number} flags
+ * @param {(code: number) => string} char
+ */
+export const canonicalizeUrl = (input, flags, char)=>{
+    let url = trimmed(input);
+    const fromPath = isDosPath(url);
+    if (fromPath)
+    {
+        url = fileUrlOf(url, (flags & URL_UNESCAPE) === 0);
+    }
+    const simplifying = (flags & URL_DONT_SIMPLIFY) === 0;
+    const parsed = parseScheme(url);
+    let head = '';
+    let main = url;
+    let extra = '';
+    if (parsed)
+    {
+        const { scheme, rest } = parsed;
+        head = `${scheme}:`;
+        main = rest;
+        if (!OPAQUE.has(scheme))
+        {
+            const split = rest.search(/[?#]/);
+            main = split < 0 ? rest : rest.slice(0, split);
+            extra = split < 0 ? '' : rest.slice(split);
+            const file = scheme === 'file';
+            if (file || (HOSTED.has(scheme) && !KEEPS_BACKSLASH.has(scheme)))
+            {
+                main = main.replace(/\\/g, '/');
+            }
+            if (file && !main.startsWith('//') && (main.startsWith('/') || /^[A-Za-z]:/.test(main)))
+            {
+                main = main.startsWith('/') ? `//${main}` : `///${main}`;
+            }
+            if (main.startsWith('//'))
+            {
+                let tail = main.slice(2);
+                if (file)
+                {
+                    tail = tail.replace(/^\/{2,}/, '');
+                }
+                const end = tail.indexOf('/');
+                let host = end < 0 ? tail : tail.slice(0, end);
+                let path = end < 0 ? '' : tail.slice(end);
+                if (file && /^[A-Za-z][:|]$/.test(host))
+                {
+                    path = `/${host}${path}`;
+                    host = '';
+                }
+                if (HOSTED.has(scheme))
+                {
+                    host = host.toLowerCase();
+                }
+                path ||= '/';
+                main = `//${host}${simplifying ? simplify(path, file ? DRIVE_ROOT : SLASH_ROOT)
+                    : path}`;
+            }
+            else if (simplifying && (file || HOSTED.has(scheme)))
+            {
+                main = simplify(main, NO_ROOT);
+            }
+        }
+    }
+    else if (simplifying)
+    {
+        main = simplify(main, SLASH_ROOT) || (main === '' ? '' : '/');
+    }
+    const opaque = parsed !== null && OPAQUE.has(parsed.scheme);
+    /** @param {string} text */
+    const escaped = text=>{
+        let out = (flags & URL_UNESCAPE) !== 0 ? unescapeUrl(text, true, char) : text;
+        if ((flags & URL_ESCAPE_SPACES_ONLY) !== 0 && !opaque)
+        {
+            out = out.replace(/ /g, '%20');
+        }
+        else if ((flags & URL_ESCAPE_UNSAFE) !== 0)
+        {
+            const percent = (flags & URL_ESCAPE_PERCENT) !== 0;
+            out = escapeWhere(out, c=>isUnsafe(c) || (percent && c === '%'));
+        }
+        return out;
+    };
+    const extraEscaped = (flags & URL_DONT_ESCAPE_EXTRA_INFO) !== 0 ? extra : escaped(extra);
+    return `${head}${escaped(main)}${extraEscaped}`;
+};
+
+/**
+ * UrlCombine's answer: the relative URL resolved against the base, then
+ * made canonical. A relative URL with a scheme of its own stands alone
+ * unless the scheme is the base's and what follows it is a relative path; a
+ * drive or UNC path stands alone as a file URL; `//` keeps only the base's
+ * scheme, `/` its host, `?` its path and `#` its query; and a relative path
+ * replaces the base's last segment -- or, where the base has neither a host
+ * nor a rooted path, everything after its scheme.
+ *
+ * @param {string} base @param {string} relative @param {number} flags
+ * @param {(code: number) => string} char
+ */
+export const combineUrl = (base, relative, flags, char)=>{
+    /** @param {string} url */
+    const canonical = url=>canonicalizeUrl(url, flags, char);
+    let from = trimmed(base);
+    let to = trimmed(relative);
+    if (isDosPath(to))
+    {
+        return canonical(to);
+    }
+    // The base is made canonical first, so that its last segment is the one
+    // its dots leave: `a/b/..` is the directory `a/`.
+    from = canonicalizeUrl(from, flags & URL_DONT_SIMPLIFY, char);
+    const target = parseScheme(to);
+    const origin = parseScheme(from);
+    if (target)
+    {
+        if (!origin || target.scheme !== origin.scheme || OPAQUE.has(target.scheme)
+            || /^[\\/]/.test(target.rest))
+        {
+            return canonical(to);
+        }
+        to = target.rest;
+    }
+    if (!origin)
+    {
+        return canonical(to);
+    }
+    const scheme = `${origin.scheme}:`;
+    const split = origin.rest.search(/[?#]/);
+    let main = split < 0 ? origin.rest : origin.rest.slice(0, split);
+    const extra = split < 0 ? '' : origin.rest.slice(split);
+    if (origin.scheme === 'file' || (HOSTED.has(origin.scheme)
+        && !KEEPS_BACKSLASH.has(origin.scheme)))
+    {
+        main = main.replace(/\\/g, '/');
+    }
+    const hostEnd = main.startsWith('//') ? main.indexOf('/', 2) : 0;
+    const authority = hostEnd < 0 ? main : main.slice(0, hostEnd);
+    const path = hostEnd < 0 ? '' : main.slice(hostEnd);
+    if (to === '')
+    {
+        return canonical(from);
+    }
+    if (to.startsWith('//') || to.startsWith('\\\\'))
+    {
+        return canonical(`${scheme}${to}`);
+    }
+    if (to.startsWith('/') || to.startsWith('\\'))
+    {
+        return canonical(`${scheme}${authority}${to}`);
+    }
+    if (to.startsWith('?'))
+    {
+        return canonical(`${scheme}${main}${to}`);
+    }
+    if (to.startsWith('#'))
+    {
+        const hash = extra.indexOf('#');
+        const query = !extra.startsWith('?') ? '' : hash < 0 ? extra : extra.slice(0, hash);
+        return canonical(`${scheme}${main}${query}${to}`);
+    }
+    if (authority === '' && !path.startsWith('/'))
+    {
+        return canonical(`${scheme}${to}`);
+    }
+    const directory = path.slice(0, path.lastIndexOf('/') + 1) || '/';
+    return canonical(`${scheme}${authority}${directory}${to}`);
+};
+
+/**
+ * UrlIs's answer for one question.
+ *
+ * @param {string} url @param {number} question
+ * @returns {boolean | null} null for a question this does not answer
+ */
+export const urlIs = (url, question)=>{
+    const parsed = parseScheme(url);
+    switch (question){
+        case URLIS_URL:
+            return parsed !== null;
+        case URLIS_OPAQUE:
+            return parsed !== null && OPAQUE.has(parsed.scheme);
+        case URLIS_NOHISTORY:
+            return parsed !== null && OPAQUE.has(parsed.scheme);
+        case URLIS_FILEURL:
+            return parsed?.scheme === 'file';
+        case URLIS_DIRECTORY:
+            return /[\\/]$/.test(url);
+        case URLIS_HASQUERY:
+            return parsed !== null && parsed.rest.split('#')[0].includes('?');
+        default:
+            return null;
+    }
+};
+
+/**
+ * Where UrlGetLocation's answer starts: the first `?` or `#` after a URL's
+ * scheme, a file URL's `#` only, its query being part of the file's name
+ * (MSDN); null for no location, or no URL.
+ *
+ * @param {string} url
+ * @returns {number | null}
+ */
+export const locationIndex = url=>{
+    const parsed = parseScheme(url);
+    if (!parsed)
+    {
+        return null;
+    }
+    const offset = url.length - parsed.rest.length;
+    const found = parsed.rest.search(parsed.scheme === 'file' ? /#/ : /[?#]/);
+    return found < 0 ? null : offset + found;
+};
+
+/**
+ * @typedef {Object} UrlHost
+ * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ * @property {(api: string, detail: string) => void} [divergence]
+ */
+
+/**
+ * @param {UrlHost} host
+ * @param {{ A: import('./text.js').Width, W: import('./text.js').Width }} widths
+ */
+export function createUrlFunctions(host, { A, W }){
+    /** @param {string} name @param {number} argBytes
+     *  @param {(width: import('./text.js').Width, args: number[]) => number} body */
+    const both = (name, argBytes, body)=>({
+        [`${name}A`]: { argBytes, handler: (/** @type {number[]} */ args)=>body(A, args) },
+        [`${name}W`]: { argBytes, handler: (/** @type {number[]} */ args)=>body(W, args) },
+    });
+
+    /** @param {number} address */
+    const countAt = address=>((address >>> 0) === 0 || !host.readMemory
+        ? null : u32(host.readMemory(address >>> 0, 4)));
+
+    /**
+     * An answer into a buffer the caller counts the room of: written, with
+     * its length, when it fits with its terminator; otherwise E_POINTER and
+     * the room it needs, the buffer untouched. `success` is the HRESULT a
+     * fit answers.
+     *
+     * @param {import('./text.js').Width} width @param {string} text
+     * @param {number} buffer @param {number} count @param {number} room
+     * @param {number} [success]
+     */
+    const answer = (width, text, buffer, count, room, success = S_OK)=>{
+        if (text.length < room && (buffer >>> 0) !== 0)
+        {
+            host.writeMemory(buffer >>> 0, width.sz(text));
+            host.writeMemory(count >>> 0, dword(text.length));
+            return success;
+        }
+        if (text.length < room)
+        {
+            return E_INVALIDARG;
+        }
+        host.writeMemory(count >>> 0, dword(text.length + 1));
+        return E_POINTER;
+    };
+
+    /** Said once, the first time a URL is asked a question not answered here. */
+    let unanswered = false;
+
+    return {
+        /**
+         * HRESULT UrlUnescapeA(LPSTR pszUrl, LPSTR pszUnescaped,
+         *                      LPDWORD pcchUnescaped, DWORD dwFlags)
+         *
+         * In place with URL_UNESCAPE_INPLACE, the count neither needed nor
+         * touched. Otherwise into the buffer while it has room: the count is
+         * then the characters written, or with E_POINTER the room the whole
+         * answer and its terminator need; no buffer or no count is
+         * E_INVALIDARG (Wine's test_UrlUnescape).
+         */
+        ...both('UrlUnescape', 16, (width, [pointer, output, count, flags])=>{
+            const url = width.read(pointer);
+            if (url === null)
+            {
+                return E_INVALIDARG;
+            }
+            const result = unescapeUrl(url, ((flags >>> 0) & URL_DONT_ESCAPE_EXTRA_INFO) === 0,
+                width.char);
+            if (((flags >>> 0) & URL_UNESCAPE_INPLACE) !== 0)
+            {
+                host.writeMemory(pointer >>> 0, width.sz(result));
+                return S_OK;
+            }
+            const room = countAt(count);
+            if ((output >>> 0) === 0 || room === null)
+            {
+                return E_INVALIDARG;
+            }
+            return answer(width, result, output, count, room);
+        }),
+
+        /**
+         * HRESULT UrlCanonicalizeA(PCSTR pszUrl, PSTR pszCanonicalized,
+         *                          DWORD *pcchCanonicalized, DWORD dwFlags)
+         *
+         * `canonicalizeUrl`. No URL, no buffer, no count or a count of zero
+         * is E_INVALIDARG with the count untouched (Wine's
+         * test_UrlCanonicalizeA).
+         */
+        ...both('UrlCanonicalize', 16, (width, [pointer, output, count, flags])=>{
+            const url = width.read(pointer);
+            const room = countAt(count);
+            if (url === null || (output >>> 0) === 0 || room === null || room === 0)
+            {
+                return E_INVALIDARG;
+            }
+            return answer(width, canonicalizeUrl(url, flags >>> 0, width.char), output, count,
+                room);
+        }),
+
+        /**
+         * HRESULT UrlCombineA(PCSTR pszBase, PCSTR pszRelative, PSTR pszCombined,
+         *                     DWORD *pcchCombined, DWORD dwFlags)
+         *
+         * `combineUrl`. No count is E_INVALIDARG; no buffer, or one too small,
+         * E_POINTER and the room needed (Wine's test_UrlCombine).
+         */
+        ...both('UrlCombine', 20, (width, [base, relative, output, count, flags])=>{
+            const from = width.read(base);
+            const to = width.read(relative);
+            const room = countAt(count);
+            if (from === null || to === null || room === null)
+            {
+                return E_INVALIDARG;
+            }
+            return answer(width, combineUrl(from, to, flags >>> 0, width.char), output, count,
+                (output >>> 0) === 0 ? 0 : room);
+        }),
+
+        /**
+         * HRESULT UrlCreateFromPathA(PCSTR pszPath, PSTR pszUrl, DWORD *pcchUrl,
+         *                            DWORD dwFlags)
+         *
+         * A path made a `file:` URL (`fileUrlOf`); one that is already a URL
+         * is copied as it is and answered S_FALSE (Wine's
+         * test_UrlCreateFromPath).
+         */
+        ...both('UrlCreateFromPath', 16, (width, [pointer, output, count])=>{
+            const path = width.read(pointer);
+            const room = countAt(count);
+            if (path === null || (output >>> 0) === 0 || room === null)
+            {
+                return E_INVALIDARG;
+            }
+            return hasScheme(path)
+                ? answer(width, path, output, count, room, S_FALSE)
+                : answer(width, fileUrlOf(path, true), output, count, room);
+        }),
+
+        /** LPCSTR UrlGetLocationA(PCSTR pszURL): its `#` or `?` part, or NULL. */
+        ...both('UrlGetLocation', 4, (width, [pointer])=>{
+            const url = width.read(pointer);
+            const at = url === null ? null : locationIndex(url);
+            return at === null ? 0 : (pointer >>> 0) + at * width.unit;
+        }),
+
+        /**
+         * BOOL UrlIsA(PCSTR pszUrl, URLIS UrlIs)
+         *
+         * Whether it is a URL, an opaque one, a file URL, one that ends in a
+         * directory or carries a query; never for no URL (Wine's test_UrlIs).
+         * URLIS_NOHISTORY is answered for the opaque schemes, which name no
+         * page to go back to. URLIS_APPLIABLE asks whether a scheme could be
+         * guessed for the text, which this does not guess: FALSE.
+         */
+        ...both('UrlIs', 8, (width, [pointer, question])=>{
+            const url = width.read(pointer);
+            if (url === null)
+            {
+                return 0;
+            }
+            const result = urlIs(url, question >>> 0);
+            if (result === null && (question >>> 0) === URLIS_APPLIABLE && !unanswered)
+            {
+                unanswered = true;
+                host.divergence?.('UrlIs', 'URLIS_APPLIABLE guesses no scheme: FALSE');
+            }
+            return result ? 1 : 0;
+        }),
+    };
+}

@@ -510,6 +510,14 @@ export function createGraphicsLibraries(
                         capsVersion: D3DCAPS8.PixelShaderVersion,
                     }), errorReturn, errors),
             },
+
+            /**
+             * void DebugSetMute(void)
+             *
+             * Silences the debug runtime's output; the retail runtime exports
+             * it as a call that does nothing, and nothing here prints.
+             */
+            DebugSetMute: { argBytes: 0, handler: ()=>0 },
         },
 
         'D3D9.dll': {

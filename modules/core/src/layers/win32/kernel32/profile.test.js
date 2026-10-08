@@ -577,3 +577,64 @@ test('win.ini read and written in UTF-16 is the file the A calls read and write'
     assert.equal(files.text('C:\\WINDOWS\\win.ini'), '');
     assert.equal(fns.WriteProfileStringW.handler([0, KEY, VALUE]), 0, 'a NULL section is refused');
 });
+
+test('the win.ini section calls are the private ones on win.ini, in both widths', ()=>{
+    const memory = fakeMemory();
+    const files = fakeFiles();
+    /** @param {number} at @param {string} text */
+    const wide = (at, text)=>{
+        [...text].forEach((unit, index)=>{
+            memory.bytes[at + index * 2] = unit.charCodeAt(0) & 0xff;
+            memory.bytes[at + index * 2 + 1] = unit.charCodeAt(0) >> 8;
+        });
+        return at;
+    };
+    const fns = createProfileFunctions({
+        writeMemory: memory.writeMemory,
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        readWideString: (address, maxLength)=>{
+            let text = '';
+            for (let at = address; text.length < maxLength; at += 2)
+            {
+                const unit = memory.bytes[at] | memory.bytes[at + 1] << 8;
+                if (unit === 0)
+                {
+                    break;
+                }
+                text += String.fromCharCode(unit);
+            }
+            return text;
+        },
+        files,
+    });
+    assert.deepEqual([fns.GetProfileSectionA.argBytes, fns.GetProfileSectionW.argBytes,
+        fns.WriteProfileSectionA.argBytes, fns.WriteProfileSectionW.argBytes], [12, 12, 8, 8]);
+
+    memory.put(SECTION, 'Fonts');
+    memory.put(VALUE, 'Arial=arial.ttf');
+    memory.put(VALUE + 16, 'Plain');
+    memory.bytes[VALUE + 22] = 0;
+    assert.equal(fns.WriteProfileSectionA.handler([SECTION, VALUE]), 1);
+    assert.equal(files.text('C:\\WINDOWS\\win.ini'), '[Fonts]\r\nArial=arial.ttf\r\nPlain\r\n');
+
+    assert.equal(fns.GetProfileSectionA.handler([SECTION, OUT, 64]), 22);
+    assert.equal(memory.raw(OUT, 23), 'Arial=arial.ttf\0Plain\0\0');
+    assert.equal(fns.GetPrivateProfileSectionA.handler([SECTION, OUT + 0x80, 64,
+        memory.put(FILE, 'win.ini')]), 22, 'the same file the private call finds by its name');
+
+    memory.bytes.fill(0, SECTION, SECTION + 0x40);
+    wide(SECTION, 'fonts');
+    assert.equal(fns.GetProfileSectionW.handler([SECTION, OUT, 64]), 22,
+        'counted in characters, the section found folded');
+    assert.equal(String.fromCharCode(...new Uint16Array(memory.bytes.slice(OUT, OUT + 46)
+        .buffer)), 'Arial=arial.ttf\0Plain\0\0');
+
+    memory.bytes.fill(0, VALUE, VALUE + 0x80);
+    wide(VALUE, 'Only=one');
+    assert.equal(fns.WriteProfileSectionW.handler([SECTION, VALUE]), 1);
+    assert.equal(files.text('C:\\WINDOWS\\win.ini'), '[fonts]\r\nOnly=one\r\n',
+        'the section replaced whole');
+    assert.equal(fns.WriteProfileSectionA.handler([memory.put(SECTION, 'fonts'), 0]), 1);
+    assert.equal(files.text('C:\\WINDOWS\\win.ini'), '', 'a NULL list removes it');
+    assert.equal(fns.GetProfileSectionA.handler([SECTION, OUT, 64]), 0);
+});

@@ -25,6 +25,7 @@
  */
 
 import { decodeAnsi } from './locale.js';
+import { createRefusals } from '../common/refusal.js';
 
 /** Codes this surface reports. */
 const ERROR_ACCESS_DENIED = 5;
@@ -119,6 +120,18 @@ export function createConsoleIoFunctions(host){
         writeDwordIf(read >>> 0, 0);
         return 1;
     };
+
+    const refuse = createRefusals(host);
+    /**
+     * A call on the console's screen buffer or its input queue, which no
+     * handle here is: refused as Windows refuses a handle that is not one.
+     *
+     * @param {string} name @param {number} argBytes
+     */
+    const noConsole = (name, argBytes)=>refuse(name, {
+        argBytes, lastError: ERROR_INVALID_HANDLE,
+        why: 'no handle is a console here; the standard handles are redirected streams',
+    });
 
     return {
         /** UINT GetConsoleCP(VOID) */
@@ -265,6 +278,39 @@ export function createConsoleIoFunctions(host){
             /** @param {number[]} args */
             handler: ([, , , read])=>readNothing(read),
         },
+
+        /**
+         * BOOL FlushConsoleInputBuffer(HANDLE hConsoleInput)
+         *
+         * The queue the reads above find empty is empty after a flush too,
+         * so there is nothing to discard and the call succeeds as they do.
+         */
+        FlushConsoleInputBuffer: { argBytes: 4, handler: ()=>1 },
+
+        /**
+         * BOOL WriteConsoleInputA/W(HANDLE, const INPUT_RECORD *, DWORD, LPDWORD)
+         *
+         * Refused: records put in a queue no read ever returns would be lost
+         * while the caller believed them delivered.
+         */
+        WriteConsoleInputA: noConsole('WriteConsoleInputA', 16),
+        WriteConsoleInputW: noConsole('WriteConsoleInputW', 16),
+
+        /**
+         * The screen buffer's own calls, refused as GetConsoleScreenBufferInfo
+         * is: BOOL ReadConsoleOutputCharacterA/W(HANDLE, LPSTR, DWORD, COORD,
+         * LPDWORD), BOOL SetConsoleScreenBufferSize(HANDLE, COORD), BOOL
+         * SetConsoleTextAttribute(HANDLE, WORD), BOOL SetConsoleWindowInfo(
+         * HANDLE, BOOL, const SMALL_RECT *) and COORD
+         * GetLargestConsoleWindowSize(HANDLE), whose failure is the COORD
+         * {0, 0} in EAX. A COORD by value is one stack slot.
+         */
+        ReadConsoleOutputCharacterA: noConsole('ReadConsoleOutputCharacterA', 20),
+        ReadConsoleOutputCharacterW: noConsole('ReadConsoleOutputCharacterW', 20),
+        SetConsoleScreenBufferSize: noConsole('SetConsoleScreenBufferSize', 8),
+        SetConsoleTextAttribute: noConsole('SetConsoleTextAttribute', 8),
+        SetConsoleWindowInfo: noConsole('SetConsoleWindowInfo', 12),
+        GetLargestConsoleWindowSize: noConsole('GetLargestConsoleWindowSize', 4),
 
         /** BOOL GetNumberOfConsoleInputEvents(HANDLE, LPDWORD lpcNumberOfEvents) */
         GetNumberOfConsoleInputEvents: {

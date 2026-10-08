@@ -1228,3 +1228,9 @@ test('a machine with no MIDI input and no joystick says so on every call', ()=>{
         'joyGetPos'].map(name=>m.winmm[name].argBytes),
     [0, 20, 12, 12, 4, 4, 4, 4, 12, 12, 12, 8, 16, 8]);
 });
+
+test('joyConfigChanged takes the notice: no joystick has settings to reread', ()=>{
+    const m = machine();
+    assert.equal(m.winmm.joyConfigChanged.argBytes, 4);
+    assert.equal(m.winmm.joyConfigChanged.handler([0]), 0, 'JOYERR_NOERROR');
+});

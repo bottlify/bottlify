@@ -37,8 +37,9 @@ import {
     transparentBlt,
 } from './blit.js';
 import { DSTINVERT, PATCOPY, PATINVERT, R2_COPYPEN } from './rop.js';
-import { PS_SOLID, createPainter, ellipse, fillRect, frameRect, line, polygon, rectangle }
-    from './shapes.js';
+import {
+    PS_SOLID, createPainter, ellipse, fillRect, frameRect, line, polyPolygon, polygon, rectangle,
+} from './shapes.js';
 import { MONOCHROME, colorToPixel, intersectRect, isEmptyRect, pixelToColor, surfaceBounds }
     from './surface.js';
 import { encodeDib, setDIBitsToDevice, stretchDIBits } from './dib.js';
@@ -596,6 +597,95 @@ export function createGdiDrawing(options = {}){
         },
 
         /**
+         * BOOL PlgBlt(HDC, const POINT *, HDC, int, int, int, int, HBITMAP, int, int)
+         *
+         * The source rectangle copied onto a parallelogram: its top left
+         * corner to the first point, its top right to the second, its bottom
+         * left to the third, every pixel between carried along. Each
+         * destination pixel whose centre the parallelogram holds takes the
+         * source pixel its centre maps back to -- and, with a mask, only
+         * where the mask's bit for that source pixel is set. The points and
+         * the rectangle are the devices'.
+         *
+         * @param {number} hdc
+         * @param {{ x: number, y: number }[]} corners  Three.
+         * @param {number} source
+         * @param {{ x: number, y: number, width: number, height: number }} from
+         * @param {number} [mask]  A context with the monochrome mask's pixels.
+         * @param {{ x: number, y: number }} [maskAt]  The mask's corner for the rectangle's.
+         * @returns {boolean}
+         */
+        plgBlt(hdc, corners, source, from, mask, maskAt = { x: 0, y: 0 }){
+            const context = contextOf(hdc);
+            const origin = contextOf(source);
+            const bits = mask ? contextOf(mask) : null;
+            if (!context || !origin || (mask && !bits) || corners.length < 3)
+            {
+                return false;
+            }
+            const [p0, p1, p2] = corners;
+            const ax = p1.x - p0.x;
+            const ay = p1.y - p0.y;
+            const bx = p2.x - p0.x;
+            const by = p2.y - p0.y;
+            const det = ax * by - ay * bx;
+            if (det === 0 || from.width === 0 || from.height === 0)
+            {
+                return false;
+            }
+            const convert = conversionOf(context, origin) ?? (pixel=>pixel);
+            const picture = /** @type {any} */ (bits?.surface ?? null);
+            const one = ((picture?.palette?.[1] ?? MONOCHROME[1]) & 0xffffff) >>> 0;
+            const xs = [p0.x, p1.x, p2.x, p1.x + bx];
+            const ys = [p0.y, p1.y, p2.y, p1.y + by];
+            const box = {
+                left: Math.min(...xs), top: Math.min(...ys),
+                right: Math.max(...xs) + 1, bottom: Math.max(...ys) + 1,
+            };
+            clipped(context, ()=>{
+                const area = intersectRect(intersectRect(box, context.clip),
+                    surfaceBounds(context.surface));
+                for (let y = area.top; y < area.bottom; y++)
+                {
+                    for (let x = area.left; x < area.right; x++)
+                    {
+                        // Where the pixel's centre is across the source and
+                        // down it, each from 0 to 1 inside.
+                        const dx = x + 0.5 - p0.x;
+                        const dy = y + 0.5 - p0.y;
+                        const across = (dx * by - dy * bx) / det;
+                        const down = (ax * dy - ay * dx) / det;
+                        if (across < 0 || across >= 1 || down < 0 || down >= 1)
+                        {
+                            continue;
+                        }
+                        const u = Math.floor(across * Math.abs(from.width));
+                        const v = Math.floor(down * Math.abs(from.height));
+                        const sx = from.width < 0 ? from.x - 1 - u : from.x + u;
+                        const sy = from.height < 0 ? from.y - 1 - v : from.y + v;
+                        if (sx < 0 || sy < 0 || sx >= origin.surface.width
+                            || sy >= origin.surface.height)
+                        {
+                            continue;
+                        }
+                        if (picture)
+                        {
+                            const mx = maskAt.x + u;
+                            const my = maskAt.y + v;
+                            if (mx < 0 || my < 0 || mx >= picture.width || my >= picture.height
+                                || ((picture.read(mx, my) & 0xffffff) >>> 0) !== one)
+                            {
+                                continue;
+                            }
+                        }
+                        context.surface.write(x, y, convert(origin.surface.read(sx, sy)));
+                    }
+                }
+            });
+            return true;
+        },
+
+        /**
          * BOOL GdiGradientFill(HDC, PTRIVERTEX, ULONG, PVOID, ULONG, ULONG)
          *
          * The vertices are in device coordinates and the mesh's indices are
@@ -806,6 +896,31 @@ export function createGdiDrawing(options = {}){
             const pen = penOf(context);
             const pattern = patternOf(context);
             clipped(context, ()=>polygon(painterOf(context), points, pen, pattern, fillMode));
+            return true;
+        },
+
+        /**
+         * BOOL PolyPolygon(HDC, const POINT *, const INT *, int), and the
+         * paths FillPath and StrokeAndFillPath draw: the polygons filled
+         * together with the brush, so one inside another can be a hole, and
+         * each outlined with the pen -- or only one of the two.
+         *
+         * @param {number} hdc
+         * @param {import("./shapes.js").Point[][]} rings
+         * @param {number} [fillMode]
+         * @param {{ fill?: boolean, stroke?: boolean }} [parts]
+         * @returns {boolean}
+         */
+        polyPolygon(hdc, rings, fillMode, parts){
+            const context = contextOf(hdc);
+            if (!context)
+            {
+                return false;
+            }
+            const pen = penOf(context);
+            const pattern = patternOf(context);
+            clipped(context, ()=>polyPolygon(painterOf(context), rings, pen, pattern, fillMode,
+                parts));
             return true;
         },
 

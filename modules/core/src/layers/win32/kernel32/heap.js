@@ -2134,5 +2134,75 @@ export function createHeapFunctions(host){
         LocalSize: table.GlobalSize,
         LocalHandle: table.GlobalHandle,
         LocalFlags: table.GlobalFlags,
+
+        /**
+         * SIZE_T GlobalCompact(DWORD dwMinFree), SIZE_T LocalCompact(UINT uMinFree)
+         * and SIZE_T LocalShrink(HLOCAL hMem, UINT cbNewSize)
+         *
+         * The 16-bit heap calls, which on Win32 compact the process heap and
+         * answer its largest free block -- HeapCompact's answer for it. The
+         * allocator coalesces as it frees, so there is nothing to move and
+         * the number is only measured.
+         */
+        GlobalCompact: {
+            argBytes: 4,
+            handler: ()=>table.HeapCompact.handler([processHeap, 0]),
+        },
+        LocalCompact: {
+            argBytes: 4,
+            handler: ()=>table.HeapCompact.handler([processHeap, 0]),
+        },
+        LocalShrink: {
+            argBytes: 8,
+            handler: ()=>table.HeapCompact.handler([processHeap, 0]),
+        },
+
+        /**
+         * VOID RtlMoveMemory(VOID UNALIGNED *Destination, const VOID UNALIGNED
+         *     *Source, SIZE_T Length), RtlZeroMemory(Destination, Length) and
+         * RtlFillMemory(Destination, Length, UCHAR Fill)
+         *
+         * kernel32's exports of ntdll's routines, which a program imports
+         * from kernel32 as often as it calls the macros of the same names.
+         * The move reads the whole source before it writes, so regions that
+         * overlap either way come out as memmove leaves them; the fill value
+         * comes last, where memset takes it second.
+         */
+        RtlMoveMemory: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([destination, source, length])=>{
+                if ((length >>> 0) !== 0)
+                {
+                    // A copy of its own: a reader that answers a view of
+                    // guest memory would see the write move under it.
+                    host.writeMemory(destination >>> 0,
+                        host.readMemory(source >>> 0, length >>> 0).slice());
+                }
+                return 0;
+            },
+        },
+        RtlZeroMemory: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([destination, length])=>{
+                if ((length >>> 0) !== 0)
+                {
+                    host.fillMemory(destination >>> 0, 0, length >>> 0);
+                }
+                return 0;
+            },
+        },
+        RtlFillMemory: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([destination, length, fill])=>{
+                if ((length >>> 0) !== 0)
+                {
+                    host.fillMemory(destination >>> 0, fill & 0xff, length >>> 0);
+                }
+                return 0;
+            },
+        },
     };
 }

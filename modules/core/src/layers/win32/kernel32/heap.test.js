@@ -1236,3 +1236,45 @@ test('GetWriteWatch tells every committed page of a watched reservation as writt
     fns.VirtualFree.handler([base, 0, MEM_RELEASE]);
     assert.equal(watch(base, PAGE_SIZE, 64), FAILED, 'a released reservation is watched no more');
 });
+
+test('kernel32\'s Rtl memory routines move, zero and fill, overlap either way', ()=>{
+    const { host, fns: typed } = setup();
+    const fns = /** @type {any} */ (typed);
+    const at = ARENA.base;
+    host.bytes.set([1, 2, 3, 4, 5, 6, 7, 8], at);
+    assert.equal(fns.RtlMoveMemory.argBytes, 12);
+    fns.RtlMoveMemory.handler([at + 2, at, 6]);
+    assert.deepEqual([...host.bytes.subarray(at, at + 8)], [1, 2, 1, 2, 3, 4, 5, 6],
+        'forward over itself, as memmove');
+    fns.RtlMoveMemory.handler([at, at + 2, 6]);
+    assert.deepEqual([...host.bytes.subarray(at, at + 8)], [1, 2, 3, 4, 5, 6, 5, 6],
+        'and backward');
+
+    assert.equal(fns.RtlFillMemory.argBytes, 12);
+    fns.RtlFillMemory.handler([at, 3, 0x1ab]);
+    assert.deepEqual([...host.bytes.subarray(at, at + 4)], [0xab, 0xab, 0xab, 4],
+        'the fill comes last, and only its low byte');
+    assert.equal(fns.RtlZeroMemory.argBytes, 8);
+    fns.RtlZeroMemory.handler([at, 2]);
+    assert.deepEqual([...host.bytes.subarray(at, at + 4)], [0, 0, 0xab, 4]);
+
+    const before = host.written();
+    fns.RtlMoveMemory.handler([at, at + 4, 0]);
+    fns.RtlZeroMemory.handler([at, 0]);
+    assert.equal(host.written(), before, 'a length of zero touches nothing');
+});
+
+test('GlobalCompact, LocalCompact and LocalShrink answer the process heap\'s largest free block',
+    ()=>{
+        const fns = /** @type {any} */ (setup().fns);
+        const heap = fns.GetProcessHeap.handler([]);
+        const largest = fns.HeapCompact.handler([heap, 0]);
+        assert.ok(largest > 0);
+        assert.equal(fns.GlobalCompact.handler([0]), largest);
+        assert.equal(fns.LocalCompact.handler([0]), largest);
+        assert.equal(fns.LocalShrink.handler([0, 0]), largest);
+        assert.deepEqual([fns.GlobalCompact.argBytes, fns.LocalCompact.argBytes,
+            fns.LocalShrink.argBytes], [4, 4, 8]);
+        fns.HeapAlloc.handler([heap, 0, 0x100]);
+        assert.ok(fns.GlobalCompact.handler([0]) < largest, 'and it is measured, not fixed');
+    });

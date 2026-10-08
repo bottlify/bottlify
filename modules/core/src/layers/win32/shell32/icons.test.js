@@ -187,7 +187,7 @@ async function shellOver(files, extra = {}){
         next += (text.length + 1) * 2 + 15 & ~15;
         return at;
     };
-    return { shell, put, made, diverged };
+    return { shell, put, made, diverged, memory };
 }
 
 test('ExtractIcon counts a library\'s icon groups and hands out the one at an index', async()=>{
@@ -294,4 +294,50 @@ test('a 16-bit image is reported as one whose icons are not read', async()=>{
     assert.equal(m.shell.ExtractIconW.handler([0, m.put('old.exe', true), 0xffffffff]), 0);
     assert.equal(m.diverged.length, 1);
     assert.match(m.diverged[0], /16-bit/);
+});
+
+test('ExtractIconEx hands out each icon at both sizes, and counts what it handed out', async()=>{
+    const m = await shellOver({ 'C:\\work\\icons.dll': libraryWithIcons() });
+    const view = new DataView(m.memory.buffer);
+    for (const wide of [false, true])
+    {
+        const call = m.shell[`ExtractIconEx${wide ? 'W' : 'A'}`];
+        const name = m.put('C:\\work\\icons.dll', wide);
+        assert.equal(await call.handler([name, -1 >>> 0, 0, 0, 0]), 2, 'how many');
+        m.made.length = 0;
+        m.memory.fill(0xaa, 0x800, 0x840);
+        assert.equal(await call.handler([name, 0, 0x800, 0x820, 4]), 2,
+            'two icons, a pair of sizes counting once');
+        assert.deepEqual([0x800, 0x804, 0x820, 0x824].map(at=>view.getUint32(at, true)),
+            [0x4001, 0x4003, 0x4002, 0x4004]);
+        assert.deepEqual(m.made.map(picture=>picture.width), [32, 16, 32, 32],
+            'the small size where the group has one, its only image where not');
+        assert.equal(view.getUint32(0x808, true), 0, 'past the last, a null');
+        m.made.length = 0;
+        assert.equal(await call.handler([name, 1, 0, 0x820, 1]), 1, 'the small one alone');
+        assert.equal(m.made.length, 1);
+        assert.equal(await call.handler([name, -7 >>> 0, 0x800, 0, 3]), 1,
+            'a resource id names one icon');
+        assert.equal(await call.handler([m.put('C:\\work\\gone.dll', wide), 0, 0x800, 0, 1]),
+            0);
+        assert.equal(call.argBytes, 20);
+    }
+    assert.equal(m.shell.ExtractIconEx, m.shell.ExtractIconExA, 'the bare name is the ANSI one');
+});
+
+test('ExtractAssociatedIconEx gives the file\'s own icon and its id, or NULL', async()=>{
+    const m = await shellOver({ 'C:\\work\\icons.dll': libraryWithIcons(),
+        'C:\\work\\readme.txt': new Uint8Array(0) });
+    const view = new DataView(m.memory.buffer);
+    view.setUint16(0x900, 1, true);
+    view.setUint16(0x902, 0xcaca, true);
+    const name = m.put('C:\\work\\icons.dll', true);
+    assert.equal(await m.shell.ExtractAssociatedIconExW.handler([0, name, 0x900, 0x902]), 0x4001);
+    assert.equal(view.getUint16(0x902, true), 7, 'the group\'s resource id');
+    assert.deepEqual([...m.made[0].bgra.subarray(0, 4)], [0xff, 0, 0, 0xff]);
+    view.setUint16(0x900, 0, true);
+    assert.equal(await m.shell.ExtractAssociatedIconExA.handler([0,
+        m.put('C:\\work\\readme.txt', false), 0x900, 0x902]), 0, 'no icon of its own');
+    assert.equal(m.diverged.length, 1);
+    assert.equal(m.shell.ExtractAssociatedIconExW.argBytes, 16);
 });

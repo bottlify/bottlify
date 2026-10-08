@@ -70,8 +70,12 @@ const STGM_KNOWN = STGM_ACCESS_MASK | STGM_SHARE_MASK | STGM_CREATE | STGM_TRANS
     | STGM_CONVERT | STGM_PRIORITY | 0x100000 | 0x200000 | 0x400000 | STGM_DELETEONRELEASE
     | 0x8000000;
 
-/** STGFMT_*, StgCreateStorageEx's formats: the two that are a compound file. */
+/**
+ * STGFMT_*, StgCreateStorageEx's formats: the two that are a compound file,
+ * and the one StgOpenStorageEx takes to mean whichever the file is.
+ */
 const STGFMT_STORAGE = 0;
+const STGFMT_ANY = 4;
 const STGFMT_DOCFILE = 5;
 
 /** STGTY_*, in STATSTG.type. */
@@ -2161,6 +2165,42 @@ export function createStorageFunctions(host){
                     diverge('StgCreateStorageEx', 'a larger sector is asked for and 512 is used');
                 }
                 return table.StgCreateDocfile.handler([pwcsName, grfMode, 0, out]);
+            },
+        },
+
+        /**
+         * HRESULT StgOpenStorageEx(const WCHAR *pwcsName, DWORD grfMode, DWORD stgfmt,
+         *     DWORD grfAttrs, STGOPTIONS *pStgOptions, PSECURITY_DESCRIPTOR,
+         *     REFIID riid, void **ppObjectOpen)
+         *
+         * StgOpenStorage's docfile as an IStorage, asked for as a compound
+         * file or as whatever the file is -- and a file here is a compound
+         * file or nothing a storage opens, so STGFMT_ANY is the same. A
+         * property set kept in an NTFS stream, or a plain file as a storage,
+         * is a format this layer does not have.
+         */
+        StgOpenStorageEx: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: ([pwcsName, grfMode, stgfmt, , , , riid, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return STG_E_INVALIDPOINTER;
+                }
+                writeU32(out >>> 0, 0);
+                const format = stgfmt >>> 0;
+                if (format !== STGFMT_STORAGE && format !== STGFMT_DOCFILE
+                    && format !== STGFMT_ANY)
+                {
+                    diverge('StgOpenStorageEx', `format ${format} is not opened; `
+                        + 'only a compound file is');
+                    return STG_E_INVALIDPARAMETER;
+                }
+                if ((riid >>> 0) === 0 || readGuid(host, riid >>> 0) !== IID_ISTORAGE)
+                {
+                    return E_NOINTERFACE;
+                }
+                return table.StgOpenStorage.handler([pwcsName, 0, grfMode, 0, 0, out]);
             },
         },
     };

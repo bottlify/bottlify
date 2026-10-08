@@ -58,6 +58,7 @@ const ERROR_INVALID_SECURITY_DESCR = 1338;
 const ERROR_ALLOTTED_SPACE_EXCEEDED = 1344;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 const ERROR_NONE_MAPPED = 1332;
+const ERROR_BAD_TOKEN_TYPE = 1349;
 /** A machine named other than this one: there is no network to reach it over. */
 const RPC_S_SERVER_UNAVAILABLE = 1722;
 
@@ -174,6 +175,8 @@ const GROUP_ATTRIBUTES = 0x00000007;
 
 /** The pseudo-handle GetCurrentProcess hands out. */
 const CURRENT_PROCESS = 0xffffffff;
+/** The pseudo-handle GetCurrentThread answers. */
+const CURRENT_THREAD = 0xfffffffe;
 
 /**
  * A SID as its authority and sub-authorities: S-1-<authority>-<sub>...
@@ -467,6 +470,9 @@ const accountNamed = written=>{
  *              resolve: (handle: number, type?: string) => any }} handles
  *           The one handle table: a token is closed with CloseHandle like
  *           everything else.
+ * @property {() => any} [currentThread]
+ *           The calling thread, whose impersonation token SetThreadToken and
+ *           ImpersonateSelf set. Absent, every caller is one thread.
  */
 
 /**
@@ -475,6 +481,34 @@ const accountNamed = written=>{
  * @param {TokenHost} host
  */
 export function createTokenFunctions(host){
+    /**
+     * The token each thread impersonates with, by the thread: a thread with
+     * none acts as the process, which is every thread until it is given one.
+     *
+     * @type {Map<any, any>}
+     */
+    const impersonating = new Map();
+
+    /** Every caller, on a host that cannot say which thread is calling. */
+    const CALLER = Symbol('caller');
+    const callingThread = ()=>host.currentThread?.() ?? CALLER;
+
+    /** The thread a handle names, or null. @param {number} handle */
+    const threadNamed = handle=>{
+        if ((handle >>> 0) === CURRENT_THREAD)
+        {
+            return callingThread();
+        }
+        try
+        {
+            return host.handles.resolve(handle >>> 0, 'thread') ?? null;
+        }
+        catch (e){
+            void e;
+            return null;
+        }
+    };
+
     /** @param {number} address @param {number} value */
     const writeDword = (address, value)=>{
         const bytes = new Uint8Array(4);
@@ -1493,9 +1527,93 @@ export function createTokenFunctions(host){
         OpenThreadToken: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: args=>{
-                void args;
-                return fail(ERROR_NO_TOKEN);
+            handler: ([thread, , , out])=>{
+                const named = threadNamed(thread);
+                if (named === null)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                const token = impersonating.get(named);
+                if (!token)
+                {
+                    return fail(ERROR_NO_TOKEN);
+                }
+                if ((out >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                writeDword(out >>> 0, host.handles.open('token', token));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL SetThreadToken(PHANDLE Thread, HANDLE Token)
+         *
+         * The token a thread impersonates with -- the calling thread's when
+         * no thread is named. NULL reverts it to acting as the process; a
+         * primary token is not one a thread can impersonate with, and is
+         * refused with ERROR_BAD_TOKEN_TYPE as Windows refuses it.
+         * OpenThreadToken opens what was set.
+         */
+        SetThreadToken: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([threadPointer, tokenHandle])=>{
+                const thread = (threadPointer >>> 0) === 0 ? callingThread()
+                    : threadNamed(readDword(threadPointer));
+                if (thread === null)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if ((tokenHandle >>> 0) === 0)
+                {
+                    impersonating.delete(thread);
+                    return 1;
+                }
+                const token = isToken(tokenHandle)
+                    ? host.handles.resolve(tokenHandle >>> 0, 'token') : null;
+                if (!token)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if (token.impersonationLevel === undefined)
+                {
+                    return fail(ERROR_BAD_TOKEN_TYPE);
+                }
+                impersonating.set(thread, token);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL ImpersonateSelf(SECURITY_IMPERSONATION_LEVEL ImpersonationLevel)
+         *
+         * The calling thread impersonates the process's own account, at the
+         * level asked for: the one impersonation that always succeeds, after
+         * which OpenThreadToken finds a token.
+         */
+        ImpersonateSelf: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([level])=>{
+                impersonating.set(callingThread(),
+                    { process: CURRENT_PROCESS, impersonationLevel: level >>> 0 });
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL RevertToSelf(VOID)
+         *
+         * The calling thread stops impersonating, whatever it was given; one
+         * that was not is already reverted.
+         */
+        RevertToSelf: {
+            argBytes: 0,
+            handler: ()=>{
+                impersonating.delete(callingThread());
+                return 1;
             },
         },
 
@@ -1707,6 +1825,42 @@ export function createTokenFunctions(host){
                 }
                 host.writeMemory(destination >>> 0, host.readMemory(source >>> 0, length).slice());
                 return 1;
+            },
+        },
+
+        /**
+         * PSID_IDENTIFIER_AUTHORITY GetSidIdentifierAuthority(PSID pSid)
+         * PDWORD GetSidSubAuthority(PSID pSid, DWORD nSubAuthority)
+         * PUCHAR GetSidSubAuthorityCount(PSID pSid)
+         *
+         * Pointers into the SID itself -- the six-byte authority after the
+         * revision and the count, the count, a sub-authority by its index --
+         * so a program writes a SID it initialised through them. Nothing is
+         * checked, as Windows checks nothing: the last error is set to
+         * success, which is how a caller tells the pointer is good.
+         */
+        GetSidIdentifierAuthority: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([sid])=>{
+                host.setLastError(ERROR_SUCCESS);
+                return ((sid >>> 0) + 2) >>> 0;
+            },
+        },
+        GetSidSubAuthority: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([sid, index])=>{
+                host.setLastError(ERROR_SUCCESS);
+                return ((sid >>> 0) + 8 + 4 * (index >>> 0)) >>> 0;
+            },
+        },
+        GetSidSubAuthorityCount: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([sid])=>{
+                host.setLastError(ERROR_SUCCESS);
+                return ((sid >>> 0) + 1) >>> 0;
             },
         },
 

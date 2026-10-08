@@ -32,17 +32,23 @@
  */
 
 import {
-    AF_INET, FD_ACCEPT, FD_CLOSE, FD_CONNECT, FD_MAX_EVENTS, FD_READ, FD_WRITE,
-    FIONBIO, FIONREAD, HOSTENT, INADDR_LOOPBACK, INADDR_NONE, INVALID_SOCKET,
-    SOCKET_ERROR, SOCK_STREAM, SOL_SOCKET, SO_TYPE, WSADATA, WSADESCRIPTION, WSASYSSTATUS,
-    WSAEAFNOSUPPORT, WSAEFAULT, WSAEINVAL, WSAENOTSOCK, WSAEMSGSIZE, WSAEOPNOTSUPP, WSAEWOULDBLOCK,
-    WSAHOST_NOT_FOUND, WSANOTINITIALISED, WSANO_DATA, WSA_IO_PENDING, WSOCK32_ORDINALS,
-    WS2_32_ORDINALS,
+    ADDRINFO, AF_INET, AF_UNSPEC, AI_CANONNAME, AI_NUMERICHOST, AI_PASSIVE,
+    FD_ACCEPT, FD_CLOSE, FD_CONNECT, FD_MAX_EVENTS, FD_READ, FD_WRITE, FIONBIO, FIONREAD,
+    FROM_PROTOCOL_INFO, HOSTENT, INADDR_ANY, INADDR_LOOPBACK, INADDR_NONE, INVALID_SOCKET,
+    NI_DGRAM, NI_NAMEREQD, NI_NUMERICHOST, NI_NUMERICSERV, PROTOENT, SD_BOTH,
+    SOCKET_ERROR, SOCK_DGRAM, SOCK_RAW, SOCK_RDM, SOCK_SEQPACKET, SOCK_STREAM, SOL_SOCKET,
+    SO_TYPE, WSADATA, WSADESCRIPTION, WSAOVERLAPPED, WSAPROTOCOL_INFO, WSASYSSTATUS,
+    WSAEAFNOSUPPORT, WSAEFAULT, WSAEINVAL, WSAENOTSOCK, WSAEMSGSIZE, WSAEOPNOTSUPP,
+    WSAESOCKTNOSUPPORT, WSAEWOULDBLOCK, WSAHOST_NOT_FOUND, WSANOTINITIALISED, WSANO_DATA,
+    WSANO_RECOVERY, WSATYPE_NOT_FOUND, WSA_INVALID_HANDLE, WSA_INVALID_PARAMETER,
+    WSA_IO_INCOMPLETE, WSA_IO_PENDING, WSA_MAXIMUM_WAIT_EVENTS, WSA_NOT_ENOUGH_MEMORY,
+    WSA_OPERATION_ABORTED, WSA_WAIT_FAILED, WSOCK32_ORDINALS, WS2_32_ORDINALS,
 } from './constants.js';
 import {
     SOCKADDR_IN_SIZE, formatAddress, parseAddress, readSockaddr, swap16, swap32, writeSockaddr,
 } from './sockaddr.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { createRefusals } from '../common/refusal.js';
 
 /** The name this host answers to, and the only one it can resolve to itself. */
 const HOSTNAME = 'bottlify';
@@ -70,6 +76,37 @@ const SERVENT = { s_name: 0, s_aliases: 4, s_port: 8, s_proto: 12, SIZE: 16 };
 const SIO_GET_EXTENSION_FUNCTION_POINTER = 0xc8000006;
 
 /**
+ * The protocols of the protocol file Windows ships, each with its number and
+ * the alias that file gives it.
+ *
+ * @type {[string, number, string][]}
+ */
+const PROTOCOLS = [
+    ['ip', 0, 'IP'], ['icmp', 1, 'ICMP'], ['ggp', 3, 'GGP'], ['tcp', 6, 'TCP'],
+    ['egp', 8, 'EGP'], ['pup', 12, 'PUP'], ['udp', 17, 'UDP'], ['hmp', 20, 'HMP'],
+    ['xns-idp', 22, 'XNS-IDP'], ['rdp', 27, 'RDP'], ['rvd', 66, 'RVD'],
+];
+
+/**
+ * What an overlapped operation's Internal word holds: the status the system
+ * keeps there, pending until the operation completes, then its outcome.
+ */
+const STATUS_SUCCESS = 0;
+const STATUS_PENDING = 0x103;
+const STATUS_BUFFER_OVERFLOW = 0x80000005;
+const STATUS_UNSUCCESSFUL = 0xc0000001;
+const STATUS_CANCELLED = 0xc0000120;
+
+/** WSARecv's flags word, as it comes back: nothing partial is ever reported. */
+const NO_FLAGS = 0;
+
+/** TransmitFile's flags: a disconnect after the data, and the reuse that needs one. */
+const TF_DISCONNECT = 0x01;
+const TF_REUSE_SOCKET = 0x02;
+/** How much of a file TransmitFile reads at a time. */
+const TRANSMIT_CHUNK = 0x10000;
+
+/**
  * @typedef {Object} WinsockHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -85,6 +122,13 @@ const SIO_GET_EXTENSION_FUNCTION_POINTER = 0xc8000006;
  *           Signals a kernel event object by its guest handle, for
  *           WSAEventSelect. A stale or mistyped handle is the program's
  *           mistake, not a fault here.
+ * @property {(name: string) => ((args: number[]) => any) | undefined} [kernel32]
+ *           Another kernel32 export's handler, by name, read when it is
+ *           called: a WSAEVENT is a kernel event, so the event calls are
+ *           CreateEvent, SetEvent and the waits under other names, and
+ *           TransmitFile reads its file through ReadFile. Absent, those
+ *           calls are refused.
+ * @property {(api: string, detail: string) => void} [divergence]
  */
 
 /**
@@ -549,6 +593,434 @@ export function createWinsockFunctions(host){
     };
 
     /**
+     * socket(), and WSASocket after it has read the protocol description.
+     *
+     * @param {number} family @param {number} type
+     */
+    const createSocket = (family, type)=>{
+        const missing = needStarted();
+        if (missing !== null)
+        {
+            return fail(missing, INVALID_SOCKET);
+        }
+        if (family !== AF_INET)
+        {
+            return fail(WSAEAFNOSUPPORT, INVALID_SOCKET);
+        }
+        const made = registry.create(family, type);
+        return made.error ? fail(made.error, INVALID_SOCKET) : ok(made.value);
+    };
+
+    /**
+     * connect(), and WSAConnect without its connect data.
+     *
+     * @param {number} handle @param {number} name @param {number} length
+     */
+    const connectCall = (handle, name, length)=>{
+        const socket = socketOf(handle);
+        if (!socket)
+        {
+            return fail(WSAENOTSOCK);
+        }
+        if (length < SOCKADDR_IN_SIZE)
+        {
+            return fail(WSAEFAULT);
+        }
+        const address = readSockaddr(host.readMemory, name);
+        if (!address)
+        {
+            return fail(WSAEFAULT);
+        }
+        // Reaching anything outside this runtime takes a round trip, so
+        // the outcome may be a promise; the bridge parks the guest
+        // thread on one, which is what a blocking connect does anyway.
+        const settle = (/** @type {any} */ outcome)=>{
+            notifyConnect(socket, outcome);
+            return outcome.error ? fail(outcome.error) : ok(0);
+        };
+        const outcome = registry.connect(socket, address);
+        return outcome instanceof Promise ? outcome.then(settle) : settle(outcome);
+    };
+
+    /**
+     * A protoent in the one buffer this library keeps for it, valid until the
+     * next call: the name, then the one alias and the list that names it.
+     *
+     * @param {[string, number, string]} protocol
+     */
+    const writeProtoent = ([name, number, alias])=>{
+        const block = staticBuffer('protoent', PROTOENT.SIZE + 48);
+        const nameAt = block + PROTOENT.SIZE;
+        const aliasAt = nameAt + 16;
+        const aliasesAt = aliasAt + 16;
+        host.writeMemory(nameAt, sz(name));
+        host.writeMemory(aliasAt, sz(alias));
+        writeDword(aliasesAt, aliasAt);
+        writeDword(aliasesAt + 4, 0);
+        const record = new DataView(new ArrayBuffer(PROTOENT.SIZE));
+        record.setUint32(PROTOENT.p_name, nameAt, true);
+        record.setUint32(PROTOENT.p_aliases, aliasesAt, true);
+        record.setInt16(PROTOENT.p_proto, number, true);
+        host.writeMemory(block, new Uint8Array(record.buffer));
+        return block >>> 0;
+    };
+
+    /** A kernel32 export's handler, read when it is called. @param {string} name */
+    const kernel = name=>{
+        const handler = host.kernel32?.(name);
+        if (!handler)
+        {
+            throw new Error(`winsock: kernel32 has no ${name} to answer with`);
+        }
+        return handler;
+    };
+
+    /**
+     * Carries the kernel's reason for a failure it just reported into this
+     * library's slot: on Windows the two are one slot, and a program reads
+     * WSAGetLastError after WSACloseEvent.
+     *
+     * @param {number} result @param {number} fallback  When the kernel kept no reason.
+     */
+    const kernelFailure = (result, fallback)=>{
+        const code = host.kernel32?.('GetLastError')?.([]) ?? 0;
+        setError(code === 0 ? fallback : code);
+        return result >>> 0;
+    };
+
+    const refuse = createRefusals({ setLastError: setError, divergence: host.divergence });
+
+    /**
+     * An entry over kernel32, or -- on a host that reaches none -- its refusal.
+     *
+     * @param {string} name @param {number} argBytes
+     * @param {{ answer: number, lastError: number }} refusal
+     * @param {(args: number[]) => any} handler
+     */
+    const overKernel = (name, argBytes, refusal, handler)=>(host.kernel32
+        ? { argBytes, handler }
+        : refuse(name, { argBytes, ...refusal, why: 'no kernel32 is reachable from winsock' }));
+
+    /**
+     * The overlapped operations still in flight, by their WSAOVERLAPPED, each
+     * with what settles when it completes.
+     *
+     * @type {Map<number, Promise<void>>}
+     */
+    const inFlight = new Map();
+
+    /**
+     * How the overlapped operations that failed failed, by their WSAOVERLAPPED.
+     * Only the failures: a success is what Internal already says, and keeping
+     * nothing for one keeps this from growing with every operation.
+     *
+     * @type {Map<number, number>}
+     */
+    const failures = new Map();
+
+    /** The status an outcome leaves in Internal. @param {number} error */
+    const statusOf = error=>(error === 0 ? STATUS_SUCCESS
+        : error === WSAEMSGSIZE ? STATUS_BUFFER_OVERFLOW
+            : error === WSA_OPERATION_ABORTED ? STATUS_CANCELLED : STATUS_UNSUCCESSFUL);
+
+    /**
+     * The event an operation signals, read when the call is made: the low bit
+     * only asks that no completion port be told, and the rest is the handle.
+     *
+     * @param {number} overlapped
+     */
+    const eventOf = overlapped=>(readDword(overlapped + WSAOVERLAPPED.hEvent) & ~1) >>> 0;
+
+    /** An operation begun and not yet done, as Internal says while it lasts. */
+    const begin = (/** @type {number} */ overlapped)=>{
+        failures.delete(overlapped);
+        writeDword(overlapped + WSAOVERLAPPED.Internal, STATUS_PENDING);
+        writeDword(overlapped + WSAOVERLAPPED.InternalHigh, 0);
+    };
+
+    /**
+     * Completes an operation: its status and byte count where the system keeps
+     * them, then its event -- signalled also for one that completed at once,
+     * which Windows signals too, so a program that waits on it either way
+     * never waits for nothing.
+     *
+     * @param {number} overlapped @param {number} event
+     * @param {{ error: number, bytes: number }} outcome
+     */
+    const complete = (overlapped, event, { error, bytes })=>{
+        inFlight.delete(overlapped);
+        if (error === 0)
+        {
+            failures.delete(overlapped);
+        }
+        else
+        {
+            failures.set(overlapped, error);
+        }
+        writeDword(overlapped + WSAOVERLAPPED.Internal, statusOf(error));
+        writeDword(overlapped + WSAOVERLAPPED.InternalHigh, bytes);
+        if (event !== 0)
+        {
+            signalEvent(event);
+        }
+    };
+
+    /** The calls whose completion routine has been refused, said once each. */
+    const routinesRefused = new Set();
+
+    /**
+     * A completion routine runs as an APC on the calling thread the next time
+     * it waits alertably, and no APC queue is reachable from here. Refused
+     * rather than accepted and never run: a program told the call is pending
+     * waits for a routine that never comes.
+     *
+     * @param {string} api
+     */
+    const noRoutine = api=>{
+        if (!routinesRefused.has(api))
+        {
+            routinesRefused.add(api);
+            host.divergence?.(api, 'a completion routine needs an APC queue winsock cannot reach');
+        }
+        return fail(WSAEOPNOTSUPP);
+    };
+
+    /**
+     * What WSARecv and WSARecvFrom both are. The buffers and the address to
+     * fill are taken at the call; the bytes land in them now or, for an
+     * overlapped call that would have waited, when they arrive -- and then the
+     * operation completes in its WSAOVERLAPPED and signals its event.
+     *
+     * @param {{ handle: number, buffers: number, count: number, received: number,
+     *     flags: number, from: number, fromLength: number, overlapped: number,
+     *     routine: number }} call
+     * @param {string} api
+     */
+    const receiveCall = (call, api)=>{
+        const socket = socketOf(call.handle);
+        if (!socket)
+        {
+            return fail(WSAENOTSOCK);
+        }
+        if ((call.routine >>> 0) !== 0)
+        {
+            return noRoutine(api);
+        }
+        const from = call.from >>> 0;
+        const fromLength = call.fromLength >>> 0;
+        if (from !== 0 && (fromLength === 0 || (readDword(fromLength) | 0) < SOCKADDR_IN_SIZE))
+        {
+            return fail(WSAEFAULT);
+        }
+        const taken = readBuffers(call.buffers, call.count >>> 0);
+        const overlapped = call.overlapped >>> 0;
+        const event = overlapped === 0 ? 0 : eventOf(overlapped);
+        const attempt = ()=>registry.receive(socket, totalOf(taken));
+
+        /** @param {any} outcome @returns {{ error: number, bytes: number }} */
+        const deliver = outcome=>{
+            rearm(socket, 'read');
+            if (outcome.error)
+            {
+                return { error: outcome.error, bytes: 0 };
+            }
+            scatter(taken, outcome.bytes);
+            if (from !== 0 && outcome.from)
+            {
+                writeSockaddr(host.writeMemory, from, outcome.from);
+                writeDword(fromLength, SOCKADDR_IN_SIZE);
+            }
+            // A datagram that did not fit is a failure that still delivered
+            // what fitted, and says so after handing it over.
+            return { error: outcome.truncated ? WSAEMSGSIZE : 0, bytes: outcome.value };
+        };
+
+        /** The call's own answer, once the bytes are in. @param {{ error: number, bytes: number }} result */
+        const answer = result=>{
+            const delivered = result.error === 0 || result.error === WSAEMSGSIZE;
+            if (!delivered)
+            {
+                return fail(result.error);
+            }
+            if (overlapped !== 0)
+            {
+                complete(overlapped, event, result);
+            }
+            if ((call.received >>> 0) !== 0)
+            {
+                writeDword(call.received, result.bytes);
+            }
+            if ((call.flags >>> 0) !== 0)
+            {
+                writeDword(call.flags, NO_FLAGS);
+            }
+            return result.error === 0 ? ok(0) : fail(result.error);
+        };
+
+        const first = attempt();
+        if (first.error !== WSAEWOULDBLOCK)
+        {
+            return answer(deliver(first));
+        }
+        rearm(socket, 'read');
+        if (overlapped !== 0)
+        {
+            // Pending: the counts belong to the completion, and writing them
+            // now is what makes a program read a byte count for data that has
+            // not arrived. A socket closed under the operation aborts it.
+            begin(overlapped);
+            const record = { kind: 'recv', overlapped, buffers: taken };
+            socket.pending.push(record);
+            inFlight.set(overlapped, until(socket, attempt).then(outcome=>{
+                const at = socket.pending.indexOf(record);
+                if (at >= 0)
+                {
+                    socket.pending.splice(at, 1);
+                }
+                const result = deliver(outcome);
+                complete(overlapped, event, result.error === WSAENOTSOCK
+                    ? { error: WSA_OPERATION_ABORTED, bytes: 0 } : result);
+            }));
+            return fail(WSA_IO_PENDING);
+        }
+        if (socket.nonBlocking)
+        {
+            return fail(WSAEWOULDBLOCK);
+        }
+        return until(socket, attempt).then(outcome=>answer(deliver(outcome)));
+    };
+
+    /**
+     * What WSASend and WSASendTo both are: a send never waits here, so an
+     * overlapped one completes at once, in its WSAOVERLAPPED as well as in the
+     * count it was handed.
+     *
+     * @param {{ handle: number, buffers: number, count: number, sent: number,
+     *     to: number, toLength: number, overlapped: number, routine: number }} call
+     * @param {string} api
+     */
+    const sendCall = (call, api)=>{
+        const socket = socketOf(call.handle);
+        if (!socket)
+        {
+            return fail(WSAENOTSOCK);
+        }
+        if ((call.routine >>> 0) !== 0)
+        {
+            return noRoutine(api);
+        }
+        const to = call.to >>> 0;
+        if (to !== 0 && (call.toLength | 0) < SOCKADDR_IN_SIZE)
+        {
+            return fail(WSAEFAULT);
+        }
+        const target = to === 0 ? null : readSockaddr(host.readMemory, to);
+        if (to !== 0 && !target)
+        {
+            return fail(WSAEFAULT);
+        }
+        const overlapped = call.overlapped >>> 0;
+        const event = overlapped === 0 ? 0 : eventOf(overlapped);
+        const outcome = registry.send(socket, gather(readBuffers(call.buffers, call.count >>> 0)),
+            target);
+        if (outcome.error)
+        {
+            return fail(outcome.error);
+        }
+        if (overlapped !== 0)
+        {
+            complete(overlapped, event, { error: 0, bytes: outcome.value });
+        }
+        if ((call.sent >>> 0) !== 0)
+        {
+            writeDword(call.sent, outcome.value);
+        }
+        return ok(0);
+    };
+
+    /**
+     * The name a host is asked by, as a number: a literal, this machine by
+     * either of its names, or -- for anything else -- null, which the
+     * transport's resolver is asked about.
+     *
+     * @param {string} name
+     */
+    const resolveLocally = name=>{
+        const literal = parseAddress(name);
+        // The one address whose number is also inet_addr's failure.
+        if (literal !== INADDR_NONE || name.trim() === '255.255.255.255')
+        {
+            return literal;
+        }
+        return name === HOSTNAME || name === 'localhost' || name === '' ? INADDR_LOOPBACK : null;
+    };
+
+    /**
+     * The nodes getaddrinfo handed out, so freeaddrinfo frees only what was
+     * ours: a pointer it never made is the program's mistake, not a block to
+     * hand back to the heap.
+     *
+     * @type {Set<number>}
+     */
+    const addrinfoNodes = new Set();
+
+    /**
+     * A getaddrinfo answer in guest memory: one node per address, each a block
+     * of its own with its sockaddr after it -- so a program that frees part of
+     * the chain frees exactly that part -- and the canonical name, when asked
+     * for, after the first.
+     *
+     * @param {number[]} addresses host order
+     * @param {number} port
+     * @param {{ socktype: number, protocol: number }} hints
+     * @param {string | null} canonical
+     */
+    const writeAddrinfo = (addresses, port, hints, canonical)=>{
+        let next = 0;
+        for (let at = addresses.length - 1; at >= 0; at--)
+        {
+            const name = at === 0 && canonical !== null ? sz(canonical) : null;
+            const block = host.heap.allocate(ADDRINFO.SIZE + SOCKADDR_IN_SIZE
+                + (name ? name.length : 0)) >>> 0;
+            if (block === 0)
+            {
+                return 0;
+            }
+            addrinfoNodes.add(block);
+            const addressAt = block + ADDRINFO.SIZE;
+            const nameAt = addressAt + SOCKADDR_IN_SIZE;
+            const node = new DataView(new ArrayBuffer(ADDRINFO.SIZE));
+            node.setInt32(ADDRINFO.ai_flags, 0, true);
+            node.setInt32(ADDRINFO.ai_family, AF_INET, true);
+            node.setInt32(ADDRINFO.ai_socktype, hints.socktype, true);
+            node.setInt32(ADDRINFO.ai_protocol, hints.protocol, true);
+            node.setUint32(ADDRINFO.ai_addrlen, SOCKADDR_IN_SIZE, true);
+            node.setUint32(ADDRINFO.ai_canonname, name ? nameAt : 0, true);
+            node.setUint32(ADDRINFO.ai_addr, addressAt, true);
+            node.setUint32(ADDRINFO.ai_next, next, true);
+            host.writeMemory(block, new Uint8Array(node.buffer));
+            writeSockaddr(host.writeMemory, addressAt, { host: addresses[at], port });
+            if (name)
+            {
+                host.writeMemory(nameAt, name);
+            }
+            next = block;
+        }
+        return next;
+    };
+
+    /**
+     * A getaddrinfo or getnameinfo failure: the code is the answer, and the
+     * error slot holds it too.
+     *
+     * @param {number} code
+     */
+    const eai = code=>{
+        setError(code);
+        return code >>> 0;
+    };
+
+    /**
      * The socket calls, shared by wsock32 and ws2_32.
      *
      * One table and one registry, because they are one library as far as a
@@ -640,19 +1112,7 @@ export function createWinsockFunctions(host){
         socket: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([family, type])=>{
-                const missing = needStarted();
-                if (missing !== null)
-                {
-                    return fail(missing, INVALID_SOCKET);
-                }
-                if (family !== AF_INET)
-                {
-                    return fail(WSAEAFNOSUPPORT, INVALID_SOCKET);
-                }
-                const made = registry.create(family, type);
-                return made.error ? fail(made.error, INVALID_SOCKET) : ok(made.value);
-            },
+            handler: ([family, type])=>createSocket(family, type),
         },
 
         closesocket: {
@@ -713,31 +1173,7 @@ export function createWinsockFunctions(host){
         connect: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([handle, name, length])=>{
-                const socket = socketOf(handle);
-                if (!socket)
-                {
-                    return fail(WSAENOTSOCK);
-                }
-                if (length < SOCKADDR_IN_SIZE)
-                {
-                    return fail(WSAEFAULT);
-                }
-                const address = readSockaddr(host.readMemory, name);
-                if (!address)
-                {
-                    return fail(WSAEFAULT);
-                }
-                // Reaching anything outside this runtime takes a round trip, so
-                // the outcome may be a promise; the bridge parks the guest
-                // thread on one, which is what a blocking connect does anyway.
-                const settle = (/** @type {any} */ outcome)=>{
-                    notifyConnect(socket, outcome);
-                    return outcome.error ? fail(outcome.error) : ok(0);
-                };
-                const outcome = registry.connect(socket, address);
-                return outcome instanceof Promise ? outcome.then(settle) : settle(outcome);
-            },
+            handler: ([handle, name, length])=>connectCall(handle, name, length),
         },
 
         accept: {
@@ -1430,100 +1866,609 @@ export function createWinsockFunctions(host){
         },
 
         /**
-         * The overlapped pair.
+         * The overlapped calls.
          *
-         * Everything the completion would need is taken now, and the completion
-         * itself has nowhere to go: posting one needs a completion port, and
-         * there is no CreateIoCompletionPort here yet. So an operation that
-         * cannot finish immediately is recorded and reported as pending, and
-         * the out-parameters are deliberately left alone -- on the pending path
-         * the count belongs to the completion packet, and writing it here is
-         * what makes a program read a byte count for data that has not arrived.
-         *
-         * ponytail: pending operations accumulate on the socket with no port to
-         * drain them. Wire them to CreateIoCompletionPort when it lands.
+         * Everything the completion needs is taken at the call. One that
+         * finishes at once completes at once -- its counts written, its
+         * WSAOVERLAPPED filled in and its event signalled, as Windows does for
+         * a call that did not have to wait. One that would wait answers
+         * WSA_IO_PENDING and completes in its WSAOVERLAPPED when the bytes
+         * arrive, signalling its event then; WSAGetOverlappedResult reads it.
+         * A completion routine is refused (`noRoutine`), and so is a
+         * completion port: there is no CreateIoCompletionPort to post to.
+         */
+
+        /**
+         * int WSARecv(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
+         *   LPDWORD lpNumberOfBytesRecvd, LPDWORD lpFlags,
+         *   LPWSAOVERLAPPED lpOverlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE)
          */
         WSARecv: {
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([handle, buffers, count, received, flags, overlapped])=>{
-                const socket = socketOf(handle);
-                if (!socket)
-                {
-                    return fail(WSAENOTSOCK);
-                }
-                const taken = readBuffers(buffers, count >>> 0);
-                const outcome = registry.receive(socket, totalOf(taken));
-                rearm(socket, 'read');
-                if (!outcome.error)
-                {
-                    scatter(taken, outcome.bytes);
-                    if (received !== 0)
-                    {
-                        writeDword(received, outcome.value);
-                    }
-                    if (flags !== 0)
-                    {
-                        writeDword(flags, 0);
-                    }
-                    return ok(0);
-                }
-                if (outcome.error !== WSAEWOULDBLOCK)
-                {
-                    return fail(outcome.error);
-                }
-                if (overlapped !== 0)
-                {
-                    socket.pending.push({ kind: 'recv', overlapped, buffers: taken });
-                    return fail(WSA_IO_PENDING);
-                }
-                if (socket.nonBlocking)
-                {
-                    return fail(WSAEWOULDBLOCK);
-                }
-                return until(socket, ()=>registry.receive(socket, totalOf(taken)))
-                    .then(later=>{
-                        rearm(socket, 'read');
-                        if (later.error)
-                        {
-                            return fail(later.error);
-                        }
-                        scatter(taken, later.bytes);
-                        if (received !== 0)
-                        {
-                            writeDword(received, later.value);
-                        }
-                        if (flags !== 0)
-                        {
-                            writeDword(flags, 0);
-                        }
-                        return ok(0);
-                    });
-            },
+            handler: ([handle, buffers, count, received, flags, overlapped, routine])=>
+                receiveCall({ handle, buffers, count, received, flags, from: 0, fromLength: 0,
+                    overlapped, routine }, 'WSARecv'),
         },
 
+        /**
+         * int WSARecvFrom(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
+         *   LPDWORD lpNumberOfBytesRecvd, LPDWORD lpFlags, struct sockaddr *lpFrom,
+         *   LPINT lpFromlen, LPWSAOVERLAPPED lpOverlapped,
+         *   LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+         *
+         * WSARecv with the sender's address, written with the bytes: a
+         * length that cannot hold a sockaddr_in is WSAEFAULT before anything
+         * is read.
+         */
+        WSARecvFrom: {
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: ([handle, buffers, count, received, flags, from, fromLength, overlapped,
+                routine])=>receiveCall({
+                handle, buffers, count, received, flags, from, fromLength, overlapped, routine,
+            }, 'WSARecvFrom'),
+        },
+
+        /**
+         * int WSASend(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
+         *   LPDWORD lpNumberOfBytesSent, DWORD dwFlags, LPWSAOVERLAPPED lpOverlapped,
+         *   LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+         */
         WSASend: {
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([handle, buffers, count, sent])=>{
+            handler: ([handle, buffers, count, sent, , overlapped, routine])=>sendCall({
+                handle, buffers, count, sent, to: 0, toLength: 0, overlapped, routine,
+            }, 'WSASend'),
+        },
+
+        /**
+         * int WSASendTo(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
+         *   LPDWORD lpNumberOfBytesSent, DWORD dwFlags, const struct sockaddr *lpTo,
+         *   int iTolen, LPWSAOVERLAPPED lpOverlapped,
+         *   LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+         *
+         * sendto over a WSABUF array. A stream socket goes to its peer
+         * whatever address it is given, as sendto's does.
+         */
+        WSASendTo: {
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: ([handle, buffers, count, sent, , to, toLength, overlapped, routine])=>
+                sendCall({ handle, buffers, count, sent, to, toLength, overlapped, routine },
+                    'WSASendTo'),
+        },
+
+        /**
+         * BOOL WSAGetOverlappedResult(SOCKET s, LPWSAOVERLAPPED lpOverlapped,
+         *   LPDWORD lpcbTransfer, BOOL fWait, LPDWORD lpdwFlags)
+         *
+         * What an overlapped operation came to: its byte count and TRUE, or
+         * FALSE with the reason it failed. Still pending, it is
+         * WSA_IO_INCOMPLETE -- or, with fWait, the answer once it completes.
+         */
+        WSAGetOverlappedResult: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, overlapped, transferred, wait, flags])=>{
+                if (!socketOf(handle))
+                {
+                    return fail(WSAENOTSOCK, 0);
+                }
+                if ((overlapped >>> 0) === 0 || (transferred >>> 0) === 0)
+                {
+                    return fail(WSAEFAULT, 0);
+                }
+                const at = overlapped >>> 0;
+                const report = ()=>{
+                    const status = readDword(at + WSAOVERLAPPED.Internal);
+                    writeDword(transferred, readDword(at + WSAOVERLAPPED.InternalHigh));
+                    if ((flags >>> 0) !== 0)
+                    {
+                        writeDword(flags, NO_FLAGS);
+                    }
+                    const error = failures.get(at) ?? (status === STATUS_SUCCESS ? 0 : WSAEINVAL);
+                    return error === 0 ? 1 : fail(error, 0);
+                };
+                if (readDword(at + WSAOVERLAPPED.Internal) !== STATUS_PENDING)
+                {
+                    return report();
+                }
+                const waiting = inFlight.get(at);
+                if (wait === 0 || !waiting)
+                {
+                    return fail(WSA_IO_INCOMPLETE, 0);
+                }
+                return waiting.then(report);
+            },
+        },
+
+        /**
+         * The event calls. A WSAEVENT is a manual-reset kernel event, so
+         * these are CreateEvent, CloseHandle, SetEvent, ResetEvent and
+         * WaitForMultipleObjectsEx under other names -- an event made here is
+         * one WaitForSingleObject waits on, and one WSAEventSelect signals --
+         * with the kernel's reason for a failure carried into this library's
+         * slot.
+         */
+
+        /** WSAEVENT WSACreateEvent(void): manual reset, not signalled, unnamed. */
+        WSACreateEvent: overKernel('WSACreateEvent', 0,
+            { answer: 0, lastError: WSA_NOT_ENOUGH_MEMORY }, ()=>{
+                const event = kernel('CreateEventA')([0, 1, 0, 0]) >>> 0;
+                return event === 0 ? kernelFailure(0, WSA_NOT_ENOUGH_MEMORY) : event;
+            }),
+
+        /** BOOL WSACloseEvent(WSAEVENT hEvent) */
+        WSACloseEvent: overKernel('WSACloseEvent', 4,
+            { answer: 0, lastError: WSA_INVALID_HANDLE },
+            ([event])=>(kernel('CloseHandle')([event]) !== 0
+                ? 1 : kernelFailure(0, WSA_INVALID_HANDLE))),
+
+        /** BOOL WSASetEvent(WSAEVENT hEvent) */
+        WSASetEvent: overKernel('WSASetEvent', 4,
+            { answer: 0, lastError: WSA_INVALID_HANDLE },
+            ([event])=>(kernel('SetEvent')([event]) !== 0
+                ? 1 : kernelFailure(0, WSA_INVALID_HANDLE))),
+
+        /** BOOL WSAResetEvent(WSAEVENT hEvent) */
+        WSAResetEvent: overKernel('WSAResetEvent', 4,
+            { answer: 0, lastError: WSA_INVALID_HANDLE },
+            ([event])=>(kernel('ResetEvent')([event]) !== 0
+                ? 1 : kernelFailure(0, WSA_INVALID_HANDLE))),
+
+        /**
+         * DWORD WSAWaitForMultipleEvents(DWORD cEvents, const WSAEVENT *lphEvents,
+         *   BOOL fWaitAll, DWORD dwTimeout, BOOL fAlertable)
+         *
+         * WaitForMultipleObjectsEx with the same five arguments: the answers
+         * -- WSA_WAIT_EVENT_0 + n, WSA_WAIT_TIMEOUT, WSA_WAIT_IO_COMPLETION --
+         * are the kernel's under other names. No events, or more than
+         * WSA_MAXIMUM_WAIT_EVENTS, is WSA_INVALID_PARAMETER.
+         */
+        WSAWaitForMultipleEvents: overKernel('WSAWaitForMultipleEvents', 20,
+            { answer: WSA_WAIT_FAILED, lastError: WSA_INVALID_PARAMETER },
+            ([count, events, waitAll, timeout, alertable])=>{
+                const total = count >>> 0;
+                if (total === 0 || total > WSA_MAXIMUM_WAIT_EVENTS || (events >>> 0) === 0)
+                {
+                    return fail(WSA_INVALID_PARAMETER, WSA_WAIT_FAILED);
+                }
+                const settle = (/** @type {number} */ result)=>((result >>> 0) === WSA_WAIT_FAILED
+                    ? kernelFailure(WSA_WAIT_FAILED, WSA_INVALID_HANDLE) : result >>> 0);
+                const result = kernel('WaitForMultipleObjectsEx')(
+                    [total, events, waitAll, timeout, alertable]);
+                return result instanceof Promise ? result.then(settle) : settle(result);
+            }),
+
+        /**
+         * int WSAConnect(SOCKET s, const struct sockaddr *name, int namelen,
+         *   LPWSABUF lpCallerData, LPWSABUF lpCalleeData, LPQOS lpSQOS, LPQOS lpGQOS)
+         *
+         * connect: TCP/IP carries no connect data and grants no quality of
+         * service, so the caller's data is not sent and the callee's comes
+         * back empty.
+         */
+        WSAConnect: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([handle, name, length, , calleeData])=>{
+                if ((calleeData >>> 0) !== 0 && socketOf(handle))
+                {
+                    writeDword(calleeData, 0);
+                }
+                return connectCall(handle, name, length);
+            },
+        },
+
+        /**
+         * SOCKET WSASocketA(int af, int type, int protocol,
+         *   LPWSAPROTOCOL_INFOA lpProtocolInfo, GROUP g, DWORD dwFlags)
+         *
+         * socket, with FROM_PROTOCOL_INFO taken from the description the
+         * caller passed. Every socket here takes overlapped calls, so
+         * WSA_FLAG_OVERLAPPED changes nothing; a socket group is not one
+         * this stack forms.
+         */
+        WSASocketA: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([family, type, protocol, info, group])=>{
+                void protocol;
+                if ((group >>> 0) !== 0)
+                {
+                    return fail(WSAEINVAL, INVALID_SOCKET);
+                }
+                const described = (/** @type {number} */ value, /** @type {number} */ offset)=>
+                    ((value | 0) === FROM_PROTOCOL_INFO && (info >>> 0) !== 0
+                        ? readDword((info >>> 0) + offset) : value);
+                return createSocket(described(family, WSAPROTOCOL_INFO.iAddressFamily),
+                    described(type, WSAPROTOCOL_INFO.iSocketType));
+            },
+        },
+
+        /**
+         * int getaddrinfo(PCSTR pNodeName, PCSTR pServiceName,
+         *   const ADDRINFOA *pHints, PADDRINFOA *ppResult)
+         *
+         * gethostbyname's resolution, as a list of ADDRINFOA in guest memory
+         * -- IPv4 alone, as on a Windows XP without the IPv6 stack installed.
+         * No node is the loopback, or "any" with AI_PASSIVE; a service is a
+         * port number or a name from the services file. The answer is the
+         * error code itself (zero for success), which the error slot holds
+         * too; a failure leaves the result NULL.
+         */
+        getaddrinfo: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([nodePointer, servicePointer, hintsPointer, result])=>{
+                if ((result >>> 0) !== 0)
+                {
+                    writeDword(result, 0);
+                }
+                if (!started)
+                {
+                    return eai(WSANOTINITIALISED);
+                }
+                if ((result >>> 0) === 0)
+                {
+                    return eai(WSAEINVAL);
+                }
+                if ((nodePointer >>> 0) === 0 && (servicePointer >>> 0) === 0)
+                {
+                    return eai(WSAHOST_NOT_FOUND);
+                }
+                let flags = 0;
+                let family = AF_UNSPEC;
+                let socktype = 0;
+                let protocol = 0;
+                if ((hintsPointer >>> 0) !== 0)
+                {
+                    const hints = new DataView(
+                        host.readMemory(hintsPointer >>> 0, ADDRINFO.SIZE).slice().buffer);
+                    flags = hints.getInt32(ADDRINFO.ai_flags, true);
+                    family = hints.getInt32(ADDRINFO.ai_family, true);
+                    socktype = hints.getInt32(ADDRINFO.ai_socktype, true);
+                    protocol = hints.getInt32(ADDRINFO.ai_protocol, true);
+                    // A hint's other members are documented to be zero.
+                    if ([ADDRINFO.ai_addrlen, ADDRINFO.ai_canonname, ADDRINFO.ai_addr,
+                        ADDRINFO.ai_next].some(at=>hints.getUint32(at, true) !== 0))
+                    {
+                        return eai(WSANO_RECOVERY);
+                    }
+                }
+                if ((flags & ~(AI_PASSIVE | AI_CANONNAME | AI_NUMERICHOST)) !== 0
+                    || ((flags & AI_CANONNAME) !== 0 && (nodePointer >>> 0) === 0))
+                {
+                    return eai(WSAEINVAL);
+                }
+                if (family !== AF_UNSPEC && family !== AF_INET)
+                {
+                    return eai(WSAEAFNOSUPPORT);
+                }
+                if (![0, SOCK_STREAM, SOCK_DGRAM, SOCK_RAW, SOCK_RDM, SOCK_SEQPACKET]
+                    .includes(socktype))
+                {
+                    return eai(WSAESOCKTNOSUPPORT);
+                }
+
+                let port = 0;
+                if ((servicePointer >>> 0) !== 0)
+                {
+                    const service = host.readCString(servicePointer >>> 0, 64);
+                    if (/^\d+$/.test(service))
+                    {
+                        port = Number(service);
+                        if (port > 0xffff)
+                        {
+                            return eai(WSATYPE_NOT_FOUND);
+                        }
+                    }
+                    else
+                    {
+                        const proto = socktype === SOCK_STREAM ? 'tcp'
+                            : socktype === SOCK_DGRAM ? 'udp' : null;
+                        const found = SERVICES.find(([name, , protocols])=>
+                            name === service.toLowerCase()
+                            && (proto === null || protocols.includes(proto)));
+                        if (!found)
+                        {
+                            return eai(WSATYPE_NOT_FOUND);
+                        }
+                        port = found[1];
+                    }
+                }
+
+                const shape = { socktype, protocol };
+                const reply = (/** @type {number[]} */ addresses, /** @type {string | null} */ name)=>{
+                    const list = writeAddrinfo(addresses, port, shape,
+                        (flags & AI_CANONNAME) !== 0 ? name : null);
+                    if (list === 0)
+                    {
+                        return eai(WSA_NOT_ENOUGH_MEMORY);
+                    }
+                    writeDword(result, list);
+                    return 0;
+                };
+                if ((nodePointer >>> 0) === 0)
+                {
+                    return reply([(flags & AI_PASSIVE) !== 0 ? INADDR_ANY : INADDR_LOOPBACK], null);
+                }
+                const name = host.readCString(nodePointer >>> 0, 256);
+                const numeric = parseAddress(name) !== INADDR_NONE
+                    || name.trim() === '255.255.255.255';
+                if ((flags & AI_NUMERICHOST) !== 0 && !numeric)
+                {
+                    return eai(WSAHOST_NOT_FOUND);
+                }
+                const local = resolveLocally(name);
+                if (local !== null)
+                {
+                    return reply([local], name);
+                }
+                const asked = registry.resolve(name);
+                if (!asked)
+                {
+                    return eai(WSAHOST_NOT_FOUND);
+                }
+                return asked.then((/** @type {number[]} */ found)=>(found.length === 0
+                    ? eai(WSAHOST_NOT_FOUND) : reply(found, name)));
+            },
+        },
+
+        /**
+         * void freeaddrinfo(PADDRINFOA pAddrInfo)
+         *
+         * Frees the chain from the node given to its end, a node at a time,
+         * as getaddrinfo made them. A pointer it did not make is left alone.
+         */
+        freeaddrinfo: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([list])=>{
+                let node = list >>> 0;
+                while (node !== 0 && addrinfoNodes.has(node))
+                {
+                    const next = readDword(node + ADDRINFO.ai_next);
+                    addrinfoNodes.delete(node);
+                    host.heap.free?.(node);
+                    node = next;
+                }
+                return 0;
+            },
+        },
+
+        /**
+         * int getnameinfo(const struct sockaddr *sa, socklen_t salen, char *host,
+         *   DWORD hostlen, char *serv, DWORD servlen, int flags)
+         *
+         * gethostbyaddr's reverse lookup and getservbyname's table, the other
+         * way round: the loopback is this machine's name and any other
+         * address is its own dotted form -- or, with NI_NAMEREQD, not found.
+         * A port the services file names is that name, any other its number.
+         */
+        getnameinfo: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([pointer, length, hostOut, hostLength, servOut, servLength, flags])=>{
+                if (!started)
+                {
+                    return eai(WSANOTINITIALISED);
+                }
+                if ((pointer >>> 0) === 0)
+                {
+                    return eai(WSAEFAULT);
+                }
+                const address = /** @type {{ family: number, host: number, port: number }} */ (
+                    readSockaddr(host.readMemory, pointer >>> 0));
+                if (address.family !== AF_INET)
+                {
+                    return eai(WSAEAFNOSUPPORT);
+                }
+                if ((length | 0) < SOCKADDR_IN_SIZE)
+                {
+                    return eai(WSAEFAULT);
+                }
+                const wantHost = (hostOut >>> 0) !== 0 && (hostLength >>> 0) !== 0;
+                const wantService = (servOut >>> 0) !== 0 && (servLength >>> 0) !== 0;
+                if (!wantHost && !wantService)
+                {
+                    return eai(WSAHOST_NOT_FOUND);
+                }
+                /** @type {Uint8Array | null} */
+                let hostText = null;
+                if (wantHost)
+                {
+                    const reversed = address.host === INADDR_LOOPBACK
+                        && (flags & NI_NUMERICHOST) === 0;
+                    if (!reversed && (flags & (NI_NUMERICHOST | NI_NAMEREQD)) === NI_NAMEREQD)
+                    {
+                        return eai(WSAHOST_NOT_FOUND);
+                    }
+                    hostText = sz(reversed ? HOSTNAME : formatAddress(address.host));
+                }
+                /** @type {Uint8Array | null} */
+                let serviceText = null;
+                if (wantService)
+                {
+                    const proto = (flags & NI_DGRAM) !== 0 ? 'udp' : 'tcp';
+                    const found = (flags & NI_NUMERICSERV) === 0
+                        ? SERVICES.find(([, port, protocols])=>port === address.port
+                            && protocols.includes(proto))
+                        : undefined;
+                    serviceText = sz(found ? found[0] : String(address.port));
+                }
+                if ((hostText && hostText.length > (hostLength >>> 0))
+                    || (serviceText && serviceText.length > (servLength >>> 0)))
+                {
+                    return eai(WSAEFAULT);
+                }
+                if (hostText)
+                {
+                    host.writeMemory(hostOut >>> 0, hostText);
+                }
+                if (serviceText)
+                {
+                    host.writeMemory(servOut >>> 0, serviceText);
+                }
+                return 0;
+            },
+        },
+
+        /**
+         * struct protoent* getprotobyname(const char *name)
+         * struct protoent* getprotobynumber(int number)
+         *
+         * A protocol the protocol file lists, by its name or its alias in any
+         * case, or by its number, in the one buffer this library keeps for
+         * it. One it does not list is WSANO_DATA and NULL.
+         */
+        getprotobyname: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                if ((pointer >>> 0) === 0)
+                {
+                    return fail(WSAEFAULT, 0);
+                }
+                const name = host.readCString(pointer >>> 0, 64).toLowerCase();
+                const found = PROTOCOLS.find(([own, , alias])=>own === name
+                    || alias.toLowerCase() === name);
+                return found ? writeProtoent(found) : fail(WSANO_DATA, 0);
+            },
+        },
+
+        getprotobynumber: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([number])=>{
+                const found = PROTOCOLS.find(([, own])=>own === (number | 0));
+                return found ? writeProtoent(found) : fail(WSANO_DATA, 0);
+            },
+        },
+
+        /**
+         * BOOL TransmitFile(SOCKET hSocket, HANDLE hFile, DWORD nNumberOfBytesToWrite,
+         *   DWORD nNumberOfBytesPerSend, LPOVERLAPPED lpOverlapped,
+         *   LPTRANSMIT_FILE_BUFFERS lpTransmitBuffers, DWORD dwReserved)
+         *
+         * The head, the file from where its position stands -- all of it, or
+         * the count asked for -- and the tail, sent as one; read through
+         * ReadFile, so a file is whatever kernel32 opened. TF_DISCONNECT shuts
+         * the connection down after. An overlapped call completes at once,
+         * as every send here does.
+         */
+        TransmitFile: overKernel('TransmitFile', 28, { answer: 0, lastError: WSAEOPNOTSUPP },
+            ([handle, file, total, , overlapped, buffers, flags])=>{
                 const socket = socketOf(handle);
                 if (!socket)
                 {
-                    return fail(WSAENOTSOCK);
+                    return fail(WSAENOTSOCK, 0);
                 }
-                const taken = readBuffers(buffers, count >>> 0);
-                const outcome = registry.send(socket, gather(taken));
-                if (outcome.error)
+                const how = flags >>> 0;
+                if ((how & TF_REUSE_SOCKET) !== 0 && (how & TF_DISCONNECT) === 0)
                 {
-                    return fail(outcome.error);
+                    return fail(WSAEINVAL, 0);
                 }
-                if (sent !== 0)
+                /** @param {number} at @param {number} bytes */
+                const taken = (at, bytes)=>(at === 0 || bytes === 0
+                    ? new Uint8Array(0) : host.readMemory(at, bytes).slice());
+                const extra = (buffers >>> 0) === 0 ? null : {
+                    head: taken(readDword(buffers), readDword((buffers >>> 0) + 4)),
+                    tail: taken(readDword((buffers >>> 0) + 8), readDword((buffers >>> 0) + 12)),
+                };
+                const event = (overlapped >>> 0) === 0 ? 0 : eventOf(overlapped >>> 0);
+                const wanted = total >>> 0;
+                const scratch = (file >>> 0) === 0 ? 0
+                    : host.heap.allocate(TRANSMIT_CHUNK + 4) >>> 0;
+                if ((file >>> 0) !== 0 && scratch === 0)
                 {
-                    writeDword(sent, outcome.value);
+                    return fail(WSA_NOT_ENOUGH_MEMORY, 0);
                 }
-                return ok(0);
-            },
-        },
+                /** @type {Uint8Array[]} */
+                const parts = extra ? [extra.head] : [];
+                let read = 0;
+
+                /** @param {boolean} failed  Whether the file could not be read. */
+                const finish = failed=>{
+                    if (scratch !== 0)
+                    {
+                        host.heap.free?.(scratch);
+                    }
+                    if (failed)
+                    {
+                        return kernelFailure(0, WSA_INVALID_HANDLE);
+                    }
+                    if (extra)
+                    {
+                        parts.push(extra.tail);
+                    }
+                    const body = new Uint8Array(parts.reduce((sum, part)=>sum + part.length, 0));
+                    let at = 0;
+                    for (const part of parts)
+                    {
+                        body.set(part, at);
+                        at += part.length;
+                    }
+                    const outcome = registry.send(socket, body);
+                    if (outcome.error)
+                    {
+                        return fail(outcome.error, 0);
+                    }
+                    if ((how & TF_DISCONNECT) !== 0)
+                    {
+                        registry.shutdown(socket, SD_BOTH);
+                    }
+                    if ((overlapped >>> 0) !== 0)
+                    {
+                        complete(overlapped >>> 0, event, { error: 0, bytes: outcome.value });
+                    }
+                    return 1;
+                };
+
+                /**
+                 * What one ReadFile came to: the call's answer once the file
+                 * is done with, or null to read on.
+                 *
+                 * @param {number} succeeded
+                 */
+                const took = succeeded=>{
+                    if (succeeded === 0)
+                    {
+                        return finish(true);
+                    }
+                    const got = readDword(scratch + TRANSMIT_CHUNK);
+                    if (got === 0)
+                    {
+                        return finish(false);
+                    }
+                    parts.push(host.readMemory(scratch, got).slice());
+                    read += got;
+                    return wanted !== 0 && read >= wanted ? finish(false) : null;
+                };
+
+                /** @returns {number | Promise<number>} */
+                const pump = ()=>{
+                    for (;;)
+                    {
+                        const ask = wanted === 0 ? TRANSMIT_CHUNK
+                            : Math.min(TRANSMIT_CHUNK, wanted - read);
+                        const result = kernel('ReadFile')(
+                            [file, scratch, ask, scratch + TRANSMIT_CHUNK, 0]);
+                        if (result instanceof Promise)
+                        {
+                            return result.then(value=>took(value) ?? pump());
+                        }
+                        const verdict = took(result);
+                        if (verdict !== null)
+                        {
+                            return verdict;
+                        }
+                    }
+                };
+                return (file >>> 0) === 0 ? finish(false) : pump();
+            }),
     };
 
     /** The extensions, which a program reaches by name through GetProcAddress. */

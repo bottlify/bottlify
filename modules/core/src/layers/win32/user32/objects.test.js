@@ -1140,3 +1140,401 @@ test('a window\'s context help id is read back, and a window that is not one has
     assert.equal(fns.SetWindowContextHelpId.handler([0x9999, 1]), 0);
     assert.equal(fns.GetWindowContextHelpId.handler([0x9999]), 0);
 });
+
+// --- default items, radio groups, highlighting, help ids ---
+
+const MF_GRAYED = 0x0001;
+const MF_CHECKED = 0x0008;
+const MF_HILITE = 0x0080;
+const MF_POPUP = 0x0010;
+const MF_SEPARATOR = 0x0800;
+const MFS_DEFAULT = 0x1000;
+const MFT_RADIOCHECK = 0x0200;
+const GMDI_USEDISABLED = 0x0001;
+const GMDI_GOINTOPOPUPS = 0x0002;
+const ERROR_INVALID_MENU_HANDLE = 1401;
+const NONE = 0xffffffff;
+
+/** A popup of the given commands, each named after its id. @param {any} fns @param {any} memory */
+function popupOf(fns, memory, /** @type {number[]} */ ids){
+    const menu = fns.CreatePopupMenu.handler([]);
+    for (const id of ids)
+    {
+        fns.AppendMenuA.handler([menu, id === 0 ? MF_SEPARATOR : 0, id,
+            id === 0 ? 0 : memory.putString(TEXT, `Item ${id}`)]);
+    }
+    return menu;
+}
+
+test('one item of a menu is its default, by command or place, and -1 leaves none', ()=>{
+    /** @type {number[]} */
+    const errors = [];
+    const { memory, fns } = setup({ setLastError: (/** @type {number} */ code)=>errors.push(code) });
+    const menu = popupOf(fns, memory, [10, 20, 30]);
+    assert.equal(fns.GetMenuDefaultItem.handler([menu, 0, 0]), NONE, 'none to begin with');
+
+    assert.equal(fns.SetMenuDefaultItem.handler([menu, 20, 0]), 1);
+    assert.equal(fns.GetMenuDefaultItem.handler([menu, 0, 0]), 20);
+    assert.equal(fns.GetMenuDefaultItem.handler([menu, 1, 0]), 1, 'by place');
+    assert.equal(fns.GetMenuState.handler([menu, 20, 0]) & MFS_DEFAULT, MFS_DEFAULT);
+
+    // Marking another unmarks the first: there is one default.
+    assert.equal(fns.SetMenuDefaultItem.handler([menu, 2, 1]), 1);
+    assert.equal(fns.GetMenuDefaultItem.handler([menu, 0, 0]), 30);
+    assert.equal(fns.GetMenuState.handler([menu, 20, 0]) & MFS_DEFAULT, 0);
+
+    assert.equal(fns.SetMenuDefaultItem.handler([menu, 99, 0]), 0, 'no such command');
+    assert.equal(fns.SetMenuDefaultItem.handler([menu, 3, 1]), 0, 'no such place');
+    assert.equal(fns.GetMenuDefaultItem.handler([menu, 0, 0]), 30, 'a refusal changes nothing');
+    assert.equal(fns.SetMenuDefaultItem.handler([menu, -1 >>> 0, 0]), 1);
+    assert.equal(fns.GetMenuDefaultItem.handler([menu, 0, 0]), NONE);
+
+    assert.equal(fns.SetMenuDefaultItem.handler([0x9999, 0, 0]), 0);
+    assert.equal(fns.GetMenuDefaultItem.handler([0x9999, 0, 0]), NONE);
+    assert.deepEqual(errors, [ERROR_INVALID_MENU_HANDLE]);
+});
+
+test('a disabled default counts only when asked, and a default popup is looked into', ()=>{
+    const { memory, fns } = setup();
+    const inner = popupOf(fns, memory, [5, 6]);
+    const outer = popupOf(fns, memory, [1]);
+    fns.AppendMenuA.handler([outer, MF_POPUP, inner, memory.putString(TEXT, 'More')]);
+    fns.SetMenuDefaultItem.handler([outer, 1, 1]);
+    // The popup has no default of its own yet: the popup item itself answers.
+    assert.equal(fns.GetMenuDefaultItem.handler([outer, 1, GMDI_GOINTOPOPUPS]), 1);
+    fns.SetMenuDefaultItem.handler([inner, 6, 0]);
+    assert.equal(fns.GetMenuDefaultItem.handler([outer, 0, GMDI_GOINTOPOPUPS]), 6);
+    assert.equal(fns.GetMenuDefaultItem.handler([outer, 1, 0]), 1, 'not looked into unasked');
+
+    fns.EnableMenuItem.handler([inner, 6, MF_GRAYED]);
+    assert.equal(fns.GetMenuDefaultItem.handler([inner, 0, 0]), NONE);
+    assert.equal(fns.GetMenuDefaultItem.handler([inner, 0, GMDI_USEDISABLED]), 6);
+});
+
+test('CheckMenuRadioItem checks one of a group with the bullet and clears the rest', ()=>{
+    const { memory, fns } = setup();
+    const menu = popupOf(fns, memory, [100, 101, 0, 102, 200]);
+    fns.CheckMenuItem.handler([menu, 100, MF_CHECKED]);
+    fns.CheckMenuItem.handler([menu, 200, MF_CHECKED]);
+    assert.equal(fns.CheckMenuRadioItem.handler([menu, 100, 102, 102, 0]), 1);
+    assert.equal(fns.GetMenuState.handler([menu, 100, 0]) & MF_CHECKED, 0, 'unchecked');
+    assert.equal(fns.GetMenuState.handler([menu, 102, 0]) & (MF_CHECKED | MFT_RADIOCHECK),
+        MF_CHECKED | MFT_RADIOCHECK, 'checked with the bullet');
+    assert.equal(fns.GetMenuState.handler([menu, 200, 0]) & MF_CHECKED, MF_CHECKED,
+        'outside the group, untouched');
+
+    // A check outside the group checks nothing, and says so -- after
+    // clearing the group, as Windows does.
+    assert.equal(fns.CheckMenuRadioItem.handler([menu, 100, 101, 200, 0]), 0);
+    // By place, the separator is no part of the group.
+    assert.equal(fns.CheckMenuRadioItem.handler([menu, 0, 3, 1, MF_BYPOSITION]), 1);
+    assert.equal(fns.GetMenuState.handler([menu, 1, MF_BYPOSITION]) & MF_CHECKED, MF_CHECKED);
+    assert.equal(fns.GetMenuState.handler([menu, 3, MF_BYPOSITION]) & MF_CHECKED, 0);
+    // The widest range there is is walked by the ids the menu has, not by number.
+    assert.equal(fns.CheckMenuRadioItem.handler([menu, 0, 0xffffffff, 200, 0]), 1);
+    assert.equal(fns.CheckMenuRadioItem.handler([0x9999, 0, 1, 0, 0]), 0);
+});
+
+test('HiliteMenuItem marks the item, and a menu carries a help id of its own', ()=>{
+    const { memory, fns } = setup();
+    const hwnd = makeWindow(memory, fns);
+    const menu = popupOf(fns, memory, [7, 8]);
+    assert.equal(fns.HiliteMenuItem.handler([hwnd, menu, 8, MF_HILITE]), 1);
+    assert.equal(fns.GetMenuState.handler([menu, 8, 0]) & MF_HILITE, MF_HILITE);
+    assert.equal(fns.HiliteMenuItem.handler([hwnd, menu, 1, MF_HILITE | MF_BYPOSITION]), 1);
+    assert.equal(fns.HiliteMenuItem.handler([hwnd, menu, 8, 0]), 1);
+    assert.equal(fns.GetMenuState.handler([menu, 8, 0]) & MF_HILITE, 0);
+    assert.equal(fns.HiliteMenuItem.handler([hwnd, menu, 99, MF_HILITE]), 0);
+
+    assert.equal(fns.GetMenuContextHelpId.handler([menu]), 0);
+    assert.equal(fns.SetMenuContextHelpId.handler([menu, 0x1234]), 1);
+    assert.equal(fns.GetMenuContextHelpId.handler([menu]), 0x1234);
+    assert.equal(fns.SetMenuContextHelpId.handler([0x9999, 1]), 0);
+    assert.equal(fns.GetMenuContextHelpId.handler([0x9999]), 0);
+});
+
+test('TrackPopupMenuEx is dismissed as TrackPopupMenu is, and refuses what is no menu', ()=>{
+    /** @type {number[]} */
+    const errors = [];
+    const { memory, fns } = setup({ setLastError: (/** @type {number} */ code)=>errors.push(code) });
+    const hwnd = makeWindow(memory, fns);
+    const menu = popupOf(fns, memory, [1]);
+    const TPM_RETURNCMD = 0x0100;
+    assert.equal(fns.TrackPopupMenuEx.argBytes, 24);
+    assert.equal(fns.TrackPopupMenuEx.handler([menu, TPM_RETURNCMD, 0, 0, hwnd, 0]), 0);
+    assert.deepEqual(errors, []);
+    assert.equal(fns.TrackPopupMenuEx.handler([0x9999, 0, 0, 0, hwnd, 0]), 0);
+    assert.equal(fns.TrackPopupMenu.handler([0x9999, 0, 0, 0, 0, hwnd, 0]), 0);
+    assert.deepEqual(errors, [ERROR_INVALID_MENU_HANDLE, ERROR_INVALID_MENU_HANDLE]);
+});
+
+// --- menus out of templates in memory ---
+
+const TEMPLATE_AT = 0x12000;
+
+test('LoadMenuIndirect builds a menu out of a template in the program\'s memory', ()=>{
+    const { memory, fns } = setup();
+    memory.writeMemory(TEMPLATE_AT, TWO_MENUS);
+    for (const name of ['LoadMenuIndirectA', 'LoadMenuIndirectW'])
+    {
+        const menu = fns[name].handler([TEMPLATE_AT]);
+        assert.notEqual(menu, 0, name);
+        assert.equal(fns.GetMenuItemCount.handler([menu]), 2);
+        const file = fns.GetSubMenu.handler([menu, 0]);
+        assert.equal(fns.GetMenuItemCount.handler([file]), 3);
+        assert.equal(fns.GetMenuStringA.handler([file, 2, OUT, 16, MF_BYPOSITION]), 4);
+        assert.equal(memory.readCString(OUT, 16), 'Exit');
+    }
+    assert.equal(fns.LoadMenuIndirectA.handler([0]), 0);
+    // A template whose last item never says it is the last is cut short.
+    memory.writeMemory(0x13f00, TWO_MENUS.subarray(0, 24));
+    assert.equal(fns.LoadMenuIndirectA.handler([0x13f00]), 0);
+});
+
+/**
+ * An extended (MENUEX) template: the header, then each item's type, state,
+ * id and flags, its text padded to a DWORD, a popup's help id and items.
+ *
+ * @param {{ type?: number, state?: number, id?: number, text: string, last?: boolean,
+ *     help?: number, popup?: any[] }[]} items @param {number} help
+ */
+function menuExTemplate(items, help){
+    /** @type {number[]} */
+    const bytes = [1, 0, 4, 0, help & 0xff, help >>> 8 & 0xff, help >>> 16 & 0xff, help >>> 24];
+    /** @param {number} value */
+    const dword = value=>bytes.push(value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff,
+        value >>> 24 & 0xff);
+    /** @param {any[]} level */
+    const put = level=>level.forEach((item, index)=>{
+        dword(item.type ?? 0);
+        dword(item.state ?? 0);
+        dword(item.id ?? 0);
+        const flags = (item.popup ? 0x01 : 0) | (index === level.length - 1 ? 0x80 : 0);
+        bytes.push(flags, 0);
+        for (const character of `${item.text}\0`)
+        {
+            bytes.push(character.charCodeAt(0), 0);
+        }
+        while (bytes.length % 4 !== 0)
+        {
+            bytes.push(0);
+        }
+        if (item.popup)
+        {
+            dword(item.help ?? 0);
+            put(item.popup);
+        }
+    });
+    put(items);
+    return Uint8Array.from(bytes);
+}
+
+test('an extended template carries states, popup ids and help ids', ()=>{
+    const { memory, fns } = setup();
+    memory.writeMemory(TEMPLATE_AT, menuExTemplate([
+        { text: 'File', id: 50, help: 0x77, popup: [
+            { text: 'Open', id: 1, state: MFS_DEFAULT },
+            { text: '', type: MF_SEPARATOR },
+            { text: 'Quit', id: 2, state: MF_GRAYED },
+        ] },
+        { text: 'Go', id: 3 },
+    ], 0x55));
+    const menu = fns.LoadMenuIndirectW.handler([TEMPLATE_AT]);
+    assert.notEqual(menu, 0);
+    assert.equal(fns.GetMenuItemCount.handler([menu]), 2);
+    assert.equal(fns.GetMenuContextHelpId.handler([menu]), 0x55);
+    const file = fns.GetSubMenu.handler([menu, 0]);
+    assert.equal(fns.GetMenuContextHelpId.handler([file]), 0x77);
+    assert.equal(fns.GetMenuItemCount.handler([file]), 3);
+    assert.equal(fns.GetMenuDefaultItem.handler([file, 0, 0]), 1);
+    assert.equal(fns.GetMenuState.handler([file, 2, 0]) & MF_GRAYED, MF_GRAYED);
+    assert.equal(fns.GetMenuStringA.handler([menu, 3, OUT, 16, 0]), 2);
+    assert.equal(memory.readCString(OUT, 16), 'Go');
+});
+
+// --- the clipboard's owner, its sequence and its viewers ---
+
+const WM_DRAWCLIPBOARD = 0x0308;
+const WM_CHANGECBCHAIN = 0x030d;
+
+/** The table over a window manager that writes down what each window procedure is sent. */
+function listening(){
+    /** @type {{ hwnd: number, message: number, wParam: number, lParam: number }[]} */
+    const sent = [];
+    /** @type {number[]} */
+    const errors = [];
+    const memory = fakeMemory();
+    const board = { text: /** @type {string | null} */ (null), version: 0 };
+    const fns = /** @type {any} */ (createWindowFunctions({
+        readMemory: (a, n)=>memory.readMemory(a, n),
+        writeMemory: (a, d)=>memory.writeMemory(a, d),
+        readCString: (a, n)=>memory.readCString(a, n),
+        handles: fakeHandles(),
+        queue: createMessageQueue(),
+        dispatch: (wndProc, message)=>{
+            sent.push({ hwnd: message.hwnd, message: message.message, wParam: message.wParam,
+                lParam: message.lParam });
+            return message.message === WM_CHANGECBCHAIN ? 0 : 0;
+        },
+        park: ()=>({ parked: true }),
+        idle: ()=>new Promise(()=>{}),
+        setLastError: code=>errors.push(code),
+        pasteboard: board,
+    }));
+    /** @param {number} kind */
+    const told = kind=>sent.filter(each=>each.message === kind);
+    return { memory, fns, sent, told, errors, board };
+}
+
+test('the window that empties the clipboard owns it, and the open window is told apart', ()=>{
+    const { memory, fns, board } = listening();
+    const a = makeWindow(memory, fns);
+    const b = makeWindow(memory, fns);
+    assert.equal(fns.GetClipboardOwner.handler([]), 0);
+    assert.equal(fns.GetOpenClipboardWindow.handler([]), 0);
+    const first = fns.GetClipboardSequenceNumber.handler([]);
+
+    fns.OpenClipboard.handler([a]);
+    assert.equal(fns.GetOpenClipboardWindow.handler([]), a);
+    assert.equal(fns.GetClipboardOwner.handler([]), 0, 'opening is not owning');
+    fns.EmptyClipboard.handler([]);
+    assert.equal(fns.GetClipboardOwner.handler([]), a);
+    fns.SetClipboardData.handler([CF_TEXT, 0x10400]);
+    fns.CloseClipboard.handler([]);
+    assert.equal(fns.GetOpenClipboardWindow.handler([]), 0);
+    assert.equal(fns.GetClipboardOwner.handler([]), a, 'owned after it is closed');
+    const second = fns.GetClipboardSequenceNumber.handler([]);
+    assert.ok(second > first, 'the contents changed, so the number did');
+
+    // Opened by another to read: the owner stays, and nothing changed.
+    fns.OpenClipboard.handler([b]);
+    fns.CloseClipboard.handler([]);
+    assert.equal(fns.GetClipboardOwner.handler([]), a);
+    assert.equal(fns.GetClipboardSequenceNumber.handler([]), second);
+
+    // The host's paste replaces it: a change, and no window of ours owns it.
+    board.text = 'pasted';
+    board.version = 1;
+    assert.equal(fns.GetClipboardOwner.handler([]), 0);
+    assert.ok(fns.GetClipboardSequenceNumber.handler([]) > second);
+});
+
+test('a clipboard viewer is told of every change and of the chain changing', ()=>{
+    const { memory, fns, told, errors } = listening();
+    const first = makeWindow(memory, fns);
+    const second = makeWindow(memory, fns);
+    assert.equal(fns.GetClipboardViewer.handler([]), 0);
+    assert.equal(fns.SetClipboardViewer.handler([first]), 0, 'nobody to pass the news to');
+    assert.deepEqual(told(WM_DRAWCLIPBOARD).map(each=>each.hwnd), [first], 'told at once');
+    assert.equal(fns.SetClipboardViewer.handler([second]), first, 'passes it on to the first');
+    assert.equal(fns.GetClipboardViewer.handler([]), second);
+
+    fns.OpenClipboard.handler([0]);
+    fns.EmptyClipboard.handler([]);
+    fns.CloseClipboard.handler([]);
+    assert.deepEqual(told(WM_DRAWCLIPBOARD).map(each=>each.hwnd), [first, second, second],
+        'the front of the chain hears of the change');
+    fns.OpenClipboard.handler([0]);
+    fns.CloseClipboard.handler([]);
+    assert.equal(told(WM_DRAWCLIPBOARD).length, 3, 'and not of a look that changed nothing');
+
+    // The second viewer is the front: one behind it leaving is the front's
+    // news to pass along.
+    assert.equal(fns.ChangeClipboardChain.handler([first, 0]), 1);
+    assert.deepEqual(told(WM_CHANGECBCHAIN).map(each=>[each.hwnd, each.wParam, each.lParam]),
+        [[second, first, 0]]);
+    // The front leaving hands the front on, unannounced.
+    assert.equal(fns.ChangeClipboardChain.handler([second, 0]), 1);
+    assert.equal(fns.GetClipboardViewer.handler([]), 0);
+    assert.equal(told(WM_CHANGECBCHAIN).length, 1);
+
+    assert.equal(fns.SetClipboardViewer.handler([0x9999]), 0);
+    assert.deepEqual(errors, [1400]);
+});
+
+// --- icons made of bitmaps, and copies ---
+
+test('CreateIconIndirect copies the two bitmaps into a picture, the mask\'s pixels clear', ()=>{
+    // A 2 x 1 icon: the left pixel shows red, the right is masked out.
+    const pixels = new Map([
+        [0x700, { width: 2, height: 1, bgra: Uint8Array.from([0, 0, 0, 0, 255, 255, 255, 0]) }],
+        [0x704, { width: 2, height: 1, bgra: Uint8Array.from([0, 0, 255, 0, 0, 0, 0, 0]) }],
+    ]);
+    const { memory, fns } = setup({
+        bitmapSize: (/** @type {number} */ handle)=>pixels.get(handle) ?? null,
+        bitmapPixels: (/** @type {number} */ handle)=>pixels.get(handle) ?? null,
+    });
+    memory.putU32s(INFO, [1, 9, 9, 0x700, 0x704]);
+    const icon = fns.CreateIconIndirect.handler([INFO]);
+    assert.notEqual(icon, 0);
+    memory.putU32s(OUT, [0, 0, 0, 0, 0]);
+    assert.equal(fns.GetIconInfo.handler([icon, OUT]), 1);
+    assert.equal(memory.u32(OUT), 1, 'an icon');
+    assert.deepEqual([memory.u32(OUT + 4), memory.u32(OUT + 8)], [1, 0],
+        'whose hot spot is its centre, whatever it was given');
+
+    // A cursor keeps the hot spot it was given.
+    memory.putU32s(INFO, [0, 1, 0, 0x700, 0x704]);
+    const cursor = fns.CreateIconIndirect.handler([INFO]);
+    fns.GetIconInfo.handler([cursor, OUT]);
+    assert.deepEqual([memory.u32(OUT), memory.u32(OUT + 4)], [0, 1]);
+
+    memory.putU32s(INFO, [1, 0, 0, 0, 0x704]);
+    assert.equal(fns.CreateIconIndirect.handler([INFO]), 0, 'no mask, no icon');
+    assert.equal(fns.CreateIconIndirect.handler([0]), 0);
+});
+
+test('a monochrome icon is a mask twice its height, the colour in its lower half', ()=>{
+    const mask = { width: 1, height: 2, bgra: Uint8Array.from([0, 0, 0, 0, 255, 255, 255, 0]) };
+    /** @type {any} */
+    let drawn = null;
+    /** @param {number} hdc @param {number} x @param {number} y @param {any} shown */
+    const picture = (hdc, x, y, shown)=>{
+        drawn = shown;
+        return true;
+    };
+    const { memory, fns } = setup({
+        bitmapSize: ()=>mask,
+        bitmapPixels: ()=>mask,
+        dc: ()=>({ get: ()=>1, release: ()=>{} }),
+        draw: { fill: ()=>true, clip: ()=>{}, picture },
+    });
+    memory.putU32s(INFO, [1, 0, 0, 0x700, 0]);
+    const icon = fns.CreateIconIndirect.handler([INFO]);
+    assert.notEqual(icon, 0);
+    fns.DrawIcon.handler([1, 0, 0, icon]);
+    assert.deepEqual(drawn && [drawn.width, drawn.height, ...drawn.bgra],
+        [1, 1, 255, 255, 255, 255], 'drawn white, opaque, at half the mask\'s height');
+});
+
+test('CopyIcon is a new handle to the same picture, and a standard icon copies too', ()=>{
+    /** @type {number[]} */
+    const errors = [];
+    const { memory, fns } = setup({ setLastError: (/** @type {number} */ code)=>errors.push(code) });
+    memory.putU32s(INFO, [1, 0, 0, 0x700, 0]);
+    const icon = fns.CreateIconIndirect.handler([INFO]);
+    const copy = fns.CopyIcon.handler([icon]);
+    assert.notEqual(copy, 0);
+    assert.notEqual(copy, icon);
+    assert.equal(fns.DestroyIcon.handler([icon]), 1);
+    assert.equal(fns.GetIconInfo.handler([copy, OUT]), 1, 'the copy outlives the original');
+    assert.equal(fns.DestroyIcon.handler([copy]), 1);
+
+    const IDI_APPLICATION = 32512;
+    const standard = fns.CopyIcon.handler([IDI_APPLICATION]);
+    assert.notEqual(standard, 0);
+    assert.equal(fns.DestroyIcon.handler([standard]), 1, 'the copy is the program\'s to destroy');
+    assert.equal(fns.CopyIcon.handler([0]), 0);
+    assert.deepEqual(errors, [1402]);
+});
+
+test('LoadMenu reads an extended menu resource as LoadMenuIndirect does', ()=>{
+    const source = menuHost(menuExTemplate([{ text: 'Only', id: 9, state: MF_CHECKED }], 3));
+    const { memory, fns } = setup(source.host);
+    source.plant(memory);
+    const menu = fns.LoadMenuA.handler([source.base, 128]);
+    assert.notEqual(menu, 0);
+    assert.equal(fns.GetMenuItemID.handler([menu, 0]), 9);
+    assert.equal(fns.GetMenuState.handler([menu, 9, 0]) & MF_CHECKED, MF_CHECKED);
+    assert.equal(fns.GetMenuContextHelpId.handler([menu]), 3);
+});

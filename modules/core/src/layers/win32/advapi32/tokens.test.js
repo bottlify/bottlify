@@ -22,7 +22,7 @@ const NEEDED = 0x104;
 const BUFFER = 0x200;
 const SID = 0x600;
 
-function setup(){
+function setup(/** @type {{ currentThread?: () => any }} */ extra = {}){
     const bytes = new Uint8Array(0x1000);
     /** @type {number[]} */
     const errors = [];
@@ -62,6 +62,7 @@ function setup(){
                 return entry.object;
             },
         },
+        ...extra,
     });
     /** @param {number} at */
     const dword = at=>new DataView(bytes.buffer).getUint32(at, true);
@@ -820,4 +821,66 @@ test('AccessCheck reads an audit ACE as nothing to do with who is let in', ()=>{
     assert.equal(fns.AccessCheck.handler([DESCRIPTOR, token, 1, MAPPING, 0, LENGTH, GRANTED,
         STATUS]), 1);
     assert.deepEqual([dword(STATUS), dword(GRANTED)], [1, 1], 'allowed, the audit not a denial');
+});
+
+test('the SID pointers point into the SID: the authority, a sub-authority, the count', ()=>{
+    const { bytes, errors, fns } = setup();
+    // S-1-5-32-544, laid out: revision, count, authority (big-endian), then the subs.
+    bytes.set([1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 2, 0, 0], SID);
+    assert.equal(fns.GetSidIdentifierAuthority.handler([SID]), SID + 2);
+    assert.equal(bytes[fns.GetSidIdentifierAuthority.handler([SID]) + 5], 5, 'NT authority');
+    assert.equal(fns.GetSidSubAuthorityCount.handler([SID]), SID + 1);
+    assert.equal(bytes[fns.GetSidSubAuthorityCount.handler([SID])], 2);
+    assert.equal(fns.GetSidSubAuthority.handler([SID, 0]), SID + 8);
+    assert.equal(fns.GetSidSubAuthority.handler([SID, 1]), SID + 12);
+    assert.deepEqual([...new Set(errors)], [0], 'success is said, as Windows says it');
+    assert.equal(fns.GetSidSubAuthority.argBytes, 8);
+    assert.equal(fns.GetSidIdentifierAuthority.argBytes, 4);
+    assert.equal(fns.GetSidSubAuthorityCount.argBytes, 4);
+});
+
+test('SetThreadToken gives a thread the impersonation token OpenThreadToken then opens', ()=>{
+    const { bytes, errors, fns, dword, table } = setup();
+    assert.equal(fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]), 1);
+    const primary = dword(OUT);
+    assert.equal(fns.SetThreadToken.handler([0, primary]), 0, 'a primary token is not one');
+    assert.deepEqual(errors, [1349], 'ERROR_BAD_TOKEN_TYPE');
+    assert.equal(fns.SetThreadToken.handler([0, 0x7777]), 0);
+    assert.deepEqual(errors, [1349, ERROR_INVALID_HANDLE]);
+
+    assert.equal(fns.DuplicateToken.handler([primary, 2, NEEDED]), 1);
+    const impersonation = dword(NEEDED);
+    assert.equal(fns.SetThreadToken.handler([0, impersonation]), 1);
+    assert.equal(fns.OpenThreadToken.handler([CURRENT_THREAD, TOKEN_QUERY, 0, OUT]), 1);
+    const opened = dword(OUT);
+    assert.notEqual(opened, impersonation, 'a handle of its own');
+    assert.equal(table.get(opened)?.object, table.get(impersonation)?.object, 'onto that token');
+
+    // A thread named through a pointer to its handle is the same thread.
+    new DataView(bytes.buffer).setUint32(BUFFER, CURRENT_THREAD, true);
+    assert.equal(fns.SetThreadToken.handler([BUFFER, 0]), 1, 'NULL reverts');
+    assert.equal(fns.OpenThreadToken.handler([CURRENT_THREAD, TOKEN_QUERY, 0, OUT]), 0);
+    assert.equal(errors.at(-1), ERROR_NO_TOKEN);
+});
+
+test('ImpersonateSelf gives the calling thread a token, RevertToSelf takes it away', ()=>{
+    let thread = { name: 'main' };
+    const { errors, fns, table, dword } = setup({ currentThread: ()=>thread });
+    assert.equal(fns.ImpersonateSelf.handler([2]), 1);
+    assert.equal(fns.OpenThreadToken.handler([CURRENT_THREAD, TOKEN_QUERY, 0, OUT]), 1);
+    assert.equal(table.get(dword(OUT))?.object.impersonationLevel, 2);
+
+    const main = thread;
+    thread = { name: 'worker' };
+    assert.equal(fns.OpenThreadToken.handler([CURRENT_THREAD, TOKEN_QUERY, 0, OUT]), 0,
+        'another thread impersonates nobody');
+    assert.equal(errors.at(-1), ERROR_NO_TOKEN);
+    assert.equal(fns.RevertToSelf.handler(), 1, 'reverting without impersonating is nothing');
+
+    thread = main;
+    assert.equal(fns.RevertToSelf.handler(), 1);
+    assert.equal(fns.OpenThreadToken.handler([CURRENT_THREAD, TOKEN_QUERY, 0, OUT]), 0);
+    assert.equal(fns.ImpersonateSelf.argBytes, 4);
+    assert.equal(fns.RevertToSelf.argBytes, 0);
+    assert.equal(fns.SetThreadToken.argBytes, 8);
 });

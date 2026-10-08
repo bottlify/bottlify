@@ -21,6 +21,7 @@
  */
 
 import { compareNames, nameKey } from '../ole32/cfb.js';
+import { formatGuid } from '../ole32/guid.js';
 
 const SIGNATURE = Object.freeze([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
 const HEADER_SIZE = 512;
@@ -54,6 +55,8 @@ const TYPE_ROOT = 5;
  * @property {number} size     A stream's length in bytes.
  * @property {number} start    Its first sector, or mini sector.
  * @property {Map<string, CompoundNode>} children  By `nameKey`; empty for a stream.
+ * @property {string} [clsid]  A storage's class, as a GUID string: what says a
+ *           storage is a transform rather than any other docfile.
  */
 
 /**
@@ -243,6 +246,7 @@ export async function openCompound(source){
             child: u32(directory, at + 0x4c),
             start: u32(directory, at + 0x74),
             size: u32(directory, at + 0x78) + high * 0x1_0000_0000,
+            clsid: formatGuid(directory.subarray(at + 0x50, at + 0x60)),
         };
     };
 
@@ -286,6 +290,7 @@ export async function openCompound(source){
                 kind: entry.type === TYPE_STORAGE ? 'storage' : 'stream',
                 size: entry.size,
                 start: entry.start,
+                clsid: entry.clsid,
                 children: entry.type === TYPE_STORAGE
                     ? childrenOf(entry.child, visited) : new Map(),
             });
@@ -299,7 +304,7 @@ export async function openCompound(source){
     /** @type {CompoundNode} */
     const root = {
         name: rootEntry.name, kind: 'storage', size: rootEntry.size, start: rootEntry.start,
-        children: childrenOf(rootEntry.child, new Set([0])),
+        clsid: rootEntry.clsid, children: childrenOf(rootEntry.child, new Set([0])),
     };
 
     // The mini stream: the root's own chain, cut into 64-byte sectors that a

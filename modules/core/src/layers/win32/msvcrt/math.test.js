@@ -155,6 +155,17 @@ test('every function is code in the guest, hypot the same as _hypot', ()=>{
         assert.deepEqual(table[name].code(builder), bound(name), name);
     }
     assert.deepEqual(table.hypot.code(builder), bound('_hypot'));
+    assert.deepEqual(table._cabs.code(builder), bound('_hypot'), '_cabs is _hypot\'s code');
+});
+
+test('_cabs reads its structure\'s two doubles where _hypot reads its two arguments', ()=>{
+    const { fpu, table, errors } = build();
+    table._cabs.handler([...doubleSlots(3), ...doubleSlots(4)]);
+    assert.equal(fpu.result, 5);
+    assert.equal(table._cabs.argBytes, 16, 'a struct _complex by value: two doubles');
+    assert.equal(table._cabs.convention, 'cdecl');
+    table._cabs.handler([...doubleSlots(1.5e308), ...doubleSlots(1.5e308)]);
+    assert.deepEqual(errors, [ERANGE], 'an overflow is ERANGE, as _hypot\'s is');
 });
 
 test('errno as msvcrt sets it: EDOM for a NaN of arguments that were none, ERANGE for an '

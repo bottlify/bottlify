@@ -31,6 +31,8 @@
 import { HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR } from './console.js';
 import { fileAttributes, msToFileTime } from './filetime.js';
 import { decodeAnsi, encodeAnsi } from './locale.js';
+import { createCommFunctions } from './comm.js';
+import { createResourceUpdates } from './resource-update.js';
 
 /** Codes this surface reports through the last-error slot. */
 const ERROR_SUCCESS = 0;
@@ -269,6 +271,9 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @property {boolean} [hidden]
  * @property {number} [attributes]
  */
+
+/** The handle kinds that are file objects: what CancelIo takes. */
+const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
 
 /**
  * @typedef {Object} OpenMode
@@ -2647,6 +2652,10 @@ export function createFileFunctions(host){
         CreateHardLinkW: createHardLink.wide,
         ReplaceFileA: replaceFile.ansi,
         ReplaceFileW: replaceFile.wide,
+        // kernel32's export of the name with neither suffix, which is the
+        // wide call: the name a program written before the A and W forms
+        // looks up.
+        ReplaceFile: replaceFile.wide,
         /**
          * BOOL MoveFileEx(LPCSTR lpExistingFileName, LPCSTR lpNewFileName,
          *                 DWORD dwFlags) -- one body, both spellings.
@@ -3047,6 +3056,31 @@ export function createFileFunctions(host){
             argBytes: 32,
             handler: ()=>fail(ERROR_INVALID_FUNCTION),
         },
+
+        /**
+         * BOOL CancelIo(HANDLE hFile)
+         *
+         * Every read and write here has finished by the time its call
+         * answers -- a parked one answers before its thread runs again -- so
+         * the calling thread has nothing outstanding on any handle and there
+         * is nothing to cancel. A handle that is no file object is refused,
+         * as NtCancelIoFile refuses one.
+         */
+        CancelIo: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const kind = isStandardHandle(handle >>> 0) ? 'file'
+                    : host.handles.typeOf?.(handle >>> 0);
+                return kind && FILE_OBJECTS.has(kind) ? 1 : fail(ERROR_INVALID_HANDLE);
+            },
+        },
+
+        // The serial port calls, refused on a machine with no serial port.
+        ...createCommFunctions(host),
+
+        // A program rewriting an executable's resources on the volume.
+        ...createResourceUpdates({ ...host, fullPath }),
     };
 
     // The long spellings are the same calls on Win32, where every count is

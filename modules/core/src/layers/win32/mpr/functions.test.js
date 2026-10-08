@@ -165,3 +165,27 @@ test('a local path has no network name at either level, and nothing is written f
     assert.equal(errors.at(-1), ERROR_INVALID_ADDRESS, 'the last error is the answer too');
     assert.ok(bytes.subarray(BUFFER, BUFFER + 0x100).every(byte=>byte === 0));
 });
+
+test('with no provider, no connection is made, cancelled or restored, and no dialog shows', ()=>{
+    // [name, argBytes, args, answer]
+    const cases = /** @type {[string, number, number[], number][]} */ ([
+        ['WNetCancelConnectionA', 8, [PATH, 1], ERROR_NOT_CONNECTED],
+        ['WNetCancelConnectionA', 8, [0, 0], ERROR_INVALID_ADDRESS],
+        ['WNetUseConnectionA', 32, [0, BUFFER, 0, 0, 0, 0, SIZE, COUNT], ERROR_NO_NETWORK],
+        ['WNetUseConnectionA', 32, [0, 0, 0, 0, 0, 0, SIZE, COUNT], ERROR_INVALID_ADDRESS],
+        ['WNetConnectionDialog', 8, [0, RESOURCETYPE_DISK], ERROR_NO_NETWORK],
+        ['WNetConnectionDialog', 8, [0, RESOURCETYPE_ANY], ERROR_INVALID_PARAMETER],
+        ['WNetConnectionDialog', 8, [0, 8], ERROR_INVALID_PARAMETER],
+        ['WNetRestoreConnectionW', 8, [0, PATH], ERROR_NO_NETWORK],
+        ['WNetRestoreConnectionW', 8, [0, 0], ERROR_NO_NETWORK],
+    ]);
+    for (const [name, argBytes, args, expected] of cases)
+    {
+        const { errors, fns } = setup();
+        const entry = /** @type {Record<string, { argBytes: number, handler: Function }>} */ (
+            fns)[name];
+        assert.equal(entry.argBytes, argBytes, name);
+        assert.equal(entry.handler(args), expected, name);
+        assert.deepEqual(errors, [expected], `${name}: the last error too`);
+    }
+});

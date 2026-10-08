@@ -3466,3 +3466,206 @@ test('WINNLSEnableIME finds the input method off on a system that has none', ()=
     assert.equal(fns.WINNLSEnableIME.handler([0, 0]), 0);
     assert.equal(fns.WINNLSEnableIME.handler([0, 1]), 0);
 });
+
+// --- the colours, the caption's flash, a window opened from its icon ---
+
+/**
+ * A drawing that answers every call, writing down the colour of each fill:
+ * enough of one for the frame to be painted and its caption read back.
+ *
+ * @param {number[]} fills
+ */
+function recordingDraw(fills){
+    return new Proxy({}, {
+        get: (_, name)=>{
+            if (name === 'fill')
+            {
+                /** @param {number} hdc @param {any} rect @param {number} color */
+                return (hdc, rect, color)=>{
+                    fills.push(color);
+                    return true;
+                };
+            }
+            if (name === 'measure')
+            {
+                return ()=>({ width: 8, height: 16, ascent: 12 });
+            }
+            return ()=>1;
+        },
+    });
+}
+
+test('SetSysColors changes what GetSysColor answers, and every window is told', ()=>{
+    const WM_SYSCOLORCHANGE = 0x0015;
+    const COLOR_WINDOW = 5;
+    /** @type {number[]} */
+    const told = [];
+    const { memory, fns, errors } = setup({
+        dispatch: (/** @type {number} */ wndProc, /** @type {any} */ message)=>{
+            told.push(message.message);
+            return 0;
+        },
+    });
+    makeWindow(memory, fns, WS_OVERLAPPED | WS_VISIBLE);
+    const before = fns.GetSysColor.handler([COLOR_WINDOW]);
+    memory.putU32s(OUT_BUFFER, [COLOR_WINDOW, 99, 0x00123456, 0x00abcdef]);
+    assert.equal(fns.SetSysColors.handler([2, OUT_BUFFER, OUT_BUFFER + 8]), 1);
+    assert.equal(fns.GetSysColor.handler([COLOR_WINDOW]), 0x00123456);
+    assert.notEqual(before, 0x00123456);
+    assert.equal(fns.GetSysColor.handler([99]), 0, 'an index that names nothing is passed over');
+    assert.ok(told.includes(WM_SYSCOLORCHANGE), 'the window heard of it');
+
+    assert.equal(fns.SetSysColors.handler([1, 0, 0]), 0);
+    assert.deepEqual(errors, [998]);
+    assert.equal(fns.SetSysColors.handler([0, 0, 0]), 1, 'none to change is no fault');
+});
+
+test('FlashWindow draws the caption the other way about, and answers how it was', ()=>{
+    const COLOR_ACTIVE = 0x00800000;
+    const COLOR_INACTIVE = 0x00808080;
+    /** @type {number[]} */
+    const fills = [];
+    const { memory, fns, errors } = setup({ draw: recordingDraw(fills) });
+    const hwnd = makeWindow(memory, fns, WS_CAPTION | WS_VISIBLE);
+    fns.SetActiveWindow.handler([hwnd]);
+    assert.equal(fns.GetActiveWindow.handler([]), hwnd);
+
+    fills.length = 0;
+    assert.equal(fns.FlashWindow.handler([hwnd, 1]), 1, 'it was drawn active');
+    assert.ok(fills.includes(COLOR_INACTIVE) && !fills.includes(COLOR_ACTIVE),
+        'and is drawn inactive now');
+    fills.length = 0;
+    assert.equal(fns.FlashWindow.handler([hwnd, 1]), 0, 'drawn inactive before this one');
+    assert.ok(fills.includes(COLOR_ACTIVE));
+    fns.FlashWindow.handler([hwnd, 1]);
+    fills.length = 0;
+    assert.equal(fns.FlashWindow.handler([hwnd, 0]), 0);
+    assert.ok(fills.includes(COLOR_ACTIVE), 'FALSE puts it back as the activation has it');
+
+    assert.equal(fns.FlashWindow.handler([0x9999, 1]), 0);
+    assert.deepEqual(errors, [1400]);
+});
+
+test('OpenIcon restores a minimised window, and refuses one that is not', async()=>{
+    const { memory, fns } = setup();
+    const hwnd = makeWindow(memory, fns, WS_OVERLAPPED | WS_VISIBLE);
+    assert.equal(await fns.OpenIcon.handler([hwnd]), 0);
+    await fns.CloseWindow.handler([hwnd]);
+    assert.equal(fns.IsIconic.handler([hwnd]), 1);
+    assert.equal(await fns.OpenIcon.handler([hwnd]), 1);
+    assert.equal(fns.IsIconic.handler([hwnd]), 0);
+    assert.equal(fns.IsWindowVisible.handler([hwnd]), 1);
+    assert.equal(await fns.OpenIcon.handler([0x9999]), 0);
+});
+
+test('BroadcastSystemMessage sends to every top-level window, and a query can be denied', ()=>{
+    const WM_APP = 0x8000;
+    const BSF_QUERY = 0x0001;
+    const BSF_POSTMESSAGE = 0x0010;
+    const BSM_VXDS = 0x0001;
+    const BSM_APPLICATIONS = 0x0008;
+    const BROADCAST_QUERY_DENY = 0x424d5144;
+    /** @type {{ hwnd: number, message: number }[]} */
+    const told = [];
+    let deny = 0;
+    const { memory, fns, errors } = setup({
+        dispatch: (/** @type {number} */ wndProc, /** @type {any} */ message)=>{
+            if (message.message === WM_APP)
+            {
+                told.push({ hwnd: message.hwnd, message: message.message });
+                return message.hwnd === deny ? BROADCAST_QUERY_DENY : 1;
+            }
+            return 0;
+        },
+    });
+    const first = makeWindow(memory, fns, WS_OVERLAPPED);
+    const second = makeWindow(memory, fns, WS_OVERLAPPED);
+
+    memory.putU32s(OUT_BUFFER, [0]);
+    assert.equal(fns.BroadcastSystemMessageA.handler([0, OUT_BUFFER, WM_APP, 1, 2]), 1);
+    assert.deepEqual(told.map(each=>each.hwnd).sort(), [first, second].sort());
+    assert.equal(memory.u32(OUT_BUFFER), BSM_APPLICATIONS, 'all components: the applications');
+
+    told.length = 0;
+    deny = first;
+    assert.equal(fns.BroadcastSystemMessageW.handler([BSF_QUERY, 0, WM_APP, 0, 0]), 0,
+        'one denied the query');
+
+    told.length = 0;
+    memory.putU32s(OUT_BUFFER, [BSM_VXDS]);
+    assert.equal(fns.BroadcastSystemMessageA.handler([0, OUT_BUFFER, WM_APP, 0, 0]), 1);
+    assert.deepEqual(told, [], 'drivers alone: nobody here to tell');
+    assert.equal(memory.u32(OUT_BUFFER), 0);
+
+    assert.equal(fns.BroadcastSystemMessageA.handler([BSF_POSTMESSAGE, 0, WM_APP, 0, 0]), 1);
+    assert.deepEqual(told, [], 'posted, not sent');
+    assert.equal(fns.PeekMessageA.handler([OUT_BUFFER, 0, 0, 0, 1]), 1);
+    assert.equal(memory.u32(OUT_BUFFER + 4), WM_APP);
+
+    assert.equal(fns.BroadcastSystemMessageA.handler([BSF_QUERY | BSF_POSTMESSAGE, 0, WM_APP,
+        0, 0]), 0);
+    assert.deepEqual(errors, [87]);
+});
+
+test('ExcludeUpdateRgn keeps a context off what is still to be repainted', ()=>{
+    /** @type {[number, any[]][]} */
+    const clips = [];
+    const { memory, fns } = setup({ draw: {
+        clip: (/** @type {number} */ hdc, /** @type {any[]} */ area)=>clips.push([hdc, area]),
+    } });
+    const hwnd = makeWindow(memory, fns, WS_OVERLAPPED | WS_VISIBLE);
+    fns.ValidateRect.handler([hwnd, 0]);
+    const hdc = fns.GetDC.handler([hwnd]);
+    const SIMPLEREGION = 2;
+    const COMPLEXREGION = 3;
+    assert.equal(fns.ExcludeUpdateRgn.handler([hdc, hwnd]), SIMPLEREGION, 'nothing to leave out');
+    memory.putU32s(RECT_BUFFER, [0, 0, 10, 10]);
+    fns.InvalidateRect.handler([hwnd, RECT_BUFFER, 0]);
+    assert.equal(fns.ExcludeUpdateRgn.handler([hdc, hwnd]), COMPLEXREGION);
+    const [on, area] = /** @type {[number, any[]]} */ (clips.at(-1));
+    assert.equal(on, hdc);
+    assert.ok(area.every(piece=>piece.left >= 10 || piece.top >= 10),
+        'no piece left inside the update area');
+    assert.equal(fns.ExcludeUpdateRgn.handler([hdc, 0x9999]), 0, 'ERROR for no window');
+    fns.ReleaseDC.handler([hwnd, hdc]);
+});
+
+// --- characters, DDE and the old IME interface ---
+
+test('CharPrevW steps back one unit, and CharNextExA over a double-byte character', ()=>{
+    const { memory, fns } = setup();
+    assert.equal(fns.CharPrevW.handler([0x100, 0x104]), 0x102);
+    assert.equal(fns.CharPrevW.handler([0x100, 0x100]), 0x100);
+    assert.equal(fns.CharPrevW.handler([0x100, 0xfe]), 0xfe, 'not past the start: as it came');
+
+    memory.writeMemory(TEXT_BUFFER, Uint8Array.from([0x82, 0xa0, 0x41, 0x82, 0]));
+    assert.equal(fns.CharNextExA.handler([932, TEXT_BUFFER, 0]), TEXT_BUFFER + 2);
+    assert.equal(fns.CharNextExA.handler([0, TEXT_BUFFER, 0]), TEXT_BUFFER + 1,
+        'the process\'s own page is single-byte');
+    assert.equal(fns.CharNextExA.handler([936, TEXT_BUFFER + 2, 0]), TEXT_BUFFER + 3);
+    assert.equal(fns.CharNextExA.handler([932, TEXT_BUFFER + 3, 0]), TEXT_BUFFER + 4,
+        'a lead byte before the terminator is one character');
+    assert.equal(fns.CharNextExA.handler([932, TEXT_BUFFER + 4, 0]), TEXT_BUFFER + 4);
+    assert.equal(fns.CharNextExA.handler([932, 0, 0]), 0);
+    assert.equal(fns.CharNextExA.argBytes, 12);
+});
+
+test('with no DDE instance its handles are refused, and string handles still compare', ()=>{
+    const { fns, diverged } = setup();
+    for (const [name, args] of /** @type {[string, number[]][]} */ ([
+        ['DdeFreeDataHandle', [0x10]], ['DdeAbandonTransaction', [1, 2, 3]],
+        ['DdePostAdvise', [1, 2, 3]], ['DdeQueryConvInfo', [1, 2, 0x100]],
+        ['DdeSetUserHandle', [1, 2, 3]]]))
+    {
+        assert.equal(fns[name].handler(args), 0, name);
+        assert.equal(fns[name].argBytes, args.length * 4, name);
+    }
+    fns.DdeFreeDataHandle.handler([0x10]);
+    assert.equal(diverged.filter(line=>line.startsWith('DdeFreeDataHandle')).length, 1,
+        'said once');
+    assert.equal(fns.DdeCmpStringHandles.handler([1, 2]), 0xffffffff);
+    assert.equal(fns.DdeCmpStringHandles.handler([2, 1]), 1);
+    assert.equal(fns.DdeCmpStringHandles.handler([0, 0]), 0);
+    assert.equal(fns.SendIMEMessageExA.handler([0, 0]), 0, 'no IME to take the request');
+    assert.equal(fns.SendIMEMessageExW.argBytes, 8);
+});

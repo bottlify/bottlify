@@ -21,11 +21,13 @@ import { characterOf } from './keys.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { createPaintFunctions, layoutText } from './paint.js';
 import { createMessageBoxFunctions } from './msgbox.js';
-import { HOVER_SIZE, HOVER_TIME, SYS_COLORS, createSystemFunctions } from './system.js';
+import { HOVER_SIZE, HOVER_TIME, createSystemColors, createSystemFunctions } from './system.js';
 import { createObjectFunctions } from './objects.js';
 import { createDialogFunctions } from './dialogs.js';
 import { createDesktopFunctions } from './desktops.js';
 import { createRawInput } from './rawinput.js';
+import { createCaret } from './caret.js';
+import { createDirectoryListFunctions } from './dlgdir.js';
 import { createMdi } from './mdi.js';
 import {
     WS_CHILD, WS_CLIPSIBLINGS, WS_DISABLED, contains, createGeometry, createdStyles, edgeFor,
@@ -585,6 +587,14 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           A bitmap for the display made from a packed DIB in guest memory
  *           (its header and colours at `info`, its pixels at `bits`), as
  *           CreateDIBitmap on a screen context makes one; zero when it cannot.
+ * @property {(handle: number) => { width: number, height: number } | null} [bitmapSize]
+ *           A GDI bitmap's size, or null for a handle that is no bitmap: the
+ *           size a bitmap caret and an icon made from bitmaps take.
+ * @property {(handle: number) => { width: number, height: number,
+ *     bgra: Uint8Array } | null} [bitmapPixels]
+ *           A GDI bitmap's pixels, top row first, four bytes each in blue,
+ *           green, red and a fourth byte: what CreateIconIndirect copies.
+ *           Absent, an icon made from bitmaps has its size and no picture.
  * @property {import('../kernel32/files.js').FileSystem} [files]
  *           The volume every file call uses, which an image loaded from a
  *           file is read from. Absent, no file is there to load.
@@ -3090,8 +3100,11 @@ export function createWindowFunctions(host){
         }
     };
 
+    /** The colours GetSysColor answers and SetSysColors changes. */
+    const systemColors = createSystemColors();
+
     /** @param {number} index  A system colour, as a COLORREF. */
-    const sysColor = index=>SYS_COLORS[index | 0] ?? 0;
+    const sysColor = index=>systemColors.get(index);
 
     /**
      * The window manager's drawing, over gdi32's, with the system colours
@@ -3758,7 +3771,10 @@ export function createWindowFunctions(host){
         const width = record.width;
         const height = record.height;
         const face = sysColor(COLOR_3DFACE);
-        const isActive = topLevelOf(record).hwnd === activeWindow();
+        // FlashWindow's inverted caption lasts until the activation it
+        // inverted changes, as the flag WM_NCACTIVATE sets does.
+        const activeNow = topLevelOf(record).hwnd === activeWindow();
+        const isActive = record.flash?.active === activeNow ? record.flash.shown : activeNow;
         // The edge, one ring per pixel, each in the colours its part of the
         // frame is drawn in: raised, banded, bordered or sunken.
         const rings = frameRings(record.style, record.exStyle, isActive);
@@ -4713,6 +4729,27 @@ export function createWindowFunctions(host){
      * @type {(args: number[], thread?: unknown) => any} */
     let placeWindow = ()=>0;
 
+    // The thread's caret, drawn into its window's client area and taken off
+    // while the window paints.
+    // Threads by their ids where the bridge gives them one: the same
+    // thread may reach here as more than one object.
+    const caret = createCaret({
+        live,
+        caller: ()=>{
+            const thread = host.callerThread?.();
+            return threadIdOf(thread) ?? thread;
+        },
+        threadOf: record=>threadIdOf(record.thread) ?? record.thread,
+        contextOn: record=>paint.contextOn(record),
+        release: (record, hdc)=>host.dc?.()?.release(record.hwnd, hdc),
+        draw,
+        painted,
+        bitmapSize: host.bitmapSize,
+        writeMemory: host.writeMemory,
+        setLastError: host.setLastError,
+        divergence: host.divergence,
+    });
+
     const paint = createPaintFunctions({
         // The drawing with the system colours on it, which FillRect needs
         // for a brush named as a colour index.
@@ -4727,6 +4764,7 @@ export function createWindowFunctions(host){
         frozen: (/** @type {any} */ record)=>frozen(record),
         desktop: ()=>desktopWindow().hwnd,
         covering: coveringOf,
+        caret,
     });
 
     /**
@@ -4839,6 +4877,8 @@ export function createWindowFunctions(host){
         release: host.release,
         call: host.call,
         divergence: host.divergence,
+        caret: caret.table,
+        files: host.files,
     };
     const controls = createControlProcedures(controlHost);
     Object.assign(controlProcedures, controls.procedures);
@@ -5232,6 +5272,63 @@ export function createWindowFunctions(host){
     let runModal = null;
 
     /**
+     * BroadcastSystemMessage in either encoding: sent to each recipient in
+     * turn, or posted to all; under BSF_QUERY the first that answers
+     * BROADCAST_QUERY_DENY stops it and the answer is zero. Any answer else
+     * is positive.
+     *
+     * @param {number[]} args @param {boolean} unicode
+     * @returns {number | Promise<number>}
+     */
+    const broadcastSystem = ([flags, recipients, message, wParam, lParam], unicode)=>{
+        const BSF_QUERY = 0x0001;
+        const BSF_IGNORECURRENTTASK = 0x0002;
+        const BSF_POSTMESSAGE = 0x0010;
+        const BSF_SENDNOTIFYMESSAGE = 0x0100;
+        const BSM_APPLICATIONS = 0x0008;
+        const BSM_ALLDESKTOPS = 0x0010;
+        const BROADCAST_QUERY_DENY = 0x424d5144;
+        if ((flags & BSF_QUERY) !== 0 && (flags & (BSF_POSTMESSAGE | BSF_SENDNOTIFYMESSAGE)) !== 0)
+        {
+            // A query is answered one recipient at a time; one that is not
+            // waited for cannot answer it.
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        let asked = 0;
+        if ((recipients >>> 0) !== 0)
+        {
+            const bytes = host.readMemory(recipients >>> 0, 4);
+            asked = (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+            const reached = asked === 0 ? BSM_APPLICATIONS
+                : asked & (BSM_APPLICATIONS | BSM_ALLDESKTOPS);
+            host.writeMemory(recipients >>> 0, Uint8Array.of(reached & 0xff, reached >>> 8 & 0xff,
+                reached >>> 16 & 0xff, reached >>> 24 & 0xff));
+        }
+        if (asked !== 0 && (asked & (BSM_APPLICATIONS | BSM_ALLDESKTOPS)) === 0)
+        {
+            return 1;
+        }
+        const ours = (flags & BSF_IGNORECURRENTTASK) !== 0;
+        const targets = broadcastTargets().filter(hwnd=>!ours || !live(hwnd));
+        if ((flags & (BSF_POSTMESSAGE | BSF_SENDNOTIFYMESSAGE)) !== 0)
+        {
+            for (const hwnd of targets)
+            {
+                postTo([hwnd, message, wParam, lParam], unicode);
+            }
+            return 1;
+        }
+        const thread = host.callerThread?.();
+        /** @param {number} at @returns {number | Promise<number>} */
+        const next = at=>(at >= targets.length ? 1
+            : andThen(sendAcross(targets[at], message, wParam, lParam, thread, unicode),
+                answer=>((flags & BSF_QUERY) !== 0 && (answer >>> 0) === BROADCAST_QUERY_DENY
+                    ? 0 : next(at + 1))));
+        return next(0);
+    };
+
+    /**
      * PostMessage and SendNotifyMessage, in either encoding.
      *
      * @param {number[]} args  hWnd, Msg, wParam, lParam.
@@ -5513,13 +5610,14 @@ export function createWindowFunctions(host){
     // handed to the default procedure in this table by `deliver` above.
     const table = {
         ...paint.table,
+        ...caret.table,
         // The focus, the capture and the geometry live with the windows, so
         // the system half answers from them through a view of the host that
         // carries them.
         ...createSystemFunctions({
             host: Object.assign(Object.create(host), {
                 focus: focusWindow, setFocus, active: activeWindow, activate,
-                capture: ()=>captured, setCapture, releaseCapture,
+                capture: ()=>captured, setCapture, releaseCapture, colors: systemColors,
                 send, sendAcross, callProcedure, geometry, windowFromPoint, askedFromPoint,
                 isChild, repaint,
                 appear, uncover, eraseShown, wholeOnScreen, moveBits, dragging, dragMove,
@@ -5580,7 +5678,7 @@ export function createWindowFunctions(host){
                 (/** @type {any} */ (table)).SetWindowPos.handler([hwnd, HWND_BOTTOM, 0, 0, 0, 0,
                     0x0001 | 0x0002 | 0x0010]);
             } }),
-        ...createObjectFunctions({ host, live,
+        ...createObjectFunctions({ host, live, send,
             clipboardService: service=>{
                 clipboardAccess = service;
             },
@@ -5951,6 +6049,57 @@ export function createWindowFunctions(host){
                 }
                 showWindow(record, SW_MINIMIZE);
                 return 1;
+            },
+        },
+
+        /**
+         * BOOL OpenIcon(HWND hWnd)
+         *
+         * A minimised window restored and activated, as SW_SHOWNORMAL does;
+         * FALSE for one that is not minimised.
+         */
+        OpenIcon: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>{
+                const SW_SHOWNORMAL = 1;
+                const record = live(hwnd);
+                if (!record || (record.style & WS_MINIMIZE) === 0)
+                {
+                    return 0;
+                }
+                return andThen(showWindow(record, SW_SHOWNORMAL), ()=>1);
+            },
+        },
+
+        /**
+         * BOOL FlashWindow(HWND hWnd, BOOL bInvert)
+         *
+         * The caption drawn the other way about -- active as inactive, or
+         * back -- to catch the eye; FALSE puts it back as the activation
+         * has it. Answers whether it was drawn active before the call. The
+         * taskbar button a flash also lights is the host's, and not here.
+         */
+        FlashWindow: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, invert])=>{
+                const record = live(hwnd);
+                if (!record || record === desktop)
+                {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+                    return 0;
+                }
+                const activeNow = topLevelOf(record).hwnd === activeWindow();
+                const before = record.flash?.active === activeNow ? record.flash.shown : activeNow;
+                record.flash = (invert >>> 0) !== 0 ? { active: activeNow, shown: !before } : null;
+                const drawn = record.flash ? record.flash.shown : activeNow;
+                if (drawn !== before && shown(record))
+                {
+                    paintFrame(record);
+                    painted();
+                }
+                return before ? 1 : 0;
             },
         },
 
@@ -6368,6 +6517,31 @@ export function createWindowFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: args=>postTo(args, false),
+        },
+
+        /**
+         * long BroadcastSystemMessageA(DWORD flags, LPDWORD lpdwRecipients, UINT uiMessage,
+         *                              WPARAM wParam, LPARAM lParam)
+         *
+         * A message to every top-level window, this process's and the
+         * others'. Only applications are here to receive it: drivers and
+         * network drivers asked for alone receive nothing, and the
+         * recipients written back say who did.
+         */
+        BroadcastSystemMessageA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>broadcastSystem(args, false),
+        },
+        BroadcastSystemMessage: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>broadcastSystem(args, false),
+        },
+        BroadcastSystemMessageW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>broadcastSystem(args, true),
         },
 
         /**
@@ -7089,15 +7263,25 @@ export function createWindowFunctions(host){
                 host.callerThread?.()),
         },
     };
+    /**
+     * One of the table's own calls, made as a program makes it: from
+     * `thread` when named, since past an await the thread on the processor
+     * is another.
+     *
+     * @param {string} name @param {number[]} args @param {unknown} [thread]
+     */
+    const callOwn = (name, args, thread)=>{
+        const run = ()=>/** @type {any} */ (table)[name].handler(args);
+        return thread !== undefined && host.answering ? host.answering(thread, run) : run();
+    };
+    // The directory list a dialog fills is made of the list box's messages.
+    Object.assign(table, createDirectoryListFunctions({ host, call: callOwn }));
     // A message box is a dialog user32 makes out of its own calls, so it is
     // built over the finished table.
     let messageBoxProcedures = 0;
     return Object.assign(table, createMessageBoxFunctions({
         host,
-        call: (name, args, thread)=>{
-            const run = ()=>/** @type {any} */ (table)[name].handler(args);
-            return thread !== undefined && host.answering ? host.answering(thread, run) : run();
-        },
+        call: callOwn,
         procedure: (name, handler)=>{
             messageBoxProcedures++;
             /** @type {number} */

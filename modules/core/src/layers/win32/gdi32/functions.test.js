@@ -1560,7 +1560,7 @@ test('the extents a DC has are read back, and a metafile is refused', ()=>{
     assert.equal(fns.GetWindowExtEx.handler([0x7777, OUT]), 0, 'not a DC');
 
     assert.equal(fns.SetMetaFileBitsEx.handler(), 0);
-    assert.equal(fns.PlayMetaFile.handler(), 0);
+    assert.equal(fns.PlayMetaFile.handler([hdc, 0x7777]), 0, 'not a metafile');
     assert.equal(fns.DeleteMetaFile.handler([0x7777]), 0, 'not a metafile');
     assert.deepEqual([fns.GetViewportExtEx, fns.GetWindowExtEx, fns.SetMetaFileBitsEx,
         fns.PlayMetaFile, fns.DeleteMetaFile].map(fn=>fn.argBytes), [8, 8, 8, 8, 4]);
@@ -2340,7 +2340,7 @@ test('D3DKMTCreateDCFromMemory makes a memory DC over the program\'s own pixels'
     assert.ok(!context.surfaces.freed.includes(PIXELS), 'the pixels stay the program\'s');
 });
 
-test('an enhanced metafile DC closes into a metafile handle, and says it recorded nothing', ()=>{
+test('an enhanced metafile DC closes into a metafile handle; a Windows 3 one records nothing', ()=>{
     const memory = fakeMemory();
     /** @type {string[]} */
     const said = [];
@@ -2358,7 +2358,6 @@ test('an enhanced metafile DC closes into a metafile handle, and says it recorde
     const hdc = fns.CreateEnhMetaFileA.handler([0, 0, 0, 0]);
     assert.notEqual(hdc, 0);
     assert.equal(fns.GetObjectType.handler([hdc]), OBJ_ENHMETADC);
-    assert.ok(said.some(line=>line.startsWith('CreateEnhMetaFileA: drawing')));
     assert.equal(fns.GetDeviceCaps.handler([hdc, TECHNOLOGY]), 1,
         'the reference device is the display');
 
@@ -2380,6 +2379,7 @@ test('an enhanced metafile DC closes into a metafile handle, and says it recorde
     // The Windows 3 metafile the same way, each Close ending only its own kind.
     const old = fns.CreateMetaFileA.handler([0]);
     assert.equal(fns.GetObjectType.handler([old]), 4, 'OBJ_METADC');
+    assert.ok(said.some(line=>line.startsWith('CreateMetaFileA: drawing')));
     assert.equal(fns.CloseEnhMetaFile.handler([old]), 0);
     const closed = fns.CloseMetaFile.handler([old]);
     assert.equal(fns.GetObjectType.handler([closed]), 9, 'OBJ_METAFILE');

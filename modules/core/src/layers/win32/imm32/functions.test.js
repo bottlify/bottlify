@@ -126,3 +126,60 @@ test('the composition font and window are refused, there being no context to kee
     assert.equal(machine().imm.ImmSetCompositionWindow.handler([0, 0]), 0,
         'the same answer with nowhere to put the error');
 });
+
+test('there is no IME window, and nothing about an input method to describe', ()=>{
+    const m = machine();
+    assert.equal(m.imm.ImmGetDefaultIMEWnd.handler([0x40]), 0);
+    assert.equal(m.imm.ImmGetDescriptionA.handler([0x04090409, 0x10, 32]), 0);
+    assert.equal(m.memory[0x10], 0xcd, 'the buffer is untouched');
+    assert.equal(m.imm.ImmGetProperty.handler([0x04090409, 4]), 0);
+    assert.equal(m.imm.ImmEscapeA.handler([0x04090409, 0, 0x1000, 0]), 0);
+    const sizes = { ImmGetDefaultIMEWnd: 4, ImmGetDescriptionA: 12, ImmGetProperty: 8,
+        ImmEscapeA: 16, ImmGetCandidateListW: 16, ImmGetCandidateListCountW: 8,
+        ImmSetCandidateWindow: 8, ImmSetCompositionStringA: 24, ImmIsUIMessageA: 16 };
+    for (const [name, bytes] of Object.entries(sizes))
+    {
+        assert.equal(m.imm[name].argBytes, bytes, name);
+    }
+});
+
+test('the candidate calls answer no lists, the wide count written as the narrow one is', ()=>{
+    const m = machine();
+    assert.equal(m.imm.ImmGetCandidateListCountW.handler([0, 0x20]), 0);
+    assert.deepEqual([...m.memory.slice(0x20, 0x24)], [0, 0, 0, 0]);
+    assert.equal(m.imm.ImmGetCandidateListCountW.handler([0, 0]), 0);
+    assert.equal(m.imm.ImmGetCandidateListW.handler([0, 0, 0x30, 64]), 0);
+    assert.equal(m.memory[0x30], 0xcd);
+});
+
+test('setting a context\'s candidate window or composition string is refused for the handle',
+    ()=>{
+        /** @type {number[]} */
+        const errors = [];
+        const imm = /** @type {any} */ (createImmFunctions({
+            writeMemory: ()=>{}, setLastError: code=>errors.push(code),
+        }));
+        assert.equal(imm.ImmSetCandidateWindow.handler([0, 0x10]), 0);
+        assert.equal(imm.ImmSetCompositionStringA.handler([0, 9, 0x10, 4, 0, 0]), 0);
+        assert.deepEqual(errors, [6, 6], 'ERROR_INVALID_HANDLE');
+    });
+
+test('ImmIsUIMessage knows the IME messages and hands them to the window it is given', ()=>{
+    /** @type {number[][]} */
+    const sent = [];
+    const imm = /** @type {any} */ (createImmFunctions({
+        writeMemory: ()=>{},
+        sendMessage: (hwnd, message, wParam, lParam)=>{
+            sent.push([hwnd, message, wParam, lParam]);
+            return 0;
+        },
+    }));
+    assert.equal(imm.ImmIsUIMessageA.handler([0, 0x10f, 1, 2]), 1, 'WM_IME_COMPOSITION');
+    assert.equal(imm.ImmIsUIMessageA.handler([0, 0x282, 1, 2]), 1, 'WM_IME_NOTIFY');
+    assert.equal(imm.ImmIsUIMessageA.handler([0, 0x100, 1, 2]), 0, 'WM_KEYDOWN is not one');
+    assert.equal(imm.ImmIsUIMessageA.handler([0, 0x286, 1, 2]), 0, 'WM_IME_CHAR is not one');
+    assert.deepEqual(sent, [], 'no window, nothing sent');
+    assert.equal(imm.ImmIsUIMessageA.handler([0x40, 0x10d, 3, 4]), 1);
+    assert.equal(imm.ImmIsUIMessageA.handler([0x40, 0x100, 3, 4]), 0);
+    assert.deepEqual(sent, [[0x40, 0x10d, 3, 4]], 'only the IME message reaches it');
+});

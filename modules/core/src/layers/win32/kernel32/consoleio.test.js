@@ -121,3 +121,42 @@ test('no console is made, none is a screen buffer, and the one page is the one t
     assert.deepEqual([fns.SetConsoleCP.argBytes, fns.GetConsoleScreenBufferInfo.argBytes,
         fns.AllocConsole.argBytes], [4, 8, 0]);
 });
+
+test('the screen buffer\'s calls and writing input are refused as for a handle that is no console',
+    ()=>{
+        /** @type {string[]} */
+        const said = [];
+        const { fns: typed, errors } = setup();
+        const fns = /** @type {any} */ (typed);
+        const withSay = /** @type {any} */ (createConsoleIoFunctions({
+            readMemory: ()=>new Uint8Array(0),
+            writeMemory: ()=>{},
+            setLastError: code=>errors.push(code),
+            write: ()=>{},
+            divergence: api=>said.push(api),
+        }));
+        /** @type {[string, number][]} */
+        const cases = [
+            ['WriteConsoleInputA', 16], ['WriteConsoleInputW', 16],
+            ['ReadConsoleOutputCharacterA', 20], ['ReadConsoleOutputCharacterW', 20],
+            ['SetConsoleScreenBufferSize', 8], ['SetConsoleTextAttribute', 8],
+            ['SetConsoleWindowInfo', 12], ['GetLargestConsoleWindowSize', 4],
+        ];
+        for (const [name, argBytes] of cases)
+        {
+            assert.equal(fns[name].argBytes, argBytes, name);
+            assert.equal(fns[name].handler([7, 0x100, 1, 0, 0x200]), 0, name);
+            assert.equal(errors.at(-1), 6, `${name}: ERROR_INVALID_HANDLE`);
+            withSay[name].handler([]);
+            withSay[name].handler([]);
+        }
+        assert.equal(said.length, cases.length, 'each said once');
+    });
+
+test('flushing the console input succeeds: the queue the reads find empty stays empty', ()=>{
+    const { fns: typed, errors } = setup();
+    const fns = /** @type {any} */ (typed);
+    assert.equal(fns.FlushConsoleInputBuffer.argBytes, 4);
+    assert.equal(fns.FlushConsoleInputBuffer.handler([3]), 1);
+    assert.deepEqual(errors, []);
+});

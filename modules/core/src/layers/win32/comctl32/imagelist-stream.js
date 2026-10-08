@@ -23,6 +23,7 @@
  * called through its vtable with the bytes in guest memory.
  */
 
+import { createImageListIcons } from './imagelist-icon.js';
 import { createImageLists } from './imagelist.js';
 
 /** ILHEAD's fields and its packed size. */
@@ -343,13 +344,14 @@ export function createImageListStreams(host, lists){
 
 /**
  * The image list family's exports, the host's own lists when it built them,
- * and the two that move a list through a stream. Here rather than beside the
- * lists, so the lists know nothing of streams and the two files do not
- * import each other.
+ * the two that move a list through a stream, and the icon made of an
+ * image. Here rather than beside the lists, so the lists know nothing of
+ * streams or icons and the files do not import each other.
  *
  * @param {import('./imagelist.js').ImageListHost} host
  */
 export function createImageListFunctions(host){
     const lists = host.imageLists ?? createImageLists(host);
-    return { ...lists.functions, ...createImageListStreams(host, lists) };
+    return { ...lists.functions, ...createImageListStreams(host, lists),
+        ...createImageListIcons(host, lists) };
 }

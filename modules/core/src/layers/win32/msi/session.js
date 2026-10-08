@@ -80,6 +80,7 @@ const FEATURE_UI_DISALLOW_ABSENT = 0x10;
  * @property {string | null} condition
  * @property {string | null} keyPath
  * @property {boolean} enabled
+ * @property {boolean} shared  Another product has it too: its resources stay on removal.
  * @property {number} installed
  * @property {number} action
  * @property {string[]} features
@@ -267,12 +268,28 @@ export function parseCommandLine(text){
  * @property {Machine} machine
  * @property {string} [commandLine]
  * @property {(productCode: string) => boolean} [isInstalled]
+ * @property {InstalledParts} [installed]
+ */
+
+/**
+ * What the machine records of a product already installed: which of its
+ * features are there and which components it put down. A maintenance
+ * session -- a removal, a repair, a change -- starts from these, as Windows
+ * reads them from its own registration.
+ *
+ * @typedef {Object} InstalledParts
+ * @property {(productCode: string, feature: string) => boolean} feature
+ * @property {(productCode: string, componentId: string) => boolean} component
+ * @property {(componentId: string, productCode: string) => boolean} [sharedWith]
+ *     Whether another product has the component too.
  */
 
 /**
  * @param {SessionOptions} options
  */
-export function createSession({ db, packagePath, machine, commandLine = '', isInstalled }){
+export function createSession(options){
+    const { db, packagePath, machine, commandLine = '', isInstalled } = options;
+    const recorded = options.installed;
     /** @type {Map<string, string>} */
     const properties = machineProperties(machine);
     const summary = readSummary(db.summaryStream());
@@ -368,8 +385,8 @@ export function createSession({ db, packagePath, machine, commandLine = '', isIn
             directory: String(row[2] ?? ''), attributes: Number(row[3] ?? 0),
             condition: row[4] === null ? null : String(row[4]),
             keyPath: row[5] === null ? null : String(row[5]),
-            enabled: true, installed: INSTALLSTATE.ABSENT, action: INSTALLSTATE.UNKNOWN,
-            features: [],
+            enabled: true, shared: false, installed: INSTALLSTATE.ABSENT,
+            action: INSTALLSTATE.UNKNOWN, features: [],
         });
     }
     for (const row of rowsOf('FeatureComponents'))
@@ -380,6 +397,30 @@ export function createSession({ db, packagePath, machine, commandLine = '', isIn
         {
             feature.components.push(component.key);
             component.features.push(feature.key);
+        }
+    }
+    for (const component of recorded?.sharedWith ? components.values() : [])
+    {
+        component.shared = component.id !== null
+            && Boolean(recorded?.sharedWith?.(component.id, productCode));
+    }
+    if (getProperty('Installed') !== '' && recorded)
+    {
+        for (const feature of features.values())
+        {
+            if (recorded.feature(productCode, feature.key))
+            {
+                feature.installed = (feature.attributes & FEATURE_FAVOR_SOURCE) !== 0
+                    ? INSTALLSTATE.SOURCE : INSTALLSTATE.LOCAL;
+            }
+        }
+        for (const component of components.values())
+        {
+            if (component.id && recorded.component(productCode, component.id))
+            {
+                component.installed = (component.attributes & COMPONENT_SOURCE_ONLY) !== 0
+                    ? INSTALLSTATE.SOURCE : INSTALLSTATE.LOCAL;
+            }
         }
     }
     /** @type {Map<string, PackageFile>} */
@@ -535,12 +576,21 @@ export function createSession({ db, packagePath, machine, commandLine = '', isIn
         };
         const addLocal = listed('ADDLOCAL');
         const addSource = listed('ADDSOURCE');
+        const addDefault = listed('ADDDEFAULT');
         const remove = listed('REMOVE');
-        const anyRequest = addLocal || addSource || remove || listed('ADDDEFAULT')
-            || listed('REINSTALL');
+        const reinstall = listed('REINSTALL');
+        const advertise = listed('ADVERTISE');
+        const anyRequest = addLocal || addSource || remove || addDefault || reinstall
+            || advertise;
         /** @param {Set<string> | 'ALL' | null} list @param {string} key */
         const names = (list, key)=>list === 'ALL' || (list?.has(key) ?? false);
         const installed = getProperty('Installed') !== '';
+        /** @param {Feature} feature where the feature goes when it is installed by default */
+        const byDefault = feature=>((feature.attributes & FEATURE_FAVOR_SOURCE) !== 0
+            ? INSTALLSTATE.SOURCE : INSTALLSTATE.LOCAL);
+        /** @param {Feature} feature */
+        const isThere = feature=>feature.installed === INSTALLSTATE.LOCAL
+            || feature.installed === INSTALLSTATE.SOURCE;
         for (const feature of features.values())
         {
             if (feature.request !== INSTALLSTATE.UNKNOWN)
@@ -548,9 +598,12 @@ export function createSession({ db, packagePath, machine, commandLine = '', isIn
                 feature.action = feature.request;
                 continue;
             }
+            // The request properties in the order Windows weighs them: a
+            // removal over an addition, an addition over a repair -- and
+            // removing or repairing what is not there does nothing.
             if (names(remove, feature.key))
             {
-                feature.action = INSTALLSTATE.ABSENT;
+                feature.action = isThere(feature) ? INSTALLSTATE.ABSENT : INSTALLSTATE.UNKNOWN;
             }
             else if (names(addLocal, feature.key))
             {
@@ -560,14 +613,27 @@ export function createSession({ db, packagePath, machine, commandLine = '', isIn
             {
                 feature.action = INSTALLSTATE.SOURCE;
             }
+            else if (names(addDefault, feature.key))
+            {
+                feature.action = byDefault(feature);
+            }
+            else if (names(reinstall, feature.key))
+            {
+                feature.action = isThere(feature) ? feature.installed : INSTALLSTATE.UNKNOWN;
+            }
+            else if (names(advertise, feature.key))
+            {
+                // Published, its files left for the first use to bring.
+                feature.action = isThere(feature) ? INSTALLSTATE.UNKNOWN
+                    : INSTALLSTATE.ADVERTISED;
+            }
             else if (anyRequest || installed)
             {
                 feature.action = INSTALLSTATE.UNKNOWN;
             }
             else if (feature.level > 0 && feature.level <= level)
             {
-                feature.action = (feature.attributes & FEATURE_FAVOR_SOURCE) !== 0
-                    ? INSTALLSTATE.SOURCE : INSTALLSTATE.LOCAL;
+                feature.action = byDefault(feature);
             }
             else
             {
@@ -607,6 +673,11 @@ export function createSession({ db, packagePath, machine, commandLine = '', isIn
             }
             const states = component.features.map(key=>features.get(key)?.action
                 ?? INSTALLSTATE.UNKNOWN);
+            // Where each feature ends up, asked for or left as it is: a
+            // component another feature keeps stays where it is.
+            const kept = component.features.map(key=>features.get(key))
+                .some(feature=>feature && feature.action === INSTALLSTATE.UNKNOWN
+                    && isThere(feature));
             if (states.includes(INSTALLSTATE.LOCAL) || states.includes(INSTALLSTATE.SOURCE))
             {
                 component.action = (component.attributes & COMPONENT_SOURCE_ONLY) !== 0
@@ -614,7 +685,7 @@ export function createSession({ db, packagePath, machine, commandLine = '', isIn
                         && (component.attributes & COMPONENT_OPTIONAL) !== 0)
                     ? INSTALLSTATE.SOURCE : INSTALLSTATE.LOCAL;
             }
-            else if (states.includes(INSTALLSTATE.ABSENT)
+            else if (states.includes(INSTALLSTATE.ABSENT) && !kept
                 && component.installed !== INSTALLSTATE.ABSENT)
             {
                 component.action = INSTALLSTATE.ABSENT;

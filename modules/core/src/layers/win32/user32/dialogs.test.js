@@ -1842,3 +1842,38 @@ test('SetDlgItemInt sets the number as text, signed when asked', ()=>{
     assert.equal(fns.GetDlgItemInt.handler([dialog, 300, 0, 0]), 4294967291);
     assert.equal(fns.SetDlgItemInt.handler([dialog, 999, 1, 0]), 0, 'no such control');
 });
+
+test('the AorW calls make the Unicode dialog for flags zero and the ANSI one otherwise', async()=>{
+    // DLG_ISANSI is the 2 CreateDialogIndirectParamA passes on; zero is
+    // the W form. What differs is the encoding the procedure is handed.
+    const DLG_ISANSI = 2;
+    /** @type {any} */
+    let table = null;
+    const { memory, fns } = setup({
+        dispatch: (wndProc, message)=>{
+            if (message.message === 0x0110)
+            {
+                table.EndDialog.handler([message.hwnd, table.IsWindowUnicode.handler([
+                    message.hwnd]) + 40]);
+            }
+            return 0;
+        },
+    });
+    table = fns;
+    putTemplate(memory, [{ id: 100, x: 4, y: 8, cx: 20, cy: 6, title: 'OK' }]);
+    const wide = fns.CreateDialogIndirectParamAorW.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0, 0]);
+    assert.notEqual(wide, 0);
+    assert.equal(fns.IsWindowUnicode.handler([wide]), 1);
+    const ansi = fns.CreateDialogIndirectParamAorW.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0, DLG_ISANSI]);
+    assert.equal(fns.IsWindowUnicode.handler([ansi]), 0);
+    assert.equal(fns.CreateDialogIndirectParamAorW.argBytes, 24);
+
+    assert.equal(await fns.DialogBoxIndirectParamAorW.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0, 0]), 41, 'modal and Unicode');
+    assert.equal(await fns.DialogBoxIndirectParamAorW.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0, DLG_ISANSI]), 40, 'modal and ANSI');
+    assert.equal(fns.DialogBoxIndirectParamAorW.handler([HINSTANCE, 0, 0, DIALOGPROC, 0, 0]), -1);
+    assert.equal(fns.DialogBoxIndirectParamAorW.argBytes, 24);
+});

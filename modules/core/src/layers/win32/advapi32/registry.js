@@ -401,6 +401,13 @@ const IN_PROCESS_CLASSES = Object.freeze([
     { clsid: '{3C305196-50DB-11D3-9CFE-00C04FD930C5}', library: 'ddraw.dll' }, // DirectDraw7
 ]);
 
+/** The Active Scripting engines Windows Script installs, and the names each answers to. */
+const SCRIPT_ENGINES = Object.freeze([
+    { clsid: '{F414C260-6AC0-11CF-B6D1-00AA00BBBB58}',
+        progIds: ['JScript', 'JavaScript', 'ECMAScript', 'LiveScript'] },
+    { clsid: '{B54F3741-5B07-11CF-A4B0-00AA004A55E8}', progIds: ['VBScript', 'VBS'] },
+]);
+
 /**
  * The keys and values every Windows installation carries before any program
  * has run, as far as a program of the era asks for them: where programs go,
@@ -439,6 +446,15 @@ const machineKeys = (windows, directx)=>{
             path: `${MACHINE_CLASSES}\\CLSID\\${clsid}\\InprocServer32`,
             values: { '': library, ThreadingModel: 'Both' },
         })),
+        // The script engines' names, which CLSIDFromProgID reads for a host
+        // that asks for "JScript" by name; the classes themselves are served
+        // by the engine.
+        ...SCRIPT_ENGINES.flatMap(({ clsid, progIds })=>[
+            { root: HKEY_LOCAL_MACHINE, path: `${MACHINE_CLASSES}\\CLSID\\${clsid}\\ProgID`,
+                values: { '': progIds[0] } },
+            ...progIds.map(progId=>({ root: HKEY_LOCAL_MACHINE,
+                path: `${MACHINE_CLASSES}\\${progId}\\CLSID`, values: { '': clsid } })),
+        ]),
         { root: HKEY_LOCAL_MACHINE, path: windowsKey, values: {
             ProgramFilesDir: folders.ProgramFiles,
             ProgramFilesPath: folders.ProgramFiles,

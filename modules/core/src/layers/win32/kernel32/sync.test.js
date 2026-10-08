@@ -992,3 +992,56 @@ test('a debugged child reports its creation, then its exit, waited for as the ch
     assert.equal(fns.WaitForDebugEvent.argBytes, 8);
     assert.equal(fns.ContinueDebugEvent.argBytes, 12);
 });
+
+test('the debugger calls act on the children this process debugs and refuse the rest', ()=>{
+    const host = fakeHost();
+    const kernel = /** @type {any} */ (host.kernel);
+    const debugged = { id: 0x300, debugEvents: ['create', 'exit'] };
+    const plain = { id: 0x310, debugEvents: null };
+    kernel.processes = { STILL_ACTIVE: 259, all: ()=>[debugged, plain] };
+    /** @type {string[]} */
+    const said = [];
+    const fns = /** @type {any} */ (createSyncFunctions({ ...host, kernel,
+        divergence: (/** @type {string} */ api)=>said.push(api) }));
+    host.register(0x50, 'process', debugged);
+    host.register(0x54, 'process', plain);
+    host.register(0x58, 'event', { kind: 'event' });
+    assert.deepEqual([fns.DebugActiveProcessStop.argBytes, fns.DebugBreakProcess.argBytes,
+        fns.DebugSetProcessKillOnExit.argBytes], [4, 4, 4]);
+
+    assert.equal(fns.DebugSetProcessKillOnExit.handler([0]), 1, 'a debugger sets it');
+    assert.equal(/** @type {any} */ (debugged).killOnExit, false);
+
+    assert.equal(fns.DebugBreakProcess.handler([0xffffffff]), 1, 'no debugger: nothing happens');
+    assert.equal(fns.DebugBreakProcess.handler([0x54]), 1);
+    assert.equal(fns.DebugBreakProcess.handler([0x50]), 1);
+    assert.deepEqual(said, ['DebugBreakProcess'], 'the debugged child\'s breakpoint is said');
+    assert.equal(fns.DebugBreakProcess.handler([0x58]), 0, 'an event is no process');
+    assert.equal(host.errors.at(-1), 6);
+
+    assert.equal(fns.DebugActiveProcessStop.handler([0x310]), 0, 'not debugged by us');
+    assert.equal(host.errors.at(-1), 6);
+    assert.equal(fns.DebugActiveProcessStop.handler([0x999]), 0, 'no such process');
+    assert.equal(host.errors.at(-1), 87);
+    assert.equal(fns.DebugActiveProcessStop.handler([0x300]), 1);
+    assert.equal(debugged.debugEvents, null, 'it reports to nobody now');
+    assert.equal(fns.WaitForDebugEvent.handler([0x200, 0]), 0, 'and no event comes');
+
+    assert.equal(fns.DebugSetProcessKillOnExit.handler([1]), 0,
+        'with no child debugged there is no debug object to set');
+    assert.equal(host.errors.at(-1), 6);
+});
+
+test('ReinitializeCriticalSection makes a section new again, as InitializeCriticalSection does',
+    ()=>{
+        const host = fakeHost();
+        const fns = /** @type {any} */ (createSyncFunctions(host));
+        assert.equal(fns.ReinitializeCriticalSection.argBytes, 4);
+        host.bytes.fill(0x55, 0x100, 0x118);
+        fns.ReinitializeCriticalSection.handler([0x100]);
+        const reinitialised = host.bytes.slice(0x100, 0x118);
+        host.bytes.fill(0x55, 0x100, 0x118);
+        fns.InitializeCriticalSection.handler([0x100]);
+        assert.deepEqual(reinitialised, host.bytes.slice(0x100, 0x118));
+        assert.equal(host.readI32(0x104), -1, 'LockCount: free');
+    });
