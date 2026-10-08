@@ -4832,20 +4832,47 @@ export function createGdiFunctions(host){
                     === true,
 
             /**
-             * A bitmap the program owns, drawn at a point, or nothing when it
-             * has no pixels this layer can reach.
+             * A bitmap the program owns, drawn at a point -- stretched to a
+             * size when one is given -- or nothing when it has no pixels this
+             * layer can reach.
              *
              * @param {number} hdc @param {number} x @param {number} y @param {number} bitmap
+             * @param {number} [width] @param {number} [height]
              */
-            bitmap(hdc, x, y, bitmap){
+            bitmap(hdc, x, y, bitmap, width, height){
                 const record = objects.get(bitmap);
                 const shape = record?.type === 'bitmap' ? record.attributes : null;
                 if (!shape || (!shape.bits && !shape.pixels))
                 {
                     return false;
                 }
-                return lend(bitmap, source=>table.BitBlt.handler([hdc >>> 0, x | 0, y | 0,
-                    shape.width | 0, shape.height | 0, source, 0, 0, SRCCOPY]) === 1);
+                const w = width ?? shape.width;
+                const h = height ?? shape.height;
+                return lend(bitmap, source=>(w === shape.width && h === shape.height
+                    ? table.BitBlt.handler([hdc >>> 0, x | 0, y | 0,
+                        shape.width | 0, shape.height | 0, source, 0, 0, SRCCOPY])
+                    : table.StretchBlt.handler([hdc >>> 0, x | 0, y | 0, w | 0, h | 0, source, 0,
+                        0, shape.width | 0, shape.height | 0, SRCCOPY])) === 1);
+            },
+
+            /**
+             * A bitmap's size and the colour of its top-left pixel, or null for
+             * a handle that is no bitmap with pixels: what a static control
+             * centring one fills the rest of itself with.
+             *
+             * @param {number} bitmap
+             * @returns {{ width: number, height: number, corner: number } | null}
+             */
+            bitmapShape(bitmap){
+                const record = objects.get(bitmap);
+                const shape = record?.type === 'bitmap' ? record.attributes : null;
+                if (!shape || (!shape.bits && !shape.pixels))
+                {
+                    return null;
+                }
+                const corner = lend(bitmap, source=>table.GetPixel.handler([source, 0, 0]));
+                return { width: shape.width | 0, height: Math.abs(shape.height | 0),
+                    corner: corner >>> 0 };
             },
         },
 

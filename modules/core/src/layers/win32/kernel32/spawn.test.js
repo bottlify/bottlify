@@ -633,7 +633,9 @@ test('a system program is found by bare name, in any case, with no file for it',
         'C:\\Windows\\System32\\regsvr32.exe', 'a full path, spelled as the caller spelled it');
     assert.equal(spawner.imageOf('C:\\App\\msiexec.exe'), null,
         'only in the system folder: anywhere else it is a file that is not there');
-    assert.equal(spawner.imageOf('notepad.exe'), null, 'and only the programs the engine has');
+    assert.equal(spawner.imageOf('calc.exe'), null, 'and only the programs the engine has');
+    assert.equal(spawner.imageOf('C:\\WINDOWS\\Notepad.exe readme.txt'),
+        'C:\\WINDOWS\\Notepad.exe', 'Notepad in the Windows directory as well');
 
     const made = spawner.launch('', 'msiexec /i setup.msi /qn', 0);
     assert.equal(made.imagePath, 'C:\\WINDOWS\\system32\\msiexec.exe');

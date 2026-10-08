@@ -20,7 +20,7 @@ import {
     TVM_HITTEST, TVM_ENSUREVISIBLE, TVM_SETIMAGELIST, TVM_GETIMAGELIST,
     TVIF_TEXT, TVIF_PARAM, TVIF_STATE, TVIF_CHILDREN, TVIS_SELECTED, TVIS_EXPANDED,
     TVIS_STATEIMAGEMASK, LPSTR_TEXTCALLBACK, TVITEM, TVINSERTSTRUCT,
-    WM_NOTIFY, NM_CLICK, NM_DBLCLK, TVN_SELCHANGINGA, TVN_SELCHANGEDA,
+    WM_NOTIFY, NM_CLICK, NM_DBLCLK, TVN_SELCHANGINGA, TVN_SELCHANGEDA, TVN_DELETEITEMA,
     TVN_GETDISPINFOA, TVN_ITEMEXPANDINGA, TVN_ITEMEXPANDEDA,
 } from './treeview.js';
 
@@ -146,6 +146,12 @@ function setup(){
      * @type {number[]}
      */
     const notifyCodes = [];
+    /**
+     * Each TVN_DELETEITEM's old item, as the parent reads it.
+     *
+     * @type {{ mask: number, hItem: number, lParam: number }[]}
+     */
+    const deleted = [];
     /** What a TVN_GETDISPINFO answers for each item handle. @type {Map<number,string>} */
     const callbackText = new Map();
     let heapNext = HEAP;
@@ -190,6 +196,13 @@ function setup(){
             {
                 const code = memory.i32(message.lParam + 8);
                 notifyCodes.push(code);
+                if (code === TVN_DELETEITEMA)
+                {
+                    const old = message.lParam + 16;
+                    deleted.push({ mask: memory.u32(old + TVITEM.mask),
+                        hItem: memory.u32(old + TVITEM.hItem),
+                        lParam: memory.u32(old + TVITEM.lParam) });
+                }
                 if (code === TVN_GETDISPINFOA)
                 {
                     const handle = memory.u32(message.lParam + 12 + TVITEM.hItem);
@@ -323,7 +336,7 @@ function setup(){
 
     return {
         memory, desktop, gdi, fns: table, pump, tree, insert, notifications,
-        dispatched, callbackText, host_window, treeRect, treeRow,
+        dispatched, callbackText, host_window, treeRect, treeRow, deleted,
         makeHost: async()=>{
             const name = TEXT + 64;
             memory.putString(name, 'host');
@@ -519,6 +532,33 @@ test('DELETEITEM removes a subtree and TVI_ROOT clears the whole tree', async()=
     assert.equal(context.fns.SendMessageA.handler([tree, TVM_GETCOUNT, 0, 0]), 0);
 });
 
+test('every item deleted is told to the parent, children first, and on destroy too', async()=>{
+    // The notification is where a program frees what an item's lParam holds;
+    // a setup's feature tree unregisters an object per item there, and one
+    // never told leaves the object pointing into a library it unloads.
+    const context = setup();
+    await context.makeHost();
+    const tree = await context.tree(0);
+    const root = context.insert(tree, TVI_ROOT, { text: 'Root', param: 0x11 });
+    const child = context.insert(tree, root, { text: 'Child', param: 0x22 });
+    const other = context.insert(tree, TVI_ROOT, { text: 'Other', param: 0x33 });
+
+    assert.equal(await context.fns.SendMessageA.handler([tree, TVM_DELETEITEM, 0, root]), 1);
+    assert.deepEqual(context.deleted.map(item=>[item.hItem, item.lParam]),
+        [[child, 0x22], [root, 0x11]], 'the child before its parent');
+    assert.equal(context.deleted[0].mask, 0x0010 | 0x0004, 'TVIF_HANDLE | TVIF_PARAM');
+
+    context.deleted.length = 0;
+    assert.equal(await context.fns.SendMessageA.handler([tree, TVM_DELETEITEM, 0, TVI_ROOT]), 1);
+    assert.deepEqual(context.deleted.map(item=>item.hItem), [other], 'TVI_ROOT tells of each');
+
+    context.deleted.length = 0;
+    const last = context.insert(tree, TVI_ROOT, { text: 'Last', param: 0x44 });
+    await context.fns.DestroyWindow.handler([tree]);
+    assert.deepEqual(context.deleted.map(item=>[item.hItem, item.lParam]), [[last, 0x44]],
+        'and a tree that is destroyed gives its items back the same way');
+});
+
 test('HITTEST names the row a point falls in', async()=>{
     const context = setup();
     await context.makeHost();
@@ -531,6 +571,36 @@ test('HITTEST names the row a point falls in', async()=>{
     assert.equal(context.fns.SendMessageA.handler([tree, TVM_HITTEST, 0, OUT]),
         context.fns.SendMessageA.handler([tree, TVM_GETNEXTITEM, TVGN_NEXT, first]),
         'the second row');
+    const TVHT_ONITEMLABEL = 0x4;
+    assert.equal(context.memory.u32(OUT + 8), TVHT_ONITEMLABEL, 'on its text');
+    context.memory.put32(OUT + 0, 150);
+    context.fns.SendMessageA.handler([tree, TVM_HITTEST, 0, OUT]);
+    assert.equal(context.memory.u32(OUT + 8), 0x20, 'TVHT_ONITEMRIGHT: past the text');
+    context.memory.put32(OUT + 0, -5);
+    assert.equal(context.fns.SendMessageA.handler([tree, TVM_HITTEST, 0, OUT]), 0);
+    assert.equal(context.memory.u32(OUT + 8), 0x800, 'TVHT_TOLEFT: outside the tree');
+});
+
+test('HITTEST tells the check box, the button and the indent apart', async()=>{
+    // The old answer was TVHT_ONITEMSTATEICON for every point of a row: a
+    // setup's feature tree took every click for one on the state image.
+    const context = setup();
+    await context.makeHost();
+    const tree = await context.tree(TVS_HASBUTTONS | TVS_CHECKBOXES);
+    const parent = context.insert(tree, TVI_ROOT, { text: 'Game', children: 1 });
+    context.insert(tree, parent, { text: 'Data' });
+    const at = context.treeRow(tree, 0);
+    /** @param {number} x */
+    const flagsAt = x=>{
+        context.memory.put32(OUT + 0, x);
+        context.memory.put32(OUT + 4, at.cy + 4);
+        context.fns.SendMessageA.handler([tree, TVM_HITTEST, 0, OUT]);
+        return context.memory.u32(OUT + 8);
+    };
+    assert.equal(flagsAt(0), 0x8, 'TVHT_ONITEMINDENT');
+    assert.equal(flagsAt(3), 0x10, 'TVHT_ONITEMBUTTON');
+    assert.equal(flagsAt(1 + 9 + 3 + 4), 0x40, 'TVHT_ONITEMSTATEICON');
+    assert.equal(flagsAt(1 + 9 + 3 + 13 + 3 + 4), 0x4, 'TVHT_ONITEMLABEL');
 });
 
 test('ENSUREVISIBLE opens the ancestors of a hidden item', async()=>{

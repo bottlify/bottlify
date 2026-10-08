@@ -763,6 +763,11 @@ export function createSyncFunctions(host){
                 // child's own index. A wait for all of a set with more in it
                 // than the child cannot be satisfied by the child alone, and
                 // stays the old handover: the parent is replaced.
+                if (child !== null && (timeout >>> 0) === 0 && !child.started
+                    && !kernel.processes?.finished?.(child))
+                {
+                    child.polled = true;
+                }
                 if (child !== null && (timeout >>> 0) !== 0)
                 {
                     if (waitAll === 0 || objects.length === 0)

@@ -74,6 +74,7 @@ const SE_GROUP_DEFAULTED = 0x0002;
 const SE_DACL_PRESENT = 0x0004;
 const SE_DACL_DEFAULTED = 0x0008;
 const SE_SACL_PRESENT = 0x0010;
+const SE_SACL_DEFAULTED = 0x0020;
 const SE_SELF_RELATIVE = 0x8000;
 
 /** An ACL's header: revision, a pad, its size, its ACE count, a pad. */
@@ -662,6 +663,104 @@ export function createTokenFunctions(host){
     };
 
     /**
+     * Any descriptor a getter is handed: an absolute one, whose parts are
+     * pointers, or a self-relative one -- what GetFileSecurity and
+     * RegGetKeySecurity fill in -- whose parts are offsets from its start.
+     * Null for anything else.
+     *
+     * @param {number} descriptor
+     * @returns {{ at: number, control: number, part: (slot: number) => number } | null}
+     */
+    const anyDescriptor = descriptor=>{
+        if ((descriptor >>> 0) === 0)
+        {
+            return null;
+        }
+        const at = descriptor >>> 0;
+        if (host.readMemory(at, 1)[0] !== SECURITY_DESCRIPTOR_REVISION)
+        {
+            return null;
+        }
+        const control = readWord(at + SD.CONTROL);
+        const relative = (control & SE_SELF_RELATIVE) !== 0;
+        return {
+            at, control,
+            part: slot=>{
+                const value = readDword(at + slot);
+                return relative && value !== 0 ? (at + value) >>> 0 : value;
+            },
+        };
+    };
+
+    /** @param {number} acl  An ACL's size, from its header. */
+    const aclLength = acl=>(acl === 0 ? 0 : readWord(acl + ACL.SIZE));
+
+    /** @param {number} sid */
+    const sidLength = sid=>(sid === 0 ? 0 : 8 + 4 * host.readMemory(sid, 2)[1]);
+
+    /**
+     * GetSecurityDescriptorOwner and Group: the SID's pointer, and whether
+     * it was defaulted.
+     *
+     * @param {number} slot @param {number} bit
+     */
+    const getSidOf = (slot, bit)=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [descriptor, out, defaulted])=>{
+            const held = anyDescriptor(descriptor);
+            if (held === null)
+            {
+                return fail(ERROR_INVALID_SECURITY_DESCR);
+            }
+            if ((out >>> 0) === 0 || (defaulted >>> 0) === 0)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            writeDword(out >>> 0, held.part(slot));
+            writeDword(defaulted >>> 0, (held.control & bit) !== 0 ? 1 : 0);
+            return 1;
+        },
+    });
+
+    /**
+     * GetSecurityDescriptorDacl and Sacl: whether the list is present and,
+     * when it is, its pointer -- null for the null list -- and whether it was
+     * defaulted; an absent one leaves the other two as they were.
+     *
+     * @param {number} slot @param {number} presentBit @param {number} defaultedBit
+     */
+    const getAclOf = (slot, presentBit, defaultedBit)=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [descriptor, present, out, defaulted])=>{
+            const held = anyDescriptor(descriptor);
+            if (held === null)
+            {
+                return fail(ERROR_INVALID_SECURITY_DESCR);
+            }
+            if ((present >>> 0) === 0)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            const isPresent = (held.control & presentBit) !== 0;
+            writeDword(present >>> 0, isPresent ? 1 : 0);
+            if (isPresent)
+            {
+                if ((out >>> 0) !== 0)
+                {
+                    writeDword(out >>> 0, held.part(slot));
+                }
+                if ((defaulted >>> 0) !== 0)
+                {
+                    writeDword(defaulted >>> 0, (held.control & defaultedBit) !== 0 ? 1 : 0);
+                }
+            }
+            return 1;
+        },
+    });
+
+    /**
      * The owner or group pointer of a descriptor, and the bit that says it
      * was defaulted.
      *
@@ -1182,6 +1281,74 @@ export function createTokenFunctions(host){
             /** @param {number[]} args */
             handler: ([descriptor])=>(descriptorAt(descriptor) === null
                 ? fail(ERROR_INVALID_SECURITY_DESCR) : 1),
+        },
+
+        /**
+         * BOOL GetSecurityDescriptorControl(PSECURITY_DESCRIPTOR,
+         *   PSECURITY_DESCRIPTOR_CONTROL pControl, LPDWORD lpdwRevision)
+         */
+        GetSecurityDescriptorControl: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([descriptor, control, revision])=>{
+                const held = anyDescriptor(descriptor);
+                if (held === null)
+                {
+                    return fail((descriptor >>> 0) === 0 ? ERROR_INVALID_SECURITY_DESCR
+                        : ERROR_UNKNOWN_REVISION);
+                }
+                if ((control >>> 0) === 0 || (revision >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                writeWord(control >>> 0, held.control);
+                writeDword(revision >>> 0, SECURITY_DESCRIPTOR_REVISION);
+                return 1;
+            },
+        },
+
+        /** BOOL GetSecurityDescriptorOwner(PSECURITY_DESCRIPTOR, PSID *, LPBOOL) */
+        GetSecurityDescriptorOwner: getSidOf(SD.OWNER, SE_OWNER_DEFAULTED),
+
+        /** BOOL GetSecurityDescriptorGroup(PSECURITY_DESCRIPTOR, PSID *, LPBOOL) */
+        GetSecurityDescriptorGroup: getSidOf(SD.GROUP, SE_GROUP_DEFAULTED),
+
+        /** BOOL GetSecurityDescriptorDacl(PSECURITY_DESCRIPTOR, LPBOOL, PACL *, LPBOOL) */
+        GetSecurityDescriptorDacl: getAclOf(SD.DACL, SE_DACL_PRESENT, SE_DACL_DEFAULTED),
+
+        /** BOOL GetSecurityDescriptorSacl(PSECURITY_DESCRIPTOR, LPBOOL, PACL *, LPBOOL) */
+        GetSecurityDescriptorSacl: getAclOf(SD.SACL, SE_SACL_PRESENT, SE_SACL_DEFAULTED),
+
+        /**
+         * DWORD GetSecurityDescriptorLength(PSECURITY_DESCRIPTOR)
+         *
+         * What the descriptor takes made self-relative: its header and each
+         * part it holds, as MakeSelfRelativeSD would lay them out.
+         */
+        GetSecurityDescriptorLength: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([descriptor])=>{
+                const held = anyDescriptor(descriptor);
+                if (held === null)
+                {
+                    return 0;
+                }
+                return SD.SIZE + sidLength(held.part(SD.OWNER)) + sidLength(held.part(SD.GROUP))
+                    + ((held.control & SE_DACL_PRESENT) !== 0 ? aclLength(held.part(SD.DACL)) : 0)
+                    + ((held.control & SE_SACL_PRESENT) !== 0 ? aclLength(held.part(SD.SACL)) : 0);
+            },
+        },
+
+        /**
+         * BOOL IsValidAcl(PACL pAcl)
+         *
+         * A revision an ACL may have, and ACEs that fit in the size it gives.
+         */
+        IsValidAcl: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([acl])=>((acl >>> 0) !== 0 && acesOf(acl) !== null ? 1 : 0),
         },
 
         /** BOOL SetSecurityDescriptorOwner(PSECURITY_DESCRIPTOR, PSID, BOOL bOwnerDefaulted) */

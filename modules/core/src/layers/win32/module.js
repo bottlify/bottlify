@@ -51,7 +51,7 @@ import {
 import { createServiceFunctions } from './advapi32/services.js';
 import { createCryptoFunctions } from './advapi32/crypto.js';
 import {
-    DIRECTX_RELEASES, createHive, profileDirectories, shellFolders,
+    DIRECTX_RELEASES, createHive, shellFolderDirectories, shellFolders,
 } from './advapi32/registry.js';
 import { createGdiFunctions } from './gdi32/functions.js';
 import { createWinsockFunctions } from './wsock32/functions.js';
@@ -65,8 +65,9 @@ import { createTimerService } from './winmm/timers.js';
 import { COMCTL32_ORDINALS, createComctlFunctions } from './comctl32/functions.js';
 import { createCommonControls } from './comctl32/controls.js';
 import { createImageLists } from './comctl32/imagelist.js';
-import { createShellFunctions } from './shell32/functions.js';
+import { SHELL32_ORDINALS, createShellFunctions } from './shell32/functions.js';
 import { registerShellLinkClasses } from './shell32/shelllink.js';
+import { registerInternetShortcutClass } from './shell32/internet-shortcut.js';
 import { registerWbemClasses } from './ole32/wbem.js';
 import { registerDxDiagClasses } from './ole32/dxdiag.js';
 import { registerJScriptClass } from './jscript/active-script.js';
@@ -1073,7 +1074,8 @@ export function createWin32Module(){
             // an installer reaches it through CoCreateInstance rather than an
             // export. It saves onto the same volume every file call uses and hands
             // back strings from the same task heap CoTaskMemAlloc does.
-            registerShellLinkClasses(com, {
+            /** @type {Parameters<typeof registerShellLinkClasses>[1]} */
+            const shortcutHost = {
                 readMemory,
                 writeMemory,
                 readCString,
@@ -1082,7 +1084,10 @@ export function createWin32Module(){
                 allocate: bytes=>heap.allocate(bytes),
                 files: volume,
                 divergence: config?.divergence,
-            });
+            };
+            registerShellLinkClasses(com, shortcutHost);
+            // The `.url` beside it: a setup's link to its publisher's site.
+            registerInternetShortcutClass(com, /** @type {any} */ (shortcutHost));
 
             // WMI's locator, which a program asks about its video memory and its
             // machine.
@@ -1638,7 +1643,11 @@ export function createWin32Module(){
                         readCString,
                         readWideString,
                         files: volume,
-                        directories: profileDirectories(windows),
+                        // The libraries this build implements, standing in the
+                        // system folder for a setup that looks before it loads.
+                        systemLibraries: ()=>Object.keys(libraries)
+                            .filter(name=>name !== PROGRAMS_LIBRARY && /\.(dll|drv|ocx)$/i.test(name)),
+                        directories: shellFolderDirectories(windows),
                         imagePath: ()=>modules.imagePath(),
                         setLastError: setError,
                         writeConsole: (handle, text)=>sink(handle, text),
@@ -1889,6 +1898,8 @@ export function createWin32Module(){
                     resolve: path=>filesystem.resolve(path).path,
                     // And a launch starts the program kernel32 would have started.
                     launcher: spawner,
+                    /** @param {string} url */
+                    openUrl: url=>config?.openUrl?.(url) ?? false,
                     divergence: config?.divergence,
                     taskAllocator,
                     // The task allocator's memory: a caller frees an item id list
@@ -1994,6 +2005,40 @@ export function createWin32Module(){
                     // when they are called: the table is still being built here.
                     /** @param {string} name */
                     library: name=>libraries[name],
+                    /**
+                     * Through GetTextExtentPoint32W, on the screen's context
+                     * for a null one, as the program's own call would measure.
+                     *
+                     * @param {number} hdc @param {string} text
+                     */
+                    textWidth: (hdc, text)=>{
+                        const user = libraries['USER32.dll'];
+                        const dc = hdc !== 0 ? hdc : user.GetDC.handler([0]);
+                        const bytes = new Uint8Array(text.length * 2 + 8);
+                        for (let at = 0; at < text.length; at++)
+                        {
+                            bytes[at * 2] = text.charCodeAt(at) & 0xff;
+                            bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
+                        }
+                        const block = heap.allocate(bytes.length);
+                        try
+                        {
+                            writeMemory(block, bytes);
+                            const size = block + text.length * 2;
+                            libraries['GDI32.dll'].GetTextExtentPoint32W.handler(
+                                [dc, block, text.length, size]);
+                            return new DataView(readMemory(size, 4).slice().buffer)
+                                .getInt32(0, true);
+                        }
+                        finally
+                        {
+                            heap.free(block);
+                            if (hdc === 0)
+                            {
+                                user.ReleaseDC.handler([0, dc]);
+                            }
+                        }
+                    },
                     divergence: config?.divergence,
                 }),
 
@@ -2781,6 +2826,7 @@ export function createWin32Module(){
                 free: address=>heap.free(address),
                 writeMemory,
                 readWideString,
+                readMemory,
             });
 
             libraries['SHFOLDER.dll'] = {
@@ -2933,6 +2979,7 @@ export function createWin32Module(){
                     // A program of the 9x era imports shlwapi's wide-character
                     // wrappers by number alone.
                     'SHLWAPI.dll': SHLWAPI_ORDINALS,
+                    'SHELL32.dll': SHELL32_ORDINALS,
                 }),
 
                 /**

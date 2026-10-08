@@ -571,7 +571,8 @@ export function createSession(options){
         /** @param {string} name */
         const listed = name=>{
             const value = getProperty(name);
-            return value === '' ? null : value === 'ALL' ? 'ALL'
+            // ALL in any case, as Windows reads it: setups write `ADDLOCAL=All`.
+            return value === '' ? null : value.trim().toUpperCase() === 'ALL' ? 'ALL'
                 : new Set(value.split(',').map(entry=>entry.trim()));
         };
         const addLocal = listed('ADDLOCAL');

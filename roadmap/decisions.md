@@ -318,6 +318,45 @@ checks for msiexec.exe, or reads its version, before starting it; the answer the
 entry served from the synthesised image, not a file written to the volume. A file a bundle does
 carry at that path always wins. *2026-10-08.*
 
+**A39 -- Windows XP's Internet Explorer and Media Player are there, at Service Pack 3's versions,
+without files.** Setups check them before installing what needs either: an IExpress package's
+version check reads `shdocvw.dll` or `msdxm.ocx` in the system folder, others read the registry.
+The XP description carries the browser's and the player's versions and the files that carry them
+(`kernel32/versions.js`, `components`): GetFileVersionInfo answers those files with their own
+versions, as it answers the engine's libraries with the system's, and the registry's `Internet
+Explorer\Version` and `MediaPlayer\PlayerUpgrade\PlayerVersion` say the same, from the same
+table. As with the system programs (A38), the volume shows no file at those paths. The numbers
+are Service Pack 3's as published (IE 6.0.2900.5512, WMP 9.0.0.4503, msdxm.ocx 6.4.9.1133) and
+were not read off a machine; the other Windows releases describe no components and answer as
+before. *2026-10-08.*
+
+**A40 -- Notepad is a system program, and the shell opens text files in it and hands addresses
+to the page.** Setups show a readme by starting `C:\WINDOWS\Notepad.exe readme.txt` or by
+asking ShellExecute to open the `.txt`, and a "visit our site" button by opening an address. On
+the model of A38, `notepad.exe` in the Windows directory and the system folder is a synthesised
+image whose routine reads the file through CreateFile/ReadFile (a UTF-16 or UTF-8 byte order
+mark decides the encoding, the ANSI code page otherwise), shows it in a frame filled by a
+multi-line edit control, and runs a message loop until the frame is closed; editing, saving and
+printing (`/p`) are not offered. ShellExecute's open verb opens `.txt`, `.log`, `.ini`, `.inf`,
+`.nfo` and `.diz` as XP's registry has them -- `%SystemRoot%\system32\NOTEPAD.EXE %1`, the
+file unquoted -- and an `http`, `https`, `ftp` or `mailto` address, or the address a `.url`
+shortcut holds, is handed to the page as an `open-url` event and answered with success, since
+the machine reports a browser installed (A39). The frame is a class of the program's own, named
+`Notepad` as the real one's is, whose procedure is DefWindowProcW's own address -- so it is
+moved, activated and closed as any window is -- because the routine drives only exports a program
+could call and writes no window procedure in guest code. *2026-10-08.*
+
+**A41 -- The libraries the engine implements stand in the system folder as files, for the
+questions asked before loading one.** A38 left the system folder empty of what the engine
+supplies, to be revisited when a setup checked first; InstallShield 9's `UseDLL` does, with
+FindFirstFile on `system32\Shell32.dll`, and stopped at "UseDLL failed". In the system folder a
+name that is one of the engine's libraries, and is not a file on the volume, now answers
+GetFileAttributes(Ex) and a FindFirstFile for that exact name as a file: archive, 64 KiB, dated
+as Windows XP SP3's build (2008-04-14). A search with a wildcard lists the folder as it is, and
+the name cannot be opened -- what it holds is the engine's, not bytes; GetFileVersionInfo answers
+such a library already (A39). The system programs stay as A38 has them. Revisit if a program
+reads a system library's bytes or enumerates the folder to find one. *2026-10-08.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

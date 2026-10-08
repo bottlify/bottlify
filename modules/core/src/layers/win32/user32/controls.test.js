@@ -14,6 +14,8 @@ import { createGdiFunctions } from '../gdi32/functions.js';
 import { createGdiDrawing } from '../../graphics/gdi/context.js';
 import { createSurface, surfaceForDibSection, viewOf } from '../../graphics/gdi/surface.js';
 import { createCommonControls } from '../comctl32/controls.js';
+import { createRichEditControls } from '../riched/richedit.js';
+import { imagePlace } from './controls.js';
 import { PBM_SETRANGE, PBM_SETPOS } from '../comctl32/progress.js';
 import {
     TVM_INSERTITEMA, TVM_EXPAND, TVM_SELECTITEM, TVS_HASBUTTONS, TVS_HASLINES,
@@ -363,7 +365,8 @@ function setup({ reply = ()=>0, engine = false, desktopPicture = null } = {}){
         },
         release: ()=>{},
         registerControls: (controlHost, toolkit, register)=>{
-            for (const definition of createCommonControls(controlHost, toolkit))
+            for (const definition of [...createCommonControls(controlHost, toolkit),
+                ...createRichEditControls(controlHost, toolkit)])
             {
                 register(definition);
             }
@@ -463,7 +466,9 @@ test('byte-exact: a dialog with a push button, a static and a check box paints a
         // and looked at; from then on any change to the painting is a change
         // to the picture, and has to be a deliberate one.
         const context = setup({ reply: message=>(message.message === WM_INITDIALOG ? 1 : 0) });
-        const dialog = await openDialog(context);
+        // With a system menu, so its caption has the close box in the picture.
+        const dialog = await openDialog(context, { ...WIZARD_PAGE,
+            style: WIZARD_PAGE.style | 0x00080000 });
         context.fns.SendDlgItemMessageA.handler([dialog, 101, BM_SETCHECK, 1, 0]);
         await context.pump(dialog);
 
@@ -1280,6 +1285,46 @@ test('a read-only multi-line edit breaks its text into lines and scrolls by page
         'SB_TOP goes back to the top');
 });
 
+test('a multi-line edit\'s own scroll bar follows its lines, as GetScrollInfo reads it',
+    async()=>{
+        // A licence page enables "I accept" once the box's bar says the text
+        // is read to its end. The bar stayed at its default, top and all,
+        // however far the text scrolled, and the page never let anyone on.
+        const context = setup();
+        const dialog = await openDialog(context);
+        context.memory.putString(TEXT, 'Edit');
+        const edit = context.fns.CreateWindowExA.handler([WS_EX_CLIENTEDGE, TEXT, 0,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY,
+            8, 60, 200, 40, dialog, 301, HINSTANCE, 0]);
+        context.memory.putString(TEXT, Array.from({ length: 12 }, (_, index)=>`Clause ${index}`)
+            .join('\r\n'));
+        context.fns.SetWindowTextA.handler([edit, TEXT]);
+        await context.pump(dialog);
+        const SB_VERT = 1;
+        const SIF_ALL = 0x17;
+        const INFO = 0x16000;
+        const info = ()=>{
+            context.memory.writeMemory(INFO, new Uint8Array(28));
+            context.memory.writeMemory(INFO, new Uint8Array([28, 0, 0, 0, SIF_ALL, 0, 0, 0]));
+            assert.equal(context.fns.GetScrollInfo.handler([edit, SB_VERT, INFO]), 1);
+            const [min, max, page, pos] = [8, 12, 16, 20].map(at=>context.memory.u32(INFO + at));
+            return { min, max, page, pos };
+        };
+        const first = info();
+        assert.equal(first.max, 11, 'twelve lines');
+        assert.equal(first.pos, 0);
+        assert.ok(first.page > 0 && first.page < 12, `the lines that show: ${first.page}`);
+        const SB_BOTTOM = 7;
+        context.fns.SendMessageA.handler([edit, WM_VSCROLL, SB_BOTTOM, 0]);
+        const last = info();
+        assert.equal(last.pos, last.max - last.page + 1, 'at the end, as the bar says');
+        assert.equal(last.pos, context.fns.SendMessageA.handler([edit, EM_GETFIRSTVISIBLELINE,
+            0, 0]));
+        context.memory.putString(TEXT, 'One line');
+        context.fns.SetWindowTextA.handler([edit, TEXT]);
+        assert.deepEqual([info().max, info().pos], [0, 0], 'new text starts it over');
+    });
+
 test('a list box keeps its items and a click selects one with LBN_SELCHANGE', async()=>{
     const context = setup();
     const dialog = await openDialog(context);
@@ -1546,8 +1591,10 @@ test('a system class has a procedure address a program can subclass and call thr
     });
 
 test('a click on the caption\'s close box asks the dialog to close, which is Cancel', async()=>{
+    const WS_SYSMENU = 0x00080000;
     const context = setup();
-    const dialog = await openDialog(context);
+    const dialog = await openDialog(context, { ...WIZARD_PAGE,
+        style: WIZARD_PAGE.style | WS_SYSMENU });
     context.fns.GetWindowRect.handler([dialog, OUT]);
     const right = context.memory.u32(OUT + 8);
     const top = context.memory.u32(OUT + 4);
@@ -1558,6 +1605,24 @@ test('a click on the caption\'s close box asks the dialog to close, which is Can
     assert.deepEqual(closing.map(one=>one.message), [WM_NCLBUTTONDOWN, WM_CLOSE]);
     assert.deepEqual(context.commands().at(-1), [IDCANCEL, BN_CLICKED, 0]);
 });
+
+test('a dialog without a system menu has no close box: its caption\'s corner is caption',
+    async()=>{
+        // A setup's last page drops WS_SYSMENU so that only Finish ends it;
+        // a close box drawn and hit there closed it all the same.
+        const context = setup();
+        const dialog = await openDialog(context);
+        context.fns.GetWindowRect.handler([dialog, OUT]);
+        const right = context.memory.u32(OUT + 8);
+        const top = context.memory.u32(OUT + 4);
+        const HTCAPTION = 2;
+        assert.equal(context.fns.SendMessageA.handler([dialog, 0x0084, 0,
+            ((top + 10) << 16) | (right - 8)]), HTCAPTION);
+        context.click(right - 8, top + 10);
+        await context.pump(dialog);
+        assert.deepEqual(context.dispatched.filter(one=>one.wndProc === DIALOGPROC
+            && one.message === WM_CLOSE), []);
+    });
 
 test('a template that sets a font lays the dialog out in it and hands it to every control',
     async()=>{
@@ -1711,6 +1776,61 @@ test('an unread message for a hidden window paints nothing and the desktop stays
     void MSG;
 });
 
+test('a window that relabels its button in its WM_PAINT is not painted again inside it',
+    async()=>{
+        // A launcher re-applies its language from WM_PAINT, before BeginPaint:
+        // it sets its buttons' text. A button repaints itself at once, and
+        // Windows sends the parent WM_CTLCOLORBTN then, never WM_PAINT
+        // (user32's WmSetTextButtonSeq). Started from the parent, which still
+        // had its area to paint, the button's repaint sent the parent WM_PAINT
+        // inside its own WM_PAINT until the stack ran out.
+        let parent = 0;
+        let button = 0;
+        let depth = 0;
+        let deepest = 0;
+        let paints = 0;
+        const context = setup({
+            reply: message=>{
+                const passOn = ()=>context.fns.DefWindowProcA.handler(
+                    [message.hwnd, message.message, message.wParam, message.lParam]);
+                if (message.message !== WM_PAINT || message.hwnd !== parent || button === 0
+                    || depth > 3)
+                {
+                    return passOn();
+                }
+                paints++;
+                depth++;
+                deepest = Math.max(deepest, depth);
+                context.memory.putString(TEXT + 32, '&Next >');
+                return Promise.resolve(context.fns.SetWindowTextA.handler([button, TEXT + 32]))
+                    .then(()=>{
+                        depth--;
+                        return passOn();
+                    });
+            },
+        });
+        context.memory.putString(TEXT, 'Launcher');
+        const CLASS = OUT + 64;
+        [0, GUEST_PROC, 0, 0, HINSTANCE, 0, 0, 5 + 1, 0, TEXT].forEach((value, index)=>{
+            const bytes = new Uint8Array(4);
+            new DataView(bytes.buffer).setUint32(0, value, true);
+            context.memory.writeMemory(CLASS + index * 4, bytes);
+        });
+        assert.notEqual(context.fns.RegisterClassA.handler([CLASS]), 0);
+        parent = await context.fns.CreateWindowExA.handler([0, TEXT, TEXT,
+            WS_POPUP | WS_CAPTION | WS_VISIBLE, 20, 30, 200, 120, 0, 0, HINSTANCE, 0]);
+        context.memory.putString(TEXT + 64, 'Button');
+        button = await context.fns.CreateWindowExA.handler([0, TEXT + 64, TEXT + 64,
+            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 100, 70, 75, 23, parent, 1, HINSTANCE, 0]);
+        await context.pump();
+        paints = 0;
+        deepest = 0;
+        context.fns.InvalidateRect.handler([parent, 0, 1]);
+        await context.fns.UpdateWindow.handler([parent]);
+        assert.equal(deepest, 1, 'no WM_PAINT inside the WM_PAINT');
+        assert.equal(paints, 1);
+    });
+
 test('a MoveWindow that leaves a control where it was repaints nothing', async()=>{
     // MoveWindow is SetWindowPos with the z-order left alone, and a placement
     // that changes neither the position nor the size uncovers nothing: the
@@ -1833,4 +1953,85 @@ test('a desktop given a picture shows it where no window is, its colour without 
     const plain = setup();
     await openDialog(plain);
     assert.equal(plain.desktop.read(4, 150), 0x00808080, 'with no picture, the desktop colour');
+});
+
+test('a static control\'s image is centred, stretched or left at its corner as its styles say',
+    ()=>{
+        // A setup's welcome page centres a picture larger than its control;
+        // drawn from the corner, it showed its own left margin and lost its
+        // right side.
+        const SS_BITMAP = 0x0e;
+        const SS_CENTERIMAGE = 0x200;
+        const SS_REALSIZECONTROL = 0x40;
+        const SS_REALSIZEIMAGE = 0x800;
+        const rect = { left: 10, top: 20, right: 175, bottom: 321 };
+        const picture = { width: 200, height: 320 };
+        assert.deepEqual(imagePlace({ style: SS_BITMAP | SS_CENTERIMAGE | SS_REALSIZEIMAGE },
+            rect, picture), { x: -8, y: 10, centred: true }, 'centred, and clipped either side');
+        assert.deepEqual(imagePlace({ style: SS_BITMAP | SS_REALSIZECONTROL }, rect, picture),
+            { x: 10, y: 20, width: 165, height: 301, centred: false }, 'stretched to the control');
+        assert.deepEqual(imagePlace({ style: SS_BITMAP | SS_REALSIZECONTROL | SS_CENTERIMAGE },
+            rect, picture).centred, true, 'centring wins over stretching');
+        assert.deepEqual(imagePlace({ style: SS_BITMAP }, rect, picture),
+            { x: 10, y: 20, centred: false });
+    });
+
+test('a static given a bitmap takes the bitmap\'s size, unless it centres or stretches it',
+    async()=>{
+        // A setup's page lays its picture static over the whole page and its
+        // radio buttons inside it. Kept at the template's size, the static
+        // painted its background over them and they could not be seen.
+        const STM_SETIMAGE = 0x0172;
+        const IMAGE_BITMAP = 0;
+        const SS_BITMAP = 0x0e;
+        const SS_CENTERIMAGE = 0x200;
+        const context = setup();
+        const dialog = await openDialog(context);
+        const bitmap = context.gdi.table.CreateBitmap.handler([20, 10, 1, 32, 0]);
+        assert.notEqual(bitmap, 0);
+        /** @param {number} style */
+        const make = style=>{
+            context.memory.putString(TEXT, 'Static');
+            return context.fns.CreateWindowExA.handler([0, TEXT, 0,
+                WS_CHILD | WS_VISIBLE | style, 8, 8, 120, 90, dialog, 0, HINSTANCE, 0]);
+        };
+        /** @param {number} hwnd */
+        const size = hwnd=>{
+            context.fns.GetWindowRect.handler([hwnd, OUT]);
+            return [context.memory.u32(OUT + 8) - context.memory.u32(OUT),
+                context.memory.u32(OUT + 12) - context.memory.u32(OUT + 4)];
+        };
+        const corner = make(SS_BITMAP);
+        await context.fns.SendMessageA.handler([corner, STM_SETIMAGE, IMAGE_BITMAP, bitmap]);
+        assert.deepEqual(size(corner), [20, 10], 'the bitmap\'s size');
+        const centred = make(SS_BITMAP | SS_CENTERIMAGE);
+        await context.fns.SendMessageA.handler([centred, STM_SETIMAGE, IMAGE_BITMAP, bitmap]);
+        assert.deepEqual(size(centred), [120, 90], 'its own size, the bitmap centred in it');
+    });
+
+test('a rich edit shows a scroll bar only while it has something to scroll', async()=>{
+    // A setup's welcome page puts its text in a rich edit made with both
+    // bars. The text fits, and Windows shows neither; the bars stood there,
+    // empty, beside it.
+    const WS_HSCROLL = 0x00100000;
+    const ES_DISABLENOSCROLL = 0x2000;
+    const context = setup();
+    const dialog = await openDialog(context);
+    /** @param {number} style @param {string} text */
+    const make = async(style, text)=>{
+        context.memory.putString(TEXT, 'RichEdit20A');
+        context.memory.putString(TEXT + 0x40, text);
+        const hwnd = context.fns.CreateWindowExA.handler([0, TEXT, TEXT + 0x40,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY | style,
+            8, 8, 200, 60, dialog, 0, HINSTANCE, 0]);
+        await context.pump(dialog);
+        return hwnd;
+    };
+    /** @param {number} hwnd */
+    const bars = hwnd=>context.fns.GetWindowLongA.handler([hwnd, -16]) & (WS_VSCROLL | WS_HSCROLL);
+    assert.equal(bars(await make(0, 'Welcome.')), 0, 'neither, for text that fits');
+    const long = Array.from({ length: 30 }, (_, index)=>`Line ${index}`).join('\r\n');
+    assert.equal(bars(await make(0, long)), WS_VSCROLL, 'the vertical one, for text that does not');
+    assert.equal(bars(await make(ES_DISABLENOSCROLL, 'Welcome.')), WS_VSCROLL | WS_HSCROLL,
+        'kept, disabled, when the style asks');
 });

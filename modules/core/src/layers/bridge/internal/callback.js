@@ -41,6 +41,13 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
     let deepest = 0;
     let pending = 0;
     /**
+     * Counts suspensions. A host call that calls the guest back builds the
+     * callback's frame before it suspends, so a frame stamped with the count
+     * still current when a call suspends is that call's own, however far
+     * below its stack it stands.
+     */
+    let epoch = 0;
+    /**
      * Whoever is waiting for the next host call to answer, and the promise
      * they hold. Made when first asked for and settled by the next `finish`,
      * so a run loop with nothing to do sleeps until something has changed
@@ -102,6 +109,57 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
         return Math.min(frame, call);
     }
 
+    /**
+     * Forgets every callback and host call a thread's own code has left by a
+     * jump of its own, seen when the thread next stands above them.
+     *
+     * A C++ catch found by the runtime's frame handler in guest code ends in
+     * the runtime's own jump to the continuation: the throw's host call and
+     * the handler's callback never return, and neither `returned` nor
+     * `transfer` hears of it. Left in the books, the thread counted as inside
+     * a callback, so its next wait for a message was a wait the scheduler ran
+     * -- a process spinning in the park loop for good, which never idled and
+     * so never let the child it had started have a turn.
+     *
+     * Only on the thread's own stack: a fiber's stack is elsewhere, and a
+     * host call made on one says nothing about the frames on the other. And
+     * never the frames the suspending call has just built for its own
+     * callback, which stand below it too.
+     *
+     * @param {any} thread @param {number} stack  Where the thread's stack is now.
+     */
+    function abandonBelow(thread, stack){
+        const own = (/** @type {number} */ address)=>thread.stackLimit === undefined
+            || (address >= thread.stackLimit >>> 0 && address <= thread.stackTop >>> 0);
+        if (!own(stack))
+        {
+            return;
+        }
+        const frames = callbackFrames(thread);
+        let top = frames.length;
+        while (top > 0 && frames[top - 1].epoch === epoch)
+        {
+            top--;
+        }
+        let cut = top;
+        while (cut > 0 && frames[cut - 1].extent >>> 0 <= stack
+            && own(frames[cut - 1].frameBase >>> 0))
+        {
+            cut--;
+        }
+        if (cut < top)
+        {
+            frames.splice(cut, top - cut);
+        }
+        const suspended = hostCalls(thread);
+        while (suspended.length > 0 && suspended[suspended.length - 1].restingStack >>> 0 < stack
+            && own(suspended[suspended.length - 1].restingStack >>> 0))
+        {
+            suspended.pop();
+            pending--;
+        }
+    }
+
     return {
         /**
          * Takes the sentinel's slot in the stub table.
@@ -136,6 +194,10 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          * @param {number} call.hostReturn
          */
         suspended(thread, call){
+            abandonBelow(thread, call.restingStack >>> 0);
+            const frames = callbackFrames(thread);
+            const callingBack = frames.length > 0 && frames[frames.length - 1].epoch === epoch;
+            epoch++;
             pending++;
             // A thread whose host call has not answered has nothing to run: it
             // is parked on `hlt` and retires the park loop and nothing else.
@@ -145,10 +207,14 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             // crossed in steps of however long the host loop takes to come
             // round, which measured at a fifth to a third of a whole run.
             //
-            // Unless it is running a callback. Then the very same suspension is
-            // what sends it into guest code, and it is the most runnable thread
-            // there is.
-            thread.awaitingHost = callbackFrames(thread).length === 0;
+            // Unless this call is running a callback. Then the very same
+            // suspension is what sends it into guest code, and it is the most
+            // runnable thread there is. Only this call's: a wait made inside a
+            // callback some outer call is running -- a modal loop inside a
+            // window procedure, a script's message loop inside a COM call --
+            // is a wait like any other, and counted runnable it spun the park
+            // loop for as long as the wait lasted.
+            thread.awaitingHost = !callingBack;
             // Stamped so a report can say how long it has been waiting. A call
             // that suspends and never answers stops the whole machine -- every
             // thread of it -- and from outside that is indistinguishable from a
@@ -277,7 +343,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             const answer = new Promise(resolve=>{
                 settle = resolve;
             });
-            frames.push({ frameBase, extent: frameBase + 4 * (args.length + 2), settle });
+            frames.push({ frameBase, extent: frameBase + 4 * (args.length + 2), settle, epoch });
 
             kernel.scheduleResume(thread, { eip: entry, esp: frameBase, registers });
             // Off to run guest code, whatever it was doing before.

@@ -1964,6 +1964,45 @@ test('a window shaped to an empty region takes none of the screen, and the deskt
         assert.deepEqual(desktop(), [], 'not redrawn, the screen is left until something paints');
     });
 
+test('a window shaped by a region of many rectangles shows, covers and is hit only there',
+    ()=>{
+        // A launcher cuts its region out of a picture around the picture's
+        // transparent colour. Only the rectangle around the region was kept:
+        // the window showed whole, the transparent colour with it, and took
+        // the clicks and the screen of its corners.
+        let clock = 0;
+        const SHAPE = 0x5000;
+        const shape = { left: 0, top: 0, right: 200, bottom: 100, rects: [
+            { left: 0, top: 0, right: 200, bottom: 50 },
+            { left: 0, top: 50, right: 100, bottom: 100 }] };
+        const { fns, memory, fills } = setup({ paint: true, queueNow: ()=>clock,
+            regionBox: region=>(region === SHAPE ? shape : null) });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const WS_POPUP = 0x80000000;
+        const drain = ()=>{
+            while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) !== 0)
+            {
+                fns.ValidateRect.handler([memory.u32(MSG_BUFFER + MSG.hwnd), 0]);
+            }
+        };
+        const desktop = ()=>fills.filter(fill=>fill.color === 0x808080 && !fill.quiet)
+            .map(fill=>fill.rect);
+        const launcher = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+            x: 0, y: 0, width: 200, height: 100 });
+        drain();
+        fills.length = 0;
+
+        assert.equal(fns.SetWindowRgn.handler([launcher, SHAPE, 1]), 1);
+        clock += 1000;
+        drain();
+        assert.deepEqual(desktop(), [{ left: 100, top: 50, right: 200, bottom: 100 }],
+            'the corner its region leaves out is the desktop\'s');
+        assert.equal(fns.WindowFromPoint.handler([150, 75]), 0, 'and is not on it');
+        assert.equal(fns.WindowFromPoint.handler([50, 75]), launcher, 'its shape is');
+        assert.equal(fns.WindowFromPoint.handler([150, 25]), launcher);
+    });
+
 test('the desktop paints what a window left on the system\'s clock, with no queue looked at',
     ()=>{
         // The desktop is no thread of the program's: on Windows its own thread
@@ -1989,6 +2028,77 @@ test('the desktop paints what a window left on the system\'s clock, with no queu
         assert.deepEqual(desktop(), [{ left: 10, top: 20, right: 310, bottom: 220 }],
             'then, with no message looked at');
     });
+
+test('a window hidden or destroyed has the caller\'s windows under it erased before it returns',
+    ()=>{
+        // XP's synchronous paint: the windows a hide or a destroy uncovers are
+        // framed and erased at once when they are the caller's, their client
+        // left to WM_PAINT. A setup that closes a page and copies files
+        // without looking at its queue shows its window's background where
+        // the page was, not the page.
+        const WM_ERASEBKGND = 0x0014;
+        const WS_POPUP = 0x80000000;
+        const { fns, memory, dispatched } = setup({ paint: true });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const drain = ()=>{
+            while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) !== 0)
+            {
+                fns.ValidateRect.handler([memory.u32(MSG_BUFFER + MSG.hwnd), 0]);
+            }
+        };
+        const under = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+            x: 0, y: 0, width: 300, height: 200 });
+        const page = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+            x: 50, y: 50, width: 100, height: 50 });
+        const other = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+            x: 50, y: 120, width: 100, height: 50 });
+        drain();
+        /** @param {number} hwnd */
+        const erased = hwnd=>dispatched.filter(message=>message.hwnd === hwnd
+            && message.message === WM_ERASEBKGND).length;
+
+        dispatched.length = 0;
+        fns.ShowWindow.handler([page, SW_HIDE]);
+        assert.equal(erased(under), 1, 'the window under it was erased before the call returned');
+        assert.equal(fns.GetUpdateRect.handler([under, 0, 0]), 1, 'its client is still to paint');
+        drain();
+
+        dispatched.length = 0;
+        fns.DestroyWindow.handler([other]);
+        assert.equal(erased(under), 1, 'and the same for a window destroyed');
+    });
+
+test('a sibling painted over by a change repaints only where it was painted over', ()=>{
+    // A wizard page's white panel is its first control, under the labels and
+    // check boxes laid on it. A check box that repaints itself takes the
+    // panel along under it -- and the panel repainted whole painted over
+    // every label, none of which had changed or was repainted after it.
+    const WS_POPUP = 0x80000000;
+    const { fns, memory } = setup({ paint: true });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const page = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+        x: 0, y: 0, width: 400, height: 300 });
+    const panel = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: page,
+        x: 100, y: 0, width: 300, height: 300 });
+    const label = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: page,
+        x: 110, y: 20, width: 200, height: 20 });
+    const box = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: page,
+        x: 110, y: 120, width: 200, height: 20 });
+    while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) !== 0)
+    {
+        fns.ValidateRect.handler([memory.u32(MSG_BUFFER + MSG.hwnd), 0]);
+    }
+    void panel;
+
+    fns.InvalidateRect.handler([box, 0, 1]);
+    const RECT_AT = 0x7f00;
+    assert.equal(fns.GetUpdateRect.handler([panel, RECT_AT, 0]), 1);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RECT_AT + at)), [10, 120, 210, 140],
+        'the panel repaints under the check box and nowhere else');
+    assert.equal(fns.GetUpdateRect.handler([label, 0, 0]), 0, 'the label is left as it is');
+});
 
 test('a window that moves takes its pixels with it, and only what it left is painted', ()=>{
     // As SetWindowPos copies a window's bits. A launcher that moves itself on

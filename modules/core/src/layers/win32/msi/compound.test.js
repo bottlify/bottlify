@@ -81,3 +81,20 @@ test('bytes that are not a compound file, or a damaged one, are refused', async(
     bytes.set([0xff, 0xff, 0xff, 0x0f], 0x30);
     await assert.rejects(openCompound(bytesSource(bytes)), CompoundError);
 });
+
+test('a package that ends partway into its last sector opens, the rest of it as zeros', async()=>{
+    const root = createRoot();
+    const entry = createEntry('large', 'stream');
+    entry.data = pattern(25440, 5);
+    root.children.set(nameKey('large'), entry);
+    const bytes = serializeCompoundFile(root);
+    let end = bytes.length;
+    while (bytes[end - 1] === 0)
+    {
+        end--;
+    }
+    assert.notEqual(end % 512, 0, 'the file ends inside a sector');
+    const file = await openCompound(bytesSource(bytes.slice(0, end)));
+    const large = /** @type {any} */ (file.root.children.get('LARGE'));
+    assert.deepEqual(await file.readAll(large), entry.data);
+});

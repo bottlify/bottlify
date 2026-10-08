@@ -125,7 +125,9 @@ export async function openCompound(source){
     const sectorSize = 1 << sectorShift;
     // A version 4 file pads its header to a whole sector; sector 0 follows.
     const sectorBase = sectorSize;
-    const sectorCount = Math.floor((source.size - sectorBase) / sectorSize);
+    // A file may end partway into its last sector, where the stream in it
+    // ends: Windows opens such a package, and what is missing reads as zeros.
+    const sectorCount = Math.ceil((source.size - sectorBase) / sectorSize);
     const wordsPerSector = sectorSize / 4;
 
     /**
@@ -143,7 +145,9 @@ export async function openCompound(source){
                 break;
             }
             const take = Math.min(count * sectorSize, size - at);
-            out.set(await source.read(sectorBase + first * sectorSize, take), at);
+            const offset = sectorBase + first * sectorSize;
+            out.set(await source.read(offset, Math.max(0, Math.min(take, source.size - offset))),
+                at);
             at += take;
         }
         return out;

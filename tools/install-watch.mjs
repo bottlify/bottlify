@@ -11,14 +11,17 @@
  * An install several processes deep that has stopped shows here which process
  * waits on which; the facade alone speaks for one of them.
  *
- *   node tools/install-watch.mjs <setup.exe> | --bundle ID [--which PATH]
+ *   node tools/install-watch.mjs <setup.exe | disc.iso | archive.zip [--entry PATH]>
+ *       | --bundle ID [--which PATH]
  *       [--every 30] [--minutes 20]
  *       [--journal SECONDS] [--memory MB] [--key Code@S]... [--click X,Y@S]...
  *       [--shots DIR] [--list 'C:\Program Files'] [--collect]
  *       [--screen 1024x768] [--cat 'C:\WINDOWS\DirectX.log']... [--siblings]
  *       [--copy 'C:\WINDOWS\TEMP' temp]...
  *
- * `--journal S` prints, S seconds in, the last cross-process COM calls and
+ * `--trace-box` prints the trace when the first box reporting an error is
+ * shown instead, and `--trace-fault` when a process ends with an exception's
+ * code. `--journal S` prints, S seconds in, the last cross-process COM calls and
  * message waits from the call journal (every call area on); `--trace S` prints
  * the last three thousand calls of every kind instead (`--trace-lines N`), with their first
  * arguments -- what a process that loops without waiting keeps calling. A run
@@ -28,10 +31,12 @@
  * A wizard waits in its own message loop rather than in a modal dialog an
  * unattended run answers, so a route through one is given as input: `--key
  * Enter@40` presses a key (a `KeyboardEvent.code`) forty seconds in, `--click
- * 320,400@55` clicks at a point of the screen. Each goes to the process the
- * facade stands for, which is the newest one standing. Every status line is
- * followed by that process's visible windows, one a line, children indented:
- * what a person would have seen at that moment. `--shots DIR` writes the
+ * 320,400@55` clicks at a point of the screen, and `--press 'Next >|Finish'`
+ * presses buttons by their titles in turn, each once it has stood a whole
+ * look. Each goes to the process the facade stands for, which is the newest
+ * one standing. Every status line is followed by that process's visible
+ * windows, one a line, children indented: what a person would have seen at
+ * that moment. `--shots DIR` writes the
  * desktop the facade's process paints into as a PNG at every status, which is
  * what a person would have seen, pixel for pixel. `--list DIR` prints the
  * files under a directory of the volume once the run is over -- what an
@@ -67,7 +72,8 @@ import { deflateSync } from 'node:zlib';
 import { openBundle } from './btl.mjs';
 import { createApp } from '../modules/core/src/app.js';
 import { createFakeDevice } from '../modules/core/src/layers/graphics/webgpu/internal/fake-device.js';
-import { collectFrom, placementOf, prefixOptions } from '../modules/installer/src/index.js';
+import { archiveDisc, collectFrom, discOptions, placementOf, prefixOptions, readZip }
+    from '../modules/installer/src/index.js';
 
 const argv = process.argv.slice(2);
 /** @param {string} flag @param {number} fallback */
@@ -95,7 +101,15 @@ const shotsAt = argv.includes('--shots') ? argv[argv.indexOf('--shots') + 1] : n
 const all = flag=>argv.flatMap((argument, index)=>argument === flag && index + 1 < argv.length
     ? [argv[index + 1]] : []);
 const traceAt = number('--trace', 0);
-const journalAt = number('--journal', 0) || traceAt;
+// `--trace-box`: the trace printed when the first message box is shown --
+// the calls that led a setup to the error it reports, which a fixed time
+// misses when the box's moment moves from run to run.
+const traceOnBox = argv.includes('--trace-box');
+// `--trace-fault`: the trace printed when a process ends with an exception's
+// code -- the calls that led to a crash nothing reported in a box.
+const traceOnFault = argv.includes('--trace-fault');
+const journalAt = number('--journal', 0) || traceAt
+    || (traceOnBox || traceOnFault ? 1e6 : 0);
 const memory = number('--memory', 0);
 const listAt = argv.includes('--list') ? argv[argv.indexOf('--list') + 1] : null;
 // The launcher hands a program the size of the screen it is on; the engine's
@@ -143,12 +157,27 @@ const besideSetup = ()=>readdirSync(dirname(file), { withFileTypes: true })
     .filter(one=>one.isFile() && one.name !== basename(file))
     .map(one=>({ name: one.name,
         bytes: new Uint8Array(readFileSync(join(dirname(file), one.name))) }));
-const media = bundleId ? null : {
+/**
+ * A disc image, or a zip built into one as the page builds it, mounted as D:
+ * with the program it names started from there -- the autorun's, or the one
+ * `--entry PATH` names on it.
+ */
+const discMedia = async()=>{
+    const name = basename(file);
+    const bytes = new Uint8Array(readFileSync(file));
+    const disc = /\.zip$/i.test(name)
+        ? archiveDisc(name, await readZip(new Blob([bytes]))) : { name, disc: bytes };
+    return discOptions(disc, argv.includes('--entry')
+        ? { entry: argv[argv.indexOf('--entry') + 1] } : {});
+};
+const isDisc = !bundleId && /\.(iso|zip)$/i.test(file);
+const media = bundleId || isDisc ? null : {
     name: basename(file),
     bytes: new Uint8Array(readFileSync(file)),
     ...argv.includes('--siblings') ? { files: besideSetup() } : {},
 };
-const prefix = media ? prefixOptions(media) : await mountBundle(file);
+/** @type {any} */
+const prefix = media ? prefixOptions(media) : isDisc ? await discMedia() : await mountBundle(file);
 /**
  * `--worker`: the devices draw as a page's do, in a graphics worker -- a
  * worker thread playing their calls over the fake GPU, which this thread
@@ -187,11 +216,17 @@ const app = await createApp({
     executable: prefix.executable,
     imagePath: prefix.imagePath,
     // `--args '...'`: what follows the program's own path on its command line.
+    ...'commandLine' in prefix ? { commandLine: prefix.commandLine } : {},
+    ...'discs' in prefix ? { discs: prefix.discs } : {},
     ...argv.includes('--args')
         ? { commandLine: `"${prefix.imagePath}" ${argv[argv.indexOf('--args') + 1]}` } : {},
     storage: prefix.storage,
     ...'bundle' in prefix ? { bundle: prefix.bundle } : {},
     engine: 'cork',
+    // `--concurrency N`: processes at once, each child in a worker of its
+    // own, as a page with concurrency runs them.
+    ...argv.includes('--concurrency')
+        ? { concurrency: Number(argv[argv.indexOf('--concurrency') + 1]) } : {},
     // `--unshared`: guest memory not a SharedArrayBuffer, as on a page that is
     // not cross-origin isolated.
     // `--cork JSON`: cork's settings (`EngineConfig`), beside `--unshared`.
@@ -330,6 +365,72 @@ for (const { what, at } of all('--key').map(timed))
         setTimeout(()=>app.input.send({ kind: 'key', code: what, down: false }), 150);
     }, at * 1000);
 }
+// `--press 'Next >|I &accept|Finish'`: the buttons pressed in turn, each by
+// its title once it has stood visible and enabled for a whole look, and is not
+// the button pressed last unless three looks have passed -- a wizard's pages
+// driven without guessing when each will come, which drifts from run to run.
+//
+// `--press-any 'Next >|OK|Finish'`: any of them, in whatever order they come,
+// for as long as the run lasts -- every installer on the disk driven by one
+// list of the buttons that go forward.
+const anyOrder = argv.includes('--press-any');
+const pressing = argv.includes('--press') || anyOrder
+    ? argv[argv.indexOf(anyOrder ? '--press-any' : '--press') + 1].split('|') : [];
+if (pressing.length > 0)
+{
+    let step = 0;
+    let lastButton = '';
+    let looksSince = 0;
+    let seen = '';
+    let looking = false;
+    const WS_DISABLED = 0x08000000;
+    const look = setInterval(async()=>{
+        if (looking || step >= pressing.length)
+        {
+            return;
+        }
+        looking = true;
+        looksSince++;
+        try
+        {
+            for (const { diagnostics } of await app.standing())
+            {
+                const win32 = diagnostics.find((/** @type {any} */ entry)=>entry.name === 'win32')
+                    ?.metrics ?? {};
+                const button = (win32.windows ?? []).find((/** @type {any} */ w)=>w.visible
+                    && w.className === 'Button'
+                    && (anyOrder ? pressing.includes(w.title) : w.title === pressing[step])
+                    && (w.hwnd !== lastButton || looksSince > 3)
+                    && (parseInt(w.style, 16) & WS_DISABLED) === 0);
+                if (!button)
+                {
+                    continue;
+                }
+                if (seen !== button.hwnd)
+                {
+                    seen = button.hwnd;
+                    break;
+                }
+                const x = Math.round((button.rect.left + button.rect.right) / 2);
+                const y = Math.round((button.rect.top + button.rect.bottom) / 2);
+                console.log(seconds(), 'PRESS', button.title, x, y);
+                lastButton = button.hwnd;
+                looksSince = 0;
+                step += anyOrder ? 0 : 1;
+                app.input.send({ kind: 'pointerMove', x, y });
+                app.input.send({ kind: 'pointerButton', button: 'left', down: true });
+                setTimeout(()=>app.input.send({ kind: 'pointerButton', button: 'left',
+                    down: false }), 150);
+                break;
+            }
+        }
+        finally
+        {
+            looking = false;
+        }
+    }, 2000);
+    look.unref?.();
+}
 for (const { what, at } of all('--click').map(timed))
 {
     const [x, y] = what.split(',').map(Number);
@@ -425,16 +526,39 @@ const printJournal = ()=>{
     }
     journalPrinted = true;
     const crossing = /OleMainThread|CoWait|MsgWait|PostMessage|PostThread|SendMessage|WaitFor/;
-    const trail = app.log.recent(100000).filter((/** @type {any} */ entry)=>traceAt > 0
+    const whole = traceAt > 0 || traceOnBox || traceOnFault;
+    const trail = app.log.recent(100000).filter((/** @type {any} */ entry)=>whole
         || entry.category === 'call.com' || crossing.test(entry.text));
-    for (const entry of trail.slice(traceAt > 0 ? -number('--trace-lines', 3000) : -150))
+    for (const entry of trail.slice(whole ? -number('--trace-lines', 3000) : -150))
     {
         console.log('JOURNAL', (entry.time / 1000).toFixed(2), entry.text.slice(0, 220));
     }
 };
-if (journalAt > 0)
+if (traceOnFault)
+{
+    const EXCEPTION_CODES = 0xc0000000;
+    app.on('process-resumed', (/** @type {any} */ event)=>{
+        if ((event?.code >>> 0) >= EXCEPTION_CODES)
+        {
+            console.log(seconds(), 'FAULT', event.image, (event.code >>> 0).toString(16));
+            printJournal();
+        }
+    });
+}
+if (journalAt > 0 && !traceOnBox && !traceOnFault)
 {
     setTimeout(printJournal, journalAt * 1000);
+}
+if (traceOnBox)
+{
+    app.on('divergence', (/** @type {any} */ event)=>{
+        if (/MessageBox|DialogBox/.test(event?.api ?? '') && /error|cannot|fail|not /i
+            .test(event?.detail ?? ''))
+        {
+            printJournal();
+        }
+    });
+    app.on('message-box', printJournal);
 }
 
 try

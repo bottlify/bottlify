@@ -286,3 +286,15 @@ test('environment rows: prefixes and list parts, installed and removed', ()=>{
     const prepend = environmentRow('VAR', 'C:\\first;[~]');
     assert.equal(installedValue(prepend, 'C:\\a'), 'C:\\first;C:\\a');
 });
+
+test('ALL is read in any case: a setup\'s ADDLOCAL=All installs every feature', async()=>{
+    const host = await machine();
+    const { code } = await run(host, 'ADDLOCAL=All');
+    assert.equal(code, 0);
+    assert.equal(host.registration.featureInstalled(PRODUCT, 'Main'), true);
+    assert.equal(host.registration.featureInstalled(PRODUCT, 'Extras'), true);
+    assert.equal(await text(host.files, 'C:\\Program Files\\Test\\one.txt'), 'first');
+
+    assert.equal((await run(host, 'REMOVE=all')).code, 0);
+    assert.equal(host.registration.featureInstalled(PRODUCT, 'Main'), false, 'and removes it');
+});

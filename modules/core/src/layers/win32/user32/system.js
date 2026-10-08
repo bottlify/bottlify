@@ -3579,8 +3579,9 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                     return 0;
                 }
                 const took = redraw && host.shown(record) ? host.geometry.shapedRect(record) : null;
-                // A rectangle, as every region here is; GetWindowRgn and
-                // GetWindowRgnBox answer it too.
+                // The rectangle around it and, for a region of more than one,
+                // its rectangles: the window's shape (frame.js `shapeRects`).
+                // GetWindowRgn and GetWindowRgnBox answer the rectangle.
                 record.regionBox = (hRgn >>> 0) === 0 ? null : host.regionBox?.(hRgn >>> 0) ?? null;
                 if (took)
                 {

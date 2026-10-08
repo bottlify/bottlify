@@ -46,6 +46,12 @@ export const STILL_ACTIVE = 259;
  *           though it had run and left exit code 0. It is never handed over.
  * @property {boolean} started      Running beside its parent (`concurrency` above 1), so no
  *                                  longer waiting to take the parent's place.
+ * @property {boolean} [polled]
+ *           The parent asked whether it has exited while it had not yet run --
+ *           its exit code, or a wait that does not block. A parent that polls
+ *           its child in a loop that never blocks is waiting on it all the
+ *           same, so the child runs in its place then, as it would when the
+ *           parent blocked on its handle.
  * @property {MemoryPatch[]} patches
  *           Writes made into the child before its image exists, replayed once
  *           the PE is mapped. This is process hollowing implemented as a queue.

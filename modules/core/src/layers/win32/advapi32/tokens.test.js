@@ -6,7 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ADMINISTRATORS_SID, TOKEN_NATIVES, createTokenFunctions } from './tokens.js';
+import {
+    ADMINISTRATORS_SID, TOKEN_NATIVES, createTokenFunctions, selfRelativeDescriptor,
+} from './tokens.js';
 
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_NO_TOKEN = 1008;
@@ -883,4 +885,53 @@ test('ImpersonateSelf gives the calling thread a token, RevertToSelf takes it aw
     assert.equal(fns.ImpersonateSelf.argBytes, 4);
     assert.equal(fns.RevertToSelf.argBytes, 0);
     assert.equal(fns.SetThreadToken.argBytes, 8);
+});
+
+test('a descriptor is read back through its getters, absolute or self-relative', ()=>{
+    // An installer copies a folder's security: it reads the descriptor
+    // GetFileSecurity filled in, which is self-relative, part by part.
+    const { bytes, errors, fns, dword } = setup();
+    const DESCRIPTOR = 0x300, ACL_AT = 0x340, OUTS = 0x500, RELATIVE = 0x700;
+    bytes.set(ADMINISTRATORS_SID, SID);
+    const aclSize = 8 + 8 + ADMINISTRATORS_SID.length;
+    assert.equal(fns.InitializeSecurityDescriptor.handler([DESCRIPTOR, 1]), 1);
+    assert.equal(fns.InitializeAcl.handler([ACL_AT, aclSize, 2]), 1);
+    assert.equal(fns.AddAccessAllowedAce.handler([ACL_AT, 2, 1, SID]), 1);
+    assert.equal(fns.SetSecurityDescriptorDacl.handler([DESCRIPTOR, 1, ACL_AT, 1]), 1);
+    assert.equal(fns.SetSecurityDescriptorOwner.handler([DESCRIPTOR, SID, 0]), 1);
+
+    assert.equal(fns.GetSecurityDescriptorControl.handler([DESCRIPTOR, OUTS, OUTS + 4]), 1);
+    assert.equal(bytes[OUTS] | bytes[OUTS + 1] << 8, 0x0004 | 0x0008, 'DACL present, defaulted');
+    assert.equal(dword(OUTS + 4), 1, 'revision');
+    assert.equal(fns.GetSecurityDescriptorOwner.handler([DESCRIPTOR, OUTS, OUTS + 4]), 1);
+    assert.equal(dword(OUTS), SID);
+    assert.equal(dword(OUTS + 4), 0);
+    assert.equal(fns.GetSecurityDescriptorGroup.handler([DESCRIPTOR, OUTS, OUTS + 4]), 1);
+    assert.equal(dword(OUTS), 0, 'no group');
+    assert.equal(fns.GetSecurityDescriptorDacl.handler([DESCRIPTOR, OUTS, OUTS + 4, OUTS + 8]),
+        1);
+    assert.deepEqual([dword(OUTS), dword(OUTS + 4), dword(OUTS + 8)], [1, ACL_AT, 1]);
+    new DataView(bytes.buffer).setUint32(OUTS + 4, 0xabcd, true);
+    assert.equal(fns.GetSecurityDescriptorSacl.handler([DESCRIPTOR, OUTS, OUTS + 4, OUTS + 8]),
+        1);
+    assert.equal(dword(OUTS), 0, 'no SACL');
+    assert.equal(dword(OUTS + 4), 0xabcd, 'and the list left as it was');
+    assert.equal(fns.GetSecurityDescriptorLength.handler([DESCRIPTOR]),
+        20 + ADMINISTRATORS_SID.length + aclSize);
+    assert.equal(fns.IsValidAcl.handler([ACL_AT]), 1);
+    assert.equal(fns.IsValidAcl.handler([SID]), 0, 'a SID is no ACL');
+
+    // The same parts laid out self-relative: offsets, not pointers.
+    const { bytes: relative } = selfRelativeDescriptor({ owner: ADMINISTRATORS_SID,
+        dacl: bytes.slice(ACL_AT, ACL_AT + aclSize) });
+    bytes.set(relative, RELATIVE);
+    assert.equal(fns.GetSecurityDescriptorOwner.handler([RELATIVE, OUTS, OUTS + 4]), 1);
+    assert.deepEqual([...bytes.subarray(dword(OUTS), dword(OUTS) + ADMINISTRATORS_SID.length)],
+        [...ADMINISTRATORS_SID]);
+    assert.equal(fns.GetSecurityDescriptorDacl.handler([RELATIVE, OUTS, OUTS + 4, OUTS + 8]), 1);
+    assert.equal(fns.IsValidAcl.handler([dword(OUTS + 4)]), 1, 'the pointer is into the block');
+    assert.equal(fns.GetSecurityDescriptorLength.handler([RELATIVE]), relative.length);
+
+    assert.equal(fns.GetSecurityDescriptorOwner.handler([0, OUTS, OUTS + 4]), 0);
+    assert.equal(errors.at(-1), 1338, 'ERROR_INVALID_SECURITY_DESCR');
 });

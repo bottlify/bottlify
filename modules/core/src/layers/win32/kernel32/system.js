@@ -993,6 +993,10 @@ export function createSystemFunctions(host){
                 new DataView(bytes.buffer).setUint32(
                     0, child ? child.exitCode : STILL_ACTIVE, true);
                 host.writeMemory(code >>> 0, bytes);
+                if (child && child.exitCode === STILL_ACTIVE && !child.started)
+                {
+                    child.polled = true;
+                }
                 return 1;
             },
         },

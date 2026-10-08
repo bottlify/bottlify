@@ -1734,8 +1734,14 @@ export function createWindowFunctions(host){
             }
             else if (above && !each.destroyed && !isChild(each) && covering(each))
             {
-                covers.push(geometry.shapedRect(each));
+                covers.push(...geometry.shapeRects(each));
             }
+        }
+        // What a window region leaves out of it and its ancestors: nothing of
+        // it is shown there, and what is beneath shows instead.
+        for (let at = record; at; at = isChild(at) ? windows.get(at.parent) : null)
+        {
+            covers.push(...geometry.holesOf(at));
         }
         for (let at = record; at && isChild(at); at = windows.get(at.parent))
         {
@@ -1752,7 +1758,7 @@ export function createWindowFunctions(host){
                 }
                 if (covering(sibling))
                 {
-                    covers.push(geometry.shapedRect(sibling));
+                    covers.push(...geometry.shapeRects(sibling));
                 }
             }
         }
@@ -1762,7 +1768,7 @@ export function createWindowFunctions(host){
             {
                 if (shown(child))
                 {
-                    covers.push(geometry.shapedRect(child));
+                    covers.push(...geometry.shapeRects(child));
                 }
             }
         }
@@ -2292,11 +2298,12 @@ export function createWindowFunctions(host){
             return andThen(destroyChildren(0),
                 ()=>andThen(tell(WM_NCDESTROY), ()=>{
                     forget(record);
-                    if (covered)
+                    if (!covered)
                     {
-                        uncover(covered);
+                        return 1;
                     }
-                    return 1;
+                    uncover(covered);
+                    return andThen(eraseShown(on), ()=>1);
                 }));
         });
     };
@@ -3150,7 +3157,8 @@ export function createWindowFunctions(host){
     const bubbledTo = record=>{
         const found = [];
         for (let up = isChild(record) ? live(record.parent) : null;
-            up && shown(up) && (up.style & WS_CLIPCHILDREN) === 0 && !up.inPaint;
+            up && shown(up) && (up.style & WS_CLIPCHILDREN) === 0 && !up.inPaint
+                && !(up.paintSent > 0);
             up = isChild(up) ? live(up.parent) : null)
         {
             found.push(up);
@@ -3212,19 +3220,31 @@ export function createWindowFunctions(host){
             const overlap = shown(other) ? intersect(dirty, geometry.shapedRect(other)) : null;
             if (overlap && !isEmpty(overlap))
             {
+                // Only where it was painted over: a window repainted whole
+                // paints over every sibling it overlaps beyond that area --
+                // a dialog's white panel over the labels on it -- and those
+                // are not repainted, being nowhere near what changed.
+                const client = geometry.clientRect(other);
                 const size = geometry.clientSize(other);
-                const whole = { left: 0, top: 0, right: size.width, bottom: size.height };
-                if (!other.updateRect || !sameRect(other.updateRect, whole))
+                const local = {
+                    left: Math.max(0, overlap.left - client.left),
+                    top: Math.max(0, overlap.top - client.top),
+                    right: Math.min(size.width, overlap.right - client.left),
+                    bottom: Math.min(size.height, overlap.bottom - client.top),
+                };
+                if (local.right > local.left && local.bottom > local.top)
                 {
-                    other.ncDirty = true;
-                    other.updateRect = whole;
+                    other.updateRect = other.updateRect ? {
+                        left: Math.min(other.updateRect.left, local.left),
+                        top: Math.min(other.updateRect.top, local.top),
+                        right: Math.max(other.updateRect.right, local.right),
+                        bottom: Math.max(other.updateRect.bottom, local.bottom),
+                    } : local;
                     other.erase = true;
                 }
                 // Painted over past its client, the frame is painted again
-                // too, though the client was to be repainted already: a
-                // parent's one rectangle around a label and a child beside it
-                // takes in the child's edge.
-                const client = geometry.clientRect(other);
+                // too: a parent's one rectangle around a label and a child
+                // beside it takes in the child's edge.
                 if (overlap.left < client.left || overlap.top < client.top
                     || overlap.right > client.right || overlap.bottom > client.bottom)
                 {
@@ -3303,6 +3323,7 @@ export function createWindowFunctions(host){
             if (shown(each))
             {
                 repaint(each);
+                each.eraseRect = null;
                 unerased.add(each);
             }
         }
@@ -3530,7 +3551,10 @@ export function createWindowFunctions(host){
         {
             if (!record.destroyed && !isChild(record) && shown(record))
             {
-                bare = subtractFromArea(bare, geometry.shapedRect(record));
+                for (const piece of geometry.shapeRects(record))
+                {
+                    bare = subtractFromArea(bare, piece);
+                }
             }
         }
         const hdc = bare.length > 0 ? host.dc?.()?.get(0, null) ?? 0 : 0;
@@ -3574,6 +3598,22 @@ export function createWindowFunctions(host){
                 && !isEmpty(intersect(rect, geometry.shapedRect(other))))
             {
                 repaint(other);
+                // And erased there before the call returns, when it is the
+                // caller's -- XP's synchronous paint after a window is moved,
+                // hidden or destroyed; another thread's is erased when that
+                // thread looks at its queue (WM_SYNCPAINT). A program busy
+                // copying files shows its window's background where a
+                // dialog was, not the dialog.
+                const client = geometry.clientRect(other);
+                const left = { left: rect.left - client.left, top: rect.top - client.top,
+                    right: rect.right - client.left, bottom: rect.bottom - client.top };
+                other.eraseRect = other.eraseRect ? {
+                    left: Math.min(other.eraseRect.left, left.left),
+                    top: Math.min(other.eraseRect.top, left.top),
+                    right: Math.max(other.eraseRect.right, left.right),
+                    bottom: Math.max(other.eraseRect.bottom, left.bottom),
+                } : left;
+                unerased.add(other);
             }
         }
     };
@@ -3802,28 +3842,31 @@ export function createWindowFunctions(host){
             draw.text(hdc, bar.left + 4, bar.top + Math.floor((frame.caption - metrics.height) / 2),
                 record.title, {
                     color: sysColor(isActive ? COLOR_CAPTIONTEXT : COLOR_INACTIVECAPTIONTEXT),
-                    clip: { ...bar, right: box.left - 2 },
+                    clip: { ...bar, right: box ? box.left - 2 : bar.right },
                 });
-            draw.fill(hdc, box, face);
-            draw.fill(hdc, { ...box, right: box.right - 1, bottom: box.top + 1 },
-                sysColor(COLOR_3DHILIGHT));
-            draw.fill(hdc, { ...box, right: box.left + 1, bottom: box.bottom - 1 },
-                sysColor(COLOR_3DHILIGHT));
-            draw.fill(hdc, { ...box, top: box.bottom - 1 }, sysColor(COLOR_3DDKSHADOW));
-            draw.fill(hdc, { ...box, left: box.right - 1 }, sysColor(COLOR_3DDKSHADOW));
-            draw.fill(hdc, { left: box.left + 1, top: box.bottom - 2, right: box.right - 1,
-                bottom: box.bottom - 1 }, sysColor(COLOR_3DSHADOW));
-            draw.fill(hdc, { left: box.right - 2, top: box.top + 1, right: box.right - 1,
-                bottom: box.bottom - 1 }, sysColor(COLOR_3DSHADOW));
-            // The cross: two diagonals, two pixels wide, drawn a pixel at a time.
-            const ink = sysColor(COLOR_BTNTEXT);
-            for (let step = 0; step < 7; step++)
+            if (box)
             {
-                const x = box.left + 3 + step;
-                const y = box.top + 3 + step;
-                draw.fill(hdc, { left: x, top: y, right: x + 2, bottom: y + 1 }, ink);
-                draw.fill(hdc, { left: box.right - 5 - step, top: y, right: box.right - 3 - step,
-                    bottom: y + 1 }, ink);
+                draw.fill(hdc, box, face);
+                draw.fill(hdc, { ...box, right: box.right - 1, bottom: box.top + 1 },
+                    sysColor(COLOR_3DHILIGHT));
+                draw.fill(hdc, { ...box, right: box.left + 1, bottom: box.bottom - 1 },
+                    sysColor(COLOR_3DHILIGHT));
+                draw.fill(hdc, { ...box, top: box.bottom - 1 }, sysColor(COLOR_3DDKSHADOW));
+                draw.fill(hdc, { ...box, left: box.right - 1 }, sysColor(COLOR_3DDKSHADOW));
+                draw.fill(hdc, { left: box.left + 1, top: box.bottom - 2, right: box.right - 1,
+                    bottom: box.bottom - 1 }, sysColor(COLOR_3DSHADOW));
+                draw.fill(hdc, { left: box.right - 2, top: box.top + 1, right: box.right - 1,
+                    bottom: box.bottom - 1 }, sysColor(COLOR_3DSHADOW));
+                // The cross: two diagonals, two pixels wide, drawn a pixel at a time.
+                const ink = sysColor(COLOR_BTNTEXT);
+                for (let step = 0; step < 7; step++)
+                {
+                    const x = box.left + 3 + step;
+                    const y = box.top + 3 + step;
+                    draw.fill(hdc, { left: x, top: y, right: x + 2, bottom: y + 1 }, ink);
+                    draw.fill(hdc, { left: box.right - 5 - step, top: y,
+                        right: box.right - 3 - step, bottom: y + 1 }, ink);
+                }
             }
         }
         if (frame.menu > 0)
@@ -3874,14 +3917,31 @@ export function createWindowFunctions(host){
                 right: record.width - frame.right, bottom: record.height - frame.edge };
     };
 
+    /** WS_SYSMENU: the caption's buttons, the close box among them. */
+    const WS_SYSMENU_STYLE = 0x00080000;
+
     /** The close box, in window coordinates. @param {any} record */
     const closeBox = record=>{
+        // Only a window with a system menu has caption buttons.
+        if ((record.style & WS_SYSMENU_STYLE) === 0)
+        {
+            return null;
+        }
         const frame = geometry.frame(record);
         const size = Math.min(CLOSE_BOX, frame.caption - 2 * CLOSE_GAP);
         const top = frame.edge + Math.floor((frame.caption - size) / 2);
         return { left: record.width - frame.edge - CLOSE_GAP - size, top,
             right: record.width - frame.edge - CLOSE_GAP, bottom: top + size };
     };
+
+    /**
+     * Whether a screen point is in a window's shape: its rectangle, or the
+     * rectangles of its window region.
+     *
+     * @param {any} record @param {number} x @param {number} y
+     */
+    const inShape = (record, x, y)=>geometry.shapeRects(record)
+        .some((/** @type {any} */ piece)=>contains(piece, x, y));
 
     /**
      * What part of a window a screen point is on: the client area, the
@@ -3891,7 +3951,7 @@ export function createWindowFunctions(host){
      */
     const hitTest = (record, x, y)=>{
         const rect = geometry.windowRect(record);
-        if (!contains(geometry.shapedRect(record), x, y))
+        if (!inShape(record, x, y))
         {
             return HTNOWHERE;
         }
@@ -3905,7 +3965,7 @@ export function createWindowFunctions(host){
             && local.x >= frame.edge && local.x < record.width - frame.edge)
         {
             const box = closeBox(record);
-            return contains(box, local.x, local.y) ? HTCLOSE : HTCAPTION;
+            return box && contains(box, local.x, local.y) ? HTCLOSE : HTCAPTION;
         }
         const barTop = frame.edge + frame.caption;
         if (frame.menu > 0 && local.y >= barTop && local.y < barTop + frame.menu
@@ -3941,7 +4001,7 @@ export function createWindowFunctions(host){
             for (const record of candidates)
             {
                 if ((record.style & WS_VISIBLE) === 0
-                    || !contains(geometry.shapedRect(record), x, y)
+                    || !inShape(record, x, y)
                     || (!disabledToo && (record.style & WS_DISABLED) !== 0))
                 {
                     continue;
@@ -4861,7 +4921,21 @@ export function createWindowFunctions(host){
             paint.invalidate(record, { left: 0, top: 0, right: size.width, bottom: size.height },
                 true);
         },
-        update: record=>(shown(record) ? paint.updateNow(record, true) : 1),
+        // A control repainting itself as it handles a message -- its new
+        // text, its new position -- is the control alone: Windows sends its
+        // parent WM_CTLCOLOR* then (user32's WmSetTextButtonSeq), never
+        // WM_PAINT. What the change left the parent to paint waits for the
+        // parent's next look at its queue.
+        update: (record, thread)=>(shown(record)
+            ? paint.updateNow(record, true, thread, true) : 1),
+        // A control's own scroll bar moved: its frame, where the bar is drawn.
+        frameChanged: record=>{
+            record.ncDirty = true;
+            if (shown(record))
+            {
+                paintFrame(record);
+            }
+        },
         move: (hwnd, x, y, width, height)=>/** @type {any} */ (table).MoveWindow
             .handler([hwnd, x, y, width, height, 1]),
         setFocus,
@@ -5256,6 +5330,7 @@ export function createWindowFunctions(host){
         if (covered)
         {
             uncover(covered);
+            told = andThen(told, ()=>eraseShown(thread));
         }
         // The answer waits for the procedures that were sent to: returning it
         // before they have run is the stack the guest reuses under itself.

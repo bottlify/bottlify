@@ -104,14 +104,15 @@ export function createProgressProcedure(host, tk){
      * every one. Answers what the message answers.
      *
      * @param {any} record @param {number} previous
+     * @param {unknown} thread  Whose call it is, which the painting runs as.
      */
-    const moved = (record, previous)=>{
+    const moved = (record, previous, thread)=>{
         if (state(record).pos === previous)
         {
             return previous;
         }
         host.invalidate(record);
-        return after(host.update?.(record) ?? 1, ()=>previous);
+        return after(host.update?.(record, thread) ?? 1, ()=>previous);
     };
 
     /**
@@ -199,12 +200,12 @@ export function createProgressProcedure(host, tk){
             case PBM_SETPOS: {
                 const previous = held.pos;
                 held.pos = clamp(record, message.wParam | 0);
-                return moved(record, previous);
+                return moved(record, previous, thread);
             }
             case PBM_DELTAPOS: {
                 const previous = held.pos;
                 held.pos = clamp(record, held.pos + (message.wParam | 0));
-                return moved(record, previous);
+                return moved(record, previous, thread);
             }
             case PBM_SETSTEP: {
                 const previous = held.step;
@@ -222,7 +223,7 @@ export function createProgressProcedure(host, tk){
                     next = held.min + (next - held.max - 1) % (span + 1);
                 }
                 held.pos = clamp(record, next);
-                return moved(record, previous);
+                return moved(record, previous, thread);
             }
             case PBM_GETPOS:
                 return held.pos;

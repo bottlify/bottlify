@@ -3972,6 +3972,16 @@ async function buildApp(options){
             // what it copied cannot leave the engine.
             /** @param {string} text */
             onClipboard: text=>events.emit('clipboard', { text }),
+            // An address the program asked the shell to open -- a setup's
+            // "visit our site", a readme's link -- for the page to open, as
+            // XP's browser would. Taken whether or not anyone opens it: the
+            // machine reports a browser installed, and its ShellExecute
+            // answers success.
+            /** @param {string} url */
+            openUrl: url=>{
+                events.emit('open-url', { url });
+                return true;
+            },
             /** @param {number} handle @param {string} text */
             onOutput: (handle, text)=>events.emit('output', { handle, text }),
             /** @param {string} text */
@@ -6161,6 +6171,19 @@ async function buildApp(options){
                         const error = new Error(fault.text);
                         Object.assign(error, { code: 'GUEST_FAULT', fault });
                         throw fail('guest-fault', error);
+                    }
+
+                    // A parent polling a child that has not run -- its exit
+                    // code, a wait that does not block -- in a loop that never
+                    // blocks is waiting on it: the child runs now, beside it,
+                    // as it would once the parent blocked on its handle.
+                    if (replacing?.polled && win32.childWaitedOn(replacing))
+                    {
+                        events.emit('process-child', {
+                            image: replacing.imagePath,
+                            commandLine: replacing.commandLine,
+                        });
+                        return 0;
                     }
 
                     let step;
