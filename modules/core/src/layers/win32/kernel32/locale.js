@@ -127,6 +127,8 @@ const CP437_HIGH = [
  */
 export const LANGID_EN_US = 0x0409;
 const LCID_EN_US = 0x0409;
+/** EnumSystemLocales' flag for the alternate sort orders alone. */
+const LCID_ALTERNATE_SORTS = 0x4;
 const LOCALE_INVARIANT = 0x007F;
 const LOCALE_USER_DEFAULT = 0x0400;
 const LOCALE_SYSTEM_DEFAULT = 0x0800;
@@ -799,6 +801,16 @@ export function createLocaleFunctions(host){
         }
         return left > right ? CSTR_GREATER_THAN : CSTR_EQUAL;
     };
+
+    /**
+     * What EnumSystemLocales hands out for its flags: the locale's LCID as
+     * eight hex digits, or nothing for the alternate sorts alone.
+     *
+     * @param {number} flags
+     * @returns {string[]}
+     */
+    const systemLocales = flags=>((flags & ~LCID_ALTERNATE_SORTS) === 0 && flags !== 0 ? []
+        : [LCID_EN_US.toString(16).toUpperCase().padStart(8, '0')]);
 
     /** @param {number} locale */
     const isOurLocale = locale=>locale === LCID_EN_US
@@ -2051,20 +2063,22 @@ export function createLocaleFunctions(host){
         },
 
         /**
-         * BOOL EnumSystemLocalesA(LOCALE_ENUMPROCA lpLocaleEnumProc, DWORD dwFlags)
+         * BOOL EnumSystemLocalesA/W(LOCALE_ENUMPROCA/W lpLocaleEnumProc, DWORD dwFlags)
          *
-         * Not enumerated. Calling the callback would mean calling into guest
-         * code from here, which this table has no way to do; a C runtime uses
-         * this to find out which locales exist and falls back to the default
-         * when it learns nothing, which is the same place it ends up anyway with
-         * one locale installed.
+         * The one locale, as the eight hex digits of its LCID, to the callback;
+         * none for LCID_ALTERNATE_SORTS, en-US having no other sort. A C runtime
+         * picks its locale from what this hands out, and a program that read
+         * the old failure as no locale at all looked for one for ever.
          */
         EnumSystemLocalesA: {
             argBytes: 8,
-            handler: ()=>{
-                host.setLastError(ERROR_CALL_NOT_IMPLEMENTED);
-                return 0;
-            },
+            /** @param {number[]} args */
+            handler: ([proc, flags])=>enumerateFormats(proc, systemLocales(flags), false),
+        },
+        EnumSystemLocalesW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([proc, flags])=>enumerateFormats(proc, systemLocales(flags), true),
         },
 
         /**

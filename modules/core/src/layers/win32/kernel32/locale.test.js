@@ -130,6 +130,45 @@ test('EnumTimeFormatsA hands each format to the callback until it stops', async(
     assert.equal(fns.EnumTimeFormatsW.argBytes, 12);
 });
 
+test('EnumSystemLocales hands the callback the one locale, as eight hex digits', async()=>{
+    // A launcher picks its language from what this hands out; the old
+    // failure, with nothing handed out, sent one looking for ever.
+    const host = fakeHost();
+    /** @type {string[]} */
+    const seen = [];
+    let next = 0x800;
+    const fns = createLocaleFunctions({
+        ...host,
+        callerThread: ()=>({ id: 1 }),
+        /** @param {number} bytes */
+        allocate: bytes=>{
+            const at = next;
+            next += bytes + 8;
+            return at;
+        },
+        free: ()=>{},
+        /** @param {number} entry @param {number[]} args */
+        call: async(entry, [buffer])=>{
+            void entry;
+            let text = '';
+            for (let at = 0; host.bytes[buffer + at] !== 0; at++)
+            {
+                text += String.fromCharCode(host.bytes[buffer + at]);
+            }
+            seen.push(text);
+            return 1;
+        },
+    });
+    const LCID_INSTALLED = 1;
+    const LCID_ALTERNATE_SORTS = 4;
+    assert.equal(await fns.EnumSystemLocalesA.handler([0x1234, LCID_INSTALLED]), 1);
+    assert.deepEqual(seen, ['00000409']);
+    assert.equal(await fns.EnumSystemLocalesA.handler([0x1234, LCID_ALTERNATE_SORTS]), 1,
+        'en-US has no other sort: nothing handed out, and done');
+    assert.deepEqual(seen, ['00000409']);
+    assert.equal(fns.EnumSystemLocalesW.argBytes, 8);
+});
+
 test("EnumDateFormatsA hands out each kind of date, the locale's own picture first", async()=>{
     // locale.c test_EnumDateFormatsA: the first format is GetLocaleInfo's.
     const host = fakeHost();
