@@ -1529,9 +1529,21 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * @returns {number} D3D_OK, or the refusal
      */
     const drawPreconditions = (type, primitiveCount)=>{
-        if (!inScene || vertexCountOf(type, primitiveCount) === 0
-            || !vertexDeclaration.declaration)
+        // Each refusal says which: the draw is simply missing from the picture otherwise.
+        if (!inScene)
         {
+            report('draw-scene', 'a draw outside BeginScene and EndScene was refused');
+            return D3DERR_INVALIDCALL;
+        }
+        if (vertexCountOf(type, primitiveCount) === 0)
+        {
+            report('draw-count', `a draw of no vertices (type ${type}, ${primitiveCount}`
+                + ' primitives) was refused');
+            return D3DERR_INVALIDCALL;
+        }
+        if (!vertexDeclaration.declaration)
+        {
+            report('draw-declaration', 'a draw with no vertex declaration or FVF was refused');
             return D3DERR_INVALIDCALL;
         }
         // A format without one of the three position bits is not a format: a
@@ -1539,6 +1551,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         // has no position is drawing something this device reports instead.
         if (vertexDeclaration.fvf !== 0 && (vertexDeclaration.fvf & 0xe) === 0)
         {
+            report('draw-fvf', `a draw through FVF 0x${vertexDeclaration.fvf.toString(16)},`
+                + ' which has no position, was refused');
             return D3DERR_INVALIDCALL;
         }
         return D3D_OK;
@@ -1581,8 +1595,27 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         // Read, not made: `stream` keeps an entry for the index it is asked,
         // and a state block of everything captures every entry there is.
         const source = streams.get(0);
-        if (!source?.buffer || !(source.stride > 0) || source.offset % source.stride !== 0)
+        // A declaration that reads nothing from stream zero -- none of its elements there, as
+        // a vertex shader that makes its vertices from constants has it -- draws whatever
+        // stream zero holds, nothing included, as Direct3D does.
+        const elements = vertexDeclaration.declaration?.elements ?? [];
+        if (vertexDeclaration.fvf === 0 && !elements.some((/** @type {any} */ e)=>e.Stream === 0))
         {
+            return 0;
+        }
+        if (!source?.buffer || !(source.stride > 0))
+        {
+            const read = [...new Set(elements.map((/** @type {any} */ e)=>e.Stream))].join(',');
+            report(`draw-stream-${source?.buffer ? 'stride' : 'buffer'}-${read}`,
+                `a draw with ${source?.buffer ? `stride ${source.stride}` : 'no vertex buffer'}`
+                + ` on stream 0 was refused; its declaration reads streams ${read || 'none'}`
+                + ` (FVF 0x${(vertexDeclaration.fvf ?? 0).toString(16)})`);
+            return null;
+        }
+        if (source.offset % source.stride !== 0)
+        {
+            report('draw-offset', `a draw from stream 0 at offset ${source.offset}, not a whole`
+                + ` vertex of stride ${source.stride}, was refused`);
             return null;
         }
         return source.offset / source.stride;

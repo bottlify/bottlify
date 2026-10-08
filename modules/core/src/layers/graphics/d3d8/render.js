@@ -3624,6 +3624,12 @@ export function createRenderer(options){
 
     /** @type {any} a buffer of zeros for a stream with nothing bound */
     let zeroStream = null;
+    /** The buffer of zeros, made at its first use. */
+    const zeroBuffer = ()=>(zeroStream ??= backend.createDynamicBuffer({
+        size: ZERO_STREAM_BYTES,
+        usage: BufferUsage.VERTEX | BufferUsage.COPY_DST,
+        label: 'zero-stream',
+    }));
 
     /**
      * How many vertices stream zero's offset was folded into the first
@@ -3688,12 +3694,7 @@ export function createRenderer(options){
             const source = model.streamAt?.(stream);
             if (!source?.buffer)
             {
-                zeroStream ??= backend.createDynamicBuffer({
-                    size: ZERO_STREAM_BYTES,
-                    usage: BufferUsage.VERTEX | BufferUsage.COPY_DST,
-                    label: 'zero-stream',
-                });
-                bound.push({ slot: index + 1, gpu: zeroStream.gpu, offset: 0 });
+                bound.push({ slot: index + 1, gpu: zeroBuffer().gpu, offset: 0 });
                 continue;
             }
             // Stream zero's first vertex moves the streams that step with it;
@@ -7510,21 +7511,23 @@ export function createRenderer(options){
             const count = vertexCountOf(type, primitiveCount);
             const fill = fillOf(model, type);
             const rewrite = fill !== D3DFILL.SOLID || listed(model, type);
-            const prepared = prepare(model, stream.stride,
+            // A declaration that reads nothing from stream zero draws with it empty: zeros,
+            // at a stride of nothing.
+            const prepared = prepare(model, stream.buffer ? stream.stride : 0,
                 FILLED[fill] ?? (rewrite ? LIST_OF[type] : TOPOLOGY[type]));
             if (!prepared)
             {
                 return;
             }
-            const streamBuffer = bufferFor(stream.buffer).gpu;
+            const streamBuffer = stream.buffer ? bufferFor(stream.buffer).gpu : null;
             // The bytes this draw reads must survive a later lock of the same
             // buffer in this frame, which is what makes such a lock rename.
             // Stream zero's offset is in the first vertex here, as the
             // binding below starts the buffer at zero.
             const from = startVertex * stream.stride;
-            streamBuffer.markRead(from, from + count * stream.stride);
+            streamBuffer?.markRead(from, from + count * stream.stride);
             record(model, prepared, {
-                vertices: { gpu: streamBuffer.gpu, offset: 0 },
+                vertices: { gpu: streamBuffer?.gpu ?? zeroBuffer().gpu, offset: 0 },
                 ...(rewrite
                     ? expandedGeometry(type, ascending(count), startVertex, fill)
                     : { indices: null, count, first: startVertex }),
@@ -7564,13 +7567,30 @@ export function createRenderer(options){
             // A list drawn solid binds the program's own indices; anything
             // else is rewritten from them.
             const list = fill === D3DFILL.SOLID ? LIST_OF[type] : FILLED[fill];
-            const prepared = prepare(model, stream.stride,
+            const prepared = prepare(model, stream.buffer ? stream.stride : 0,
                 list === undefined ? TOPOLOGY[type] : list);
             if (!prepared)
             {
                 return;
             }
             const byteOffset = startIndex * format.bytes;
+            if (!stream.buffer)
+            {
+                // Nothing read from stream zero (the device allows only that): its zeros,
+                // and the program's own indices.
+                const indexBuffer = bufferFor(model.indices).gpu;
+                indexBuffer.markRead(byteOffset, byteOffset + count * format.bytes);
+                record(model, prepared, list === undefined ? {
+                    vertices: { gpu: zeroBuffer().gpu, offset: 0 },
+                    indices: indexBinding(indexBuffer.gpu, byteOffset, format.gpu),
+                    count, first: 0, baseVertex: 0,
+                } : {
+                    vertices: { gpu: zeroBuffer().gpu, offset: 0 },
+                    ...expandedGeometry(type, indicesFrom(indexBuffer.bytes(byteOffset,
+                        count * format.bytes), format.bytes), 0, fill),
+                }, true, 0);
+                return;
+            }
             if (prepared.state.points)
             {
                 if (hasFurtherStreams(prepared))
