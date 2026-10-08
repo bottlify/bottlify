@@ -114,6 +114,8 @@ export function createBuilder(profile){
     const known = new Map();
     /** The instruction that made each register `emit` gave out. @type {Map<VReg, Instr>} */
     const madeBy = new Map();
+    /** The test each r0.a a ps_1_1 cnd reads was moved from. @type {Map<VReg, Vec>} */
+    const tests = new Map();
 
     /** @param {number} width @returns {VReg} */
     const newReg = width=>({ id: vregCount++, width });
@@ -676,10 +678,66 @@ export function createBuilder(profile){
         {
             return lanewise('cmp', w, [neg(args[0]), args[2], args[1]]);
         }
+        // A truth ps_1_1's cnd made chooses by the same test, as fxc's cnd does.
+        const made = args[0].src.kind === 'reg' ? madeBy.get(args[0].src.reg) : undefined;
+        const tested = made?.op === 'cnd' && made.srcs[0].kind === 'reg'
+            ? tests.get(made.srcs[0].reg) : undefined;
+        const yes = tested && literal(vec(made?.srcs[1] ?? args[1].src))?.[0];
+        const no = tested && literal(vec(made?.srcs[2] ?? args[2].src))?.[0];
+        if (tested && yes === 1 && no === 0)
+        {
+            return cndOn(tested, args[1], args[2]);
+        }
+        if (tested && yes === 0 && no === 1)
+        {
+            return cndOn(tested, args[2], args[1]);
+        }
         // c * a + (1 - c) * b: one side is exactly zero, so the sum is exact.
         const taken = mul(args[0], args[1]);
         return mad(sub(num(1), args[0]), args[2], taken);
     }
+
+    /**
+     * ps_1_1's comparison, as fxc makes it: `x + 0.5` in r0.a, which cnd tests for more
+     * than 0.5 -- so x > 0 -- choosing `yes` or `no`. One lane: r0.a holds one.
+     *
+     * @param {Vec} x @param {Vec} yes @param {Vec} no @returns {Vec}
+     */
+    const cndOver = (x, yes, no)=>{
+        if (x.w !== 1)
+        {
+            throw new TargetError('X4532', `a comparison of vectors is not available in ${
+                profile.name}`);
+        }
+        const values = literal(x);
+        if (values)
+        {
+            return values[0] > 0 ? yes : no;
+        }
+        return cndOn(add(x, num(0.5)), yes, no);
+    };
+
+    /**
+     * cnd on a test put in r0.a just before it, so that two tests never hold r0.a at once.
+     * @param {Vec} test @param {Vec} yes @param {Vec} no @returns {Vec}
+     */
+    const cndOn = (test, yes, no)=>{
+        const reg = newReg(1);
+        reg.pin = { file: 'r', index: 0, comp: 3 };
+        instrs.push({ op: 'mov', dest: { kind: 'reg', reg, mask: 1 }, srcs: [test.src] });
+        tests.set(reg, test);
+        const { w, args } = unify([yes, no]);
+        const made = { op: 'cnd', dest: /** @type {import('./hlsl-ir.js').Dest} */ ({
+            kind: 'reg', reg: newReg(w), mask: (1 << w) - 1 }), srcs: [
+            /** @type {Src} */ ({ kind: 'reg', reg, swz: [0, 0, 0, 0].slice(0, w) }),
+            args[0].src, args[1].src] };
+        instrs.push(made);
+        const out = /** @type {VReg} */ (/** @type {any} */ (made.dest).reg);
+        madeBy.set(out, made);
+        return vec({ kind: 'reg', reg: out, swz: Array.from({ length: w }, (_, i)=>i) });
+    };
+    /** Whether a profile compares through cnd. */
+    const byCnd = Boolean(profile.legacy && !profile.cmp);
 
     /** @param {Vec} a @param {Vec} b @returns {Vec} */
     const lt = (a, b)=>{
@@ -687,6 +745,10 @@ export function createBuilder(profile){
         if (profile.cmp)
         {
             return selectGE0(sub(args[0], args[1]), num(0, w), num(1, w));
+        }
+        if (byCnd)
+        {
+            return cndOver(sub(args[1], args[0]), num(1), num(0));
         }
         return lanewise('slt', w, args);
     };
@@ -696,6 +758,10 @@ export function createBuilder(profile){
         if (profile.cmp)
         {
             return selectGE0(sub(args[0], args[1]), num(1, w), num(0, w));
+        }
+        if (byCnd)
+        {
+            return cndOver(sub(args[1], args[0]), num(0), num(1));
         }
         return lanewise('sge', w, args);
     };
@@ -710,6 +776,11 @@ export function createBuilder(profile){
         {
             return selectGE0(neg(abs(sub(args[0], args[1]))), num(1, w), num(0, w));
         }
+        if (byCnd)
+        {
+            const d = sub(args[0], args[1]);
+            return cndOver(w === 1 ? mul(d, d) : dot(d, d), num(0), num(1));
+        }
         return mul(lanewise('sge', w, args), lanewise('sge', w, [args[1], args[0]]));
     };
     /** @param {Vec} a @param {Vec} b @returns {Vec} */
@@ -718,6 +789,11 @@ export function createBuilder(profile){
         if (profile.cmp)
         {
             return selectGE0(neg(abs(sub(args[0], args[1]))), num(0, w), num(1, w));
+        }
+        if (byCnd)
+        {
+            const d = sub(args[0], args[1]);
+            return cndOver(w === 1 ? mul(d, d) : dot(d, d), num(1), num(0));
         }
         return add(lanewise('slt', w, args), lanewise('slt', w, [args[1], args[0]]));
     };

@@ -627,3 +627,24 @@ test('a product of constants is folded into one, which a model 1 literal can hol
         { inputs: { v: [], t: [] }, constants: { f } }).outputs.oC0];
     assert.deepEqual(out.map(x=>Math.round(x * 1e4) / 1e4), [0.2865, 0.1432, 0.573, 0]);
 });
+
+test('ps_1_1 compares through cnd on r0.a, as fxc does', async()=>{
+    // fxc: u.x + 0.5 into r0.a, and cnd r0, r0.a, ... chooses where it is over 0.5.
+    const result = await compile(`float4 u; float4 w;
+        float4 main() : COLOR
+        { return u.x > 0 ? float4(0.1, 0.2, 0.3, 0.4) : any(w) * 0.5; }`, 'ps_1_1');
+    assert.equal(result.ok, true, result.messages);
+    const program = decode(/** @type {Uint32Array} */ (result.tokens), { wide: true });
+    assert.ok(program.instructions.some((/** @type {any} */ i)=>i.name === 'cnd'));
+    const table = Object.fromEntries(constants(result).map(c=>[c.name, c.index]));
+    const run = (/** @type {number[]} */ u, /** @type {number[]} */ w)=>{
+        const f = new Float32Array(32 * 4);
+        f.set(u, table.u * 4);
+        f.set(w, table.w * 4);
+        return [...execute(program, { inputs: { v: [], t: [] }, constants: { f } }).outputs.oC0]
+            .map(x=>Math.round(x * 1e4) / 1e4);
+    };
+    assert.deepEqual(run([0.25, 0, 0, 0], [0, 0, 0, 0]), [0.1, 0.2, 0.3, 0.4]);
+    assert.deepEqual(run([-0.25, 0, 0, 0], [0, 0, 0.5, 0]), [0.5, 0.5, 0.5, 0.5]);
+    assert.deepEqual(run([0, 0, 0, 0], [0, 0, 0, 0]), [0, 0, 0, 0]);
+});

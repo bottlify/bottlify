@@ -126,8 +126,9 @@ export function registersOf(type){
  * @property {string} [name]
  * @property {boolean} [uniform]  Holds one value in all four components: a model 1 pixel
  *                                shader reads it through any swizzle as it stands.
- * @property {{ file: 't' | 'r', index?: number, sampler?: Const }} [pin]   Must live in this
- *           register of a model 1 pixel shader: where a texture read leaves its texel.
+ * @property {{ file: 't' | 'r', index?: number, sampler?: Const, comp?: number }} [pin]
+ *           Must live in this register of a model 1 pixel shader: where a texture read leaves
+ *           its texel, or, with `comp`, that one component -- r0.a, which ps_1_1's cnd reads.
  * @property {boolean} [carried]  A variable a loop changes: written before it and at the end
  *                                of each iteration, read in the next, so it is never merged with
  *                                another register nor its writes moved.

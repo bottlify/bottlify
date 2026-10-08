@@ -818,6 +818,17 @@ function build(ir, options, diagnostics, stats, rewrites){
     {
         const pin = /** @type {NonNullable<VReg['pin']>} */ (v.pin);
         const reg = pin.index ?? /** @type {number} */ (pin.sampler?.index);
+        if (pin.comp !== undefined)
+        {
+            if (pin.file === 'r' && reg === 0 && range.end > firstOut)
+            {
+                throw new RewriteNeeded([], [], new TargetError('X4505', `${profile.name}: `
+                    + 'a test in r0.a is read after the result is written there'), true);
+            }
+            take(`${pin.file}${reg}.${pin.comp}`, range.start, range.end);
+            homes.set(v, { file: pin.file, reg, comps: [pin.comp] });
+            continue;
+        }
         for (let c = 0; c < 4; c++)
         {
             // A texel 1.4 leaves in r0 still read after the result is written there: the
@@ -1016,7 +1027,10 @@ function build(ir, options, diagnostics, stats, rewrites){
                 // Not the instruction that makes it so: that one reads its blue.
                 const uniform = src.kind === 'reg' && src.reg.uniform
                     && !(instr.dest.kind === 'reg' && instr.dest.reg === src.reg);
-                operand.swz = uniform ? [0, 1, 2, 3]
+                // cnd tests r0.a, named as such however many components it writes.
+                const test = instr.op === 'cnd' && k === 0 && !fourth
+                    && wanted.every(w=>w === 3);
+                operand.swz = uniform ? [0, 1, 2, 3] : test ? [3, 3, 3, 3]
                     : swizzleOf(wanted, info.cls === 'comp'
                         ? destLanes.map(c=>place[c]) : null, profile, instr.op, dest?.mask === 8);
             }

@@ -317,6 +317,13 @@ export function lowerIntrinsic(L, name, args, result, e, st){
         }
         case 'any':
         case 'all': {
+            // ps_1_1 has no max to gather truths with: fxc asks whether dot(v, v) is over 0.
+            const type = args[0].type;
+            if (name === 'any' && b.profile.legacy && !b.profile.cmp && !baseIsBool(type)
+                && type.kind === 'vector')
+            {
+                return vec(b.gt(b.dot(v(0), v(0)), b.num(0)));
+            }
             const lanes = scalars(0).map(x=>(baseIsBool(args[0].type) ? x : b.nonzero(x)));
             let acc = lanes[0];
             for (const l of lanes.slice(1))
