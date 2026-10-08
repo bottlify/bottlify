@@ -106,6 +106,17 @@ export function valueText(value){
 }
 
 /**
+ * A version as the installer's records keep it: major, minor and build in
+ * one number.
+ *
+ * @param {string} text
+ */
+const packedVersion = text=>{
+    const [major = 0, minor = 0, build = 0] = text.split('.').map(part=>Number(part) || 0);
+    return ((major & 0xff) << 24 | (minor & 0xff) << 16 | (build & 0xffff)) >>> 0;
+};
+
+/**
  * The strings of a REG_MULTI_SZ value, in order.
  *
  * @param {{ data: Uint8Array } | null} value @returns {string[]}
@@ -172,6 +183,49 @@ export function createRegistration(hive){
             uninstall: `${UNINSTALL}\\${productCode}`,
             squashed,
         } : null;
+    };
+
+    /**
+     * The product as published to the machine, installed or only
+     * advertised: its name, package, version and language under the
+     * classes' Installer key, where its package can be found again, and its
+     * place under its upgrade code.
+     *
+     * @param {{ productCode: string, packageCode: string, upgradeCode: string | null,
+     *     name: string, version: string, language: number, installSource: string,
+     *     packageName: string }} product
+     */
+    const advertise = product=>{
+        const keys = productKeys(product.productCode);
+        if (!keys)
+        {
+            return;
+        }
+        const version = packedVersion(product.version);
+        const advertised = create(keys.advertised);
+        // Where the package came from, for a repair that needs its source:
+        // the folder as the first network source and the last one used.
+        const sources = create(`${keys.advertised}\\SourceList`);
+        const folder = product.installSource;
+        hive.setValue(sources, 'PackageName', REG_SZ, sz(product.packageName));
+        hive.setValue(sources, 'LastUsedSource', REG_EXPAND_SZ, sz(`n;1;${folder}`));
+        hive.setValue(create(`${keys.advertised}\\SourceList\\Net`), '1', REG_EXPAND_SZ,
+            sz(folder));
+        hive.setValue(advertised, 'ProductName', REG_SZ, sz(product.name));
+        hive.setValue(advertised, 'PackageCode', REG_SZ,
+            sz(squashGuid(product.packageCode) ?? ''));
+        hive.setValue(advertised, 'Language', REG_DWORD, dword(product.language));
+        hive.setValue(advertised, 'Version', REG_DWORD, dword(version));
+        hive.setValue(advertised, 'Assignment', REG_DWORD, dword(1));
+        if (product.upgradeCode)
+        {
+            const upgrade = squashGuid(product.upgradeCode);
+            if (upgrade)
+            {
+                hive.setValue(create(`${CLASSES}\\UpgradeCodes\\${upgrade}`), keys.squashed,
+                    REG_SZ, sz(''));
+            }
+        }
     };
 
     return {
@@ -249,9 +303,8 @@ export function createRegistration(hive){
             {
                 return;
             }
-            const [major = 0, minor = 0, build = 0] = product.version.split('.')
-                .map(part=>Number(part) || 0);
-            const version = ((major & 0xff) << 24 | (minor & 0xff) << 16 | (build & 0xffff)) >>> 0;
+            const [major = 0, minor = 0] = product.version.split('.').map(part=>Number(part) || 0);
+            const version = packedVersion(product.version);
             /** @type {[string, number, Uint8Array][]} */
             const values = [
                 ['DisplayName', REG_SZ, sz(product.name)],
@@ -280,30 +333,7 @@ export function createRegistration(hive){
                     hive.setValue(key, name, type, data);
                 }
             }
-            const advertised = create(keys.advertised);
-            // Where the package came from, for a repair that needs its source:
-            // the folder as the first network source and the last one used.
-            const sources = create(`${keys.advertised}\\SourceList`);
-            const folder = product.installSource;
-            hive.setValue(sources, 'PackageName', REG_SZ, sz(product.packageName));
-            hive.setValue(sources, 'LastUsedSource', REG_EXPAND_SZ, sz(`n;1;${folder}`));
-            hive.setValue(create(`${keys.advertised}\\SourceList\\Net`), '1', REG_EXPAND_SZ,
-                sz(folder));
-            hive.setValue(advertised, 'ProductName', REG_SZ, sz(product.name));
-            hive.setValue(advertised, 'PackageCode', REG_SZ,
-                sz(squashGuid(product.packageCode) ?? ''));
-            hive.setValue(advertised, 'Language', REG_DWORD, dword(product.language));
-            hive.setValue(advertised, 'Version', REG_DWORD, dword(version));
-            hive.setValue(advertised, 'Assignment', REG_DWORD, dword(1));
-            if (product.upgradeCode)
-            {
-                const upgrade = squashGuid(product.upgradeCode);
-                if (upgrade)
-                {
-                    hive.setValue(create(`${CLASSES}\\UpgradeCodes\\${upgrade}`), keys.squashed,
-                        REG_SZ, sz(''));
-                }
-            }
+            advertise(product);
         },
 
         /**
@@ -355,12 +385,16 @@ export function createRegistration(hive){
          *
          * @param {string} productCode @param {string} feature @param {string} components
          * @param {string | null} [parent]
+         * @param {boolean} [advertised]  Published only, for a first use to install.
          */
-        registerFeature: (productCode, feature, components, parent = null)=>{
+        registerFeature: (productCode, feature, components, parent = null, advertised = false)=>{
             const keys = productKeys(productCode);
             if (keys)
             {
-                hive.setValue(create(keys.features), feature, REG_SZ, sz(components));
+                if (!advertised)
+                {
+                    hive.setValue(create(keys.features), feature, REG_SZ, sz(components));
+                }
                 hive.setValue(create(`${CLASSES}\\Features\\${keys.squashed}`), feature, REG_SZ,
                     sz(parent ?? ''));
             }
@@ -576,6 +610,8 @@ export function createRegistration(hive){
                     transforms: valueText(hive.getValue(list, name)) ?? '',
                 }));
         },
+
+        advertiseProduct: advertise,
 
         /** @returns {any} the machine's root, for callers that keep keys of their own */
         machine: ()=>machine,

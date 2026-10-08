@@ -609,6 +609,16 @@ function environmentBlock(signature, text){
 }
 
 /**
+ * The extra data block of an advertised shortcut: the descriptor that names
+ * the product, feature and component the shell asks the installer to provide
+ * when the link is opened.
+ *
+ * @param {string} descriptor
+ */
+export const darwinBlock = descriptor=>({ signature: BLOCK_SIGNATURES.DARWIN,
+    bytes: environmentBlock(BLOCK_SIGNATURES.DARWIN, descriptor) });
+
+/**
  * A StringData entry: the count of characters, then the characters, with no
  * terminator. The count is a word, so a longer string is cut to fit.
  *

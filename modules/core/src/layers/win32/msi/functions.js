@@ -973,7 +973,12 @@ export function createMsiFunctions(host){
             return session;
         }
         session.setProperty('ACTION', session.getProperty('ACTION') || 'INSTALL');
-        session.setProperty('EXECUTEACTION', 'INSTALL');
+        const advertising = session.getProperty('ACTION') === 'ADVERTISE';
+        if (advertising && session.getProperty('ADVERTISE') === '')
+        {
+            session.setProperty('ADVERTISE', 'ALL');
+        }
+        session.setProperty('EXECUTEACTION', advertising ? 'ADVERTISE' : 'INSTALL');
         const engine = engineFor(session, thread);
         await deliver(INSTALLMESSAGE.INITIALIZE, createRecord(0), session, thread);
         const level = uiLevel & 0x0f;
@@ -981,9 +986,10 @@ export function createMsiFunctions(host){
         let code;
         try
         {
-            code = ui ? await runSequence(engine, 'InstallUISequence')
-                : await runSequence(engine, 'InstallExecuteSequence');
-            if (ui && code === ERROR_SUCCESS && !engine.ran.has('ExecuteAction')
+            code = advertising ? await runSequence(engine, 'AdvertiseExecuteSequence')
+                : ui ? await runSequence(engine, 'InstallUISequence')
+                    : await runSequence(engine, 'InstallExecuteSequence');
+            if (!advertising && ui && code === ERROR_SUCCESS && !engine.ran.has('ExecuteAction')
                 && session.script.length === 0 && session.getProperty('CostingComplete') !== '1')
             {
                 code = await doAction(engine, 'ExecuteAction');
@@ -1020,7 +1026,17 @@ export function createMsiFunctions(host){
         {
             return ERROR_INVALID_PARAMETER;
         }
-        if (registration.productState(productCode) !== INSTALLSTATE.DEFAULT)
+        const state = registration.productState(productCode);
+        if (state === INSTALLSTATE.ADVERTISED)
+        {
+            // Only advertised: its first use installs it from its source.
+            const list = registration.sourceList(productCode);
+            const net = list ? host.hive.open(list, 'Net') : null;
+            const folder = net ? valueText(host.hive.getValue(net, '1')) : null;
+            const name = list ? valueText(host.hive.getValue(list, 'PackageName')) : null;
+            return folder && name ? `${folder}${name}` : ERROR_INSTALL_SOURCE_ABSENT;
+        }
+        if (state !== INSTALLSTATE.DEFAULT)
         {
             return ERROR_UNKNOWN_PRODUCT;
         }
@@ -1237,6 +1253,8 @@ export function createMsiFunctions(host){
             messageBox: host.messageBox
                 ? (text, caption, type)=>/** @type {any} */ (host.messageBox)(text, caption, type)
                 : undefined,
+            advertise: (path, transforms)=>installPackage(path,
+                `ACTION=ADVERTISE${transforms ? ` TRANSFORMS="${transforms}"` : ''}`),
             inspectPatch: async path=>{
                 const patch = await loadPatch(path);
                 return typeof patch === 'number' ? patch

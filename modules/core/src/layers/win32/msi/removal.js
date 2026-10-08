@@ -386,7 +386,11 @@ async function removeShortcuts(engine){
     for (const row of session.db.table('Shortcut')?.rows ?? [])
     {
         const directory = session.folders.get(String(row[1]))?.target;
-        if (!directory || !removing(engine, String(row[3])))
+        // An advertised shortcut goes with its feature.
+        const feature = row[4] === null ? null : session.features.get(String(row[4]));
+        const gone = feature ? feature.action === INSTALLSTATE.ABSENT
+            : removing(engine, String(row[3]));
+        if (!directory || !gone)
         {
             continue;
         }

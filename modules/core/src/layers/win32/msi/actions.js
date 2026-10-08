@@ -33,7 +33,8 @@ import { patchFiles } from './patch.js';
 import { createMd5 } from '../crypto/digest.js';
 import { REMOVAL_ACTIONS, productGone, unpublishProduct } from './removal.js';
 import { CLASS_ACTIONS, iconPath, publishIcons } from './classes.js';
-import { SW_SHOWNORMAL, encodeShellLink } from '../common/shell-link.js';
+import { SW_SHOWNORMAL, darwinBlock, encodeShellLink } from '../common/shell-link.js';
+import { descriptor } from './system.js';
 import { SYSTEM_ACTIONS } from './system.js';
 import { UPGRADE_ACTIONS } from './upgrade.js';
 import { environmentKey, environmentRow, installedValue } from './environment.js';
@@ -546,17 +547,19 @@ async function createShortcuts(engine){
     const formatted = value=>(value === null ? '' : session.formatText(String(value)));
     for (const row of session.db.table('Shortcut')?.rows ?? [])
     {
-        if (!installing(engine, String(row[3])))
-        {
-            continue;
-        }
+        const advertised = row[4] !== null && session.features.has(String(row[4]));
+        const feature = advertised ? session.features.get(String(row[4])) : null;
+        // An advertised shortcut goes with its feature, published or
+        // installed; another with its component.
+        const wanted = feature ? feature.action === INSTALLSTATE.LOCAL
+            || feature.action === INSTALLSTATE.SOURCE || feature.action === INSTALLSTATE.ADVERTISED
+            : installing(engine, String(row[3]));
         const directory = session.folders.get(String(row[1]))?.target;
-        if (!directory)
+        if (!wanted || !directory)
         {
             continue;
         }
         const name = `${String(row[2] ?? '').split('|').pop()}.lnk`;
-        const advertised = row[4] !== null && session.features.has(String(row[4]));
         const component = session.components.get(String(row[3]));
         const target = advertised
             ? (component?.keyPath ? session.files.get(component.keyPath)?.target ?? '' : '')
@@ -571,6 +574,11 @@ async function createShortcuts(engine){
             showCommand: row[10] === null ? SW_SHOWNORMAL : Number(row[10]),
             workingDirectory: row[11] === null ? ''
                 : session.folders.get(String(row[11]))?.target ?? formatted(`[${row[11]}]`),
+            // What the shell hands the installer to provide the program when
+            // the link is opened: the product, the feature, the component.
+            blocks: feature && component?.id ? [darwinBlock(/** @type {string} */ (descriptor(
+                session.getProperty('ProductCode'), feature.key, component.id,
+                feature.components.length === 1)))] : [],
         };
         await schedule(engine, 'CreateShortcuts', async()=>{
             writeFile(host.files, `${directory}${name}`,
@@ -663,6 +671,34 @@ async function registerProduct(engine){
     });
 }
 
+/**
+ * PublishProduct: the product's icons kept, and -- when it is only being
+ * advertised -- the product published as an advertised one, which a first
+ * use then installs from its source.
+ *
+ * @param {Engine} engine
+ */
+async function publishProduct(engine){
+    const { session, host } = engine;
+    await publishIcons(engine);
+    if (session.getProperty('ACTION') !== 'ADVERTISE')
+    {
+        return ERROR_SUCCESS;
+    }
+    return schedule(engine, 'PublishProduct', async()=>{
+        host.registration.advertiseProduct({
+            productCode: session.getProperty('ProductCode'),
+            packageCode: session.getProperty('PackageCode'),
+            upgradeCode: session.getProperty('UpgradeCode') || null,
+            name: session.getProperty('ProductName'),
+            version: session.getProperty('ProductVersion'),
+            language: Number(session.getProperty('ProductLanguage')) || 0,
+            installSource: session.getProperty('SourceDir') || session.sourceDir,
+            packageName: session.packagePath.slice(session.packagePath.lastIndexOf('\\') + 1),
+        });
+    });
+}
+
 /** @param {Engine} engine */
 async function processComponents(engine){
     const { session, host } = engine;
@@ -703,13 +739,16 @@ async function publishFeatures(engine){
     const productCode = session.getProperty('ProductCode');
     for (const feature of session.features.values())
     {
-        if (feature.action !== INSTALLSTATE.LOCAL && feature.action !== INSTALLSTATE.SOURCE)
+        const advertised = feature.action === INSTALLSTATE.ADVERTISED;
+        if (feature.action !== INSTALLSTATE.LOCAL && feature.action !== INSTALLSTATE.SOURCE
+            && !advertised)
         {
             continue;
         }
         const list = feature.components.join('');
         await schedule(engine, 'PublishFeatures', async()=>{
-            host.registration.registerFeature(productCode, feature.key, list, feature.parent);
+            host.registration.registerFeature(productCode, feature.key, list, feature.parent,
+                advertised);
             feature.installed = feature.action;
         });
     }
@@ -995,7 +1034,7 @@ export const STANDARD_ACTIONS = {
     RegisterUser: nothing,
     RegisterProduct: registerProduct,
     PublishFeatures: publishFeatures,
-    PublishProduct: publishIcons,
+    PublishProduct: publishProduct,
     InstallExecute: installExecute,
     InstallExecuteAgain: installExecute,
     InstallFinalize: installFinalize,

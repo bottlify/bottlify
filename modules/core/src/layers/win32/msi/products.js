@@ -13,8 +13,9 @@
  *
  * Everything a Windows Installer 3.1 exports is here. A patch is applied by
  * running the product's package again with it, and its records answer the
- * patch queries. Advertising has no engine behind it: those calls answer as
- * an installer that cannot write an advertise script does, and say so once.
+ * patch queries. A product advertised to this machine is installed by the
+ * first use of a feature; an advertise script, whose format Windows does not
+ * document, is refused, and that is said once.
  */
 
 import { INSTALLSTATE } from './session.js';
@@ -47,6 +48,8 @@ const ERROR_SUCCESS_REBOOT_REQUIRED = 3010;
 /** MsiRemovePatches' one kind of removal, and MSIPATCHSEQUENCEINFO's patch given as a file. */
 const INSTALLTYPE_SINGLE_INSTANCE = 2;
 const MSIPATCH_DATATYPE_PATCHFILE = 0;
+/** MsiAdvertiseProduct's script argument when it advertises to this machine, not a file. */
+const ADVERTISEFLAGS_USERASSIGN = 1;
 const ERROR_BAD_CONFIGURATION = 1610;
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
 
@@ -168,6 +171,8 @@ export function decomposeDescriptor(descriptor){
  * @property {(path: string) => Promise<{ code: string, targets: string[] } | number>}
  *     inspectPatch  A patch file's code and the products it targets, or an error code.
  * @property {(path: string) => Promise<string | null>} productCodeOf  A package's ProductCode.
+ * @property {(path: string, transforms: string | null) => Promise<number>} advertise
+ *     A package advertised to this machine.
  * @property {(api: string, detail: string) => void} [divergence]
  */
 
@@ -262,6 +267,16 @@ export function createProductFunctions(context){
         if (id === null)
         {
             return { code: ERROR_UNKNOWN_COMPONENT, path: '' };
+        }
+        if (featureState(product, feature) === INSTALLSTATE.ADVERTISED && mode !== -1
+            && mode !== -2 && mode !== -4)
+        {
+            // An advertised feature's first use installs it.
+            const code = await context.maintain(product, `ADDLOCAL="${feature}"`);
+            if (code !== ERROR_SUCCESS && code !== ERROR_SUCCESS_REBOOT_REQUIRED)
+            {
+                return { code, path: '' };
+            }
         }
         let { path, state } = componentState(product, id);
         if (path === null)
@@ -1398,10 +1413,11 @@ export function createProductFunctions(context){
         }),
         ...both('MsiExtractPatchXMLData', 16, ()=>noPatches('MsiExtractPatchXMLData',
             ERROR_PATCH_PACKAGE_UNSUPPORTED)),
-        ...both('MsiAdvertiseProduct', 16, ()=>noAdvertising('MsiAdvertiseProduct',
-            ERROR_CALL_NOT_IMPLEMENTED)),
-        ...both('MsiAdvertiseProductEx', 24, ()=>noAdvertising('MsiAdvertiseProductEx',
-            ERROR_CALL_NOT_IMPLEMENTED)),
+        ...both('MsiAdvertiseProduct', 16, wide=>async([path, script, transforms])=>
+            advertiseProduct(wide, path, script, transforms)),
+        ...both('MsiAdvertiseProductEx', 24, wide=>async([path, script, transforms, , platform,
+            options])=>((platform >>> 0) > 2 || (options >>> 0) > 1 ? ERROR_INVALID_PARAMETER
+            : advertiseProduct(wide, path, script, transforms))),
         ...both('MsiAdvertiseScript', 16, ()=>noAdvertising('MsiAdvertiseScript',
             ERROR_CALL_NOT_IMPLEMENTED)),
         ...both('MsiProcessAdvertiseScript', 20, ()=>noAdvertising('MsiProcessAdvertiseScript',
@@ -1464,6 +1480,28 @@ export function createProductFunctions(context){
                 type >>> 0) ?? 0),
         QueryInstanceCount: { argBytes: 0, handler: ()=>0 },
     };
+
+    /**
+     * MsiAdvertiseProduct(Ex): the package published to this machine with
+     * none of its files, which the first use of a feature then installs. An
+     * advertise script written to a file instead has a format Windows does
+     * not document, and is refused.
+     *
+     * @param {boolean} wide @param {number} path @param {number} script
+     * @param {number} transforms
+     */
+    async function advertiseProduct(wide, path, script, transforms){
+        const name = reader(wide)(path);
+        if (name === null)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        if ((script >>> 0) > ADVERTISEFLAGS_USERASSIGN)
+        {
+            return noAdvertising('MsiAdvertiseProduct', ERROR_CALL_NOT_IMPLEMENTED)();
+        }
+        return context.advertise(name, reader(wide)(transforms));
+    }
 
     /**
      * MsiDeterminePatchSequence's and MsiDetermineApplicablePatches' answer

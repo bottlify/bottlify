@@ -89,6 +89,7 @@ async function installed(){
             // The installed package, as far as a descriptor that leaves the
             // component to its feature needs it.
             inspectPatch: async()=>1636,
+            advertise: async()=>0,
             productCodeOf: async()=>null,
             openProduct: async()=>/** @type {any} */ ({
                 features: new Map([['Main', { components: ['Core'] }]]),

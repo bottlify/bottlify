@@ -579,7 +579,9 @@ export function createSession(options){
         const addDefault = listed('ADDDEFAULT');
         const remove = listed('REMOVE');
         const reinstall = listed('REINSTALL');
-        const anyRequest = addLocal || addSource || remove || addDefault || reinstall;
+        const advertise = listed('ADVERTISE');
+        const anyRequest = addLocal || addSource || remove || addDefault || reinstall
+            || advertise;
         /** @param {Set<string> | 'ALL' | null} list @param {string} key */
         const names = (list, key)=>list === 'ALL' || (list?.has(key) ?? false);
         const installed = getProperty('Installed') !== '';
@@ -618,6 +620,12 @@ export function createSession(options){
             else if (names(reinstall, feature.key))
             {
                 feature.action = isThere(feature) ? feature.installed : INSTALLSTATE.UNKNOWN;
+            }
+            else if (names(advertise, feature.key))
+            {
+                // Published, its files left for the first use to bring.
+                feature.action = isThere(feature) ? INSTALLSTATE.UNKNOWN
+                    : INSTALLSTATE.ADVERTISED;
             }
             else if (anyRequest || installed)
             {

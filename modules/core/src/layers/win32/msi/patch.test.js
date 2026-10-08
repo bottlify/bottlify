@@ -62,7 +62,7 @@ async function asStorage(name, bytes){
     {
         children.push(streamOf(node.name, await file.readAll(node)));
     }
-    return storageOf(name, children, file.root.clsid);
+    return storageOf(name, children, file.root.clsid ?? undefined);
 }
 
 /** The .msp: the product transform, its "#" companion, and the cabinet with the new file. */
@@ -89,7 +89,7 @@ async function makePatch(){
         streamOf('\u0005SummaryInformation', writeSummaryStream(/** @type {any} */ (summary))),
         await asStorage('T1', /** @type {Uint8Array} */ (product.bytes)),
         await asStorage('#T1', /** @type {Uint8Array} */ (companion.bytes)),
-        streamOf(encodeStreamName('PATCH_CAB', false), cabinet),
+        streamOf(/** @type {string} */ (encodeStreamName('PATCH_CAB', false)), cabinet),
     ], CLSID_PATCH));
 }
 
