@@ -45,7 +45,7 @@ const MAX_PART = 64 << 20;
 const SAFE_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
 
 /** What a person may say a bottle is, beside its version. */
-const LABELS = new Set(['demo', 'benchmark', 'test']);
+const LABELS = new Set(['demo', 'benchmark', 'test', 'playable', 'non-playable', 'start-only']);
 const KINDS = new Set(['game', 'application']);
 
 /** The pictures a bottle may carry, by the type a browser sends them as. */
