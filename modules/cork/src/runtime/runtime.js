@@ -548,6 +548,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @typedef {Object} RegionRecord
      * @property {number} entry
      * @property {Set<number>} pages
+     * @property {Set<number>} [reads]   every page forming read: what a worker forms it from
      * @property {number[]} slots   entry indices
      * @property {number} table     the function's index in the table, or -1
      * @property {[number, number][]} spans   the blocks' [start, end)
@@ -1399,7 +1400,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
         /** @type {RegionRecord} */
         const record = {
-            entry: region.entry, pages: region.pages, slots: [], table: -1,
+            entry: region.entry, pages: region.pages, reads: region.reads, slots: [], table: -1,
             spans: region.blocks.map(block=>[block.start, block.end]), extents,
             entryTop: one.entryTop, hash: region.hash, labels: JSON.stringify(built.labels),
             linked: built.linked === true, wide: one.wide === true, loose: one.loose === true,
@@ -1735,7 +1736,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     const at = layout.ramBase + page * 4096;
                     // A copy of its own: a slice of a shared memory's buffer is
                     // shared too, and cannot be transferred to the translator.
-                    copies.set(page, new Uint8Array(memory.buffer, at, 4096).slice());
+                    // A page forming read past the memory -- an import slot that
+                    // names nowhere -- read as zeros there, and is zeros here.
+                    copies.set(page, at + 4096 <= memory.buffer.byteLength
+                        ? new Uint8Array(memory.buffer, at, 4096).slice() : new Uint8Array(4096));
                 }
             }
         }
@@ -2124,12 +2128,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         {
             return false;
         }
-        const copies = copyPages(chunk.map(record=>record.pages));
+        const copies = copyPages(chunk.map(record=>record.reads ?? record.pages));
         const relink = {
             jobs: chunk.map(record=>({ entry: record.entry, entryTop: record.entryTop,
                 hash: record.hash, checked: record.checked === true, copies: record.copies === true,
                 ...(record.targets === undefined ? {} : { targets: record.targets }) })),
             pages: [...copies],
+            formable: chunk.flatMap(record=>[...record.pages]),
             form: formOptions,
         };
         if (worker !== null)
@@ -2400,7 +2405,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 one.waited = true;
             }
-            const copies = copyPages(unbuilt.map(one=>one.region.pages));
+            const copies = copyPages(unbuilt.map(one=>one.region.reads ?? one.region.pages));
             worker.post({
                 id: outstanding.id,
                 relink: {
@@ -2408,6 +2413,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                         hash: one.region.hash, checked: one.checked, copies: one.copies === true,
                         ...(one.targets === undefined ? {} : { targets: one.targets }) })),
                     pages: [...copies],
+                    formable: unbuilt.flatMap(one=>[...one.region.pages]),
                     form: formOptions,
                 },
                 layout, features: found, options: emitOptions(),

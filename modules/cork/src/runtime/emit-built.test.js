@@ -154,3 +154,54 @@ test('a batch with structure left unset and one with it off do not share functio
     const keptFlat = relinkBatch(relink, layout, FEATURES, flat, cache);
     assert.deepEqual(keptFlat.module, relinkBatch(relink, layout, FEATURES, flat).module);
 });
+
+test('a region formed through an import slot is formed the same on the worker', ()=>{
+    // call dword [slot]; ret -- the slot, on a data page of its own, holds a leaf that
+    // the call is formed into (mov eax, 1; ret). The worker forms from copies of the pages
+    // read: the slot's page must be among them, or its read answers 0 there, nothing is
+    // predicted and the region hashes apart ('changed'). A write to it drops nothing.
+    const code = BASE;
+    const slot = BASE + 0x2000;
+    const leaf = BASE + 0x3000;
+    /** @type {Map<number, Uint8Array>} */
+    const memory = new Map([code, slot, leaf].map(at=>[at >>> 12, new Uint8Array(4096)]));
+    const put = (/** @type {number} */ at, /** @type {number[]} */ bytes)=>
+        /** @type {Uint8Array} */ (memory.get(at >>> 12)).set(bytes, at & 0xfff);
+    put(code, [0xff, 0x15, ...new Uint8Array(Uint32Array.of(slot).buffer), 0xc3]);
+    put(slot, [...new Uint8Array(Uint32Array.of(leaf).buffer)]);
+    put(leaf, [0xb8, 1, 0, 0, 0, 0xc3]);
+    const read = (/** @type {number} */ address)=>memory.get(address >>> 12)?.[address & 0xfff]
+        ?? 0;
+    const region = formRegion(read, code, { ...FORM, translatable: ()=>true });
+    assert.ok(region.blocks.some(block=>block.start === leaf), 'the leaf is formed in');
+    assert.ok(region.reads?.has(slot >>> 12), 'the slot\'s page is among the pages read');
+    assert.ok(!region.pages.has(slot >>> 12), 'and not among those a write to drops it');
+    const pages = [...(region.reads ?? [])].map(page=>/** @type {[number, Uint8Array]} */ (
+        [page, /** @type {Uint8Array} */ (memory.get(page)).slice()]));
+    const built = relinkBatch({ jobs: [{ entry: code, entryTop: 0, hash: region.hash }], pages,
+        formable: [...region.pages], form: FORM }, layout, FEATURES, OPTIONS);
+    assert.equal(built.results[0].ok, true, JSON.stringify(built.results[0]));
+});
+
+test('every region is formed the same on the worker from its own pages alone', ()=>{
+    // The runtime sends the worker copies of the pages forming read and the regions' own
+    // pages to form over: from them alone the worker forms every region as it was formed.
+    for (const name of ['load-x87', 'game-x87', 'crc-x87'])
+    {
+        const relink = relinkOf(name, 40);
+        const all = new Map(relink.pages);
+        const read = (/** @type {number} */ address)=>all.get(address >>> 12)?.[address & 0xfff]
+            ?? 0;
+        for (const job of relink.jobs)
+        {
+            const region = formRegion(read, job.entry, { ...FORM,
+                translatable: address=>all.has(address >>> 12) });
+            const own = [...(region.reads ?? [])].filter(page=>all.has(page)).map(page=>
+                /** @type {[number, Uint8Array]} */ ([page, /** @type {Uint8Array} */ (
+                    all.get(page))]));
+            const built = relinkBatch({ jobs: [job], pages: own, formable: [...region.pages],
+                form: FORM }, layout, FEATURES, OPTIONS);
+            assert.equal(built.results[0].ok, true, `${name} at ${job.entry.toString(16)}`);
+        }
+    }
+});
