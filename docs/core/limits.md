@@ -106,7 +106,8 @@ differently raises a `divergence` event naming the API.
 - The Windows Installer is the engine's own (`msi.dll`, version 3.1 on Windows XP SP3): it
   installs, repairs, changes and removes products, applies transforms and patches, advertises,
   and keeps each installed package's copy in `C:\WINDOWS\Installer` with its embedded cabinets
-  left out. Calls added by Windows Installer 4.5 and 5.0 are not exported.
+  left out. It reports Windows Installer 4.5 on XP and exports what 4.5 and 5.0 added, but
+  `MsiGetPatchFileList`; a transaction's rollback keeps what was installed in it.
 - A package's own dialogs are never drawn: an installation runs without the internal user
   interface, as a setup that drives its own does. `MsiCollectUserInfo` and the dialog previews
   show nothing.

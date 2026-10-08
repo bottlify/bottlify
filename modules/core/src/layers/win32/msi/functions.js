@@ -1360,6 +1360,7 @@ export function createMsiFunctions(host){
             messageBox: host.messageBox
                 ? (text, caption, type)=>/** @type {any} */ (host.messageBox)(text, caption, type)
                 : undefined,
+            openHandle: (kind, object)=>open(kind, object),
             advertise: (path, transforms)=>installPackage(path,
                 `ACTION=ADVERTISE${transforms ? ` TRANSFORMS="${transforms}"` : ''}`),
             inspectPatch: async path=>{

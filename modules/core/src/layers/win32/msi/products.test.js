@@ -89,6 +89,7 @@ async function installed(){
             // The installed package, as far as a descriptor that leaves the
             // component to its feature needs it.
             inspectPatch: async()=>1636,
+            openHandle: ()=>1,
             advertise: async()=>0,
             productCodeOf: async()=>null,
             openProduct: async()=>/** @type {any} */ ({
@@ -214,3 +215,26 @@ test('a file\'s MD5 hash, and a missing component repaired by its feature', asyn
         put(0x500, CORE), 0, 0x200, 0x40]);
     assert.deepEqual(maintained, [`${PRODUCT} REINSTALL="Main" REINSTALLMODE=omus`]);
 });
+
+test('the Windows Installer 4.5 and 5.0 forms: per-context enumerations, paths, transactions',
+    async()=>{
+        const { fns, put, string, view } = await installed();
+        const MACHINE_CONTEXT = 4;
+        view.setUint32(0x40, 64, true);
+        assert.equal(fns.MsiEnumComponentsExA.handler([0, MACHINE_CONTEXT, 0, 0x200, 0x60,
+            0x300, 0x40]), 0);
+        assert.equal(string(0x200), CORE);
+        assert.equal(view.getUint32(0x60, true), MACHINE_CONTEXT);
+        assert.equal(fns.MsiEnumComponentsExA.handler([0, 1, 0, 0x200, 0, 0, 0]), 259,
+            'nothing installed per user');
+        view.setUint32(0x40, 64, true);
+        assert.equal(fns.MsiEnumClientsExA.handler([put(0x500, CORE), 0, MACHINE_CONTEXT, 0,
+            0x200, 0, 0x300, 0x40]), 0);
+        assert.equal(string(0x200), PRODUCT);
+        view.setUint32(0x40, 128, true);
+        assert.equal(fns.MsiGetComponentPathExA.handler([put(0x100, PRODUCT), 0x500, 0,
+            MACHINE_CONTEXT, 0x200, 0x40]), INSTALLSTATE.LOCAL);
+        assert.equal(string(0x200), 'C:\\Program Files\\Game\\game.exe');
+        assert.equal(fns.MsiBeginTransactionA.handler([put(0x600, 'batch'), 0, 0x64, 0x68]), 0);
+        assert.equal(fns.MsiEndTransaction.handler([1]), 0, 'committed');
+    });

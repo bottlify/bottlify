@@ -11,7 +11,8 @@
  * places its package can be found again, and the descriptors an advertised
  * shortcut or a published component names a feature and component by.
  *
- * Everything a Windows Installer 3.1 exports is here. A patch is applied by
+ * Everything a Windows Installer 4.5 or 5.0 exports is here, MsiGetPatchFileList
+ * aside. A patch is applied by
  * running the product's package again with it, and its records answer the
  * patch queries. A product advertised to this machine is installed by the
  * first use of a feature; an advertise script, whose format Windows does not
@@ -48,6 +49,8 @@ const ERROR_SUCCESS_REBOOT_REQUIRED = 3010;
 /** MsiRemovePatches' one kind of removal, and MSIPATCHSEQUENCEINFO's patch given as a file. */
 const INSTALLTYPE_SINGLE_INSTANCE = 2;
 const MSIPATCH_DATATYPE_PATCHFILE = 0;
+/** MsiEndTransaction's state for undoing what the transaction did. */
+const MSITRANSACTIONSTATE_ROLLBACK = 0;
 /** MsiAdvertiseProduct's script argument when it advertises to this machine, not a file. */
 const ADVERTISEFLAGS_USERASSIGN = 1;
 const ERROR_BAD_CONFIGURATION = 1610;
@@ -171,6 +174,7 @@ export function decomposeDescriptor(descriptor){
  * @property {(path: string) => Promise<{ code: string, targets: string[] } | number>}
  *     inspectPatch  A patch file's code and the products it targets, or an error code.
  * @property {(path: string) => Promise<string | null>} productCodeOf  A package's ProductCode.
+ * @property {(kind: string, object: object) => number} openHandle  A new MSIHANDLE.
  * @property {(path: string, transforms: string | null) => Promise<number>} advertise
  *     A package advertised to this machine.
  * @property {(api: string, detail: string) => void} [divergence]
@@ -1442,6 +1446,113 @@ export function createProductFunctions(context){
         },
         ...both('MsiPreviewDialog', 8, ()=>()=>ERROR_INVALID_HANDLE),
         ...both('MsiPreviewBillboard', 12, ()=>()=>ERROR_INVALID_HANDLE),
+
+        // ----- Windows Installer 4.5 and 5.0 ----------------------------------
+        ...both('MsiBeginTransaction', 16, wide=>([name, attributes, transaction, event])=>{
+            void attributes;
+            if (reader(wide)(name) === null || (transaction >>> 0) === 0 || (event >>> 0) === 0)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            writeU32(transaction, context.openHandle('transaction', {}));
+            // No other process takes a transaction over, so there is no event
+            // to wait for its ownership changing.
+            writeU32(event, 0);
+            return ERROR_SUCCESS;
+        }),
+        MsiJoinTransaction: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([transaction, , event])=>{
+                if (!get(transaction, 'transaction'))
+                {
+                    return ERROR_INVALID_HANDLE;
+                }
+                if ((event >>> 0) !== 0)
+                {
+                    writeU32(event, 0);
+                }
+                return ERROR_SUCCESS;
+            },
+        },
+        MsiEndTransaction: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([state])=>{
+                if ((state >>> 0) === MSITRANSACTIONSTATE_ROLLBACK)
+                {
+                    sayOnce('MsiEndTransaction', 'nothing is rolled back: the installations in'
+                        + ' the transaction stay');
+                }
+                return ERROR_SUCCESS;
+            },
+        },
+        ...both('MsiEnumComponentsEx', 28, wide=>([sid, contextMask, index, component,
+            installedContext, sidBuffer, sidSize])=>{
+            void sid;
+            if ((contextMask & MSIINSTALLCONTEXT_MACHINE) === 0)
+            {
+                return ERROR_NO_MORE_ITEMS;
+            }
+            const id = registration.components()[index >>> 0];
+            if (!id)
+            {
+                return ERROR_NO_MORE_ITEMS;
+            }
+            if ((component >>> 0) !== 0)
+            {
+                putFixed(wide, id, component);
+            }
+            if ((installedContext >>> 0) !== 0)
+            {
+                writeU32(installedContext, MSIINSTALLCONTEXT_MACHINE);
+            }
+            return putString(wide, '', sidBuffer, sidSize);
+        }),
+        ...both('MsiEnumClientsEx', 32, wide=>([component, sid, contextMask, index, product,
+            installedContext, sidBuffer, sidSize])=>{
+            void sid;
+            const id = reader(wide)(component);
+            if (id === null || squashGuid(id) === null)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            const clients = (contextMask & MSIINSTALLCONTEXT_MACHINE) === 0 ? []
+                : registration.clients(id);
+            const code = clients[index >>> 0];
+            if (!code)
+            {
+                return ERROR_NO_MORE_ITEMS;
+            }
+            if ((product >>> 0) !== 0)
+            {
+                putFixed(wide, code, product);
+            }
+            if ((installedContext >>> 0) !== 0)
+            {
+                writeU32(installedContext, MSIINSTALLCONTEXT_MACHINE);
+            }
+            return putString(wide, '', sidBuffer, sidSize);
+        }),
+        ...both('MsiGetComponentPathEx', 24, wide=>([product, component, sid, contextMask,
+            buffer, size])=>{
+            void sid;
+            const code = reader(wide)(product);
+            const id = reader(wide)(component);
+            if (code === null || id === null || (contextMask & MSIINSTALLCONTEXT_MACHINE) === 0)
+            {
+                return INSTALLSTATE.INVALIDARG;
+            }
+            const answer = componentState(code, id);
+            if (answer.path === null)
+            {
+                return INSTALLSTATE.UNKNOWN;
+            }
+            putString(wide, answer.path, buffer, size);
+            return answer.state;
+        }),
+        ...both('MsiGetPatchFileList', 16, ()=>noPatches('MsiGetPatchFileList',
+            ERROR_FUNCTION_FAILED)),
 
         // ----- housekeeping --------------------------------------------------
         MsiInvalidateFeatureCache: { argBytes: 8, handler: ()=>ERROR_SUCCESS },
