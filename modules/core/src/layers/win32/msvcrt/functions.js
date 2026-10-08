@@ -46,6 +46,7 @@ import { createDescriptors, createIoFunctions } from './io.js';
 import { createEnvironment } from './environ.js';
 import { createMultiBytePage } from './mbcs.js';
 import { createLocaleFunctions } from './locale.js';
+import { createProcessFunctions } from './process.js';
 import { bytesOfUnits, unitsOfText, wideStringAt } from './widetext.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
@@ -871,6 +872,10 @@ export function createMsvcrtFunctions(host){
         }),
         ...createScanFunctions(host),
         ...createCxxFunctions(host),
+        ...createProcessFunctions({
+            errno,
+            ...host.divergence ? { divergence: host.divergence } : {},
+        }),
         ...createLocaleFunctions({
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,

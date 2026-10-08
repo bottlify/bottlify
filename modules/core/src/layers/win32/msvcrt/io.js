@@ -1333,6 +1333,23 @@ export function createIoFunctions(host, descriptors){
         _tell: cdecl(4, ([fd])=>fileAt(fd)?.position ?? -1),
 
         /**
+         * int _isatty(int fd)
+         *
+         * The descriptor's character-device bit, as `__pioinfo` holds it:
+         * nonzero (FDEV, 0x40) for one on the console, zero for a file. A
+         * number not open is zero, with EBADF.
+         */
+        _isatty: cdecl(4, ([fd])=>{
+            const descriptor = descriptors.get(fd | 0);
+            if (!descriptor)
+            {
+                fail(EBADF);
+                return 0;
+            }
+            return descriptor.console !== undefined ? WX_TTY : 0;
+        }),
+
+        /**
          * int _eof(int fd)
          *
          * 1 at or past the end of the file, and after a text-mode ^Z, which

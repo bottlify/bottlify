@@ -894,3 +894,18 @@ test('_chsize cuts a file, grows it with zeroes and keeps the position', ()=>{
     assert.deepEqual(errno, [EBADF, EBADF, EINVAL]);
 
 });
+
+test('_isatty: the console\'s descriptors are character devices, a file is not', ()=>{
+    const { fns, open, errno } = build({ 'C:\\game\\save.dat': bytesOf('x') });
+    for (const fd of [0, 1, 2])
+    {
+        assert.equal(fns._isatty.handler([fd]), 0x40, `descriptor ${fd}`);
+    }
+    const fd = open('C:\\game\\save.dat', 0);
+    assert.ok(fd > 2);
+    assert.equal(fns._isatty.handler([fd]), 0);
+    assert.deepEqual(errno, []);
+    assert.equal(fns._isatty.handler([77]), 0, 'a number not open');
+    assert.deepEqual(errno, [9], 'EBADF');
+    assert.equal(fns._isatty.convention, 'cdecl');
+});
