@@ -3811,28 +3811,31 @@ export function createWindowFunctions(host){
             draw.text(hdc, bar.left + 4, bar.top + Math.floor((frame.caption - metrics.height) / 2),
                 record.title, {
                     color: sysColor(isActive ? COLOR_CAPTIONTEXT : COLOR_INACTIVECAPTIONTEXT),
-                    clip: { ...bar, right: box.left - 2 },
+                    clip: { ...bar, right: box ? box.left - 2 : bar.right },
                 });
-            draw.fill(hdc, box, face);
-            draw.fill(hdc, { ...box, right: box.right - 1, bottom: box.top + 1 },
-                sysColor(COLOR_3DHILIGHT));
-            draw.fill(hdc, { ...box, right: box.left + 1, bottom: box.bottom - 1 },
-                sysColor(COLOR_3DHILIGHT));
-            draw.fill(hdc, { ...box, top: box.bottom - 1 }, sysColor(COLOR_3DDKSHADOW));
-            draw.fill(hdc, { ...box, left: box.right - 1 }, sysColor(COLOR_3DDKSHADOW));
-            draw.fill(hdc, { left: box.left + 1, top: box.bottom - 2, right: box.right - 1,
-                bottom: box.bottom - 1 }, sysColor(COLOR_3DSHADOW));
-            draw.fill(hdc, { left: box.right - 2, top: box.top + 1, right: box.right - 1,
-                bottom: box.bottom - 1 }, sysColor(COLOR_3DSHADOW));
-            // The cross: two diagonals, two pixels wide, drawn a pixel at a time.
-            const ink = sysColor(COLOR_BTNTEXT);
-            for (let step = 0; step < 7; step++)
+            if (box)
             {
-                const x = box.left + 3 + step;
-                const y = box.top + 3 + step;
-                draw.fill(hdc, { left: x, top: y, right: x + 2, bottom: y + 1 }, ink);
-                draw.fill(hdc, { left: box.right - 5 - step, top: y, right: box.right - 3 - step,
-                    bottom: y + 1 }, ink);
+                draw.fill(hdc, box, face);
+                draw.fill(hdc, { ...box, right: box.right - 1, bottom: box.top + 1 },
+                    sysColor(COLOR_3DHILIGHT));
+                draw.fill(hdc, { ...box, right: box.left + 1, bottom: box.bottom - 1 },
+                    sysColor(COLOR_3DHILIGHT));
+                draw.fill(hdc, { ...box, top: box.bottom - 1 }, sysColor(COLOR_3DDKSHADOW));
+                draw.fill(hdc, { ...box, left: box.right - 1 }, sysColor(COLOR_3DDKSHADOW));
+                draw.fill(hdc, { left: box.left + 1, top: box.bottom - 2, right: box.right - 1,
+                    bottom: box.bottom - 1 }, sysColor(COLOR_3DSHADOW));
+                draw.fill(hdc, { left: box.right - 2, top: box.top + 1, right: box.right - 1,
+                    bottom: box.bottom - 1 }, sysColor(COLOR_3DSHADOW));
+                // The cross: two diagonals, two pixels wide, drawn a pixel at a time.
+                const ink = sysColor(COLOR_BTNTEXT);
+                for (let step = 0; step < 7; step++)
+                {
+                    const x = box.left + 3 + step;
+                    const y = box.top + 3 + step;
+                    draw.fill(hdc, { left: x, top: y, right: x + 2, bottom: y + 1 }, ink);
+                    draw.fill(hdc, { left: box.right - 5 - step, top: y,
+                        right: box.right - 3 - step, bottom: y + 1 }, ink);
+                }
             }
         }
         if (frame.menu > 0)
@@ -3883,8 +3886,16 @@ export function createWindowFunctions(host){
                 right: record.width - frame.right, bottom: record.height - frame.edge };
     };
 
+    /** WS_SYSMENU: the caption's buttons, the close box among them. */
+    const WS_SYSMENU_STYLE = 0x00080000;
+
     /** The close box, in window coordinates. @param {any} record */
     const closeBox = record=>{
+        // Only a window with a system menu has caption buttons.
+        if ((record.style & WS_SYSMENU_STYLE) === 0)
+        {
+            return null;
+        }
         const frame = geometry.frame(record);
         const size = Math.min(CLOSE_BOX, frame.caption - 2 * CLOSE_GAP);
         const top = frame.edge + Math.floor((frame.caption - size) / 2);
@@ -3923,7 +3934,7 @@ export function createWindowFunctions(host){
             && local.x >= frame.edge && local.x < record.width - frame.edge)
         {
             const box = closeBox(record);
-            return contains(box, local.x, local.y) ? HTCLOSE : HTCAPTION;
+            return box && contains(box, local.x, local.y) ? HTCLOSE : HTCAPTION;
         }
         const barTop = frame.edge + frame.caption;
         if (frame.menu > 0 && local.y >= barTop && local.y < barTop + frame.menu
@@ -4880,6 +4891,14 @@ export function createWindowFunctions(host){
                 true);
         },
         update: record=>(shown(record) ? paint.updateNow(record, true) : 1),
+        // A control's own scroll bar moved: its frame, where the bar is drawn.
+        frameChanged: record=>{
+            record.ncDirty = true;
+            if (shown(record))
+            {
+                paintFrame(record);
+            }
+        },
         move: (hwnd, x, y, width, height)=>/** @type {any} */ (table).MoveWindow
             .handler([hwnd, x, y, width, height, 1]),
         setFocus,

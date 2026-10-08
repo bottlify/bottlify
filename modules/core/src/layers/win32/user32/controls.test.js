@@ -464,7 +464,9 @@ test('byte-exact: a dialog with a push button, a static and a check box paints a
         // and looked at; from then on any change to the painting is a change
         // to the picture, and has to be a deliberate one.
         const context = setup({ reply: message=>(message.message === WM_INITDIALOG ? 1 : 0) });
-        const dialog = await openDialog(context);
+        // With a system menu, so its caption has the close box in the picture.
+        const dialog = await openDialog(context, { ...WIZARD_PAGE,
+            style: WIZARD_PAGE.style | 0x00080000 });
         context.fns.SendDlgItemMessageA.handler([dialog, 101, BM_SETCHECK, 1, 0]);
         await context.pump(dialog);
 
@@ -1281,6 +1283,46 @@ test('a read-only multi-line edit breaks its text into lines and scrolls by page
         'SB_TOP goes back to the top');
 });
 
+test('a multi-line edit\'s own scroll bar follows its lines, as GetScrollInfo reads it',
+    async()=>{
+        // A licence page enables "I accept" once the box's bar says the text
+        // is read to its end. The bar stayed at its default, top and all,
+        // however far the text scrolled, and the page never let anyone on.
+        const context = setup();
+        const dialog = await openDialog(context);
+        context.memory.putString(TEXT, 'Edit');
+        const edit = context.fns.CreateWindowExA.handler([WS_EX_CLIENTEDGE, TEXT, 0,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY,
+            8, 60, 200, 40, dialog, 301, HINSTANCE, 0]);
+        context.memory.putString(TEXT, Array.from({ length: 12 }, (_, index)=>`Clause ${index}`)
+            .join('\r\n'));
+        context.fns.SetWindowTextA.handler([edit, TEXT]);
+        await context.pump(dialog);
+        const SB_VERT = 1;
+        const SIF_ALL = 0x17;
+        const INFO = 0x16000;
+        const info = ()=>{
+            context.memory.writeMemory(INFO, new Uint8Array(28));
+            context.memory.writeMemory(INFO, new Uint8Array([28, 0, 0, 0, SIF_ALL, 0, 0, 0]));
+            assert.equal(context.fns.GetScrollInfo.handler([edit, SB_VERT, INFO]), 1);
+            const [min, max, page, pos] = [8, 12, 16, 20].map(at=>context.memory.u32(INFO + at));
+            return { min, max, page, pos };
+        };
+        const first = info();
+        assert.equal(first.max, 11, 'twelve lines');
+        assert.equal(first.pos, 0);
+        assert.ok(first.page > 0 && first.page < 12, `the lines that show: ${first.page}`);
+        const SB_BOTTOM = 7;
+        context.fns.SendMessageA.handler([edit, WM_VSCROLL, SB_BOTTOM, 0]);
+        const last = info();
+        assert.equal(last.pos, last.max - last.page + 1, 'at the end, as the bar says');
+        assert.equal(last.pos, context.fns.SendMessageA.handler([edit, EM_GETFIRSTVISIBLELINE,
+            0, 0]));
+        context.memory.putString(TEXT, 'One line');
+        context.fns.SetWindowTextA.handler([edit, TEXT]);
+        assert.deepEqual([info().max, info().pos], [0, 0], 'new text starts it over');
+    });
+
 test('a list box keeps its items and a click selects one with LBN_SELCHANGE', async()=>{
     const context = setup();
     const dialog = await openDialog(context);
@@ -1547,8 +1589,10 @@ test('a system class has a procedure address a program can subclass and call thr
     });
 
 test('a click on the caption\'s close box asks the dialog to close, which is Cancel', async()=>{
+    const WS_SYSMENU = 0x00080000;
     const context = setup();
-    const dialog = await openDialog(context);
+    const dialog = await openDialog(context, { ...WIZARD_PAGE,
+        style: WIZARD_PAGE.style | WS_SYSMENU });
     context.fns.GetWindowRect.handler([dialog, OUT]);
     const right = context.memory.u32(OUT + 8);
     const top = context.memory.u32(OUT + 4);
@@ -1559,6 +1603,24 @@ test('a click on the caption\'s close box asks the dialog to close, which is Can
     assert.deepEqual(closing.map(one=>one.message), [WM_NCLBUTTONDOWN, WM_CLOSE]);
     assert.deepEqual(context.commands().at(-1), [IDCANCEL, BN_CLICKED, 0]);
 });
+
+test('a dialog without a system menu has no close box: its caption\'s corner is caption',
+    async()=>{
+        // A setup's last page drops WS_SYSMENU so that only Finish ends it;
+        // a close box drawn and hit there closed it all the same.
+        const context = setup();
+        const dialog = await openDialog(context);
+        context.fns.GetWindowRect.handler([dialog, OUT]);
+        const right = context.memory.u32(OUT + 8);
+        const top = context.memory.u32(OUT + 4);
+        const HTCAPTION = 2;
+        assert.equal(context.fns.SendMessageA.handler([dialog, 0x0084, 0,
+            ((top + 10) << 16) | (right - 8)]), HTCAPTION);
+        context.click(right - 8, top + 10);
+        await context.pump(dialog);
+        assert.deepEqual(context.dispatched.filter(one=>one.wndProc === DIALOGPROC
+            && one.message === WM_CLOSE), []);
+    });
 
 test('a template that sets a font lays the dialog out in it and hands it to every control',
     async()=>{

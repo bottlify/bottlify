@@ -298,6 +298,8 @@ const LBN_KILLFOCUS = 5;
 const CBS_TYPEMASK = 0x0003;
 /** The scroll bars a combo box is given, which are its list's. */
 const WS_VSCROLL = 0x00200000;
+/** A window's own vertical bar, as GetScrollInfo names it. */
+const SB_VERT_BAR = 1;
 const WS_HSCROLL = 0x00100000;
 const CBS_SIMPLE = 0x0001;
 const CBS_DROPDOWN = 0x0002;
@@ -530,6 +532,8 @@ export const imagePlace = (record, rect, shape)=>{
  * @property {(record: any, hdc: number) => void} endPaint
  * @property {(record: any) => void} invalidate   The whole client area, erased.
  * @property {(record: any) => number | Promise<number>} [update]
+ * @property {(record: any) => void} [frameChanged]
+ *           Its frame changed -- a scroll bar of its own moved -- and is drawn again.
  *           UpdateWindow: what is to paint painted now, when it is shown.
  * @property {(hwnd: number, x: number, y: number, width: number, height: number)
  *     => number | Promise<number>} [move]
@@ -1511,6 +1515,9 @@ export function createControlProcedures(host){
     const paintEdit = (record, hdc, rect, brush)=>{
         const draw = /** @type {Drawing} */ (host.draw);
         const state = editState(record);
+        // Whatever moved its lines since -- an insertion, a stream, a new
+        // size or font -- the bar is drawn with what is drawn here.
+        syncEditBar(record);
         const readOnly = (record.style & ES_READONLY) !== 0 || disabled(record);
         if (state.richBackground !== undefined)
         {
@@ -1849,7 +1856,36 @@ export function createControlProcedures(host){
         {
             host.invalidate(record);
         }
+        syncEditBar(record);
         return moved;
+    };
+
+    /**
+     * A multi-line edit's own vertical scroll bar, kept as the edit keeps it:
+     * its range the lines, its page the lines that show, its position the
+     * first that does -- what GetScrollInfo answers about it, and where its
+     * thumb is drawn. A licence page that enables "I accept" only once the
+     * bar says the text is read to its end reads it there.
+     *
+     * @param {any} record
+     */
+    const syncEditBar = record=>{
+        if (!multiline(record) || (record.style & WS_VSCROLL) === 0)
+        {
+            return;
+        }
+        const state = editState(record);
+        const total = editLines(record, editGridColumns(record)).length;
+        const held = scrollOf(record, SB_VERT_BAR);
+        const next = { min: 0, max: Math.max(0, total - 1), page: editGridRows(record),
+            pos: state.firstLine };
+        if (held.min === next.min && held.max === next.max && held.page === next.page
+            && held.pos === next.pos)
+        {
+            return;
+        }
+        Object.assign(held, next, { trackPos: next.pos });
+        host.frameChanged?.(record);
     };
 
     /** Columns across the client without a context to measure with. @param {any} record */
@@ -2001,6 +2037,7 @@ export function createControlProcedures(host){
                 state.undo = null;
                 state.typingRun = false;
                 host.invalidate(record);
+                syncEditBar(record);
                 return after(notify(record, EN_UPDATE, thread),
                     ()=>after(notify(record, EN_CHANGE, thread), ()=>1));
             }
