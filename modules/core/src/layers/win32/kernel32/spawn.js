@@ -31,6 +31,8 @@
  *   `game.exe` find an entry stored as `Game.exe`.
  */
 
+import { SYSTEM_DIRECTORY, systemProgramAt } from '../programs/table.js';
+
 /** Codes this surface reports. */
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -174,6 +176,13 @@ export function isRedistributableInstaller(path){
     return REDISTRIBUTABLE.test(path);
 }
 
+/**
+ * Where CreateProcess looks for a bare name after the program's own directory
+ * and the current one, in its documented order: the system directory, the
+ * 16-bit system directory, the Windows directory.
+ */
+const SYSTEM_SEARCH = [SYSTEM_DIRECTORY, 'C:\\WINDOWS\\system', 'C:\\WINDOWS'];
+
 /** @param {string} path The directory part, separator included. */
 const directoryOf = path=>path.slice(0, Math.max(
     path.lastIndexOf('\\'), path.lastIndexOf('/')) + 1);
@@ -195,15 +204,19 @@ const directoryOf = path=>path.slice(0, Math.max(
  *           Told about every request as it is recorded, while the caller's
  *           stack is still standing. A replacement erases the logs of the run
  *           that asked for it, so this is where the evidence has to be taken.
+ * @property {() => string} [currentDirectory]
+ *           The process's current directory, which a system program it starts
+ *           begins in.
  */
 
 /**
  * @typedef {Object} Spawner
- * @property {(named: string, line: string, flags: number) => any} launch
+ * @property {(named: string, line: string, flags: number, directory?: string) => any} launch
  *           Records a child and opens the handles on it, or answers null when
  *           the image is not there. `named` is the image when the caller
  *           already knows it and '' when only the command line is there to find
- *           it in.
+ *           it in. `directory` is the one the caller asked the child to start
+ *           in, '' for none.
  * @property {(name: string) => string | null} imageOf
  *           The image a name -- or a command line whose first token is one --
  *           points at, or null.
@@ -261,17 +274,27 @@ export function createSpawner(host){
     };
 
     /**
+     * Whether a path is an image: a file on the volume, or one of the system
+     * programs the engine provides (`programs/table.js`) where the volume has
+     * none.
+     *
+     * @param {string} path
+     */
+    const isImage = path=>isFile(path) || systemProgramAt(path) !== null;
+
+    /**
      * Where an image a program named actually lives, or null.
      *
      * A bare name is looked for beside the running program first, which is
      * where a launcher's companion executable lives and where Windows looks
-     * before anything else. `.exe` is appended when the name carries no
-     * extension, because CreateProcess does that too and a program that omits
-     * it is not naming a different file.
+     * before anything else; then in the current directory, and then in the
+     * system directories and the Windows directory, as CreateProcess
+     * documents. `.exe` is appended when the name carries no extension,
+     * because CreateProcess does that too and a program that omits it is not
+     * naming a different file.
      *
-     * The search path is not consulted: a program that relies on one is rare,
-     * and inventing an order here that Windows does not use would be worse than
-     * not finding the image at all.
+     * The PATH is not consulted: a program that relies on it is rare, and
+     * what it holds is the machine's, not the program's.
      *
      * The answer is a full path. A bare name is found through the current
      * directory, and a child recorded as `setup.exe` is a child whose location
@@ -288,15 +311,17 @@ export function createSpawner(host){
         {
             return null;
         }
+        const bare = !/[\\/]/.test(wanted);
         const bases = isQualified(wanted)
             ? [wanted]
-            : [`${directoryOf(host.imagePath())}${wanted}`, wanted];
+            : [`${directoryOf(host.imagePath())}${wanted}`, wanted,
+                ...bare ? SYSTEM_SEARCH.map(directory=>`${directory}\\${wanted}`) : []];
         const extensionless = !wanted.slice(directoryOf(wanted).length).includes('.');
         for (const base of bases)
         {
             for (const candidate of extensionless ? [base, `${base}.exe`] : [base])
             {
-                if (isFile(candidate))
+                if (isImage(candidate))
                 {
                     return qualify(candidate);
                 }
@@ -337,7 +362,7 @@ export function createSpawner(host){
     };
 
     return {
-        launch(named, line, flags){
+        launch(named, line, flags, directory = ''){
             const path = named === '' ? imageFromCommandLine(line) : resolveImage(named);
             if (path === null)
             {
@@ -365,6 +390,16 @@ export function createSpawner(host){
             // WaitForDebugEvent.
             made.debugEvents = (flags & (DEBUG_PROCESS | DEBUG_ONLY_THIS_PROCESS)) !== 0
                 ? ['create', 'exit'] : null;
+            // A child starts in its own image's directory here; a system
+            // program has nothing of its own there, and the paths on its
+            // command line are its parent's to mean -- `msiexec /i setup.msi`
+            // -- so it starts where Windows starts every child: in the
+            // directory asked for, else in its parent's current one.
+            if (!isFile(path) && systemProgramAt(path) !== null)
+            {
+                made.startDirectory = directory.trim() !== '' ? qualify(directory.trim())
+                    : host.currentDirectory?.();
+            }
             host.spawned?.(made);
             return made;
         },
@@ -392,6 +427,8 @@ export function createSpawner(host){
  *           Told about every request as it is recorded, while the caller's
  *           stack is still standing. A replacement erases the logs of the run
  *           that asked for it, so this is where the evidence has to be taken.
+ * @property {() => string} [currentDirectory]
+ *           The process's current directory, for the spawner this builds.
  * @property {Spawner} [spawner]
  *           The one every library in this process launches through, when the
  *           caller assembled it. Built here otherwise, from the same fields.
@@ -469,9 +506,10 @@ export function createSpawnFunctions(host){
     /**
      * @param {string} named @param {string} line
      * @param {number} flags @param {number} information @param {number} [startup]
+     * @param {string} [directory]
      */
-    const create = (named, line, flags, information, startup = 0)=>{
-        const made = record(named, line, flags);
+    const create = (named, line, flags, information, startup = 0, directory = '')=>{
+        const made = record(named, line, flags, directory);
         if (!made)
         {
             host.setLastError(ERROR_FILE_NOT_FOUND);
@@ -500,33 +538,38 @@ export function createSpawnFunctions(host){
          *
          * The handles are real and the ids are the child's; what does not exist
          * yet is the child itself. A STARTUPINFO's output and error files are the
-         * child's own; other inherited handles, a chosen environment and a
-         * chosen current directory are accepted and not acted on -- the child
-         * runs in this machine's own volume and environment, which is the same
-         * one the parent had.
+         * child's own; other inherited handles and a chosen environment are
+         * accepted and not acted on -- the child runs in this machine's own
+         * volume and environment, which is the same one the parent had. A
+         * chosen current directory is where a system program starts
+         * (`createSpawner`); any other child starts in its own directory.
          */
         CreateProcessA: {
             argBytes: 40,
             /** @param {number[]} args */
-            handler: ([application, commandLine, , , , flags, , , startup, information])=>create(
+            handler: ([application, commandLine, , , , flags, , directory, startup,
+                information])=>create(
                 (application >>> 0) === 0 ? '' : host.readCString(application >>> 0, MAX_PATH),
                 (commandLine >>> 0) === 0
                     ? ''
                     : host.readCString(commandLine >>> 0, MAX_COMMAND_LINE),
-                flags >>> 0, information, startup),
+                flags >>> 0, information, startup,
+                (directory >>> 0) === 0 ? '' : host.readCString(directory >>> 0, MAX_PATH)),
         },
 
         /** BOOL CreateProcessW(...) — the same call, read as wide strings. */
         CreateProcessW: {
             argBytes: 40,
             /** @param {number[]} args */
-            handler: ([application, commandLine, , , , flags, , , startup, information])=>create(
+            handler: ([application, commandLine, , , , flags, , directory, startup,
+                information])=>create(
                 (application >>> 0) === 0 ? ''
                     : host.readWideString(application >>> 0, MAX_PATH * 2),
                 (commandLine >>> 0) === 0
                     ? ''
                     : host.readWideString(commandLine >>> 0, MAX_COMMAND_LINE * 2),
-                flags >>> 0, information, startup),
+                flags >>> 0, information, startup,
+                (directory >>> 0) === 0 ? '' : host.readWideString(directory >>> 0, MAX_PATH * 2)),
         },
 
         /**

@@ -300,6 +300,24 @@ conflicts of the others in the error table; the two databases' code pages are no
 though the SDK says they should match. The summary's dates in an archive are read and written as
 UTC. A session's read-only database refuses both. Not measured against Windows. *2026-10-08.*
 
+**A38 — The system folder's programs (msiexec, rundll32, regsvr32) are processes whose images
+the engine makes, and the volume does not show them as files.** Installers, bootstrappers and
+uninstall strings start them by name, and a bottle has no Microsoft binaries. A request for one in
+`C:\WINDOWS\system32` (by full path, or by bare name through CreateProcess's documented search)
+that the volume cannot answer starts a real process, whose image is a synthesised executable: its
+entry point calls a routine of the engine's own library (`bottlify.dll`) and exits with the
+answer. Each routine drives only the process's own exports (msi.dll's install calls,
+LoadLibrary/GetProcAddress, MessageBox), so what it does is what those exports do. Such a program
+starts in the directory its parent asked for, or else in the parent's current directory, as
+Windows starts every child, since the paths on its command line are the parent's to mean; other
+children keep starting in their own image's directory. The volume reports no file at those paths
+-- `GetFileAttributes`, `FindFirstFile`, `SearchPath`, `GetFileVersionInfo` and `CreateFile` on
+`system32\msiexec.exe` fail -- because an entry would need bytes to read and a version resource
+to answer, and no measured program has needed either. Revisit if a bootstrapper is found that
+checks for msiexec.exe, or reads its version, before starting it; the answer then is a read-only
+entry served from the synthesised image, not a file written to the volume. A file a bundle does
+carry at that path always wins. *2026-10-08.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

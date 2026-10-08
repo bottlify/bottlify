@@ -620,3 +620,54 @@ test('a process-thread attribute list is laid out as Windows lays it, each kind 
         fns.UpdateProcThreadAttribute.argBytes, fns.DeleteProcThreadAttributeList.argBytes],
     [16, 28, 4]);
 });
+
+test('a system program is found by bare name, in any case, with no file for it', ()=>{
+    // `msiexec /i setup.msi`, `MsiExec.exe /X{...}`, `RunDll32 x,y`: the name
+    // an installer writes, found in the system folder as CreateProcess looks
+    // there after the program's own directory and the current one.
+    const host = fakeHost({ cwd: 'C:\\App\\' });
+    const spawner = createSpawner({ ...host, currentDirectory: ()=>'C:\\App' });
+    assert.equal(spawner.imageOf('msiexec'), 'C:\\WINDOWS\\system32\\msiexec.exe');
+    assert.equal(spawner.imageOf('RunDll32.EXE x,y'), 'C:\\WINDOWS\\system32\\RunDll32.EXE');
+    assert.equal(spawner.imageOf('C:\\Windows\\System32\\regsvr32.exe /s a.dll'),
+        'C:\\Windows\\System32\\regsvr32.exe', 'a full path, spelled as the caller spelled it');
+    assert.equal(spawner.imageOf('C:\\App\\msiexec.exe'), null,
+        'only in the system folder: anywhere else it is a file that is not there');
+    assert.equal(spawner.imageOf('notepad.exe'), null, 'and only the programs the engine has');
+
+    const made = spawner.launch('', 'msiexec /i setup.msi /qn', 0);
+    assert.equal(made.imagePath, 'C:\\WINDOWS\\system32\\msiexec.exe');
+    assert.equal(made.commandLine, 'msiexec /i setup.msi /qn', 'its line as the caller gave it');
+    assert.equal(made.startDirectory, 'C:\\App',
+        'it starts in its parent\'s current directory, where `setup.msi` is');
+    assert.equal(pending(host), made, 'a process like any other, waiting to run');
+});
+
+test('a file the volume has wins over the program the engine provides, and starts as any child',
+    ()=>{
+        const host = fakeHost({ files: ['C:\\WINDOWS\\system32\\msiexec.exe',
+            'C:\\WINDOWS\\system32\\tool.exe'] });
+        const spawner = createSpawner({ ...host, currentDirectory: ()=>'C:\\App' });
+        const made = spawner.launch('', 'msiexec /i x.msi', 0);
+        assert.equal(made.imagePath, 'C:\\WINDOWS\\system32\\msiexec.exe');
+        assert.equal(made.startDirectory, undefined, 'its own directory, as for any child');
+        assert.equal(spawner.imageOf('tool'), 'C:\\WINDOWS\\system32\\tool.exe',
+            'and any bare name is looked for in the system folder too');
+        assert.equal(spawner.imageOf('sub\\tool.exe'), null,
+            'but a name with a directory in it is not searched for');
+    });
+
+test('CreateProcess\'s current directory is where a system program starts', ()=>{
+    const host = fakeHost({ cwd: 'C:\\App\\' });
+    const fns = createSpawnFunctions({ ...host, currentDirectory: ()=>'C:\\App' });
+    const line = putAnsi(host, 0x100, 'regsvr32 /s x.dll');
+    const directory = putAnsi(host, 0x200, 'C:\\Libraries');
+    assert.equal(fns.CreateProcessA.handler([0, line, 0, 0, 0, 0, 0, directory, 0, 0x300]), 1);
+    assert.equal(pending(host).startDirectory, 'C:\\Libraries');
+    const wide = putWide(host, 0x400, 'rundll32 x.dll,Entry');
+    const there = putWide(host, 0x600, 'Other');
+    assert.equal(fns.CreateProcessW.handler([0, wide, 0, 0, 0, 0, 0, there, 0, 0x300]), 1);
+    assert.equal(/** @type {any} */ (host.kernel.processes.all()[1]).startDirectory,
+        'C:\\App\\Other',
+        'a relative one taken against the parent\'s');
+});

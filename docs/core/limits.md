@@ -123,7 +123,11 @@ differently raises a `divergence` event naming the API.
   assembly cache assemblies are not installed.
 - An advertise script cannot be written or read (`MsiAdvertiseScript`,
   `MsiProcessAdvertiseScript`, `MsiGetProductInfoFromScript`, `MsiAdvertiseProduct` to a file).
-- There is no `msiexec.exe`: a program that starts it to install a package does not find it.
+- `msiexec.exe`, `rundll32.exe` and `regsvr32.exe` in `C:\WINDOWS\system32` are the engine's
+  own: a program that starts one gets a process that drives `msi.dll`, the named library's entry
+  point or its registration exports, and exits with what Windows' program would. The volume shows
+  no file at those paths, so a setup that checks for one before starting it does not find it.
+  `msiexec /l` writes no log.
 - Nothing is rolled back: an installation that fails leaves what it had done.
 
 ## Network
