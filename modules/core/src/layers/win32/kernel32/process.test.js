@@ -8,9 +8,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { TEB } from './teb.js';
 import {
-    CLOCK, TLS_SLOTS, createProcessFunctions, getLastErrorCode, queryPerformanceCounterCode,
-    queryPerformanceFrequencyCode, setLastErrorCode, tickCountCode, tlsGetValueCode,
-    tlsSetValueCode,
+    CLOCK, TLS_SLOTS, createProcessFunctions, getCurrentThreadIdCode, getLastErrorCode,
+    queryPerformanceCounterCode, queryPerformanceFrequencyCode, setLastErrorCode, tickCountCode,
+    tlsGetValueCode, tlsSetValueCode,
 } from './process.js';
 import { VER, WINDOWS_VERSIONS, setCondition } from './versions.js';
 
@@ -1040,4 +1040,12 @@ test('the performance frequency is the host\'s to choose, and a bad one is refus
     {
         assert.throws(()=>setup({ performanceFrequency: bad }), /performance frequency/);
     }
+});
+
+test('GetCurrentThreadId is the field of the block the host fills with the id', ()=>{
+    // fs:[0x24]: teb.test.js holds the block to carry the id the thread was made with, and
+    // the export offers this routine rather than its trap.
+    assert.deepEqual([...getCurrentThreadIdCode()], [0x64, 0xa1, 0x24, 0, 0, 0, 0xc3]);
+    assert.ok(createProcessFunctions(fakeHost()).GetCurrentThreadId.guest,
+        'offered as guest code');
 });

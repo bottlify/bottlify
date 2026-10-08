@@ -260,6 +260,18 @@ export function getLastErrorCode(){
     ]);
 }
 
+/**
+ * GetCurrentThreadId as guest code: the block's field, through FS -- the id the host writes
+ * there as it makes the block, and answers itself. A C runtime asks it for every lock it
+ * takes, and in a title's world load it was three host calls in five.
+ */
+export function getCurrentThreadIdCode(){
+    return new Uint8Array([
+        0x64, 0xa1, ...dword(TEB.THREAD_ID),                         // mov eax, fs:[0x24]
+        0xc3,                                                        // ret
+    ]);
+}
+
 /** SetLastError as guest code. */
 export function setLastErrorCode(){
     return new Uint8Array([
@@ -535,7 +547,7 @@ export function createProcessFunctions(host){
      * slot.
      *
      * @type {{ getLastError: number, setLastError: number, tlsGetValue: number,
-     *     tlsSetValue: number } | null}
+     *     tlsSetValue: number, getCurrentThreadId: number } | null}
      */
     let fastPaths = null;
     /** @param {import('./sync.js').GuestBuilder} builder */
@@ -567,6 +579,7 @@ export function createProcessFunctions(host){
         };
         fastPaths = {
             getLastError: place(()=>getLastErrorCode()),
+            getCurrentThreadId: place(()=>getCurrentThreadIdCode()),
             setLastError: place(()=>setLastErrorCode()),
             tlsGetValue: place(at=>tlsGetValueCode(at, getTrap)),
             tlsSetValue: place(at=>tlsSetValueCode(at, setTrap)),
@@ -874,6 +887,8 @@ export function createProcessFunctions(host){
         GetCurrentThreadId: {
             argBytes: 0,
             handler: ()=>host.currentThread().id >>> 0,
+            /** @param {import('./sync.js').GuestBuilder} builder */
+            guest: builder=>placed(builder).getCurrentThreadId,
         },
 
         /** DWORD GetCurrentProcessId(VOID) */
