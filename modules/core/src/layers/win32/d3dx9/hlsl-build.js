@@ -293,6 +293,11 @@ export function createBuilder(profile){
         {
             return v;
         }
+        // A model 1 pixel shader has no |x|: fxc's cmp r0, x, x, -x where there is a cmp.
+        if (profile.legacy && profile.cmp)
+        {
+            return selectGE0(v, v, neg(v));
+        }
         return vec(patch(src, { abs: true, neg: false }));
     };
 
@@ -459,15 +464,26 @@ export function createBuilder(profile){
         return mad(args[0], sub(args[1], args[2]), args[2]);
     };
 
+    /** A model 1 pixel shader has no min or max: fxc compares the difference with cmp. */
+    const compared = ()=>Boolean(profile.ops && !profile.ops.has('max') && profile.cmp);
+
     /** @param {Vec} a @param {Vec} b @returns {Vec} */
     const min = (a, b)=>{
         const { w, args } = unify([a, b]);
+        if (compared())
+        {
+            return selectGE0(sub(args[0], args[1]), args[1], args[0]);
+        }
         return lanewise('min', w, args);
     };
 
     /** @param {Vec} a @param {Vec} b @returns {Vec} */
     const max = (a, b)=>{
         const { w, args } = unify([a, b]);
+        if (compared())
+        {
+            return selectGE0(sub(args[0], args[1]), args[0], args[1]);
+        }
         return lanewise('max', w, args);
     };
 
@@ -556,6 +572,12 @@ export function createBuilder(profile){
         {
             const product = mul(args[0], args[1]);
             return add(lane(product, 0), lane(product, 1));
+        }
+        if (w === 4 && profile.ops && !profile.ops.has('dp4'))
+        {
+            // ps_1_1 has no dp4: the first three by dp3, the fourth added as fxc adds it.
+            return mad(lane(args[0], 3), lane(args[1], 3),
+                emit('dp3', 1, [args[0].src, args[1].src]));
         }
         return emit(w === 3 ? 'dp3' : 'dp4', 1, [args[0].src, args[1].src]);
     };

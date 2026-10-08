@@ -31,7 +31,7 @@ import { OPCODES, REG, MOD, encodeProgram } from './hlsl-encode.js';
 import { constantTableComment } from './hlsl-ctab.js';
 import {
     assignConstants, coalesceMoves, forwardOutputs, fuseMultiplyAdd, lanesRead, numberValues,
-    prune, usage, USAGE_NAMES,
+    prune, reselect, usage, USAGE_NAMES,
 } from './hlsl-backend.js';
 
 /** @typedef {import('./hlsl-ir.js').IrProgram} IrProgram */
@@ -161,8 +161,9 @@ function propagateModifiers(instrs){
                 continue;
             }
             const use = /** @type {import('./hlsl-ir.js').SrcReg} */ (reader.srcs[at]);
-            if (use.neg || use.abs || reader.op === 'texkill' || (reader.dest.kind === 'reg'
-                && reader.dest.reg === reg))
+            // A reader with a modifier of its own keeps it: 1 - (1 - x) is not 1 - x.
+            if (use.neg || use.abs || use.mod || reader.op === 'texkill'
+                || (reader.dest.kind === 'reg' && reader.dest.reg === reg))
             {
                 return;
             }
@@ -233,7 +234,8 @@ export function assembleLegacy(ir, options = {}){
  */
 function assembleWith(ir, options, numbered){
     /** @type {Rewrites} */
-    const rewrites = { spread: new Set(), split: new Set(), numbered, keepMoves: false };
+    const rewrites = { spread: new Set(), split: new Set(), merge: new Set(), numbered,
+        keepMoves: false };
     // A source the model cannot read as it stands, or an instruction it cannot
     // write in one, is rewritten and the program built again from the start:
     // where a value lives is only known once it is placed.
@@ -249,12 +251,14 @@ function assembleWith(ir, options, numbered){
         catch (e){
             if (e instanceof RewriteNeeded && attempt < 8)
             {
-                const before = rewrites.spread.size + rewrites.split.size;
+                const before = rewrites.spread.size + rewrites.split.size + rewrites.merge.size;
                 e.spread.forEach(key=>rewrites.spread.add(key));
                 e.split.forEach(key=>rewrites.split.add(key));
+                e.merge.forEach(key=>rewrites.merge.add(key));
                 const keepMoves = e.keepMoves && !rewrites.keepMoves;
                 rewrites.keepMoves ||= e.keepMoves;
-                if (rewrites.spread.size + rewrites.split.size > before || keepMoves)
+                if (rewrites.spread.size + rewrites.split.size + rewrites.merge.size > before
+                    || keepMoves)
                 {
                     continue;
                 }
@@ -271,13 +275,14 @@ function assembleWith(ir, options, numbered){
 }
 
 /**
- * @typedef {{ spread: Set<string>, split: Set<string>, numbered: boolean,
- *     keepMoves: boolean }} Rewrites
+ * @typedef {{ spread: Set<string>, split: Set<string>, merge: Set<string>,
+ *     numbered: boolean, keepMoves: boolean }} Rewrites
  * `spread`: the sources -- a value and the one component it is read as -- to
  * read through a dot product that puts that component in every lane;
  * `split`: the instructions to write one component at a time; `numbered`: whether each
  * value is computed once; `keepMoves`: the result moved into r0 at the end, not written
- * there earlier by what makes it.
+ * there earlier by what makes it; `merge`: the instructions that write components a model
+ * before 1.4 cannot write alone, computed into a temporary and merged in.
  */
 
 /** Where the numbers of the registers a spread reads start. */
@@ -289,13 +294,16 @@ class RewriteNeeded extends Error {
      * @param {string[]} spread @param {string[]} split @param {TargetError} failure
      * @param {boolean} [keepMoves]  The result is to be moved into r0 at the end rather
      *     than written there by what makes it.
+     * @param {string[]} [merge]  Instructions writing components a model before 1.4 cannot
+     *     write alone, to compute into a temporary and merge in.
      */
-    constructor(spread, split, failure, keepMoves = false){
+    constructor(spread, split, failure, keepMoves = false, merge = []){
         super(failure.message);
         this.spread = spread;
         this.split = split;
         this.failure = failure;
         this.keepMoves = keepMoves;
+        this.merge = merge;
     }
 }
 
@@ -345,34 +353,47 @@ function splitKey(instr){
  * @returns {Instr[]}
  */
 function applyRewrites(instrs, rewrites){
-    if (rewrites.spread.size === 0 && rewrites.split.size === 0)
+    if (rewrites.spread.size === 0 && rewrites.split.size === 0 && rewrites.merge.size === 0)
     {
         return instrs;
     }
     /** @type {Instr[]} */
     const out = [];
     let made = 0;
+    /** The components of each register written so far. @type {Map<VReg, number>} */
+    const written = new Map();
+    /** @param {Instr} one */
+    const push = one=>{
+        if (one.dest.kind === 'reg')
+        {
+            written.set(one.dest.reg, (written.get(one.dest.reg) ?? 0) | one.dest.mask);
+        }
+        out.push(one);
+    };
+    /** @param {Src} src @returns {Src} */
+    const spreadOf = src=>{
+        const key = spreadKey(src);
+        if (key === null || !rewrites.spread.has(key))
+        {
+            return src;
+        }
+        // The same value in all four lanes: read through any swizzle, as it stands.
+        // Numbered apart from the registers the passes make, so that theirs -- which
+        // a later rewrite may name -- are the same in every build.
+        /** @type {VReg} */
+        const spread = { id: SPREAD_IDS + made++, width: 4, uniform: true };
+        const wanted = /** @type {number[]} */ (/** @type {any} */ (src).swz)[0];
+        const selector = [0, 1, 2, 3].map(c=>(c === wanted ? 1 : 0));
+        /** @type {Src} */
+        const whole = /** @type {any} */ ({ ...src, swz: [0, 1, 2, 3] });
+        push({ op: 'dp3', dest: { kind: 'reg', reg: spread, mask: 15 },
+            srcs: [whole, { kind: 'imm', values: selector }] });
+        return /** @type {Src} */ ({ kind: 'reg', reg: spread, swz: [0, 1, 2, 3] });
+    };
     for (const instr of instrs)
     {
-        const srcs = instr.srcs.map(src=>{
-            const key = spreadKey(src);
-            if (key === null || !rewrites.spread.has(key))
-            {
-                return src;
-            }
-            // The same value in all four lanes: read through any swizzle, as it stands.
-            // Numbered apart from the registers the passes make, so that theirs -- which
-            // a later rewrite may name -- are the same in every build.
-            /** @type {VReg} */
-            const spread = { id: SPREAD_IDS + made++, width: 4, uniform: true };
-            const wanted = /** @type {number[]} */ (/** @type {any} */ (src).swz)[0];
-            const selector = [0, 1, 2, 3].map(c=>(c === wanted ? 1 : 0));
-            /** @type {Src} */
-            const whole = /** @type {any} */ ({ ...src, swz: [0, 1, 2, 3] });
-            out.push({ op: 'dp3', dest: { kind: 'reg', reg: spread, mask: 15 },
-                srcs: [whole, { kind: 'imm', values: selector }] });
-            return /** @type {Src} */ ({ kind: 'reg', reg: spread, swz: [0, 1, 2, 3] });
-        });
+        const merged = rewrites.merge.has(splitKey(instr)) && instr.dest.kind === 'reg';
+        const srcs = merged ? instr.srcs : instr.srcs.map(spreadOf);
         const mask = instr.dest.kind === 'reg' || instr.dest.kind === 'out' ? instr.dest.mask : 0;
         if (rewrites.split.has(splitKey(instr)) && (mask & (mask - 1)) !== 0)
         {
@@ -380,13 +401,54 @@ function applyRewrites(instrs, rewrites){
             {
                 if ((mask & 1 << c) !== 0)
                 {
-                    out.push({ ...instr, srcs, dest: /** @type {any} */ ({ ...instr.dest,
+                    push({ ...instr, srcs, dest: /** @type {any} */ ({ ...instr.dest,
                         mask: 1 << c }) });
                 }
             }
             continue;
         }
-        out.push({ ...instr, srcs });
+        if (merged && instr.dest.kind === 'reg')
+        {
+            // fxc's way: each component computed into a temporary in every lane -- a source
+            // read as one component, which a spread makes readable -- and laid over what the
+            // register holds by a lrp with a selector; alpha by a move of its own.
+            const target = instr.dest.reg;
+            const lanewise = /** @type {Record<string, { cls: string }>} */ (OPCODES)[instr.op]
+                ?.cls === 'comp';
+            for (let c = 0; c < 4; c++)
+            {
+                if ((mask & 1 << c) === 0 || (!lanewise && c < 3 && (mask & ((1 << c) - 1)) !== 0))
+                {
+                    continue;
+                }
+                /** @type {VReg} */
+                const temp = { id: SPREAD_IDS + made++, width: 4 };
+                // A replicated result is one instruction for every component it fills.
+                const fills = lanewise ? 1 << c : c === 3 ? 8 : mask & 7;
+                push({ ...instr, dest: { kind: 'reg', reg: temp, mask: c === 3 ? 8 : 7 },
+                    srcs: srcs.map(src=>spreadOf(lanewise ? reselect(src, [c, c, c, c], false)
+                        : src)) });
+                /** @type {Src} */
+                const whole = { kind: 'reg', reg: temp, swz: [0, 1, 2, 3] };
+                if (c === 3)
+                {
+                    push({ op: 'mov', dest: { kind: 'reg', reg: target, mask: 8 }, srcs: [whole] });
+                    continue;
+                }
+                const held = written.get(target) ?? 0;
+                if ((held & 7 & ~fills) === 0)
+                {
+                    push({ op: 'mov', dest: { kind: 'reg', reg: target, mask: 7 }, srcs: [whole] });
+                    continue;
+                }
+                const selector = [0, 1, 2, 3].map(l=>((fills & 1 << l) !== 0 ? 1 : 0));
+                push({ op: 'lrp', dest: { kind: 'reg', reg: target, mask: 7 },
+                    srcs: [{ kind: 'imm', values: selector }, whole,
+                        { kind: 'reg', reg: target, swz: [0, 1, 2, 3] }] });
+            }
+            continue;
+        }
+        push({ ...instr, srcs });
     }
     return out;
 }
@@ -417,7 +479,8 @@ function build(ir, options, diagnostics, stats, rewrites){
     instrs = coalesceMoves(instrs);
     if (!rewrites.keepMoves)
     {
-        instrs = forwardOutputs(instrs);
+        // Before 1.4 a part of the result is written as rgb, alpha or all of it.
+        instrs = forwardOutputs(instrs, mask=>fourth || mask === 7 || mask === 8 || mask === 15);
     }
     else
     {
@@ -867,6 +930,12 @@ function build(ir, options, diagnostics, stats, rewrites){
         }
         if (dest && !allowedMask(dest.mask ?? 15) && !isTextureOp(instr))
         {
+            if (instr.dest.kind === 'reg' && !rewrites.merge.has(splitKey(instr)))
+            {
+                throw new RewriteNeeded([], [], new TargetError('X4537', `${profile.name} `
+                    + 'cannot write these components of a result alone'), false,
+                [splitKey(instr)]);
+            }
             throw new TargetError('X4537', `${profile.name} cannot write only the components `
                 + `${'rgba'.split('').filter((_, c)=>((dest?.mask ?? 0) & 1 << c) !== 0).join('')}`
                 + ' of a result');

@@ -363,3 +363,39 @@ test('a model 1 program fits as fxc fits it, computing what ps_2_0 computes', as
     assert.equal(texel.text.match(/texld/g)?.length, 1, texel.text);
     assert.deepEqual(texel.model1, texel.model2);
 });
+
+test('model 1 compares and takes |x| with cmp, and a four-lane dot with dp3 and mad', async()=>{
+    // fxc's ps_1_4: abs is cmp r0, x, x, -x; max is add r0, -b, a and cmp r0, r0, a, b. ps_1_1
+    // has no dp4: dp3 and a mad of the fourth lanes.
+    const cases = [['abs(c - 0.5)', 'ps_1_4'], ['max(c, d)', 'ps_1_4'], ['min(c, d)', 'ps_1_3'],
+        ['c == d ? c : d', 'ps_1_4'], ['dot(c, d).xxxx', 'ps_1_1']];
+    for (const [body, profile] of cases)
+    {
+        const run = await againstModel2(
+            `float4 main(float4 c : COLOR0, float4 d : COLOR1) : COLOR0 { return ${body}; }`,
+            profile);
+        assert.deepEqual(run.model1, run.model2, `${profile} ${body}:\n${run.text}`);
+        assert.doesNotMatch(run.text, /\b(max|min|dp4)\b/, run.text);
+    }
+});
+
+test('before ps_1_4 components written apart are merged in as fxc merges them', async()=>{
+    // Only rgb, alpha or all four can be written: each other component is computed in every
+    // lane of a temporary and laid over the register with a lrp by a selector, alpha moved.
+    for (const body of ['float4 r = c; r.ba = d.rg; return r;',
+        'float4 r = c; r.rg = d.ba * 0.5; return r;', 'float4 r = c; r.r = d.g; return r;'])
+    {
+        const run = await againstModel2(
+            `float4 main(float4 c : COLOR0, float4 d : COLOR1) : COLOR0 { ${body} }`, 'ps_1_1');
+        assert.deepEqual(run.model1, run.model2, `${body}:\n${run.text}`);
+    }
+});
+
+test('a model 1 complement of a complement is the value again', async()=>{
+    // 1 - x is a source modifier before 2.0: a move that complements what a complement made
+    // keeps its own, and a move merged into what made its source keeps the source's.
+    const run = await againstModel2(`float4 main(float4 c : COLOR0, float4 d : COLOR1) : COLOR0
+        { float a = c.x > 0.5; float b = d.y > 0.5;
+          return float4(!!(a || b), 1 - (1 - d.z), !a, 1); }`, 'ps_1_4');
+    assert.deepEqual(run.model1, run.model2, run.text);
+});

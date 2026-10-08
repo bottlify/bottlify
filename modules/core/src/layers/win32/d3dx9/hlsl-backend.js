@@ -546,7 +546,7 @@ export function coalesceMoves(instrs){
             return;
         }
         const src = move.srcs[0];
-        if (src.kind !== 'reg' || src.neg || src.abs || reads.get(src.reg) !== 1)
+        if (src.kind !== 'reg' || src.neg || src.abs || src.mod || reads.get(src.reg) !== 1)
         {
             return;
         }
@@ -596,9 +596,10 @@ export function coalesceMoves(instrs){
  * by each of its writers, when it was made in parts.
  *
  * @param {Instr[]} instrs
+ * @param {(mask: number) => boolean} [writable]  The parts a target writes on their own.
  * @returns {Instr[]}
  */
-export function forwardOutputs(instrs){
+export function forwardOutputs(instrs, writable = ()=>true){
     const { writers, reads } = usage(instrs);
     /** @type {Map<number, Instr>} */
     const replaced = new Map();
@@ -610,7 +611,7 @@ export function forwardOutputs(instrs){
             return;
         }
         const src = instr.srcs[0];
-        if (src.kind !== 'reg' || src.neg || src.abs || reads.get(src.reg) !== 1)
+        if (src.kind !== 'reg' || src.neg || src.abs || src.mod || reads.get(src.reg) !== 1)
         {
             return;
         }
@@ -627,6 +628,7 @@ export function forwardOutputs(instrs){
             const cls = /** @type {Record<string, { cls: string }>} */ (OPCODES)[maker.op]?.cls;
             if (maker.dest.kind !== 'reg'
                 || !(cls === 'comp' || cls === 'scalar' || cls === 'lanes')
+                || (made.length > 1 && !writable(maker.dest.mask))
                 || maker.op === 'sincos' || (maker.dest.mask & ~instr.dest.mask) !== 0
                 || (maker.dest.mask & covered) !== 0)
             {
