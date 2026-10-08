@@ -499,10 +499,12 @@ export function createPaintFunctions(options){
      * BeginPaint; one that does not is sent it once, not in a loop.
      *
      * @param {any} record
+     * @param {unknown} [thread]  Whose call it is: the caller's when it named
+     *        one, as a control painting itself does from a dialog's loop.
      * @returns {number | Promise<number>}
      */
-    const paintNow = record=>(record.updateRect
-        ? after(send(record.hwnd, WM_PAINT, 0, 0, host.callerThread?.()), ()=>1)
+    const paintNow = (record, thread)=>(record.updateRect
+        ? after(send(record.hwnd, WM_PAINT, 0, 0, thread ?? host.callerThread?.()), ()=>1)
         : 1);
 
     /**
@@ -511,10 +513,13 @@ export function createPaintFunctions(options){
      * children, as the screen shows them. RDW_UPDATENOW, with or without
      * RDW_ALLCHILDREN.
      *
-     * @param {any} record @param {boolean} children
+     * @param {any} record @param {boolean} children @param {unknown} [thread]
      * @returns {number | Promise<number>}
      */
-    const updateNow = (record, children)=>{
+    const updateNow = (record, children, thread)=>{
+        // Named once, here: past the first window's paint the thread on the
+        // processor may be any other.
+        const on = thread ?? host.callerThread?.();
         // Under an area an ancestor still has to paint, a window paints after
         // it: painted first, it would be painted over.
         const from = options.paintsFirst?.(record) ?? record;
@@ -523,7 +528,7 @@ export function createPaintFunctions(options){
         /** @param {number} index @returns {number | Promise<number>} */
         const next = index=>(index >= order.length
             ? 1
-            : after(paintNow(order[index]), ()=>next(index + 1)));
+            : after(paintNow(order[index], on), ()=>next(index + 1)));
         return next(0);
     };
 

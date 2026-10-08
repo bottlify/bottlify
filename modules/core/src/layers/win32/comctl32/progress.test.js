@@ -16,6 +16,7 @@ import { decodeAnsi } from '../kernel32/locale.js';
 import {
     PBM_SETRANGE, PBM_SETPOS, PBM_DELTAPOS, PBM_SETSTEP, PBM_STEPIT, PBM_SETRANGE32,
     PBM_GETRANGE, PBM_GETPOS, PBM_SETBARCOLOR, PBM_SETBKCOLOR, PBS_SMOOTH, PBS_VERTICAL,
+    createProgressProcedure,
 } from './progress.js';
 
 /**
@@ -493,4 +494,26 @@ test('a parent that paints over a bar\'s edge has the edge painted again after i
     await context.pump();
     assert.equal(context.desktop.read(left, top + 8), SHADOW, 'the edge, after the parent');
     assert.equal(context.desktop.read(left + 50, top), SHADOW);
+});
+
+test('a bar that moves paints itself as the call of the thread that moved it', ()=>{
+    // A dialog's modal loop hands the bar a position a worker thread posted;
+    // past the loop's await the thread on the processor is that worker, which
+    // is in no call to run the dialog's procedure on. The bar painted as
+    // whichever thread held the processor, and the paint asked a thread with
+    // no stack at rest to run guest code.
+    /** @type {unknown[]} */
+    const painted = [];
+    const procedure = createProgressProcedure(/** @type {any} */ ({
+        invalidate: ()=>{},
+        update: (/** @type {any} */ _record, /** @type {unknown} */ thread)=>{
+            painted.push(thread);
+            return 1;
+        },
+    }), { stateOf: (/** @type {any} */ record)=>(record.state ??= {}) });
+    const record = { hwnd: 0x10040, style: 0, exStyle: 0 };
+    const caller = { id: 'main' };
+    assert.equal(procedure(record, { hwnd: record.hwnd, message: PBM_SETPOS, wParam: 40,
+        lParam: 0 }, caller), 0);
+    assert.deepEqual(painted, [caller], 'painted once, as the thread whose call it is');
 });

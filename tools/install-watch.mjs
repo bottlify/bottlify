@@ -216,6 +216,10 @@ const app = await createApp({
     storage: prefix.storage,
     ...'bundle' in prefix ? { bundle: prefix.bundle } : {},
     engine: 'cork',
+    // `--concurrency N`: processes at once, each child in a worker of its
+    // own, as a page with concurrency runs them.
+    ...argv.includes('--concurrency')
+        ? { concurrency: Number(argv[argv.indexOf('--concurrency') + 1]) } : {},
     // `--unshared`: guest memory not a SharedArrayBuffer, as on a page that is
     // not cross-origin isolated.
     // `--cork JSON`: cork's settings (`EngineConfig`), beside `--unshared`.

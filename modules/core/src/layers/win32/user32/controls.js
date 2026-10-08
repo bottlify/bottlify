@@ -531,7 +531,9 @@ export const imagePlace = (record, rect, shape)=>{
  *           measuring with; given back through endPaint.
  * @property {(record: any, hdc: number) => void} endPaint
  * @property {(record: any) => void} invalidate   The whole client area, erased.
- * @property {(record: any) => number | Promise<number>} [update]
+ * @property {(record: any, thread?: unknown) => number | Promise<number>} [update]
+ *           Paints it now, as the call of `thread` -- the control's caller's,
+ *           not whichever thread holds the processor past an await.
  * @property {(record: any) => void} [frameChanged]
  *           Its frame changed -- a scroll bar of its own moved -- and is drawn again.
  *           UpdateWindow: what is to paint painted now, when it is shown.
@@ -863,7 +865,7 @@ export function createControlProcedures(host){
                 // labels its progress from a loop that never pumps shows it.
                 return after(host.defWindowProc(record, message, thread), answer=>{
                     host.invalidate(record);
-                    return after(host.update?.(record) ?? 1, ()=>answer);
+                    return after(host.update?.(record, thread) ?? 1, ()=>answer);
                 });
             case WM_ENABLE:
                 return after(host.defWindowProc(record, message, thread), answer=>{
