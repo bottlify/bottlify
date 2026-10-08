@@ -10,7 +10,9 @@
  * fix what stops it in the generic layer that is wrong.
  *
  * Sessions run on the Claude Agent SDK and bill the API key in
- * ANTHROPIC_API_KEY, never a subscription. They run one at a time because the
+ * ANTHROPIC_API_KEY, or in tools/night-run/.api-key (not in git) -- a file, so
+ * the key is not in the environment of every Claude Code session on the
+ * machine, which would then bill it too. Never a subscription. They run one at a time because the
  * harness drives one browser and the tree has one checkout; each starts with a
  * fresh context, so one title's hunt does not crowd out the next.
  *
@@ -18,7 +20,8 @@
  *   node tools/night-run/night-run.mjs [--budget USD] [--model ID] [--minutes N]
  *       [--only id,id] [--skip id,id] [--dry]
  *
- * A bottle is broken unless its manifest labels it playable, benchmark or test.
+ * A bottle is broken unless its manifest labels it playable; the Wine test
+ * bottles (labelled test) are not titles and are left out.
  * start-only ones go first: they are the closest to working. The budget is
  * shared out evenly over the bottles not yet run, so an early long hunt leaves
  * less for the rest rather than running the key dry. Every session's messages
@@ -73,7 +76,7 @@ async function brokenBottles(){
         const labels = Array.isArray(manifest.labels) ? manifest.labels : [];
         const chosen = only.length ? only.includes(id)
             : !labels.some((/** @type {string} */ label)=>
-                ['playable', 'benchmark', 'test'].includes(label));
+                ['playable', 'test'].includes(label));
         if (chosen && !skip.includes(id))
         {
             bottles.push({ id, title: String(manifest.title ?? id).trim(), labels });
@@ -89,9 +92,17 @@ const brief = (bottle, dollars)=>`Night run, one bottle: "${bottle.title}" \
 (bundle id ${bottle.id}, labels: ${bottle.labels.join(', ') || 'none'}). \
 Nobody is watching; do not ask questions.
 
-Goal: the title reaches its own loading screen (or further) when started through the harness. \
-Solved means a harness run shows it, and the fix is committed. A dead end means every approach \
-was refuted by measurement -- say what was measured.
+Goal: get into the game -- past its launcher, settings dialogs, intro films and menus, through \
+New Game / Single Player / a skirmish or the first level, until the title is loading its world or \
+is in it. A main menu is not the goal. Solved means a harness run shows the title in its game and \
+the fixes are committed. A dead end means every approach was refuted by measurement -- say what \
+was measured.
+
+The route: bundles/${bottle.id}/route.json, beside the bundle, holds the game.mjs flags that take \
+this title from its start into the game (format: --route in tools/cdp_test/README.md). If it is \
+there, start with it (game.mjs ${bottle.id} --route ...). If it is not, find the way in and save \
+it there before you finish -- even when nothing needed fixing -- with "reaches" saying what screen \
+it ends on. A route that no longer gets in is corrected, not worked around.
 
 How:
 - Read CLAUDE.md, tools/cdp_test/README.md and the bringup skill (.claude/skills/bringup) first.
@@ -99,12 +110,10 @@ How:
 --specs dbg/specs, and implement every missing entry point the main executable reaches.
 - Run it: node tools/cdp_test/game.mjs ${bottle.id} --headed --worker --coi --wait 240 (more if \
 the title loads slowly). Read the report and the files the game itself wrote before theorising.
-- Many titles open a launcher, a settings dialog or a menu before they load. Look at the \
-screenshots (read the PNGs) and get past them: walk the screens a step at a time with \
-tools/cdp_test/live/drive.mjs (/shot, /click, /key, /type -- see tools/cdp_test/README.md), then \
-replay the route in game.mjs with --click x,y,Ns, --key Code,Ns, --click-at x,y,ms or \
---press "Play|OK" so the run that proves it is repeatable. Reaching the loading screen means \
-getting through those screens, not stopping at them.
+- Find the way in by looking: read the screenshots (the PNGs) and walk the screens a step at a \
+time with tools/cdp_test/live/drive.mjs (/shot, /click, /key, /type -- see \
+tools/cdp_test/README.md), then write the route as game.mjs flags (--click x,y,Ns, --key Code,Ns, \
+--click-at x,y,ms, --press "Play|OK") and confirm that one run with --route gets in on its own.
 - Fix the generic contract that is wrong -- never branch on a program's name, executable or hash, \
 never hardcode an offset for one title. Every fix carries a test in the same change.
 - Run only the touched layer's tests and gates (the table in CLAUDE.md), npm run typecheck and \
@@ -118,17 +127,19 @@ or anything holding a token. Temporary files go to dbg/.
 harness browser; one run at a time.
 - Do not touch modules/cork's translator: if the title stops inside the translator, write down \
 the evidence and move on.
-- This session has about $${dollars.toFixed(0)} of API budget. When the title reaches its loading \
-screen, or the budget is nearly spent, stop.
+- This session has about $${dollars.toFixed(0)} of API budget. When the title is in its game \
+and the route is saved, or the budget is nearly spent, stop.
 
-Finish with one short paragraph: solved / dead end / out of budget, the commits made (hashes), \
-and what stops the title now.`;
+Finish with one short paragraph: solved / dead end / out of budget, how far the title gets, \
+whether the route is saved, the commits made (hashes), and what stops the title now.`;
 
 async function main(){
-    if (!process.env.ANTHROPIC_API_KEY)
+    const key = process.env.ANTHROPIC_API_KEY
+        ?? (await readFile(new URL('./.api-key', import.meta.url), 'utf8').catch(()=>'')).trim();
+    if (!key)
     {
-        throw new Error(
-            'ANTHROPIC_API_KEY is not set: the night run bills the API key, never a subscription');
+        throw new Error('no API key (ANTHROPIC_API_KEY or tools/night-run/.api-key): '
+            + 'the night run bills an API key, never a subscription');
     }
     await mkdir(OUT, { recursive: true });
     const bottles = await brokenBottles();
@@ -174,7 +185,7 @@ async function main(){
                     systemPrompt: { type: 'preset', preset: 'claude_code' },
                     settingSources: ['project'],
                     abortController: abort,
-                    env: { ...process.env },
+                    env: { ...process.env, ANTHROPIC_API_KEY: key },
                 },
             }))
             {
@@ -216,7 +227,7 @@ async function main(){
         // its whole share is counted, so the rest is not overspent.
         spent += cost || (abort.signal.aborted ? share : 0);
         const line = `- **${bottle.title}** (${bottle.id}) -- ${outcome}, $${cost.toFixed(2)}: `
-            + `${last.replace(/\s+/g, ' ').trim().slice(0, 600)}\n`;
+            + `${last.replace(/\s+/g, ' ').trim().slice(0, 1200)}\n`;
         await appendFile(summary, line);
         console.log(line.trim());
     }

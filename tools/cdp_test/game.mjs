@@ -26,6 +26,7 @@
  *                                  [--cpu-profile SECONDS] [--heap-profile [old]]
  *                                  [--export-translations FILE]
  *                                  [--watch SECONDS] [--press LABEL|LABEL... [--press-settle MS]]
+ *                                  [--route]
  *
  * `--watch S` is for a program that does not present, an installer above
  * all: every S seconds the desktop it paints with GDI is written as a PNG,
@@ -2002,7 +2003,31 @@ the run as it stands: ${path}`;
     }
 }
 
-const options = parse(process.argv.slice(2));
+/**
+ * The arguments with a title's saved route behind them: `--route` reads
+ * route.json beside the bundle, whose `args` are the clicks and keys that take
+ * the title from its start to where `reaches` says. Behind, so a flag given by
+ * hand wins over the route's.
+ *
+ * @param {string[]} argv
+ */
+function withRoute(argv){
+    if (!argv.includes('--route'))
+    {
+        return argv;
+    }
+    const id = argv.find(argument=>!argument.startsWith('--'));
+    const file = join(BUNDLES_DIR, id ?? '', 'route.json');
+    if (!existsSync(file))
+    {
+        throw new Error(`--route: no route saved for ${id} (${file})`);
+    }
+    const route = JSON.parse(readFileSync(file, 'utf8'));
+    console.log(`route: ${route.reaches ?? 'where it goes is not written'}`);
+    return [...argv.filter(argument=>argument !== '--route'), ...route.args];
+}
+
+const options = parse(withRoute(process.argv.slice(2)));
 if (!options.id)
 {
     console.error(
