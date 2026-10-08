@@ -1803,6 +1803,9 @@ export function createWin32Module(){
                     // as a program would make one, around a dialog procedure the
                     // bridge gives an address.
                     user32: name=>libraries['USER32.dll'][name],
+                    // CreateMappedBitmap reads and writes a bitmap's bits
+                    // through gdi32's own calls, looked up when called.
+                    gdi32: name=>libraries['GDI32.dll']?.[name],
                     allocate: bytes=>heap.allocate(bytes),
                     release: address=>heap.free(address),
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),

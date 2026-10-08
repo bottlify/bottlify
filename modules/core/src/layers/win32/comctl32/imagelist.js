@@ -39,8 +39,18 @@ const ILC_COLORMASK = 0x00fe;
 const ILC_COLOR4 = 0x0004;
 const ILC_COLOR24 = 0x0018;
 
-/** No overlay image is set: ILHEAD's ovls as a list starts. */
-const NO_OVERLAYS = Object.freeze([-1, -1, -1, -1]);
+/**
+ * How many overlay masks a list has (MSDN: fifteen since 4.71), and how many
+ * of them ILHEAD records, its ovls being four words.
+ */
+const MAX_OVERLAYS = 15;
+const SAVED_OVERLAYS = 4;
+
+/** No overlay image is set, as a list starts. */
+const NO_OVERLAYS = Object.freeze(Array(MAX_OVERLAYS).fill(-1));
+
+/** The bits of a drawing style that name an overlay, one-based. */
+const ILD_OVERLAYMASK = 0x0f00;
 
 /** The depths a list's image is written at; any other -- ILC_COLORDDB -- is 32. */
 const DIB_DEPTHS = new Set([4, 8, 16, 24, 32]);
@@ -68,6 +78,7 @@ const SRCPAINT = 0x00ee0086;
 const DSNA = 0x00220326;
 const PATCOPY = 0x00f00021;
 const BLACKNESS = 0x00000042;
+const WHITENESS = 0x00ff0062;
 const PSDPXAX = 0x00b8074a;
 
 /** IMAGELISTDRAWPARAMS, and the smallest size of it a caller may pass. */
@@ -156,7 +167,7 @@ export function createImageLists(host){
      * @property {number} image     The bitmap every image sits in, side by side.
      * @property {number} mask      Its monochrome mask, or 0 without ILC_MASK.
      * @property {number} background  What ILD_NORMAL fills behind the image.
-     * @property {readonly number[]} overlays  The images the four overlays are, or -1.
+     * @property {readonly number[]} overlays  The images the fifteen overlays are, or -1.
      */
 
     /** @type {Map<number, ImageList>} */
@@ -164,7 +175,11 @@ export function createImageLists(host){
     let nextHandle = 0x2000;
 
     /** What a drag in progress has been told, and reads back. */
-    let drag = { list: 0, image: 0, dx: 0, dy: 0, window: 0, x: 0, y: 0, shown: true };
+    /**
+     * `owned` is the list a cursor image was merged into the dragged one in,
+     * which the drag holds and lets go of.
+     */
+    let drag = { list: 0, image: 0, dx: 0, dy: 0, window: 0, x: 0, y: 0, shown: true, owned: 0 };
     let dragging = false;
 
     /** @param {number} handle */
@@ -450,8 +465,150 @@ export function createImageLists(host){
         }
         gdi('SetTextColor', hdc, text);
         gdi('SetBkColor', hdc, back);
+        drawOverlay(list, request);
         return true;
     };
+
+    /**
+     * The overlay a style names drawn over the image, through its own mask,
+     * when the list has one set for it.
+     *
+     * @param {ImageList} list @param {DrawRequest} request
+     */
+    const drawOverlay = (list, request)=>{
+        const overlay = ((request.style >>> 0) & ILD_OVERLAYMASK) >>> 8;
+        const image = overlay === 0 ? -1 : list.overlays[overlay - 1] ?? -1;
+        if (image >= 0 && image < list.count)
+        {
+            drawImage({ ...request, index: image, style: ILD_TRANSPARENT, background: CLR_NONE });
+        }
+    };
+
+    /**
+     * One image laid into a merged list's only place at (x, y): its mask
+     * ANDed into the merged mask, so a pixel either image covers is opaque,
+     * and its pixels put where it is opaque. An index the list does not have
+     * lays nothing, and the merge still succeeds (Wine's test_merge).
+     *
+     * @param {ImageList} into @param {ImageList} from @param {number} index
+     * @param {number} x @param {number} y
+     */
+    const lay = (into, from, index, x, y)=>{
+        if (index < 0 || index >= from.count || from.image === 0)
+        {
+            return;
+        }
+        const left = index * from.cx;
+        if (from.mask !== 0)
+        {
+            // Out of monochrome a 1 -- transparent -- is a new DC's white, so
+            // ANDing the mask clears exactly where the image is opaque.
+            withDCs([into.mask, from.mask], (target, source)=>gdi('BitBlt', target, x, y,
+                from.cx, from.cy, source, left, 0, SRCAND));
+            withDCs([into.image, from.mask], (target, source)=>gdi('BitBlt', target, x, y,
+                from.cx, from.cy, source, left, 0, SRCAND));
+        }
+        else
+        {
+            withDCs([into.mask], target=>gdi('PatBlt', target, x, y, from.cx, from.cy,
+                BLACKNESS));
+            withDCs([into.image], target=>gdi('PatBlt', target, x, y, from.cx, from.cy,
+                BLACKNESS));
+        }
+        // A list's image is black where it is transparent, so ORing it in
+        // leaves what is under its transparent part alone.
+        withDCs([into.image, from.image], (target, source)=>gdi('BitBlt', target, x, y,
+            from.cx, from.cy, source, left, 0, SRCPAINT));
+    };
+
+    /**
+     * ImageList_Merge's list: one image, large enough for both, the second
+     * offset by (dx, dy) from the first and drawn over it, at the deeper of
+     * the two lists' depths and always with a mask.
+     *
+     * @param {number} first @param {number} firstIndex
+     * @param {number} second @param {number} secondIndex
+     * @param {number} dx @param {number} dy
+     * @returns {number} its handle, or zero
+     */
+    const merge = (first, firstIndex, second, secondIndex, dx, dy)=>{
+        const a = listOf(first);
+        const b = listOf(second);
+        if (!a || !b)
+        {
+            return 0;
+        }
+        const [x1, y1] = [Math.max(0, -dx), Math.max(0, -dy)];
+        const [x2, y2] = [Math.max(0, dx), Math.max(0, dy)];
+        const depth = Math.max(a.flags & ILC_COLORMASK, b.flags & ILC_COLORMASK);
+        const handle = makeList(Math.max(x1 + a.cx, x2 + b.cx), Math.max(y1 + a.cy, y2 + b.cy),
+            ILC_MASK | depth, 1, 1);
+        const list = listOf(handle);
+        if (!list)
+        {
+            return 0;
+        }
+        list.count = 1;
+        if (host.gdi32 && list.image !== 0)
+        {
+            const width = list.cx * list.max;
+            withDCs([list.image], target=>gdi('PatBlt', target, 0, 0, width, list.cy, BLACKNESS));
+            withDCs([list.mask], target=>gdi('PatBlt', target, 0, 0, width, list.cy, WHITENESS));
+            lay(list, a, firstIndex, x1, y1);
+            lay(list, b, secondIndex, x2, y2);
+        }
+        return handle;
+    };
+
+    /** The list a drag merged a cursor image into, let go of with the drag. */
+    const letGo = ()=>{
+        if (drag.owned !== 0)
+        {
+            functions.ImageList_Destroy.handler([drag.owned]);
+            drag = { ...drag, owned: 0 };
+        }
+    };
+
+    /**
+     * ImageList_LoadImageA and W: one body, user32's LoadImage in the
+     * spelling the name was given in.
+     *
+     * @param {'LoadImageA' | 'LoadImageW'} loader
+     */
+    const loadImage = loader=>({
+        argBytes: 28,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [instance, name, cx, grow, key, type, flags])=>{
+            if ((type >>> 0) !== IMAGE_BITMAP)
+            {
+                host.divergence?.(`ImageList_${loader}`,
+                    `an image list of type ${type >>> 0} is not loaded: only a bitmap's`);
+                return 0;
+            }
+            const bitmap = (host.user32?.(loader)
+                ?.handler([instance, name, IMAGE_BITMAP, 0, 0, flags]) ?? 0) >>> 0;
+            const size = bitmap === 0 ? null : host.bitmapSize?.(bitmap) ?? null;
+            if (!size || size.height <= 0)
+            {
+                if (bitmap !== 0)
+                {
+                    gdi('DeleteObject', bitmap);
+                }
+                return 0;
+            }
+            const width = (cx | 0) > 0 ? cx | 0 : size.height;
+            const masked = (key >>> 0) !== CLR_NONE;
+            const handle = functions.ImageList_Create.handler([width, size.height,
+                ILC_COLOR24 | (masked ? ILC_MASK : 0),
+                Math.max(1, Math.floor(size.width / width)), grow]);
+            if (handle !== 0)
+            {
+                add(handle, bitmap, 0, masked ? key >>> 0 : null);
+            }
+            gdi('DeleteObject', bitmap);
+            return handle;
+        },
+    });
 
     const functions = {
         /**
@@ -479,40 +636,12 @@ export function createImageLists(host){
          * is CLR_NONE. The bitmap is loaded and let go of; the list keeps its
          * copy. An icon or a cursor resource is not loaded.
          */
-        ImageList_LoadImageA: {
-            argBytes: 28,
-            /** @param {number[]} args */
-            handler: ([instance, name, cx, grow, key, type, flags])=>{
-                if ((type >>> 0) !== IMAGE_BITMAP)
-                {
-                    host.divergence?.('ImageList_LoadImageA',
-                        `an image list of type ${type >>> 0} is not loaded: only a bitmap's`);
-                    return 0;
-                }
-                const bitmap = (host.user32?.('LoadImageA')
-                    ?.handler([instance, name, IMAGE_BITMAP, 0, 0, flags]) ?? 0) >>> 0;
-                const size = bitmap === 0 ? null : host.bitmapSize?.(bitmap) ?? null;
-                if (!size || size.height <= 0)
-                {
-                    if (bitmap !== 0)
-                    {
-                        gdi('DeleteObject', bitmap);
-                    }
-                    return 0;
-                }
-                const width = (cx | 0) > 0 ? cx | 0 : size.height;
-                const masked = (key >>> 0) !== CLR_NONE;
-                const handle = functions.ImageList_Create.handler([width, size.height,
-                    ILC_COLOR24 | (masked ? ILC_MASK : 0),
-                    Math.max(1, Math.floor(size.width / width)), grow]);
-                if (handle !== 0)
-                {
-                    add(handle, bitmap, 0, masked ? key >>> 0 : null);
-                }
-                gdi('DeleteObject', bitmap);
-                return handle;
-            },
-        },
+        ImageList_LoadImageA: loadImage('LoadImageA'),
+        /**
+         * HIMAGELIST ImageList_LoadImageW(HINSTANCE hi, LPCWSTR lpbmp, int cx,
+         *     int cGrow, COLORREF crMask, UINT uType, UINT uFlags)
+         */
+        ImageList_LoadImageW: loadImage('LoadImageW'),
 
         /** BOOL ImageList_Destroy(HIMAGELIST himl): its bitmaps go with it. */
         ImageList_Destroy: {
@@ -753,9 +882,10 @@ export function createImageLists(host){
                 {
                     return 0;
                 }
+                letGo();
                 drag = {
                     list: handle >>> 0, image: track | 0, dx: dx | 0, dy: dy | 0,
-                    window: 0, x: 0, y: 0, shown: true,
+                    window: 0, x: 0, y: 0, shown: true, owned: 0,
                 };
                 dragging = true;
                 return 1;
@@ -767,6 +897,7 @@ export function createImageLists(host){
             argBytes: 0,
             handler: ()=>{
                 dragging = false;
+                letGo();
                 return 0;
             },
         },
@@ -841,7 +972,7 @@ export function createImageLists(host){
                 {
                     host.writeMemory(hotspot >>> 0, point32(drag.dx, drag.dy));
                 }
-                return drag.list;
+                return drag.owned || drag.list;
             },
         },
 
@@ -902,6 +1033,110 @@ export function createImageLists(host){
                     style: field(IMAGELISTDRAWPARAMS.fStyle),
                     rop: field(IMAGELISTDRAWPARAMS.dwRop) >>> 0,
                 }) ? 1 : 0;
+            },
+        },
+
+        /**
+         * HIMAGELIST ImageList_Merge(HIMAGELIST himl1, int i1, HIMAGELIST himl2,
+         *                            int i2, int dx, int dy)
+         *
+         * A new list of one image: the second drawn over the first at
+         * (dx, dy) from it, as large as both together. An image either list
+         * does not have is left out rather than refused (Wine's test_merge);
+         * only a list that is not one fails.
+         */
+        ImageList_Merge: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([first, firstIndex, second, secondIndex, dx, dy])=>merge(first,
+                firstIndex | 0, second, secondIndex | 0, dx | 0, dy | 0),
+        },
+
+        /**
+         * BOOL ImageList_SetDragCursorImage(HIMAGELIST himlDrag, int iDrag,
+         *                                   int dxHotspot, int dyHotspot)
+         *
+         * The image being dragged, with a cursor's image merged over it at
+         * the offset given: the drag's image becomes that merged list, as
+         * large as both, and its hot spot stays where BeginDrag put it (Wine's
+         * test_hotspot). Each call merges from the image the drag began with,
+         * so a cursor that changes does not pile up. No drag is FALSE.
+         */
+        ImageList_SetDragCursorImage: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([cursor, index, dx, dy])=>{
+                if (!dragging)
+                {
+                    return 0;
+                }
+                const merged = merge(drag.list, drag.image, cursor, index | 0, dx | 0, dy | 0);
+                if (merged === 0)
+                {
+                    return 0;
+                }
+                letGo();
+                drag = { ...drag, owned: merged };
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL ImageList_SetOverlayImage(HIMAGELIST himl, int iImage, int iOverlay)
+         *
+         * Names an image as one of the list's fifteen overlay masks, which a
+         * drawing style picks with INDEXTOOVERLAYMASK and draws over the image
+         * through its own mask; -1 clears it. An overlay out of 1..15, or an
+         * image the list does not have, is refused.
+         */
+        ImageList_SetOverlayImage: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, image, overlay])=>{
+                const list = listOf(handle);
+                const at = overlay | 0;
+                const index = image | 0;
+                if (!list || at < 1 || at > MAX_OVERLAYS || index < -1 || index >= list.count)
+                {
+                    return 0;
+                }
+                list.overlays = list.overlays.map((held, slot)=>(slot === at - 1 ? index : held));
+                return 1;
+            },
+        },
+
+        /**
+         * HIMAGELIST ImageList_Duplicate(HIMAGELIST himl)
+         *
+         * A list of its own with the same images, room, growth, background and
+         * overlays.
+         */
+        ImageList_Duplicate: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const list = listOf(handle);
+                if (!list)
+                {
+                    return 0;
+                }
+                const copy = makeList(list.cx, list.cy, list.flags, list.initial, list.grow,
+                    list.max);
+                const made = listOf(copy);
+                if (!made)
+                {
+                    return 0;
+                }
+                Object.assign(made, { count: list.count, background: list.background,
+                    overlays: [...list.overlays] });
+                /** @type {[number, number][]} */
+                const pairs = [[made.image, list.image], [made.mask, list.mask]];
+                for (const [to, from] of pairs.filter(([a, b])=>a !== 0 && b !== 0))
+                {
+                    withDCs([to, from], (target, source)=>gdi('BitBlt', target, 0, 0,
+                        list.cx * list.max, list.cy, source, 0, 0, SRCCOPY));
+                }
+                return copy;
             },
         },
 
@@ -1087,6 +1322,55 @@ export function createImageLists(host){
         functions,
         drawEmbossed,
         /**
+         * One image as an icon is made of: its colour bits as a 32-bit
+         * device-dependent bitmap's, rows top first, and its mask's, each row
+         * padded to a WORD -- black where the mask is set, as an icon's XOR
+         * plane is. A list without a mask is opaque throughout. Null for no
+         * list, no such image, no gdi32, or no guest memory to read through.
+         *
+         * @param {number} handle @param {number} index @param {Scratch} scratch
+         * @returns {{ cx: number, cy: number, and: Uint8Array, xor: Uint8Array } | null}
+         */
+        iconPlanes: (handle, index, scratch)=>{
+            const list = listOf(handle);
+            const read = host.readMemory;
+            if (!list || !host.gdi32 || !read || list.image === 0 || (index | 0) < 0
+                || (index | 0) >= list.count)
+            {
+                return null;
+            }
+            const { cx, cy } = list;
+            const colourSize = cx * 4 * cy;
+            const maskSize = ((cx + 15) >>> 4) * 2 * cy;
+            const block = scratch.allocate(colourSize + maskSize);
+            if (block === 0)
+            {
+                return null;
+            }
+            try
+            {
+                /** @param {number} source @param {number} depth @param {number} size @param {number} at */
+                const planeOf = (source, depth, size, at)=>{
+                    const bitmap = gdi('CreateBitmap', cx, cy, 1, depth, 0);
+                    withDCs([bitmap, source], (target, from)=>gdi('BitBlt', target, 0, 0, cx, cy,
+                        from, (index | 0) * cx, 0, SRCCOPY));
+                    gdi('GetBitmapBits', bitmap, size, at);
+                    gdi('DeleteObject', bitmap);
+                    return read(at, size).slice();
+                };
+                return {
+                    cx, cy,
+                    xor: planeOf(list.image, 32, colourSize, block),
+                    and: list.mask !== 0 ? planeOf(list.mask, 1, maskSize, block + colourSize)
+                        : new Uint8Array(maskSize),
+                };
+            }
+            finally
+            {
+                scratch.release(block);
+            }
+        },
+        /**
          * A list as ImageList_Write records it: the fields of its header,
          * and its image and mask as DIBs of `columns` images a row, the image
          * at the depth the list was made with. Null for no list, or no guest
@@ -1112,8 +1396,9 @@ export function createImageLists(host){
                 return null;
             }
             const { cx, cy, flags, count, max, grow, background, overlays } = list;
-            return { fields: { cx, cy, flags, count, max, grow, background, overlays }, image,
-                mask };
+            const saved = overlays.slice(0, SAVED_OVERLAYS);
+            return { fields: { cx, cy, flags, count, max, grow, background, overlays: saved },
+                image, mask };
         },
         /**
          * A list made again from what `save` recorded, with the room its
@@ -1136,7 +1421,7 @@ export function createImageLists(host){
                 return 0;
             }
             Object.assign(list, { count: fields.count, background: fields.background >>> 0,
-                overlays: [...fields.overlays] });
+                overlays: [...NO_OVERLAYS].map((none, at)=>fields.overlays[at] ?? none) });
             if (!restoreDib(list, list.image, image, scratch)
                 || (mask !== null && !restoreDib(list, list.mask, mask, scratch)))
             {
