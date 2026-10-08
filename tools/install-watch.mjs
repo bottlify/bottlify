@@ -366,14 +366,15 @@ for (const { what, at } of all('--key').map(timed))
     }, at * 1000);
 }
 // `--press 'Next >|I &accept|Finish'`: the buttons pressed in turn, each by
-// its title once it has stood visible, enabled and in a dialog other than the
-// last one pressed, for a whole look -- a wizard's pages driven without
-// guessing when each will come, which drifts from run to run.
+// its title once it has stood visible and enabled for a whole look, and is not
+// the button pressed last unless three looks have passed -- a wizard's pages
+// driven without guessing when each will come, which drifts from run to run.
 const pressing = argv.includes('--press') ? argv[argv.indexOf('--press') + 1].split('|') : [];
 if (pressing.length > 0)
 {
     let step = 0;
-    let lastDialog = '';
+    let lastButton = '';
+    let looksSince = 0;
     let seen = '';
     let looking = false;
     const WS_DISABLED = 0x08000000;
@@ -383,6 +384,7 @@ if (pressing.length > 0)
             return;
         }
         looking = true;
+        looksSince++;
         try
         {
             for (const { diagnostics } of await app.standing())
@@ -391,7 +393,8 @@ if (pressing.length > 0)
                     ?.metrics ?? {};
                 const button = (win32.windows ?? []).find((/** @type {any} */ w)=>w.visible
                     && w.className === 'Button' && w.title === pressing[step]
-                    && w.parent !== lastDialog && (parseInt(w.style, 16) & WS_DISABLED) === 0);
+                    && (w.hwnd !== lastButton || looksSince > 3)
+                    && (parseInt(w.style, 16) & WS_DISABLED) === 0);
                 if (!button)
                 {
                     continue;
@@ -404,7 +407,8 @@ if (pressing.length > 0)
                 const x = Math.round((button.rect.left + button.rect.right) / 2);
                 const y = Math.round((button.rect.top + button.rect.bottom) / 2);
                 console.log(seconds(), 'PRESS', pressing[step], x, y);
-                lastDialog = button.parent;
+                lastButton = button.hwnd;
+                looksSince = 0;
                 step++;
                 app.input.send({ kind: 'pointerMove', x, y });
                 app.input.send({ kind: 'pointerButton', button: 'left', down: true });
