@@ -96,6 +96,15 @@ twenty-five years, and this entry records that debt.
 What is not taken: no code, no test structure, no helper, no assertion text, no ordering. Every
 test in this repository is written independently, against this project's own conventions.
 
+## Wine's Windows Installer transform test vectors
+
+- Source: Wine, `dlls/msi/tests/db.c` (`test_try_transform`, `generate_transform`), LGPL-2.1-or-later.
+- Location in this repository: `modules/core/src/layers/win32/msi/transform.fixture.js`, test data
+  only; nothing from it is in the product.
+- What is used: the stream names and the words of the hand-made transform those tests apply --
+  a transform's bytes as Windows reads them, used to check that ours reads and writes the same.
+  The transform reader and writer themselves are written from the format, not from Wine's code.
+
 ## The Windows CD-ROM file system's behaviour -- used as a specification
 
 What a disc mounted as a drive answers (`modules/core/src/layers/filesystem/internal/iso/`,
