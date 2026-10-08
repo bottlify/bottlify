@@ -161,6 +161,49 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS }){
     return { ...fields, id: layoutId(fields) };
 }
 
+/** The fields of a layout that lie in an executor's state page, each its own. */
+const STATE_FIELDS = Object.freeze(['regs', 'eip', 'previousIp', 'eflags', 'flagRecord',
+    'flagsChanged', 'x87', 'x87Top', 'x87Empty', 'x87Control', 'x87Status', 'x87Exact', 'xmm',
+    'mxcsr', 'fsBase', 'gsBase', 'counter', 'callProfile', 'origin', 'nanFirst']);
+
+/**
+ * Bytes an executor past the first keeps of a memory for its own, past the
+ * first executor's: a state page -- the state block, `nanFirst`, the wasm
+ * interpreter's statics -- then tables of its own. Its translations, its entry
+ * hash and its call stack are its own; guest RAM is the process's.
+ */
+export const EXECUTOR_BYTES = PAGE + Math.ceil(Tables.SIZE / PAGE) * PAGE;
+
+/**
+ * Cork's own layout moved to another executor's state page at `base`, a
+ * multiple of `PAGE`: the state fields from `base` as the first executor's are
+ * from 0, the tables past the page. Translated code addresses all of them by
+ * constants, so a translation is the executor's own and the layout's id tells.
+ *
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout  the first
+ *     executor's (`ownLayout`)
+ * @param {number} base
+ * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
+ */
+export function executorLayout(layout, base){
+    if (base % PAGE !== 0 || base < layout.tables + Tables.SIZE)
+    {
+        throw new Error(`layout: an executor's page at ${base} is not one past the first's`);
+    }
+    /** @type {Record<string, any>} */
+    const fields = { ...layout };
+    delete fields.id;
+    for (const name of STATE_FIELDS)
+    {
+        if (typeof fields[name] === 'number' && fields[name] >= 0)
+        {
+            fields[name] += base;
+        }
+    }
+    fields.tables = base + PAGE;
+    return /** @type {any} */ ({ ...fields, id: layoutId(fields) });
+}
+
 /**
  * The identity of a layout, for cache keys: every field's value, hashed.
  *

@@ -124,6 +124,9 @@
  *     instruction leaves undefined left as the instruction model leaves them rather than as the
  *     cheapest code does. Default false, as games run; the
  *     corpora run with it.
+ * @property {boolean} [atomic]          Locked instructions (`lock`-prefixed read-modify-writes,
+ *     `xchg` with memory) as wasm atomics, each indivisible on the shared memory: for a process
+ *     whose threads run on more than one executor. Default false.
  * @property {boolean} [blockProfile]    A diagnostic: every block counts its executions.
  * @property {number} [blockProfileFrom]  With `blockProfile`: seconds after start at which the
  *           counts start over.
