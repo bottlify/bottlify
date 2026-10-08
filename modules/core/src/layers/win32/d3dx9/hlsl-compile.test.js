@@ -399,3 +399,20 @@ test('a model 1 complement of a complement is the value again', async()=>{
           return float4(!!(a || b), 1 - (1 - d.z), !a, 1); }`, 'ps_1_4');
     assert.deepEqual(run.model1, run.model2, run.text);
 });
+
+test('frexp, ldexp and isinf compile, and fold when their arguments are known', async()=>{
+    // fxc folds frexp(7604, e) to 13 even in ps_1_1; on the GPU the same steps run.
+    const result = await compile(`float4 k; float4 main() : COLOR0
+        { float e; float m = frexp(k.x, e); return float4(m, e, ldexp(k.y, 2), isinf(k.z)); }`,
+    'ps_2_0');
+    assert.equal(result.ok, true, result.messages);
+    const f = new Float32Array(32 * 4);
+    f.set([6, 0.25, 1, 0]);
+    const out = [...Object.values(execute(decode(/** @type {Uint32Array} */ (result.tokens)),
+        { constants: { f }, inputs: { v: [], t: [] } }).outputs)[0]];
+    assert.deepEqual(out.map(x=>Math.round(x * 1e4) / 1e4), [0.75, 3, 1, 0]);
+    const folded = await compile(`float4 main() : COLOR0 { float e; float m = frexp(7604, e);
+        return float4(e / 16, m, 0, 0); }`, 'ps_1_1');
+    assert.equal(folded.ok, true, folded.messages);
+    assert.doesNotMatch(disassemble(/** @type {Uint32Array} */ (folded.tokens)), /\b(log|exp)\b/);
+});

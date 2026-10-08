@@ -90,7 +90,9 @@ export function lanesRead(instr, k){
         {
             return [0];
         }
-        return Array.from({ length: count }, (_, i)=>i);
+        // A dot product reads the lanes it multiplies and no more.
+        const reads = instr.op === 'dp3' ? 3 : instr.op === 'dp2add' ? 2 : count;
+        return Array.from({ length: Math.min(count, reads) }, (_, i)=>i);
     }
     const mask = instr.dest.kind === 'reg' || instr.dest.kind === 'out' ? instr.dest.mask : 1;
     return [0, 1, 2, 3].filter(c=>(mask & 1 << c) !== 0);

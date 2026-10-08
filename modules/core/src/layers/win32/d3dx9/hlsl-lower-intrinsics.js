@@ -352,6 +352,17 @@ export function lowerIntrinsic(L, name, args, result, e, st){
             storeOut(1, vec(whole));
             return vec(b.sub(v(0), whole));
         }
+        case 'ldexp': return vec(b.mul(v(0), b.exp2(v(1))));
+        case 'frexp': {
+            // fxc's steps: the exponent is the ceiling of log2|x|, of 1 for a zero, and the
+            // mantissa x over two to it (frexpParts folds a known argument the same way).
+            const magnitude = b.abs(v(0));
+            const log = b.log2(b.add(magnitude, b.eq(magnitude, num(0))));
+            const exponent = b.add(log, b.frc(b.neg(log)));
+            storeOut(1, vec(exponent));
+            return vec(b.mul(v(0), b.rcp(b.exp2(exponent))));
+        }
+        case 'isinf': return each(x=>b.eq(b.abs(x), num(Infinity)));
         case 'mul': return multiply(L, a, args.map(x=>x.type));
         case 'transpose': {
             const m = /** @type {Extract<Value, {k: 'mat'}>} */ (a[0]);

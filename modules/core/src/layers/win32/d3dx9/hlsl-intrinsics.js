@@ -411,25 +411,16 @@ export function fmodFloat(/** @type {number} */ a, /** @type {number} */ b){
     return f32(a - f32(b * Math.trunc(f32(a / b))));
 }
 
-/** @param {number} x */
+/**
+ * frexp as fxc computes it for models 1 to 3: the exponent is the ceiling of log2|x| (of 1
+ * for a zero), the mantissa x over two to it -- so a power of two is itself times 2^0, not a
+ * half times 2^(n+1), and what is not finite comes out NaN.
+ *
+ * @param {number} x
+ */
 function frexpParts(x){
-    if (x === 0 || !Number.isFinite(x))
-    {
-        return { mant: x, exp: 0 };
-    }
-    let exp = Math.floor(Math.log2(Math.abs(x))) + 1;
-    let mant = x / Math.pow(2, exp);
-    if (Math.abs(mant) >= 1)
-    {
-        mant /= 2;
-        exp++;
-    }
-    else if (Math.abs(mant) < 0.5)
-    {
-        mant *= 2;
-        exp--;
-    }
-    return { mant, exp };
+    const exp = Math.ceil(Math.log2(Math.abs(x) + (x === 0 ? 1 : 0)));
+    return { mant: f32(x / Math.pow(2, exp)), exp };
 }
 
 /**

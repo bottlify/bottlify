@@ -530,9 +530,11 @@ test('modf, frexp, sincos give their results through the out arguments', ()=>{
     r = run('modf', [[v(2), [2.25, 7]], [v(2), 0]]);
     assert.deepEqual(r.result, [0.25, 0]);
     assert.deepEqual(r.outs.get(1), [2, 7]);
+    // fxc's models 1 to 3 take the ceiling of log2|x|: a power of two is itself times 2^0,
+    // 8 is 1 * 2^3 (frexp(true) is 1 and 0 there, where model 4 says 0.5 and 1).
     r = run('frexp', [[FLOAT, 8], [FLOAT, 0]]);
-    assert.equal(r.result, 0.5);
-    assert.equal(r.outs.get(1), 4);
+    assert.equal(r.result, 1);
+    assert.equal(r.outs.get(1), 3);
     r = run('frexp', [[FLOAT, 0.375], [FLOAT, 0]]);
     assert.equal(r.result, 0.75);
     assert.equal(r.outs.get(1), -1);
