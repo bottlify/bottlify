@@ -1592,12 +1592,14 @@ export function createWinsockFunctions(host){
          * Reports lNetworkEvents and iErrorCode[FD_MAX_EVENTS] as they stand
          * and clears both -- the accumulator exists so nothing is lost
          * between one enum call and the next, never so the same bit is read
-         * twice.
+         * twice -- and resets hEventObject, as documented. Left signalled, a
+         * manual-reset event answers every wait at once and a network thread
+         * waiting on it spins.
          */
         WSAEnumNetworkEvents: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([handle, , eventsPointer])=>{
+            handler: ([handle, hEvent, eventsPointer])=>{
                 const socket = socketOf(handle);
                 if (!socket)
                 {
@@ -1606,6 +1608,10 @@ export function createWinsockFunctions(host){
                 if (eventsPointer === 0)
                 {
                     return fail(WSAEFAULT);
+                }
+                if ((hEvent >>> 0) !== 0)
+                {
+                    host.kernel32?.('ResetEvent')?.([hEvent >>> 0]);
                 }
                 const armed = socket.eventSelect;
                 const pending = armed ? armed.pending : 0;

@@ -748,6 +748,19 @@ test('WSAEventSelect signals a kernel event, and WSAEnumNetworkEvents reports an
     assert.equal(fx.dword(EVENTS), 0, 'reading it clears it');
 });
 
+test('WSAEnumNetworkEvents resets the event it is handed', ()=>{
+    // A manual-reset event left signalled answers every wait at once: a
+    // network thread that waits, enumerates and selects again spins on it.
+    const kernel = fakeKernel();
+    const fx = fixture({ kernel32: kernel.kernel32 });
+    const { accepted } = connected(fx);
+    const event = fx.call('WSACreateEvent');
+    assert.equal(fx.call('WSASetEvent', [event]), 1);
+    assert.equal(fx.call('WSAEventSelect', [accepted, event, FD_READ]), 0);
+    assert.equal(fx.call('WSAEnumNetworkEvents', [accepted, event, 0x700]), 0);
+    assert.equal(kernel.events.get(event)?.signalled, false);
+});
+
 test('WSAEventSelect cancels a prior WSAAsyncSelect on the same socket', ()=>{
     const fx = fixture();
     const { client, accepted } = connected(fx);
