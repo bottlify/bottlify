@@ -132,6 +132,29 @@ test('vs_2_0: lengths, i# and b# and their defs, mova, relative addressing, loop
     ]);
 });
 
+test('vs_2_0: the address register has four components, each addressing on its own', ()=>{
+    // fxc writes a whole vector into it and reads c[a0.y]: the relative token's swizzle
+    // replicates the component. vs_1_1's address register is a0.x alone.
+    expectTokens([
+        'vs_2_0',
+        'dcl_position v0',
+        'mova a0, v0.yxzw',
+        'mov oPos, c[a0.y+2]',
+    ].join('\n'), [
+        0xfffe0200,
+        0x0200001f, 0x80000000, 0x900f0000,
+        0x0200002e, 0xb00f0000, 0x90e10000,
+        0x03000001, 0xc00f0000, 0xa0e42002, 0xb0550000,
+        0xffff,
+    ]);
+    assert.match(disassembleShader(words('vs_2_0\nmova a0.w, c0\nmov oPos, c[a0.w + 1]\n')),
+        /mov oPos, c1\[a0\.w\]/);
+    assert.match(errorsOf('vs_1_1\nmov a0.y, c0\nmov oPos, c0\n')[0].message,
+        /address register is written as a0.x in vs_1_1/);
+    assert.match(errorsOf('vs_1_1\nmov a0.x, c0\nmov oPos, c[a0.y]\n')[0].message,
+        /vs_1_1 addresses relatively through a0.x only/);
+});
+
 test('ps_3_0: dcl forms, half precision, centroid, saturation, abs, oC and oDepth', ()=>{
     expectTokens([
         'ps_3_0',

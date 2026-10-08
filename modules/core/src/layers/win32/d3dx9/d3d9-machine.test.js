@@ -340,7 +340,13 @@ test('mova rounds to nearest, relative addressing with a0 and aL', ()=>{
     assert.equal(run(3, 'c[a0.x + 0]'), 30);
     assert.equal(run(1, '-c[a0.x + 2].w'), -30);
     rejects(()=>run(-3), /outside the register file/);
-    rejects(()=>asm('vs_2_0\nmova a0.y, c0\n'), /address register is written as a0.x only/);
+    // From vs_2_0 the address register has four components, each addressing on its own:
+    // fxc moves a whole vector into it (mova a0, r0.yxzw) and reads c[a0.y].
+    const four = execute(asm('vs_2_0\ndcl_position v0\nmova a0, v0.yxzw\n'
+        + 'mov oPos.x, c[a0.y + 1].x\nmov oPos.y, c[a0.x].x\nmov oPos.zw, c[a0.w].x\n'),
+    { constants: { f }, inputs: { v: [[3, 1, 0, 2]] } }).outputs.oPos;
+    assert.deepEqual([...four], [40, 10, 20, 20]);
+    rejects(()=>asm('vs_1_1\nmov a0.y, c0\n'), /address register is written as a0.x/);
     rejects(()=>go('vs_2_0\nmov oPos, c[a0.x]\n', { constants: { f } }),
         /read of unwritten a0/);
 });
@@ -782,7 +788,8 @@ test('decode rejects what the version does not have', ()=>{
     bad('ps_2_0\nmov r0, oC0\n', /cannot be a source/);
     bad('ps_2_0\nmov r0, i0\n', /not available|beyond the 0 registers|cannot be a source/);
     bad('ps_2_0\nmov t0, c0\n', /cannot be written/);
-    bad('vs_2_0\nmov a0, c0\n', /address register is written as a0.x only/);
+    bad('vs_2_0\nmov a0, c0\n', /mov to a0 is not valid in vs_2_0; use mova/);
+    bad('vs_1_1\nmov a0.xy, c0\n', /address register is written as a0.x only in vs_1_1/);
     bad('vs_2_0\nadd a0.x, c0, c1\n', /add cannot write the address register/);
     bad('vs_2_0\nsincos r0.z, c0.x, c1, c2\n', /sincos writes x \(cosine\) and y \(sine\) only/);
     bad('vs_2_0\nsincos r0.xy, c0.x\n', /truncated source 1 at token/);
@@ -876,11 +883,11 @@ test('decode rejects registers beyond the version\'s files', ()=>{
     bad('ps_3_0\nmov oC0, t0\n', /bad register|cannot be read/);
     bad('vs_2_0\nmov r0, c[a0.x + 256]\n', /beyond the 256/);
     bad('vs_2_0\nmov r0, v[a0.x]\n',
-        /inputs are addressed relatively only through aL|only a0.x can address constants/);
+        /inputs are addressed relatively only through aL|only a0 can address constants/);
     bad('vs_2_0\nmov r0, r[aL]\n', /only c and v can be addressed relatively|bad/);
     bad('ps_2_x\nmov r0, c[aL]\n', /aL cannot address c0 in ps_2_x/);
     bad('vs_1_1\nmov r0, c[aL]\n', /addresses relatively through a0.x only/);
-    bad('ps_3_0\nmov r0, c[a0.x]\n', /bad register|only a0.x can address constants/);
+    bad('ps_3_0\nmov r0, c[a0.x]\n', /bad register|only a0 can address constants/);
 });
 
 test('decode rejects malformed token streams', ()=>{
@@ -1231,4 +1238,13 @@ test('every assembled shader survives assemble, disassemble, assemble', ()=>{
         checked++;
     }
     assert.ok(checked > 100, `only ${checked} shaders round-tripped`);
+});
+
+test('before ps_1_4 arithmetic writes a texture register its stage has filled', ()=>{
+    // fxc does when the two temporaries are taken: mov_sat t0.w, v0.w.
+    const out = go('ps_1_1\ntex t0\nmov_sat t0.a, v0\nmul r0, t0, v0\n', {
+        inputs: { v: [[0.5, 0.5, 0.5, 0.5]], t: [[0, 0, 0, 0]] },
+        sample: ()=>[0.25, 0.5, 0.75, 1] }).outputs.oC0;
+    assert.deepEqual([...out], [0.125, 0.25, 0.375, 0.25]);
+    assert.throws(()=>asm('ps_1_4\ntexld r0, t0\nmov t0, r0\n'), /writes a r# register/);
 });

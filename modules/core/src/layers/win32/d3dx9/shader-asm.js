@@ -599,6 +599,8 @@ function maskBits(letters){
  * @property {string} cls
  * @property {number} num
  * @property {string} relName     'a0' or 'aL' for a register addressed relatively, else ''.
+ * @property {number} relComp     The component of a0 that addresses it: x in vs_1_1, any from
+ *                                vs_2_0, whose address register has four.
  * @property {string} swizzle     The letters after the dot, '' for none.
  * @property {string} suffix      The modifier written after the register, '' for none.
  * @property {string} indexText   What was between the brackets, '' if no brackets.
@@ -638,6 +640,7 @@ function parseOperand(text, v){
         throw fail(`there is only ${cls}0, not ${cls}${num}`);
     }
     let relName = '';
+    let relComp = 0;
     if (m[3] !== undefined)
     {
         if (!['c', 'v', 'o'].includes(cls))
@@ -646,6 +649,7 @@ function parseOperand(text, v){
         }
         const rel = parseRelativeIndex(m[3], v);
         relName = rel.name;
+        relComp = rel.comp;
         if (rel.offset !== null)
         {
             if (m[2] !== '')
@@ -656,20 +660,22 @@ function parseOperand(text, v){
         }
     }
     return {
-        cls, num, relName, swizzle: m[5] ?? '', suffix: (m[4] ?? '').toLowerCase(),
+        cls, num, relName, relComp, swizzle: m[5] ?? '', suffix: (m[4] ?? '').toLowerCase(),
         indexText: m[3] ?? '',
     };
 }
 
 /**
- * The inside of the brackets of a relative address: a0.x or aL, plus an optional constant.
+ * The inside of the brackets of a relative address: a component of a0 or aL, plus an
+ * optional constant.
  * @param {string} text
  * @param {Version} v
- * @returns {{ name: string, offset: number | null }}
+ * @returns {{ name: string, offset: number | null, comp: number }}
  */
 function parseRelativeIndex(text, v){
     let name = '';
     let offset = null;
+    let comp = 0;
     for (const raw of text.split('+'))
     {
         const term = raw.trim();
@@ -681,13 +687,14 @@ function parseRelativeIndex(text, v){
             }
             offset = Number(term);
         }
-        else if (/^a0\.(x|r)$/i.test(term) || /^al$/i.test(term))
+        else if (/^a0\.[xyzwrgba]$/i.test(term) || /^al$/i.test(term))
         {
             if (name !== '')
             {
                 throw fail(`a relative index takes one address register, not "[${text}]"`);
             }
             name = /^al$/i.test(term) ? 'aL' : 'a0';
+            comp = name === 'a0' ? 'xyzwrgba'.indexOf(term[3].toLowerCase()) & 3 : 0;
         }
         else if (/^a0$/i.test(term))
         {
@@ -706,15 +713,15 @@ function parseRelativeIndex(text, v){
     {
         throw fail('a pixel shader has no address register a0');
     }
-    if (name === 'a0' && v.major < 2)
+    if (name === 'a0' && v.major < 2 && comp !== 0)
     {
-        return { name, offset };
+        throw fail(`${v.name} addresses relatively through a0.x only`);
     }
     if (name === 'aL' && v.major < 2)
     {
         throw fail(`${v.name} has no loop counter aL`);
     }
-    return { name, offset };
+    return { name, offset, comp };
 }
 
 /**
@@ -910,7 +917,9 @@ function registerTokens(operand, v, bits){
         token = (token | (1 << 13)) >>> 0;
         if (v.major >= 2)
         {
-            extra.push(operand.relName === 'aL' ? 0xf0e40800 : 0xb0000000);
+            // The relative token's swizzle replicates the component of a0 it reads.
+            extra.push(operand.relName === 'aL' ? 0xf0e40800
+                : (0xb0000000 | operand.relComp * 0x55 << 16) >>> 0);
         }
         else if (operand.relName !== 'a0')
         {
@@ -972,9 +981,9 @@ function assembleDestination(text, kind, v, mods, defMask){
     }
     checkRegister(operand, v);
     const mask = operand.swizzle === '' ? defMask : maskBits(operand.swizzle);
-    if (operand.cls === 'a' && mask !== 1)
+    if (operand.cls === 'a' && mask !== 1 && v.major < 2)
     {
-        throw fail('the address register is written as a0.x');
+        throw fail(`the address register is written as a0.x in ${v.name}`);
     }
     let bits = mask << 16;
     bits |= mods.shift << 24;

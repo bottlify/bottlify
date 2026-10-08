@@ -767,9 +767,12 @@ function checkSource(v, op, kind, where){
         }
         if (rel.type === REG.ADDR)
         {
-            if (!v.vs || op.type !== REG.CONST || rel.index !== 0 || (rel.swizzle & 3) !== 0)
+            // vs_1_1's address register is a0.x alone; from vs_2_0 it has four components.
+            if (!v.vs || op.type !== REG.CONST || rel.index !== 0
+                || (v.num < 20 && (rel.swizzle & 3) !== 0))
             {
-                throw bad(`only a0.x can address constants, and only in a vertex shader (${name})`);
+                throw bad(`only a0 can address constants, only a0.x in vs_1_1, and only in a`
+                    + ` vertex shader (${name})`);
             }
         }
         else if (rel.type === REG.LOOP)
@@ -831,9 +834,9 @@ function checkDest(v, ins, where){
             {
                 throw bad(`${name} cannot be written in ${v.name}`);
             }
-            if (op.index !== 0 || op.writeMask !== 1)
+            if (op.index !== 0 || (v.num < 20 && op.writeMask !== 1))
             {
-                throw bad('the address register is written as a0.x only');
+                throw bad('the address register is written as a0.x only in vs_1_1');
             }
             if (ins.name === 'mov' && v.num >= 20)
             {
@@ -1110,7 +1113,9 @@ function checkPs1(v, ins, state){
     {
         if (spec.kind === 'arith')
         {
-            dest(d, REG.TEMP);
+            // Before 1.4 a texture register is a temporary once its stage has run: fxc
+            // writes arithmetic into it (mov_sat t0.w, v0.w) when the two r# are taken.
+            dest(d, !late && d.type === REG.TEXTURE ? REG.TEXTURE : REG.TEMP);
             if (ins.name === 'bem')
             {
                 if (d.writeMask !== 3)
@@ -1999,7 +2004,8 @@ function sourceText(v, op){
     if (op.relative)
     {
         const prefix = op.type === REG.CONST ? 'c' : 'v';
-        const rel = op.relative.type === REG.LOOP ? 'aL' : 'a0.x';
+        const rel = op.relative.type === REG.LOOP ? 'aL'
+            : `a0.${COMPONENTS[op.relative.swizzle & 3]}`;
         body = op.index ? `${prefix}[${rel} + ${op.index}]` : `${prefix}[${rel}]`;
     }
     else
@@ -2297,7 +2303,7 @@ function parseMask(text){
     return mask;
 }
 
-const OPERAND_PATTERN = /^([A-Za-z]+)(\d*)(?:\[\s*(a0\.x|aL)\s*(?:\+\s*(\d+))?\s*\])?(?:\.([xyzwrgba]+))?$/;
+const OPERAND_PATTERN = /^([A-Za-z]+)(\d*)(?:\[\s*(a0\.[xyzw]|aL)\s*(?:\+\s*(\d+))?\s*\])?(?:\.([xyzwrgba]+))?$/;
 
 /**
  * A swizzle or write mask in the xyzw spelling. The ps_1_x models spell it
@@ -2431,7 +2437,9 @@ function assembleSource(v, text){
         if (v.major >= 2)
         {
             const rtype = m[3] === 'aL' ? REG.LOOP : REG.ADDR;
-            extra.push((0x80000000 | typeBits(rtype)) >>> 0);
+            // The relative token's swizzle replicates the component of a0 it reads.
+            const comp = rtype === REG.ADDR ? COMPONENTS.indexOf(m[3][3]) : 0;
+            extra.push((0x80000000 | typeBits(rtype) | comp * 0x55 << 16) >>> 0);
         }
         else if (m[3] !== 'a0.x')
         {
@@ -2797,8 +2805,9 @@ export function execute(subject, io){
 
     const temps = new Float32Array(v.limits.temps * 4);
     const tempsWritten = new Uint8Array(v.limits.temps * 4);
-    let a0 = 0;
-    let a0Written = false;
+    const a0 = [0, 0, 0, 0];
+    /** The components of a0 written so far. */
+    let a0Written = 0;
     /** @type {Record<string, Float32Array>} */
     const outputs = {};
     /** @type {Record<string, number>} */
@@ -2897,7 +2906,9 @@ export function execute(subject, io){
             const frame = currentLoop();
             return frame ? frame.aL : fail('read of aL outside a loop');
         }
-        return a0Written ? a0 : fail('read of unwritten a0');
+        const comp = rel.swizzle & 3;
+        return (a0Written & 1 << comp) !== 0 ? a0[comp]
+            : fail(`read of unwritten a0.${COMPONENTS[comp]}`);
     };
 
     /**
@@ -3031,9 +3042,16 @@ export function execute(subject, io){
         const mask = d.writeMask;
         if (d.type === REG.ADDR)
         {
-            const value = cur.name === 'mova' ? Math.floor(res[0] + 0.5) : Math.floor(res[0]);
-            a0 = Number.isFinite(value) ? value | 0 : 0;
-            a0Written = true;
+            for (let c = 0; c < 4; c++)
+            {
+                if ((mask & 1 << c) !== 0)
+                {
+                    const value = cur.name === 'mova' ? Math.floor(res[c] + 0.5)
+                        : Math.floor(res[c]);
+                    a0[c] = Number.isFinite(value) ? value | 0 : 0;
+                }
+            }
+            a0Written |= mask;
             return;
         }
         /** @type {Float32Array | null} */
@@ -3604,7 +3622,8 @@ function executePs1(program, io){
     };
 
     /**
-     * Stores a result in the temporaries: the shift scale, then _sat, then the mask.
+     * Stores a result in the temporaries -- or, before 1.4, a texture register -- the shift
+ * scale, then _sat, then the mask.
      * @param {Instruction} ins @param {number[]} res
      */
     const store = (ins, res)=>{
@@ -3624,6 +3643,12 @@ function executePs1(program, io){
             if (d.saturate)
             {
                 x = saturate(x);
+            }
+            if (d.type === REG.TEXTURE)
+            {
+                texels[d.index * 4 + c] = x;
+                texelsWritten[d.index] = 1;
+                continue;
             }
             temps[d.index * 4 + c] = x;
             tempsWritten[d.index * 4 + c] = 1;
