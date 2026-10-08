@@ -22,32 +22,29 @@
 
 import { MSICONDITION } from './condition.js';
 import { INSTALLSTATE, normalize } from './session.js';
-import { createRecord } from './record.js';
 import { extractCabinet } from '../cabinet/stream.js';
-import {
-    HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS, REG_BINARY, REG_DWORD,
-    REG_EXPAND_SZ, REG_MULTI_SZ, REG_SZ,
-} from '../advapi32/registry.js';
+import { REG_DWORD, REG_EXPAND_SZ, REG_SZ } from '../advapi32/registry.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { runCustomAction } from './custom.js';
 import { PID } from './summary.js';
+import { editIni } from './ini.js';
+import { REMOVAL_ACTIONS, productGone, unpublishProduct } from './removal.js';
+import { environmentKey, environmentRow, installedValue } from './environment.js';
+import { valueText } from './registration.js';
+import {
+    ERROR_SUCCESS, ERROR_FUNCTION_NOT_CALLED, ERROR_INSTALL_USEREXIT, ERROR_INSTALL_FAILURE,
+    ERROR_INSTALL_SUSPEND, ERROR_NO_MORE_ITEMS, INSTALLMESSAGE, log, message, actionStart,
+    errorMessage, REGISTRY_TICKS, COMPONENT_TICKS, PROGRESS_RESET, progressed, actionData,
+    schedule, makeDirectories, create, readFile, writeFile, componentOf, installing, removing,
+    registryRoot, registryValue,
+} from './steps.js';
+export { setIniValue } from './ini.js';
 
-export const ERROR_SUCCESS = 0;
-export const ERROR_FUNCTION_NOT_CALLED = 1626;
-export const ERROR_INSTALL_USEREXIT = 1602;
-export const ERROR_INSTALL_FAILURE = 1603;
-export const ERROR_INSTALL_SUSPEND = 1604;
-export const ERROR_NO_MORE_ITEMS = 259;
-export const ERROR_INVALID_HANDLE_STATE = 1609;
-
-/** INSTALLMESSAGE types, in the top byte of a message's type. */
-export const INSTALLMESSAGE = Object.freeze({
-    FATALEXIT: 0x00000000, ERROR: 0x01000000, WARNING: 0x02000000, USER: 0x03000000,
-    INFO: 0x04000000, FILESINUSE: 0x05000000, RESOLVESOURCE: 0x06000000,
-    OUTOFDISKSPACE: 0x07000000, ACTIONSTART: 0x08000000, ACTIONDATA: 0x09000000,
-    PROGRESS: 0x0a000000, COMMONDATA: 0x0b000000, INITIALIZE: 0x0c000000,
-    TERMINATE: 0x0d000000, SHOWDIALOG: 0x0e000000,
-});
+export {
+    ERROR_SUCCESS, ERROR_FUNCTION_NOT_CALLED, ERROR_INSTALL_USEREXIT, ERROR_INSTALL_FAILURE,
+    ERROR_INSTALL_SUSPEND, ERROR_NO_MORE_ITEMS, ERROR_INVALID_HANDLE_STATE, INSTALLMESSAGE,
+    message, errorMessage, schedule, makeDirectories, readFile, writeFile, registryValue,
+} from './steps.js';
 
 /** A File row's attributes that change how it is installed. */
 const FILE_READONLY = 0x1;
@@ -61,79 +58,6 @@ const COMPONENT_NEVER_OVERWRITE = 0x80;
 const COMPONENT_REGISTRY_KEY_PATH = 0x4;
 
 /** @typedef {import('./engine.js').Engine} Engine */
-
-/** @param {Engine} engine @param {string} text */
-const log = (engine, text)=>engine.host.log?.(text);
-
-/**
- * Sends a message to the user interface.
- *
- * @param {Engine} engine @param {number} type @param {(string | number | null)[]} fields
- */
-export async function message(engine, type, fields){
-    const record = createRecord(Math.max(0, fields.length - 1));
-    fields.forEach((value, index)=>{
-        record.fields[index] = value;
-    });
-    return engine.host.message(type, record);
-}
-
-/**
- * The action's start, as ActionText describes it, told to the interface.
- *
- * @param {Engine} engine @param {string} action
- */
-async function actionStart(engine, action){
-    const row = engine.session.db.table('ActionText')?.rows.find(entry=>entry[0] === action);
-    const now = new Date();
-    const two = (/** @type {number} */ value)=>String(value).padStart(2, '0');
-    const time = `${two(now.getHours())}:${two(now.getMinutes())}:${two(now.getSeconds())}`;
-    log(engine, `Action ${time}: ${action}.`);
-    return message(engine, INSTALLMESSAGE.ACTIONSTART,
-        [null, action, row?.[1] ?? null, row?.[2] ?? null]);
-}
-
-/**
- * An error from the Error table, its fields formatted in.
- *
- * @param {Engine} engine @param {number} code @param {(string | number | null)[]} fields
- */
-export async function errorMessage(engine, code, fields){
-    const row = engine.session.db.table('Error')?.rows.find(entry=>entry[0] === code);
-    return message(engine, INSTALLMESSAGE.ERROR, [row?.[1] ?? null, code, ...fields]);
-}
-
-/**
- * What a piece of the installation counts for on the progress bar: a file
- * its size in bytes, a registry value and a component a fixed amount each.
- * Windows documents the messages, not the amounts (roadmap/decisions.md, A33).
- */
-const REGISTRY_TICKS = 13200;
-const COMPONENT_TICKS = 24000;
-
-/** INSTALLMESSAGE_PROGRESS's first field: what the message does to the bar. */
-const PROGRESS_RESET = 0;
-const PROGRESS_REPORT = 2;
-
-/**
- * The bar moved on by so many ticks.
- *
- * @param {Engine} engine @param {number} ticks
- */
-const progressed = (engine, ticks)=>
-    message(engine, INSTALLMESSAGE.PROGRESS, [null, PROGRESS_REPORT, ticks, 0, 0]);
-
-/**
- * What an action is doing now, as its ActionText template words it.
- *
- * @param {Engine} engine @param {string} action @param {(string | number | null)[]} fields
- *     From the first.
- */
-const actionData = (engine, action, fields)=>{
-    const row = engine.session.db.table('ActionText')?.rows.find(entry=>entry[0] === action);
-    return message(engine, INSTALLMESSAGE.ACTIONDATA,
-        [row?.[2] === null || row?.[2] === undefined ? null : String(row[2]), ...fields]);
-};
 
 /**
  * Runs a sequence table: every action with a positive number, in order,
@@ -228,20 +152,6 @@ export async function doAction(engine, action){
 }
 
 /**
- * Puts work into the script when one is being written, or does it now.
- *
- * @param {Engine} engine @param {string} name @param {() => Promise<number | void>} run
- */
-export async function schedule(engine, name, run){
-    if (engine.session.mode.scheduled)
-    {
-        engine.session.script.push({ name, run: async()=>(await run()) ?? ERROR_SUCCESS });
-        return ERROR_SUCCESS;
-    }
-    return (await run()) ?? ERROR_SUCCESS;
-}
-
-/**
  * Runs the script written so far, and empties it. Each action in it starts
  * again as it is carried out, as Windows' script starts it, so the interface
  * says what is being done while it is.
@@ -269,89 +179,6 @@ async function runScript(engine){
     }
     return ERROR_SUCCESS;
 }
-
-/**
- * Makes a directory and every one above it that is missing.
- *
- * @param {any} files @param {string} path
- */
-export function makeDirectories(files, path){
-    const parts = normalize(path).replace(/\\$/, '').split('\\');
-    for (let depth = 1; depth <= parts.length; depth++)
-    {
-        const partial = parts.slice(0, depth).join('\\');
-        if (depth === 1 && /^[A-Za-z]:$/.test(partial))
-        {
-            continue;
-        }
-        if (!files.stat(partial)?.isDirectory)
-        {
-            files.mkdir(partial);
-        }
-    }
-}
-
-/**
- * Opens a file for writing, its directory made first; the file is replaced.
- *
- * @param {any} files @param {string} path
- */
-function create(files, path){
-    makeDirectories(files, path.slice(0, path.lastIndexOf('\\') + 1));
-    return files.open(path, { read: false, write: true, create: true, truncate: true });
-}
-
-/**
- * Reads a whole file off the volume.
- *
- * @param {any} files @param {string} path @returns {Promise<Uint8Array | null>}
- */
-export async function readFile(files, path){
-    const stat = files.stat(path);
-    if (!stat || stat.isDirectory)
-    {
-        return null;
-    }
-    const node = files.open(path, { read: true });
-    if (!node)
-    {
-        return null;
-    }
-    try
-    {
-        return await files.read(node, 0, stat.size);
-    }
-    finally
-    {
-        files.close(node);
-    }
-}
-
-/**
- * Writes a whole file, replacing it.
- *
- * @param {any} files @param {string} path @param {Uint8Array} bytes
- */
-export function writeFile(files, path, bytes){
-    const node = create(files, path);
-    if (!node)
-    {
-        return false;
-    }
-    files.write(node, 0, bytes);
-    files.close(node);
-    return true;
-}
-
-/** @param {Engine} engine @param {string} key */
-const componentOf = (engine, key)=>engine.session.components.get(key) ?? null;
-
-/** @param {Engine} engine @param {string} key whether the component is being installed */
-const installing = (engine, key)=>{
-    const component = componentOf(engine, key);
-    return Boolean(component && (component.action === INSTALLSTATE.LOCAL
-        || component.action === INSTALLSTATE.SOURCE));
-};
 
 /**
  * The files the installation puts down: those of each component installing
@@ -521,57 +348,6 @@ async function installFiles(engine){
     return ERROR_SUCCESS;
 }
 
-/**
- * A Registry row's root: its own, or for -1 the machine's when the
- * installation is for everyone and the user's when it is not.
- *
- * @param {Engine} engine @param {number} root
- */
-function registryRoot(engine, root){
-    const roots = [HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS];
-    const id = root === -1
-        ? (engine.session.getProperty('ALLUSERS') !== '' ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER)
-        : roots[root];
-    return id === undefined ? null : engine.host.hive.root(id);
-}
-
-/**
- * A Registry row's value, formatted and typed as its prefix says: #x binary
- * in hex, #% an expandable string, # a number, ## a string beginning with
- * #, and a value holding NULs from [~] several strings.
- *
- * @param {string} value @returns {{ type: number, data: Uint8Array }}
- */
-export function registryValue(value){
-    if (value.startsWith('#x') || value.startsWith('#X'))
-    {
-        const hex = value.slice(2).replace(/[^0-9A-Fa-f]/g, '');
-        const padded = hex.length % 2 === 1 ? `0${hex}` : hex;
-        return { type: REG_BINARY,
-            data: Uint8Array.from(padded.match(/../g) ?? [], pair=>parseInt(pair, 16)) };
-    }
-    if (value.startsWith('#%'))
-    {
-        return { type: REG_EXPAND_SZ, data: encodeAnsi(`${value.slice(2)}\0`) };
-    }
-    if (value.startsWith('##'))
-    {
-        return { type: REG_SZ, data: encodeAnsi(`${value.slice(1)}\0`) };
-    }
-    if (value.startsWith('#'))
-    {
-        const number = Number.parseInt(value.slice(1), 10);
-        return { type: REG_DWORD,
-            data: new Uint8Array(Uint32Array.of(Number.isNaN(number) ? 0 : number >>> 0).buffer) };
-    }
-    if (value.includes('\0'))
-    {
-        const strings = value.split('\0').filter(part=>part !== '');
-        return { type: REG_MULTI_SZ, data: encodeAnsi(`${strings.join('\0')}\0\0`) };
-    }
-    return { type: REG_SZ, data: encodeAnsi(`${value}\0`) };
-}
-
 /** @param {Engine} engine */
 async function writeRegistryValues(engine){
     const { session, host } = engine;
@@ -589,6 +365,11 @@ async function writeRegistryValues(engine){
         const keyPath = session.formatText(String(row[2] ?? ''));
         const name = row[3] === null ? null : session.formatText(String(row[3]));
         const raw = row[4] === null ? null : String(row[4]);
+        if (raw === null && name === '-')
+        {
+            // A key named only to go with its component is not made.
+            continue;
+        }
         await schedule(engine, 'WriteRegistryValues', async()=>{
             const key = host.hive.create(root, keyPath).key;
             const value = raw === null ? null : session.formatText(raw);
@@ -604,39 +385,6 @@ async function writeRegistryValues(engine){
         });
     }
     return ERROR_SUCCESS;
-}
-
-/**
- * An INI file with one key set: the section made if missing, the key
- * replaced where it is or added at the section's end.
- *
- * @param {string} text @param {string} section @param {string} key @param {string} value
- */
-export function setIniValue(text, section, key, value){
-    const lines = text === '' ? [] : text.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n');
-    const wanted = `[${section.toLowerCase()}]`;
-    const header = lines.findIndex(line=>line.trim().toLowerCase() === wanted);
-    if (header < 0)
-    {
-        lines.push(`[${section}]`, `${key}=${value}`);
-        return `${lines.join('\r\n')}\r\n`;
-    }
-    let end = header + 1;
-    while (end < lines.length && !lines[end].trim().startsWith('['))
-    {
-        end++;
-    }
-    for (let at = header + 1; at < end; at++)
-    {
-        const equals = lines[at].indexOf('=');
-        if (equals > 0 && lines[at].slice(0, equals).trim().toLowerCase() === key.toLowerCase())
-        {
-            lines[at] = `${key}=${value}`;
-            return `${lines.join('\r\n')}\r\n`;
-        }
-    }
-    lines.splice(end, 0, `${key}=${value}`);
-    return `${lines.join('\r\n')}\r\n`;
 }
 
 /** @param {Engine} engine */
@@ -655,10 +403,11 @@ async function writeIniValues(engine){
         const section = session.formatText(String(row[3] ?? ''));
         const key = session.formatText(String(row[4] ?? ''));
         const value = session.formatText(String(row[5] ?? ''));
+        const action = Number(row[6] ?? 0);
         await schedule(engine, 'WriteIniValues', async()=>{
             const bytes = await readFile(host.files, path);
             const text = bytes ? new TextDecoder('latin1').decode(bytes) : '';
-            writeFile(host.files, path, encodeAnsi(setIniValue(text, section, key, value)));
+            writeFile(host.files, path, encodeAnsi(editIni(text, section, key, value, action)));
         });
     }
     return ERROR_SUCCESS;
@@ -747,16 +496,28 @@ async function writeEnvironmentStrings(engine){
         {
             continue;
         }
-        let name = String(row[1] ?? '');
-        const machine = name.includes('*');
-        name = name.replace(/^[=+\-!*]+/, '');
-        const value = session.formatText(String(row[2] ?? '')).replace(/\[~\]|\0/g, '');
+        const variable = environmentRow(String(row[1] ?? ''),
+            row[2] === null ? '' : session.formatText(String(row[2])));
+        if (variable.name === '')
+        {
+            continue;
+        }
         await schedule(engine, 'WriteEnvironmentStrings', async()=>{
-            const root = host.hive.root(machine ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER);
-            const key = host.hive.create(root, machine
-                ? 'SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment'
-                : 'Environment').key;
-            host.hive.setValue(key, name, REG_EXPAND_SZ, encodeAnsi(`${value}\0`));
+            const key = environmentKey(host.hive, variable.machine);
+            const now = host.hive.getValue(key, variable.name);
+            const existing = now ? valueText(now) : null;
+            const next = installedValue(variable, existing);
+            if (next === undefined)
+            {
+                return;
+            }
+            if (next === null)
+            {
+                host.hive.deleteValue(key, variable.name);
+                return;
+            }
+            host.hive.setValue(key, variable.name, now?.type === REG_SZ ? REG_SZ : REG_EXPAND_SZ,
+                encodeAnsi(`${next}\0`));
         });
     }
     return ERROR_SUCCESS;
@@ -799,6 +560,16 @@ async function processComponents(engine){
     const productCode = session.getProperty('ProductCode');
     for (const component of session.components.values())
     {
+        if (component.id && removing(engine, component.key))
+        {
+            const id = component.id;
+            await schedule(engine, 'ProcessComponents', async()=>{
+                host.registration.unregisterComponent(id, productCode);
+                component.installed = INSTALLSTATE.ABSENT;
+                await progressed(engine, COMPONENT_TICKS);
+            });
+            continue;
+        }
         if (!component.id || !installing(engine, component.key))
         {
             continue;
@@ -1045,6 +816,10 @@ async function installFinalize(engine){
     {
         await step.run();
     }
+    if (productGone(engine))
+    {
+        await unpublishProduct(engine);
+    }
     return ERROR_SUCCESS;
 }
 
@@ -1096,6 +871,7 @@ async function nothing(engine){
  * @type {Record<string, (engine: Engine) => Promise<number>>}
  */
 export const STANDARD_ACTIONS = {
+    ...REMOVAL_ACTIONS,
     AppSearch: appSearch,
     CCPSearch: nothing,
     RMCCPSearch: nothing,
@@ -1114,25 +890,16 @@ export const STANDARD_ACTIONS = {
     AllocateRegistrySpace: nothing,
     ProcessComponents: processComponents,
     UnpublishComponents: nothing,
-    UnpublishFeatures: nothing,
     StopServices: nothing,
     DeleteServices: nothing,
     UnregisterComPlus: nothing,
-    SelfUnregModules: nothing,
     UnregisterTypeLibraries: nothing,
     RemoveODBC: nothing,
     UnregisterFonts: nothing,
-    RemoveRegistryValues: nothing,
     UnregisterClassInfo: nothing,
     UnregisterExtensionInfo: nothing,
     UnregisterProgIdInfo: nothing,
     UnregisterMIMEInfo: nothing,
-    RemoveIniValues: nothing,
-    RemoveShortcuts: nothing,
-    RemoveEnvironmentStrings: nothing,
-    RemoveDuplicateFiles: nothing,
-    RemoveFiles: nothing,
-    RemoveFolders: nothing,
     CreateFolders: createFolders,
     MoveFiles: nothing,
     InstallFiles: installFiles,

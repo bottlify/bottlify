@@ -35,7 +35,7 @@ import { INSTALLSTATE, createSession } from './session.js';
 import { PID_TYPES, VT, readSummary } from './summary.js';
 import { INSTALLMESSAGE, doAction, readFile, runSequence } from './actions.js';
 import { finishAsync } from './custom.js';
-import { createRegistration } from './registration.js';
+import { createRegistration, squashGuid } from './registration.js';
 import { installerVersion } from './version.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 
@@ -62,6 +62,41 @@ const ERROR_INVALID_TABLE = 1628;
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
 const ERROR_DATATYPE_MISMATCH = 1629;
 const ERROR_ACCESS_DENIED = 5;
+const ERROR_UNKNOWN_PRODUCT = 1605;
+const ERROR_INSTALL_SOURCE_ABSENT = 1612;
+
+/** MsiConfigureProduct's install levels with a meaning of their own. */
+const INSTALLLEVEL_DEFAULT = 0;
+const INSTALLLEVEL_MAXIMUM = 0xffff;
+
+/**
+ * What MsiConfigureProduct's state asks the installation for: the whole
+ * product removed, every feature local or from source, or as it stands.
+ *
+ * @type {Map<number, string>}
+ */
+const PRODUCT_REQUESTS = new Map([
+    [2, 'REMOVE=ALL'], [3, 'ADDLOCAL=ALL'], [4, 'ADDSOURCE=ALL'], [5, ''],
+]);
+
+/** And MsiConfigureFeature's, for one feature. @type {Map<number, string>} */
+const FEATURE_REQUESTS = new Map([
+    [2, 'REMOVE'], [3, 'ADDLOCAL'], [4, 'ADDSOURCE'], [5, 'ADDDEFAULT'],
+]);
+
+/**
+ * REINSTALLMODE's letters for MsiReinstallProduct's flags, lowest bit first:
+ * repair, missing, older, equal, exact, checksum, all, machine data, user
+ * data, shortcuts, package.
+ */
+const REINSTALL_LETTERS = 'rpoedcamusv';
+
+/** @param {number} flags @returns {string} the REINSTALLMODE the flags spell */
+const reinstallMode = flags=>[...REINSTALL_LETTERS]
+    .filter((_, bit)=>((flags >>> 0) & (1 << bit)) !== 0).join('');
+
+/** @param {string} value a property value quoted for a command line */
+const quoted = value=>`"${value.replace(/"/g, '""')}"`;
 
 /** INSTALLUILEVEL values. */
 const INSTALLUILEVEL = Object.freeze({
@@ -554,6 +589,10 @@ export function createMsiFunctions(host){
         const session = createSession({
             db, packagePath, machine: host.machine(), commandLine,
             isInstalled: code=>registration.productState(code) === INSTALLSTATE.DEFAULT,
+            installed: {
+                feature: registration.featureInstalled,
+                component: (product, id)=>registration.componentPath(product, id) !== null,
+            },
         });
         session.setProperty('UILevel', String(uiLevel & 0x0f || INSTALLUILEVEL.BASIC));
         return session;
@@ -602,6 +641,58 @@ export function createMsiFunctions(host){
         }
         host.log?.(`Installation of ${path} answered ${code}.`);
         return code;
+    };
+
+    // ----- an installed product ---------------------------------------------
+
+    /**
+     * The copy of its package the machine kept for an installed product, or
+     * the error a call on a product that is not installed answers.
+     *
+     * @param {string | null} productCode @returns {string | number}
+     */
+    const localPackage = productCode=>{
+        if (productCode === null || squashGuid(productCode) === null)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        if (registration.productState(productCode) !== INSTALLSTATE.DEFAULT)
+        {
+            return ERROR_UNKNOWN_PRODUCT;
+        }
+        const info = registration.productInfo(productCode, 'LocalPackage');
+        return 'value' in info && info.value !== '' ? info.value : ERROR_INSTALL_SOURCE_ABSENT;
+    };
+
+    /**
+     * An installed product's package run again with the properties that ask
+     * for a change: a removal, a repair, a feature added or taken away.
+     *
+     * @param {string | null} productCode @param {string} request
+     */
+    const maintain = async(productCode, request)=>{
+        const local = localPackage(productCode);
+        return typeof local === 'number' ? local : installPackage(local, request);
+    };
+
+    /**
+     * MsiConfigureProduct(Ex): the whole product put in a state -- removed,
+     * every feature local or run from source, or reconfigured as it is --
+     * at an install level, the caller's own properties after.
+     *
+     * @param {string | null} productCode @param {number} level @param {number} state
+     * @param {string} commandLine
+     */
+    const configureProduct = async(productCode, level, state, commandLine)=>{
+        const request = PRODUCT_REQUESTS.get(state | 0);
+        if (request === undefined)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        const levelText = (level | 0) === INSTALLLEVEL_DEFAULT ? ''
+            : `INSTALLLEVEL=${(level | 0) === INSTALLLEVEL_MAXIMUM ? 32767 : level | 0}`;
+        return maintain(productCode, [request, levelText, commandLine]
+            .filter(part=>part !== '').join(' '));
     };
 
     // ----- sessions: what a custom action calls ---------------------------
@@ -1460,17 +1551,49 @@ export function createMsiFunctions(host){
             }
             return installPackage(name, reader(wide)(commandLine) ?? '');
         }),
-        ...both('MsiConfigureProduct', 12, ()=>()=>{
-            host.divergence?.('MsiConfigureProduct', 'an installed product is not reconfigured');
-            return ERROR_CALL_NOT_IMPLEMENTED;
+        ...both('MsiConfigureProduct', 12, wide=>async([product, level, state])=>
+            configureProduct(reader(wide)(product), level, state, '')),
+        ...both('MsiConfigureProductEx', 16, wide=>async([product, level, state, commandLine])=>
+            configureProduct(reader(wide)(product), level, state,
+                reader(wide)(commandLine) ?? '')),
+        ...both('MsiConfigureFeature', 12, wide=>async([product, feature, state])=>{
+            const name = reader(wide)(feature);
+            const request = name === null ? null : FEATURE_REQUESTS.get(state | 0);
+            if (request === undefined || name === null)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            return maintain(reader(wide)(product), `${request}=${quoted(name)}`);
         }),
-        ...both('MsiConfigureProductEx', 16, ()=>()=>{
-            host.divergence?.('MsiConfigureProductEx', 'an installed product is not reconfigured');
-            return ERROR_CALL_NOT_IMPLEMENTED;
+        ...both('MsiReinstallProduct', 8, wide=>async([product, mode])=>
+            maintain(reader(wide)(product), `REINSTALL=ALL REINSTALLMODE=${reinstallMode(mode)}`)),
+        ...both('MsiReinstallFeature', 12, wide=>async([product, feature, mode])=>{
+            const name = reader(wide)(feature);
+            if (name === null)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            return maintain(reader(wide)(product),
+                `REINSTALL=${quoted(name)} REINSTALLMODE=${reinstallMode(mode)}`);
         }),
-        ...both('MsiOpenProduct', 8, ()=>()=>{
-            host.divergence?.('MsiOpenProduct', 'an installed product is not opened as a session');
-            return ERROR_CALL_NOT_IMPLEMENTED;
+        ...both('MsiOpenProduct', 8, wide=>async([product, out])=>{
+            const code = reader(wide)(product);
+            if (code === null || (out >>> 0) === 0)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            const local = localPackage(code);
+            if (typeof local === 'number')
+            {
+                return local;
+            }
+            const session = await openSession(local);
+            if (!session)
+            {
+                return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
+            }
+            writeU32(out, open('session', { session, deferred: null }));
+            return ERROR_SUCCESS;
         }),
         ...both('MsiDatabaseApplyTransform', 12, ()=>()=>{
             host.divergence?.('MsiDatabaseApplyTransform', 'a transform is not applied');

@@ -126,6 +126,25 @@ const ADVERTISED_PROPERTIES = Object.freeze({
 });
 
 /**
+ * Deletes a key and everything under it. The hive refuses a key that has
+ * subkeys, as NT does, so the tree goes from its leaves up.
+ *
+ * @param {Hive} hive @param {any} root @param {string} path
+ */
+export function removeKeyTree(hive, root, path){
+    const key = hive.open(root, path);
+    if (!key)
+    {
+        return;
+    }
+    for (const name of hive.subkeys(key))
+    {
+        removeKeyTree(hive, root, `${path}\\${name}`);
+    }
+    hive.remove(root, path);
+}
+
+/**
  * @param {Hive} hive
  */
 export function createRegistration(hive){
@@ -316,6 +335,91 @@ export function createRegistration(hive){
             const keys = productKeys(productCode);
             const key = keys ? open(keys.features) : null;
             return Boolean(key && hive.getValue(key, feature));
+        },
+
+        /**
+         * Forgets a component's key path for one product: the component stays
+         * registered for the others that share it.
+         *
+         * @param {string} componentId @param {string} productCode
+         */
+        unregisterComponent: (componentId, productCode)=>{
+            const component = squashGuid(componentId);
+            const product = squashGuid(productCode);
+            const path = `${USER_DATA}\\Components\\${component}`;
+            const key = component && product ? open(path) : null;
+            if (!key)
+            {
+                return;
+            }
+            hive.deleteValue(key, /** @type {string} */ (product));
+            if (hive.values(key).length === 0 && hive.subkeys(key).length === 0)
+            {
+                hive.remove(machine, path);
+            }
+        },
+
+        /** @param {string} productCode @param {string} feature */
+        unregisterFeature: (productCode, feature)=>{
+            const keys = productKeys(productCode);
+            for (const path of keys ? [keys.features, `${CLASSES}\\Features\\${keys.squashed}`]
+                : [])
+            {
+                const key = open(path);
+                if (key)
+                {
+                    hive.deleteValue(key, feature);
+                }
+            }
+        },
+
+        /**
+         * Forgets a product entirely, as a removal leaves the machine: its
+         * properties, its line in the control panel, its advertisement, its
+         * features, its components' key paths and its place under its upgrade
+         * code.
+         *
+         * @param {string} productCode
+         */
+        unregisterProduct: productCode=>{
+            const keys = productKeys(productCode);
+            if (!keys)
+            {
+                return;
+            }
+            for (const path of [`${USER_DATA}\\Products\\${keys.squashed}`, keys.uninstall,
+                keys.advertised, `${CLASSES}\\Features\\${keys.squashed}`])
+            {
+                removeKeyTree(hive, machine, path);
+            }
+            const components = open(`${USER_DATA}\\Components`);
+            for (const name of components ? hive.subkeys(components) : [])
+            {
+                const path = `${USER_DATA}\\Components\\${name}`;
+                const key = open(path);
+                if (key && hive.getValue(key, keys.squashed))
+                {
+                    hive.deleteValue(key, keys.squashed);
+                    if (hive.values(key).length === 0 && hive.subkeys(key).length === 0)
+                    {
+                        hive.remove(machine, path);
+                    }
+                }
+            }
+            const upgrades = open(`${CLASSES}\\UpgradeCodes`);
+            for (const name of upgrades ? hive.subkeys(upgrades) : [])
+            {
+                const path = `${CLASSES}\\UpgradeCodes\\${name}`;
+                const key = open(path);
+                if (key && hive.getValue(key, keys.squashed))
+                {
+                    hive.deleteValue(key, keys.squashed);
+                    if (hive.values(key).length === 0)
+                    {
+                        hive.remove(machine, path);
+                    }
+                }
+            }
         },
 
         /** @param {string} upgradeCode @returns {string[]} the products filed under it */

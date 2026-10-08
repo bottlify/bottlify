@@ -283,6 +283,14 @@ made. A program that probes `GetProcAddress` for one of them to tell the familie
 here and is told the failure when it calls; revisit if such a program is found to take a 9x path it
 cannot finish. *2026-10-07.*
 
+**A36 — A removal that takes the last key out of an INI section takes the section too, and a
+file it leaves empty goes.** The IniFile and RemoveIniFile tables say which line or tag to take
+out, not what becomes of a heading left with nothing under it. Leaving it would keep the file,
+and with it the folder the product made, after a removal that otherwise leaves nothing; so the
+empty heading goes with its last key, and a file with nothing left in it is deleted. Not measured
+against Windows; revisit if a program is found reading an empty section its setup left.
+*2026-10-08.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

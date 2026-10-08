@@ -69,3 +69,20 @@ test('a record holds a string of any length, as Windows bounds none', ()=>{
     assert.equal(fns.MsiRecordGetStringA.handler([record, 1, BUFFER, SIZE]), 0);
     assert.equal(readCString(BUFFER, 0x100000), text, 'and all of it, read back');
 });
+
+test('an installed product is reached through the package the machine kept for it', async()=>{
+    const { fns, put, setU32 } = setup();
+    const unknown = put(0x1000, '{6D7A2B10-1111-4222-8333-944455556666}');
+    const OUT = 0x40;
+    assert.equal(await fns.MsiConfigureProductA.handler([unknown, 0, 2]), 1605,
+        'ERROR_UNKNOWN_PRODUCT for one the machine has no record of');
+    assert.equal(await fns.MsiReinstallProductA.handler([unknown, 0x1]), 1605);
+    assert.equal(await fns.MsiConfigureFeatureA.handler([unknown, put(0x2000, 'Main'), 2]),
+        1605);
+    setU32(OUT, 0);
+    assert.equal(await fns.MsiOpenProductA.handler([unknown, OUT]), 1605);
+    assert.equal(await fns.MsiConfigureProductA.handler([put(0x3000, 'not a guid'), 0, 2]), 87);
+    assert.equal(await fns.MsiConfigureProductA.handler([unknown, 0, 9]), 87,
+        'a state that is not one of the four');
+    assert.equal(await fns.MsiOpenProductA.handler([unknown, 0]), 87);
+});
