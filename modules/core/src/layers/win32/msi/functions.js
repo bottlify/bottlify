@@ -47,6 +47,7 @@ import { createRegistration, squashGuid, valueText } from './registration.js';
 import { installerVersion } from './version.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { createProductFunctions } from './products.js';
+import { applyPatch as applyDeltaPatch } from '../mspatcha/pa19.js';
 import {
     ERROR_BAD_PATHNAME, exportTable, importTable, mergeDatabases, streamFolder,
 } from './archive.js';
@@ -418,6 +419,10 @@ export function createMsiFunctions(host){
                     installNested: (kind, source, commandLine)=>installNested(session, kind,
                         source, commandLine, made.thread),
                     cachePackage,
+                    applyDelta: async(old, delta)=>{
+                        const result = applyDeltaPatch(old, delta);
+                        return { code: result.code, bytes: result.bytes ?? null };
+                    },
                     registerPatches: async(productCode, folder)=>{
                         for (const entry of sessionPatches.get(session) ?? [])
                         {

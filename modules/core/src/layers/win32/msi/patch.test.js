@@ -24,13 +24,21 @@ import { encodeStreamName } from './database.js';
 import { buildCabinet } from '../cabinet/cabinet.fixture.js';
 import { PID } from './summary.js';
 import { VT } from './summary.js';
+import { buildPatch, storedStream } from '../mspatcha/pa19.fixture.js';
 
 const PRODUCT = '{6D7A2B10-1111-4222-8333-944455556666}';
 const PATCH = '{9A9A9A9A-1111-4222-8333-944455556666}';
 const CLSID_PATCH = '{000C1086-0000-0000-C000-000000000046}';
 
-/** @param {string} version @param {number} size @param {number} sequence */
-const tables = (version, size, sequence)=>/** @type {import('./install.fixture.js').Tables} */ ({
+/**
+ * The product's tables at a version; the file in the patch's cabinet when its
+ * sequence is 2, or -- `delta` -- left where it was and a delta for it in the
+ * Patch table instead.
+ *
+ * @param {string} version @param {number} size @param {number} sequence
+ * @param {boolean} [delta]
+ */
+const tables = (version, size, sequence, delta = false)=>/** @type {import('./install.fixture.js').Tables} */ ({
     Property: [['Property', 'Value'], [['ProductCode', PRODUCT], ['ProductName', 'Game'],
         ['ProductVersion', version], ['Manufacturer', 'Maker'], ['ProductLanguage', '1033'],
         ['ProgramFilesFolder', 'C:\\Program Files\\']]],
@@ -46,8 +54,10 @@ const tables = (version, size, sequence)=>/** @type {import('./install.fixture.j
     File: [['File', 'Component_', 'FileName', 'FileSize', 'Version', 'Language', 'Attributes',
         // The patched file is compressed into the patch's cabinet, as a patch
         // tool marks it.
-        'Sequence'], [['exe', 'Core', 'game.exe', size, null, null, sequence === 1 ? 0 : 0x4000,
-        sequence]]],
+        'Sequence'], [['exe', 'Core', 'game.exe', size, null, null,
+        sequence === 1 || delta ? 0 : 0x4000, delta ? 1 : sequence]]],
+    ...delta ? { Patch: [['File_', 'Sequence', 'PatchSize', 'Attributes', 'Header',
+        'StreamRef_'], [['exe', 2, 0, 0, null, null]]] } : {},
     Media: [['DiskId', 'LastSequence', 'DiskPrompt', 'Cabinet', 'VolumeLabel', 'Source'],
         sequence === 1 ? [[1, 1, null, null, null, null]]
             : [[1, 1, null, null, null, null], [2, 2, null, '#PATCH_CAB', null, null]]],
@@ -66,17 +76,20 @@ async function asStorage(name, bytes){
 }
 
 /** The .msp: the product transform, its "#" companion, and the cabinet with the new file. */
-async function makePatch(){
+/** @param {boolean} [delta] */
+async function makePatch(delta = false){
     const base = typed(packageDatabase(tables('1.0', 4, 1)));
-    const patched = typed(packageDatabase(tables('1.1', 6, 2)));
+    const patched = typed(packageDatabase(tables('1.1', 6, 2, delta)));
     const product = await generateTransform(patched, base);
     assert.equal(product.code, 0);
-    const companionTables = { ...tables('1.1', 6, 2),
+    const companionTables = { ...tables('1.1', 6, 2, delta),
         PatchPackage: [['PatchId', 'Media_'], [[PATCH, 2]]] };
     const companion = await generateTransform(typed(packageDatabase(
-        /** @type {any} */ (companionTables))), typed(packageDatabase(tables('1.1', 6, 2))));
+        /** @type {any} */ (companionTables))), typed(packageDatabase(tables('1.1', 6, 2, delta))));
     assert.equal(companion.code, 0);
-    const content = encodeAnsi('MZ.v11');
+    const content = delta ? buildPatch({ newBytes: encodeAnsi('MZ.v11'),
+        oldFiles: [{ bytes: encodeAnsi('MZ..'), stream: storedStream(encodeAnsi('MZ.v11')) }] })
+        : encodeAnsi('MZ.v11');
     const cabinet = buildCabinet({ folders: [{ compression: 0,
         blocks: [{ packed: content, size: content.length }] }],
     files: [{ name: 'exe', size: content.length, offset: 0, folder: 0 }] });
@@ -93,7 +106,13 @@ async function makePatch(){
     ], CLSID_PATCH));
 }
 
-test('a patch is applied to the installed product, listed, and removed again', async()=>{
+/**
+ * Installs the product through msi.dll, then patches it, lists the patch and
+ * removes it.
+ *
+ * @param {boolean} delta  A patch carrying a delta rather than the whole file.
+ */
+async function patchedAndRemoved(delta){
     const host = await machine(['C:\\src', 'C:\\src\\Game'],
         { 'C:\\src\\Game\\game.exe': 'MZ..' });
     const { files } = host;
@@ -104,7 +123,7 @@ test('a patch is applied to the installed product, listed, and removed again', a
         files.close(node);
     };
     write('C:\\src\\game.msi', await databaseBytes(typed(packageDatabase(tables('1.0', 4, 1)))));
-    write('C:\\src\\fix.msp', await makePatch());
+    write('C:\\src\\fix.msp', await makePatch(delta));
 
     const memory = new Uint8Array(0x40000);
     let next = 0x20000;
@@ -158,4 +177,12 @@ test('a patch is applied to the installed product, listed, and removed again', a
     assert.equal(files.stat(info.localPackage), null);
     assert.equal(await fns.MsiApplyPatchA.handler([put(0x300, 'C:\\src\\game.msi'), 0, 0, 0]),
         1636, 'a package that is not a patch');
+}
+
+test('a patch is applied to the installed product, listed, and removed again', async()=>{
+    await patchedAndRemoved(false);
+});
+
+test('a patch\'s delta brings the installed file up to date through the Patch API', async()=>{
+    await patchedAndRemoved(true);
 });
