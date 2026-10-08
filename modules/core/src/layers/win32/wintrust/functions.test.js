@@ -212,3 +212,47 @@ test('an unknown action, another subject form and missing arguments are refused'
     assert.equal(m.fns.WinVerifyTrust.handler([0, m.action, 0]), ERROR_INVALID_PARAMETER);
     assert.equal(m.fns.WinVerifyTrustEx.handler([0, m.action, 0]), ERROR_INVALID_PARAMETER);
 });
+
+test('WTHelperProvDataFromStateData has no provider data to hand back for a verification', ()=>{
+    const m = machine({ roots: [chain.root] });
+    m.file('C:\\signed.cab', signedCabinet());
+    assert.equal(m.verify('C:\\signed.cab', { state: WTD_STATEACTION_VERIFY }), 0);
+    const entry = m.fns.WTHelperProvDataFromStateData;
+    assert.equal(entry.argBytes, 4);
+    assert.equal(entry.handler([m.stateHandle()]), 0, 'no CRYPT_PROVIDER_DATA is laid out');
+    assert.equal(entry.handler([m.stateHandle()]), 0);
+    assert.equal(m.divergences.length, 1, 'said once');
+    assert.equal(entry.handler([0]), 0);
+    // What a program does next with that NULL: no signer, no certificate.
+    assert.equal(m.fns.WTHelperGetProvSignerFromChain.handler([0, 0, 0, 0]), 0);
+    assert.equal(m.fns.WTHelperGetProvCertFromChain.handler([0, 0]), 0);
+});
+
+test('WTHelperGetProvSignerFromChain and WTHelperGetProvCertFromChain index the arrays given', ()=>{
+    // CRYPT_PROVIDER_DATA at 0x1000 with two signers of 44 bytes at 0x2000;
+    // the second has three countersigners at 0x3000 and the first a chain of
+    // two 60-byte certificates at 0x4000.
+    const m = machine();
+    const data = 0x1000;
+    const signers = 0x2000;
+    m.view.setUint32(data + 64, 2, true);
+    m.view.setUint32(data + 68, signers, true);
+    m.view.setUint32(signers + 44 + 32, 3, true);
+    m.view.setUint32(signers + 44 + 36, 0x3000, true);
+    m.view.setUint32(signers + 12, 2, true);
+    m.view.setUint32(signers + 16, 0x4000, true);
+    const signer = m.fns.WTHelperGetProvSignerFromChain;
+    const cert = m.fns.WTHelperGetProvCertFromChain;
+    assert.deepEqual([signer.argBytes, cert.argBytes], [16, 8]);
+    assert.equal(signer.handler([data, 0, 0, 0]), signers);
+    assert.equal(signer.handler([data, 1, 0, 7]), signers + 44, 'the index ignored unasked');
+    assert.equal(signer.handler([data, 2, 0, 0]), 0, 'past the signers');
+    assert.equal(signer.handler([data, 1, 1, 2]), 0x3000 + 2 * 44);
+    assert.equal(signer.handler([data, 1, 1, 3]), 0, 'past the countersigners');
+    assert.equal(signer.handler([data, 0, 1, 0]), 0, 'the first signer has none');
+    assert.equal(cert.handler([signers, 1]), 0x4000 + 60);
+    assert.equal(cert.handler([signers, 2]), 0, 'past the chain');
+    assert.equal(cert.handler([signers + 44, 0]), 0, 'no chain');
+    m.view.setUint32(data + 68, 0, true);
+    assert.equal(signer.handler([data, 0, 0, 0]), 0, 'a count with no array');
+});
