@@ -117,7 +117,7 @@
  * @property {number} [maxRegionBlocks]  Default 128.
  * @property {number} [hashSlots]  The entry hash's slots, a power of two: a block start
  *     past three quarters of them is reached from translated code only through the host.
- *     Default 2^22 (`Tables.HASH_SLOTS`).
+ *     Default 2^20 (`Tables.HASH_SLOTS`).
  * @property {number} [maxRegionBytes]   Default 8192.
  * @property {boolean} [precise]         Nothing relaxed for speed: the x87 exception flags,
  *     signalling NaNs, underflow and C1 kept as the processor keeps them, and the flags an

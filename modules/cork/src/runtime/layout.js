@@ -64,7 +64,7 @@ export const Tables = Object.freeze({
      * and left translated code 42.7 million times in four minutes for
      * addresses it had translated long before.
      */
-    HASH_SLOTS: 1 << 22,
+    HASH_SLOTS: 1 << 20,
     HASH_SLOT: 12,
     // A diagnostic block profile (`blockProfile`), past the tables
     // (`blockProfileAt`) and only in a memory a profiling host sized for it: a
