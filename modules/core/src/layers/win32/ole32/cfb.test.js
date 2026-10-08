@@ -243,3 +243,21 @@ test('a file too large for the header alone chains its FAT through DIFAT sectors
     assert.equal(data?.[size - 1], (size - 1) & 0xff);
     assert.equal(data?.[123456], 123456 & 0xff);
 });
+
+test('a file that ends partway into its last sector reads, the rest of it as zeros', ()=>{
+    // A package that shipped ended 352 bytes into the sector its last stream
+    // ends in, and Windows opens it.
+    const root = createRoot();
+    const data = new Uint8Array(25440).fill(7);
+    addStream(root, 'Large', data);
+    const bytes = serializeCompoundFile(root);
+    let end = bytes.length;
+    while (bytes[end - 1] === 0)
+    {
+        end--;
+    }
+    assert.notEqual(end % 512, 0, 'the file ends inside a sector');
+    const back = parseCompoundFile(bytes.slice(0, end));
+    assert.ok(back);
+    assert.deepEqual(back.children.get('LARGE')?.data, data);
+});

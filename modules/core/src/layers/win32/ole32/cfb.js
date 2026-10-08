@@ -110,27 +110,37 @@ export function isCompoundFile(bytes){
  * directory are all the same "this is not a docfile we can trust", and a
  * program is better told so than handed half of its data.
  *
- * @param {Uint8Array} bytes
+ * @param {Uint8Array} given
  * @returns {CfbEntry | null} the root, or null if the bytes are not a compound file
  */
-export function parseCompoundFile(bytes){
-    if (!isCompoundFile(bytes))
+export function parseCompoundFile(given){
+    if (!isCompoundFile(given))
     {
         return null;
     }
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const sectorShift = view.getUint16(0x1e, true);
-    const miniShift = view.getUint16(0x20, true);
+    const header = new DataView(given.buffer, given.byteOffset, HEADER_SIZE);
+    const sectorShift = header.getUint16(0x1e, true);
+    const miniShift = header.getUint16(0x20, true);
     if ((sectorShift !== 9 && sectorShift !== 12) || miniShift !== 6)
     {
         return null;
     }
     const sectorSize = 1 << sectorShift;
-    const sectorCount = Math.floor((bytes.length - HEADER_SIZE) / sectorSize);
+    // The header takes a whole sector -- a version 4 file pads it to 4096 --
+    // and a file may end partway into its last one, where the stream in it
+    // ends: Windows opens it, and what is missing reads as zeros.
+    const sectorCount = Math.max(0, Math.ceil((given.length - sectorSize) / sectorSize));
+    const whole = sectorSize * (sectorCount + 1);
+    const bytes = given.length >= whole ? given : new Uint8Array(whole);
+    if (bytes !== given)
+    {
+        bytes.set(given);
+    }
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const entriesPerFatSector = sectorSize / 4;
 
     /** @param {number} sector */
-    const sectorOffset = sector=>HEADER_SIZE + sector * sectorSize;
+    const sectorOffset = sector=>sectorSize + sector * sectorSize;
     /** @param {number} sector @returns {Uint32Array | null} */
     const sectorWords = sector=>{
         if (sector > MAXREGSECT || sector >= sectorCount)
