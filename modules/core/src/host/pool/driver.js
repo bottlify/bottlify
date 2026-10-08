@@ -42,7 +42,10 @@
  * @property {number} [leaveBelow]  the median share under which one leaves, in time
  * @property {number} [leaveAfterMs]  how long the median stays under it first
  * @property {number} [idleBelow]  a share this low counts as idle (a process that waits)
- * @property {number} [trialWindows]  windows a join is weighed over
+ * @property {number} [trialWindows]  windows with work a join is weighed over
+ * @property {number} [trialLimit]  windows a join waits for that many; past them it leaves, no
+ *     ceiling kept: the work does not last long enough to need it
+ * @property {number} [restMs]  after such a join, how long no other is tried
  * @property {number} [yieldShare]  of the gain one more worker brings at best, the share a
  *     join must bring to stay
  */
@@ -63,16 +66,20 @@
  * @typedef {Object} DriverState
  * @property {Map<number, number>} lowSince  by process: when its median went under
  *     `leaveBelow`, while it stays there
- * @property {Map<number, number>} rates  by process: its rate over the window before
- * @property {Map<number, { workers: number, before: number, rates: number[] }>} trials
- *     by process: a join being weighed -- how many worked before it, at what rate
+ * @property {Map<number, number[]>} rates  by process: its rates over the last windows
+ * @property {Map<number, { workers: number, before: number, rates: number[],
+ *     windows: number }>} trials
+ *     by process: a join being weighed -- how many worked before it, at what rate, the rates
+ *     of the windows with work since, and every window since
  * @property {Map<number, number>} ceilings  by process: the workers a trial found it
  *     gains nothing past
+ * @property {Map<number, number>} restUntil  by process: no join is tried before then
  */
 
 /** @returns {DriverState} */
 export function createDriverState(){
-    return { lowSince: new Map(), rates: new Map(), trials: new Map(), ceilings: new Map() };
+    return { lowSince: new Map(), rates: new Map(), trials: new Map(), ceilings: new Map(),
+        restUntil: new Map() };
 }
 
 /** @param {number[]} values */
@@ -101,7 +108,9 @@ export function decide(state, processes, now, settings){
     const leaveBelow = settings.leaveBelow ?? 0.4;
     const leaveAfterMs = settings.leaveAfterMs ?? 3000;
     const idleBelow = settings.idleBelow ?? 0.02;
-    const trialWindows = settings.trialWindows ?? 2;
+    const trialWindows = settings.trialWindows ?? 4;
+    const trialLimit = settings.trialLimit ?? 8;
+    const restMs = settings.restMs ?? 10000;
     const yieldShare = settings.yieldShare ?? 0.5;
     const perProcess = Math.max(1, settings.perProcess);
     const ceiling = perProcess * processes.length;
@@ -109,7 +118,8 @@ export function decide(state, processes, now, settings){
     /** @type {Decision[]} */
     const decisions = [];
     const sampled = new Set(processes.map(one=>one.id));
-    for (const kept of [state.lowSince, state.rates, state.trials, state.ceilings])
+    for (const kept of [state.lowSince, state.rates, state.trials, state.ceilings,
+        state.restUntil])
     {
         for (const id of kept.keys())
         {
@@ -123,9 +133,33 @@ export function decide(state, processes, now, settings){
     {
         const middle = median(shares);
         const joined = shares.length - 1;
-        const before = state.rates.get(id) ?? rate;
-        state.rates.set(id, rate);
+        // The rate before a join is the mean of the last windows': regions
+        // are counted as each batch ends, and one window is lumpy.
+        const recent = state.rates.get(id) ?? [];
+        const before = recent.length === 0 ? rate
+            : recent.reduce((sum, one)=>sum + one, 0) / recent.length;
+        recent.push(rate);
+        if (recent.length > trialWindows)
+        {
+            recent.shift();
+        }
+        state.rates.set(id, recent);
         const trial = state.trials.get(id);
+        if (trial !== undefined)
+        {
+            trial.windows++;
+        }
+        if (trial !== undefined && trial.windows > trialLimit
+            && trial.rates.length < trialWindows)
+        {
+            // Too few windows with work to weigh it: the work does not last
+            // long enough to need it, which says nothing of a ceiling.
+            state.trials.delete(id);
+            state.restUntil.set(id, now + restMs);
+            decisions.push({ kind: 'leave', process: id });
+            working--;
+            continue;
+        }
         // A trial is weighed only over windows the work lasts: workers that
         // ran out of it say nothing of what one more is worth. Meanwhile it
         // goes by the rules below, and no other joins.
@@ -161,14 +195,14 @@ export function decide(state, processes, now, settings){
         if (middle >= joinAt)
         {
             state.lowSince.delete(id);
-            if (trial === undefined
+            if (trial === undefined && now >= (state.restUntil.get(id) ?? 0)
                 && shares.length < Math.min(perProcess, state.ceilings.get(id) ?? perProcess)
                 && working < ceiling)
             {
                 decisions.push({ kind: 'join', process: id });
                 working++;
                 state.trials.set(id, { workers: shares.length, before: Math.max(before, rate),
-                    rates: [] });
+                    rates: [], windows: 0 });
             }
             continue;
         }

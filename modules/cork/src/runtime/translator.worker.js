@@ -24,12 +24,19 @@
 import { arenaEmitCache, createEmitCache, emitBatch, relinkBatch } from './emit-built.js';
 
 /**
- * Where this worker adds the microseconds it works, and next to them the
- * regions it emits, when a pool lends it: the pool's driver reads from these
- * how busy each of its workers was, and how much they got through.
- * @type {{ cells: Int32Array, at: number } | null}
+ * Where this worker adds the time it works, in tenths of a millisecond (a
+ * word holds 59 hours of them), and next to it the
+ * regions it emits and when the batch it is on began, when a pool lends it:
+ * the pool's driver reads from these how busy each of its workers was, and how
+ * much they got through. The batch under way counts as it goes: a batch of
+ * hundreds of regions outlasts the driver's window, and counted only once done
+ * it showed a worker idle for a window and then busy for two.
+ * @type {{ cells: Int32Array, at: number, epoch: number } | null}
  */
 let busyCell = null;
+/** Milliseconds since the pool's epoch, on the clock every thread shares. */
+const sinceEpoch = (/** @type {number} */ epoch)=>
+    Math.max(1, Math.round(performance.timeOrigin + performance.now() - epoch));
 
 /**
  * One runtime this worker serves: the worker's own scope, when a runtime
@@ -86,6 +93,10 @@ function connection(send){
         // The whole of what the batch held this worker for, forming a relink and
         // compiling included: how busy the worker is, which its parts do not say.
         const started = performance.now();
+        if (busyCell !== null)
+        {
+            Atomics.store(busyCell.cells, busyCell.at + 2, sinceEpoch(busyCell.epoch));
+        }
         try
         {
             const batch = relink
@@ -107,12 +118,19 @@ function connection(send){
             const busyMs = performance.now() - started;
             if (busyCell !== null)
             {
-                Atomics.add(busyCell.cells, busyCell.at, Math.round(busyMs * 1000));
+                Atomics.add(busyCell.cells, busyCell.at, Math.round(busyMs * 10));
                 Atomics.add(busyCell.cells, busyCell.at + 1, batch.results.length);
+                Atomics.store(busyCell.cells, busyCell.at + 2, 0);
             }
             send({ id, batch, compiled, busyMs }, [batch.module.buffer]);
         }
         catch (e){
+            if (busyCell !== null)
+            {
+                Atomics.add(busyCell.cells, busyCell.at,
+                    Math.round((performance.now() - started) * 10));
+                Atomics.store(busyCell.cells, busyCell.at + 2, 0);
+            }
             const message = e instanceof Error ? e.message : String(e);
             send({ id, batch: null, message: message.slice(0, 160) }, []);
         }
@@ -133,7 +151,8 @@ function scopeHandler(send){
     return (/** @type {any} */ data)=>{
         if (data?.busy !== undefined)
         {
-            busyCell = { cells: new Int32Array(data.busy.buffer), at: data.busy.index };
+            busyCell = { cells: new Int32Array(data.busy.buffer), at: data.busy.index,
+                epoch: data.busy.epoch };
             return;
         }
         if (data?.serve !== undefined)

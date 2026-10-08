@@ -14,7 +14,7 @@ import { createTranslatorPool } from './pool.js';
  */
 function fakePool(perProcess = 4){
     let clock = 0;
-    /** @type {{ posts: any[], busy: Int32Array | null, terminated: boolean }[]} */
+    /** @type {{ posts: any[], busy: Int32Array | null, epoch: number, terminated: boolean }[]} */
     const workers = [];
     /** @type {Map<number, { lent: number[], recalled: number[] }>} */
     const seen = new Map();
@@ -22,9 +22,10 @@ function fakePool(perProcess = 4){
         perProcess,
         now: ()=>clock,
         windowMs: 1e9,
+        driver: { trialWindows: 2 },
         open: async()=>{
             const worker = { posts: /** @type {any[]} */ ([]),
-                busy: /** @type {Int32Array | null} */ (null), terminated: false };
+                busy: /** @type {Int32Array | null} */ (null), epoch: 0, terminated: false };
             workers.push(worker);
             return {
                 post: message=>{
@@ -32,6 +33,7 @@ function fakePool(perProcess = 4){
                     if (message.busy)
                     {
                         worker.busy = new Int32Array(message.busy.buffer);
+                        worker.epoch = message.busy.epoch;
                     }
                     message.serve?.close();
                 },
@@ -64,8 +66,8 @@ function fakePool(perProcess = 4){
             const busy = lent[i]?.busy;
             if (busy)
             {
-                // A region a millisecond of work: the regions grow as the work does.
-                Atomics.add(busy, 0, Math.round(share * ms * 1000));
+                // Tenths of a millisecond; a region a millisecond of work.
+                Atomics.add(busy, 0, Math.round(share * ms * 10));
                 Atomics.add(busy, 1, Math.round(share * ms));
             }
         });
@@ -137,6 +139,26 @@ test('no more than perProcess for one process; a process\'s exit trims the idle 
         pool.removeProcess(1);
         assert.equal(pool.diagnostics().workers, 1, 'one kept for the next process');
         assert.equal(workers.filter(one=>one.terminated).length, 1);
+    }
+    finally
+    {
+        pool.dispose();
+    }
+});
+
+test('a batch under way counts in the window it runs in, not only once it is done', async()=>{
+    const { pool, workers, seen, add, window } = fakePool();
+    try
+    {
+        await add(1);
+        // The first worker began a batch 280 ms ago, on the clock every thread shares,
+        // and is still on it: the window it ran through was all work.
+        await new Promise(resolve=>setTimeout(resolve, 300));
+        const [first] = workers;
+        const began = performance.timeOrigin + performance.now() - first.epoch - 280;
+        Atomics.store(/** @type {Int32Array} */ (first.busy), 2, Math.round(began));
+        await window(250, [0]);
+        assert.equal(seen.get(1)?.lent.length, 2, 'it was busy: a second joins');
     }
     finally
     {

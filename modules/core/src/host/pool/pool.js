@@ -39,8 +39,11 @@ import { createDriverState, decide } from './driver.js';
 /**
  * @typedef {Object} PoolEntry
  * @property {PoolWorker} worker
- * @property {Int32Array} busy  the microseconds it worked, and the regions it emitted, ever
- * @property {number} seen  the microseconds when the driver last read them
+ * @property {Int32Array} busy  the time it worked (tenths of a millisecond) and the regions it
+ *     emitted, ever,
+ *     and when the batch it is on began (milliseconds since the pool's epoch; 0: none)
+ * @property {number} seen  the microseconds when the driver last read them, the batch under
+ *     way counted as far as it had gone
  * @property {number} emitted  the regions when the driver last read them
  * @property {number} share  its busy share of the last window
  * @property {number | null} process  the process it works for, or null
@@ -71,6 +74,15 @@ export function createTranslatorPool({ open, perProcess, windowMs = 500,
     /** @type {ReturnType<typeof setInterval> | null} */
     let timer = null;
     let lastAt = now();
+    /** The pool's clock as every thread reads it: what a worker's batch start is counted from. */
+    const epoch = performance.timeOrigin + performance.now();
+    const sinceEpoch = ()=>performance.timeOrigin + performance.now() - epoch;
+    /** The microseconds a worker has worked, the batch under way included. @param {PoolEntry} entry */
+    const workedOf = entry=>{
+        const done = Atomics.load(entry.busy, 0) * 100;
+        const began = Atomics.load(entry.busy, 2);
+        return done + (began > 0 ? Math.max(0, (sinceEpoch() - began) * 1000) : 0);
+    };
 
     /** @param {string} kind @param {number} process */
     const note = (kind, process)=>{
@@ -90,8 +102,8 @@ export function createTranslatorPool({ open, perProcess, windowMs = 500,
             return idle;
         }
         const worker = await open();
-        const cell = new SharedArrayBuffer(8);
-        worker.post({ busy: { buffer: cell, index: 0 } }, []);
+        const cell = new SharedArrayBuffer(16);
+        worker.post({ busy: { buffer: cell, index: 0, epoch } }, []);
         /** @type {PoolEntry} */
         const entry = { worker, busy: new Int32Array(cell), seen: 0, emitted: 0, share: 0,
             process: null, token: 0 };
@@ -110,7 +122,7 @@ export function createTranslatorPool({ open, perProcess, windowMs = 500,
         const channel = new MessageChannel();
         entry.process = id;
         entry.token = ++tokens;
-        entry.seen = Atomics.load(entry.busy, 0);
+        entry.seen = workedOf(entry);
         entry.emitted = Atomics.load(entry.busy, 1);
         at.workers.push(entry);
         entry.worker.post({ serve: channel.port1 }, [channel.port1]);
@@ -158,8 +170,10 @@ export function createTranslatorPool({ open, perProcess, windowMs = 500,
         {
             let emitted = 0;
             const shares = workers.map(entry=>{
-                const value = Atomics.load(entry.busy, 0);
-                const worked = (value - entry.seen) | 0;
+                // A batch that ended between the two reads is counted the next
+                // window; the count never goes back.
+                const value = Math.max(entry.seen, workedOf(entry));
+                const worked = value - entry.seen;
                 entry.seen = value;
                 entry.share = Math.min(1, worked / 1000 / span);
                 const regions = Atomics.load(entry.busy, 1);

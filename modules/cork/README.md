@@ -21,6 +21,13 @@ instructions on cork's own instruction model -- the JavaScript interpreter over 
 `ir-x87.js` and `ir-simd.js`, with no wasm tier -- and on translated code, and compares the two
 bit for bit.
 
+Emitting and compiling run in translation workers (`runtime/translator.worker.js`): the runtime
+opens `translators` of its own, or a host's pool lends it workers (`attachTranslator`,
+`detachTranslator`), each with a batch of its own out. What they emitted is kept for the process,
+not for a worker: an arena of shared memory (`runtime/arena.js`) every translator of the process
+reads and adds to, so a relink takes again what any of them emitted. Their gates are
+`runtime/translators.test.js` and `runtime/arena.test.js`.
+
 Where it goes next: `roadmap/v2/`. Zero runtime
 dependencies; vanilla ES modules with JSDoc; tests are `node:test`, colocated (`*.test.js` for
 units, `*.itest.js` for the corpus suites).

@@ -2220,6 +2220,7 @@ export async function zstdWasmFor(options, here = import.meta.url){
  *                     stop: () => void, ahead: () => number,
  *                     refetched: () => { blocks: number, bytes: number },
  *                     ranges: () => { requests: number, bytes: number },
+ *                     decoded: () => { blocks: number, bytes: number, ms: number },
  *                     registry: Promise<any> } | null>}
  */
 async function mountBundle({ options, cpu, events, translationStore }){
@@ -2255,10 +2256,18 @@ async function mountBundle({ options, cpu, events, translationStore }){
     const decode = (codec, bytes, expectedLength)=>{
         if (codec === 2)
         {
-            return zstdForEngine(bytes, expectedLength ?? 0);
+            // Counted: the decoding a guest read waits for is what a pool
+            // worker would take off this thread (roadmap/v2, stage 2).
+            const startedAt = performance.now();
+            const plain = zstdForEngine(bytes, expectedLength ?? 0);
+            decoded.blocks++;
+            decoded.bytes += plain.length;
+            decoded.ms += performance.now() - startedAt;
+            return plain;
         }
         return bytes;
     };
+    const decoded = { blocks: 0, bytes: 0, ms: 0 };
 
     // The index is deflated, and opening is asynchronous anyway, so it may use
     // the decoder a guest read cannot.
@@ -2634,6 +2643,7 @@ async function mountBundle({ options, cpu, events, translationStore }){
         /** Blocks a request went out for that were already here: the number
          *  that has to stay at zero. */
         refetched: ()=>({ ...refetched }),
+        decoded: ()=>({ ...decoded }),
         /** Range requests made and bytes asked for, ever. */
         ranges: ()=>({ ...ranges }),
         stop(){
@@ -3151,6 +3161,7 @@ async function buildApp(options){
      *          ahead: () => number,
      *          refetched: () => { blocks: number, bytes: number },
      *          ranges: () => { requests: number, bytes: number },
+     *          decoded: () => { blocks: number, bytes: number, ms: number },
      *          registry: Promise<any> } | null} */
     let blocks = null;
     /**
@@ -6879,6 +6890,10 @@ async function buildApp(options){
                         refetchedBytes: blocks?.refetched().bytes ?? 0,
                         ranges: blocks?.ranges().requests ?? 0,
                         rangeBytes: blocks?.ranges().bytes ?? 0,
+                        // zstd blocks decoded for guest reads, and the time it took.
+                        decoded: blocks?.decoded().blocks ?? 0,
+                        decodedBytes: blocks?.decoded().bytes ?? 0,
+                        decodeMs: Math.round(blocks?.decoded().ms ?? 0),
                     },
                     film: { ...film },
                     // Which of the program's own code the machine is spent on

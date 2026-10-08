@@ -9,7 +9,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createDriverState, decide, median } from './driver.js';
 
-const SETTINGS = { perProcess: 4 };
+// Two windows to a trial: what the tests below step through.
+const SETTINGS = { perProcess: 4, trialWindows: 2 };
 
 test('the median of the shares, an even count taking the middle two\'s mean', ()=>{
     assert.equal(median([0.9, 0.1]), 0.5);
