@@ -7,8 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bytesSource, openCompound } from './compound.js';
-import { COPY_CHUNK, compoundBytes, storageOf, streamOf } from './compound-writer.js';
-import { isPattern, patternSource, pieceFile } from './compound-writer.fixture.js';
+import { COPY_CHUNK, compoundBytes, storageOf, streamOf } from '../common/compound-writer.js';
+import { isPattern, patternSource, pieceFile } from '../common/compound-writer.fixture.js';
 import {
     CLSID_MSI_DATABASE, DatabaseWriteError, databaseBytes, databaseTree, embeddedCabinets,
     writeDatabase,

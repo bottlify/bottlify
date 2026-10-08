@@ -133,3 +133,33 @@ test('a read-only database commits nothing, and an output path takes the changes
     assert.ok(files.stat('C:\\work\\copy.msi'), 'written to the output path');
     assert.equal(files.stat('C:\\work\\base.msi').size, before, 'the source untouched');
 });
+
+test('a table exported to an archive file imports into another database', async()=>{
+    const { files, call, put, view, run, fieldText } = await setup();
+    await call('MsiOpenDatabaseA', [put('C:\\work\\a.msi'), MSIDBOPEN_CREATE, 0x40]);
+    const source = view.getUint32(0x40, true);
+    await run('CREATE TABLE `Fruit` (`Name` CHAR(32) NOT NULL, `Count` SHORT '
+        + 'PRIMARY KEY `Name`)', source);
+    await run('INSERT INTO `Fruit` (`Name`, `Count`) VALUES (\'fig\', 7)', source);
+    assert.equal(await call('MsiDatabaseExportA', [source, put('Fruit'), put('C:\\work'),
+        put('Fruit.idt')]), 0);
+    assert.ok(files.stat('C:\\work\\Fruit.idt'));
+    assert.equal(await call('MsiDatabaseExportA', [source, put('Fruit'), put('C:\\nowhere'),
+        put('Fruit.idt')]), 161, 'ERROR_BAD_PATHNAME');
+
+    await call('MsiOpenDatabaseA', [put('C:\\work\\b.msi'), MSIDBOPEN_CREATE, 0x40]);
+    const target = view.getUint32(0x40, true);
+    assert.equal(await call('MsiDatabaseImportA', [target, put('C:\\work'), put('Fruit.idt')]),
+        0);
+    const query = await run('SELECT `Name`, `Count` FROM `Fruit`', target);
+    assert.equal(await call('MsiViewFetch', [query, 0x4c]), 0);
+    const record = view.getUint32(0x4c, true);
+    assert.deepEqual([await fieldText(record, 1), await call('MsiRecordGetInteger',
+        [record, 2])], ['fig', 7]);
+
+    await call('MsiOpenDatabaseA', [put('C:\\work\\c.msi'), MSIDBOPEN_CREATE, 0x40]);
+    const merged = view.getUint32(0x40, true);
+    assert.equal(await call('MsiDatabaseMergeA', [merged, source, 0]), 0);
+    const again = await run('SELECT `Count` FROM `Fruit`', merged);
+    assert.equal(await call('MsiViewFetch', [again, 0x4c]), 0, 'merged in');
+});

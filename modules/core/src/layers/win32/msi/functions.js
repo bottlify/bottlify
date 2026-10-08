@@ -44,6 +44,9 @@ import { createRegistration, squashGuid } from './registration.js';
 import { installerVersion } from './version.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { createProductFunctions } from './products.js';
+import {
+    ERROR_BAD_PATHNAME, exportTable, importTable, mergeDatabases, streamFolder,
+} from './archive.js';
 import { parseGuid } from '../ole32/guid.js';
 
 const ERROR_SUCCESS = 0;
@@ -2021,6 +2024,82 @@ export function createMsiFunctions(host){
             }
             return writeFile(host.files, host.fullPath(name), bytes) ? ERROR_SUCCESS
                 : ERROR_CREATE_FAILED;
+        }),
+        ...both('MsiDatabaseExport', 16, wide=>async([database, table, folder, file])=>{
+            const opened = get(database, 'database');
+            if (!opened)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const read = reader(wide);
+            const name = read(table);
+            const directory = read(folder);
+            const target = read(file);
+            if (name === null || directory === null || target === null)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            if (!host.files.stat(host.fullPath(directory))?.isDirectory)
+            {
+                return ERROR_BAD_PATHNAME;
+            }
+            /** @param {string} path */
+            const at = path=>host.fullPath(`${directory.replace(/[\\/]+$/, '')}\\${path}`);
+            const made = await exportTable(opened.db, name);
+            if (made.code !== ERROR_SUCCESS)
+            {
+                return made.code;
+            }
+            for (const stream of made.streams)
+            {
+                const folderOf = at(stream.path.slice(0, stream.path.lastIndexOf('\\')));
+                if (!host.files.stat(folderOf)?.isDirectory)
+                {
+                    host.files.mkdir(folderOf);
+                }
+                if (!writeFile(host.files, at(stream.path), stream.bytes))
+                {
+                    return ERROR_FUNCTION_FAILED;
+                }
+            }
+            return writeFile(host.files, at(target), made.bytes) ? ERROR_SUCCESS
+                : ERROR_FUNCTION_FAILED;
+        }),
+        ...both('MsiDatabaseImport', 12, wide=>async([database, folder, file])=>{
+            const opened = get(database, 'database');
+            if (!opened)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const directory = reader(wide)(folder);
+            const name = reader(wide)(file);
+            if (directory === null || name === null)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            if (!host.files.stat(host.fullPath(directory))?.isDirectory)
+            {
+                return ERROR_BAD_PATHNAME;
+            }
+            /** @param {string} path */
+            const at = path=>host.fullPath(`${directory.replace(/[\\/]+$/, '')}\\${path}`);
+            const bytes = await readFile(host.files, at(name));
+            if (!bytes)
+            {
+                return ERROR_FUNCTION_FAILED;
+            }
+            const streams = streamFolder(name);
+            return importTable(opened.db, bytes, stream=>(streams === null ? null
+                : readFile(host.files, at(`${streams}\\${stream}`))));
+        }),
+        ...both('MsiDatabaseMerge', 12, wide=>async([database, merge, table])=>{
+            const opened = get(database, 'database');
+            const other = get(merge, 'database');
+            if (!opened || !other)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            return mergeDatabases(opened.db, other.db, reader(wide)(table));
         }),
         ...both('MsiCreateTransformSummaryInfo', 20, wide=>async([database, reference, file,
             conditions, validation])=>{

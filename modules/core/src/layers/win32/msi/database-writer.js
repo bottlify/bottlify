@@ -25,7 +25,7 @@
  */
 
 import { GUID_NULL } from '../ole32/guid.js';
-import { compoundBytes, storageOf, streamOf, writeCompound } from './compound-writer.js';
+import { compoundBytes, storageOf, streamOf, writeCompound } from '../common/compound-writer.js';
 import {
     SYSTEM_COLUMNS, decodeStreamName, encodeStreamName, isBinaryType, isKey, isStringType,
     persistentPart, persistentTables, rowStreamName, writeStringPool, writeTableRows,
@@ -42,9 +42,9 @@ const SUMMARY_STREAM = '\u0005SummaryInformation';
  * @typedef {import('./database.js').Column} Column
  * @typedef {import('./compound.js').CompoundNode} CompoundNode
  * @typedef {import('./compound.js').CompoundFile} CompoundFile
- * @typedef {import('./compound-writer.js').WriteNode} WriteNode
- * @typedef {import('./compound-writer.js').WriteStorage} WriteStorage
- * @typedef {import('./compound-writer.js').CompoundSink} CompoundSink
+ * @typedef {import('../common/compound-writer.js').WriteNode} WriteNode
+ * @typedef {import('../common/compound-writer.js').WriteStorage} WriteStorage
+ * @typedef {import('../common/compound-writer.js').CompoundSink} CompoundSink
  *
  * @typedef {Object} DatabaseWriteOptions
  * @property {(name: string) => boolean} [omitStreams]

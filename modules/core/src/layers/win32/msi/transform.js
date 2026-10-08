@@ -40,9 +40,8 @@
  * goes from and to and the upgrade code.
  */
 
-import {
-    createEntry, createRoot, nameKey, parseCompoundFile, serializeCompoundFile,
-} from '../ole32/cfb.js';
+import { compoundBytesSync, nameKey, storageOf, streamOf } from '../common/compound-writer.js';
+import { createEntry, parseCompoundFile, serializeCompoundFile } from '../ole32/cfb.js';
 import { parseGuid } from '../ole32/guid.js';
 import { openCompound } from './compound.js';
 import {
@@ -1209,17 +1208,15 @@ export async function generateTransform(db, reference){
         return { code: ERROR_NO_DATA, bytes: null };
     }
     const { pool, data, longRefs } = writeStringPool(strings, refs, db.codepage);
-    const root = createRoot();
-    root.clsid = CLSID_MSI_TRANSFORM;
+    /** @type {Map<string, import('../common/compound-writer.js').WriteStream>} */
+    const children = new Map();
     /** @param {string | null} packed @param {Uint8Array} bytes */
     const put = (packed, bytes)=>{
         if (packed === null)
         {
             return false;
         }
-        const entry = createEntry(packed, 'stream');
-        entry.data = bytes;
-        root.children.set(nameKey(packed), entry);
+        children.set(nameKey(packed), streamOf(packed, bytes));
         return true;
     };
     put(encodeStreamName(POOL, true), pool);
@@ -1238,7 +1235,8 @@ export async function generateTransform(db, reference){
             return { code: ERROR_INSTALL_TRANSFORM_FAILURE, bytes: null };
         }
     }
-    return { code: ERROR_SUCCESS, bytes: serializeCompoundFile(root) };
+    return { code: ERROR_SUCCESS, bytes: compoundBytesSync(
+        storageOf('Root Entry', [...children.values()], CLSID_MSI_TRANSFORM)) };
 }
 
 /**

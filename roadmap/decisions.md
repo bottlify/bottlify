@@ -291,6 +291,15 @@ empty heading goes with its last key, and a file with nothing left in it is dele
 against Windows; revisit if a program is found reading an empty section its setup left.
 *2026-10-08.*
 
+**A37 — An imported archive replaces a table whole; a merge leaves out only the tables that
+conflict.** `MsiDatabaseImport` of a table the database already has replaces it, its columns
+included, as the archive describes them; Wine keeps the old columns and replaces only the rows,
+and no published source settles which Windows does. `MsiDatabaseMerge` checks every table's
+schema before changing anything, merges each table without conflicting rows, and counts the
+conflicts of the others in the error table; the two databases' code pages are not compared,
+though the SDK says they should match. The summary's dates in an archive are read and written as
+UTC. A session's read-only database refuses both. Not measured against Windows. *2026-10-08.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
