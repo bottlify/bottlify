@@ -227,13 +227,17 @@ function special(p, next, name, source, dest){
     const temp = ()=>pick(next, p.temps);
     switch (name)
     {
-        case 'pow': return [`pow ${temp()}${pick(next, ['.x', '.y', ''])}, ${source(true)}, ${source(true)}`];
+        case 'pow':
+            return [`pow ${temp()}${pick(next, ['.x', '.y', ''])}, ${source(true)},`
+                + ` ${source(true)}`];
         case 'lit': return [`lit ${dest()}, ${source(false)}`];
         case 'm4x4': return [`m4x4 ${temp()}, ${source(false)}, c${pick(next, [4, 8])}`];
         case 'm3x3': return [`m3x3 ${temp()}.xyz, ${source(false)}, c${pick(next, [4, 8])}`];
         case 'sincos2':
-            return [`sincos ${temp()}${pick(next, ['.x', '.y', '.xy'])}, ${source(true)}, c20, c21`];
-        case 'sincos3': return [`sincos ${temp()}${pick(next, ['.x', '.y', '.xy'])}, ${source(true)}`];
+            return [`sincos ${temp()}${pick(next, ['.x', '.y', '.xy'])}, ${source(true)},`
+                + ' c20, c21'];
+        case 'sincos3':
+            return [`sincos ${temp()}${pick(next, ['.x', '.y', '.xy'])}, ${source(true)}`];
         case 'texkill': return [`texkill ${pick(next, p.temps)}`];
         case 'dsx': return [`dsx ${dest()}, ${source(false)}`];
         case 'dsy': return [`dsy ${dest()}, ${source(false)}`];
@@ -268,8 +272,8 @@ function block(p, next){
         case 0: return [`if b${Math.floor(next() * 4)}`, ...inner(), 'endif'];
         case 1: return [`if b${Math.floor(next() * 4)}`, ...inner(), 'else', ...inner(), 'endif'];
         case 2:
-            return [`if_${pick(next, ['gt', 'lt', 'ge', 'le', 'eq', 'ne'])} ${temp}.x, c1.y`, ...inner(),
-                'endif'];
+            return [`if_${pick(next, ['gt', 'lt', 'ge', 'le', 'eq', 'ne'])} ${temp}.x, c1.y`,
+                ...inner(), 'endif'];
         case 3: return ['rep i0', ...inner(), 'endrep'];
         default:
             return ['loop aL, i1', `add ${temp}, ${temp}, c[aL + 10]`, ...inner(), 'endloop'];
@@ -331,7 +335,8 @@ export function buildCase(profile, seed, length = 10){
     const reach = ps1 ? 1.5 : 2;
     const constants = Array.from({ length: 64 * 4 }, ()=>between(next, -reach, reach));
     // Counts up to 7, starts and steps up to 3: a loop's c[aL + 10] stays below c32.
-    const ints = Array.from({ length: 16 * 4 }, (_, at)=>Math.floor(next() * (at % 4 === 0 ? 8 : 4)));
+    const ints = Array.from({ length: 16 * 4 },
+        (_, at)=>Math.floor(next() * (at % 4 === 0 ? 8 : 4)));
     const bools = Array.from({ length: 16 }, ()=>(next() < 0.5 ? 1 : 0));
     /** @type {Record<string, number[]>} */
     const inputs = {};

@@ -93,6 +93,9 @@ jobs:
       # its business and has moved before, and a wrong path here fails inside
       # the probe rather than at the step that owns it.
       - run: npm run cdp:probe
+        env:
+          CDP_TEST_CHROME: ${{ steps.chrome.outputs.chrome-path }}
+      # Random shaders through the reference machine and through WGSL on the GPU.
       - run: npm run cdp:shaders
         env:
           CDP_TEST_CHROME: ${{ steps.chrome.outputs.chrome-path }}

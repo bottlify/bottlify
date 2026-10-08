@@ -535,7 +535,8 @@ export function translateShader(parsed, options = {}){
         const relative = !operand.relative ? ''
             : operand.relative.type === REGISTER.LOOP
                 ? ` + ${registerName(operand.relative, false)}`
-                : ` + i32(${registerName(operand.relative, false)}${swizzleOf(operand.relative)}.x)`;
+                : ` + i32(${registerName(operand.relative, false)}`
+                    + `${swizzleOf(operand.relative)}.x)`;
         switch (operand.type)
         {
             case REGISTER.TEMP:
