@@ -161,7 +161,8 @@ export function createCpuModule(){
              *              leaves: number },
              *          faultHandler: ((fault: any) => boolean) | null,
              *          guestClock: (() => number) | null,
-             *          yieldCheck: (() => boolean) | null, stacks: [number, number][] }}
+             *          yieldCheck: (() => boolean) | null, stacks: [number, number][],
+             *          lent: import('./engine.js').TranslatorPort[] }}
              */
             const state = {
                 host: null, thunks: null, running: false, tableWritten: false,
@@ -177,6 +178,8 @@ export function createCpuModule(){
                 // The threads' stacks the kernel named, for a host made after it did.
                 /** @type {[number, number][]} */
                 stacks: [],
+                // Translators a pool lent before the translator was up, taken once it is.
+                lent: [],
             };
             /**
              * Once a frame: every bucket the sampler has credited past the
@@ -437,6 +440,10 @@ export function createCpuModule(){
                             noExecuteBelow: settings.noExecuteBelow,
                         });
                         state.cork = state.host.cork();
+                        for (const adapter of state.lent.splice(0))
+                        {
+                            state.cork?.attachTranslator?.(adapter);
+                        }
                         for (const [base, size] of state.stacks)
                         {
                             state.host.noteStack(base, size);
@@ -563,6 +570,45 @@ export function createCpuModule(){
                  */
                 onFault(handler){
                     state.faultHandler = handler;
+                },
+
+                /**
+                 * A translation worker a pool lends this machine's translator:
+                 * taken once the translator is up, or at once if it is. False
+                 * where the engine takes none (the emulator).
+                 *
+                 * @param {import('./engine.js').TranslatorPort} adapter
+                 * @returns {boolean}
+                 */
+                attachTranslator(adapter){
+                    if (state.disposed || engine !== 'cork')
+                    {
+                        return false;
+                    }
+                    if (state.cork === null)
+                    {
+                        state.lent.push(adapter);
+                        return true;
+                    }
+                    return typeof state.cork.attachTranslator === 'function'
+                        ? (state.cork.attachTranslator(adapter), true) : false;
+                },
+
+                /**
+                 * The same worker asked back: it takes no batch from now on, and
+                 * goes once the one it holds is answered.
+                 *
+                 * @param {import('./engine.js').TranslatorPort} adapter
+                 */
+                detachTranslator(adapter){
+                    const waiting = state.lent.indexOf(adapter);
+                    if (waiting >= 0)
+                    {
+                        state.lent.splice(waiting, 1);
+                        adapter.terminate();
+                        return;
+                    }
+                    state.cork?.detachTranslator?.(adapter);
                 },
 
                 /**
