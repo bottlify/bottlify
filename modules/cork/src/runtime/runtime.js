@@ -34,8 +34,7 @@ import { HELD, PRECISION } from '../emit/memory.js';
 import { features as probeFeatures } from '../wasm/features.js';
 import { Body, ModuleBuilder, ValType } from '../wasm/encoder.js';
 import { SHARED_MAX_PAGES } from '../wasm/shared-import.js';
-import { arenaEmitCache, createEmitCache, emitBatch, relinkBatch } from './emit-built.js';
-import { createArena, openArena } from './arena.js';
+import { createEmitCache, emitBatch, relinkBatch } from './emit-built.js';
 import { buildHelpersModule } from '../emit/helpers.js';
 import { openTranslationWorker } from './translator.js';
 import { ANY_TOP, createEntries } from './entries.js';
@@ -134,23 +133,6 @@ function nanFirst(view, layout){
         out.nanStoreFirst = { ...first(NanRecord.STORE), to: hex(NanRecord.STORE + 8) };
     }
     return out;
-}
-
-/**
- * The translation worker's file, beside this one, as a host opens it for a
- * pool of its own; null where it cannot be named (a bundler that did not carry
- * the file).
- *
- * @returns {string | null}
- */
-export function translatorWorkerUrl(){
-    try
-    {
-        return new URL('./translator.worker.js', import.meta.url).href;
-    }
-    catch {
-        return null;
-    }
 }
 
 /**
@@ -260,16 +242,6 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // How long a batch may be with the worker, on time the engine thread was
         // free to hear its answer, before it is given up (tests shorten it).
         inFlightMs: 10_000,
-        // Translation workers the runtime opens itself, each with a batch of its
-        // own out: a loading phase keeps one busy most of the time with work
-        // queued behind its batch. 0 with a worker: none opened here, a host's
-        // pool lends them (`attachTranslator`).
-        translators: 1,
-        // Bytes of the translation cache arena, the functions emitted here and
-        // by every translator, which each takes again rather than emitting
-        // (0: each keeps a cache of its own). Shared memory is committed as
-        // it fills.
-        arenaBytes: 48 << 20,
         // Diagnostic: the host clock read around the translator's phases -- the
         // milliseconds of forming, lookups, emitting, encoding, storing,
         // instantiating and publishing, and the record of long holds. Off, as a
@@ -1054,72 +1026,30 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const workerWanted = settings.workerUrl !== undefined
         || (settings.worker ?? (settings.feed !== 'slice'
             && typeof globalThis.Worker === 'function'));
-    const workerUrl = workerWanted ? (settings.workerUrl ?? translatorWorkerUrl()) : null;
-    /**
-     * A batch with a translator: the regions it publishes (`metas`) or the
-     * running ones it relinks, and whether nothing else may be out beside it
-     * (`alone`: a relink, a merge, regions formed again with their callees or
-     * copies -- each takes over regions that are running, and a batch
-     * publishing beside it could publish one of them).
-     * @typedef {{ id: number, metas?: any[], relink?: RegionRecord[], store: any,
-     *     at: number, alone: boolean, covers?: number[] }} Pending
-     *     covers: the block starts of its regions with no x87 in them (`coveredOut`)
-     */
-    /**
-     * A translation worker: loaded once it has answered its first message
-     * (`ready`), with at most one batch out (`pending`); one asked to go
-     * (`leaving`) takes no batch and goes when its last one is back.
-     * @typedef {{ adapter: import('./translator.js').WorkerAdapter, ready: boolean,
-     *     pending: Pending | null, leaving: boolean }} Translator
-     */
-    /** @type {Translator[]} */
-    const translators = [];
-    /** Whether the translators are a pool's to lend, none opened here, until the first is. */
-    let awaitingLend = workerUrl !== null && settings.translators === 0;
-    /** When the first translator was made, and the time spent emitting here since. */
-    let loadingSince = performance.now();
+    const workerUrl = workerWanted
+        ? (settings.workerUrl ?? (()=>{
+            try
+            {
+                return new URL('./translator.worker.js', import.meta.url).href;
+            }
+            catch {
+                return null;
+            }
+        })())
+        : null;
+    /** @type {{ post: (message: any, transfer: any[]) => void,
+     *     terminate: () => void } | null} */
+    let worker = null;
+    /** When the worker in `loading` was made, and the time spent emitting here since. */
+    let loadingSince = 0;
     let inlineWhileLoading = 0;
+    /** A worker made and still loading, which `flush` ends too.
+     * @type {{ post: (message: any, transfer: any[]) => void, terminate: () => void } | null} */
+    let loading = null;
     let workerClosed = false;
-    /** One that can take a batch now. */
-    const freeTranslator = ()=>translators.find(one=>one.ready && !one.leaving
-        && one.pending === null) ?? null;
-    /** Whether any translator takes batches, free or not. */
-    const translatorReady = ()=>translators.some(one=>one.ready && !one.leaving);
-    /**
-     * Whether a translator was made and has not loaded yet -- or none is
-     * opened here and the host's pool has yet to lend the first: what is asked
-     * for meanwhile is emitted here as while a worker loads.
-     */
-    const translatorLoading = ()=>translators.some(one=>!one.ready)
-        || (awaitingLend && translators.length === 0);
-    const batchesOut = ()=>translators.some(one=>one.pending !== null);
-    /** Set while a step that takes over running regions (`Pending.alone`) posts. */
-    let postingAlone = false;
-    /**
-     * The block starts the batches out will publish as entries at any top, by
-     * how many hold each: a candidate among them is not formed again beside
-     * them, as one a batch's own region covers is not -- with several batches
-     * out, every block of a loop met while its region was with one translator
-     * otherwise became a region of its own with the next.
-     * @type {Map<number, number>}
-     */
-    const coveredOut = new Map();
-    /** @param {Pending} pending */
-    const uncover = pending=>{
-        for (const at of pending.covers ?? [])
-        {
-            const held = (coveredOut.get(at) ?? 1) - 1;
-            if (held === 0)
-            {
-                coveredOut.delete(at);
-            }
-            else
-            {
-                coveredOut.set(at, held);
-            }
-        }
-        pending.covers = [];
-    };
+    /** @type {{ id: number, metas?: any[], relink?: RegionRecord[], store: any,
+     *     at: number } | null} */
+    let outstanding = null;
     // A batch's store lookups are in flight: its bytes come back between
     // frames, and until then no new batch is formed, so the batches publish in
     // order and the waiting is never the slice's.
@@ -1138,26 +1068,14 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * cold.
      */
     let owed = 0;
-    /**
-     * Whether a batch may go now: no store lookups out, nothing out that must
-     * be alone, and a translator free -- or none ready, the batch then
-     * emitted here as without a worker.
-     */
-    const batchMayGo = ()=>!storePending && !translators.some(one=>one.pending?.alone === true)
-        && (freeTranslator() !== null || !translatorReady());
     const sendNext = ()=>{
-        if (owed > 0 && queue.size > 0 && batchMayGo())
+        if (owed > 0 && queue.size > 0 && outstanding === null && !storePending)
         {
             runtimeApi?.translatePending().catch(()=>{});
         }
     };
-    /** The process's translation cache arena, shared with every translator it has; none
-     * without a translator or where memory cannot be shared. */
-    const arena = workerUrl !== null && settings.arenaBytes > 0
-        && typeof SharedArrayBuffer === 'function' ? createArena(settings.arenaBytes) : null;
-    /** What emitting inline keeps for a relink to take again: the arena the translators
-     * share, or a cache of this thread's own. */
-    const emitCache = arena !== null ? arenaEmitCache(arena) : createEmitCache();
+    /** What emitting inline keeps for a relink to take again, as the worker keeps its own. */
+    const emitCache = createEmitCache();
 
     // The block profile is past cork's own tables, in a memory sized for it;
     // the hybrid layout's tables are carved from the emulator's RAM.
@@ -1929,8 +1847,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // the engine thread would be a slice's toll. Read every so many
         // translated instructions, not every call: a loading phase has
         // hundreds of modules and calls here between slices.
-        if (settings.mergeAfter <= 0 || !translatorReady()
-            || corkRetired - sampledAt < MERGE_SAMPLE)
+        if (settings.mergeAfter <= 0 || worker === null || corkRetired - sampledAt < MERGE_SAMPLE)
         {
             return false;
         }
@@ -2215,13 +2132,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             pages: [...copies],
             form: formOptions,
         };
-        const translator = freeTranslator();
-        if (translator !== null)
+        if (worker !== null)
         {
-            const pending = { id: ++workerRequest, relink: chunk, store, at: performance.now(),
-                alone: true };
-            translator.pending = pending;
-            translator.adapter.post({ id: pending.id, relink, layout, features: found,
+            outstanding = { id: ++workerRequest, relink: chunk, store, at: performance.now() };
+            worker.post({ id: outstanding.id, relink, layout, features: found,
                 options: emitOptions() }, [...copies.values()].map(bytes=>bytes.buffer));
             return true;
         }
@@ -2237,22 +2151,16 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * engine thread when the message arrives, which is between the frames the
      * host asked for.
      *
-     * @param {Translator} translator
      * @param {{ id: number, batch: import('./emit-built.js').BuiltBatch | null,
      *     compiled?: WebAssembly.Module | null, message?: string, busyMs?: number }} data
      */
-    const onWorkerResults = (translator, data)=>{
-        const pending = translator.pending;
+    const onWorkerResults = data=>{
+        const pending = outstanding;
         if (pending === null || data?.id !== pending.id)
         {
             return;
         }
-        translator.pending = null;
-        uncover(pending);
-        if (translator.leaving)
-        {
-            dropTranslator(translator);
-        }
+        outstanding = null;
         if (!data.batch)
         {
             refused[`emit: ${data.message ?? 'the worker failed'}`] = 1;
@@ -2277,115 +2185,53 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         sendNext();
     };
 
-    /**
-     * A batch given up: its answer, should it come, no longer matches, and
-     * the candidates it held are free to be taken again.
-     * @param {Translator} translator
-     */
-    const giveUp = translator=>{
-        const { pending } = translator;
-        if (pending === null)
-        {
-            return;
-        }
-        for (const one of pending.metas ?? [])
-        {
-            inFlight.delete(keyOf(one.region.entry, one.entryTop));
-        }
-        uncover(pending);
-        translator.pending = null;
-    };
-    /** @param {Translator} translator */
-    const dropTranslator = translator=>{
-        const at = translators.indexOf(translator);
-        if (at >= 0)
-        {
-            translators.splice(at, 1);
-        }
-        translator.adapter.terminate();
-    };
-
-    /**
-     * A translation worker taken on: a worker the runtime opened, or one a
-     * host's pool lends it. It is made at once and loads its modules after: a
-     * batch posted before then waited out the load -- a quarter of a second
-     * from source -- while inline it would have run. So the batches go to it
-     * only once it has answered a first message of its own, and are emitted
-     * inline until then (while no other translator is ready).
-     *
-     * @param {import('./translator.js').WorkerAdapter} adapter
-     */
-    const attachTranslator = adapter=>{
-        if (workerClosed)
-        {
-            adapter.terminate();
-            return;
-        }
-        /** @type {Translator} */
-        const translator = { adapter, ready: false, pending: null, leaving: false };
-        if (translators.length === 0 && !awaitingLend)
-        {
-            loadingSince = performance.now();
-        }
-        awaitingLend = false;
-        translators.push(translator);
-        adapter.onMessage(data=>{
-            if (data?.ready === true)
-            {
-                translator.ready = true;
-                // What waited for it goes now.
-                sendNext();
-                return;
-            }
-            onWorkerResults(translator, data);
-            // A translator free beside others still out takes the next batch
-            // now rather than at the host's next ask.
-            sendNext();
-        });
-        adapter.onLost(reason=>{
-            // A worker that cannot load or has died answers nothing again:
-            // its batch is given up so the next one is not held behind it,
-            // and emitting goes back inline once no translator is left.
-            if (!translators.includes(translator))
-            {
-                return;
-            }
-            refused[`worker: ${reason}`] = 1;
-            giveUp(translator);
-            dropTranslator(translator);
-        });
-        adapter.post({ ready: true, doorbell: settings.doorbell ?? null, arena }, []);
-    };
-
-    /**
-     * A translator asked to go: it takes no batch from now on, and goes as
-     * soon as the one it holds is back.
-     * @param {import('./translator.js').WorkerAdapter} adapter
-     */
-    const detachTranslator = adapter=>{
-        const translator = translators.find(one=>one.adapter === adapter);
-        if (translator === undefined)
-        {
-            return;
-        }
-        translator.leaving = true;
-        if (translator.pending === null)
-        {
-            dropTranslator(translator);
-        }
-    };
-
     if (workerUrl !== null)
     {
-        for (let n = 0; n < settings.translators; n++)
-        {
-            openTranslationWorker(workerUrl).then(adapter=>{
-                if (adapter !== null)
+        openTranslationWorker(workerUrl).then(adapter=>{
+            if (adapter === null || workerClosed)
+            {
+                adapter?.terminate();
+                return;
+            }
+            // A worker is made at once and loads its modules after: a batch
+            // posted before then waited out the load -- a quarter of a second
+            // from source -- while inline it would have run. So the batches go
+            // to it only once it has answered a first message of its own, and
+            // are emitted inline until then.
+            let ready = false;
+            loading = adapter;
+            loadingSince = performance.now();
+            adapter.onMessage(data=>{
+                if (data?.ready === true)
                 {
-                    attachTranslator(adapter);
+                    ready = true;
+                    loading = null;
+                    if (!workerClosed)
+                    {
+                        worker = adapter;
+                        // What waited for it goes now.
+                        sendNext();
+                    }
+                    return;
                 }
-            }, ()=>{});
-        }
+                onWorkerResults(data);
+            });
+            adapter.onLost(reason=>{
+                // A worker that cannot load or has died answers nothing
+                // again: emitting goes back inline, and a batch it held is
+                // given up so the next one is not held behind it.
+                if (worker !== adapter && ready)
+                {
+                    return;
+                }
+                refused[`worker: ${reason}`] = 1;
+                worker = null;
+                outstanding = null;
+                inFlight.clear();
+                adapter.terminate();
+            });
+            adapter.post({ ready: true, doorbell: settings.doorbell ?? null }, []);
+        }, ()=>{});
     }
 
     /**
@@ -2542,36 +2388,21 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             one.loose = loose;
             one.checked = checkedAt(one.region, one.entryTop);
         }
-        const translator = unbuilt.length > 0 ? freeTranslator() : null;
-        if (translator !== null)
+        if (unbuilt.length > 0 && worker !== null)
         {
             // Off the frame thread: post the batch and answer with it later.
             // The records are kept until then; nothing here waits.
             // The worker forms the regions again from a copy of their pages, as
             // a relink does, and keeps each one only when its bytes hash as they
             // did here.
-            /** @type {Pending} */
-            const pending = { id: ++workerRequest, metas: unbuilt, store, at: performance.now(),
-                alone: postingAlone, covers: [] };
-            for (const one of unbuilt)
-            {
-                if (!usesX87(one.region))
-                {
-                    for (const block of one.region.blocks)
-                    {
-                        pending.covers?.push(block.start);
-                        coveredOut.set(block.start, (coveredOut.get(block.start) ?? 0) + 1);
-                    }
-                }
-            }
-            translator.pending = pending;
+            outstanding = { id: ++workerRequest, metas: unbuilt, store, at: performance.now() };
             for (const one of unbuilt)
             {
                 one.waited = true;
             }
             const copies = copyPages(unbuilt.map(one=>one.region.pages));
-            translator.adapter.post({
-                id: pending.id,
+            worker.post({
+                id: outstanding.id,
                 relink: {
                     jobs: unbuilt.map(one=>({ entry: one.region.entry, entryTop: one.entryTop,
                         hash: one.region.hash, checked: one.checked, copies: one.copies === true,
@@ -2636,7 +2467,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         if (settings.timings === true)
         {
             const now = performance.now();
-            if (lookedAt !== 0 && batchesOut() && freeTranslator() === null && queue.size > 0)
+            if (lookedAt !== 0 && outstanding !== null && queue.size > 0)
             {
                 counts.behindMs += now - lookedAt;
             }
@@ -2651,18 +2482,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // A batch the worker has held past the in-flight limit is given
         // up: its answer, should it come, no longer matches, and the
         // candidates it held are free to be taken again.
-        for (const translator of translators)
+        if (outstanding !== null && overdue(outstanding.at))
         {
-            if (translator.pending !== null && overdue(translator.pending.at))
-            {
-                refused['worker: no answer'] = (refused['worker: no answer'] ?? 0) + 1;
-                giveUp(translator);
-            }
+            refused['worker: no answer'] = (refused['worker: no answer'] ?? 0) + 1;
+            outstanding = null;
+            inFlight.clear();
         }
-        // Every translator busy, or one holding a batch nothing may be beside:
-        // the ask is owed until an answer frees one. With none ready the batch
-        // is emitted here, as without a worker.
-        if (!batchMayGo())
+        if (outstanding !== null || storePending)
         {
             owed++;
             return 0;
@@ -2679,27 +2505,14 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // length.
         const keeps = leaveOut.size > 0 || settings.undoLog || profiling
             ? null : (settings.store ?? null);
-        // The steps that take over running regions go out alone: only with no
-        // batch out, and nothing goes beside them until they are back.
-        if (!batchesOut())
+        if (copiesWanted.size > 0 && copiesStep(keeps))
         {
-            postingAlone = true;
-            try
-            {
-                if (copiesWanted.size > 0 && copiesStep(keeps))
-                {
-                    return 0;
-                }
-                if (!buckets.slice(HOT_BUCKET).some(bucket=>bucket.size > 0)
-                    && (profileAt >= 0 && reformStep(keeps) || relinkStep(keeps)))
-                {
-                    return 0;
-                }
-            }
-            finally
-            {
-                postingAlone = false;
-            }
+            return 0;
+        }
+        if (!buckets.slice(HOT_BUCKET).some(bucket=>bucket.size > 0)
+            && (profileAt >= 0 && reformStep(keeps) || relinkStep(keeps)))
+        {
+            return 0;
         }
         if (queue.size === 0)
         {
@@ -2719,7 +2532,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // round trip through the worker and the store is paid per hundreds
         // of regions rather than per thirty-two.
         // While the worker loads, a batch emitted here is kept small.
-        const ceiling = translatorLoading() && !translatorReady()
+        const ceiling = loading !== null && worker === null
             ? LOADING_BATCH : settings.maxBatchRegions;
         const wanted = Math.min(ceiling,
             Math.max(settings.batchRegions, queue.size >> 2));
@@ -2759,8 +2572,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // published while it waited, the return address of a call the
             // interpreter met before its caller's region came back -- would
             // be formed again as a region of its own.
-            if (covered.has(eip) || coveredOut.has(eip) || closedIn.has(eip)
-                || entries.entryOf(eip, entryTop) >= 0)
+            if (covered.has(eip) || closedIn.has(eip) || entries.entryOf(eip, entryTop) >= 0)
             {
                 inFlight.delete(key);
                 continue;
@@ -2836,7 +2648,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // A batch the store answered whole has no answer to come back
             // with, which is what sends the next one for the asks still owed:
             // the next goes after this turn, as it would after the worker's.
-            queueMicrotask(sendNext);
+            if (outstanding === null)
+            {
+                queueMicrotask(sendNext);
+            }
             return published;
         }
         // A store that cannot answer at once answers off the slice path:
@@ -3103,8 +2918,6 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             enqueue(key, eip, hotness);
         },
         seedRecords,
-        attachTranslator,
-        detachTranslator,
         /** Writes whatever the store keeps aside from its records, so the
          * names of this run's regions are on disk before the run ends and the
          * next run's index can find them. The store stays open: it is its
@@ -3116,16 +2929,16 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // The worker holds nothing the store needs; end it and drop any
             // batch it still owes.
             workerClosed = true;
-            for (const translator of [...translators])
-            {
-                giveUp(translator);
-                dropTranslator(translator);
-            }
+            worker?.terminate();
+            worker = null;
+            loading?.terminate();
+            loading = null;
+            outstanding = null;
         },
 
         /** @type {() => Promise<number>} */
         async translatePending(){
-            if (!translatorLoading() || translatorReady())
+            if (loading === null || worker !== null)
             {
                 return translateNow();
             }
@@ -3291,11 +3104,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 relaxedFlagReads: { ...relaxedFlagReads },
                 forcedSteps,
                 handoffMisses: 0,
-                worker: translatorReady() ? 'ready' : translatorLoading() ? 'loading' : 'none',
-                translators: translators.length,
-                translatorsReady: translators.filter(one=>one.ready).length,
-                ...(arena === null ? {} : { arena: openArena(arena).counts() }),
-                batchesOut: translators.filter(one=>one.pending !== null).length,
+                worker: worker !== null ? 'ready' : loading !== null ? 'loading' : 'none',
             };
         },
     };

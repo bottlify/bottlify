@@ -28,12 +28,6 @@ differently raises a `divergence` event naming the API.
   network transport the page handed in (`win32.network`).
   The run's diagnostics are the program's tables as it last answered, with the journal and the
   sound output the engine's thread keeps.
-- The run's translation workers are a pool (`cork.pool`): each process is lent one, and more only
-  while its translation lags and a trial shows they make it go faster. On a machine whose cores a
-  loading game already keeps busy -- four cores, measured -- a second worker makes loading slower,
-  and the pool gives it back after its trial; the gain is for machines with cores to spare, and
-  has not been measured on one yet. Only translation runs in the pool so far: bundle blocks are
-  still decoded on the thread that mounted the bundle.
 - With `concurrency` 1 the process of an out-of-process COM server runs alongside the program that
   uses it, outside `concurrency`, beside it on the engine thread. With 2 or 4 the class table is
   the run's, kept on the engine thread: a server COM starts runs in a worker of its own while the

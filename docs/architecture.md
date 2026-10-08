@@ -122,10 +122,9 @@ its place; with `graphics: null`, for instance, a game runs with no picture.
 
 ## 3. Threads: who starts whom, and why
 
-A tab runs seven kinds of thread, two of them several times over. The page starts three: the engine
-thread, the log keeper and the AudioWorklet. The engine thread starts the graphics thread, a process
-thread for each process where processes run at once, and the run's pool of translation threads,
-which it lends to the processes.
+A tab runs up to six threads. The page starts three: the engine thread, the log keeper and the
+AudioWorklet. The engine thread starts the graphics thread, and cork inside the engine starts the
+translation thread.
 
 Nearly all the work happens on the engine thread. The others take from it what can run in
 parallel, or what the browser only allows off the main thread.
@@ -138,12 +137,12 @@ flowchart TB
   K["<b>Log keeper</b><br/>core/src/host/log.worker.js"]
   A["<b>AudioWorklet</b><br/>core/src/layers/audio/output/worklet.js"]
   G["<b>Graphics thread</b><br/>core/src/host/graphics.worker.js"]
-  T["<b>Translation threads</b><br/>cork/src/runtime/translator.worker.js"]
+  T["<b>Translation thread</b><br/>cork/src/runtime/translator.worker.js"]
   P -->|"new Worker"| E
   P -->|"new Worker"| K
   P -->|"audioWorklet.addModule<br/>new AudioWorkletNode"| A
   E -->|"new Worker<br/>at start, if there is a canvas"| G
-  E -->|"new Worker<br/>the run's pool"| T
+  E -->|"new Worker<br/>from cork's runtime"| T
 ```
 
 | Thread | Started by | When | Why a thread of its own |
@@ -152,7 +151,7 @@ flowchart TB
 | Engine thread | the page, `core/src/host/create.js` | always. With `?host=thread` the engine runs on the page's thread instead, over the same protocol | The program runs in long quanta. On the page's thread it would be interrupted by garbage collection and the interface's rendering, and a click would wait for the quantum to end. Synchronous OPFS access also exists only in a worker. A WebGPU device cannot move between threads, so the worker opens its own and gets the canvas as an `OffscreenCanvas` |
 | Log keeper | the page, `core/src/host/remote.js` | always. Without `Worker`, a `MessageChannel` on the page takes its place | The engine writes its journal, counters and tables into shared memory and answers no questions. The keeper drains the ring before it laps, keeps the history and works out frames, the profile and the per-module breakdown. Logging then costs neither the page nor the engine anything |
 | Graphics thread | the engine thread, `core/src/host/graphics-worker.js` (called from `serve.js`) | at start, if the engine has a canvas and `device.graphicsWorker: false` is not set (`?graphicsWorker=off` in the launcher). Survives a change of program. If it opens no device within 10 s, everything draws on the engine thread | Its job is to draw all the graphics, so the engine thread only keeps state and answers the program. Today Direct3D 7, 8, 9 and OpenGL are played here on a WebGPU device of its own; Direct3D 10 and Vulkan will move here too. It arrived in cork 1.3. In the `tools/graphics-bench --remote` bench the engine thread spends 0.69 ms a Direct3D frame instead of 2.95 |
-| Translation threads | the run's pool, `core/src/host/pool/pool.js` (made in `app.js`) | when the engine is cork and a translator would use a worker. Each process is lent one from its start to its exit, and more join it while its translation lags, as the pool's driver decides (`driver.js`). Until the first answers `ready`, regions are translated on the process's own thread | Emits wasm for regions, builds a module and compiles it. The process's thread does not wait for it: it posts a batch and publishes the result between frames, whenever it arrives. A translation thread works for one process at a time, over a port of its own; one that works for none sleeps and holds nothing of any process |
+| Translation thread | cork's runtime inside the engine thread, `cork/src/runtime/translator.js` | when the engine is cork. Until it answers `ready`, regions are translated on the engine thread | Emits wasm for regions, builds a module and compiles it. The engine thread does not wait for it: it posts a batch and publishes the result between frames, whenever it arrives |
 | AudioWorklet | the page, `ui/src/engine/session.js` | if the page is cross-origin isolated (`crossOriginIsolated`) and sound is on | The Web Audio real-time thread. It reads the voices from shared memory on its own clock, so sound does not break up even while the engine is busy |
 | Process thread | the engine thread, `core/src/host/process-worker.js` (called from `app.js`) | with `concurrency` 2 or 4, once per process, the program the page started included, for as long as it runs | A process -- the launcher, and the game it starts -- runs on a thread of its own, beside its parent, with its own memory and translator. It blocks while it waits instead of taking turns with the engine's event loop, and the engine's thread runs no program at all |
 
@@ -166,7 +165,7 @@ flowchart LR
   P -->|"postMessage ⇄"| K["Log keeper"]
   E -->|"SAB: journal ring"| K
   E -->|"MessageChannel ⇄"| G["Graphics thread"]
-  E -->|"MessagePort ⇄<br/>SAB: cache arena, busy cells"| T["Translation threads"]
+  E -->|"postMessage ⇄"| T["Translation thread"]
   E -->|"SAB: voice table"| A["AudioWorklet"]
 ```
 
@@ -253,7 +252,7 @@ sequenceDiagram
   E->>E: layers in requires order
   E->>O: session: registry and files from last time
   E->>S: /engine/cork/index.js
-  E->>T: new Worker(translator.worker.js), lent to the process by the run's pool
+  E->>T: new Worker(translator.worker.js)
   E->>S: bundle header and table of contents (Range)
   E->>O: block cache, translations from the bundle
   E->>E: loader: .exe, DLLs, TLS, the program's main thread into the scheduler
@@ -296,7 +295,7 @@ into the bridge fires instead (section 6).
 | Where | What it does |
 | --- | --- |
 | Engine thread | The interpreters, region forming, store lookups, publishing and running translated code, traps into the bridge |
-| Translation threads | The emitter and the encoder: a batch of regions becomes a wasm module, and the module a compiled `WebAssembly.Module`. Several may work for one process, each with a batch of its own |
+| Translation thread | The emitter and the encoder: a batch of regions becomes a wasm module, and the module a compiled `WebAssembly.Module` |
 | OPFS | The translation store, `cork/<id>.v3/` |
 | Server | The code of cork and its worker (`/engine/cork/`). A bundle may bring translations ready-made |
 
@@ -314,7 +313,7 @@ program's memory. There are no page tables: each 4 KiB page has one byte of flag
 | Decoder | `decode/decoder.js`, `decode/table.js` | bytes at an address → `Instruction` | The opcode tables are written by hand. For each instruction the decoder knows its operands, its length, which flags it reads and writes, and how it can fault. On an unknown opcode it refuses and names it |
 | Region former | `region.js`, `helpers.js` | an entry address → `Region` | Gathers blocks along direct jumps and stops at an indirect jump, `ret`, `call`, a trap, `hlt`, a decoder refusal, or at the limit of 128 blocks / 8192 bytes. Short leaf functions (up to 16 blocks / 512 bytes) are inlined into the region. Compiler helpers such as MSVC's `_ftol2` are recognised by a fingerprint of their bytes |
 | Emitter | `emit/` | `Region` → one wasm function | Builds a `br_table` dispatch loop with structured loops. Integer instructions are `integer.js`, lazy flags `flags.js`, memory and page checks `memory.js`, the FPU `x87.js`, MMX and SSE `simd.js`, shared helpers `helpers.js` |
-| Encoder and batches | `wasm/encoder.js`, `wasm/features.js`, `runtime/emit-built.js`, `runtime/arena.js`, `runtime/translator.worker.js` | a batch of regions → one module | A pure function, so it can run on a translation thread, or on the engine thread until one is ready. `features.js` finds out whether the browser has SIMD and tail calls. `arena.js` keeps the functions already emitted in shared memory, for every translation thread of the process |
+| Encoder and batches | `wasm/encoder.js`, `wasm/features.js`, `runtime/emit-built.js`, `runtime/translator.worker.js` | a batch of regions → one module | A pure function, so it can run on the translation thread, or on the engine thread until that one is ready. `features.js` finds out whether the browser has SIMD and tail calls |
 | Runtime | `runtime/runtime.js`, `entries.js`, `pages.js`, `layout.js`, `cache.js` | EIP → translated function | The candidate queue by heat, batches, publishing, the entry hash of 262,144 slots, page flags, dropping translations on a write into code, relinking modules |
 | Interpreters | `interp.js` with `fast.js`, `interp-wasm.c` | run what is not translated yet | The JS interpreter runs first, then a wasm interpreter built from C with clang. It hands MMX and rare instruction forms back to JS |
 | Instruction model | `ir.js`, `ir-x87.js`, `ir-simd.js` | — | A deliberately slow and obvious account of what each x86 instruction does. The JS interpreter runs on it, and the emitter's tests are checked against it |
@@ -332,7 +331,7 @@ flowchart TB
     REG["Region former and decoder"]
     Q{"Translation<br/>in the store?"}
   end
-  subgraph TW["Translation threads"]
+  subgraph TW["Translation thread"]
     EMI["Emitter: region → wasm function"]
     ENC["Encoder: batch → module,<br/>compilation"]
   end
@@ -354,23 +353,6 @@ flowchart TB
 - **Batches.** Regions are translated 32 at a time, up to 256 when the queue is long. Each batch is
   one wasm module. Functions a region calls directly go into the same batch. Later the modules are
   relinked into larger ones of 512 regions.
-- **Several translation threads, one arena.** A process can have several translation threads, each
-  with a batch of its own out. A relink, a merge, and a region formed again take over running
-  regions, so they still go out alone. The functions already emitted, which a relink or merge takes
-  again rather than emitting them anew, belong to the process, not to a thread. They are kept in its
-  arena: 48 MB of shared memory that every translation thread of the process reads and adds to,
-  under one lock, the oldest segment going first. Without it a relink emits again what was emitted:
-  Doom 3's translation thread was busy 23.3 s instead of 14.6 s while it loaded.
-- **The pool's driver.** Every 500 ms it reads how long each translation thread worked and how many
-  regions it emitted (shared memory the threads write to). One more joins a process when the median
-  load of those already working for it reaches 80 %, at most `hardwareConcurrency` for a process.
-  Each join is a trial: unless the process's regions a second rise by half of what one more thread
-  adds at best, the joined thread leaves and the process keeps that count as its ceiling. On four
-  cores one translation thread already leaves no core free while a game loads, and a second made
-  Doom 3 and Tron load slower (`roadmap/negative-results.md`, 2026-10-07). There a joined thread
-  leaves after its trial. Joined threads leave at once when the process stops translating to wait,
-  and after 3 s of a median under 40 % otherwise. Every decision is in the pool's journal
-  (`translationPool()` on the run).
 - **The store.** A translation's key is made of the cache version, the browser's features, the
   memory layout, the bundle id, the entry address, a 64-bit FNV hash of the region's bytes and the
   x87 stack top. A second run takes from the store everything the first one translated. A bundle may

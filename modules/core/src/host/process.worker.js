@@ -69,20 +69,18 @@ const standardFilesOf = (named, ask)=>named && Object.fromEntries(Object.entries
     }]));
 
 /**
- * What a report reads, as data that crosses to another thread; where reading
- * it fails or it holds something that does not cross, what `failed` makes of
- * the error -- null by default.
+ * What a report reads, as data that crosses to another thread: null where it
+ * holds something that does not.
  *
  * @param {() => any} read
- * @param {(message: string) => any} [failed]
  */
-export const plainOf = (read, failed = ()=>null)=>{
+const plainOf = read=>{
     try
     {
         return JSON.parse(JSON.stringify(read()));
     }
-    catch (e){
-        return failed(e instanceof Error ? e.message : String(e));
+    catch {
+        return null;
     }
 };
 
@@ -137,11 +135,7 @@ export async function serveProcess(start){
     /** The machine's tables, and what it waited on the system for. */
     const tables = ()=>[...app.diagnostics(),
         { name: 'link', status: 'ready', metrics: link.diagnostics() }];
-    /** The tables as data, or a table that says why they could not be read: a
-     * report that loses them unsaid looks like a process that had none. */
-    const plainTables = ()=>plainOf(tables, message=>[{ name: 'diagnostics', status: 'error',
-        metrics: { error: message } }]);
-    handlers.report = { diagnostics: ()=>(app ? plainTables() : null) };
+    handlers.report = { diagnostics: ()=>(app ? plainOf(tables) : null) };
     // What the page asks of the process it drives, as it would of a machine on
     // its own thread: pausing it, and looking inside it.
     handlers.control = {
@@ -207,20 +201,6 @@ export async function serveProcess(start){
     }
     app.attachLog((/** @type {number} */ handle, /** @type {string} */ text)=>
         ask('process', 'output', [handle, text]));
-    lendings.apply = ()=>{
-        for (const { type, port, token } of lendings.splice(0))
-        {
-            if (type === 'translator')
-            {
-                app.lendTranslator(port, token);
-            }
-            else
-            {
-                app.recallTranslator(token);
-            }
-        }
-    };
-    lendings.apply();
     try
     {
         let code;
@@ -232,9 +212,9 @@ export async function serveProcess(start){
             // A run that failed is read as one that ended: what it did up to
             // the failure is what is asked of it next.
             throw Object.assign(e instanceof Error ? e : new Error(String(e)),
-                { diagnostics: plainTables() });
+                { diagnostics: plainOf(tables) });
         }
-        return { code, diagnostics: plainTables(),
+        return { code, diagnostics: plainOf(tables),
             // What an installer's output is sorted against, read while the
             // machine that knows it still stands.
             systemLibraries: plainOf(()=>app.systemLibraries?.() ?? []) };
@@ -251,25 +231,10 @@ export async function serveProcess(start){
 }
 
 /**
- * The pool's lendings and recalls, in the order they came, and what hands them
- * to the machine once it stands.
- * @type {any[] & { apply?: () => void }}
- */
-const lendings = [];
-
-/**
  * @param {(handler: (data: any) => void) => void} listen
  * @param {(message: any) => void} send
  */
 const bind = (listen, send)=>listen(data=>{
-    // A worker of the run's translation pool, lent to this process or asked
-    // back: taken by the machine, or kept until the machine is built.
-    if (data?.type === 'translator' || data?.type === 'recall')
-    {
-        lendings.push(data);
-        lendings.apply?.();
-        return;
-    }
     if (data?.type !== 'start')
     {
         return;

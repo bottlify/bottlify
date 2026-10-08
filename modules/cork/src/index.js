@@ -23,7 +23,7 @@
  * @typedef {import('../../core/src/layers/cpu/engine.js').Runtime} Runtime
  */
 
-import { createCorkRuntime, translatorWorkerUrl } from './runtime/runtime.js';
+import { createCorkRuntime } from './runtime/runtime.js';
 import { replaySlice } from './testing/differential.js';
 
 export {
@@ -37,7 +37,7 @@ export { eflagsOf, setEflags } from './emit/flags.js';
 export { snapshot, restore, compare } from './testing/snapshot.js';
 export { readUndoLog, resetUndoLog, spansOf } from './emit/memory.js';
 export { slotOf } from './runtime/entries.js';
-export { replaySlice, translatorWorkerUrl };
+export { replaySlice };
 
 /**
  * Builds a runtime over the memory and layout the core hands in.
