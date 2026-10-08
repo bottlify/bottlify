@@ -113,6 +113,8 @@ const WM_HOTKEY = 0x0312;
 /** The two presses a hot key can be registered on; a release never fires one. */
 const WM_KEYDOWN = 0x0100;
 const WM_SYSKEYDOWN = 0x0104;
+const WM_KEYUP = 0x0101;
+const WM_SYSKEYUP = 0x0105;
 
 /** RegisterHotKey's modifier bits. */
 const MOD_ALT = 0x0001;
@@ -216,6 +218,12 @@ export function createMessageQueue(options = {}){
     const quits = new Map();
     let posted = 0;
     let retrieved = 0;
+    // The keys held as of the last key message taken, which is what
+    // TranslateMessage reads the modifiers from: the input layer may have let
+    // go of Control (a paste's chord is pressed and released at once) before
+    // the program gets to the V it was held for.
+    const keysAsTaken = new Uint8Array(256);
+    let heldKnown = false;
 
     /**
      * What a thread's last look at its queue saw.
@@ -1117,6 +1125,13 @@ export function createMessageQueue(options = {}){
                     pending.splice(index, 1);
                     retrieved++;
                     last = entry;
+                    if (entry.message === WM_KEYDOWN || entry.message === WM_SYSKEYDOWN
+                        || entry.message === WM_KEYUP || entry.message === WM_SYSKEYUP)
+                    {
+                        keysAsTaken[entry.wParam & 0xff] = entry.message === WM_KEYDOWN
+                            || entry.message === WM_SYSKEYDOWN ? 1 : 0;
+                        heldKnown = true;
+                    }
                     pumped.set(entry.message, (pumped.get(entry.message) ?? 0) + 1);
                 }
                 return entry;
@@ -1175,6 +1190,15 @@ export function createMessageQueue(options = {}){
 
         /** The message most recently taken, or null before the first. */
         last: ()=>last,
+
+        /**
+         * Whether a key was down as of the last key message taken, or null
+         * before the first: the synchronous state, which moves as the thread
+         * takes its key messages rather than as the keys move.
+         *
+         * @param {number} vk
+         */
+        heldAsOfMessage: vk=>(heldKnown ? keysAsTaken[vk & 0xff] === 1 : null),
 
         /**
          * Drops everything queued for a window. A destroyed window's pending

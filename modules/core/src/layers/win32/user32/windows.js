@@ -4827,14 +4827,20 @@ export function createWindowFunctions(host){
         caret,
     });
 
+    // A modifier as of the message being translated, as Windows reads the
+    // thread's synchronous state; the live state before any key was taken.
+    /** @param {number} vk */
+    const heldAsOfMessage = vk=>host.queue.heldAsOfMessage?.(vk)
+        ?? ((host.keyState?.(vk) ?? 0) & 0x8000) !== 0;
+
     /**
      * What TranslateMessage does: a key press becomes the character the
      * host's own keyboard layout made of it, posted after the press. That is
      * where a layout, a dead key and an input method live, and none of them
      * can be worked out from a virtual key here; for a host that composes
      * nothing -- a recorded session, a test -- the character is the one
-     * layout table's (`keys.js`), under the modifiers held now: the same
-     * answer ToUnicode gives for the same key state.
+     * layout table's (`keys.js`), under the modifiers held as of the message:
+     * the same answer ToUnicode gives for the same key state.
      *
      * @param {{ hwnd: number, message: number, wParam: number, lParam: number }} message
      * @returns {number} nonzero for any of the four key messages, whether or
@@ -4848,9 +4854,9 @@ export function createWindowFunctions(host){
         const isDown = message.message === WM_KEYDOWN || message.message === WM_SYSKEYDOWN;
         const character = isDown
             ? host.queue.takeComposed?.(message.lParam) ?? characterOf(message.wParam & 0xff, {
-                shift: ((host.keyState?.(0x10) ?? 0) & 0x8000) !== 0,
+                shift: heldAsOfMessage(0x10),
                 capsLock: ((host.keyState?.(0x14) ?? 0) & 0x0001) !== 0,
-                control: ((host.keyState?.(0x11) ?? 0) & 0x8000) !== 0,
+                control: heldAsOfMessage(0x11),
             })
             : null;
         if (character !== null)

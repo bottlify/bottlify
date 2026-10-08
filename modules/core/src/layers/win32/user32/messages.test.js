@@ -38,6 +38,26 @@ test('an injected message defaults the fields the injector did not supply', ()=>
     });
 });
 
+test('a key is held as of the key message taken, not as the keys are now', ()=>{
+    // A paste's chord is Control down, V down, V up, Control up, all at once:
+    // by the time the program takes the V, Control is already up on the
+    // keyboard, and TranslateMessage must still read it as held.
+    const queue = createMessageQueue();
+    assert.equal(queue.heldAsOfMessage(0x11), null, 'nothing taken yet');
+    for (const [message, wParam] of [[WM_KEYDOWN, 0x11], [WM_KEYDOWN, 0x56],
+        [0x0101, 0x56], [0x0101, 0x11]])
+    {
+        queue.post({ hwnd: 0, message, wParam, lParam: 0 });
+    }
+    queue.peek(ALL);
+    queue.peek(ALL);
+    assert.equal(queue.heldAsOfMessage(0x11), true, 'Control, as of the V');
+    assert.equal(queue.heldAsOfMessage(0x56), true);
+    queue.peek(ALL);
+    queue.peek(ALL);
+    assert.equal(queue.heldAsOfMessage(0x11), false);
+});
+
 test('an empty queue answers with nothing rather than a placeholder', ()=>{
     const queue = createMessageQueue();
     assert.equal(queue.peek(ALL), null);
