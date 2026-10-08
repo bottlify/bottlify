@@ -112,6 +112,8 @@ export function createBuilder(profile){
     let vregCount = 0;
     /** @type {Map<string, Vec>} */
     const known = new Map();
+    /** The instruction that made each register `emit` gave out. @type {Map<VReg, Instr>} */
+    const madeBy = new Map();
 
     /** @param {number} width @returns {VReg} */
     const newReg = width=>({ id: vregCount++, width });
@@ -207,7 +209,10 @@ export function createBuilder(profile){
             return earlier;
         }
         const reg = newReg(w);
-        instrs.push({ op, dest: { kind: 'reg', reg, mask: (1 << w) - 1 }, srcs: fitted, ...extra });
+        const made = { op, dest: /** @type {import('./hlsl-ir.js').Dest} */ ({ kind: 'reg', reg,
+            mask: (1 << w) - 1 }), srcs: fitted, ...extra };
+        instrs.push(made);
+        madeBy.set(reg, made);
         const result = vec({ kind: 'reg', reg, swz: Array.from({ length: w }, (_, i)=>i) });
         if (!addressed)
         {
@@ -441,6 +446,27 @@ export function createBuilder(profile){
             return b;
         }
         const { w, args } = unify([a, b]);
+        // (x * k1) * k2 is x * (k1 * k2), as fxc folds it: degrees(a) / 100 is one product,
+        // and a model 1 target, whose literals hold -1 to 1, can hold it.
+        for (const [p, q] of [[0, 1], [1, 0]])
+        {
+            const k2 = literal(args[q]);
+            const read = args[p].src;
+            const made = read.kind === 'reg' ? madeBy.get(read.reg) : undefined;
+            if (!k2 || !made || read.kind !== 'reg' || made.op !== 'mul' || made.sat || read.neg
+                || read.abs || read.mod)
+            {
+                continue;
+            }
+            // The product's operands as this read of it sees them.
+            const lanes = read.swz;
+            const [x, y] = made.srcs.map(src=>swizzle(vec(src), lanes));
+            const k1 = literal(y) ? y : literal(x) ? x : null;
+            if (k1)
+            {
+                return mul(k1 === y ? x : y, mul(k1, args[q]));
+            }
+        }
         return lanewise('mul', w, args);
     };
 
@@ -909,8 +935,12 @@ export function createBuilder(profile){
         else
         {
             reg.pin = { file: 'r', sampler };
+            // texld reads a t# or an r# of the first phase: a literal or a constant
+            // coordinate is moved into one there, as fxc does.
+            const from = src.kind === 'imm' || src.kind === 'const'
+                ? emit('mov', coord.w, [src]).src : src;
             instrs.push({ op: 'texld', dest: { kind: 'reg', reg, mask: 15 },
-                srcs: [src, { kind: 'sampler', cst: sampler }] });
+                srcs: [from, { kind: 'sampler', cst: sampler }] });
         }
         return vec({ kind: 'reg', reg, swz: [0, 1, 2, 3] });
     };

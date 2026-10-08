@@ -603,3 +603,27 @@ test('an entry\'s array of structures reads its members\' inputs for every eleme
         .outputs.oC0];
     assert.deepEqual(out, [0.25, 0.25, 0.5, 0.5]);
 });
+
+test('ps_1_4 reads a texture at a constant coordinate through a register of phase 1', async()=>{
+    // fxc: mov r0.xyz, c0; phase; texld r0, r0 -- texld reads no c#.
+    const result = await compile(`sampler sam;
+        float4 main() : COLOR { return tex2D(sam, float2(0.25, 0.5)); }`, 'ps_1_4');
+    assert.equal(result.ok, true, result.messages);
+    const program = decode(/** @type {Uint32Array} */ (result.tokens));
+    const out = [...execute(program, { inputs: { v: [], t: [] },
+        constants: { f: new Float32Array(32 * 4) }, sample: (_, __, c)=>[c[0], c[1], 0, 1] })
+        .outputs.oC0];
+    assert.deepEqual(out, [0.25, 0.5, 0, 1]);
+});
+
+test('a product of constants is folded into one, which a model 1 literal can hold', async()=>{
+    // fxc: degrees(a) / 100 is a * 0.5729578; 57.3 alone would clamp to 1 in ps_1_1.
+    const result = await compile(`float4 a;
+        float4 main() : COLOR { return degrees(a) / 100; }`, 'ps_1_1');
+    assert.equal(result.ok, true, result.messages);
+    const f = new Float32Array(32 * 4);
+    f.set([0.5, 0.25, 1, 0], constants(result)[0].index * 4);
+    const out = [...execute(decode(/** @type {Uint32Array} */ (result.tokens)),
+        { inputs: { v: [], t: [] }, constants: { f } }).outputs.oC0];
+    assert.deepEqual(out.map(x=>Math.round(x * 1e4) / 1e4), [0.2865, 0.1432, 0.573, 0]);
+});
