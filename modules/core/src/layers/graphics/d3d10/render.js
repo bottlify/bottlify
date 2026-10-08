@@ -41,6 +41,7 @@ import {
     isDepthFormat, textureStorage, viewFormatOf,
 } from './gpuformats.js';
 import { levelExtent } from './validity.js';
+import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
 import {
     BINDING, BUFFER_VIEW_FORMATS, STAGE, linkProgram, translateShader,
 } from './wgsl.js';
@@ -379,6 +380,8 @@ export function createRenderer(services){
     let chain = Promise.resolve();
     /** @type {any[]} */
     let lastFrame = [];
+    /** Whether a count the GPU gave only as some or none has been reported. */
+    let assumedCountReported = false;
     /**
      * A clear that has not yet met a pass: WebGPU clears an attachment as a
      * pass begins, so a clear waits for the next pass on its target, and a
@@ -2297,7 +2300,7 @@ export function createRenderer(services){
         /** @type {{ read: () => Promise<any>, command: any }[]} */
         const readers = [];
         const counting = recorded.some(command=>command.occlusion);
-        /** @type {{ slot: number, counters: OcclusionCounter[] }[]} */
+        /** @type {{ slot: number, counters: OcclusionCounter[], area: number }[]} */
         const counted = [];
         /** @type {(() => Promise<number[]>) | null} */
         let readCounts = null;
@@ -2533,7 +2536,8 @@ export function createRenderer(services){
                 if (slot !== null)
                 {
                     current.endOcclusionQuery();
-                    counted.push({ slot, counters: command.occlusion });
+                    counted.push({ slot, counters: command.occlusion,
+                        area: reachableArea(command.viewport, command.scissor ?? null) });
                 }
                 else if (command.occlusion)
                 {
@@ -2583,11 +2587,18 @@ export function createRenderer(services){
         if (readCounts)
         {
             const values = await readCounts();
-            for (const { slot, counters: into } of counted)
+            for (const { slot, counters: into, area } of counted)
             {
+                const { samples, assumed } = passedSamples(values[slot] ?? 0, area);
+                if (assumed && !assumedCountReported)
+                {
+                    assumedCountReported = true;
+                    diverge('an occlusion query counts every pixel its draws could cover:'
+                        + ' the GPU said only that some sample passed, not how many');
+                }
                 for (const counter of into)
                 {
-                    counter.samples += values[slot] ?? 0;
+                    counter.samples += samples;
                 }
             }
         }

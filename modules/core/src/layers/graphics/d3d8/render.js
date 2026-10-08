@@ -55,6 +55,7 @@ import {
 import { D3DDECLUSAGE } from '../d3d9/declaration.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
 import { toHalf } from '../d3d9/half.js';
+import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
 import {
     fixedFragmentStage, generates, generationOf, readsNormal,
 } from '../webgpu/internal/fixedfunction.js';
@@ -2347,9 +2348,30 @@ export function createRenderer(options){
      * its set goes to, and the counts it holds a part of. Null in a frame
      * that counts nothing.
      *
-     * @type {{ slots: any[], touched: Set<any> } | null}
+     * @type {{ slots: any[], areas: number[], touched: Set<any> } | null}
      */
     let frameOcclusion = null;
+    /**
+     * The pixels a draw can touch where replay stands: its target's, narrowed by the
+     * viewport and then the scissor (which is recorded cut to the viewport).
+     */
+    let drawArea = 0;
+    let assumedCountReported = false;
+    /**
+     * The samples a draw passed, as the program is told them (see occlusion.js).
+     *
+     * @param {number} answered @param {number} area
+     */
+    const countedSamples = (answered, area)=>{
+        const { samples, assumed } = passedSamples(answered, area);
+        if (assumed && divergence && !assumedCountReported)
+        {
+            assumedCountReported = true;
+            divergence('Direct3D', 'an occlusion query counts every pixel its draws could'
+                + ' cover: the GPU said only that some sample passed, not how many');
+        }
+        return samples;
+    };
     /** @param {any} count  An occlusion count every counter of which is back. */
     const settleOcclusion = count=>{
         count.value = count.total;
@@ -5696,6 +5718,7 @@ export function createRenderer(options){
         }
         pass.endOcclusionQuery();
         occlusion.slots[slot] = countingQuery;
+        occlusion.areas[slot] = drawArea;
         if (!occlusion.touched.has(countingQuery))
         {
             occlusion.touched.add(countingQuery);
@@ -7966,8 +7989,8 @@ export function createRenderer(options){
         // and then every pass of it can: a BEGIN may land in any of them.
         const counts = countingQuery !== null
             || recorded.commands.some((/** @type {any} */ command)=>command.kind === 'occlusion');
-        /** @type {{ slots: any[], touched: Set<any> } | null} */
-        const occlusion = counts ? { slots: [], touched: new Set() } : null;
+        /** @type {{ slots: any[], areas: number[], touched: Set<any> } | null} */
+        const occlusion = counts ? { slots: [], areas: [], touched: new Set() } : null;
         frameOcclusion = occlusion;
         /** @type {(() => Promise<number[]>) | null} */
         let counted = null;
@@ -8043,12 +8066,12 @@ export function createRenderer(options){
         {
             // Not waited for: the next frame replays while these come back,
             // and a count is settled once every frame it counted in has.
-            const { slots, touched } = occlusion;
+            const { slots, areas, touched } = occlusion;
             counted().then(samples=>{
                 samples.forEach((value, slot)=>{
                     if (slots[slot])
                     {
-                        slots[slot].total += value;
+                        slots[slot].total += countedSamples(value, areas[slot] ?? 0);
                     }
                 });
                 for (const count of touched)
@@ -8211,6 +8234,7 @@ export function createRenderer(options){
             if (command.kind === 'pass')
             {
                 opened = command;
+                drawArea = reachableArea(command.target);
                 pass = countingPass({
                     target: command.target,
                     clear: command.clearColor !== undefined,
@@ -8271,12 +8295,14 @@ export function createRenderer(options){
                 // reopened after this must not bring back an older scissor.
                 viewport = command.rect;
                 scissor = null;
+                drawArea = reachableArea(command.rect);
                 pass.setViewport(command.rect);
                 continue;
             }
             if (command.kind === 'scissor')
             {
                 scissor = command.rect;
+                drawArea = reachableArea(command.rect);
                 pass.setScissor(command.rect);
                 continue;
             }
