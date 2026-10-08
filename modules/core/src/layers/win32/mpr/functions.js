@@ -220,5 +220,57 @@ export function createNetworkFunctions(host){
 
         WNetGetUniversalNameA: getUniversalName,
         WNetGetUniversalNameW: getUniversalName,
+
+        /**
+         * DWORD WNetCancelConnectionA(LPCSTR lpName, BOOL fForce)
+         *
+         * Nothing is connected, so whatever is named -- a drive letter or a
+         * share -- is not a connection to cancel.
+         */
+        WNetCancelConnectionA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([name])=>answer((name >>> 0) === 0 ? ERROR_INVALID_ADDRESS
+                : ERROR_NOT_CONNECTED),
+        },
+
+        /**
+         * DWORD WNetUseConnectionA(HWND, LPNETRESOURCEA lpNetResource,
+         *   LPCSTR lpPassword, LPCSTR lpUserId, DWORD dwFlags, LPSTR lpAccessName,
+         *   LPDWORD lpBufferSize, LPDWORD lpResult)
+         *
+         * Making a connection is a provider's work, and there is no provider.
+         */
+        WNetUseConnectionA: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: ([, resource])=>answer((resource >>> 0) === 0 ? ERROR_INVALID_ADDRESS
+                : ERROR_NO_NETWORK),
+        },
+
+        /**
+         * DWORD WNetConnectionDialog(HWND hwnd, DWORD dwType)
+         *
+         * The dialog browses what the providers offer, and with none it is not
+         * shown: there is no network, rather than a dialog the user cancelled.
+         * A type that is neither disk nor print is refused first.
+         */
+        WNetConnectionDialog: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, type])=>answer((type >>> 0) === 0 || ((type >>> 0) & ~RESOURCE_TYPES) !== 0
+                ? ERROR_INVALID_PARAMETER : ERROR_NO_NETWORK),
+        },
+
+        /**
+         * DWORD WNetRestoreConnectionW(HWND hwndParent, LPCWSTR lpDevice)
+         *
+         * Restoring a remembered connection asks its provider to make it
+         * again; with no provider there is no network to restore it on.
+         */
+        WNetRestoreConnectionW: {
+            argBytes: 8,
+            handler: ()=>answer(ERROR_NO_NETWORK),
+        },
     };
 }
