@@ -405,6 +405,7 @@ const IN_PROCESS_CLASSES = Object.freeze([
 const SCRIPT_ENGINES = Object.freeze([
     { clsid: '{F414C260-6AC0-11CF-B6D1-00AA00BBBB58}',
         progIds: ['JScript', 'JavaScript', 'ECMAScript', 'LiveScript'] },
+    { clsid: '{B54F3741-5B07-11CF-A4B0-00AA004A55E8}', progIds: ['VBScript', 'VBS'] },
 ]);
 
 /**

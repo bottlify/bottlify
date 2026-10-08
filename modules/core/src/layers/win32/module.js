@@ -70,6 +70,7 @@ import { registerShellLinkClasses } from './shell32/shelllink.js';
 import { registerWbemClasses } from './ole32/wbem.js';
 import { registerDxDiagClasses } from './ole32/dxdiag.js';
 import { registerJScriptClass } from './jscript/active-script.js';
+import { registerVBScriptClass } from './vbscript/active-script.js';
 import { createRpcFunctions } from './rpcrt4/functions.js';
 import { createVersionFunctions } from './version/functions.js';
 import { createLzFunctions } from './lz32/functions.js';
@@ -1097,9 +1098,11 @@ export function createWin32Module(){
                 windows, directx, screen: config?.screen, divergence: config?.divergence,
             });
 
-            // JScript, the Active Scripting engine a host -- an installer's
-            // script, a page, a configuration tool -- asks COM for.
-            registerJScriptClass({
+            // JScript and VBScript, the Active Scripting engines a host -- an
+            // installer's script, a page, a configuration tool -- asks COM for,
+            // both on one host of the scripting interfaces.
+            /** @type {Parameters<typeof registerJScriptClass>[0]} */
+            const scriptHost = {
                 registry: com,
                 publish: (object, iid)=>bridge.publishInterface(object, iid),
                 com: {
@@ -1129,7 +1132,9 @@ export function createWin32Module(){
                 threadId: ()=>kernel.currentThread().id >>> 0,
                 now: ()=>kernel.clock.wallClock(),
                 divergence: config?.divergence,
-            });
+            };
+            registerJScriptClass(scriptHost);
+            registerVBScriptClass(scriptHost);
 
             // One way of starting a program, behind three spellings of asking for
             // one: kernel32's CreateProcess and WinExec, and the shell's launch. A
