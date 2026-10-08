@@ -303,8 +303,11 @@ into the bridge fires instead (section 6).
 **Memory.** All of the program's memory is one `WebAssembly.Memory` of fixed size, shared in the
 `isolated` mode: 1 GiB for the program by default, plus cork's tables. Program address `a` sits at `0x10000 + a`, so an ordinary
 x86 read or write becomes an equally ordinary `i32.load` or `i32.store` with an offset. The first
-64 KiB hold the state block with the registers (512 bytes), and cork's tables follow right after the
-program's memory. There are no page tables: each 4 KiB page has one byte of flags — `INACCESSIBLE`,
+64 KiB hold the state block with the registers (512 bytes) and the wasm interpreter's data and
+stack, and cork's tables follow right after the program's memory. A memory made for more than one
+executor of a process has, past these, a 64 KiB state page and tables for each further executor
+(`executorLayout`): its translations carry its own addresses, the program's memory is everyone's.
+There are no page tables: each 4 KiB page has one byte of flags — `INACCESSIBLE`,
 `HAS_CODE`, `VOLATILE`, `CLOSED`, `NO_EXECUTE`.
 
 ### The layers of cork
