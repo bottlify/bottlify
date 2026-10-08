@@ -82,8 +82,12 @@ const hostOf = cork=>/** @type {CorkHost} */ (createCorkHost({
 /**
  * Makes the model and the translator, each over a host of its own, and answers
  * a judge that runs one sequence on both from one state.
+ *
+ * @param {{ pool?: import('./sequences.js').Form[], cork?: Record<string, unknown> }} [given]
+ *     pool: the forms the sequences index (`POOL` by default); cork: the translator's
+ *     settings besides the judge's own (the atomic variant's judge sets `atomic`)
  */
-function createJudge(){
+export function createJudge({ pool = undefined, cork = {} } = {}){
     // The model is the JavaScript interpreter alone: the wasm tier is an
     // implementation of the instructions of its own, not their description.
     const model = hostOf({ translate: false, wasmInterpreter: false });
@@ -99,6 +103,7 @@ function createJudge(){
         missThreshold: Number.POSITIVE_INFINITY,
         hotThreshold: Number.POSITIVE_INFINITY,
         wasmInterpreter: false,
+        ...cork,
     });
     const runtime = translator.cork();
 
@@ -150,14 +155,14 @@ function createJudge(){
                 const key = setup.join(',');
                 if (key !== written)
                 {
-                    model.writePhysical(SETUP, programBytes(setup));
+                    model.writePhysical(SETUP, programBytes(setup, pool));
                     written = key;
                 }
                 model.writeReg32('eip', SETUP);
                 model.wake();
                 retireExactly(model.runSlice, model.halted, LIMIT);
             }
-            const code = programBytes(body);
+            const code = programBytes(body, pool);
             model.writePhysical(CODE, code);
             model.writeReg32('eip', CODE);
             const state = snapshot(model, SPANS);

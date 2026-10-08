@@ -31,6 +31,7 @@ import { checkAccess, emitStaleExit, looseStackStore, noteStore, stackAccess } f
 import { Tables } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { emitSimd } from './simd.js';
+import { emitLocked, isLocked } from './locked.js';
 import { emitX87, isX87, topAfterCall, x87AfterCall, x87Normalise, x87Reloaded } from './x87.js';
 
 /** i64 opcodes. */
@@ -287,6 +288,10 @@ export function emitInstruction(e, instruction, flagsLive){
         // 16-bit addressing outside `lea` is rare in 32-bit code and not worth
         // a wrapped address path here.
         return false;
+    }
+    if (e.context.atomic === true && isLocked(instruction))
+    {
+        return emitLocked(e, instruction, flagsLive);
     }
     switch (op)
     {

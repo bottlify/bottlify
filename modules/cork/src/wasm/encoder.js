@@ -144,6 +144,19 @@ const STORES = Object.freeze({
     i32: [0x36, 2], i64: [0x37, 3], f32: [0x38, 2], f64: [0x39, 3],
     i32_8: [0x3a, 0], i32_16: [0x3b, 1], i64_8: [0x3c, 0], i64_16: [0x3d, 1], i64_32: [0x3e, 2],
 });
+/**
+ * Atomic memory access, the threads proposal's 0xfe space, by operation and
+ * width, with the natural alignment each must be written with: `load_i32`,
+ * `store_i32_8`, `add_i32_16`, `cmpxchg_i64` and so on. The read-modify-writes
+ * answer the value memory held before.
+ */
+const ATOMICS = Object.freeze(Object.fromEntries(
+    /** @type {[string, number][]} */ ([['load', 0x10], ['store', 0x17], ['add', 0x1e],
+        ['sub', 0x25], ['and', 0x2c], ['or', 0x33], ['xor', 0x3a], ['xchg', 0x41],
+        ['cmpxchg', 0x48]])
+        .flatMap(([operation, base])=>[[`${operation}_i32`, [base, 2]],
+            [`${operation}_i64`, [base + 1, 3]], [`${operation}_i32_8`, [base + 2, 0]],
+            [`${operation}_i32_16`, [base + 3, 1]]])));
 /** A float constant's little-endian bytes, written here and copied out. */
 const FLOAT_BYTES = new Uint8Array(8);
 const FLOAT_VIEW = new DataView(FLOAT_BYTES.buffer);
@@ -518,6 +531,27 @@ export class Body {
     store(kind, { offset = 0, align } = {}){
         const [opcode, natural] = STORES[kind];
         return this.byte(opcode).u32(align ?? natural).u32(offset);
+    }
+
+    /**
+     * An atomic access (`ATOMICS`): sequentially consistent, and a trap where
+     * the address is not a multiple of its width -- the caller tests that first.
+     *
+     * @param {string} kind @param {{ offset?: number }} [options]
+     */
+    atomic(kind, { offset = 0 } = {}){
+        const entry = ATOMICS[/** @type {keyof typeof ATOMICS} */ (kind)];
+        if (entry === undefined)
+        {
+            throw new Error(`encoder: no such atomic (${kind})`);
+        }
+        const [opcode, natural] = entry;
+        return this.byte(0xfe).u32(opcode).u32(natural).u32(offset);
+    }
+
+    /** `atomic.fence`: every access before it is seen before any after it. */
+    atomicFence(){
+        return this.byte(0xfe).u32(0x03).byte(0);
     }
 
     /** @param {{ offset?: number, align?: number }} [options] */
