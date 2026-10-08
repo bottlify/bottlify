@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHeapAllocator, createHeapFunctions } from './heap.js';
+import { arenaRegion, createHeapAllocator, createHeapFunctions } from './heap.js';
 
 const HEAP_ZERO_MEMORY = 0x8;
 const HEAP_REALLOC_IN_PLACE_ONLY = 0x10;
@@ -1278,3 +1278,133 @@ test('GlobalCompact, LocalCompact and LocalShrink answer the process heap\'s lar
         fns.HeapAlloc.handler([heap, 0, 0x100]);
         assert.ok(fns.GlobalCompact.handler([0]) < largest, 'and it is measured, not fixed');
     });
+
+test('the block an address falls inside is the one a walk over every live block finds,'
+    + ' whatever was allocated and freed before', ()=>{
+    // The allocator answers from blocks kept in address order; the walk is the
+    // answer by definition. Seeded, so a failure names the program that makes it.
+    for (let seed = 1; seed <= 20; seed++)
+    {
+        let state = seed;
+        const next = (/** @type {number} */ below)=>{
+            state ^= state << 13;
+            state ^= state >>> 17;
+            state ^= state << 5;
+            return (state >>> 0) % below;
+        };
+        const base = 0x100000;
+        const size = 0x400000;
+        const allocator = createHeapAllocator({ base, size });
+        /** @type {number[]} */
+        const held = [];
+        for (let step = 0; step < 600; step++)
+        {
+            if (held.length > 0 && next(3) === 0)
+            {
+                const [address] = held.splice(next(held.length), 1);
+                assert.equal(allocator.free(address), true);
+            }
+            else
+            {
+                const address = allocator.allocate(8 + next(0x3000));
+                if (address !== 0)
+                {
+                    held.push(address);
+                }
+            }
+            const probe = base + next(size);
+            const walked = held.map(address=>/** @type {any} */ (allocator.block(address)))
+                .find(block=>probe >= block.address && probe < block.address + block.capacity)
+                ?? null;
+            assert.equal(allocator.blockContaining(probe), walked,
+                `seed ${seed}, step ${step}, address 0x${probe.toString(16)}`);
+        }
+    }
+});
+
+test('the VirtualQuery answer for an arena page outside every reservation is the one a walk'
+    + ' over every free span and every reservation gives', ()=>{
+    const PAGE = 4096;
+    const roundUp = (/** @type {number} */ v, /** @type {number} */ to)=>Math.ceil(v / to) * to;
+    /** The answer as it was: every free span, then every reservation and span. */
+    /**
+     * @param {any} allocator @param {number} page @param {number} arenaEnd
+     * @param {Set<number>} reservations
+     */
+    const walked = (allocator, page, arenaEnd, reservations)=>{
+        /** @type {{ base: number, size: number }[]} */
+        const spans = allocator.freeSpans();
+        const free = spans.find(span=>span.base <= page && span.base + span.size >= page + PAGE);
+        if (free)
+        {
+            return { free: true, end: ((free.base + free.size) & ~(PAGE - 1)) >>> 0 };
+        }
+        let end = arenaEnd;
+        for (const reservation of reservations)
+        {
+            if (reservation > page && reservation < end)
+            {
+                end = reservation;
+            }
+        }
+        for (const span of spans)
+        {
+            const first = roundUp(span.base, PAGE);
+            if (first > page && first + PAGE <= span.base + span.size && first < end)
+            {
+                end = first;
+            }
+        }
+        return { free: false, end };
+    };
+    for (let seed = 1; seed <= 20; seed++)
+    {
+        let state = seed;
+        const next = (/** @type {number} */ below)=>{
+            state ^= state << 13;
+            state ^= state >>> 17;
+            state ^= state << 5;
+            return (state >>> 0) % below;
+        };
+        const base = 0x100000;
+        const size = 0x200000;
+        const allocator = createHeapAllocator({ base, size });
+        const reserve = {};
+        const heap = {};
+        /** @type {number[]} */
+        const held = [];
+        const reservations = new Set();
+        for (let step = 0; step < 400; step++)
+        {
+            if (held.length > 0 && next(3) === 0)
+            {
+                const [address] = held.splice(next(held.length), 1);
+                reservations.delete(address);
+                allocator.free(address);
+            }
+            else
+            {
+                const reserving = next(4) === 0;
+                const address = allocator.allocate(reserving ? 0x10000 : 8 + next(0x2000),
+                    { owner: reserving ? reserve : heap });
+                if (address !== 0)
+                {
+                    held.push(address);
+                    if (reserving)
+                    {
+                        reservations.add(address);
+                    }
+                }
+            }
+            const page = (base + next(size)) & ~(PAGE - 1);
+            const block = allocator.blockContaining(page);
+            if (block && block.owner === reserve)
+            {
+                continue;
+            }
+            assert.deepEqual(arenaRegion(allocator, page, base, base + size,
+                one=>one.owner === reserve), walked(allocator, page, base + size, reservations),
+            `seed ${seed}, step ${step}, page 0x${page.toString(16)}`);
+        }
+    }
+});

@@ -219,6 +219,46 @@ const binOf = size=>(size < SMALL_LIMIT
     : SMALL_CLASSES + (31 - Math.clz32(size)) - (31 - Math.clz32(SMALL_LIMIT)));
 
 /**
+ * What VirtualQuery answers for an arena page no reservation holds: free to
+ * the end of the free run it begins (a whole page of it), or the heap's own
+ * blocks up to the next page that is a reservation's or wholly free. Read off
+ * the blocks in address order on either side of the page, where it walked
+ * every free span and every block -- a hundred microseconds a call.
+ *
+ * @param {ReturnType<typeof createHeapAllocator>} allocator
+ * @param {number} page @param {number} arenaBase @param {number} arenaEnd
+ * @param {(block: HeapBlock) => boolean} isReservation
+ * @returns {{ free: boolean, end: number }}
+ */
+export function arenaRegion(allocator, page, arenaBase, arenaEnd, isReservation){
+    const before = allocator.blockAtOrBefore(page);
+    let gapStart = before ? before.address + before.capacity : arenaBase;
+    const blocks = allocator.blocksAbove(page);
+    let next = blocks.next();
+    const gapEnd = next.done ? arenaEnd : next.value.address;
+    if (gapStart <= page && gapEnd >= page + PAGE_SIZE)
+    {
+        return { free: true, end: (gapEnd & ~(PAGE_SIZE - 1)) >>> 0 };
+    }
+    for (; !next.done; next = blocks.next())
+    {
+        const block = next.value;
+        const first = roundUp(gapStart, PAGE_SIZE);
+        if (first > page && first + PAGE_SIZE <= block.address)
+        {
+            return { free: false, end: first };
+        }
+        if (isReservation(block))
+        {
+            return { free: false, end: block.address };
+        }
+        gapStart = block.address + block.capacity;
+    }
+    const first = roundUp(gapStart, PAGE_SIZE);
+    return { free: false, end: first > page && first + PAGE_SIZE <= arenaEnd ? first : arenaEnd };
+}
+
+/**
  * An allocator over one byte range.
  *
  * Free space is kept in size classes -- a stack of spans per class, taken
@@ -253,6 +293,35 @@ export function createHeapAllocator({ base, size }){
     /** @type {Map<number, HeapBlock | null>} */
     let live = new Map();
     let stale = 0;
+    // The live blocks by address, for the block an interior address falls in:
+    // VirtualAlloc's commit, VirtualQuery, VirtualProtect and VirtualFree each
+    // ask, and a walk over every block (and every null left behind) cost 50 to
+    // 100 microseconds a call in a title with thousands of reservations.
+    /** @type {HeapBlock[]} */
+    const byAddress = [];
+    /** The index of the first block starting above `address`. @param {number} address */
+    const above = address=>{
+        let low = 0;
+        let high = byAddress.length;
+        while (low < high)
+        {
+            const mid = (low + high) >>> 1;
+            if (byAddress[mid].address <= address)
+            {
+                low = mid + 1;
+            }
+            else
+            {
+                high = mid;
+            }
+        }
+        return low;
+    };
+    /** @param {HeapBlock} block */
+    const placed = block=>{
+        live.set(block.address, block);
+        byAddress.splice(above(block.address), 0, block);
+    };
     let liveBlocks = 0;
     let liveSpans = 0;
     /**
@@ -397,7 +466,7 @@ export function createHeapAllocator({ base, size }){
 
             const fresh = start >= handedTo;
             handedTo = Math.max(handedTo, end);
-            live.set(start, { address: start, size: bytes, capacity, owner, fresh });
+            placed({ address: start, size: bytes, capacity, owner, fresh });
             liveBlocks++;
             return start;
         },
@@ -450,7 +519,7 @@ export function createHeapAllocator({ base, size }){
             }
             const fresh = start >= handedTo;
             handedTo = Math.max(handedTo, end);
-            live.set(start, { address: start, size: bytes, capacity, owner, fresh });
+            placed({ address: start, size: bytes, capacity, owner, fresh });
             liveBlocks++;
             return true;
         },
@@ -466,6 +535,7 @@ export function createHeapAllocator({ base, size }){
                 return false;
             }
             live.set(address, null);
+            byAddress.splice(above(address) - 1, 1);
             liveBlocks--;
             forget();
             let spanBase = block.address;
@@ -499,14 +569,29 @@ export function createHeapAllocator({ base, size }){
          * @returns {HeapBlock | null}
          */
         blockContaining(address){
-            for (const block of live.values())
+            const block = byAddress[above(address) - 1];
+            return block !== undefined && address < block.address + block.capacity ? block : null;
+        },
+
+        /**
+         * The last live block starting at or below an address, or null.
+         *
+         * @param {number} address
+         * @returns {HeapBlock | null}
+         */
+        blockAtOrBefore: address=>byAddress[above(address) - 1] ?? null,
+
+        /**
+         * The live blocks starting above an address, in address order.
+         *
+         * @param {number} address
+         * @returns {Generator<HeapBlock>}
+         */
+        *blocksAbove(address){
+            for (let i = above(address); i < byAddress.length; i++)
             {
-                if (block && address >= block.address && address < block.address + block.capacity)
-                {
-                    return block;
-                }
+                yield byAddress[i];
             }
-            return null;
         },
 
         /**
@@ -872,35 +957,12 @@ export function createHeapFunctions(host){
             return [page, block.address, PAGE_EXECUTE_READWRITE,
                 (next ? Math.min(next.from, end) : end) - page, MEM_RESERVE, 0, MEM_PRIVATE];
         }
-        /** @type {{ base: number, size: number }[]} */
-        const spans = allocator.freeSpans();
-        const free = spans.find(span=>
-            span.base <= page && span.base + span.size >= page + PAGE_SIZE);
-        if (free)
-        {
-            const end = ((free.base + free.size) & ~(PAGE_SIZE - 1)) >>> 0;
-            return [page, 0, 0, end - page, MEM_FREE, PAGE_NOACCESS, 0];
-        }
-        // The heap's own blocks, up to the next page that is a reservation's
-        // or wholly free.
-        let end = arenaEnd;
-        for (const reservation of allocator.owned(VIRTUAL))
-        {
-            if (reservation > page && reservation < end)
-            {
-                end = reservation;
-            }
-        }
-        for (const span of spans)
-        {
-            const first = roundUp(span.base, PAGE_SIZE);
-            if (first > page && first + PAGE_SIZE <= span.base + span.size && first < end)
-            {
-                end = first;
-            }
-        }
-        return [page, host.arena.base, PAGE_EXECUTE_READWRITE, end - page, MEM_COMMIT,
-            PAGE_EXECUTE_READWRITE, MEM_PRIVATE];
+        const region = arenaRegion(allocator, page, host.arena.base, arenaEnd,
+            one=>one.owner === VIRTUAL);
+        return region.free
+            ? [page, 0, 0, region.end - page, MEM_FREE, PAGE_NOACCESS, 0]
+            : [page, host.arena.base, PAGE_EXECUTE_READWRITE, region.end - page, MEM_COMMIT,
+                PAGE_EXECUTE_READWRITE, MEM_PRIVATE];
     };
 
     /**
