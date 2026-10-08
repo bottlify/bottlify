@@ -67,6 +67,7 @@ import { createCommonControls } from './comctl32/controls.js';
 import { createImageLists } from './comctl32/imagelist.js';
 import { createShellFunctions } from './shell32/functions.js';
 import { registerShellLinkClasses } from './shell32/shelllink.js';
+import { registerInternetShortcutClass } from './shell32/internet-shortcut.js';
 import { registerWbemClasses } from './ole32/wbem.js';
 import { registerDxDiagClasses } from './ole32/dxdiag.js';
 import { registerJScriptClass } from './jscript/active-script.js';
@@ -1073,7 +1074,8 @@ export function createWin32Module(){
             // an installer reaches it through CoCreateInstance rather than an
             // export. It saves onto the same volume every file call uses and hands
             // back strings from the same task heap CoTaskMemAlloc does.
-            registerShellLinkClasses(com, {
+            /** @type {Parameters<typeof registerShellLinkClasses>[1]} */
+            const shortcutHost = {
                 readMemory,
                 writeMemory,
                 readCString,
@@ -1082,7 +1084,10 @@ export function createWin32Module(){
                 allocate: bytes=>heap.allocate(bytes),
                 files: volume,
                 divergence: config?.divergence,
-            });
+            };
+            registerShellLinkClasses(com, shortcutHost);
+            // The `.url` beside it: a setup's link to its publisher's site.
+            registerInternetShortcutClass(com, /** @type {any} */ (shortcutHost));
 
             // WMI's locator, which a program asks about its video memory and its
             // machine.
