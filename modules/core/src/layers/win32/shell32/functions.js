@@ -108,7 +108,7 @@ const SHELLEXECUTEINFO_PROCESS = 56;
  */
 const SEE_MASK_IDLIST = 0x00000004;
 const SEE_MASK_NOCLOSEPROCESS = 0x00000040;
-const SEE_MASK_CLASSNAME = 0x00000400;
+const SEE_MASK_CLASSNAME = 0x00000001;
 
 /**
  * SHFILEOPSTRUCT, either spelling. shellapi.h packs the structure to one byte

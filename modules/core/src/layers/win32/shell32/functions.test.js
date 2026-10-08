@@ -281,19 +281,48 @@ test('the extended launch answers in the record, and hands over the child', ()=>
     assert.equal(m.launched[0].line, '"C:\\App\\setup.exe"');
 });
 
-test('the extended launch refuses a record that names a list rather than a file', ()=>{
-    const m = machineWithLauncher(['C:\\App\\setup.exe']);
-    m.put('setup.exe', 0x200);
-    const view = new DataView(m.memory.buffer);
-    const SEE_MASK_IDLIST = 0x4;
-    m.memory.fill(0, 0x100, 0x140);
-    view.setUint32(0x104, SEE_MASK_IDLIST, true);
-    view.setUint32(0x110, 0x200, true);
+test('the extended launch starts the program whatever the flags that change nothing here',
+    ()=>{
+        // A setup starting its redistributable asks for no error boxes, no
+        // asynchronous launch and the variables expanded; none of them makes
+        // the file anything but the program to run.
+        const SEE_MASK_NOCLOSEPROCESS = 0x40;
+        const SEE_MASK_FLAG_NO_UI = 0x400;
+        const SEE_MASK_NOASYNC = 0x100;
+        const SEE_MASK_DOENVSUBST = 0x200;
+        for (const mask of [SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_DOENVSUBST])
+        {
+            const m = machineWithLauncher(['C:\\WINDOWS\\TEMP\\DPLAY61A.EXE']);
+            m.put('C:\\WINDOWS\\TEMP\\DPLAY61A.EXE', 0x200);
+            m.put('/Q:A /R:N', 0x280);
+            const view = new DataView(m.memory.buffer);
+            m.memory.fill(0, 0x100, 0x140);
+            view.setUint32(0x104, mask | SEE_MASK_NOCLOSEPROCESS, true);
+            view.setUint32(0x110, 0x200, true);
+            view.setUint32(0x114, 0x280, true);
 
-    assert.equal(m.shell.ShellExecuteExA.handler([0x100]), 0);
-    assert.equal(view.getUint32(0x120, true), 31);
-    assert.deepEqual(m.launched, []);
-});
+            assert.equal(m.shell.ShellExecuteExA.handler([0x100]), 1, `mask ${mask}`);
+            assert.equal(view.getUint32(0x120, true), 33);
+            assert.equal(m.launched[0].line, '"C:\\WINDOWS\\TEMP\\DPLAY61A.EXE" /Q:A /R:N');
+        }
+    });
+
+test('the extended launch refuses a record that names a list or a class rather than a file',
+    ()=>{
+        for (const mask of [0x4, 0x1])
+        {
+            const m = machineWithLauncher(['C:\\App\\setup.exe']);
+            m.put('setup.exe', 0x200);
+            const view = new DataView(m.memory.buffer);
+            m.memory.fill(0, 0x100, 0x140);
+            view.setUint32(0x104, mask, true);
+            view.setUint32(0x110, 0x200, true);
+
+            assert.equal(m.shell.ShellExecuteExA.handler([0x100]), 0, `mask ${mask}`);
+            assert.equal(view.getUint32(0x120, true), 31);
+            assert.deepEqual(m.launched, []);
+        }
+    });
 
 /**
  * The machine above with an ANSI string reader and a path resolver, which is
