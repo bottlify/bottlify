@@ -20,7 +20,8 @@
  *       [--copy 'C:\WINDOWS\TEMP' temp]...
  *
  * `--trace-box` prints the trace when the first box reporting an error is
- * shown instead. `--journal S` prints, S seconds in, the last cross-process COM calls and
+ * shown instead, and `--trace-fault` when a process ends with an exception's
+ * code. `--journal S` prints, S seconds in, the last cross-process COM calls and
  * message waits from the call journal (every call area on); `--trace S` prints
  * the last three thousand calls of every kind instead (`--trace-lines N`), with their first
  * arguments -- what a process that loops without waiting keeps calling. A run
@@ -104,7 +105,11 @@ const traceAt = number('--trace', 0);
 // the calls that led a setup to the error it reports, which a fixed time
 // misses when the box's moment moves from run to run.
 const traceOnBox = argv.includes('--trace-box');
-const journalAt = number('--journal', 0) || traceAt || (traceOnBox ? 1e6 : 0);
+// `--trace-fault`: the trace printed when a process ends with an exception's
+// code -- the calls that led to a crash nothing reported in a box.
+const traceOnFault = argv.includes('--trace-fault');
+const journalAt = number('--journal', 0) || traceAt
+    || (traceOnBox || traceOnFault ? 1e6 : 0);
 const memory = number('--memory', 0);
 const listAt = argv.includes('--list') ? argv[argv.indexOf('--list') + 1] : null;
 // The launcher hands a program the size of the screen it is on; the engine's
@@ -510,7 +515,7 @@ const printJournal = ()=>{
     }
     journalPrinted = true;
     const crossing = /OleMainThread|CoWait|MsgWait|PostMessage|PostThread|SendMessage|WaitFor/;
-    const whole = traceAt > 0 || traceOnBox;
+    const whole = traceAt > 0 || traceOnBox || traceOnFault;
     const trail = app.log.recent(100000).filter((/** @type {any} */ entry)=>whole
         || entry.category === 'call.com' || crossing.test(entry.text));
     for (const entry of trail.slice(whole ? -number('--trace-lines', 3000) : -150))
@@ -518,7 +523,18 @@ const printJournal = ()=>{
         console.log('JOURNAL', (entry.time / 1000).toFixed(2), entry.text.slice(0, 220));
     }
 };
-if (journalAt > 0 && !traceOnBox)
+if (traceOnFault)
+{
+    const EXCEPTION_CODES = 0xc0000000;
+    app.on('process-resumed', (/** @type {any} */ event)=>{
+        if ((event?.code >>> 0) >= EXCEPTION_CODES)
+        {
+            console.log(seconds(), 'FAULT', event.image, (event.code >>> 0).toString(16));
+            printJournal();
+        }
+    });
+}
+if (journalAt > 0 && !traceOnBox && !traceOnFault)
 {
     setTimeout(printJournal, journalAt * 1000);
 }
