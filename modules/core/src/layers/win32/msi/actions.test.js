@@ -151,7 +151,8 @@ test('an action written into the script starts again when the script carries it 
     const starts = heard.filter(entry=>entry.kind === INSTALLMESSAGE.ACTIONSTART)
         .map(entry=>entry.fields[1]);
     const finalize = starts.indexOf('InstallFinalize');
-    assert.deepEqual(starts.slice(finalize + 1), ['ProcessComponents', 'WriteRegistryValues'],
+    assert.deepEqual(starts.slice(finalize + 1),
+        ['ProcessComponents', 'InstallFiles', 'WriteRegistryValues'],
         'after InstallFinalize, as its script runs them');
     const value = heard.find(entry=>entry.kind === INSTALLMESSAGE.ACTIONDATA
         && entry.fields[1] === 'Software\\Test');

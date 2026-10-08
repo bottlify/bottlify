@@ -319,6 +319,20 @@ export function createRegistration(hive){
             return key ? valueText(hive.getValue(key, /** @type {string} */ (product))) : null;
         },
 
+        /**
+         * Whether a component is registered for any product but this one: a
+         * shared component, whose files stay until its last product goes.
+         *
+         * @param {string} componentId @param {string} productCode
+         */
+        sharedWith: (componentId, productCode)=>{
+            const component = squashGuid(componentId);
+            const product = squashGuid(productCode);
+            const key = component ? open(`${USER_DATA}\\Components\\${component}`) : null;
+            return Boolean(key && hive.values(key).some(value=>value.name.toUpperCase()
+                !== product));
+        },
+
         /** @param {string} productCode @param {string} feature @param {string} components */
         registerFeature: (productCode, feature, components)=>{
             const keys = productKeys(productCode);

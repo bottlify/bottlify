@@ -38,6 +38,7 @@ import { finishAsync } from './custom.js';
 import { createRegistration, squashGuid } from './registration.js';
 import { installerVersion } from './version.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { parseGuid } from '../ole32/guid.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -64,6 +65,11 @@ const ERROR_DATATYPE_MISMATCH = 1629;
 const ERROR_ACCESS_DENIED = 5;
 const ERROR_UNKNOWN_PRODUCT = 1605;
 const ERROR_INSTALL_SOURCE_ABSENT = 1612;
+const ERROR_SUCCESS_REBOOT_REQUIRED = 3010;
+
+/** LoadTypeLibEx: load without registering; UnRegisterTypeLib: a 32-bit library. */
+const REGKIND_NONE = 2;
+const SYS_WIN32 = 1;
 
 /** MsiConfigureProduct's install levels with a meaning of their own. */
 const INSTALLLEVEL_DEFAULT = 0;
@@ -391,6 +397,11 @@ export function createMsiFunctions(host){
                     startDll: (path, entry, args)=>startDll(path, entry, args, made.thread),
                     runExe: async(commandLine, directory, wait)=>
                         host.runExe?.(commandLine, directory, wait) ?? null,
+                    registerTypeLib: (path, helpDir)=>registerTypeLib(path, helpDir, made.thread),
+                    unregisterTypeLib: (libId, major, minor, language)=>
+                        unregisterTypeLib(libId, major, minor, language, made.thread),
+                    removeProduct: (product, features)=>maintain(product,
+                        `REMOVE=${quoted(features)}`, made.thread),
                     divergence: host.divergence,
                     log: host.log,
                 },
@@ -592,6 +603,7 @@ export function createMsiFunctions(host){
             installed: {
                 feature: registration.featureInstalled,
                 component: (product, id)=>registration.componentPath(product, id) !== null,
+                sharedWith: registration.sharedWith,
             },
         });
         session.setProperty('UILevel', String(uiLevel & 0x0f || INSTALLUILEVEL.BASIC));
@@ -605,8 +617,7 @@ export function createMsiFunctions(host){
      *
      * @param {string} path @param {string} commandLine
      */
-    const installPackage = async(path, commandLine)=>{
-        const thread = host.callerThread();
+    const installPackage = async(path, commandLine, thread = host.callerThread())=>{
         const session = await openSession(path, commandLine);
         if (!session)
         {
@@ -639,6 +650,10 @@ export function createMsiFunctions(host){
             await deliver(INSTALLMESSAGE.TERMINATE, createRecord(0), session, thread);
             engines.delete(session);
         }
+        if (code === ERROR_SUCCESS && session.mode.rebootAtEnd)
+        {
+            code = ERROR_SUCCESS_REBOOT_REQUIRED;
+        }
         host.log?.(`Installation of ${path} answered ${code}.`);
         return code;
     };
@@ -669,10 +684,98 @@ export function createMsiFunctions(host){
      * for a change: a removal, a repair, a feature added or taken away.
      *
      * @param {string | null} productCode @param {string} request
+     * @param {unknown} [thread]  Whose call the installation answers.
      */
-    const maintain = async(productCode, request)=>{
+    const maintain = async(productCode, request, thread = host.callerThread())=>{
         const local = localPackage(productCode);
-        return typeof local === 'number' ? local : installPackage(local, request);
+        return typeof local === 'number' ? local : installPackage(local, request, thread);
+    };
+
+    /**
+     * Calls one of oleaut32's exports from the installation, with the strings
+     * and out-pointers it takes laid out in the guest for the call.
+     *
+     * @param {string} entry @param {(block: number) => number[]} args
+     * @param {Uint8Array} data  Copied to the block first.
+     * @param {unknown} thread
+     * @returns {Promise<{ answer: number, block: Uint8Array } | null>}
+     */
+    const callOleaut = async(entry, args, data, thread)=>{
+        const module = await withString('oleaut32.dll',
+            name=>on(thread, ()=>host.libraries.loadAnsi(name)));
+        if (!module)
+        {
+            return null;
+        }
+        const block = host.allocate(data.length);
+        host.writeMemory(block, data);
+        try
+        {
+            const address = await withString(entry,
+                name=>on(thread, ()=>host.libraries.procAddress(module >>> 0, name)));
+            if (!address)
+            {
+                return null;
+            }
+            const answer = (await host.call(address >>> 0, args(block), thread)) >>> 0;
+            return { answer, block: host.readMemory(block, data.length).slice() };
+        }
+        finally
+        {
+            host.free(block);
+            await on(thread, ()=>host.libraries.free(module >>> 0));
+        }
+    };
+
+    /**
+     * RegisterTypeLibraries' registration of one file: loaded by oleaut32,
+     * registered with the help folder the row names, released.
+     *
+     * @param {string} path @param {string | null} helpDir @param {unknown} thread
+     */
+    const registerTypeLib = async(path, helpDir, thread)=>{
+        const name = utf16(`${path}\0`);
+        const help = helpDir === null ? new Uint8Array(0) : utf16(`${helpDir}\0`);
+        // The out-pointer first, then the path and the help folder.
+        const data = new Uint8Array(4 + name.length + help.length);
+        data.set(name, 4);
+        data.set(help, 4 + name.length);
+        const loaded = await callOleaut('LoadTypeLibEx',
+            block=>[block + 4, REGKIND_NONE, block], data, thread);
+        if (!loaded || loaded.answer !== 0)
+        {
+            return loaded?.answer ?? null;
+        }
+        const library = new DataView(loaded.block.buffer).getUint32(0, true);
+        try
+        {
+            const registered = await callOleaut('RegisterTypeLib', block=>[library, block,
+                helpDir === null ? 0 : block + name.length], data.subarray(4), thread);
+            return registered?.answer ?? null;
+        }
+        finally
+        {
+            const table = readU32(library);
+            await host.call(readU32(table + 8), [library], thread);
+        }
+    };
+
+    /**
+     * UnregisterTypeLibraries' undoing of one: UnRegisterTypeLib for the
+     * library's GUID, version and language.
+     *
+     * @param {string} libId @param {number} major @param {number} minor
+     * @param {number} language @param {unknown} thread
+     */
+    const unregisterTypeLib = async(libId, major, minor, language, thread)=>{
+        const guid = parseGuid(libId);
+        if (guid === null)
+        {
+            return null;
+        }
+        const done = await callOleaut('UnRegisterTypeLib',
+            block=>[block, major, minor, language, SYS_WIN32], guid, thread);
+        return done?.answer ?? null;
     };
 
     /**

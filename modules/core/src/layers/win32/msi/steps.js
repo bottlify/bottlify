@@ -262,8 +262,13 @@ export function registryValue(value){
 
 
 /**
- * Whether a component is being taken off the machine.
+ * Whether a component's resources are being taken off the machine: it is
+ * being removed, and no other product has it -- a shared component's files,
+ * values and registrations stay for the product that still uses them.
  *
  * @param {Engine} engine @param {string} key
  */
-export const removing = (engine, key)=>componentOf(engine, key)?.action === INSTALLSTATE.ABSENT;
+export const removing = (engine, key)=>{
+    const component = componentOf(engine, key);
+    return component?.action === INSTALLSTATE.ABSENT && !component.shared;
+};

@@ -29,13 +29,16 @@ import { runCustomAction } from './custom.js';
 import { PID } from './summary.js';
 import { editIni } from './ini.js';
 import { REMOVAL_ACTIONS, productGone, unpublishProduct } from './removal.js';
+import { CLASS_ACTIONS, iconPath, publishIcons } from './classes.js';
+import { SYSTEM_ACTIONS } from './system.js';
+import { UPGRADE_ACTIONS } from './upgrade.js';
 import { environmentKey, environmentRow, installedValue } from './environment.js';
 import { valueText } from './registration.js';
 import {
     ERROR_SUCCESS, ERROR_FUNCTION_NOT_CALLED, ERROR_INSTALL_USEREXIT, ERROR_INSTALL_FAILURE,
     ERROR_INSTALL_SUSPEND, ERROR_NO_MORE_ITEMS, INSTALLMESSAGE, log, message, actionStart,
     errorMessage, REGISTRY_TICKS, COMPONENT_TICKS, PROGRESS_RESET, progressed, actionData,
-    schedule, makeDirectories, create, readFile, writeFile, componentOf, installing, removing,
+    schedule, makeDirectories, create, readFile, writeFile, componentOf, installing,
     registryRoot, registryValue,
 } from './steps.js';
 export { setIniValue } from './ini.js';
@@ -196,6 +199,18 @@ const filesToInstall = engine=>[...engine.session.files.values()]
     });
 
 /**
+ * InstallFiles: the files are put down as the script is carried out, so a
+ * removal written into the script before them -- an earlier product's, a
+ * file the RemoveFile table names -- happens first, as on Windows.
+ *
+ * @param {Engine} engine
+ */
+async function installFiles(engine){
+    return filesToInstall(engine).length === 0 ? ERROR_SUCCESS
+        : schedule(engine, 'InstallFiles', ()=>copyFiles(engine));
+}
+
+/**
  * The files to install and where they come from: each component installing
  * locally, its files by sequence, each in the Media row whose range holds it.
  * Each is told to the interface as it is begun and counted on the bar when it
@@ -203,7 +218,7 @@ const filesToInstall = engine=>[...engine.session.files.values()]
  *
  * @param {Engine} engine
  */
-async function installFiles(engine){
+async function copyFiles(engine){
     const { session } = engine;
     const wordCount = Number(session.summary.get(PID.WORDCOUNT)?.value ?? 0);
     const compressedByDefault = (wordCount & 2) !== 0;
@@ -549,6 +564,8 @@ async function registerProduct(engine){
                 ['Contact', 'ARPCONTACT'], ['ProductID', 'ProductID'],
                 ['RegOwner', 'USERNAME'], ['RegCompany', 'COMPANYNAME']]
                 .map(([name, property])=>[name, session.getProperty(property)])
+                .concat(session.getProperty('ARPPRODUCTICON') === '' ? []
+                    : [['DisplayIcon', iconPath(engine, session.getProperty('ARPPRODUCTICON'))]])
                 .filter(([, value])=>value !== '')),
         });
     });
@@ -560,7 +577,7 @@ async function processComponents(engine){
     const productCode = session.getProperty('ProductCode');
     for (const component of session.components.values())
     {
-        if (component.id && removing(engine, component.key))
+        if (component.id && component.action === INSTALLSTATE.ABSENT)
         {
             const id = component.id;
             await schedule(engine, 'ProcessComponents', async()=>{
@@ -725,23 +742,6 @@ async function appSearch(engine){
 }
 
 /** @param {Engine} engine */
-async function findRelatedProducts(engine){
-    const { session, host } = engine;
-    for (const row of session.db.table('Upgrade')?.rows ?? [])
-    {
-        const related = host.registration.relatedProducts(String(row[0] ?? ''))
-            .filter(product=>product !== session.getProperty('ProductCode'));
-        if (related.length > 0 && row[6] !== null)
-        {
-            const property = String(row[6]);
-            const existing = session.getProperty(property);
-            session.setProperty(property, [existing, ...related].filter(Boolean).join(';'));
-        }
-    }
-    return ERROR_SUCCESS;
-}
-
-/** @param {Engine} engine */
 async function costInitialize(engine){
     const { session } = engine;
     if (session.getProperty('ROOTDRIVE') === '')
@@ -872,12 +872,13 @@ async function nothing(engine){
  */
 export const STANDARD_ACTIONS = {
     ...REMOVAL_ACTIONS,
+    ...CLASS_ACTIONS,
+    ...SYSTEM_ACTIONS,
+    ...UPGRADE_ACTIONS,
     AppSearch: appSearch,
     CCPSearch: nothing,
     RMCCPSearch: nothing,
     LaunchConditions: launchConditions,
-    FindRelatedProducts: findRelatedProducts,
-    MigrateFeatureStates: nothing,
     ValidateProductID: validateProductId,
     CostInitialize: costInitialize,
     FileCost: nothing,
@@ -889,52 +890,24 @@ export const STANDARD_ACTIONS = {
     InstallInitialize: installInitialize,
     AllocateRegistrySpace: nothing,
     ProcessComponents: processComponents,
-    UnpublishComponents: nothing,
-    StopServices: nothing,
-    DeleteServices: nothing,
-    UnregisterComPlus: nothing,
-    UnregisterTypeLibraries: nothing,
-    RemoveODBC: nothing,
-    UnregisterFonts: nothing,
-    UnregisterClassInfo: nothing,
-    UnregisterExtensionInfo: nothing,
-    UnregisterProgIdInfo: nothing,
-    UnregisterMIMEInfo: nothing,
     CreateFolders: createFolders,
-    MoveFiles: nothing,
     InstallFiles: installFiles,
     PatchFiles: nothing,
     DuplicateFiles: duplicateFiles,
     BindImage: nothing,
     CreateShortcuts: createShortcuts,
-    RegisterClassInfo: nothing,
-    RegisterExtensionInfo: nothing,
-    RegisterProgIdInfo: nothing,
-    RegisterMIMEInfo: nothing,
     WriteRegistryValues: writeRegistryValues,
     WriteIniValues: writeIniValues,
     WriteEnvironmentStrings: writeEnvironmentStrings,
-    RegisterFonts: nothing,
-    InstallODBC: nothing,
-    InstallServices: nothing,
-    StartServices: nothing,
-    RegisterComPlus: nothing,
-    RegisterTypeLibraries: nothing,
     SelfRegModules: selfRegModules,
     RegisterUser: nothing,
     RegisterProduct: registerProduct,
-    PublishComponents: nothing,
     PublishFeatures: publishFeatures,
-    PublishProduct: nothing,
-    MsiPublishAssemblies: nothing,
-    MsiUnpublishAssemblies: nothing,
+    PublishProduct: publishIcons,
     InstallExecute: installExecute,
     InstallExecuteAgain: installExecute,
     InstallFinalize: installFinalize,
     ExecuteAction: executeAction,
-    ScheduleReboot: nothing,
-    ForceReboot: nothing,
-    RemoveExistingProducts: nothing,
     InstallAdminPackage: nothing,
     InstallSFPCatalogFile: nothing,
     StartApplication: nothing,

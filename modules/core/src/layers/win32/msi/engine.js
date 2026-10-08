@@ -36,6 +36,13 @@
  * @property {(commandLine: string, directory: string | null, wait: boolean)
  *     => Promise<number | null>} runExe
  *           Starts a program; its exit code when waited for, null when it could not start.
+ * @property {(path: string, helpDir: string | null) => Promise<number | null>} [registerTypeLib]
+ *     oleaut32's registration of a type library file, as RegisterTypeLib makes it; its
+ *     HRESULT, or null with no oleaut32 to ask.
+ * @property {(libId: string, major: number, minor: number, language: number)
+ *     => Promise<number | null>} [unregisterTypeLib]
+ * @property {(productCode: string, features: string) => Promise<number>} [removeProduct]
+ *     Another installed product's removal, from the package the machine kept for it.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(text: string) => void} [log]
  */

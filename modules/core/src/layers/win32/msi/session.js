@@ -80,6 +80,7 @@ const FEATURE_UI_DISALLOW_ABSENT = 0x10;
  * @property {string | null} condition
  * @property {string | null} keyPath
  * @property {boolean} enabled
+ * @property {boolean} shared  Another product has it too: its resources stay on removal.
  * @property {number} installed
  * @property {number} action
  * @property {string[]} features
@@ -279,6 +280,8 @@ export function parseCommandLine(text){
  * @typedef {Object} InstalledParts
  * @property {(productCode: string, feature: string) => boolean} feature
  * @property {(productCode: string, componentId: string) => boolean} component
+ * @property {(componentId: string, productCode: string) => boolean} [sharedWith]
+ *     Whether another product has the component too.
  */
 
 /**
@@ -382,8 +385,8 @@ export function createSession(options){
             directory: String(row[2] ?? ''), attributes: Number(row[3] ?? 0),
             condition: row[4] === null ? null : String(row[4]),
             keyPath: row[5] === null ? null : String(row[5]),
-            enabled: true, installed: INSTALLSTATE.ABSENT, action: INSTALLSTATE.UNKNOWN,
-            features: [],
+            enabled: true, shared: false, installed: INSTALLSTATE.ABSENT,
+            action: INSTALLSTATE.UNKNOWN, features: [],
         });
     }
     for (const row of rowsOf('FeatureComponents'))
@@ -395,6 +398,11 @@ export function createSession(options){
             feature.components.push(component.key);
             component.features.push(feature.key);
         }
+    }
+    for (const component of recorded?.sharedWith ? components.values() : [])
+    {
+        component.shared = component.id !== null
+            && Boolean(recorded?.sharedWith?.(component.id, productCode));
     }
     if (getProperty('Installed') !== '' && recorded)
     {
