@@ -111,8 +111,10 @@ differently raises a `divergence` event naming the API.
   interface, as a setup that drives its own does. `MsiCollectUserInfo` and the dialog previews
   show nothing.
 - Script custom actions (VBScript, JScript) do not run; the action fails.
-- A patch's deltas (the `Patch` table) are not applied: only a patch that delivers its files whole
-  installs.
+- A patch's deltas are applied (the Patch API, `mspatcha.dll`), except a delta made against a
+  32-bit executable with the executable transforms -- that layout is not public -- or against an
+  old file only Windows' PE normalisation would match; such a patch fails with
+  `ERROR_PATCH_DECODE_FAILURE`.
 - No service runs: a service a package installs is registered with the service manager and
   stays stopped. ODBC drivers and data sources, COM+ applications and side-by-side or global
   assembly cache assemblies are not installed.
