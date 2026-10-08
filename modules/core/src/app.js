@@ -3161,7 +3161,7 @@ async function buildApp(options){
      *          ahead: () => number,
      *          refetched: () => { blocks: number, bytes: number },
      *          ranges: () => { requests: number, bytes: number },
-     *          decoded: () => { blocks: number, bytes: number, ms: number },
+     *          decoded?: () => { blocks: number, bytes: number, ms: number },
      *          registry: Promise<any> } | null} */
     let blocks = null;
     /**
@@ -6890,10 +6890,12 @@ async function buildApp(options){
                         refetchedBytes: blocks?.refetched().bytes ?? 0,
                         ranges: blocks?.ranges().requests ?? 0,
                         rangeBytes: blocks?.ranges().bytes ?? 0,
-                        // zstd blocks decoded for guest reads, and the time it took.
-                        decoded: blocks?.decoded().blocks ?? 0,
-                        decodedBytes: blocks?.decoded().bytes ?? 0,
-                        decodeMs: Math.round(blocks?.decoded().ms ?? 0),
+                        // zstd blocks decoded for guest reads, and the time it took:
+                        // a bundle mounted on this thread's; one a process in a
+                        // worker reads across its link decodes on the system's.
+                        decoded: blocks?.decoded?.().blocks ?? 0,
+                        decodedBytes: blocks?.decoded?.().bytes ?? 0,
+                        decodeMs: Math.round(blocks?.decoded?.().ms ?? 0),
                     },
                     film: { ...film },
                     // Which of the program's own code the machine is spent on
