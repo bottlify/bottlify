@@ -421,7 +421,7 @@ test('frexp, ldexp and isinf compile, and fold when their arguments are known', 
     assert.doesNotMatch(disassemble(/** @type {Uint32Array} */ (folded.tokens)), /\b(log|exp)\b/);
 });
 
-test('a Direct3D 10 texture read and an array of samplers, as fxc compiles them for model 2', async()=>{
+test('a Direct3D 10 texture read and an array of samplers, as fxc compiles them', async()=>{
     // tex.Sample(sam, uv) reads a sampler of the pair, named sam+tex; texB[1] is the second
     // of the pair's; sam[1] is the second register of the array, the only one declared.
     const result = await compile(`Texture2D tex; Texture2D texB[2]; sampler sam; sampler arr[2];
@@ -437,7 +437,8 @@ test('a Direct3D 10 texture read and an array of samplers, as fxc compiles them 
     const read = (/** @type {number} */ s)=>[s, s, s, s];
     const out = [...Object.values(execute(program, { inputs: { v: [[0.5, 0.5, 0, 0]], t: [] },
         constants: { f: new Float32Array(32 * 4) }, sample: read }).outputs)[0]];
-    const expected = table['sam+tex'][0] + 10 * (table['sam+texB'][0] + 1) + 100 * (table.arr[0] + 1);
+    const expected = table['sam+tex'][0] + 10 * (table['sam+texB'][0] + 1)
+        + 100 * (table.arr[0] + 1);
     assert.deepEqual(out, [expected, expected, expected, expected]);
     assert.deepEqual([...program.samplers.keys()].sort((a, b)=>a - b),
         [table['sam+tex'][0], table['sam+texB'][0] + 1, table.arr[0] + 1].sort((a, b)=>a - b),
