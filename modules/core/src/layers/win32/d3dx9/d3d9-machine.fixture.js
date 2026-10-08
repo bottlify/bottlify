@@ -168,8 +168,10 @@ const CTAB_FOURCC = 0x42415443;
 
 /** The per-version register files. Every number here is one documented limit. */
 export const VERSION_LIMITS = Object.freeze({
+    // vs_1_1's constants: 96 is the least a device's caps promise; ours has 256
+    // (MaxVertexShaderConst), and fxc places vs_1_1 constants that far (def c215).
     vs_1_1: Object.freeze({
-        temps: 12, floatConsts: 96, intConsts: 0, boolConsts: 0,
+        temps: 12, floatConsts: 256, intConsts: 0, boolConsts: 0,
         inputs: 16, texcoords: 0, outputs: 0, samplers: 0,
     }),
     vs_2_0: Object.freeze({
@@ -1286,11 +1288,13 @@ function checkPs1(v, ins, state){
         }
         const second = d ? d.writeMask : 0;
         const colour = (/** @type {number} */ m)=>m !== 0 && (m & MASK_ALPHA) === 0;
+        // Either first, in every model 1 version: fxc writes a ps_1_1 pair alpha first
+        // (mul t0.w, r1.w, t0.w + lrp t0.xyz, ...).
         if (!((colour(first) && second === MASK_ALPHA)
-            || (late && first === MASK_ALPHA && colour(second))))
+            || (first === MASK_ALPHA && colour(second))))
         {
             throw bad('a co-issued pair writes red, green and blue in one instruction and alpha '
-                + `alone in the other${late ? '' : ', the colour one first'}`);
+                + 'alone in the other');
         }
     }
 

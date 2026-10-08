@@ -318,7 +318,7 @@ test('vertex shader 1.1: mov to a0 floors, relative addressing is implied a0.x',
     // Floor, not truncation: -0.5 is -1, which reaches c0 through c[a0.x + 1].
     assert.deepEqual(run(-0.5).oPos, [1, 1, 1, 1]);
     rejects(()=>run(5), /read of unsupplied constant c6.x/);
-    rejects(()=>run(100), /constant address c101 is outside the register file/);
+    rejects(()=>run(300), /constant address c301 is outside the register file/);
     rejects(()=>asm('vs_2_0\nmov a0.x, c0\n'), /mov to a0 is not valid in vs_2_0; use mova/);
 });
 
@@ -829,11 +829,11 @@ test('decode rejects registers beyond the version\'s files', ()=>{
     const bad = (/** @type {string} */ text,
         /** @type {RegExp} */ pattern)=>rejects(()=>assemble(text), pattern);
     const L = VERSION_LIMITS;
-    assert.equal(L.vs_1_1.floatConsts, 96);
+    assert.equal(L.vs_1_1.floatConsts, 256);
     assert.equal(L.ps_3_0.floatConsts, 224);
-    ok('vs_1_1\nmov r11, c95\nmov oPos, r11\n');
+    ok('vs_1_1\nmov r11, c255\nmov oPos, r11\n');
     bad('vs_1_1\nmov r12, c0\n', /register r12 is beyond the 12 registers/);
-    bad('vs_1_1\nmov r0, c96\n', /register c96 is beyond the 96 registers/);
+    bad('vs_1_1\nmov r0, c256\n', /register c256 is beyond the 256 registers/);
     bad('vs_1_1\nmov r0, v16\n', /register v16 is beyond the 16/);
     bad('vs_1_1\nmov oT8, c0\n', /register oT8 is beyond the 8/);
     bad('vs_1_1\nmov oD2, c0\n', /register oD2 is beyond the 2/);
@@ -846,7 +846,7 @@ test('decode rejects registers beyond the version\'s files', ()=>{
     bad('vs_2_0\ndefi i16, 1, 2, 3, 4\n', /defi of i16 is not a register of vs_2_0/);
     bad('vs_2_0\ndefb b16, true\n', /defb of b16/);
     bad('vs_2_0\ndef c256, 1, 2, 3, 4\n', /def of c256 is not a register of vs_2_0/);
-    bad('vs_1_1\ndef c96, 1, 2, 3, 4\n', /def of c96/);
+    bad('vs_1_1\ndef c256, 1, 2, 3, 4\n', /def of c256/);
     ok('vs_3_0\ndcl_position o0\nmov r31, c255\nmov o0, r31\n');
     bad('vs_3_0\ndcl_position o0\nmov r32, c0\n', /register r32 is beyond the 32/);
     bad('vs_3_0\ndcl_position o12\n', /o12 is beyond its register file/);
@@ -1197,7 +1197,7 @@ test('predication is refused with a clear message', ()=>{
 
 test('the limits are the documented ones', ()=>{
     const want = {
-        vs_1_1: [12, 96, 0, 0, 16], vs_2_0: [12, 256, 16, 16, 16], vs_2_x: [12, 256, 16, 16, 16],
+        vs_1_1: [12, 256, 0, 0, 16], vs_2_0: [12, 256, 16, 16, 16], vs_2_x: [12, 256, 16, 16, 16],
         vs_3_0: [32, 256, 16, 16, 16], ps_2_0: [12, 32, 0, 0, 2], ps_2_x: [32, 32, 16, 16, 2],
         ps_3_0: [32, 224, 16, 16, 10],
     };
@@ -1247,4 +1247,12 @@ test('before ps_1_4 arithmetic writes a texture register its stage has filled', 
         sample: ()=>[0.25, 0.5, 0.75, 1] }).outputs.oC0;
     assert.deepEqual([...out], [0.125, 0.25, 0.375, 0.25]);
     assert.throws(()=>asm('ps_1_4\ntexld r0, t0\nmov t0, r0\n'), /writes a r# register/);
+});
+
+test('a model 1 co-issued pair may write alpha first', ()=>{
+    // fxc writes ps_1_1 pairs that way: mul t0.w, r1.w, t0.w + lrp t0.xyz, ...
+    const out = go('ps_1_1\nmov r0.a, v0\n+ mov r0.rgb, v1\n', {
+        inputs: { v: [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]], t: [] } }).outputs.oC0;
+    assert.deepEqual([...out].map(x=>Math.round(x * 10) / 10), [0.5, 0.6, 0.7, 0.4]);
+    assert.throws(()=>asm('ps_1_1\nmov r0.a, v0\n+ mov r0.a, v1\n'), /co-issued pair/);
 });
