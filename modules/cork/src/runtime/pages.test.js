@@ -6,12 +6,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Tables, ownLayout, pagesFor } from './layout.js';
+import { Tables, ownLayout, pagesFor, tablesSize } from './layout.js';
 import { PageFlag, createPageTable } from './pages.js';
 
 function machine(){
-    const layout = ownLayout({ ramSize: 1 << 20 });
-    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const layout = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
     return { layout, memory, pages: createPageTable(memory, layout) };
 }
 
@@ -57,8 +57,8 @@ test('the table survives a grow of the memory', ()=>{
 });
 
 test('code marked on a page keeps a range of granules; data beside it is outside', ()=>{
-    const layout = ownLayout({ ramSize: 1 << 20 });
-    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const layout = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
     const pages = createPageTable(memory, layout);
     pages.markCode(0x1040, 0x30);                       // granules 2..3 of page 1
     assert.equal(pages.get(1) & PageFlag.HAS_CODE, PageFlag.HAS_CODE);

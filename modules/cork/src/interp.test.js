@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { Fault, interpret, blockState } from './interp.js';
 import { createState } from './ir.js';
-import { ownLayout, pagesFor, Tables } from './runtime/layout.js';
+import { Tables, ownLayout, pagesFor, tablesSize } from './runtime/layout.js';
 import { PageFlag } from './runtime/pages.js';
 
 /** A little machine and a state over it. */
@@ -186,8 +186,8 @@ test('an instruction with no model throws Unsupported', ()=>{
 });
 
 test('blockState runs over cork\'s own state block', ()=>{
-    const layout = ownLayout({ ramSize: 1 << 20 });
-    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const layout = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
     const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
     // mov eax, 0x1234; inc eax; hlt
     ram.set([0xb8, 0x34, 0x12, 0, 0, 0x40, 0xf4], 0x1000);
@@ -203,8 +203,8 @@ test('blockState runs over cork\'s own state block', ()=>{
 });
 
 test('blockState faults on an inaccessible page and reports a code write', ()=>{
-    const layout = ownLayout({ ramSize: 1 << 20 });
-    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const layout = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
     const flags = new Uint8Array(
         memory.buffer, layout.tables + Tables.PAGE_FLAGS, Tables.PAGE_FLAGS_SIZE);
     const ranges = new Uint8Array(memory.buffer, layout.tables + Tables.CODE_RANGES, 1 << 21);
@@ -240,8 +240,8 @@ test('blockState faults on an inaccessible page and reports a code write', ()=>{
 });
 
 test('a push, a call, a leave and an SSE store that fault leave esp and memory as they were', ()=>{
-    const layout = ownLayout({ ramSize: 1 << 20 });
-    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const layout = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
     const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
     const flags = new Uint8Array(
         memory.buffer, layout.tables + Tables.PAGE_FLAGS, Tables.PAGE_FLAGS_SIZE);
@@ -274,8 +274,8 @@ test('a push, a call, a leave and an SSE store that fault leave esp and memory a
 });
 
 test('blockState keeps its fields fast and sees code rewritten in place', ()=>{
-    const layout = ownLayout({ ramSize: 1 << 20 });
-    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const layout = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
     const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
     const state = blockState({ memory, layout });
     // The step's fields are the object's own and the accessors its
@@ -317,8 +317,8 @@ test('a quadword fild\'s exact value outlives a sync, until a writer takes its m
     // fild qword [0x2000] of 2^53 + 1 interpreted, then fistp qword [0x2008] in
     // another run: a run, or a thread's slice, may end between the two, and the
     // processor stores the quadword it loaded.
-    const layout = ownLayout({ ramSize: 1 << 20 });
-    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const layout = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
     const view = new DataView(memory.buffer);
     const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
     view.setUint8(layout.x87Empty, 0xff);
@@ -381,8 +381,8 @@ test('fxsave writes the x87 and SSE image and fxrstor reads it back', ()=>{
 });
 
 test('a run of instructions sees a store into its own bytes decoded before it', ()=>{
-    const layout = ownLayout({ ramSize: 1 << 20 });
-    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const layout = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
     const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
     // mov [0x100a], al; nop; nop; add ecx, imm8; hlt -- the store rewrites the
     // add's immediate. The first run decodes the add after the store; the
@@ -404,8 +404,8 @@ test('a run of instructions sees a store into its own bytes decoded before it', 
 });
 
 test('a rep stos moved in bulk over its own run\'s bytes ends the run as a store does', ()=>{
-    const layout = ownLayout({ ramSize: 1 << 20 });
-    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const layout = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
     const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
     // mov edi, 0x100f; mov ecx, 1; rep stosb; nop; add ecx, imm8; hlt -- the
     // rep rewrites the add's immediate, as the store above does.
@@ -444,10 +444,11 @@ test('every machine\'s state and memory have one shape, whatever the machine', (
     const layouts = JSON.stringify(new URL('./runtime/layout.js', import.meta.url).href);
     const script = `
         import { blockState } from ${interp};
-        import { ownLayout, pagesFor, Tables } from ${layouts};
+        import { ownLayout, pagesFor, tablesSize } from ${layouts};
         const made = [[1 << 20, true], [1 << 21, false]].map(([ramSize, host])=>{
-            const layout = ownLayout({ ramSize });
-            const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+            const layout = ownLayout({ ramSize, hashSlots: 1 << 16 });
+            const pages = pagesFor(layout, tablesSize(layout));
+            const memory = new WebAssembly.Memory({ initial: pages });
             return blockState(host ? { memory, layout, onCodeWrite: ()=>{}, rdtsc: ()=>0n }
                 : { memory, layout });
         });
@@ -460,8 +461,8 @@ test('every machine\'s state and memory have one shape, whatever the machine', (
 });
 
 test('a compiled lea step with an fs: override leaves the segment out', ()=>{
-    const layout = ownLayout({ ramSize: 1 << 20 });
-    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const layout = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
     const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
     ram.set([0x64, 0x8d, 0x43, 0x18, 0xf4], 0x1000); // lea eax, fs:[ebx+0x18]; hlt
     const state = blockState({ memory, layout });
@@ -474,8 +475,8 @@ test('a compiled lea step with an fs: override leaves the segment out', ()=>{
 
 test('a cached run over a page made inaccessible since runs up to that page and faults there',
     ()=>{
-        const layout = ownLayout({ ramSize: 1 << 20 });
-        const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+        const layout = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16 });
+        const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
         const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
         const flags = new Uint8Array(
             memory.buffer, layout.tables + Tables.PAGE_FLAGS, Tables.PAGE_FLAGS_SIZE);
@@ -497,8 +498,8 @@ test('a cached run over a page made inaccessible since runs up to that page and 
 
 test('a run is reported once, at its start, and a fetch from an inaccessible page faults there',
     ()=>{
-        const layout = ownLayout({ ramSize: 1 << 20 });
-        const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+        const layout = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16 });
+        const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
         const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
         const flags = new Uint8Array(
             memory.buffer, layout.tables + Tables.PAGE_FLAGS, Tables.PAGE_FLAGS_SIZE);

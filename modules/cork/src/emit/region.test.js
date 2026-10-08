@@ -896,7 +896,7 @@ test('a loop onto itself inside another loop has an entry, through the head arou
 
 test('the function of a region\'s copies, planned from the region\'s own planning, is the one'
     + ' planned afresh', ()=>{
-    const layout = ownLayout({ ramSize: 1 << 22 });
+    const layout = ownLayout({ ramSize: 1 << 22, hashSlots: 1 << 16 });
     const features = { simd: true, tailCalls: true, defaultNaNNegative: false };
     // mov ecx, 5; L: fld1; fstp st0; test cl, 1; jz S; inc edx; S: dec ecx; jnz L; hlt
     const X87_LOOP = [0xb9, 5, 0, 0, 0, 0xd9, 0xe8, 0xdd, 0xd8, 0xf6, 0xc1, 0x01, 0x74, 0x01,
@@ -985,7 +985,7 @@ test('a call made as a wasm call has its rare ways out hinted unlikely', ()=>{
     // mov ecx, 5; L: call F; dec ecx; jnz L; hlt; F: inc edx; ret -- with callReturn the
     // call leaves only past the depth of waiting calls or on a spent budget, and goes up
     // only when the callee left for the host: both ways hinted, beside the loop's own.
-    const layout = ownLayout({ ramSize: 1 << 22 });
+    const layout = ownLayout({ ramSize: 1 << 22, hashSlots: 1 << 16 });
     const features = { simd: true, tailCalls: true, defaultNaNNegative: false };
     const program = [0xb9, 5, 0, 0, 0, 0xe8, 0x04, 0, 0, 0, 0x49, 0x75, 0xf8, 0xf4, 0x42, 0xc3];
     const region = formRegion(address=>program[address - CODE] ?? 0xf4, CODE, { leafCalls: false });

@@ -19,7 +19,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Tables, ownLayout, pagesFor } from './layout.js';
+import { ownLayout, pagesFor, tablesSize } from './layout.js';
 import { createCorkRuntime } from './runtime.js';
 import { blockState, interpret } from '../interp.js';
 
@@ -229,8 +229,8 @@ function generate(seed){
  * @returns {Promise<Uint8Array>}  what it left in the data area
  */
 async function runProgram(code, callReturn, budget, leafCalls = false){
-    const layout = ownLayout({ ramSize: 16 << 20 });
-    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const layout = ownLayout({ ramSize: 16 << 20, hashSlots: 1 << 16 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
     const bytes = ()=>new Uint8Array(memory.buffer);
     const view = ()=>new DataView(memory.buffer);
     view().setUint8(layout.x87Empty, 0xff);

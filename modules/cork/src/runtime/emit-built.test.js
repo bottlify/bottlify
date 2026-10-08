@@ -15,7 +15,7 @@ const FEATURES = { simd: true, tailCalls: true, defaultNaNNegative: false };
 const OPTIONS = { hash: true, place: true, trapPort: 0xb077, profileCalls: true };
 const FORM = { maxBlocks: 128, maxBytes: 8192, leafCalls: true };
 const BASE = 0x401000;
-const layout = ownLayout({ ramSize: 16 << 20 });
+const layout = ownLayout({ ramSize: 16 << 20, hashSlots: 1 << 16 });
 
 /**
  * A relink of the regions at a benchmark program's first block starts, over a

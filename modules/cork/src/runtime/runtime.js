@@ -39,7 +39,7 @@ import { buildHelpersModule } from '../emit/helpers.js';
 import { openTranslationWorker } from './translator.js';
 import { ANY_TOP, createEntries } from './entries.js';
 import { PageFlag, createPageTable } from './pages.js';
-import { Tables } from './layout.js';
+import { Tables, tablesSize } from './layout.js';
 import { blockCounts, resetBlockCounts, topBlocks } from './block-profile.js';
 import {
     CACHE_VERSION, cacheKey, moduleKey, packRegion, seedRecords, unpackRegion,
@@ -275,10 +275,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         helpers: settings.runtimeHelpers !== false };
     /** @type {Set<string>} instruction classes left to the other executor */
     const leaveOut = new Set(settings.leaveOut ?? []);
-    if (layout.tables + Tables.SIZE > memory.buffer.byteLength)
+    if (layout.tables + tablesSize(layout) > memory.buffer.byteLength)
     {
         throw new Error(`cork: the memory ends at ${memory.buffer.byteLength}, before the tables`
-            + ` at ${layout.tables} + ${Tables.SIZE}`);
+            + ` at ${layout.tables} + ${tablesSize(layout)}`);
     }
     const found = features ?? probeFeatures();
     // A shared memory links only to modules whose import says so, with a
@@ -2750,7 +2750,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 && performance.now() >= profileResetAt)
             {
                 profileResetAt = null;
-                resetBlockCounts(view(), layout.tables);
+                resetBlockCounts(view(), layout);
                 // The exits are counted over the same window as the blocks.
                 for (const name of /** @type {(keyof typeof exits)[]} */ (Object.keys(exits)))
                 {
@@ -3047,7 +3047,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         diagnostics(){
             fold();
             const blocks = import.meta.BOTTLIFY_DIAGNOSTICS !== false && profiling
-                ? blockCounts(view(), layout.tables, regions) : null;
+                ? blockCounts(view(), layout, regions) : null;
             return {
                 ...(import.meta.BOTTLIFY_DIAGNOSTICS !== false && blocks
                     ? { blockCounts: blocks, topBlocks: topBlocks(blocks, regions) } : {}),
@@ -3067,6 +3067,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 // The function table's length: what the regions' indices span.
                 tableSize: table ? table.length : 0,
                 entries: table ? entries.hashed() : entries.count(),
+                // Every entry, hashed or not: past the hash's room the rest are
+                // reached from translated code only through the host.
+                entriesAll: entries.count(),
                 translateMs: counts.formingMs + counts.lookupMs + counts.emitMs
                     + counts.encodeMs + counts.storeMs + counts.instantiateMs + counts.publishMs,
                 formingMs: counts.formingMs,

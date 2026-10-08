@@ -56,7 +56,7 @@ import {
     planLoop, planRegion,
 } from './memory.js';
 import { importHelpers } from './helpers.js';
-import { Tables, blockSlot } from '../runtime/layout.js';
+import { Tables, blockProfileAt, blockSlot, hashSlotsOf } from '../runtime/layout.js';
 import { ANY_TOP } from '../runtime/entries.js';
 import { callsOut, inlineReturns } from '../region.js';
 import {
@@ -497,7 +497,7 @@ export function finishModule(context, functions){
     };
     slot(0);
     b.loop(EMPTY);
-    b.localGet(index).i32const(1).op(I32.add).i32const(Tables.HASH_SLOTS - 1).op(I32.and)
+    b.localGet(index).i32const(1).op(I32.add).i32const(hashSlotsOf(layout) - 1).op(I32.and)
         .localSet(index);
     slot(1);
     b.br(0);
@@ -2368,7 +2368,8 @@ export class RegionEmitter {
      */
     countBlock(start){
         const { b } = this;
-        const at = this.layout.tables + Tables.BLOCK_PROFILE + blockSlot(start) * Tables.BLOCK_SLOT;
+        const at = this.layout.tables + blockProfileAt(this.layout)
+            + blockSlot(start) * Tables.BLOCK_SLOT;
         b.i32const(0).i32const(0).load('i32', { offset: at + 4 }).i32const(1).op(I32.add)
             .store('i32', { offset: at + 4 });
         b.i32const(0).load('i32', { offset: at }).i32const(start | 0).op(I32.ne);

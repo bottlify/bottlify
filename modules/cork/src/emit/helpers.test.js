@@ -14,11 +14,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildHelpersModule, HELPER_NAMES } from './helpers.js';
-import { ownLayout, Tables, pagesFor } from '../runtime/layout.js';
+import { Tables, ownLayout, pagesFor, tablesSize } from '../runtime/layout.js';
 import { createTestMachine } from '../testing/machine.js';
 import { PageFlag } from '../runtime/pages.js';
 
-const layout = ownLayout({ ramSize: 1 << 20 });
+const layout = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16 });
 
 test('the shared helpers module exports the five functions', ()=>{
     const bytes = buildHelpersModule(layout);
@@ -26,7 +26,7 @@ test('the shared helpers module exports the five functions', ()=>{
     const names = WebAssembly.Module.exports(module).filter(one=>one.kind === 'function')
         .map(one=>one.name);
     assert.deepEqual(names, [...HELPER_NAMES]);
-    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
     const exports = /** @type {Record<string, Function>} */ (
         new WebAssembly.Instance(module, { env: { memory } }).exports);
     assert.equal(exports.materialise.length, 6, 'six flag parts in, the word out');
@@ -50,7 +50,7 @@ test('a region module imports the helpers instead of defining them', ()=>{
 
 test('spanHit finds code in any granule a span reaches, windowHit an inaccessible page too', ()=>{
     const bytes = buildHelpersModule(layout);
-    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
     const { spanHit, windowHit } = /** @type {Record<string, Function>} */ (new WebAssembly.Instance(
         new WebAssembly.Module(/** @type {Uint8Array<ArrayBuffer>} */ (bytes)),
         { env: { memory } }).exports);

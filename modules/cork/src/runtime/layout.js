@@ -38,6 +38,10 @@ export const PAGE = 65536;
  * code, so a store into the page's data beside its code is not a store
  * into code.
  */
+const CODE_RANGES = (1 << 20) + 16 + 4096 * 24;
+/** The entry hash, last of the tables: its size is the layout's (`hashSlots`). */
+const HASH = CODE_RANGES + (1 << 21);
+
 export const Tables = Object.freeze({
     PAGE_FLAGS: 0,
     PAGE_FLAGS_SIZE: 1 << 20,
@@ -49,21 +53,48 @@ export const Tables = Object.freeze({
     UNDO_RING: (1 << 20) + 16,
     UNDO_ENTRIES: 4096,
     UNDO_ENTRY: 24,
-    HASH: (1 << 20) + 16 + 4096 * 24,
-    HASH_SLOTS: 262144,
-    HASH_SLOT: 12,
-    CODE_RANGES: (1 << 20) + 16 + 4096 * 24 + 262144 * 12,
+    CODE_RANGES,
     CODE_GRANULE_SHIFT: 5,
-    SIZE: (1 << 20) + 16 + 4096 * 24 + 262144 * 12 + (1 << 21),
-    // A diagnostic block profile (`blockProfile`), past the tables and only in
-    // a memory a profiling host sized for it: a slot per hashed block start
-    // (`blockSlot`) of its address, its executions and whether another block
-    // shared the slot.
-    BLOCK_PROFILE: (1 << 20) + 16 + 4096 * 24 + 262144 * 12 + (1 << 21),
+    HASH,
+    /**
+     * The entry hash's slots unless a layout says otherwise. A program of a
+     * dozen large libraries has hundreds of thousands of block starts, and an
+     * entry the hash has no room for is reached from translated code only
+     * through the host: Gothic 3's filled 2^18 slots to their three quarters
+     * and left translated code 42.7 million times in four minutes for
+     * addresses it had translated long before.
+     */
+    HASH_SLOTS: 1 << 22,
+    HASH_SLOT: 12,
+    // A diagnostic block profile (`blockProfile`), past the tables
+    // (`blockProfileAt`) and only in a memory a profiling host sized for it: a
+    // slot per hashed block start (`blockSlot`) of its address, its executions
+    // and whether another block shared the slot.
     BLOCK_SLOTS: 1 << 20,
     BLOCK_SLOT: 12,
     BLOCK_PROFILE_SIZE: (1 << 20) * 12,
 });
+
+/**
+ * The entry hash's slots under a layout: its slot shift says how many.
+ *
+ * @param {{ hashShift?: number }} layout
+ */
+export const hashSlotsOf = layout=>2 ** (32 - (layout.hashShift ?? 16));
+
+/**
+ * The tables' bytes under a layout, the entry hash last.
+ *
+ * @param {{ hashShift?: number }} layout
+ */
+export const tablesSize = layout=>Tables.HASH + hashSlotsOf(layout) * Tables.HASH_SLOT;
+
+/**
+ * Where a profiling run's block profile starts, from the tables' start: past them.
+ *
+ * @param {{ hashShift?: number }} layout
+ */
+export const blockProfileAt = layout=>tablesSize(layout);
 
 /**
  * The block profile's slot for a block start: the top twenty bits of the
@@ -76,10 +107,16 @@ export const blockSlot = address=>Math.imul(address, 0x9e3779b1) >>> 12;
 /**
  * Cork's own layout for a memory holding `ramSize` bytes of guest RAM.
  *
- * @param {{ ramSize: number }} options
+ * @param {{ ramSize: number, hashSlots?: number }} options  `hashSlots`: the entry
+ *     hash's, a power of two (`Tables.HASH_SLOTS` unless given)
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
-export function ownLayout({ ramSize }){
+export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS }){
+    if (!(hashSlots >= 1 << 10 && hashSlots <= 1 << 26 && (hashSlots & (hashSlots - 1)) === 0))
+    {
+        throw new Error(`cork: ${hashSlots} entry hash slots is not a power of two`
+            + ' from 2^10 to 2^26');
+    }
     const ramBase = PAGE;
     const fields = {
         bits: /** @type {32} */ (32),
@@ -118,8 +155,8 @@ export function ownLayout({ ramSize }){
         tables: ramBase + ramSize,
         codePages: -1,
         // The entry hash's slot is the top bits of eip times the golden ratio,
-        // as many as the hash has slots for (2^18).
-        hashShift: 14,
+        // as many as the hash has slots for.
+        hashShift: 32 - Math.log2(hashSlots),
     };
     return { ...fields, id: layoutId(fields) };
 }
@@ -144,8 +181,8 @@ export function layoutId(fields){
 /**
  * How many wasm pages a memory with this layout needs.
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
- * @param {number} tablesSize
+ * @param {number} bytes  the tables' and what lies past them
  */
-export function pagesFor(layout, tablesSize){
-    return Math.ceil((layout.tables + tablesSize) / PAGE);
+export function pagesFor(layout, bytes){
+    return Math.ceil((layout.tables + bytes) / PAGE);
 }

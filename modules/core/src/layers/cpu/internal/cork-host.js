@@ -102,7 +102,7 @@ const WASM_AFTER = 8192;
 const NEW_TARGET_WORK = 128;
 /** The names an engine module must export for this host. */
 const ENGINE_EXPORTS = Object.freeze([
-    'createEngine', 'ownLayout', 'pagesFor', 'Tables', 'STATE_BLOCK_SIZE',
+    'createEngine', 'ownLayout', 'pagesFor', 'Tables', 'tablesSize', 'STATE_BLOCK_SIZE',
     'interpret', 'blockState', 'eflagsOf', 'setEflags',
 ]);
 
@@ -155,20 +155,23 @@ export function createCorkHost(config){
             throw new Error(`cpu: the cork engine module does not export ${name}`);
         }
     }
-    const { createEngine, ownLayout, pagesFor, Tables, STATE_BLOCK_SIZE, interpret, blockState,
+    const { createEngine, ownLayout, pagesFor, Tables, tablesSize, STATE_BLOCK_SIZE, interpret,
+        blockState,
         eflagsOf, setEflags, WasmExit } = engine;
 
     // The guest RAM is the whole memorySize; the tables and the state block are
     // memory of cork's own beside it, not carved out of the guest's.
-    const layout = ownLayout({ ramSize: memorySize });
+    // The entry hash's slots: the engine's own unless the config names a size.
+    const layout = ownLayout({ ramSize: memorySize,
+        ...(corkConfig?.hashSlots ? { hashSlots: corkConfig.hashSlots } : {}) });
     // A profiling run (`blockProfile`) has the block profile past the tables,
     // and the interpreter tier in wasm its hot counts past that.
     const profileSize = import.meta.BOTTLIFY_DIAGNOSTICS !== false && corkConfig?.blockProfile
         ? Tables.BLOCK_PROFILE_SIZE : 0;
     const wasmWanted = typeof engine.createWasmInterpreter === 'function'
         && corkConfig?.wasmInterpreter !== false;
-    const wasmArea = layout.tables + Tables.SIZE + profileSize;
-    const pages = pagesFor(layout, Tables.SIZE + profileSize
+    const wasmArea = layout.tables + tablesSize(layout) + profileSize;
+    const pages = pagesFor(layout, tablesSize(layout) + profileSize
         + (wasmWanted ? engine.WASM_INTERPRETER_AREA : 0));
     // Shared where the host can share it -- a page that is cross-origin
     // isolated, or node -- so another worker can read and write guest memory

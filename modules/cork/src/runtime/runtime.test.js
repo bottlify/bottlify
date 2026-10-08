@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Tables, ownLayout, pagesFor } from './layout.js';
+import { Tables, ownLayout, pagesFor, tablesSize } from './layout.js';
 import { PageFlag } from './pages.js';
 import { createCorkRuntime } from './runtime.js';
 import { eflagsOf } from '../emit/flags.js';
@@ -16,9 +16,9 @@ const CODE = 0x1000;
 
 /** A machine of 4 MiB with cork's own layout and a runtime over it. */
 function machine(config = {}, ramSize = 4 << 20){
-    const layout = ownLayout({ ramSize });
+    const layout = ownLayout({ ramSize, hashSlots: 1 << 16 });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout,
-        Tables.SIZE + (/** @type {any} */ (config).blockProfile ? Tables.BLOCK_PROFILE_SIZE : 0)) });
+        tablesSize(layout) + (/** @type {any} */ (config).blockProfile ? Tables.BLOCK_PROFILE_SIZE : 0)) });
     const bytes = ()=>new Uint8Array(memory.buffer);
     const view = ()=>new DataView(memory.buffer);
     // The x87 as a fresh processor has it: every register empty, the default control word.
@@ -626,7 +626,7 @@ test('a region that meets an instruction the emitter leaves out still runs up to
 });
 
 test('the runtime refuses a memory that has no room for its tables', ()=>{
-    const layout = ownLayout({ ramSize: 1 << 20 });
+    const layout = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16 });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout, 0) });
     assert.throws(()=>createCorkRuntime({
         memory, layout, config: {}, read: ()=>0,
@@ -1696,15 +1696,15 @@ test('the untranslated exits are told apart by what left, and a target only ever
     await m.runtime.translatePending();
     const exit = m.runtime.run(m.runtime.entryOf(CODE), 1000);
     assert.equal(exit.kind, 'untranslated');
-    const counts = ()=>m.runtime.diagnostics().untranslatedBy;
+    const counts = ()=>/** @type {any} */ (m.runtime.diagnostics()).untranslatedBy;
     assert.equal(counts().bare, 1);
     assert.equal(counts().held, 0);
 
     // Two exits a region made to the host on purpose (HELD) at one target.
     m.runtime.missAt(0x6000, 0, true);
     m.runtime.missAt(0x6000, 0, true);
-    const target = (/** @type {number} */ address)=>m.runtime.diagnostics().exitsByTarget
-        .find((/** @type {any} */ one)=>one.address === address);
+    const target = (/** @type {number} */ address)=>/** @type {any} */ (m.runtime.diagnostics())
+        .exitsByTarget.find((/** @type {any} */ one)=>one.address === address);
     assert.deepEqual([target(0x6000).count, target(0x6000).held, target(0x6000).reason],
         [2, 2, 'held']);
     // One bare exit among them, and its reason is read again.

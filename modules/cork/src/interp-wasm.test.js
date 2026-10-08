@@ -22,7 +22,7 @@ import {
     HOT_SLOTS, WASM_INTERPRETER_AREA, WasmExit, createWasmInterpreter,
 } from './interp-wasm.js';
 import { SOURCE_SHA256 } from './interp-wasm.bytes.js';
-import { ownLayout, pagesFor, Tables } from './runtime/layout.js';
+import { Tables, ownLayout, pagesFor, tablesSize } from './runtime/layout.js';
 import { PageFlag, createPageTable } from './runtime/pages.js';
 import { Kind, eflagsOf, kindOf } from './emit/flags.js';
 
@@ -44,9 +44,9 @@ test('the module is built from the source beside it', ()=>{
 
 /** A machine in cork's own layout, the tier over it, and the JavaScript interpreter's state. */
 function machine(){
-    const layout = ownLayout({ ramSize: RAM });
-    const area = layout.tables + Tables.SIZE;
-    const pages = pagesFor(layout, Tables.SIZE + WASM_INTERPRETER_AREA);
+    const layout = ownLayout({ ramSize: RAM, hashSlots: 1 << 16 });
+    const area = layout.tables + tablesSize(layout);
+    const pages = pagesFor(layout, tablesSize(layout) + WASM_INTERPRETER_AREA);
     const memory = new WebAssembly.Memory({ initial: pages, maximum: pages });
     const table = createPageTable(memory, layout);
     const tier = createWasmInterpreter({ memory, layout, area, hotThreshold: 2,
