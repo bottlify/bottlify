@@ -388,11 +388,27 @@ export function numberValues(instrs, profile){
     const fixedSources = (/** @type {Instr} */ instr)=>profile.legacy
         && /** @type {Record<string, { cls: string }>} */ (OPCODES)[instr.op]?.cls === 'texture';
 
+    /**
+     * Registers pinned to the same physical one as a register holding the same texel: the
+     * same storage, so the one stands for the other everywhere after.
+     *
+     * @type {Map<VReg, VReg>}
+     */
+    const alias = new Map();
+    /** @param {VReg} reg */
+    const real = reg=>alias.get(reg) ?? reg;
+
     /** @type {Instr[]} */
     const out = [];
     for (const original of instrs)
     {
-        let instr = original;
+        let instr = alias.size === 0 ? original : {
+            ...original,
+            srcs: original.srcs.map(src=>(src.kind === 'reg' && alias.has(src.reg)
+                ? { ...src, reg: real(src.reg) } : src)),
+            dest: original.dest.kind === 'reg' && alias.has(original.dest.reg)
+                ? { ...original.dest, reg: real(original.dest.reg) } : original.dest,
+        };
         const cls = /** @type {Record<string, { cls: string }>} */ (OPCODES)[instr.op]?.cls;
         // Reads go to where their values were first computed.
         if (!fixedSources(instr))
@@ -475,14 +491,24 @@ export function numberValues(instrs, profile){
         }
         const pinned = instr.dest.kind === 'reg'
             && (instr.dest.reg.pin || instr.dest.reg.fixed || instr.dest.reg.uniform);
-        const found = plain || pinned ? null : holderOf(values);
+        const found = plain ? null : holderOf(values);
         if (found && instr.dest.kind === 'reg' && found.reg === instr.dest.reg
             && found.comps.every((comp, i)=>comp === comps[i]))
         {
-            // Already there: nothing to do.
+            // Already there: nothing to do -- a texel fetched again into the register a
+            // model 1 texture read fills.
             continue;
         }
-        if (found)
+        const pin = instr.dest.kind === 'reg' ? instr.dest.reg.pin : undefined;
+        const samePin = found?.reg.pin && pin && found.reg.pin.file === pin.file
+            && found.reg.pin.index === pin.index && found.reg.pin.sampler === pin.sampler
+            && found.comps.every((comp, i)=>comp === comps[i]);
+        if (samePin && instr.dest.kind === 'reg' && found)
+        {
+            alias.set(instr.dest.reg, found.reg);
+            continue;
+        }
+        if (found && !pinned)
         {
             const swz = [0, 1, 2, 3].map(c=>found.comps[Math.max(0, comps.indexOf(c))]);
             instr = { op: 'mov', dest: instr.dest,

@@ -215,8 +215,25 @@ function component(src, lane, homes){
  * @returns {AssembleResult}
  */
 export function assembleLegacy(ir, options = {}){
+    // Computing a value once keeps it alive until its last reader, and two temporaries
+    // may not hold it: what does not fit is built again computing it where it is read.
+    const numbered = assembleWith(ir, options, true);
+    if (numbered.tokens)
+    {
+        return numbered;
+    }
+    const plain = assembleWith(ir, options, false);
+    return plain.tokens ? plain : numbered;
+}
+
+/**
+ * @param {IrProgram} ir @param {{ creator?: string, flags?: number }} options
+ * @param {boolean} numbered   Whether each value is computed once (numberValues).
+ * @returns {AssembleResult}
+ */
+function assembleWith(ir, options, numbered){
     /** @type {Rewrites} */
-    const rewrites = { spread: new Set(), split: new Set() };
+    const rewrites = { spread: new Set(), split: new Set(), numbered, keepMoves: false };
     // A source the model cannot read as it stands, or an instruction it cannot
     // write in one, is rewritten and the program built again from the start:
     // where a value lives is only known once it is placed.
@@ -235,7 +252,9 @@ export function assembleLegacy(ir, options = {}){
                 const before = rewrites.spread.size + rewrites.split.size;
                 e.spread.forEach(key=>rewrites.spread.add(key));
                 e.split.forEach(key=>rewrites.split.add(key));
-                if (rewrites.spread.size + rewrites.split.size > before)
+                const keepMoves = e.keepMoves && !rewrites.keepMoves;
+                rewrites.keepMoves ||= e.keepMoves;
+                if (rewrites.spread.size + rewrites.split.size > before || keepMoves)
                 {
                     continue;
                 }
@@ -252,10 +271,13 @@ export function assembleLegacy(ir, options = {}){
 }
 
 /**
- * @typedef {{ spread: Set<string>, split: Set<string> }} Rewrites
+ * @typedef {{ spread: Set<string>, split: Set<string>, numbered: boolean,
+ *     keepMoves: boolean }} Rewrites
  * `spread`: the sources -- a value and the one component it is read as -- to
  * read through a dot product that puts that component in every lane;
- * `split`: the instructions to write one component at a time.
+ * `split`: the instructions to write one component at a time; `numbered`: whether each
+ * value is computed once; `keepMoves`: the result moved into r0 at the end, not written
+ * there earlier by what makes it.
  */
 
 /** Where the numbers of the registers a spread reads start. */
@@ -265,12 +287,15 @@ const SPREAD_IDS = 1 << 24;
 class RewriteNeeded extends Error {
     /**
      * @param {string[]} spread @param {string[]} split @param {TargetError} failure
+     * @param {boolean} [keepMoves]  The result is to be moved into r0 at the end rather
+     *     than written there by what makes it.
      */
-    constructor(spread, split, failure){
+    constructor(spread, split, failure, keepMoves = false){
         super(failure.message);
         this.spread = spread;
         this.split = split;
         this.failure = failure;
+        this.keepMoves = keepMoves;
     }
 }
 
@@ -381,12 +406,40 @@ function build(ir, options, diagnostics, stats, rewrites){
     const newReg = width=>({ id: counter++, width });
 
     let instrs = prune(ir.instrs.map(i=>({ ...i, srcs: i.srcs.slice() })));
-    instrs = prune(numberValues(instrs, profile));
+    if (rewrites.numbered)
+    {
+        instrs = prune(numberValues(instrs, profile));
+    }
     instrs = fuseMultiplyAdd(instrs, profile);
     instrs = foldScales(instrs, profile);
     instrs = foldModifiers(instrs);
     instrs = propagateModifiers(prune(instrs));
-    instrs = forwardOutputs(coalesceMoves(instrs));
+    instrs = coalesceMoves(instrs);
+    if (!rewrites.keepMoves)
+    {
+        instrs = forwardOutputs(instrs);
+    }
+    else
+    {
+        // Every write of the result goes to a temporary, moved into r0 at the end.
+        /** @type {Map<import('./hlsl-ir.js').Output, { reg: VReg, mask: number }>} */
+        const held = new Map();
+        instrs = instrs.map(instr=>{
+            if (instr.dest.kind !== 'out')
+            {
+                return instr;
+            }
+            const one = held.get(instr.dest.out) ?? { reg: newReg(4), mask: 0 };
+            one.mask |= instr.dest.mask;
+            held.set(instr.dest.out, one);
+            return { ...instr, dest: { kind: 'reg', reg: one.reg, mask: instr.dest.mask } };
+        });
+        for (const [out, { reg, mask }] of held)
+        {
+            instrs.push({ op: 'mov', dest: { kind: 'out', out, mask },
+                srcs: [{ kind: 'reg', reg, swz: [0, 1, 2, 3] }] });
+        }
+    }
 
     // An input nothing reads is not declared, and not judged: a pixel shader that
     // takes the vertex shader's output structure carries its POSITION, which no
@@ -504,6 +557,54 @@ function build(ir, options, diagnostics, stats, rewrites){
     }
     const isTextureOp = (/** @type {Instr} */ i)=>i.op === 'tex' || i.op === 'texcoord'
         || i.op === 'texld' || i.op === 'texcrd';
+    // Eight arithmetic instructions a phase: in 1.4 a program longer than that runs its
+    // tail in phase two, as fxc does, keeping in phase one what the reads of phase two
+    // need; the texture reads only phase two uses are made there too.
+    if (fourth && first.filter(i=>!isTextureOp(i)).length > profile.maxArith)
+    {
+        /** @type {Set<Instr>} */
+        const needed = new Set();
+        /** @type {Set<VReg>} */
+        const wanted = new Set();
+        for (const instr of second)
+        {
+            if (isTextureOp(instr))
+            {
+                instr.srcs.forEach(src=>src.kind === 'reg' && wanted.add(src.reg));
+            }
+        }
+        for (let i = first.length - 1; i >= 0; i--)
+        {
+            const instr = first[i];
+            if (instr.dest.kind === 'reg' && wanted.has(instr.dest.reg))
+            {
+                needed.add(instr);
+                instr.srcs.forEach(src=>src.kind === 'reg' && wanted.add(src.reg));
+            }
+        }
+        let count = first.filter(i=>!isTextureOp(i)).length;
+        /** @type {Instr[]} */
+        const moved = [];
+        for (let i = first.length - 1; i >= 0 && count > profile.maxArith; i--)
+        {
+            const instr = first[i];
+            if (isTextureOp(instr) || needed.has(instr))
+            {
+                continue;
+            }
+            moved.unshift(instr);
+            first.splice(i, 1);
+            count--;
+        }
+        /** @type {Set<VReg>} */
+        const readFirst = new Set();
+        first.forEach(instr=>instr.srcs.forEach(src=>src.kind === 'reg' && readFirst.add(src.reg)));
+        const stay = first.filter(i=>!isTextureOp(i) || (i.dest.kind === 'reg'
+            && readFirst.has(i.dest.reg)));
+        const later = first.filter(i=>!stay.includes(i));
+        first.splice(0, first.length, ...stay);
+        second.unshift(...later, ...moved);
+    }
     /** @param {Instr[]} list */
     const textureFirst = list=>[...list.filter(isTextureOp), ...list.filter(i=>!isTextureOp(i))];
     /** @type {Instr[]} */
@@ -649,6 +750,14 @@ function build(ir, options, diagnostics, stats, rewrites){
         const reg = pin.index ?? /** @type {number} */ (pin.sampler?.index);
         for (let c = 0; c < 4; c++)
         {
+            // A texel 1.4 leaves in r0 still read after the result is written there: the
+            // result waits, moved into r0 at the end.
+            if (pin.file === 'r' && reg === 0 && range.end > firstOut)
+            {
+                throw new RewriteNeeded([], [], new TargetError('X4505', `${profile.name}: `
+                    + `the texel in ${pin.file}${reg} is read after the result is written there`),
+                true);
+            }
             take(`${pin.file}${reg}.${c}`, range.start, range.end);
         }
         homes.set(v, { file: pin.file, reg, comps: [0, 1, 2, 3].slice(0, v.width) });
@@ -662,6 +771,22 @@ function build(ir, options, diagnostics, stats, rewrites){
         while (!comps.every(c=>free(`r${reg}.${c}`, range.start, range.end)))
         {
             reg++;
+        }
+        if (reg >= profile.maxTemps && !fourth)
+        {
+            // Before 1.4 a texture register is a temporary once its stage has run, and
+            // fxc keeps a value there when the two r# are taken (mov_sat t0.w, v0.w).
+            const spare = [0, 1, 2, 3].find(t=>comps.every(c=>
+                free(`t${t}.${c}`, range.start, range.end)));
+            if (spare !== undefined)
+            {
+                for (const c of comps)
+                {
+                    take(`t${spare}.${c}`, range.start, range.end);
+                }
+                homes.set(v, { file: 't', reg: spare, comps });
+                continue;
+            }
         }
         for (const c of comps)
         {
