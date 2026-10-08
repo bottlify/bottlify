@@ -2143,6 +2143,10 @@ export function createWin32Module(){
                 'WININET.dll': createWininetFunctions({
                     readMemory, writeMemory, readCString, setLastError: setError,
                     request: config?.http ?? null,
+                    // The guest's wall clock, which a cookie's expiry is read
+                    // against: the host's would disagree with what the
+                    // program's own GetSystemTime says.
+                    now: ()=>kernel.clock.wallClock(),
                     divergence: config?.divergence,
                 }),
 

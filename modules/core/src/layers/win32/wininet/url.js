@@ -46,13 +46,24 @@ export const URL_COMPONENTS = Object.freeze({
     SIZE: 60,
 });
 
-/** INTERNET_SCHEME. Only the ones a scheme name can produce here. */
+/**
+ * INTERNET_SCHEME, by name. UNKNOWN is -1 and not zero: zero is
+ * INTERNET_SCHEME_DEFAULT, which a caller of InternetCreateUrl may pass and
+ * which a cracked URL never answers with.
+ */
 export const Scheme = Object.freeze({
-    UNKNOWN: 0,
+    UNKNOWN: -1,
     FTP: 1,
+    GOPHER: 2,
     HTTP: 3,
     HTTPS: 4,
     FILE: 8,
+    NEWS: 5,
+    MAILTO: 6,
+    SOCKS: 7,
+    JAVASCRIPT: 9,
+    VBSCRIPT: 10,
+    RES: 11,
 });
 
 /** INTERNET_DEFAULT_*_PORT, and the zero that means "no default". */
@@ -60,14 +71,20 @@ const DEFAULT_PORTS = Object.freeze({ http: 80, https: 443, ftp: 21, file: 0 });
 
 /** @param {string} scheme */
 export function schemeNumber(scheme){
-    switch (scheme.toLowerCase())
-    {
-        case 'ftp': return Scheme.FTP;
-        case 'http': return Scheme.HTTP;
-        case 'https': return Scheme.HTTPS;
-        case 'file': return Scheme.FILE;
-        default: return Scheme.UNKNOWN;
-    }
+    const known = /** @type {Record<string, number>} */ (Scheme)[scheme.toUpperCase()];
+    return known === undefined || scheme.toUpperCase() === 'UNKNOWN' ? Scheme.UNKNOWN : known;
+}
+
+/**
+ * The name InternetCreateUrl writes for an INTERNET_SCHEME number, or null
+ * for a number that names none.
+ *
+ * @param {number} number
+ */
+export function schemeName(number){
+    const found = Object.entries(Scheme).find(([name, value])=>value === number
+        && name !== 'UNKNOWN');
+    return found ? found[0].toLowerCase() : null;
 }
 
 /** @param {string} scheme */
@@ -209,4 +226,67 @@ export function buildUrl({ host, port, secure, objectName }){
         : `${host}:${port}`;
     const target = objectName.startsWith('/') ? objectName : `/${objectName}`;
     return `${scheme}://${authority}${target}`;
+}
+
+/** Schemes whose URLs carry an authority, so "//" follows the colon. */
+const HIERARCHICAL = new Set(['http', 'https', 'ftp', 'gopher', 'file']);
+
+/**
+ * @typedef {Object} UrlParts
+ * @property {string | null} scheme  Null asks for nScheme's name instead.
+ * @property {number} nScheme
+ * @property {string | null} host
+ * @property {number} port           Zero, or the scheme's own default, is left out.
+ * @property {string | null} user
+ * @property {string | null} password
+ * @property {string | null} path
+ * @property {string | null} extra
+ */
+
+/**
+ * Assembles a URL the way InternetCreateUrl does. Answers null when the
+ * parts cannot make one: no scheme at all, or a password with no user name to
+ * go with it.
+ *
+ * Null and empty are different here, as they are to the caller: a null part
+ * is absent and leaves no punctuation, an empty one is present and keeps it --
+ * an empty password still writes its colon.
+ *
+ * @param {UrlParts} parts
+ * @param {(text: string) => string} [escape]  Applied to the path and extra info.
+ * @returns {string | null}
+ */
+export function createUrl(parts, escape){
+    const scheme = parts.scheme ?? schemeName(parts.nScheme);
+    if (scheme === null || (parts.password !== null && parts.user === null))
+    {
+        return null;
+    }
+    let url = `${scheme}:`;
+    // A scheme that has no authority of its own gets one only when a host is
+    // given: "about:blank", but "about://host/blank".
+    const authority = parts.host !== null || HIERARCHICAL.has(scheme.toLowerCase());
+    const host = parts.host ?? '';
+    if (authority)
+    {
+        url += '//';
+        if (parts.user !== null)
+        {
+            url += parts.user;
+            if (parts.password !== null)
+            {
+                url += `:${parts.password}`;
+            }
+            url += '@';
+        }
+        url += host;
+        if (host !== '' && parts.port !== 0 && parts.port !== defaultPort(scheme))
+        {
+            url += `:${parts.port}`;
+        }
+    }
+    const tail = (parts.path ?? '') + (parts.extra ?? '');
+    const path = authority && host !== '' && parts.path !== null && !parts.path.startsWith('/')
+        ? `/${tail}` : tail;
+    return url + (escape ? escape(path) : path);
 }
