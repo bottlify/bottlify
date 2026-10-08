@@ -72,6 +72,7 @@ import { registerDxDiagClasses } from './ole32/dxdiag.js';
 import { createRpcFunctions } from './rpcrt4/functions.js';
 import { createVersionFunctions } from './version/functions.js';
 import { createLzFunctions } from './lz32/functions.js';
+import { createMspatchaFunctions } from './mspatcha/functions.js';
 import { createCommonDialogFunctions } from './comdlg32/functions.js';
 import { createImmFunctions } from './imm32/functions.js';
 import { createShlwapiFunctions } from './shlwapi/functions.js';
@@ -1880,6 +1881,37 @@ export function createWin32Module(){
                 }),
 
                 'LZ32.dll': createLzFunctions({ readCString, writeMemory, files: volume }),
+
+                // The Patch API's applying half: the delta patches a Windows
+                // Installer patch's PatchFiles action and setups apply.
+                'MSPATCHA.dll': createMspatchaFunctions({
+                    readMemory, writeMemory, readCString, readWideString,
+                    setLastError: setError,
+                    setLastErrorFor: setErrorOn,
+                    files: volume,
+                    handles: {
+                        /** @param {number} handle */
+                        file: handle=>{
+                            try
+                            {
+                                return handles.resolve(handle, 'file') ?? null;
+                            }
+                            catch (e){
+                                void e;
+                                return null;
+                            }
+                        },
+                    },
+                    // ApplyPatchToFileByBuffers' own buffer, which the program
+                    // frees with VirtualFree.
+                    /** @param {number} bytes */
+                    virtualAlloc: bytes=>libraries['KERNEL32.dll'].VirtualAlloc
+                        .handler([0, bytes, 0x3000, 0x04]) >>> 0,
+                    /** @param {number} entry @param {number[]} args @param {unknown} [thread] */
+                    call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    callerThread: ()=>bridge.callerThread(),
+                    divergence: config?.divergence,
+                }),
 
                 'COMDLG32.dll': createCommonDialogFunctions({
                     readMemory, readCString, writeMemory,
