@@ -221,7 +221,7 @@ export function discEntry(iso, autorun){
  * @param {string[]} [under.dialogs]  An InstallShield 5 script's dialog order, as
  *        far as earlier runs found it.
  * @returns {Promise<{ executable: Uint8Array, imagePath: string, commandLine: string,
- *     discs: { image: DiscMedia['disc'], letter: string }[],
+ *     startDirectory: string, discs: { image: DiscMedia['disc'], letter: string }[],
  *     storage: { load: () => Promise<{ path: string, bytes: Uint8Array }[]> },
  *     seeded: string[], label: string, entry: DiscEntry,
  *     unattended: import('./silent.js').SilentOptions | null,
@@ -252,6 +252,12 @@ export async function discOptions(media, under = {}){
     const imagePath = `${DISC_LETTER}:\\${program.path}`;
     const commandLine = entry.arguments === ''
         ? `"${imagePath}"` : `"${imagePath}" ${entry.arguments}`;
+    // Windows starts a disc's autorun program in the disc's root, wherever on
+    // the disc the program lives, and launchers lean on it: a menu in a
+    // subfolder looks for the setup beside autorun.inf by a relative name. A
+    // program a person picked starts where it lives, as Explorer starts it.
+    const startDirectory = entry.from === 'asked' && program.path.includes('\\')
+        ? imagePath.slice(0, imagePath.lastIndexOf('\\')) : `${DISC_LETTER}:\\`;
 
     /** @type {import('./silent.js').SilentOptions | null} */
     let unattended = null;
@@ -278,6 +284,7 @@ export async function discOptions(media, under = {}){
         executable,
         imagePath,
         commandLine,
+        startDirectory,
         discs: [{ image: media.disc, letter: DISC_LETTER }],
         // Nothing is seeded: the disc is its own drive, and the prefix beneath
         // the program starts empty. An unattended run's answers are

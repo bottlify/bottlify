@@ -218,6 +218,7 @@ const app = await createApp({
     // `--args '...'`: what follows the program's own path on its command line.
     ...'commandLine' in prefix ? { commandLine: prefix.commandLine } : {},
     ...'discs' in prefix ? { discs: prefix.discs } : {},
+    ...'startDirectory' in prefix ? { startDirectory: prefix.startDirectory } : {},
     ...argv.includes('--args')
         ? { commandLine: `"${prefix.imagePath}" ${argv[argv.indexOf('--args') + 1]}` } : {},
     storage: prefix.storage,
