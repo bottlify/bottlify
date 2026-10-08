@@ -220,19 +220,47 @@ export async function readZip(blob, progress){
 }
 
 /**
+ * The folder an archive holds a copied disc in, or null: a zip of a CD's
+ * folder holds nothing at its root but that folder, and the disc's
+ * autorun.inf inside it says the folder is the disc.
+ *
+ * @param {ArchiveEntry[]} entries
+ * @returns {string | null}
+ */
+function copiedDiscFolder(entries){
+    const tops = new Set(entries.map(entry=>entry.path.split('\\')[0]));
+    if (tops.size !== 1 || entries.some(entry=>!entry.path.includes('\\') && entry.bytes))
+    {
+        return null;
+    }
+    const [folder] = tops;
+    return entries.some(entry=>entry.bytes
+        && entry.path.toLowerCase() === `${folder.toLowerCase()}\\autorun.inf`) ? folder : null;
+}
+
+/**
  * An archive's tree as the disc it stands in for, under a label made of its
- * file name.
+ * file name -- the disc's own folder at the root, when the archive is of a
+ * copied disc.
  *
  * @param {string} name  The archive's file name.
  * @param {ArchiveEntry[]} entries
  * @returns {{ name: string, disc: Uint8Array }}
  */
 export function archiveDisc(name, entries){
+    const folder = copiedDiscFolder(entries);
     /** @type {Record<string, Uint8Array | null>} */
     const files = {};
     for (const entry of entries)
     {
-        files[entry.path] = entry.bytes;
+        if (folder === null)
+        {
+            files[entry.path] = entry.bytes;
+        }
+        else if (entry.path.length > folder.length + 1)
+        {
+            files[entry.path.slice(folder.length + 1)] = entry.bytes;
+        }
     }
     const label = name.replace(/\.[^.]+$/, '').toUpperCase().replace(/[^A-Z0-9_]/g, '_')
         .slice(0, 32) || 'ARCHIVE';

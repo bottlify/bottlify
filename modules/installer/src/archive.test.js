@@ -97,6 +97,19 @@ test('an archive is the disc it stands in for, and the program picked out of it 
             'an archive has no autorun.inf, so nothing is started unless it is picked');
     });
 
+test('an archive of a copied disc\'s folder is that disc, its autorun at the root', async()=>{
+    const program = new Uint8Array([0x4d, 0x5a, 7]);
+    const entries = await readZip(await zipOf([
+        ['Demo Game/autorun.inf', new TextEncoder().encode('[autorun]\r\nopen=setup.exe\r\n'),
+            false],
+        ['Demo Game/setup.exe', program, false],
+        ['Demo Game/Data/a.cab', new Uint8Array(10), false],
+    ]));
+    const run = await discOptions(archiveDisc('demo_game.zip', entries));
+    assert.equal(run.imagePath, 'D:\\setup.exe', 'started as the disc starts itself');
+    assert.deepEqual(run.executable, program);
+});
+
 test('an entry packed some other way, or encrypted, is refused by name', async()=>{
     const packed = await zipOf([['a.exe', new Uint8Array(3), false]]);
     const zip = new Uint8Array(await packed.arrayBuffer());
