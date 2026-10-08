@@ -1332,7 +1332,23 @@ export function createProductFunctions(context){
                 return ERROR_UNKNOWN_PRODUCT;
             }
             const applied = registration.patches(code).map(entry=>entry.code.toUpperCase());
-            const asked = list.split(';').map(entry=>entry.trim().toUpperCase()).filter(Boolean);
+            // The list names each patch by its code or by the path of its
+            // package, as the reference allows; a package is asked its code.
+            const asked = [];
+            for (const entry of list.split(';').map(each=>each.trim()).filter(Boolean))
+            {
+                if (squashGuid(entry) !== null)
+                {
+                    asked.push(entry.toUpperCase());
+                    continue;
+                }
+                const opened = await context.inspectPatch(entry.replace(/^"(.*)"$/, '$1'));
+                if (typeof opened === 'number')
+                {
+                    return ERROR_UNKNOWN_PATCH;
+                }
+                asked.push(opened.code.toUpperCase());
+            }
             if (asked.length === 0 || !asked.every(entry=>applied.includes(entry)))
             {
                 return ERROR_UNKNOWN_PATCH;

@@ -169,9 +169,10 @@ async function patchedAndRemoved(delta){
         'the machine keeps its own copy');
 
     const INSTALLTYPE_SINGLE_INSTANCE = 2;
-    assert.equal(await fns.MsiRemovePatchesA.handler([put(0x800, PATCH), product,
-        INSTALLTYPE_SINGLE_INSTANCE,
-        put(0x900, '')]), 0);
+    // The delta run names the patch by its package's path, the other by its code.
+    const named = delta ? 'C:\\src\\fix.msp' : PATCH;
+    assert.equal(await fns.MsiRemovePatchesA.handler([put(0x800, named), product,
+        INSTALLTYPE_SINGLE_INSTANCE, put(0x900, '')]), 0);
     assert.equal(await text(), 'MZ..', 'the shipped file back');
     assert.deepEqual(host.registration.patches(PRODUCT), []);
     assert.equal(files.stat(info.localPackage), null);
