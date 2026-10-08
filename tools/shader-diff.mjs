@@ -25,7 +25,7 @@
  * compiler with the model 1 targets; its x86 build is loaded into a 32-bit
  * PowerShell -- model 1 shaders are compiled by it for their own profile instead.
  *
- *     node tools/shader-diff.mjs <dir> [--trials N] [--only NNN] [--legacy d3dx9_31.dll]
+ *     node tools/shader-diff.mjs <dir> [--trials N] [--only NNN[,NNN...]] [--legacy d3dx9_31.dll]
  */
 
 import { execFileSync } from 'node:child_process';
@@ -191,7 +191,7 @@ function outputsOf(/** @type {any} */ result, /** @type {boolean} */ pixel){
 }
 
 const files = readdirSync(dir).filter(name=>/^\d+-[pv]s_\d_\w+-.+\.hlsl$/.test(name)
-    && (!only || name.startsWith(only))).sort();
+    && (!only || only.split(',').some(p=>name.startsWith(p)))).sort();
 /** @param {string} file */
 const partsOf = file=>{
     const [, profile, entry] = /^\d+-([pv]s_\d_\w)-(.+)\.hlsl$/.exec(file) ?? [];

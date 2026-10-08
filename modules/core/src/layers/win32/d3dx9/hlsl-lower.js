@@ -39,6 +39,20 @@ import { lowerIntrinsic } from './hlsl-lower-intrinsics.js';
 /** @typedef {import('./hlsl-lower-intrinsics.js').Value} Value */
 /** @typedef {import('./hlsl-lower-intrinsics.js').State} State */
 /** @typedef {import('./hlsl-lower-intrinsics.js').LowerContext} LowerContext */
+/**
+ * A loop or a switch a break may leave, and for a loop, where it was left or its iteration
+ * continued under a condition not known (and the variables there).
+ *
+ * @typedef {Object} Jumps
+ * @property {number} id
+ * @property {boolean} isSwitch
+ * @property {object} end                 Its marker at the end.
+ * @property {Vec | null} path            Where it runs.
+ * @property {Vec | null} broke
+ * @property {Map<any, Value> | null} brokeEnv
+ * @property {Vec | null} skipped
+ * @property {Map<any, Value> | null} skippedEnv
+ */
 /** @typedef {import('./hlsl-lower-intrinsics.js').UniformArray} UniformArray */
 
 /** A diagnostic the lowering found. */
@@ -1190,9 +1204,9 @@ export function lower(module, entry, profile){
 
     /**
      * Whether a statement breaks or continues out of a loop around it.
-     * @param {any} s @returns {boolean}
+     * @param {any} s @param {string[]} [kinds] @returns {boolean}
      */
-    const jumps = s=>{
+    const jumps = (s, kinds = ['break', 'continue'])=>{
         if (!s)
         {
             return false;
@@ -1200,9 +1214,12 @@ export function lower(module, entry, profile){
         switch (s.kind)
         {
             case 'break':
-            case 'continue': return true;
-            case 'block': return s.stmts.some(jumps);
-            case 'if': return jumps(s.then) || jumps(s.else);
+            case 'continue': return kinds.includes(s.kind);
+            case 'block': return s.stmts.some((/** @type {any} */ one)=>jumps(one, kinds));
+            // A branch of a switch ends at a break, where the switch ends, and an if in it
+            // that breaks on a value not known answers for itself when it runs.
+            case 'if': return s.ends ? jumps(s.then, ['continue']) || jumps(s.else, ['continue'])
+                : jumps(s.then, kinds) || jumps(s.else, kinds);
             default: return false;
         }
     };
@@ -1212,19 +1229,69 @@ export function lower(module, entry, profile){
     /**
      * Runs a list of statements to the end of the function or of the list.
      *
+     * A break or a continue under a condition not known when the shader is compiled keeps
+     * the variables as they were where it was taken, and the code after it goes on where it
+     * was not -- the loop's counter as known as it was -- until the end of the iteration (of
+     * the loop, for a break) chooses between the two.
+     *
      * @param {any[]} items   Statements and the markers loops leave in them.
      * @param {State} st
+     * @param {Jumps[]} [around]   The loops and switches the list is in, the innermost last.
      * @returns {{ value?: Value }}
      */
-    function execList(items, st){
+    function execList(items, st, around = []){
         const stack = items.slice().reverse();
+        const loops = around.slice();
+        /** Forgets the loops and switches this list has left. */
+        const prune = ()=>{
+            while (loops.length > around.length
+                && !stack.includes(/** @type {Jumps} */ (loops.at(-1)).end))
+            {
+                loops.pop();
+            }
+        };
+        /** @param {Vec} c @param {Map<any, Value>} a @param {Map<any, Value>} other */
+        const merged = (c, a, other)=>{
+            /** @type {State} */
+            const into = { env: new Map(), path: null };
+            join(into, c, { env: a, path: null }, { env: other, path: null });
+            return into.env;
+        };
+        /** @param {Vec | null} path @param {Vec | null} gone */
+        const without = (path, gone)=>(!gone ? path
+            : path ? b.and(path, b.not(gone)) : b.not(gone));
+        /** At the end of an iteration, the variables of where it was continued. @param {Jumps} loop */
+        const settle = loop=>{
+            if (loop.skipped && loop.skippedEnv)
+            {
+                st.env = merged(loop.skipped, loop.skippedEnv, st.env);
+                loop.skipped = null;
+                loop.skippedEnv = null;
+                st.path = without(loop.path, loop.broke);
+            }
+        };
+        /** At the end of a loop, the variables of where it was left. @param {Jumps} loop */
+        const leave = loop=>{
+            if (loop.broke && loop.brokeEnv)
+            {
+                st.env = merged(loop.broke, loop.brokeEnv, st.env);
+                st.path = loop.path;
+            }
+        };
         while (stack.length > 0)
         {
             const s = stack.pop();
             switch (s.kind)
             {
-                case 'mark':
+                case 'mark': {
+                    const loop = loops.find(one=>one.id === s.id && !one.isSwitch);
+                    if (loop)
+                    {
+                        (s.what === 'cont' ? settle : leave)(loop);
+                    }
+                    prune();
                     break;
+                }
                 case 'empty':
                     break;
                 case 'block':
@@ -1251,22 +1318,56 @@ export function lower(module, entry, profile){
                 case 'continue': {
                     // To the end of the iteration or of the loop: the markers say where.
                     const want = s.kind === 'break' ? 'end' : 'cont';
-                    while (stack.length > 0)
+                    let at = stack.length - 1;
+                    while (at >= 0 && !(stack[at].kind === 'mark' && stack[at].what === want))
                     {
-                        const top = stack.pop();
-                        if (top.kind === 'mark' && top.what === want)
-                        {
-                            if (want === 'cont')
-                            {
-                                stack.push(top);
-                            }
-                            break;
-                        }
+                        at--;
                     }
+                    if (at < 0)
+                    {
+                        // The marker is outside this branch, which ends here: the loop keeps
+                        // the variables as they are where the jump was taken (the branch of a
+                        // switch simply ends).
+                        let i = loops.length - 1;
+                        if (want === 'cont')
+                        {
+                            while (i >= 0 && loops[i].isSwitch)
+                            {
+                                i--;
+                            }
+                        }
+                        const loop = loops[i];
+                        if (loop && !loop.isSwitch)
+                        {
+                            const here = st.path ?? b.num(1);
+                            if (want === 'end')
+                            {
+                                loop.brokeEnv = loop.broke && loop.brokeEnv
+                                    ? merged(here, st.env, loop.brokeEnv) : new Map(st.env);
+                                loop.broke = loop.broke ? b.or(loop.broke, here) : here;
+                            }
+                            else
+                            {
+                                loop.skippedEnv = loop.skipped && loop.skippedEnv
+                                    ? merged(here, st.env, loop.skippedEnv) : new Map(st.env);
+                                loop.skipped = loop.skipped ? b.or(loop.skipped, here) : here;
+                            }
+                        }
+                        stack.length = 0;
+                        break;
+                    }
+                    const top = stack[at];
+                    stack.length = want === 'cont' ? at + 1 : at;
+                    const left = loops.find(one=>one.end === top && !one.isSwitch);
+                    if (left)
+                    {
+                        leave(left);
+                    }
+                    prune();
                     break;
                 }
                 case 'if': {
-                    const c = truth(ev(s.test, st));
+                    const c = s.cond ?? truth(ev(s.test, st));
                     const test = known(c);
                     if (test)
                     {
@@ -1277,7 +1378,8 @@ export function lower(module, entry, profile){
                         }
                         break;
                     }
-                    if (jumps(s.then) || jumps(s.else))
+                    const jumping = jumps(s);
+                    if (jumping && (loops.length === 0 || loops.at(-1)?.isSwitch))
                     {
                         fail('X3511', 'unable to unroll loop, a break or continue depends on a '
                             + 'value that is not known when the shader is compiled', s.pos);
@@ -1287,28 +1389,36 @@ export function lower(module, entry, profile){
                     const no = fork(st, b.not(c));
                     if (returns(s.then) || returns(s.else))
                     {
-                        const a = execList([s.then, ...rest], yes);
-                        const o = execList([...(s.else ? [s.else] : []), ...rest], no);
+                        const a = execList([s.then, ...rest], yes, loops);
+                        const o = execList([...(s.else ? [s.else] : []), ...rest], no, loops);
                         join(st, c, yes, no);
                         return { value: a.value && o.value ? choose(c, a.value, o.value)
                             : a.value ?? o.value };
                     }
-                    execList([s.then], yes);
+                    execList([s.then], yes, loops);
                     if (s.else)
                     {
-                        execList([s.else], no);
+                        execList([s.else], no, loops);
                     }
                     join(st, c, yes, no);
+                    if (jumping)
+                    {
+                        // What follows runs where the loop was neither left nor continued.
+                        const loop = /** @type {Jumps} */ (loops.at(-1));
+                        st.path = without(st.path, loop.broke && loop.skipped
+                            ? b.or(loop.broke, loop.skipped) : loop.broke ?? loop.skipped);
+                    }
                     break;
                 }
                 case 'for':
                 case 'while':
                 case 'do': {
                     const id = ++loopId;
-                    const loop = { kind: 'iterate', id, stmt: s, count: 0,
-                        first: s.kind === 'do' };
-                    stack.push({ kind: 'mark', what: 'end', id });
-                    stack.push(loop);
+                    const end = { kind: 'mark', what: 'end', id };
+                    loops.push({ id, isSwitch: false, end, path: st.path, broke: null,
+                        brokeEnv: null, skipped: null, skippedEnv: null });
+                    stack.push(end);
+                    stack.push({ kind: 'iterate', id, stmt: s, count: 0, first: s.kind === 'do' });
                     if (s.kind === 'for' && s.init)
                     {
                         stack.push(s.init);
@@ -1317,11 +1427,10 @@ export function lower(module, entry, profile){
                 }
                 case 'iterate': {
                     const loop = s.stmt;
-                    if (s.count >= MAX_UNROLL)
-                    {
-                        fail('X3511', 'unable to unroll loop, loop does not appear to terminate '
-                            + `in a timely manner (${MAX_UNROLL} iterations)`, loop.pos);
-                    }
+                    // [unroll(n)] lets a loop run n times however many that is.
+                    const told = loop.attributes?.find((/** @type {any} */ x)=>
+                        x.name.toLowerCase() === 'unroll')?.args[0];
+                    const most = told?.kind === 'num' ? told.value : MAX_UNROLL;
                     let go = true;
                     if (!s.first && loop.test)
                     {
@@ -1333,6 +1442,11 @@ export function lower(module, entry, profile){
                                 + 'terminate in a timely manner', loop.pos);
                         }
                         go = value[0] !== 0;
+                    }
+                    if (go && s.count >= most)
+                    {
+                        fail('X3511', 'unable to unroll loop, loop does not appear to terminate '
+                            + `in a timely manner (${most} iterations)`, loop.pos);
                     }
                     if (go)
                     {
@@ -1347,9 +1461,35 @@ export function lower(module, entry, profile){
                     }
                     break;
                 }
-                case 'switch':
-                    fail('X3500', 'switch is not supported', s.pos);
+                case 'switch': {
+                    // An if for each case, the default the last else; a case runs on from
+                    // where it begins to a break, which goes to the mark after the switch.
+                    const selector = truth(ev(s.test, st));
+                    const from = (/** @type {number} */ i)=>({ kind: 'block',
+                        stmts: s.cases.slice(i).flatMap((/** @type {any} */ c)=>c.body) });
+                    const fallback = s.cases.findIndex((/** @type {any} */ c)=>!c.value);
+                    /** @type {any} */
+                    let chain = fallback < 0 ? null : from(fallback);
+                    for (let i = s.cases.length - 1; i >= 0; i--)
+                    {
+                        if (s.cases[i].value)
+                        {
+                            const cond = b.eq(selector, truth(ev(s.cases[i].value, st)));
+                            chain = { kind: 'if', cond, then: from(i), else: chain, ends: true,
+                                pos: s.pos };
+                        }
+                    }
+                    const id = ++loopId;
+                    const end = { kind: 'mark', what: 'end', id };
+                    loops.push({ id, isSwitch: true, end, path: st.path, broke: null,
+                        brokeEnv: null, skipped: null, skippedEnv: null });
+                    stack.push(end);
+                    if (chain)
+                    {
+                        stack.push(chain);
+                    }
                     break;
+                }
                 default:
                     fail('X3000', `unsupported statement '${s.kind}'`, s.pos);
             }

@@ -486,3 +486,43 @@ test('an array or a matrix in and out of a shader takes the semantic\'s indices 
     assert.deepEqual([...outputs.oC0].map(x=>Math.round(x * 1000) / 1000), [5.1, 6.2, 7.3, 8.4]);
     assert.deepEqual([...outputs.oC1], [1, 5, 4, 8]);
 });
+
+test('a switch on a value not known runs the case it names, on to a break', async()=>{
+    // fxc: case 2 adds 0.1 and breaks on a known if; case 1, and case 2 had it not, adds 0.2;
+    // default and case 0 leave c as it was.
+    const result = await compile(`int k;
+        float4 main() : COLOR0
+        { float4 c = 1;
+          switch (k) { case 2: c += 0.1; if (true) break; c = 9;
+                       case 1: c += 0.2; break;
+                       default: case 0: break; }
+          return c; }`, 'ps_2_0');
+    assert.equal(result.ok, true, result.messages);
+    const program = decode(/** @type {Uint32Array} */ (result.tokens));
+    const table = Object.fromEntries(constants(result).map(c=>[c.name, c.index]));
+    const run = (/** @type {number} */ k)=>{
+        const f = new Float32Array(32 * 4);
+        f.fill(k, table.k * 4, table.k * 4 + 4);
+        return Math.round(execute(program, { inputs: { v: [], t: [] }, constants: { f } })
+            .outputs.oC0[0] * 1000) / 1000;
+    };
+    assert.deepEqual([0, 1, 2, 3].map(run), [1, 1.2, 1.1, 1]);
+});
+
+test('an unrolled loop breaks and continues on a value not known, as fxc compiles it', async()=>{
+    // vkd3d's for.shader_test: where tex > 0.5 the loop is left at i = 5, otherwise from
+    // i = 7 on the subtraction is skipped where tex > -0.5.
+    const result = await compile(`float4 main(float tex : TEXCOORD0) : COLOR0
+        { int i; float x = 0.0;
+          [unroll] for (i = 0; i < 10; i++)
+          { x += i; if (tex > 0.5 && i == 5) break; if (tex > -0.5 && i >= 7) continue; x -= 1; }
+          return float4(i, x, 0, 0); }`, 'ps_2_0');
+    assert.equal(result.ok, true, result.messages);
+    const program = decode(/** @type {Uint32Array} */ (result.tokens));
+    const run = (/** @type {number} */ tex)=>[...execute(program, { inputs: { v: [],
+        t: [[tex, 0, 0, 0]] }, constants: { f: new Float32Array(32 * 4) } }).outputs.oC0]
+        .slice(0, 2);
+    assert.deepEqual(run(0.75), [5, 10]);
+    assert.deepEqual(run(0), [10, 38]);
+    assert.deepEqual(run(-0.75), [10, 35]);
+});

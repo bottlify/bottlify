@@ -71,6 +71,7 @@
  * @property {string | null} semantic
  * @property {Value | undefined} constValue   Of a constant with a constant initialiser.
  * @property {any} init   The checked initialiser, converted to the type, or null.
+ * @property {any} [defaultValue]   A parameter's default, as written, for a call leaving it out.
  * @property {'in' | 'out' | 'inout'} [dir]   Of a parameter.
  * @property {{ name: string, valueText: string }[]} [samplerState]
  * @property {number} order   Declaration order of a global.
