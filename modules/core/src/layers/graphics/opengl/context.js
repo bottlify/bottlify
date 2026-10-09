@@ -35,7 +35,8 @@
 import { GL } from './constants.js';
 import { EXTENSION_FUNCTIONS } from './extensions.js';
 import {
-    copyOf, createMatrixStacks, frustum, identity, multiply, ortho, rotation, scaling, translation,
+    copyOf, createMatrixStacks, frustum, identity, multiply, ortho, rotation, scaling, transform,
+    translation,
 } from './matrix.js';
 import { createShareGroup } from './objects.js';
 import { createDefaultState, readState } from './state.js';
@@ -1773,6 +1774,25 @@ export function createGlContext(options = {}){
     }
 
     /**
+     * The vertices with the fixed pipeline's lit colour in place of their own.
+     * The device's shader has no lights: a lit draw is lit here, per vertex,
+     * as the processor's rasteriser lights it, or it reaches the screen in
+     * the current colour -- black for a program that lights everything.
+     * ponytail: the separate specular colour is not carried; add it to the
+     * vertex's secondary when a program separates it.
+     *
+     * @param {any[]} vertices
+     */
+    function litVertices(vertices){
+        const built = scenes.scene();
+        const modelview = stacks.modelview.current;
+        return vertices.map(vertex=>({
+            ...vertex,
+            color: built.lit(vertex, transform(modelview, vertex.position)),
+        }));
+    }
+
+    /**
      * @param {number} mode
      * @param {any[]} vertices
      */
@@ -1785,7 +1805,8 @@ export function createGlContext(options = {}){
         {
             if (attached)
             {
-                gpu.draw(context, scenes.scene, mode, vertices);
+                gpu.draw(context, scenes.scene, mode,
+                    scenes.litFixed() ? litVertices(vertices) : vertices);
             }
             return;
         }
