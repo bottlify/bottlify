@@ -179,6 +179,29 @@ export function createStringFunctions(host, { A, W }){
         return text === null ? E_FAIL : S_OK;
     };
 
+    /**
+     * StrCSpn's count: the leading characters none of the set.
+     *
+     * @param {import('./text.js').Width} width @param {number} text
+     * @param {number} set @param {boolean} ignoreCase
+     */
+    const span = (width, text, set, ignoreCase)=>{
+        const fold = (/** @type {string} */ value)=>(ignoreCase ? value.toUpperCase() : value);
+        const string = width.read(text);
+        const stops = width.read(set);
+        if (string === null || stops === null)
+        {
+            return 0;
+        }
+        const folded = fold(stops);
+        let at = 0;
+        while (at < string.length && !folded.includes(fold(string[at])))
+        {
+            at++;
+        }
+        return at;
+    };
+
     return {
         /**
          * PSTR StrChrA(PCSTR pszStart, WORD wMatch)
@@ -211,6 +234,16 @@ export function createStringFunctions(host, { A, W }){
             const at = stop <= 0 ? -1 : text.lastIndexOf(wanted, stop - 1);
             return at < 0 ? 0 : (start >>> 0) + at * width.unit;
         }),
+
+        /**
+         * int StrCSpnA(LPCSTR pszStr, LPCSTR pszSet)
+         * int StrCSpnIA(LPCSTR pszStr, LPCSTR pszSet)
+         *
+         * How many characters lead the string before one of the set; the
+         * whole length when none is there. The I spelling ignores case.
+         */
+        ...both('StrCSpn', 8, (width, [text, set])=>span(width, text, set, false)),
+        ...both('StrCSpnI', 8, (width, [text, set])=>span(width, text, set, true)),
 
         /** int StrCmpW(PCWSTR psz1, PCWSTR psz2) */
         StrCmpW: one(W, 8, (width, [first, second])=>compare(width, first, second, 0, null)),

@@ -659,6 +659,28 @@ export function createPathFunctions(host, { A, W }){
         }),
 
         /**
+         * BOOL PathAddExtensionA(LPSTR pszPath, LPCSTR pszExt)
+         *
+         * The extension added only where the path has none -- FALSE, the
+         * path untouched, when it has one or the result would not fit
+         * MAX_PATH; a null or empty extension adds ".exe", as documented.
+         */
+        ...both('PathAddExtension', 8, (width, [pointer, extension])=>{
+            const path = width.read(pointer);
+            if (path === null || extensionIndex(path) !== path.length)
+            {
+                return 0;
+            }
+            const added = width.read(extension) || '.exe';
+            if (path.length + added.length >= MAX_PATH)
+            {
+                return 0;
+            }
+            host.writeMemory((pointer >>> 0) + path.length * width.unit, width.sz(added));
+            return 1;
+        }),
+
+        /**
          * BOOL PathSearchAndQualifyA(LPCSTR pszPath, LPSTR pszBuf, UINT cchBuf)
          *
          * A name found where SearchPath finds one, and otherwise the path

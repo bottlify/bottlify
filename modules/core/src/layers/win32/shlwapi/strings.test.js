@@ -232,3 +232,20 @@ test('each string function declares the arguments it pops', ()=>{
         assert.equal(fns[name].argBytes, bytes, name);
     }
 });
+
+test('StrCSpn counts the characters before one of the set, StrCSpnI ignoring case', ()=>{
+    for (const [suffix, wide] of WIDTHS)
+    {
+        const m = shlwapiMachine();
+        const text = m.put('Data\\Maps.pff', wide);
+        const call = (/** @type {string} */ name, /** @type {string} */ set)=>
+            m.fns[`${name}${suffix}`].handler([text, m.put(set, wide)]);
+        assert.equal(call('StrCSpn', '\\/'), 4);
+        assert.equal(call('StrCSpn', 'm'), 13);
+        assert.equal(call('StrCSpnI', 'm'), 5);
+        assert.equal(call('StrCSpnI', 'D'), 0);
+        assert.equal(call('StrCSpn', ''), 13);
+        assert.equal(m.fns[`StrCSpnI${suffix}`].handler([0, text]), 0);
+        assert.equal(m.fns[`StrCSpnI${suffix}`].argBytes, 8);
+    }
+});

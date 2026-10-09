@@ -205,6 +205,24 @@ const combine = (directory, file)=>{
 };
 
 /**
+ * Where PathFindFileName's answer starts: past the last separator or drive
+ * colon that has something after it.
+ *
+ * @param {string} path
+ */
+const fileNameStart = path=>{
+    let start = 0;
+    for (let at = 0; at + 1 < path.length; at++)
+    {
+        if (isSeparator(path[at]) || path[at] === ':')
+        {
+            start = at + 1;
+        }
+    }
+    return start;
+};
+
+/**
  * A DOS wildcard match of a whole string, without regard to case: `*` any run
  * of characters, `?` any one.
  *
@@ -396,15 +414,56 @@ export function createShlwapiFunctions(host){
             {
                 return 0;
             }
-            let start = 0;
-            for (let at = 0; at + 1 < path.length; at++)
+            return (pointer >>> 0) + fileNameStart(path) * unit;
+        },
+    });
+
+    /**
+     * PathStripPath for either width: the name PathFindFileName finds moved
+     * to the start of the buffer, over the directories before it.
+     *
+     * @param {(address: number) => string | null} read
+     * @param {(text: string) => Uint8Array} encode
+     */
+    const pathStripPath = (read, encode)=>({
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([pointer])=>{
+            const path = read(pointer);
+            const start = path === null ? 0 : fileNameStart(path);
+            if (path !== null && start > 0)
             {
-                if (isSeparator(path[at]) || path[at] === ':')
-                {
-                    start = at + 1;
-                }
+                host.writeMemory(pointer >>> 0, encode(path.slice(start)));
             }
-            return (pointer >>> 0) + start * unit;
+            return 0;
+        },
+    });
+
+    /**
+     * PathAppend for either width: PathCombine of the path with the part, in
+     * place, the part's leading backslashes dropped first unless it is a UNC
+     * name -- so a part that starts at a root still goes under the path.
+     *
+     * @param {(address: number) => string | null} read
+     * @param {(text: string) => Uint8Array} encode
+     */
+    const pathAppend = (read, encode)=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([pointer, more])=>{
+            const path = read(pointer);
+            const part = read(more);
+            if (path === null || part === null)
+            {
+                return 0;
+            }
+            const result = combine(path, part.startsWith('\\\\') ? part : part.replace(/^\\+/, ''));
+            if (result === null)
+            {
+                return 0;
+            }
+            host.writeMemory(pointer >>> 0, encode(result));
+            return 1;
         },
     });
 
@@ -679,6 +738,20 @@ export function createShlwapiFunctions(host){
          */
         PathCombineA: pathCombine(pathAt, narrow),
         PathCombineW: pathCombine(widePathAt, wide),
+
+        /**
+         * BOOL PathAppendA(LPSTR pszPath, LPCSTR pszMore)
+         * BOOL PathAppendW(LPWSTR, LPCWSTR)
+         */
+        PathAppendA: pathAppend(pathAt, narrow),
+        PathAppendW: pathAppend(widePathAt, wide),
+
+        /**
+         * void PathStripPathA(LPSTR pszPath)
+         * void PathStripPathW(LPWSTR pszPath)
+         */
+        PathStripPathA: pathStripPath(pathAt, narrow),
+        PathStripPathW: pathStripPath(widePathAt, wide),
 
         /**
          * BOOL PathMatchSpecA(LPCSTR pszFile, LPCSTR pszSpec)

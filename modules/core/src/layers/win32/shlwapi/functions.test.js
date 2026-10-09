@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createShlwapiFunctions } from './functions.js';
+import { shlwapiMachine } from './memory.fixture.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { createRegistryFunctions } from '../advapi32/functions.js';
 import { createHive } from '../advapi32/registry.js';
@@ -744,4 +745,43 @@ test('DllGetVersion answers shlwapi of Windows XP SP3 in either structure', ()=>
     assert.equal(fns.DllGetVersion.handler([0x80]), E_INVALIDARG);
     assert.equal(fns.DllGetVersion.handler([0]), E_INVALIDARG);
     assert.equal(fns.DllGetVersion.argBytes, 4);
+});
+
+test('PathAppend puts the part under the path, its leading backslashes dropped', ()=>{
+    const cases = /** @type {[string, string, string, number][]} */ ([
+        ['C:\\dir', 'file', 'C:\\dir\\file', 1], ['C:\\dir\\', 'file', 'C:\\dir\\file', 1],
+        ['C:\\dir', '\\file', 'C:\\dir\\file', 1], ['C:\\dir', '..\\file', 'C:\\file', 1],
+        ['C:\\dir', 'D:\\file', 'D:\\file', 1], ['C:\\dir', '\\\\srv\\share', '\\\\srv\\share', 1],
+        ['', 'file', 'file', 1], ['C:\\dir', '', 'C:\\dir', 1],
+    ]);
+    for (const [suffix, wide] of /** @type {const} */ ([['A', false], ['W', true]]))
+    {
+        const m = shlwapiMachine();
+        for (const [path, part, expected, answer] of cases)
+        {
+            const at = m.put(path, wide);
+            const more = m.put(part, wide);
+            assert.equal(m.fns[`PathAppend${suffix}`].handler([at, more]), answer, path + part);
+            assert.equal(m.read(at, wide), expected, path + part);
+        }
+        assert.equal(m.fns[`PathAppend${suffix}`].handler([0, m.put('x', wide)]), 0);
+        assert.equal(m.fns[`PathAppend${suffix}`].handler([m.put('x', wide), 0]), 0);
+        assert.equal(m.fns[`PathAppend${suffix}`].argBytes, 8);
+    }
+});
+
+test('PathStripPath leaves the name PathFindFileName finds', ()=>{
+    const cases = [['C:\\dir\\file.txt', 'file.txt'], ['C:\\dir\\', 'dir\\'], ['C:file', 'file'],
+        ['file', 'file'], ['\\\\srv\\share', 'share'], ['dir/file', 'file'], ['', '']];
+    for (const [suffix, wide] of /** @type {const} */ ([['A', false], ['W', true]]))
+    {
+        const m = shlwapiMachine();
+        for (const [path, expected] of cases)
+        {
+            const at = m.put(path, wide);
+            m.fns[`PathStripPath${suffix}`].handler([at]);
+            assert.equal(m.read(at, wide), expected, path);
+        }
+        assert.equal(m.fns[`PathStripPath${suffix}`].argBytes, 4);
+    }
 });

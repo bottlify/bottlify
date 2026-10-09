@@ -420,3 +420,29 @@ test('PathRelativePathTo steps out of the rest of the source, then into the targ
         }
     }
 });
+
+test('PathAddExtension adds only where there is none, ".exe" for an empty one', ()=>{
+    const cases = /** @type {[string, string, string, number][]} */ ([
+        ['C:\\dir\\file', '.txt', 'C:\\dir\\file.txt', 1], ['file.dat', '.txt', 'file.dat', 0],
+        ['dir.d\\file', '.txt', 'dir.d\\file.txt', 1], ['file', '', 'file.exe', 1],
+        ['', '.txt', '.txt', 1],
+    ]);
+    for (const [suffix, wide] of WIDTHS)
+    {
+        const m = shlwapiMachine();
+        for (const [path, extension, expected, answer] of cases)
+        {
+            const at = m.put(path, wide);
+            const added = m.put(extension, wide);
+            assert.equal(m.fns[`PathAddExtension${suffix}`].handler([at, added]), answer, path);
+            assert.equal(m.read(at, wide), expected, path);
+        }
+        const bare = m.put('name', wide);
+        assert.equal(m.fns[`PathAddExtension${suffix}`].handler([bare, 0]), 1);
+        assert.equal(m.read(bare, wide), 'name.exe');
+        const long = m.put('a'.repeat(256), wide);
+        assert.equal(m.fns[`PathAddExtension${suffix}`].handler([long, m.put('.txt', wide)]), 0);
+        assert.equal(m.fns[`PathAddExtension${suffix}`].handler([0, bare]), 0);
+        assert.equal(m.fns[`PathAddExtension${suffix}`].argBytes, 8);
+    }
+});
