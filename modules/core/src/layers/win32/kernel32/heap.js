@@ -194,6 +194,17 @@ const PROCESS_MEMORY_COUNTERS = Object.freeze({
 
 const ERROR_BAD_LENGTH = 24;
 
+/**
+ * PERFORMANCE_INFORMATION: thirteen counters after cb, the memory ones in
+ * pages and the last three plain counts.
+ */
+const PERFORMANCE_INFORMATION = Object.freeze({
+    cb: 0, CommitTotal: 4, CommitLimit: 8, CommitPeak: 12, PhysicalTotal: 16,
+    PhysicalAvailable: 20, SystemCache: 24, KernelTotal: 28, KernelPaged: 32,
+    KernelNonpaged: 36, PageSize: 40, HandleCount: 44, ProcessCount: 48, ThreadCount: 52,
+    SIZE: 56,
+});
+
 /** Marks the blocks VirtualAlloc handed out, so HeapFree cannot reach them. */
 const VIRTUAL = Symbol('virtual');
 
@@ -685,6 +696,8 @@ export function createHeapAllocator({ base, size }){
  * @typedef {Object} HeapHost
  * @property {{ base: number, size: number }} arena   Guest bytes to allocate out of.
  * @property {any} [allocator]  An allocator over that arena, when one is shared.
+ * @property {() => { processes: number, threads: number }} [systemCounts]
+ *     The processes and threads running, for GetPerformanceInfo.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, value: number, length: number) => void} fillMemory
@@ -2299,6 +2312,55 @@ export function createHeapFunctions(host){
                 {
                     view.setUint32(PROCESS_MEMORY_COUNTERS.PrivateUsage, used, true);
                 }
+                host.writeMemory(buffer >>> 0, data);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL K32GetPerformanceInfo(PPERFORMANCE_INFORMATION pPerformanceInformation,
+         *     DWORD cb), psapi's GetPerformanceInfo.
+         *
+         * The arena is the machine: its size is the physical memory and the
+         * commit limit, what it has handed out the commit charge. A cb other
+         * than the structure's own size is ERROR_BAD_LENGTH, as Wine's psapi
+         * tests find Windows answering. No kernel or cache is modelled, so
+         * those read zero, and handles are not counted across the machine.
+         * The process and thread counts are the kernel's when the host has
+         * them, the one running process and thread otherwise.
+         */
+        K32GetPerformanceInfo: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([buffer, cb])=>{
+                if ((cb >>> 0) !== PERFORMANCE_INFORMATION.SIZE)
+                {
+                    host.setLastError(ERROR_BAD_LENGTH);
+                    return 0;
+                }
+                if (buffer === 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const used = Math.max(0, host.arena.size - allocator.diagnostics().free);
+                peakUsed = Math.max(peakUsed, used);
+                const pages = (/** @type {number} */ bytes)=>Math.floor(bytes / PAGE_SIZE);
+                const counts = host.systemCounts?.() ?? { processes: 1, threads: 1 };
+                const data = new Uint8Array(PERFORMANCE_INFORMATION.SIZE);
+                const view = new DataView(data.buffer);
+                const set = (/** @type {keyof typeof PERFORMANCE_INFORMATION} */ field,
+                    /** @type {number} */ value)=>view.setUint32(PERFORMANCE_INFORMATION[field],
+                    value >>> 0, true);
+                set('cb', PERFORMANCE_INFORMATION.SIZE);
+                set('CommitTotal', pages(used));
+                set('CommitLimit', pages(host.arena.size));
+                set('CommitPeak', pages(peakUsed));
+                set('PhysicalTotal', pages(host.arena.size));
+                set('PhysicalAvailable', pages(host.arena.size - used));
+                set('PageSize', PAGE_SIZE);
+                set('ProcessCount', counts.processes);
+                set('ThreadCount', counts.threads);
                 host.writeMemory(buffer >>> 0, data);
                 return 1;
             },

@@ -959,6 +959,32 @@ test('GetProcessMemoryInfo reports what the arena handed out, in the form cb ask
     assert.equal(view.getUint32(at + 40, true), view.getUint32(at + 12, true), 'private bytes');
 });
 
+test('GetPerformanceInfo reports the arena in pages and takes only its own size', ()=>{
+    /** @type {number[]} */
+    const errors = [];
+    const host = { ...fakeHost(), setLastError: (/** @type {number} */ e)=>errors.push(e) };
+    const fns = createHeapFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    const at = 0x100;
+    assert.equal(fns.K32GetPerformanceInfo.argBytes, 8);
+    assert.equal(fns.K32GetPerformanceInfo.handler([at, 55]), 0, 'one byte short');
+    assert.equal(fns.K32GetPerformanceInfo.handler([at, 57]), 0, 'one byte over');
+    assert.deepEqual(errors, [24, 24], 'ERROR_BAD_LENGTH both ways');
+
+    const heap = fns.GetProcessHeap.handler();
+    assert.notEqual(fns.HeapAlloc.handler([heap, 0, 0x2000]), 0);
+    assert.equal(fns.K32GetPerformanceInfo.handler([at, 56]), 1);
+    const field = (/** @type {number} */ offset)=>view.getUint32(at + offset, true);
+    assert.equal(field(0), 56);
+    assert.equal(field(40), 4096, 'PageSize');
+    assert.equal(field(16), Math.floor(ARENA.size / 4096), 'PhysicalTotal in pages');
+    assert.ok(field(4) >= 2 && field(4) <= field(8), 'the commit charge covers the allocation');
+    assert.equal(field(4) + field(20), field(16), 'committed and available make the whole');
+    assert.ok(field(12) >= field(4), 'the peak covers the current charge');
+    assert.equal(field(48), 1, 'the one running process');
+    assert.equal(field(52), 1);
+});
+
 test('a refused allocation says what was asked and what was left', ()=>{
     // A program told it has run out of memory says so in its own words and
     // exits; the report is the only account of how much it asked for.

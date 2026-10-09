@@ -1450,6 +1450,10 @@ export function createWin32Module(){
                         /** @param {number} address @param {number} length @param {boolean} open */
                         pageAccess: (address, length, open)=>
                             memory.pageAccess?.(address, length, open) === true,
+                        systemCounts: ()=>({
+                            processes: Math.max(1, (kernel.processes?.all() ?? []).length),
+                            threads: Math.max(1, kernel.threads().length),
+                        }),
                     }),
                     ...createProcessFunctions({
                         performanceFrequency: config?.performanceFrequency,
@@ -2155,6 +2159,8 @@ export function createWin32Module(){
                         libraries['KERNEL32.dll'].K32EmptyWorkingSet.handler(args) },
                     GetProcessMemoryInfo: { argBytes: 12, handler: (/** @type {number[]} */ args)=>
                         libraries['KERNEL32.dll'].K32GetProcessMemoryInfo.handler(args) },
+                    GetPerformanceInfo: { argBytes: 8, handler: (/** @type {number[]} */ args)=>
+                        libraries['KERNEL32.dll'].K32GetPerformanceInfo.handler(args) },
                 },
 
                 'CRYPT32.dll': createCrypt32Functions({
