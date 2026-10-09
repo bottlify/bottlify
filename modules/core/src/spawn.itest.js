@@ -1199,3 +1199,47 @@ for (const delay of [0, 1000])
         assert.equal(where.get('C:\\App\\b.exe') ?? false, false, 'b beside its parent');
     });
 }
+
+test('a timed wait on a child running beside its parent runs out while the child runs',
+    { timeout: 60000 }, async t=>{
+        // msg.c test_WaitForInputIdle waits a second on a child that never
+        // exits and then terminates it: the wait answers WAIT_TIMEOUT.
+        const parent = buildExe({
+            imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject',
+                'TerminateProcess', 'ExitProcess'] },
+            data: {
+                command: ascii('C:\\App\\a.exe'),
+                startup: [...u32(68), ...new Array(64).fill(0)],
+                info: new Array(16).fill(0),
+                waited: u32(0),
+            },
+            codeSize: 0x100,
+            code: ({ iat, at })=>[
+                0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+                0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+                0x68, ...u32(at('command')), 0x6a, 0,
+                0xff, 0x15, ...u32(iat('CreateProcessA')),
+                // waited = WaitForSingleObject(info.hProcess, 300)
+                0x68, ...u32(300), 0xff, 0x35, ...u32(at('info')),
+                0xff, 0x15, ...u32(iat('WaitForSingleObject')), 0xa3, ...u32(at('waited')),
+                // TerminateProcess(info.hProcess, 1);
+                // WaitForSingleObject(info.hProcess, INFINITE)
+                0x6a, 1, 0xff, 0x35, ...u32(at('info')),
+                0xff, 0x15, ...u32(iat('TerminateProcess')),
+                0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+                0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+                // ExitProcess(waited)
+                0xff, 0x35, ...u32(at('waited')), 0xff, 0x15, ...u32(iat('ExitProcess')),
+            ],
+        });
+        const { endless } = buildTerminatingParent(0);
+        const app = await createApp({
+            executable: parent,
+            imagePath: 'C:\\App\\parent.exe',
+            engine: 'cork',
+            concurrency: 2,
+            storage: { load: async()=>({ files: [{ path: 'C:\\App\\a.exe', bytes: endless }] }) },
+        });
+        t.after(()=>app.dispose());
+        assert.equal(await app.run({ timeoutMs: 30000 }), 0x102, 'WAIT_TIMEOUT');
+    });

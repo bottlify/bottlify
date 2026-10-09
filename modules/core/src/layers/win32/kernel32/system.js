@@ -1103,7 +1103,8 @@ export function createSystemFunctions(host){
                     }
                     child.exitCode = code >>> 0;
                     child.completed = true;
-                    const waiters = child.waiters ?? [];
+                    const waiters = (child.waiters ?? []).filter(
+                        (/** @type {any} */ waiter)=>waiter.live?.() ?? true);
                     child.waiters = [];
                     for (const waiter of waiters)
                     {

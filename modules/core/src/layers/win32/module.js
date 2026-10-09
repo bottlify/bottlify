@@ -3309,7 +3309,10 @@ export function createWin32Module(){
                 childExited(child, code){
                     child.exitCode = code >>> 0;
                     child.completed = true;
-                    const waiters = child.waiters ?? [];
+                    // A thread whose timed wait ran out has gone on, to
+                    // whatever it waits on now.
+                    const waiters = (child.waiters ?? []).filter(
+                        (/** @type {any} */ waiter)=>waiter.live?.() ?? true);
                     child.waiters = [];
                     for (const { thread, result, settle } of waiters)
                     {

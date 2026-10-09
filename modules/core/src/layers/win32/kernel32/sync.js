@@ -11,6 +11,7 @@ import { createSListFunctions } from './slist.js';
 import { isStandardHandle, untagged } from './handle-tags.js';
 import { createChangeNotifications } from './changes.js';
 import { SELECTORS } from './seh.js';
+import { childWaitMark } from './threading.js';
 
 /**
  * What the export binding hands an entry that is guest code rather than a
@@ -780,14 +781,21 @@ export function createSyncFunctions(host){
                                 ? WAIT_ABANDONED_0 : WAIT_OBJECT_0;
                             return base + indices[any.index];
                         };
-                        (child.waiters ??= []).push(
-                            { thread, result: WAIT_OBJECT_0 + childAt, settle });
+                        const reason = `child process ${child.imagePath}`;
+                        (child.waiters ??= []).push({ thread, result: WAIT_OBJECT_0 + childAt,
+                            settle, live: childWaitMark(thread, reason) });
                     }
                     else
                     {
                         child.handsOver = true;
                     }
-                    kernel.block(thread, `child process ${child.imagePath}`);
+                    // Timed only for a child running beside this process: one
+                    // run in its place has the parent's time stand still.
+                    kernel.block(thread, `child process ${child.imagePath}`,
+                        child.started && (timeout >>> 0) !== INFINITE
+                            ? { deadline: kernel.clock.virtualTime() + (timeout >>> 0),
+                                result: WAIT_TIMEOUT }
+                            : undefined);
                     return host.park(thread);
                 }
                 // A poll is a question, not a wait, and the honest answer about

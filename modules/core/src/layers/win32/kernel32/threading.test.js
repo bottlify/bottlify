@@ -471,8 +471,10 @@ test('waiting on a child process is where the parent hands over', ()=>{
     assert.equal(kernel.state.blocked.length, 1);
     assert.equal(kernel.state.blocked[0].thread, current);
     assert.equal(kernel.state.waits.length, 0, 'and it never joined a wait queue');
-    assert.deepEqual(child.waiters, [{ thread: current, result: 0 }],
-        'the child knows who waits on it, and that the wait answers WAIT_OBJECT_0');
+    assert.deepEqual(child.waiters.map((/** @type {any} */ waiter)=>
+        [waiter.thread, waiter.result, typeof waiter.live]), [[current, 0, 'function']],
+    'the child knows who waits on it, that the wait answers WAIT_OBJECT_0, and how to tell'
+        + ' it still waits');
 });
 
 test('polling a child process says it is still running', ()=>{

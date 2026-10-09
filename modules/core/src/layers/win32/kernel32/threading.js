@@ -25,6 +25,21 @@ import { STATUS, toDosError } from '../ntdll/status.js';
 /** Waits with this timeout never give up. */
 const INFINITE = 0xffffffff;
 
+/**
+ * A thread's wait on a child process, marked so the child's exit wakes it
+ * only while it is still that wait: one that timed out and went on to wait
+ * on something else is not woken out of that by a child it stopped waiting
+ * for.
+ *
+ * @param {any} thread @param {string} reason  what the thread is blocked on
+ * @returns {() => boolean} whether the thread is still in this wait
+ */
+export function childWaitMark(thread, reason){
+    const mark = {};
+    thread.childWait = mark;
+    return ()=>thread.childWait === mark && thread.waitingOn === reason;
+}
+
 /** What the guest gets back when a handle is not what it claims to be. */
 const WAIT_FAILED = 0xffffffff;
 /** The wait ran out of time; the object was never signalled. */
@@ -845,17 +860,17 @@ export function createThreadingFunctions(host){
                     {
                         return WAIT_OBJECT_0;
                     }
-                    // A child process has not run while its parent can look:
-                    // it runs once the parent has nothing else to do. So a poll
-                    // says the child is still running, which is true, and a
-                    // real wait is the parent handing over to it. The waiter is
-                    // noted on the child: when the engine runs the child beside
-                    // this process and it exits, this thread is woken with the
+                    // A child process that has not started runs once the
+                    // parent has nothing else to do. So a poll says the child
+                    // is still running, which is true, and a real wait is the
+                    // parent handing over to it. The waiter is noted on the
+                    // child: when it exits, this thread is woken with the
                     // wait's answer, and the parent goes on after its child as
-                    // on Windows. A timeout is not armed -- nothing of the
-                    // parent's runs while the child does, so no time of its
-                    // passes to run out. A poll is noted too: a parent that
-                    // polls in a loop that never blocks waits all the same.
+                    // on Windows. A timeout is armed only for a child running
+                    // beside this process: one run in its place has the
+                    // parent's time stand still. A poll is noted too: a parent
+                    // that polls in a loop that never blocks waits all the
+                    // same.
                     if (wait === 0)
                     {
                         if (!target.started)
@@ -864,8 +879,12 @@ export function createThreadingFunctions(host){
                         }
                         return WAIT_TIMEOUT;
                     }
-                    (target.waiters ??= []).push({ thread, result: WAIT_OBJECT_0 });
-                    kernel.block(thread, `child process ${target.imagePath}`);
+                    const reason = `child process ${target.imagePath}`;
+                    (target.waiters ??= []).push({ thread, result: WAIT_OBJECT_0,
+                        live: childWaitMark(thread, reason) });
+                    kernel.block(thread, reason, target.started && wait !== INFINITE
+                        ? { deadline: kernel.clock.virtualTime() + wait, result: WAIT_TIMEOUT }
+                        : undefined);
                     return host.park(thread);
                 }
 
