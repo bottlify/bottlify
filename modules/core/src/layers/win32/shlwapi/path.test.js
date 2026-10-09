@@ -356,7 +356,8 @@ test('each path function declares the arguments it pops, in both spellings', ()=
         PathIsUNC: 4, PathRemoveExtension: 4, PathStripToRoot: 4, PathAddBackslash: 4,
         PathCanonicalize: 8, PathCreateFromUrl: 16, PathFileExists: 4, PathIsRoot: 4,
         PathIsURL: 4, PathRemoveBlanks: 4, PathRemoveFileSpec: 4, PathRenameExtension: 8,
-        PathSearchAndQualify: 12, PathSkipRoot: 4, PathIsRelative: 4,
+        PathSearchAndQualify: 12, PathSkipRoot: 4, PathIsRelative: 4, PathCommonPrefix: 12,
+        PathRelativePathTo: 20,
     });
     for (const [name, bytes] of Object.entries(expected))
     {
@@ -375,4 +376,47 @@ test('PathCompactPath cuts the directories, then the name, behind an ellipsis', 
         'the name is kept whole while it fits behind the ellipsis');
     assert.equal(compactPath(path, 8 * 6, width), '...setup');
     assert.equal(compactPath(path, 2 * 6, width), '..', 'not even the ellipsis fits');
+});
+
+test('PathCommonPrefix shares whole components, a drive root keeping its backslash', ()=>{
+    const cases = /** @type {[string, string, string][]} */ ([
+        ['C:\\a\\b', 'c:\\A\\c', 'C:\\a'], ['C:\\a', 'C:\\b', 'C:\\'], ['C:\\ab', 'C:\\a', 'C:\\'],
+        ['C:\\a\\', 'C:\\a', 'C:\\a'], ['C:\\a', 'D:\\a', ''], ['\\\\s\\x', 'C:\\x', ''],
+        ['\\\\s\\x\\y', '\\\\s\\x\\z', '\\\\s\\x'], ['', 'C:\\', ''],
+    ]);
+    for (const [suffix, wide] of WIDTHS)
+    {
+        const m = shlwapiMachine();
+        for (const [one, two, expected] of cases)
+        {
+            const out = m.put(' '.repeat(16), wide);
+            const answer = m.fns[`PathCommonPrefix${suffix}`]
+                .handler([m.put(one, wide), m.put(two, wide), out]);
+            assert.equal(answer, expected.length, `${one} ${two}`);
+            assert.equal(m.read(out, wide), expected, `${one} ${two}`);
+        }
+    }
+});
+
+test('PathRelativePathTo steps out of the rest of the source, then into the target', ()=>{
+    const DIRECTORY = 0x10;
+    const cases = /** @type {[string, number, string, number, string, number][]} */ ([
+        ['C:\\A\\B\\C', DIRECTORY, 'C:\\A\\D\\E', DIRECTORY, '..\\..\\D\\E', 1],
+        ['C:\\A\\B\\file.txt', 0, 'C:\\A\\D\\x.dat', 0, '..\\D\\x.dat', 1],
+        ['C:\\A', DIRECTORY, 'c:\\a\\B\\x', 0, '.\\B\\x', 1],
+        ['C:\\A\\B', DIRECTORY, 'C:\\A', DIRECTORY, '..', 1],
+        ['C:\\A', DIRECTORY, 'D:\\A', DIRECTORY, '', 0],
+    ]);
+    for (const [suffix, wide] of WIDTHS)
+    {
+        const m = shlwapiMachine();
+        for (const [from, fromAttributes, to, toAttributes, expected, answer] of cases)
+        {
+            const out = m.put('stale', wide);
+            assert.equal(m.fns[`PathRelativePathTo${suffix}`].handler(
+                [out, m.put(from, wide), fromAttributes, m.put(to, wide), toAttributes]),
+            answer, `${from} ${to}`);
+            assert.equal(m.read(out, wide), expected, `${from} ${to}`);
+        }
+    }
 });

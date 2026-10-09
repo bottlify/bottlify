@@ -32,3 +32,9 @@ test('an MCIWnd is never made, and its class is not offered', ()=>{
     assert.equal(fns.MCIWndCreateA.argBytes, 16);
     assert.equal(fns.MCIWndRegisterClass.argBytes, 0);
 });
+
+test('ICClose refuses a handle the manager never gave out', ()=>{
+    const { fns } = make();
+    assert.equal(fns.ICClose.handler(), 0xfffffff8, 'ICERR_BADHANDLE');
+    assert.equal(fns.ICClose.argBytes, 4);
+});

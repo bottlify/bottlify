@@ -19,6 +19,9 @@
 /** sizeof(ICINFO): dwSize … szDriver[128] (WCHAR). */
 export const ICINFO_SIZE = 568;
 
+/** ICERR_BADHANDLE, (LRESULT)-8. */
+const ICERR_BADHANDLE = 0xfffffff8;
+
 /**
  * @typedef {Object} MsvfwHost
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -50,6 +53,15 @@ export function createMsvfwFunctions(host){
                 return 0;
             },
         },
+
+        /**
+         * LRESULT ICClose(HIC hic)
+         *
+         * No compressor is ever opened here, so no handle is one of ours:
+         * ICERR_BADHANDLE, what the manager answers for a handle it never
+         * gave out.
+         */
+        ICClose: { argBytes: 4, handler: ()=>ICERR_BADHANDLE },
 
         /**
          * HWND MCIWndCreateA(HWND hwndParent, HINSTANCE hInstance, DWORD dwStyle,

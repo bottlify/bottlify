@@ -18,6 +18,7 @@ import { dword, u32 } from './text.js';
 
 /** What a path may be, terminator included. */
 export const MAX_PATH = 260;
+const FILE_ATTRIBUTE_DIRECTORY = 0x10;
 
 const S_OK = 0;
 const E_POINTER = 0x80004003;
@@ -156,6 +157,67 @@ export const fileSpecCut = path=>{
         }
     }
     return cut < path.length ? cut : null;
+};
+
+/**
+ * PathCommonPrefix's length: how much of `first` the two paths share in whole
+ * components, compared without case. A UNC path shares nothing with one that
+ * is not, and two drive prefixes keep their backslash (`C:\a` and `C:\b`
+ * share `C:\`, 3), as Windows answers (Wine's test_PathCommonPrefixA).
+ *
+ * @param {string} first @param {string} second
+ * @returns {number}
+ */
+export const commonPrefixLength = (first, second)=>{
+    const unc = (/** @type {string} */ path)=>path.startsWith('\\\\');
+    if (unc(first) !== unc(second))
+    {
+        return 0;
+    }
+    let length = 0;
+    for (let at = unc(first) ? 2 : 0; ; at++)
+    {
+        const ends = (/** @type {string} */ path)=>at >= path.length || path[at] === '\\';
+        if (ends(first) && ends(second))
+        {
+            length = at;
+        }
+        if (at >= first.length || first[at].toLowerCase() !== second[at]?.toLowerCase())
+        {
+            break;
+        }
+    }
+    return length === 2 ? 3 : length;
+};
+
+/**
+ * PathRelativePathTo's answer: the way from `from` to `to` as `..\` steps
+ * out of what is left of `from` past the shared prefix, then the rest of
+ * `to`; `.` when `from` is the prefix itself. A path that is not a directory
+ * is matched by the directory holding it, a target's own name still part of
+ * the answer. Null when the two share no prefix, or the answer would not fit
+ * MAX_PATH.
+ *
+ * @param {string} from @param {boolean} fromIsDirectory
+ * @param {string} to @param {boolean} toIsDirectory
+ * @returns {string | null}
+ */
+export const relativePath = (from, fromIsDirectory, to, toIsDirectory)=>{
+    const directory = (/** @type {string} */ path, /** @type {boolean} */ is)=>{
+        const cut = is ? null : fileSpecCut(path);
+        return cut === null ? path : path.slice(0, cut);
+    };
+    const start = directory(from.slice(0, MAX_PATH - 1), fromIsDirectory);
+    const target = to.slice(0, MAX_PATH - 1);
+    const end = directory(target, toIsDirectory);
+    const shared = commonPrefixLength(start, end);
+    if (shared === 0)
+    {
+        return null;
+    }
+    const steps = start.slice(shared).split('\\').filter(Boolean).map(()=>'..');
+    const answer = (steps.length ? steps.join('\\') : '.') + target.slice(shared);
+    return answer.length < MAX_PATH ? answer : null;
 };
 
 /**
@@ -535,6 +597,43 @@ export function createPathFunctions(host, { A, W }){
             }
             host.writeMemory((pointer >>> 0) + cut * width.unit, width.sz(''));
             return 1;
+        }),
+
+        /**
+         * int PathCommonPrefixA(LPCSTR pszFile1, LPCSTR pszFile2, LPSTR achPath)
+         *
+         * The shared length (`commonPrefixLength`), and the prefix itself
+         * into achPath when one is given.
+         */
+        ...both('PathCommonPrefix', 12, (width, [first, second, out])=>{
+            const one = width.read(first);
+            const two = width.read(second);
+            const length = one === null || two === null ? 0 : commonPrefixLength(one, two);
+            if ((out >>> 0) !== 0)
+            {
+                write(out, width, (one ?? '').slice(0, length));
+            }
+            return length;
+        }),
+
+        /**
+         * BOOL PathRelativePathToA(LPSTR pszPath, LPCSTR pszFrom, DWORD dwAttrFrom,
+         *   LPCSTR pszTo, DWORD dwAttrTo)
+         *
+         * `relativePath`, FILE_ATTRIBUTE_DIRECTORY saying which ends are
+         * directories; pszPath is emptied when there is no answer.
+         */
+        ...both('PathRelativePathTo', 20, (width, [out, from, fromAttributes, to, toAttributes])=>{
+            const start = width.read(from);
+            const end = width.read(to);
+            if ((out >>> 0) === 0 || start === null || end === null)
+            {
+                return 0;
+            }
+            const answer = relativePath(start, (fromAttributes & FILE_ATTRIBUTE_DIRECTORY) !== 0,
+                end, (toAttributes & FILE_ATTRIBUTE_DIRECTORY) !== 0);
+            write(out, width, answer ?? '');
+            return answer === null ? 0 : 1;
         }),
 
         /**
