@@ -507,7 +507,10 @@ export function createSeh(host){
             return { handled: true, registers: continuation(at.context, flags) };
         }
 
-        const { frames, damaged } = chain();
+        // The asking thread's chain: after the vectored handlers the thread on
+        // the processor, or the one an executor's call is answered for, may
+        // be another, and its frames are not this exception's.
+        const { frames, damaged } = chain(asked);
         // A jump into the first page is a call through a null pointer, whose
         // return address -- the call's own place -- is the only lead.
         const caller = (what.address >>> 0) < 0x10000 && host.isMapped(registers.esp >>> 0)
