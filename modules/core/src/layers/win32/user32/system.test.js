@@ -1880,6 +1880,8 @@ test('SystemParametersInfo answers the hover time and the hover rectangle', ()=>
     };
     assert.deepEqual([SPI_GETMOUSEHOVERWIDTH, SPI_GETMOUSEHOVERHEIGHT, SPI_GETMOUSEHOVERTIME]
         .map(ask), [4, 4, HOVER_TIME]);
+    const SPI_GETFONTSMOOTHING = 0x004a;
+    assert.equal(ask(SPI_GETFONTSMOOTHING), 0, 'text is not smoothed, and that is an answer');
 });
 
 test('SPI_GETNONCLIENTMETRICS answers the frame the metrics describe and its fonts', ()=>{

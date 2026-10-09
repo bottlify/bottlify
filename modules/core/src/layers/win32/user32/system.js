@@ -1886,7 +1886,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
     /**
      * SystemParametersInfo, both spellings: the work area, the hover
      * parameters TrackMouseEvent works by, the non-client and minimised
-     * windows' metrics, and a refusal for everything else.
+     * windows' metrics, whether text is smoothed, and a refusal for
+     * everything else.
      *
      * @param {number} action @param {number} value @param {boolean} wide
      */
@@ -1899,6 +1900,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         const SPI_GETMOUSEHOVERWIDTH = 0x0062;
         const SPI_GETMOUSEHOVERHEIGHT = 0x0064;
         const SPI_GETMOUSEHOVERTIME = 0x0066;
+        const SPI_GETFONTSMOOTHING = 0x004a;
         if ((value >>> 0) === 0)
         {
             return 0;
@@ -1916,6 +1918,12 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 return 1;
             case SPI_GETMOUSEHOVERTIME:
                 writeU32s(host, value, [HOVER_TIME]);
+                return 1;
+            // FALSE: text is drawn here without smoothing. A font renderer
+            // picks the quality it asks GDI for from this, and a refusal
+            // leaves it reporting an error on every font it makes.
+            case SPI_GETFONTSMOOTHING:
+                writeU32s(host, value, [0]);
                 return 1;
             case SPI_GETMINIMIZEDMETRICS:
             case SPI_SETMINIMIZEDMETRICS: {
