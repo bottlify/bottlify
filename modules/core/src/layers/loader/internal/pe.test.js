@@ -243,3 +243,34 @@ test('an export pointing inside the directory is a forwarder, not code', ()=>{
     assert.equal(exports.length, 1);
     assert.equal(exports[0].forwards, 'OTHER.Beta');
 });
+
+test('an export directory pointing outside the file reads what it can, not a throw', ()=>{
+    // A packed executable keeps its export directory encrypted on disk and
+    // rebuilds it in memory; the loader never walks it while mapping, so the
+    // image must load whatever the directory's fields hold.
+    const module = synthesiseModule({
+        name: 'sample.dll',
+        base: 0x02000000,
+        exports: [{ name: 'Alpha', target: 0x11110000 }],
+    });
+    const image = parsePe(module.bytes);
+    const at = rvaToFileOffset(image, image.directories[DIR_EXPORT].address);
+
+    const badName = module.bytes.slice();
+    new DataView(badName.buffer).setUint32(at + 12, 0xb8f4a879, true);
+    const named = readExports(badName, image);
+    assert.equal(named.name, null, 'a name RVA outside every section names nothing');
+    assert.deepEqual(named.exports.map(entry=>entry.name), ['Alpha']);
+
+    const badTables = module.bytes.slice();
+    const view = new DataView(badTables.buffer);
+    view.setUint32(at + 28, 0xdeadbeef, true);
+    view.setUint32(at + 32, 0xdeadbeef, true);
+    assert.deepEqual(readExports(badTables, image).exports, [],
+        'an address table outside the file exports nothing');
+
+    const badNames = module.bytes.slice();
+    new DataView(badNames.buffer).setUint32(at + 32, 0xdeadbeef, true);
+    assert.deepEqual(readExports(badNames, image).exports.map(entry=>entry.name), [null],
+        'a name table outside the file leaves the export by ordinal');
+});

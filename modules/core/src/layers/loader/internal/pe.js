@@ -261,9 +261,28 @@ export function readExports(bytes, image){
         return { name: null, exports: [] };
     }
 
+    // The loader does not walk an export directory when it maps an image -- only
+    // a binding or a GetProcAddress does -- so one whose fields point nowhere
+    // (a packed executable's, encrypted on disk and rebuilt in memory) does not
+    // stop the image loading. What reads is returned; what points outside the
+    // file is left out.
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const fileOffset = (/** @type {number} */ rva)=>rvaToFileOffset(image, rva);
-    const at = fileOffset(directory.address);
+    const fileOffset = (/** @type {number} */ rva, /** @type {number} */ length)=>{
+        try
+        {
+            const at = rvaToFileOffset(image, rva);
+            return at + length <= bytes.length ? at : -1;
+        }
+        catch {
+            return -1;
+        }
+    };
+    const empty = { name: null, exports: [] };
+    const at = fileOffset(directory.address, 40);
+    if (at < 0)
+    {
+        return empty;
+    }
 
     const nameRva = view.getUint32(at + 12, true);
     const ordinalBase = view.getUint32(at + 16, true);
@@ -273,15 +292,31 @@ export function readExports(bytes, image){
     const namesRva = view.getUint32(at + 32, true);
     const ordinalsRva = view.getUint32(at + 36, true);
 
+    const functions = fileOffset(functionsRva, functionCount * 4);
+    if (functions < 0)
+    {
+        return empty;
+    }
+    const ordinals = fileOffset(ordinalsRva, nameCount * 2);
+    const names = fileOffset(namesRva, nameCount * 4);
+    const string = (/** @type {number} */ rva)=>{
+        const offset = rva === 0 ? -1 : fileOffset(rva, 1);
+        return offset < 0 ? null : readCString(bytes, offset);
+    };
+
     // Names are attached to slots afterwards: the ordinal table is the join, and
     // a slot no name points at is exported by ordinal alone.
     /** @type {Map<number, string>} */
     const namesBySlot = new Map();
-    for (let index = 0; index < nameCount; index++)
+    const named = ordinals >= 0 && names >= 0 ? nameCount : 0;
+    for (let index = 0; index < named; index++)
     {
-        const slot = view.getUint16(fileOffset(ordinalsRva) + index * 2, true);
-        const rva = view.getUint32(fileOffset(namesRva) + index * 4, true);
-        namesBySlot.set(slot, readCString(bytes, fileOffset(rva)));
+        const slot = view.getUint16(ordinals + index * 2, true);
+        const name = string(view.getUint32(names + index * 4, true));
+        if (name !== null)
+        {
+            namesBySlot.set(slot, name);
+        }
     }
 
     const end = directory.address + directory.size;
@@ -289,14 +324,12 @@ export function readExports(bytes, image){
     const exports = [];
     for (let slot = 0; slot < functionCount; slot++)
     {
-        const rva = view.getUint32(fileOffset(functionsRva) + slot * 4, true);
+        const rva = view.getUint32(functions + slot * 4, true);
         if (rva === 0)
         {
             continue; // A hole in the ordinal space, not an export.
         }
-        const forwards = rva >= directory.address && rva < end
-            ? readCString(bytes, fileOffset(rva))
-            : null;
+        const forwards = rva >= directory.address && rva < end ? string(rva) : null;
         exports.push({
             name: namesBySlot.get(slot) ?? null,
             ordinal: ordinalBase + slot,
@@ -305,10 +338,7 @@ export function readExports(bytes, image){
         });
     }
 
-    return {
-        name: nameRva === 0 ? null : readCString(bytes, fileOffset(nameRva)),
-        exports,
-    };
+    return { name: string(nameRva), exports };
 }
 
 /**
