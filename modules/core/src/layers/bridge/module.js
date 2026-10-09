@@ -45,6 +45,16 @@ const continuation = (registers, below)=>{
 const isContinuation = value=>typeof value === 'object' && value !== null
     && value[CONTINUATION] === true;
 
+/** Marks an answer that returns a value and sets other registers besides. */
+const RETURNING = Symbol('returning');
+
+/**
+ * @param {any} value
+ * @returns {value is { value: number, registers: Record<string, number> }}
+ */
+const isReturning = value=>typeof value === 'object' && value !== null
+    && value[RETURNING] === true;
+
 /** The bridge layer's module for one graph; see `defaultModules`. */
 export function createBridgeModule(){
     /**
@@ -175,6 +185,11 @@ export function createBridgeModule(){
                         if (isContinuation(value))
                         {
                             state.callbacks.transfer(thread, value.registers, value.below);
+                            return;
+                        }
+                        if (isReturning(value))
+                        {
+                            state.callbacks.finish(thread, value.value | 0, value.registers);
                             return;
                         }
                         state.callbacks.finish(thread, value | 0);
@@ -556,6 +571,23 @@ export function createBridgeModule(){
                 continueAt: (registers, options)=>continuation(registers, options?.below),
 
                 /**
+                 * What an asynchronous handler resolves with when its call
+                 * returns as usual but answers in registers besides EAX: an
+                 * exception a handler continued from, whose context the
+                 * thread takes back. Writing them when the answer arrives
+                 * would write them into whichever thread is on the processor
+                 * by then; these are applied when the caller resumes.
+                 *
+                 * @param {number} value  EAX.
+                 * @param {Record<string, number>} registers  The others;
+                 *     `eip`, `esp` and `eax` are the call's own and are not
+                 *     taken from here.
+                 */
+                answerWith: (value, registers)=>Object.freeze({
+                    [RETURNING]: /** @type {true} */ (true), value, registers: { ...registers },
+                }),
+
+                /**
                  * Holds the running thread while a processor exception it took is
                  * offered to its handlers, the way a host call holds it while it
                  * waits: the thread is sent to the park loop from the vector's
@@ -583,6 +615,11 @@ export function createBridgeModule(){
                             if (isContinuation(value))
                             {
                                 state.callbacks.transfer(thread, value.registers, value.below);
+                                return;
+                            }
+                            if (isReturning(value))
+                            {
+                                state.callbacks.finish(thread, value.value | 0, value.registers);
                                 return;
                             }
                             state.callbacks.finish(thread, value | 0);

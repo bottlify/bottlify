@@ -42,7 +42,7 @@ test('an invalid-opcode fault on SMSW goes on after it without a handler', async
     const code = [0x0f, 0x01, 0xe0];
     const seh = createSeh(/** @type {any} */ ({
         readMemory: at(code), writeMemory: ()=>{}, isMapped: ()=>true, teb: ()=>0,
-        registers: ()=>({ ...registers }), setRegisters: ()=>{},
+        registers: ()=>({ ...registers }), answerWith: (/** @type {number} */ value)=>value,
         callGuest: async()=>assert.fail('no handler runs'),
     }));
     const result = await seh.onFault({ vector: 6, eip: 0x401000, errorCode: null }, registers);
