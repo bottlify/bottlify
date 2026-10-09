@@ -427,6 +427,16 @@ export function retryingFetch({ fetch, events, retry }){
 const FIRST_PROCESS_ID = 0x1000;
 
 /**
+ * A first process id of its own for each run, under the 0x2000 the run's other
+ * processes are numbered from, on the kernel table's step of eight. Windows
+ * never hands out the same id twice in a row, and a program that keeps its
+ * id in a file to refuse a second copy of itself -- OpenProcess on the id it
+ * wrote, then the modules of what answers -- found itself under the same id
+ * the next run and quit as the copy.
+ */
+export const runProcessId = ()=>0x400 + 8 * Math.floor(Math.random() * ((0x2000 - 0x400) / 8));
+
+/**
  * How much one range request may ask for.
  *
  * The bound is not bandwidth but what a failure costs: a request that dies at
@@ -7493,6 +7503,7 @@ export async function createApp(options){
     windowsVersion(options.windows);
     // Settled once, here, so every process the run makes is built in it.
     options = withRunMode(options);
+    options = { ...options, processId: options.processId ?? runProcessId() };
     graphicsChoice(options.graphicsApi);
     emulatorOf(options);
     // Both outlive every process: subscriptions a caller made before the first

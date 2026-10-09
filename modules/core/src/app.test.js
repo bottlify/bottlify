@@ -37,6 +37,7 @@ import {
     compatibilityOf,
     createApp,
     versionResourceOf,
+    runProcessId,
 } from './app.js';
 import { createEvents } from './events.js';
 import { filesystemModule } from './layers/filesystem/module.js';
@@ -1736,4 +1737,15 @@ test('the version block of a bundle file whose bytes are still coming is waited 
     assert.ok(fetched.length >= 2 && fetched.length <= 4, `${fetched.length} fetches`);
     assert.deepEqual(versionResourceOf(filesystem, 'C:\\Game\\steam.exe', blocks), block,
         'and once they are here it answers at once');
+});
+
+test('each run has a first process id of its own, below the others and on the table step', ()=>{
+    // A program that writes its id to a file to refuse a second copy of itself
+    // found its own id there the next run, when every run had the same one.
+    const ids = new Set(Array.from({ length: 64 }, ()=>runProcessId()));
+    assert.ok(ids.size > 1, 'not the same id every run');
+    for (const id of ids)
+    {
+        assert.ok(id >= 0x400 && id < 0x2000 && id % 8 === 0, `0x${id.toString(16)}`);
+    }
 });
