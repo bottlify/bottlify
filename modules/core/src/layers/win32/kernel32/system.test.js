@@ -94,6 +94,17 @@ test('the machine reported is one a program of the era knows what to do with', (
     assert.equal(host.view.getUint16(0x222, true), 0x0703, 'the revision its model and stepping');
 });
 
+test('kernel32 exports none of the Windows 95 calls NT lacks', ()=>{
+    const fns = /** @type {any} */ (createSystemFunctions(fakeHost()));
+    for (const name of ['FT_Thunk', 'FT_Exit20', 'SMapLS_IP_EBP_8', 'MapLS', 'MapSL', 'SMapLS',
+        'ThunkConnect32',
+        'OpenVxDHandle', 'RegisterServiceProcess', 'ConvertToGlobalHandle'])
+    {
+        assert.equal(name in fns, false, name);
+    }
+    assert.ok(fns.CreateSocketHandle && fns.SetHandleContext, 'the two NT kept');
+});
+
 test('the lstr family answers NULL to a pointer that faults, as the real one does', ()=>{
     // Windows wraps these in an exception handler; a program of the era hands
     // lstrcpy a -1 and tests the NULL. Raised through, the fault stops a
@@ -787,13 +798,8 @@ test('FindActCtxSectionString is absent, as no activation context is built', ()=
     }
 });
 
-test('the Windows 95 calls are kernel32\'s exports here too', ()=>{
+test('win.ini is not kernel32\'s table to answer', ()=>{
     const fns = /** @type {any} */ (createSystemFunctions(fakeHost()));
-    for (const name of ['ThunkConnect32', 'MapLS', 'SMapLS_IP_EBP_8', 'FT_Exit20', 'FT_Thunk',
-        'RegisterServiceProcess', 'ConvertToGlobalHandle'])
-    {
-        assert.ok(fns[name], name);
-    }
     assert.equal(fns.GetProfileStringA, undefined,
         'win.ini is the profile functions\' to answer, not a fixed default here');
 });

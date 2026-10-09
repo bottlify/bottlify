@@ -236,6 +236,14 @@ const compare = (left, right)=>(left < right ? -1 : (left > right ? 1 : 0));
  */
 
 /**
+ * @template {Record<string, unknown>} T
+ * @param {T} table @param {string[]} names
+ * @returns {Partial<T>}
+ */
+const pick = (table, names)=>/** @type {Partial<T>} */ (
+    Object.fromEntries(names.map(name=>[name, table[name]])));
+
+/**
  * @param {SystemHost} host
  */
 export function createSystemFunctions(host){
@@ -1535,8 +1543,12 @@ export function createSystemFunctions(host){
     // -- and the same entries rather than copies, so the two cannot drift.
     return {
         ...table,
-        // Windows 95's own calls, which find nothing of what they reach for.
-        ...createWin9xFunctions(host),
+        // Of Windows 95's own calls, only the two NT's kernel32 also exports.
+        // The thunk, selector, VxD and service calls are not there on NT: a
+        // program written for both families asks GetProcAddress for one of
+        // them (FT_Thunk) to learn which it runs on, and a machine that
+        // reports NT and finds it anyway is refused as neither.
+        ...pick(createWin9xFunctions(host), ['CreateSocketHandle', 'SetHandleContext']),
         lstrcat: table.lstrcatA,
         lstrcmp: table.lstrcmpA,
         lstrcmpi: table.lstrcmpiA,
