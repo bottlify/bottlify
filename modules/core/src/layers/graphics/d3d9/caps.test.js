@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { capabilityWords } from './caps.js';
 import { DEFAULT_CAPS } from './device.js';
 import { D3DCAPS9, D3DCAPS9_FLOATS } from './structs.js';
+import { DECLTYPE_ATTRIBUTE } from '../webgpu/internal/programmable.js';
 
 test('every field of the block has a value, and only fields of the block are named', ()=>{
     const words = capabilityWords(DEFAULT_CAPS);
@@ -41,6 +42,17 @@ test('no reserved bit is set in the words a conformance test masks', ()=>{
     // The pipeline blends alpha with its own factors under
     // D3DRS_SEPARATEALPHABLENDENABLE, so the device says so.
     assert.equal(words.PrimitiveMiscCaps & 0x00020000, 0x00020000);
+    // Each D3DDTCAPS bit claimed is a type the programmable path has a vertex
+    // format for: bit 0 is UBYTE4 (5), bit n past it is D3DDECLTYPE 7 + n.
+    assert.notEqual(words.DeclTypes & 0x2, 0, 'UBYTE4N');
+    for (let bit = 0; bit < 10; bit++)
+    {
+        if ((words.DeclTypes & (1 << bit)) !== 0)
+        {
+            const type = bit === 0 ? 5 : 7 + bit;
+            assert.ok(DECLTYPE_ATTRIBUTE[type], `D3DDTCAPS bit ${bit} claims type ${type}`);
+        }
+    }
     assert.equal(words.StencilCaps & ~0x1ff, 0);
     assert.equal(words.DeclTypes & ~0x3ff, 0);
 });

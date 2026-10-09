@@ -59,6 +59,14 @@ const D3DPMISCCAPS_CULLCCW = 0x00000040;
 const D3DPMISCCAPS_COLORWRITEENABLE = 0x00000080;
 const D3DPMISCCAPS_BLENDOP = 0x00000800;
 const D3DPMISCCAPS_SEPARATEALPHABLEND = 0x00020000;
+const D3DDTCAPS_UBYTE4 = 0x0001;
+const D3DDTCAPS_UBYTE4N = 0x0002;
+const D3DDTCAPS_SHORT2N = 0x0004;
+const D3DDTCAPS_SHORT4N = 0x0008;
+const D3DDTCAPS_USHORT2N = 0x0010;
+const D3DDTCAPS_USHORT4N = 0x0020;
+const D3DDTCAPS_FLOAT16_2 = 0x0100;
+const D3DDTCAPS_FLOAT16_4 = 0x0200;
 
 const D3DPRASTERCAPS_DITHER = 0x00000001;
 const D3DPRASTERCAPS_ZTEST = 0x00000010;
@@ -235,9 +243,13 @@ export function capabilityWords(caps, identity = {}){
         MasterAdapterOrdinal: 0,
         AdapterOrdinalInGroup: 0,
         NumberOfAdaptersInGroup: 1,
-        // The declaration types beyond a flexible vertex format's own: none,
-        // because the renderer reads formats.
-        DeclTypes: 0,
+        // The declaration types beyond a flexible vertex format's own that the
+        // programmable path reads as WebGPU vertex formats: UBYTE4 through
+        // USHORT4N and both FLOAT16s. Not UDEC3 or DEC3N, the packed ten-bit
+        // triples, which have no WebGPU format.
+        DeclTypes: D3DDTCAPS_UBYTE4 | D3DDTCAPS_UBYTE4N | D3DDTCAPS_SHORT2N | D3DDTCAPS_SHORT4N
+            | D3DDTCAPS_USHORT2N | D3DDTCAPS_USHORT4N | D3DDTCAPS_FLOAT16_2
+            | D3DDTCAPS_FLOAT16_4,
         NumSimultaneousRTs: 1,
         // StretchRect stretches on the GPU, point or linear: D3DPTFILTERCAPS_MINFPOINT,
         // MINFLINEAR, MAGFPOINT and MAGFLINEAR.
