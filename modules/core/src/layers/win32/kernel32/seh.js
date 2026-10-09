@@ -79,6 +79,13 @@ export const CONTEXT = Object.freeze({
     SIZE: 0x2cc,
 });
 
+/**
+ * The flat selectors a 32-bit thread of x86 Windows runs under: user code at
+ * RPL 3, FS the thread's TEB, GS unused. A CONTEXT that says it holds the
+ * segment registers carries these, wherever it is written.
+ */
+export const SELECTORS = Object.freeze({ CODE: 0x1b, DATA: 0x23, FS: 0x3b, GS: 0 });
+
 /** CONTEXT_FULL: control, integer and segment registers. */
 export const CONTEXT_FULL = 0x00010007;
 
@@ -273,6 +280,14 @@ export function createSeh(host){
         ])
         {
             writeU32(at + Number(field), registers[String(name)] ?? 0);
+        }
+        for (const [field, selector] of [
+            [CONTEXT.GS, SELECTORS.GS], [CONTEXT.FS, SELECTORS.FS],
+            [CONTEXT.ES, SELECTORS.DATA], [CONTEXT.DS, SELECTORS.DATA],
+            [CONTEXT.CS, SELECTORS.CODE], [CONTEXT.SS, SELECTORS.DATA],
+        ])
+        {
+            writeU32(at + field, selector);
         }
     };
 

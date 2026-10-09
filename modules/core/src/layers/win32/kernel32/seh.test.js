@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     createSeh, RECORD, CONTEXT, Disposition, EFLAGS_AC, EFLAGS_DF, EFLAGS_TF, END_OF_CHAIN,
-    EH_UNWINDING, STATUS,
+    EH_UNWINDING, SELECTORS, STATUS,
 } from './seh.js';
 
 const TEB = 0x8000;
@@ -141,6 +141,19 @@ test('a handler is handed the record, its own frame and a context', async()=>{
         'the context clears the record and the word after it');
     assert.equal(m.get(context + CONTEXT.EIP), 0x401000, 'the registers as they stood');
     assert.equal(m.get(context + CONTEXT.EAX), 0x11);
+});
+
+test('the context a handler gets holds the segment registers CONTEXT_FULL names', async()=>{
+    // A handler that checks it ran at RPL 3, or restores the selectors it
+    // was handed, finds a ring-3 thread's -- not zeros.
+    const m = machine();
+    m.registerFrames([0x51000]);
+    await m.seh.dispatch({ code: STATUS.ACCESS_VIOLATION, address: 0x401000 });
+    const [, , context] = m.called[0].args;
+    assert.equal(m.get(context + CONTEXT.FLAGS) & 0x10004, 0x10004, 'CONTEXT_SEGMENTS');
+    assert.deepEqual([CONTEXT.CS, CONTEXT.SS, CONTEXT.DS, CONTEXT.ES, CONTEXT.FS, CONTEXT.GS]
+        .map(field=>m.get(context + field)), [0x1b, 0x23, 0x23, 0x23, 0x3b, 0]);
+    assert.equal(SELECTORS.CODE & 3, 3, 'user code runs at RPL 3');
 });
 
 test('the record is built on the program\'s stack, below where it was', async()=>{

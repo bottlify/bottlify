@@ -10,6 +10,7 @@ import { createSlimSync } from './slimsync.js';
 import { createSListFunctions } from './slist.js';
 import { isStandardHandle, untagged } from './handle-tags.js';
 import { createChangeNotifications } from './changes.js';
+import { SELECTORS } from './seh.js';
 
 /**
  * What the export binding hands an entry that is guest code rather than a
@@ -103,10 +104,6 @@ const CONTEXT_INTEGER = 0x10002;
 const CONTEXT_SEGMENTS = 0x10004;
 const CONTEXT_DEBUG_REGISTERS = 0x10010;
 const CONTEXT_BYTES = 0x2cc;
-/** The flat selectors a 32-bit thread runs under. */
-const SELECTOR_CODE = 0x1b;
-const SELECTOR_DATA = 0x23;
-const SELECTOR_FS = 0x3b;
 
 /** Milliseconds from the FILETIME epoch (1601) to the Unix one, for thread times. */
 const FILETIME_EPOCH_MS = 11644473600000;
@@ -302,10 +299,10 @@ export function createSyncFunctions(host){
         }
         if ((flags & CONTEXT_SEGMENTS) === CONTEXT_SEGMENTS)
         {
-            put(0x8c, 0);
-            put(0x90, SELECTOR_FS);
-            put(0x94, SELECTOR_DATA);
-            put(0x98, SELECTOR_DATA);
+            put(0x8c, SELECTORS.GS);
+            put(0x90, SELECTORS.FS);
+            put(0x94, SELECTORS.DATA);
+            put(0x98, SELECTORS.DATA);
         }
         if ((flags & CONTEXT_INTEGER) === CONTEXT_INTEGER)
         {
@@ -317,10 +314,10 @@ export function createSyncFunctions(host){
         {
             put(0xb4, registers.ebp);
             put(0xb8, registers.eip);
-            put(0xbc, SELECTOR_CODE);
+            put(0xbc, SELECTORS.CODE);
             put(0xc0, registers.eflags ?? 0x202);
             put(0xc4, registers.esp);
-            put(0xc8, SELECTOR_DATA);
+            put(0xc8, SELECTORS.DATA);
         }
         host.writeMemory(at, bytes);
     };
@@ -1043,9 +1040,9 @@ export function createSyncFunctions(host){
                 const index = (selector >>> 0) & ~3;
                 /** @type {[number, number, number, number, boolean] | null} */
                 const descriptor = index === 0 ? [0, 0, 0, 0, false]
-                    : index === (SELECTOR_CODE & ~3) ? [0, 0xfffff, 0x1b, 3, true]
-                        : index === (SELECTOR_DATA & ~3) ? [0, 0xfffff, 0x13, 3, true]
-                            : index === (SELECTOR_FS & ~3)
+                    : index === (SELECTORS.CODE & ~3) ? [0, 0xfffff, 0x1b, 3, true]
+                        : index === (SELECTORS.DATA & ~3) ? [0, 0xfffff, 0x13, 3, true]
+                            : index === (SELECTORS.FS & ~3)
                                 ? [thread.tebAddress >>> 0, 0xfff, 0x13, 3, false] : null;
                 if (!descriptor)
                 {
