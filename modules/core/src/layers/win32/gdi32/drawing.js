@@ -698,8 +698,8 @@ export function createDrawingFunctions(
      *        the desktop colour as a frame was the blank screen a display was
      *        handed before the program had drawn anything.
      */
-    const bound = (handle, present = true)=>{
-        const drawn = pixelsOf(handle, present);
+    const bound = (handle, present = true, source = 0)=>{
+        const drawn = pixelsOf(handle, present, true, source);
         const dc = dcOf(handle);
         return dc?.path?.open ? recording(dc, drawn) : drawn;
     };
@@ -712,8 +712,13 @@ export function createDrawingFunctions(
      * @param {number} handle @param {boolean} present
      * @param {boolean} [mapped]  False for the context in device units
      *        whatever the DC's mapping, for a caller that maps for itself.
+     * @param {number} [source]  A blit's source DC: mapped as well when only
+     *        it moves its origin -- a program that paints a strip into a DC
+     *        whose origin is the strip's corner and copies it out at the
+     *        strip's place in the window names the source by the window's
+     *        coordinates.
      */
-    const pixelsOf = (handle, present, mapped = true)=>{
+    const pixelsOf = (handle, present, mapped = true, source = 0)=>{
         const dc = dcOf(handle);
         const interfaces = draw();
         if (!dc || !interfaces || !services.surfaceFor)
@@ -765,7 +770,9 @@ export function createDrawingFunctions(
         {
             services.presentDesktop?.();
         }
-        return mapped && mapsAway(dc) ? mappedView(dc, interfaces) : interfaces;
+        const other = (source >>> 0) === 0 ? null : dcOf(source);
+        return mapped && (mapsAway(dc) || (other ? mapsAway(other) : false))
+            ? mappedView(dc, interfaces) : interfaces;
     };
 
     /** Whether text drawn into a path has been reported. */
@@ -1593,7 +1600,7 @@ export function createDrawingFunctions(
             argBytes: 36,
             /** @param {number[]} args */
             handler: ([dest, x, y, cx, cy, source, x1, y1, rop])=>{
-                const interfaces = bound(dest);
+                const interfaces = bound(dest, true, source);
                 if (!interfaces)
                 {
                     return 0;
@@ -1632,7 +1639,7 @@ export function createDrawingFunctions(
                         (rop & 0x00ffffff) >>> 0]);
                 }
                 const record = objects.get(mask);
-                const interfaces = bound(dest);
+                const interfaces = bound(dest, true, source);
                 if (!interfaces || record?.type !== 'bitmap' || record.attributes.bitCount !== 1)
                 {
                     return 0;
@@ -1672,7 +1679,7 @@ export function createDrawingFunctions(
             argBytes: 44,
             /** @param {number[]} args */
             handler: ([dest, x, y, cx, cy, source, x1, y1, cx1, cy1, rop])=>{
-                const interfaces = bound(dest);
+                const interfaces = bound(dest, true, source);
                 if (!interfaces || !bound(source))
                 {
                     return 0;

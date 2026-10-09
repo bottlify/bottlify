@@ -2259,6 +2259,20 @@ test('GdiGradientFill shades the device\'s pixels where the mapping puts its ver
         [WHITE_PIXEL, 0x80ff0000, 0xbf7f7f00, WHITE_PIXEL], 'moved by the viewport, shaded down');
 });
 
+test('BitBlt reads the source rectangle in the source DC\'s own logical space', ()=>{
+    // A strip repainted through a memory DC whose window origin is moved to
+    // the strip, then copied out at the same logical x into a DC that is not.
+    const { fns, dc, pixel, fill, section } = painted(4, 1);
+    const source = section(2, 1);
+    source.put(0, 0, RED_PIXEL);
+    source.put(1, 0, BLUE_PIXEL);
+    fns.SetWindowOrgEx.handler([source.dc, 2, 0, 0]);
+    fill(WHITE_PIXEL);
+    assert.equal(fns.BitBlt.handler([dc, 2, 0, 2, 1, source.dc, 2, 0, 0x00cc0020]), 1);
+    assert.deepEqual([0, 1, 2, 3].map(x=>pixel(x, 0)),
+        [WHITE_PIXEL, WHITE_PIXEL, RED_PIXEL, BLUE_PIXEL]);
+});
+
 test('GdiTransparentBlt stretches the source over the destination, leaving the key out', ()=>{
     const machine = painted(4, 2);
     const { fns, dc, pixel, fill, section } = machine;
