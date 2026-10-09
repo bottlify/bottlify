@@ -119,6 +119,7 @@ function harness(options = {}){
         },
         dumpDraws: options.dumpDraws ?? false,
         dumpEvery: options.dumpEvery,
+        liveDump: options.liveDump,
         maxDraws: options.maxDraws,
         divergence: options.divergence,
         skipTexture: options.skipTexture,
@@ -4005,4 +4006,24 @@ test('recorded: a draw under the stencil test carries it, its reference set on t
     assert.deepEqual(gpu.of('setStencilReference').map((/** @type {any} */ call)=>call.reference),
         [0xff]);
     assert.equal(cleared.stencilFront, undefined, 'the clear quad runs no stencil test');
+});
+
+test('a dump asked for on a running device writes down that many frames, then stops', async()=>{
+    const liveDump = { dumpFrames: 0 };
+    const h = harness({ width: 64, height: 64, liveDump });
+    const { device } = h;
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    const frame = async()=>{
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
+            quad([0, 0, 8, 8], argb(255, 255, 0, 0)), 20), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        return device.diagnostics().lastDump.length;
+    };
+    assert.equal(await frame(), 0, 'nothing until it is asked for');
+    liveDump.dumpFrames = 1;
+    assert.equal(await frame(), 1, 'the frame after the asking, one line a draw');
+    assert.equal(liveDump.dumpFrames, 0, 'counted down');
+    assert.equal(await frame(), 0, 'and no more');
 });

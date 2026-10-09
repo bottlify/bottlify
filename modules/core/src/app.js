@@ -7603,6 +7603,23 @@ async function buildSystemHost(deps){
             desktop: ()=>ask('debug.desktop'),
             /** @param {number} address @param {any} how */
             hook: (address, how)=>ask('debug.hook', [address, how]),
+            /**
+             * Writes down the next `frames` frames with draws, every draw with
+             * its shaders, stages and state, on a program already running: the
+             * account reaches `report()` as the device's `lastDump` and its
+             * shaders' bytecode. Zero stops it.
+             *
+             * @param {number} [frames]
+             */
+            dumpFrames: (frames = 1)=>{
+                const worker = options.device?.worker;
+                if (!worker)
+                {
+                    throw new Error('dumpFrames: this run draws without a graphics worker');
+                }
+                worker.postMessage({ type: 'debug', dumpFrames: frames });
+                return frames;
+            },
         },
         trace: ()=>ask('trace'),
         report: ()=>ask('report'),

@@ -435,6 +435,9 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  *     Where "this call succeeded and did not do all of what it promises" goes.
  * @property {boolean} [dumpDraws]
  * @property {number} [dumpEvery]
+ * @property {{ dumpFrames: number }} [liveDump]
+ *     Set on a running program to have its next frames with draws written
+ *     down as `dumpDraws` writes them; counts down as they are.
  * @property {number} [maxDraws]
  * @property {string} [skipTexture]
  * @property {string} [probeTexture]
@@ -472,16 +475,16 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
 export function createDirect3D9(options = {}){
     const {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
-        free: giveBack, divergence, dumpDraws, dumpEvery, maxDraws, skipTexture, probeTexture,
-        fog, mips, onDeviceLost, gamma, frameQueued, renderedElsewhere, ...caps
+        free: giveBack, divergence, dumpDraws, dumpEvery, liveDump, maxDraws, skipTexture,
+        probeTexture, fog, mips, onDeviceLost, gamma, frameQueued, renderedElsewhere, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
     /** @type {DeviceServices} */
     const services = {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
-        free: giveBack, divergence, dumpDraws, dumpEvery, maxDraws, skipTexture, probeTexture,
-        fog, mips, onDeviceLost, gamma, frameQueued, renderedElsewhere,
+        free: giveBack, divergence, dumpDraws, dumpEvery, liveDump, maxDraws, skipTexture,
+        probeTexture, fog, mips, onDeviceLost, gamma, frameQueued, renderedElsewhere,
     };
     if (backend && !readMemory)
     {
@@ -852,6 +855,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             createSampler: services.createSampler ?? null,
             dumpDraws: services.dumpDraws,
             dumpEvery: services.dumpEvery,
+            liveDump: services.liveDump,
             maxDraws: services.maxDraws,
             divergence: services.divergence,
             skipTexture: services.skipTexture,
