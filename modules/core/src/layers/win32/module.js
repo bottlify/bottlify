@@ -1761,6 +1761,10 @@ export function createWin32Module(){
                         // the code and parks the calling thread rather than
                         // returning to a caller that no longer exists.
                         exitProcess: (/** @type {number} */ code)=>endProcess(code),
+                        // _spawn starts what CreateProcess starts.
+                        launch: (named, line, flags)=>spawner.launch(named, line, flags),
+                        /** @param {number} handle */
+                        closeHandle: handle=>kernel.handles.close(handle),
                         exit: (/** @type {number} */ code)=>detachAndEnd(code),
                         atProcessEnd: task=>endTasks.push(task),
                         // The high half of an __int64 answer, which a program

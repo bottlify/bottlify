@@ -61,7 +61,7 @@ test('system: there is no interpreter, and a command is ENOENT', ()=>{
     assert.equal(fns.system.convention, 'cdecl');
 });
 
-test('_spawnl checks its arguments as the runtime does, then starts nothing', ()=>{
+test('_spawnl checks its arguments as the runtime does; with no launcher it starts nothing', ()=>{
     const { fns, errno, said } = build();
     assert.equal(fns._spawnl.handler([5, 0x1000, 0x1000, 0]), 0xffffffff, 'no such mode');
     assert.equal(fns._spawnl.handler([0, 0, 0]), 0xffffffff, 'no image');
@@ -79,6 +79,78 @@ test('_spawnv answers as _spawnl does, its arguments in an array', ()=>{
     assert.equal(fns._spawnv.handler([0, 0x1000, 0x2000]), 0xffffffff);
     assert.deepEqual(errno, [EINVAL, EINVAL, ENOENT]);
     assert.equal(fns._spawnv.argBytes, 12);
+});
+
+/**
+ * A process table with an image `C:\\Game\\bf.exe` and strings in memory.
+ *
+ * @param {Record<number, string>} strings
+ * @param {Record<number, number>} [words]
+ */
+const launching = (strings, words = {})=>{
+    /** @type {Array<{ named: string, line: string }>} */
+    const launched = [];
+    /** @type {number[]} */
+    const closed = [];
+    /** @type {number[]} */
+    const exited = [];
+    /** @type {number[]} */
+    const errno = [];
+    const fns = /** @type {Record<string, any>} */ (createProcessFunctions({
+        errno: code=>void errno.push(code),
+        readCString: at=>strings[at] ?? '',
+        readU32: at=>words[at] ?? 0,
+        launch: (named, line)=>{
+            if (!/bf\.exe$/i.test(named))
+            {
+                return null;
+            }
+            launched.push({ named, line });
+            return { handle: 0x40, threadHandle: 0x44 };
+        },
+        closeHandle: handle=>void closed.push(handle),
+        exitProcess: code=>void exited.push(code),
+    }));
+    return { fns, launched, closed, exited, errno };
+};
+
+const STRINGS = {
+    0x1000: 'C:\\Game\\bf.exe', 0x1100: 'bf.exe',
+    0x1200: '+restart', 0x1300: '7648' };
+
+test('_spawnl starts the image with its arguments joined by spaces, as the runtime joins them',
+    ()=>{
+        const { fns, launched, closed } = launching(STRINGS);
+        const P_NOWAIT = 1;
+        assert.equal(fns._spawnl.handler([P_NOWAIT, 0x1000, 0x1100, 0x1200, 0x1300, 0, 0x9999]),
+            0x40, 'the process handle');
+        assert.deepEqual(launched, [{ named: 'C:\\Game\\bf.exe', line: 'bf.exe +restart 7648' }]);
+        assert.deepEqual(closed, [0x44], 'the thread handle is the runtime\'s to close');
+    });
+
+test('_spawnl: _P_NOWAITO and _P_DETACH answer zero; _P_OVERLAY ends the caller',
+    ()=>{
+        const { fns, closed, exited } = launching(STRINGS);
+        assert.equal(fns._spawnl.handler([3, 0x1000, 0x1100, 0]), 0, '_P_NOWAITO');
+        assert.equal(fns._spawnl.handler([4, 0x1000, 0x1100, 0]), 0, '_P_DETACH');
+        assert.deepEqual(closed, [0x44, 0x40, 0x44, 0x40]);
+        fns._spawnl.handler([2, 0x1000, 0x1100, 0]);
+        assert.deepEqual(exited, [0], '_P_OVERLAY');
+    });
+
+test('_spawnl: an image that is not there is ENOENT, and _P_WAIT is refused', ()=>{
+    const { fns, launched, errno } = launching({ ...STRINGS, 0x1400: 'C:\\nothing.exe' });
+    assert.equal(fns._spawnl.handler([1, 0x1400, 0x1400, 0]), 0xffffffff);
+    assert.equal(fns._spawnl.handler([0, 0x1000, 0x1100, 0]), 0xffffffff, '_P_WAIT');
+    assert.deepEqual(errno, [ENOENT, ENOENT]);
+    assert.deepEqual(launched, []);
+});
+
+test('_spawnv reads argv up to its NULL', ()=>{
+    const { fns, launched } = launching(STRINGS,
+        { 0x2000: 0x1100, 0x2004: 0x1200, 0x2008: 0, 0x200c: 0x1300 });
+    assert.equal(fns._spawnv.handler([1, 0x1000, 0x2000]), 0x40);
+    assert.deepEqual(launched, [{ named: 'C:\\Game\\bf.exe', line: 'bf.exe +restart' }]);
 });
 
 test('raise ignores, ends the process by default, or runs the handler set', async()=>{
