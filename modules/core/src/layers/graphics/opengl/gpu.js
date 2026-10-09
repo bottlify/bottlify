@@ -1744,6 +1744,14 @@ export function createGpuRenderer(services){
     let lastDraw = null;
 
     /**
+     * The first vertex of an immediate-mode draw, for the dump line: what the
+     * program handed over, before any of it reached the device.
+     *
+     * @type {any}
+     */
+    let packedSample = null;
+
+    /**
      * Records one draw of a laid-out vertex stream.
      *
      * @param {object} context
@@ -1902,6 +1910,11 @@ export function createGpuRenderer(services){
                 }).join(' ')}]`
                 + dumpPrograms(recording, state)
                 + dumpBound(scene)
+                + (packedSample
+                    ? ` v0=[colour ${packedSample.color?.map((/** @type {number} */ v)=>
+                        v.toFixed(3)).join(' ')} tc0 ${packedSample.texCoords?.[0]?.map(
+                        (/** @type {number} */ v)=>v.toFixed(3)).join(' ')}]`
+                    : '')
                 + ` uni=${describeBlock(uniforms)}`
                 + ` vuni=${describeBlock(vertexUniforms)}`
                 + ` funi=${describeBlock(fragmentUniforms)}`);
@@ -1984,6 +1997,7 @@ export function createGpuRenderer(services){
             // A fan, a strip or a polygon too short for a triangle draws nothing.
             return;
         }
+        packedSample = dumpDraws ? vertices[0] : null;
         const packed = scratchVertices.write(packVertices(vertices));
         const indices = expanded
             ? { ...scratchIndices.write(expanded), format: 'uint32', count: expanded.length }
@@ -2103,6 +2117,7 @@ export function createGpuRenderer(services){
                 ...scratchIndices.write(expanded), format: 'uint32', count: expanded.length,
             };
         }
+        packedSample = null;
         record(context, scene(), layout, slots,
             indices, indices ? indices.count : request.count,
             indices ? 0 : request.first - from, 0 - from, topologyOf(request.mode));
