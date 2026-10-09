@@ -55,6 +55,8 @@ const WM_MOVE = 0x0003;
 const WM_SIZE = 0x0005;
 /** The frame painted before a call that shows a window returns, as Windows XP paints it. */
 const WM_NCPAINT = 0x0085;
+const WM_WINDOWPOSCHANGING = 0x0046;
+const WM_WINDOWPOSCHANGED = 0x0047;
 const WM_SHOWWINDOW = 0x0018;
 const WM_NCACTIVATE = 0x0086;
 const WM_USER = 0x0400;
@@ -729,7 +731,8 @@ test('MoveWindow changes both rectangles', ()=>{
     assert.equal(memory.u32(RECT_BUFFER + RECT.right), 120);
 });
 
-test('CloseWindow minimises rather than closing, and a show restores', ()=>{
+test('CloseWindow minimises rather than closing, and a restore restores', ()=>{
+    const SW_RESTORE = 9;
     const { fns, hwnd } = withWindow();
     fns.ShowWindow.handler([hwnd, SW_SHOW]);
 
@@ -737,7 +740,10 @@ test('CloseWindow minimises rather than closing, and a show restores', ()=>{
     assert.equal(fns.IsWindow.handler([hwnd]), 1, 'the window is still there');
     assert.equal(fns.IsIconic.handler([hwnd]), 1, 'minimised');
     assert.equal(fns.ShowWindow.handler([hwnd, SW_SHOW]), 1);
-    assert.equal(fns.IsIconic.handler([hwnd]), 0, 'and a show restores it');
+    assert.equal(fns.IsIconic.handler([hwnd]), 1,
+        'SW_SHOW on a window shown leaves it as it is (msg.c test_ShowWindow)');
+    assert.equal(fns.ShowWindow.handler([hwnd, SW_RESTORE]), 1);
+    assert.equal(fns.IsIconic.handler([hwnd]), 0, 'and a restore restores it');
     assert.equal(fns.CloseWindow.handler([0x9999]), 0, 'no window, nothing to minimise');
 });
 
@@ -1012,10 +1018,14 @@ test('the first window shown makes the application active before the call return
     fns.DestroyWindow.handler([shown]);
     dispatched.length = 0;
     fns.ShowWindow.handler([hidden, SW_SHOW]);
+    // WmShowOverlappedSeq: the activation inside the SetWindowPos, before
+    // WM_WINDOWPOSCHANGED, and the size and place an overlapped window was
+    // not told when it was made after it.
     assert.deepEqual(dispatched.map(({ hwnd, message, wParam })=>[hwnd, message, wParam]), [
-        [hidden, WM_SHOWWINDOW, 1], [hidden, WM_ACTIVATEAPP, 1], [hidden, WM_NCACTIVATE, 1],
-        [hidden, WM_ACTIVATE, 1], [hidden, WM_SETFOCUS, 0], [hidden, WM_NCPAINT, 1],
-        [hidden, WM_SIZE, 0],
+        [hidden, WM_SHOWWINDOW, 1], [hidden, WM_WINDOWPOSCHANGING, 0], [hidden, WM_NCPAINT, 1],
+        [hidden, WM_ACTIVATEAPP, 1], [hidden, WM_NCACTIVATE, 1], [hidden, WM_ACTIVATE, 1],
+        [hidden, WM_SETFOCUS, 0], [hidden, WM_WINDOWPOSCHANGED, 0], [hidden, WM_SIZE, 0],
+        [hidden, WM_MOVE, 0],
     ], 'with no window active, the application is activated again');
 });
 
@@ -2640,13 +2650,14 @@ test('a window with an area to paint is handed WM_PAINT when nothing else is que
     const { fns, memory, queue, hwnd, dispatched } = withWindow();
     const announced = dispatched.length;
     fns.ShowWindow.handler([hwnd, SW_SHOW]);
-    // Sent, not posted: the procedure hears WM_SHOWWINDOW first and its own
-    // size second, both before this call returns, because a program measures
-    // the window in the code that follows it. Posting either one leaves the
-    // text rasterised for whatever default the program started with.
+    // Sent, not posted: the procedure hears WM_SHOWWINDOW first and, shown
+    // for the first time, its own size last, both before this call returns,
+    // because a program measures the window in the code that follows it.
+    // Posting either one leaves the text rasterised for whatever default the
+    // program started with.
     assert.deepEqual(dispatched.slice(announced).map(entry=>entry.message),
-        [WM_SHOWWINDOW, 0x001c, WM_NCACTIVATE, 0x0006, 0x0007, WM_NCPAINT, WM_SIZE],
-        'shown: the show message, the activation, then the size');
+        [WM_SHOWWINDOW, WM_NCPAINT, 0x001c, WM_NCACTIVATE, 0x0006, 0x0007, WM_SIZE, WM_MOVE],
+        'shown: the show message, the painting, the activation, then the size');
     assert.equal(dispatched[announced].wParam, 1, 'TRUE: the window is being shown');
     // Showing a window is the first thing that paints it.
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
@@ -2759,8 +2770,8 @@ test('ShowWindow answers only after the procedures it sent to have run', async()
     answer(0);
     assert.equal(await result, 0, 'SW_SHOW on a hidden window answers the state it found');
     assert.deepEqual(dispatched.map(entry=>entry.message),
-        [WM_SHOWWINDOW, 0x001c, WM_NCACTIVATE, 0x0006, 0x0007, WM_NCPAINT, WM_SIZE],
-        'the activation and the size went once the show message was answered');
+        [WM_SHOWWINDOW, WM_NCPAINT, 0x001c, WM_NCACTIVATE, 0x0006, 0x0007, WM_SIZE, WM_MOVE],
+        'the painting, the activation and the size went once the show message was answered');
 });
 
 test('past the show message\'s answer, the activation and the size run on the thread that '
@@ -2784,8 +2795,8 @@ test('past the show message\'s answer, the activation and the size run on the th
     await fns.ShowWindow.handler([hwnd, SW_SHOW]);
     const shown = dispatched.findIndex(entry=>entry.message === WM_SHOWWINDOW);
     const later = dispatched.slice(shown + 1).map(entry=>[entry.message, entry.thread?.name]);
-    assert.deepEqual(later, [[0x001c, 'main'], [WM_NCACTIVATE, 'main'], [0x0006, 'main'],
-        [0x0007, 'main'], [WM_NCPAINT, 'main'], [WM_SIZE, 'main']]);
+    assert.deepEqual(later, [[WM_NCPAINT, 'main'], [0x001c, 'main'], [WM_NCACTIVATE, 'main'],
+        [0x0006, 'main'], [0x0007, 'main'], [WM_SIZE, 'main'], [WM_MOVE, 'main']]);
 });
 
 test('WaitMessage yields until there is something to retrieve, and takes nothing', async()=>{
@@ -5301,8 +5312,6 @@ test('SetWindowPos asks the window first, applies what it answers, and tells it 
         // message tests' (WmSWP_ResizeSeq): WM_WINDOWPOSCHANGING, which may
         // change the WINDOWPOS, then WM_WINDOWPOSCHANGED, which DefWindowProc
         // turns into WM_MOVE and WM_SIZE for what of the client area changed.
-        const WM_WINDOWPOSCHANGING = 0x0046;
-        const WM_WINDOWPOSCHANGED = 0x0047;
         const SWP_NOSIZE = 0x0001;
         const SWP_NOZORDER = 0x0004;
         const SWP_NOACTIVATE = 0x0010;
@@ -5569,4 +5578,70 @@ test('another program\'s window taking the foreground is the run\'s, and both pr
     assert.deepEqual(of(first.dispatched, WM_ACTIVATEAPP), [[mine, 1, secondThread]],
         'told it came from the second program\'s thread');
     assert.deepEqual(of(first.dispatched, WM_ACTIVATE), [[mine, 1, theirs]]);
+});
+
+test('ShowWindow is WM_SHOWWINDOW and a SetWindowPos with the command\'s flags', ()=>{
+    // msg.c test_ShowWindow, on a popup the way its window procedure records
+    // it: the show message, then WM_WINDOWPOSCHANGING and _CHANGED with what
+    // the command asks -- SWP_NOACTIVATE where it does not activate, the
+    // flag a check masks out left out here -- and nothing at all for a
+    // command that finds the window as it asks.
+    const WS_POPUP = 0x80000000;
+    const SW_SHOWNORMAL = 1;
+    const SW_SHOWNA = 8;
+    const SWP_NOSIZE = 0x1;
+    const SWP_NOMOVE = 0x2;
+    const SWP_NOACTIVATE = 0x10;
+    const SWP_SHOWWINDOW = 0x40;
+    const SWP_HIDEWINDOW = 0x80;
+    const SWP_NOCLIENTSIZE = 0x800;
+    const SWP_NOCLIENTMOVE = 0x1000;
+    const RECORDED = new Set([WM_SHOWWINDOW, WM_SIZE, WM_MOVE, WM_WINDOWPOSCHANGING,
+        WM_WINDOWPOSCHANGED]);
+    /** @type {[number, number][]} */
+    const seen = [];
+    const context = setup({ heap: true, reply: message=>{
+        if (!RECORDED.has(message.message))
+        {
+            // WM_NCCREATE's TRUE among them: the window is made.
+            return 1;
+        }
+        const positioned = message.message === WM_WINDOWPOSCHANGING
+            || message.message === WM_WINDOWPOSCHANGED;
+        seen.push([message.message, positioned
+            ? context.memory.u32(message.lParam + 24) & ~SWP_NOACTIVATE : message.wParam]);
+        return 0;
+    } });
+    const { fns, memory } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory, { style: WS_POPUP, x: 120, y: 120, width: 90,
+        height: 90 });
+    const placed = SWP_NOSIZE | SWP_NOMOVE;
+    const told = placed | SWP_NOCLIENTSIZE | SWP_NOCLIENTMOVE;
+    /** @param {number} cmd @param {number} answer @param {[number, number][]} sequence */
+    const step = (cmd, answer, sequence)=>{
+        seen.length = 0;
+        assert.equal(fns.ShowWindow.handler([hwnd, cmd]), answer, `ShowWindow(${cmd})`);
+        assert.deepEqual(seen, sequence, `ShowWindow(${cmd})`);
+    };
+    step(SW_SHOWNORMAL, 0, [[WM_SHOWWINDOW, 1], [WM_WINDOWPOSCHANGING, SWP_SHOWWINDOW | placed],
+        [WM_WINDOWPOSCHANGED, SWP_SHOWWINDOW | told]]);
+    assert.equal(fns.GetActiveWindow.handler(), hwnd, 'activated inside the SetWindowPos');
+    step(SW_SHOWNORMAL, 1, []);
+    step(SW_HIDE, 1, [[WM_SHOWWINDOW, 0], [WM_WINDOWPOSCHANGING, SWP_HIDEWINDOW | placed],
+        [WM_WINDOWPOSCHANGED, SWP_HIDEWINDOW | told]]);
+    assert.equal(fns.GetActiveWindow.handler(), 0, 'hidden, it handed the activation on');
+    step(SW_HIDE, 0, []);
+    step(SW_SHOW, 0, [[WM_SHOWWINDOW, 1], [WM_WINDOWPOSCHANGING, SWP_SHOWWINDOW | placed],
+        [WM_WINDOWPOSCHANGED, SWP_SHOWWINDOW | told]]);
+    step(SW_SHOW, 1, []);
+    step(SW_HIDE, 1, [[WM_SHOWWINDOW, 0], [WM_WINDOWPOSCHANGING, SWP_HIDEWINDOW | placed],
+        [WM_WINDOWPOSCHANGED, SWP_HIDEWINDOW | told]]);
+    const before = context.dispatched.length;
+    step(SW_SHOWNA, 0, [[WM_SHOWWINDOW, 1], [WM_WINDOWPOSCHANGING, SWP_SHOWWINDOW | placed],
+        [WM_WINDOWPOSCHANGED, SWP_SHOWWINDOW | told]]);
+    const WM_ACTIVATE = 0x0006;
+    assert.equal(context.dispatched.slice(before).filter(entry=>entry.message === WM_ACTIVATE)
+        .length, 0, 'SW_SHOWNA activates nothing');
 });

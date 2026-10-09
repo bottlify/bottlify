@@ -1046,11 +1046,27 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         // What it showed is framed and erased before it returns, as Windows
         // XP's SetWindowPos does it; SWP_NOREDRAW asks for no painting at all.
         const erased = redrawn ? host.eraseShown?.(thread) ?? 1 : 1;
+        // A top-level window placed without SWP_NOACTIVATE is activated, and
+        // the active one hidden hands the activation on, both before the
+        // window hears WM_WINDOWPOSCHANGED (msg.c WmShowOverlappedSeq,
+        // WmSWP_ShowOverlappedSeq, WmSWP_HideOverlappedSeq).
+        const topLevel = (record.style & WS_CHILD) === 0;
+        const activated = andThen(erased, ()=>{
+            if (topLevel && isShown && (flags & (SWP_NOACTIVATE | SWP_HIDEWINDOW)) === 0)
+            {
+                return host.activate?.(record.hwnd, { thread }) ?? 0;
+            }
+            if (topLevel && wasShown && !isShown && host.active?.() === record.hwnd)
+            {
+                return host.activateOther?.(record, thread) ?? 0;
+            }
+            return 0;
+        });
         // A child placed without SWP_NOACTIVATE is told it is the active
         // child, shown or not (user32's message tests, WmShowChildSeq_2 and
         // _4): an MDI child becomes the client's active one this way when its
         // program brings it to the top.
-        const told = andThen(erased, changed);
+        const told = andThen(activated, changed);
         if ((flags & (SWP_NOACTIVATE | SWP_HIDEWINDOW)) === 0
             && (record.style & (WS_CHILD | WS_POPUP)) === WS_CHILD)
         {

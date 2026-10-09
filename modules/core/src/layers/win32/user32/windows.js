@@ -306,6 +306,12 @@ const SW_SHOWNA = 8;
 const MINIMISING = new Set([2, SW_MINIMIZE, 7]);
 /** The show commands that bring a minimised window back: SW_SHOWNORMAL, SW_RESTORE, SW_SHOWDEFAULT. */
 const RESTORING = new Set([1, 9, 10]);
+/**
+ * The commands that bring a minimised window back: those, and showing it
+ * maximised or without activating it. SW_SHOW and SW_SHOWNA leave it as it
+ * is (msg.c test_ShowWindow).
+ */
+const RESTORED_BY = new Set([...RESTORING, 3, 4, 0xcc]);
 const WS_MINIMIZE = 0x20000000;
 const WS_MAXIMIZE = 0x01000000;
 const WS_EX_TOPMOST = 0x00000008;
@@ -328,6 +334,8 @@ const COMPLEXREGION = 3;
 const MDICREATESTRUCT_SIZE = 36;
 /** Painted only once the siblings beneath it have been: a label over a picture. */
 const WS_EX_TRANSPARENT = 0x20;
+/** A floating toolbar: never handed the activation another window gave up. */
+const WS_EX_TOOLWINDOW = 0x00000080;
 const WS_CLIPCHILDREN = 0x02000000;
 /** A layered window is one only once CreateWindowEx has shown the CBT hook the window. */
 const WS_EX_LAYERED = 0x00080000;
@@ -2983,8 +2991,12 @@ export function createWindowFunctions(host){
                 appear(record);
             }
         };
-        /** The window, shown and then activated when it was created visible. */
+        /**
+         * The window, shown and then activated when it was created visible.
+         * Made without being told its size, it is told when first shown.
+         */
         const activated = ()=>{
+            record.needsSize = (style & WS_VISIBLE) === 0;
             reveal();
             return andThen(activateCreated(record, thread),
                 ()=>andThen(eraseShown(thread), ()=>record.hwnd));
@@ -3108,6 +3120,7 @@ export function createWindowFunctions(host){
                     const visible = (style & WS_VISIBLE) !== 0;
                     if (!visible && (record.style & (WS_CHILD | WS_POPUP)) === 0)
                     {
+                        record.needsSize = true;
                         return done(record.hwnd);
                     }
                     const client = geometry.clientRect(record);
@@ -5400,7 +5413,10 @@ export function createWindowFunctions(host){
         // procedure answers, the thread on the processor is somebody else.
         const thread = caller ?? host.callerThread?.();
         const minimised = (record.style & WS_MINIMIZE) !== 0;
-        if ((MINIMISING.has(cmdShow) && !minimised) || (RESTORING.has(cmdShow) && minimised))
+        // Every minimising command is the hook's to hear, the window
+        // minimised already or not (msg.c WmMinMax_1, _3, _4), and every
+        // restoring one of a minimised window.
+        if (MINIMISING.has(cmdShow) || (RESTORED_BY.has(cmdShow) && minimised))
         {
             // Minimising and restoring are a CBT hook's to forbid; the window
             // is still shown as asked, in the state it had.
@@ -5411,6 +5427,65 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * What ShowWindow asks SetWindowPos for, by command: shown or hidden,
+     * where it is and at its size, activated unless the command says not to
+     * -- a child never is -- and the active window hidden handing the
+     * activation on (msg.c test_ShowWindow, WmShowChildSeq, WmHideChildSeq).
+     *
+     * @param {any} record @param {number} cmdShow
+     */
+    const showFlags = (record, cmdShow)=>{
+        const SWP_NOSIZE = 0x0001;
+        const SWP_NOMOVE = 0x0002;
+        const SWP_NOZORDER = 0x0004;
+        const SWP_NOACTIVATE = 0x0010;
+        const SWP_SHOWWINDOW = 0x0040;
+        const SWP_HIDEWINDOW = 0x0080;
+        const SW_SHOWMINIMIZED = 2;
+        const placed = SWP_NOSIZE | SWP_NOMOVE;
+        const child = isChild(record) ? SWP_NOACTIVATE : 0;
+        if (cmdShow === SW_HIDE)
+        {
+            return SWP_HIDEWINDOW | placed | child
+                | (activeWindow() === record.hwnd ? 0 : SWP_NOACTIVATE | SWP_NOZORDER);
+        }
+        if (MINIMISING.has(cmdShow))
+        {
+            return SWP_SHOWWINDOW | placed | child
+                | (cmdShow === SW_SHOWMINIMIZED ? 0 : SWP_NOACTIVATE | SWP_NOZORDER);
+        }
+        return SWP_SHOWWINDOW | placed | child
+            | (SHOW_WITHOUT_ACTIVATING.has(cmdShow) ? SWP_NOACTIVATE : 0);
+    };
+
+    /**
+     * The window next in line for the activation when the active one is
+     * hidden: its owner, when that shows and takes input, else the topmost
+     * other top-level window that does; none at all otherwise, and the
+     * program is no longer the active one.
+     *
+     * @param {any} record @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const activateOther = (record, thread)=>{
+        /** @param {any} each */
+        const takes = each=>each && each !== record && !each.destroyed && !isChild(each)
+            && shown(each) && (each.style & WS_DISABLED) === 0
+            && (each.exStyle & WS_EX_TOOLWINDOW) === 0;
+        const owner = live(record.owner ?? 0);
+        const next = takes(owner) ? owner
+            : [...windows.values()].reverse().find(takes) ?? null;
+        return activate(next ? next.hwnd : 0, { thread });
+    };
+
+    /**
+     * ShowWindow past the hook: WM_SHOWWINDOW when the visibility changes,
+     * then SetWindowPos with the command's flags -- which paints, activates
+     * and tells WM_WINDOWPOSCHANGING and WM_WINDOWPOSCHANGED -- and, the
+     * first time an overlapped window shows, the size and place it was not
+     * told when it was made (msg.c WmShowOverlappedSeq). SW_SHOW on a window
+     * already shown does nothing at all.
+     *
      * @param {any} record @param {number} cmdShow
      * @param {boolean} keepState  Whether a hook forbade minimising or restoring.
      * @param {unknown} thread  The thread whose call this answers.
@@ -5419,68 +5494,63 @@ export function createWindowFunctions(host){
     const showNow = (record, cmdShow, keepState, thread)=>{
         const wasVisible = (record.style & WS_VISIBLE) !== 0;
         const hide = cmdShow === SW_HIDE;
-        const covered = wasVisible && hide && shown(record) ? beforeChange(record) : null;
-        // Matches Wine's dlls/user32/tests/msg.c WmShowNormal sequence: the
-        // message is *sent* -- the procedure runs before this call returns --
-        // and only when this call changes the visibility, because SW_SHOW on
-        // an already-visible window says nothing happened and nothing did.
-        // SW_SHOWNA is the exception, told whatever it found (WmSHOWNATopVisible).
-        //
+        const minimised = (record.style & WS_MINIMIZE) !== 0;
+        const stateChanges = !keepState && (MINIMISING.has(cmdShow) ? !minimised
+            : RESTORED_BY.has(cmdShow) && minimised);
+        // A command that finds the window as it asks does nothing at all, a
+        // shown window not activated either; SW_SHOWNA places it whatever
+        // it finds (msg.c test_ShowWindow, WmEmptySeq, WmShowNA_2).
+        if (wasVisible === !hide && !stateChanges && cmdShow !== SW_SHOWNA)
+        {
+            return wasVisible ? 1 : 0;
+        }
+        const flags = showFlags(record, cmdShow);
         // Sent, and then chained onto whatever follows it: a procedure the
         // bridge has to run answers with a promise, so returning this call's
         // own result before it has answered hands the host call back to the
         // guest while the guest's procedure is still pending -- and the guest
-        // reuses its own stack under it.
+        // reuses its own stack under it. SW_SHOWNA tells it whatever it
+        // found (WmSHOWNATopVisible).
         const greeting = wasVisible === hide || cmdShow === SW_SHOWNA
             ? send(record.hwnd, WM_SHOWWINDOW, hide ? 0 : 1, 0, thread)
             : 0;
-        record.style = hide
-            ? (record.style & ~WS_VISIBLE) >>> 0
-            : (record.style | WS_VISIBLE) >>> 0;
-        // Minimised is a state IsIconic reads back and a restore clears; the
-        // window keeps its place in the picture, there being no taskbar to
-        // shrink to.
-        if (!keepState && MINIMISING.has(cmdShow))
+        let told = andThen(greeting, ()=>{
+            // Minimised is a state IsIconic reads back and a restore clears;
+            // the window keeps its place in the picture, there being no
+            // taskbar to shrink to.
+            if (!keepState && MINIMISING.has(cmdShow))
+            {
+                record.style = (record.style | WS_MINIMIZE) >>> 0;
+            }
+            else if (!keepState && RESTORED_BY.has(cmdShow))
+            {
+                record.style = (record.style & ~WS_MINIMIZE) >>> 0;
+            }
+            return placeWindow([record.hwnd, 0, 0, 0, 0, 0, flags], thread);
+        });
+        if (hide && isChild(record))
         {
-            record.style = (record.style | WS_MINIMIZE) >>> 0;
+            // A child hidden with the focus in it hands it to its parent.
+            told = andThen(told, ()=>{
+                const focus = live(focusWindow());
+                return focus && insideOf(focus, record) ? setFocus(record.parent, thread) : 0;
+            });
         }
-        else if (!keepState && !hide)
+        if (!hide && record.needsSize)
         {
-            record.style = (record.style & ~WS_MINIMIZE) >>> 0;
-        }
-        /** The sent messages so far, for the result to wait on. */
-        let told = greeting;
-        if (!hide && !SHOW_WITHOUT_ACTIVATING.has(cmdShow) && !isChild(record))
-        {
-            told = andThen(greeting, ()=>activate(record.hwnd, { thread }));
-            raise(record);
-        }
-        if (!wasVisible && !hide)
-        {
-            appear(record);
-            told = andThen(told, ()=>eraseShown(thread));
-            // A window that becomes visible hears its own size, as the real
-            // ShowWindow sends it: the message a program lays itself out by
-            // and rasterises every glyph of its text for. Without it a program
-            // keeps whatever default it started with, and its text stays
-            // scaled for that instead of for its window.
-            // After the activation, not beside it: two guest calls started
-            // from one host call would run over each other's stack.
-            const client = geometry.clientRect(record);
-            told = andThen(told, ()=>send(record.hwnd, WM_SIZE, SIZE_RESTORED,
-                ((((client.bottom - client.top) & 0xffff) << 16)
-                    | ((client.right - client.left) & 0xffff)) >>> 0,
-                thread));
-        }
-        tell(record);
-        if (covered)
-        {
-            afterChange(covered);
-            told = andThen(told, ()=>eraseShown(thread));
+            record.needsSize = false;
+            told = andThen(told, ()=>{
+                const client = geometry.clientRect(record);
+                return andThen(send(record.hwnd, WM_SIZE, SIZE_RESTORED,
+                    ((((client.bottom - client.top) & 0xffff) << 16)
+                        | ((client.right - client.left) & 0xffff)) >>> 0, thread),
+                ()=>send(record.hwnd, WM_MOVE, 0,
+                    (((client.top & 0xffff) << 16) | (client.left & 0xffff)) >>> 0, thread));
+            });
         }
         // The answer waits for the procedures that were sent to: returning it
         // before they have run is the stack the guest reuses under itself.
-        return andThen(told, ()=>wasVisible ? 1 : 0);
+        return andThen(told, ()=>(wasVisible ? 1 : 0));
     };
 
     /**
@@ -5854,6 +5924,7 @@ export function createWindowFunctions(host){
                 positions: place=>{
                     placeWindow = place;
                 },
+                activateOther,
                 shown, raise, restack, tell, desktop: desktopWindow, showWindow,
                 // What the run answers for every process's windows.
                 runForeground: ()=>directory.foreground?.() ?? 0,
