@@ -50,7 +50,15 @@ const HORZRES = 8;
 const VERTRES = 10;
 const BITSPIXEL = 12;
 const PLANES = 14;
+const RASTERCAPS = 38;
 const LOGPIXELSX = 88;
+
+/** RASTERCAPS bits a program checks before it blits. */
+const RC_BITBLT = 0x0001;
+const RC_DIBTODEV = 0x0200;
+const RC_STRETCHBLT = 0x0800;
+const RC_STRETCHDIB = 0x2000;
+const RC_PALETTE = 0x0100;
 
 /** What a call that should have returned a colour says instead. */
 const CLR_INVALID = 0xffffffff;
@@ -1243,6 +1251,16 @@ test('GetDeviceCaps answers for what is modelled and zero for what is not', ()=>
     assert.equal(fns.GetDeviceCaps.handler([hdc, BITSPIXEL]), 32);
     assert.equal(fns.GetDeviceCaps.handler([hdc, PLANES]), 1);
     assert.equal(fns.GetDeviceCaps.handler([hdc, LOGPIXELSX]), 96);
+
+    const raster = fns.GetDeviceCaps.handler([hdc, RASTERCAPS]);
+    for (const bit of [RC_BITBLT, RC_DIBTODEV, RC_STRETCHBLT, RC_STRETCHDIB])
+    {
+        assert.equal(raster & bit, bit, `RASTERCAPS has 0x${bit.toString(16)}`);
+    }
+    assert.equal(raster & RC_PALETTE, 0, 'a 32-bit display is not a palette device');
+    const memoryDC = fns.CreateCompatibleDC.handler([hdc]);
+    assert.equal(fns.GetDeviceCaps.handler([memoryDC, RASTERCAPS]), raster,
+        'a memory DC answers for the display it is compatible with');
 
     assert.equal(fns.GetDeviceCaps.handler([hdc, 118]), 0,
         'an index with no answer here reads as absent, not as garbage');

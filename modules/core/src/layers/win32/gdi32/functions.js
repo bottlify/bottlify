@@ -234,6 +234,7 @@ const VERTRES = 10;
 const BITSPIXEL = 12;
 const PLANES = 14;
 const NUMCOLORS = 24;
+const RASTERCAPS = 38;
 const LOGPIXELSX = 88;
 const LOGPIXELSY = 90;
 const SIZEPALETTE = 104;
@@ -242,6 +243,16 @@ const COLORMGMTCAPS = 121;
 
 /** CM_GAMMA_RAMP: the device takes a gamma ramp that reaches the picture. */
 const CM_GAMMA_RAMP = 0x00000002;
+
+/**
+ * RASTERCAPS of a display: block and stretched transfers, DIBs to the device,
+ * bitmaps over 64K, big fonts, scaling, flood fill -- every one of which this
+ * layer draws. RC_PALETTE is left out, as no device here is a palette device.
+ * RC_BITBLT, RC_SCALING, RC_BITMAP64, RC_DI_BITMAP, RC_DIBTODEV, RC_BIGFONT,
+ * RC_STRETCHBLT, RC_FLOODFILL, RC_STRETCHDIB, RC_OP_DX_OUTPUT.
+ */
+const DISPLAY_RASTER_CAPS = 0x0001 | 0x0008 | 0x0010 | 0x0080 | 0x0200 | 0x0400
+    | 0x0800 | 0x1000 | 0x2000 | 0x4000;
 
 /** DT_RASDISPLAY: the device is a raster display, not a plotter or a printer. */
 const DT_RASDISPLAY = 1;
@@ -1574,6 +1585,8 @@ export function createGdiFunctions(host){
                 // Documented as -1 for a device with more colours than a palette
                 // can hold, which is every device deeper than 8 bits.
                 return depth > PALETTE_DEPTH ? -1 : 1 << depth;
+            case RASTERCAPS:
+                return DISPLAY_RASTER_CAPS;
             case LOGPIXELSX:
             case LOGPIXELSY:
                 return LOGICAL_DPI;
