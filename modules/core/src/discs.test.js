@@ -97,3 +97,38 @@ test('mounted discs are CD-ROM drives, and a letter asked for must be free', asy
         /letter is taken/);
     await filesystemModule.dispose();
 });
+
+test('a disc on a server is read a range at a time, from a worker only', async()=>{
+    // The image a bottle keeps beside its bundle: hundreds of megabytes, of
+    // which a game reads a file or two.
+    /** @type {string[]} */
+    const ranges = [];
+    class XMLHttpRequest
+    {
+        status = 0;
+        /** @type {ArrayBuffer | null} */
+        response = null;
+        range = '';
+        open(){}
+        /** @param {string} _name @param {string} value */
+        setRequestHeader(_name, value){
+            this.range = value;
+        }
+        send(){
+            ranges.push(this.range);
+            const [first, last] = this.range.slice(6).split('-').map(Number);
+            this.status = 206;
+            this.response = IMAGE.slice(first, last + 1).buffer;
+        }
+        /** @param {string} name */
+        getResponseHeader(name){
+            return name === 'Content-Range' ? `bytes 0-0/${IMAGE.length}` : null;
+        }
+    }
+    const reader = await discReader({ url: '/bundles/game/disc.iso' }, { XMLHttpRequest });
+    assert.equal(reader.size, IMAGE.length);
+    assert.deepEqual(reader.read(0x8001, 5), IMAGE.subarray(0x8001, 0x8006));
+    assert.deepEqual(ranges, ['bytes=0-0', `bytes=${0x8001}-${0x8005}`]);
+    await assert.rejects(discReader({ url: '/disc.iso' }, { XMLHttpRequest, document: {} }),
+        /only be read from a worker/, 'a page cannot wait on a request');
+});

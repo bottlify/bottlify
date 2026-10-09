@@ -28,8 +28,14 @@ import { chunkedReads, createIsoSource } from './layers/filesystem/internal/iso/
  */
 
 /**
+ * A disc image on a server that honours byte ranges -- the one a bottle keeps
+ * beside its bundle. Read a range at a time, never whole.
+ * @typedef {{ url: string }} DiscUrl
+ */
+
+/**
  * @typedef {Object} DiscOption
- * @property {Blob | Uint8Array | ArrayBuffer | DiscReader} image
+ * @property {Blob | Uint8Array | ArrayBuffer | DiscReader | DiscUrl} image
  * @property {string} [letter]  The drive it is mounted as. Absent, D: or the first
  *                              letter after it that nothing holds.
  */
@@ -82,6 +88,10 @@ export async function discReader(image, scope = globalThis){
         return { size: reader.size, read: (offset, length)=>reader.read(offset, length),
             whole: false };
     }
+    if (typeof (/** @type {any} */ (image)).url === 'string')
+    {
+        return urlReader(/** @type {DiscUrl} */ (image).url, scope);
+    }
     const blob = /** @type {Blob} */ (image);
     if (typeof scope.FileReaderSync === 'function')
     {
@@ -95,6 +105,45 @@ export async function discReader(image, scope = globalThis){
     }
     const bytes = new Uint8Array(await blob.arrayBuffer());
     return { ...await discReader(bytes, scope), whole: true };
+}
+
+/**
+ * A reader over an image on a server: each read a synchronous ranged request,
+ * which a worker may make and which is what a guest's ReadFile waits on.
+ *
+ * @param {string} url @param {any} scope
+ */
+function urlReader(url, scope){
+    if (typeof scope.XMLHttpRequest !== 'function' || typeof scope.document === 'object')
+    {
+        throw new Error(`the disc at ${url} can only be read from a worker`);
+    }
+    /** @param {number} first @param {number} last */
+    const ranged = (first, last)=>{
+        const request = new scope.XMLHttpRequest();
+        request.open('GET', url, false);
+        request.responseType = 'arraybuffer';
+        request.setRequestHeader('Range', `bytes=${first}-${last}`);
+        request.send();
+        if (request.status !== 206)
+        {
+            throw new Error(`the disc at ${url} answered ${request.status} to a range`);
+        }
+        return request;
+    };
+    const total = /\/(\d+)$/.exec(ranged(0, 0).getResponseHeader('Content-Range') ?? '');
+    if (!total)
+    {
+        throw new Error(`the disc at ${url} does not say how long it is`);
+    }
+    const size = Number(total[1]);
+    return {
+        size,
+        read: (/** @type {number} */ offset, /** @type {number} */ length)=>(length <= 0
+            ? new Uint8Array(0)
+            : new Uint8Array(ranged(offset, Math.min(offset + length, size) - 1).response)),
+        whole: false,
+    };
 }
 
 /**
