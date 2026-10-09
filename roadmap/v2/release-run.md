@@ -202,6 +202,29 @@ node tools/cdp_test/game.mjs tri-e2e --worker --coi --run-seconds 15 --wait 120 
 Every mode once: the report must say `stopped: exited with 0` and, in the `multi` modes,
 `executors: N, ...` -- not `REFUSED`.
 
+### 4.6 Titles run by the person: Gothic 3 (full game), Call of Duty 2, Call of Duty 4, Need for Speed Underground 2
+
+No route for these is recorded in the repository: the bundle id, the entry and the clicks are the
+person's, and the author has run none of them on this branch. Each is run the same way as the
+titles above, with the route filled in, so its rows land in the same report:
+
+```
+node tools/cdp_test/game.mjs <bundle> [--entry <exe in the bundle>] --worker --coi \
+  [--click x,y,frame | --click-at x,y,ms ...] [--file HOST=GUEST ...] \
+  --run-seconds <S> --wait <S + 300> --mode <MODE>
+```
+
+- Modes: `default` on both arms, then `multi2`, `multi`, `multi4` on `cork2`.
+- Or in the player, by hand: `node tools/play.mjs <bundle>`, the mode chosen by its button or
+  `bottlifyMode('<name>')`; a person's run records the same fields (mode, what the screen showed,
+  the frame rate the title itself reports if it has a counter) and says it was a manual run.
+- What to read in each report beyond step 4's fields: the threads the title has (the `threads`
+  line, by state), and in a `multi` mode the `executors:` line -- how many slices ran on the
+  others and the most threads at once. A title whose threads mostly wait gives the executors
+  little; that is a measurement, not a finding.
+- For a title new to the harness, `node tools/launch-probe.mjs <bundle>` first: its import list
+  says whether the title is expected to start at all on this branch.
+
 ## 5. What counts as a finding
 
 - A gate red (step 1).
