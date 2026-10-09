@@ -4043,6 +4043,46 @@ test('recorded: a draw under the stencil test carries it, its reference set on t
     assert.equal(cleared.stencilFront, undefined, 'the clear quad runs no stencil test');
 });
 
+test('a blend by D3DRS_BLENDFACTOR sets that colour on the pass, out of the pipeline key', ()=>{
+    const model = /** @type {any} */ ({
+        renderStates: new Map([[27, 1], [19, 14], [20, 15], [193, 0x80402010]]),
+    });
+    const shape = {
+        fvf: 0, targetFormat: 'bgra8unorm', depthFormat: undefined, topology: 'triangle-list',
+        stages: [],
+    };
+    const state = pipelineStateOf(model, shape);
+    assert.equal(state.blendConstant, 0x80402010);
+    assert.equal(pipelineKey(state), pipelineKey({ ...state, blendConstant: 0 }));
+    // Unset, it reads as its default, opaque white; a blend that reads no
+    // constant carries none.
+    model.renderStates.delete(193);
+    assert.equal(pipelineStateOf(model, shape).blendConstant, 0xffffffff);
+    model.renderStates.set(19, 5);
+    model.renderStates.set(20, 6);
+    assert.equal(pipelineStateOf(model, shape).blendConstant, undefined);
+});
+
+test('recorded: a draw blended by D3DRS_BLENDFACTOR sets it on the pass', async()=>{
+    const h = harness();
+    const { device, gpu } = h;
+    const set = (/** @type {number} */ state, /** @type {number} */ value)=>
+        device.SetRenderState(state, value);
+    set(27, 1);
+    set(19, 14);
+    set(20, 6);
+    // A Direct3D 8 device has no BLENDFACTOR state to set, so the draw
+    // blends by its default, opaque white; the value is pipelineStateOf's.
+    assert.notEqual(set(193, 0xff00ff00), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+    assert.deepEqual(gpu.of('setBlendConstant').map((/** @type {any} */ call)=>call.color),
+        [{ r: 1, g: 1, b: 1, a: 1 }]);
+});
+
 test('a dump asked for on a running device writes down that many frames, then stops', async()=>{
     const liveDump = { dumpFrames: 0 };
     const h = harness({ width: 64, height: 64, liveDump });

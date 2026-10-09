@@ -2081,7 +2081,34 @@ export function pipelineStateOf(model, shape){
         ...(shape.depthFormat !== undefined && hasStencil(shape.depthFormat)
             && (model.renderStates.get(STENCIL_RS.ENABLE) ?? 0) !== 0
             ? { stencil: stencilOf(model) } : {}),
+        ...blendConstantOf(model),
     };
+}
+
+/** D3DBLEND_BLENDFACTOR and D3DBLEND_INVBLENDFACTOR, Direct3D 9's alone. */
+const CONSTANT_FACTORS = new Set([14, 15]);
+
+/**
+ * The colour D3DRS_BLENDFACTOR names, for a blend that reads it. It is a
+ * state of the pass in WebGPU, not of the pipeline, so it travels with the
+ * draw and stays out of the pipeline's key; a draw that does not read it
+ * carries none, and the pass keeps whatever the last one set.
+ *
+ * @param {any} model
+ * @returns {{ blendConstant?: number }}
+ */
+function blendConstantOf(model){
+    const rs = (/** @type {number} */ state)=>model.renderStates.get(state) ?? 0;
+    if (rs(D3DRS.ALPHABLENDENABLE) === 0)
+    {
+        return {};
+    }
+    const separate = rs(D3DRS9.SEPARATEALPHABLENDENABLE) !== 0;
+    const factors = [rs(D3DRS.SRCBLEND), rs(D3DRS.DESTBLEND),
+        ...(separate ? [rs(D3DRS9.SRCBLENDALPHA), rs(D3DRS9.DESTBLENDALPHA)] : [])];
+    return factors.some(factor=>CONSTANT_FACTORS.has(factor))
+        ? { blendConstant: (model.renderStates.get(D3DRS9.BLENDFACTOR) ?? 0xffffffff) >>> 0 }
+        : {};
 }
 
 /** The stencil render states, the same numbers in Direct3D 8 and 9. */
@@ -8548,17 +8575,24 @@ export function createRenderer(options){
     }
 
     /**
-     * The stencil reference a draw under the stencil test compares with: a
-     * state of the pass rather than of the pipeline, so set with each such
-     * draw.
+     * The stencil reference and blend constant a draw compares with and
+     * blends by: states of the pass rather than of the pipeline, so set with
+     * each draw that reads them.
      *
      * @param {any} pass @param {any} command
      */
-    function referStencil(pass, command){
+    function referPassState(pass, command){
         const stencil = command.state?.stencil;
         if (stencil)
         {
             pass.setStencilReference(stencil.ref);
+        }
+        const constant = command.state?.blendConstant;
+        if (constant !== undefined)
+        {
+            // D3DCOLOR is ARGB in a DWORD.
+            pass.setBlendConstant({ r: (constant >>> 16 & 0xff) / 255, g: (constant >>> 8 & 0xff) / 255,
+                b: (constant & 0xff) / 255, a: (constant >>> 24) / 255 });
         }
     }
 
@@ -8571,7 +8605,7 @@ export function createRenderer(options){
     function replayProgram(pass, pipeline, command){
         const program = command.program;
         pass.setPipeline(pipeline.gpu);
-        referStencil(pass, command);
+        referPassState(pass, command);
         pass.setBindings(0, pipeline.bindGroupLayouts[0],
             blockEntries(pass, program.vertexBlocks));
         pass.setBindings(1, pipeline.bindGroupLayouts[1],
@@ -8788,7 +8822,7 @@ export function createRenderer(options){
                 }
             }
             pass.setPipeline(pipeline.gpu);
-            referStencil(pass, command);
+            referPassState(pass, command);
             // Bound at once and kept by nothing, unless a check keeps it.
             const block = command.check
                 ? pass.uniforms(command.uniforms)
@@ -8849,7 +8883,7 @@ export function createRenderer(options){
                     pass.setScissor(scissor);
                 }
                 pass.setPipeline(pipeline.gpu);
-                referStencil(pass, command);
+                referPassState(pass, command);
                 pass.setBindings(0, pipeline.bindGroupLayout, entries);
                 pass.setVertexBuffer(0, command.vertices.gpu, command.vertices.offset);
                 bindStreams(pass, command);
