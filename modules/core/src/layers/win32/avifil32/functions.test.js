@@ -48,3 +48,24 @@ test('calls on a file or stream nobody holds fail without writing past their out
     assert.equal(fns.AVIFileInit.handler(), 0);
     assert.equal(fns.AVIFileExit.handler(), 0);
 });
+
+test('the reading calls a film player links fail as for a stream nobody holds', ()=>{
+    const { fns, dword, memory } = make();
+    assert.equal(fns.AVIFileGetStream.handler([0, 32, 0x73646976, 0]), AVIERR_BADHANDLE);
+    assert.equal(dword(32), 0);
+    assert.equal(fns.AVIStreamRead.handler([0, 0, 1, 0, 0, 36, 40]), AVIERR_BADHANDLE);
+    assert.equal(dword(36), 0);
+    assert.equal(dword(40), 0);
+    assert.equal(memory[44], 0xcc, 'nothing past the counts is written');
+    assert.equal(fns.AVIStreamRead.argBytes, 28);
+    assert.equal(fns.AVIFileInfoA.handler([0, 0, 0]), AVIERR_BADHANDLE);
+    assert.equal(fns.AVIStreamInfoA.handler([0, 0, 0]), AVIERR_BADHANDLE);
+    assert.equal(fns.AVIStreamReadFormat.handler([0, 0, 0, 0]), AVIERR_BADHANDLE);
+    assert.equal(fns.AVIStreamStart.handler([0]), -1);
+    assert.equal(fns.AVIStreamLength.handler([0]), -1);
+    assert.equal(fns.AVIStreamGetFrameOpen.handler([0, 0]), 0);
+    assert.equal(fns.AVIStreamGetFrame.handler([0, 0]), 0);
+    assert.equal(fns.AVIStreamGetFrameClose.handler([0]), AVIERR_BADHANDLE);
+    assert.equal(fns.AVISaveOptions.handler([0, 0, 1, 0, 0]), 0);
+    assert.equal(fns.AVISaveOptions.argBytes, 20);
+});

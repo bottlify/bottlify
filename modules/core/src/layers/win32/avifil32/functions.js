@@ -77,6 +77,57 @@ export function createAvifilFunctions(host){
             return AVIERR_BADHANDLE;
         } },
 
+        /** HRESULT AVIFileGetStream(PAVIFILE pfile, PAVISTREAM *ppavi, DWORD fccType, LONG lParam) */
+        AVIFileGetStream: { argBytes: 16, handler: (/** @type {number[]} */ [, out])=>{
+            clear(out);
+            return AVIERR_BADHANDLE;
+        } },
+        /**
+         * HRESULT AVIFileInfoA(PAVIFILE pfile, AVIFILEINFOA *pfi, LONG lSize),
+         * HRESULT AVIStreamInfoA(PAVISTREAM pavi, AVISTREAMINFOA *psi, LONG lSize)
+         */
+        AVIFileInfoA: { argBytes: 12, handler: ()=>AVIERR_BADHANDLE },
+        AVIStreamInfoA: { argBytes: 12, handler: ()=>AVIERR_BADHANDLE },
+
+        /**
+         * HRESULT AVIStreamRead(PAVISTREAM pavi, LONG lStart, LONG lSamples,
+         *     LPVOID lpBuffer, LONG cbBuffer, LONG *plBytes, LONG *plSamples)
+         */
+        AVIStreamRead: { argBytes: 28, handler: (/** @type {number[]} */ args)=>{
+            clear(args[5]);
+            clear(args[6]);
+            return AVIERR_BADHANDLE;
+        } },
+        /** HRESULT AVIStreamReadFormat(PAVISTREAM pavi, LONG lPos, LPVOID lpFormat, LONG *lpcbFormat) */
+        AVIStreamReadFormat: { argBytes: 16, handler: ()=>AVIERR_BADHANDLE },
+
+        /**
+         * LONG AVIStreamStart(PAVISTREAM pavi), LONG AVIStreamLength(PAVISTREAM pavi)
+         *
+         * -1 is the documented answer when the stream cannot say.
+         */
+        AVIStreamStart: { argBytes: 4, handler: ()=>-1 },
+        AVIStreamLength: { argBytes: 4, handler: ()=>-1 },
+
+        /**
+         * PGETFRAME AVIStreamGetFrameOpen(PAVISTREAM pavi, LPBITMAPINFOHEADER lpbiWanted),
+         * LPVOID AVIStreamGetFrame(PGETFRAME pg, LONG lPos),
+         * HRESULT AVIStreamGetFrameClose(PGETFRAME pg)
+         *
+         * No decompressor to open one with: NULL, and NULL is not a frame object.
+         */
+        AVIStreamGetFrameOpen: { argBytes: 8, handler: ()=>0 },
+        AVIStreamGetFrame: { argBytes: 8, handler: ()=>0 },
+        AVIStreamGetFrameClose: { argBytes: 4, handler: ()=>AVIERR_BADHANDLE },
+
+        /**
+         * BOOL AVISaveOptions(HWND hwnd, UINT uiFlags, int nStreams,
+         *     PAVISTREAM *ppavi, LPAVICOMPRESSOPTIONS *plpOptions)
+         *
+         * FALSE, as when the person cancels the dialog: there is nothing to choose from.
+         */
+        AVISaveOptions: { argBytes: 20, handler: ()=>0 },
+
         /** HRESULT AVIStreamSetFormat(PAVISTREAM pavi, LONG lPos, LPVOID lpFormat, LONG cbFormat) */
         AVIStreamSetFormat: { argBytes: 16, handler: ()=>AVIERR_BADHANDLE },
 
