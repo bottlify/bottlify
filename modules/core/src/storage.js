@@ -250,6 +250,42 @@ const entryName = async path=>{
     return [...digest.subarray(0, 16)].map(byte=>byte.toString(16).padStart(2, '0')).join('');
 };
 
+/** What `entryName` makes: nothing else in a session's folder is one of its files. */
+const ENTRY_NAME = /^[0-9a-f]{32}$/;
+
+/**
+ * The files of a session's folder that are its entries, each as a File.
+ *
+ * Another holder of the same session -- a process the run started, the
+ * launcher's editor -- may be saving into the folder meanwhile, and a
+ * writable stream keeps its bytes in a swap file beside the entry until it
+ * closes: listed, and gone by the time it is read. Only entries' names are
+ * read, and one that went between the listing and the read is passed over.
+ *
+ * @param {any} folder
+ * @returns {AsyncGenerator<any>}
+ */
+async function* entryFiles(folder){
+    for await (const [name, handle] of folder.entries())
+    {
+        if (!ENTRY_NAME.test(name))
+        {
+            continue;
+        }
+        const file = await handle.getFile().catch((/** @type {any} */ e)=>{
+            if (e?.name === 'NotFoundError')
+            {
+                return null;
+            }
+            throw e;
+        });
+        if (file)
+        {
+            yield file;
+        }
+    }
+}
+
 /** @param {string} path @param {Uint8Array} bytes */
 const entryOf = (path, bytes)=>{
     const name = new TextEncoder().encode(path);
@@ -387,9 +423,8 @@ export function opfsSession(key, directory){
             }
             /** @type {{ path: string, size: number }[]} */
             const files = [];
-            for await (const [, handle] of folder.entries())
+            for await (const file of entryFiles(folder))
             {
-                const file = await handle.getFile();
                 const head = await headOf(file);
                 if (head && head.path !== REGISTRY_ENTRY)
                 {
@@ -440,6 +475,7 @@ export function opfsSession(key, directory){
             return writing;
         },
         async load(){
+            await writing;
             const dir = await open();
             const folder = await dir.getDirectoryHandle(folderName).catch(()=>null);
             if (!folder)
@@ -459,9 +495,9 @@ export function opfsSession(key, directory){
             /** @type {SessionFile[]} */
             const files = [];
             let registry = null;
-            for await (const [, handle] of folder.entries())
+            for await (const file of entryFiles(folder))
             {
-                const raw = new Uint8Array(await (await handle.getFile()).arrayBuffer());
+                const raw = new Uint8Array(await file.arrayBuffer());
                 const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
                 if (raw.length < 8 || view.getUint32(0, true) !== ENTRY_MAGIC)
                 {

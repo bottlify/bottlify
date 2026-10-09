@@ -137,6 +137,35 @@ test('a session in the origin file system is kept a file to each file and read b
         [['C:\\Dir\\Ünïcode.cfg', [1]], ['C:\\save.dat', [7, 7]]]);
 });
 
+test("a session read while another holder saves into it passes over a save's swap file",
+    async()=>{
+        // A process the run started reads the session while its parent saves:
+        // the parent's open stream keeps a swap file beside the entry, listed
+        // and gone by the time it is read, and it is not one of the session's
+        // files either way. Read, its absence stopped the run.
+        const disk = fakeDirectory();
+        const store = opfsSession('game', async()=>disk.root);
+        await store.save({ files: [{ path: 'C:\\a.cfg', bytes: new Uint8Array([5]) }],
+            registry: null });
+        const folder = disk.entries.get('game.files');
+        const [entry] = [...folder.here.keys()];
+        folder.here.set(`${entry}.crswap`, folder.here.get(entry));
+        const listed = folder.entries.bind(folder);
+        folder.entries = async function* (){
+            for await (const [name, handle] of listed())
+            {
+                yield [name, name.endsWith('.crswap')
+                    ? { getFile: async()=>{
+                        throw new DOMException('gone', 'NotFoundError');
+                    } }
+                    : handle];
+            }
+        };
+        const other = opfsSession('game', async()=>disk.root);
+        assert.deepEqual((await other.load()).files.map(file=>file.path), ['C:\\a.cfg']);
+        assert.deepEqual((await other.list()).map(file=>file.path), ['C:\\a.cfg']);
+    });
+
 test('a save after the first writes only what changed, and drops what was removed', async()=>{
     const disk = fakeDirectory();
     const store = opfsSession('game', async()=>disk.root);
