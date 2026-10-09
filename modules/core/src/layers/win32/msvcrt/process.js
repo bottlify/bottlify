@@ -9,12 +9,15 @@
  * program starts another one -- a command through the interpreter, and an
  * image with its arguments.
  *
- * Nothing here can start a process. There is no command interpreter on this
- * machine, so `system` answers as the runtime does when COMSPEC names
- * nothing it can run, and `_spawnl` -- whose `_P_WAIT` waits for an exit
- * code no child here ever reports -- fails the same way, its arguments
- * checked first as the runtime checks them. Both are documented failures a
- * C program tests for, said once as a divergence.
+ * There is no command interpreter on this machine, so `system` answers as
+ * the runtime does when COMSPEC names nothing it can run. `_spawnl` and
+ * `_spawnv` start the image as CreateProcess does (kernel32's spawner): the
+ * runtime's command line is the arguments joined by spaces, as it joins
+ * them, and the mode decides what the caller gets -- the process handle for
+ * `_P_NOWAIT`, zero for `_P_NOWAITO` and `_P_DETACH`, and for `_P_OVERLAY`
+ * the caller ends. `_P_WAIT` waits for the child's exit code, which this
+ * call cannot do while the caller is inside it: that mode fails as the
+ * runtime fails when the image is not there, said once as a divergence.
  */
 
 import { createRefusals } from '../common/refusal.js';
@@ -47,6 +50,11 @@ const SIGFPE = 8;
 
 /** _spawn's modes: _P_WAIT, _P_NOWAIT, _P_OVERLAY, _P_NOWAITO, _P_DETACH. */
 const SPAWN_MODES = 5;
+const P_WAIT = 0;
+const P_NOWAIT = 1;
+const P_OVERLAY = 2;
+/** The most argument strings read off a list with no NULL in reach. */
+const MOST_ARGUMENTS = 1024;
 
 /**
  * @typedef {Object} ProcessHost
@@ -57,6 +65,13 @@ const SPAWN_MODES = 5;
  * @property {() => any} [currentThread]
  * @property {(code: number) => any} [exitProcess]
  *           Ends the process, for the default action raise takes.
+ * @property {(named: string, line: string, flags: number) => any} [launch]
+ *           Starts an image as CreateProcess does (kernel32's spawner):
+ *           the record, with `handle` and `threadHandle` open on it, or null
+ *           when the image is not there.
+ * @property {(handle: number) => void} [closeHandle]
+ * @property {(address: number) => string} [readCString]
+ * @property {(address: number) => number} [readU32]
  */
 
 /**
@@ -79,12 +94,70 @@ export function createProcessFunctions(host){
         why: 'there is no command interpreter to run a command with',
     });
 
-    const noProcess = refuse('_spawnl', {
+    const noWait = refuse('_spawnl', {
         argBytes: 8 + VARIADIC_SLOTS * 4,
         answer: 0xffffffff,
         lastError: ENOENT,
-        why: 'no second process can be started from the runtime',
+        why: '_P_WAIT: a child\'s exit code is not waited for inside the call',
     });
+
+    /**
+     * Starts `name` with `args` in `mode`, the arguments already checked.
+     *
+     * @param {number} mode @param {number} name @param {number[]} args  the
+     *     string pointers, argv[0] first, up to the NULL
+     */
+    const spawn = (mode, name, args)=>{
+        const { launch, readCString } = host;
+        if (mode === P_WAIT || !launch || !readCString)
+        {
+            return noWait.handler();
+        }
+        const line = args.map(at=>readCString(at)).join(' ');
+        const made = launch(readCString(name), line, 0);
+        if (made === null)
+        {
+            host.errno(ENOENT);
+            return 0xffffffff;
+        }
+        host.closeHandle?.(made.threadHandle);
+        if (mode === P_OVERLAY)
+        {
+            host.closeHandle?.(made.handle);
+            if (!host.exitProcess)
+            {
+                throw new Error('_spawn: cannot end the process for _P_OVERLAY');
+            }
+            return host.exitProcess(0);
+        }
+        if (mode === P_NOWAIT)
+        {
+            return made.handle >>> 0;
+        }
+        host.closeHandle?.(made.handle);
+        return 0;
+    };
+
+    /**
+     * The pointers from `at` up to the first NULL, each read by `read`.
+     *
+     * @param {(index: number) => number} read
+     * @param {number} most
+     */
+    const untilNull = (read, most)=>{
+        /** @type {number[]} */
+        const found = [];
+        for (let index = 0; index < most; index++)
+        {
+            const value = read(index) >>> 0;
+            if (value === 0)
+            {
+                break;
+            }
+            found.push(value);
+        }
+        return found;
+    };
 
     return {
         /**
@@ -168,20 +241,19 @@ export function createProcessFunctions(host){
          * intptr_t _spawnl(int mode, const char *cmdname, const char *arg0, ..., NULL)
          *
          * A mode that is none, or no image named, is -1 and EINVAL, as the
-         * runtime checks them; anything else is -1 and ENOENT -- no process
-         * is started.
+         * runtime checks them; an image that is not there is -1 and ENOENT.
          */
         _spawnl: {
             convention: 'cdecl',
             argBytes: 8 + VARIADIC_SLOTS * 4,
             /** @param {number[]} args */
-            handler: ([mode, name])=>{
+            handler: ([mode, name, ...rest])=>{
                 if ((mode >>> 0) >= SPAWN_MODES || (name >>> 0) === 0)
                 {
                     host.errno(EINVAL);
                     return 0xffffffff;
                 }
-                return noProcess.handler();
+                return spawn(mode >>> 0, name, untilNull(index=>rest[index] ?? 0, rest.length));
             },
         },
 
@@ -194,13 +266,16 @@ export function createProcessFunctions(host){
             convention: 'cdecl',
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([mode, name])=>{
+            handler: ([mode, name, argv])=>{
                 if ((mode >>> 0) >= SPAWN_MODES || (name >>> 0) === 0)
                 {
                     host.errno(EINVAL);
                     return 0xffffffff;
                 }
-                return noProcess.handler();
+                const { readU32 } = host;
+                const list = (argv >>> 0) === 0 || !readU32 ? []
+                    : untilNull(index=>readU32((argv >>> 0) + index * 4), MOST_ARGUMENTS);
+                return spawn(mode >>> 0, name, list);
             },
         },
     };

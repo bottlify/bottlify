@@ -137,6 +137,9 @@ const RAND_MAX = 0x7fff;
  *           cannot park: `exit` once its handlers have run.
  *           Ends the process; answers with what the calling thread must return,
  *           since `exit` does not come back.
+ * @property {(named: string, line: string, flags: number) => any} [launch]
+ *           Starts an image as CreateProcess does, for _spawn (process.js).
+ * @property {(handle: number) => void} [closeHandle]
  * @property {(api: string, detail: string) => void} [divergence]
  *           Where a call answers plausibly but not the way real Windows does
  *           -- a locale we do not carry data for is the case here. Absent,
@@ -874,6 +877,11 @@ export function createMsvcrtFunctions(host){
         ...createCxxFunctions(host),
         ...createProcessFunctions({
             errno,
+            readCString: readString,
+            readU32: at=>new DataView(host.readMemory(at >>> 0, 4).slice().buffer)
+                .getUint32(0, true),
+            ...host.launch ? { launch: host.launch } : {},
+            ...host.closeHandle ? { closeHandle: host.closeHandle } : {},
             callGuest: host.callGuest,
             ...host.currentThread ? { currentThread: host.currentThread } : {},
             ...host.exitProcess ? { exitProcess: host.exitProcess } : {},
