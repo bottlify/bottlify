@@ -176,7 +176,12 @@ const D3DPTEXTURECAPS_MIPVOLUMEMAP = 0x00008000;
  * filter is sampled linearly and D3DTSS_MAXANISOTROPY is not read, so neither
  * it nor a maximum above one is claimed.
  */
-const FILTER_CAPS = 0x03030300;
+/** Point and linear for each filter, and anisotropic minification and magnification. */
+const FILTER_CAPS = 0x03030300 | 0x00000400 | 0x04000000;
+/** KEEP through DECR, every operation the pipeline maps; Direct3D 8 has no two-sided set. */
+const STENCIL_CAPS = 0xff;
+const D3DPRASTERCAPS_ZBIAS = 0x00004000;
+const D3DPRASTERCAPS_ANISOTROPY = 0x00020000;
 
 const D3DPTADDRESSCAPS_WRAP = 0x00000001;
 const D3DPTADDRESSCAPS_MIRROR = 0x00000002;
@@ -2453,11 +2458,12 @@ export function createDirect3D8Seam(
             PrimitiveMiscCaps: D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW
                 | D3DPMISCCAPS_CULLCCW | D3DPMISCCAPS_MASKZ
                 | D3DPMISCCAPS_COLORWRITEENABLE | D3DPMISCCAPS_BLENDOP,
-            // No depth bias, level bias or anisotropy: the renderer reads
-            // none of D3DRS_ZBIAS, D3DTSS_MIPMAPLODBIAS and MAXANISOTROPY.
+            // D3DRS_ZBIAS and MAXANISOTROPY are read; no level bias, which the
+            // sampler does not read.
             RasterCaps: D3DPRASTERCAPS_DITHER | D3DPRASTERCAPS_ZTEST
                 | D3DPRASTERCAPS_FOGVERTEX | D3DPRASTERCAPS_FOGTABLE | D3DPRASTERCAPS_FOGRANGE
-                | D3DPRASTERCAPS_WFOG | D3DPRASTERCAPS_ZFOG,
+                | D3DPRASTERCAPS_WFOG | D3DPRASTERCAPS_ZFOG | D3DPRASTERCAPS_ZBIAS
+                | D3DPRASTERCAPS_ANISOTROPY,
             // Every comparison a depth test can ask for; the backend maps them
             // one to one onto its own.
             ZCmpCaps: ALL_COMPARE_CAPS,
@@ -2483,10 +2489,8 @@ export function createDirect3D8Seam(
             MaxVolumeExtent: caps.maxVolumeExtent ?? 256,
             MaxTextureRepeat: caps.maxTextureRepeat ?? 8192,
             MaxTextureAspectRatio: caps.maxTextureAspectRatio ?? 4096,
-            MaxAnisotropy: caps.maxAnisotropy ?? 1,
-            // The pipeline has no stencil test, so no stencil operation is
-            // promised.
-            StencilCaps: 0,
+            MaxAnisotropy: caps.maxAnisotropy ?? 16,
+            StencilCaps: STENCIL_CAPS,
             FVFCaps: D3DFVFCAPS_PSIZE | 8,
             TextureOpCaps: TEXTURE_OP_CAPS,
             MaxTextureBlendStages: caps.maxTextureBlendStages ?? 8,

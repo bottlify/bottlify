@@ -1709,7 +1709,7 @@ test('the capabilities a device reports are answers, not gaps', ()=>{
     assert.equal(caps.DeviceType, D3DDEVTYPE.HAL, 'the first field, so the whole run starts right');
     assert.equal(caps.MaxPixelShaderValue, 1, 'a float');
     assert.equal(caps.MaxTextureAspectRatio, 4096);
-    assert.equal(caps.MaxAnisotropy, 1, 'the sampler filters no more than linearly');
+    assert.equal(caps.MaxAnisotropy, 16, 'WebGPU\'s ceiling for a sampler');
     assert.equal(caps.MaxTextureBlendStages, 8);
     assert.equal(caps.MaxSimultaneousTextures, 8);
     assert.equal(caps.MaxActiveLights, 8);
@@ -1787,12 +1787,12 @@ test('every capability claimed is one the renderer honours', ()=>{
         'no D3DCAPS2_FULLSCREENGAMMA: no display here shows a ramp');
     assert.equal(caps.TextureCaps & 0x00000080, 0,
         'no D3DPTEXTURECAPS_ALPHAPALETTE: no palettised format is made');
-    assert.equal(caps.RasterCaps & 0x00004000, 0, 'no D3DRS_ZBIAS, which nothing reads');
-    assert.equal(caps.RasterCaps & 0x00020000, 0, 'no anisotropy');
-    assert.equal(caps.TextureFilterCaps & (0x00000400 | 0x04000000), 0,
-        'no anisotropic minification or magnification');
+    assert.equal(caps.RasterCaps & 0x00004000, 0x00004000, 'D3DRS_ZBIAS, the pipeline\'s bias');
+    assert.equal(caps.RasterCaps & 0x00020000, 0x00020000, 'anisotropy, the sampler\'s');
+    assert.equal(caps.TextureFilterCaps & (0x00000400 | 0x04000000), 0x04000400,
+        'anisotropic minification and magnification');
     assert.equal(caps.RasterCaps & 0x00002000, 0, 'no D3DTSS_MIPMAPLODBIAS, which nothing reads');
-    assert.equal(caps.StencilCaps, 0, 'no stencil test in the pipeline');
+    assert.equal(caps.StencilCaps, 0xff, 'KEEP through DECR, the operations the pipeline maps');
     assert.equal(caps.MaxVertexBlendMatrices, 0, 'no vertex blending');
     assert.equal(caps.TextureAddressCaps & (0x00000008 | 0x00000020), 0,
         'no border colour and no mirror-once, which the sampler folds into others');

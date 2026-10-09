@@ -274,7 +274,8 @@ export const DEFAULT_CAPS = Object.freeze({
     maxTextureWidth: 4096,
     maxTextureHeight: 4096,
     maxVolumeExtent: 256,
-    maxAnisotropy: 1,
+    // WebGPU's ceiling for a sampler's maxAnisotropy.
+    maxAnisotropy: 16,
     maxPrimitiveCount: 0xffff,
     // Thirty-two-bit indices are read, so the highest index is not sixteen bits.
     maxVertexIndex: 0x00ffffff,
