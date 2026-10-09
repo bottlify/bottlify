@@ -2072,6 +2072,8 @@ export function createWin32Module(){
                         libraries['KERNEL32.dll'].K32EnumProcesses.handler(args) },
                     EmptyWorkingSet: { argBytes: 4, handler: (/** @type {number[]} */ args)=>
                         libraries['KERNEL32.dll'].K32EmptyWorkingSet.handler(args) },
+                    GetProcessMemoryInfo: { argBytes: 12, handler: (/** @type {number[]} */ args)=>
+                        libraries['KERNEL32.dll'].K32GetProcessMemoryInfo.handler(args) },
                 },
 
                 'CRYPT32.dll': createCrypt32Functions({

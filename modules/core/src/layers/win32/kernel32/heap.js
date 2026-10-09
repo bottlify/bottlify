@@ -175,6 +175,25 @@ const MEMORYSTATUSEX = Object.freeze({
     SIZE: 64,
 });
 
+/**
+ * PROCESS_MEMORY_COUNTERS(_EX): cb, the page-fault count, then SIZE_T figures
+ * -- peak and current working set, four pool quotas, current and peak page
+ * file use and, in the Ex form, the private bytes.
+ */
+const PROCESS_MEMORY_COUNTERS = Object.freeze({
+    cb: 0,
+    PageFaultCount: 4,
+    PeakWorkingSetSize: 8,
+    WorkingSetSize: 12,
+    PagefileUsage: 32,
+    PeakPagefileUsage: 36,
+    PrivateUsage: 40,
+    SIZE: 40,
+    SIZE_EX: 44,
+});
+
+const ERROR_BAD_LENGTH = 24;
+
 /** Marks the blocks VirtualAlloc handed out, so HeapFree cannot reach them. */
 const VIRTUAL = Symbol('virtual');
 
@@ -717,6 +736,8 @@ export function createHeapFunctions(host){
     // section, COM task memory -- comes from the same free list rather than from
     // arenas carved up in advance into sizes nobody can predict.
     const allocator = host.allocator ?? createHeapAllocator(host.arena);
+    /** The most the arena has had handed out at any GetProcessMemoryInfo. */
+    let peakUsed = 0;
 
     /** Handles are opaque to the guest: only ever compared, never dereferenced. */
     let nextHeap = 4;
@@ -2129,6 +2150,53 @@ export function createHeapFunctions(host){
                 view.setUint32(MEMORYSTATUS.dwAvailVirtual, free, true);
                 host.writeMemory(buffer >>> 0, data);
                 return 0;
+            },
+        },
+
+        /**
+         * BOOL K32GetProcessMemoryInfo(HANDLE Process,
+         *     PPROCESS_MEMORY_COUNTERS ppsmemCounters, DWORD cb),
+         * psapi's GetProcessMemoryInfo.
+         *
+         * The bytes the arena has handed out are the working set, the page
+         * file use and the private bytes alike: nothing is paged out or
+         * shared. The peak is the most seen by any call so far. A buffer
+         * smaller than the plain structure is refused with ERROR_BAD_LENGTH;
+         * one large enough for the Ex form gets PrivateUsage too, and cb says
+         * which form was written. The only address space is the running one.
+         */
+        K32GetProcessMemoryInfo: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, buffer, cb])=>{
+                if ((cb >>> 0) < PROCESS_MEMORY_COUNTERS.SIZE)
+                {
+                    host.setLastError(ERROR_BAD_LENGTH);
+                    return 0;
+                }
+                if (buffer === 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const size = (cb >>> 0) >= PROCESS_MEMORY_COUNTERS.SIZE_EX
+                    ? PROCESS_MEMORY_COUNTERS.SIZE_EX
+                    : PROCESS_MEMORY_COUNTERS.SIZE;
+                const used = Math.max(0, host.arena.size - allocator.diagnostics().free);
+                peakUsed = Math.max(peakUsed, used);
+                const data = new Uint8Array(size);
+                const view = new DataView(data.buffer);
+                view.setUint32(PROCESS_MEMORY_COUNTERS.cb, size, true);
+                view.setUint32(PROCESS_MEMORY_COUNTERS.PeakWorkingSetSize, peakUsed, true);
+                view.setUint32(PROCESS_MEMORY_COUNTERS.WorkingSetSize, used, true);
+                view.setUint32(PROCESS_MEMORY_COUNTERS.PagefileUsage, used, true);
+                view.setUint32(PROCESS_MEMORY_COUNTERS.PeakPagefileUsage, peakUsed, true);
+                if (size === PROCESS_MEMORY_COUNTERS.SIZE_EX)
+                {
+                    view.setUint32(PROCESS_MEMORY_COUNTERS.PrivateUsage, used, true);
+                }
+                host.writeMemory(buffer >>> 0, data);
+                return 1;
             },
         },
 

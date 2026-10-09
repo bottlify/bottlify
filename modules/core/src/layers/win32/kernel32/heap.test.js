@@ -931,6 +931,34 @@ test('GlobalMemoryStatusEx reports the arena in 64-bit fields and insists on its
     assert.equal(view.getBigUint64(at + 56, true), 0n, 'no extended virtual');
 });
 
+test('GetProcessMemoryInfo reports what the arena handed out, in the form cb asks for', ()=>{
+    /** @type {number[]} */
+    const errors = [];
+    const host = { ...fakeHost(), setLastError: (/** @type {number} */ e)=>errors.push(e) };
+    const fns = createHeapFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    const at = 0x100;
+    assert.equal(fns.K32GetProcessMemoryInfo.argBytes, 12);
+
+    assert.equal(fns.K32GetProcessMemoryInfo.handler([-1, at, 36]), 0, 'too small');
+    assert.deepEqual(errors, [24], 'ERROR_BAD_LENGTH');
+
+    const heap = fns.GetProcessHeap.handler();
+    assert.notEqual(fns.HeapAlloc.handler([heap, 0, 0x1000]), 0);
+    view.setUint32(at + 40, 0xdeadbeef, true);
+    assert.equal(fns.K32GetProcessMemoryInfo.handler([-1, at, 40]), 1);
+    assert.equal(view.getUint32(at, true), 40);
+    const working = view.getUint32(at + 12, true);
+    assert.ok(working >= 0x1000 && working <= ARENA.size, 'the working set covers the allocation');
+    assert.ok(view.getUint32(at + 8, true) >= working, 'the peak covers the current figure');
+    assert.equal(view.getUint32(at + 32, true), working, 'page file use is the same bytes');
+    assert.equal(view.getUint32(at + 40, true), 0xdeadbeef, 'the plain form stops at 40 bytes');
+
+    assert.equal(fns.K32GetProcessMemoryInfo.handler([-1, at, 44]), 1);
+    assert.equal(view.getUint32(at, true), 44);
+    assert.equal(view.getUint32(at + 40, true), view.getUint32(at + 12, true), 'private bytes');
+});
+
 test('a refused allocation says what was asked and what was left', ()=>{
     // A program told it has run out of memory says so in its own words and
     // exits; the report is the only account of how much it asked for.
