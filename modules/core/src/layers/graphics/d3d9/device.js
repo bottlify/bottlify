@@ -2198,9 +2198,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * state is kept but for the targets, the viewport's rectangle and the
          * scissor, which take the new back buffer.
          *
+         * A Reset played from a recording (`asRecorded`) has already been
+         * answered to the program by the recording device, which counts what
+         * the program holds: one this side still counts held is a reference
+         * of its own the program never took, said once rather than refused.
+         *
          * @param {import("./validity.js").PresentParameters} [next]
+         * @param {boolean} [asRecorded]
          */
-        Reset(next){
+        Reset(next, asRecorded = false){
             if (deviceState === DEVICE_STATE.LOST)
             {
                 return lostAnswer();
@@ -2213,7 +2219,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                     return hr;
                 }
             }
-            if (!extended && defaultPoolResourcesHeld())
+            if (!extended && defaultPoolResourcesHeld() && asRecorded)
+            {
+                report('reset-held', 'a Reset the program was answered D3D_OK went ahead here'
+                    + ' with a default-pool resource or back buffer held that the program does'
+                    + ' not hold');
+            }
+            else if (!extended && defaultPoolResourcesHeld())
             {
                 deviceState = DEVICE_STATE.NOT_RESET;
                 return D3DERR_INVALIDCALL;

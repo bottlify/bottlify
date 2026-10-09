@@ -1810,9 +1810,16 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * so the code alone does not say which happened and
          * TestCooperativeLevel does not distinguish them either.
          *
+         * A Reset played from a recording (`asRecorded`) has already been
+         * answered to the program by the recording device, which counts what
+         * the program holds: one this side still counts held is a reference
+         * of its own the program never took, said once rather than refused.
+         * A device that is lost is lost on both sides alike.
+         *
          * @param {import('./validity.js').PresentParameters} [next]
+         * @param {boolean} [asRecorded]
          */
-        Reset(next){
+        Reset(next, asRecorded = false){
             if (deviceState === DEVICE_STATE.LOST)
             {
                 return D3DERR_DEVICELOST;
@@ -1825,7 +1832,14 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                     return hr;
                 }
             }
-            if (liveDefaultPoolResources > 0 || liveImplicitReferences > 0)
+            if ((liveDefaultPoolResources > 0 || liveImplicitReferences > 0) && asRecorded)
+            {
+                reportOnce('reset-held', 'a Reset the program was answered D3D_OK went ahead'
+                    + ` here holding ${liveDefaultPoolResources} default-pool resource(s) and`
+                    + ` ${liveImplicitReferences} reference(s) on the device's own surfaces`
+                    + ' that the program does not hold');
+            }
+            else if (liveDefaultPoolResources > 0 || liveImplicitReferences > 0)
             {
                 deviceState = DEVICE_STATE.NOT_RESET;
                 return D3DERR_DEVICELOST;
