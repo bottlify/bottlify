@@ -87,6 +87,7 @@ Everything below crosses to the engine's worker by `postMessage`, so every value
 | `sampling` | boolean | `true` | The cpu layer's guest sampler. |
 | `device.*` | | | `dumpDraws`, `dumpEvery`, `maxDraws`, `skipTexture`, `probeTexture`, `keepImages`, `fog`, `mips`: per-draw dumps and one-variable-off runs of the graphics layer. |
 | `pacing` | `'page'` \| `'event'` | `'page'` | How the run loop waits in a worker: a short look every turn, or sleep until something is due. |
+| `pendingYieldMs` | number | `1` | How often, in milliseconds, the run loop gives its thread to the event loop to hear an outstanding host answer (a call parked on the device, a range in flight) while other guest threads still have work. A turn that ran nothing looks at once. Lower hears answers sooner at the cost of more trips round the event loop. |
 
 ## The controller
 
@@ -108,6 +109,7 @@ Everything below crosses to the engine's worker by `postMessage`, so every value
 | `attachLog(sink)`, `detachLog(sink)` | What the program writes to its standard handles, as `(handle, text)`. |
 | `diagnostics(layer?)` | Every layer's diagnostics, or one layer's. A request to the engine thread, not for polling. Beside the layers', a `windows` table holds the run's windows as every process tells them (`roadmap/v2/windows.md`): the top-level windows of every process, the topmost first, each with its process, title, class, visibility and rectangle, and the run's foreground and captured windows. |
 | `report()` | Everything the engine can say about the run in one answer: every layer's diagnostics, the phase profile and recent frames, `trace()`, the threads, the guest's time by module, and the guest's code (`hotCode`, 4 KiB pages as base64) around its most-sampled addresses. The app layer's table lists the divergences said so far (`divergences`, the first 128); the devices drawing in the graphics worker are asked for their own counters and waited for, up to a second, so the graphics table carries them. A request, not for polling. |
+| `translationPool()` | The run's pool of translation workers as it stands (`cork.pool`): how many workers it holds and how many are idle, how many work for each process, how many it opened and lent, the joins and leaves its driver decided, and its journal of the last decisions (`start`, `join`, `leave`, `exit`, each with the process, the time and the workers it had after). `null` where the run has none. |
 | `trace()`, `traffic()` | The last host calls as text; messages counted by kind. |
 | `log.*` | The journal and counters: `recent`, `drain`, `setLevel`, `setDefaultLevel`, `areas`, `profile`, `frames`, `counters`, `table`, `threads`, `guestByModule`, `stats`, `memory`. |
 | `guestProfile.*` | Where the guest ran, by address (`available`, `start`, `read`, `stop`). |

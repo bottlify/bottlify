@@ -746,7 +746,8 @@ export function createSeh(host){
          * catching its own divide by zero -- is ordinary, and halting instead
          * loses every one of them.
          *
-         * @param {{ vector: number, eip: number, errorCode: number | null }} fault
+         * @param {{ vector: number, eip: number, errorCode: number | null,
+         *     address?: number }} fault
          * @param {Record<string, number>} registers  The faulting code's, as
          *        the context shows them.
          * @returns {Promise<{ handled: boolean, registers?: Record<string, number> }>}
@@ -767,10 +768,12 @@ export function createSeh(host){
                 return { handled: false };
             }
             // An access violation says whether it was a read or a write, and
-            // what address, because a handler is allowed to read them. A
+            // what address, because a handler is allowed to read them -- one
+            // that commits the page it was refused and goes on reads both. A
             // protection fault has no address to give, and says so with -1.
             const parameters = code === STATUS.ACCESS_VIOLATION
-                ? [(fault.errorCode ?? 0) & 2 ? 1 : 0, fault.vector === 13 ? 0xffffffff : 0]
+                ? [(fault.errorCode ?? 0) & 2 ? 1 : 0,
+                    fault.vector === 13 ? 0xffffffff : (fault.address ?? 0) >>> 0]
                 : [];
             const result = await dispatch({ code, address: registers.eip, parameters }, registers);
             if (result.handled)

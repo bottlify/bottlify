@@ -28,9 +28,10 @@ import { EMPTY } from '../wasm/encoder.js';
 import { I32, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { CallStack, Exit, Local, STATE_PARAMS } from './region.js';
 import { checkAccess, emitStaleExit, looseStackStore, noteStore, stackAccess } from './memory.js';
-import { Tables } from '../runtime/layout.js';
+import { pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { emitSimd } from './simd.js';
+import { emitLocked, isLocked } from './locked.js';
 import { emitX87, isX87, topAfterCall, x87AfterCall, x87Normalise, x87Reloaded } from './x87.js';
 
 /** i64 opcodes. */
@@ -287,6 +288,10 @@ export function emitInstruction(e, instruction, flagsLive){
         // 16-bit addressing outside `lea` is rare in 32-bit code and not worth
         // a wrapped address path here.
         return false;
+    }
+    if (e.context.atomic === true && isLocked(instruction))
+    {
+        return emitLocked(e, instruction, flagsLive);
     }
     switch (op)
     {
@@ -2181,7 +2186,7 @@ const BULK_UNIT_SHIFT = 4;
 function bulkTurn(e, size){
     const { b } = e;
     const elementShift = Math.log2(size);
-    const table = e.layout.tables + Tables.PAGE_FLAGS;
+    const table = pageFlagsAt(e.layout);
     // t0 = min(t0, the value on the stack), unsigned.
     const minInto = ()=>{
         b.localSet(Local.t1);

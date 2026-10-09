@@ -1,122 +1,122 @@
 # `@bottlify/networking`
 
-A browser tab cannot open a TCP connection or bind a UDP port. It can open a
-WebSocket, and nothing else. So a guest program that wants a socket asks a relay,
-and the relay does the work with its own sockets and forwards the bytes back.
+TCP and UDP for a browser tab, over one WebSocket.
 
-This package is both halves of that: the transport a runtime plugs in, and the
-server it talks to.
+A page cannot open a TCP connection or bind a UDP port; it can open a WebSocket. This package is
+both ends of the way around that: a **relay** server (Node, no dependencies) that holds real
+sockets, and a **client** that gives the page sockets through it — streams, datagrams, listening
+ports, name lookups. Pages that join the same **room** share a private network, `10.86.0.0/16`,
+and reach each other directly; anything outside the room is a real connection the relay opens,
+only to the hosts you allow.
+
+It is how `@bottlify/core` gives a Windows program Winsock, and it works without it: a game, an
+emulator or a tool of your own can use the same transport.
 
 ```
-guest program                 @bottlify/core                @bottlify/networking
--------------                 --------------                --------------------
-connect() ------------------> wsock32 --------------------> client transport
-                              socket registry                     |
-                              (local addresses served here)       | wss
-                                                                  v
-                                                            relay --> real socket
-                                                                  --> another peer
+page A ── wss ──┐                ┌── page B        (same room: 10.86.0.1 ↔ 10.86.0.2)
+                ├── relay ───────┤
+page C ── wss ──┘                └── TCP/UDP to an allowed host on the internet
 ```
 
-## The seam
-
-`@bottlify/core` never imports this package. Its Winsock layer defines a
-transport contract in `layers/win32/wsock32/transport.js` and reaches the network
-only through whatever the embedder passed as `win32.network`. Everything in that
-contract is optional; what is not supplied behaves as though there were no
-network, which is the default and is what a single-tab run gets.
-
-So an embedder has three choices, and they cost the same to wire:
-
-```js
-// Nothing outside this runtime. Loopback still works; this is the default.
-createApp({ win32: {} });
-
-// Ours.
-import { connectRelay } from '@bottlify/networking';
-createApp({ win32: { network: await connectRelay({ url, room: 'my-game' }) } });
-
-// Yours. Implement as much of the contract as you have; the rest degrades.
-createApp({ win32: { network: { sendTo, listen, attach } } });
-```
-
-## Two destinations, one address space
-
-The relay puts every peer that named the same room onto a private network,
-`10.86.0.0/16`, and gives each an address on it.
-
-- **Anything aimed at a room address** never leaves the relay process: it is
-  handed to that peer. A guest's broadcast reaches the room and stops there, so
-  two unrelated sessions cannot discover each other's games.
-- **Anything else** is a real socket the relay opens on the peer's behalf, and
-  it is refused unless the policy allows it.
-
-The default policy refuses everything outside the room. An unconfigured relay is
-therefore a private LAN and not an open proxy — which is the only safe thing for
-a service whose whole purpose is to be reachable.
-
-## Running one
+## Run a relay
 
 ```sh
-node src/server/cli.js --port 8787
+npm run relay -w @bottlify/networking -- --port 8787
+# or, from modules/networking:
 node src/server/cli.js --port 8787 --allow logon.example.com --allow '*.example.net'
 node src/server/cli.js --port 8787 --origin https://play.example.com
 ```
 
-`--allow` opens named hosts to the outbound bridge, `*.` opening a suffix.
-`--origin`, if given at all, restricts which pages may open a connection; it is
-checked at the handshake, because a browser will open a WebSocket cross-origin
-without asking anyone.
+| Option | Default | What it does |
+| --- | --- | --- |
+| `--port` | 8787 | The port it listens on. |
+| `--host` | `0.0.0.0` | The address it binds. |
+| `--allow host` | nothing | A host the relay may open real connections to; `*.example.net` allows a suffix. Repeat for more. |
+| `--origin url` | any | Only pages from these origins may connect (checked at the handshake). Repeat for more. |
 
-Terminate TLS in front of the relay. A page served over HTTPS may only open a
-`wss://` connection, so this is not optional in a deployment.
-
-For anything beyond the two flags, embed it:
+With no `--allow`, a relay is a private LAN per room and never an open proxy. A page served over
+HTTPS may only open `wss://`, so in a deployment put TLS in front of it — or attach it to the
+HTTPS server you already have:
 
 ```js
 import { createRelayServer } from '@bottlify/networking/server';
 
-const server = createRelayServer({
-    port: 8787,
-    policy: ({ room, peer, protocol, host, port }) => ...,
-});
-await server.listen();
+const relay = createRelayServer({ server: httpsServer, path: '/relay',
+    policy: ({ room, peer, protocol, host, port })=>host === 'logon.example.com' });
+httpsServer.listen(443, ()=>relay.listen());
 ```
 
-Or ride on a server that already exists -- the one serving the page and holding
-its certificate, since a page over HTTPS may only open `wss://`:
+`policy` decides every outbound connection; it sees the host *name* when the page looked it up
+through the relay, so an allowlist reads the way it was meant. `createRelayServer({ port })` runs
+standalone.
+
+## Give a Bottlify program the network
 
 ```js
-const relay = createRelayServer({ server: httpsServer, path: '/relay', policy });
-httpsServer.listen(443, async () => { await relay.listen(); });
+const app = await createApp({
+    ...options,
+    network: {
+        module: '/networking/src/client/index.js',  // where the page serves this package's client
+        url: 'wss://play.example.com/relay',
+        room: 'my-game-lobby',                      // everyone in it is on one LAN
+    },
+});
 ```
 
-`server` and `path` attach the relay's upgrade handling to that server at one
-path and leave listening and closing to its owner; any other upgrade on the
-server is left alone.
+The engine runs in a worker, so it is given the client's URL and connects from there. Without
+`network`, Winsock has a loopback adapter only. A program's broadcast reaches every peer of its
+room and stops there, so two sessions in different rooms never find each other.
 
-The policy sees a host *name* rather than an address whenever the guest reached
-it through the relay's resolver, so an allowlist can be written in the terms it
-was meant in.
+## Use it on your own
+
+```js
+import { connectRelay } from '@bottlify/networking';
+
+const net = await connectRelay({ url: 'wss://relay.example.com', room: 'demo' });
+net.localAddress();                 // 10.86.0.x in host byte order, assigned on joining
+
+net.attach({
+    datagram: (port, from, bytes)=>console.log(port, from, new TextDecoder().decode(bytes)),
+    accepted: (port, streamId, remote)=>{},     // a peer connected to a port you listen on
+    received: (streamId, bytes)=>{},            // bytes on a stream
+    disconnected: (streamId, error)=>{},
+    lost: error=>{},                            // the relay link dropped: every socket is gone
+});
+
+// UDP: bind a port, send to a peer of the room.
+net.listen(false, 5000);
+net.sendTo({ host: net.localAddress(), port: 5000 }, { host: peerAddress, port: 5000 }, bytes);
+
+// TCP: to a peer, or to an allowed host outside.
+const [host] = await net.resolve('logon.example.com');
+const { error } = await net.connect(1, { host, port: 6112 });   // 1: a stream id you choose
+net.send(1, bytes);
+net.disconnect(1, false);
+```
+
+Addresses are `{ host, port }`, the host a 32-bit number in host byte order. `listen(true, port)`
+accepts streams. A dropped link is reported through `lost`, never repaired silently: reconnecting
+would mean a new address and an empty room. Node 22 and later has `WebSocket` built in, so the
+client runs there too.
 
 ## The wire
 
-`@bottlify/networking/protocol` is imported by both halves and depends on
-nothing, so the two cannot drift apart. Control messages — joining, the roster —
-are JSON text frames. Everything else is a binary frame with a twenty-byte
-header the relay routes on without reading the payload, so one guest `send()` is
-one frame and a datagram's boundaries survive the trip.
+`@bottlify/networking/protocol` is shared by both halves, so they cannot drift apart. Joining and
+the roster are JSON text frames; everything else is a binary frame with a twenty-byte header the
+relay routes without reading the payload, so one `send` is one frame and a datagram keeps its
+boundaries. The RFC 6455 server side is in `src/server/websocket.js`, about a hundred lines.
 
-The whole package has no runtime dependencies, server included: the RFC 6455
-server side it needs is about a hundred lines and is in `src/server/websocket.js`.
+Inside `@bottlify/core` the seam is the transport contract in
+`modules/core/src/layers/win32/wsock32/transport.js`: every part of it is optional, and what is
+missing behaves as no network. `createApp({ win32: { network: transport } })` takes any object
+implementing it, when the engine runs on the page's own thread (`host: 'thread'`).
 
 ## Tests
 
 ```sh
-npm test --workspace @bottlify/networking
+npm test -w @bottlify/networking
 ```
 
-Frame and control codecs; the relay's routing, driven directly through fake
-peers; the WebSocket server against Node's own `WebSocket` client, including
-fragmented and interleaved frames; the client transport, including what happens
-to a dial, a name lookup and an open stream when the link drops underneath them.
+Frame and control codecs; the relay's routing through fake peers; the WebSocket server against
+Node's own client, fragmented and interleaved frames included; the client transport, including what
+happens to a dial, a lookup and an open stream when the link drops underneath them.

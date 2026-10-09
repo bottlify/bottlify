@@ -53,6 +53,7 @@
  *     signal?: SharedArrayBuffer,
  *     inbound?: import('../system/ring.js').RingMemory,
  *     pacing?: 'page' | 'event',
+ *     pendingYieldMs?: number,
  *     network?: { module: string, url: string, room: string, token?: string },
  *     files?: { path: string, bytes: Uint8Array }[],
  *     discs?: { image: Blob | Uint8Array, letter?: string }[],

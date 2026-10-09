@@ -20,6 +20,7 @@
  *                                  [--dump-draws] [--skip-texture tN] [--no-video] [--no-hooks]
  *                                  [--keep-images N,M] [--watch-import LIB.dll[#ord+ord]]
  *                                  [--click x,y[,after]] [--key Code[,after]] [--coi]
+ *                                  [--mode NAME] [--executors N] [--cork-config JSON]
  *                                  [--command-line STRING] [--windows NAME]
  *                                  [--file HOST=GUEST] [--save-files]
  *                                  [--user-data-dir DIR] [--port N] [--store local] [--prefetch]
@@ -54,6 +55,7 @@ import { openBundle } from '../btl.mjs';
 import { placementOf } from '../../modules/installer/src/prefix.js';
 import { windowsVersion } from '../../modules/core/src/layers/win32/kernel32/versions.js';
 import { disassemble } from '../../modules/core/src/layers/win32/d3dx9/d3d9-machine.fixture.js';
+import { modeOf } from '../play/modes.js';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 
@@ -148,7 +150,11 @@ function parse(argv){
         const at = argv.indexOf(flag);
         return at === -1 ? fallback : Number(argv[at + 1]);
     };
+    // The run mode by name, the player's own (`tools/play/modes.js`); an
+    // explicit --executors or --cork-config goes over it.
+    const mode = modeOf(argv.includes('--mode') ? argv[argv.indexOf('--mode') + 1] : null);
     return {
+        mode: mode.name,
         id,
         // A run given a time is bounded by that time: the turn cap alone ended a
         // loading title's run within seconds of the minutes it was given.
@@ -256,7 +262,8 @@ function parse(argv){
         jsFlags: argv.includes('--js-flags') ? argv[argv.indexOf('--js-flags') + 1] : undefined,
         // The translator's own settings as JSON ('{"countTransfers":true}').
         corkConfig: argv.includes('--cork-config')
-            ? JSON.parse(argv[argv.indexOf('--cork-config') + 1]) : undefined,
+            ? { ...mode.cork, ...JSON.parse(argv[argv.indexOf('--cork-config') + 1]) }
+            : mode.cork,
         // The display the program is told it has, as `WxH`. The launcher
         // names the person's own screen, which is rarely a size a program of
         // this era lists, so what a title does on one is a different path.
@@ -479,6 +486,9 @@ function parse(argv){
         quantum: argv.includes('--profile')
             ? number('--profile', 2000) || 2000
             : 0,
+        // Executors of the program's process (`createApp`'s `executors`): past
+        // one, threads that are ready together run at once.
+        executors: number('--executors', mode.executors ?? 0),
         // The engine in a worker, with the page's canvas transferred to it;
         // otherwise on the page's own thread.
         worker: argv.includes('--worker'),
@@ -788,6 +798,17 @@ function describe(result, context, calls, symbols){
 
     say(`${context.title} ${context.version} -- ${context.entry}`);
     say(`  entry image: ${context.executableBytes} bytes`);
+    say(`  mode: ${context.mode}`);
+    const executors = result.executors;
+    if (executors?.refused)
+    {
+        say(`  executors: REFUSED -- ${executors.refused}`);
+    }
+    else if (executors?.others > 0)
+    {
+        say(`  executors: ${executors.others + 1}, ${executors.slices ?? 'not measured'} slices`
+            + ` on the others, at most ${executors.mostAtOnce ?? 'not measured'} threads at once`);
+    }
     say(`  adapter: ${JSON.stringify(result.adapter)}`);
     say(`  ran for ${result.elapsedMs}ms, ${result.instructions} guest instructions`);
     say(`stopped: ${result.stopped ?? result.error ?? 'no answer'}`);
@@ -1076,6 +1097,16 @@ function describe(result, context, calls, symbols){
         for (const [name, count] of result.bridge.hot)
         {
             say(`    ${String(count).padStart(5)}  ${name}`);
+        }
+        say('');
+    }
+
+    if ((result.bridge?.byFunction ?? []).length > 0)
+    {
+        say('  host functions since the start, by host time (name, calls, ms):');
+        for (const line of result.bridge.byFunction)
+        {
+            say(`    ${line}`);
         }
         say('');
     }
@@ -1429,6 +1460,7 @@ export async function game(options){
             cork: { config: { timings: true, ...options.corkConfig } },
             screen: options.screen,
             quantum: options.quantum,
+            executors: options.executors,
             log: Boolean(options.log),
             logLines: options.logLines,
             video: options.video,
@@ -1850,6 +1882,8 @@ the run as it stands: ${path}`;
             version: manifest.version,
             entry: manifest.entry,
             executableBytes: executable.length,
+            mode: `${options.mode}, ${options.executors || 1} executor(s), cork`
+                + ` ${JSON.stringify(options.corkConfig ?? {})}`,
         }, options.calls, symbols);
         writeFileSync(reportPath, text);
         // The store's keys put and missed (`traceStore` in --cork-config), for

@@ -302,3 +302,39 @@ test('a point list is drawn as quads: triangles, never culled, a point an instan
         /** @type {any} */ ({ ...baseState(), points: { sprite, scale: false } }));
     assert.notEqual(keyed(true), keyed(false));
 });
+
+/** A stencil state with every field set, so a test can change exactly one. */
+const stencil = (over = {})=>({
+    func: 6, fail: 1, zfail: 1, pass: 3, ccwFunc: 6, ccwFail: 1, ccwZfail: 1, ccwPass: 3,
+    readMask: 0xff, writeMask: 0xff, ref: 0xff, ...over,
+});
+
+test('every stencil field the descriptor reads is one the key folds, the reference none', ()=>{
+    // The reference is set on the pass, so two draws that differ in it alone share a pipeline.
+    const base = { ...baseState(), depthFormat: 'depth24plus-stencil8', stencil: stencil() };
+    const original = pipelineKey(base);
+    assert.notEqual(pipelineKey({ ...base, stencil: undefined }), original);
+    const changes = { func: 3, fail: 2, zfail: 4, pass: 1, ccwFunc: 8, ccwFail: 5, ccwZfail: 7,
+        ccwPass: 6, readMask: 0x0f, writeMask: 0 };
+    for (const [field, value] of Object.entries(changes))
+    {
+        assert.notEqual(pipelineKey({ ...base, stencil: stencil({ [field]: value }) }), original,
+            `changing stencil ${field} left the key alone`);
+    }
+    assert.equal(pipelineKey({ ...base, stencil: stencil({ ref: 1 }) }), original);
+});
+
+test('the stencil goes to the faces as Direct3D winds them, the masks to eight bits', ()=>{
+    const descriptor = pipelineDescriptor({ ...baseState(), depthFormat: 'depth24plus-stencil8',
+        stencil: stencil({ ccwFunc: 8, ccwPass: 7, readMask: 0xffffffff, writeMask: 0x1ff }) },
+    null);
+    // D3DCULL_CW culls WebGPU's back faces: the clockwise states are the back's.
+    assert.deepEqual(descriptor.depthStencil.stencilBack,
+        { compare: 'not-equal', failOp: 'keep', depthFailOp: 'keep', passOp: 'replace' });
+    assert.deepEqual(descriptor.depthStencil.stencilFront,
+        { compare: 'always', failOp: 'keep', depthFailOp: 'keep', passOp: 'increment-wrap' });
+    assert.equal(descriptor.depthStencil.stencilReadMask, 0xff);
+    assert.equal(descriptor.depthStencil.stencilWriteMask, 0xff);
+    assert.equal(pipelineDescriptor(baseState(), null).depthStencil.stencilFront, undefined,
+        'no stencil state, no stencil test');
+});

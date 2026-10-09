@@ -163,3 +163,14 @@ test('flushing the console input succeeds: the queue the reads find empty stays 
     assert.equal(fns.FlushConsoleInputBuffer.handler([3]), 1);
     assert.deepEqual(errors, []);
 });
+
+test('a console title is a console\'s, and there is none to have one', ()=>{
+    const { fns, errors } = setup();
+    assert.equal(fns.SetConsoleTitleA.handler(), 0);
+    assert.equal(fns.SetConsoleTitleW.handler(), 0);
+    assert.equal(fns.GetConsoleTitleA.handler(), 0, 'no characters copied');
+    assert.equal(fns.GetConsoleTitleW.handler(), 0);
+    assert.deepEqual(errors, [6, 6, 6, 6], 'ERROR_INVALID_HANDLE, as GetConsoleMode answers');
+    assert.equal(fns.SetConsoleTitleA.argBytes, 4);
+    assert.equal(fns.GetConsoleTitleA.argBytes, 8);
+});

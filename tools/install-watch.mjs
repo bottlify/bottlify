@@ -52,7 +52,8 @@
  * files a bottle would get;
  * `--collect-to DIR` also writes it there, a directory make-btl packs.
  *
- * `--bundle ID` runs an installed program instead: the bundle in
+ * `--bundle ID` runs an installed program instead, `--file HOST=GUEST` putting
+ * a file of this disk on its volume first: the bundle in
  * `bundles/ID`, mounted where its installation put it, started at its entry
  * or at `--which`, a path in the bundle -- a launcher's dialog driven by the
  * same keys, clicks and pictures as a wizard's. `--attended` leaves a message
@@ -134,10 +135,16 @@ const mountBundle = async id=>{
     await reader.close();
     const handle = await open(path, 'r');
     const placement = placementOf({ ...manifest, entry: wanted });
+    // `--file HOST=GUEST`: a file of this disk put on the session's volume
+    // before the program starts -- a saved game to load, a settings file.
+    const seeded = all('--file').map(pair=>{
+        const at = pair.indexOf('=');
+        return { path: pair.slice(at + 1), bytes: new Uint8Array(readFileSync(pair.slice(0, at))) };
+    });
     return {
         executable,
         imagePath: placement.imagePath,
-        storage: null,
+        storage: seeded.length > 0 ? { files: seeded } : null,
         bundle: {
             /** @param {number} offset @param {number} length */
             fetch: async(offset, length)=>{
@@ -418,7 +425,7 @@ if (pressing.length > 0)
                 lastButton = button.hwnd;
                 looksSince = 0;
                 step += anyOrder ? 0 : 1;
-                app.input.send({ kind: 'pointerMove', x, y });
+                app.input.send({ kind: 'pointerMove', x, y, dx: 0, dy: 0 });
                 app.input.send({ kind: 'pointerButton', button: 'left', down: true });
                 setTimeout(()=>app.input.send({ kind: 'pointerButton', button: 'left',
                     down: false }), 150);
@@ -437,7 +444,9 @@ for (const { what, at } of all('--click').map(timed))
     const [x, y] = what.split(',').map(Number);
     setTimeout(()=>{
         console.log(seconds(), 'CLICK', x, y);
-        app.input.send({ kind: 'pointerMove', x, y });
+        // No movement of its own: a program reading the mouse through DirectInput
+        // would otherwise see a jump from wherever the pointer last was.
+        app.input.send({ kind: 'pointerMove', x, y, dx: 0, dy: 0 });
         app.input.send({ kind: 'pointerButton', button: 'left', down: true });
         setTimeout(()=>app.input.send({ kind: 'pointerButton', button: 'left', down: false }),
             150);

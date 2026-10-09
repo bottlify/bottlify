@@ -100,3 +100,30 @@ assembler of the machine fixture. Not known without a real D3DX: the wording of 
 errors, the rounding of a float literal, the order of `_sat` and `_pp` in a listing, and
 which versions accept which modifiers; the structure of a program (unbalanced `if`,
 texture ops after arithmetic in ps_1_x) is not checked.
+
+## Effects
+
+`D3DXCreateEffect` and its kin read an effect file with the same front end
+(`effect-model.js`): the preprocessor with the program's macros and includes, the
+parser and the checker over every declaration -- a function's body is checked by
+the compile of the entry point a pass names, so a function no pass compiles does
+not refuse the effect. Each `compile vs_2_0 f(...)` is a compile of one entry point
+over the same source and the same included files, its arguments bound to the
+`uniform` parameters of `f` (or, where it declares none, to those without a
+semantic), which then fold into the code instead of taking registers.
+
+`effect.js` builds ID3DXEffect, ID3DXEffectPool and ID3DXEffectCompiler over that
+description. A pass's states go to the device (or the program's state manager) in
+the order written; each shader is followed by its constants -- the parameters of the
+same names, laid out by the shader's constant table with the routine D3DX's setters
+use -- and the sampler states of the samplers it reads. `effect.test.js` holds the
+contract (vtable order and widths for d3dx9_24/25, 26 and 27 on; Wine's conformance
+expectations for descriptions, names, conversions and pools) and runs a pass's pixel
+shader on the reference machine with the registers the effect set.
+
+Not done: a compiled fx_2_0 effect is not read (E_NOTIMPL), and the effect compiler's
+CompileEffect hands back this layer's own container of the source, which
+D3DXCreateEffect takes back; a state value that is an expression of parameters
+(fxc's preshader) is left out with a warning; a pass whose shader does not compile,
+or is written in an `asm { }` block, makes its technique invalid rather than refusing
+the effect.

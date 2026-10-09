@@ -23,21 +23,25 @@
  * @typedef {import('../../core/src/layers/cpu/engine.js').Runtime} Runtime
  */
 
-import { createCorkRuntime } from './runtime/runtime.js';
+import { createCorkRuntime, translatorWorkerUrl } from './runtime/runtime.js';
 import { replaySlice } from './testing/differential.js';
 
 export {
-    ownLayout, pagesFor, layoutId, Tables, tablesSize, STATE_BLOCK_SIZE, PAGE,
+    ownLayout, executorLayout, executorBytes, pagesFor, layoutId, Tables, tablesSize,
+    STATE_BLOCK_SIZE, PAGE,
 } from './runtime/layout.js';
 export { interpret, blockState } from './interp.js';
 export {
-    createWasmInterpreter, WasmExit, WASM_INTERPRETER_AREA, HOT_SLOTS,
+    createWasmInterpreter, WasmExit, WASM_INTERPRETER_AREA, WASM_INTERPRETER_STATICS_AT, HOT_SLOTS,
 } from './interp-wasm.js';
 export { eflagsOf, setEflags } from './emit/flags.js';
+export { SHARED_CODE_BYTES } from './runtime/shared-code.js';
 export { snapshot, restore, compare } from './testing/snapshot.js';
 export { readUndoLog, resetUndoLog, spansOf } from './emit/memory.js';
 export { slotOf } from './runtime/entries.js';
-export { replaySlice };
+export { replaySlice, translatorWorkerUrl };
+export { createMachine } from './machine.js';
+export { regionModule } from './region-module.js';
 
 /**
  * Builds a runtime over the memory and layout the core hands in.

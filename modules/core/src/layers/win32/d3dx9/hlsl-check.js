@@ -62,7 +62,9 @@ const COMPOUND = new Set(['+=', '-=', '*=', '/=', '%=', '<<=', '>>=', '&=', '|='
 
 /**
  * @param {Program} program
- * @param {{ entry?: string, rowMajor?: boolean }} [options]
+ * @param {{ entry?: string, rowMajor?: boolean, bodies?: boolean }} [options]   `bodies`: false
+ *     to check every declaration but no function's body -- an effect, whose bodies are checked
+ *     by the compile of each entry point it names.
  * @returns {{ module: Module, diagnostics: Diagnostic[] }}
  */
 export function check(program, options = {}){
@@ -1695,9 +1697,12 @@ export function check(program, options = {}){
     }
     else
     {
-        for (const list of functions.values())
+        if (options.bodies !== false)
         {
-            queue.push(...list);
+            for (const list of functions.values())
+            {
+                queue.push(...list);
+            }
         }
         globals.forEach(ensureGlobal);
     }

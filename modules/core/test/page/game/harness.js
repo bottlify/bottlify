@@ -1622,6 +1622,8 @@ export function createHarness(canvas, how = {}){
             // which is exactly the situation once a game reaches its own main loop.
             sampling: request.sampling,
             quantum: request.quantum || undefined,
+            // Executors of the program's process: past one, its threads run at once.
+            executors: request.executors || undefined,
             sample: request.profile || request.quantum ? recordSample : undefined,
             device: {
                 device: handle.device,
@@ -1821,6 +1823,14 @@ export function createHarness(canvas, how = {}){
         result.staleTrail = layers.find((/** @type {any} */ one)=>one.name === 'audio')
             ?.metrics?.staleTrail ?? [];
         result.instructions = metrics('cpu').instructions ?? null;
+        // Whether the run had the executors it was given: how many slices ran
+        // on the others, the most threads at once, and why none ran if they did not.
+        result.executors = {
+            refused: metrics('cpu').executorsRefused ?? null,
+            others: (metrics('cpu').executors ?? []).length,
+            slices: metrics('kernel').executorSlices ?? null,
+            mostAtOnce: metrics('kernel').mostAtOnce ?? null,
+        };
         result.threads = {
             byState: metrics('kernel').byState ?? {},
             waiting: metrics('kernel').waiting ?? [],
@@ -1834,6 +1844,10 @@ export function createHarness(canvas, how = {}){
         result.bridge = {
             sequence: metrics('bridge').sequence ?? [],
             hot: metrics('bridge').hot ?? [],
+            // Every host function by the time its calls took since the start, with
+            // how many: the ring above is the last few thousand calls, which a
+            // thread waiting in a loop fills by itself.
+            byFunction: metrics('bridge').byFunction ?? [],
             recent: (metrics('bridge').recentDetailed ?? []).slice(-LIMITS.calls)
                 .map((/** @type {any} */ call)=>({ ...call, fromName: where(call.from >>> 0) })),
             // Named rather than left to `scalars`, which keeps only numbers and

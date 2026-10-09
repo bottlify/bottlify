@@ -83,11 +83,11 @@ test('the arithmetic instructions become the statements they mean', ()=>{
             'r0 = (c[1] * c[2] + c[3]);'],
         ['min', [op(OPCODE.MIN, 3), dst(r, 0), src(c, 1), src(c, 2)], 'r0 = min(c[1], c[2]);'],
         ['max', [op(OPCODE.MAX, 3), dst(r, 0), src(c, 1), src(c, 2)], 'r0 = max(c[1], c[2]);'],
-        ['rcp', [op(OPCODE.RCP, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(1.0 / c[1].w);'],
+        ['rcp', [op(OPCODE.RCP, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(d3dRcp(c[1].w));'],
         ['rsq', [op(OPCODE.RSQ, 2), dst(r, 0), src(c, 1)],
-            'r0 = vec4f(inverseSqrt(abs(c[1].w)));'],
+            'r0 = vec4f(d3dRsq(c[1].w));'],
         ['exp', [op(OPCODE.EXP, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(exp2(c[1].w));'],
-        ['log', [op(OPCODE.LOG, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(log2(abs(c[1].w)));'],
+        ['log', [op(OPCODE.LOG, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(d3dLog(c[1].w));'],
         ['frc', [op(OPCODE.FRC, 2), dst(r, 0), src(c, 1)], 'r0 = fract(c[1]);'],
         ['dp3', [op(OPCODE.DP3, 3), dst(r, 0), src(c, 1), src(c, 2)],
             'r0 = vec4f(dot(c[1].xyz, c[2].xyz));'],
@@ -100,8 +100,8 @@ test('the arithmetic instructions become the statements they mean', ()=>{
         ['sge', [op(OPCODE.SGE, 3), dst(r, 0), src(c, 1), src(c, 2)],
             'r0 = select(vec4f(0.0), vec4f(1.0), c[1] >= c[2]);'],
         ['lit', [op(OPCODE.LIT, 2), dst(r, 0), src(c, 1)],
-            'r0 = vec4f(1.0, max(c[1].x, 0.0), select(0.0, pow(max(c[1].y, 0.0),'
-            + ' clamp(c[1].w, -128.0, 128.0)), c[1].x > 0.0), 1.0);'],
+            'r0 = vec4f(1.0, max(c[1].x, 0.0), select(0.0, d3dPow(c[1].y,'
+            + ' clamp(c[1].w, -128.0, 128.0)), c[1].x > 0.0 && c[1].y > 0.0), 1.0);'],
         ['dst', [op(OPCODE.DST, 3), dst(r, 0), src(c, 1), src(c, 2)],
             'r0 = vec4f(1.0, c[1].y * c[2].y, c[1].z, c[2].w);'],
         ['lrp', [op(OPCODE.LRP, 4), dst(r, 0), src(c, 1), src(c, 2), src(c, 3)],
@@ -119,19 +119,19 @@ test('the arithmetic instructions become the statements they mean', ()=>{
         ['m3x2', [op(OPCODE.M3x2, 3), dst(r, 0), src(c, 1), src(c, 4)],
             'r0 = vec4f(dot(c[1].xyz, c[4].xyz), dot(c[1].xyz, c[5].xyz), 0.0, 0.0);'],
         ['pow', [op(OPCODE.POW, 3), dst(r, 0), src(c, 1), src(c, 2)],
-            'r0 = vec4f(pow(abs(c[1].x), c[2].x));'],
+            'r0 = vec4f(d3dPow(c[1].x, c[2].x));'],
         ['crs', [op(OPCODE.CRS, 3), dst(r, 0), src(c, 1), src(c, 2)],
             'r0 = vec4f(cross(c[1].xyz, c[2].xyz), 0.0);'],
         ['sgn', [op(OPCODE.SGN, 4), dst(r, 0), src(c, 1), src(r, 1), src(r, 2)],
             'r0 = sign(c[1]);'],
         ['abs', [op(OPCODE.ABS, 2), dst(r, 0), src(c, 1)], 'r0 = abs(c[1]);'],
         ['nrm', [op(OPCODE.NRM, 2), dst(r, 0), src(c, 1)],
-            'r0 = vec4f(normalize(c[1].xyz), 0.0);'],
+            'r0 = d3dNrm4(c[1]);'],
         ['sincos', [op(OPCODE.SINCOS, 4), dst(r, 0), src(c, 1), src(c, 2), src(c, 3)],
             'r0 = vec4f(cos(c[1].x), sin(c[1].x), 0.0, 0.0);'],
         ['mova', [op(OPCODE.MOVA, 2), dst(REGISTER.ADDR, 0), src(c, 1)], 'a0 = round(c[1]);'],
         ['expp', [op(OPCODE.EXPP, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(exp2(c[1].w));'],
-        ['logp', [op(OPCODE.LOGP, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(log2(abs(c[1].w)));'],
+        ['logp', [op(OPCODE.LOGP, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(d3dLog(c[1].w));'],
     ]);
     for (const [name, tokens, line] of cases)
     {
@@ -266,7 +266,7 @@ test('flow control maps onto WGSL\'s own, and the loop register steps', ()=>{
     assertLine(translated.wgsl, 'if (r0.x < c[2].x) { break; }');
     assertLine(translated.wgsl, 'aL = ci[1].y;');
     assertLine(translated.wgsl, 'for (var _loop0 = 0; _loop0 < ci[1].x; _loop0++) {');
-    assertLine(translated.wgsl, 'r1 = c[10 + i32(aL.xxxx.x)];');
+    assertLine(translated.wgsl, 'r1 = c[10 + aL];');
     assertLine(translated.wgsl, 'break;');
     assertLine(translated.wgsl, 'aL += ci[1].z;');
     const fnBody = translated.wgsl.slice(translated.wgsl.indexOf('fn vs_main'));
@@ -808,7 +808,7 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
     assertLine(generated.wgsl,
         'let cameraPosition = (worldView * vec4f(vec4f(in.v0, 1.0).xyz, 1.0)).xyz;');
     assertLine(generated.wgsl,
-        'let cameraNormal = normalize((mat4x4f(c[43], c[44], c[45], c[46])'
+        'let cameraNormal = d3dNrm((mat4x4f(c[43], c[44], c[45], c[46])'
             + ' * vec4f(vec4f(in.v1, 1.0).xyz, 0.0)).xyz);');
     assertLine(generated.wgsl, `out.o${t0} = vec4f(dot(c[9], vec4f(cameraPosition, 1.0)),`
         + ' dot(c[10], vec4f(cameraPosition, 1.0)), dot(c[11], vec4f(cameraPosition, 1.0)),'
@@ -966,7 +966,7 @@ test('the fog stage after a pixel shader mixes the shaded colour by the varying'
     assertLine(table.wgsl, 'return clamp(exp(-fogRange.z * dist), 0.0, 1.0);');
     assertLine(table.wgsl, 'fogRange = in.fogRange;');
     assertLine(table.wgsl, 'oC0 = vec4f(mix(in.fog.yzw, oC0.rgb, clamp(fogFactorOf('
-        + 'select(1.0 / in.vPos.w, in.vPos.z, fogRange.w != 0.0)), 0.0, 1.0)), oC0.a);');
+        + 'select(d3dRcp(in.vPos.w), in.vPos.z, fogRange.w != 0.0)), 0.0, 1.0)), oC0.a);');
 });
 
 test('a pixel shader under the alpha test discards what fails it, by a register of its own', ()=>{

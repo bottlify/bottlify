@@ -21,6 +21,7 @@
   },
   "include": [
     "src/**/*.js",
+    "bin/*.mjs",
     "../core/types/build.d.ts"
   ]
 }

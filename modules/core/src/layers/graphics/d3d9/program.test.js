@@ -1101,7 +1101,7 @@ test('a pixel shader over fixed-function vertices reads a coordinate the stages 
         await h.draw();
         assert.ok(h.gpu.of('createShaderModule').map(call=>call.descriptor)
             .some(module=>module.label.startsWith('vs:')
-                && module.code.includes('let cameraNormal = normalize((mat4x4f(c[43]')));
+                && module.code.includes('let cameraNormal = d3dNrm((mat4x4f(c[43]')));
 
         h.device.SetTexture(0, null);
         h.device.SetPixelShader(null);

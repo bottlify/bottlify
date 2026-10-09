@@ -15,17 +15,30 @@
  *
  * Usage:
  *   node tools/make-btl.mjs pack <game-directory> <bundle-id> [--store] [--block=N]
+ *       [--entry=<path-in-bundle>] [--root=<install-directory>]
  *   node tools/make-btl.mjs verify <bundle-id>
  *   node tools/make-btl.mjs list <bundle-id> [pattern]
  *   node tools/make-btl.mjs translations <bundle-id> (<seed-file> | --remove) [--store]
+ *   node tools/make-btl.mjs extract <bundle-id> [<file-in-bundle>] [--out=<path>]
+ *
+ * `--entry` names the program to start (otherwise guessed, below); `--root` is
+ * where an installer put the tree, `C:\Program Files\Vendor\Game` -- what
+ * `install-watch.mjs --collect` reports -- and the bottle is mounted there
+ * rather than at `C:\App`, so the paths the installation wrote into the
+ * registry hold. Both go into the manifest and stay there across a repack.
  *
  * `translations` puts a translation seed (a run's store, exported) into the
  * packed bundle without packing the game again, and rewrites the manifest's
  * `indexSha256`, which the new index changes.
+ *
+ * `extract` copies one file out of the bundle: by default the manifest's
+ * `entry` to `bundles/<id>/entry`, the address a player page fetches the
+ * program's image from -- `createApp` takes the image as bytes, and a page on a
+ * static host has no server to read it out of the bundle for it.
  */
 
-import { writeFile, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile, rm, writeFile } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 import { attachTranslations, openBundle, verifyBundle, writeBundle, ensureDirectory,
     DEFAULT_BLOCK_SIZE }
     from './btl.mjs';
@@ -122,12 +135,26 @@ async function pack(root, id, flags){
             entry: null,
         };
 
+    if (typeof flags.entry === 'string')
+    {
+        manifest.entry = flags.entry.replace(/\//g, '\\');
+    }
+    if (typeof flags.root === 'string')
+    {
+        manifest.root = flags.root;
+    }
+
     // Each packing is a new revision of the bottle: a session saved under an
     // earlier one takes this one's registry over its own.
     manifest.revision = (Number.isInteger(manifest.revision) ? manifest.revision : 0) + 1;
 
     const bundle = await openBundle(output);
     manifest.entry ??= guessEntry(bundle.list());
+    if (bundle.stat(manifest.entry ?? '') === null)
+    {
+        console.log(`  the entry ${manifest.entry} is not in the bundle: set "entry" in the`
+            + ' manifest');
+    }
     await bundle.close();
 
     manifest.bundle = {
@@ -151,6 +178,9 @@ async function pack(root, id, flags){
 
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 4)}\n`);
     console.log(`  manifest: ${manifestPath}`);
+    // The image `extract` took out of the last bundle: the new one may name
+    // another, or hold another build of it.
+    await rm(join(directory, 'entry'), { force: true });
 }
 
 /** @param {string} id */
@@ -212,6 +242,34 @@ async function list(id, pattern){
     await bundle.close();
 }
 
+/**
+ * @param {string} id @param {string | undefined} file
+ * @param {Record<string, any>} flags
+ */
+async function extract(id, file, flags){
+    const directory = join(BUNDLES, id);
+    const manifest = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'));
+    const path = file ?? manifest.entry;
+    if (typeof path !== 'string' || path === '')
+    {
+        throw new Error(`${id}: no file named and no entry in the manifest`);
+    }
+    const out = typeof flags.out === 'string' ? flags.out
+        : file === undefined ? join(directory, 'entry') : join(directory, basename(path));
+    const bundle = await openBundle(join(directory, 'bundle.btl'));
+    try
+    {
+        // The index is read case-blind and backslashed, as the guest names files.
+        const bytes = await bundle.read(path.replace(/\//g, '\\'));
+        await writeFile(out, bytes);
+        console.log(`${out}: ${path}, ${bytes.length} bytes`);
+    }
+    finally
+    {
+        await bundle.close();
+    }
+}
+
 const [, , command, ...rest] = process.argv;
 const flags = parseFlags(rest);
 const positional = rest.filter(argument=>!argument.startsWith('--'));
@@ -229,12 +287,17 @@ switch (command){
     case 'translations':
         await translations(positional[0], positional[1], flags);
         break;
+    case 'extract':
+        await extract(positional[0], positional[1], flags);
+        break;
     default:
         console.log('usage: node tools/make-btl.mjs pack <game-directory> <bundle-id> '
-            + '[--store] [--block=N]');
+            + '[--store] [--block=N] [--entry=<path>] [--root=<install-directory>]');
         console.log('       node tools/make-btl.mjs verify <bundle-id>');
         console.log('       node tools/make-btl.mjs list <bundle-id> [pattern]');
         console.log('       node tools/make-btl.mjs translations <bundle-id> '
             + '(<seed-file> | --remove) [--store]');
+        console.log('       node tools/make-btl.mjs extract <bundle-id> [<file-in-bundle>] '
+            + '[--out=<path>]');
         process.exitCode = 1;
 }

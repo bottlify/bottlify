@@ -541,6 +541,589 @@ export function createScheduler(options){
         noDeadlineBefore = soonest();
     };
 
+    /**
+     * The thread to run of the ready `candidates`: the highest priority, the
+     * queue's order among equals, one passed over too long first of all.
+     *
+     * @param {any[]} candidates
+     */
+    const pick = candidates=>{
+        // The highest priority runs; among equals the queue order decides,
+        // and a thread that has just run goes behind the others by being
+        // moved to the back. A thread passed over for longer than the
+        // starvation bound outranks everyone for this one turn, so a busy
+        // high-priority thread can never hold the machine for ever.
+        let next = candidates[0];
+        if (candidates.length > 1)
+        {
+            const at = now();
+            /** @param {any} thread */
+            const rank = thread=>(at - thread.readySince >= starvation
+                ? STARVED
+                : absolutePriority(thread.priority));
+            let best = rank(next);
+            for (let i = 1; i < candidates.length; i++)
+            {
+                const contender = rank(candidates[i]);
+                if (contender > best)
+                {
+                    best = contender;
+                    next = candidates[i];
+                }
+            }
+            if (best === STARVED)
+            {
+                next.boosted = true;
+                next.boosts++;
+                boosts++;
+            }
+        }
+
+        return next;
+    };
+
+    /**
+     * Where a thread continues when it is not where it stopped: a parked one
+     * goes back with what its wait produced, applied by the switch.
+     *
+     * @param {any} next
+     */
+    const resumeOf = next=>{
+        // A thread that parked was stopped mid-call: put it back where it
+        // belongs, carrying whatever its wait produced. Deciding that here
+        // and applying it inside the switch means it happens exactly once,
+        // after the thread's own state has been saved -- which matters most
+        // when the thread coming back is the one already on the CPU.
+        let resume = null;
+        if (next.parkedReturn !== null && next.parkedReturn !== undefined)
+        {
+            resume = {
+                eip: next.parkedReturn,
+                esp: next.resumeStack ?? null,
+                returnValue: next.waitResult ?? 0,
+                // Only a thread sent into code that reads more than its
+                // stack carries these: an exception handler's block.
+                ...next.resumeRegisters ? { registers: next.resumeRegisters } : {},
+            };
+            onResume?.(next, next.lastWaitingOn ?? null, resume.returnValue >>> 0);
+            next.parkedReturn = null;
+            next.resumeStack = null;
+            next.waitResult = null;
+            next.resumeRegisters = null;
+        }
+        return resume;
+    };
+
+    /** @param {any} next */
+    const noteGap = next=>{
+        // Whatever `current` is, it is the thread whose state is on the CPU,
+        // and it has to be saved before another one takes over -- including,
+        // especially, a thread that has just blocked. Saving only threads
+        // still marked RUNNING loses the state of every thread that parked
+        // itself in a wait, which then resumes from wherever it first began.
+        // How long, on the host clock, a thread that waits in short
+        // periods -- a mixer feeding a sound device every few milliseconds
+        // -- went without the processor, and what had it instead: the
+        // slices run meanwhile by thread, and the time spent outside any.
+        // A gap longer than what it keeps written ahead is heard.
+        if (next.shortWait
+            && next.lastRanAt !== undefined)
+        {
+            const t = wall();
+            const gap = t - next.lastRanAt;
+            next.worstGap = Math.max(next.worstGap ?? 0, gap);
+            if (gap >= LATE_GAP_MS)
+            {
+                next.lateGaps = (next.lateGaps ?? 0) + 1;
+                /** @type {Map<string, number>} */
+                const held = new Map();
+                let outside = 0;
+                for (const turn of recentTurns)
+                {
+                    if (turn.end > next.lastRanAt)
+                    {
+                        held.set(turn.thread, (held.get(turn.thread) ?? 0) + turn.ms);
+                        outside += turn.outside;
+                    }
+                }
+                const by = [...held].map(([name, ms])=>`${name}:${Math.round(ms)}`).join(',');
+                lateGaps.push(`${next.name}@${Math.round(t)}+${Math.round(gap)} ${by} out:${
+                    Math.round(outside)}`);
+                if (lateGaps.length > 32)
+                {
+                    lateGaps.shift();
+                }
+            }
+        }
+    };
+
+    /**
+     * What a slice of `next` came to: the thread's account and the machine's,
+     * and the thread to the back of the queue if it is still runnable.
+     *
+     * @param {any} next @param {number} instructions @param {number} began  host ms
+     * @param {number} from  where the slice began @param {number} at  where it ended
+     */
+    const account = (next, instructions, began, from, at)=>{
+        const held = wall() - began;
+        const could = Math.min(readyAtSlice.size, 3);
+        parallel.ms[could] += held;
+        parallel.instructions[could] += instructions;
+        recentTurns.push({ thread: next.name ?? '?', ms: held, end: began + held,
+            outside: lastEnd === 0 ? 0 : Math.max(0, began - lastEnd) });
+        const slot = busySlot(began);
+        const name = next.name ?? '?';
+        let seconds = busyByThread.get(name);
+        if (seconds === undefined)
+        {
+            seconds = new Array(BUSY_SECONDS).fill(0);
+            busyByThread.set(name, seconds);
+        }
+        seconds[slot] += held;
+        // Only the part of the gap inside the window.
+        const windowStart = (Math.floor(began / 1000) - BUSY_SECONDS + 1) * 1000;
+        // Slices on several executors overlap: none of that is time between them.
+        between[slot] += lastEnd === 0 ? 0 : Math.max(0, began - Math.max(lastEnd, windowStart));
+        if (recentTurns.length > 256)
+        {
+            recentTurns.shift();
+        }
+        lastEnd = Math.max(lastEnd, began + held);
+        next.lastRanAt = lastEnd;
+        next.instructions += instructions;
+        next.sincePublished += instructions;
+        // Where the heaviest slice of the interval began: one page names
+        // the module, and a slice weighs what it retired, so this is the
+        // code the machine was actually in rather than the code it was in
+        // most often.
+        if (instructions > heaviestSlice)
+        {
+            heaviestSlice = instructions;
+            heaviestFrom = from;
+        }
+        const slowest = slowSlices[slowSlices.length - 1];
+        const kept = slowSlices.length < SLOW_SLICES_KEPT || held > slowest.ms;
+        if (held >= SLOW_SLICE_MS && kept)
+        {
+            slowSlices.push({
+                ms: held, instructions, from, at, thread: next.name ?? null,
+            });
+            slowSlices.sort((a, b)=>b.ms - a.ms);
+            slowSlices.length = Math.min(slowSlices.length, SLOW_SLICES_KEPT);
+            if (slowSliceTable)
+            {
+                // Rare by definition -- forty milliseconds and up -- so
+                // rewriting the eight rows here costs nothing that matters.
+                for (let row = 0; row < slowSlices.length; row++)
+                {
+                    const slice = slowSlices[row];
+                    slowSliceTable.set(row, 0, slice.ms);
+                    slowSliceTable.set(row, 1, slice.instructions);
+                    slowSliceTable.set(row, 2, slice.from);
+                    slowSliceTable.set(row, 3, slice.at);
+                    slowSliceTable.set(row, 4, intern(slice.thread ?? '?'));
+                }
+                slowSliceTable.used(slowSlices.length);
+            }
+        }
+        creditPage(from, instructions);
+        turns++;
+        counters[1] = turns;
+        // Whether the slice we asked for is the slice we got.
+        //
+        // A quantum is how long a thread may hold the machine before
+        // anything else -- another thread, a message, a frame -- gets a
+        // look. Nothing checked that the emulator honoured it, so an
+        // emulator that ran four times the instructions asked for would
+        // hold the machine four times as long and say nothing, and the only
+        // symptom would be a frame rate nobody could account for. Asking is
+        // not knowing; this is the knowing.
+        if (instructions > quantum)
+        {
+            overruns++;
+            if (instructions > worstSlice)
+            {
+                worstSlice = instructions;
+                worstSliceAt = at;
+                worstSliceFrom = from;
+                worstSliceOn = next.name ?? null;
+            }
+        }
+
+        next.boosted = false;
+        if (next.state === ThreadState.RUNNING)
+        {
+            next.state = ThreadState.READY;
+            next.readySince = now();
+            // To the back of the queue, so the next call picks someone else.
+            threads.splice(threads.indexOf(next), 1);
+            threads.push(next);
+        }
+
+    };
+
+    /**
+     * The thread each of the process's other executors is running, and when and
+     * where its slice began.
+     *
+     * @type {Map<any, { thread: any, began: number, from: number }>}
+     */
+    const placed = new Map();
+    /** Slices run on the other executors, and the most threads running at once, this one's included. */
+    let executorSlices = 0;
+    let mostAtOnce = 0;
+
+    /** Set while they are answered: an answer's own trap does not answer again. */
+    let answering = false;
+    /** The bell's count when they were last answered. */
+    let answeredAt = -1;
+
+    /**
+     * The executor a thread runs on: where its translations are, made there
+     * the first time it ran. The process's first thread is this executor's;
+     * each later one goes to the executor fewest live threads call theirs,
+     * one of the others before this one, which also answers their crossings.
+     *
+     * @param {any} thread @param {any[]} remotes
+     * @returns {number} the executor's index, 0 for this one
+     */
+    const homeOf = (thread, remotes)=>{
+        if (thread.home !== undefined)
+        {
+            return thread.home;
+        }
+        // This one counts a thread more than it holds: it answers the others' crossings.
+        /** @type {Map<number, number>} */
+        const homed = new Map([[0, 1]]);
+        for (const remote of remotes)
+        {
+            homed.set(remote.index, 0);
+        }
+        let any = false;
+        for (const other of threads)
+        {
+            if (other.home !== undefined && other.state !== ThreadState.TERMINATED)
+            {
+                homed.set(other.home, (homed.get(other.home) ?? 0) + 1);
+                any = true;
+            }
+        }
+        let home = 0;
+        if (any)
+        {
+            for (const [index, count] of homed)
+            {
+                if (count < (homed.get(home) ?? 0))
+                {
+                    home = index;
+                }
+            }
+        }
+        thread.home = home;
+        return home;
+    };
+
+    /**
+     * The ready threads no executor is running. A thread that waits on another
+     * executor is made ready by its wake before that executor's slice has
+     * ended -- it spins in the park loop until the slice is taken -- and must
+     * not start a second time elsewhere meanwhile.
+     */
+    const runnable = ()=>{
+        const elsewhere = new Set([...placed.values()].map(on=>on.thread));
+        return elsewhere.size === 0 ? ready() : ready().filter(thread=>!elsewhere.has(thread));
+    };
+
+    /**
+     * A thread started on a second executor while one runs it diverges in ways
+     * found much later -- a lock taken twice, a count lost -- so the start
+     * itself fails.
+     *
+     * @param {any} next
+     */
+    const runsOnce = next=>{
+        for (const [remote, on] of placed)
+        {
+            if (on.thread === next)
+            {
+                throw new Error(`${next.name} started while executor ${remote.index} runs it`);
+            }
+        }
+    };
+
+    /**
+     * Puts `next` on executor `remote` and starts its slice. A thread whose
+     * state is on the process's own executor is taken off it first.
+     *
+     * @param {any} remote @param {any} next
+     */
+    const place = (remote, next)=>{
+        runsOnce(next);
+        if (next === current)
+        {
+            current.context = cpu.captureContext();
+            current = null;
+        }
+        const resume = resumeOf(next);
+        noteGap(next);
+        let from = 0;
+        cpu.onExecutor(remote.index, ()=>{
+            switcher.switchTo(null, next, resume);
+            watchStack(next);
+            from = cpu.eip?.() ?? 0;
+        });
+        note(next, `runs on executor ${remote.index}`);
+        next.state = ThreadState.RUNNING;
+        placed.set(remote, { thread: next, began: wall(), from });
+        remote.start(quantum);
+        executorSlices++;
+        mostAtOnce = Math.max(mostAtOnce, placed.size + (inSlice ? 1 : 0));
+    };
+
+    /**
+     * Answers what the other executors raised -- with the raising thread as
+     * the current one, so a wait blocks it, a wake that outranks it ends its
+     * slice and an exit ends it -- and takes the slices that ended, accounted
+     * as a slice here is. Called between turns and on every crossing of the
+     * process's own thread, so a trap on another executor waits at most for
+     * the next of those.
+     *
+     * @returns {{ ran: any | null, instructions: number }} the last thread whose slice ended
+     */
+    const answerExecutors = ()=>{
+        if (answering || placed.size === 0)
+        {
+            return { ran: null, instructions: 0 };
+        }
+        answering = true;
+        let ran = null;
+        let instructions = 0;
+        try
+        {
+            for (const [remote, on] of placed)
+            {
+                const ended = remote.step((/** @type {() => void} */ reply)=>{
+                    const was = current;
+                    const wasInSlice = inSlice;
+                    current = on.thread;
+                    inSlice = true;
+                    try
+                    {
+                        reply();
+                    }
+                    finally
+                    {
+                        inSlice = wasInSlice;
+                        current = was;
+                    }
+                });
+                if (ended === null)
+                {
+                    continue;
+                }
+                placed.delete(remote);
+                let at = 0;
+                cpu.onExecutor(remote.index, ()=>{
+                    on.thread.context = cpu.captureContext();
+                    at = cpu.eip?.() ?? 0;
+                });
+                if (ended.fault !== null)
+                {
+                    cpu.remoteFault?.(ended.fault);
+                }
+                account(on.thread, ended.instructions, on.began, on.from, at);
+                ran = on.thread;
+                instructions += ended.instructions;
+            }
+        }
+        finally
+        {
+            answering = false;
+        }
+        return { ran, instructions };
+    };
+
+    /**
+     * Gives the CPU of the process's own executor to `next` for a quantum,
+     * answering the other executors at each of its crossings.
+     *
+     * @param {any} next
+     * @returns {{ ran: any | null, instructions: number, switched: boolean }}
+     */
+    const runHere = next=>{
+        runsOnce(next);
+        const resume = resumeOf(next);
+        noteGap(next);
+        if (next !== current)
+        {
+            note(next, `runs after ${current?.name ?? '-'} (${lastSlice})`);
+        }
+        const switched = switcher.switchTo(current, next, resume);
+
+        if (current && current.state === ThreadState.RUNNING)
+        {
+            current.state = ThreadState.READY;
+            current.readySince = now();
+        }
+        current = next;
+        next.state = ThreadState.RUNNING;
+
+        // Before the slice, not after: the value on the processor when a
+        // slice ends in a fault belongs to the fault stub, and reading that
+        // would report every faulting thread as having left its stack.
+        watchStack(next);
+        const from = cpu.eip?.() ?? 0;
+        const began = wall();
+        readyAtSlice.clear();
+        for (const thread of threads)
+        {
+            if (thread !== next && thread.state === ThreadState.READY)
+            {
+                readyAtSlice.add(thread);
+            }
+        }
+        inSlice = true;
+        mostAtOnce = Math.max(mostAtOnce, placed.size + 1);
+        let instructions = cpu.runSlice(quantum);
+        inSlice = false;
+        lastSlice = instructions;
+        // A slice that ran out inside a routine the host placed to run
+        // unbroken -- one writing a record another thread's entry into the
+        // host reads -- runs on to the routine's end: none of them waits,
+        // so the end is a few instructions away.
+        for (let more = 0; more < ATOMIC_STEPS && atomic.starts.length !== 0
+            && next.state === ThreadState.RUNNING && insideAtomic(cpu.eip?.() ?? 0); more++)
+        {
+            instructions += cpu.runSlice(ATOMIC_STEP);
+        }
+        account(next, instructions, began, from, cpu.eip?.() ?? 0);
+        return { ran: next, instructions, switched };
+    };
+
+    /**
+     * The ready threads in the usual order, each to its own executor while
+     * that one is free. A thread whose own is taken then goes to an executor
+     * left free -- this one first, its translations made there too -- rather
+     * than leave a processor idle while it waits; it keeps its own for the
+     * next turn. Starts the others' slices and answers the thread for this
+     * one, if any.
+     *
+     * @param {any[]} remotes @param {any} bell
+     * @returns {any | null}
+     */
+    const choose = (remotes, bell)=>{
+        let candidates = runnable();
+        const free = remotes.filter(remote=>!remote.busy());
+        let here = null;
+        /** @type {any[]} */
+        const waiting = [];
+        while (candidates.length > 0 && (here === null || free.length > 0))
+        {
+            const next = pick(candidates);
+            candidates = candidates.filter(thread=>thread !== next);
+            const home = homeOf(next, remotes);
+            const remote = free.find(one=>one.index === home);
+            if (home === 0 && here === null)
+            {
+                here = next;
+            }
+            else if (remote !== undefined)
+            {
+                free.splice(free.indexOf(remote), 1);
+                place(remote, next);
+            }
+            else
+            {
+                waiting.push(next);
+            }
+        }
+        for (const next of waiting)
+        {
+            if (here === null)
+            {
+                here = next;
+            }
+            else if (free.length > 0)
+            {
+                place(/** @type {any} */ (free.shift()), next);
+            }
+            else
+            {
+                break;
+            }
+        }
+        // A thread left without an executor waits for one to give its thread up.
+        bell.goOn?.(candidates.length === 0
+            && waiting.every(thread=>thread.state !== ThreadState.READY));
+        return here;
+    };
+
+    /**
+     * A turn of a process with executors in workers of their own
+     * (`cpu.executors`): the ready threads, chosen as ever, each on its own
+     * executor (`homeOf`) while that one is free. The others' traps are
+     * answered on this executor's crossings and between its turns; with
+     * nothing to run here, the turn waits for them.
+     *
+     * @param {any[]} remotes
+     * @returns {{ ran: any | null, instructions: number, switched: boolean }}
+     */
+    const runShared = remotes=>{
+        expire();
+        let { ran, instructions } = answerExecutors();
+        const bell = cpu.executorBell();
+        for (;;)
+        {
+            const here = choose(remotes, bell);
+            if (here !== null)
+            {
+                const turn = runHere(here);
+                const after = answerExecutors();
+                return { ran: turn.ran, instructions: turn.instructions + instructions
+                    + after.instructions, switched: turn.switched };
+            }
+            if (placed.size === 0)
+            {
+                // Nothing runs anywhere: the clock to the soonest deadline, as with one executor.
+                const deadline = soonest();
+                if (deadline !== null && skipTo(deadline) !== 0)
+                {
+                    expire();
+                }
+                return { ran, instructions, switched: false };
+            }
+            // Nothing to run here: the others' words are waited for -- a slice's
+            // end, or a trap whose answer makes a thread ready that can run now.
+            const seen = bell.rung();
+            const taken = answerExecutors();
+            instructions += taken.instructions;
+            ran = taken.ran ?? ran;
+            if (ran !== null)
+            {
+                return { ran, instructions, switched: true };
+            }
+            // A thread made ready runs here next round: this executor is free.
+            if (runnable().length === 0)
+            {
+                bell.wait(seen);
+            }
+        }
+    };
+
+    /** The other executors' traps, answered at a crossing of this executor's thread. */
+    cpu.beforeTrap?.(()=>{
+        if (placed.size === 0)
+        {
+            return;
+        }
+        const rung = cpu.executorBell().rung();
+        if (rung !== answeredAt)
+        {
+            answeredAt = rung;
+            answerExecutors();
+        }
+    });
+
     const api = {
         /**
          * Creates a thread. It does not run yet, and creating it does not move
@@ -698,6 +1281,11 @@ export function createScheduler(options){
          * @returns {{ ran: any | null, instructions: number, switched: boolean }}
          */
         runOnce(){
+            const remotes = cpu.executors?.() ?? [];
+            if (remotes.length > 0)
+            {
+                return runShared(remotes);
+            }
             expire();
             let candidates = ready();
             if (candidates.length === 0)
@@ -728,234 +1316,7 @@ export function createScheduler(options){
                 }
             }
 
-            // The highest priority runs; among equals the queue order decides,
-            // and a thread that has just run goes behind the others by being
-            // moved to the back. A thread passed over for longer than the
-            // starvation bound outranks everyone for this one turn, so a busy
-            // high-priority thread can never hold the machine for ever.
-            let next = candidates[0];
-            if (candidates.length > 1)
-            {
-                const at = now();
-                /** @param {any} thread */
-                const rank = thread=>(at - thread.readySince >= starvation
-                    ? STARVED
-                    : absolutePriority(thread.priority));
-                let best = rank(next);
-                for (let i = 1; i < candidates.length; i++)
-                {
-                    const contender = rank(candidates[i]);
-                    if (contender > best)
-                    {
-                        best = contender;
-                        next = candidates[i];
-                    }
-                }
-                if (best === STARVED)
-                {
-                    next.boosted = true;
-                    next.boosts++;
-                    boosts++;
-                }
-            }
-
-            // A thread that parked was stopped mid-call: put it back where it
-            // belongs, carrying whatever its wait produced. Deciding that here
-            // and applying it inside the switch means it happens exactly once,
-            // after the thread's own state has been saved -- which matters most
-            // when the thread coming back is the one already on the CPU.
-            let resume = null;
-            if (next.parkedReturn !== null && next.parkedReturn !== undefined)
-            {
-                resume = {
-                    eip: next.parkedReturn,
-                    esp: next.resumeStack ?? null,
-                    returnValue: next.waitResult ?? 0,
-                    // Only a thread sent into code that reads more than its
-                    // stack carries these: an exception handler's block.
-                    ...next.resumeRegisters ? { registers: next.resumeRegisters } : {},
-                };
-                onResume?.(next, next.lastWaitingOn ?? null, resume.returnValue >>> 0);
-                next.parkedReturn = null;
-                next.resumeStack = null;
-                next.waitResult = null;
-                next.resumeRegisters = null;
-            }
-            // Whatever `current` is, it is the thread whose state is on the CPU,
-            // and it has to be saved before another one takes over -- including,
-            // especially, a thread that has just blocked. Saving only threads
-            // still marked RUNNING loses the state of every thread that parked
-            // itself in a wait, which then resumes from wherever it first began.
-            // How long, on the host clock, a thread that waits in short
-            // periods -- a mixer feeding a sound device every few milliseconds
-            // -- went without the processor, and what had it instead: the
-            // slices run meanwhile by thread, and the time spent outside any.
-            // A gap longer than what it keeps written ahead is heard.
-            if (next.shortWait
-                && next.lastRanAt !== undefined)
-            {
-                const t = wall();
-                const gap = t - next.lastRanAt;
-                next.worstGap = Math.max(next.worstGap ?? 0, gap);
-                if (gap >= LATE_GAP_MS)
-                {
-                    next.lateGaps = (next.lateGaps ?? 0) + 1;
-                    /** @type {Map<string, number>} */
-                    const held = new Map();
-                    let outside = 0;
-                    for (const turn of recentTurns)
-                    {
-                        if (turn.end > next.lastRanAt)
-                        {
-                            held.set(turn.thread, (held.get(turn.thread) ?? 0) + turn.ms);
-                            outside += turn.outside;
-                        }
-                    }
-                    const by = [...held].map(([name, ms])=>`${name}:${Math.round(ms)}`).join(',');
-                    lateGaps.push(`${next.name}@${Math.round(t)}+${Math.round(gap)} ${by} out:${
-                        Math.round(outside)}`);
-                    if (lateGaps.length > 32)
-                    {
-                        lateGaps.shift();
-                    }
-                }
-            }
-            if (next !== current)
-            {
-                note(next, `runs after ${current?.name ?? '-'} (${lastSlice})`);
-            }
-            const switched = switcher.switchTo(current, next, resume);
-
-            if (current && current.state === ThreadState.RUNNING)
-            {
-                current.state = ThreadState.READY;
-                current.readySince = now();
-            }
-            current = next;
-            next.state = ThreadState.RUNNING;
-
-            // Before the slice, not after: the value on the processor when a
-            // slice ends in a fault belongs to the fault stub, and reading that
-            // would report every faulting thread as having left its stack.
-            watchStack(next);
-            const from = cpu.eip?.() ?? 0;
-            const began = wall();
-            readyAtSlice.clear();
-            for (const thread of threads)
-            {
-                if (thread !== next && thread.state === ThreadState.READY)
-                {
-                    readyAtSlice.add(thread);
-                }
-            }
-            inSlice = true;
-            let instructions = cpu.runSlice(quantum);
-            inSlice = false;
-            lastSlice = instructions;
-            // A slice that ran out inside a routine the host placed to run
-            // unbroken -- one writing a record another thread's entry into the
-            // host reads -- runs on to the routine's end: none of them waits,
-            // so the end is a few instructions away.
-            for (let more = 0; more < ATOMIC_STEPS && atomic.starts.length !== 0
-                && next.state === ThreadState.RUNNING && insideAtomic(cpu.eip?.() ?? 0); more++)
-            {
-                instructions += cpu.runSlice(ATOMIC_STEP);
-            }
-            const held = wall() - began;
-            const could = Math.min(readyAtSlice.size, 3);
-            parallel.ms[could] += held;
-            parallel.instructions[could] += instructions;
-            recentTurns.push({ thread: next.name ?? '?', ms: held, end: began + held,
-                outside: lastEnd === 0 ? 0 : began - lastEnd });
-            const slot = busySlot(began);
-            const name = next.name ?? '?';
-            let seconds = busyByThread.get(name);
-            if (seconds === undefined)
-            {
-                seconds = new Array(BUSY_SECONDS).fill(0);
-                busyByThread.set(name, seconds);
-            }
-            seconds[slot] += held;
-            // Only the part of the gap inside the window.
-            const windowStart = (Math.floor(began / 1000) - BUSY_SECONDS + 1) * 1000;
-            between[slot] += lastEnd === 0 ? 0 : began - Math.max(lastEnd, windowStart);
-            if (recentTurns.length > 256)
-            {
-                recentTurns.shift();
-            }
-            lastEnd = began + held;
-            next.lastRanAt = lastEnd;
-            next.instructions += instructions;
-            next.sincePublished += instructions;
-            // Where the heaviest slice of the interval began: one page names
-            // the module, and a slice weighs what it retired, so this is the
-            // code the machine was actually in rather than the code it was in
-            // most often.
-            if (instructions > heaviestSlice)
-            {
-                heaviestSlice = instructions;
-                heaviestFrom = from;
-            }
-            const slowest = slowSlices[slowSlices.length - 1];
-            const kept = slowSlices.length < SLOW_SLICES_KEPT || held > slowest.ms;
-            if (held >= SLOW_SLICE_MS && kept)
-            {
-                slowSlices.push({
-                    ms: held, instructions, from, at: cpu.eip?.() ?? 0, thread: next.name ?? null,
-                });
-                slowSlices.sort((a, b)=>b.ms - a.ms);
-                slowSlices.length = Math.min(slowSlices.length, SLOW_SLICES_KEPT);
-                if (slowSliceTable)
-                {
-                    // Rare by definition -- forty milliseconds and up -- so
-                    // rewriting the eight rows here costs nothing that matters.
-                    for (let row = 0; row < slowSlices.length; row++)
-                    {
-                        const slice = slowSlices[row];
-                        slowSliceTable.set(row, 0, slice.ms);
-                        slowSliceTable.set(row, 1, slice.instructions);
-                        slowSliceTable.set(row, 2, slice.from);
-                        slowSliceTable.set(row, 3, slice.at);
-                        slowSliceTable.set(row, 4, intern(slice.thread ?? '?'));
-                    }
-                    slowSliceTable.used(slowSlices.length);
-                }
-            }
-            creditPage(from, instructions);
-            turns++;
-            counters[1] = turns;
-            // Whether the slice we asked for is the slice we got.
-            //
-            // A quantum is how long a thread may hold the machine before
-            // anything else -- another thread, a message, a frame -- gets a
-            // look. Nothing checked that the emulator honoured it, so an
-            // emulator that ran four times the instructions asked for would
-            // hold the machine four times as long and say nothing, and the only
-            // symptom would be a frame rate nobody could account for. Asking is
-            // not knowing; this is the knowing.
-            if (instructions > quantum)
-            {
-                overruns++;
-                if (instructions > worstSlice)
-                {
-                    worstSlice = instructions;
-                    worstSliceAt = cpu.eip?.() ?? 0;
-                    worstSliceFrom = from;
-                    worstSliceOn = next.name ?? null;
-                }
-            }
-
-            next.boosted = false;
-            if (next.state === ThreadState.RUNNING)
-            {
-                next.state = ThreadState.READY;
-                next.readySince = now();
-                // To the back of the queue, so the next call picks someone else.
-                threads.splice(threads.indexOf(next), 1);
-                threads.push(next);
-            }
-
-            return { ran: next, instructions, switched };
+            return runHere(pick(candidates));
         },
 
         /**
@@ -1272,6 +1633,10 @@ export function createScheduler(options){
                 // never yields, which a program does not mean to do.
                 boosts,
                 preemptions,
+                // Slices given to the process's other executors, and the most
+                // that ran at once: zero and zero where it has one.
+                executorSlices,
+                mostAtOnce,
                 recentWakes: recentWakes.slice(),
                 recentByThread: threads.filter(thread=>thread.state !== ThreadState.TERMINATED)
                     .map(thread=>`${thread.name}: ${(thread.recent ?? []).join(' > ')}`),

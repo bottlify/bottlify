@@ -39,16 +39,18 @@ const REMOVED = 0xffffffff;
  */
 
 /**
- * @param {{ memory?: WebAssembly.Memory, hashBase?: number, shift?: number }} [hash]  the
- *     memory and the offset of the entry hash in it, and the layout's slot shift; without
- *     them the map alone answers
+ * @param {{ memory?: WebAssembly.Memory, hashBase?: number, shift?: number,
+ *     load?: number }} [hash]  the memory and the offset of the entry hash in it, and the
+ *     layout's slot shift; without them the map alone answers. `load`: the share of the
+ *     slots live past which entries stay in the map alone (three quarters)
  */
-export function createEntries({ memory, hashBase = -1, shift = 16 } = {}){
+export function createEntries({ memory, hashBase = -1, shift = 16, load: share = 0.75 } = {}){
     const hashed = memory !== undefined && hashBase >= 0;
-    // As many slots as the shift leaves bits for; past three quarters of them
-    // live, entries stay in the map alone.
+    // As many slots as the shift leaves bits for; past `share` of them live,
+    // entries stay in the map alone -- an open-addressed probe grows long as
+    // the slots fill.
     const slotCount = 2 ** (32 - shift);
-    const load = slotCount * 3 / 4;
+    const load = slotCount * Math.min(Math.max(share, 0.1), 0.95);
     const view = ()=>new DataView(/** @type {WebAssembly.Memory} */ (memory).buffer);
     const clear = ()=>new Uint8Array(/** @type {WebAssembly.Memory} */ (memory).buffer)
         .fill(0, hashBase, hashBase + slotCount * Tables.HASH_SLOT);

@@ -6,6 +6,7 @@
 
 import { createV86Host } from './internal/v86-host.js';
 import { createCorkHost } from './internal/cork-host.js';
+import { createBell, createRemoteExecutor } from './internal/executor.js';
 import { createFpu } from './internal/fpu.js';
 import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
 import {
@@ -171,13 +172,24 @@ export function createCpuModule(){
              *              leaves: number },
              *          faultHandler: ((fault: any) => boolean) | null,
              *          guestClock: (() => number) | null,
-             *          yieldCheck: (() => boolean) | null, stacks: [number, number][] }}
+             *          yieldCheck: (() => boolean) | null, stacks: [number, number][],
+             *          lent: import('./engine.js').TranslatorPort[], remotes: any[],
+             *          bell: ReturnType<typeof createBell> | null,
+             *          beforeTrap: (() => void) | null,
+             *          remoteFigures: Map<number, any>, executorsRefused: string | null }}
              */
             const state = {
                 host: null, thunks: null, running: false, tableWritten: false,
                 worstInterpreted: 0, worstInterpretedAt: 0, interpretedBefore: 0,
                 lastFault: null, disposed: false, samples: createSampleTable(), engine,
                 cork: null,
+                remotes: [],
+                bell: null,
+                beforeTrap: null,
+                // The other executors' translator figures, as each last answered.
+                remoteFigures: new Map(),
+                // Why fewer executors run than were asked, if they do.
+                executorsRefused: null,
                 faultHandler: null,
                 // The guest's clock once the kernel gives it (`useGuestClock`).
                 guestClock: null,
@@ -187,6 +199,8 @@ export function createCpuModule(){
                 // The threads' stacks the kernel named, for a host made after it did.
                 /** @type {[number, number][]} */
                 stacks: [],
+                // Translators a pool lent before the translator was up, taken once it is.
+                lent: [],
             };
             /**
              * Once a frame: every bucket the sampler has credited past the
@@ -331,7 +345,24 @@ export function createCpuModule(){
                 // defaults are small, and a program that leaves generated code
                 // every few dozen instructions pays the dispatch walk each time.
                 jit: config?.jit,
+                // Executors of the process: the process's own thread, and each
+                // past the first a worker running its threads at once with the
+                // others (`internal/executor.js`); under cork, and with the atomic
+                // variant, which more than one needs. The kernel gives them the
+                // threads (`executors`).
+                executors: Math.max(1, config?.executors ?? 1),
             };
+            // Executors past one share the program's memory with workers, which
+            // only a SharedArrayBuffer allows, and a page that is not
+            // cross-origin isolated has none: the program then runs on one, as
+            // by default, and the report says why rather than the launch failing.
+            if (settings.executors > 1 && typeof SharedArrayBuffer !== 'function')
+            {
+                state.executorsRefused = `${settings.executors} asked, 1 run: no`
+                    + ' SharedArrayBuffer, the page is not cross-origin isolated';
+                settings.executors = 1;
+                log?.warn?.('cpu', `executors: ${state.executorsRefused}`);
+            }
 
             /** @type {(id: number) => void} */
             let dispatch = ()=>{};
@@ -436,17 +467,48 @@ export function createCpuModule(){
                             throw new Error('cpu: engine "cork" needs an engineUrl');
                         }
                         const engineModule = await import(settings.engineUrl);
-                        state.host = createCorkHost({
-                            engine: engineModule,
+                        const several = settings.executors > 1;
+                        const hostConfig = {
                             memorySize: settings.memorySize,
                             trapPort: settings.trapPort,
                             entryVector: settings.entryVector,
                             initialStack: settings.initialStack,
-                            cork: settings.cork,
+                            thunkBase: settings.thunkBase,
+                            cork: several ? { ...settings.cork, atomic: true } : settings.cork,
                             closedBelow: settings.closedBelow,
                             noExecuteBelow: settings.noExecuteBelow,
-                        });
+                            executors: settings.executors,
+                        };
+                        state.host = createCorkHost({ ...hostConfig, engine: engineModule });
+                        if (several)
+                        {
+                            // What crosses to a worker is data: the translation store
+                            // and anything callable stay with the process's own.
+                            // The doorbell is the process's link's, rung for the process's
+                            // own batches. A run's pool lends translators to the process's
+                            // own executor alone (`translators: 0`): another one waiting for
+                            // a lend would interpret all but what it emits inline while it
+                            // loads, so it opens a translator of its own.
+                            const cork = Object.fromEntries(Object.entries(hostConfig.cork)
+                                .filter(([key, value])=>key !== 'store' && key !== 'doorbell'
+                                    && typeof value !== 'function'));
+                            if (cork.translators === 0)
+                            {
+                                cork.translators = 1;
+                            }
+                            const bell = createBell();
+                            state.bell = bell;
+                            state.remotes = await Promise.all(Array.from(
+                                { length: settings.executors - 1 },
+                                (_, i)=>createRemoteExecutor({ host: state.host, index: i + 1,
+                                    engineUrl: settings.engineUrl, bell,
+                                    config: { ...hostConfig, cork } })));
+                        }
                         state.cork = state.host.cork();
+                        for (const adapter of state.lent.splice(0))
+                        {
+                            state.cork?.attachTranslator?.(adapter);
+                        }
                         for (const [base, size] of state.stacks)
                         {
                             state.host.noteStack(base, size);
@@ -476,6 +538,7 @@ export function createCpuModule(){
                         capacity: settings.thunkCapacity,
                     });
                     state.host.onTrap((/** @type {number} */ id)=>{
+                        state.beforeTrap?.();
                         // A processor exception arrives as a trap like any other,
                         // from a stub the ROM put behind its vector. Answered here
                         // rather than passed on, because the layer that owns the
@@ -573,6 +636,45 @@ export function createCpuModule(){
                  */
                 onFault(handler){
                     state.faultHandler = handler;
+                },
+
+                /**
+                 * A translation worker a pool lends this machine's translator:
+                 * taken once the translator is up, or at once if it is. False
+                 * where the engine takes none (the emulator).
+                 *
+                 * @param {import('./engine.js').TranslatorPort} adapter
+                 * @returns {boolean}
+                 */
+                attachTranslator(adapter){
+                    if (state.disposed || engine !== 'cork')
+                    {
+                        return false;
+                    }
+                    if (state.cork === null)
+                    {
+                        state.lent.push(adapter);
+                        return true;
+                    }
+                    return typeof state.cork.attachTranslator === 'function'
+                        ? (state.cork.attachTranslator(adapter), true) : false;
+                },
+
+                /**
+                 * The same worker asked back: it takes no batch from now on, and
+                 * goes once the one it holds is answered.
+                 *
+                 * @param {import('./engine.js').TranslatorPort} adapter
+                 */
+                detachTranslator(adapter){
+                    const waiting = state.lent.indexOf(adapter);
+                    if (waiting >= 0)
+                    {
+                        state.lent.splice(waiting, 1);
+                        adapter.terminate();
+                        return;
+                    }
+                    state.cork?.detachTranslator?.(adapter);
                 },
 
                 /**
@@ -734,6 +836,50 @@ export function createCpuModule(){
                 /** @param {(id: number) => void} handler */
                 onTrap(handler){
                     dispatch = handler;
+                },
+
+                /**
+                 * The process's executors past its own, each running a thread at
+                 * once with the others: empty where there is one.
+                 *
+                 * @returns {any[]}
+                 */
+                executors: ()=>state.remotes,
+                /** The word their turns ring: one wait for all of them. */
+                executorBell: ()=>state.bell,
+                /**
+                 * Who is told of every crossing into the host before it is
+                 * answered: the scheduler, which answers the other executors'
+                 * traps there while this one's thread runs.
+                 *
+                 * @param {(() => void) | null} handler
+                 */
+                beforeTrap(handler){
+                    state.beforeTrap = handler;
+                },
+
+                /**
+                 * Runs `work` with executor `index`'s state as the processor's:
+                 * a thread put on it or taken off it, through this layer as ever.
+                 *
+                 * @param {number} index @param {() => void} work
+                 */
+                onExecutor(index, work){
+                    const remote = state.remotes.find((/** @type {any} */ one)=>one.index === index);
+                    if (!remote)
+                    {
+                        throw new Error(`cpu: no executor ${index}`);
+                    }
+                    remote.onBlock(work);
+                },
+                /**
+                 * A fault another executor took that no handler did: the
+                 * processor's fault, as one of its own would be.
+                 *
+                 * @param {any} fault
+                 */
+                remoteFault(fault){
+                    state.lastFault ??= fault;
                 },
 
                 /**
@@ -960,6 +1106,16 @@ export function createCpuModule(){
                     state.stacks.push([base >>> 0, size >>> 0]);
                     state.host?.noteStack?.(base >>> 0, size >>> 0);
                 },
+                /**
+                 * Opens or closes pages to the program (the host's `pageAccess`):
+                 * false where the engine does not fault a read of a closed page,
+                 * and then nothing changes.
+                 *
+                 * @param {number} address @param {number} length @param {boolean} open
+                 * @returns {boolean}
+                 */
+                pageAccess: (address, length, open)=>
+                    state.host?.pageAccess?.(address, length, open) ?? false,
 
                 instructionCount: ()=>started().instructionCount(),
                 compiledModules: ()=>started().compiledModules(),
@@ -1031,6 +1187,7 @@ export function createCpuModule(){
                     // can read and write in place.
                     sharedMemory: typeof SharedArrayBuffer === 'function'
                         && instance.host.wasmMemory?.()?.buffer instanceof SharedArrayBuffer,
+                    executorsRefused: instance.executorsRefused,
                     running: instance.running,
                     instructions: instance.host.instructionCount(),
                     protectedMode: instance.host.inProtectedMode(),
@@ -1080,6 +1237,23 @@ export function createCpuModule(){
                     cork: instance.cork
                         ? instance.host?.corkDiagnostics?.() ?? instance.cork.diagnostics()
                         : null,
+                    // The other executors' translators, as each answered last: they
+                    // answer between their slices, so a report carries the answer to
+                    // the report before it, and says so of one not yet given.
+                    executors: instance.remotes.map((/** @type {any} */ remote)=>{
+                        remote.diagnostics().then((/** @type {any} */ value)=>{
+                            instance.remoteFigures.set(remote.index, value);
+                        }).catch(()=>{});
+                        const figures = instance.remoteFigures.get(remote.index);
+                        return figures ? {
+                            index: remote.index,
+                            retired: figures.retired,
+                            translatedShare: figures.translatedShare,
+                            regions: figures.regions,
+                            translateMs: figures.translateMs,
+                            workerBusyMs: figures.workerBusyMs,
+                        } : { index: remote.index, answer: 'not answered yet' };
+                    }),
                 },
             };
         },
@@ -1099,6 +1273,12 @@ export function createCpuModule(){
                 {
                     current.host.stop();
                 }
+                for (const remote of current.remotes)
+                {
+                    remote.close();
+                }
+                current.remotes = [];
+                current.bell = null;
                 current.host = null;
                 current.thunks = null;
                 current.running = false;

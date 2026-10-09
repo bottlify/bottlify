@@ -188,12 +188,12 @@ export function random(seed){
  * A sequence's body: `shortest` to `longest` forms drawn from the pool.
  *
  * @param {() => number} next
- * @param {{ shortest?: number, longest?: number }} [given]
+ * @param {{ shortest?: number, longest?: number, pool?: Form[] }} [given]
  * @returns {number[]}  pool indices
  */
-export function bodyOf(next, { shortest = 2, longest = 8 } = {}){
+export function bodyOf(next, { shortest = 2, longest = 8, pool = POOL } = {}){
     const length = shortest + Math.floor(next() * (longest - shortest + 1));
-    return Array.from({ length }, ()=>Math.floor(next() * POOL.length));
+    return Array.from({ length }, ()=>Math.floor(next() * pool.length));
 }
 
 /**
@@ -233,16 +233,17 @@ export function preambleOf(next){
  * The bytes of a program: the forms named by `indices`, then a halt.
  *
  * @param {number[]} indices  pool indices
+ * @param {Form[]} [pool]
  * @returns {Uint8Array}
  */
-export function programBytes(indices){
-    const bytes = indices.flatMap(index=>POOL[index].bytes);
+export function programBytes(indices, pool = POOL){
+    const bytes = indices.flatMap(index=>pool[index].bytes);
     return Uint8Array.from([...bytes, HALT]);
 }
 
-/** How a report names a sequence. @param {number[]} indices */
-export function namesOf(indices){
-    return indices.map(index=>POOL[index].name).join('; ');
+/** How a report names a sequence. @param {number[]} indices @param {Form[]} [pool] */
+export function namesOf(indices, pool = POOL){
+    return indices.map(index=>pool[index].name).join('; ');
 }
 
 /**

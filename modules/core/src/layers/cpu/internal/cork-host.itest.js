@@ -134,7 +134,7 @@ test('a fault the handler declines stops the machine as before', ()=>{
     assert.equal(h.haltedFlag(), 1);
 });
 
-test('an interpreted access beyond RAM is a #GP at the instruction', ()=>{
+test('an interpreted access beyond RAM is a page fault at the instruction, with its address', ()=>{
     const h = host();
     // mov eax, [eax]; hlt -- eax points past the 1 MiB of guest RAM.
     load(h, 0x1000, [0x8b, 0x00, 0xf4]);
@@ -142,7 +142,9 @@ test('an interpreted access beyond RAM is a #GP at the instruction', ()=>{
     h.runSlice(10);
     const fault = h.fault();
     assert.ok(fault, 'a fault record was built');
-    assert.equal(fault.vector, 13);
+    assert.equal(fault.vector, 14, 'as Windows raises an access violation: #PF');
+    assert.equal(fault.address, 0x200000, 'the address it could not reach');
+    assert.equal(fault.errorCode, 0, 'a read of a page not present');
     assert.equal(fault.eip, 0x1000, 'at the faulting instruction');
     assert.equal(h.haltedFlag(), 1);
 });

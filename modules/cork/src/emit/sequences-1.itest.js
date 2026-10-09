@@ -8,4 +8,4 @@
 
 import { testSequences } from '../testing/sequences-judge.js';
 
-testSequences(0, 2);
+testSequences(0, 4);

@@ -11,7 +11,7 @@ gets a `C:` drive, a registry, windows and messages, and runs unchanged.
 import { createApp } from '@bottlify/core';
 
 const canvas = document.querySelector('canvas');
-// The program's PE image: here the server reads the bundle's entry for us.
+// The program's PE image, beside the bundle (`node tools/make-btl.mjs extract demo`).
 const executable = new Uint8Array(await (await fetch('/bundles/demo/entry')).arrayBuffer());
 
 const app = await createApp({

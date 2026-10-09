@@ -26,7 +26,7 @@
 
 import { MODULE_BASE64 } from './interp-wasm.bytes.js';
 import { eflagsOf } from './emit/flags.js';
-import { Tables } from './runtime/layout.js';
+import { Tables, codeRangesAt, pageFlagsAt } from './runtime/layout.js';
 import { withSharedMemoryImport } from './wasm/shared-import.js';
 
 /** How a run of the tier ended. `interp-wasm.c` has the same numbers. */
@@ -57,8 +57,13 @@ export const RING_STARTS = 256;
 /** Bytes the tier keeps past the tables: the counts, the ring, the ring's next index and
  * what its runs from translated code have retired. */
 export const WASM_INTERPRETER_AREA = HOT_SLOTS + RING_STARTS * 4 + 8;
-/** Where the module's own data and stack end (the build fails past it): below guest RAM. */
-const MODULE_END = 16384;
+/** Bytes an executor keeps for an instance's data and stack, its statics: the module is
+ * position-independent, so each executor's instance has its own (the build fails past it). */
+export const WASM_INTERPRETER_STATICS = 12288;
+/** Where they lie from an executor's state block: in the page it keeps below guest RAM. */
+export const WASM_INTERPRETER_STATICS_AT = 4096;
+/** Of them, the stack's, below the top. */
+export const WASM_INTERPRETER_STACK = 8192;
 
 /** The transcendentals the module imports: the host's, as the JavaScript
  * interpreter's and translated code's are, so every tier computes the same. */
@@ -110,23 +115,25 @@ function wasmModule(shared){
 /**
  * The tier over one memory, or null for a layout it cannot run over: another
  * executor's (the hybrid's code table is a second thing a store is noted
- * against), one without an `fs` base, or one whose guest RAM starts too low
- * to leave the module its page.
+ * against), one without an `fs` base, or a memory without room for its areas.
  *
  * @param {{ memory: WebAssembly.Memory,
  *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout,
- *     area: number, hotThreshold: number, trapPort?: number, parkBase: number,
- *     precise?: boolean }} options
- *     area: where the tier's `WASM_INTERPRETER_AREA` bytes lie; parkBase: the park loop's
- *     address, whose jumps the ring leaves out; precise: the engine's `precise`, the x87
- *     bookkeeping games do not read kept as the JavaScript interpreter keeps it
+ *     area: number, statics: number, hotThreshold: number, trapPort?: number,
+ *     parkBase: number, precise?: boolean, atomic?: boolean }} options
+ *     area: where the tier's `WASM_INTERPRETER_AREA` bytes lie; statics: where the
+ *     instance's `WASM_INTERPRETER_STATICS` bytes, its data and stack, lie; parkBase: the
+ *     park loop's address, whose jumps the ring leaves out; precise: the engine's `precise`,
+ *     the x87 bookkeeping games do not read kept as the JavaScript interpreter keeps it;
+ *     atomic: the engine's `atomic`, every locked instruction left to the JavaScript tier
  * @returns {WasmInterpreter | null}
  */
-export function createWasmInterpreter({ memory, layout, area, hotThreshold, trapPort, parkBase,
-    precise = false })
+export function createWasmInterpreter({ memory, layout, area, statics, hotThreshold, trapPort,
+    parkBase, precise = false, atomic = false })
 {
-    if ((layout.codePages ?? -1) >= 0 || layout.fsBase < 0 || layout.ramBase < MODULE_END
-        || layout.regs + 32 > 512 || area + WASM_INTERPRETER_AREA > memory.buffer.byteLength)
+    if ((layout.codePages ?? -1) >= 0 || layout.fsBase < 0
+        || area + WASM_INTERPRETER_AREA > memory.buffer.byteLength
+        || statics + WASM_INTERPRETER_STATICS > memory.buffer.byteLength)
     {
         return null;
     }
@@ -147,10 +154,20 @@ export function createWasmInterpreter({ memory, layout, area, hotThreshold, trap
     const instantiate = ()=>{
         const shared = typeof SharedArrayBuffer === 'function'
             && memory.buffer instanceof SharedArrayBuffer;
-        const exports = /** @type {any} */ (new WebAssembly.Instance(wasmModule(shared),
-            { env: { memory, ...HOST_MATH } }).exports);
-        exports.configure(layout.ramBase, layout.tables + Tables.PAGE_FLAGS,
-            layout.tables + Tables.CODE_RANGES, layout.tables + Tables.HASH, layout.hashShift ?? 16,
+        const exports = /** @type {any} */ (new WebAssembly.Instance(wasmModule(shared), {
+            env: {
+                memory, ...HOST_MATH,
+                __memory_base: new WebAssembly.Global({ value: 'i32', mutable: false }, statics),
+                __stack_pointer: new WebAssembly.Global({ value: 'i32', mutable: true },
+                    statics + WASM_INTERPRETER_STATICS),
+                __table_base: new WebAssembly.Global({ value: 'i32', mutable: false }, 0),
+                __indirect_function_table: new WebAssembly.Table({ initial: 0,
+                    element: 'anyfunc' }),
+            },
+        }).exports);
+        exports.__wasm_apply_data_relocs?.();
+        exports.configure(layout.ramBase, pageFlagsAt(layout),
+            codeRangesAt(layout), layout.tables + Tables.HASH, layout.hashShift ?? 16,
             layout.regs, layout.eip, layout.eflags, layout.fsBase, area, HOT_SLOTS, hotThreshold,
             // No port a byte or a word can name: every `out` is left to the JavaScript tier.
             trapPort ?? 0x10000, parkBase >>> 0);
@@ -159,6 +176,7 @@ export function createWasmInterpreter({ memory, layout, area, hotThreshold, trap
         exports.configureEntry(layout.counter);
         // Zero is no place: the block's first word is a register, never the marks.
         exports.configureExact(layout.x87Format === 'f64' ? layout.x87Exact ?? 0 : 0);
+        exports.configureAtomic(atomic ? 1 : 0);
         ({ retired, relaxedReads, exitValue, exitSize, enter } = exports);
         run = /** @type {(budget: number) => number} */ (exports.run);
         return run;

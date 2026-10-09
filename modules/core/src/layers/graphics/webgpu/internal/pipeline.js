@@ -115,6 +115,12 @@ const BLEND_OP = Object.freeze({
  */
 const CULL = Object.freeze({ 1: 'none', 2: 'back', 3: 'front' });
 
+/** D3DSTENCILOP to WebGPU's stencil operation. */
+const STENCIL_OP = Object.freeze({
+    1: 'keep', 2: 'zero', 3: 'replace', 4: 'increment-clamp', 5: 'decrement-clamp',
+    6: 'invert', 7: 'increment-wrap', 8: 'decrement-wrap',
+});
+
 /** @param {Record<number, string>} table @param {number} value @param {string} what */
 function lookUp(table, value, what){
     const found = table[value];
@@ -227,6 +233,27 @@ function lookUp(table, value, what){
  * @property {PointState} [points]
  *     A point list, which WebGPU draws only a pixel wide: each point is drawn
  *     as a quad of its size instead, its vertex read once an instance.
+ * @property {StencilState} [stencil]
+ *     D3DRS_STENCILENABLE on a target with a stencil: absent, no stencil test.
+ */
+
+/**
+ * The stencil test and what it writes, as the render states say them. The
+ * reference is set on the pass, not built into the pipeline, so it is no part
+ * of the key.
+ *
+ * @typedef {Object} StencilState
+ * @property {number} func       D3DCMP of the clockwise faces (all faces when one-sided).
+ * @property {number} fail       D3DSTENCILOP, the test failed.
+ * @property {number} zfail      D3DSTENCILOP, the test passed and the depth test failed.
+ * @property {number} pass       D3DSTENCILOP, both passed.
+ * @property {number} ccwFunc    The same four for the counter-clockwise faces, which equal
+ * @property {number} ccwFail    the ones above unless D3DRS_TWOSIDEDSTENCILMODE is set.
+ * @property {number} ccwZfail
+ * @property {number} ccwPass
+ * @property {number} readMask   D3DRS_STENCILMASK.
+ * @property {number} writeMask  D3DRS_STENCILWRITEMASK.
+ * @property {number} ref        D3DRS_STENCILREF.
  */
 
 /**
@@ -302,6 +329,10 @@ export function pipelineKey(state){
         ...(state.rangeFog ? ['range'] : []),
         ...(state.points
             ? [`points${state.points.sprite ? 's' : ''}${state.points.scale ? 'd' : ''}`] : []),
+        ...(state.stencil ? [`stencil${[state.stencil.func, state.stencil.fail,
+            state.stencil.zfail, state.stencil.pass, state.stencil.ccwFunc, state.stencil.ccwFail,
+            state.stencil.ccwZfail, state.stencil.ccwPass, state.stencil.readMask & 0xff,
+            state.stencil.writeMask & 0xff].join(',')}`] : []),
     ].join('|');
 }
 
@@ -371,6 +402,30 @@ export function vertexBuffersOf(stride, attributes, streams = [], points = false
 }
 
 /**
+ * A pipeline's stencil faces and masks. A clockwise face is WebGPU's back one
+ * (`CULL`: D3DCULL_CW culls 'back'), so the states Direct3D applies to
+ * clockwise triangles go to `stencilBack` and the counter-clockwise ones to
+ * `stencilFront`.
+ *
+ * @param {StencilState} stencil
+ */
+function stencilDescriptor(stencil){
+    /** @param {number} func @param {number} fail @param {number} zfail @param {number} pass */
+    const face = (func, fail, zfail, pass)=>({
+        compare: lookUp(COMPARE, func, 'stencil function'),
+        failOp: lookUp(STENCIL_OP, fail, 'stencil operation'),
+        depthFailOp: lookUp(STENCIL_OP, zfail, 'stencil operation'),
+        passOp: lookUp(STENCIL_OP, pass, 'stencil operation'),
+    });
+    return {
+        stencilBack: face(stencil.func, stencil.fail, stencil.zfail, stencil.pass),
+        stencilFront: face(stencil.ccwFunc, stencil.ccwFail, stencil.ccwZfail, stencil.ccwPass),
+        stencilReadMask: stencil.readMask & 0xff,
+        stencilWriteMask: stencil.writeMask & 0xff,
+    };
+}
+
+/**
  * The descriptor for the state, less the shader modules and layout, which the
  * caller supplies because it owns compilation and binding.
  *
@@ -390,6 +445,7 @@ export function pipelineDescriptor(state, layout){
                 ? lookUp(COMPARE, state.depthFunc, 'depth function')
                 : 'always',
             depthWriteEnabled: state.depthWrite,
+            ...(state.stencil ? stencilDescriptor(state.stencil) : {}),
         };
 
     const blend = state.blend

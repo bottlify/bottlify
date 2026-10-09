@@ -21,7 +21,7 @@
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import { DF } from '../decode/table.js';
 import { isX87Opcode } from '../decode/decoder.js';
-import { Tables } from '../runtime/layout.js';
+import { Tables, codeRangesAt, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { I32 } from './flags.js';
 import { Exit, Local } from './region.js';
@@ -42,6 +42,19 @@ export const HELD = 1;
  * rounding from then on.
  */
 export const PRECISION = 2;
+
+/**
+ * Whether an instruction that only reads is left untested, its address wrapped
+ * into RAM: not under `precise`, nor `checkReads`, where a page the program
+ * cannot read faults, and only with RAM a power of two.
+ *
+ * @param {{ precise?: boolean, checkReads?: boolean }} context
+ * @param {{ ramSize: number }} layout
+ */
+export function readsWrapped(context, layout){
+    return context.precise !== true && context.checkReads !== true
+        && (layout.ramSize & layout.ramSize - 1) === 0;
+}
 
 /**
  * Stores whose code note `checkAccess` already made, by the instruction they
@@ -82,13 +95,13 @@ export function checkAccess(e, size, { counted = true, store = false } = {}){
     // one `and` for a shift, a load and a branch. A read past the end of
     // guest memory then reads RAM where it raised #GP.
     const { ramSize } = e.layout;
-    if (!store && e.context.precise !== true && (ramSize & ramSize - 1) === 0
-        && e.layout.codePages < 0 && readsOnly(e.current))
+    if (!store && readsWrapped(e.context, e.layout) && e.layout.codePages < 0
+        && readsOnly(e.current))
     {
         b.localGet(Local.addr).i32const(ramSize - 1).op(I32.and).localSet(Local.addr);
         return;
     }
-    const table = e.layout.tables + Tables.PAGE_FLAGS;
+    const table = pageFlagsAt(e.layout);
     const noting = store && e.layout.codePages < 0 && size <= 16;
     const bits = PageFlag.INACCESSIBLE | (noting ? PageFlag.HAS_CODE : 0);
     b.localGet(Local.addr).i32const(12).op(I32.shrU)
@@ -165,7 +178,7 @@ export function noteStore(e, size){
             // A state save (fsave, fnstenv): its access was checked at the
             // operand's size, so its last page's flags are read here.
             b.localGet(Local.addr).i32const(size - 1).op(I32.add).i32const(12).op(I32.shrU)
-                .load('i32_8u', { offset: e.layout.tables + Tables.PAGE_FLAGS }).op(I32.or);
+                .load('i32_8u', { offset: pageFlagsAt(e.layout) }).op(I32.or);
         }
         // The next page's flag too: a wide access's halfword holds it.
         b.i32const(PageFlag.HAS_CODE * 0x101).op(I32.and);
@@ -246,8 +259,8 @@ function noteCodeStore(e, size){
 export function addCodeHitHelper(m, layout){
     const type = m.type({ params: [ValType.i32], results: [ValType.i32] });
     const b = new Body();
-    const flags = layout.tables + Tables.PAGE_FLAGS;
-    const ranges = layout.tables + Tables.CODE_RANGES;
+    const flags = pageFlagsAt(layout);
+    const ranges = codeRangesAt(layout);
     // local 1: the page; local 2: the granule
     b.localGet(0).i32const(12).op(I32.shrU).localSet(1);
     b.localGet(1).load('i32_8u', { offset: flags }).i32const(PageFlag.HAS_CODE).op(I32.and);
@@ -311,7 +324,7 @@ export function addWindowHitHelper(m, layout, spanHit){
     const i32 = ValType.i32;
     const type = m.type({ params: [i32, i32, i32, i32], results: [i32] });
     const b = new Body();
-    const flags = layout.tables + Tables.PAGE_FLAGS;
+    const flags = pageFlagsAt(layout);
     b.localGet(0).i32const(12).op(I32.shrU).load('i32_8u', { offset: flags });
     b.localGet(0).localGet(1).op(I32.add).i32const(12).op(I32.shrU)
         .load('i32_8u', { offset: flags });
@@ -1340,7 +1353,7 @@ export function emitGroupChecks(e, checks, at = -1){
         }
     }
     const { b } = e;
-    const table = e.layout.tables + Tables.PAGE_FLAGS;
+    const table = pageFlagsAt(e.layout);
     // Held: the epilogue's hash probe would find this very address's entry
     // and tail-call it, whose check leaves again with nothing retired -- for
     // ever, the budget untouched. Back at the host, the interpreter runs it.
@@ -1580,7 +1593,7 @@ function loopAccessesOf(ins, forward){
  */
 export function emitStreamWindow(e, streams, turns, forward = false){
     const { b } = e;
-    const table = e.layout.tables + Tables.PAGE_FLAGS;
+    const table = pageFlagsAt(e.layout);
     if (forward)
     {
         b.localGet(Local.flags).i32const(DF).op(I32.and);

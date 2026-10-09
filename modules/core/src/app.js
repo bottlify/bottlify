@@ -19,7 +19,8 @@ import { createPresenter } from './layers/graphics/webgpu/internal/presenter.js'
 import { baseOf, compositionPlan, needsComposing } from './layers/graphics/webgpu/internal/compose.js';
 import { connectGraphicsWorker, portEnd } from './layers/graphics/remote/connect.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
-import { parsePe, readExports, readImports, rvaToFileOffset } from './layers/loader/internal/pe.js';
+import { DIR_EXPORT, parseExportDirectory, parsePe, readExports, readImports, rvaToFileOffset }
+    from './layers/loader/internal/pe.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
 import {
     findResource, listResources, loadString, RT_STRING, stringInBundle,
@@ -58,6 +59,7 @@ import { createWindowDirectory } from './layers/win32/user32/directory.js';
 import { createMixer } from './layers/audio/output/mixer.js';
 import { objectHandlers } from './system-objects.js';
 import { openProcessWorker } from './host/process-worker.js';
+import { createTranslatorPool, portTranslator } from './host/pool/pool.js';
 
 /**
  * createApp — the consumer-facing entry point: run a Win32 application.
@@ -85,6 +87,16 @@ import { openProcessWorker } from './host/process-worker.js';
  * @property {import('./layers/cpu/engine.js').EngineConfig} [cork.config]  Its settings;
  *     `store` here is a request -- `'local'` (the default) for the origin's private file
  *     system, a store of your own when the app runs in this thread, `null` for none.
+ * @property {boolean} [cork.pool]  The run's pool of translation workers, lent to its
+ *     processes as their translation needs (roadmap/v2): on by default wherever a machine's
+ *     translator would open a worker of its own, unless `cork.config.translators` is set.
+ * @property {number} [cork.poolPerProcess]  Workers of the pool at most for one process:
+ *     `navigator.hardwareConcurrency` by default.
+ * @property {number} [cork.poolWindowMs]  How often the pool's driver reads its workers.
+ *     Default 500.
+ * @property {Partial<import('./host/pool/driver.js').DriverSettings>} [cork.poolDriver]  The
+ *     driver's thresholds (`joinAt`, `leaveBelow`, `leaveAfterMs`, `idleBelow`, `trialWindows`,
+ *     `trialLimit`, `restMs`, `yieldShare`).
  * @property {Object} [zstd]              The bundle decoder's wasm build, when the package's
  *           own is not wanted: `vendor/zstd.wasm` beside this module by default; absent
  *           there, the JavaScript decoder (or the emulator's, while it is loaded) decodes.
@@ -216,12 +228,20 @@ import { openProcessWorker } from './host/process-worker.js';
  *     rather than the guest's code.
  * @property {number} [quantum]  Guest instructions per scheduler turn. Lowering
  *           it is what makes `sample` a profile rather than a rumour.
+ * @property {number} [executors]  Executors of the program's process under cork: past
+ *           the process's own thread, each a worker running one of its threads at once
+ *           with the others, the locked instructions atomic (roadmap/v2, stage 3).
+ *           Default 1, every thread on the process's own.
  * @property {boolean} [preemption]  End a slice early when a thread of higher
  *           priority comes due, as Windows preempts (the kernel's option; off).
  * @property {(eip: number, instructions: number) => void} [sample]
  *           Called with the guest's instruction pointer at every turn boundary.
  *           This is the only view of what a program is doing between host calls,
  *           which is where a program that fails on its own computed state fails.
+ * @property {number} [pendingYieldMs]  How often, in milliseconds, the run
+ *     loop gives its thread away to hear an outstanding host answer while
+ *     other threads still run. Default 1; lower hears answers sooner at more
+ *     trips round the event loop.
  * @property {RunPacing} [pacing]
  *     How the run loop gives the thread away, and how it waits when the guest
  *     has nothing to run. The default is a page's: it cannot block, so it
@@ -1002,6 +1022,15 @@ export function timedWait({ hidden, macrotask, timer }){
 export const PAGE_YIELD_MS = 2;
 
 /**
+ * How often an outstanding host answer -- a call suspended on the host, a
+ * range in flight -- is looked for while other guest threads still have work.
+ * It bounds how late the parked thread hears its answer; a trip costs tens of
+ * microseconds, a turn a few hundred, so one look a millisecond keeps the
+ * trips a small share of the run.
+ */
+export const PENDING_YIELD_MS = 1;
+
+/**
  * A yield by need and by time, not by turn.
  *
  * The loop leaves the microtask queue when the host may have something to
@@ -1021,18 +1050,29 @@ export const PAGE_YIELD_MS = 2;
  * @param {() => number} deps.now             Wall milliseconds.
  * @param {number} deps.intervalMs
  * @param {() => boolean} [deps.signalled]    Whether a message is known to be waiting.
+ * @param {number} [deps.pendingMs]  How long after the last trip an outstanding host
+ *     answer or range is looked for again while other threads still run.
  * @param {Record<string, number>} [deps.counts]  Counted into: each turn, by why it went to
  *     the event loop (`suspended`, `fetching`, `spun`, `signalled`, `interval`) or `kept`.
  * @returns {RunPacing['yield']}
  */
-export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false, counts }){
+export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false,
+    pendingMs = PENDING_YIELD_MS, counts })
+{
     let rested = now();
     return pending=>{
+        // An answer outstanding is looked for at once only when the turn ran
+        // nothing; while other threads run it waits out pendingMs, since a
+        // trip a turn behind a loader running beside a thread parked on
+        // Present was the largest host phase of a run (2.46 M trips in 1500 s).
+        const since = now() - rested;
+        const look = pending.spun > 0 || since >= pendingMs;
         // Why the turn went to the event loop, the first reason that held -- what a report
         // reads when the trips are many.
-        const why = pending.suspended > 0 ? 'suspended' : pending.fetching > 0 ? 'fetching'
-            : pending.spun > 0 ? 'spun' : signalled() ? 'signalled'
-                : now() - rested >= intervalMs ? 'interval' : null;
+        const why = pending.suspended > 0 && look ? 'suspended'
+            : pending.fetching > 0 && look ? 'fetching'
+                : pending.spun > 0 ? 'spun' : signalled() ? 'signalled'
+                    : since >= intervalMs ? 'interval' : null;
         if (counts)
         {
             counts[why ?? 'kept'] = (counts[why ?? 'kept'] ?? 0) + 1;
@@ -1059,16 +1099,17 @@ export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false, 
  * @param {number} [deps.yieldMs]
  * @param {() => number} [deps.now]
  * @param {() => boolean} [deps.signalled]
+ * @param {number} [deps.pendingMs]
  * @returns {RunPacing}
  */
 export function pagePacing({ macrotask, hidden, lookMs = IDLE_LOOK_MS, yieldMs = PAGE_YIELD_MS,
-    now = ()=>performance.now(), signalled })
+    now = ()=>performance.now(), signalled, pendingMs })
 {
     /** Turns kept on the thread and trips to the event loop, by why. @type {Record<string, number>} */
     const counts = {};
     return {
         counts: ()=>({ ...counts }),
-        yield: pacedYield({ macrotask, now, intervalMs: yieldMs, signalled, counts }),
+        yield: pacedYield({ macrotask, now, intervalMs: yieldMs, signalled, pendingMs, counts }),
         wait({ timer, wakes }){
             if (!timer)
             {
@@ -1376,6 +1417,46 @@ const CORK = /** @type {{ env?: { BOTTLIFY_CORK?: string } }} */ (import.meta).e
  */
 export function corkArtifacts(asked, here = import.meta.url){
     return { moduleUrl: asked?.moduleUrl ?? new URL(CORK, here).href };
+}
+
+/**
+ * The run's pool of translation workers (roadmap/v2, stage 2), where every
+ * machine's translator would otherwise open a worker of its own: on cork, with
+ * shared memory and ports to lend through, and unless the caller turned it off
+ * (`cork.pool: false`) or set the translators a machine opens itself
+ * (`cork.config.translators`). A process in a worker of its own is lent its
+ * workers by the run's system, and makes no pool.
+ *
+ * @param {AppOptions} options
+ * @returns {Promise<ReturnType<typeof createTranslatorPool> | null>}
+ */
+async function openTranslationPool(options){
+    const cork = options.cork ?? {};
+    const config = /** @type {any} */ (cork.config ?? {});
+    if ((options.engine ?? DEFAULT_ENGINE) !== 'cork' || options.system || cork.pool === false
+        || typeof SharedArrayBuffer !== 'function' || typeof MessageChannel !== 'function')
+    {
+        return null;
+    }
+    const wanted = cork.pool === true || (config.translators === undefined
+        && (config.worker ?? (config.feed !== 'slice' && typeof globalThis.Worker === 'function')));
+    if (!wanted)
+    {
+        return null;
+    }
+    const engine = await import(corkArtifacts(cork).moduleUrl);
+    const url = config.workerUrl ?? engine.translatorWorkerUrl?.() ?? null;
+    if (url === null)
+    {
+        return null;
+    }
+    return createTranslatorPool({
+        open: ()=>openProcessWorker(url),
+        perProcess: cork.poolPerProcess
+            ?? Math.max(1, globalThis.navigator?.hardwareConcurrency ?? 4),
+        ...(cork.poolWindowMs === undefined ? {} : { windowMs: cork.poolWindowMs }),
+        driver: cork.poolDriver ?? {},
+    });
 }
 
 /**
@@ -2255,6 +2336,7 @@ export async function zstdWasmFor(options, here = import.meta.url){
  *                     stop: () => void, ahead: () => number,
  *                     refetched: () => { blocks: number, bytes: number },
  *                     ranges: () => { requests: number, bytes: number },
+ *                     decoded: () => { blocks: number, bytes: number, ms: number },
  *                     registry: Promise<any> } | null>}
  */
 async function mountBundle({ options, cpu, events, translationStore }){
@@ -2290,10 +2372,18 @@ async function mountBundle({ options, cpu, events, translationStore }){
     const decode = (codec, bytes, expectedLength)=>{
         if (codec === 2)
         {
-            return zstdForEngine(bytes, expectedLength ?? 0);
+            // Counted: the decoding a guest read waits for is what a pool
+            // worker would take off this thread (roadmap/v2, stage 2).
+            const startedAt = performance.now();
+            const plain = zstdForEngine(bytes, expectedLength ?? 0);
+            decoded.blocks++;
+            decoded.bytes += plain.length;
+            decoded.ms += performance.now() - startedAt;
+            return plain;
         }
         return bytes;
     };
+    const decoded = { blocks: 0, bytes: 0, ms: 0 };
 
     // The index is deflated, and opening is asynchronous anyway, so it may use
     // the decoder a guest read cannot.
@@ -2672,6 +2762,7 @@ async function mountBundle({ options, cpu, events, translationStore }){
         /** Blocks a request went out for that were already here: the number
          *  that has to stay at zero. */
         refetched: ()=>({ ...refetched }),
+        decoded: ()=>({ ...decoded }),
         /** Range requests made and bytes asked for, ever. */
         ranges: ()=>({ ...ranges }),
         stop(){
@@ -3203,6 +3294,7 @@ async function buildApp(options){
      *          ahead: () => number,
      *          refetched: () => { blocks: number, bytes: number },
      *          ranges: () => { requests: number, bytes: number },
+     *          decoded?: () => { blocks: number, bytes: number, ms: number },
      *          registry: Promise<any> } | null} */
     let blocks = null;
     /**
@@ -3439,6 +3531,7 @@ async function buildApp(options){
             // faults, as on Windows, rather than sliding through the zeroes.
             noExecuteBelow: 0x10000,
             engine: options.engine ?? DEFAULT_ENGINE,
+            executors: options.executors ?? 1,
             engineUrl: (options.engine ?? DEFAULT_ENGINE) !== 'emulator'
                 ? corkArtifacts(options.cork).moduleUrl : null,
             cork: {
@@ -4268,6 +4361,9 @@ async function buildApp(options){
     }
 
     const cpu = core.api('cpu');
+    /** The workers of the run's translation pool lent to this machine, by the pool's token.
+     * @type {Map<number, import('./layers/cpu/engine.js').TranslatorPort>} */
+    const lentTranslators = new Map();
     const memory = core.api('memory');
     const kernel = core.api('kernel');
     const loader = core.api('loader');
@@ -5309,21 +5405,50 @@ async function buildApp(options){
     // An executable exports too: a library a program ships imports from the
     // program that loads it, by name or by ordinal, and is bound to those
     // addresses the way it is bound to any other module's.
+    //
+    // Read out of the mapping when asked, as Windows reads them, never out of
+    // the file at load: an executable may carry its table encoded and write it
+    // out in place before it asks for its own exports. Read again whenever the
+    // directory's head has changed since; one the image could not hold is no
+    // exports at all, said once.
     const ownImage = parsePe(options.executable);
-    const ownExports = readExports(options.executable, ownImage).exports;
-    const ownByName = new Map(ownExports
-        .filter(entry=>entry.name !== null && entry.forwards === null)
-        .map(entry=>[String(entry.name), image.base + entry.rva]));
-    const ownByOrdinal = new Map(ownExports
-        .filter(entry=>entry.forwards === null)
-        .map(entry=>[entry.ordinal, image.base + entry.rva]));
+    const ownDirectory = ownImage.directories[DIR_EXPORT];
+    /** @type {{ head: string, byName: Map<string, number>, byOrdinal: Map<number, number> } | null} */
+    let ownTable = null;
+    let ownRefusal = '';
+    const ownExports = ()=>{
+        if (!ownDirectory || ownDirectory.size === 0)
+        {
+            return null;
+        }
+        const head = [...memory.readBytes(image.base + ownDirectory.address, 40)].join(',');
+        if (ownTable?.head !== head)
+        {
+            const parsed = parseExportDirectory((rva, length)=>(rva >= ownImage.sizeOfImage ? null
+                : memory.readBytes(image.base + rva, Math.min(length, ownImage.sizeOfImage - rva))),
+            ownDirectory);
+            if (parsed.refused !== null && parsed.refused !== ownRefusal)
+            {
+                ownRefusal = parsed.refused;
+                events.emit('exports-refused', { name: mainModule.path, reason: parsed.refused });
+            }
+            const resolved = parsed.exports.filter(entry=>entry.forwards === null);
+            ownTable = {
+                head,
+                byName: new Map(resolved.filter(entry=>entry.name !== null)
+                    .map(entry=>[String(entry.name), image.base + entry.rva])),
+                byOrdinal: new Map(resolved.map(entry=>[entry.ordinal, image.base + entry.rva])),
+            };
+        }
+        return ownTable;
+    };
     mainModule = {
         name: 'app.exe',
         base: image.base,
         /** @param {string} exported */
-        addressOf: exported=>ownByName.get(exported) ?? null,
+        addressOf: exported=>ownExports()?.byName.get(exported) ?? null,
         /** @param {number} ordinal */
-        addressOfOrdinal: ordinal=>ownByOrdinal.get(ordinal) ?? null,
+        addressOfOrdinal: ordinal=>ownExports()?.byOrdinal.get(ordinal) ?? null,
         // Kept because a program reads its own resources, and a resource
         // directory is read out of the file rather than out of the mapping.
         file: options.executable,
@@ -5888,6 +6013,7 @@ async function buildApp(options){
     const pacing = options.pacing ?? pagePacing({
         macrotask: breathe,
         hidden: options.pageHidden ?? pageIsHidden,
+        pendingMs: options.pendingYieldMs,
     });
 
     /**
@@ -6978,6 +7104,36 @@ async function buildApp(options){
          */
         exportTranslations: ()=>cpu.exportTranslations(),
 
+        /**
+         * A worker of the run's translation pool, lent to this process: the
+         * port is the process's end of the worker's, and the token names it
+         * when the pool asks for it back (`recallTranslator`). A machine whose
+         * engine takes none tells the worker so at once.
+         *
+         * @param {MessagePort} port @param {number} token
+         */
+        lendTranslator(port, token){
+            const adapter = portTranslator(port);
+            if (cpu.attachTranslator(adapter))
+            {
+                lentTranslators.set(token, adapter);
+            }
+            else
+            {
+                adapter.terminate();
+            }
+        },
+
+        /** @param {number} token */
+        recallTranslator(token){
+            const adapter = lentTranslators.get(token);
+            if (adapter !== undefined)
+            {
+                lentTranslators.delete(token);
+                cpu.detachTranslator(adapter);
+            }
+        },
+
         exitCode: ()=>win32.exitCode(),
 
         /**
@@ -7039,6 +7195,12 @@ async function buildApp(options){
                         refetchedBytes: blocks?.refetched().bytes ?? 0,
                         ranges: blocks?.ranges().requests ?? 0,
                         rangeBytes: blocks?.ranges().bytes ?? 0,
+                        // zstd blocks decoded for guest reads, and the time it took:
+                        // a bundle mounted on this thread's; one a process in a
+                        // worker reads across its link decodes on the system's.
+                        decoded: blocks?.decoded?.().blocks ?? 0,
+                        decodedBytes: blocks?.decoded?.().bytes ?? 0,
+                        decodeMs: Math.round(blocks?.decoded?.().ms ?? 0),
                     },
                     film: { ...film },
                     // Which of the program's own code the machine is spent on
@@ -7704,10 +7866,15 @@ export async function createApp(options){
     const translationStore = await resolveTranslationStore(runStoreSpec,
         options.bundle?.id ?? options.id ?? 'bundle');
 
+    const translationPool = await openTranslationPool(options);
+    /** What a machine's translator is told where the run lends it its translators. */
+    const lentConfig = translationPool ? { worker: true, translators: 0 } : {};
+
     /** @param {any} [extra] */
     const machine = extra=>({
         ...options,
-        cork: { ...options.cork, config: { ...options.cork?.config, store: translationStore } },
+        cork: { ...options.cork, config: { ...options.cork?.config, store: translationStore,
+            ...lentConfig } },
         events,
         spawned: remember,
         logSinks,
@@ -7810,6 +7977,10 @@ export async function createApp(options){
         names.set(built, process);
         images.set(built, extra?.imagePath ?? '');
         processIds.set(built, extra?.processId ?? FIRST_PROCESS_ID);
+        translationPool?.addProcess(extra?.processId ?? FIRST_PROCESS_ID, {
+            lend: (port, token)=>built.lendTranslator(port, token),
+            recall: token=>built.recallTranslator(token),
+        }).catch(()=>{});
         return built;
     };
 
@@ -7821,6 +7992,7 @@ export async function createApp(options){
      */
     const retire = async ended=>{
         standing.delete(ended);
+        translationPool?.removeProcess(processIds.get(ended) ?? FIRST_PROCESS_ID);
         await classTable.ended(names.get(ended));
         processes.delete(names.get(ended));
         names.delete(ended);
@@ -8434,6 +8606,10 @@ export async function createApp(options){
         // the run's sound is mixed on this thread, and the child has none.
         const sound = from.sound();
         const worker = await openProcessWorker();
+        translationPool?.addProcess(request.id, {
+            lend: (port, token)=>worker.post({ type: 'translator', port, token }, [port]),
+            recall: token=>worker.post({ type: 'recall', token }),
+        }).catch(()=>{});
         // The page's input reaches it as the run routes it (`routedInput`).
         const asked = { image: request.imagePath, id: request.id, link,
             diagnostics: ()=>link.call('report', 'diagnostics', []) };
@@ -8492,7 +8668,7 @@ export async function createApp(options){
                             .filter(([, value])=>typeof value !== 'function')) : undefined,
                         // The translator's store is the run's, asked across the
                         // link; the doorbell is this thread's.
-                        cork: { config: { ...options.cork?.config,
+                        cork: { config: { ...options.cork?.config, ...lentConfig,
                             store: translationStore ? 'run' : null, doorbell: undefined } },
                     },
                     run: { maxTurns: runOptionsNow?.maxTurns, timeoutMs: runOptionsNow?.timeoutMs },
@@ -8502,6 +8678,7 @@ export async function createApp(options){
         finally
         {
             standingAcross.delete(asked);
+            translationPool?.removeProcess(request.id);
             forgetObjects();
             await com.gone();
             link.close();
@@ -8731,6 +8908,7 @@ export async function createApp(options){
      */
     const startBeside = (parent, request)=>{
         const shared = audioMemory && 'table' in audioMemory
+            && typeof SharedArrayBuffer === 'function'
             && audioMemory.table instanceof SharedArrayBuffer;
         if (inWorker())
         {
@@ -9039,6 +9217,12 @@ export async function createApp(options){
 
     const own = {
         /**
+         * The run's translation pool as it stands: its workers, the idle ones,
+         * how many work for each process, and its journal of joins and leaves;
+         * null where the run has none.
+         */
+        translationPool: ()=>translationPool?.diagnostics() ?? null,
+        /**
          * Every process standing, each with its image and its own diagnostics:
          * the facade speaks for one of them, and an install several processes
          * deep that waits on itself shows nothing through one.
@@ -9093,6 +9277,7 @@ export async function createApp(options){
             .finally(()=>{
                 shownHere?.dispose();
                 presenter?.dispose?.();
+                translationPool?.dispose();
             }),
 
         /**

@@ -3,9 +3,14 @@
 Русская версия: [README.ru.md](README.ru.md).
 
 **Status:** proposed 2026-10-03, revised against `main` 6554baf0; the workers of stage 2 and the
-translation cache arena decided 2026-10-07 on `cork2` (no pool code yet). How the engine works
-today is in [`docs/architecture.md`](../../docs/architecture.md); this document is where it goes
-next.
+translation cache arena decided 2026-10-07 on `cork2`, where the translation pool, its driver and
+the arena landed the same day; zstd stays on the coordinator, measured not worth moving yet
+(`negative-results.md`, 2026-10-08). Stage 3's atomic variant, the executors' layouts (a state
+page, tables and interpreter statics of each executor's own over one guest RAM), executors in
+workers of their own and the kernel running a process's threads on them at once landed on
+`cork2` on 2026-10-08 (`createApp`'s `executors`); choosing the mode per process, and the host's
+unbroken routines (below), are open. How the engine works today is in
+[`docs/architecture.md`](../../docs/architecture.md); this document is where it goes next.
 
 v2 turns the engine from one thread that does everything into a platform of workers whose number
 follows the load: one worker while one copes, four when two are choking, never four held idle. On
@@ -235,6 +240,14 @@ off the thread that runs the program, not from running the program's threads at 
     holds at most hc × n. These count workers, not cores: a process that waits keeps none of its
     joined workers busy, so the ceiling of the whole is not what limits the machine — the median
     rule is, as each process asks only for what it can use.
+  - **The trial** (added 2026-10-07, measured). A busy worker is not yet a worker that helps: on
+    four cores one translator already leaves no core free while a game loads -- the engine's thread,
+    the translator and the browser's own threads take 2.5-3.6 of them -- and two or three
+    translators for one process loaded Doom 3 and Tron slower than one (`negative-results.md`,
+    2026-10-07). So each join is weighed: unless the regions the process's workers emit a second,
+    over the next two windows in which its work lasts, rise by half of what one more worker adds at
+    best, the worker leaves and the process keeps that many as its ceiling for the run. No other
+    worker joins it while a join is being weighed.
   - **Leaving.** Joined workers leave a process lazily, after seconds of its median well below the
     mark, and at once when the process stops translating to wait; they go back to the pool and
     sleep. Joining is quick (a window of a few hundred milliseconds), leaving slow, so the pool
@@ -299,10 +312,14 @@ measurement before stage 1 says that pays.
 
 - **The atomic variant.**
   - *plain* — today's code.
-  - *atomic* — `lock`-prefixed instructions become wasm atomic read-modify-writes, loads and stores
-    are ordered as x86 orders them, and an atomic access to an address that is not naturally
-    aligned takes a fallback path (a lock held across the access), since a misaligned wasm atomic
-    traps where x86 does not.
+  - *atomic* (landed, `emit/locked.js`) — `lock`-prefixed instructions and `xchg` with memory
+    become wasm atomics: the threads proposal's read-modify-write where it has one, a
+    compare-and-swap loop where it has none (adc, sbb, neg). A misaligned wasm atomic traps where
+    x86 does not, so an access off its alignment inside one aligned qword is a compare-and-swap of
+    the qword, and one across two qwords (a split lock, which hardware too makes the slow
+    exception) a plain read-modify-write, not indivisible against another executor. Plain loads
+    and stores stay plain: on an x86 host they keep the processor's order; elsewhere what they
+    promise another thread is the atomic tax's question.
 
   The store's key already carries a variant (`runtime/cache.js`); the two are kept side by side.
   The interpreters, JavaScript and wasm, get the same variant: the host runs them where no region
@@ -321,6 +338,17 @@ measurement before stage 1 says that pays.
 | Pool | Min | Max | Grows when | Shrinks |
 | --- | --- | --- | --- | --- |
 | Executors of a process | 1 | `hardwareConcurrency`, at most the process's thread count | two or more of its threads are ready most of the time | rarely, after a long quiet spell: it is a mode switch |
+
+**Measured** (2026-10-08, `tools/executor-sweep.mjs`, node 22.22.0, a 4-core VM, no browser;
+three runs a point, medians): a synthetic program of T threads, each on its own data, with a
+`lock add` every 256 iterations or none and a host call every 4 096 or 65 536 or none, ran
+x1.53 to x1.91 faster with two threads on three or four executors than on one, and x1.88 to
+x2.58 with three threads on four; the more locks and host calls, the larger the gain. It ran
+slower -- x0.64 to x0.86 -- with more threads than executors past the process's own, and never
+faster with two executors in all (`negative-results.md`). One thread lost nothing on any count
+(x0.94 to x1.10). Doom 3, one executor, against `728d9672` before this stage: loading to the same
+mark in 17 s against 18 s (medians of six runs), the rate after it 14.56 against 14.78 M/s
+(three 70 s runs each, spread about 7 %): not distinguishable.
 
 **What it costs, and when it pays.** The atomic variant makes every executor slower by the tax *t*
 measured before stage 1. Two executors win when their speedup *S* satisfies *S* × (1 − *t*) > 1.
@@ -392,8 +420,20 @@ one executor.
   x86 and on ARM hosts, and whether ordering can be limited to fewer than every load and store
   without breaking programs that rely on x86's order. Wasm offers no acquire and release
   orderings yet; the proposal that adds them would change the answer.
-- **Executor state: a base or translations per executor** (stage 1), decided by measuring the add
-  per access against a cache per executor.
+- **Executor state: a base or translations per executor** — decided 2026-10-08: translations per
+  executor. Each executor's layout moves its state block, its tables and the wasm interpreter's
+  statics into a state page of its own (`executorLayout`), so its translations carry its
+  addresses as constants and cost nothing at run time; the price is a translation per executor.
+  The base was measured at +23 to +37 % per turn on a worst-case loop of state accesses (node,
+  three runs; not measured on the benchmarks). The wasm interpreter is built position-independent
+  for it: measured 0 to 7 % slower on interpreted-only runs of the cork bench (node, x87,
+  `translate: false`, three alternations; noise about ±6 %).
+- **The host's unbroken routines under several executors** (stage 3). Guest code the host writes
+  -- the seams that record Direct3D and OpenGL calls -- is marked so that no slice ends inside it,
+  because another thread's call into the host reads what it writes. With threads running at once
+  that holds no more: one thread can be inside such a routine while another's call is answered.
+  Until the routines are made safe against that (a host call around them, or records each
+  thread owns), a process that runs them is one to keep on one executor.
 - **Memory shared between processes** (stage 2): which mechanism for named mappings, shared
   sections and cross-process reads and writes, and which programs need them coherent rather than
   copied at a wait.

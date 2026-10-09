@@ -35,4 +35,7 @@ test('the package resolves by name and exposes its building blocks', async()=>{
     assert.equal(typeof wasm.ModuleBuilder, 'function');
     const runtime = await import('@bottlify/cork/runtime');
     assert.equal(typeof runtime.createCorkRuntime, 'function');
+    const machine = await import('@bottlify/cork/machine');
+    assert.equal(root.createMachine, machine.createMachine);
+    assert.equal(typeof root.regionModule, 'function');
 });

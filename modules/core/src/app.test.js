@@ -16,6 +16,7 @@ import {
     withReadAhead, withWindow, refetchedIn,
     resolveLibraryPath, startDirectoryOf, libraryCandidates, timedWait, pagePacing,
     PAGE_YIELD_MS,
+    PENDING_YIELD_MS,
     retryingFetch,
     moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, feedFilmSound, emulatorOf,
     heapSizeFor,
@@ -1080,17 +1081,26 @@ test('the loop yields at once for something pending, otherwise on a clock it res
     assert.equal(yieldNow(nothing), null, 'nothing pending and the interval not up');
     now = 3;
     assert.equal(yieldNow(nothing), null);
-    for (const pending of [{ suspended: 1 }, { fetching: 1 }, { spun: 1 }])
+    await yieldNow({ ...nothing, spun: 1 });
+    assert.equal(trips, 1, 'a turn that retired nothing yields at once');
+    // An answer outstanding while threads still run waits out PENDING_YIELD_MS
+    // since the last trip ended: the trips a turn behind a running loader
+    // were the largest host phase of a run.
+    for (const pending of [{ suspended: 1 }, { fetching: 1 }])
     {
+        assert.equal(yieldNow({ ...nothing, ...pending }), null, 'not straight after a trip');
+        now += PENDING_YIELD_MS;
         await yieldNow({ ...nothing, ...pending });
     }
-    assert.equal(trips, 3, 'each kind of pending work yields at once');
+    assert.equal(trips, 3, 'and once the bound is up it does');
+    await yieldNow({ ...nothing, suspended: 1, spun: 1 });
+    assert.equal(trips, 4, 'with nothing else running the answer is looked for at once');
     assert.equal(yieldNow({ ...nothing, idlers: 1 }), null,
         "a caller on the guest's own queue is not the host's to answer");
     assert.equal(yieldNow(nothing), null, 'and a trip resets the clock');
     now += 4;
     await yieldNow(nothing);
-    assert.equal(trips, 4, 'the interval is up');
+    assert.equal(trips, 5, 'the interval is up');
     assert.equal(yieldNow(nothing), null, 'once');
     now += 3;
     assert.equal(yieldNow(nothing), null,

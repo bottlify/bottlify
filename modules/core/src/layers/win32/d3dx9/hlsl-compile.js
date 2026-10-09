@@ -39,6 +39,10 @@ export const D3DXSHADER = Object.freeze({
  * @property {number} [flags]
  * @property {[string, string][]} [defines]
  * @property {import('./preprocess.js').PreprocessOptions['include']} [include]
+ * @property {import('./hlsl-parser.js').Expr[]} [arguments]
+ *           What an effect's `compile ps_2_0 main(...)` passes: one value for each uniform
+ *           parameter of the entry point, in order, which becomes a constant of the shader
+ *           rather than a register the program sets.
  */
 
 /**
@@ -61,7 +65,7 @@ export const D3DXSHADER = Object.freeze({
  * @param {string} text @param {import('./preprocess.js').Origin[]} origins
  * @returns {string}
  */
-function withLineMarkers(text, origins){
+export function withLineMarkers(text, origins){
     const lines = text.split('\n');
     /** @type {string[]} */
     const out = [];
@@ -151,6 +155,16 @@ async function compile(source, options){
         return failed();
     }
 
+    if (options.arguments && options.arguments.length > 0)
+    {
+        const bound = bindArguments(program, entryName, options.arguments);
+        if (bound)
+        {
+            report(bound);
+            return failed();
+        }
+    }
+
     // The flag is the packing before any `#pragma pack_matrix`; each declaration takes the
     // last one before it.
     const rowMajor = ((options.flags ?? 0) & D3DXSHADER.PACKMATRIX_ROWMAJOR) !== 0;
@@ -215,6 +229,41 @@ async function compile(source, options){
     return { tokens: assembled.tokens, constantTable: constantTableOf(assembled.tokens),
         messages: messages.map(m=>`${m}\n`).join(''), ok: true,
         info: { profile, inputs: ir.inputs, outputs: ir.outputs, constants: ir.constants } };
+}
+
+/**
+ * An entry point given values for its uniform parameters, as an effect's `compile`
+ * expression gives them: each bound parameter leaves the signature and becomes a local
+ * of the body, initialised with its value -- so the value is checked, converted and
+ * folded as any initialiser is. The parameters bound are those declared `uniform`, in
+ * order; for an entry that declares none, those without a semantic.
+ *
+ * @param {import('./hlsl-parser.js').Program} program
+ * @param {string} entry @param {import('./hlsl-parser.js').Expr[]} values
+ * @returns {{ code: string, message: string, pos: any } | null}  The error, if any.
+ */
+function bindArguments(program, entry, values){
+    const fn = program.decls.find(d=>d.kind === 'function' && d.name === entry && d.body
+        && d.body.kind === 'block' && d.params.length >= values.length);
+    if (!fn || fn.kind !== 'function' || !fn.body || fn.body.kind !== 'block')
+    {
+        // The compile itself says the entry point is not there.
+        return null;
+    }
+    const uniform = fn.params.filter(p=>p.mods.includes('uniform'));
+    const open = uniform.length > 0 ? uniform : fn.params.filter(p=>!p.semantic);
+    if (values.length > open.length)
+    {
+        const count = values.length;
+        return { code: 'X3013', message: `'${entry}': function does not take ${count} `
+            + 'uniform parameters', pos: fn.pos };
+    }
+    const bound = open.slice(0, values.length);
+    fn.params = fn.params.filter(p=>!bound.includes(p));
+    fn.body.stmts.unshift({ kind: 'decl', pos: fn.body.pos, vars: bound.map((p, i)=>({
+        ...p, mods: p.mods.filter(m=>m !== 'uniform' && m !== 'in'), semantic: null,
+        register: null, init: structuredClone(values[i]) })) });
+    return null;
 }
 
 /**

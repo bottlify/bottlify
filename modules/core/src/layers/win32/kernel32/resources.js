@@ -238,15 +238,16 @@ export function createResourceFunctions(host){
     };
 
     /**
-     * Calls back once for each key, in order: a string key lives in guest memory
-     * for the length of its callback and no longer, as Windows' does. FALSE when
-     * the callback stopped it early, as Windows answers.
+     * Calls `callback` with each of `keys` in turn until it answers FALSE: a
+     * string key lives in guest memory for the length of its callback and no
+     * longer, as Windows' does, and a number goes as the integer resource it is.
+     * FALSE when the callback stopped it early, as Windows answers.
      *
-     * @param {number} callback @param {(number | string)[]} keys @param {boolean} wide
-     * @param {(key: number) => number[]} argsFor  the callback's arguments, given the key
+     * @param {(number | string)[]} keys @param {boolean} wide @param {number} callback
+     * @param {(key: number) => number[]} argsOf  the callback's arguments for a key
      * @returns {number | Promise<number>}
      */
-    const callEach = (callback, keys, wide, argsFor)=>{
+    const callEach = (keys, wide, callback, argsOf)=>{
         const thread = host.callerThread?.();
         const call = /** @type {NonNullable<typeof host.call>} */ (host.call);
         /** @param {number} at @returns {number | Promise<number>} */
@@ -267,7 +268,7 @@ export function createResourceFunctions(host){
                 pointer = host.allocate(bytes.length);
                 host.writeMemory(pointer, bytes);
             }
-            const answer = call(callback >>> 0, argsFor(pointer || Number(key)), thread);
+            const answer = call(callback >>> 0, argsOf(pointer || Number(key)), thread);
             /** @param {number} went */
             const then = went=>{
                 if (pointer !== 0)
@@ -307,19 +308,22 @@ export function createResourceFunctions(host){
         {
             return fail(ERROR_RESOURCE_TYPE_NOT_FOUND);
         }
-        return callEach(callback, names, wide,
+        return callEach(names, wide, callback,
             name=>[instance >>> 0, type >>> 0, name, lParam >>> 0]);
     };
 
     /**
-     * EnumResourceTypes, either width: each type once, whatever names and
-     * languages it holds, in the order the image lists them. A module with no
-     * resources at all fails with ERROR_RESOURCE_DATA_NOT_FOUND.
+     * EnumResourceTypes, either width: each type the image holds once, in the
+     * order it lists them; ERROR_RESOURCE_DATA_NOT_FOUND for an image with none.
      *
      * @param {number[]} args @param {boolean} wide
      * @returns {number | Promise<number>}
      */
     const enumTypes = ([instance, callback, lParam], wide)=>{
+        if (!host.call || (callback >>> 0) === 0)
+        {
+            return fail(ERROR_RESOURCE_DATA_NOT_FOUND);
+        }
         /** @type {(number | string)[]} */
         const types = [];
         for (const entry of host.listResources?.(instance >>> 0) ?? [])
@@ -329,11 +333,11 @@ export function createResourceFunctions(host){
                 types.push(entry.type);
             }
         }
-        if (!host.call || (callback >>> 0) === 0 || types.length === 0)
+        if (types.length === 0)
         {
             return fail(ERROR_RESOURCE_DATA_NOT_FOUND);
         }
-        return callEach(callback, types, wide, type=>[instance >>> 0, type, lParam >>> 0]);
+        return callEach(types, wide, callback, type=>[instance >>> 0, type, lParam >>> 0]);
     };
 
     /**
@@ -399,14 +403,19 @@ export function createResourceFunctions(host){
         },
 
         /**
-         * BOOL EnumResourceTypesA/W(HMODULE hModule, ENUMRESTYPEPROCA lpEnumFunc,
-         *                           LONG_PTR lParam)
+         * BOOL EnumResourceTypesA(HMODULE hModule, ENUMRESTYPEPROCA lpEnumFunc,
+         *                         LONG_PTR lParam)
          */
         EnumResourceTypesA: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: args=>enumTypes(args, false),
         },
+
+        /**
+         * BOOL EnumResourceTypesW(HMODULE hModule, ENUMRESTYPEPROCW lpEnumFunc,
+         *                         LONG_PTR lParam)
+         */
         EnumResourceTypesW: {
             argBytes: 12,
             /** @param {number[]} args */

@@ -2042,6 +2042,42 @@ export function pipelineStateOf(model, shape){
             vertexLayoutKey: shape.vertexLayoutKey,
         } : {}),
         ...(shape.topology === POINT_QUADS ? { points: pointsOf(model) } : {}),
+        ...(shape.depthFormat !== undefined && hasStencil(shape.depthFormat)
+            && (model.renderStates.get(STENCIL_RS.ENABLE) ?? 0) !== 0
+            ? { stencil: stencilOf(model) } : {}),
+    };
+}
+
+/** The stencil render states, the same numbers in Direct3D 8 and 9. */
+const STENCIL_RS = Object.freeze({
+    ENABLE: 52, FAIL: 53, ZFAIL: 54, PASS: 55, FUNC: 56, REF: 57, MASK: 58, WRITEMASK: 59,
+    TWOSIDED: 185, CCW_FAIL: 186, CCW_ZFAIL: 187, CCW_PASS: 188, CCW_FUNC: 189,
+});
+
+/**
+ * The stencil test the render states ask for. Unset states read as their
+ * defaults: KEEP, ALWAYS, masks of all ones and a reference of zero.
+ *
+ * @param {RenderModel} model
+ * @returns {import('../webgpu/internal/pipeline.js').StencilState}
+ */
+export function stencilOf(model){
+    /** @param {number} state @param {number} fallback */
+    const rs = (state, fallback)=>(model.renderStates.get(state) ?? fallback) >>> 0;
+    const func = rs(STENCIL_RS.FUNC, 8);
+    const fail = rs(STENCIL_RS.FAIL, 1);
+    const zfail = rs(STENCIL_RS.ZFAIL, 1);
+    const pass = rs(STENCIL_RS.PASS, 1);
+    const twoSided = rs(STENCIL_RS.TWOSIDED, 0) !== 0;
+    return {
+        func, fail, zfail, pass,
+        ccwFunc: twoSided ? rs(STENCIL_RS.CCW_FUNC, 8) : func,
+        ccwFail: twoSided ? rs(STENCIL_RS.CCW_FAIL, 1) : fail,
+        ccwZfail: twoSided ? rs(STENCIL_RS.CCW_ZFAIL, 1) : zfail,
+        ccwPass: twoSided ? rs(STENCIL_RS.CCW_PASS, 1) : pass,
+        readMask: rs(STENCIL_RS.MASK, 0xffffffff),
+        writeMask: rs(STENCIL_RS.WRITEMASK, 0xffffffff),
+        ref: rs(STENCIL_RS.REF, 0) & 0xff,
     };
 }
 
@@ -2491,6 +2527,10 @@ export function createRenderer(options){
     let lastFrame = [];
     /** @type {string[]} one line per draw of the frame being recorded */
     let dump = [];
+    /** Shaders whose bytecode a dump has already written. @type {Set<string>} */
+    const dumpedShaders = new Set();
+    /** Each dumped draw's shaders once, as `vs12 <hex tokens>`. @type {string[]} */
+    const shaderBytecode = [];
     /** @type {string[]} the same, for the frame most recently presented */
     let lastDump = [];
     /** @type {{ frame: number, lines: string[] }[]} the frames `dumpEvery` kept */
@@ -3138,6 +3178,21 @@ export function createRenderer(options){
      */
     const dumpProgram = (model, prepared, count)=>{
         const program = prepared.program;
+        // Each shader's bytecode once a run, in hex, before the first draw
+        // that ran it: a program's own shaders come as bytecode, with no
+        // source a report could show.
+        for (const [kind, id, tokens] of [
+            ['vs', prepared.state.vertexShader, prepared.program?.held?.tokens?.vertex],
+            ['ps', prepared.state.pixelShader, prepared.program?.held?.tokens?.pixel]])
+        {
+            const name = `${kind}${id}`;
+            if (tokens && !dumpedShaders.has(name))
+            {
+                dumpedShaders.add(name);
+                shaderBytecode.push(`${name} ${Array.from(tokens, (/** @type {number} */ token)=>
+                    (token >>> 0).toString(16).padStart(8, '0')).join('')}`);
+            }
+        }
         const bound = program.samplerBindings.map((/** @type {any} */ binding)=>
             `#${binding.stage}:${binding.placeholder
                 ? 'placeholder'
@@ -3164,6 +3219,11 @@ export function createRenderer(options){
             + `/bias${dwordToFloat(model.renderStates.get(D3DRS9.DEPTHBIAS) ?? 0)}`
             + `,${dwordToFloat(model.renderStates.get(D3DRS9.SLOPESCALEDEPTHBIAS) ?? 0)}`
             + ` cull=${model.renderStates.get(D3DRS.CULLMODE) ?? '-'}`
+            // As a fixed-function draw's line says them: what a draw under a
+            // stencil test reads, and what one made for the stencil writes.
+            + (model.renderStates.get(52) ? ` stencil=${[53, 54, 55, 56, 57, 58, 59]
+                .map(index=>((model.renderStates.get(index) ?? 0) >>> 0).toString(16))
+                .join('/')}` : '')
             + (state.pixelShader === -1 && state.stages
                 ? ` stages=${state.stages.map((/** @type {any} */ stage)=>
                     `${stage.colorOp}(${stage.colorArg1},${stage.colorArg2})`
@@ -5322,6 +5382,9 @@ export function createRenderer(options){
             vertex,
             samplerPlan,
             state,
+            // The bytecode itself, for a frame dump to name what a draw ran.
+            tokens: { vertex: /** @type {any} */ (program.vertexShader)?.tokens ?? null,
+                pixel: /** @type {any} */ (pixelShader)?.tokens ?? null },
             // The bindings handed out last, and the recording and index of the
             // pipeline in it: kept with the pieces, where a draw's own
             // preparation is made for it alone.
@@ -7648,6 +7711,9 @@ export function createRenderer(options){
                 // the scene's lighting nor its specular pass belongs to it.
                 specularEnable: false,
                 lighting: null,
+                // Clear writes every pixel of its rectangles whatever the
+                // stencil holds: it is no draw under the stencil test.
+                stencil: undefined,
             };
             const prepared = /** @type {PreparedDraw} */ ({
                 version: undefined,
@@ -8167,6 +8233,8 @@ export function createRenderer(options){
                 recentFrames: frameHistory.slice(),
                 // Empty unless the build asked for it; see `dumpDraws`.
                 lastDump,
+                // The bytecode of the shaders the dumped draws ran, each once.
+                shaderBytecode: [...shaderBytecode],
                 // The same, every `dumpEvery`-th frame.
                 ...(dumpEvery > 0 ? { dumps: dumps.slice() } : {}),
                 // What the program made, and where its pixels live. Addresses
@@ -8356,6 +8424,21 @@ export function createRenderer(options){
     }
 
     /**
+     * The stencil reference a draw under the stencil test compares with: a
+     * state of the pass rather than of the pipeline, so set with each such
+     * draw.
+     *
+     * @param {any} pass @param {any} command
+     */
+    function referStencil(pass, command){
+        const stencil = command.state?.stencil;
+        if (stencil)
+        {
+            pass.setStencilReference(stencil.ref);
+        }
+    }
+
+    /**
      * One draw through shaders: its constants into the two stages' groups,
      * its textures into the third, then the geometry.
      *
@@ -8364,6 +8447,7 @@ export function createRenderer(options){
     function replayProgram(pass, pipeline, command){
         const program = command.program;
         pass.setPipeline(pipeline.gpu);
+        referStencil(pass, command);
         pass.setBindings(0, pipeline.bindGroupLayouts[0],
             blockEntries(pass, program.vertexBlocks));
         pass.setBindings(1, pipeline.bindGroupLayouts[1],
@@ -8580,6 +8664,7 @@ export function createRenderer(options){
                 }
             }
             pass.setPipeline(pipeline.gpu);
+            referStencil(pass, command);
             // Bound at once and kept by nothing, unless a check keeps it.
             const block = command.check
                 ? pass.uniforms(command.uniforms)
@@ -8640,6 +8725,7 @@ export function createRenderer(options){
                     pass.setScissor(scissor);
                 }
                 pass.setPipeline(pipeline.gpu);
+                referStencil(pass, command);
                 pass.setBindings(0, pipeline.bindGroupLayout, entries);
                 pass.setVertexBuffer(0, command.vertices.gpu, command.vertices.offset);
                 bindStreams(pass, command);

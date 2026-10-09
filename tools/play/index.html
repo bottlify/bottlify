@@ -1,0 +1,166 @@
+<!doctype html>
+<!--
+  Copyright © 2026 Bottlify Project
+  Licensed under the Mozilla Public License, version 2.0
+  See LICENSE for details
+
+  A player for one bottle, and the whole of what a page needs to run one:
+  @bottlify/core's dist/ served at /bottlify/, and the bottle's directory at
+  /bundles/<id>/ -- manifest.json, bundle.btl (served with HTTP Range) and
+  entry, the program's image (`node tools/make-btl.mjs extract <id>`).
+  `node tools/play.mjs <id>` serves exactly that; any static host that answers
+  Range requests does too. Cross-origin isolation (COOP/COEP) is optional: it
+  lets the engine share memory with its workers; without it the engine runs in
+  its compatible mode.
+
+  /?bottle=<id> names the bottle; &mode=<name> the run mode (tools/play/modes.js),
+  chosen too by the buttons under Start or `bottlifyMode('<name>')` in the
+  console, which reload the page in that mode. `bottlifyMode()` lists them.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bottlify player</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+    background: #111; color: #ddd; font: 14px system-ui, sans-serif; }
+  canvas { display: block; background: #000; max-width: 100vw; }
+  #status { position: fixed; left: 8px; bottom: 8px; opacity: 0.8; }
+  button { font: inherit; padding: 8px 20px; }
+  #modes { position: fixed; left: 8px; top: 8px; display: flex; gap: 4px; flex-wrap: wrap; }
+  #modes button { padding: 4px 10px; opacity: 0.7; }
+  #modes button[aria-pressed="true"] { opacity: 1; outline: 2px solid #8cf; }
+</style>
+</head>
+<body>
+<div id="modes"></div>
+<button id="start" hidden>Start</button>
+<canvas id="screen" width="640" height="480" hidden></canvas>
+<div id="status"></div>
+<script type="module">
+import { createApp } from '/bottlify/core.js';
+import { MODES, modeOf } from '/modes.js';
+
+const query = new URLSearchParams(location.search);
+const id = query.get('bottle');
+// What a run is measured under, from the address: a named mode, and past it
+// `executors=3` -- the program's threads on three executors at once -- and
+// `cork={"checkReads":true}`, the translator's settings (`EngineConfig`),
+// each overriding the mode's own.
+const mode = modeOf(query.get('mode'));
+const executors = Number(query.get('executors') ?? 0) || mode.executors || undefined;
+const corkConfig = query.has('cork')
+    ? { ...mode.cork, ...JSON.parse(query.get('cork')) } : mode.cork ?? null;
+
+/**
+ * Reloads the page in mode `name`, the bottle kept and any override dropped;
+ * without a name, says which mode this page runs and which there are.
+ *
+ * @param {string} [name]
+ */
+window.bottlifyMode = name=>{
+    if (name === undefined)
+    {
+        console.table(Object.fromEntries(Object.entries(MODES).map(([key, one])=>
+            [key, { what: one.what, active: key === mode.name }])));
+        return { mode: mode.name, executors: executors ?? 1, cork: corkConfig ?? {} };
+    }
+    modeOf(name);
+    const next = new URLSearchParams(location.search);
+    next.set('mode', name);
+    next.delete('executors');
+    next.delete('cork');
+    location.search = next.toString();
+    return name;
+};
+const modes = document.getElementById('modes');
+for (const name of Object.keys(MODES))
+{
+    const button = document.createElement('button');
+    button.textContent = name;
+    button.title = MODES[name].what;
+    button.setAttribute('aria-pressed', String(name === mode.name));
+    button.onclick = ()=>window.bottlifyMode(name);
+    modes.append(button);
+}
+console.log(`bottlify: mode ${mode.name}, ${executors ?? 1} executor(s), cork`
+    + ` ${JSON.stringify(corkConfig ?? {})}; bottlifyMode() lists the modes`);
+const base = `/bundles/${encodeURIComponent(id ?? '')}`;
+const canvas = document.getElementById('screen');
+const start = document.getElementById('start');
+const status = document.getElementById('status');
+const say = text=>{
+    status.textContent = text;
+};
+
+async function play(){
+    start.hidden = true;
+    say('loading');
+    const manifest = await (await fetch(`${base}/manifest.json`)).json();
+    const executable = new Uint8Array(await (await fetch(`${base}/entry`)).arrayBuffer());
+
+    // Sound: the worklet mixes from shared memory on an isolated page, and
+    // from what the engine posts down a channel on any other.
+    const audio = new AudioContext();
+    await audio.audioWorklet.addModule('/bottlify/worklet.js');
+    const sound = crossOriginIsolated ? null : new MessageChannel();
+
+    // Where the bottle is mounted on C: -- where its installation put it
+    // (`root`), or C:\App for a bottle packed from a directory -- and the
+    // program is started from there.
+    const root = /^c:\\(.*)$/i.exec(manifest.root ?? '');
+    const prefix = root ? root[1].replace(/\\+$/, '') : 'App';
+
+    canvas.hidden = false;
+    const app = await createApp({
+        canvas,
+        executable,
+        imagePath: `C:\\${prefix ? `${prefix}\\` : ''}${manifest.entry}`,
+        bundle: { url: `${base}/bundle.btl`, id, prefix,
+            indexSha256: manifest.bundle?.indexSha256 },
+        // Saves and settings are kept in this browser, per bottle.
+        storage: 'opfs',
+        id,
+        ...executors ? { executors } : {},
+        ...corkConfig ? { cork: { config: corkConfig } } : {},
+        audio: { drained: true, sampleRate: audio.sampleRate,
+            ...(sound ? { port: sound.port2 } : {}) },
+    });
+    const { channels } = app.audio.format();
+    const node = new AudioWorkletNode(audio, 'bottlify-output', {
+        outputChannelCount: [channels],
+        processorOptions: sound ? { channels } : { table: app.audio.memory().table, channels },
+    });
+    if (sound)
+    {
+        node.port.postMessage({ type: 'feed', port: sound.port1 }, [sound.port1]);
+    }
+    node.connect(audio.destination);
+
+    app.input.attach(canvas);
+    app.on('frame', ({ width, height })=>say(`${manifest.title ?? id} ${width}×${height}`
+        + ` · ${mode.name}`));
+    // A message box gets its default button; a real player would show it.
+    app.on('message-box', box=>app.answerMessageBox(box.id, box.defaultButton));
+    app.on('output', ({ text })=>console.log(text));
+    window.bottlify = app;
+    const code = await app.run();
+    say(`exited with ${code}`);
+    await app.dispose();
+}
+
+if (!id)
+{
+    say('name a bottle: ?bottle=<id>');
+}
+else
+{
+    // An AudioContext starts only from a person's gesture.
+    start.hidden = false;
+    start.onclick = ()=>play().catch(e=>say(`failed: ${e?.message ?? e}`));
+}
+</script>
+</body>
+</html>

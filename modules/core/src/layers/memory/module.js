@@ -189,6 +189,16 @@ export function createMemoryModule(){
                     state.regions.protect(name, access);
                     publish();
                 },
+                /**
+                 * Opens or closes pages to the program: a reservation's commit,
+                 * VirtualProtect. False where the processor does not fault a read
+                 * of a closed page (the cpu layer's `pageAccess`).
+                 *
+                 * @param {number} address @param {number} length @param {boolean} open
+                 * @returns {boolean}
+                 */
+                pageAccess: (address, length, open)=>live()
+                    && /** @type {any} */ (cpu).pageAccess?.(address, length, open) === true,
                 /** @param {number} address */
                 find: address=>live() ? state.regions.find(address) : undefined,
                 /** @param {number} address */

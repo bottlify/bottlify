@@ -17,7 +17,7 @@
  * read-only regions, is the owner's policy switch.
  */
 
-import { Tables } from './layout.js';
+import { Tables, codeRangesAt, pageFlagsAt } from './layout.js';
 
 /**
  * Page flag bits. CLOSED marks a page holding a block with no entry inside a
@@ -55,9 +55,12 @@ export const GUEST_PAGE = 4096;
 /**
  * @param {WebAssembly.Memory} memory
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ * @param {ReturnType<typeof import('./shared-code.js').createSharedCode> | null} [shared]
+ *     the process's record of who holds code where, when other executors share the flags: a
+ *     page keeps its flag and range while any of them still holds code on it
  * @returns {PageTable}
  */
-export function createPageTable(memory, layout){
+export function createPageTable(memory, layout, shared = null){
     // Growing a memory detaches its old buffer, and a view over a detached
     // buffer has no bytes: the views are taken afresh then, and only then. A
     // view made per call costs more than the lookup it serves, and the runtime
@@ -68,9 +71,9 @@ export function createPageTable(memory, layout){
     let words = new DataView(new ArrayBuffer(0));
     const fresh = ()=>{
         const buffer = memory.buffer;
-        flagView = new Uint8Array(buffer, layout.tables + Tables.PAGE_FLAGS,
+        flagView = new Uint8Array(buffer, pageFlagsAt(layout),
             Tables.PAGE_FLAGS_SIZE);
-        rangeView = new Uint8Array(buffer, layout.tables + Tables.CODE_RANGES, 1 << 21);
+        rangeView = new Uint8Array(buffer, codeRangesAt(layout), 1 << 21);
         words = new DataView(buffer);
     };
     const flags = ()=>{
@@ -126,6 +129,7 @@ export function createPageTable(memory, layout){
             const end = address + length - 1;
             for (let page = first; page <= last; page++)
             {
+                shared?.hold(page);
                 table[page] |= PageFlag.HAS_CODE;
                 const from = page === first ? (address & 0xfff) >>> GRANULE : 0;
                 const to = (page === last ? (end & 0xfff) >>> GRANULE : (0xfff >>> GRANULE)) + 1;
@@ -137,6 +141,12 @@ export function createPageTable(memory, layout){
         },
         /** No translated code on the page: the flag and the range cleared. @param {number} page */
         clearCode(page){
+            if (shared?.release(page) === true)
+            {
+                // Another executor's code is still on it: its granules too, so
+                // the range stays as wide as it was.
+                return;
+            }
             flags()[page] &= ~PageFlag.HAS_CODE;
             ranges()[page * 2] = 0;
             ranges()[page * 2 + 1] = 0;

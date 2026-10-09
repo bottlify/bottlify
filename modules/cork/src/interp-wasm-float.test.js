@@ -20,7 +20,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Fault, Unsupported, blockState, interpret } from './interp.js';
-import { WASM_INTERPRETER_AREA, WasmExit, createWasmInterpreter } from './interp-wasm.js';
+import { WASM_INTERPRETER_AREA, WASM_INTERPRETER_STATICS_AT, WasmExit, createWasmInterpreter }
+    from './interp-wasm.js';
 import { ownLayout, pagesFor, tablesSize } from './runtime/layout.js';
 import { createPageTable } from './runtime/pages.js';
 import { eflagsOf } from './emit/flags.js';
@@ -40,7 +41,8 @@ function machine({ precise = true } = {}){
     const pages = pagesFor(layout, tablesSize(layout) + WASM_INTERPRETER_AREA);
     const memory = new WebAssembly.Memory({ initial: pages, maximum: pages });
     const table = createPageTable(memory, layout);
-    const tier = createWasmInterpreter({ memory, layout, area, hotThreshold: 2,
+    const tier = createWasmInterpreter({ memory, layout,
+        statics: WASM_INTERPRETER_STATICS_AT, area, hotThreshold: 2,
         trapPort: 0xb077, parkBase: 0x100000, precise });
     assert.ok(tier);
     const bytes = new Uint8Array(memory.buffer);

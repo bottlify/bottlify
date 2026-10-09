@@ -3,6 +3,9 @@
 - **[`v2/`](v2/README.md)** — the plan: the engine becomes a multi-worker platform whose capacity
   follows the load, single-thread mode first and exactly as today; then x86-64 on that platform,
   Direct3D 11, and ARM and ARM64. Start there; in Russian, [`v2/README.ru.md`](v2/README.ru.md).
+  [`v2/release-run.md`](v2/release-run.md) is the scenario a branch is measured by before it goes
+  to main: gates, synthetic load on the executors, the benchmark against main, and titles in the
+  browser in each run mode.
 - **[`bottles/`](bottles/README.md)** — bottles made, kept, changed and started on the device, and
   the bottle editor: entries, arguments, mode and network; the server is where a bottle is shared.
   In Russian, [`bottles/README.ru.md`](bottles/README.ru.md).

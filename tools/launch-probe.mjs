@@ -19,7 +19,7 @@
  * single guest instruction. The second is where execution stopped, when it got
  * far enough to run at all.
  *
- *     node tools/launch-probe.mjs <bundle-id> [--turns 200000]
+ *     node tools/launch-probe.mjs <bundle-id> [--turns 200000] [--mode NAME]
  */
 
 import { createWriteStream, mkdirSync, writeFileSync } from 'node:fs';
@@ -29,6 +29,7 @@ import { openBundle } from './btl.mjs';
 import { createApp } from '../modules/core/src/app.js';
 import { peekBytes } from '../modules/core/src/trace.js';
 import { placementOf } from '../modules/installer/src/prefix.js';
+import { modeOf } from './play/modes.js';
 
 const BUNDLES = new URL('../bundles/', import.meta.url);
 
@@ -36,7 +37,11 @@ const BUNDLES = new URL('../bundles/', import.meta.url);
 function parse(argv){
     const id = argv.find(argument=>!argument.startsWith('--'));
     const turns = argv.indexOf('--turns');
+    // The run mode by name, the player's own (`tools/play/modes.js`); an
+    // explicit --executors or --cork-config goes over it.
+    const mode = modeOf(argv.includes('--mode') ? argv[argv.indexOf('--mode') + 1] : null);
     return {
+        mode: mode.name,
         id,
         turns: turns === -1 ? 200000 : Number(argv[turns + 1]),
         map: argv.includes('--map'),
@@ -55,8 +60,8 @@ function parse(argv){
         // The translator's settings for the run, merged over the probe's own
         // (`feed: 'slice'`, `timings: true`, a translation worker), so two
         // settings compare on one title.
-        corkConfig: argv.includes('--cork-config')
-            ? JSON.parse(argv[argv.indexOf('--cork-config') + 1]) : {},
+        corkConfig: { ...mode.cork, ...argv.includes('--cork-config')
+            ? JSON.parse(argv[argv.indexOf('--cork-config') + 1]) : {} },
         // Seconds between rows of the run's time series (0: none). A game is no
         // benchmark's loop that settles once: new code keeps arriving and the
         // translator's relinks, merges and reforms may never settle, which only
@@ -109,6 +114,13 @@ function parse(argv){
         // started straight into a level (`+map ...`) loads it and plays.
         commandLine: argv.includes('--command-line')
             ? argv[argv.indexOf('--command-line') + 1] : undefined,
+        // Executors of the program's process, so one title compares on one and
+        // on several (`createApp`'s `executors`).
+        executors: argv.includes('--executors')
+            ? Number(argv[argv.indexOf('--executors') + 1]) : mode.executors,
+        // Guest RAM in megabytes, as the launcher's setting gives it.
+        memory: argv.includes('--memory')
+            ? Number(argv[argv.indexOf('--memory') + 1]) : undefined,
     };
 }
 
@@ -283,9 +295,12 @@ function byLibrary(unresolved){
  *
  * @param {any} app
  */
-function report(app, { grep = null, calls = 24 } = {}){
+async function report(app, { grep = null, calls = 24 } = {}){
     // Taken once: a snapshot walks every ring it publishes, and asking three
     // times over asks three times as much of the guest's address space.
+    // The other executors answer between their slices: asked once, then read.
+    app.diagnostics();
+    await new Promise(resolve=>setTimeout(resolve, 500));
     const layers = app.diagnostics();
     for (const layer of layers)
     {
@@ -295,6 +310,10 @@ function report(app, { grep = null, calls = 24 } = {}){
             .map(([name, value])=>`${name}=${value}`)
             .join(' ');
         console.log(`  ${layer.name} [${layer.status}] ${interesting}`);
+        for (const row of layer.name === 'cpu' ? metrics.executors ?? [] : [])
+        {
+            console.log(`    executor ${row.index}  ${JSON.stringify(row)}`);
+        }
         // A process in a worker of its own: what it waited on the system for.
         for (const row of layer.name === 'link' ? metrics.asked ?? [] : [])
         {
@@ -433,7 +452,7 @@ function seriesRow(app, last, began){
 
 async function main(){
     const { id, turns, map, grep, calls, heap, profile, log, watch, peek, dump, which,
-        corkConfig, series, raster, concurrency, seconds, commandLine }
+        corkConfig, series, raster, concurrency, seconds, commandLine, executors, memory, mode }
         = parse(process.argv.slice(2));
     if (!id)
     {
@@ -442,6 +461,7 @@ async function main(){
         process.exit(2);
     }
 
+    console.log(`mode: ${mode}, ${executors ?? 1} executor(s), cork ${JSON.stringify(corkConfig)}`);
     const directory = new URL(`${id}/`, BUNDLES);
     const manifest = JSON.parse(
         await readFile(new URL('manifest.json', directory), 'utf8'));
@@ -495,6 +515,8 @@ async function main(){
                 import.meta.url).href,
             ...corkConfig } },
         heapSize: heap,
+        ...executors ? { executors } : {},
+        ...memory ? { memorySize: memory * 1024 * 1024 } : {},
         ...concurrency ? { concurrency } : {},
         ...(raster ? {} : { graphics: { raster: false } }),
         quantum: profile > 0 ? profile : undefined,
@@ -672,7 +694,7 @@ async function main(){
     {
         printProfile(app, samples);
     }
-    report(app, { grep, calls });
+    await report(app, { grep, calls });
     for (const failure of failures.slice(0, 3))
     {
         // The trace, not the payload. A dump of the whole event is unreadable

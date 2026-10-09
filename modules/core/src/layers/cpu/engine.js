@@ -67,6 +67,9 @@
  * @property {number} [nanFirst]   Cork's own, outside the state block: under `precise`, a NaN
  *     hunt's record (`NanRecord` in cork's emit/x87.js).
  * @property {number} tables       Wasm address of the engine's own tables.
+ * @property {number} [pageFlags]  Cork's own: where the page flags lie when not in `tables` --
+ *     another executor of a process reads and writes the first's (`executorLayout`).
+ * @property {number} [codeRanges] Cork's own: the same for the pages' code granules.
  * @property {number} codePages    Wasm address of the other executor's byte-per-page
  *                                 "has compiled code" table (hybrid), or -1: a store into
  *                                 such a page leaves `stale` so its cache can be dirtied.
@@ -88,9 +91,10 @@
  * The host functions translated code may call.
  *
  * @typedef {Object} EngineImports
- * @property {(id: number) => 0 | 1} trap
- *     The trap port write. Answers 1 when the handler moved EIP or asked the
- *     machine to stop, in which case the region must exit rather than continue.
+ * @property {(id: number) => 0 | 1 | 2} trap
+ *     The trap port write. Answers 1 when the handler moved EIP, so the region goes on
+ *     where it points through the entry hash, and 2 (`TRAP_END_TURN`) when the turn is to
+ *     end there and the region leaves for the host.
  * @property {() => number} getEflags   The eager flags word, for a region that reads
  *     flags before writing them.
  * @property {(index: number) => number} x87Read  A physical x87 register the state
@@ -112,8 +116,8 @@
  * The engine's own configuration, the `cork` object of the cpu layer's.
  *
  * @typedef {Object} EngineConfig
- * @property {number} [hotThreshold]     Instructions a 64-byte bucket must have been
- *     credited before its address is a region candidate. Default 2000.
+ * @property {number} [hotThreshold]     Times the interpreter reaches a jump target before the
+ *     address is a region candidate (the cork host's count). Default 2.
  * @property {number} [maxRegionBlocks]  Default 128.
  * @property {number} [hashSlots]  The entry hash's slots, a power of two: a block start
  *     past three quarters of them is reached from translated code only through the host.
@@ -124,6 +128,14 @@
  *     instruction leaves undefined left as the instruction model leaves them rather than as the
  *     cheapest code does. Default false, as games run; the
  *     corpora run with it.
+ * @property {boolean} [checkReads]      An instruction that only reads tests its pages as a store
+ *     does, so a page the program cannot reach -- a reservation's page not committed, one
+ *     protected PAGE_NOACCESS -- faults with its address, as on Windows, and those pages are
+ *     closed (`pageAccess`). Default false: a translated read is wrapped into RAM, and every
+ *     page reads.
+ * @property {boolean} [atomic]          Locked instructions (`lock`-prefixed read-modify-writes,
+ *     `xchg` with memory) as wasm atomics, each indivisible on the shared memory: for a process
+ *     whose threads run on more than one executor. Default false.
  * @property {boolean} [blockProfile]    A diagnostic: every block counts its executions.
  * @property {number} [blockProfileFrom]  With `blockProfile`: seconds after start at which the
  *           counts start over.
@@ -183,6 +195,83 @@
  *     process's cork hosts, between them, before the wasm tier takes over: their instructions,
  *     a jump target new to a host counting as 128. Default 8192; 0 runs the wasm tier from the
  *     first instruction.
+ * @property {number} [newTargetWork]  What a jump target new to a host counts as against
+ *     `wasmInterpreterAfter`. Default 128.
+ * @property {number} [volatileAfter]  Invalidations of one page before its code is left to the
+ *     interpreter for good. Default 8.
+ * @property {boolean} [undoLog]  A differential build: every store's old bytes recorded, so a
+ *     slice can be replayed. Default false.
+ * @property {boolean} [countTransfers]  A diagnostic: transfers between regions through the hash
+ *     counted. Default false.
+ * @property {boolean} [checkStale]  A diagnostic: regions whose bytes no longer form as they
+ *     did named in the diagnostics. Default false.
+ * @property {[number, number] | null} [interpretRange]  A diagnostic: addresses in [from, to)
+ *     left to the interpreter. Default none.
+ * @property {number} [relinkAfter]  Batch modules published before the running regions are
+ *     gathered into large ones (0: never). Default 16.
+ * @property {number} [relinkRegions]  Regions in each gathered module. Default 512.
+ * @property {number} [mergeAfter]  Transfers between two modules' regions before the two are
+ *     gathered into one on the translation worker (0: never). Default 2^16.
+ * @property {number} [mergeSample]  Translated instructions between two readings of the
+ *     modules' crossings. Default 2^20.
+ * @property {number} [mergeEvery]  The fewest translated instructions between two merges.
+ *     Default 2^23.
+ * @property {number} [mergePerRegion]  Of those, per region a merge builds again. Default 2^19.
+ * @property {number} [mergesARegion]  Merges one region may take part in. Default 2.
+ * @property {boolean} [dispatch]  Each module placed in a range of the table, a transfer inside
+ *     it a direct tail call. Default false.
+ * @property {boolean} [leafCalls]  A small leaf callee formed into its caller. Default true.
+ * @property {number} [leafBlocks]  Its blocks at most. Default 16.
+ * @property {number} [leafBytes]  Its bytes at most. Default 512.
+ * @property {number} [switchEntries]  Entries of a switch's jump table followed when forming.
+ *     Default 1024.
+ * @property {boolean} [runtimeHelpers]  A call to a compiler's runtime helper (MSVC's `_ftol2`)
+ *     formed as what it amounts to. Default true.
+ * @property {boolean} [callTargets]  Indirect calls sampled and their few small callees formed
+ *     in. Default false.
+ * @property {number} [predictAfter]  Samples of one call before its callees are looked at.
+ *     Default 48.
+ * @property {number} [predictShare]  A callee formed in takes one in this many of the call's
+ *     samples. Default 8.
+ * @property {number} [predictCallees]  Callees one call compares its target with. Default 4.
+ * @property {number} [reforms]  Times a region is formed again for its calls. Default 3.
+ * @property {number} [callWindow]  The window a call's samples are counted in. Default 64.
+ * @property {boolean} [callReturn]  A call out of a region a wasm call, the region going on after
+ *     the `ret`. Default true.
+ * @property {boolean} [wideFirst]  x87 regions compiled for the precision control the program
+ *     runs under, tested once a block. Default true.
+ * @property {boolean} [x87Shapes]  x87 regions compiled for the stack's shape at their entries,
+ *     tested once at an entry. Default true.
+ * @property {number} [checkedAfter]  Failed shape tests before a region is formed again with no
+ *     test. Default 4.
+ * @property {boolean} [structure]  A region's loops as wasm loops. Default true.
+ * @property {boolean} [looseStacks]  A store through esp alone tests no page while no
+ *     translated code lies on a stack. Default true.
+ * @property {number} [hashLoad]  The share of the entry hash's slots live past which a block
+ *     start stays in the host's map alone. Default 0.75.
+ * @property {number} [translators]  Translation workers the runtime opens itself (0: a host's
+ *     pool lends them). Default 1.
+ * @property {number} [arenaBytes]  Bytes of the shared translation arena (0: none). Default
+ *     48 MiB.
+ * @property {number} [loadingBatch]  While the translation worker loads, the largest batch
+ *     emitted on the engine thread. Default 16.
+ * @property {number} [loadingShare]  And the share of the time since the worker was made
+ *     emitting there may take. Default 0.25.
+ * @property {number} [exitTargets]  Targets of untranslated exits kept. Default 4096.
+ * @property {number} [missesKept]  (Address, top) miss counts kept. Default 4096.
+ * @property {number} [callSitesKept]  Indirect call sites tried with predicted callees kept.
+ *     Default 4096.
+ * @property {number} [yieldChunk]  Instructions translated code runs at a time while a slice may
+ *     end early. Default 10000.
+ * @property {number} [interpretChunk]  Instructions the interpreter runs at a time. Default 8192.
+ * @property {number} [sliceMs]  How long a slice that has interpreted may take. Default 8.
+ * @property {number} [tscDriftMs]  How far `rdtsc` runs ahead of the guest's clock. Default 16.
+ * @property {number} [spinMs]  With several executors, how long a side of their channel looks
+ *     at it before it sleeps. Default 0.05.
+ * @property {number} [executorIdleMs]  How long an executor waits in place for its next slice
+ *     before its event loop does. Default 2.
+ * @property {number} [executorYieldMs]  The longest an executor goes without a turn of its
+ *     event loop. Default 4.
  */
 
 /**
@@ -364,6 +453,18 @@
  */
 
 /**
+ * A connection to a translation worker: a worker of the runtime's own, or one
+ * a pool lends it, whose messages run over a port of their own.
+ *
+ * @typedef {Object} TranslatorPort
+ * @property {(message: any, transfer: any[]) => void} post
+ * @property {(handler: (data: any) => void) => void} onMessage
+ * @property {(handler: (reason: string) => void) => void} onLost
+ * @property {() => void} terminate  Ends the connection: the runtime's own worker ends with
+ *     it, a lent one goes back to its pool.
+ */
+
+/**
  * What a runtime answers to the host that composes it.
  *
  * @typedef {Object} Runtime
@@ -384,7 +485,16 @@
  * @property {(records: [string, Uint8Array][], nameOf: (key: string) => string)
  *     => [string, Uint8Array][]} [seedRecords]  Of a store's records (name, bytes), the ones
  *     a seed for this translator needs: its region records and the modules they name.
+ * @property {(adapter: TranslatorPort) => void} [attachTranslator]  A translation worker lent
+ *     by the host's pool: it takes batches of its own once it has answered its first message.
+ * @property {(adapter: TranslatorPort) => void} [detachTranslator]  The same worker asked
+ *     back: it takes no batch from then on, and goes once the one it holds is answered.
  * @property {(page: number) => void} invalidatePage  A host or guest write into code.
+ * @property {(address: number, size: number) => void} codeWritten  A write into code this
+ *     executor met: its translations of the pages go, and the process's other executors are
+ *     told (`sharedCode`).
+ * @property {() => number} takeCodeWrites  The writes into code the process's other executors
+ *     met since this one last looked: its translations of those pages go.
  * @property {(entry: (budget: number) => number, entered: () => number) => boolean}
  *     [interpretWith]  Cork alone: the interpreter tier in wasm's `entry`, which translated
  *     code then runs at an untranslated exit whose target has no region, going on at the

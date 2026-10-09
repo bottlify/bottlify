@@ -84,6 +84,7 @@ const FLAT_CS = 0x08;
 const INVALID_OPCODE = 6;
 /** #PF. */
 const PAGE_FAULT = 14;
+const GENERAL_PROTECTION = 13;
 /** How many of those the diagnostics name. */
 const UNTIERED_KEPT = 16;
 /**
@@ -102,8 +103,10 @@ const WASM_AFTER = 8192;
 const NEW_TARGET_WORK = 128;
 /** The names an engine module must export for this host. */
 const ENGINE_EXPORTS = Object.freeze([
-    'createEngine', 'ownLayout', 'pagesFor', 'Tables', 'tablesSize', 'STATE_BLOCK_SIZE',
-    'interpret', 'blockState', 'eflagsOf', 'setEflags',
+    'createEngine', 'ownLayout', 'pagesFor', 'Tables', 'STATE_BLOCK_SIZE',
+    'interpret', 'blockState', 'eflagsOf', 'setEflags', 'executorLayout', 'executorBytes',
+    'tablesSize',
+    'SHARED_CODE_BYTES',
 ]);
 
 /**
@@ -127,6 +130,12 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  *     they answer.
  * @property {number} [closedBelow]  Addresses below this are no-access: a fetch, a
  *           store or an interpreted read there faults. Zero, the default, closes none.
+ * @property {number} [executors]  Executors the memory has room for, each a state page and
+ *     tables of its own past the first's (`executorLayout`). Default 1.
+ * @property {number} [executor]   Which of them this host is. Default 0, the first, whose state
+ *     block is at the start of the memory.
+ * @property {WebAssembly.Memory} [memory]  The memory, made by the host of another executor of
+ *     the process (`wasmMemory`) -- shared, sized for `executors` -- rather than one of its own.
  */
 
 /**
@@ -145,7 +154,7 @@ export const CORK_TSC_MHZ = 3000;
  */
 export function createCorkHost(config){
     const { engine, memorySize, trapPort, entryVector, initialStack, cork: corkConfig,
-        closedBelow = 0, noExecuteBelow = 0 } = config;
+        closedBelow = 0, noExecuteBelow = 0, executors = 1, executor = 0, memory: given } = config;
     // Where code may run from: a closed range runs nothing either.
     const runsFrom = Math.max(closedBelow, noExecuteBelow) >>> 0;
     for (const name of ENGINE_EXPORTS)
@@ -155,52 +164,81 @@ export function createCorkHost(config){
             throw new Error(`cpu: the cork engine module does not export ${name}`);
         }
     }
-    const { createEngine, ownLayout, pagesFor, Tables, tablesSize, STATE_BLOCK_SIZE, interpret,
-        blockState,
-        eflagsOf, setEflags, WasmExit } = engine;
+    const { createEngine, ownLayout, pagesFor, Tables, STATE_BLOCK_SIZE, interpret, blockState,
+        eflagsOf, setEflags, WasmExit, executorLayout, executorBytes, tablesSize } = engine;
+    if (!(executor >= 0 && executor < executors))
+    {
+        throw new Error(`cpu: executor ${executor} of ${executors}`);
+    }
+    // The host's own pacing, the config's where it names one (`EngineConfig`).
+    const yieldChunk = corkConfig?.yieldChunk ?? YIELD_CHUNK;
+    const interpretChunk = corkConfig?.interpretChunk ?? INTERPRET_CHUNK;
+    const sliceMs = corkConfig?.sliceMs ?? SLICE_MS;
+    const tscDriftMs = corkConfig?.tscDriftMs ?? TSC_DRIFT_MS;
 
     // The guest RAM is the whole memorySize; the tables and the state block are
-    // memory of cork's own beside it, not carved out of the guest's.
-    // The entry hash's slots: the engine's own unless the config names a size.
-    const layout = ownLayout({ ramSize: memorySize,
+    // memory of cork's own beside it, not carved out of the guest's. `own` is
+    // the first executor's layout, which is also where every field lies from
+    // the start of any executor's state block: the block's views, and a
+    // thread's context taken from them, are the same on every executor.
+    // The entry hash's slots are the engine's own unless the config names a size.
+    const own = ownLayout({ ramSize: memorySize,
         ...(corkConfig?.hashSlots ? { hashSlots: corkConfig.hashSlots } : {}) });
+    const tables = tablesSize(own);
     // A profiling run (`blockProfile`) has the block profile past the tables,
     // and the interpreter tier in wasm its hot counts past that.
     const profileSize = import.meta.BOTTLIFY_DIAGNOSTICS !== false && corkConfig?.blockProfile
         ? Tables.BLOCK_PROFILE_SIZE : 0;
     const wasmWanted = typeof engine.createWasmInterpreter === 'function'
         && corkConfig?.wasmInterpreter !== false;
-    const wasmArea = layout.tables + tablesSize(layout) + profileSize;
-    const pages = pagesFor(layout, tablesSize(layout) + profileSize
-        + (wasmWanted ? engine.WASM_INTERPRETER_AREA : 0));
+    const past = tables + profileSize + (wasmWanted ? engine.WASM_INTERPRETER_AREA : 0);
+    const firstPages = pagesFor(own, past);
+    // Every other executor's: its state page, its tables and what lies past them.
+    const executorPages = Math.ceil((executorBytes(own) - tables + past) / 65536);
+    /** Where an executor's state page begins. @param {number} index */
+    const executorBase = index=>(index === 0 ? 0
+        : (firstPages + (index - 1) * executorPages) * 65536);
+    const stateBase = executorBase(executor);
+    const layout = executor === 0 ? own : executorLayout(own, stateBase);
+    const wasmArea = layout.tables + tables + profileSize;
+    // Past every executor's pages, the record they keep together of who holds
+    // code where and which stores reached it (`shared-code.js`).
+    const sharedAt = executors > 1 ? (firstPages + (executors - 1) * executorPages) * 65536 : -1;
+    const pages = firstPages + (executors - 1) * executorPages
+        + (executors > 1 ? Math.ceil(engine.SHARED_CODE_BYTES / 65536) : 0);
     // Shared where the host can share it -- a page that is cross-origin
     // isolated, or node -- so another worker can read and write guest memory
     // in place; the translated code runs as fast on either.
     const shared = corkConfig?.sharedMemory !== false && typeof SharedArrayBuffer === 'function'
         && /** @type {any} */ (globalThis).crossOriginIsolated !== false;
-    const memory = new WebAssembly.Memory({ initial: pages, maximum: pages, shared });
+    if (given !== undefined && given.buffer.byteLength < pages * 65536)
+    {
+        throw new Error(`cpu: a memory of ${given.buffer.byteLength} bytes has no room for`
+            + ` ${executors} executors`);
+    }
+    const memory = given ?? new WebAssembly.Memory({ initial: pages, maximum: pages, shared });
 
     // The memory is fixed (initial === maximum), so the buffer never detaches
     // and the views are taken once.
-    const block = new Uint8Array(memory.buffer, 0, STATE_BLOCK_SIZE);
-    const blockView = new DataView(memory.buffer, 0, STATE_BLOCK_SIZE);
+    const block = new Uint8Array(memory.buffer, stateBase, STATE_BLOCK_SIZE);
+    const blockView = new DataView(memory.buffer, stateBase, STATE_BLOCK_SIZE);
     const reg32 = new Int32Array(memory.buffer, layout.regs, 8);
     const xmm = new Uint32Array(memory.buffer, layout.xmm, 32);
     const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
     const whole = new DataView(memory.buffer);
 
     /** The flags word, whole: the record a region left is folded into it first. */
-    const eflagsWord = ()=>eflagsOf(blockView, layout) >>> 0;
+    const eflagsWord = ()=>eflagsOf(blockView, own) >>> 0;
     /** @param {number} address  A guest address. */
     const ramOffset = address=>layout.ramBase + address;
 
     // The boot state: the registers the ROM would have left, and nothing run.
     block.fill(0);
     reg32[4] = initialStack | 0; // ESP
-    blockView.setUint32(layout.eflags, DEFAULT_EFLAGS, true);
-    blockView.setUint16(layout.x87Control, DEFAULT_CONTROL_WORD, true);
-    block[layout.x87Empty] = 0xff; // every register empty
-    blockView.setUint32(layout.mxcsr, DEFAULT_MXCSR, true);
+    blockView.setUint32(own.eflags, DEFAULT_EFLAGS, true);
+    blockView.setUint16(own.x87Control, DEFAULT_CONTROL_WORD, true);
+    block[own.x87Empty] = 0xff; // every register empty
+    blockView.setUint32(own.mxcsr, DEFAULT_MXCSR, true);
 
     /** @type {((value: number) => void) | null} */
     let trapHandler = null;
@@ -230,8 +268,9 @@ export function createCorkHost(config){
      */
     const wasmTier = wasmWanted
         ? engine.createWasmInterpreter({ memory, layout, area: wasmArea,
+            statics: stateBase + engine.WASM_INTERPRETER_STATICS_AT,
             hotThreshold: corkConfig?.hotThreshold ?? 2, trapPort, parkBase,
-            precise: corkConfig?.precise === true })
+            precise: corkConfig?.precise === true, atomic: corkConfig?.atomic === true })
         : null;
     /** The last run starts the interpreter ran, a ring: the path a run took
      * into wherever it sits. The wasm tier's, when there is one. */
@@ -291,7 +330,9 @@ export function createCorkHost(config){
     const isFeedDue = ()=>feedDue;
     // eip is read from the entry vector at the first slice, the way the ROM's
     // indirect jump read it: the loader writes the entry point after boot.
-    let entered = false;
+    // Another executor's threads are placed in its block by the process: it
+    // never starts from the entry vector.
+    let entered = executor !== 0;
     /** @type {import('./faults.js').GuestFault | null} */
     let lastFault = null;
     /**
@@ -308,15 +349,15 @@ export function createCorkHost(config){
     let counted = 0;
     let lastWord = 0;
 
-    const eip = ()=>blockView.getUint32(layout.eip, true) >>> 0;
+    const eip = ()=>blockView.getUint32(own.eip, true) >>> 0;
     /** @param {number} value */
     const setEip = value=>{
-        blockView.setUint32(layout.eip, value >>> 0, true);
+        blockView.setUint32(own.eip, value >>> 0, true);
         entered = true;
     };
-    const x87Top = ()=>block[layout.x87Top] & 7;
+    const x87Top = ()=>block[own.x87Top] & 7;
     /** @param {number} index */
-    const x87At = index=>layout.x87 + (index & 7) * 16;
+    const x87At = index=>own.x87 + (index & 7) * 16;
 
     /** The trap the call channel reaches: run the handler, answer whether to leave
      * -- 1 where the handler moved EIP, 2 where the turn is to end (a stop, a halt),
@@ -369,7 +410,7 @@ export function createCorkHost(config){
                 guestMs = ms;
                 guestMovedAt = now;
             }
-            ticks = (guestMs + Math.min(now - guestMovedAt, TSC_DRIFT_MS)) * TICKS_PER_MS;
+            ticks = (guestMs + Math.min(now - guestMovedAt, tscDriftMs)) * TICKS_PER_MS;
         }
         lastTsc = Math.max(lastTsc + 1, Math.floor(ticks));
         return BigInt(lastTsc);
@@ -386,7 +427,8 @@ export function createCorkHost(config){
     const runtime = createEngine({
         memory,
         layout,
-        config: { ...(trapPort === undefined ? {} : { trapPort }), ...corkConfig },
+        config: { ...(trapPort === undefined ? {} : { trapPort }), ...corkConfig,
+            ...(sharedAt < 0 ? {} : { sharedCode: { at: sharedAt, index: executor } }) },
         read: (/** @type {number} */ address)=>ram[address],
         imports: {
             trap: raiseTrap,
@@ -421,6 +463,12 @@ export function createCorkHost(config){
     const invalidate = (address, length)=>{
         if (length <= 0)
         {
+            return;
+        }
+        if (sharedAt >= 0)
+        {
+            // The process's other executors drop theirs too.
+            runtime.codeWritten(address, length);
             return;
         }
         const last = (address + length - 1) >>> 12;
@@ -468,6 +516,7 @@ export function createCorkHost(config){
     // instruction. Once the stretch is spent the tier runs every range, and
     // `wasmSwitch` ends the range it ran out in.
     const wasmAfter = corkConfig?.wasmInterpreterAfter ?? WASM_AFTER;
+    const newTargetWork = corkConfig?.newTargetWork ?? NEW_TARGET_WORK;
     let wasmDue = wasmTier !== null && (wasmAfter <= 0 || wasmTier.started());
     let wasmSwitch = false;
     /** Counts one interpreted start and notes the address once it is hot.
@@ -477,7 +526,7 @@ export function createCorkHost(config){
         const slot = (address >>> 2) & HOT_MASK;
         if (hotCounts[slot] === 0 && !wasmDue && wasmTier !== null)
         {
-            wasmTier.stretch.work += NEW_TARGET_WORK;
+            wasmTier.stretch.work += newTargetWork;
             if (wasmTier.stretch.work >= wasmAfter)
             {
                 wasmDue = true;
@@ -521,7 +570,7 @@ export function createCorkHost(config){
 
     /** Fold the block's 32-bit counter word into the exact count. */
     const fold = ()=>{
-        const word = blockView.getUint32(layout.counter, true) >>> 0;
+        const word = blockView.getUint32(own.counter, true) >>> 0;
         counted += (word - lastWord) >>> 0;
         lastWord = word;
     };
@@ -558,19 +607,43 @@ export function createCorkHost(config){
      * emulator's fault stub ends it with a halt.
      *
      * @param {number} vector
+     * @param {{ address: number, write: boolean } | null} [page]  for an access to a page the
+     *     program cannot reach: raised as a page fault there
      */
-    const takeFault = vector=>{
+    const takeFault = (vector, page = null)=>{
         const fault = {
             ...buildFault(vector),
             stack: reg32[4] >>> 0,
             eax: reg32[0] >>> 0,
             edx: reg32[2] >>> 0,
+            // A page fault's error code and the address it could not reach (CR2):
+            // not present, and whether the access wrote.
+            ...page === null ? {} : { errorCode: page.write ? 2 : 0, address: page.address >>> 0 },
         };
         if (faultHandler?.(fault) !== true)
         {
             lastFault = fault;
         }
         halted = true;
+    };
+
+    /**
+     * A fault translated code or the wasm tier left with, before the instruction:
+     * a #GP there is what either raises for a page the program cannot reach,
+     * whose address neither carries, so the instruction runs once more on the
+     * JavaScript interpreter, which raises the same fault with the address --
+     * or, if the page was opened meanwhile, simply runs it. Any other vector is
+     * taken as it is.
+     *
+     * @param {number} vector
+     */
+    const takeTieredFault = vector=>{
+        if (vector !== GENERAL_PROTECTION)
+        {
+            takeFault(vector);
+            return;
+        }
+        interpretJs(eip(), 1, true, false, false);
     };
 
     // Where the last run the interpreter stepped began, so a no-tier answer
@@ -695,14 +768,14 @@ export function createCorkHost(config){
             tierInstalled = true;
             runtime.interpretWith?.(tier.entry(), tier.entered);
         }
-        blockView.setUint32(layout.eip, address >>> 0, true);
+        blockView.setUint32(own.eip, address >>> 0, true);
         lastStart = address;
         if (jumpedIn)
         {
             countHot(address);
         }
         let retired = 0;
-        let own = 0;
+        let tierRetired = 0;
         // The first instruction runs whatever is due, as the JavaScript
         // interpreter's first run does: the jump that brought the range here
         // may have made its start hot and the feed due, and a range that
@@ -719,7 +792,7 @@ export function createCorkHost(config){
                 first = false;
                 const ran = tier.retired();
                 retired += ran;
-                own += ran;
+                tierRetired += ran;
                 wasmRetired += ran;
                 const at = eip();
                 if (notedSinceFeed && interpretedSoFar() - retiredAtFeed >= FEED_MIN_STEPS)
@@ -767,7 +840,7 @@ export function createCorkHost(config){
                 }
                 if (code === WasmExit.FAULT)
                 {
-                    takeFault(tier.exitValue());
+                    takeTieredFault(tier.exitValue());
                     break;
                 }
                 retired += interpretJs(at, left, false, false, true);
@@ -789,10 +862,10 @@ export function createCorkHost(config){
             // The wasm tier's instructions count in the block's word as the
             // JavaScript interpreter's do, a range that dies on a no-tier
             // instruction included.
-            if (own > 0)
+            if (tierRetired > 0)
             {
-                const word = blockView.getUint32(layout.counter, true);
-                blockView.setUint32(layout.counter, (word + own) >>> 0, true);
+                const word = blockView.getUint32(own.counter, true);
+                blockView.setUint32(own.counter, (word + tierRetired) >>> 0, true);
             }
         }
         return retired;
@@ -810,6 +883,7 @@ export function createCorkHost(config){
             memory,
             layout,
             rdtsc: readTsc,
+            atomic: corkConfig?.atomic === true,
             ...(trapPort === undefined ? {} : { ports: { ...ports, trapPort } }),
             // An interpreted store into a page a region was translated on
             // invalidates it, as a translated store's `stale` exit does.
@@ -858,15 +932,25 @@ export function createCorkHost(config){
         // run rather than only over what the translator ran.
         if (retired > 0)
         {
-            const word = blockView.getUint32(layout.counter, true);
-            blockView.setUint32(layout.counter, (word + retired) >>> 0, true);
+            const word = blockView.getUint32(own.counter, true);
+            blockView.setUint32(own.counter, (word + retired) >>> 0, true);
         }
         if (thrown !== null)
         {
-            const fault = /** @type {{ vector?: number, eip?: number, op?: string }} */ (thrown);
+            const fault = /** @type {{ vector?: number, eip?: number, op?: string,
+                address?: number, write?: boolean }} */ (thrown);
             if (typeof fault.vector === 'number')
             {
-                takeFault(fault.vector);
+                // An access to a page the program cannot reach is the page fault
+                // Windows raises, with the address its handler commits.
+                if (typeof fault.address === 'number')
+                {
+                    takeFault(PAGE_FAULT, { address: fault.address, write: fault.write === true });
+                }
+                else
+                {
+                    takeFault(fault.vector);
+                }
                 return retired;
             }
             if (typeof fault.op === 'string')
@@ -915,6 +999,11 @@ export function createCorkHost(config){
     const runSlice = maxInstructions=>{
         const sliceAt = clock();
         const wallAt = performance.now();
+        if (sharedAt >= 0)
+        {
+            // What the process's other executors wrote over code meanwhile.
+            runtime.takeCodeWrites();
+        }
         stopped = false;
         feedDue = false;
         // A slice is the clock's tick. On the emulator a `hlt` holds the
@@ -965,7 +1054,7 @@ export function createCorkHost(config){
             if (entry >= 0)
             {
                 const exit = runtime.run(entry,
-                    yieldCheck === null ? remaining : Math.min(remaining, YIELD_CHUNK));
+                    yieldCheck === null ? remaining : Math.min(remaining, yieldChunk));
                 jumpedIn = exit.kind === 'untranslated';
                 remaining -= exit.retired;
                 ran += exit.retired;
@@ -983,7 +1072,7 @@ export function createCorkHost(config){
                     }
                     if (code === WasmExit.FAULT)
                     {
-                        takeFault(wasmTier.exitValue());
+                        takeTieredFault(wasmTier.exitValue());
                         break;
                     }
                     if (code === WasmExit.HOT)
@@ -1018,7 +1107,7 @@ export function createCorkHost(config){
                 }
                 if (exit.kind === 'fault')
                 {
-                    takeFault(exit.vector);
+                    takeTieredFault(exit.vector);
                     break;
                 }
                 if (exit.kind === 'trap')
@@ -1051,7 +1140,7 @@ export function createCorkHost(config){
                 continue;
             }
             const interpretAt = clock();
-            const stepped = interpretRange(at, Math.min(remaining, INTERPRET_CHUNK), false,
+            const stepped = interpretRange(at, Math.min(remaining, interpretChunk), false,
                 jumpedIn);
             interpretMs += clock() - interpretAt;
             interpreted += stepped;
@@ -1071,7 +1160,7 @@ export function createCorkHost(config){
                     break;
                 }
             }
-            if (performance.now() - wallAt >= SLICE_MS)
+            if (performance.now() - wallAt >= sliceMs)
             {
                 break;
             }
@@ -1098,37 +1187,37 @@ export function createCorkHost(config){
     const dropExact = mask=>{
         if (layout.x87Exact !== undefined && layout.x87Exact >= 0)
         {
-            block[layout.x87Exact] &= ~mask;
+            block[own.x87Exact] &= ~mask;
         }
     };
 
     const fpu = {
         /** @param {number} value */
         setResult(value){
-            const top = (block[layout.x87Top] - 1) & 7;
-            const empty = block[layout.x87Empty];
+            const top = (block[own.x87Top] - 1) & 7;
+            const empty = block[own.x87Empty];
             const held = (empty >>> top & 1) === 0;
-            block[layout.x87Top] = top;
-            block[layout.x87Empty] = empty & ~(1 << top);
+            block[own.x87Top] = top;
+            block[own.x87Empty] = empty & ~(1 << top);
             if (held)
             {
-                const status = blockView.getUint16(layout.x87Status, true);
-                blockView.setUint16(layout.x87Status, status | 0x201, true);
+                const status = blockView.getUint16(own.x87Status, true);
+                blockView.setUint16(own.x87Status, status | 0x201, true);
             }
             blockView.setFloat64(x87At(top), held ? -Infinity : value, true);
             dropExact(1 << top);
         },
         /** @param {number} index */
         get(index){
-            return blockView.getFloat64(x87At(block[layout.x87Top] + index), true);
+            return blockView.getFloat64(x87At(block[own.x87Top] + index), true);
         },
         pop(){
-            const top = block[layout.x87Top];
-            block[layout.x87Empty] |= 1 << top;
-            block[layout.x87Top] = (top + 1) & 7;
+            const top = block[own.x87Top];
+            block[own.x87Empty] |= 1 << top;
+            block[own.x87Top] = (top + 1) & 7;
         },
         depth(){
-            const empty = block[layout.x87Empty];
+            const empty = block[own.x87Empty];
             let held = 0;
             for (let index = 0; index < 8; index++)
             {
@@ -1136,7 +1225,7 @@ export function createCorkHost(config){
             }
             return held;
         },
-        controlWord: ()=>blockView.getUint16(layout.x87Control, true),
+        controlWord: ()=>blockView.getUint16(own.x87Control, true),
     };
 
     /** @type {Record<string, any>} */
@@ -1172,6 +1261,14 @@ export function createCorkHost(config){
         stop(){
             stopped = true;
         },
+        /** Whether something asked the turn to end since the slice began (`stop`). */
+        stopRequested: ()=>stopped,
+        /** @param {boolean} value */
+        setStopRequested(value){
+            stopped = value;
+        },
+        /** Where executor `index`'s state page begins in the memory. */
+        executorBase,
         /** @param {(() => boolean) | null} check */
         setYieldCheck(check){
             yieldCheck = check;
@@ -1281,7 +1378,7 @@ export function createCorkHost(config){
             }
             if (name === 'eflags')
             {
-                setEflags(blockView, layout, value);
+                setEflags(blockView, own, value);
                 return;
             }
             const index = REGISTERS.indexOf(name);
@@ -1296,11 +1393,42 @@ export function createCorkHost(config){
         registerFile: ()=>reg32,
         /** @param {number} base @param {number} size */
         noteStack: (base, size)=>runtime.noteStack(base, size),
+        /**
+         * Opens or closes pages to the program, as a reservation's commit and
+         * VirtualProtect do: a closed one faults any access, with its address.
+         * Only where every tier tests a read (`checkReads`) -- elsewhere a
+         * translated read would wrap into RAM where the interpreter faults, the
+         * same instruction answering two ways -- and never below `closedBelow`
+         * or past RAM, which stay closed. Answers whether it did.
+         *
+         * @param {number} address @param {number} length @param {boolean} open
+         */
+        pageAccess: (address, length, open)=>{
+            if (corkConfig?.checkReads !== true || !runtime.pages)
+            {
+                return false;
+            }
+            const from = Math.max(address >>> 0, closedBelow);
+            const to = Math.min((address >>> 0) + (length >>> 0), memorySize);
+            if (to <= from)
+            {
+                return true;
+            }
+            if (open)
+            {
+                runtime.pages.clearRange(from, to - from, PAGE_INACCESSIBLE);
+            }
+            else
+            {
+                runtime.pages.markRange(from, to - from, PAGE_INACCESSIBLE);
+            }
+            return true;
+        },
         /** The guest's RAM in place, byte 0 at address 0. @returns {Uint8Array} */
         ramView: ()=>ram,
         /** The state block, for the block-based context capture and the tests. */
         block: ()=>block,
-        blockLayout: ()=>layout,
+        blockLayout: ()=>own,
         /** The host-built fault record, or null. */
         fault: ()=>lastFault,
         /**
@@ -1312,6 +1440,13 @@ export function createCorkHost(config){
         onFault(handler){
             faultHandler = handler;
         },
+        /**
+         * A fault another executor of the process took, offered to this one's handler
+         * with that executor's state in this one's block: whether the handler claimed it.
+         *
+         * @param {any} fault
+         */
+        offerFault: fault=>faultHandler?.(fault) === true,
         clearFault(){
             lastFault = null;
         },
@@ -1326,10 +1461,10 @@ export function createCorkHost(config){
         writeXmm(index, words){
             xmm.set(Uint32Array.from(words, word=>word >>> 0), index * 4);
         },
-        readMxcsr: ()=>blockView.getUint32(layout.mxcsr, true) >>> 0,
+        readMxcsr: ()=>blockView.getUint32(own.mxcsr, true) >>> 0,
         /** @param {number} value */
         writeMxcsr(value){
-            blockView.setUint32(layout.mxcsr, value >>> 0, true);
+            blockView.setUint32(own.mxcsr, value >>> 0, true);
         },
         x87State(){
             const registers = new Float64Array(8);
@@ -1343,9 +1478,9 @@ export function createCorkHost(config){
             const top = x87Top();
             return {
                 top,
-                empty: block[layout.x87Empty],
-                control: blockView.getUint16(layout.x87Control, true),
-                status: (blockView.getUint16(layout.x87Status, true) & ~0x3800
+                empty: block[own.x87Empty],
+                control: blockView.getUint16(own.x87Control, true),
+                status: (blockView.getUint16(own.x87Status, true) & ~0x3800
                     | top << 11) & 0xffff,
                 registers,
                 raw,
@@ -1356,12 +1491,12 @@ export function createCorkHost(config){
          *     raw: Uint8Array }} state
          */
         restoreX87State(state){
-            block.set(state.raw, layout.x87);
+            block.set(state.raw, own.x87);
             dropExact(0xff);
-            block[layout.x87Top] = state.top & 7;
-            block[layout.x87Empty] = state.empty & 0xff;
-            blockView.setUint16(layout.x87Control, state.control, true);
-            blockView.setUint16(layout.x87Status, state.status & ~0x3800, true);
+            block[own.x87Top] = state.top & 7;
+            block[own.x87Empty] = state.empty & 0xff;
+            blockView.setUint16(own.x87Control, state.control, true);
+            blockView.setUint16(own.x87Status, state.status & ~0x3800, true);
         },
 
         /** @returns {number} instructions retired since boot */

@@ -82,16 +82,17 @@ test('a report lists what was said as a divergence, which nothing else keeps',
 
 test('a polling loop is written twice and counted, so the journal still holds what came before',
     { timeout: 60000 }, async t=>{
-        // GetCurrentThreadId; mov ecx, 50000; L: push ecx; push 0; call [Sleep]; pop ecx;
-        // dec ecx; jnz L; GetCurrentThreadId; push 0; call [ExitProcess]
+        // GetACP (a call the host answers; the thread's and the process's ids are
+        // answered in the guest); mov ecx, 50000; L: push ecx; push 0; call [Sleep]; pop ecx;
+        // dec ecx; jnz L; GetACP; push 0; call [ExitProcess]
         const executable = buildExe({
-            imports: { 'KERNEL32.dll': ['GetCurrentThreadId', 'Sleep', 'ExitProcess'] },
+            imports: { 'KERNEL32.dll': ['GetACP', 'Sleep', 'ExitProcess'] },
             codeSize: 0x40,
             code: ({ iat })=>[
-                0xff, 0x15, ...u32(iat('GetCurrentThreadId')),
+                0xff, 0x15, ...u32(iat('GetACP')),
                 0xb9, ...u32(50000),
                 0x51, 0x6a, 0x00, 0xff, 0x15, ...u32(iat('Sleep')), 0x59, 0x49, 0x75, 0xf3,
-                0xff, 0x15, ...u32(iat('GetCurrentThreadId')),
+                0xff, 0x15, ...u32(iat('GetACP')),
                 0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess')),
             ],
         });
@@ -106,6 +107,6 @@ test('a polling loop is written twice and counted, so the journal still holds wh
         const said = lines.find((/** @type {string} */ text)=>/went round again/.test(text));
         assert.ok(said, lines.slice(-12).join('\n'));
         assert.match(said, /the 1 calls before went round again: 49992 calls not written/);
-        assert.equal(lines.filter((/** @type {string} */ text)=>/GetCurrentThreadId/.test(text)).length,
+        assert.equal(lines.filter((/** @type {string} */ text)=>/GetACP/.test(text)).length,
             2, 'what came before the loop and after it both stay');
     });

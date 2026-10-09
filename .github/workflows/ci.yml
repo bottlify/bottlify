@@ -95,3 +95,7 @@ jobs:
       - run: npm run cdp:probe
         env:
           CDP_TEST_CHROME: ${{ steps.chrome.outputs.chrome-path }}
+      # Random shaders through the reference machine and through WGSL on the GPU.
+      - run: npm run cdp:shaders
+        env:
+          CDP_TEST_CHROME: ${{ steps.chrome.outputs.chrome-path }}

@@ -238,7 +238,14 @@ export function readImports(bytes, image){
  */
 
 /**
- * Reads the export directory: what an image provides, by name and by ordinal.
+ * The longest export name read: a name is code's identifier, and one without
+ * its terminator in this much is a table that is not one.
+ */
+const EXPORT_NAME_MOST = 4096;
+
+/**
+ * Reads an export directory through `read`, the file or the mapped image by
+ * RVA: what an image provides, by name and by ordinal.
  *
  * Both are needed and neither substitutes for the other. An import descriptor
  * may name a function or give only an ordinal, and a program that resolves at
@@ -250,72 +257,83 @@ export function readImports(bytes, image){
  * a string naming another library's export. Treating that string's address as
  * code puts the guest on ASCII, which is a fault a long way from its cause.
  *
- * @param {Uint8Array} bytes  The raw file (not the mapped image).
- * @param {PeImage} image
- * @returns {{ name: string | null, exports: ExportedName[] }}
+ * A directory whose counts, tables or names fall outside the image is refused,
+ * with the reason, and never thrown over: Windows reads an image's exports only
+ * when something asks for one, from the mapping, and an executable may carry
+ * its table encoded until its own code has written it out in place.
+ *
+ * @param {(rva: number, length: number) => Uint8Array | null} read  null outside the image
+ * @param {{ address: number, size: number } | undefined} directory
+ * @returns {{ name: string | null, exports: ExportedName[], refused: string | null }}
  */
-export function readExports(bytes, image){
-    const directory = image.directories[DIR_EXPORT];
+export function parseExportDirectory(read, directory){
     if (!directory || directory.size === 0)
     {
-        return { name: null, exports: [] };
+        return { name: null, exports: [], refused: null };
     }
-
-    // The loader does not walk an export directory when it maps an image -- only
-    // a binding or a GetProcAddress does -- so one whose fields point nowhere
-    // (a packed executable's, encrypted on disk and rebuilt in memory) does not
-    // stop the image loading. What reads is returned; what points outside the
-    // file is left out.
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const fileOffset = (/** @type {number} */ rva, /** @type {number} */ length)=>{
-        try
-        {
-            const at = rvaToFileOffset(image, rva);
-            return at + length <= bytes.length ? at : -1;
-        }
-        catch {
-            return -1;
-        }
+    /** @param {string} why */
+    const refuse = why=>({ name: null, exports: [], refused: why });
+    const head = read(directory.address, 40);
+    if (head === null)
+    {
+        return refuse('the directory lies outside the image');
+    }
+    const view = new DataView(head.buffer, head.byteOffset, head.byteLength);
+    const nameRva = view.getUint32(12, true);
+    const ordinalBase = view.getUint32(16, true);
+    const functionCount = view.getUint32(20, true);
+    const nameCount = view.getUint32(24, true);
+    /**
+     * A table of `count` entries `width` bytes wide at `rva`, as a view.
+     * @param {number} rva @param {number} count @param {number} width
+     */
+    const table = (rva, count, width)=>{
+        const bytes = count === 0 ? new Uint8Array(0) : read(rva, count * width);
+        return bytes && new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     };
-    const empty = { name: null, exports: [] };
-    const at = fileOffset(directory.address, 40);
-    if (at < 0)
+    const functions = table(view.getUint32(28, true), functionCount, 4);
+    const names = table(view.getUint32(32, true), nameCount, 4);
+    const ordinals = table(view.getUint32(36, true), nameCount, 2);
+    if (functions === null)
     {
-        return empty;
+        return refuse(`its address table (${functionCount} functions) lies outside the image`);
     }
-
-    const nameRva = view.getUint32(at + 12, true);
-    const ordinalBase = view.getUint32(at + 16, true);
-    const functionCount = view.getUint32(at + 20, true);
-    const nameCount = view.getUint32(at + 24, true);
-    const functionsRva = view.getUint32(at + 28, true);
-    const namesRva = view.getUint32(at + 32, true);
-    const ordinalsRva = view.getUint32(at + 36, true);
-
-    const functions = fileOffset(functionsRva, functionCount * 4);
-    if (functions < 0)
-    {
-        return empty;
-    }
-    const ordinals = fileOffset(ordinalsRva, nameCount * 2);
-    const names = fileOffset(namesRva, nameCount * 4);
-    const string = (/** @type {number} */ rva)=>{
-        const offset = rva === 0 ? -1 : fileOffset(rva, 1);
-        return offset < 0 ? null : readCString(bytes, offset);
+    // A name table that points nowhere leaves every export reachable by its
+    // ordinal, as the loader would find it.
+    const named = names !== null && ordinals !== null;
+    /** @param {number} rva @returns {string | null} */
+    const cString = rva=>{
+        for (let length = 64; length <= EXPORT_NAME_MOST; length *= 4)
+        {
+            const bytes = read(rva, length) ?? read(rva, 1);
+            if (bytes === null)
+            {
+                return null;
+            }
+            const end = bytes.indexOf(0);
+            if (end >= 0)
+            {
+                return new TextDecoder().decode(bytes.subarray(0, end));
+            }
+            if (bytes.length < length)
+            {
+                return null;
+            }
+        }
+        return null;
     };
 
     // Names are attached to slots afterwards: the ordinal table is the join, and
     // a slot no name points at is exported by ordinal alone.
     /** @type {Map<number, string>} */
     const namesBySlot = new Map();
-    const named = ordinals >= 0 && names >= 0 ? nameCount : 0;
-    for (let index = 0; index < named; index++)
+    for (let index = 0; index < (named ? nameCount : 0); index++)
     {
-        const slot = view.getUint16(ordinals + index * 2, true);
-        const name = string(view.getUint32(names + index * 4, true));
+        const name = cString(/** @type {DataView} */ (names).getUint32(index * 4, true));
+        // A name that points nowhere names nothing; the rest still do.
         if (name !== null)
         {
-            namesBySlot.set(slot, name);
+            namesBySlot.set(/** @type {DataView} */ (ordinals).getUint16(index * 2, true), name);
         }
     }
 
@@ -324,12 +342,12 @@ export function readExports(bytes, image){
     const exports = [];
     for (let slot = 0; slot < functionCount; slot++)
     {
-        const rva = view.getUint32(functions + slot * 4, true);
+        const rva = functions.getUint32(slot * 4, true);
         if (rva === 0)
         {
             continue; // A hole in the ordinal space, not an export.
         }
-        const forwards = rva >= directory.address && rva < end ? string(rva) : null;
+        const forwards = rva >= directory.address && rva < end ? cString(rva) : null;
         exports.push({
             name: namesBySlot.get(slot) ?? null,
             ordinal: ordinalBase + slot,
@@ -338,7 +356,34 @@ export function readExports(bytes, image){
         });
     }
 
-    return { name: string(nameRva), exports };
+    return {
+        name: nameRva === 0 ? null : cString(nameRva),
+        exports,
+        refused: null,
+    };
+}
+
+/**
+ * Reads the export directory out of the raw file (`parseExportDirectory`).
+ *
+ * @param {Uint8Array} bytes  The raw file (not the mapped image).
+ * @param {PeImage} image
+ * @returns {{ name: string | null, exports: ExportedName[], refused: string | null }}
+ */
+export function readExports(bytes, image){
+    return parseExportDirectory((rva, length)=>{
+        let at;
+        try
+        {
+            at = rvaToFileOffset(image, rva);
+        }
+        catch {
+            return null;
+        }
+        // A read may end past the section's bytes in the file but not past the file.
+        return at + length <= bytes.length ? bytes.subarray(at, at + length)
+            : at < bytes.length ? bytes.subarray(at) : null;
+    }, image.directories[DIR_EXPORT]);
 }
 
 /**

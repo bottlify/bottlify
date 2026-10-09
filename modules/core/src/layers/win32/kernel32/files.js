@@ -98,6 +98,7 @@ const GENERIC_READ = 0x80000000;
 
 /** dwFlagsAndAttributes' flag that ends the file with its handle. */
 const FILE_FLAG_DELETE_ON_CLOSE = 0x04000000;
+const FILE_FLAG_OVERLAPPED = 0x40000000;
 
 /** LockFileEx's flag for an exclusive lock; without it the lock is shared. */
 const LOCKFILE_EXCLUSIVE_LOCK = 0x2;
@@ -1546,8 +1547,12 @@ export function createFileFunctions(host){
         {
             giveAttributes(path, flags);
         }
+        // A handle opened for overlapped I/O keeps no file pointer of its
+        // own that a read or write moves: each says where in its OVERLAPPED.
+        const overlapped = ((flags >>> 0) & FILE_FLAG_OVERLAPPED) !== 0;
         const handle = host.handles.open('file', {
             path, node, read, write, position: 0, ...deleteOnClose ? { deleteOnClose } : {},
+            ...overlapped ? { overlapped } : {},
         });
         return { handle, existed: exists };
     };
@@ -2155,7 +2160,13 @@ export function createFileFunctions(host){
                     {
                         host.writeMemory(buffer >>> 0, bytes);
                     }
-                    file.position = at + bytes.length;
+                    // A synchronous handle's pointer moves past what was read,
+                    // even when an OVERLAPPED said where; an overlapped one's
+                    // does not.
+                    if (pointer === 0 || !file.overlapped)
+                    {
+                        file.position = at + bytes.length;
+                    }
                     // Written even when nothing was read: a program that checks
                     // it is exactly the one that has reached the end of a file.
                     writeDwordIf(read >>> 0, bytes.length);
@@ -2236,7 +2247,12 @@ export function createFileFunctions(host){
                     : file.position;
                 /** @param {number} stored */
                 const deliver = stored=>{
-                    file.position = at + stored;
+                    // An overlapped write on a handle opened for it leaves the
+                    // file pointer where it was; the OVERLAPPED says where.
+                    if (pointer === 0 || !file.overlapped)
+                    {
+                        file.position = at + stored;
+                    }
                     // Written even for a zero-length write, which is how a program
                     // asks whether the handle still works.
                     writeDwordIf(written >>> 0, stored);
