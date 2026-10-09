@@ -144,6 +144,7 @@ const ERROR_NOACCESS = 998;
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, maxLength: number) => string} [readWideString]
  * @property {() => any} currentThread     The record per-thread state hangs on.
+ * @property {any} [kernel]  The kernel layer's API: the ready threads Sleep(0) may yield to.
  * @property {() => number} now            Guest milliseconds since boot.
  * @property {() => number} systemTimeMs   Guest wall clock, milliseconds since 1970.
  * @property {(name: string | null) => number} moduleHandle
@@ -484,6 +485,22 @@ export function createProcessFunctions(host){
         writeU32: (address, value)=>host.writeMemory(address, new Uint8Array(dword(value))),
     };
     const { stateOf, setError, lastErrorOf } = createThreadState(host.currentThread, memory);
+
+    /** Sleep(0): behind a ready thread of the caller's priority or higher, if there is one. */
+    const yieldTurn = ()=>{
+        const kernel = host.kernel;
+        const self = host.currentThread();
+        const mine = self?.priority ?? 0;
+        const ahead = (kernel?.threads?.() ?? []).some((/** @type {any} */ thread)=>
+            thread !== self && thread.state === 'ready' && !thread.awaitingHost
+            && (thread.priority ?? 0) >= mine);
+        if (!kernel || !ahead)
+        {
+            return 0;
+        }
+        kernel.block(self, 'Sleep', { deadline: kernel.clock.virtualTime(), result: 0 });
+        return host.park();
+    };
 
     /** The process's place in the shutdown order, which it may move. */
     const shutdown = { level: SHUTDOWN_DEFAULT_LEVEL, flags: 0 };
@@ -1116,13 +1133,16 @@ export function createProcessFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([milliseconds])=>{
-                // Zero yields rather than waits: it is a program saying another
-                // thread may go first, and turning it into a wait of no time
-                // would be the same thing more expensively.
+                // Zero gives the rest of the turn to a ready thread of the
+                // caller's priority or higher, and returns at once when there
+                // is none. A thread that polls a flag another sets -- Sleep(0)
+                // between looks -- otherwise keeps the one processor for its
+                // whole quantum, two host calls a look, while the thread that
+                // would set the flag waits for the turn to end.
                 const wait = milliseconds >>> 0;
                 if (wait === 0)
                 {
-                    return 0;
+                    return yieldTurn();
                 }
                 host.sleep(wait);
                 return host.park();

@@ -1372,6 +1372,7 @@ export function createWin32Module(){
                         nextRegionAfter: address=>memory.nextRegionAfter(address) ?? null,
                     }),
                     ...createProcessFunctions({
+                        kernel,
                         performanceFrequency: config?.performanceFrequency,
                         readMemory,
                         processId,
