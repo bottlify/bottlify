@@ -238,10 +238,52 @@ export function createResourceFunctions(host){
     };
 
     /**
+     * Calls back once for each key, in order: a string key lives in guest memory
+     * for the length of its callback and no longer, as Windows' does. FALSE when
+     * the callback stopped it early, as Windows answers.
+     *
+     * @param {number} callback @param {(number | string)[]} keys @param {boolean} wide
+     * @param {(key: number) => number[]} argsFor  the callback's arguments, given the key
+     * @returns {number | Promise<number>}
+     */
+    const callEach = (callback, keys, wide, argsFor)=>{
+        const thread = host.callerThread?.();
+        const call = /** @type {NonNullable<typeof host.call>} */ (host.call);
+        /** @param {number} at @returns {number | Promise<number>} */
+        const next = at=>{
+            if (at === keys.length)
+            {
+                return 1;
+            }
+            const key = keys[at];
+            let pointer = 0;
+            if (typeof key === 'string')
+            {
+                if (!host.allocate || !host.writeMemory)
+                {
+                    return next(at + 1);
+                }
+                const bytes = encodeName(key, wide);
+                pointer = host.allocate(bytes.length);
+                host.writeMemory(pointer, bytes);
+            }
+            const answer = call(callback >>> 0, argsFor(pointer || Number(key)), thread);
+            /** @param {number} went */
+            const then = went=>{
+                if (pointer !== 0)
+                {
+                    host.free?.(pointer);
+                }
+                return (went | 0) === 0 ? 0 : next(at + 1);
+            };
+            return typeof answer === 'number' ? then(answer) : answer.then(then);
+        };
+        return next(0);
+    };
+
+    /**
      * EnumResourceNames, either width: each name of the type once, whatever
-     * languages it comes in, in the order the image lists them. A string name
-     * lives in guest memory for the length of its callback and no longer, as
-     * Windows' does.
+     * languages it comes in, in the order the image lists them.
      *
      * @param {number[]} args @param {boolean} wide
      * @returns {number | Promise<number>}
@@ -265,39 +307,33 @@ export function createResourceFunctions(host){
         {
             return fail(ERROR_RESOURCE_TYPE_NOT_FOUND);
         }
-        const thread = host.callerThread?.();
-        const call = /** @type {NonNullable<typeof host.call>} */ (host.call);
-        /** @param {number} at @returns {number | Promise<number>} */
-        const next = at=>{
-            if (at === names.length)
+        return callEach(callback, names, wide,
+            name=>[instance >>> 0, type >>> 0, name, lParam >>> 0]);
+    };
+
+    /**
+     * EnumResourceTypes, either width: each type once, whatever names and
+     * languages it holds, in the order the image lists them. A module with no
+     * resources at all fails with ERROR_RESOURCE_DATA_NOT_FOUND.
+     *
+     * @param {number[]} args @param {boolean} wide
+     * @returns {number | Promise<number>}
+     */
+    const enumTypes = ([instance, callback, lParam], wide)=>{
+        /** @type {(number | string)[]} */
+        const types = [];
+        for (const entry of host.listResources?.(instance >>> 0) ?? [])
+        {
+            if (!types.some(type=>sameKey(type, entry.type)))
             {
-                return 1;
+                types.push(entry.type);
             }
-            const name = names[at];
-            let pointer = 0;
-            if (typeof name === 'string')
-            {
-                if (!host.allocate || !host.writeMemory)
-                {
-                    return next(at + 1);
-                }
-                const bytes = encodeName(name, wide);
-                pointer = host.allocate(bytes.length);
-                host.writeMemory(pointer, bytes);
-            }
-            const answer = call(callback >>> 0,
-                [instance >>> 0, type >>> 0, pointer || Number(name), lParam >>> 0], thread);
-            /** @param {number} went */
-            const then = went=>{
-                if (pointer !== 0)
-                {
-                    host.free?.(pointer);
-                }
-                return (went | 0) === 0 ? 0 : next(at + 1);
-            };
-            return typeof answer === 'number' ? then(answer) : answer.then(then);
-        };
-        return next(0);
+        }
+        if (!host.call || (callback >>> 0) === 0 || types.length === 0)
+        {
+            return fail(ERROR_RESOURCE_DATA_NOT_FOUND);
+        }
+        return callEach(callback, types, wide, type=>[instance >>> 0, type, lParam >>> 0]);
     };
 
     /**
@@ -360,6 +396,21 @@ export function createResourceFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: args=>enumLanguages(args, true),
+        },
+
+        /**
+         * BOOL EnumResourceTypesA/W(HMODULE hModule, ENUMRESTYPEPROCA lpEnumFunc,
+         *                           LONG_PTR lParam)
+         */
+        EnumResourceTypesA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: args=>enumTypes(args, false),
+        },
+        EnumResourceTypesW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: args=>enumTypes(args, true),
         },
 
         /**

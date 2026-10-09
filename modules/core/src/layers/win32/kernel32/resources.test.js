@@ -269,3 +269,24 @@ test('a callback that says stop ends the name enumeration with FALSE', ()=>{
     assert.equal(missing.fns.EnumResourceNamesW.handler([0, 99, 0x401000, 0]), 0);
     assert.deepEqual(missing.errors, [1813]);
 });
+
+test('the types of a module are enumerated once each, a string type placed for its callback', ()=>{
+    const { fns, called, placed, freed } = setup();
+    assert.equal(fns.EnumResourceTypesA.handler([0, 0x401000, 0x77]), 1);
+    assert.deepEqual(called.map(({ args })=>args),
+        [[0, RT_STRING, 0x77], [0, RT_BITMAP, 0x77], [0, 0x50000, 0x77]],
+        'a type holding several names is one type');
+    assert.deepEqual(placed, [{ bytes: 8, text: 'TESTDLL ' }]);
+    assert.deepEqual(freed, [0x50000], 'the string lives for its callback only');
+    assert.equal(fns.EnumResourceTypesA.argBytes, 12);
+    assert.equal(fns.EnumResourceTypesW.argBytes, 12);
+
+    const stopped = setup({ reply: ()=>0 });
+    assert.equal(stopped.fns.EnumResourceTypesA.handler([0, 0x401000, 0]), 0,
+        'a callback that says stop ends it with FALSE');
+    assert.equal(stopped.called.length, 1);
+
+    const { fns: none, errors } = setup();
+    assert.equal(none.EnumResourceTypesA.handler([0, 0, 0]), 0, 'no callback, no enumeration');
+    assert.deepEqual(errors, [1812]);
+});
