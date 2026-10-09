@@ -937,6 +937,42 @@ test('an owner-drawn static is drawn by its parent', async()=>{
     assert.deepEqual(seen[2].rect, [0, 0, 40, 20]);
 });
 
+test('an edit writes its text in the colour WM_CTLCOLOREDIT set', async()=>{
+    // A game's name box answers a black brush and sets white text on the
+    // context; written in the window text colour instead, every letter typed
+    // was black on black until the dialog closed.
+    const WHITE = 0x00ffffff;
+    /** @type {any} */
+    let gdi = null;
+    const context = setup({
+        reply: message=>{
+            if (message.message === 0x0133)
+            {
+                gdi.table.SetTextColor.handler([message.wParam, WHITE]);
+                gdi.table.SetBkColor.handler([message.wParam, 0]);
+                return gdi.table.GetStockObject.handler([4]);
+            }
+            return 0;
+        },
+    });
+    gdi = context.gdi;
+    const dialog = await openDialog(context, { ...WIZARD_PAGE, controls: [
+        { id: 102, className: 'Edit', title: 'WWWW', x: 4, y: 4, cx: 60, cy: 14,
+            style: WS_CHILD | WS_VISIBLE },
+    ] });
+    context.fns.GetWindowRect.handler([context.fns.GetDlgItem.handler([dialog, 102]), OUT]);
+    const [left, top, right, bottom] = [0, 4, 8, 12].map(at=>context.memory.u32(OUT + at));
+    const seen = new Set();
+    for (let y = top; y < bottom; y++)
+    {
+        for (let x = left; x < right; x++)
+        {
+            seen.add(context.desktop.read(x, y));
+        }
+    }
+    assert.ok(seen.has(0x00ffffff), 'the letters are white');
+});
+
 test('statics and check boxes write their text in the colour WM_CTLCOLORSTATIC set',
     async()=>{
         // As documented for WM_CTLCOLORSTATIC: the parent sets the text

@@ -1558,7 +1558,12 @@ export function createControlProcedures(host){
         }
         const grid = editGrid(record, hdc);
         const lines = editLines(record, grid.columns);
-        const ink = color(disabled(record) ? COLOR_GRAYTEXT : COLOR_WINDOWTEXT);
+        // The text colour the parent left in the context on WM_CTLCOLOREDIT --
+        // white on the black brush of a game's name box -- as a static's; a
+        // rich edit asks its parent for nothing and keeps the window text.
+        const ink = state.richBackground !== undefined
+            ? color(disabled(record) ? COLOR_GRAYTEXT : COLOR_WINDOWTEXT)
+            : staticInk(record, hdc);
         const selection = {
             from: Math.min(state.selStart, state.selEnd),
             to: Math.max(state.selStart, state.selEnd),
