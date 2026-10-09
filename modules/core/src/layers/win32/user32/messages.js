@@ -1136,9 +1136,37 @@ export function createMessageQueue(options = {}){
                 }
                 return entry;
             }
-            // Nothing queued: a window with an area to paint is made up now,
-            // then a due timer, then the quit -- the order Windows retrieves
-            // in. Not removed, because retrieval does not paint: the area
+            // Nothing posted: the quit, which is one of the posted messages
+            // as GetQueueStatus counts them (QS_POSTMESSAGE, msg.c
+            // test_queue_status), and so comes before what is made up only
+            // when nothing else waits -- a window's paint, then a due timer.
+            // A window that never validates itself would otherwise keep its
+            // program from ever seeing the quit.
+            const quitting = quitFor(asking);
+            if (quitting !== null)
+            {
+                const quit = {
+                    hwnd: 0,
+                    message: WM_QUIT,
+                    wParam: quitting[1] >>> 0,
+                    lParam: 0,
+                    time: 0,
+                    x: 0,
+                    y: 0,
+                };
+                if (accepts(quit, filter))
+                {
+                    if (filter.remove)
+                    {
+                        quits.delete(quitting[0]);
+                        retrieved++;
+                        last = quit;
+                    }
+                    return quit;
+                }
+            }
+            // A window with an area to paint is made up now, then a due
+            // timer. Not removed, because retrieval does not paint: the area
             // stays until BeginPaint clears it, and the next look finds it
             // again exactly as Windows would.
             const paint = takePaint(scoped);
@@ -1152,40 +1180,12 @@ export function createMessageQueue(options = {}){
                 return paint;
             }
             const due = takeTimer(scoped);
-            if (due)
+            if (due && filter.remove)
             {
-                if (filter.remove)
-                {
-                    last = due;
-                    pumped.set(WM_TIMER, (pumped.get(WM_TIMER) ?? 0) + 1);
-                }
-                return due;
+                last = due;
+                pumped.set(WM_TIMER, (pumped.get(WM_TIMER) ?? 0) + 1);
             }
-            const quitting = quitFor(asking);
-            if (quitting === null)
-            {
-                return null;
-            }
-            const quit = {
-                hwnd: 0,
-                message: WM_QUIT,
-                wParam: quitting[1] >>> 0,
-                lParam: 0,
-                time: 0,
-                x: 0,
-                y: 0,
-            };
-            if (!accepts(quit, filter))
-            {
-                return null;
-            }
-            if (filter.remove)
-            {
-                quits.delete(quitting[0]);
-                retrieved++;
-                last = quit;
-            }
-            return quit;
+            return due ?? null;
         },
 
         /** The message most recently taken, or null before the first. */

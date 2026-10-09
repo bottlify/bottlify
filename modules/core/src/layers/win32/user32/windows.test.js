@@ -1453,6 +1453,24 @@ test('a message loop runs until PostQuitMessage ends it', ()=>{
         'carrying the exit code the program chose');
 });
 
+test('a quit comes before a window\'s paint and a due timer', ()=>{
+    // GetQueueStatus counts a pending quit among the posted messages (msg.c
+    // test_queue_status), and those come before what is made up only when
+    // nothing else waits. A window that never validates itself does not
+    // keep its program from seeing the quit.
+    let clock = 0;
+    const { fns, memory, hwnd } = withWindow({ queueNow: ()=>clock });
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    fns.SetTimer.handler([hwnd, 1, 10, 0]);
+    clock += 50;
+    fns.InvalidateRect.handler([hwnd, 0, 0]);
+    fns.PostQuitMessage.handler([7]);
+    assert.equal(fns.GetMessageA.handler([MSG_BUFFER, 0, 0, 0]), 0);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_QUIT);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_PAINT, 'the paint after it');
+});
+
 test('GetMessageA waits for a message rather than reporting an empty queue', async()=>{
     const { fns, queue, memory, tick } = setup();
 
