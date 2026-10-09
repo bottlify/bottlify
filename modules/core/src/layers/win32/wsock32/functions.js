@@ -230,6 +230,37 @@ export function createWinsockFunctions(host){
     };
 
     /**
+     * The protocol a service lookup is narrowed to, lowercased, or null for any.
+     *
+     * @param {number} pointer
+     */
+    const protoOf = pointer=>((pointer >>> 0) === 0
+        ? null : host.readCString(pointer >>> 0, 16).toLowerCase());
+
+    /**
+     * A service as struct servent, in the buffer both lookups share: named by
+     * the protocol asked for, or the first it is listed for.
+     *
+     * @param {[string, number, string[]]} service @param {string | null} proto
+     */
+    const writeServent = ([name, port, protocols], proto)=>{
+        const block = staticBuffer('servent', SERVENT.SIZE + 48);
+        const nameAt = block + SERVENT.SIZE;
+        const aliasesAt = nameAt + 32;
+        const protoAt = aliasesAt + 4;
+        host.writeMemory(nameAt, sz(name));
+        writeDword(aliasesAt, 0);
+        host.writeMemory(protoAt, sz(proto ?? protocols[0]));
+        const record = new DataView(new ArrayBuffer(SERVENT.SIZE));
+        record.setUint32(SERVENT.s_name, nameAt, true);
+        record.setUint32(SERVENT.s_aliases, aliasesAt, true);
+        record.setUint16(SERVENT.s_port, port, false);
+        record.setUint32(SERVENT.s_proto, protoAt, true);
+        host.writeMemory(block, new Uint8Array(record.buffer));
+        return block >>> 0;
+    };
+
+    /**
      * Reads a WSABUF array as values, at call time.
      *
      * The array lives in guest memory the caller may reuse the moment this
@@ -1754,28 +1785,29 @@ export function createWinsockFunctions(host){
                     return fail(WSAEFAULT, 0);
                 }
                 const name = host.readCString(namePointer >>> 0, 64).toLowerCase();
-                const proto = protoPointer === 0
-                    ? null : host.readCString(protoPointer >>> 0, 16).toLowerCase();
+                const proto = protoOf(protoPointer);
                 const found = SERVICES.find(([service, , protocols])=>service === name
                     && (proto === null || protocols.includes(proto)));
-                if (!found)
-                {
-                    return fail(WSANO_DATA, 0);
-                }
-                const block = staticBuffer('servent', SERVENT.SIZE + 48);
-                const nameAt = block + SERVENT.SIZE;
-                const aliasesAt = nameAt + 32;
-                const protoAt = aliasesAt + 4;
-                host.writeMemory(nameAt, sz(found[0]));
-                writeDword(aliasesAt, 0);
-                host.writeMemory(protoAt, sz(proto ?? found[2][0]));
-                const record = new DataView(new ArrayBuffer(SERVENT.SIZE));
-                record.setUint32(SERVENT.s_name, nameAt, true);
-                record.setUint32(SERVENT.s_aliases, aliasesAt, true);
-                record.setUint16(SERVENT.s_port, found[1], false);
-                record.setUint32(SERVENT.s_proto, protoAt, true);
-                host.writeMemory(block, new Uint8Array(record.buffer));
-                return block >>> 0;
+                return found ? writeServent(found, proto) : fail(WSANO_DATA, 0);
+            },
+        },
+
+        /**
+         * struct servent* getservbyport(int port, const char *proto)
+         *
+         * getservbyname's lookup the other way: the port comes in network
+         * order, in the low half of the int, and the answer shares the same
+         * buffer -- one call overwrites what the other returned.
+         */
+        getservbyport: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([port, protoPointer])=>{
+                const wanted = (port & 0xff) << 8 | port >>> 8 & 0xff;
+                const proto = protoOf(protoPointer);
+                const found = SERVICES.find(([, own, protocols])=>own === wanted
+                    && (proto === null || protocols.includes(proto)));
+                return found ? writeServent(found, proto) : fail(WSANO_DATA, 0);
             },
         },
 
