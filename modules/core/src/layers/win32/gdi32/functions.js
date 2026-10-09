@@ -1371,7 +1371,7 @@ export function createGdiFunctions(host){
             return 0;
         }
         const text = (count | 0) === 0 ? '' : read(string >>> 0, count | 0);
-        const extents = Array.from(text, (_, index)=>widthOf(dc, text.slice(0, index + 1)));
+        const extents = Array.from(text, (_, index)=>extentOf(dc, text.slice(0, index + 1)));
         if ((fit >>> 0) !== 0)
         {
             const limit = maxExtent | 0;
@@ -1713,6 +1713,48 @@ export function createGdiFunctions(host){
     };
 
     /**
+     * Each character's advance as text is laid out on this DC: its width in
+     * the font, SetTextCharacterExtra's spacing added to every one, and
+     * SetTextJustification's extra space shared among the break characters,
+     * the remainder going one a break to the first of them. Null when
+     * neither is set, the font's own advances standing.
+     *
+     * @param {any} dc @param {string} text
+     * @returns {number[] | null}
+     */
+    const spacedAdvances = (dc, text)=>{
+        const extra = dc.characterExtra | 0;
+        const justify = dc.justification;
+        const breaks = justify && (justify.count | 0) > 0 && (justify.extra | 0) !== 0;
+        if (extra === 0 && !breaks)
+        {
+            return null;
+        }
+        const each = breaks ? Math.trunc((justify.extra | 0) / (justify.count | 0)) : 0;
+        let left = breaks ? (justify.extra | 0) - each * (justify.count | 0) : 0;
+        return Array.from(text, character=>{
+            let advance = widthOf(dc, character) + extra;
+            if (breaks && character.charCodeAt(0) === BREAK_CHAR)
+            {
+                advance += each + Math.sign(left);
+                left -= Math.sign(left);
+            }
+            return advance;
+        });
+    };
+
+    /**
+     * How wide a string is as TextOut would lay it on this DC, spacing and
+     * justification included: what GetTextExtentPoint32 answers.
+     *
+     * @param {any} dc @param {string} text
+     */
+    const extentOf = (dc, text)=>{
+        const spaced = spacedAdvances(dc, text);
+        return spaced ? spaced.reduce((sum, advance)=>sum + advance, 0) : widthOf(dc, text);
+    };
+
+    /**
      * @param {any} dc
      * @param {number} index
      * @returns {number}
@@ -2005,7 +2047,7 @@ export function createGdiFunctions(host){
     };
 
     const drawing = createDrawingFunctions({
-        host, objects, dcOf, surfaceOf, currentMetrics, lend,
+        host, objects, dcOf, surfaceOf, currentMetrics, lend, spacedAdvances,
         toDevice: (dc, point)=>transform(dc, point, true),
         toLogical: (dc, point)=>transform(dc, point, false),
         /** @param {number} at @param {number} count @param {number} usage @param {any} dc */
@@ -2156,7 +2198,7 @@ export function createGdiFunctions(host){
             }
             return null;
         },
-        textExtent: (dc, text)=>({ cx: widthOf(dc, text), cy: currentMetrics(dc).height }),
+        textExtent: (dc, text)=>({ cx: extentOf(dc, text), cy: currentMetrics(dc).height }),
     });
 
     const table = {
@@ -4261,7 +4303,7 @@ export function createGdiFunctions(host){
                     return 0;
                 }
                 const text = (string >>> 0) === 0 ? '' : wideText(string, count | 0, true);
-                writeSize(host, out, { cx: widthOf(dc, text), cy: currentMetrics(dc).height });
+                writeSize(host, out, { cx: extentOf(dc, text), cy: currentMetrics(dc).height });
                 return 1;
             },
         },
@@ -4403,10 +4445,6 @@ export function createGdiFunctions(host){
                     return 0;
                 }
                 dc.justification = { extra: extra | 0, count: count | 0 };
-                if ((extra | 0) !== 0)
-                {
-                    host.divergence?.('SetTextJustification', 'the extra space is not applied');
-                }
                 return 1;
             },
         },
@@ -4650,7 +4688,7 @@ export function createGdiFunctions(host){
                 const text = (string >>> 0) === 0 || (count | 0) === 0
                     ? ''
                     : decodeAnsi(host.readMemory(string >>> 0, count | 0));
-                writeSize(host, out, { cx: widthOf(dc, text), cy: currentMetrics(dc).height });
+                writeSize(host, out, { cx: extentOf(dc, text), cy: currentMetrics(dc).height });
                 return 1;
             },
         },
@@ -5031,7 +5069,8 @@ export function createGdiFunctions(host){
                 dc.textAlign = 0;
                 interfaces.setTextAlign(hdc >>> 0, 0);
                 const drawn = interfaces.extTextOutA(hdc >>> 0, x | 0, y | 0,
-                    options.clip ? ETO_CLIPPED : 0, options.clip ?? null, text);
+                    options.clip ? ETO_CLIPPED : 0, options.clip ?? null, text,
+                    spacedAdvances(dc, text) ?? undefined);
                 dc.textColor = textColor;
                 dc.bkMode = bkMode;
                 dc.textAlign = textAlign;
@@ -5048,7 +5087,8 @@ export function createGdiFunctions(host){
             measure(hdc, text){
                 const dc = dcOf(hdc) ?? { font: 0 };
                 const metrics = currentMetrics(dc);
-                return { width: widthOf(dc, text), height: metrics.height, ascent: metrics.ascent };
+                return { width: extentOf(dc, text), height: metrics.height,
+                    ascent: metrics.ascent };
             },
 
             /**

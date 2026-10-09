@@ -189,6 +189,15 @@ function fakeDrawing(){
         },
         getPixel: ()=>0x00112233,
         /** @param {number} hdc @param {number} x @param {number} y @param {string} text */
+        /**
+         * @param {number} hdc @param {number} x @param {number} y @param {number} options
+         * @param {any} rect @param {string} text
+         */
+        extTextOutA(hdc, x, y, options, rect, text){
+            calls.push(['extTextOutA', hdc, x, y, options, rect, text]);
+            return true;
+        },
+        /** @param {number} hdc @param {number} x @param {number} y @param {string} text */
         textOutA(hdc, x, y, text){
             calls.push(['textOutA', hdc, x, y, text]);
         },
@@ -1176,14 +1185,11 @@ test('the drawing entry points reach the service, and fail without one', ()=>{
     memory.bytes.set([0x41, 0x42, 0x43, 0x44], STRUCT);
     assert.equal(fns.ExtTextOutA.handler([hdc, 5, 6, 0, 0, STRUCT, 2, 0]), 1);
     assert.equal(seen[1][6], 'AB');
-    // TextOut is the same: the count, and no terminator anywhere near.
-    service.textOutA = (/** @type {any[]} */ ...args)=>{
-        seen.push(['textOutA', ...args]);
-        return true;
-    };
+    // TextOut is ExtTextOut with no options, rectangle or advances: the
+    // count, and no terminator anywhere near.
     memory.bytes.fill(0x58, STRUCT, STRUCT + 64);
     assert.equal(fns.TextOutA.handler([hdc, 7, 8, STRUCT, 3]), 1);
-    assert.deepEqual(seen[2], ['textOutA', hdc, 7, 8, 'XXX']);
+    assert.deepEqual(seen[2], ['extTextOutA', hdc, 7, 8, 0, null, 'XXX', undefined]);
 
     const bare = setup();
     assert.equal(bare.fns.Rectangle.handler([bare.hdc, 0, 0, 1, 1]), 0);
@@ -1200,10 +1206,6 @@ test('ANSI text is drawn as the characters its bytes are in the ANSI page', ()=>
     const service = /** @type {any} */ (drawing.drawing);
     service.extTextOutA = (/** @type {any[]} */ ...args)=>{
         drawn.push(args[5]);
-        return true;
-    };
-    service.textOutA = (/** @type {any[]} */ ...args)=>{
-        drawn.push(args[3]);
         return true;
     };
     const { memory, fns, hdc } = setup(drawing.services);
@@ -1279,13 +1281,13 @@ test('TextOutW reads code units and draws through the same engine as the narrow 
     // caller drawing part of a longer buffer passes the buffer and a short count.
     memory.bytes.set([0x41, 0, 0x42, 0, 0x43, 0, 0x44, 0], STRUCT);
     assert.equal(fns.TextOutW.handler([hdc, 5, 6, STRUCT, 3]), 1);
-    assert.deepEqual(drawing.calls.filter(call=>call[0] === 'textOutA'),
-        [['textOutA', hdc, 5, 6, 'ABC']]);
+    assert.deepEqual(drawing.calls.filter(call=>call[0] === 'extTextOutA'),
+        [['extTextOutA', hdc, 5, 6, 0, null, 'ABC']]);
 
     // A character outside Latin-1 survives, since nothing here narrows it.
     memory.bytes.set([0x14, 0x04], STRUCT);
     assert.equal(fns.TextOutW.handler([hdc, 0, 0, STRUCT, 1]), 1);
-    assert.equal(drawing.calls.filter(call=>call[0] === 'textOutA')[1][4], '\u0414');
+    assert.equal(drawing.calls.filter(call=>call[0] === 'extTextOutA')[1][6], '\u0414');
 
     assert.equal(fns.TextOutW.argBytes, 20, 'the same five arguments as TextOutA');
     const bare = setup();

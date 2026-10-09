@@ -316,3 +316,39 @@ test('a DC that accumulates bounds widens them by what it draws (dc.c test_bound
     assert.equal(fns.GetBoundsRect.handler([dc, RECT_AT, 0]), 1,
         'DCB_RESET: nothing while disabled');
 });
+
+test('SetTextJustification and SetTextCharacterExtra widen what is measured and what is drawn'
+    + ' (font.c test_SetTextJustification)', ()=>{
+    const machine = painted(200, 20);
+    const { fns, dc, view } = machine;
+    machine.bytes.set([...'ab cd ef'].map(c=>c.charCodeAt(0)), 0x3000);
+    const extent = ()=>{
+        fns.GetTextExtentPoint32A.handler([dc, 0x3000, 8, SIZE_AT]);
+        return view.getInt32(SIZE_AT, true);
+    };
+    const plain = extent();
+    fns.SetTextJustification.handler([dc, 7, 2]);
+    assert.equal(extent(), plain + 7, 'two breaks share seven pixels, four and three');
+    fns.SetTextJustification.handler([dc, 0, 0]);
+    fns.SetTextCharacterExtra.handler([dc, 2]);
+    assert.equal(extent(), plain + 16, 'two pixels after each of eight characters');
+
+    // Drawn, the last character ends where the extent says.
+    fns.SetTextColor.handler([dc, 0x00ffffff]);
+    fns.SetBkMode.handler([dc, 1]);
+    machine.fill(0);
+    fns.TextOutA.handler([dc, 0, 0, 0x3000, 8]);
+    let right = -1;
+    for (let y = 0; y < 20; y++)
+    {
+        for (let x = 0; x < 200; x++)
+        {
+            if (machine.pixel(x, y) !== 0)
+            {
+                right = Math.max(right, x);
+            }
+        }
+    }
+    assert.ok(right > plain, `ink reaches ${right}, past the unspaced width ${plain}`);
+    assert.ok(right < plain + 16, 'and not past the spaced one');
+});

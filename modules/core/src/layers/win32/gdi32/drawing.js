@@ -561,6 +561,9 @@ export function isPolyDrawable(types){
  * @param {(dc: any, point: { x: number, y: number }) => { x: number, y: number }}
  *        [options.toLogical]  A device point as the DC's logical space names it, as
  *        DPtoLP maps it; the identity when absent.
+ * @param {(dc: any, text: string) => number[] | null} [options.spacedAdvances]
+ *        Each character's advance under the DC's character spacing and
+ *        justification, or null when neither is set.
  * @returns The entry points; `bound`, the drawing interface a context is
  *     bound to, for the window manager, which paints its own controls through
  *     the same engine without a guest string to read; and `setDIBits`, which
@@ -568,7 +571,7 @@ export function isPolyDrawable(types){
  */
 export function createDrawingFunctions(
     { host, objects, dcOf, surfaceOf, currentMetrics, lend, readColorTable, toDevice,
-        toLogical = (dc, point)=>point })
+        toLogical = (dc, point)=>point, spacedAdvances = ()=>null })
 {
     /** @type {DrawingServices} */
     const services = host.graphics ?? {};
@@ -2030,19 +2033,8 @@ export function createDrawingFunctions(
         TextOutA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([handle, x, y, string, count])=>{
-                const interfaces = bound(handle);
-                if (!interfaces)
-                {
-                    return 0;
-                }
-                const length = Math.max(count | 0, 0);
-                const text = (string >>> 0) === 0 || length === 0
-                    ? ''
-                    : decodeAnsi(host.readMemory(string >>> 0, length));
-                interfaces.textOutA(handle >>> 0, x | 0, y | 0, text);
-                return 1;
-            },
+            handler: ([handle, x, y, string, count])=>
+                extTextOut([handle, x, y, 0, 0, string, count, 0], false),
         },
 
         /**
@@ -2057,24 +2049,8 @@ export function createDrawingFunctions(
         TextOutW: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([handle, x, y, string, count])=>{
-                const interfaces = bound(handle);
-                if (!interfaces)
-                {
-                    return 0;
-                }
-                const length = Math.max(count | 0, 0);
-                const bytes = (string >>> 0) === 0 || length === 0
-                    ? new Uint8Array(0)
-                    : host.readMemory(string >>> 0, length * 2);
-                let text = '';
-                for (let at = 0; at * 2 + 1 < bytes.length; at++)
-                {
-                    text += String.fromCharCode(bytes[at * 2] | (bytes[at * 2 + 1] << 8));
-                }
-                interfaces.textOutA(handle >>> 0, x | 0, y | 0, text);
-                return 1;
-            },
+            handler: ([handle, x, y, string, count])=>
+                extTextOut([handle, x, y, 0, 0, string, count, 0], true),
         },
 
         /**
@@ -4821,8 +4797,10 @@ export function createDrawingFunctions(
                 text += String.fromCharCode(bytes[at * 2] | bytes[at * 2 + 1] << 8);
             }
         }
+        // Advances the program gave are its own; without them the DC's
+        // character spacing and justification decide.
         const advances = (dx >>> 0) === 0 || length === 0
-            ? undefined
+            ? spacedAdvances(dcOf(handle), text) ?? undefined
             : [...Array(length).keys()].map(index=>{
                 const word = host.readMemory((dx >>> 0) + index * 4, 4);
                 return (word[0] | word[1] << 8 | word[2] << 16 | word[3] << 24) | 0;
