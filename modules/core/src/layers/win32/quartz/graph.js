@@ -43,8 +43,11 @@ import {
     IID_IFILTER_MAPPER2, IID_IGRAPH_BUILDER, IID_IMEDIA_CONTROL, IID_IMEDIA_EVENT,
     IID_IMEDIA_EVENT_EX, IID_IMEDIA_POSITION, IID_IMEDIA_SEEKING, IID_IVIDEO_WINDOW,
     IMEDIA_CONTROL_SLOTS, IMEDIA_EVENT_EX_SLOTS, IMEDIA_EVENT_SLOTS, IMEDIA_POSITION_SLOTS,
-    IMEDIA_SEEKING_SLOTS, IVIDEO_WINDOW_SLOTS,
+    IMEDIA_SEEKING_SLOTS, IVIDEO_WINDOW_SLOTS, IID_IMEDIA_EVENT_SINK, IMEDIA_EVENT_SINK_SLOTS,
+    IID_IBASE_FILTER, VTABLE,
 } from './interfaces.js';
+import { describe } from './describe.js';
+import { createStreaming } from './stream.js';
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
@@ -60,6 +63,7 @@ const VFW_E_CANNOT_LOAD_SOURCE_FILTER = 0x80040241;
 
 /** Event codes. All three end a playback loop; only the reason differs. */
 const EC_COMPLETE = 0x01;
+const EC_USERABORT = 0x02;
 const EC_ERRORABORT = 0x03;
 
 /** OAFilterState, which GetState reports. */
@@ -92,6 +96,10 @@ const SW_SHOWNORMAL = 1;
 
 const DEFAULT_VIDEO_WIDTH = 640;
 const DEFAULT_VIDEO_HEIGHT = 480;
+
+/** IMediaSeeking's positioning flags: the low two bits say how to read the position. */
+const AM_SEEKING_POSITIONING_MASK = 0x03;
+const AM_SEEKING_ABSOLUTE = 0x01;
 
 /** A file name no longer than Windows would hand a filter graph. */
 const MAX_PATH = 260;
@@ -208,6 +216,12 @@ const AUDIO_PROPERTIES = ['Volume', 'Balance'];
  *           a pause or a decode that could not keep up cost. Null until the
  *           first tick after Run, so that Run needs no clock of its own.
  * @property {boolean} finished        Whether EC_COMPLETE has been raised.
+ * @property {number[]} filters
+ *           Filters the program added itself, one reference held on each: a
+ *           renderer it wrote, which the graph starts and stops with itself.
+ * @property {import('./stream.js').Source | null} source
+ *           What AddSourceFilter opened, which feeds those filters rather than
+ *           a window of the graph's own.
  */
 
 /**
@@ -271,37 +285,9 @@ function newGraphState(){
         soundMovedAt: null,
         startedAt: null,
         finished: false,
+        filters: [],
+        source: null,
     };
-}
-
-/**
- * Builds an interface descriptor from `[name, dwords]` pairs.
- *
- * The count excludes the interface pointer, because that is how a header reads
- * and transcribing a header is what the slot lists are; `argBytes` adds it back
- * because that is how the bridge counts. A slot with no implementation keeps
- * its place and answers E_NOTIMPL.
- *
- * @template S
- * @param {string} id
- * @param {[string, number][]} slots
- * @param {Record<string, (state: S, args: number[]) => number | Promise<number>>} [implemented]
- *        A method may answer with a promise: the bridge parks the calling
- *        thread until it settles, which is what building a graph over a file
- *        that has to be fetched needs.
- * @returns {import('../ole32/objects.js').ComInterfaceDescriptor}
- */
-function describe(id, slots, implemented = {}){
-    /** @type {import('../ole32/objects.js').ComMethod[]} */
-    const methods = slots.map(([name, dwords])=>{
-        const method = implemented[name];
-        return {
-            name,
-            argBytes: 4 + dwords * 4,
-            invoke: method ? (object, args)=>method(object.state, args) : undefined,
-        };
-    });
-    return { id, methods };
 }
 
 /**
@@ -320,6 +306,11 @@ function describe(id, slots, implemented = {}){
  * @property {((api: string, detail: string) => void) | undefined} [divergence]
  *           Where "this call succeeded and did not do all of what it promises"
  *           goes, once per distinct difference.
+ * @property {import('./stream.js').StreamHost | undefined} [stream]
+ *           What joining a program's own filters to a graph needs: calling into
+ *           its objects, handing out ours, and a thread to call it from. Absent,
+ *           AddFilter and AddSourceFilter refuse as a machine with no such
+ *           filters would.
  */
 
 /**
@@ -415,6 +406,8 @@ export function createQuartz(host){
         }
     };
 
+    const streaming = host.stream ? createStreaming(host.stream) : null;
+
     /** Graphs with a clip that are running, so `tick` knows what to advance. */
     /** @type {Set<FilterGraphState>} */
     const playing = new Set();
@@ -471,6 +464,10 @@ export function createQuartz(host){
      * @param {FilterGraphState} graph
      */
     const run = graph=>{
+        if (streaming && graph.filters.length > 0)
+        {
+            return startFilters(graph);
+        }
         graph.state = STATE_RUNNING;
         autoShow(graph);
         if (!graph.loaded)
@@ -491,6 +488,37 @@ export function createQuartz(host){
         // had to present, so it says so at once -- the same event a whole film
         // ends with, and the path every program is written for.
         complete(graph);
+        return S_OK;
+    };
+
+    /**
+     * Running a graph that holds the program's own filters runs them too:
+     * paused first if they were stopped, then run, which is the order a graph
+     * takes its filters through. Their source is fed from then on.
+     *
+     * @param {FilterGraphState} graph
+     */
+    const startFilters = async graph=>{
+        const filters = /** @type {NonNullable<typeof streaming>} */ (streaming);
+        if (graph.state === STATE_STOPPED)
+        {
+            await filters.each(graph.filters, VTABLE.FilterPause);
+        }
+        const result = await filters.each(graph.filters, VTABLE.FilterRun, [0, 0]);
+        graph.state = STATE_RUNNING;
+        if (graph.source)
+        {
+            graph.source.startedAt = null;
+            playing.add(graph);
+        }
+        return (result | 0) < 0 ? result : S_OK;
+    };
+
+    /** @param {FilterGraphState} graph @param {number} slot @param {number} state */
+    const moveFilters = async(graph, slot, state)=>{
+        playing.delete(graph);
+        await /** @type {NonNullable<typeof streaming>} */ (streaming).each(graph.filters, slot);
+        graph.state = state;
         return S_OK;
     };
 
@@ -556,6 +584,10 @@ export function createQuartz(host){
      * @param {FilterGraphState} graph
      */
     const stopGraph = graph=>{
+        if (streaming && graph.filters.length > 0)
+        {
+            return moveFilters(graph, VTABLE.FilterStop, STATE_STOPPED);
+        }
         graph.state = STATE_STOPPED;
         playing.delete(graph);
         if (graph.clip && graph.shown > 0 && !graph.finished)
@@ -604,6 +636,11 @@ export function createQuartz(host){
         let shown = null;
         for (const graph of [...playing])
         {
+            if (graph.source)
+            {
+                streaming?.feed(graph.source, nowMs);
+                continue;
+            }
             const clip = graph.clip;
             if (!clip)
             {
@@ -776,8 +813,162 @@ export function createQuartz(host){
         return table;
     };
 
-    /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number | Promise<number>>} */
+    /**
+     * A seek on a graph whose source feeds the program's renderer. Back to the
+     * start is the one this decoder can do -- the file is opened again -- and
+     * it is the one a looping film asks for; anywhere else is said out loud.
+     *
+     * @param {FilterGraphState} graph @param {number} seconds
+     * @returns {number | Promise<number> | null} null for a graph with no such source
+     */
+    const seekSource = (graph, seconds)=>{
+        const source = graph.source;
+        if (!source || !streaming)
+        {
+            return null;
+        }
+        if (seconds > 0)
+        {
+            host.divergence?.('DirectShow',
+                'a seek to anywhere but the start is accepted and does not move:'
+                + ' this decoder reads forward only');
+            return S_OK;
+        }
+        const restart = streaming.restart;
+        /** @param {VideoClip | null} clip */
+        const took = clip=>{
+            restart(source, clip);
+            return S_OK;
+        };
+        const opened = host.video?.open(source.path) ?? null;
+        return typeof (/** @type {any} */ (opened))?.then === 'function'
+            ? /** @type {Promise<VideoClip | null>} */ (opened).then(took, ()=>took(null))
+            : took(/** @type {VideoClip | null} */ (opened));
+    };
+
+    /** A REFTIME pushed as two words. @param {number} low @param {number} high */
+    const doubleOf = (low, high)=>{
+        const view = new DataView(new ArrayBuffer(8));
+        view.setUint32(0, low >>> 0, true);
+        view.setUint32(4, high >>> 0, true);
+        return view.getFloat64(0, true);
+    };
+
+    /**
+     * AddSourceFilter: the file opened behind a source filter whose pin the
+     * program connects to its own renderer.
+     *
+     * @param {FilterGraphState} graph @param {number} path @param {number} name
+     * @param {number} out @param {import('../ole32/objects.js').ComObject} self
+     */
+    const addSource = (graph, path, name, out, self)=>{
+        const stream = host.stream;
+        if (!streaming || !stream)
+        {
+            return refuse(out, recordFailure(graph, VFW_E_CANNOT_LOAD_SOURCE_FILTER));
+        }
+        if ((out >>> 0) === 0)
+        {
+            return E_POINTER;
+        }
+        const sources = streaming;
+        const file = (path >>> 0) === 0 ? '' : stream.readWideString(path >>> 0, MAX_PATH);
+        const label = (name >>> 0) === 0 ? file : stream.readWideString(name >>> 0, MAX_PATH);
+        /** @param {VideoClip | null} clip */
+        const took = clip=>{
+            if (!clip || !clip.hasVideo)
+            {
+                clip?.close();
+                return refuse(out, recordFailure(graph, VFW_E_CANNOT_LOAD_SOURCE_FILTER));
+            }
+            if (graph.source)
+            {
+                sources.close(graph.source);
+            }
+            const source = sources.createSource(clip, file, label, ()=>{
+                self.addRef();
+                return stream.publish(self, IID_IFILTER_GRAPH);
+            });
+            graph.source = source;
+            graph.loaded = true;
+            graph.video.width = clip.width;
+            graph.video.height = clip.height;
+            // The caller's reference; the graph keeps the one it was made with.
+            source.filter.addRef();
+            return writeLong(out, stream.publish(source.filter, IID_IBASE_FILTER));
+        };
+        const opened = openMedia(host, path);
+        return typeof (/** @type {any} */ (opened))?.then === 'function'
+            ? /** @type {Promise<VideoClip | null>} */ (opened).then(took, ()=>took(null))
+            : took(/** @type {VideoClip | null} */ (opened));
+    };
+
+    /**
+     * Connect and ConnectDirect: only a connection out of this graph's own
+     * source pin can be made, because that pin is the one thing here that
+     * produces anything.
+     *
+     * @param {FilterGraphState} graph @param {number} out @param {number} into
+     */
+    const connectPins = (graph, out, into)=>{
+        const source = graph.source;
+        if (!streaming || !source || host.stream?.objectAt(out) !== source.pin)
+        {
+            return VFW_E_CANNOT_CONNECT;
+        }
+        return streaming.connect(source, into);
+    };
+
+    /**
+     * @type {Record<string, (graph: FilterGraphState, args: number[],
+     *     self: import('../ole32/objects.js').ComObject) => number | Promise<number>>}
+     */
     const graphBuilder = {
+        /**
+         * HRESULT AddFilter(IBaseFilter *pFilter, LPCWSTR pName)
+         *
+         * The program's own filter joins the graph: it is told which graph
+         * with JoinFilterGraph, which is also where it asks for the graph's
+         * IMediaEventSink, and the graph keeps a reference to it.
+         */
+        AddFilter: (graph, [filter, name], self)=>{
+            const stream = host.stream;
+            if (!streaming || !stream)
+            {
+                return E_NOTIMPL;
+            }
+            if ((filter >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            if (graph.source && stream.objectAt(filter) === graph.source.filter)
+            {
+                return S_OK;
+            }
+            return streaming.join(filter, stream.publish(self, IID_IFILTER_GRAPH), name)
+                .then(result=>{
+                    if ((result | 0) >= 0)
+                    {
+                        graph.filters.push(filter >>> 0);
+                    }
+                    return result;
+                });
+        },
+
+        /** HRESULT RemoveFilter(IBaseFilter *pFilter) */
+        RemoveFilter: (graph, [filter])=>{
+            const at = graph.filters.indexOf(filter >>> 0);
+            if (at < 0 || !streaming)
+            {
+                return VFW_E_NOT_FOUND;
+            }
+            graph.filters.splice(at, 1);
+            return streaming.remove(filter);
+        },
+
+        /** HRESULT ConnectDirect(IPin *ppinOut, IPin *ppinIn, const AM_MEDIA_TYPE *pmt) */
+        ConnectDirect: (graph, [out, into])=>connectPins(graph, out, into),
+
         /** HRESULT EnumFilters(IEnumFilters **ppEnum) */
         EnumFilters: (graph, [out])=>refuse(out, E_NOTIMPL),
 
@@ -788,7 +979,7 @@ export function createQuartz(host){
         SetDefaultSyncSource: ()=>S_OK,
 
         /** HRESULT Connect(IPin *ppinOut, IPin *ppinIn) */
-        Connect: ()=>VFW_E_CANNOT_CONNECT,
+        Connect: (graph, [out, into])=>connectPins(graph, out, into),
 
         /** HRESULT Render(IPin *ppinOut) */
         Render: graph=>recordFailure(graph, VFW_E_CANNOT_RENDER),
@@ -796,9 +987,8 @@ export function createQuartz(host){
         /** HRESULT RenderFile(LPCWSTR lpcwstrFile, LPCWSTR lpcwstrPlayList) */
         RenderFile: (graph, [path])=>render(graph, path),
 
-        /** HRESULT AddSourceFilter(LPCWSTR, LPCWSTR, IBaseFilter **ppFilter) */
-        AddSourceFilter: (graph, [, , out])=>
-            refuse(out, recordFailure(graph, VFW_E_CANNOT_LOAD_SOURCE_FILTER)),
+        /** HRESULT AddSourceFilter(LPCWSTR lpcwstrFileName, LPCWSTR lpcwstrFilterName, IBaseFilter **ppFilter) */
+        AddSourceFilter: (graph, [path, name, out], self)=>addSource(graph, path, name, out, self),
 
         /** HRESULT Abort(void) */
         Abort: ()=>S_OK,
@@ -824,6 +1014,10 @@ export function createQuartz(host){
          * clock, and the frames already decoded stay where they are.
          */
         Pause: graph=>{
+            if (streaming && graph.filters.length > 0)
+            {
+                return moveFilters(graph, VTABLE.FilterPause, STATE_PAUSED);
+            }
             graph.state = STATE_PAUSED;
             autoShow(graph);
             playing.delete(graph);
@@ -1055,7 +1249,12 @@ export function createQuartz(host){
          * would be worse -- a program seeking to zero before playing is asking
          * for what it is about to get anyway -- but it is not a seek.
          */
-        put_CurrentPosition: graph=>{
+        put_CurrentPosition: (graph, [low, high])=>{
+            const seeked = seekSource(graph, doubleOf(low, high));
+            if (seeked !== null)
+            {
+                return seeked;
+            }
             if (graph.clip)
             {
                 host.divergence?.('DirectShow',
@@ -1118,14 +1317,48 @@ export function createQuartz(host){
         GetPositions: (graph, [current, stop])=>writeEach(writeLongLong,
             [[current, reference(position(graph))], [stop, reference(duration(graph))]]),
 
-        /** HRESULT SetPositions(LONGLONG *pCurrent, DWORD, LONGLONG *pStop, DWORD) */
-        SetPositions: ()=>S_OK,
+        /**
+         * HRESULT SetPositions(LONGLONG *pCurrent, DWORD dwCurrentFlags,
+         *                      LONGLONG *pStop, DWORD dwStopFlags)
+         *
+         * Only an absolute current position moves anything, and only on a
+         * graph whose source can be opened again.
+         */
+        SetPositions: (graph, [current, flags])=>{
+            const stream = host.stream;
+            if ((flags & AM_SEEKING_POSITIONING_MASK) !== AM_SEEKING_ABSOLUTE
+                || (current >>> 0) === 0 || !stream)
+            {
+                return S_OK;
+            }
+            const low = stream.readU32(current >>> 0);
+            const high = stream.readU32((current + 4) >>> 0) | 0;
+            return seekSource(graph, (high * 2 ** 32 + low) / TICKS_PER_SECOND) ?? S_OK;
+        },
 
         /** HRESULT SetRate(double dRate) */
         SetRate: ()=>S_OK,
 
         /** HRESULT GetRate(double *pdRate) */
         GetRate: (graph, [out])=>writeDouble(out, 1),
+    };
+
+    /**
+     * IMediaEventSink, which the program's own filters report through. What a
+     * renderer reports that ends playback reaches the program as the graph's
+     * own event; the rest -- a repaint, a change of display -- is what a graph
+     * handles itself and does not pass on.
+     *
+     * @type {Record<string, (graph: FilterGraphState, args: number[]) => number>}
+     */
+    const eventSink = {
+        Notify: (graph, [code])=>{
+            if (code === EC_COMPLETE || code === EC_USERABORT || code === EC_ERRORABORT)
+            {
+                raise(graph, code, S_OK, 0);
+            }
+            return S_OK;
+        },
     };
 
     /**
@@ -1178,6 +1411,19 @@ export function createQuartz(host){
                 playing.delete(state);
                 state.clip?.close();
                 state.clip = null;
+                if (streaming)
+                {
+                    if (state.source)
+                    {
+                        streaming.close(state.source);
+                        state.source = null;
+                    }
+                    for (const filter of state.filters)
+                    {
+                        streaming.leave(filter, state.state !== STATE_STOPPED);
+                    }
+                    state.filters = [];
+                }
             },
             interfaces: [
                 describe(IID_IFILTER_GRAPH, IFILTER_GRAPH_SLOTS, graphBuilder),
@@ -1190,6 +1436,7 @@ export function createQuartz(host){
                 describe(IID_IBASIC_AUDIO, IBASIC_AUDIO_SLOTS, basicAudio),
                 describe(IID_IMEDIA_POSITION, IMEDIA_POSITION_SLOTS, mediaPosition),
                 describe(IID_IMEDIA_SEEKING, IMEDIA_SEEKING_SLOTS, mediaSeeking),
+                describe(IID_IMEDIA_EVENT_SINK, IMEDIA_EVENT_SINK_SLOTS, eventSink),
             ],
         };
     };

@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createNoticeThread, loopCode } from './thread.js';
+import { createNoticeThread, loopCode, LOOP_BYTES } from './thread.js';
 
 const PARKED = Object.freeze({ parked: true });
 
@@ -73,13 +73,16 @@ function machine(){
 
 test('the loop is the bytes it says it is, with the call made relative', ()=>{
     const code = loopCode(0x900, 0x200);
-    assert.equal(code.length, 24);
+    assert.equal(code.length, LOOP_BYTES);
     // call rel32: 0x900 - (0x200 + 5)
     assert.deepEqual([...code.slice(0, 5)], [0xe8, 0xfb, 0x06, 0x00, 0x00]);
-    // five pushes of [eax+20] down to [eax+4], then call [eax], then jmp back 24
+    // mov esi, esp; five pushes of [eax+20] down to [eax+4]; call [eax];
+    // mov esp, esi; jmp back to the start
     assert.deepEqual([...code.slice(5)], [
+        0x89, 0xe6,
         0xff, 0x70, 0x14, 0xff, 0x70, 0x10, 0xff, 0x70, 0x0c,
-        0xff, 0x70, 0x08, 0xff, 0x70, 0x04, 0xff, 0x10, 0xeb, 0xe8,
+        0xff, 0x70, 0x08, 0xff, 0x70, 0x04, 0xff, 0x10,
+        0x89, 0xf4, 0xeb, 0xe4,
     ]);
 });
 
@@ -92,7 +95,7 @@ test('the first notice makes the thread, whose entry is the loop', ()=>{
     assert.equal(m.created.length, 1);
     assert.equal(m.created[0].name, 'winmm');
     const entry = m.created[0].entry;
-    assert.deepEqual([...m.memory.slice(entry, entry + 24)], [...loopCode(0x900, entry)],
+    assert.deepEqual([...m.memory.slice(entry, entry + LOOP_BYTES)], [...loopCode(0x900, entry)],
         'the loop was written where the thread starts');
     assert.equal(m.notices.diagnostics().queued, 1, 'the notice waits for the loop to ask');
 });
@@ -154,5 +157,21 @@ test('a routine takes five arguments and is given exactly five', ()=>{
     // The loop is allocated right after the record: extra arguments would have
     // overwritten its first instruction.
     const entry = m.created[0].entry;
-    assert.deepEqual([...m.memory.slice(entry, entry + 24)], [...loopCode(0x900, entry)]);
+    assert.deepEqual([...m.memory.slice(entry, entry + LOOP_BYTES)], [...loopCode(0x900, entry)]);
+});
+
+test('a routine of fewer arguments gets zeros for the rest, and is told of its return', ()=>{
+    const m = machine();
+    /** @type {string[]} */
+    const returned = [];
+    m.notices.deliver(0xa0, [0x50, 0x60], ()=>returned.push('first'));
+    m.notices.deliver(0xb0, [7], ()=>returned.push('second'));
+    assert.deepEqual(m.record(m.ask()).args, [0x50, 0x60, 0, 0, 0]);
+    assert.deepEqual(returned, [], 'not until the loop asks again');
+    assert.equal(m.notices.diagnostics().running, true);
+    assert.deepEqual(m.record(m.ask()).args, [7, 0, 0, 0, 0]);
+    assert.deepEqual(returned, ['first']);
+    assert.equal(m.ask(), PARKED);
+    assert.deepEqual(returned, ['first', 'second']);
+    assert.equal(m.notices.diagnostics().running, false);
 });

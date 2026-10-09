@@ -27,6 +27,12 @@
  * ordinary thread: its frame is on the thread's own stack, its return address
  * is the loop's, and nothing on the host side has to know where a stack came
  * to rest.
+ *
+ * The same thread serves anything else that owes a program calls from a thread
+ * of its own -- a filter graph feeding a renderer the program wrote is one --
+ * so the routine is not assumed to take five arguments: the loop puts the stack
+ * back where it was after each call, and a routine that pops two of the five
+ * words leaves nothing behind.
  */
 
 /** Guest-side layout of a notice: the routine, then its five arguments. */
@@ -36,17 +42,22 @@ const RECORD = {
     SIZE: 24,
 };
 
+/** How long the loop is. */
+export const LOOP_BYTES = 28;
+
 /**
  * The loop, as x86. `stub` is where the trap lives and `at` is where these
  * bytes will be, because the call to the stub is relative.
  *
  *     loop: call stub              ; EAX = the record
+ *           mov esi, esp           ; callee-saved, so it outlives the call
  *           push dword [eax+20]    ; dwParam2
  *           push dword [eax+16]    ; dwParam1
  *           push dword [eax+12]    ; dwInstance
  *           push dword [eax+8]     ; uMsg
  *           push dword [eax+4]     ; hwo
- *           call dword [eax]       ; stdcall, so the routine pops its own arguments
+ *           call dword [eax]
+ *           mov esp, esi           ; whatever the routine popped, none is left
  *           jmp loop
  *
  * @param {number} stub
@@ -58,13 +69,15 @@ export function loopCode(stub, at){
     return new Uint8Array([
         0xe8, relative & 0xff, relative >>> 8 & 0xff,
         relative >>> 16 & 0xff, relative >>> 24 & 0xff,
+        0x89, 0xe6,
         0xff, 0x70, 0x14,
         0xff, 0x70, 0x10,
         0xff, 0x70, 0x0c,
         0xff, 0x70, 0x08,
         0xff, 0x70, 0x04,
         0xff, 0x10,
-        0xeb, 0xe8,
+        0x89, 0xf4,
+        0xeb, 0xe4,
     ]);
 }
 
@@ -81,14 +94,23 @@ export function loopCode(stub, at){
  * @property {(thread: any, result: number) => boolean} wake
  * @property {(thread: any) => any} park
  *           Stops the thread inside the trap; only legal from a handler.
+ * @property {string} [name]    The thread's name; a wave device's by default.
+ * @property {string} [reason]  What the thread is said to wait on while idle.
+ * @property {string} [trap]    The name its trap is registered under.
  */
 
 /**
  * @param {NoticeThreadDeps} deps
  */
 export function createNoticeThread(deps){
-    /** @type {{ entry: number, args: number[] }[]} */
+    const name = deps.name ?? 'winmm';
+    const reason = deps.reason ?? 'a wave notice';
+    const trap = deps.trap ?? '<wave-notices>';
+    /** @type {{ entry: number, args: number[], done?: () => void }[]} */
     const queue = [];
+    /** The notice whose routine is running: its loop has not asked again yet. */
+    /** @type {{ done?: () => void } | null} */
+    let running = null;
     /** @type {any} */
     let thread = null;
     /** The thread, while it is parked in the trap with nothing to do. */
@@ -104,32 +126,38 @@ export function createNoticeThread(deps){
 
     /** Writes the next notice where the loop reads it. @returns {number} */
     const handOut = ()=>{
-        const next = /** @type {{ entry: number, args: number[] }} */ (queue.shift());
+        const next = /** @type {{ entry: number, args: number[], done?: () => void }} */ (
+            queue.shift());
         deps.writeMemory(record + RECORD.ENTRY, dword(next.entry));
-        next.args.forEach((value, index)=>
-            deps.writeMemory(record + RECORD.ARGS + index * 4, dword(value)));
+        [0, 1, 2, 3, 4].forEach(index=>
+            deps.writeMemory(record + RECORD.ARGS + index * 4, dword(next.args[index] ?? 0)));
         delivered++;
+        running = next;
         return record;
     };
 
     /** What the loop's trap answers: the next notice, or nothing until there is one. */
     const fetch = ()=>{
+        // Asking again is how the loop says the last routine returned.
+        const finished = running;
+        running = null;
+        finished?.done?.();
         if (queue.length > 0)
         {
             return handOut();
         }
         const me = deps.currentThread();
         waiting = me;
-        deps.block(me, 'a wave notice');
+        deps.block(me, reason);
         return deps.park(me);
     };
 
     const start = ()=>{
         record = deps.allocate(RECORD.SIZE);
-        const stub = deps.register('<wave-notices>', { argBytes: 0, handler: fetch });
-        const code = deps.allocate(24);
+        const stub = deps.register(trap, { argBytes: 0, handler: fetch });
+        const code = deps.allocate(LOOP_BYTES);
         deps.writeMemory(code, loopCode(stub, code));
-        thread = deps.createThread({ entry: code, name: 'winmm' });
+        thread = deps.createThread({ entry: code, name });
     };
 
     return {
@@ -137,10 +165,12 @@ export function createNoticeThread(deps){
          * Queues a call to the program's routine, on the thread, in order.
          *
          * @param {number} entry
-         * @param {number[]} args  Exactly five: the routine takes no other shape.
+         * @param {number[]} args  Up to five; the loop pushes five whatever the
+         *        routine takes, and missing ones are zero.
+         * @param {() => void} [done]  Called once the routine has returned.
          */
-        deliver(entry, args){
-            queue.push({ entry, args: args.slice(0, 5) });
+        deliver(entry, args, done){
+            queue.push({ entry, args: args.slice(0, 5), done });
             if (thread === null)
             {
                 start();
@@ -158,6 +188,7 @@ export function createNoticeThread(deps){
             waiting: waiting !== null,
             queued: queue.length,
             delivered,
+            running: running !== null,
         }),
     };
 }
