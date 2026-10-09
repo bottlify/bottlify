@@ -166,7 +166,7 @@ export function createCpuModule(){
              *          lent: import('./engine.js').TranslatorPort[], remotes: any[],
              *          bell: ReturnType<typeof createBell> | null,
              *          beforeTrap: (() => void) | null,
-             *          remoteFigures: Map<number, any> }}
+             *          remoteFigures: Map<number, any>, executorsRefused: string | null }}
              */
             const state = {
                 host: null, thunks: null, running: false, tableWritten: false,
@@ -178,6 +178,8 @@ export function createCpuModule(){
                 beforeTrap: null,
                 // The other executors' translator figures, as each last answered.
                 remoteFigures: new Map(),
+                // Why fewer executors run than were asked, if they do.
+                executorsRefused: null,
                 faultHandler: null,
                 // The guest's clock once the kernel gives it (`useGuestClock`).
                 guestClock: null,
@@ -340,6 +342,17 @@ export function createCpuModule(){
                 // threads (`executors`).
                 executors: Math.max(1, config?.executors ?? 1),
             };
+            // Executors past one share the program's memory with workers, which
+            // only a SharedArrayBuffer allows, and a page that is not
+            // cross-origin isolated has none: the program then runs on one, as
+            // by default, and the report says why rather than the launch failing.
+            if (settings.executors > 1 && typeof SharedArrayBuffer !== 'function')
+            {
+                state.executorsRefused = `${settings.executors} asked, 1 run: no`
+                    + ' SharedArrayBuffer, the page is not cross-origin isolated';
+                settings.executors = 1;
+                log?.warn?.('cpu', `executors: ${state.executorsRefused}`);
+            }
 
             /** @type {(id: number) => void} */
             let dispatch = ()=>{};
@@ -1164,6 +1177,7 @@ export function createCpuModule(){
                     // can read and write in place.
                     sharedMemory: typeof SharedArrayBuffer === 'function'
                         && instance.host.wasmMemory?.()?.buffer instanceof SharedArrayBuffer,
+                    executorsRefused: instance.executorsRefused,
                     running: instance.running,
                     instructions: instance.host.instructionCount(),
                     protectedMode: instance.host.inProtectedMode(),
