@@ -779,6 +779,14 @@ export function createRegistryFunctions(host){
                     }),
                 },
                 /**
+                 * NTSTATUS NtFlushKey(HANDLE): RegFlushKey's native call, with
+                 * nothing to wait for and the handle still checked.
+                 */
+                NtFlushKey: {
+                    argBytes: 4,
+                    handler: onHeld(()=>STATUS.SUCCESS),
+                },
+                /**
                  * NTSTATUS NtQueryKey(HANDLE, KEY_INFORMATION_CLASS, PVOID,
                  *     ULONG Length, PULONG ResultLength)
                  */

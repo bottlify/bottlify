@@ -63,3 +63,10 @@ test('without a network the adapter is there with no address', ()=>{
     assert.equal(text(INFO + ADAPTER_INFO.IP_ADDRESS_LIST + 4), '0.0.0.0');
     assert.equal(text(INFO + ADAPTER_INFO.IP_ADDRESS_LIST + 20), '0.0.0.0');
 });
+
+test('the interface count holds the adapter and the loopback interface', ()=>{
+    const { view, fns } = machine();
+    assert.equal(fns.GetNumberOfInterfaces.handler([0x100]), 0);
+    assert.equal(view.getUint32(0x100, true), 2);
+    assert.equal(fns.GetNumberOfInterfaces.handler([0]), 87, 'no place for the answer');
+});

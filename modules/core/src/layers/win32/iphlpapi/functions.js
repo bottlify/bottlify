@@ -55,6 +55,8 @@ const DESCRIPTION = 'Ethernet Adapter';
 export const HARDWARE_ADDRESS = Object.freeze([0x02, 0x00, 0x4c, 0x55, 0x00, 0x01]);
 
 const LOOPBACK_NET = 127;
+/** The adapter and the loopback interface. */
+const INTERFACES = 2;
 
 /** @param {number} address */
 const dotted = address=>[24, 16, 8, 0].map(shift=>address >>> shift & 0xff).join('.');
@@ -121,6 +123,24 @@ export function createIphlpapiFunctions(host){
                     return ERROR_BUFFER_OVERFLOW;
                 }
                 host.writeMemory(info >>> 0, adapter(info >>> 0));
+                return NO_ERROR;
+            },
+        },
+        /**
+         * DWORD GetNumberOfInterfaces(PDWORD pdwNumIf)
+         *
+         * The interface table counts the loopback interface beside the
+         * adapter, as GetIfTable lists both on a real machine.
+         */
+        GetNumberOfInterfaces: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([count])=>{
+                if ((count >>> 0) === 0)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                writeU32(count >>> 0, INTERFACES);
                 return NO_ERROR;
             },
         },

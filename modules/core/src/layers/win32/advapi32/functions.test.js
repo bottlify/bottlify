@@ -1370,6 +1370,8 @@ test('the native registry calls work the same keys through the same handles', ()
     assert.equal(call('NtQueryKey', [HKEY_LOCAL_MACHINE, KEY_FULL, OUT_INFO, 0x40, 0]),
         STATUS_INVALID_HANDLE, 'a predefined root is no handle to these calls');
 
+    assert.equal(call('NtFlushKey', [child]), STATUS_SUCCESS);
+    assert.equal(call('NtFlushKey', [HKEY_LOCAL_MACHINE]), STATUS_INVALID_HANDLE);
     assert.equal(call('NtDeleteValueKey', [child, counted(0xa00, 'Word')]), STATUS_SUCCESS);
     assert.equal(call('NtDeleteValueKey', [child, counted(0xa00, 'Word')]),
         STATUS_OBJECT_NAME_NOT_FOUND);
