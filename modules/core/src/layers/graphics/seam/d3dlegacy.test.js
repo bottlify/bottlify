@@ -48,7 +48,10 @@ import {
 import { D3DPRIMCAPS, D3DVERTEXBUFFERDESC } from './structs.js';
 import { guidBytes } from './d3d7.js';
 import { createDirectDraw } from '../ddraw/objects.js';
-import { DDSURFACEDESC, DDSURFACEDESC2, writeSurfaceDesc } from '../ddraw/structs.js';
+import { DDSURFACEDESC, DDSURFACEDESC2, readSurfaceDesc, writeSurfaceDesc }
+    from '../ddraw/structs.js';
+import { d3dFormatOf } from '../d3d7/device.js';
+import { D3DFMT } from '../d3d7/constants.js';
 import {
     DDCKEY_SRCBLT, DDERR_NOCOLORKEY, DDPF_RGB, DDSCAPS_3DDEVICE, DDSCAPS_OFFSCREENPLAIN,
     DDSCAPS_TEXTURE, DDSCL_NORMAL, DDSD_CAPS, DDSD_HEIGHT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK,
@@ -1064,7 +1067,9 @@ test('SwapTextureHandles trades the handles of two textures that both have one',
 
 test('IDirect3D2 describes its devices at DirectX 5\'s size, and names formats by surface',
     async()=>{
-        const h = seamed((box, args)=>args.map(arg=>box.memory.readU32(arg)));
+        const h = seamed((box, args)=>[...args.map(arg=>box.memory.readU32(arg)),
+            // What the first argument points at, as the callback saw it.
+            box.bytes.slice(args[0], args[0] + DDSURFACEDESC.SIZE)]);
         const ddraw = h.create2();
         const d3d = h.query(ddraw, IID_IDirect3D2).pointer;
         assert.equal(await h.box.callRaw(d3d, slot(IDIRECT3D2_SLOTS, 'EnumDevices'),
@@ -1100,6 +1105,21 @@ test('IDirect3D2 describes its devices at DirectX 5\'s size, and names formats b
             assert.equal(h.box.memory.readU32(at), DDSURFACEDESC.SIZE, 'a DDSURFACEDESC');
             assert.equal(h.box.memory.readU32(at + 4) & DDSD_PIXELFORMAT, DDSD_PIXELFORMAT);
             assert.equal(call.args[1], 0x99);
+        }
+        // Every format named is one the renderer uploads, and a program that
+        // looks for alpha in sixteen bits -- 1-5-5-5 or 4-4-4-4 -- finds it.
+        const named = h.callbacks.map(call=>{
+            const seen = /** @type {Uint8Array} */ (call.seen.at(-1));
+            const guest = { readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+                seen.subarray(at, at + length) };
+            return d3dFormatOf(
+                /** @type {any} */ (readSurfaceDesc(/** @type {any} */ (guest), 0, DDSURFACEDESC)).pixelFormat);
+        });
+        assert.ok(named.every(format=>format !== null), String(named));
+        for (const wanted of [D3DFMT.A8R8G8B8, D3DFMT.X8R8G8B8, D3DFMT.R5G6B5,
+            D3DFMT.X1R5G5B5, D3DFMT.A1R5G5B5, D3DFMT.A4R4G4B4])
+        {
+            assert.ok(named.includes(wanted), `format ${wanted} is offered`);
         }
 
         assert.equal(h.release(device), 0);

@@ -47,7 +47,6 @@ import {
 } from './structs-legacy.js';
 import { readGuid } from './ddraw.js';
 import { DDSURFACEDESC, writeSurfaceDesc } from '../ddraw/structs.js';
-import { pixelFormatForDepth } from '../ddraw/objects.js';
 import { guidBytes } from './d3d7.js';
 import {
     D3DCOLOR_RGB, D3DDD, D3DDEVCAPS_DRAWPRIMITIVES2EX, D3DDEVCAPS_FLOATTLVERTEX,
@@ -1063,14 +1062,14 @@ export function createLegacyDirect3DSeam(
         // Whose call this is, before the loop awaits anything.
         const asked = currentThread?.();
         return (async()=>{
-            for (const depth of d3d7.textureDepths)
+            for (const format of d3d7.textureFormats)
             {
                 const at = scratchBlock();
                 memory.writeMemory(at, new Uint8Array(DDSURFACEDESC.SIZE));
                 writeSurfaceDesc(memory, at, DDSURFACEDESC, {
                     flags: DDSD_CAPS | DDSD_PIXELFORMAT, width: 0, height: 0, pitch: 0,
                     backBufferCount: 0, mipMapCount: 0, caps: DDSCAPS_TEXTURE, caps2: 0,
-                    pixelFormat: /** @type {any} */ (pixelFormatForDepth(depth)),
+                    pixelFormat: format,
                 });
                 const answer = await call({ entry: callback >>> 0, args: [at, context >>> 0],
                     thread: asked });

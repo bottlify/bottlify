@@ -144,6 +144,10 @@ export function d3dFormatOf(format){
             {
                 return D3DFMT.R5G6B5;
             }
+            if (alpha && format.alphaMask === 0xf000)
+            {
+                return D3DFMT.A4R4G4B4;
+            }
             return alpha ? D3DFMT.A1R5G5B5 : D3DFMT.X1R5G5B5;
         case 8:
             return alpha ? D3DFMT.A8 : null;

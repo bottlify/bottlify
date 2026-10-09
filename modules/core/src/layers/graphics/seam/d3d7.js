@@ -33,8 +33,9 @@ import {
 } from './structs.js';
 import { readGuid } from './ddraw.js';
 import { writePixelFormat } from '../ddraw/structs.js';
-import { depthFormatForDepth, pixelFormatForDepth } from '../ddraw/objects.js';
+import { depthFormatForDepth } from '../ddraw/objects.js';
 import { DDERR_INVALIDPARAMS, D3D_OK } from '../d3d7/constants.js';
+import { DDPF_ALPHAPIXELS, DDPF_RGB } from '../ddraw/constants.js';
 import { createDirect3D7 } from '../d3d7/device.js';
 import { loadTexture } from '../d3d7/load.js';
 import { processVertices } from '../d3d7/process.js';
@@ -46,8 +47,30 @@ const DDENUMRET_CANCEL = 0;
 /** Succeeded, and answered nothing -- which is what GetInfo does outside a debug runtime. */
 const S_FALSE = 1;
 
-/** The texture formats EnumTextureFormats names: the ones the renderer uploads. */
-const TEXTURE_DEPTHS = Object.freeze([32, 16]);
+/**
+ * @param {number} bitCount @param {number} red @param {number} green @param {number} blue
+ * @param {number} alpha
+ */
+const rgbFormat = (bitCount, red, green, blue, alpha)=>Object.freeze({
+    size: 0x20, flags: DDPF_RGB | (alpha !== 0 ? DDPF_ALPHAPIXELS : 0), fourCC: 0, bitCount,
+    redMask: red, greenMask: green, blueMask: blue, alphaMask: alpha,
+});
+
+/**
+ * The texture formats EnumTextureFormats names: the ones the renderer uploads
+ * (d3d7/device.js d3dFormatOf), each by its own masks, as a driver of the era
+ * named them. A program picks its formats by those masks -- one with alpha for
+ * what it blends, 5-5-5 or 4-4-4-4 -- and gives up when the one it looks for
+ * is not offered.
+ */
+const TEXTURE_FORMATS = Object.freeze([
+    rgbFormat(32, 0x00ff0000, 0x0000ff00, 0x000000ff, 0),
+    rgbFormat(32, 0x00ff0000, 0x0000ff00, 0x000000ff, 0xff000000),
+    rgbFormat(16, 0xf800, 0x07e0, 0x001f, 0),
+    rgbFormat(16, 0x7c00, 0x03e0, 0x001f, 0),
+    rgbFormat(16, 0x7c00, 0x03e0, 0x001f, 0x8000),
+    rgbFormat(16, 0x0f00, 0x00f0, 0x000f, 0xf000),
+]);
 
 /** The most vertices one draw may name (d3dtypes.h). */
 const D3DMAXNUMVERTICES = 0xffff;
@@ -547,9 +570,8 @@ export function createDirect3D7Seam(
             // first callback of an enumeration runs on the thread standing here.
             const asked = currentThread?.();
             return (async()=>{
-                for (const depth of TEXTURE_DEPTHS)
+                for (const format of TEXTURE_FORMATS)
                 {
-                    const format = /** @type {any} */ (pixelFormatForDepth(depth));
                     const at = scratchBlock();
                     writePixelFormat(memory, at, format);
                     const answer = await call({ entry: callback >>> 0,
@@ -1111,7 +1133,7 @@ export function createDirect3D7Seam(
          */
         shared: {
             d3dFor, deviceMethods, bufferMethods, d3dMethods, gatherStrided, readArray, readFloats,
-            strideOf, writeString, textureDepths: TEXTURE_DEPTHS,
+            strideOf, writeString, textureFormats: TEXTURE_FORMATS,
         },
     };
 }
