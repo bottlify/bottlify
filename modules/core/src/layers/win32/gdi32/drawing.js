@@ -3482,14 +3482,18 @@ export function createDrawingFunctions(
                 const APIRGN = 3;
                 const SYSRGN = 4;
                 const dc = dcOf(handle);
-                const target = objects.get(region);
-                if (!dc || !target || target.type !== 'region')
+                if (!dc)
                 {
                     return 0xffffffff;
                 }
                 if ((which | 0) === CLIPRGN)
                 {
                     return functions.GetClipRgn.handler([handle, region]);
+                }
+                const target = objects.get(region);
+                if (!target || target.type !== 'region')
+                {
+                    return 0xffffffff;
                 }
                 if ((which | 0) === METARGN || (which | 0) === APIRGN)
                 {
@@ -3597,14 +3601,20 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([handle, region])=>{
                 const dc = dcOf(handle);
-                const target = objects.get(region);
-                if (!dc || !target || target.type !== 'region')
+                if (!dc)
                 {
                     return 0xffffffff;
                 }
+                // No clip is 0 before the region is looked at: a null region
+                // asks only whether there is one (clipping.c test_GetClipRgn).
                 if (!dc.clipSelected)
                 {
                     return 0;
+                }
+                const target = objects.get(region);
+                if (!target || target.type !== 'region')
+                {
+                    return 0xffffffff;
                 }
                 holdArea(target, clipAreaOf(dc));
                 return 1;

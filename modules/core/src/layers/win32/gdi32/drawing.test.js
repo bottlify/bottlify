@@ -514,6 +514,9 @@ test('GetClipRgn copies the clip the program selected, and answers 0 for none', 
         { left: 2, top: 3, right: 40, bottom: 50 }, 'the copy is the selection');
     assert.equal(fns.SelectClipRgn.handler([hdc, 0]), SIMPLEREGION);
     assert.equal(fns.GetClipRgn.handler([hdc, region]), 0, 'a null selection is none again');
+    // With no clip the region is never looked at (Wine's clipping.c test_GetClipRgn).
+    assert.equal(fns.GetClipRgn.handler([hdc, 0]), 0, 'a null region, no clip');
+    fns.SelectClipRgn.handler([hdc, selected]);
     assert.equal(fns.GetClipRgn.handler([hdc, hdc]) | 0, -1, 'not a region');
     assert.equal(fns.GetClipRgn.handler([0x9999, region]) | 0, -1, 'not a context');
 });
