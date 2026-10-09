@@ -42,7 +42,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
     from 'node:fs';
 import { tmpdir } from 'node:os';
 import { readFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchWithGpu, shutdown } from './browser.mjs';
 import { CdpEndpoint } from './cdp.mjs';
@@ -155,6 +155,9 @@ function parse(argv){
         turns: number('--turns', argv.includes('--run-seconds') ? Number.MAX_SAFE_INTEGER : 200000),
         // The arguments the title believes it was started with, so a run can
         // set one cvar (`+set logFile 1`) without editing its files.
+        // A disc image mounted as D: for the run, as the disc a program was
+        // installed from stays in the drive while it plays.
+        disc: argv.includes('--disc') ? resolve(argv[argv.indexOf('--disc') + 1]) : null,
         commandLine: argv.includes('--command-line')
             ? argv[argv.indexOf('--command-line') + 1]
             : null,
@@ -1373,6 +1376,7 @@ export async function game(options){
         extra: [
             { prefix: '/bundle/', root: directory },
             { prefix: '/entry/', root: entryDirectory },
+            ...(options.disc ? [{ prefix: '/disc/', root: dirname(options.disc) }] : []),
             // The translator package beside core, where app.js resolves it.
             { prefix: '/cork/', root: join(PACKAGE_DIR, '..', 'cork') },
             // The networking client, for a run that names a relay.
@@ -1426,6 +1430,9 @@ export async function game(options){
         const request = JSON.stringify({
             exeUrl: `http://127.0.0.1:${server.port}/entry/entry.exe`,
             bundleUrl: `http://127.0.0.1:${server.port}/bundle/bundle.btl`,
+            discUrl: options.disc
+                ? `http://127.0.0.1:${server.port}/disc/${encodeURIComponent(basename(options.disc))}`
+                : undefined,
             bundlePrefix,
             imagePath,
             // The bundle's own launch arguments, appended after the quoted

@@ -1372,7 +1372,7 @@ export function createHarness(canvas, how = {}){
     /**
      * Runs one title and reports what came out of it.
      *
-     * @param {{ exe?: string, exeUrl?: string, bundleUrl: string, bundlePrefix?: string,
+     * @param {{ exe?: string, exeUrl?: string, bundleUrl: string, discUrl?: string, bundlePrefix?: string,
      *           imagePath: string,
      *           commandLine?: string,
      *           concurrency?: import('../../../src/mode.js').Concurrency,
@@ -1575,6 +1575,8 @@ export function createHarness(canvas, how = {}){
                 : undefined,
             media: decoder ? { wasmBytes: decoder } : undefined,
             imagePath: request.imagePath,
+            discs: request.discUrl
+                ? [{ image: await (await fetch(request.discUrl)).blob() }] : undefined,
             concurrency: request.concurrency ?? undefined,
             screen: request.screen ?? undefined,
             // The graphics layer's own configuration, whatever fields the run
