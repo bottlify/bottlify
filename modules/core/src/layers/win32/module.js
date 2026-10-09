@@ -84,6 +84,7 @@ import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
 import { createCfgmgrFunctions } from './cfgmgr32/functions.js';
 import { createMsvfwFunctions } from './msvfw32/functions.js';
+import { DPLAYX_ORDINALS, createDplayFunctions } from './dplayx/functions.js';
 import { createIostreamFunctions } from './msvcirt/functions.js';
 import { formatToString } from './msvcrt/format.js';
 import { createDsetupFunctions } from './dsetup/functions.js';
@@ -2067,6 +2068,10 @@ export function createWin32Module(){
                 // Video for Windows with no compressors and no MCI video device.
                 'MSVFW32.dll': createMsvfwFunctions({ writeMemory }),
 
+                // DirectPlay with no service provider, and a lobby that did
+                // not launch the program.
+                'DPLAYX.dll': createDplayFunctions({ writeMemory, vtables: comVtables }),
+
                 // The old iostream library: its objects live in the program's
                 // memory and its methods run over the C runtime's heap, locks
                 // and descriptors, calling the program's own overrides through
@@ -2988,6 +2993,7 @@ export function createWin32Module(){
                     // wrappers by number alone.
                     'SHLWAPI.dll': SHLWAPI_ORDINALS,
                     'SHELL32.dll': SHELL32_ORDINALS,
+                    'DPLAYX.dll': DPLAYX_ORDINALS,
                 }),
 
                 /**
