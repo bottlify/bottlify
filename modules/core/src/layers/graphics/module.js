@@ -70,7 +70,9 @@ const subtractRect = (rect, hole)=>{
  *
  * The list is in the order the window manager paints: top-level windows
  * from the bottom up. A window inside another is inside its area and is
- * not counted as over it, which is what a primary without a clipper sees.
+ * not counted as over it, which is what a primary without a clipper sees --
+ * except in exclusive mode, where GDI paints the screen itself and a
+ * control inside the program's window is drawn over the picture.
  *
  * @param {ListedWindow[]} windows
  * @param {number} owner      The cooperative window, or zero for the topmost.
@@ -119,6 +121,17 @@ export function uncoveredRegion(windows, owner, exclusive, screen){
     for (const above of topLevels.slice(topLevels.indexOf(owning) + 1))
     {
         region = region.flatMap(piece=>subtractRect(piece, above.rect));
+    }
+    if (exclusive)
+    {
+        // In exclusive mode GDI paints straight onto the screen the primary
+        // is: a control inside the program's own window -- the edit box a
+        // name is typed into -- shows over the picture, not under it.
+        for (const inside of windows.filter(window=>window.child && shown(window)
+            && window !== owning && topLevelOf(window) === owning))
+        {
+            region = region.flatMap(piece=>subtractRect(piece, inside.rect));
+        }
     }
     return region;
 }

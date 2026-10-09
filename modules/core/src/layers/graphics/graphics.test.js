@@ -12,7 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { graphicsModule } from './module.js';
+import { graphicsModule, uncoveredRegion } from './module.js';
 import { createPresenter } from './webgpu/internal/presenter.js';
 import { createFakeDevice } from './webgpu/internal/fake-device.js';
 import { FVF } from './webgpu/internal/vertexformat.js';
@@ -919,3 +919,19 @@ test('the display\'s gamma ramp is the run\'s: a device\'s goes with the machine
             'without a canvas no ramp is shown, and none is claimed');
         await graphicsModule.dispose();
     });
+
+test('in exclusive mode a control inside the program window is over the primary', ()=>{
+    // A name typed into an edit box over a full-screen picture: GDI paints the
+    // screen itself, so the box shows; counted under the picture it stayed black.
+    const screen = { left: 0, top: 0, right: 640, bottom: 480 };
+    const game = { hwnd: '0x10', rect: screen, client: screen, visible: true, parent: null };
+    const edit = { hwnd: '0x11', rect: { left: 100, top: 100, right: 300, bottom: 120 },
+        client: { left: 100, top: 100, right: 300, bottom: 120 }, visible: true,
+        child: true, parent: '0x10' };
+    const area = (/** @type {any[]} */ rects)=>rects.reduce(
+        (sum, r)=>sum + (r.right - r.left) * (r.bottom - r.top), 0);
+    assert.equal(area(uncoveredRegion([game, edit], 0x10, true, screen) ?? []),
+        640 * 480 - 200 * 20);
+    assert.equal(area(uncoveredRegion([game, edit], 0x10, false, screen) ?? []), 640 * 480,
+        'windowed, the child is inside the picture as before');
+});
