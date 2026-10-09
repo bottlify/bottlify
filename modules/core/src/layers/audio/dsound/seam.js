@@ -90,6 +90,8 @@ const WAVE_FORMAT_PCM = 1;
 
 /** DSBCAPS flags a program sets when it describes a buffer it wants. */
 const DSBCAPS_PRIMARYBUFFER = 0x00000001;
+/** How long the primary buffer is, in bytes. */
+const PRIMARY_BYTES = 0x10000;
 const DSBCAPS_LOCHARDWARE = 0x00000004;
 const DSBCAPS_LOCSOFTWARE = 0x00000008;
 const DSBCAPS_CTRL3D = 0x00000010;
@@ -1207,8 +1209,12 @@ export function createDirectSound({
             // Up to a whole frame, as DirectSound does: every cursor and every
             // read is frame-aligned, and a lap that ends part way through a
             // frame starts the next one reading its samples out of step.
+            // The primary buffer is a power of two long, as Windows' is (Wine's
+            // 64 KiB): a program that writes it itself indexes its ring with a
+            // mask of the length less one, and over any other length every lap
+            // writes its samples to the wrong places -- sound in fragments.
             const bytes = primary
-                ? resolved.blockAlign * resolved.sampleRate
+                ? PRIMARY_BYTES
                 : Math.ceil(wanted / resolved.blockAlign) * resolved.blockAlign;
             const address = allocate(bytes);
             if (address === 0)

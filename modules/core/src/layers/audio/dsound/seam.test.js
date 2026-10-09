@@ -410,6 +410,9 @@ test('a primary buffer needs neither a size nor a format', ()=>{
     assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, out, 0]), DS_OK);
     assert.notEqual(f.memory.u32(out), 0);
     assert.equal(f.dsound.buffers()[0].primary, true);
+    // A power of two long: a program that writes it indexes its ring by mask.
+    const bytes = f.dsound.buffers()[0].bytes;
+    assert.equal(bytes & (bytes - 1), 0, `${bytes} bytes`);
 });
 
 test('through DirectSound 8, a 3D buffer is mono and has no pan', ()=>{
