@@ -2071,7 +2071,9 @@ export function createWin32Module(){
 
                 // DirectPlay with no service provider, and a lobby that did
                 // not launch the program.
-                'DPLAYX.dll': createDplayFunctions({ writeMemory, vtables: comVtables }),
+                'DPLAYX.dll': createDplayFunctions({
+                    writeMemory, readMemory, vtables: comVtables,
+                }),
 
                 // The rich edit classes are always registered; these are the
                 // libraries a program loads before it makes one.
