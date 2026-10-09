@@ -313,12 +313,15 @@ export function createConsoleIoFunctions(host){
         GetLargestConsoleWindowSize: noConsole('GetLargestConsoleWindowSize', 4),
 
         /**
-         * BOOL SetConsoleTitleA/W(LPCSTR lpConsoleTitle) and BOOL
+         * BOOL SetConsoleTitleA/W(LPCSTR lpConsoleTitle), DWORD GetConsoleTitleA/W(
+         * LPSTR lpConsoleTitle, DWORD nSize) -- a length, zero when it fails -- and BOOL
          * WriteConsoleOutputCharacterA/W(HANDLE, LPCSTR, DWORD, COORD, LPDWORD):
          * refused as a process with no console of its own is refused.
          */
         SetConsoleTitleA: noConsole('SetConsoleTitleA', 4),
         SetConsoleTitleW: noConsole('SetConsoleTitleW', 4),
+        GetConsoleTitleA: noConsole('GetConsoleTitleA', 8),
+        GetConsoleTitleW: noConsole('GetConsoleTitleW', 8),
         WriteConsoleOutputCharacterA: noConsole('WriteConsoleOutputCharacterA', 20),
         WriteConsoleOutputCharacterW: noConsole('WriteConsoleOutputCharacterW', 20),
 
