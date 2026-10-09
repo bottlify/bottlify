@@ -191,9 +191,8 @@ export function createGdiDrawing(options = {}){
     const penOf = context=>{
         const record = objects.get(context.state.pen);
         const pen = record && record.type === 'pen' ? record.attributes : DEFAULT_PEN;
-        const color = resolveColor(context, pen.color);
-        return { ...pen,
-            color: context.surface.mono === true ? monoPenColor(context, color) : color };
+        return { ...pen, color: context.surface.mono === true
+            ? monoPenColor(context, pen.color >>> 0) : resolveColor(context, pen.color) };
     };
 
     /**
@@ -201,13 +200,15 @@ export function createGdiDrawing(options = {}){
      * With the DC's text colour black or its background white, the pen is
      * black unless it is exactly white or exactly the background; with
      * both the other way, it is black only when it is black or the
-     * background (Wine's bitmap.c test_mono_bitmap, is_black_pen).
+     * background (Wine's bitmap.c test_mono_bitmap, is_black_pen). The
+     * COLORREFs are compared as they were given: PALETTEINDEX(0) is not
+     * black here.
      *
-     * @param {any} context @param {number} color  A plain COLORREF.
+     * @param {any} context @param {number} color  The pen's COLORREF.
      */
     const monoPenColor = (context, color)=>{
-        const text = resolveColor(context, context.state.textColor);
-        const background = resolveColor(context, context.state.bkColor);
+        const text = context.state.textColor >>> 0;
+        const background = context.state.bkColor >>> 0;
         const black = text === 0 || background === WHITE
             ? color !== WHITE && color !== background
             : color === 0 || color === background;

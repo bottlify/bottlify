@@ -4104,8 +4104,10 @@ export function createDrawingFunctions(
         GetSystemPaletteEntries: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([handle, start, count, out])=>{
-                if (!dcOf(handle) || (out >>> 0) === 0)
+            handler: ([, start, count, out])=>{
+                // The palette is the system's, not the DC's: it is written
+                // whatever handle came with the call, a stale one included.
+                if ((out >>> 0) === 0)
                 {
                     return 0;
                 }
