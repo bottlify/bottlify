@@ -89,6 +89,10 @@ import {
     D3DSAMP, D3DTSS9, SAMPLER_STATE_KEY, addDirect3D9StageDefaults, isSampler,
 } from './samplerstates.js';
 
+/** D3DUSAGE_QUERY_SRGBREAD and D3DUSAGE_QUERY_SRGBWRITE, asked of CheckDeviceFormat. */
+const USAGE_QUERY_SRGBREAD = 0x00010000;
+const USAGE_QUERY_SRGBWRITE = 0x00040000;
+
 /** The three states a device is ever in, as far as a program can tell. */
 export const DEVICE_STATE = Object.freeze({
     OK: 'ok',
@@ -512,6 +516,13 @@ export function createDirect3D9(options = {}){
         CheckDeviceFormat(usage, resourceType, format){
             const info = FORMAT_INFO[format];
             if (!info || info.video)
+            {
+                return D3DERR_NOTAVAILABLE;
+            }
+            // D3DUSAGE_QUERY_SRGBREAD and _SRGBWRITE: nothing here reads or
+            // writes a texture as sRGB, so a program told yes would draw in
+            // the wrong space -- told no, it does its own correction or none.
+            if ((usage & (USAGE_QUERY_SRGBREAD | USAGE_QUERY_SRGBWRITE)) !== 0)
             {
                 return D3DERR_NOTAVAILABLE;
             }

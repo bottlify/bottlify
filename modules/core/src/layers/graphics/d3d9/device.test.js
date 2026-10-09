@@ -567,6 +567,16 @@ test('a fresh device has a white material, not a black one', ()=>{
     assertFullyReleased(device);
 });
 
+test('sRGB reads and writes are not offered: nothing here reads or writes in that space', ()=>{
+    const d3d = createDirect3D9({});
+    assert.equal(d3d.CheckDeviceFormat(0x00010000, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8),
+        D3DERR_NOTAVAILABLE, 'D3DUSAGE_QUERY_SRGBREAD');
+    assert.equal(d3d.CheckDeviceFormat(0x00040000 | D3DUSAGE.RENDERTARGET, D3DRTYPE.TEXTURE,
+        D3DFMT.A8R8G8B8), D3DERR_NOTAVAILABLE, 'D3DUSAGE_QUERY_SRGBWRITE');
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8), D3D_OK,
+        'the format itself is there');
+});
+
 // --- the block-compressed formats ---
 
 test('a compressed texture is created whatever compressedTextures says -- the flag only'
