@@ -1220,12 +1220,10 @@ export function createDirectSound({
             // start one looping before it has written a byte -- a mixer that
             // fills it from a timer only once something plays -- and a block a
             // heap hands out again still holds whatever was there, which the
-            // loop would play over and over.
-            if (!primary)
-            {
-                memory.writeMemory(address, new Uint8Array(bytes)
-                    .fill(resolved.bitsPerSample === 8 ? 0x80 : 0));
-            }
+            // loop would play over and over. The primary buffer too: under
+            // DSSCL_WRITEPRIMARY it is played as the program left it.
+            memory.writeMemory(address, new Uint8Array(bytes)
+                .fill(resolved.bitsPerSample === 8 ? 0x80 : 0));
 
             const buffer = createSoundBuffer({
                 bytes, address, format: resolved, now, primary, capabilities: flags,
@@ -1738,7 +1736,7 @@ export function createDirectSound({
             }
         },
 
-        /** What a program last asked for, for whoever is measuring. */
+        /** What a program last asked for: DSSCL_WRITEPRIMARY makes the primary buffer heard. */
         cooperativeLevel: ()=>cooperativeLevel,
 
         libraries: {

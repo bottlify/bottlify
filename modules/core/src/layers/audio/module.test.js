@@ -860,3 +860,26 @@ test('a sound device made again after the last one was let go of is heard', asyn
     f.api.pump();
     assert.ok(f.api.output().diagnostics().produced > before, 'the second device is heard too');
 });
+
+test('a program that writes the primary buffer itself is heard from it', async()=>{
+    // At DSSCL_WRITEPRIMARY there is no secondary buffer: the program mixes
+    // into the primary one and plays it. Passed over as the mix target, the
+    // device was given nothing.
+    const f = await playing();
+    const PRIMARY_DESC = 0x500;
+    f.view.setUint32(PRIMARY_DESC + DSBUFFERDESC.dwSize, DSBUFFERDESC.SIZE, true);
+    f.view.setUint32(PRIMARY_DESC + DSBUFFERDESC.dwFlags, 1, true);
+    for (const [level, heard] of /** @type {[number, boolean][]} */ ([[2, false], [4, true]]))
+    {
+        assert.equal(f.call(f.root, 'SetCooperativeLevel', [0x1c, level]), DS_OK);
+        assert.equal(f.call(f.root, 'CreateSoundBuffer', [PRIMARY_DESC, OUT_AT + 8, 0]), DS_OK);
+        const primary = f.view.getUint32(OUT_AT + 8, true);
+        const held = f.api.buffers().find((/** @type {any} */ b)=>b.primary);
+        f.bytes.fill(0x40, held.address, held.address + held.bytes);
+        assert.equal(f.call(primary, 'Play', [0, 0, DSBPLAY_LOOPING]), DS_OK);
+        const before = f.api.output().diagnostics().produced;
+        f.advance(50);
+        f.api.pump();
+        assert.equal(f.api.output().diagnostics().produced > before, heard, `level ${level}`);
+    }
+});

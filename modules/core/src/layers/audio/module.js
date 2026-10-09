@@ -13,6 +13,9 @@ import { createMp3Provider } from './asi/provider.js';
 import { createMinimp3Decoder } from './asi/minimp3.js';
 import { splitFrames } from './asi/mp3.js';
 
+/** The level at which the program writes the primary buffer itself. */
+const DSSCL_WRITEPRIMARY = 4;
+
 /**
  * audio — the sound APIs a program was written against.
  *
@@ -391,9 +394,9 @@ export function createAudioModule(){
                 for (const buffer of dsound.buffers())
                 {
                     // The primary buffer is the mix target and holds no samples of
-                    // the program's own; reading it would play whatever the
-                    // allocator left there.
-                    if (buffer.primary)
+                    // the program's own -- except under DSSCL_WRITEPRIMARY, where
+                    // the program mixes into it itself and it is played as it is.
+                    if (buffer.primary && dsound.cooperativeLevel() !== DSSCL_WRITEPRIMARY)
                     {
                         continue;
                     }
