@@ -486,6 +486,8 @@ const WS_EX_TOOLWINDOW = 0x00000080;
 const WS_EX_CONTEXTHELP = 0x00000400;
 /** TITLEBARINFO: cbSize, rcTitleBar, rgstate[6] (the bar, a reserved slot, four buttons). */
 const TITLEBARINFO_SIZE = 44;
+/** COMBOBOXINFO: cbSize, rcItem, rcButton, stateButton, hwndCombo, hwndItem, hwndList. */
+const COMBOBOXINFO_SIZE = 52;
 const TITLEBARINFO_RGSTATE = 20;
 const STATE_SYSTEM_UNAVAILABLE = 0x00000001;
 const STATE_SYSTEM_INVISIBLE = 0x00008000;
@@ -618,6 +620,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
 
     const refuse = createRefusals(host);
 
+    /** Whether GetComboBoxInfo has said it names no edit or list window. */
+    let comboWindowsSaid = false;
     // Ids handed to a timer with no window, kept clear of the small numbers a
     // program picks for its own.
     let nextTimerId = 0x1000;
@@ -2953,6 +2957,55 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                     help,
                     buttons ? 0 : STATE_SYSTEM_INVISIBLE,
                 ]);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetComboBoxInfo(HWND hwndCombo, PCOMBOBOXINFO pcbi)
+         *
+         * A combo box's field and drop-down button, in its client
+         * coordinates, the button's state -- invisible for CBS_SIMPLE, which
+         * has none -- and its windows. This build's combo box is one window,
+         * its field and list drawn in it, so it names no edit and no list
+         * window of its own. Any other window is no combo box, and a cbSize
+         * that is not the structure's is refused.
+         */
+        GetComboBoxInfo: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, info])=>{
+                const CBS_TYPEMASK = 0x3;
+                const CBS_SIMPLE = 0x1;
+                const COMBO_BUTTON = 16;
+                const record = live(hwnd);
+                if (!record || String(record.className).toLowerCase() !== 'combobox')
+                {
+                    return 0;
+                }
+                if ((info >>> 0) === 0 || readU32(info) !== COMBOBOXINFO_SIZE)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const client = host.geometry.clientRect(record);
+                const width = client.right - client.left;
+                const height = client.bottom - client.top;
+                const simple = (record.style & CBS_TYPEMASK) === CBS_SIMPLE;
+                const button = simple ? { left: 0, top: 0, right: 0, bottom: 0 }
+                    : { left: width - 2 - COMBO_BUTTON, top: 2, right: width - 2,
+                        bottom: height - 2 };
+                writeRect(host, info + 4, { left: 3, top: 3,
+                    right: (simple ? width : button.left) - 2, bottom: height - 3 });
+                writeRect(host, info + 20, button);
+                writeU32s(host, info + 36,
+                    [simple ? STATE_SYSTEM_INVISIBLE : 0, record.hwnd, 0, 0]);
+                if (!comboWindowsSaid)
+                {
+                    comboWindowsSaid = true;
+                    host.divergence?.('GetComboBoxInfo', 'the combo box is one window: no edit'
+                        + ' and no list window are named');
+                }
                 return 1;
             },
         },

@@ -376,6 +376,35 @@ test('GetTitleBarInfo checks cbSize and reports the caption strip and its button
     assert.equal(memory.u32(OUT_BUFFER + 40), STATE_SYSTEM_INVISIBLE);
 });
 
+test('GetComboBoxInfo describes a combo box, and only a combo box', ()=>{
+    // A program asks for it before it subclasses the parts; one that is not
+    // there must not stop the machine (msg.c's combo box tests ask for it).
+    const ERROR_INVALID_PARAMETER = 87;
+    const CBS_DROPDOWNLIST = 0x3;
+    const CBS_SIMPLE = 0x1;
+    const STATE_SYSTEM_INVISIBLE = 0x8000;
+    const { memory, fns, errors } = setup();
+    const main = makeWindow(memory, fns, WS_VISIBLE);
+    memory.putString(TITLE, 'ComboBox');
+    /** @param {number} style */
+    const combo = style=>fns.CreateWindowExA.handler([0, TITLE, 0,
+        0x40000000 | WS_VISIBLE | style, 10, 10, 120, 24, main, 0, HINSTANCE, 0]);
+    const list = combo(CBS_DROPDOWNLIST);
+    memory.putU32s(OUT_BUFFER, [48]);
+    assert.equal(fns.GetComboBoxInfo.handler([list, OUT_BUFFER]), 0);
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER, 'a cbSize not the structure\'s');
+    memory.putU32s(OUT_BUFFER, [52]);
+    assert.equal(fns.GetComboBoxInfo.handler([list, OUT_BUFFER]), 1);
+    const [, itemLeft, , itemRight, , buttonLeft, , buttonRight] =
+        [0, 4, 8, 12, 16, 20, 24, 28].map(at=>memory.u32(OUT_BUFFER + at) | 0);
+    assert.ok(itemLeft < itemRight && itemRight <= buttonLeft && buttonLeft < buttonRight,
+        'the field, then the button at the right');
+    assert.deepEqual([36, 40].map(at=>memory.u32(OUT_BUFFER + at)), [0, list]);
+    fns.GetComboBoxInfo.handler([combo(CBS_SIMPLE), OUT_BUFFER]);
+    assert.equal(memory.u32(OUT_BUFFER + 36), STATE_SYSTEM_INVISIBLE, 'CBS_SIMPLE has no button');
+    assert.equal(fns.GetComboBoxInfo.handler([main, OUT_BUFFER]), 0, 'no combo box');
+});
+
 test('a child is hit where GetWindow stacks it, and SetWindowPos restacks it', ()=>{
     // user32's window tests: children made one after another are stacked
     // first-made on top (GW_CHILD, then GW_HWNDNEXT, walks them in creation
