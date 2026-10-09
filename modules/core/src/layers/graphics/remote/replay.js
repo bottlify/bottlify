@@ -955,6 +955,22 @@ export function createRecording(options){
                 }
                 return method.apply(target, applied);
             }
+            // A poll of an occlusion count already asked is answered here and
+            // recorded nowhere: the played side has nothing to do with it, and
+            // a program polls hundreds of thousands of times a minute.
+            const known = name === 'GetData' ? counts.get(target) : undefined;
+            if (known)
+            {
+                if (!known.reply)
+                {
+                    return S_FALSE;
+                }
+                for (let index = 0; index < count; index++)
+                {
+                    copyOut(args[index], known.reply.outs[index]);
+                }
+                return known.reply.answer;
+            }
             if (pending.addresses.size > 0 && !quiet)
             {
                 shipPending(readBy(target, name, args));
@@ -1171,20 +1187,6 @@ export function createRecording(options){
             }
             if (name === 'GetData' && /** @type {any} */ (target)?.type === D3DQUERYTYPE_OCCLUSION)
             {
-                const known = counts.get(target);
-                if (known)
-                {
-                    transport.called(WAIT.NONE, name);
-                    if (!known.reply)
-                    {
-                        return S_FALSE;
-                    }
-                    for (let index = 0; index < args.length; index++)
-                    {
-                        copyOut(args[index], known.reply.outs[index]);
-                    }
-                    return known.reply.answer;
-                }
                 const asking = { reply: /** @type {PlayedAnswer | null} */ (null) };
                 counts.set(target, asking);
                 Promise.resolve(transport.called(WAIT.ANSWER, name)).then(played=>{
