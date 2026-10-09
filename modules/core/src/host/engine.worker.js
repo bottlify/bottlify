@@ -11,5 +11,11 @@
 
 import { createApp } from '../app.js';
 import { serveEngine } from './serve.js';
+import { traceOpfsRejections } from './opfs-trace.js';
+
+if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+{
+    traceOpfsRejections(globalThis);
+}
 
 serveEngine(/** @type {any} */ (globalThis), { createApp, threaded: true });

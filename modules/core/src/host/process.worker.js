@@ -28,8 +28,14 @@ import { openLink } from '../system/link.js';
 import { remoteSystem } from '../system-link.js';
 import { remoteStore } from '../layers/cpu/internal/store-link.js';
 import { ringPacing } from './ring-pacing.js';
+import { traceOpfsRejections } from './opfs-trace.js';
 import { portEnd } from '../layers/graphics/remote/connect.js';
 import { plainEvent } from '../system/events-across.js';
+
+if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+{
+    traceOpfsRejections(globalThis);
+}
 
 /** How often a process with work to do gives its event loop a turn, as the engine's worker does. */
 const YIELD_MS = 4;
