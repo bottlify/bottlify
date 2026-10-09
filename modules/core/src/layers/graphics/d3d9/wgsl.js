@@ -393,6 +393,11 @@ const FOUR_FLOATS = Object.freeze({ components: 4, scalar: 'f32', bgra: false })
 function moduleHeader(options){
     const group = options.vertex ? BIND_GROUP.VERTEX_CONSTANTS : BIND_GROUP.PIXEL_CONSTANTS;
     const header = [
+        // Direct3D leaves a derivative taken in divergent flow undefined
+        // rather than refusing the shader, and model 2 and 3 compilers put
+        // texld inside branches and loops, which WGSL's uniformity analysis
+        // would turn into a module that does not build.
+        ...(options.vertex ? [] : ['diagnostic(off, derivative_uniformity);']),
         `@group(${group}) @binding(0) var<uniform> c:`
             + ` array<vec4f, ${Math.max(1, options.constants)}>;`,
         `@group(${group}) @binding(1) var<uniform> ci: array<vec4i, 16>;`,
