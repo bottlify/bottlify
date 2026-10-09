@@ -59,6 +59,7 @@ export const DDERR_WRONGMODE = dderr(587);
 export const DDERR_IMPLICITLYCREATED = dderr(588);
 export const DDERR_INVALIDSURFACETYPE = dderr(592);
 export const DDERR_NOTONMIPMAPSUBLEVEL = dderr(603);
+export const DDERR_CANTCREATEDC = dderr(587);
 export const DDERR_DCALREADYCREATED = dderr(620);
 
 /** DirectDraw borrows these three from COM rather than minting its own. */

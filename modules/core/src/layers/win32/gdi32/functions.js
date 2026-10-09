@@ -5117,10 +5117,10 @@ export function createGdiFunctions(host){
          * the whole point, because a program gets a DC on a surface, draws with
          * GDI, and expects to see the result when it presents.
          *
-         * Refused rather than approximated when the row stride is not the one
-         * GDI would compute for that width and depth: drawing with the wrong
-         * stride shears the picture by a pixel per row, which reads as a
-         * corrupted image rather than as a rejected call.
+         * The rows are as far apart as the surface says, whatever GDI would
+         * have padded them to: a DirectDraw surface's pitch is its own, and an
+         * eight-bit surface 622 pixels wide has rows 622 bytes apart. Refusing
+         * one whose pitch is not a DIB's left GetDC answering with no DC.
          *
          * @param {{ width: number, height: number, pitch: number,
          *           bitCount: number, bits: number, palette?: number[] | null,
@@ -5135,7 +5135,7 @@ export function createGdiFunctions(host){
             if (!(width > 0) || !(height > 0) || (bits >>> 0) === 0
                 || !SURFACE_DC_DEPTHS.has(bitCount)
                 || (bitCount === 8 && !palette)
-                || pitch !== dibSize(width, 1, bitCount))
+                || !(pitch >= Math.ceil(width * bitCount / 8)))
             {
                 return 0;
             }
@@ -5150,6 +5150,7 @@ export function createGdiFunctions(host){
                 topDown: true,
                 bits: bits >>> 0,
                 section: bits >>> 0,
+                pitch,
                 palette,
                 format,
             });

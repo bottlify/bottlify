@@ -49,6 +49,7 @@ import {
     DDCKEY_SRCBLT,
     DDERR_CANNOTATTACHSURFACE,
     DDERR_CANNOTDETACHSURFACE,
+    DDERR_CANTCREATEDC,
     DDERR_DCALREADYCREATED,
     DDERR_CLIPPERISUSINGHWND,
     DDERR_EXCLUSIVEMODEALREADYSET,
@@ -1347,7 +1348,7 @@ export function createDirectDraw(options = {}){
                 {
                     return { hr: DDERR_SURFACELOST, dc: null };
                 }
-                dc = createDc({
+                const made = createDc({
                     width: width,
                     height: height,
                     pitch,
@@ -1360,6 +1361,14 @@ export function createDirectDraw(options = {}){
                     palette: bpp === 1 ? (palette ?? primaryPalette())?.pixels ?? null : null,
                     format: pixelFormat.greenMask === 0x07e0 ? '565' : '555',
                 });
+                // No DC is a failure, and leaves the surface free: a DC
+                // handed out as zero is never released, and every Lock after
+                // it is DDERR_SURFACEBUSY.
+                if (!made)
+                {
+                    return { hr: DDERR_CANTCREATEDC, dc: null };
+                }
+                dc = made;
                 return { hr: DD_OK, dc };
             },
 
