@@ -495,6 +495,15 @@ export function createPathFunctions(host, { A, W }){
             return path !== null && isRoot(path) ? 1 : 0;
         }),
 
+        /**
+         * BOOL PathIsRelativeA(LPCSTR pszPath): neither rooted at a backslash
+         * nor at a drive; NULL and the empty string count as relative.
+         */
+        ...both('PathIsRelative', 4, (width, [pointer])=>{
+            const path = width.read(pointer);
+            return path === null || !(path.startsWith('\\') || path[1] === ':') ? 1 : 0;
+        }),
+
         /** BOOL PathIsURLA(LPCSTR pszPath): a scheme of two characters or more. */
         ...both('PathIsURL', 4, (width, [pointer])=>{
             const path = width.read(pointer);

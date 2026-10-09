@@ -333,13 +333,30 @@ test('PathSearchAndQualify is kernel32\'s search, then its full path', ()=>{
         'no kernel32 behind it');
 });
 
+test('PathIsRelative is false only for a path rooted at a backslash or a drive', ()=>{
+    const cases = /** @type {[string, number][]} */ ([
+        ['C:\\dir', 0], ['C:', 0], ['c:file', 0], ['\\dir', 0], ['\\\\server\\share', 0],
+        ['dir\file', 1], ['.\file', 1], ['..', 1], ['', 1], ['file:x', 1],
+    ]);
+    for (const [suffix, wide] of WIDTHS)
+    {
+        const m = shlwapiMachine();
+        for (const [path, expected] of cases)
+        {
+            assert.equal(m.fns[`PathIsRelative${suffix}`].handler([m.put(path, wide)]), expected,
+                path);
+        }
+        assert.equal(m.fns[`PathIsRelative${suffix}`].handler([0]), 1, 'NULL is relative');
+    }
+});
+
 test('each path function declares the arguments it pops, in both spellings', ()=>{
     const { fns } = shlwapiMachine();
     const expected = /** @type {Record<string, number>} */ ({
         PathIsUNC: 4, PathRemoveExtension: 4, PathStripToRoot: 4, PathAddBackslash: 4,
         PathCanonicalize: 8, PathCreateFromUrl: 16, PathFileExists: 4, PathIsRoot: 4,
         PathIsURL: 4, PathRemoveBlanks: 4, PathRemoveFileSpec: 4, PathRenameExtension: 8,
-        PathSearchAndQualify: 12, PathSkipRoot: 4,
+        PathSearchAndQualify: 12, PathSkipRoot: 4, PathIsRelative: 4,
     });
     for (const [name, bytes] of Object.entries(expected))
     {
