@@ -1078,8 +1078,13 @@ export function createWinsockFunctions(host){
                     view.setUint16(WSADATA.wHighVersion, 0x0202, true);
                     block.set(sz(WSADESCRIPTION), WSADATA.szDescription);
                     block.set(sz(WSASYSSTATUS), WSADATA.szSystemStatus);
-                    view.setUint16(WSADATA.iMaxSockets, 0, true);
-                    view.setUint16(WSADATA.iMaxUdpDg, 0, true);
+                    // Winsock 2 says to ignore both limits and leaves them
+                    // zero; a 1.x caller still reads them, and Windows tells
+                    // it 32767 sockets and 65467-byte datagrams (Wine's
+                    // sock.c test_startup). Zero there reads as no sockets.
+                    const legacy = (asked & 0xff) < 2;
+                    view.setUint16(WSADATA.iMaxSockets, legacy ? 32767 : 0, true);
+                    view.setUint16(WSADATA.iMaxUdpDg, legacy ? 65467 : 0, true);
                     host.writeMemory(data >>> 0, block);
                 }
                 return ok(0);

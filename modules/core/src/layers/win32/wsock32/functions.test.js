@@ -161,6 +161,14 @@ test('WSAStartup fills in the version it agreed to', ()=>{
         'the version negotiated is the one asked for');
     assert.equal(view.getUint16((OUT & ~3) + WSADATA.wHighVersion, true), 0x0202,
         'the high version is what we could do');
+    assert.equal(view.getUint16((OUT & ~3) + WSADATA.iMaxSockets, true), 32767,
+        'a 1.x caller is told the socket limit Windows reports');
+    assert.equal(view.getUint16((OUT & ~3) + WSADATA.iMaxUdpDg, true), 65467);
+
+    assert.equal(fx.call('WSAStartup', [0x0202, OUT & ~3]), 0);
+    assert.equal(view.getUint16((OUT & ~3) + WSADATA.iMaxSockets, true), 0,
+        'Winsock 2 leaves the limits it says to ignore at zero');
+    assert.equal(view.getUint16((OUT & ~3) + WSADATA.iMaxUdpDg, true), 0);
 });
 
 test('the last error belongs to the thread that caused it', ()=>{
