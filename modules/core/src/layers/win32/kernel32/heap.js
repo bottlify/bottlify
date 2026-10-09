@@ -687,6 +687,11 @@ export function createHeapAllocator({ base, size }){
  *           guest code that falls back to the handlers here.
  * @property {(bytes: number) => number} [allocateCode]  Pages of their own for
  *           that code (`code-arena.js`).
+ * @property {(address: number, length: number, open: boolean) => boolean} [pageAccess]
+ *           Opens or closes pages to the program (the memory layer's `pageAccess`):
+ *           a reservation's pages not committed, and those protected
+ *           PAGE_NOACCESS, fault on any access, as on Windows. False where the
+ *           processor does not fault a read, and then every page reads.
  */
 
 /**
@@ -810,6 +815,77 @@ export function createHeapFunctions(host){
      * @type {Map<number, { from: number, to: number }[]>}
      */
     const committed = new Map();
+
+    /**
+     * The pages of each reservation protected PAGE_NOACCESS, committed or not:
+     * a commit with that protection, or VirtualProtect to it.
+     *
+     * @type {Map<number, Set<number>>}
+     */
+    const unreadable = new Map();
+
+    /**
+     * Opens what of [from, to) of a reservation the program may touch -- its
+     * committed pages not protected PAGE_NOACCESS -- and closes the rest, where
+     * the processor faults a closed page (`pageAccess`).
+     *
+     * @param {number} reservation @param {number} from @param {number} to
+     */
+    const settleAccess = (reservation, from, to)=>{
+        if (!host.pageAccess?.(from, 0, false) || to <= from)
+        {
+            return;
+        }
+        host.pageAccess(from, to - from, false);
+        for (const range of committed.get(reservation) ?? [])
+        {
+            const start = Math.max(range.from, from);
+            const end = Math.min(range.to, to);
+            if (start < end)
+            {
+                host.pageAccess(start, end - start, true);
+            }
+        }
+        for (const page of unreadable.get(reservation) ?? [])
+        {
+            if (page >= from && page < to)
+            {
+                host.pageAccess(page, PAGE_SIZE, false);
+            }
+        }
+    };
+
+    /**
+     * Notes the protection [from, to) of a reservation was given: PAGE_NOACCESS
+     * closes the pages, anything else leaves them to their commit.
+     *
+     * @param {number} reservation @param {number} from @param {number} to
+     * @param {number} protection
+     */
+    const noteProtection = (reservation, from, to, protection)=>{
+        let pages = unreadable.get(reservation);
+        if ((protection & 0xff) === PAGE_NOACCESS)
+        {
+            if (!pages)
+            {
+                pages = new Set();
+                unreadable.set(reservation, pages);
+            }
+            for (let page = from; page < to; page += PAGE_SIZE)
+            {
+                pages.add(page);
+            }
+            return;
+        }
+        if (!pages)
+        {
+            return;
+        }
+        for (let page = from; page < to; page += PAGE_SIZE)
+        {
+            pages.delete(page);
+        }
+    };
 
     /** The reservations made with MEM_WRITE_WATCH, by base. */
     const watched = new Set();
@@ -1308,10 +1384,11 @@ export function createHeapFunctions(host){
         VirtualAlloc: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([pointer, bytes, type])=>{
+            handler: ([pointer, bytes, type, protect])=>{
                 const kind = type >>> 0;
                 const size = bytes >>> 0;
                 const requested = pointer >>> 0;
+                const protection = protect >>> 0;
                 const acting = kind & (MEM_COMMIT | MEM_RESERVE | MEM_RESET);
                 if ((kind & ~ALLOCATION_TYPES) !== 0 || acting === 0
                     || ((kind & MEM_RESET) !== 0 && acting !== MEM_RESET) || size === 0)
@@ -1342,16 +1419,19 @@ export function createHeapFunctions(host){
                     }
                     decommitted.delete(start);
                     committed.set(start, []);
+                    unreadable.delete(start);
                     if ((kind & MEM_COMMIT) !== 0)
                     {
-                        markCommitted(start, (requested & ~(PAGE_SIZE - 1)) >>> 0,
-                            start + span, true);
+                        const first = (requested & ~(PAGE_SIZE - 1)) >>> 0;
+                        markCommitted(start, first, start + span, true);
+                        noteProtection(start, first, start + span, protection);
                     }
                     if ((kind & MEM_WRITE_WATCH) !== 0)
                     {
                         watched.add(start);
                     }
                     zeroHandedOver(start, span);
+                    settleAccess(start, start, start + span);
                     return start;
                 }
 
@@ -1415,6 +1495,8 @@ export function createHeapFunctions(host){
                     // does exactly that.
                     takeBack(existing.address, page, page + needed);
                     markCommitted(existing.address, page, page + needed, true);
+                    noteProtection(existing.address, page, page + needed, protection);
+                    settleAccess(existing.address, page, page + needed);
                     return page;
                 }
 
@@ -1451,23 +1533,28 @@ export function createHeapFunctions(host){
                 // on Windows touching it faults, here it yields old bytes, and
                 // a stale value that happens to look like a pointer is read as
                 // one, then dereferenced far from anything that would explain
-                // where it came from. Reading zero where Windows would fault is
-                // the more forgiving of the two wrong answers, and the only one
-                // that cannot be mistaken for data.
+                // where it came from. Where the processor faults a closed page
+                // (`settleAccess`) the pages not committed fault as on Windows --
+                // a program that commits a page in its own handler when it is
+                // touched depends on it; elsewhere they read zero, the more
+                // forgiving of the two wrong answers.
                 //
                 // Arena that was never handed out is zero already; only what
                 // something else finished with costs a write.
                 decommitted.delete(address);
                 committed.set(address, []);
+                unreadable.delete(address);
                 if ((kind & MEM_COMMIT) !== 0)
                 {
                     markCommitted(address, address, address + rounded, true);
+                    noteProtection(address, address, address + rounded, protection);
                 }
                 if ((kind & MEM_WRITE_WATCH) !== 0)
                 {
                     watched.add(address);
                 }
                 zeroHandedOver(address, span);
+                settleAccess(address, address, address + span);
                 return address;
             },
         },
@@ -1512,18 +1599,21 @@ export function createHeapFunctions(host){
                         host.setLastError(ERROR_INVALID_ADDRESS);
                         return 0;
                     }
+                    // Back to the arena, whose next owner -- a heap, another
+                    // reservation -- finds it open.
+                    host.pageAccess?.(address, end - address, true);
                     allocator.free(address);
                     decommitted.delete(address);
                     committed.delete(address);
+                    unreadable.delete(address);
                     watched.delete(address);
                     return 1;
                 }
-                // Decommit keeps the reservation. Page-level commit state is not
-                // modelled, so the memory stays readable -- observably identical
-                // except for the fault a program would have to be provoking on
-                // purpose to notice. What is remembered is the range, because a
-                // commit of it later has to read as zeroes: Windows took those
-                // pages away and gives back new ones.
+                // Decommit keeps the reservation and closes the pages where the
+                // processor faults a closed one (`settleAccess`). What is
+                // remembered is the range, because a commit of it later has to
+                // read as zeroes: Windows took those pages away and gives back
+                // new ones.
                 //
                 // No size is the rest of the reservation from the page named,
                 // which from its base is the whole of it.
@@ -1536,6 +1626,7 @@ export function createHeapFunctions(host){
                 }
                 giveBack(block.address, Math.max(page, block.address), to);
                 markCommitted(block.address, Math.max(page, block.address), to, false);
+                settleAccess(block.address, Math.max(page, block.address), to);
                 return 1;
             },
         },
@@ -1933,20 +2024,22 @@ export function createHeapFunctions(host){
          * BOOL VirtualProtect(LPVOID lpAddress, SIZE_T dwSize, DWORD flNewProtect,
          *                     PDWORD lpflOldProtect)
          *
-         * Reports the previous protection and changes nothing, because there is
-         * nothing to change: this build does not enforce page protection, so
-         * every page is already readable, writable and executable and every
-         * request a caller makes is already satisfied. A runtime making its
-         * generated code executable gets what it asked for.
+         * PAGE_NOACCESS is the one protection enforced, on a reservation's pages
+         * and where the processor faults a closed page: a program that closes
+         * pages to catch the touch of them gets its fault. Every other request
+         * is already satisfied -- a page that is open is readable, writable and
+         * executable -- so a runtime making its generated code executable gets
+         * what it asked for.
          *
-         * The old protection is not invented -- it is what this build actually
-         * offers -- and lpflOldProtect must be written, because a caller that
-         * puts the protection back afterwards reads it from there.
+         * The old protection is not invented -- PAGE_NOACCESS where the first
+         * page was closed, otherwise what this build offers -- and
+         * lpflOldProtect must be written, because a caller that puts the
+         * protection back afterwards reads it from there.
          */
         VirtualProtect: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([address, size, , oldProtect])=>{
+            handler: ([address, size, protect, oldProtect])=>{
                 if (address === 0 || (size >>> 0) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
@@ -1959,7 +2052,18 @@ export function createHeapFunctions(host){
                     host.setLastError(ERROR_NOACCESS);
                     return 0;
                 }
-                writeDword(oldProtect >>> 0, PAGE_EXECUTE_READWRITE);
+                const block = allocator.blockContaining(address >>> 0);
+                const first = ((address >>> 0) & ~(PAGE_SIZE - 1)) >>> 0;
+                const was = block?.owner === VIRTUAL
+                    && unreadable.get(block.address)?.has(first) === true;
+                writeDword(oldProtect >>> 0, was ? PAGE_NOACCESS : PAGE_EXECUTE_READWRITE);
+                if (block && block.owner === VIRTUAL)
+                {
+                    const end = Math.min(roundUp((address >>> 0) + (size >>> 0), PAGE_SIZE),
+                        block.address + block.capacity);
+                    noteProtection(block.address, first, end, protect >>> 0);
+                    settleAccess(block.address, first, end);
+                }
                 return 1;
             },
         },

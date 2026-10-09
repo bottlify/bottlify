@@ -249,6 +249,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // leaves there; on, what the emulator leaves. Off, as games run: the tests and
         // the hardware corpus turn it on.
         precise: false,
+        // An instruction that only reads tests its pages as a store does, so a
+        // page the program cannot read -- a reservation not committed, one
+        // protected PAGE_NOACCESS -- faults as on Windows rather than reading
+        // RAM. Off, a read is wrapped into RAM: one `and` for a shift, a load
+        // and a branch.
+        checkReads: false,
         // Locked instructions as wasm atomics, each one indivisible on the shared
         // memory: for a process whose threads run on more than one executor
         // (roadmap/v2, stage 3). Off, a process on one executor pays nothing.
@@ -1240,6 +1246,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         narrow: precision === 'narrow',
         structure: settings.structure,
         precise: settings.precise === true,
+        checkReads: settings.checkReads === true,
         atomic: settings.atomic === true,
         looseStacks: loose,
         leaveOut,
@@ -1685,7 +1692,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         + (settings.precise === true ? 'P' : '') + (settings.countTransfers ? 'T' : '')
         + (settings.dispatch === true ? 'D' : '') + (settings.callTargets === true ? 'C' : '')
         + (settings.callReturn === true ? 'R' : '') + (sharedMemory ? 'M' : '')
-        + (settings.atomic === true ? 'A' : '')
+        + (settings.atomic === true ? 'A' : '') + (settings.checkReads === true ? 'Q' : '')
         + `p${(settings.trapPort ?? 0).toString(16)}`;
     /** The store key of one formed region: an x87 region compiled for the wide
      * precision controls or for single, or checked, is another translation of the same

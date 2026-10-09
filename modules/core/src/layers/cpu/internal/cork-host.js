@@ -84,6 +84,7 @@ const FLAT_CS = 0x08;
 const INVALID_OPCODE = 6;
 /** #PF. */
 const PAGE_FAULT = 14;
+const GENERAL_PROTECTION = 13;
 /** How many of those the diagnostics name. */
 const UNTIERED_KEPT = 16;
 /**
@@ -606,19 +607,43 @@ export function createCorkHost(config){
      * emulator's fault stub ends it with a halt.
      *
      * @param {number} vector
+     * @param {{ address: number, write: boolean } | null} [page]  for an access to a page the
+     *     program cannot reach: raised as a page fault there
      */
-    const takeFault = vector=>{
+    const takeFault = (vector, page = null)=>{
         const fault = {
             ...buildFault(vector),
             stack: reg32[4] >>> 0,
             eax: reg32[0] >>> 0,
             edx: reg32[2] >>> 0,
+            // A page fault's error code and the address it could not reach (CR2):
+            // not present, and whether the access wrote.
+            ...page === null ? {} : { errorCode: page.write ? 2 : 0, address: page.address >>> 0 },
         };
         if (faultHandler?.(fault) !== true)
         {
             lastFault = fault;
         }
         halted = true;
+    };
+
+    /**
+     * A fault translated code or the wasm tier left with, before the instruction:
+     * a #GP there is what either raises for a page the program cannot reach,
+     * whose address neither carries, so the instruction runs once more on the
+     * JavaScript interpreter, which raises the same fault with the address --
+     * or, if the page was opened meanwhile, simply runs it. Any other vector is
+     * taken as it is.
+     *
+     * @param {number} vector
+     */
+    const takeTieredFault = vector=>{
+        if (vector !== GENERAL_PROTECTION)
+        {
+            takeFault(vector);
+            return;
+        }
+        interpretJs(eip(), 1, true, false, false);
     };
 
     // Where the last run the interpreter stepped began, so a no-tier answer
@@ -815,7 +840,7 @@ export function createCorkHost(config){
                 }
                 if (code === WasmExit.FAULT)
                 {
-                    takeFault(tier.exitValue());
+                    takeTieredFault(tier.exitValue());
                     break;
                 }
                 retired += interpretJs(at, left, false, false, true);
@@ -912,10 +937,20 @@ export function createCorkHost(config){
         }
         if (thrown !== null)
         {
-            const fault = /** @type {{ vector?: number, eip?: number, op?: string }} */ (thrown);
+            const fault = /** @type {{ vector?: number, eip?: number, op?: string,
+                address?: number, write?: boolean }} */ (thrown);
             if (typeof fault.vector === 'number')
             {
-                takeFault(fault.vector);
+                // An access to a page the program cannot reach is the page fault
+                // Windows raises, with the address its handler commits.
+                if (typeof fault.address === 'number')
+                {
+                    takeFault(PAGE_FAULT, { address: fault.address, write: fault.write === true });
+                }
+                else
+                {
+                    takeFault(fault.vector);
+                }
                 return retired;
             }
             if (typeof fault.op === 'string')
@@ -1037,7 +1072,7 @@ export function createCorkHost(config){
                     }
                     if (code === WasmExit.FAULT)
                     {
-                        takeFault(wasmTier.exitValue());
+                        takeTieredFault(wasmTier.exitValue());
                         break;
                     }
                     if (code === WasmExit.HOT)
@@ -1072,7 +1107,7 @@ export function createCorkHost(config){
                 }
                 if (exit.kind === 'fault')
                 {
-                    takeFault(exit.vector);
+                    takeTieredFault(exit.vector);
                     break;
                 }
                 if (exit.kind === 'trap')
@@ -1358,6 +1393,37 @@ export function createCorkHost(config){
         registerFile: ()=>reg32,
         /** @param {number} base @param {number} size */
         noteStack: (base, size)=>runtime.noteStack(base, size),
+        /**
+         * Opens or closes pages to the program, as a reservation's commit and
+         * VirtualProtect do: a closed one faults any access, with its address.
+         * Only where every tier tests a read (`checkReads`) -- elsewhere a
+         * translated read would wrap into RAM where the interpreter faults, the
+         * same instruction answering two ways -- and never below `closedBelow`
+         * or past RAM, which stay closed. Answers whether it did.
+         *
+         * @param {number} address @param {number} length @param {boolean} open
+         */
+        pageAccess: (address, length, open)=>{
+            if (corkConfig?.checkReads !== true || !runtime.pages)
+            {
+                return false;
+            }
+            const from = Math.max(address >>> 0, closedBelow);
+            const to = Math.min((address >>> 0) + (length >>> 0), memorySize);
+            if (to <= from)
+            {
+                return true;
+            }
+            if (open)
+            {
+                runtime.pages.clearRange(from, to - from, PAGE_INACCESSIBLE);
+            }
+            else
+            {
+                runtime.pages.markRange(from, to - from, PAGE_INACCESSIBLE);
+            }
+            return true;
+        },
         /** The guest's RAM in place, byte 0 at address 0. @returns {Uint8Array} */
         ramView: ()=>ram,
         /** The state block, for the block-based context capture and the tests. */

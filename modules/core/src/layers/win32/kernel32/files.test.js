@@ -2144,3 +2144,26 @@ test('a library this build implements stands in the system folder as a file', ()
         GENERIC_READ, 0, 0, OPEN_EXISTING, 0, 0]) === INVALID_HANDLE_VALUE, false,
     'a file on the volume is the file');
 });
+
+test('a read through an OVERLAPPED moves a synchronous handle\'s pointer, not an overlapped one\'s',
+    ()=>{
+        const { memory, files, fns, open } = setup({ ports: {
+            offsetOf: ()=>2,
+            completed: ()=>true,
+        } });
+        files.put('C:\\GAME\\SAVE.DAT', 'abcdefghij');
+        const plain = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+        assert.equal(fns.ReadFile.handler([plain, 0x600, 3, 0x700, 0x500]), 1);
+        assert.equal(memory.readCString(0x600, 3), 'cde', 'at the OVERLAPPED\'s offset');
+        assert.equal(fns.SetFilePointer.handler([plain, 0, 0, FILE_CURRENT]), 5, 'moved past it');
+
+        memory.putString(0x800, 'C:\\GAME\\SAVE.DAT');
+        const overlapped = fns.CreateFileA.handler([0x800, GENERIC_READ, 0, 0, OPEN_EXISTING,
+            0x40000000, 0]);
+        assert.equal(fns.ReadFile.handler([overlapped, 0x600, 3, 0x700, 0x500]), 1);
+        assert.equal(fns.SetFilePointer.handler([overlapped, 0, 0, FILE_CURRENT]), 0,
+            'FILE_FLAG_OVERLAPPED: no pointer moved');
+        assert.equal(fns.ReadFile.handler([overlapped, 0x600, 3, 0x700, 0]), 1);
+        assert.equal(fns.SetFilePointer.handler([overlapped, 0, 0, FILE_CURRENT]), 3,
+            'a read with no OVERLAPPED still moves it');
+    });

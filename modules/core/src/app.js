@@ -16,7 +16,8 @@ import { createPresenter } from './layers/graphics/webgpu/internal/presenter.js'
 import { baseOf, compositionPlan, needsComposing } from './layers/graphics/webgpu/internal/compose.js';
 import { connectGraphicsWorker, portEnd } from './layers/graphics/remote/connect.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
-import { parsePe, readExports, readImports, rvaToFileOffset } from './layers/loader/internal/pe.js';
+import { DIR_EXPORT, parseExportDirectory, parsePe, readExports, readImports, rvaToFileOffset }
+    from './layers/loader/internal/pe.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
 import {
     findResource, listResources, loadString, RT_STRING, stringInBundle,
@@ -5316,21 +5317,50 @@ async function buildApp(options){
     // An executable exports too: a library a program ships imports from the
     // program that loads it, by name or by ordinal, and is bound to those
     // addresses the way it is bound to any other module's.
+    //
+    // Read out of the mapping when asked, as Windows reads them, never out of
+    // the file at load: an executable may carry its table encoded and write it
+    // out in place before it asks for its own exports. Read again whenever the
+    // directory's head has changed since; one the image could not hold is no
+    // exports at all, said once.
     const ownImage = parsePe(options.executable);
-    const ownExports = readExports(options.executable, ownImage).exports;
-    const ownByName = new Map(ownExports
-        .filter(entry=>entry.name !== null && entry.forwards === null)
-        .map(entry=>[String(entry.name), image.base + entry.rva]));
-    const ownByOrdinal = new Map(ownExports
-        .filter(entry=>entry.forwards === null)
-        .map(entry=>[entry.ordinal, image.base + entry.rva]));
+    const ownDirectory = ownImage.directories[DIR_EXPORT];
+    /** @type {{ head: string, byName: Map<string, number>, byOrdinal: Map<number, number> } | null} */
+    let ownTable = null;
+    let ownRefusal = '';
+    const ownExports = ()=>{
+        if (!ownDirectory || ownDirectory.size === 0)
+        {
+            return null;
+        }
+        const head = [...memory.readBytes(image.base + ownDirectory.address, 40)].join(',');
+        if (ownTable?.head !== head)
+        {
+            const parsed = parseExportDirectory((rva, length)=>(rva >= ownImage.sizeOfImage ? null
+                : memory.readBytes(image.base + rva, Math.min(length, ownImage.sizeOfImage - rva))),
+            ownDirectory);
+            if (parsed.refused !== null && parsed.refused !== ownRefusal)
+            {
+                ownRefusal = parsed.refused;
+                events.emit('exports-refused', { name: mainModule.path, reason: parsed.refused });
+            }
+            const resolved = parsed.exports.filter(entry=>entry.forwards === null);
+            ownTable = {
+                head,
+                byName: new Map(resolved.filter(entry=>entry.name !== null)
+                    .map(entry=>[String(entry.name), image.base + entry.rva])),
+                byOrdinal: new Map(resolved.map(entry=>[entry.ordinal, image.base + entry.rva])),
+            };
+        }
+        return ownTable;
+    };
     mainModule = {
         name: 'app.exe',
         base: image.base,
         /** @param {string} exported */
-        addressOf: exported=>ownByName.get(exported) ?? null,
+        addressOf: exported=>ownExports()?.byName.get(exported) ?? null,
         /** @param {number} ordinal */
-        addressOfOrdinal: ordinal=>ownByOrdinal.get(ordinal) ?? null,
+        addressOfOrdinal: ordinal=>ownExports()?.byOrdinal.get(ordinal) ?? null,
         // Kept because a program reads its own resources, and a resource
         // directory is read out of the file rather than out of the mapping.
         file: options.executable,

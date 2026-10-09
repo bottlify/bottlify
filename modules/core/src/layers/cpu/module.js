@@ -1083,6 +1083,16 @@ export function createCpuModule(){
                     state.stacks.push([base >>> 0, size >>> 0]);
                     state.host?.noteStack?.(base >>> 0, size >>> 0);
                 },
+                /**
+                 * Opens or closes pages to the program (the host's `pageAccess`):
+                 * false where the engine does not fault a read of a closed page,
+                 * and then nothing changes.
+                 *
+                 * @param {number} address @param {number} length @param {boolean} open
+                 * @returns {boolean}
+                 */
+                pageAccess: (address, length, open)=>
+                    state.host?.pageAccess?.(address, length, open) ?? false,
 
                 instructionCount: ()=>started().instructionCount(),
                 compiledModules: ()=>started().compiledModules(),

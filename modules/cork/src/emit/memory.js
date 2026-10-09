@@ -44,6 +44,19 @@ export const HELD = 1;
 export const PRECISION = 2;
 
 /**
+ * Whether an instruction that only reads is left untested, its address wrapped
+ * into RAM: not under `precise`, nor `checkReads`, where a page the program
+ * cannot read faults, and only with RAM a power of two.
+ *
+ * @param {{ precise?: boolean, checkReads?: boolean }} context
+ * @param {{ ramSize: number }} layout
+ */
+export function readsWrapped(context, layout){
+    return context.precise !== true && context.checkReads !== true
+        && (layout.ramSize & layout.ramSize - 1) === 0;
+}
+
+/**
  * Stores whose code note `checkAccess` already made, by the instruction they
  * belong to: `noteStore` for that instruction only keeps the undo log.
  *
@@ -82,8 +95,8 @@ export function checkAccess(e, size, { counted = true, store = false } = {}){
     // one `and` for a shift, a load and a branch. A read past the end of
     // guest memory then reads RAM where it raised #GP.
     const { ramSize } = e.layout;
-    if (!store && e.context.precise !== true && (ramSize & ramSize - 1) === 0
-        && e.layout.codePages < 0 && readsOnly(e.current))
+    if (!store && readsWrapped(e.context, e.layout) && e.layout.codePages < 0
+        && readsOnly(e.current))
     {
         b.localGet(Local.addr).i32const(ramSize - 1).op(I32.and).localSet(Local.addr);
         return;

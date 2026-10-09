@@ -53,7 +53,7 @@ import {
 import { emitInstruction } from './integer.js';
 import {
     addUndoHelper, copyPlan, emitGroupChecks, emitStaleExit, emitStreamWindow, planBlock,
-    planLoop, planRegion,
+    planLoop, planRegion, readsWrapped,
 } from './memory.js';
 import { importHelpers } from './helpers.js';
 import { Tables, blockProfileAt, blockSlot, hashSlotsOf } from '../runtime/layout.js';
@@ -222,6 +222,7 @@ const LOCAL_TYPES = [
  *     rounds to single with no test of its own, and a block leaves with `PRECISION` if it
  *     finds another precision set
  * @property {boolean} [atomic]  locked instructions as wasm atomics (`locked.js`)
+ * @property {boolean} [checkReads]  an instruction that only reads tests its pages too
  * @property {boolean} [precise]  every relaxation off (the runtime's `precise`): the x87
  *     exception flags, the signalling-NaN tests, the underflow test and C1 kept as the processor
  *     keeps them, the flags an instruction leaves undefined keeping the values the emulator
@@ -273,8 +274,10 @@ const LOCAL_TYPES = [
  *     countTransfers?: boolean, wide?: boolean, narrow?: boolean, blockProfile?: boolean,
  *     structure?: boolean, precise?: boolean, place?: number, profileCalls?: boolean,
  *     resume?: boolean, callReturn?: boolean, looseStacks?: boolean,
- *     atomic?: boolean }}
- *     [options]  atomic: locked instructions as wasm atomics (`locked.js`), for a process
+ *     atomic?: boolean, checkReads?: boolean }}
+ *     [options]  checkReads: an instruction that only reads tests its pages too, so a page
+ *     the program cannot read faults (a reservation not committed, PAGE_NOACCESS) rather
+ *     than reading RAM; atomic: locked instructions as wasm atomics (`locked.js`), for a process
  *     whose threads run on more than one executor; looseStacks: a store through esp alone
  *     tests no page (`emitGroupChecks`), which holds while no translated code lies on a
  *     thread's stack (the runtime's
@@ -295,7 +298,7 @@ export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
         wide = false, narrow = false, blockProfile = false, structure = true, precise = false,
         place = 0, profileCalls = false, resume = false, callReturn = false,
-        looseStacks = false, atomic = false } = {})
+        looseStacks = false, atomic = false, checkReads = false } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -386,6 +389,10 @@ export function prepareModule(m, layout, features, memory = {},
     else if (looseStacks && undoLog !== true)
     {
         context.looseStacks = true;
+    }
+    if (checkReads)
+    {
+        context.checkReads = true;
     }
     if (atomic)
     {
@@ -1038,8 +1045,7 @@ export class RegionEmitter {
             : this.layout.codePages < 0
                 ? planRegion(blocks, { entry: this.region.entry, backward: flat,
                     heads: new Set([...this.loopEnds.keys(), ...this.x87.cut]),
-                    returns: this.returns, masked: this.context.precise !== true
-                        && (this.layout.ramSize & this.layout.ramSize - 1) === 0 })
+                    returns: this.returns, masked: readsWrapped(this.context, this.layout) })
                 : null;
         if (this.copies.length > 0 && !this.copyFunction)
         {

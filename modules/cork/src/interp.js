@@ -378,7 +378,7 @@ class BlockMemory {
     loadLocked(address, size){
         if (this.inaccessible(address, size))
         {
-            throw this.fault();
+            throw this.fault(address, size, true);
         }
         const at = this.ramBase + address;
         if ((at & (size - 1)) === 0)
@@ -450,7 +450,7 @@ class BlockMemory {
     exchangeQword(address, expected, value){
         if (this.inaccessible(address, 8))
         {
-            throw this.fault();
+            throw this.fault(address, 8, true);
         }
         const at = this.ramBase + address;
         let held;
@@ -516,8 +516,19 @@ class BlockMemory {
         return granule >= this.view.getUint8(range) && granule < this.view.getUint8(range + 1);
     }
 
-    fault(){
-        return new Fault(13, this.owner.faultEip);
+    /**
+     * The fault of an access to a page the program cannot reach: #GP here, as
+     * translated code raises it, carrying the first byte it could not reach and
+     * whether it wrote -- what a host reports as a page fault's address, and
+     * what a program's handler reads to commit the page and go on.
+     *
+     * @param {number} address @param {number} size @param {boolean} write
+     */
+    fault(address, size, write){
+        const first = (this.pageFlags[address >>> 12] & PageFlag.INACCESSIBLE) !== 0
+            ? address : ((address + size - 1) & ~0xfff) >>> 0;
+        return Object.assign(new Fault(13, this.owner.faultEip),
+            { address: first >>> 0, write });
     }
 
     /**
@@ -531,7 +542,7 @@ class BlockMemory {
             ? (this.pageFlags[address >>> 12] & PageFlag.INACCESSIBLE) !== 0
             : this.inaccessible(address, size))
         {
-            throw this.fault();
+            throw this.fault(address, size, false);
         }
         const offset = this.ramBase + address;
         return size === 1 ? this.ramBytes[address]
@@ -546,7 +557,7 @@ class BlockMemory {
         // holding translated code -- has nothing to test after its flag.
         if (!plain && this.inaccessible(address, size))
         {
-            throw this.fault();
+            throw this.fault(address, size, true);
         }
         if (size === 1)
         {

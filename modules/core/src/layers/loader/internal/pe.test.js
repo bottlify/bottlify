@@ -12,7 +12,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { parsePe, readImports, readExports, rvaToFileOffset, applyRelocations, DIR_EXPORT }
+import { parsePe, readImports, readExports, rvaToFileOffset, applyRelocations, DIR_EXPORT,
+    parseExportDirectory }
     from './pe.js';
 import { synthesiseModule } from './synth.js';
 import { buildImage, mapImage } from './image.js';
@@ -242,4 +243,35 @@ test('an export pointing inside the directory is a forwarder, not code', ()=>{
     const { exports } = readExports(bytes, image);
     assert.equal(exports.length, 1);
     assert.equal(exports[0].forwards, 'OTHER.Beta');
+});
+
+test('an export directory the image cannot hold is refused with its reason, not thrown', ()=>{
+    // An executable may carry its table encoded and write it out in place
+    // before it asks for its own exports: what the file holds there is noise,
+    // counts in the hundreds of millions and tables far past the image.
+    const module = synthesiseModule({
+        name: 'sample.dll',
+        base: 0x02000000,
+        exports: [{ name: 'Alpha', target: 0x11110000 }],
+    });
+    const image = parsePe(module.bytes);
+    const directory = image.directories[DIR_EXPORT];
+    const bytes = module.bytes.slice();
+    const head = rvaToFileOffset(image, directory.address);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    view.setUint32(head + 20, 342396563, true);
+    view.setUint32(head + 28, 0x5ec159bc, true);
+
+    const garbled = readExports(bytes, image);
+    assert.deepEqual(garbled.exports, []);
+    assert.match(String(garbled.refused), /outside the image/);
+
+    // The same directory read through the mapping once the program wrote it
+    // out: the reader decides where the bytes come from.
+    const fixed = parseExportDirectory((rva, length)=>{
+        const at = rvaToFileOffset(image, rva);
+        return module.bytes.subarray(at, at + length);
+    }, directory);
+    assert.equal(fixed.refused, null);
+    assert.deepEqual(fixed.exports.map(entry=>entry.name), ['Alpha']);
 });

@@ -269,3 +269,22 @@ test('a callback that says stop ends the name enumeration with FALSE', ()=>{
     assert.equal(missing.fns.EnumResourceNamesW.handler([0, 99, 0x401000, 0]), 0);
     assert.deepEqual(missing.errors, [1813]);
 });
+
+test('the types of an image are enumerated once each, a string type placed for its callback', ()=>{
+    const { fns, called, placed, freed } = setup();
+    assert.equal(fns.EnumResourceTypesA.handler([0, 0x401000, 0x77]), 1);
+    assert.deepEqual(called.map(({ args })=>args),
+        [[0, RT_STRING, 0x77], [0, RT_BITMAP, 0x77], [0, 0x50000, 0x77]],
+        'a type with several names is one type');
+    assert.deepEqual(placed, [{ bytes: 8, text: 'TESTDLL\0' }]);
+    assert.deepEqual(freed, [0x50000], 'the string lives for its callback only');
+    assert.equal(fns.EnumResourceTypesW.argBytes, 12);
+
+    const stopped = setup({ reply: ()=>0 });
+    assert.equal(stopped.fns.EnumResourceTypesW.handler([0, 0x401000, 0]), 0, 'stopped: FALSE');
+    assert.equal(stopped.called.length, 1);
+
+    const none = setup();
+    assert.equal(none.fns.EnumResourceTypesA.handler([0, 0, 0]), 0);
+    assert.deepEqual(none.errors, [1812], 'no callback: ERROR_RESOURCE_DATA_NOT_FOUND');
+});

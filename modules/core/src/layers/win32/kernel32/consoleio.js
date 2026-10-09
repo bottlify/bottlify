@@ -208,6 +208,17 @@ export function createConsoleIoFunctions(host){
         },
         FreeConsole: { argBytes: 0, handler: ()=>1 },
 
+        /**
+         * DWORD GetConsoleTitleA/W(LPTSTR lpConsoleTitle, DWORD nSize) and
+         * BOOL SetConsoleTitleA/W(LPCTSTR lpConsoleTitle): a console's title,
+         * and there is no console to have one -- they fail as on a process
+         * whose console was never made, and the program goes on without it.
+         */
+        GetConsoleTitleA: { argBytes: 8, handler: ()=>fail(ERROR_INVALID_HANDLE) },
+        GetConsoleTitleW: { argBytes: 8, handler: ()=>fail(ERROR_INVALID_HANDLE) },
+        SetConsoleTitleA: { argBytes: 4, handler: ()=>fail(ERROR_INVALID_HANDLE) },
+        SetConsoleTitleW: { argBytes: 4, handler: ()=>fail(ERROR_INVALID_HANDLE) },
+
         /** HWND GetConsoleWindow(void): there is no console, so no window of one */
         GetConsoleWindow: { argBytes: 0, handler: ()=>0 },
 

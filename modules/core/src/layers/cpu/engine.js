@@ -128,6 +128,11 @@
  *     instruction leaves undefined left as the instruction model leaves them rather than as the
  *     cheapest code does. Default false, as games run; the
  *     corpora run with it.
+ * @property {boolean} [checkReads]      An instruction that only reads tests its pages as a store
+ *     does, so a page the program cannot reach -- a reservation's page not committed, one
+ *     protected PAGE_NOACCESS -- faults with its address, as on Windows, and those pages are
+ *     closed (`pageAccess`). Default false: a translated read is wrapped into RAM, and every
+ *     page reads.
  * @property {boolean} [atomic]          Locked instructions (`lock`-prefixed read-modify-writes,
  *     `xchg` with memory) as wasm atomics, each indivisible on the shared memory: for a process
  *     whose threads run on more than one executor. Default false.
