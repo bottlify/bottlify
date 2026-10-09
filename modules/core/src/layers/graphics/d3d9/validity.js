@@ -108,6 +108,17 @@ export const RESOURCE_VALIDITY = Object.freeze([
 
     { pool: D3DPOOL.SYSTEMMEM, format: FORMAT_KIND.COLOUR, usage: 0, valid: true },
     { pool: D3DPOOL.SYSTEMMEM, format: FORMAT_KIND.DEPTH, usage: 0, valid: false },
+    // A dynamic texture in system memory is one the program fills often and
+    // copies up itself; only the managed and scratch pools refuse DYNAMIC
+    // (Wine's d3d8 and d3d9 test_volume_locking and test_lockrect).
+    {
+        pool: D3DPOOL.SYSTEMMEM, format: FORMAT_KIND.COLOUR,
+        usage: D3DUSAGE.DYNAMIC, valid: true,
+    },
+    {
+        pool: D3DPOOL.SYSTEMMEM, format: FORMAT_KIND.DEPTH,
+        usage: D3DUSAGE.DYNAMIC, valid: false,
+    },
     {
         pool: D3DPOOL.SYSTEMMEM, format: FORMAT_KIND.COLOUR,
         usage: D3DUSAGE.RENDERTARGET, valid: false,

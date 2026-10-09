@@ -74,7 +74,7 @@ test('a back buffer count of zero is reported back as one', ()=>{
 test('the pool, format and usage table is D3D9 own, row for row', ()=>{
     assert.equal(RESOURCE_VALIDITY, RESOURCE_VALIDITY_9,
         'a second copy of this table is free to drift from the first');
-    assert.equal(RESOURCE_VALIDITY.length, 30);
+    assert.equal(RESOURCE_VALIDITY.length, 32);
 });
 
 test('every row of the shared table answers the same way through both entry points', ()=>{
@@ -88,6 +88,19 @@ test('every row of the shared table answers the same way through both entry poin
         assert.equal(createResult(SURFACE_TYPE.CUBE, format, row.pool, row.usage, support),
             expected, `cube pool ${row.pool} usage ${row.usage} ${row.format}`);
     }
+});
+
+test('DYNAMIC is refused in the managed pool and taken in the default and system pools', ()=>{
+    // Wine's d3d8 test_lockrect and test_volume_locking: a dynamic texture in
+    // system memory is created; only MANAGED (and D3D9's SCRATCH) refuse it.
+    const support = { depthTexture2d: true, depthCube: true, depthPlain: true };
+    const at = (/** @type {number} */ pool, /** @type {number} */ format)=>
+        createResult(SURFACE_TYPE.TEXTURE_2D, format, pool, D3DUSAGE.DYNAMIC, support);
+    assert.equal(at(D3DPOOL.DEFAULT, D3DFMT.A8R8G8B8), D3D_OK);
+    assert.equal(at(D3DPOOL.SYSTEMMEM, D3DFMT.A8R8G8B8), D3D_OK);
+    assert.equal(at(D3DPOOL.MANAGED, D3DFMT.A8R8G8B8), D3DERR_INVALIDCALL);
+    assert.equal(at(D3DPOOL.SYSTEMMEM, D3DFMT.D24S8), D3DERR_INVALIDCALL,
+        'a depth texture lives in video memory only');
 });
 
 test('a depth format is a texture only where the adapter says so', ()=>{

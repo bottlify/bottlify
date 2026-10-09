@@ -573,8 +573,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      * everything after that looks merely slow rather than wrong.
      *
      * @param {number} format D3DFMT
+     * @param {number} [pool]  D3DPOOL, where the refusal came from the pool x usage table.
+     * @param {number} [usage] D3DUSAGE bits.
      */
-    const reportRefusedFormat = format=>{
+    const reportRefusedFormat = (format, pool, usage)=>{
         if (!services.divergence || refusedFormats.has(format))
         {
             return;
@@ -584,7 +586,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         services.divergence('Direct3D 8',
             `a texture in format ${name ? name[0] : format} was refused: this device`
             + ' does not offer it, and a program with no other copy of the art will'
-            + ' either convert it itself or go without');
+            + ' either convert it itself or go without'
+            + (pool === undefined ? '' : ` (pool ${pool}, usage 0x${(usage ?? 0).toString(16)})`));
     };
 
     let presentParameters = parameters;
@@ -2711,7 +2714,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 // format costs a run its art with no trace anywhere: the
                 // program takes a slower path of its own and everything after
                 // looks merely slow rather than wrong.
-                reportRefusedFormat(format);
+                reportRefusedFormat(format, pool, usage);
                 return hr;
             }
             const chain = levels || fullChainOf(width, height);
