@@ -80,7 +80,7 @@ function machine(){
     const published = new Map();
     /** @type {Map<any, Map<string, number>>} */
     const pointers = new Map();
-    /** @type {{ entry: number, args: number[], done?: () => void }[]} */
+    /** @type {{ entry: number, args: number[], done?: () => void, tag?: any }[]} */
     const queue = [];
     const thread = { name: 'main' };
 
@@ -171,8 +171,17 @@ function machine(){
             },
             objectAt: (/** @type {number} */ at)=>published.get(at)?.object ?? null,
             notices: {
-                /** @param {number} entry @param {number[]} args @param {() => void} [done] */
-                deliver: (entry, args, done)=>queue.push({ entry, args, done }),
+                /**
+                 * @param {number} entry @param {number[]} args @param {() => void} [done]
+                 * @param {any} [tag]
+                 */
+                deliver: (entry, args, done, tag)=>queue.push({ entry, args, done, tag }),
+                /** @param {any} tag */
+                drop(tag){
+                    const dropped = queue.filter(notice=>notice.tag === tag);
+                    queue.splice(0, queue.length, ...queue.filter(notice=>notice.tag !== tag));
+                    return dropped;
+                },
             },
         },
     };
@@ -417,16 +426,32 @@ test('only the source pin can be connected, and only by name', async()=>{
     assert.equal(await m.invoke(graph, 'Connect', [seen.pin, seen.pin]), VFW_E_CANNOT_CONNECT);
 });
 
-test('releasing the graph stops the renderer and takes it out of the graph', async()=>{
-    const { m, graphObject, seen } = await built();
+/**
+ * The program's Release, as the bridge runs it: what the object owes as its
+ * last reference goes is waited for first.
+ *
+ * @param {import('../ole32/objects.js').ComObject} object
+ */
+async function releaseAll(object){
+    while (object.refCount > 0)
+    {
+        if (object.refCount === 1)
+        {
+            await object.lastRelease?.();
+        }
+        object.release();
+    }
+}
+
+test('the last Release stops the renderer and takes it out of the graph first', async()=>{
+    const { m, graphObject, seen, tick } = await built();
     const control = m.host.stream.publish(graphObject, IID_IMEDIA_CONTROL);
     await m.invoke(control, 'Run');
+    tick(0);
+    assert.equal(m.host.queue.length, 1, 'a sample is owed');
     const before = seen.refs;
-    while (graphObject.refCount > 0)
-    {
-        graphObject.release();
-    }
-    await m.pump();
+    await releaseAll(graphObject);
+    assert.equal(m.host.queue.length, 0, 'and taken back: nothing is left for later');
     assert.equal(seen.states.at(-1), 'stop');
     assert.equal(seen.graph, 0, 'told it is in no graph');
     assert.equal(seen.connector, 0, 'disconnected');
@@ -446,3 +471,25 @@ test('the sample a renderer is given is the frame, bottom-up, rows padded to fou
     ]);
 });
 
+test('rendering the source pin plays the film in the window of the graph', async()=>{
+    const m = machine();
+    const registry = createComRegistry();
+    const { tick } = registerQuartzClasses(registry, /** @type {any} */ (m.host));
+    const graphObject = registry.create(CLSID_FILTER_GRAPH);
+    assert.ok(graphObject);
+    const graph = m.host.stream.publish(graphObject, IID_IGRAPH_BUILDER);
+    const path = m.allocate(128);
+    m.host.putWide(path, String.raw`C:\App\Movies\Intro.avi`);
+    const out = m.allocate(4);
+    assert.equal(await m.invoke(graph, 'AddSourceFilter', [path, 0, out]), S_OK);
+    const name = m.allocate(32);
+    m.host.putWide(name, 'Output');
+    assert.equal(m.invoke(m.view.getUint32(out, true), 'FindPin', [name, out]), S_OK);
+    assert.equal(await m.invoke(graph, 'Render', [m.view.getUint32(out, true)]), S_OK);
+    await m.invoke(m.host.stream.publish(graphObject, IID_IMEDIA_CONTROL), 'Run');
+    tick(0);
+    const shown = tick(150);
+    assert.ok(shown, 'a frame for the window');
+    assert.equal(shown.width, 2);
+    assert.equal(m.host.queue.length, 0, 'nothing for a renderer of the program');
+});

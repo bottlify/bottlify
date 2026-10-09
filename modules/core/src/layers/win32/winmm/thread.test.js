@@ -175,3 +175,16 @@ test('a routine of fewer arguments gets zeros for the rest, and is told of its r
     assert.deepEqual(returned, ['first', 'second']);
     assert.equal(m.notices.diagnostics().running, false);
 });
+
+test('notices taken back by their tag never reach the loop', ()=>{
+    const m = machine();
+    const going = {};
+    m.notices.deliver(0xa0, [1]);
+    m.notices.deliver(0xa0, [2], undefined, going);
+    m.notices.deliver(0xa0, [3]);
+    m.notices.deliver(0xa0, [4], undefined, going);
+    assert.deepEqual(m.notices.drop(going).map(notice=>notice.args[0]), [2, 4]);
+    assert.equal(m.record(m.ask()).args[0], 1);
+    assert.equal(m.record(m.ask()).args[0], 3);
+    assert.equal(m.ask(), PARKED);
+});

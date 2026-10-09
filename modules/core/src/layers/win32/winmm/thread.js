@@ -106,7 +106,7 @@ export function createNoticeThread(deps){
     const name = deps.name ?? 'winmm';
     const reason = deps.reason ?? 'a wave notice';
     const trap = deps.trap ?? '<wave-notices>';
-    /** @type {{ entry: number, args: number[], done?: () => void }[]} */
+    /** @type {{ entry: number, args: number[], done?: () => void, tag?: any }[]} */
     const queue = [];
     /** The notice whose routine is running: its loop has not asked again yet. */
     /** @type {{ done?: () => void } | null} */
@@ -168,9 +168,10 @@ export function createNoticeThread(deps){
          * @param {number[]} args  Up to five; the loop pushes five whatever the
          *        routine takes, and missing ones are zero.
          * @param {() => void} [done]  Called once the routine has returned.
+         * @param {any} [tag]  What `drop` finds it by.
          */
-        deliver(entry, args, done){
-            queue.push({ entry, args: args.slice(0, 5), done });
+        deliver(entry, args, done, tag){
+            queue.push({ entry, args: args.slice(0, 5), done, tag });
             if (thread === null)
             {
                 start();
@@ -181,6 +182,28 @@ export function createNoticeThread(deps){
                 waiting = null;
                 deps.wake(woken, handOut());
             }
+        },
+
+        /**
+         * Takes back every queued notice with this tag that has not started:
+         * the object it was for is going, and a call made after it went is a
+         * call into freed memory. One already running is the caller's to wait
+         * for.
+         *
+         * @param {any} tag
+         * @returns {{ entry: number, args: number[], done?: () => void }[]} what was taken back
+         */
+        drop(tag){
+            /** @type {{ entry: number, args: number[], done?: () => void }[]} */
+            const dropped = [];
+            for (let at = queue.length - 1; at >= 0; at--)
+            {
+                if (queue[at].tag === tag)
+                {
+                    dropped.unshift(...queue.splice(at, 1));
+                }
+            }
+            return dropped;
         },
 
         diagnostics: ()=>({

@@ -454,16 +454,14 @@ export function createVtables({ memory, register, heap }){
             case 'addRef':
                 return object.addRef(interfaceId);
             case 'release': {
-                const left = object.release(interfaceId);
-                if (left === 0)
-                {
-                    releasedToZero(object, interfaceId);
-                }
-                if (heldAtZero.size > 0)
-                {
-                    sweepHeld();
-                }
-                return left;
+                // The last reference of an object that owes the program calls as
+                // it goes: those are made, and waited for, before it goes.
+                const owed = object.refCount === 1 && object.lastRelease
+                    ? object.lastRelease()
+                    : undefined;
+                return typeof owed?.then === 'function'
+                    ? owed.then(()=>release(object, interfaceId))
+                    : release(object, interfaceId);
             }
             default:
                 if (!method.invoke)
@@ -479,6 +477,20 @@ export function createVtables({ memory, register, heap }){
                 // started.
                 return thenableOrDword(method.invoke(object, args));
         }
+    }
+
+    /** @param {any} object @param {string} interfaceId */
+    function release(object, interfaceId){
+        const left = object.release(interfaceId);
+        if (left === 0)
+        {
+            releasedToZero(object, interfaceId);
+        }
+        if (heldAtZero.size > 0)
+        {
+            sweepHeld();
+        }
+        return left;
     }
 
     /**
