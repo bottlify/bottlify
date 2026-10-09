@@ -104,9 +104,13 @@ function jumpFrom(decoded, rva){
     const offset = rvaToFileOffset(decoded.image, rva);
     const view = new DataView(decoded.bytes.buffer, decoded.bytes.byteOffset,
         decoded.bytes.byteLength);
-    assert.equal(decoded.bytes[offset], 0xe9, 'export RVA points at a JMP rel32');
-    const displacement = view.getInt32(offset + 1, true);
-    return { target: (BASE + rva + 5 + displacement) >>> 0, displacement };
+    // Opened by `mov edi, edi`, as a Windows API is: a jump as the first
+    // instruction is what a hook looks like to a program that checks.
+    assert.deepEqual([...decoded.bytes.subarray(offset, offset + 2)], [0x8b, 0xff],
+        'export RVA opens with mov edi, edi');
+    assert.equal(decoded.bytes[offset + 2], 0xe9, 'and then a JMP rel32');
+    const displacement = view.getInt32(offset + 3, true);
+    return { target: (BASE + rva + 7 + displacement) >>> 0, displacement };
 }
 
 /**

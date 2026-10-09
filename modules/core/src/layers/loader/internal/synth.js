@@ -54,6 +54,13 @@ const HEADERS_SIZE = PAGE;
 /** Each export gets a whole slot, so code that reads past the JMP finds int3, not the next export. */
 const TRAMPOLINE_STRIDE = 0x10;
 const JMP_REL32 = 0xe9;
+/**
+ * `mov edi, edi`: the two-byte no-op every Windows API since XP SP2 opens
+ * with, for hot patching. A trampoline that opens with its jump looks like
+ * an API someone has hooked, and a program that checks its imports for hooks
+ * -- a jump out of the module as the first instruction -- refuses to run.
+ */
+const HOT_PATCH_PROLOGUE = [0x8b, 0xff];
 const INT3 = 0xcc;
 
 const EXPORT_DIRECTORY_SIZE = 40;
@@ -235,10 +242,12 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
         }
         else
         {
-            bytes[rva] = JMP_REL32;
+            bytes.set(HOT_PATCH_PROLOGUE, rva);
+            const jump = rva + HOT_PATCH_PROLOGUE.length;
+            bytes[jump] = JMP_REL32;
             // Relative to the instruction after the jump; 32-bit EIP arithmetic wraps,
             // so any pair of guest addresses is reachable regardless of sign.
-            view.setUint32(rva + 1, ((entry.target ?? 0) - (base + rva + 5)) >>> 0, true);
+            view.setUint32(jump + 1, ((entry.target ?? 0) - (base + jump + 5)) >>> 0, true);
         }
         view.setUint32(functionsRva + (ordinals[index] - ordinalBase) * 4, exportRva(index), true);
     });
