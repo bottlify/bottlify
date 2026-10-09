@@ -41,7 +41,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
-    D3D8, D3D9, HWND, SOFTWARE_VERTEXPROCESSING, machine, random,
+    D3D9, HWND, SOFTWARE_VERTEXPROCESSING, machine, random,
 } from './guest-machine.itest.js';
 
 /** @typedef {import('./guest-machine.itest.js').Version} Version */
@@ -1181,8 +1181,14 @@ const DONE = ['SetRenderTarget', 'LockRect'];
 const DONE_8 = ['CopyRects'];
 const DONE_9 = ['StretchRect', 'Issue', 'GetData'];
 
-for (const version of [D3D8, D3D9])
-{
+/**
+ * The gate for one version. Each version's gate is a file of its own
+ * (`frames-contract-8.itest.js`, `-9`): together they run about a minute,
+ * which is the whole of the time a file is given.
+ *
+ * @param {Version} version
+ */
+export function frameGate(version){
     const nine = version === D3D9;
     test(`${nine ? 'Direct3D 9' : 'Direct3D 8'}: the GPU is given what it would be with every`
         + ' call a trap and with the device drawing on the program\'s thread, whatever a frame'
