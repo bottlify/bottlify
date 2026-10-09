@@ -1937,6 +1937,7 @@ export const isAffine = projection=>projection[3] === 0 && projection[7] === 0
  */
 export function pipelineStateOf(model, shape){
     const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
+    const rs9 = (/** @type {number} */ state)=>model.renderStates.get(state) ?? 0;
     let srcBlend = rs('SRCBLEND');
     let destBlend = rs('DESTBLEND');
     if (srcBlend === D3DBLEND.BOTHSRCALPHA)
@@ -1970,6 +1971,14 @@ export function pipelineStateOf(model, shape){
         srcBlend,
         destBlend,
         blendOp: rs('BLENDOP'),
+        // Direct3D 9's states; a Direct3D 8 model never sets them.
+        ...(rs9(D3DRS9.SEPARATEALPHABLENDENABLE) !== 0
+            ? {
+                srcBlendAlpha: rs9(D3DRS9.SRCBLENDALPHA),
+                destBlendAlpha: rs9(D3DRS9.DESTBLENDALPHA),
+                blendOpAlpha: rs9(D3DRS9.BLENDOPALPHA),
+            }
+            : {}),
         // A target whose format has no alpha channel must not be written with
         // one. Every backend renders into four channels because three-channel
         // targets do not exist, so the channel the program was told is absent

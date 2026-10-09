@@ -38,6 +38,9 @@ test('no reserved bit is set in the words a conformance test masks', ()=>{
     assert.equal(words.VertexProcessingCaps & ~(0x1 | 0x2 | 0x8 | 0x10 | 0x20 | 0x40 | 0x100
         | 0x200), 0);
     assert.equal(words.PrimitiveMiscCaps & ~0x003fdff2, 0);
+    // The pipeline blends alpha with its own factors under
+    // D3DRS_SEPARATEALPHABLENDENABLE, so the device says so.
+    assert.equal(words.PrimitiveMiscCaps & 0x00020000, 0x00020000);
     assert.equal(words.StencilCaps & ~0x1ff, 0);
     assert.equal(words.DeclTypes & ~0x3ff, 0);
 });

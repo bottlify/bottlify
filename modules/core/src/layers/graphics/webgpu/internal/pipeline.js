@@ -193,6 +193,10 @@ function lookUp(table, value, what){
  * @property {number} srcBlend
  * @property {number} destBlend
  * @property {number} blendOp
+ * @property {number} [srcBlendAlpha]    D3DRS_SEPARATEALPHABLENDENABLE's alpha
+ *     factors and operation; absent, alpha blends as colour does.
+ * @property {number} [destBlendAlpha]
+ * @property {number} [blendOpAlpha]
  * @property {number} colorWrite         D3DCOLORWRITEENABLE bits.
  * @property {boolean} alphaTest
  * @property {number} alphaFunc
@@ -270,6 +274,8 @@ export function pipelineKey(state){
         state.srcBlend,
         state.destBlend,
         state.blendOp,
+        state.srcBlendAlpha === undefined ? '-'
+            : `${state.srcBlendAlpha}/${state.destBlendAlpha}/${state.blendOpAlpha}`,
         state.colorWrite,
         state.alphaTest ? 1 : 0,
         state.alphaFunc,
@@ -389,9 +395,12 @@ export function pipelineDescriptor(state, layout){
                 operation: lookUp(BLEND_OP, state.blendOp, 'blend operation'),
             },
             alpha: {
-                srcFactor: lookUp(BLEND_FACTOR, state.srcBlend, 'source blend'),
-                dstFactor: lookUp(BLEND_FACTOR, state.destBlend, 'destination blend'),
-                operation: lookUp(BLEND_OP, state.blendOp, 'blend operation'),
+                srcFactor: lookUp(BLEND_FACTOR, state.srcBlendAlpha ?? state.srcBlend,
+                    'source blend'),
+                dstFactor: lookUp(BLEND_FACTOR, state.destBlendAlpha ?? state.destBlend,
+                    'destination blend'),
+                operation: lookUp(BLEND_OP, state.blendOpAlpha ?? state.blendOp,
+                    'blend operation'),
             },
         }
         : undefined;

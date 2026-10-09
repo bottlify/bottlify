@@ -132,7 +132,7 @@ test('the same state gives the same key, every time', ()=>{
     // Exact, because a key is compared by value and a diagnostic prints it.
     assert.equal(
         pipelineKey(baseState()),
-        '322|0|0|bgra8unorm|depth24plus|1|triangle-list|1|1|4|3|0|5|6|1|15|0|5|0/0|0[]|0|-',
+        '322|0|0|bgra8unorm|depth24plus|1|triangle-list|1|1|4|3|0|5|6|1|-|15|0|5|0/0|0[]|0|-',
     );
 });
 
@@ -215,6 +215,31 @@ test('cull mode names the face, not the winding', ()=>{
     assert.equal(cull(1), 'none');
     assert.equal(cull(2), 'back', 'D3DCULL_CW discards clockwise, which is the back face here');
     assert.equal(cull(3), 'front', 'and D3DCULL_CCW discards the front one');
+});
+
+test('a separate alpha blend is folded into the key and blends alpha on its own', ()=>{
+    // D3DRS_SEPARATEALPHABLENDENABLE: colour keeps SRCBLEND/DESTBLEND/BLENDOP
+    // and alpha takes SRCBLENDALPHA/DESTBLENDALPHA/BLENDOPALPHA.
+    const separate = { ...baseState(), blend: true, srcBlendAlpha: 2, destBlendAlpha: 1,
+        blendOpAlpha: 1 };
+    const key = pipelineKey(separate);
+    assert.notEqual(key, pipelineKey({ ...separate, srcBlendAlpha: undefined,
+        destBlendAlpha: undefined, blendOpAlpha: undefined }));
+    for (const [field, value] of [['srcBlendAlpha', 5], ['destBlendAlpha', 2],
+        ['blendOpAlpha', 2]])
+    {
+        assert.notEqual(pipelineKey({ ...separate, [field]: value }), key,
+            `changing ${field} left the key alone`);
+    }
+
+    const blend = pipelineDescriptor(separate, null).target.blend;
+    assert.deepEqual(blend?.color, { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha',
+        operation: 'add' });
+    assert.deepEqual(blend?.alpha, { srcFactor: 'one', dstFactor: 'zero', operation: 'add' });
+
+    const shared = pipelineDescriptor({ ...baseState(), blend: true }, null)
+        .target.blend;
+    assert.deepEqual(shared?.alpha, shared?.color, 'without it alpha blends as colour does');
 });
 
 test('a blend factor with no counterpart is refused, not approximated', ()=>{
