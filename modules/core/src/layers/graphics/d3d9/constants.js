@@ -265,6 +265,7 @@ export const D3DFMT = Object.freeze({
     // Signed bump-map offsets, which a pixel shader's texbem and the
     // fixed-function BUMPENVMAP read as -1..1.
     V8U8: 60,
+    L6V5U5: 61,
     Q8W8V8U8: 63,
     // One floating-point channel: what a shadow map of the Direct3D 9 era keeps its
     // depths in when the card samples no depth texture.
@@ -340,6 +341,9 @@ export const FORMAT_INFO = Object.freeze({
     [D3DFMT.V8U8]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: false, signed: true }),
     [D3DFMT.Q8W8V8U8]: Object.freeze({
         bytesPerPixel: 4, depth: false, alpha: true, signed: true }),
+    // U in bits 0-4 and V in 5-9, both signed, and an unsigned luminance in
+    // 10-15: the bump map with luminance hardware of the ps_1_1 era offered.
+    [D3DFMT.L6V5U5]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: false, signed: true }),
     [D3DFMT.R16F]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: false, float: true }),
     [D3DFMT.R32F]: Object.freeze({ bytesPerPixel: 4, depth: false, alpha: false, float: true }),
     [D3DFMT.D32]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),

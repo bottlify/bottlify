@@ -3955,6 +3955,16 @@ test('a signed bump map is sampled from rgba8snorm, U and V as they lie and the 
         [0x80, 0x7f, 0x7f, 0x7f, 0x01, 0xff, 0x7f, 0x7f]);
 });
 
+test('an L6V5U5 bump map widens its five-bit U and V and six-bit luminance into rgba8snorm', ()=>{
+    assert.equal(gpuFormatOf(D3DFMT.L6V5U5, 64, 64, false), 'rgba8snorm');
+    // U=+15 V=-16 L=63, then U=-1 V=0 L=0.
+    const first = 0x0f | (0x10 << 5) | (63 << 10);
+    const second = 0x1f;
+    const texels = Uint8Array.from([first & 0xff, first >>> 8, second & 0xff, second >>> 8]);
+    assert.deepEqual([...new Int8Array(expandTexels(D3DFMT.L6V5U5, texels, 2).buffer)],
+        [127, -127, 127, 127, -8, 0, 0, 127]);
+});
+
 test('a floating-point surface is an r16float, R32F narrowed to half precision on upload', ()=>{
     assert.equal(gpuFormatOf(D3DFMT.R16F, 64, 64, false), 'r16float');
     assert.equal(gpuFormatOf(D3DFMT.R32F, 64, 64, true), 'r16float');

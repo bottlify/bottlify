@@ -771,7 +771,7 @@ test('a signed bump-map format is a texture, sampled and never drawn into', ()=>
     // textures; the bump-map tests ask CheckDeviceFormat first.
     const d3d = createDirect3D9();
     const device = createDevice();
-    for (const format of [D3DFMT.V8U8, D3DFMT.Q8W8V8U8])
+    for (const format of [D3DFMT.V8U8, D3DFMT.L6V5U5, D3DFMT.Q8W8V8U8])
     {
         assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, format), D3D_OK);
         assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.RENDERTARGET, D3DRTYPE.TEXTURE, format),

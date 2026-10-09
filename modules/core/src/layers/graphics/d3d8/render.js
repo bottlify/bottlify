@@ -608,6 +608,22 @@ const TEXEL_EXPANSION = Object.freeze({
         return out;
     },
     [D3DFMT.Q8W8V8U8]: pixels=>pixels,
+    // U and V widened from five signed bits, the luminance from six unsigned
+    // ones into the positive half, and the alpha L6V5U5 lacks at 1.
+    [D3DFMT.L6V5U5]: (pixels, count)=>{
+        const out = new Int8Array(count * 4);
+        for (let index = 0; index < count; index++)
+        {
+            const packed = pixels[index * 2] | (pixels[index * 2 + 1] << 8);
+            const u = ((packed & 0x1f) << 27) >> 27;
+            const v = (((packed >>> 5) & 0x1f) << 27) >> 27;
+            out[index * 4] = Math.max(-127, Math.round(u * 127 / 15));
+            out[index * 4 + 1] = Math.max(-127, Math.round(v * 127 / 15));
+            out[index * 4 + 2] = Math.round((packed >>> 10) * 127 / 63);
+            out[index * 4 + 3] = 0x7f;
+        }
+        return new Uint8Array(out.buffer);
+    },
     // The floating-point formats go to `r16float` as numbers: R16F as it lies,
     // R32F narrowed to half precision.
     [D3DFMT.R16F]: (pixels, count)=>pixels.slice(0, count * 2),
