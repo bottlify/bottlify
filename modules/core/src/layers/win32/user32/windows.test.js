@@ -5663,3 +5663,29 @@ test('ShowWindow is WM_SHOWWINDOW and a SetWindowPos with the command\'s flags',
     assert.equal(context.dispatched.slice(before).filter(entry=>entry.message === WM_ACTIVATE)
         .length, 0, 'SW_SHOWNA activates nothing');
 });
+
+test('fErase says the background is still the program\'s to erase', ()=>{
+    // MSDN WM_ERASEBKGND: a procedure that answers zero did not erase, and
+    // BeginPaint's PAINTSTRUCT says so; one that erased, or a paint asked
+    // for without an erase, leaves fErase FALSE.
+    const WM_ERASEBKGND = 0x0014;
+    const PAINT = 0x11800;
+    let answer = 0;
+    const { fns, memory, hwnd } = withWindow({ paint: true,
+        reply: message=>(message.message === WM_ERASEBKGND ? answer : 1) });
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    /** @param {number} erase  InvalidateRect's bErase */
+    const fErase = erase=>{
+        fns.ValidateRect.handler([hwnd, 0]);
+        fns.InvalidateRect.handler([hwnd, 0, erase]);
+        fns.BeginPaint.handler([hwnd, PAINT]);
+        const said = memory.u32(PAINT + 4);
+        fns.EndPaint.handler([hwnd, PAINT]);
+        return said;
+    };
+    assert.equal(fErase(1), 1, 'answered zero: not erased');
+    answer = 1;
+    assert.equal(fErase(1), 0, 'erased');
+    answer = 0;
+    assert.equal(fErase(0), 0, 'no erase asked for');
+});

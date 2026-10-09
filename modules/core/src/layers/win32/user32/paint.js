@@ -151,6 +151,8 @@ const DCX_CACHE = 0x0002;
 const DCX_EXCLUDERGN = 0x0040;
 const DCX_INTERSECTRGN = 0x0080;
 
+/** @typedef {{ hdc: number, rect: Rect, erase: boolean }} PaintStarted */
+
 /**
  * @typedef {Object} HeldContext
  * @property {any} record  The window it is on.
@@ -1058,14 +1060,17 @@ export function createPaintFunctions(options){
      * window's own procedure -- which is what makes BeginPaint the moment a
      * window's frame appears. Only measuring leaves the update area alone.
      *
+     * `erase` is what PAINTSTRUCT's fErase says: the background is still
+     * the program's to erase.
+     *
      * @param {any} record @param {boolean} [measuring]
-     * @returns {{ hdc: number, rect: Rect } | Promise<{ hdc: number, rect: Rect }>}
+     * @returns {PaintStarted | Promise<PaintStarted>}
      */
     const beginPaint = (record, measuring = false)=>{
         const hdc = contextOn(record);
         if (measuring)
         {
-            return { hdc, rect: clientArea(record) };
+            return { hdc, rect: clientArea(record), erase: false };
         }
         // With nothing to paint, the paint is of nothing: rcPaint empty and
         // every pixel clipped, as Windows clips to an empty update region. A
@@ -1088,16 +1093,18 @@ export function createPaintFunctions(options){
             // region itself, so two far corners do not paint the span between.
             limitContext(hdc, area);
         }
-        const result = { hdc, rect: dirty };
         if (hdc === 0)
         {
-            return result;
+            return { hdc, rect: dirty, erase };
         }
         // Named before the first send: the second one may follow an await,
         // after which the thread on the processor may be another.
         const thread = host.callerThread?.();
+        // A background the procedure did not erase -- it answered zero --
+        // is still to be erased, by the program: fErase (MSDN WM_ERASEBKGND).
         return after(frame ? send(record.hwnd, WM_NCPAINT, 1, 0, thread) : 0,
-            ()=>after(erase ? send(record.hwnd, WM_ERASEBKGND, hdc, 0, thread) : 0, ()=>result));
+            ()=>after(erase ? send(record.hwnd, WM_ERASEBKGND, hdc, 0, thread) : 1,
+                erased=>({ hdc, rect: dirty, erase: (erased | 0) === 0 })));
     };
 
     /** @param {any} record @param {number} hdc */
@@ -1458,8 +1465,7 @@ export function createPaintFunctions(options){
                 {
                     return 0;
                 }
-                const erase = record.erase === true;
-                return after(beginPaint(record), ({ hdc, rect })=>{
+                return after(beginPaint(record), ({ hdc, rect, erase })=>{
                     writeU32s(host, paintStruct + PAINTSTRUCT.hdc, [hdc, erase ? 1 : 0]);
                     writeRect(host, paintStruct + PAINTSTRUCT.rcPaint, rect);
                     writeU32s(host, paintStruct + PAINTSTRUCT.fRestore, [0, 0]);
@@ -1476,7 +1482,11 @@ export function createPaintFunctions(options){
                 const record = live(hwnd);
                 const hdc = host.readMemory(paintStruct + PAINTSTRUCT.hdc, 4);
                 const handle = (hdc[0] | hdc[1] << 8 | hdc[2] << 16 | hdc[3] << 24) >>> 0;
-                owners.delete(handle);
+                // A kept context is still its window's after the paint.
+                if ((held.get(handle)?.kind ?? 'cache') === 'cache')
+                {
+                    owners.delete(handle);
+                }
                 if (record)
                 {
                     endPaint(record, handle);
