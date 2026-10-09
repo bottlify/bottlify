@@ -366,7 +366,9 @@ export function oleProcess(options = {}){
         heap,
         callMethod,
         queryPointer,
-        callerThread: ()=>'caller',
+        // The thread whose call is answered, and the one running: one thread
+        // while a call is answered, as the engine has them.
+        callerThread: ()=>thread,
         currentThread: ()=>thread,
         makeObject: (clsid, definition)=>{
             if (!registry.isRegistered(clsid))

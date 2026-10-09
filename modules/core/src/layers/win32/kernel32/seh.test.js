@@ -234,7 +234,8 @@ test('a chain that points backwards ends the walk rather than looping', async()=
     const frames = m.registerFrames([0x51000, 0x52000]);
     m.put(frames[1], frames[0]); // second points back at the first
 
-    const { frames: walked, damaged } = m.seh.chain();
+    // No thread object: the machine's one block is the running thread's.
+    const { frames: walked, damaged } = m.seh.chain(null);
 
     assert.equal(damaged, true);
     assert.equal(walked.length, 2, 'what was reached before it doubled back');

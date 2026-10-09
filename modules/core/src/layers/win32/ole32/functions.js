@@ -3461,7 +3461,7 @@ export function createOleFunctions(host){
                         await callMethod(marshal, SLOT_RELEASE, [], thread);
                         return hr;
                     }
-                    if (!inApartment(host.currentThread()))
+                    if (!inApartment(thread))
                     {
                         return CO_E_NOTINITIALIZED;
                     }

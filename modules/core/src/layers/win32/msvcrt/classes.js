@@ -415,6 +415,7 @@ export function createClassFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: async([buffer, mangled, length, allocate])=>{
+                const thread = host.currentThread?.();
                 if ((mangled >>> 0) === 0)
                 {
                     return 0;
@@ -444,8 +445,7 @@ export function createClassFunctions(host){
                 {
                     return 0;
                 }
-                const at = await host.callGuest(allocate >>> 0, [bytes.length],
-                    host.currentThread?.()) >>> 0;
+                const at = await host.callGuest(allocate >>> 0, [bytes.length], thread) >>> 0;
                 if (at !== 0)
                 {
                     host.writeMemory(at, bytes);

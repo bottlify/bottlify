@@ -409,7 +409,7 @@ export function createClipboardFunctions(env){
                 {
                     await env.callMethod(data >>> 0, SLOT.ADD_REF, [], thread);
                     board.source = data >>> 0;
-                    board.owner = env.currentThread();
+                    board.owner = thread;
                     board.formats = await util.formatsOf(data >>> 0, thread);
                     if (opened !== null)
                     {
