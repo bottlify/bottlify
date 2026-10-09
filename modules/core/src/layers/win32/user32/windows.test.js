@@ -5786,3 +5786,37 @@ test('WM_NCCALCSIZE places the client area where the procedure says', ()=>{
     assert.ok(memory.u32(RECT_BUFFER + 8) < 300 && memory.u32(RECT_BUFFER + 12) < 200,
         'DefWindowProc\'s answer leaves the frame its style draws');
 });
+
+test('SW_SCROLLCHILDREN moves each child in turn, and the scroll answers after they have heard',
+    async()=>{
+        // msg.c test_scrollwindowex, ScrollWindowExSeq: the child is placed, and
+        // DefWindowProc tells it WM_MOVE from WM_WINDOWPOSCHANGED. A child's
+        // procedure that answers late -- guest code does -- is waited for: two
+        // guest calls started from one host call would run over each other's
+        // stack.
+        const SW_SCROLLCHILDREN = 0x1;
+        const SW_INVALIDATE = 0x2;
+        /** @type {(() => void)[]} */
+        const late = [];
+        const { fns, memory, hwnd, dispatched } = withWindow({ heap: true,
+            reply: message=>(message.message === WM_WINDOWPOSCHANGING
+                ? new Promise(resolve=>late.push(()=>resolve(0))) : 1) });
+        fns.ShowWindow.handler([hwnd, SW_SHOW]);
+        late.splice(0).forEach(go=>go());
+        await new Promise(resolve=>setImmediate(resolve));
+        const child = await createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: hwnd,
+            x: 10, y: 10, width: 50, height: 50 });
+        const before = dispatched.length;
+        const answer = fns.ScrollWindowEx.handler([hwnd, 10, 10, 0, 0, 0, 0,
+            SW_SCROLLCHILDREN | SW_INVALIDATE]);
+        assert.equal(typeof answer?.then, 'function', 'the child is still hearing of its move');
+        late.splice(0).forEach(go=>go());
+        await answer;
+        const toChild = dispatched.slice(before).filter(entry=>entry.hwnd === child)
+            .map(entry=>entry.message);
+        assert.deepEqual(toChild, [WM_WINDOWPOSCHANGING, WM_WINDOWPOSCHANGED]);
+        fns.GetWindowRect.handler([child, RECT_BUFFER]);
+        fns.GetWindowRect.handler([hwnd, RECT_BUFFER + 16]);
+        assert.ok(memory.u32(RECT_BUFFER) > memory.u32(RECT_BUFFER + 16) + 10,
+            'it moved with the scroll');
+    });

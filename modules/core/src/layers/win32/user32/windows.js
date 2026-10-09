@@ -7406,27 +7406,28 @@ export function createWindowFunctions(host){
                 {
                     paint.invalidate(record, carried, record.erase === true, 'none');
                 }
-                if (children)
-                {
-                    for (const child of childrenOf(record))
+                const thread = host.callerThread?.();
+                const taken = children ? childrenOf(record).filter(child=>child.x < scroll.right
+                    && child.x + child.width > scroll.left && child.y < scroll.bottom
+                    && child.y + child.height > scroll.top) : [];
+                // One at a time, each move answered before the next starts:
+                // a child's procedure hears WM_WINDOWPOSCHANGING, and two guest
+                // calls started from one host call would run over each
+                // other's stack. Its pixels moved with the window's; nothing
+                // of it is to be redrawn but what the scroll left.
+                /** @param {number} at @returns {number | Promise<number>} */
+                const move = at=>(at >= taken.length ? 0
+                    : andThen(placeWindow([taken[at].hwnd, 0, taken[at].x + (dx | 0),
+                        taken[at].y + (dy | 0), 0, 0, 0x0001 | 0x0004 | 0x0008 | 0x0010 | 0x0100],
+                    thread), ()=>move(at + 1)));
+                return andThen(move(0), ()=>{
+                    if ((flags & SW_INVALIDATE) !== 0 && uncovered.length > 0)
                     {
-                        if (child.x < scroll.right && child.x + child.width > scroll.left
-                            && child.y < scroll.bottom && child.y + child.height > scroll.top)
-                        {
-                            // Its pixels moved with the window's; nothing of it
-                            // is to be redrawn but what the scroll left.
-                            (/** @type {any} */ (table)).SetWindowPos.handler([child.hwnd, 0,
-                                child.x + (dx | 0), child.y + (dy | 0), 0, 0,
-                                0x0001 | 0x0004 | 0x0008 | 0x0010 | 0x0100]);
-                        }
+                        paint.invalidate(record, uncovered, (flags & SW_ERASE) !== 0,
+                            children ? 'all' : 'auto');
                     }
-                }
-                if ((flags & SW_INVALIDATE) !== 0 && uncovered.length > 0)
-                {
-                    paint.invalidate(record, uncovered, (flags & SW_ERASE) !== 0,
-                        children ? 'all' : 'auto');
-                }
-                return handScrollBack([...uncovered, ...owed, ...carried], region, updateRect);
+                    return handScrollBack([...uncovered, ...owed, ...carried], region, updateRect);
+                });
             },
         },
 
@@ -7441,9 +7442,10 @@ export function createWindowFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([hwnd, dx, dy, scrollRect, clipRect])=>
-                ((/** @type {any} */ (table)).ScrollWindowEx.handler([hwnd, dx, dy, scrollRect,
-                    clipRect, 0, 0, 0x0002 | 0x0004 | ((scrollRect >>> 0) === 0 ? 0x0001 : 0)])
-                    !== REGION_ERROR ? 1 : 0),
+                andThen((/** @type {any} */ (table)).ScrollWindowEx.handler([hwnd, dx, dy,
+                    scrollRect, clipRect, 0, 0,
+                    0x0002 | 0x0004 | ((scrollRect >>> 0) === 0 ? 0x0001 : 0)]),
+                (/** @type {number} */ kind)=>(kind !== REGION_ERROR ? 1 : 0)),
         },
 
         /**
