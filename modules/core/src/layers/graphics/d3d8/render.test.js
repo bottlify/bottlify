@@ -77,7 +77,8 @@ const FVF_TEXTURED_QUAD = FVF.XYZRHW | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT);
  * A device with a backend over the recording GPU, and guest memory it can read.
  *
  * @param {{ width?: number, height?: number, format?: number, depth?: boolean,
- *           dumpDraws?: boolean, dumpEvery?: number, maxDraws?: number, fog?: boolean,
+ *           dumpDraws?: boolean, dumpEvery?: number, liveDump?: { dumpFrames: number },
+ *           maxDraws?: number, fog?: boolean,
  *           mips?: boolean,
  *           probeTexture?: string,
  *           divergence?: (api: string, detail: string)=>void,
