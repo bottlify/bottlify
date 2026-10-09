@@ -21,7 +21,7 @@
  *   node tools/night-run/night-run.mjs [--budget USD] [--model ID] [--minutes N]
  *       [--only id,id] [--skip id,id] [--dry]
  *
- * Games only, and broken ones: a bottle labelled playable, a benchmark, the Wine test
+ * Games only, and broken ones: a bottle whose status is playable, a benchmark, the Wine test
  * bottles (labelled test) and applications are left out.
  * They go in alphabetical order of title. The budget is shared out evenly
  * over the bottles not yet run, so an early long hunt leaves less for the rest
@@ -77,7 +77,7 @@ async function brokenBottles(){
         const labels = Array.isArray(manifest.labels) ? manifest.labels : [];
         const chosen = only.length ? only.includes(id)
             : manifest.kind !== 'application' && !id.startsWith('wine-')
-                && !labels.some((/** @type {string} */ label)=>
+                && manifest.status !== 'playable' && !labels.some((/** @type {string} */ label)=>
                     ['playable', 'test', 'benchmark'].includes(label));
         if (chosen && !skip.includes(id))
         {
@@ -113,9 +113,10 @@ with tests.
 4. Run the title and fix everything up to its first start in the game (below).
 5. Commit each fix to review and push it; the message says what was fixed and why -- the \
 contract that was wrong and what the title did because of it.
-6. When the title reaches its game, label it playable: add "playable" to "labels" in \
-bundles/${bottle.id}/manifest.json (that file is not in git; keep the rest of it as it is). \
-Not before.
+6. When the title reaches its game, set its status in bundles/${bottle.id}/manifest.json (that \
+file is not in git; keep the rest of it as it is): "status": "playable" when it plays right, \
+"start-only" when it is in its game but something there is wrong (pictures, text, speed), \
+"non-playable" when it does not get into its game. One status, not a label.
 7. Leave the test's route beside the game: bundles/${bottle.id}/route.json.
 8. Copy the screenshot that shows how far the title got (in its game, or where it stops) to \
 dbg/night/${bottle.id}.png; the person reads it in the morning.
