@@ -2464,6 +2464,10 @@ export function createRenderer(options){
     let lastFrame = [];
     /** @type {string[]} one line per draw of the frame being recorded */
     let dump = [];
+    /** Shaders whose bytecode a dump has already written. @type {Set<string>} */
+    const dumpedShaders = new Set();
+    /** Each dumped draw's shaders once, as `vs12 <hex tokens>`. @type {string[]} */
+    const shaderBytecode = [];
     /** @type {string[]} the same, for the frame most recently presented */
     let lastDump = [];
     /** @type {{ frame: number, lines: string[] }[]} the frames `dumpEvery` kept */
@@ -3111,6 +3115,21 @@ export function createRenderer(options){
      */
     const dumpProgram = (model, prepared, count)=>{
         const program = prepared.program;
+        // Each shader's bytecode once a run, in hex, before the first draw
+        // that ran it: a program's own shaders come as bytecode, with no
+        // source a report could show.
+        for (const [kind, id, tokens] of [
+            ['vs', prepared.state.vertexShader, prepared.program?.held?.tokens?.vertex],
+            ['ps', prepared.state.pixelShader, prepared.program?.held?.tokens?.pixel]])
+        {
+            const name = `${kind}${id}`;
+            if (tokens && !dumpedShaders.has(name))
+            {
+                dumpedShaders.add(name);
+                shaderBytecode.push(`${name} ${Array.from(tokens, (/** @type {number} */ token)=>
+                    (token >>> 0).toString(16).padStart(8, '0')).join('')}`);
+            }
+        }
         const bound = program.samplerBindings.map((/** @type {any} */ binding)=>
             `#${binding.stage}:${binding.placeholder
                 ? 'placeholder'
@@ -5300,6 +5319,9 @@ export function createRenderer(options){
             vertex,
             samplerPlan,
             state,
+            // The bytecode itself, for a frame dump to name what a draw ran.
+            tokens: { vertex: /** @type {any} */ (program.vertexShader)?.tokens ?? null,
+                pixel: /** @type {any} */ (pixelShader)?.tokens ?? null },
             // The bindings handed out last, and the recording and index of the
             // pipeline in it: kept with the pieces, where a draw's own
             // preparation is made for it alone.
@@ -8148,6 +8170,8 @@ export function createRenderer(options){
                 recentFrames: frameHistory.slice(),
                 // Empty unless the build asked for it; see `dumpDraws`.
                 lastDump,
+                // The bytecode of the shaders the dumped draws ran, each once.
+                shaderBytecode: [...shaderBytecode],
                 // The same, every `dumpEvery`-th frame.
                 ...(dumpEvery > 0 ? { dumps: dumps.slice() } : {}),
                 // What the program made, and where its pixels live. Addresses
