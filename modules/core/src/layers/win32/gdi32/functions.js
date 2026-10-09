@@ -148,6 +148,56 @@ const GGO_GLYPH_INDEX = 0x80;
 const GGO_UNHINTED = 0x100;
 const GLYPHMETRICS_SIZE = 20;
 const GGI_MARK_NONEXISTING_GLYPHS = 1;
+/** 'cmap' as GetFontData takes a table's tag: its four bytes read little-endian. */
+const CMAP_TAG = 0x70616d63;
+
+/**
+ * A TrueType 'cmap' table (big-endian, as in a font file) with one subtable,
+ * Windows Unicode BMP (platform 3, encoding 1) in format 4: one segment that
+ * maps every character from `first` to `last` to the glyph of the same
+ * number, and the 0xffff segment that ends every format-4 map.
+ *
+ * @param {number} first @param {number} last
+ * @returns {Uint8Array}
+ */
+export function characterMap(first, last){
+    const end = Math.min(last, 0xfffe);
+    const segments = 2;
+    const subtable = 16 + segments * 8;
+    const bytes = new Uint8Array(12 + subtable);
+    const view = new DataView(bytes.buffer);
+    // The header and the one encoding record.
+    view.setUint16(0, 0);
+    view.setUint16(2, 1);
+    view.setUint16(4, 3);
+    view.setUint16(6, 1);
+    view.setUint32(8, 12);
+    let at = 12;
+    const put = (/** @type {number} */ value)=>{
+        view.setUint16(at, value);
+        at += 2;
+    };
+    const searchRange = 2 * 2 ** Math.floor(Math.log2(segments));
+    put(4);
+    put(subtable);
+    put(0);
+    put(segments * 2);
+    put(searchRange);
+    put(Math.log2(searchRange / 2));
+    put(segments * 2 - searchRange);
+    put(end);
+    put(0xffff);
+    put(0);
+    put(first);
+    put(0xffff);
+    // idDelta 0 maps a character to the glyph of its own number; the last
+    // segment's 1 maps 0xffff to glyph 0, as the format asks.
+    put(0);
+    put(1);
+    put(0);
+    put(0);
+    return bytes;
+}
 /** GetCharacterPlacement's flag that stops the fit at nMaxExtent. */
 const GCP_MAXEXTENT = 0x100000;
 
@@ -419,12 +469,14 @@ const NEWTEXTMETRICEXA_SIZE = 96;
 const NEWTEXTMETRICEXW_SIZE = 100;
 
 /**
- * An enumerated face's FontType: none of RASTER_FONTTYPE, DEVICE_FONTTYPE and
- * TRUETYPE_FONTTYPE, which is what a vector font is. Every face here is drawn
- * at any size, and none has tables a program could read, as TEXTMETRIC's
- * TMPF_VECTOR and GetTextCharsetInfo already say.
+ * An enumerated face's FontType: TRUETYPE_FONTTYPE, as the system faces these
+ * stand for (Tahoma, Arial, Times New Roman) are on Windows. A program that
+ * keeps only the TrueType faces it is told of -- a text layout's font map, a
+ * font picker -- otherwise keeps none and has nothing to draw text with. The
+ * faces are still drawn here, not from a file: TEXTMETRIC says TMPF_VECTOR
+ * only, and of the tables GetFontData answers only 'cmap'.
  */
-const SCALABLE_FONTTYPE = 0;
+const ENUMERATED_FONTTYPE = 0x0004;
 
 /**
  * @typedef {Object} GdiHost
@@ -1892,7 +1944,7 @@ export function createGdiFunctions(host){
                     host.writeMemory(block + enumSize, new Uint8Array(metricSize));
                     (wide ? writeTextMetricsW : writeTextMetrics)(host, block + enumSize, metrics);
                     answer = (await call(proc >>> 0,
-                        [block, block + enumSize, SCALABLE_FONTTYPE, lParam >>> 0], thread)) | 0;
+                        [block, block + enumSize, ENUMERATED_FONTTYPE, lParam >>> 0], thread)) | 0;
                     if (answer === 0)
                     {
                         break;
@@ -4097,11 +4149,38 @@ export function createGdiFunctions(host){
         /**
          * DWORD GetFontData(HDC hdc, DWORD dwTable, DWORD dwOffset, PVOID pvBuffer, DWORD cjBuffer)
          *
-         * GDI_ERROR: a font here is no TrueType file with tables to read.
+         * A font here is no TrueType file, but its 'cmap' table is answered:
+         * a text layout that finds glyphs by reading the font's own character
+         * map, rather than by GetGlyphIndices, otherwise finds none and draws
+         * every character as a missing-glyph box. The map says what
+         * GetGlyphIndices does -- a glyph index is the character code, over
+         * the font's range. Every other table, and the whole file, is
+         * GDI_ERROR.
          */
         GetFontData: {
             argBytes: 20,
-            handler: ()=>GDI_ERROR,
+            /** @param {number[]} args */
+            handler: ([handle, tag, offset, out, size])=>{
+                const dc = dcOf(handle);
+                if (!dc || (tag >>> 0) !== CMAP_TAG)
+                {
+                    return GDI_ERROR;
+                }
+                const { firstChar, lastChar } = currentMetrics(dc);
+                const data = characterMap(firstChar, lastChar);
+                if ((offset >>> 0) > data.length)
+                {
+                    return GDI_ERROR;
+                }
+                if ((out >>> 0) === 0 || (size >>> 0) === 0)
+                {
+                    return data.length - (offset >>> 0);
+                }
+                const part = data.subarray(offset >>> 0,
+                    Math.min(data.length, (offset >>> 0) + (size >>> 0)));
+                host.writeMemory(out >>> 0, part);
+                return part.length;
+            },
         },
 
         /**

@@ -1278,7 +1278,7 @@ test('GetTextMetricsA writes TEXTMETRIC at the documented offsets', ()=>{
 test('a font here reports itself a vector font, as its enumeration does', ()=>{
     // TMPF_VECTOR is what separates a scalable font from a raster one (Wine's
     // dib tests skip their outline text when it is clear); neither
-    // TMPF_TRUETYPE nor TMPF_DEVICE is claimed, as FontType claims neither.
+    // TMPF_TRUETYPE nor TMPF_DEVICE is claimed: no face here is drawn from a font file.
     const TMPF_VECTOR = 0x02;
     const { fns, memory, hdc } = withDC();
     for (const pitchAndFamily of [0, 0x11, 0x22, 0x31])
@@ -1652,7 +1652,7 @@ test('EnumFontFamiliesEx lists every face offered, once each, in the one set dra
         assert.equal(one.charSet, 0, 'ANSI_CHARSET, the one set the engine draws');
         assert.equal(one.height, one.tmHeight, 'Wine\'s arial_enum_proc: lfHeight is tmHeight');
         assert.equal(one.weight, one.tmWeight, 'and its enum_fonts_proc: lfWeight is tmWeight');
-        assert.equal(one.type, 0, 'scalable, and not TrueType, as TEXTMETRIC says');
+        assert.equal(one.type, 4, 'TRUETYPE_FONTTYPE, as the faces are on Windows');
         assert.equal(one.script, 'Western');
     }
     assert.deepEqual(surfaces.freed, surfaces.allocated.map(block=>block.address),
@@ -2480,7 +2480,38 @@ test('GetTextExtentExPoint answers the extent of each prefix and how many fit', 
     assert.equal(fns.GetTextExtentExPointW.handler([hdc, 0, 3, 0, 0, 0, SIZE_AT]), 0);
     assert.equal(fns.GetOutlineTextMetricsW.handler([hdc, 0, 0]), 0, 'no outline font here');
     assert.equal(fns.GetKerningPairsW.handler(), 0);
-    assert.equal(fns.GetFontData.handler(), 0xffffffff);
+    assert.equal(fns.GetFontData.handler([hdc, 0, 0, 0, 0]), 0xffffffff, 'no whole file');
+    assert.equal(fns.GetFontData.handler([hdc, 0x64616568, 0, 0, 0]), 0xffffffff, "no 'head'");
+    const CMAP = 0x70616d63;
+    const cmapSize = fns.GetFontData.handler([hdc, CMAP, 0, 0, 0]);
+    assert.equal(cmapSize, 44, "the 'cmap' table's size");
+    assert.equal(fns.GetFontData.handler([hdc, CMAP, 0, FIT, cmapSize]), cmapSize);
+    const cmap = memory.readMemory(FIT, cmapSize).slice();
+    const be = (/** @type {number} */ at)=>cmap[at] << 8 | cmap[at + 1];
+    assert.deepEqual([be(2), be(4), be(6), be(10)], [1, 3, 1, 12], 'one Unicode BMP subtable');
+    assert.equal(be(12), 4, 'in format 4');
+    // Read as a font reader reads it: the segment a code falls in, then its delta.
+    const glyphOf = (/** @type {number} */ code)=>{
+        const segments = be(12 + 6) / 2;
+        for (let segment = 0; segment < segments; segment++)
+        {
+            const endAt = 12 + 14 + segment * 2;
+            const start = be(endAt + segments * 2 + 2);
+            if (code <= be(endAt))
+            {
+                return code < start ? 0 : (code + be(endAt + segments * 4 + 2)) & 0xffff;
+            }
+        }
+        return 0;
+    };
+    memory.putString(TEXT, 'Az');
+    assert.equal(fns.GetGlyphIndicesA.handler([hdc, TEXT, 2, DX, 0]), 2);
+    const named = memory.u32(DX);
+    assert.deepEqual([glyphOf(0x41), glyphOf(0x7a)], [named & 0xffff, named >>> 16],
+        'the glyphs GetGlyphIndices names');
+    assert.equal(glyphOf(0xffff), 0, 'the closing segment, the missing glyph');
+    assert.equal(fns.GetFontData.handler([hdc, CMAP, 40, FIT, 16]), 4, 'cut at the end');
+    assert.equal(fns.GetFontData.handler([hdc, CMAP, 45, FIT, 4]), 0xffffffff);
     assert.equal(fns.SetTextJustification.handler([hdc, 0, 0]), 1);
     assert.equal(fns.GetFontUnicodeRanges.handler([hdc, 0]), 20, 'the size of one range');
     assert.equal(fns.GetFontUnicodeRanges.handler([hdc, FIT]), 20);
