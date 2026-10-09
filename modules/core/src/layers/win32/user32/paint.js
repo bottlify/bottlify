@@ -439,6 +439,10 @@ export function tabbedWidth(text, widthOf, stops, interval){
  * @param {(record: any) => Rect[]} [options.covering]
  *        The rectangles, in screen coordinates, of the windows over a window:
  *        what its visible region leaves out.
+ * @param {() => number} [options.layoutRevision]
+ *        A count that moves whenever any window's place, size, style,
+ *        parent or stacking changes: a context held across one is brought up
+ *        to date before it draws.
  * @param {(record: any) => boolean} [options.frozen]
  *        Whether a window is held as it is, being dragged: it draws nowhere.
  * @param {{ paintStarts: (record: any) => void, paintEnds: (record: any) => void }}
@@ -725,13 +729,12 @@ export function createPaintFunctions(options){
             {
                 return 1;
             }
-            host.draw?.clip?.(hdc, intersectAreas(
-                visibleArea(record, false, geometry.clientRect(record)), area));
+            limitContext(hdc, area);
             // Shown only when it erased, which the answer says: a window
             // with no background leaves the screen as it was, and that is
             // not a picture to present.
             return after(send(record.hwnd, WM_ERASEBKGND, hdc, 0, thread), erased=>{
-                contexts()?.release(record.hwnd, hdc);
+                releaseContext(record.hwnd, hdc);
                 if ((erased | 0) !== 0)
                 {
                     painted();
@@ -776,9 +779,77 @@ export function createPaintFunctions(options){
         const hdc = contexts()?.get(record.hwnd, area) ?? 0;
         if (hdc !== 0)
         {
+            held.set(hdc, { record, whole, limit: null,
+                revision: options.layoutRevision?.() ?? 0 });
             host.draw?.clip?.(hdc, visibleArea(record, whole, area));
         }
         return hdc;
+    };
+
+    /**
+     * The window contexts out now, each with what its origin and clip were
+     * worked out from: its window, whether it is the whole window's, the
+     * part a paint limits it to, in its own coordinates, and the layout
+     * revision they were worked out under.
+     *
+     * @type {Map<number, { record: any, whole: boolean, limit: Rect[] | null,
+     *     revision: number }>}
+     */
+    const held = new Map();
+
+    /**
+     * Clips a context to its window's visible region and, during a paint,
+     * to the part the paint is of; the limit is kept, so a later refresh
+     * keeps it too.
+     *
+     * @param {number} hdc @param {Rect[]} limit
+     */
+    const limitContext = (hdc, limit)=>{
+        const entry = held.get(hdc);
+        if (!entry)
+        {
+            return;
+        }
+        entry.limit = limit;
+        const area = entry.whole
+            ? geometry.windowRect(entry.record) : geometry.clientRect(entry.record);
+        host.draw?.clip?.(hdc, intersectAreas(visibleArea(entry.record, entry.whole, area), limit));
+    };
+
+    /**
+     * A context goes back: it is no longer brought up to date.
+     *
+     * @param {number} hwnd @param {number} hdc
+     */
+    const releaseContext = (hwnd, hdc)=>{
+        held.delete(hdc >>> 0);
+        return contexts()?.release(hwnd >>> 0, hdc >>> 0) ?? 0;
+    };
+
+    /**
+     * Brings a context out since before the windows last changed up to
+     * where its window is now and what of it shows now: a program that took
+     * a DC once and draws through it every frame must neither draw over a
+     * dialog opened since nor at the place its window has left (MSDN
+     * GetDC; Wine's dce.c test_dc_visrgn).
+     *
+     * @param {number} hdc
+     */
+    const refreshContext = hdc=>{
+        const entry = held.get(hdc >>> 0);
+        const revision = options.layoutRevision?.() ?? 0;
+        if (!entry || entry.revision === revision || entry.record.destroyed)
+        {
+            return;
+        }
+        // Set first: re-clipping draws nothing, but it reaches the drawing
+        // layer, which asks again.
+        entry.revision = revision;
+        const area = entry.whole
+            ? geometry.windowRect(entry.record) : geometry.clientRect(entry.record);
+        contexts()?.rebind?.(hdc >>> 0, area);
+        const visible = visibleArea(entry.record, entry.whole, area);
+        host.draw?.clip?.(hdc >>> 0, entry.limit ? intersectAreas(visible, entry.limit) : visible);
     };
 
     /**
@@ -845,8 +916,7 @@ export function createPaintFunctions(options){
             options.caret?.paintStarts(record);
             // rcPaint is the rectangle around the region; the clip is the
             // region itself, so two far corners do not paint the span between.
-            host.draw?.clip?.(hdc,
-                intersectAreas(visibleArea(record, false, geometry.clientRect(record)), area));
+            limitContext(hdc, area);
         }
         const result = { hdc, rect: dirty };
         if (hdc === 0)
@@ -864,7 +934,7 @@ export function createPaintFunctions(options){
     const endPaint = (record, hdc)=>{
         if (hdc !== 0)
         {
-            contexts()?.release(record.hwnd, hdc);
+            releaseContext(record.hwnd, hdc);
             painted();
         }
         if (record.painting === hdc)
@@ -1179,7 +1249,7 @@ export function createPaintFunctions(options){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([hwnd, hdc])=>{
-                const released = contexts()?.release(hwnd >>> 0, hdc >>> 0) ?? 0;
+                const released = releaseContext(hwnd, hdc);
                 if (released)
                 {
                     owners.delete(hdc >>> 0);
@@ -1230,7 +1300,7 @@ export function createPaintFunctions(options){
                 }
                 else if (handle !== 0)
                 {
-                    contexts()?.release(hwnd >>> 0, handle);
+                    releaseContext(hwnd, handle);
                 }
                 return 1;
             },
@@ -1905,7 +1975,7 @@ export function createPaintFunctions(options){
     };
 
     return { table, beginPaint, endPaint, invalidate, validate, updateNow, eraseNow, clientArea,
-        cellOf, contextOn, owesPaint, updateOf };
+        cellOf, contextOn, owesPaint, updateOf, refreshContext };
 }
 
 /** A brush argument up to this is a system colour index plus one. */

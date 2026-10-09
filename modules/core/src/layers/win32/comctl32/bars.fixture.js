@@ -150,10 +150,15 @@ export function setupBars(gdiEngine){
         return at;
     };
 
+    /** The window manager's, once it has said: how a held DC is brought up to date. */
+    let refreshContext = (/** @type {number} */ hdc)=>{
+        void hdc;
+    };
     const gdi = createGdiFunctions({
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
         readCString: memory.readCString,
+        windowContextCurrent: hdc=>refreshContext(hdc),
         handles,
         surfaces: { allocate, free: ()=>{} },
         screen: SCREEN,
@@ -200,9 +205,14 @@ export function setupBars(gdiEngine){
         dc: ()=>({
             /** @param {number} hwnd @param {any} bounds */
             get: (hwnd, bounds = null)=>gdi.windowContext(hwnd, bounds),
+            /** @param {number} hdc @param {any} bounds */
+            rebind: (hdc, bounds)=>gdi.rebindWindowContext(hdc, bounds),
             /** @param {number} hwnd @param {number} hdc */
             release: (hwnd, hdc)=>gdi.table.ReleaseDC.handler([hwnd, hdc]),
         }),
+        windowService: service=>{
+            refreshContext = service.refreshContext;
+        },
         draw: gdi.draw,
         present: ()=>{},
         allocate,

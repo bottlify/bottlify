@@ -518,6 +518,9 @@ const ENUMERATED_FONTTYPE = 0x0004;
  *           The thread whose call is being answered, which a callback runs on.
  * @property {(code: number) => void} [setLastError]
  *           The calling thread's last error, for the calls documented to set it.
+ * @property {(hdc: number) => void} [windowContextCurrent]
+ *           Brings a window's context up to where its window now is and what
+ *           of it shows, before it draws: the window manager's to say.
  * @property {(address: number, length: number) => boolean} [canWrite]
  *           Whether the program's buffer can take that many bytes. A gdi32
  *           call probes its out buffer and fails with ERROR_NOACCESS; writing
@@ -4886,6 +4889,29 @@ export function createGdiFunctions(host){
             const dc = createContext(hwnd >>> 0, 'window');
             dc.bounds = bounds;
             return dc.hdc;
+        },
+
+        /**
+         * A window's context moved to where its window now is on the screen:
+         * the next draw binds it to the pixels there.
+         *
+         * @param {number} hdc
+         * @param {{ left: number, top: number, right: number, bottom: number }} bounds
+         */
+        rebindWindowContext(hdc, bounds){
+            const dc = contexts.get(hdc >>> 0);
+            if (!dc || dc.kind !== 'window')
+            {
+                return;
+            }
+            const was = dc.bounds;
+            if (was && was.left === bounds.left && was.top === bounds.top
+                && was.right === bounds.right && was.bottom === bounds.bottom)
+            {
+                return;
+            }
+            dc.bounds = { ...bounds };
+            dc.boundSurface = null;
         },
 
         /**

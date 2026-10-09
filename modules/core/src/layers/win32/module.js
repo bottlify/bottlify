@@ -316,7 +316,7 @@ export function createWin32Module(){
              *     deactivations: () => number,
              *     rawInput: (report: import('./user32/rawinput.js').RawInputEvent) => void,
              *     modalLoop: import('./user32/windows.js').WindowService['modalLoop'],
-             *     painting: () => boolean }} */
+             *     painting: () => boolean, refreshContext?: (hdc: number) => void }} */
             let windowService = {
                 list: ()=>[], clientRect: ()=>null, place: ()=>false, active: ()=>0,
                 deactivated: ()=>false, deactivations: ()=>0, rawInput: ()=>{},
@@ -669,6 +669,7 @@ export function createWin32Module(){
                 readMemory,
                 writeMemory,
                 readCString,
+                windowContextCurrent: hdc=>windowService.refreshContext?.(hdc),
                 canWrite: (address, length)=>{
                     try
                     {
@@ -2490,6 +2491,12 @@ export function createWin32Module(){
                          *     Where on the screen the window's client area is.
                          */
                         get: (hwnd, bounds = null)=>gdi.windowContext(hwnd, bounds),
+                        /**
+                         * @param {number} hdc
+                         * @param {{ left: number, top: number, right: number,
+                         *     bottom: number }} bounds
+                         */
+                        rebind: (hdc, bounds)=>gdi.rebindWindowContext(hdc, bounds),
                         /** @param {number} hwnd @param {number} hdc */
                         release: (hwnd, hdc)=>gdi.table.ReleaseDC.handler([hwnd, hdc]),
                     }),

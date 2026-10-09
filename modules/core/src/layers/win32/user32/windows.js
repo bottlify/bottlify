@@ -441,6 +441,9 @@ const MAX_WINDOW_TEXT = 1 << 16;
 
 /**
  * @typedef {Object} WindowService
+ * @property {(hdc: number) => void} refreshContext
+ *           Brings a device context a program holds up to where its window
+ *           now is, and what of it now shows, before it draws.
  * @property {() => { hwnd: string, x: number, y: number, width: number, height: number,
  *            rect: { left: number, top: number, right: number, bottom: number },
  *            client: { left: number, top: number, right: number, bottom: number },
@@ -715,6 +718,23 @@ export function createWindowFunctions(host){
      * @type {Map<number, any>}
      */
     const windows = new Map();
+    /**
+     * Moves on with every change that can change what part of the screen a
+     * window's device context reaches: a window made, gone or restacked --
+     * the map's order is the stacking -- and any field its place, size,
+     * style or parent is read from. A context handed out under an older
+     * one has its origin and visible region worked out again before it
+     * draws (`paint.refreshContext`).
+     */
+    let layoutRevision = 0;
+    for (const change of /** @type {const} */ (['set', 'delete', 'clear']))
+    {
+        const plain = windows[change].bind(windows);
+        windows[change] = /** @type {any} */ ((/** @type {any[]} */ ...args)=>{
+            layoutRevision++;
+            return /** @type {any} */ (plain)(...args);
+        });
+    }
     let nextAtom = FIRST_ATOM;
     const processId = host.processId ?? 0x1000;
     const directory = host.directory ?? createWindowDirectory();
@@ -2353,6 +2373,7 @@ export function createWindowFunctions(host){
         host.queue.killTimersFor?.(record.hwnd);
         host.queue.unregisterHotKeysFor?.(record.hwnd);
         record.destroyed = true;
+        layoutRevision++;
         // A dialog's font is the dialog manager's, made from its template,
         // and goes with the dialog.
         if (record.dialogFont)
@@ -3391,6 +3412,7 @@ export function createWindowFunctions(host){
                     if (changed !== value)
                     {
                         value = changed;
+                        layoutRevision++;
                         if (unsaid.size === 0)
                         {
                             queueMicrotask(()=>{
@@ -4926,6 +4948,7 @@ export function createWindowFunctions(host){
         frozen: (/** @type {any} */ record)=>frozen(record),
         desktop: ()=>desktopWindow().hwnd,
         covering: coveringOf,
+        layoutRevision: ()=>layoutRevision,
         caret,
     });
 
@@ -5222,6 +5245,14 @@ export function createWindowFunctions(host){
     });
 
     host.windowService?.({
+        /**
+         * Brings a device context a program holds up to where its window now
+         * is and what of it now shows, before it draws.
+         *
+         * @param {number} hdc
+         */
+        refreshContext: hdc=>paint.refreshContext(hdc),
+
         /** The window GetForegroundWindow answers with, or zero. */
         active: ()=>activeWindow(),
         deactivated: ()=>!applicationActive,
