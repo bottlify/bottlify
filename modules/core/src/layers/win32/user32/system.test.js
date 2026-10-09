@@ -342,6 +342,40 @@ test('GetWindowInfo answers what the single queries do, and refuses no window as
     assert.equal(memory.u32(OUT_BUFFER + 44), 0, 'and on no other');
 });
 
+test('GetTitleBarInfo checks cbSize and reports the caption strip and its buttons', ()=>{
+    // win.c's test_GetTitleBarInfo: a wrong cbSize is ERROR_INVALID_PARAMETER;
+    // the bar sits above the client area inside the window, and a window with
+    // no caption reports the bar invisible.
+    const ERROR_INVALID_PARAMETER = 87;
+    const WS_OVERLAPPEDWINDOW = 0x00CF0000;
+    const STATE_SYSTEM_INVISIBLE = 0x8000;
+    const STATE_SYSTEM_FOCUSABLE = 0x100000;
+    const { memory, fns, errors } = setup();
+    const hwnd = makeWindow(memory, fns, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+    memory.fill(OUT_BUFFER, 11);
+    memory.putU32s(OUT_BUFFER, [40]);
+    assert.equal(fns.GetTitleBarInfo.handler([hwnd, OUT_BUFFER]), 0);
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+
+    memory.putU32s(OUT_BUFFER, [44]);
+    assert.equal(fns.GetTitleBarInfo.handler([hwnd, OUT_BUFFER]), 1);
+    fns.GetWindowInfo.handler([hwnd, OUT_BUFFER + 64]);
+    const [left, top, right, bottom] = [4, 8, 12, 16].map(at=>memory.u32(OUT_BUFFER + at) | 0);
+    const [, , , , clientLeft, clientTop, clientRight] =
+        [4, 8, 12, 16, 20, 24, 28].map(at=>memory.u32(OUT_BUFFER + 64 + at) | 0);
+    assert.equal(bottom, clientTop, 'the bar ends where the client area begins');
+    assert.ok(top < bottom && top >= (memory.u32(OUT_BUFFER + 64 + 8) | 0));
+    assert.deepEqual([left, right], [clientLeft, clientRight]);
+    assert.equal(memory.u32(OUT_BUFFER + 20), STATE_SYSTEM_FOCUSABLE);
+    assert.equal(memory.u32(OUT_BUFFER + 40), 0, 'the close button is there');
+    assert.equal(memory.u32(OUT_BUFFER + 36), STATE_SYSTEM_INVISIBLE, 'and no help button');
+
+    const bare = makeWindow(memory, fns, WS_VISIBLE | 0x80000000);
+    fns.GetTitleBarInfo.handler([bare, OUT_BUFFER]);
+    assert.equal(memory.u32(OUT_BUFFER + 20), STATE_SYSTEM_FOCUSABLE | STATE_SYSTEM_INVISIBLE);
+    assert.equal(memory.u32(OUT_BUFFER + 40), STATE_SYSTEM_INVISIBLE);
+});
+
 test('a child is hit where GetWindow stacks it, and SetWindowPos restacks it', ()=>{
     // user32's window tests: children made one after another are stacked
     // first-made on top (GW_CHILD, then GW_HWNDNEXT, walks them in creation

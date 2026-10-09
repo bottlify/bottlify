@@ -474,6 +474,18 @@ const REGION_ERROR = 0;
 const SIMPLEREGION = 2;
 /** WINDOWINFO's dwWindowStatus for the active window. */
 const WS_ACTIVECAPTION = 0x0001;
+/** The styles that decide which parts of a title bar GetTitleBarInfo reports. */
+const WS_SYSMENU = 0x00080000;
+const WS_MINIMIZEBOX = 0x00020000;
+const WS_MAXIMIZEBOX = 0x00010000;
+const WS_EX_TOOLWINDOW = 0x00000080;
+const WS_EX_CONTEXTHELP = 0x00000400;
+/** TITLEBARINFO: cbSize, rcTitleBar, rgstate[6] (the bar, a reserved slot, four buttons). */
+const TITLEBARINFO_SIZE = 44;
+const TITLEBARINFO_RGSTATE = 20;
+const STATE_SYSTEM_UNAVAILABLE = 0x00000001;
+const STATE_SYSTEM_INVISIBLE = 0x00008000;
+const STATE_SYSTEM_FOCUSABLE = 0x00100000;
 
 /** A class or window name is at most this long. */
 const MAX_NAME = 256;
@@ -2825,6 +2837,70 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 writeU16(host, info + WINDOWINFO.atomWindowType,
                     classOfWindow(record.hwnd)?.atom ?? 0);
                 writeU16(host, info + WINDOWINFO.wCreatorVersion, 0x0400);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetTitleBarInfo(HWND hwnd, PTITLEBARINFO pti)
+         *
+         * The caption strip between the side borders above the client area,
+         * and the accessibility state of the bar and each of its buttons: a
+         * window with no caption has an invisible bar, one with no system
+         * menu no buttons, and a box its style leaves out is invisible (or
+         * unavailable while the other box is there). A cbSize that is not
+         * the structure's is refused with ERROR_INVALID_PARAMETER.
+         */
+        GetTitleBarInfo: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, info])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+                    return 0;
+                }
+                if ((info >>> 0) === 0 || readU32(info) !== TITLEBARINFO_SIZE)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const style = record.style >>> 0;
+                const exStyle = record.exStyle >>> 0;
+                const captioned = (style & WS_CAPTION) === WS_CAPTION;
+                const frame = host.geometry.frame(record);
+                const outer = host.geometry.windowRect(record);
+                const bottom = outer.top + (captioned ? frame.top : 0);
+                const height = captioned
+                    ? metric((exStyle & WS_EX_TOOLWINDOW) !== 0 ? SM_CYSMCAPTION : SM_CYCAPTION)
+                    : 0;
+                writeRect(host, info + 4, {
+                    left: outer.left + frame.left,
+                    top: Math.max(outer.top, bottom - height),
+                    right: outer.right - frame.right,
+                    bottom,
+                });
+                const buttons = captioned && (style & WS_SYSMENU) !== 0;
+                /** @param {number} own @param {number} other */
+                const box = (own, other)=>{
+                    if (!buttons || (style & (own | other)) === 0)
+                    {
+                        return STATE_SYSTEM_INVISIBLE;
+                    }
+                    return (style & own) !== 0 ? 0 : STATE_SYSTEM_UNAVAILABLE;
+                };
+                const help = buttons && (exStyle & WS_EX_CONTEXTHELP) !== 0
+                    ? 0
+                    : STATE_SYSTEM_INVISIBLE;
+                writeU32s(host, info + TITLEBARINFO_RGSTATE, [
+                    STATE_SYSTEM_FOCUSABLE | (captioned ? 0 : STATE_SYSTEM_INVISIBLE),
+                    0,
+                    box(WS_MINIMIZEBOX, WS_MAXIMIZEBOX),
+                    box(WS_MAXIMIZEBOX, WS_MINIMIZEBOX),
+                    help,
+                    buttons ? 0 : STATE_SYSTEM_INVISIBLE,
+                ]);
                 return 1;
             },
         },
