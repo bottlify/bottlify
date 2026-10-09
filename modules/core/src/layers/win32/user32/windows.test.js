@@ -5689,3 +5689,23 @@ test('fErase says the background is still the program\'s to erase', ()=>{
     answer = 0;
     assert.equal(fErase(0), 0, 'no erase asked for');
 });
+
+test('GetUpdateRect and GetUpdateRgn with bErase erase what is owed, once, and leave the paint',
+    ()=>{
+        // msg.c test_paint_messages: with bErase they send what DispatchMessage
+        // would before WM_PAINT (WmDispatchPaint), and the area is still to be
+        // painted.
+        const WM_ERASEBKGND = 0x0014;
+        const { fns, hwnd, dispatched } = withWindow({ paint: true });
+        fns.ShowWindow.handler([hwnd, SW_SHOW]);
+        fns.ValidateRect.handler([hwnd, 0]);
+        fns.InvalidateRect.handler([hwnd, 0, 1]);
+        const erases = ()=>dispatched.filter(entry=>entry.message === WM_ERASEBKGND).length;
+        const before = erases();
+        assert.equal(fns.GetUpdateRect.handler([hwnd, 0, 0]), 1);
+        assert.equal(erases(), before, 'without bErase, nothing is sent');
+        assert.equal(fns.GetUpdateRect.handler([hwnd, 0, 1]), 1, 'still to be painted');
+        assert.equal(erases(), before + 1, 'with it, the background is erased');
+        assert.equal(fns.GetUpdateRect.handler([hwnd, 0, 1]), 1);
+        assert.equal(erases(), before + 1, 'once');
+    });

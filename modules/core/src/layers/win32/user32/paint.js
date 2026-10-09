@@ -1614,21 +1614,31 @@ export function createPaintFunctions(options){
          * BOOL GetUpdateRect(HWND hWnd, LPRECT lpRect, BOOL bErase)
          *
          * Answers whether there is anything to paint, which is what a program
-         * checks before deciding to; the rectangle is the one around the
-         * update region.
+         * checks before deciding to -- the frame alone counts -- and the
+         * rectangle is the one around the update region. With bErase, what is
+         * owed of the frame and the background is painted first, as
+         * DispatchMessage would before WM_PAINT: the frame is then no longer
+         * owed (msg.c test_paint_messages, WmGetUpdateRect).
          */
         GetUpdateRect: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([hwnd, rect])=>{
+            handler: ([hwnd, rect, erase])=>{
                 const record = live(hwnd);
-                const dirty = record?.updateRect ?? null;
-                if ((rect >>> 0) !== 0)
+                if (!record)
                 {
-                    writeRect(host, rect,
-                        dirty ?? { left: 0, top: 0, right: 0, bottom: 0 });
+                    return 0;
                 }
-                return dirty ? 1 : 0;
+                const answer = ()=>{
+                    if ((rect >>> 0) !== 0)
+                    {
+                        writeRect(host, rect,
+                            record.updateRect ?? { left: 0, top: 0, right: 0, bottom: 0 });
+                    }
+                    return owesPaint(record) ? 1 : 0;
+                };
+                return (erase | 0) !== 0 ? after(eraseNow(record, host.callerThread?.()), answer)
+                    : answer();
             },
         },
 
@@ -1817,20 +1827,27 @@ export function createPaintFunctions(options){
         GetUpdateRgn: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([hwnd, region])=>{
+            handler: ([hwnd, region, erase])=>{
                 const ERROR = 0;
                 const NULLREGION = 1;
                 const SIMPLEREGION = 2;
                 const COMPLEXREGION = 3;
                 const record = live(hwnd);
-                if (!record || !host.setRegion)
+                const setRegion = host.setRegion;
+                if (!record || !setRegion)
                 {
                     return ERROR;
                 }
-                const area = areaOf(updateOf(record));
-                host.setRegion(region >>> 0, area);
-                return area.length === 0 ? NULLREGION
-                    : area.length === 1 ? SIMPLEREGION : COMPLEXREGION;
+                const answer = ()=>{
+                    const area = areaOf(updateOf(record));
+                    setRegion(region >>> 0, area);
+                    return area.length === 0 ? NULLREGION
+                        : area.length === 1 ? SIMPLEREGION : COMPLEXREGION;
+                };
+                // With bErase, the frame and the background first, as
+                // DispatchMessage paints them (msg.c WmDispatchPaint).
+                return (erase | 0) !== 0 ? after(eraseNow(record, host.callerThread?.()), answer)
+                    : answer();
             },
         },
 
