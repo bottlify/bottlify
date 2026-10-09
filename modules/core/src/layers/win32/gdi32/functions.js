@@ -125,8 +125,6 @@ const R2_WHITE = 16;
 
 /** Mapping modes: MM_TEXT through MM_ANISOTROPIC. */
 /** What a region query answers: an error, or a region that is one rectangle. */
-const REGION_ERROR = 0;
-const SIMPLE_REGION = 2;
 
 const MM_TEXT = 1;
 const MM_ISOTROPIC = 7;
@@ -291,6 +289,8 @@ const MAX_BITMAP_SIDE = 0x7ffffff;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_NOT_SUPPORTED = 50;
+const ERROR_NOACCESS = 998;
+const ERROR_INSUFFICIENT_BUFFER = 122;
 const STATUS_INVALID_PARAMETER = 0xc000000d;
 
 /** GetBoundsRect's and SetBoundsRect's flags; DCB_SET is reset and accumulate together. */
@@ -513,6 +513,11 @@ const ENUMERATED_FONTTYPE = 0x0004;
  *           The thread whose call is being answered, which a callback runs on.
  * @property {(code: number) => void} [setLastError]
  *           The calling thread's last error, for the calls documented to set it.
+ * @property {(address: number, length: number) => boolean} [canWrite]
+ *           Whether the program's buffer can take that many bytes. A gdi32
+ *           call probes its out buffer and fails with ERROR_NOACCESS; writing
+ *           regardless takes the whole run down with it. Absent, every buffer
+ *           is taken to be good.
  */
 
 /**
@@ -904,6 +909,12 @@ export function createGdiFunctions(host){
         // The path is the DC's state like any other: a path open when SaveDC
         // was called is open again after RestoreDC (Wine's test_path_state).
         path: dc.path ? copyPath(dc.path) : null,
+        stretchMode: dc.stretchMode,
+        graphicsMode: dc.graphicsMode,
+        world: dc.world ?? null,
+        arcDirection: dc.arcDirection,
+        justification: dc.justification,
+        meta: dc.meta ?? null,
     });
 
     /**
@@ -979,6 +990,12 @@ export function createGdiFunctions(host){
         dc.clipRects = state.clipRects;
         dc.clipSelected = state.clipSelected;
         dc.path = state.path;
+        dc.stretchMode = state.stretchMode;
+        dc.graphicsMode = state.graphicsMode;
+        dc.world = state.world;
+        dc.arcDirection = state.arcDirection;
+        dc.justification = state.justification;
+        dc.meta = state.meta;
     };
 
     /**
@@ -1074,8 +1091,74 @@ export function createGdiFunctions(host){
         // succeeds and still reports the previous pair, it just changes nothing.
         if (SCALABLE_MAP_MODES.has(dc.mapMode))
         {
+            // A zero extent would divide by zero in every mapping after it.
+            if ((cx | 0) === 0 || (cy | 0) === 0)
+            {
+                return 0;
+            }
             dc[field] = { cx: cx | 0, cy: cy | 0 };
+            keepIsotropic(dc);
         }
+        return 1;
+    };
+
+    /**
+     * In MM_ISOTROPIC a logical unit is the same size both ways, so the
+     * viewport extent is shrunk along whichever axis would stretch it more
+     * than the other, its sign kept (MSDN SetMapMode; Wine's mapping.c
+     * test_SetWindowExt and test_SetViewportExt).
+     *
+     * @param {any} dc
+     */
+    const keepIsotropic = dc=>{
+        if (dc.mapMode !== MM_ISOTROPIC)
+        {
+            return;
+        }
+        const viewport = dc.viewportExt;
+        const window = dc.windowExt;
+        const across = Math.abs(viewport.cx * window.cy);
+        const down = Math.abs(viewport.cy * window.cx);
+        if (across === 0 || down === 0 || across === down)
+        {
+            return;
+        }
+        dc.viewportExt = across > down
+            ? { cx: Math.sign(viewport.cx) * Math.round(Math.abs(viewport.cx) * down / across),
+                cy: viewport.cy }
+            : { cx: viewport.cx,
+                cy: Math.sign(viewport.cy) * Math.round(Math.abs(viewport.cy) * across / down) };
+    };
+
+    /**
+     * ScaleViewportExtEx and ScaleWindowExtEx: the extent multiplied by
+     * xNum/xDenom and yNum/yDenom, the previous one reported, in the modes
+     * whose extents a program may set; a zero denominator is a failure.
+     *
+     * @param {number[]} args @param {'viewportExt' | 'windowExt'} field
+     */
+    const scaleExtent = ([handle, xNum, xDenom, yNum, yDenom, out], field)=>{
+        const dc = dcOf(handle);
+        if (!dc || (xDenom | 0) === 0 || (yDenom | 0) === 0)
+        {
+            return 0;
+        }
+        if ((out >>> 0) !== 0)
+        {
+            writeSize(host, out >>> 0, dc[field]);
+        }
+        if (!SCALABLE_MAP_MODES.has(dc.mapMode))
+        {
+            return 1;
+        }
+        const cx = Math.trunc(dc[field].cx * (xNum | 0) / (xDenom | 0));
+        const cy = Math.trunc(dc[field].cy * (yNum | 0) / (yDenom | 0));
+        if (cx === 0 || cy === 0)
+        {
+            return 0;
+        }
+        dc[field] = { cx, cy };
+        keepIsotropic(dc);
         return 1;
     };
 
@@ -1102,6 +1185,45 @@ export function createGdiFunctions(host){
     };
 
     /**
+     * GetICMProfile in either width: the display's profile, the sRGB one
+     * every Windows installs. The size is in characters with the terminator;
+     * one too small, or no buffer, is ERROR_INSUFFICIENT_BUFFER with the size
+     * needed written back (Wine's icm.c test_GetICMProfileA).
+     *
+     * @param {number[]} args @param {boolean} wide
+     */
+    const icmProfile = ([handle, sizeAt, out], wide)=>{
+        if (!dcOf(handle) || (sizeAt >>> 0) === 0)
+        {
+            return 0;
+        }
+        const name = 'C:\\WINDOWS\\system32\\spool\\drivers\\color\\sRGB Color Space Profile.icm';
+        const needed = name.length + 1;
+        const room = readU32s(host, sizeAt >>> 0, 1)[0];
+        if ((out >>> 0) === 0 || room < needed)
+        {
+            writeU32s(host, sizeAt >>> 0, [needed]);
+            host.setLastError?.(ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+        const bytes = wide ? new Uint8Array(needed * 2) : new Uint8Array(needed);
+        for (let at = 0; at < name.length; at++)
+        {
+            if (wide)
+            {
+                bytes[at * 2] = name.charCodeAt(at);
+            }
+            else
+            {
+                bytes[at] = name.charCodeAt(at);
+            }
+        }
+        host.writeMemory(out >>> 0, bytes);
+        writeU32s(host, sizeAt >>> 0, [needed]);
+        return 1;
+    };
+
+    /**
      * One record per character of a range, each made from that character's
      * advance in the context's font: GetCharWidth's INTs and
      * GetCharABCWidths' ABCs alike.
@@ -1117,6 +1239,21 @@ export function createGdiFunctions(host){
         const dc = dcOf(handle);
         if (!dc || (out >>> 0) === 0 || last < first)
         {
+            return 0;
+        }
+        // A character code past what the font's encoding can name is
+        // refused, not measured: a byte for a single-byte character set, a
+        // lead and a trail byte for a double-byte one, a code unit for the W
+        // spellings (Wine's test_GetCharABCWidths, range by range).
+        const widest = mask === 0xff && !DBCS_CHARSETS.has(currentFont(dc).charSet & 0xff)
+            ? 0xff : 0xffff;
+        if (last > widest)
+        {
+            return 0;
+        }
+        if (host.canWrite && !host.canWrite(out >>> 0, (last - first + 1) * stride))
+        {
+            host.setLastError?.(ERROR_NOACCESS);
             return 0;
         }
         for (let code = first; code <= last; code++)
@@ -2599,7 +2736,29 @@ export function createGdiFunctions(host){
         CreateFontIndirectA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([logfont])=>objects.create('font', readLogFont(host, logfont)),
+            handler: ([logfont])=>((logfont >>> 0) === 0
+                ? 0
+                : objects.create('font', readLogFont(host, logfont))),
+        },
+
+        /**
+         * HFONT CreateFontIndirectExA(const ENUMLOGFONTEXDVA *)
+         * HFONT CreateFontIndirectExW(const ENUMLOGFONTEXDVW *)
+         *
+         * The LOGFONT the structure opens with; the full name, style and
+         * script after it and the design vector name nothing a face here has.
+         * A null pointer is zero with the last error left alone (Wine's
+         * test_CreateFontIndirectEx).
+         */
+        CreateFontIndirectExA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: args=>table.CreateFontIndirectA.handler(args),
+        },
+        CreateFontIndirectExW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: args=>table.CreateFontIndirectW.handler(args),
         },
 
         /** HFONT CreateFontIndirectW(const LOGFONTW *lplf) */
@@ -3506,41 +3665,6 @@ export function createGdiFunctions(host){
         },
 
         /**
-         * Clipping and scaling a framework's device-context class wraps,
-         * whether or not the program draws. A point is always visible and
-         * the clip box is the whole surface (RectVisible, which reads the
-         * clip, is with the drawing half); the scaled extents are the plain
-         * ones, since the transform is not applied to anything; an escape is
-         * a printer's, and there is no printer.
-         *
-         * BOOL PtVisible(HDC, int x, int y)
-         * int GetClipBox(HDC, LPRECT)
-         * BOOL ScaleViewportExtEx(HDC, int, int, int, int, LPSIZE)
-         * BOOL ScaleWindowExtEx(HDC, int, int, int, int, LPSIZE)
-         * int Escape(HDC, int, int, LPCSTR, LPVOID)
-         */
-        PtVisible: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([handle])=>(dcOf(handle) ? 1 : 0),
-        },
-
-        GetClipBox: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([handle, rect])=>{
-                const dc = dcOf(handle);
-                if (!dc || (rect >>> 0) === 0)
-                {
-                    return REGION_ERROR;
-                }
-                const surface = surfaceOf(dc);
-                writeU32s(host, rect >>> 0, [0, 0, surface.width, surface.height]);
-                return SIMPLE_REGION;
-            },
-        },
-
-        /**
          * BOOL GetViewportExtEx(HDC hdc, LPSIZE lpsize)
          * BOOL GetWindowExtEx(HDC hdc, LPSIZE lpsize)
          */
@@ -3878,38 +4002,51 @@ export function createGdiFunctions(host){
             },
         },
 
+        /**
+         * BOOL ScaleViewportExtEx(HDC, int xn, int dx, int yn, int yd, LPSIZE)
+         * BOOL ScaleWindowExtEx(HDC, int xn, int xd, int yn, int yd, LPSIZE)
+         */
         ScaleViewportExtEx: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([handle, , , , , out])=>{
-                const dc = dcOf(handle);
-                if (!dc)
-                {
-                    return 0;
-                }
-                if ((out >>> 0) !== 0)
-                {
-                    writeSize(host, out >>> 0, dc.viewportExt);
-                }
-                return 1;
-            },
+            handler: args=>scaleExtent(args, 'viewportExt'),
         },
 
         ScaleWindowExtEx: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([handle, , , , , out])=>{
-                const dc = dcOf(handle);
-                if (!dc)
-                {
-                    return 0;
-                }
-                if ((out >>> 0) !== 0)
-                {
-                    writeSize(host, out >>> 0, dc.windowExt);
-                }
-                return 1;
-            },
+            handler: args=>scaleExtent(args, 'windowExt'),
+        },
+
+        /**
+         * BOOL FixBrushOrgEx(HDC, int x, int y, LPPOINT ptl)
+         *
+         * Does nothing and answers FALSE since Windows 2000, the point left
+         * as it was (Wine's brush.c test_brush_org).
+         */
+        FixBrushOrgEx: { argBytes: 16, handler: ()=>0 },
+
+        /**
+         * HCOLORSPACE GetColorSpace(HDC hdc)
+         *
+         * No colour space: image colour management is not done here, and a
+         * program that finds none selected does none of its own.
+         */
+        GetColorSpace: { argBytes: 4, handler: ()=>0 },
+
+        /**
+         * BOOL GetICMProfileA(HDC hdc, LPDWORD pBufSize, LPSTR pszFilename)
+         * BOOL GetICMProfileW(HDC hdc, LPDWORD pBufSize, LPWSTR pszFilename)
+         */
+        GetICMProfileA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: args=>icmProfile(args, false),
+        },
+        GetICMProfileW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: args=>icmProfile(args, true),
         },
 
         Escape: { argBytes: 20, handler: ()=>0 },

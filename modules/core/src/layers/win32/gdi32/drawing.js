@@ -174,6 +174,11 @@ const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PIXEL_FORMAT = 2000;
 /** What SelectClipPath says when the DC has no closed path to clip to. */
 const ERROR_CAN_NOT_COMPLETE = 1003;
+const ERROR_NOACCESS = 998;
+
+/** SetStretchBltMode's first and last modes. */
+const BLACKONWHITE = 1;
+const HALFTONE = 4;
 /** Bits per pixel the DIB decoder reads. */
 const DIB_BIT_COUNTS = new Set([1, 4, 8, 16, 24, 32]);
 
@@ -1249,10 +1254,34 @@ export function createDrawingFunctions(
      * @param {any} dc
      * @returns {import('./rects.js').Rect[]}
      */
-    const drawnAreaOf = dc=>(dc.visible
-        ? dc.visible.flatMap((/** @type {import('./rects.js').Rect} */ piece)=>
-            intersectArea(clipAreaOf(dc), piece))
-        : clipAreaOf(dc));
+    const drawnAreaOf = dc=>{
+        // The meta region SetMetaRgn fixed bounds the clip selected since,
+        // and the window's visible part bounds both.
+        const api = dc.meta
+            ? dc.meta.flatMap((/** @type {import('./rects.js').Rect} */ piece)=>
+                intersectArea(clipAreaOf(dc), piece))
+            : clipAreaOf(dc);
+        return dc.visible
+            ? dc.visible.flatMap((/** @type {import('./rects.js').Rect} */ piece)=>
+                intersectArea(api, piece))
+            : api;
+    };
+
+    /**
+     * What GetRandomRgn's APIRGN is: the meta region and the clip together,
+     * whichever of them there are; null with neither.
+     *
+     * @param {any} dc
+     * @returns {import('./rects.js').Rect[] | null}
+     */
+    const apiAreaOf = dc=>{
+        if (dc.meta && dc.clipSelected)
+        {
+            return dc.meta.flatMap((/** @type {import('./rects.js').Rect} */ piece)=>
+                intersectArea(clipAreaOf(dc), piece));
+        }
+        return dc.meta ?? (dc.clipSelected ? clipAreaOf(dc) : null);
+    };
 
     /**
      * Gives the drawing layer what a DC draws in.
@@ -1911,8 +1940,16 @@ export function createDrawingFunctions(
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, mode])=>{
-                const interfaces = bound(handle);
-                return interfaces ? interfaces.setStretchBltMode(handle >>> 0, mode | 0) : 0;
+                const dc = dcOf(handle);
+                if (!dc || (mode | 0) < BLACKONWHITE || (mode | 0) > HALFTONE)
+                {
+                    return 0;
+                }
+                // On the DC's own record, which the drawing layer reads and
+                // SaveDC copies: it outlives a bitmap selected after it.
+                const previous = dc.stretchMode ?? BLACKONWHITE;
+                dc.stretchMode = mode | 0;
+                return previous;
             },
         },
 
@@ -1921,8 +1958,8 @@ export function createDrawingFunctions(
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
-                const interfaces = bound(handle);
-                return interfaces ? interfaces.getStretchBltMode(handle >>> 0) : 0;
+                const dc = dcOf(handle);
+                return dc ? dc.stretchMode ?? BLACKONWHITE : 0;
             },
         },
 
@@ -3432,13 +3469,17 @@ export function createDrawingFunctions(
          * SYSRGN: the part of the screen the context draws on, in screen
          * coordinates -- its window's area as far as its clip lets it.
          * CLIPRGN: the clip the program selected, as GetClipRgn answers it.
-         * The others hold nothing here. -1 for a context or region there is not.
+         * METARGN: the meta region SetMetaRgn made; APIRGN: that and the clip
+         * together. 0 when there is no such region, -1 for a context or a
+         * region there is not.
          */
         GetRandomRgn: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, region, which])=>{
                 const CLIPRGN = 1;
+                const METARGN = 2;
+                const APIRGN = 3;
                 const SYSRGN = 4;
                 const dc = dcOf(handle);
                 const target = objects.get(region);
@@ -3449,6 +3490,16 @@ export function createDrawingFunctions(
                 if ((which | 0) === CLIPRGN)
                 {
                     return functions.GetClipRgn.handler([handle, region]);
+                }
+                if ((which | 0) === METARGN || (which | 0) === APIRGN)
+                {
+                    const area = (which | 0) === METARGN ? dc.meta ?? null : apiAreaOf(dc);
+                    if (!area)
+                    {
+                        return 0;
+                    }
+                    holdArea(target, area);
+                    return 1;
                 }
                 if ((which | 0) !== SYSRGN)
                 {
@@ -3764,12 +3815,120 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([handle, rect])=>{
                 const dc = dcOf(handle);
-                if (!dc || (rect >>> 0) === 0 || !bound(handle))
+                if (!dc || (rect >>> 0) === 0)
                 {
                     return 0;
                 }
                 const asked = readRect(host, rect >>> 0);
-                return clipAreaOf(dc).every(piece=>isEmpty(intersect(piece, asked))) ? 0 : 1;
+                const area = deviceArea(dc, asked.left, asked.top, asked.right, asked.bottom);
+                return drawnAreaOf(dc).every(piece=>isEmpty(intersect(piece, area))) ? 0 : 1;
+            },
+        },
+
+        /**
+         * BOOL PtVisible(HDC hdc, int x, int y)
+         *
+         * Whether the pixel at the logical point is one the DC draws: inside
+         * its clip, its meta region and the part of its window that shows.
+         * -1 for a context there is not.
+         */
+        PtVisible: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, x, y])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return 0xffffffff;
+                }
+                const point = toDevice(dc, { x: x | 0, y: y | 0 });
+                return areaContains(drawnAreaOf(dc), point.x, point.y) ? 1 : 0;
+            },
+        },
+
+        /**
+         * int GetClipBox(HDC hdc, LPRECT lprect)
+         *
+         * The tightest rectangle round what the DC draws in, in logical
+         * units, and what kind of region that is: the window's visible part
+         * for a window's context -- not the screen -- cut by the meta region
+         * and the clip. A paint loop that redraws only this box redraws only
+         * what changed.
+         */
+        GetClipBox: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, rect])=>{
+                const dc = dcOf(handle);
+                if (!dc || (rect >>> 0) === 0)
+                {
+                    return REGION_ERROR;
+                }
+                const area = areaOf(drawnAreaOf(dc));
+                const box = area.length > 0 ? areaBox(area)
+                    : { left: 0, top: 0, right: 0, bottom: 0 };
+                const a = toLogical(dc, { x: box.left, y: box.top });
+                const b = toLogical(dc, { x: box.right, y: box.bottom });
+                writeU32s(host, rect >>> 0, [Math.min(a.x, b.x), Math.min(a.y, b.y),
+                    Math.max(a.x, b.x), Math.max(a.y, b.y)]);
+                return areaKind(area);
+            },
+        },
+
+        /**
+         * int SetMetaRgn(HDC hdc)
+         *
+         * The clip becomes part of the meta region -- the two intersected
+         * when there is one already -- and the clip is cleared: what a
+         * framework does before handing a DC on, so nothing drawn through it
+         * can reach outside what it was given. Answers the meta region's kind.
+         */
+        SetMetaRgn: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return REGION_ERROR;
+                }
+                if (dc.clipSelected)
+                {
+                    dc.meta = apiAreaOf(dc);
+                    dc.clip = null;
+                    dc.clipRects = null;
+                    dc.clipSelected = false;
+                    if (dc.boundSurface)
+                    {
+                        pushClip(handle, dc, draw());
+                    }
+                }
+                return dc.meta ? areaKind(areaOf(dc.meta)) : SIMPLEREGION;
+            },
+        },
+
+        /**
+         * int GetMetaRgn(HDC hdc, HRGN hrgn)
+         *
+         * 1 with the meta region copied into the region, 0 when the DC has
+         * none.
+         */
+        GetMetaRgn: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, region])=>{
+                const dc = dcOf(handle);
+                const target = objects.get(region);
+                if (!dc || !target || target.type !== 'region')
+                {
+                    return 0;
+                }
+                if (!dc.meta)
+                {
+                    return 0;
+                }
+                holdArea(target, dc.meta);
+                return 1;
             },
         },
 
@@ -4580,6 +4739,11 @@ export function createDrawingFunctions(
         {
             return 0;
         }
+        if (host.canWrite && !host.canWrite(out >>> 0, shape.length))
+        {
+            host.setLastError?.(ERROR_NOACCESS);
+            return 0;
+        }
         host.writeMemory(out >>> 0, shape);
         return shape.length;
     };
@@ -4592,6 +4756,12 @@ export function createDrawingFunctions(
      * @param {number[]} args @param {boolean} wide
      */
     const extTextOut = ([handle, x, y, options, rect, string, count, dx], wide)=>{
+        // The count is a UINT, and one past INT_MAX -- the -1 a caller used
+        // to "terminated" passes -- is refused rather than read as a length.
+        if ((count | 0) < 0)
+        {
+            return 0;
+        }
         const interfaces = bound(handle);
         if (!interfaces)
         {

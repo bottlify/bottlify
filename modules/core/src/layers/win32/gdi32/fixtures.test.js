@@ -19,10 +19,12 @@ import { surfaceForDdb, surfaceForDibSection } from '../../graphics/gdi/surface.
  * the program's callbacks recorded rather than run, and every last error set.
  *
  * @param {number} width @param {number} height
- * @param {{ answer?: (entry: number, args: number[]) => number }} [options]
- *        What the program's callback answers, zero by default.
+ * @param {{ answer?: (entry: number, args: number[]) => number,
+ *     canWrite?: (address: number, length: number) => boolean }} [options]
+ *        What the program's callback answers, zero by default; which of its
+ *        buffers can be written, every one by default.
  */
-export function painted(width, height, { answer = ()=>0 } = {}){
+export function painted(width, height, { answer = ()=>0, canWrite } = {}){
     const bytes = new Uint8Array(0x80000);
     const view = new DataView(bytes.buffer);
     let next = 0x40000;
@@ -55,6 +57,7 @@ export function painted(width, height, { answer = ()=>0 } = {}){
             return answer(entry, args);
         },
         setLastError: code=>errors.push(code),
+        canWrite,
     });
     const fns = /** @type {Record<string, { argBytes: number, handler: (args: number[]) => any }>} */ (
         /** @type {unknown} */ (gdi.table));

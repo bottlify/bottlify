@@ -669,6 +669,17 @@ export function createWin32Module(){
                 readMemory,
                 writeMemory,
                 readCString,
+                canWrite: (address, length)=>{
+                    try
+                    {
+                        memory.assert(address >>> 0, Math.max(1, length), 'write');
+                        return true;
+                    }
+                    catch (e){
+                        void e;
+                        return false;
+                    }
+                },
                 divergence: config?.divergence,
                 handles: {
                     /** @param {string} type @param {any} object */

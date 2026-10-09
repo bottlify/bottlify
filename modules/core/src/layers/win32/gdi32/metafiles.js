@@ -1809,6 +1809,27 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
 
     const functions = {
         /**
+         * BOOL EnumEnhMetaFile(HDC, HENHMETAFILE, ENHMFENUMPROC, LPVOID, const RECT *)
+         *
+         * Handing each record to the program's procedure needs the records
+         * in its memory and PlayEnhMetaFileRecord behind them; neither is
+         * here, so the enumeration is refused and says so rather than
+         * reporting records it never offered.
+         */
+        EnumEnhMetaFile: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([, metafile])=>{
+                if (!enhanced(metafile))
+                {
+                    return refuse(ERROR_INVALID_HANDLE);
+                }
+                diverge('EnumEnhMetaFile', 'records are not handed to the procedure; refused');
+                return 0;
+            },
+        },
+
+        /**
          * BOOL PlayEnhMetaFile(HDC hdc, HENHMETAFILE hmf, const RECT *lprect)
          *
          * The picture drawn into the rectangle: see the header. No rectangle

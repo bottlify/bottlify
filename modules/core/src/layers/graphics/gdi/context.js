@@ -159,10 +159,39 @@ export function createGdiDrawing(options = {}){
         return answer;
     };
 
+    /**
+     * A COLORREF as the plain colour it names on this context. PALETTEINDEX
+     * is an entry of the logical palette selected into the DC, an index
+     * past its end the first; DIBINDEX is an entry of the colour table of
+     * the bitmap being drawn on, one it does not have black (Wine's bitmap.c
+     * test_dibsections and palette.c test_DIB_PAL_COLORS); the PALETTERGB
+     * flag only asks for the nearest colour, which every colour gets.
+     *
+     * @param {any} context @param {number} color
+     * @returns {number} a COLORREF with nothing in its top byte
+     */
+    const resolveColor = (context, color)=>{
+        const value = color >>> 0;
+        if ((value & 0xffff0000) >>> 0 === 0x10ff0000)
+        {
+            const table = context.surface.palette;
+            const pixel = table ? table[value & 0xffff] : undefined;
+            return pixel === undefined ? 0 : pixelToColor(pixel);
+        }
+        if (value >>> 24 === 0x01)
+        {
+            const record = objects.get(context.state.palette ?? 0);
+            const entries = record && record.type === 'palette' ? record.attributes.entries : [];
+            return ((entries[value & 0xffff] ?? entries[0] ?? 0) & 0x00ffffff) >>> 0;
+        }
+        return value & 0x00ffffff;
+    };
+
     /** @param {any} context @returns {import("./shapes.js").Pen} */
     const penOf = context=>{
         const record = objects.get(context.state.pen);
-        return record && record.type === 'pen' ? record.attributes : DEFAULT_PEN;
+        const pen = record && record.type === 'pen' ? record.attributes : DEFAULT_PEN;
+        return { ...pen, color: resolveColor(context, pen.color) };
     };
 
     /**
@@ -172,11 +201,13 @@ export function createGdiDrawing(options = {}){
      */
     const patternOf = (context, handle)=>{
         const record = objects.get(handle ?? context.state.brush);
+        const attributes = record && record.type === 'brush' ? record.attributes : DEFAULT_BRUSH;
         return createPattern({
-            attributes: record && record.type === 'brush' ? record.attributes : DEFAULT_BRUSH,
+            attributes: attributes.color === undefined ? attributes
+                : { ...attributes, color: resolveColor(context, attributes.color) },
             bkMode: context.state.bkMode,
-            bkColor: context.state.bkColor,
-            textColor: context.state.textColor,
+            bkColor: resolveColor(context, context.state.bkColor),
+            textColor: resolveColor(context, context.state.textColor),
             mono: context.surface.mono === true,
             origin: context.brushOrigin,
             paletteColors: ()=>{
@@ -195,10 +226,19 @@ export function createGdiDrawing(options = {}){
     const conversionOf = (context, from)=>sourceConversion({
         src: from.surface,
         dest: context.surface,
-        textColor: context.state.textColor,
-        bkColor: context.state.bkColor,
-        srcBkColor: from.state.bkColor,
+        textColor: resolveColor(context, context.state.textColor),
+        bkColor: resolveColor(context, context.state.bkColor),
+        srcBkColor: resolveColor(from, from.state.bkColor),
     });
+
+    /**
+     * The stretch mode is the device context's, kept on its record with the
+     * rest of what SaveDC remembers: a copy on the drawing context would be
+     * lost when a bitmap selected rebinds the pixels.
+     *
+     * @param {any} context
+     */
+    const stretchModeOf = context=>context.state.stretchMode ?? BLACKONWHITE;
 
     /** @param {any} context @returns {import("./contract.js").TextMetrics} */
     const metricsOf = context=>{
@@ -231,7 +271,6 @@ export function createGdiDrawing(options = {}){
                 clip: surfaceBounds(surface),
                 /** The pieces of a clip that is not one rectangle; null when it is. */
                 clipRects: null,
-                stretchMode: BLACKONWHITE,
                 brushOrigin: { x: 0, y: 0 },
             };
             contexts.set(context.hdc, context);
@@ -310,14 +349,15 @@ export function createGdiDrawing(options = {}){
             {
                 return 0;
             }
-            const previous = context.stretchMode;
-            context.stretchMode = mode | 0;
+            const previous = stretchModeOf(context);
+            context.state.stretchMode = mode | 0;
             return previous;
         },
 
         /** @param {number} hdc @returns {number} */
         getStretchBltMode(hdc){
-            return contextOf(hdc)?.stretchMode ?? 0;
+            const context = contextOf(hdc);
+            return context ? stretchModeOf(context) : 0;
         },
 
         /** @param {number} hdc @param {number} align @returns {number} the previous value */
@@ -370,8 +410,10 @@ export function createGdiDrawing(options = {}){
             }
             // SetPixel is not subject to the binary raster operation: it names
             // the colour it wants and gets it.
-            context.surface.write(x | 0, y | 0, colorToPixel(color));
-            return color >>> 0;
+            context.surface.write(x | 0, y | 0, colorToPixel(resolveColor(context, color)));
+            // The colour the pixel became, which on a palette or a
+            // monochrome bitmap is the nearest one it has.
+            return pixelToColor(context.surface.read(x | 0, y | 0));
         },
 
         /**
@@ -402,7 +444,7 @@ export function createGdiDrawing(options = {}){
             {
                 return CLR_INVALID;
             }
-            const pixel = colorToPixel(color);
+            const pixel = colorToPixel(resolveColor(context, color));
             return pixelToColor(context.surface.nearest ? context.surface.nearest(pixel) : pixel);
         },
 
@@ -469,7 +511,7 @@ export function createGdiDrawing(options = {}){
                 src: from.surface,
                 srcX, srcY, srcWidth, srcHeight,
                 rop,
-                mode: context.stretchMode,
+                mode: stretchModeOf(context),
                 pattern: patternOf(context),
                 convert: conversionOf(context, from),
             }), { x: x - srcX, y: y - srcY });
@@ -583,7 +625,7 @@ export function createGdiDrawing(options = {}){
             {
                 return false;
             }
-            const pixel = colorToPixel(color);
+            const pixel = colorToPixel(resolveColor(from, color));
             const key = from.surface.nearest ? from.surface.nearest(pixel) : pixel;
             return clipped(context, ()=>transparentBlt({
                 dest: context.surface,
@@ -727,7 +769,8 @@ export function createGdiDrawing(options = {}){
                 return false;
             }
             return floodFill(painterOf(context), context.clipRects ?? [context.clip], x | 0,
-                y | 0, colorToPixel(color), type === FLOODFILLSURFACE, patternOf(context));
+                y | 0, colorToPixel(resolveColor(context, color)), type === FLOODFILLSURFACE,
+                patternOf(context));
         },
 
         /**
@@ -1011,8 +1054,8 @@ export function createGdiDrawing(options = {}){
                     y: origin.y,
                     text,
                     metrics,
-                    textColor: context.state.textColor,
-                    bkColor: context.state.bkColor,
+                    textColor: resolveColor(context, context.state.textColor),
+                    bkColor: resolveColor(context, context.state.bkColor),
                     bkMode: context.state.bkMode,
                     align: context.state.textAlign,
                     flags,
@@ -1083,7 +1126,7 @@ export function createGdiDrawing(options = {}){
             }
             const pattern = patternOf(context);
             return clipped(context, ()=>stretchDIBits({
-                mode: context.stretchMode,
+                mode: stretchModeOf(context),
                 pattern,
                 ...request,
                 dest: context.surface,
@@ -1184,7 +1227,7 @@ export function createGdiDrawing(options = {}){
                 width: context.surface.width,
                 height: context.surface.height,
                 rop: PATCOPY,
-                pattern: solidPattern(color),
+                pattern: solidPattern(resolveColor(context, color)),
             }));
         },
     };
