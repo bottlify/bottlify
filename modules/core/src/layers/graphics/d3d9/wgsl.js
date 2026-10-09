@@ -959,10 +959,21 @@ export function translateShader(parsed, options = {}){
                 break;
             }
             case OPCODE.MOV:
-                write(instruction, src(instruction, 0));
+                // vs_1_1 has no mova and loads the address register with mov,
+                // which floors (Wine's shader_glsl_mov); a0 is read through
+                // i32(), which truncates towards zero, so a negative index
+                // would land one register high.
+                write(instruction, vertex
+                    && /** @type {import('./shader.js').Operand} */ (instruction.dest).type
+                        === REGISTER.ADDR
+                    ? `floor(${src(instruction, 0)})`
+                    : src(instruction, 0));
                 break;
             case OPCODE.MOVA:
-                write(instruction, `round(${src(instruction, 0)})`);
+                // To nearest, halves away from zero (Wine's shader_glsl_mov);
+                // WGSL's round() takes halves to even.
+                write(instruction, `(floor(abs(${src(instruction, 0)}) + vec4f(0.5))`
+                    + ` * sign(${src(instruction, 0)}))`);
                 break;
             case OPCODE.ADD:
                 write(instruction, `(${src(instruction, 0)} + ${src(instruction, 1)})`);

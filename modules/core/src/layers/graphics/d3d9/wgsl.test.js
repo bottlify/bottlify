@@ -129,7 +129,9 @@ test('the arithmetic instructions become the statements they mean', ()=>{
             'r0 = d3dNrm4(c[1]);'],
         ['sincos', [op(OPCODE.SINCOS, 4), dst(r, 0), src(c, 1), src(c, 2), src(c, 3)],
             'r0 = vec4f(cos(c[1].x), sin(c[1].x), 0.0, 0.0);'],
-        ['mova', [op(OPCODE.MOVA, 2), dst(REGISTER.ADDR, 0), src(c, 1)], 'a0 = round(c[1]);'],
+        // To nearest, halves away from zero, as Wine's shader_glsl_mov rounds.
+        ['mova', [op(OPCODE.MOVA, 2), dst(REGISTER.ADDR, 0), src(c, 1)],
+            'a0 = (floor(abs(c[1]) + vec4f(0.5)) * sign(c[1]));'],
         ['expp', [op(OPCODE.EXPP, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(exp2(c[1].w));'],
         ['logp', [op(OPCODE.LOGP, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(d3dLog(c[1].w));'],
     ]);
@@ -139,6 +141,18 @@ test('the arithmetic instructions become the statements they mean', ()=>{
         assert.equal(translated.error, null, `${name} translates`);
         assertLine(translated.wgsl, line);
     }
+});
+
+test('vs_1_1 loads the address register with mov, which floors', ()=>{
+    // The register is read through i32(), which truncates towards zero: a
+    // copied -0.5 would index the register above the one Windows reads.
+    const parsed = parseShader([versionToken(SHADER_KIND.VERTEX, 1, 1), ...dclInput(0, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.ADDR, 0), src(REGISTER.CONST, 1),
+        op(OPCODE.MOV, 2), dst(REGISTER.RASTOUT, 0), src(REGISTER.INPUT, 0), END_TOKEN]);
+    assert.equal(parsed.error, null);
+    const translated = translateShader(parsed);
+    assert.equal(translated.error, null);
+    assertLine(translated.wgsl, 'a0 = floor(c[1]);');
 });
 
 test('the pixel-stage instructions become the statements they mean', ()=>{
