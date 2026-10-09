@@ -146,3 +146,30 @@ export const DMUS_OBJ = Object.freeze({
 });
 
 
+/** The software synthesizer's class, the default port, and the port's interface (dmusicc.h). */
+export const CLSID_DIRECTMUSIC_SYNTH = '{58C2B4D0-46E7-11D1-89AC-00A0C9054129}';
+export const IID_DIRECTMUSIC_PORT = '{08F2D8C9-37C2-11D2-B9F9-0000F875AC12}';
+
+/** DMUS_PORTCAPS: what EnumPort and IDirectMusicPort::GetCaps fill in. */
+export const DMUS_PORTCAPS = Object.freeze({
+    dwSize: 0x00,
+    dwFlags: 0x04,
+    guidPort: 0x08,
+    dwClass: 0x18,
+    dwType: 0x1c,
+    dwMemorySize: 0x20,
+    dwMaxChannelGroups: 0x24,
+    dwMaxVoices: 0x28,
+    dwMaxAudioChannels: 0x2c,
+    dwEffectFlags: 0x30,
+    wszDescription: 0x34,
+    SIZE: 0x134,
+});
+export const DMUS_PC_DLS = 0x1;
+export const DMUS_PC_SOFTWARESYNTH = 0x4;
+export const DMUS_PC_DIRECTSOUND = 0x80;
+export const DMUS_PC_OUTPUTCLASS = 1;
+export const DMUS_PORT_USER_MODE_SYNTH = 1;
+/** dwMemorySize of a port that downloads into system memory, so has no fixed size. */
+export const DMUS_PC_SYSTEMMEMORY = 0x7fffffff;
+export const DAUD_STANDARD_VOICE_PRIORITY = 0x80000000;

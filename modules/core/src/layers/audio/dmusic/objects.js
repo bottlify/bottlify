@@ -38,6 +38,9 @@ const E_NOINTERFACE = 0x80004002 | 0;
 const E_INVALIDARG = 0x80070057 | 0;
 const E_FAIL = 0x80004005 | 0;
 const E_OUTOFMEMORY = 0x8007000e | 0;
+const CLASS_E_NOAGGREGATION = 0x80040110 | 0;
+/** No port of the class a program asked for (dmerror.h). */
+const DMUS_E_DRIVER_FAILED = 0x88781101 | 0;
 
 /** WAVE_FORMAT_MPEG and WAVE_FORMAT_MPEGLAYER3, the compressed wave tags. */
 const WAVE_FORMAT_MPEG = 0x50;
@@ -1273,17 +1276,118 @@ export function createDirectMusic(host){
         return path;
     };
 
+    /**
+     * The one port there is: the software synthesizer every Windows with
+     * DirectMusic has, as dmusic.h's DMUS_PORTCAPS describes it. A program
+     * asks for the default port, creates it, adds it to its performance and
+     * activates it without checking each answer, so a system with no port
+     * would leave it calling through a null pointer. What it plays still goes
+     * through the performance, so the port itself only answers.
+     *
+     * @param {number} at
+     */
+    const writePortCaps = at=>{
+        if ((at >>> 0) === 0 || readU32(at) < ids.DMUS_PORTCAPS.SIZE)
+        {
+            return E_POINTER;
+        }
+        memory.writeBytes(at + 4, new Uint8Array(ids.DMUS_PORTCAPS.SIZE - 4));
+        writeU32(at + ids.DMUS_PORTCAPS.dwFlags, ids.DMUS_PC_SOFTWARESYNTH
+            | ids.DMUS_PC_DLS | ids.DMUS_PC_DIRECTSOUND);
+        writeGuid(guidMemory, at + ids.DMUS_PORTCAPS.guidPort, ids.CLSID_DIRECTMUSIC_SYNTH);
+        writeU32(at + ids.DMUS_PORTCAPS.dwClass, ids.DMUS_PC_OUTPUTCLASS);
+        writeU32(at + ids.DMUS_PORTCAPS.dwType, ids.DMUS_PORT_USER_MODE_SYNTH);
+        writeU32(at + ids.DMUS_PORTCAPS.dwMemorySize, ids.DMUS_PC_SYSTEMMEMORY);
+        writeU32(at + ids.DMUS_PORTCAPS.dwMaxChannelGroups, 1000);
+        writeU32(at + ids.DMUS_PORTCAPS.dwMaxVoices, 1000);
+        writeU32(at + ids.DMUS_PORTCAPS.dwMaxAudioChannels, 2);
+        writeWide(at + ids.DMUS_PORTCAPS.wszDescription, 'Microsoft Synthesizer');
+        return S_OK;
+    };
+
+    const createPort = ()=>{
+        const port = { active: false, channelGroups: 1 };
+        const object = createComObject(ids.IID_DIRECTMUSIC_PORT, {
+            interfaces: [describe(ids.IID_DIRECTMUSIC_PORT, [
+                ['PlayBuffer', 8, ()=>S_OK],
+                ['SetReadNotificationHandle', 8, ()=>E_NOTIMPL],
+                ['Read', 8, ()=>E_NOTIMPL],
+                ['DownloadInstrument', 20, ()=>E_NOTIMPL],
+                ['UnloadInstrument', 8, ()=>E_NOTIMPL],
+                ['GetLatencyClock', 8, ()=>E_NOTIMPL],
+                ['GetRunningStats', 8, ()=>E_NOTIMPL],
+                ['Compact', 4, ()=>S_OK],
+                ['GetCaps', 8, (_, [at])=>writePortCaps(at)],
+                ['DeviceIoControl', 32, ()=>E_NOTIMPL],
+                ['SetNumChannelGroups', 8, (_, [count])=>{
+                    port.channelGroups = count >>> 0;
+                    return S_OK;
+                }],
+                ['GetNumChannelGroups', 8, (_, [out])=>{
+                    if ((out >>> 0) === 0)
+                    {
+                        return E_POINTER;
+                    }
+                    writeU32(out, port.channelGroups);
+                    return S_OK;
+                }],
+                ['Activate', 8, (_, [active])=>{
+                    port.active = active !== 0;
+                    return S_OK;
+                }],
+                ['SetChannelPriority', 16, ()=>S_OK],
+                ['GetChannelPriority', 16, (_, [, , out])=>{
+                    if ((out >>> 0) === 0)
+                    {
+                        return E_POINTER;
+                    }
+                    writeU32(out, ids.DAUD_STANDARD_VOICE_PRIORITY);
+                    return S_OK;
+                }],
+                ['SetDirectSound', 12, ()=>S_OK],
+                ['GetFormat', 16, ()=>E_NOTIMPL],
+            ])],
+            state: port,
+        });
+        return object;
+    };
+
     /** The DirectMusic object itself, for a program that asks for one. */
     const directMusicDefinition = ()=>{
         const methods = /** @type {ComMethodEntry[]} */ ([
-            ['EnumPort', 12, ()=>S_FALSE],
+            ['EnumPort', 12, (_, [index, caps])=>
+                (index >>> 0) === 0 ? writePortCaps(caps) : S_FALSE],
             ['CreateMusicBuffer', 16, ()=>E_NOTIMPL],
-            ['CreatePort', 20, ()=>E_NOTIMPL],
+            ['CreatePort', 20, (_, [clsid, , out, outer])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                writeU32(out, 0);
+                if ((outer >>> 0) !== 0)
+                {
+                    return CLASS_E_NOAGGREGATION;
+                }
+                const wanted = guidAt(clsid);
+                if (wanted !== GUID_NULL && wanted !== ids.CLSID_DIRECTMUSIC_SYNTH)
+                {
+                    return DMUS_E_DRIVER_FAILED;
+                }
+                writeU32(out, publish(createPort(), ids.IID_DIRECTMUSIC_PORT));
+                return S_OK;
+            }],
             ['EnumMasterClock', 12, ()=>S_FALSE],
             ['GetMasterClock', 12, ()=>E_NOTIMPL],
             ['SetMasterClock', 8, ()=>E_NOTIMPL],
             ['Activate', 8, ()=>S_OK],
-            ['GetDefaultPort', 8, ()=>E_NOTIMPL],
+            ['GetDefaultPort', 8, (_, [out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                writeGuid(guidMemory, out, ids.CLSID_DIRECTMUSIC_SYNTH);
+                return S_OK;
+            }],
             ['SetDirectSound', 12, ()=>S_OK],
         ]);
         const eight = [...methods, /** @type {ComMethodEntry} */ (
