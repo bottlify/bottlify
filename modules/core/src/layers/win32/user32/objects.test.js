@@ -1538,3 +1538,43 @@ test('LoadMenu reads an extended menu resource as LoadMenuIndirect does', ()=>{
     assert.equal(fns.GetMenuState.handler([menu, 9, 0]) & MF_CHECKED, MF_CHECKED);
     assert.equal(fns.GetMenuContextHelpId.handler([menu]), 3);
 });
+
+test('CreateIconFromResourceEx makes an icon or cursor of one resource entry\'s image', ()=>{
+    const { fns, memory } = setup();
+    // A 2x2 32-bit entry: BITMAPINFOHEADER with both masks' height, the
+    // colour rows and the AND mask (each row padded to a DWORD), bottom up.
+    const header = new DataView(new ArrayBuffer(40));
+    header.setUint32(0, 40, true);
+    header.setInt32(4, 2, true);
+    header.setInt32(8, 4, true);
+    header.setUint16(12, 1, true);
+    header.setUint16(14, 32, true);
+    const image = new Uint8Array([...new Uint8Array(header.buffer),
+        ...new Array(16).fill(0x80), ...new Array(8).fill(0)]);
+    const ICON = 0x300;
+    memory.bytes.set(image, ICON);
+    const VERSION = 0x00030000;
+    const icon = fns.CreateIconFromResourceEx.handler([ICON, image.length, 1, VERSION, 0, 0, 0]);
+    assert.notEqual(icon, 0);
+    assert.equal(fns.GetIconInfo.handler([icon, 0x100]), 1);
+    const view = new DataView(memory.bytes.buffer);
+    assert.deepEqual([0, 4, 8].map(at=>view.getUint32(0x100 + at, true)), [1, 1, 1],
+        'an icon, its hot spot in the middle');
+    assert.equal(fns.DestroyIcon.handler([icon]), 1);
+
+    // A cursor's entry is its hot spot, two WORDs, before the same image.
+    const CURSOR = 0x500;
+    memory.bytes.set([1, 0, 0, 0, ...image], CURSOR);
+    const cursor = fns.CreateIconFromResource.handler([CURSOR, image.length + 4, 0, VERSION]);
+    assert.notEqual(cursor, 0);
+    assert.equal(fns.GetIconInfo.handler([cursor, 0x100]), 1);
+    assert.deepEqual([0, 4, 8].map(at=>view.getUint32(0x100 + at, true)), [0, 1, 0],
+        'a cursor, at its own hot spot');
+
+    assert.equal(fns.CreateIconFromResourceEx.handler([0, image.length, 1, VERSION, 0, 0, 0]), 0,
+        'no bits');
+    assert.equal(fns.CreateIconFromResourceEx.handler([ICON, image.length, 1, 0x00010000, 0, 0, 0]),
+        0, 'a version below 0x00020000');
+    assert.equal(fns.CreateIconFromResourceEx.argBytes, 28);
+    assert.equal(fns.CreateIconFromResource.argBytes, 16);
+});

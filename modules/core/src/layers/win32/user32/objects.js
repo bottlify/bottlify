@@ -29,7 +29,7 @@
  *   to open it.
  */
 
-import { ddbToBgra, planesToBgra } from './cursors.js';
+import { ddbToBgra, dibToBgra, planesToBgra } from './cursors.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { readText, readWideString, writeText } from './unicode.js';
 
@@ -1434,6 +1434,44 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         return held.pos;
     };
 
+    /**
+     * The icon or cursor CreateIconFromResource(Ex) makes of one resource
+     * entry's bytes.
+     *
+     * @param {number} bits @param {number} size @param {number} isIcon @param {number} version
+     */
+    const createFromResource = (bits, size, isIcon, version)=>{
+        const ICON_RESOURCE_MIN = 0x00020000;
+        const ICON_RESOURCE_MAX = 0x00030000;
+        const at = bits >>> 0;
+        const length = size >>> 0;
+        const ver = version >>> 0;
+        const icon = (isIcon >>> 0) !== 0;
+        const skip = icon ? 0 : 4;
+        if (at === 0 || length < skip + 40 || ver < ICON_RESOURCE_MIN || ver > ICON_RESOURCE_MAX)
+        {
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        const bytes = host.readMemory(at, Math.min(length, 0x100000));
+        const image = bytes.subarray(skip);
+        const view = new DataView(image.buffer, image.byteOffset, image.byteLength);
+        const png = image[0] === 0x89 && image[1] === 0x50 && image[2] === 0x4e
+            && image[3] === 0x47;
+        const decoded = png ? null : dibToBgra(image);
+        const width = decoded?.width ?? (png ? view.getUint32(16, false) : 0);
+        const height = decoded?.height ?? (png ? view.getUint32(20, false) : 0);
+        if (width <= 0 || height <= 0)
+        {
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        const hotSpot = icon ? { x: width >> 1, y: height >> 1 }
+            : { x: bytes[0] | bytes[1] << 8, y: bytes[2] | bytes[3] << 8 };
+        const picture = decoded ? { width, height, hotSpot, bgra: decoded.bgra } : null;
+        return host.handles.open(icon ? 'icon' : 'cursor', { hotSpot, width, height, picture });
+    };
+
     return {
         /** BOOL SetPropA/W(HWND hWnd, LPCSTR lpString, HANDLE hData) */
         SetPropA: { argBytes: 12, handler: ansiProperties.set },
@@ -2521,6 +2559,37 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                         bgra: ddbToBgra(across, down, depth, mask, colour) },
                 });
             },
+        },
+
+        /**
+         * HICON CreateIconFromResourceEx(PBYTE presbits, DWORD dwResSize, BOOL fIcon,
+         *   DWORD dwVer, int cxDesired, int cyDesired, UINT Flags)
+         *
+         * An icon or cursor made from the bytes of one RT_ICON or RT_CURSOR
+         * entry, read now: a BITMAPINFOHEADER image, after a cursor's two
+         * WORDs of hot spot. The version must lie in 0x00020000..0x00030000,
+         * as the call documents; no bits, or a version outside it, is NULL.
+         * A PNG-compressed entry has its size from its header and no picture,
+         * the form the page cannot draw. The picture keeps the image's own
+         * size rather than being stretched to the size desired.
+         */
+        CreateIconFromResourceEx: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([bits, size, isIcon, version])=>
+                createFromResource(bits, size, isIcon, version),
+        },
+
+        /**
+         * HICON CreateIconFromResource(PBYTE presbits, DWORD dwResSize, BOOL fIcon, DWORD dwVer)
+         *
+         * CreateIconFromResourceEx at the image's own size.
+         */
+        CreateIconFromResource: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([bits, size, isIcon, version])=>
+                createFromResource(bits, size, isIcon, version),
         },
 
         /**
