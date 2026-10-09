@@ -421,8 +421,10 @@ function combine(op, stageIndex, coordinate, arg1, arg2, specular = 'input.specu
         // every channel, alpha too.
         case D3DTOP.DOTPRODUCT3:
             return `vec4f(saturate(4.0 * dot((${a}).rgb - vec3f(0.5), (${b}).rgb - vec3f(0.5))))`;
+        // The third argument (ARG0) is the one added, as it is the one LERP
+        // takes its proportion from: ARG1 * ARG2 + ARG0.
         case D3DTOP.MULTIPLYADD:
-            return `(${a}) + (${b}) * (${c})`;
+            return `(${a}) * (${b}) + (${c})`;
         case D3DTOP.LERP:
             return `mix(${b}, ${a}, ${c})`;
         default:

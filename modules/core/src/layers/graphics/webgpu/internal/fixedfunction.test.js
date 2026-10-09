@@ -196,8 +196,9 @@ test('the colour-plus-alpha forms, the signed dot product and ARG0 as a third op
         `(vec4f(1.0) - (${T})) * (input.diffuse) + vec4f((${T}).a)`));
     assert.ok(codeOf(D3DTOP.DOTPRODUCT3).includes(
         `4.0 * dot((${T}).rgb - vec3f(0.5), (input.diffuse).rgb - vec3f(0.5))`));
-    // ARG0 is the addend's multiplier and the interpolant, and defaults to CURRENT.
-    assert.ok(codeOf(D3DTOP.MULTIPLYADD).includes(`(${T}) + (input.diffuse) * (current)`));
+    // ARG0 is the addend and the interpolant, and defaults to CURRENT: ARG1 * ARG2 + ARG0,
+    // as Windows draws it (Wine's wined3d says MSDN has the order wrong).
+    assert.ok(codeOf(D3DTOP.MULTIPLYADD).includes(`(${T}) * (input.diffuse) + (current)`));
     assert.ok(codeOf(D3DTOP.LERP, D3DTA.TFACTOR).includes(
         `mix(input.diffuse, ${T}, uniforms.textureFactor)`));
     assert.deepEqual(argumentsRead(D3DTOP.LERP, D3DTA.TEXTURE, D3DTA.DIFFUSE, D3DTA.TFACTOR),
