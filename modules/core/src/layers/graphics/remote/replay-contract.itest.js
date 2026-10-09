@@ -1177,8 +1177,18 @@ async()=>{
                 [signalled]);
             /** @type {{ value?: number }} */
             const counted = {};
-            await run.call('GetData occlusion', ()=>occlusion.query.GetData(counted, 4,
-                GETDATA_FLUSH), [counted]);
+            // Polled until counted, as Wine's test_occlusion_query polls: a driver
+            // answers S_FALSE until the GPU has counted, and so does the renderer
+            // across the worker.
+            await run.call('GetData occlusion', async()=>{
+                let answer = await occlusion.query.GetData(counted, 4, GETDATA_FLUSH);
+                for (let tries = 0; answer === 1 && tries < 1000; tries++)
+                {
+                    await new Promise(resolve=>setTimeout(resolve, 1));
+                    answer = await occlusion.query.GetData(counted, 4, GETDATA_FLUSH);
+                }
+                return answer;
+            }, [counted]);
             // What the program reads back of the state it set.
             /** @type {Record<string, any>} */
             const outs = {};

@@ -781,6 +781,17 @@ export function createRecording(options){
     const counts = new WeakMap();
 
     /**
+     * The system-memory surfaces a GetRenderTargetData is still filling, each
+     * with when it will have: the copy is queued as a driver queues it, and
+     * only reading the surface waits for its pixels. Waiting at the copy held
+     * the program for every frame the renderer had still to play, a quarter of
+     * a second at worst, though it read the pixels frames later.
+     *
+     * @type {WeakMap<object, Promise<void>>}
+     */
+    const readbacks = new WeakMap();
+
+    /**
      * What a played call wrote into a structure the caller passed, into the
      * caller's: its plain values, the device's objects left as the recorded
      * call gave them.
@@ -943,8 +954,17 @@ export function createRecording(options){
         /** Each argument's place, for the shapes of the structures passed there. */
         /** @type {import('./wire.js').Site[]} */
         const sites = [];
-        return (/** @type {any[]} */ ...args)=>{
+        /** @type {(...args: any[]) => any} */
+        const call = (...args)=>{
             const count = args.length;
+            // A read of a surface a copy back from the GPU is still filling
+            // waits for it, then is made.
+            const filling = name === 'LockRect' || name === 'GetDC' ? readbacks.get(target)
+                : undefined;
+            if (filling)
+            {
+                return filling.then(()=>call(...args));
+            }
             /** What the device is given: its own objects rather than their proxies. */
             let applied = args;
             if (depth > 0 || pure)
@@ -1185,6 +1205,20 @@ export function createRecording(options){
                 transport.called(WAIT.NONE, name);
                 return typeof result === 'object' ? answerOf(result) : result;
             }
+            if (name === 'GetRenderTargetData' && applied[1])
+            {
+                const into = applied[1];
+                const filled = Promise.resolve(transport.called(WAIT.ANSWER, name))
+                    .then(()=>{}, ()=>{});
+                readbacks.set(into, filled);
+                filled.then(()=>{
+                    if (readbacks.get(into) === filled)
+                    {
+                        readbacks.delete(into);
+                    }
+                });
+                return typeof result === 'object' ? answerOf(result) : result;
+            }
             if (name === 'GetData' && /** @type {any} */ (target)?.type === D3DQUERYTYPE_OCCLUSION)
             {
                 const asking = { reply: /** @type {PlayedAnswer | null} */ (null) };
@@ -1220,6 +1254,7 @@ export function createRecording(options){
                 transport.called(WAIT.ANSWER, name));
             return reply instanceof Promise ? reply.then(take) : take(reply);
         };
+        return call;
     };
 
     /**
