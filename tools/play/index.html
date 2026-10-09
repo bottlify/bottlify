@@ -36,7 +36,13 @@
 <script type="module">
 import { createApp } from '/bottlify/core.js';
 
-const id = new URLSearchParams(location.search).get('bottle');
+const query = new URLSearchParams(location.search);
+const id = query.get('bottle');
+// What a run is measured under, from the address: `executors=3` runs the
+// program's threads on three executors at once, and `cork={"checkReads":true}`
+// is the translator's settings (`EngineConfig`).
+const executors = Number(query.get('executors') ?? 0) || undefined;
+const corkConfig = query.has('cork') ? JSON.parse(query.get('cork')) : null;
 const base = `/bundles/${encodeURIComponent(id ?? '')}`;
 const canvas = document.getElementById('screen');
 const start = document.getElementById('start');
@@ -73,6 +79,8 @@ async function play(){
         // Saves and settings are kept in this browser, per bottle.
         storage: 'opfs',
         id,
+        ...executors ? { executors } : {},
+        ...corkConfig ? { cork: { config: corkConfig } } : {},
         audio: { drained: true, sampleRate: audio.sampleRate,
             ...(sound ? { port: sound.port2 } : {}) },
     });
