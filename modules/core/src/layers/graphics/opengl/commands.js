@@ -186,6 +186,27 @@ const parameterVector = (method, fours)=>({
 });
 
 /**
+ * A float vector as long as its parameter says -- four for a colour or a
+ * position, three for a direction, one for the rest -- after `leading` words:
+ * the light or face it is set on, and the parameter.
+ *
+ * @param {number} leading @param {string} method @param {Map<number, number>} sizes
+ * @returns {import('../d3d8/commands.js').CommandEntry}
+ */
+const sizedVector = (leading, method, sizes)=>({
+    args: leading + 1, pointer: leading,
+    choose: { arg: leading - 1, cases: [...sizes].map(([name, count])=>[name, count * 4]),
+        otherwise: 4 },
+    make: (context, c)=>{
+        const head = leading === 1 ? [c.arg(0) >>> 0] : [c.arg(0) >>> 0, c.arg(1) >>> 0];
+        return context[method](...head,
+            [...c.floats.subarray(0, sizes.get(c.arg(leading - 1) >>> 0) ?? 1)]);
+    },
+});
+
+const COLOURED = [GL.AMBIENT, GL.DIFFUSE, GL.SPECULAR];
+
+/**
  * The vector and the matrix a call is given, made once: the context copies
  * what it keeps of either, as it must of the program's own memory, and a
  * typed array made per call is an allocation outside the heap.
@@ -302,6 +323,13 @@ const TABLE = {
         make: (context, c)=>context.glProgramLocalParameter4fARB(c.arg(0) >>> 0, c.arg(1) >>> 0,
             Float32Array.of(asFloat(c.arg(2)), asFloat(c.arg(3)), asFloat(c.arg(4)),
                 asFloat(c.arg(5)))) },
+    // --- lights and fog: a frame sets them per object ---
+    glLightfv: sizedVector(2, 'glLightfv', new Map([...COLOURED, GL.POSITION]
+        .map(name=>/** @type {[number, number]} */ ([name, 4])).concat([[GL.SPOT_DIRECTION, 3]]))),
+    glLightf: parameter(2, 'f', 'glLightfv', NONE),
+    glFogfv: sizedVector(1, 'glFogfv', new Map([[GL.FOG_COLOR, 4]])),
+    glFogf: parameter(1, 'f', 'glFogfv', NONE),
+    glLightModelfv: sizedVector(1, 'glLightModelfv', new Map([[GL.LIGHT_MODEL_AMBIENT, 4]])),
     // --- texture environment, generation and parameters ---
     glTexEnvf: parameter(2, 'f', 'glTexEnvfv', new Set([GL.TEXTURE_ENV_COLOR])),
     glTexEnvi: parameter(2, 'i', 'glTexEnvfv', new Set([GL.TEXTURE_ENV_COLOR])),
