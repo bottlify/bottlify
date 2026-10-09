@@ -37,6 +37,8 @@
  *   handler run backwards. The context keeps the flags the fault had.
  */
 
+import { storeMachineStatus } from './machine-status.js';
+
 /** EXCEPTION_RECORD, and the size the whole of one occupies. */
 export const RECORD = Object.freeze({
     CODE: 0x00,
@@ -750,7 +752,15 @@ export function createSeh(host){
          * @returns {Promise<{ handled: boolean, registers?: Record<string, number> }>}
          */
         async onFault(fault, registers){
-            const code = VECTOR_TO_STATUS[/** @type {keyof typeof VECTOR_TO_STATUS} */
+            if (fault.vector === 6)
+            {
+                const answered = storeMachineStatus(host.readMemory, registers);
+                if (answered)
+                {
+                    return { handled: true, registers: answered };
+                }
+            }
+            const code =VECTOR_TO_STATUS[/** @type {keyof typeof VECTOR_TO_STATUS} */
                 (fault.vector)];
             if (code === undefined)
             {
