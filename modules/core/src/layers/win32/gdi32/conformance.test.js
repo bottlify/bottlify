@@ -300,3 +300,19 @@ test('GetSystemPaletteEntries counts none on this display but writes the static 
     assert.deepEqual(entry(100), [0, 0, 0, 0], 'black between the two ends');
     assert.deepEqual(entry(255), [0xff, 0xff, 0xff, 0], 'white last');
 });
+
+test('a DC that accumulates bounds widens them by what it draws (dc.c test_boundsrect)', ()=>{
+    const DCB_RESET = 1;
+    const DCB_ENABLE = 4;
+    const machine = painted(64, 64);
+    const { fns, dc } = machine;
+    fns.SetBoundsRect.handler([dc, 0, DCB_RESET | DCB_ENABLE]);
+    fns.PatBlt.handler([dc, 10, 12, 5, 6, 0x00f00021]);
+    fns.SetPixel.handler([dc, 40, 3, 0x00ffffff]);
+    assert.equal(fns.GetBoundsRect.handler([dc, RECT_AT, DCB_RESET]), 3, 'DCB_SET');
+    assert.deepEqual(rectAt(machine, RECT_AT), [10, 3, 41, 18]);
+    fns.SetBoundsRect.handler([dc, 0, 8]);
+    fns.PatBlt.handler([dc, 0, 0, 5, 5, 0x00f00021]);
+    assert.equal(fns.GetBoundsRect.handler([dc, RECT_AT, 0]), 1,
+        'DCB_RESET: nothing while disabled');
+});

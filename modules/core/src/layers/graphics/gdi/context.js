@@ -48,6 +48,9 @@ import { FLOODFILLSURFACE, floodFill } from './flood.js';
 import { gradientFill } from './gradient.js';
 import { paletteEntryToPixel } from '../../win32/gdi32/structs.js';
 
+/** SetBoundsRect's flag for a DC that accumulates what it draws. */
+const DCB_ENABLE = 4;
+
 /** What a call that should have returned a COLORREF says when it failed. */
 export const CLR_INVALID = 0xffffffff;
 
@@ -129,6 +132,69 @@ export function createGdiDrawing(options = {}){
      * @returns {T}
      */
     const clipped = (context, draw, moving)=>{
+        if (context.state.boundsState !== DCB_ENABLE)
+        {
+            return clippedPieces(context, draw, moving);
+        }
+        // SetBoundsRect's DCB_ENABLE: every pixel a draw changes widens the
+        // DC's bounding rectangle, which GetBoundsRect reads back.
+        const surface = context.surface;
+        context.surface = boundedSurface(surface, context.state);
+        try
+        {
+            return clippedPieces(context, draw, moving);
+        }
+        finally
+        {
+            context.surface = surface;
+        }
+    };
+
+    /**
+     * The surface as a draw sees it while the DC accumulates bounds: the
+     * same pixels, each write also widening the record's rectangle, which is
+     * kept in device units as SetBoundsRect keeps it.
+     *
+     * @param {import("./contract.js").Surface} surface @param {any} state
+     * @returns {import("./contract.js").Surface}
+     */
+    const boundedSurface = (surface, state)=>{
+        /** @param {number} left @param {number} top @param {number} right @param {number} bottom */
+        const widen = (left, top, right, bottom)=>{
+            const was = state.boundingRect;
+            state.boundingRect = was ? {
+                left: Math.min(was.left, left), top: Math.min(was.top, top),
+                right: Math.max(was.right, right), bottom: Math.max(was.bottom, bottom),
+            } : { left, top, right, bottom };
+        };
+        const bounded = Object.create(surface);
+        /** @param {number} x @param {number} y @param {number} pixel */
+        bounded.write = (x, y, pixel)=>{
+            widen(x, y, x + 1, y + 1);
+            surface.write(x, y, pixel);
+        };
+        const fill = surface.fill?.bind(surface);
+        if (fill)
+        {
+            /** @param {number} x0 @param {number} y0 @param {number} x1 @param {number} y1 @param {number} pixel */
+            bounded.fill = (x0, y0, x1, y1, pixel)=>{
+                if (x1 > x0 && y1 > y0)
+                {
+                    widen(x0, y0, x1, y1);
+                }
+                fill(x0, y0, x1, y1, pixel);
+            };
+        }
+        return bounded;
+    };
+
+    /**
+     * @template T
+     * @param {any} context @param {() => T} draw
+     * @param {{ x: number, y: number }} [moving]
+     * @returns {T}
+     */
+    const clippedPieces = (context, draw, moving)=>{
         const pieces = context.clipRects;
         if (pieces === null)
         {
@@ -431,7 +497,8 @@ export function createGdiDrawing(options = {}){
             }
             // SetPixel is not subject to the binary raster operation: it names
             // the colour it wants and gets it.
-            context.surface.write(x | 0, y | 0, colorToPixel(resolveColor(context, color)));
+            clipped(context, ()=>context.surface.write(x | 0, y | 0,
+                colorToPixel(resolveColor(context, color))));
             // The colour the pixel became, which on a palette or a
             // monochrome bitmap is the nearest one it has.
             return pixelToColor(context.surface.read(x | 0, y | 0));

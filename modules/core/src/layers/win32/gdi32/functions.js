@@ -4113,8 +4113,9 @@ export function createGdiFunctions(host){
          * DCB_ACCUMULATE adds the rectangle given in logical units, an empty
          * one adding nothing, and DCB_ENABLE and DCB_DISABLE turn the
          * accumulation on and off. It answers the state before: whether there
-         * were bounds, and whether they were accumulating. Drawing does not
-         * accumulate here, so an enabled DC holds only what was set.
+         * were bounds, and whether they were accumulating. While enabled,
+         * every pixel a draw changes widens them (the drawing layer's
+         * `clipped`).
          */
         SetBoundsRect: {
             argBytes: 12,
