@@ -2218,7 +2218,7 @@ fn fs_main(in: Corner) -> @location(0) vec4f {
  * @param {number} [lod]  The bound texture's own level of detail.
  * @returns {{ magFilter: string, minFilter: string, mipmapFilter: string,
  *             addressModeU: string, addressModeV: string, addressModeW: string,
- *             lodMinClamp: number, lodMaxClamp: number }}
+ *             lodMinClamp: number, lodMaxClamp: number, maxAnisotropy?: number }}
  */
 export function samplerDescriptorOf(states, mips = true, lod = 0){
     const get = (/** @type {number} */ state)=>states.get(state) ?? 0;
@@ -2236,7 +2236,31 @@ export function samplerDescriptorOf(states, mips = true, lod = 0){
         // it lets any sample come.
         lodMinClamp: finest,
         lodMaxClamp: mipFilter === D3DTEXF.NONE ? finest : LOD_MAX,
+        ...anisotropyOf(get(D3DTSS.MINFILTER), get(D3DTSS.MAGFILTER), get(D3DTSS.MAXANISOTROPY),
+            mipFilter),
     };
+}
+
+/**
+ * An anisotropic filter's degree, which a sampler was given only as linear:
+ * a floor or a road seen at a glance is blurred to a smear without it.
+ * WebGPU filters anisotropically only with every filter linear, so a
+ * sampler that asks for it has them so.
+ *
+ * @param {number} min @param {number} mag @param {number} degree  D3DSAMP_MAXANISOTROPY
+ * @param {number} mipFilter
+ * @returns {{ maxAnisotropy?: number, minFilter?: string, magFilter?: string,
+ *     mipmapFilter?: string }}
+ */
+function anisotropyOf(min, mag, degree, mipFilter){
+    const most = Math.min(16, Math.max(1, degree | 0));
+    if ((min !== D3DTEXF.ANISOTROPIC && mag !== D3DTEXF.ANISOTROPIC) || most < 2
+        || mipFilter === D3DTEXF.NONE)
+    {
+        return {};
+    }
+    return { maxAnisotropy: most, minFilter: 'linear', magFilter: 'linear',
+        mipmapFilter: 'linear' };
 }
 
 /** WebGPU's own default for the far end of the level range. */
