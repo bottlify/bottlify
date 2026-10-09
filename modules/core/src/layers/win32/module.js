@@ -607,6 +607,23 @@ export function createWin32Module(){
                 readWideString: (address, maxLength)=>readWideString(address, maxLength),
                 video: config?.video,
                 divergence: config?.divergence,
+                // A renderer the program wrote is fed from a thread of its own,
+                // as quartz feeds one from its streaming thread; made on the
+                // first sample, so a program with no such filter has none.
+                stream: {
+                    readU32: address=>memory.readU32(address),
+                    writeMemory,
+                    readWideString: (address, maxLength)=>readWideString(address, maxLength),
+                    allocate: bytes=>heap.allocate(bytes),
+                    free: address=>heap.free(address),
+                    callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    currentThread: ()=>kernel.currentThread(),
+                    publish: (object, iid)=>bridge.publishInterface(object, iid),
+                    objectAt: pointer=>bridge.interfaceObject(pointer),
+                    notices: {
+                        deliver: (entry, args, done)=>streamNotices.deliver(entry, args, done),
+                    },
+                },
             });
 
             // One allocator over the whole arena. Everything the guest is handed
@@ -787,6 +804,32 @@ export function createWin32Module(){
             // use: a build whose program never asks for the callback form pays for
             // no thread, no stub and no code.
             const waveNotices = createNoticeThread({
+                /** @param {number} bytes */
+                allocate: bytes=>heap.allocate(bytes),
+                writeMemory,
+                register: (name, fn)=>bridge.register(name, fn),
+                /** @param {{ entry: number, name: string }} options */
+                createThread: options=>{
+                    const thread = kernel.createThread(options);
+                    config?.threadBlock?.(thread);
+                    return thread;
+                },
+                currentThread: ()=>kernel.currentThread(),
+                /** @param {any} thread @param {string} reason */
+                block: (thread, reason)=>kernel.block(thread, reason),
+                /** @param {any} thread @param {number} result */
+                wake: (thread, result)=>kernel.wake(thread, result),
+                /** @param {any} thread */
+                park: thread=>bridge.park(thread),
+            });
+
+            // The thread a filter graph calls a program's own filters on: the
+            // samples it feeds a renderer the program wrote, and the flushes and
+            // releases it owes that renderer.
+            const streamNotices = createNoticeThread({
+                name: 'quartz',
+                reason: 'a filter graph sample',
+                trap: '<quartz-stream>',
                 /** @param {number} bytes */
                 allocate: bytes=>heap.allocate(bytes),
                 writeMemory,

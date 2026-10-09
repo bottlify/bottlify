@@ -275,3 +275,123 @@ export const IFILTER_MAPPER2_SLOTS = [
     ['RegisterFilter', 6],
     ['EnumMatchingFilters', 15],
 ];
+
+/*
+ * The streaming half: the interfaces a filter a program wrote itself -- a
+ * renderer that copies frames into a texture, built on the SDK's base classes
+ * -- is joined to a graph and fed through. All IUnknown-derived.
+ */
+
+export const IID_IPERSIST = '{0000010C-0000-0000-C000-000000000046}';
+export const IID_IMEDIA_FILTER = '{56A86899-0AD4-11CE-B03A-0020AF0BA770}';
+export const IID_IBASE_FILTER = '{56A86895-0AD4-11CE-B03A-0020AF0BA770}';
+export const IID_IPIN = '{56A86891-0AD4-11CE-B03A-0020AF0BA770}';
+export const IID_IMEM_INPUT_PIN = '{56A8689D-0AD4-11CE-B03A-0020AF0BA770}';
+export const IID_IMEM_ALLOCATOR = '{56A8689C-0AD4-11CE-B03A-0020AF0BA770}';
+export const IID_IMEDIA_SAMPLE = '{56A8689A-0AD4-11CE-B03A-0020AF0BA770}';
+export const IID_IMEDIA_EVENT_SINK = '{56A868A2-0AD4-11CE-B03A-0020AF0BA770}';
+
+/** The class this file's source filter reports from IPersist::GetClassID: File Source (Async.). */
+export const CLSID_ASYNC_READER = '{E436EBB5-524F-11CE-9F53-0020AF0BA770}';
+
+/** IMediaFilter, which IBaseFilter extends after IPersist's one. `Run` takes a REFERENCE_TIME. @type {[string, number][]} */
+export const IMEDIA_FILTER_SLOTS = [
+    ['GetClassID', 1],
+    ['Stop', 0],
+    ['Pause', 0],
+    ['Run', 2],
+    ['GetState', 2],
+    ['SetSyncSource', 1],
+    ['GetSyncSource', 1],
+];
+
+/** @type {[string, number][]} */
+export const IBASE_FILTER_SLOTS = [
+    ...IMEDIA_FILTER_SLOTS,
+    ['EnumPins', 1],
+    ['FindPin', 2],
+    ['QueryFilterInfo', 1],
+    ['JoinFilterGraph', 2],
+    ['QueryVendorInfo', 1],
+];
+
+/** IPin. `NewSegment` takes two REFERENCE_TIMEs and a double: six words. @type {[string, number][]} */
+export const IPIN_SLOTS = [
+    ['Connect', 2],
+    ['ReceiveConnection', 2],
+    ['Disconnect', 0],
+    ['ConnectedTo', 1],
+    ['ConnectionMediaType', 1],
+    ['QueryPinInfo', 1],
+    ['QueryDirection', 1],
+    ['QueryId', 1],
+    ['QueryAccept', 1],
+    ['EnumMediaTypes', 1],
+    ['QueryInternalConnections', 2],
+    ['EndOfStream', 0],
+    ['BeginFlush', 0],
+    ['EndFlush', 0],
+    ['NewSegment', 6],
+];
+
+/** Slot numbers in a vtable, IUnknown's three counted, for calling a program's own objects. */
+export const VTABLE = {
+    AddRef: 1,
+    Release: 2,
+    QueryInterface: 0,
+    /** IBaseFilter */
+    FilterStop: 4,
+    FilterPause: 5,
+    FilterRun: 6,
+    FilterSetSyncSource: 8,
+    FilterJoinGraph: 13,
+    /** IPin */
+    PinReceiveConnection: 4,
+    PinDisconnect: 5,
+    PinEndOfStream: 14,
+    PinBeginFlush: 15,
+    PinEndFlush: 16,
+    /** IMemInputPin */
+    MemNotifyAllocator: 4,
+    MemReceive: 6,
+};
+
+/** @type {[string, number][]} */
+export const IMEM_ALLOCATOR_SLOTS = [
+    ['SetProperties', 2],
+    ['GetProperties', 1],
+    ['Commit', 0],
+    ['Decommit', 0],
+    ['GetBuffer', 4],
+    ['ReleaseBuffer', 1],
+];
+
+/**
+ * IMediaSample. `GetSize` and `GetActualDataLength` answer the number itself
+ * rather than an HRESULT, which is how the header declares them.
+ *
+ * @type {[string, number][]}
+ */
+export const IMEDIA_SAMPLE_SLOTS = [
+    ['GetPointer', 1],
+    ['GetSize', 0],
+    ['GetTime', 2],
+    ['SetTime', 2],
+    ['IsSyncPoint', 0],
+    ['SetSyncPoint', 1],
+    ['IsPreroll', 0],
+    ['SetPreroll', 1],
+    ['GetActualDataLength', 0],
+    ['SetActualDataLength', 1],
+    ['GetMediaType', 1],
+    ['SetMediaType', 1],
+    ['IsDiscontinuity', 0],
+    ['SetDiscontinuity', 1],
+    ['GetMediaTime', 2],
+    ['SetMediaTime', 2],
+];
+
+/** What a filter tells its graph through: `Notify(EventCode, Param1, Param2)`. @type {[string, number][]} */
+export const IMEDIA_EVENT_SINK_SLOTS = [
+    ['Notify', 3],
+];
