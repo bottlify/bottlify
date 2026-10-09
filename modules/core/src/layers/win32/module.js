@@ -1579,6 +1579,8 @@ export function createWin32Module(){
                         divergence: config?.divergence,
                         ramTop: arena.size > 0 ? arena.base + arena.size : 0,
                         systemTimeMs: ()=>kernel.clock.wallClock(),
+                        /** @param {number} address */
+                        regionAt: address=>memory.find(address) ?? null,
                         /** @param {number} bytes */
                         allocate: bytes=>allocator.allocate(bytes),
                         park: ()=>bridge.park(),

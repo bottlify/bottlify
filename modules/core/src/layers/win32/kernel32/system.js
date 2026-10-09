@@ -230,6 +230,10 @@ const compare = (left, right)=>(left < right ? -1 : (left > right ? 1 : 0));
  *           without a fault.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(thread: any, result: number) => void} [wake]
+ * @property {(address: number) =>
+ *     { base: number, size: number, access?: string } | null | undefined} [regionAt]
+ *        The memory layer's region at an address: what IsBadWritePtr asks a
+ *        region's declared access of.
  *           Ends a thread's wait with its answer: how a thread waiting on a
  *           child another one terminates goes on. Without it that thread
  *           stays waiting.
@@ -938,15 +942,41 @@ export function createSystemFunctions(host){
         /**
          * BOOL IsBadWritePtr(LPVOID lp, UINT_PTR ucb)
          *
-         * Answered by whether the range is mapped, not by whether it is writable.
-         * Distinguishing the two would mean probing with a write, and a probe
-         * that succeeds has changed the guest's memory to find out.
+         * Bad where the range is unmapped, or where a region the memory layer
+         * declares without write access covers any of it -- code Windows maps
+         * read-only, such as the return address a program's entry point finds
+         * on its stack. Asked of the declared access rather than by probing
+         * with a write, which would change the guest's memory to find out.
          */
         IsBadWritePtr: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([pointer, length])=>
-                (pointer >>> 0) === 0 || !readable(pointer >>> 0, length >>> 0) ? 1 : 0,
+            handler: ([pointer, length])=>{
+                const at = pointer >>> 0;
+                const count = Math.max(length >>> 0, 1);
+                if (at === 0 || !readable(at, count))
+                {
+                    return 1;
+                }
+                if (!host.regionAt)
+                {
+                    return 0;
+                }
+                for (let address = at; address < at + count;)
+                {
+                    const region = host.regionAt(address);
+                    if (!region)
+                    {
+                        return 0;
+                    }
+                    if (region.access !== undefined && !region.access.includes('w'))
+                    {
+                        return 1;
+                    }
+                    address = region.base + region.size;
+                }
+                return 0;
+            },
         },
 
         /** BOOL IsBadCodePtr(FARPROC lpfn) */

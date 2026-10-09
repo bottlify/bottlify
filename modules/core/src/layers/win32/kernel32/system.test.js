@@ -305,6 +305,30 @@ test('an unmapped pointer is bad and a mapped one is not', ()=>{
     assert.equal(fns.IsBadCodePtr.handler([0]), 1);
 });
 
+test('a write pointer is bad where a region without write access covers any of it', ()=>{
+    // Windows maps code read-only -- the return address a program's entry
+    // point finds on its stack is kernel32's code -- and a program may check
+    // that IsBadWritePtr says so before it trusts the process it runs in.
+    const host = fakeHost();
+    /** @type {{ base: number, size: number, access: string }[]} */
+    const regions = [
+        { base: 0x000, size: 0x400, access: 'rwx' },
+        { base: 0x400, size: 0x400, access: 'rx' },
+        { base: 0x800, size: 0x800, access: 'rw' },
+    ];
+    const fns = createSystemFunctions({
+        ...host,
+        regionAt: (/** @type {number} */ address)=>regions.find(region=>
+            address >= region.base && address < region.base + region.size) ?? null,
+    });
+
+    assert.equal(fns.IsBadWritePtr.handler([0x200, 16]), 0, 'read-write-execute');
+    assert.equal(fns.IsBadWritePtr.handler([0x402, 1]), 1, 'read-execute');
+    assert.equal(fns.IsBadWritePtr.handler([0x3f0, 0x20]), 1, 'runs into read-execute');
+    assert.equal(fns.IsBadWritePtr.handler([0x900, 0]), 0, 'an empty range on writable memory');
+    assert.equal(fns.IsBadReadPtr.handler([0x402, 1]), 0, 'readable all the same');
+});
+
 test('a string pointer is bad when its terminator is not in mapped memory', ()=>{
     const host = fakeHost();
     const fns = createSystemFunctions(host);
