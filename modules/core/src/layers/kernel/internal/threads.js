@@ -1084,11 +1084,17 @@ export function createScheduler(options){
             }
             if (placed.size === 0)
             {
-                // Nothing runs anywhere: the clock to the soonest deadline, as with one executor.
+                // Nothing runs anywhere: the clock to the soonest deadline, as with
+                // one executor, and a thread that woke there runs in this turn --
+                // a turn that ran nothing reads to the caller as an idle machine.
                 const deadline = soonest();
                 if (deadline !== null && skipTo(deadline) !== 0)
                 {
                     expire();
+                    if (runnable().length > 0)
+                    {
+                        continue;
+                    }
                 }
                 return { ran, instructions, switched: false };
             }
