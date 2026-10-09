@@ -13,7 +13,7 @@ import {
 import { createDirect3D9 } from './device.js';
 import {
     createReferenceCount, createSurface, createTexture, createVolumeTexture, packColour,
-    writePixels,
+    rectMoveOf, writePixels,
 } from './resources.js';
 import { SURFACE_TYPE } from './validity.js';
 
@@ -910,3 +910,19 @@ test('UpdateTexture carries a volume texture\'s dirty box, level by level and sl
         }
         assertFullyReleased(device);
     });
+
+test('a compressed rectangle that starts inside a block moves every block it touches', ()=>{
+    // A DXT1 level 16 wide is 4 blocks of 8 bytes a row; (2,2)-(6,6) lies
+    // across the first two blocks of the first two block rows.
+    const surface = (/** @type {number} */ base)=>/** @type {any} */ ({
+        base, GetDesc(/** @type {any} */ out){
+            out.desc = { Format: D3DFMT.DXT1, Width: 16, Height: 16 };
+        },
+    });
+    const move = rectMoveOf(surface(0x1000), { left: 2, top: 2, right: 6, bottom: 6 },
+        surface(0x2000), { x: 2, y: 2 });
+    assert.equal(move.from, 0x1000);
+    assert.equal(move.to, 0x2000);
+    assert.equal(move.rowBytes, 16, 'two blocks a row');
+    assert.equal(move.rows, 2, 'two block rows');
+});

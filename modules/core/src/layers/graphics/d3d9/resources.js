@@ -669,8 +669,11 @@ export function rectMoveOf(source, rect, destination, point){
             + Math.floor(rect.left / block) * blockBytes,
         to: destination.base + Math.floor(point.y / block) * toPitch
             + Math.floor(point.x / block) * blockBytes,
-        rowBytes: Math.ceil((rect.right - rect.left) / block) * blockBytes,
-        rows: Math.ceil((rect.bottom - rect.top) / block),
+        // From the block the left edge falls in to the one the right edge
+        // ends in: a rectangle that starts inside a block covers one more
+        // than its width alone says.
+        rowBytes: (Math.ceil(rect.right / block) - Math.floor(rect.left / block)) * blockBytes,
+        rows: Math.ceil(rect.bottom / block) - Math.floor(rect.top / block),
         fromPitch,
         toPitch,
     };
