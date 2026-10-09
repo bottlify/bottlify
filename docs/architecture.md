@@ -416,10 +416,14 @@ flowchart LR
   dropped. The bounds of the code are kept to 32 bytes, so a write to data next to code does not count
   as a write into code. A page that has lost its translations 8 times is marked volatile
   (`VOLATILE`), and its code is only interpreted from then on.
-- **Several executors of a process** (stage 3 of `roadmap/v2/`, `createApp`'s `executors`). The
-  kernel gives every idle executor the next ready thread, and the process's own thread, which
-  then runs no program code, answers the calls their threads make, each as the current thread
-  while it is answered. An executor past the first is a cork host in a worker of its own over the
+- **Several executors of a process** (stage 3 of `roadmap/v2/`, `createApp`'s `executors`). Each
+  thread has an executor of its own, where its translations are: the process's first thread runs on
+  the process's own, each later one on the other executor fewest live threads call theirs. A turn
+  gives every free executor the next ready thread whose executor it is; a thread whose executor is
+  busy waits for it, as it would for the one processor. The process's own thread runs its threads
+  too, and answers the calls the others' threads make -- at each of its own crossings into the host
+  and between its turns, each caller the current thread while it is answered. An executor past the
+  first is a cork host in a worker of its own over the
   process's memory
   (`core/src/layers/cpu/internal/executor.worker.js`), with its own state page, entry hash and
   translations. The page flags and the code bounds are the process's: a write on any executor into

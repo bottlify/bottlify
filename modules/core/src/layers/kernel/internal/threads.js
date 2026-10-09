@@ -769,78 +769,113 @@ export function createScheduler(options){
      * @type {Map<any, { thread: any, began: number, from: number }>}
      */
     const placed = new Map();
-    /** Slices run on the other executors, and the most at once. */
+    /** Slices run on the other executors, and the most threads running at once, this one's included. */
     let executorSlices = 0;
     let mostAtOnce = 0;
 
+    /** Set while they are answered: an answer's own trap does not answer again. */
+    let answering = false;
+    /** The bell's count when they were last answered. */
+    let answeredAt = -1;
+
     /**
-     * A turn of a process whose threads run on executors in workers of their
-     * own (`cpu.executors`), at once: every idle executor is given the next
-     * ready thread, put on it through the same switch as ever, and the
-     * process's thread answers what their slices raise -- with the raising
-     * thread as the current one, so a wait blocks it, a wake that outranks it
-     * ends its slice and an exit ends it -- until one of them ends its slice,
-     * which is accounted as a slice here is. The process's own executor runs
-     * no thread: it is where Win32 and the kernel answer the others.
+     * The executor a thread runs on: where its translations are, made there
+     * the first time it ran. The process's first thread is this executor's;
+     * each later one goes to the executor fewest live threads call theirs,
+     * one of the others before this one, which also answers their crossings.
      *
-     * @param {any[]} remotes
-     * @returns {{ ran: any | null, instructions: number, switched: boolean }}
+     * @param {any} thread @param {any[]} remotes
+     * @returns {number} the executor's index, 0 for this one
      */
-    const runParallel = remotes=>{
-        expire();
+    const homeOf = (thread, remotes)=>{
+        if (thread.home !== undefined)
+        {
+            return thread.home;
+        }
+        // This one counts a thread more than it holds: it answers the others' crossings.
+        /** @type {Map<number, number>} */
+        const homed = new Map([[0, 1]]);
         for (const remote of remotes)
         {
-            if (remote.busy())
-            {
-                continue;
-            }
-            const candidates = ready();
-            if (candidates.length === 0)
-            {
-                break;
-            }
-            const next = pick(candidates);
-            const resume = resumeOf(next);
-            noteGap(next);
-            let from = 0;
-            cpu.onExecutor(remote.index, ()=>{
-                switcher.switchTo(null, next, resume);
-                watchStack(next);
-                from = cpu.eip?.() ?? 0;
-            });
-            note(next, `runs on executor ${remote.index}`);
-            next.state = ThreadState.RUNNING;
-            placed.set(remote, { thread: next, began: wall(), from });
-            remote.start(quantum);
-            executorSlices++;
-            mostAtOnce = Math.max(mostAtOnce, placed.size);
+            homed.set(remote.index, 0);
         }
-        if (!remotes.some(remote=>remote.busy()))
+        let any = false;
+        for (const other of threads)
         {
-            // Nothing runs anywhere: the clock to the soonest deadline, as with one executor.
-            const deadline = soonest();
-            if (deadline !== null && skipTo(deadline) !== 0)
+            if (other.home !== undefined && other.state !== ThreadState.TERMINATED)
             {
-                expire();
+                homed.set(other.home, (homed.get(other.home) ?? 0) + 1);
+                any = true;
             }
-            return { ran: null, instructions: 0, switched: false };
         }
-        const bell = cpu.executorBell();
-        bell.goOn?.(ready().length === 0);
+        let home = 0;
+        if (any)
+        {
+            for (const [index, count] of homed)
+            {
+                if (count < (homed.get(home) ?? 0))
+                {
+                    home = index;
+                }
+            }
+        }
+        thread.home = home;
+        return home;
+    };
+
+    /**
+     * Puts `next` on executor `remote` and starts its slice. A thread whose
+     * state is on the process's own executor is taken off it first.
+     *
+     * @param {any} remote @param {any} next
+     */
+    const place = (remote, next)=>{
+        if (next === current)
+        {
+            current.context = cpu.captureContext();
+            current = null;
+        }
+        const resume = resumeOf(next);
+        noteGap(next);
+        let from = 0;
+        cpu.onExecutor(remote.index, ()=>{
+            switcher.switchTo(null, next, resume);
+            watchStack(next);
+            from = cpu.eip?.() ?? 0;
+        });
+        note(next, `runs on executor ${remote.index}`);
+        next.state = ThreadState.RUNNING;
+        placed.set(remote, { thread: next, began: wall(), from });
+        remote.start(quantum);
+        executorSlices++;
+        mostAtOnce = Math.max(mostAtOnce, placed.size + (inSlice ? 1 : 0));
+    };
+
+    /**
+     * Answers what the other executors raised -- with the raising thread as
+     * the current one, so a wait blocks it, a wake that outranks it ends its
+     * slice and an exit ends it -- and takes the slices that ended, accounted
+     * as a slice here is. Called between turns and on every crossing of the
+     * process's own thread, so a trap on another executor waits at most for
+     * the next of those.
+     *
+     * @returns {{ ran: any | null, instructions: number }} the last thread whose slice ended
+     */
+    const answerExecutors = ()=>{
+        if (answering || placed.size === 0)
+        {
+            return { ran: null, instructions: 0 };
+        }
+        answering = true;
         let ran = null;
         let instructions = 0;
-        for (;;)
+        try
         {
-            const seen = bell.rung();
-            for (const remote of remotes)
+            for (const [remote, on] of placed)
             {
-                const on = placed.get(remote);
-                if (on === undefined)
-                {
-                    continue;
-                }
                 const ended = remote.step((/** @type {() => void} */ reply)=>{
                     const was = current;
+                    const wasInSlice = inSlice;
                     current = on.thread;
                     inSlice = true;
                     try
@@ -849,7 +884,7 @@ export function createScheduler(options){
                     }
                     finally
                     {
-                        inSlice = false;
+                        inSlice = wasInSlice;
                         current = was;
                     }
                 });
@@ -871,17 +906,183 @@ export function createScheduler(options){
                 ran = on.thread;
                 instructions += ended.instructions;
             }
-            // What the calls answered may have made a thread ready: it waits.
-            bell.goOn?.(ready().length === 0);
+        }
+        finally
+        {
+            answering = false;
+        }
+        return { ran, instructions };
+    };
+
+    /**
+     * Gives the CPU of the process's own executor to `next` for a quantum,
+     * answering the other executors at each of its crossings.
+     *
+     * @param {any} next
+     * @returns {{ ran: any | null, instructions: number, switched: boolean }}
+     */
+    const runHere = next=>{
+        const resume = resumeOf(next);
+        noteGap(next);
+        if (next !== current)
+        {
+            note(next, `runs after ${current?.name ?? '-'} (${lastSlice})`);
+        }
+        const switched = switcher.switchTo(current, next, resume);
+
+        if (current && current.state === ThreadState.RUNNING)
+        {
+            current.state = ThreadState.READY;
+            current.readySince = now();
+        }
+        current = next;
+        next.state = ThreadState.RUNNING;
+
+        // Before the slice, not after: the value on the processor when a
+        // slice ends in a fault belongs to the fault stub, and reading that
+        // would report every faulting thread as having left its stack.
+        watchStack(next);
+        const from = cpu.eip?.() ?? 0;
+        const began = wall();
+        readyAtSlice.clear();
+        for (const thread of threads)
+        {
+            if (thread !== next && thread.state === ThreadState.READY)
+            {
+                readyAtSlice.add(thread);
+            }
+        }
+        inSlice = true;
+        mostAtOnce = Math.max(mostAtOnce, placed.size + 1);
+        let instructions = cpu.runSlice(quantum);
+        inSlice = false;
+        lastSlice = instructions;
+        // A slice that ran out inside a routine the host placed to run
+        // unbroken -- one writing a record another thread's entry into the
+        // host reads -- runs on to the routine's end: none of them waits,
+        // so the end is a few instructions away.
+        for (let more = 0; more < ATOMIC_STEPS && atomic.starts.length !== 0
+            && next.state === ThreadState.RUNNING && insideAtomic(cpu.eip?.() ?? 0); more++)
+        {
+            instructions += cpu.runSlice(ATOMIC_STEP);
+        }
+        account(next, instructions, began, from, cpu.eip?.() ?? 0);
+        return { ran: next, instructions, switched };
+    };
+
+    /**
+     * Whether `thread`'s executor could take it now.
+     *
+     * @param {any} thread @param {any[]} remotes
+     */
+    const homeFree = (thread, remotes)=>{
+        const home = homeOf(thread, remotes);
+        return home === 0 || remotes.some(remote=>remote.index === home && !remote.busy());
+    };
+
+    /**
+     * The ready threads in the usual order, each to its own executor while
+     * that one is free; one whose executor is taken waits for it, as it would
+     * for the one processor there is otherwise. Starts the others' slices and
+     * answers the thread for this one, if any.
+     *
+     * @param {any[]} remotes @param {any} bell
+     * @returns {any | null}
+     */
+    const choose = (remotes, bell)=>{
+        let candidates = ready();
+        const free = remotes.filter(remote=>!remote.busy());
+        let here = null;
+        let waiting = false;
+        while (candidates.length > 0 && (here === null || free.length > 0))
+        {
+            const next = pick(candidates);
+            candidates = candidates.filter(thread=>thread !== next);
+            const home = homeOf(next, remotes);
+            const remote = free.find(one=>one.index === home);
+            if (home === 0 && here === null)
+            {
+                here = next;
+            }
+            else if (remote !== undefined)
+            {
+                free.splice(free.indexOf(remote), 1);
+                place(remote, next);
+            }
+            else
+            {
+                waiting = true;
+            }
+        }
+        // A thread left without its executor waits for that one to give its thread up.
+        bell.goOn?.(!waiting && candidates.length === 0);
+        return here;
+    };
+
+    /**
+     * A turn of a process with executors in workers of their own
+     * (`cpu.executors`): the ready threads, chosen as ever, each on its own
+     * executor (`homeOf`) while that one is free. The others' traps are
+     * answered on this executor's crossings and between its turns; with
+     * nothing to run here, the turn waits for them.
+     *
+     * @param {any[]} remotes
+     * @returns {{ ran: any | null, instructions: number, switched: boolean }}
+     */
+    const runShared = remotes=>{
+        expire();
+        let { ran, instructions } = answerExecutors();
+        const bell = cpu.executorBell();
+        for (;;)
+        {
+            const here = choose(remotes, bell);
+            if (here !== null)
+            {
+                const turn = runHere(here);
+                const after = answerExecutors();
+                return { ran: turn.ran, instructions: turn.instructions + instructions
+                    + after.instructions, switched: turn.switched };
+            }
+            if (placed.size === 0)
+            {
+                // Nothing runs anywhere: the clock to the soonest deadline, as with one executor.
+                const deadline = soonest();
+                if (deadline !== null && skipTo(deadline) !== 0)
+                {
+                    expire();
+                }
+                return { ran, instructions, switched: false };
+            }
+            // Nothing to run here: the others' words are waited for -- a slice's
+            // end, or a trap whose answer makes a thread ready that can run now.
+            const seen = bell.rung();
+            const taken = answerExecutors();
+            instructions += taken.instructions;
+            ran = taken.ran ?? ran;
             if (ran !== null)
             {
-                // The last to end is the one a caller reading `current` between turns finds.
-                current = ran;
                 return { ran, instructions, switched: true };
             }
-            bell.wait(seen);
+            if (!ready().some(thread=>homeFree(thread, remotes)))
+            {
+                bell.wait(seen);
+            }
         }
     };
+
+    /** The other executors' traps, answered at a crossing of this executor's thread. */
+    cpu.beforeTrap?.(()=>{
+        if (placed.size === 0)
+        {
+            return;
+        }
+        const rung = cpu.executorBell().rung();
+        if (rung !== answeredAt)
+        {
+            answeredAt = rung;
+            answerExecutors();
+        }
+    });
 
     const api = {
         /**
@@ -1043,7 +1244,7 @@ export function createScheduler(options){
             const remotes = cpu.executors?.() ?? [];
             if (remotes.length > 0)
             {
-                return runParallel(remotes);
+                return runShared(remotes);
             }
             expire();
             let candidates = ready();
@@ -1075,53 +1276,7 @@ export function createScheduler(options){
                 }
             }
 
-            const next = pick(candidates);
-
-            const resume = resumeOf(next);
-            noteGap(next);
-            if (next !== current)
-            {
-                note(next, `runs after ${current?.name ?? '-'} (${lastSlice})`);
-            }
-            const switched = switcher.switchTo(current, next, resume);
-
-            if (current && current.state === ThreadState.RUNNING)
-            {
-                current.state = ThreadState.READY;
-                current.readySince = now();
-            }
-            current = next;
-            next.state = ThreadState.RUNNING;
-
-            // Before the slice, not after: the value on the processor when a
-            // slice ends in a fault belongs to the fault stub, and reading that
-            // would report every faulting thread as having left its stack.
-            watchStack(next);
-            const from = cpu.eip?.() ?? 0;
-            const began = wall();
-            readyAtSlice.clear();
-            for (const thread of threads)
-            {
-                if (thread !== next && thread.state === ThreadState.READY)
-                {
-                    readyAtSlice.add(thread);
-                }
-            }
-            inSlice = true;
-            let instructions = cpu.runSlice(quantum);
-            inSlice = false;
-            lastSlice = instructions;
-            // A slice that ran out inside a routine the host placed to run
-            // unbroken -- one writing a record another thread's entry into the
-            // host reads -- runs on to the routine's end: none of them waits,
-            // so the end is a few instructions away.
-            for (let more = 0; more < ATOMIC_STEPS && atomic.starts.length !== 0
-                && next.state === ThreadState.RUNNING && insideAtomic(cpu.eip?.() ?? 0); more++)
-            {
-                instructions += cpu.runSlice(ATOMIC_STEP);
-            }
-            account(next, instructions, began, from, cpu.eip?.() ?? 0);
-            return { ran: next, instructions, switched };
+            return runHere(pick(candidates));
         },
 
         /**

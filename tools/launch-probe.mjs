@@ -109,6 +109,13 @@ function parse(argv){
         // started straight into a level (`+map ...`) loads it and plays.
         commandLine: argv.includes('--command-line')
             ? argv[argv.indexOf('--command-line') + 1] : undefined,
+        // Executors of the program's process, so one title compares on one and
+        // on several (`createApp`'s `executors`).
+        executors: argv.includes('--executors')
+            ? Number(argv[argv.indexOf('--executors') + 1]) : undefined,
+        // Guest RAM in megabytes, as the launcher's setting gives it.
+        memory: argv.includes('--memory')
+            ? Number(argv[argv.indexOf('--memory') + 1]) : undefined,
     };
 }
 
@@ -433,7 +440,7 @@ function seriesRow(app, last, began){
 
 async function main(){
     const { id, turns, map, grep, calls, heap, profile, log, watch, peek, dump, which,
-        corkConfig, series, raster, concurrency, seconds, commandLine }
+        corkConfig, series, raster, concurrency, seconds, commandLine, executors, memory }
         = parse(process.argv.slice(2));
     if (!id)
     {
@@ -495,6 +502,8 @@ async function main(){
                 import.meta.url).href,
             ...corkConfig } },
         heapSize: heap,
+        ...executors ? { executors } : {},
+        ...memory ? { memorySize: memory * 1024 * 1024 } : {},
         ...concurrency ? { concurrency } : {},
         ...(raster ? {} : { graphics: { raster: false } }),
         quantum: profile > 0 ? profile : undefined,

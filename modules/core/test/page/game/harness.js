@@ -1619,6 +1619,8 @@ export function createHarness(canvas, how = {}){
             // which is exactly the situation once a game reaches its own main loop.
             sampling: request.sampling,
             quantum: request.quantum || undefined,
+            // Executors of the program's process: past one, its threads run at once.
+            executors: request.executors || undefined,
             sample: request.profile || request.quantum ? recordSample : undefined,
             device: {
                 device: handle.device,

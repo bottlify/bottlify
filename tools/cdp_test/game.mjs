@@ -475,6 +475,9 @@ function parse(argv){
         quantum: argv.includes('--profile')
             ? number('--profile', 2000) || 2000
             : 0,
+        // Executors of the program's process (`createApp`'s `executors`): past
+        // one, threads that are ready together run at once.
+        executors: number('--executors', 0),
         // The engine in a worker, with the page's canvas transferred to it;
         // otherwise on the page's own thread.
         worker: argv.includes('--worker'),
@@ -1462,6 +1465,7 @@ export async function game(options){
             cork: { config: { timings: true, ...options.corkConfig } },
             screen: options.screen,
             quantum: options.quantum,
+            executors: options.executors,
             log: Boolean(options.log),
             logLines: options.logLines,
             video: options.video,

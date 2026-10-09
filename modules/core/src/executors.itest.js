@@ -29,9 +29,15 @@ const u32 = value=>[
 const N = 20_000;
 const WORKER_OFFSET = 0x100;
 
-function buildRaceExe(){
+/**
+ * @param {boolean} [crossing]  every thread, the main one between starting the workers and
+ *     waiting for them, also calls into the host each time round: the others' calls are
+ *     then answered inside the calls of the thread on the process's own executor
+ */
+function buildRaceExe(crossing = false){
     return buildExe({
-        imports: { 'KERNEL32.dll': ['CreateThread', 'WaitForSingleObject', 'ExitProcess'] },
+        imports: { 'KERNEL32.dll': ['CreateThread', 'WaitForSingleObject', 'ExitProcess',
+            'GetACP'] },
         codeSize: 0x200,
         data: {
             counter: [0, 0, 0, 0], guarded: [0, 0, 0, 0], lock: [0, 0, 0, 0],
@@ -55,13 +61,20 @@ function buildRaceExe(){
             const check = (name, bit)=>[
                 0x81, 0x3d, ...u32(at(name)), ...u32(2 * N), 0x75, 0x03, 0x83, 0xcb, bit,
             ];
+            // push ecx; call [GetACP]; pop ecx -- what a crossing may clobber, kept
+            const cross = crossing ? [0x51, 0xff, 0x15, ...u32(iat('GetACP')), 0x59] : [];
+            // mov ecx, N; L: the crossing; dec ecx; jnz L
+            const busy = crossing
+                ? [0xb9, ...u32(N), ...cross, 0x49, 0x75, -(cross.length + 2) & 0xff]
+                : [];
             const main = [
-                ...start('first'), ...start('second'), ...wait('first'), ...wait('second'),
+                ...start('first'), ...start('second'), ...busy, ...wait('first'), ...wait('second'),
                 0x31, 0xdb, //                                  xor ebx, ebx
                 ...check('counter', 1), ...check('guarded', 2), ...check('swapped', 4),
                 0x53, 0xff, 0x15, ...u32(iat('ExitProcess')), // ExitProcess(ebx)
             ];
             const body = [
+                ...cross,
                 0xf0, 0xff, 0x05, ...u32(at('counter')), //        L: lock inc [counter]
                 0xb8, ...u32(1), //                                S: mov eax, 1
                 0x87, 0x05, ...u32(at('lock')), //                    xchg [lock], eax
@@ -86,10 +99,10 @@ function buildRaceExe(){
 
 /**
  * The exit code, and the scheduler's account of the executors.
- * @param {number} executors
+ * @param {number} executors @param {boolean} [crossing]
  */
-async function race(executors){
-    const app = await createApp({ executable: buildRaceExe(), executors });
+async function race(executors, crossing = false){
+    const app = await createApp({ executable: buildRaceExe(crossing), executors });
     try
     {
         const code = await app.run({ timeoutMs: 60_000 });
@@ -110,5 +123,15 @@ test('threads racing through memory end the same on one executor as on three at 
     assert.equal(three.code, 7, 'three: every counter 2N with the threads at once');
     assert.equal(one.scheduler?.executorSlices, 0, 'one: every slice the process\'s own');
     assert.ok(three.scheduler?.executorSlices > 0, 'three: the threads ran on the others');
-    assert.equal(three.scheduler?.mostAtOnce, 2, 'both workers at once');
+    // The main thread runs beside them until it waits: three at once at most.
+    assert.ok(three.scheduler?.mostAtOnce >= 2, 'both workers at once');
+});
+
+test('the same with every thread calling into the host as it goes, the others\' calls answered '
+    + 'inside those of the thread on the process\'s own executor', async()=>{
+    const one = await race(1, true);
+    assert.equal(one.code, 7, 'one executor');
+    const three = await race(3, true);
+    assert.equal(three.code, 7, 'three at once');
+    assert.equal(three.scheduler?.mostAtOnce, 3, 'the main thread beside both workers');
 });

@@ -164,7 +164,8 @@ export function createCpuModule(){
              *          guestClock: (() => number) | null,
              *          yieldCheck: (() => boolean) | null, stacks: [number, number][],
              *          lent: import('./engine.js').TranslatorPort[], remotes: any[],
-             *          bell: ReturnType<typeof createBell> | null }}
+             *          bell: ReturnType<typeof createBell> | null,
+             *          beforeTrap: (() => void) | null }}
              */
             const state = {
                 host: null, thunks: null, running: false, tableWritten: false,
@@ -173,6 +174,7 @@ export function createCpuModule(){
                 cork: null,
                 remotes: [],
                 bell: null,
+                beforeTrap: null,
                 faultHandler: null,
                 // The guest's clock once the kernel gives it (`useGuestClock`).
                 guestClock: null,
@@ -501,6 +503,7 @@ export function createCpuModule(){
                         capacity: settings.thunkCapacity,
                     });
                     state.host.onTrap((/** @type {number} */ id)=>{
+                        state.beforeTrap?.();
                         // A processor exception arrives as a trap like any other,
                         // from a stub the ROM put behind its vector. Answered here
                         // rather than passed on, because the layer that owns the
@@ -809,6 +812,17 @@ export function createCpuModule(){
                 executors: ()=>state.remotes,
                 /** The word their turns ring: one wait for all of them. */
                 executorBell: ()=>state.bell,
+                /**
+                 * Who is told of every crossing into the host before it is
+                 * answered: the scheduler, which answers the other executors'
+                 * traps there while this one's thread runs.
+                 *
+                 * @param {(() => void) | null} handler
+                 */
+                beforeTrap(handler){
+                    state.beforeTrap = handler;
+                },
+
                 /**
                  * Runs `work` with executor `index`'s state as the processor's:
                  * a thread put on it or taken off it, through this layer as ever.
