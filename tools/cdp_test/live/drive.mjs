@@ -29,6 +29,12 @@
  *   /eval?js=EXPR        the value of an expression in the launcher tab, as JSON
  *   /report?file=PATH    the running title's report, as Download report saves it;
  *                        answers the path (dbg/live-downloads by default)
+ *   /dump?frames=N&file=PATH  the next N frames with draws written down by the
+ *                        running devices (app.debug.dumpFrames), then the last of
+ *                        them as text: every draw with its shaders, stages (an
+ *                        empty one says placeholder) and state, each shader's
+ *                        bytecode, and every texture -- uploaded, dirty, resident.
+ *                        Answers the path (dbg/live-downloads by default)
  *   /stack               where the tab's own code is running when it answers nothing else
  *   /upload?file=PATH    a file handed to the page's file input (`selector`, the
  *                        first one by default) -- the library's Add, for an installer
@@ -215,6 +221,38 @@ createServer(async(request, answer)=>{
             const file = resolve(arg('file') || `${downloads}/live-report-${Date.now()}.json`);
             await writeFile(file, JSON.stringify(report));
             out = file;
+        }
+        else if (url.pathname === '/dump')
+        {
+            // The devices answer what they wrote down a report later, and the
+            // frames have to be drawn first: asked, waited for, and read twice.
+            const frames = Math.max(1, Number(arg('frames') || 1));
+            await evaluate(`globalThis.app.debug.dumpFrames(${frames})`);
+            await sleep(Number(arg('waitMs') || 1500));
+            const read = `(async()=>{
+                const report = await globalThis.app.report();
+                const graphics = report.engine?.diagnostics?.find(d=>d.name === 'graphics')
+                    ?? report.diagnostics?.find(d=>d.name === 'graphics');
+                const device = graphics?.metrics?.seam?.device ?? {};
+                return { frames: (device.recentFrames ?? []).slice(-3),
+                    lines: device.lastDump ?? [], shaders: device.shaderBytecode ?? [],
+                    textures: device.textureRecords ?? [] };
+            })()`;
+            await evaluate(read);
+            const dumped = await evaluate(read);
+            const text = [
+                '== frames', ...dumped.frames.map((/** @type {any} */ f)=>JSON.stringify(f)),
+                '', '== draws of the last frame written down', ...dumped.lines,
+                '', '== shaders', ...dumped.shaders,
+                '', '== textures',
+                ...dumped.textures.map((/** @type {any} */ t)=>`${t.id} ${t.width}x${t.height}`
+                    + ` fmt=${t.format} levels=${t.levels} uploads=${t.uploads}`
+                    + ` dirty=${t.dirty} resident=${t.resident}`
+                    + ` written=${(t.written ?? []).join(',')}`),
+            ].join('\n');
+            const file = resolve(arg('file') || `${downloads}/live-dump-${Date.now()}.txt`);
+            await writeFile(file, text);
+            out = `${file} (${dumped.lines.length} lines)`;
         }
         else if (url.pathname === '/stack')
         {
