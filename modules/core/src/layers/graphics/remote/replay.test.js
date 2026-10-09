@@ -829,3 +829,39 @@ test('a run of the command ring is one call recorded, and the played device make
         assert.equal(out.device.GetViewport(viewport), D3D_OK);
         assert.equal(viewport.viewport.Width, 4);
     });
+
+test('an occlusion count is asked of the renderer without waiting, and taken when it comes',
+    async t=>{
+        // A driver answers S_FALSE until the GPU has counted and the program
+        // polls; waiting for the renderer instead held the program for the
+        // replay of everything before the ask, every frame.
+        const d3d = acrossAPort({ writeMemory: ()=>{} });
+        t.after(()=>d3d.close());
+        /** @type {{ device?: any }} */
+        const out = {};
+        assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+            backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out),
+        D3D_OK);
+        /** @type {{ query?: any }} */
+        const made = {};
+        assert.equal(out.device.CreateQuery(D3DQUERYTYPE.OCCLUSION, made), D3D_OK);
+        const D3DISSUE_END = 1;
+        const D3DISSUE_BEGIN = 2;
+        const S_FALSE = 1;
+        assert.equal(made.query.Issue(D3DISSUE_BEGIN), D3D_OK);
+        assert.equal(made.query.Issue(D3DISSUE_END), D3D_OK);
+        /** @type {{ value?: number }} */
+        const count = {};
+        assert.equal(made.query.GetData(count, 4, 0), S_FALSE, 'asked, not waited for');
+        assert.equal(made.query.GetData(count, 4, 0), S_FALSE, 'still on its way');
+        let answer = S_FALSE;
+        for (let tries = 0; tries < 50 && answer === S_FALSE; tries++)
+        {
+            await new Promise(resolve=>setTimeout(resolve, 5));
+            answer = made.query.GetData(count, 4, 0);
+        }
+        assert.equal(answer, D3D_OK, 'the count, once the renderer has answered');
+        assert.equal(count.value, 0);
+        assert.equal(made.query.Issue(D3DISSUE_END), D3D_OK);
+        assert.equal(made.query.GetData(count, 4, 0), S_FALSE, 'a new measurement is asked anew');
+    });

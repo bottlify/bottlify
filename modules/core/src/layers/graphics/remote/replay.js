@@ -113,6 +113,10 @@ const LOCK_READ_ONLY = 0x10;
 
 /** D3DLOCK_NOOVERWRITE and DISCARD, the same in both versions too. */
 const D3DLOCK_NOOVERWRITE = 0x1000;
+/** D3DQUERYTYPE_OCCLUSION. */
+const D3DQUERYTYPE_OCCLUSION = 9;
+/** What GetData answers while the count is not back. */
+const S_FALSE = 1;
 const D3DLOCK_DISCARD = 0x2000;
 
 /**
@@ -766,6 +770,17 @@ export function createRecording(options){
     };
 
     /**
+     * Each occlusion query's count as the renderer answers it, asked once its
+     * end is issued and taken when it comes: a driver answers S_FALSE until the
+     * GPU has counted, and a program polls. Waiting for the answer instead held
+     * the program for the replay of everything recorded before the ask, every
+     * frame -- tens of milliseconds, a quarter of a second at worst.
+     *
+     * @type {WeakMap<object, { reply: PlayedAnswer | null }>}
+     */
+    const counts = new WeakMap();
+
+    /**
      * What a played call wrote into a structure the caller passed, into the
      * caller's: its plain values, the device's objects left as the recorded
      * call gave them.
@@ -1144,10 +1159,52 @@ export function createRecording(options){
                 const held = transport.called(WAIT.PACED, name);
                 return held instanceof Promise ? held.then(()=>result) : result;
             }
+            if (name === 'Issue')
+            {
+                // A new measurement: what was counted before is not its count.
+                counts.delete(target);
+            }
             if (!mayAnswer || !answered(target, name, applied))
             {
                 transport.called(WAIT.NONE, name);
                 return typeof result === 'object' ? answerOf(result) : result;
+            }
+            if (name === 'GetData' && /** @type {any} */ (target)?.type === D3DQUERYTYPE_OCCLUSION)
+            {
+                const known = counts.get(target);
+                if (known)
+                {
+                    transport.called(WAIT.NONE, name);
+                    if (!known.reply)
+                    {
+                        return S_FALSE;
+                    }
+                    for (let index = 0; index < args.length; index++)
+                    {
+                        copyOut(args[index], known.reply.outs[index]);
+                    }
+                    return known.reply.answer;
+                }
+                const asking = { reply: /** @type {PlayedAnswer | null} */ (null) };
+                counts.set(target, asking);
+                Promise.resolve(transport.called(WAIT.ANSWER, name)).then(played=>{
+                    // Still this measurement's; an answer that is not a count
+                    // yet is asked again at the next poll.
+                    if (counts.get(target) === asking)
+                    {
+                        if (played.answer === 0)
+                        {
+                            asking.reply = played;
+                        }
+                        else
+                        {
+                            counts.delete(target);
+                        }
+                    }
+                }, ()=>{
+                    counts.delete(target);
+                });
+                return S_FALSE;
             }
             /** @param {PlayedAnswer} played */
             const take = played=>{
