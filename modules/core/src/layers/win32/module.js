@@ -85,6 +85,7 @@ import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
 import { createCfgmgrFunctions } from './cfgmgr32/functions.js';
 import { createMsvfwFunctions } from './msvfw32/functions.js';
+import { createAvifilFunctions } from './avifil32/functions.js';
 import { DPLAYX_ORDINALS, createDplayFunctions } from './dplayx/functions.js';
 import { createIostreamFunctions } from './msvcirt/functions.js';
 import { formatToString } from './msvcrt/format.js';
@@ -2068,6 +2069,9 @@ export function createWin32Module(){
 
                 // Video for Windows with no compressors and no MCI video device.
                 'MSVFW32.dll': createMsvfwFunctions({ writeMemory }),
+
+                // The AVIFile library with no file handlers registered.
+                'AVIFIL32.dll': createAvifilFunctions({ writeMemory }),
 
                 // DirectPlay with no service provider, and a lobby that did
                 // not launch the program.
