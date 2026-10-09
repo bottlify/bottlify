@@ -336,7 +336,10 @@ export function validateStages(stageStates, stageCount, options = {}){
             return D3DERR_UNSUPPORTEDCOLORARG;
         }
         const alphaOp = states.get(D3DTSS.ALPHAOP) ?? 0;
-        if (!COMBINED_OPS.has(alphaOp))
+        // The bump operations move the next stage's coordinate; an alpha has
+        // no coordinate to move, and no driver takes them there.
+        if (!COMBINED_OPS.has(alphaOp) || alphaOp === D3DTOP.BUMPENVMAP
+            || alphaOp === D3DTOP.BUMPENVMAPLUMINANCE)
         {
             return D3DERR_UNSUPPORTEDALPHAOPERATION;
         }

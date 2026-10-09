@@ -1774,9 +1774,9 @@ test('every capability claimed is one the renderer honours', ()=>{
         ['MaxVertexW', 'GuardBandLeft', 'GuardBandTop', 'GuardBandRight', 'GuardBandBottom',
             'ExtentsAdjust', 'MaxPointSize']);
 
-    assert.equal(caps.TextureOpCaps, 0x039effff,
-        'DISABLE through BLENDCURRENTALPHA and the modulate-add, DOTPRODUCT3, MULTIPLYADD and LERP '
-        + 'operations, the ones the combiner draws');
+    assert.equal(caps.TextureOpCaps, 0x03feffff,
+        'DISABLE through BLENDCURRENTALPHA and the modulate-add, BUMPENVMAP, BUMPENVMAPLUMINANCE, '
+        + 'DOTPRODUCT3, MULTIPLYADD and LERP operations, the ones the combiner draws');
     assert.equal(caps.TextureCaps & (0x00000800 | 0x00010000), 0x00010800,
         'cube maps and their chains, which the renderer samples');
     assert.equal(caps.CubeTextureFilterCaps, caps.TextureFilterCaps);

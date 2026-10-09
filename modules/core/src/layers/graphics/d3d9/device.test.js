@@ -55,7 +55,7 @@ test('ValidateDevice refuses what the combiner does not draw, a filter of none i
     assert.equal(device.ValidateDevice(refused), 0x88760822, 'D3DERR_UNSUPPORTEDTEXTUREFILTER');
     assert.equal(refused.passes, undefined);
     assert.equal(device.SetSamplerState(0, 5, 1), D3D_OK);
-    assert.equal(device.SetTextureStageState(0, 1, 22), D3D_OK, 'D3DTOP_BUMPENVMAP');
+    assert.equal(device.SetTextureStageState(0, 1, 17), D3D_OK, 'D3DTOP_PREMODULATE');
     assert.equal(device.ValidateDevice(refused), 0x88760819, 'D3DERR_UNSUPPORTEDCOLOROPERATION');
     assert.equal(device.release(), 0);
 });

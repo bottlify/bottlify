@@ -75,6 +75,8 @@ export const D3DTOP = Object.freeze({
     MODULATECOLOR_ADDALPHA: 19,
     MODULATEINVALPHA_ADDCOLOR: 20,
     MODULATEINVCOLOR_ADDALPHA: 21,
+    BUMPENVMAP: 22,
+    BUMPENVMAPLUMINANCE: 23,
     DOTPRODUCT3: 24,
     MULTIPLYADD: 25,
     LERP: 26,
@@ -318,13 +320,17 @@ export function argumentsRead(op, arg1, arg2, arg0 = /** @type {number} */ (D3DT
  * @param {number} stageIndex
  * @param {string} coordinate  the expression this stage samples with
  * @param {string} [specular]  the expression the specular colour is read as
+ * @param {string} [texture]  what this stage's texture reads as: its sample, or
+ *     the sample a bump stage before it scaled
  * @returns {string}
  */
-function argument(arg, stageIndex, coordinate, specular = 'input.specular'){
+function argument(arg, stageIndex, coordinate, specular = 'input.specular',
+    texture = `sampleStage${stageIndex}(${coordinate})`)
+{
     const source = {
         [D3DTA.DIFFUSE]: 'input.diffuse',
         [D3DTA.CURRENT]: 'current',
-        [D3DTA.TEXTURE]: `sampleStage${stageIndex}(${coordinate})`,
+        [D3DTA.TEXTURE]: texture,
         [D3DTA.TFACTOR]: 'uniforms.textureFactor',
         [D3DTA.SPECULAR]: specular,
     }[arg & D3DTA.SELECTMASK];
@@ -355,13 +361,16 @@ function argument(arg, stageIndex, coordinate, specular = 'input.specular'){
  * @param {number} arg1 @param {number} arg2
  * @param {string} [specular]  as `argument` reads it
  * @param {number} [arg0]  the third operand of MULTIPLYADD and LERP
+ * @param {string} [texture]  as `argument` reads it
  * @returns {string | null}
  */
-function combine(op, stageIndex, coordinate, arg1, arg2, specular = 'input.specular', arg0 = 1){
+function combine(op, stageIndex, coordinate, arg1, arg2, specular = 'input.specular', arg0 = 1,
+    texture = `sampleStage${stageIndex}(${coordinate})`)
+{
     const read = argumentsRead(op, arg1, arg2, arg0);
-    const a = read.length > 0 ? argument(read[0], stageIndex, coordinate, specular) : '';
-    const b = read.length > 1 ? argument(read[1], stageIndex, coordinate, specular) : '';
-    const c = read.length > 2 ? argument(read[2], stageIndex, coordinate, specular) : '';
+    const a = read.length > 0 ? argument(read[0], stageIndex, coordinate, specular, texture) : '';
+    const b = read.length > 1 ? argument(read[1], stageIndex, coordinate, specular, texture) : '';
+    const c = read.length > 2 ? argument(read[2], stageIndex, coordinate, specular, texture) : '';
     switch (op)
     {
         case D3DTOP.DISABLE:
@@ -391,11 +400,11 @@ function combine(op, stageIndex, coordinate, arg1, arg2, specular = 'input.specu
         case D3DTOP.BLENDDIFFUSEALPHA:
             return `mix(${b}, ${a}, (input.diffuse).a)`;
         case D3DTOP.BLENDTEXTUREALPHA:
-            return `mix(${b}, ${a}, (sampleStage${stageIndex}(${coordinate})).a)`;
+            return `mix(${b}, ${a}, (${texture}).a)`;
         case D3DTOP.BLENDFACTORALPHA:
             return `mix(${b}, ${a}, (uniforms.textureFactor).a)`;
         case D3DTOP.BLENDTEXTUREALPHAPM:
-            return `${a} + ${b} * (1.0 - (sampleStage${stageIndex}(${coordinate})).a)`;
+            return `${a} + ${b} * (1.0 - (${texture}).a)`;
         case D3DTOP.BLENDCURRENTALPHA:
             return `mix(${b}, ${a}, (current).a)`;
         // The four colour-only forms: one argument's alpha or colour scales the
@@ -927,6 +936,12 @@ function fragmentBody(state, specularEnable, generated = state.stages.map(
 specular = 'input.specular', sprite = false)
 {
     const wide = wideSets(state);
+    /**
+     * What a bump stage hands the stage after it: the offset its coordinate
+     * moves by and the factor its texture's colour is scaled by.
+     * @type {{ offset: string, luminance: string | null } | null}
+     */
+    let bumped = null;
     const stages = state.stages.length === 0
         ? '    var current = input.diffuse;'
         : ['    var current = input.diffuse;', ...state.stages.map((stage, index)=>{
@@ -941,16 +956,50 @@ specular = 'input.specular', sprite = false)
                 ? flat ? own : stage.projected === 4 ? `(${own}.xyz / ${own}.w)` : `${own}.xyz`
                 : sprite ? flat ? 'input.sprite' : 'vec3f(input.sprite, 0.0)'
                     : `input.texCoord${set}${wide.has(set) ? flat ? '.xy' : '.xyz' : ''}`;
+            if (stage.colorOp === D3DTOP.BUMPENVMAP || stage.colorOp === D3DTOP.BUMPENVMAPLUMINANCE)
+            {
+                // The stage's texel is (du, dv, L), signed offsets and a
+                // luminance; through the stage's bump matrix the offsets move
+                // the next stage's coordinate, and the luminance, scaled and
+                // offset, scales the next stage's texture. The stage itself
+                // leaves the running colour as it was.
+                const [m00, m01, m10, m11, scale, shift] = (stage.bump ?? [0, 0, 0, 0, 0, 0])
+                    // A state never set reads as whatever its dword was; one
+                    // that is no number has no literal.
+                    .map(value=>literalOf(Number.isFinite(value) ? value : 0));
+                const texel = `bump${index}`;
+                bumped = {
+                    offset: `vec2f(${m00} * ${texel}.r + ${m10} * ${texel}.g,`
+                        + ` ${m01} * ${texel}.r + ${m11} * ${texel}.g)`,
+                    luminance: stage.colorOp === D3DTOP.BUMPENVMAPLUMINANCE
+                        ? `saturate(${texel}.b * ${scale} + ${shift})`
+                        : null,
+                };
+                return `    let ${texel} = sampleStage${index}(${coordinate});`;
+            }
+            const from = bumped;
+            bumped = null;
+            // A bump stage before this one moves a flat coordinate; a cube or
+            // volume one it cannot, as the hardware could not.
+            // A generated flat coordinate is four wide, its last two what a
+            // projected sample divides by; the offset moves its first two.
+            const moved = !from || !flat ? coordinate
+                : generated[index] ? `vec4f(${coordinate}.xy + ${from.offset}, ${coordinate}.zw)`
+                    : `(${coordinate} + ${from.offset})`;
+            const sample = `sampleStage${index}(${moved})`;
+            const texture = from?.luminance
+                ? `(${sample} * vec4f(vec3f(${from.luminance}), 1.0))`
+                : sample;
             const color = combine(
-                stage.colorOp, index, coordinate, stage.colorArg1, stage.colorArg2, specular,
-                stage.colorArg0);
+                stage.colorOp, index, moved, stage.colorArg1, stage.colorArg2, specular,
+                stage.colorArg0, texture);
             if (color === null)
             {
                 return `    // stage ${index} disabled`;
             }
             const alpha = combine(
-                stage.alphaOp, index, coordinate, stage.alphaArg1, stage.alphaArg2, specular,
-                stage.alphaArg0);
+                stage.alphaOp, index, moved, stage.alphaArg1, stage.alphaArg2, specular,
+                stage.alphaArg0, texture);
             // Each stage's result is held to [0, 1] before the next reads it,
             // as the fixed function's registers hold it: a sum past one or a
             // difference below zero is not carried into the stage after.

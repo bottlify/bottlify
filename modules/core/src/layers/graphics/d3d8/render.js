@@ -1774,6 +1774,7 @@ export function stageCascade(model, layout){
             alphaArg1: get(D3DTSS.ALPHAARG1),
             alphaArg2: get(D3DTSS.ALPHAARG2),
             ...arguments0(get),
+            ...bumpOf(get),
             texCoordIndex,
             // A projected generated coordinate is divided by its third or
             // fourth component at the sample, which is the count's last.
@@ -1830,6 +1831,25 @@ export function stageCascade(model, layout){
 }
 
 /**
+ * A bump stage's matrix and luminance, only for a bump stage: they are written
+ * into its shader, and a key that carried them always would split pipelines
+ * that draw identically.
+ *
+ * @param {(state: number)=>number} get
+ * @returns {{ bump?: number[] }}
+ */
+function bumpOf(get){
+    const op = get(D3DTSS.COLOROP);
+    if (op !== D3DTOP.BUMPENVMAP && op !== D3DTOP.BUMPENVMAPLUMINANCE)
+    {
+        return {};
+    }
+    return { bump: [D3DTSS.BUMPENVMAT00, D3DTSS.BUMPENVMAT01, D3DTSS.BUMPENVMAT10,
+        D3DTSS.BUMPENVMAT11, D3DTSS.BUMPENVLSCALE, D3DTSS.BUMPENVLOFFSET]
+        .map(state=>dwordToFloat(get(state))) };
+}
+
+/**
  * A stage's ARG0 operands, only for an operation that reads one: a key that
  * carried them always would split pipelines that draw identically.
  *
@@ -1852,6 +1872,7 @@ function arguments0(get){
  */
 function readsTexture(op, arg1, arg2, arg0){
     return op === D3DTOP.BLENDTEXTUREALPHA || op === D3DTOP.BLENDTEXTUREALPHAPM
+        || op === D3DTOP.BUMPENVMAP || op === D3DTOP.BUMPENVMAPLUMINANCE
         || argumentsRead(op, arg1, arg2, arg0)
             .some(arg=>(arg & D3DTA_SELECTMASK) === D3DTA.TEXTURE);
 }
@@ -8219,7 +8240,9 @@ export function createRenderer(options){
             // buffer, draws and copies alike.
             for (const command of recorded.commands)
             {
-                if (command.check)
+                // A draw the replay passed over -- its pipeline refused -- bound
+                // no block, and there is nothing of it on the GPU to read back.
+                if (command.check?.block)
                 {
                     checks.push(command.check);
                 }

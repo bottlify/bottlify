@@ -145,6 +145,10 @@ function lookUp(table, value, what){
  *     For a stage generating its coordinate: which component the transformed
  *     coordinate is divided by at the sample -- 3 or 4 under
  *     D3DTTFF_PROJECTED with that count, 0 or absent for no divide.
+ * @property {number[]} [bump]
+ *     A BUMPENVMAP stage's matrix and luminance, as numbers: BUMPENVMAT00, 01,
+ *     10, 11, BUMPENVLSCALE, BUMPENVLOFFSET. Written into the shader, so only
+ *     a bump stage carries them.
  * @property {number} [colorKey]
  *     Direct3D 7 colour keying in force on this stage's texture: the key as
  *     its texel expands, 0xRRGGBB. A texel of that colour is not drawn.
@@ -254,6 +258,7 @@ export function pipelineKey(state){
             ...(stage.colorArg0 === undefined && stage.alphaArg0 === undefined ? []
                 : [`a${stage.colorArg0 ?? 1}/${stage.alphaArg0 ?? 1}`]),
             ...(stage.colorKey === undefined ? [] : [`k${stage.colorKey}`]),
+            ...(stage.bump === undefined ? [] : [`b${stage.bump.join('/')}`]),
             ...(stage.dimension === undefined ? [] : [stage.dimension]),
         ].join(','))
         .join(';');

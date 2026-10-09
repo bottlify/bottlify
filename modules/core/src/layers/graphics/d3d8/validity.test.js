@@ -202,8 +202,11 @@ test('the texture stages validate when the combiner draws them, and name what it
 
     reset();
     assert.equal(validate(), D3D_OK, 'the default cascade');
+    set(0, D3DTSS.COLOROP, 17);
+    assert.equal(validate(), UNSUPPORTEDCOLOROPERATION, 'D3DTOP_PREMODULATE');
+    reset();
     set(0, D3DTSS.COLOROP, 22);
-    assert.equal(validate(), UNSUPPORTEDCOLOROPERATION, 'D3DTOP_BUMPENVMAP');
+    assert.equal(validate(), D3D_OK, 'D3DTOP_BUMPENVMAP, which the combiner draws');
     reset();
     set(0, D3DTSS.COLORARG1, 5);
     assert.equal(validate(), UNSUPPORTEDCOLORARG, 'D3DTA_TEMP');

@@ -206,6 +206,44 @@ test('the colour-plus-alpha forms, the signed dot product and ARG0 as a third op
         [D3DTA.TEXTURE, D3DTA.DIFFUSE]);
 });
 
+test('a bump stage moves the coordinate of the next stage, and with luminance scales its texture',
+    ()=>{
+        // BUMPENVMAP: the stage's texel is (du, dv, L); through its matrix the
+        // offsets move the next stage's coordinate, the luminance variant
+        // scales the next stage's texture by L * LSCALE + LOFFSET, and the
+        // bump stage leaves the running colour as it was. It threw, and every
+        // draw of a model bump-mapped this way was dropped.
+        const fvf = FVF.XYZ | FVF.DIFFUSE | (2 << FVF.TEXCOUNT_SHIFT);
+        const codeOf = (/** @type {number} */ op)=>generate(baseState({ fvf, stages: [
+            { colorOp: op, colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.CURRENT,
+                alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.CURRENT, alphaArg2: D3DTA.CURRENT,
+                texCoordIndex: 0, bump: [0.5, 0, 0, 0.25, 2, -0.5] },
+            { colorOp: D3DTOP.MODULATE, colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.DIFFUSE,
+                alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.TEXTURE, alphaArg2: D3DTA.CURRENT,
+                texCoordIndex: 1 },
+        ] })).code;
+        const moved = 'sampleStage1((input.texCoord1 + vec2f(0.5 * bump0.r + 0.0 * bump0.g,'
+            + ' 0.0 * bump0.r + 0.25 * bump0.g)))';
+        const plain = codeOf(D3DTOP.BUMPENVMAP);
+        assert.ok(plain.includes('let bump0 = sampleStage0(input.texCoord0);'));
+        assert.ok(plain.includes(`current = vec4f(saturate((${moved} * input.diffuse).rgb),`));
+        assert.ok(!plain.includes('saturate(bump0.b'), 'no luminance without the luminance op');
+        const lit = codeOf(D3DTOP.BUMPENVMAPLUMINANCE);
+        assert.ok(lit.includes(
+            `(${moved} * vec4f(vec3f(saturate(bump0.b * 2.0 + -0.5)), 1.0)) * input.diffuse`));
+        // A generated coordinate is four wide: the offset moves its first two.
+        const generatedNext = generate(baseState({ fvf, stages: [
+            { colorOp: D3DTOP.BUMPENVMAP, colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.CURRENT,
+                alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.CURRENT, alphaArg2: D3DTA.CURRENT,
+                texCoordIndex: 0, bump: [1, 0, 0, 1, 0, 0] },
+            { colorOp: D3DTOP.SELECTARG1, colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.CURRENT,
+                alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.CURRENT, alphaArg2: D3DTA.CURRENT,
+                texCoordIndex: TCI.CAMERASPACEPOSITION },
+        ] })).code;
+        assert.ok(generatedNext.includes('sampleStage1(vec4f(input.generated1.xy + vec2f('),
+            generatedNext);
+    });
+
 test('a vertex colour is swizzled back from B,G,R,A', ()=>{
     // unorm8x4 reads the DWORD in memory order, so a D3DCOLOR arrives with red
     // and blue exchanged. Missing the swizzle gives a picture that is correct
