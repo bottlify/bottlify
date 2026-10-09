@@ -107,6 +107,28 @@ export async function serveProcess(start){
     /** @type {Record<string, Record<string, (...args: any[]) => any>>} */
     const handlers = {};
     const link = openLink(end, handlers);
+    /** @type {any} */
+    let app = null;
+    /**
+     * The code its parent ended it with before it was made, to end it with
+     * once it is.
+     *
+     * @type {number | null}
+     */
+    let terminated = null;
+    // What the page asks of the process it drives, as it would of a machine on
+    // its own thread: pausing it, and looking inside it; and its parent's
+    // TerminateProcess, which may come while it is still being made -- in
+    // the first call it makes to the system, below.
+    handlers.control = {
+        pause: ()=>app?.pause(),
+        resume: ()=>app?.resume(),
+        stop: ()=>app?.stop(),
+        terminate: (/** @type {number} */ code)=>{
+            terminated ??= code;
+            app?.terminate(code);
+        },
+    };
     /** @param {string} target @param {string} method @param {any[]} args */
     const ask = (target, method, args)=>link.callWaiting(target, method, args);
     const system = remoteSystem(ask, handlers, (target, method, args)=>
@@ -117,8 +139,6 @@ export async function serveProcess(start){
         system.objects.deliver(token, result) };
     /** What the translator raises with each batch it posts. */
     const posted = { buffer: new SharedArrayBuffer(4), index: 0 };
-    /** @type {any} */
-    let app = null;
     // The page's input, while this process stands, measured on the canvas
     // the run shows it on when the run says how large that is.
     const viewport = { width: 0, height: 0 };
@@ -142,13 +162,6 @@ export async function serveProcess(start){
     const tables = ()=>[...app.diagnostics(),
         { name: 'link', status: 'ready', metrics: link.diagnostics() }];
     handlers.report = { diagnostics: ()=>(app ? plainOf(tables) : null) };
-    // What the page asks of the process it drives, as it would of a machine on
-    // its own thread: pausing it, and looking inside it.
-    handlers.control = {
-        pause: ()=>app?.pause(),
-        resume: ()=>app?.resume(),
-        stop: ()=>app?.stop(),
-    };
     handlers.facade = {
         /** @param {string} path  a member of the machine, `debug.read` @param {any[]} args */
         call: async(path, args)=>{
@@ -207,6 +220,10 @@ export async function serveProcess(start){
     }
     app.attachLog((/** @type {number} */ handle, /** @type {string} */ text)=>
         ask('process', 'output', [handle, text]));
+    if (terminated !== null)
+    {
+        app.terminate(terminated);
+    }
     try
     {
         let code;

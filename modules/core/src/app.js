@@ -3052,6 +3052,7 @@ function journalEvents(events, into){
  *         ids: { thread: number, process: number }, volume: any },
  *     mainThreadId?: number,
  *     beside?: (request: any) => void,
+ *     terminate?: (request: any, code: number) => boolean,
  *     othersRunning?: () => boolean,
  *     com?: { table: any, process: unknown },
  * }} options
@@ -4150,6 +4151,9 @@ async function buildApp(options){
                     trace: formatTrace(captureTrace({ cpu, memory, kernel, bridge })),
                 });
             },
+            // A child running beside this process, ended where it runs.
+            terminate: (/** @type {any} */ request, /** @type {number} */ code)=>
+                options.terminate?.(request, code) ?? false,
             /** @param {any} thread */
             threadBlock: thread=>{
                 const block = threadBlocks?.createThreadBlock({
@@ -6986,6 +6990,14 @@ async function buildApp(options){
         },
 
         /**
+         * Ends this process from outside, as its parent's TerminateProcess
+         * does: the run sees the code at the machine's next turn.
+         *
+         * @param {number} code
+         */
+        terminate: (/** @type {number} */ code)=>win32.terminate(code),
+
+        /**
          * A file off this process's volume, waited for if it is not here yet.
          * How the caller reads a child's image before this process -- and the
          * volume with it -- is torn down.
@@ -7766,6 +7778,7 @@ export async function createApp(options){
             // have nothing left to run, and runs in its place.
             beside: processesAtOnce
                 ? (/** @type {any} */ request)=>startBeside(self, request) : undefined,
+            terminate: processesAtOnce ? terminateBeside : undefined,
             // Only where processes run at once: one run in its parent's place
             // has the parent paused, which wakes nothing. A process that joined
             // the run's system from a worker of its own is never the run's only
@@ -8313,11 +8326,14 @@ export async function createApp(options){
      *     its parent, as the run reaches it: where its image is read, and the
      *     sound it lends
      * @param {any} request
+     * @param {{ link: ReturnType<typeof openLink> | null, code: number | null }} [reach]
+     *     how its parent's TerminateProcess reaches it: given its link once
+     *     there is one, and the code it was ended with before then
      * @returns {Promise<{ code: number, diagnostics?: any, systemLibraries?: string[] }>}
      *     its exit code, its layers' diagnostics as it ended, and the system
      *     libraries it knew
      */
-    const runAcross = async(from, request)=>{
+    const runAcross = async(from, request, reach)=>{
         const image = await from.readImage(request.imagePath).catch(()=>null);
         if (!image)
         {
@@ -8354,6 +8370,8 @@ export async function createApp(options){
             // Its own children, which the run starts, counted with the rest.
             processes: {
                 start: (/** @type {any} */ asked)=>startAcrossFor(link, asked),
+                terminate: (/** @type {number} */ id, /** @type {number} */ code)=>
+                    terminateBeside({ id }, code),
             },
             // The parent's open files the child writes its output and error
             // into: one position, the parent's, which the child's writes move.
@@ -8371,6 +8389,14 @@ export async function createApp(options){
             },
         });
         const answering = link.serve();
+        if (reach)
+        {
+            reach.link = link;
+            if (reach.code !== null)
+            {
+                terminateAcross(link, reach.code);
+            }
+        }
         // Its own way in to the run's graphics worker, where its Direct3D
         // devices draw; what they present comes back here, to the run's
         // presenter, as every root's frames do.
@@ -8471,6 +8497,26 @@ export async function createApp(options){
             presenter?.forget?.(request.id);
         }
     };
+    /**
+     * The children running beside their parents, by process id, from the
+     * moment each is asked for: how its parent's TerminateProcess reaches it
+     * wherever it runs, holding the code until it can take it.
+     *
+     * @type {Map<number, { terminate: (code: number) => void }>}
+     */
+    const reachable = new Map();
+
+    /**
+     * Tells a process in a worker of its own its parent ended it.
+     *
+     * @param {ReturnType<typeof openLink>} link @param {number} code
+     */
+    const terminateAcross = (link, code)=>{
+        link.call('control', 'terminate', [code]).catch(()=>{
+            // Gone already: its exit is on its way to its parent.
+        });
+    };
+
     /** The code the last of the run's processes beside another exited with. */
     let lastBesideCode = 0;
     /**
@@ -8496,12 +8542,21 @@ export async function createApp(options){
      */
     const startAcross = (from, request, exited, over)=>{
         across++;
+        /** @type {{ link: ReturnType<typeof openLink> | null, code: number | null }} */
+        const reach = { link: null, code: null };
+        reachable.set(request.id, { terminate: code=>{
+            reach.code = code;
+            if (reach.link)
+            {
+                terminateAcross(reach.link, code);
+            }
+        } });
         const running = (async()=>{
             /** @type {{ code: number, diagnostics?: any, systemLibraries?: string[] }} */
             let ended;
             try
             {
-                ended = await runAcross(from, request);
+                ended = await runAcross(from, request, reach);
             }
             catch (e){
                 events.emit('error', { reason: 'process', error: e });
@@ -8510,6 +8565,7 @@ export async function createApp(options){
             finally
             {
                 across--;
+                reachable.delete(request.id);
             }
             const { code, diagnostics } = ended;
             lastBesideCode = code;
@@ -8702,6 +8758,18 @@ export async function createApp(options){
         // is built: a parent that waits on it at once is waiting on something
         // that will answer, not stuck.
         starting++;
+        /** @type {{ line: { current: any } | null, code: number | null }} */
+        const reach = { line: null, code: null };
+        reachable.set(request.id, { terminate: code=>{
+            if (reach.line)
+            {
+                reach.line.current.terminate(code);
+            }
+            else
+            {
+                reach.code = code;
+            }
+        } });
         const running = (async()=>{
             /** @type {any} */
             let child = null;
@@ -8740,6 +8808,7 @@ export async function createApp(options){
             }
             if (!child)
             {
+                reachable.delete(request.id);
                 sound.giveBack();
                 parent.childExited(request, 2);
                 return 2;
@@ -8750,6 +8819,11 @@ export async function createApp(options){
             events.emit('process-started', { image: request.imagePath,
                 sequenceBase: logSequence });
             const line = { current: child, main: false };
+            reach.line = line;
+            if (reach.code !== null)
+            {
+                child.terminate(reach.code);
+            }
             let code = -1;
             try
             {
@@ -8757,6 +8831,10 @@ export async function createApp(options){
             }
             catch (e){
                 events.emit('error', { reason: 'process', error: e });
+            }
+            finally
+            {
+                reachable.delete(request.id);
             }
             const ended = line.current;
             await retire(ended);
@@ -8781,6 +8859,29 @@ export async function createApp(options){
             noteMachines();
         });
     };
+
+    /**
+     * A parent's TerminateProcess on a child running beside it: ended where
+     * it runs -- on this thread, in a worker of its own, or through the run
+     * for a process that joined it from a worker -- and its parent told as
+     * any child's exit is told. False for a child the run does not have.
+     *
+     * @param {{ id: number }} request @param {number} code
+     * @returns {boolean}
+     */
+    function terminateBeside(request, code){
+        const child = reachable.get(request.id);
+        if (child)
+        {
+            child.terminate(code >>> 0);
+            return true;
+        }
+        if (childrenAcross.has(request.id))
+        {
+            return options.system?.processes?.terminate?.(request.id, code) === true;
+        }
+        return false;
+    }
 
     /**
      * Runs the live process, and each child that takes its place or runs

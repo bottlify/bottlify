@@ -1585,6 +1585,9 @@ export function createWin32Module(){
                         // TerminateProcess wakes whoever waits on the child it ends.
                         wake: (/** @type {any} */ thread, /** @type {number} */ result)=>
                             kernel.wake(thread, result),
+                        // And ends one running beside this process where it runs.
+                        terminateChild: (/** @type {any} */ child, /** @type {number} */ code)=>
+                            config?.terminate?.(child, code) === true,
                         readMemory,
                         writeMemory,
                         setLastError: setError,
@@ -3273,6 +3276,23 @@ export function createWin32Module(){
                  */
                 childWaitedOn: (/** @type {any} */ child)=>exitCode === null
                     && child?.handsOver !== true,
+
+                /**
+                 * Ends this process from outside, as TerminateProcess does: with
+                 * the code, its threads stopped where they are, and no library
+                 * told. The run sees the code at its next turn.
+                 *
+                 * @param {number} code
+                 */
+                terminate(code){
+                    if (exitCode !== null)
+                    {
+                        return;
+                    }
+                    ending = true;
+                    exitCode = code >>> 0;
+                    processEnded();
+                },
 
                 /**
                  * A child run beside this process has exited: its record takes the

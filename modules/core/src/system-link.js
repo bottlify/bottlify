@@ -141,6 +141,13 @@ export function remoteSystem(ask, handlers = {}, call, volume = null, windowCell
         processes: {
             /** @param {any} request  as values @returns {boolean} whether the run took it */
             start: request=>ask('processes', 'start', [request]),
+            /**
+             * Ends one of them where it runs, with the code; not waited on.
+             *
+             * @param {number} id @param {number} code
+             * @returns {boolean} whether the run has it
+             */
+            terminate: (id, code)=>ask('processes', 'terminate', [id, code]),
             /** @param {Record<string, (...args: any[]) => any>} parent */
             answer(parent){
                 handlers.parent = parent;

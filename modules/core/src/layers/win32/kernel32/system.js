@@ -237,6 +237,9 @@ const compare = (left, right)=>(left < right ? -1 : (left > right ? 1 : 0));
  *           Ends a thread's wait with its answer: how a thread waiting on a
  *           child another one terminates goes on. Without it that thread
  *           stays waiting.
+ * @property {(child: any, code: number) => boolean} [terminateChild]
+ *           Ends a child that is running beside this process, with the code:
+ *           false where the run cannot reach it.
  */
 
 /**
@@ -1069,10 +1072,13 @@ export function createSystemFunctions(host){
          *
          * Terminating the running process does not return -- so, like
          * ExitProcess, the stub's own return is redirected into the park loop
-         * rather than answered. A child has not run while its parent can call
-         * this: it ends with the code before it starts, is no longer one to
-         * hand the machine to, and whoever waits on it is answered. One that
-         * has ended already is refused, as Windows refuses it.
+         * rather than answered. A child running beside this process is ended
+         * where it runs, with the code, and whoever waits on it is answered as
+         * it goes, as a child that exits is: the call starts the ending and
+         * does not wait for it, as on Windows. A child that has not run ends
+         * with the code before it starts, and is no longer one to hand the
+         * machine to. One that has ended already is refused, as Windows
+         * refuses it.
          */
         TerminateProcess: {
             argBytes: 8,
@@ -1090,6 +1096,10 @@ export function createSystemFunctions(host){
                     {
                         host.setLastError(ERROR_ACCESS_DENIED);
                         return 0;
+                    }
+                    if (child.started && host.terminateChild?.(child, code >>> 0))
+                    {
+                        return 1;
                     }
                     child.exitCode = code >>> 0;
                     child.completed = true;

@@ -1109,3 +1109,89 @@ test('concurrency asked for where memory cannot be shared falls back to one proc
         ?.metrics;
     assert.deepEqual([metrics.mode, metrics.concurrency], ['compatible', 1]);
 });
+
+/**
+ * A parent that starts C:\\App\\a.exe and C:\\App\\b.exe, neither of which ever
+ * exits, sleeps `delay` milliseconds, terminates them with 3 and 5, waits for
+ * both and exits with 0x10 * a's code + b's.
+ *
+ * @param {number} delay
+ */
+function buildTerminatingParent(delay){
+    const parent = buildExe({
+        imports: { 'KERNEL32.dll': ['CreateProcessA', 'Sleep', 'TerminateProcess',
+            'WaitForSingleObject', 'GetExitCodeProcess', 'ExitProcess'] },
+        data: {
+            first: ascii('C:\\App\\a.exe'),
+            second: ascii('C:\\App\\b.exe'),
+            startup: [...u32(68), ...new Array(64).fill(0)],
+            infoA: new Array(16).fill(0),
+            infoB: new Array(16).fill(0),
+            codeA: u32(0),
+            codeB: u32(0),
+        },
+        codeSize: 0x100,
+        code: ({ iat, at })=>{
+            /** @param {string} info @param {string} command */
+            const start = (info, command)=>[
+                0x68, ...u32(at(info)), 0x68, ...u32(at('startup')),
+                0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+                0x68, ...u32(at(command)), 0x6a, 0,
+                0xff, 0x15, ...u32(iat('CreateProcessA'))];
+            /** @param {string} info @param {number} code */
+            const terminate = (info, code)=>[0x6a, code, 0xff, 0x35, ...u32(at(info)),
+                0xff, 0x15, ...u32(iat('TerminateProcess'))];
+            /** @param {string} info */
+            const wait = info=>[0x6a, 0xff, 0xff, 0x35, ...u32(at(info)),
+                0xff, 0x15, ...u32(iat('WaitForSingleObject'))];
+            /** @param {string} info @param {string} code */
+            const exitCode = (info, code)=>[0x68, ...u32(at(code)), 0xff, 0x35, ...u32(at(info)),
+                0xff, 0x15, ...u32(iat('GetExitCodeProcess'))];
+            return [
+                ...start('infoA', 'first'), ...start('infoB', 'second'),
+                0x68, ...u32(delay), 0xff, 0x15, ...u32(iat('Sleep')),
+                ...terminate('infoA', 3), ...terminate('infoB', 5),
+                ...wait('infoA'), ...wait('infoB'),
+                ...exitCode('infoA', 'codeA'), ...exitCode('infoB', 'codeB'),
+                // ExitProcess(codeA << 4 + codeB)
+                0xa1, ...u32(at('codeA')), 0xc1, 0xe0, 0x04, 0x03, 0x05, ...u32(at('codeB')),
+                0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),
+            ];
+        },
+    });
+    const endless = buildExe({
+        imports: { 'KERNEL32.dll': ['Sleep'] },
+        data: {},
+        // for (;;) Sleep(10);
+        code: ({ iat })=>[0x6a, 10, 0xff, 0x15, ...u32(iat('Sleep')), 0xeb, 0x100 - 10],
+    });
+    return { parent, endless };
+}
+
+for (const delay of [0, 1000])
+{
+    test('TerminateProcess ends a child running beside its parent, in a worker of its own or in'
+        + ` its parent's, and its parent's wait on it ends with the code${delay
+            ? ', once it runs' : ', before it has started'}`, { timeout: 60000 }, async t=>{
+        const { parent, endless } = buildTerminatingParent(delay);
+        const app = await createApp({
+            executable: parent,
+            imagePath: 'C:\\App\\parent.exe',
+            engine: 'cork',
+            concurrency: 2,
+            storage: { load: async()=>({ files: [{ path: 'C:\\App\\a.exe', bytes: endless },
+                { path: 'C:\\App\\b.exe', bytes: endless }] }) },
+        });
+        t.after(()=>app.dispose());
+        /** @type {[string, boolean][]} */
+        const started = [];
+        app.on('process-started', (/** @type {any} */ event)=>
+            started.push([event.image, event.worker === true]));
+        assert.equal(await app.run({ timeoutMs: 30000 }), 0x35,
+            'a ended with 3 and b with 5, and the parent saw both');
+        // Ended before it was made, a child is not said to have started.
+        const where = new Map(started);
+        assert.equal(where.get('C:\\App\\a.exe') ?? true, true, 'a in a worker of its own');
+        assert.equal(where.get('C:\\App\\b.exe') ?? false, false, 'b beside its parent');
+    });
+}
