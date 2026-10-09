@@ -38,6 +38,7 @@
 import { createFonts } from './font.js';
 import { createSprites } from './sprite.js';
 import { createLines } from './line.js';
+import { createRenderToSurface } from './render-to-surface.js';
 import { createEffects } from './effect.js';
 import { D3DX_DEFAULT, createTextureLoader } from './texture.js';
 import { guestEntry } from '../msvcrt/guest-code.js';
@@ -176,6 +177,7 @@ export function createD3dxFunctions(host, options = {}){
     const sprites = createSprites(host);
     const fonts = createFonts(host, sprites);
     const polylines = createLines(host);
+    const renderTargets = createRenderToSurface(host, textures);
     /** @type {import('../ole32/objects.js').ComInterfaceDescriptor} */
     const buffer = {
         id: IID_ID3DXBUFFER,
@@ -453,6 +455,8 @@ export function createD3dxFunctions(host, options = {}){
 
         /** See line.js. */
         D3DXCreateLine: { argBytes: 8, handler: polylines.create },
+        /** See render-to-surface.js. */
+        D3DXCreateRenderToSurface: { argBytes: 28, handler: renderTargets.create },
 
         /**
          * HRESULT D3DXCreateFontA(LPDIRECT3DDEVICE9 pDevice, INT Height, UINT Width,
