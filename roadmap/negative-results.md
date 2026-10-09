@@ -72,6 +72,19 @@ evidence again.
   right. The program's error (8007) did not change. The change was not kept.
 - Not recorded: GPU, driver, power plan.
 
+### 2026-10-09 -- not waiting for a render-target copy that stays on the GPU
+
+- Idea: the recorder waits for the renderer's answer on every `CopyRects` out of a render
+  target; one into the device's memory in the same format is made on the GPU (`copySurface`)
+  and has nothing to answer, so skipping that wait would shorten a frame that copies its
+  target each frame.
+- Measured (harness, `--worker --coi`, headed Chrome, the RC demo bundle cb83b58a..., main
+  menu, 90 s, one run each arm): waits on CopyRects 13 834 before, 13 484 after; average frame
+  10.87 ms before, 10.81 ms after -- inside run-to-run noise. The title copies into a
+  system-memory surface and locks it read-only, about 250 times a second: a real read-back,
+  which the change does not touch. Not kept.
+- Not recorded: GPU, driver, power plan.
+
 ## Invalidated
 
 None yet.
