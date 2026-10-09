@@ -1107,6 +1107,16 @@ function describe(result, context, calls, symbols){
         say('');
     }
 
+    if ((result.bridge?.byFunction ?? []).length > 0)
+    {
+        say('  host functions since the start, by host time (name, calls, ms):');
+        for (const line of result.bridge.byFunction)
+        {
+            say(`    ${line}`);
+        }
+        say('');
+    }
+
     if ((result.bridge?.hooks ?? []).length > 0)
     {
         say('  sidecar hooks:');

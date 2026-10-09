@@ -1831,6 +1831,10 @@ export function createHarness(canvas, how = {}){
         result.bridge = {
             sequence: metrics('bridge').sequence ?? [],
             hot: metrics('bridge').hot ?? [],
+            // Every host function by the time its calls took since the start, with
+            // how many: the ring above is the last few thousand calls, which a
+            // thread waiting in a loop fills by itself.
+            byFunction: metrics('bridge').byFunction ?? [],
             recent: (metrics('bridge').recentDetailed ?? []).slice(-LIMITS.calls)
                 .map((/** @type {any} */ call)=>({ ...call, fromName: where(call.from >>> 0) })),
             // Named rather than left to `scalars`, which keeps only numbers and
