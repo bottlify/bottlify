@@ -864,4 +864,14 @@ test('an occlusion count is asked of the renderer without waiting, and taken whe
         assert.equal(count.value, 0);
         assert.equal(made.query.Issue(D3DISSUE_END), D3D_OK);
         assert.equal(made.query.GetData(count, 4, 0), S_FALSE, 'a new measurement is asked anew');
+
+        // Polled a frame later, the count is waited for, as hardware has
+        // counted by then: a program that reads its query the frame after
+        // asking never saw a count when the answer came later than that.
+        assert.equal(made.query.Issue(D3DISSUE_END), D3D_OK);
+        assert.equal(made.query.GetData(count, 4, 0), S_FALSE);
+        out.device.Present(null, null, 0, null);
+        const later = made.query.GetData(count, 4, 0);
+        assert.ok(later instanceof Promise, 'a frame later: waited for');
+        assert.equal(await later, D3D_OK);
     });
