@@ -43,6 +43,7 @@ import { guestEntry } from '../msvcrt/guest-code.js';
 import { createComObject } from '../ole32/objects.js';
 import { createConstantTableObjects } from './constants.js';
 import { createShaderSemantics } from './semantics.js';
+import { createMeshFunctions } from './mesh.js';
 import { preprocess, preprocessTracked } from './preprocess.js';
 import { compileShader } from './hlsl-compile.js';
 import { assembleShader, disassembleShader } from './shader-asm.js';
@@ -388,6 +389,9 @@ export function createD3dxFunctions(host, options = {}){
 
         /** See semantics.js. */
         ...createShaderSemantics(host),
+
+        /** See mesh.js. */
+        ...createMeshFunctions(host),
 
         /** See effect.js. */
         ...effects.exports,
