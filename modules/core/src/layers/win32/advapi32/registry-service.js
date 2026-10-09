@@ -202,6 +202,7 @@ export function createRegistryService(hive){
         /** @param {any} stored */
         fromJSON: stored=>hive.fromJSON(stored),
         /** @param {any} stored */
-        fillFromJSON: stored=>hive.fillFromJSON(stored),
+        /** @param {any} stored @param {boolean} [over] */
+        fillFromJSON: (stored, over)=>hive.fillFromJSON(stored, over),
     };
 }

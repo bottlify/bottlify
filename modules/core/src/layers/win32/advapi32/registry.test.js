@@ -542,6 +542,23 @@ test('a saved tree fills in what the hive lacks and leaves what it has as it is'
         'and a class registration is found where classes are');
 });
 
+test('a bottle packed again lays its registry over a session saved under the one before', ()=>{
+    // The install path corrected in the bottle: laid beneath the saved hive, the
+    // value the first run saved kept the wrong path and the game its old error.
+    const bottle = createHive();
+    bottle.setValue(machine(bottle, 'SOFTWARE\\Game'), 'SetupPath', REG_SZ,
+        latin1('C:\\Program Files\\Game\\\0'));
+    const saved = createHive();
+    const key = machine(saved, 'SOFTWARE\\Game');
+    saved.setValue(key, 'SetupPath', REG_SZ, latin1('C:\\Game\\\0'));
+    saved.setValue(key, 'PlayerName', REG_SZ, latin1('Sev\0'));
+    saved.fillFromJSON(JSON.parse(JSON.stringify(bottle.toJSON())), true);
+    assert.equal(valueOf(saved, HKEY_LOCAL_MACHINE, 'SOFTWARE\\Game', 'SetupPath'),
+        'C:\\Program Files\\Game\\', 'the value of the bottle over the saved one');
+    assert.equal(valueOf(saved, HKEY_LOCAL_MACHINE, 'SOFTWARE\\Game', 'PlayerName'), 'Sev',
+        'what the program wrote beside it stays');
+});
+
 test('the processor key names the processor the engine gives', ()=>{
     const nameOf = (/** @type {any} */ hive)=>{
         const local = /** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE));

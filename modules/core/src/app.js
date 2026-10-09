@@ -313,6 +313,9 @@ import { openProcessWorker } from './host/process-worker.js';
  *           reader has let go is then fetched again.
  * @property {string} [bundle.id]  Names this bundle's cache. Two bundles sharing
  *           a name would read each other's blocks, so it has to be the bundle's.
+ * @property {number} [bundle.revision]  The bottle's revision, raised each time it is
+ *           packed again. A session saved under an earlier one has the bottle's
+ *           registry laid over its own, as a reinstall would.
  * @property {string} [bundle.prefix]  Where in the volume the bundle appears.
  *           Defaults to the directory a game is installed into.
  * @property {boolean} [bundle.prefetch]  Whether to fill the cache in the gaps
@@ -2921,7 +2924,8 @@ async function openSession({ options, events, filesystem, registry, inherited })
         saver = coalescedSaver({
             snapshot: ()=>({
                 files: filesystem.export(),
-                registry: registry.toJSON(),
+                // The bottle's revision it was saved under rides with the hive.
+                registry: { ...registry.toJSON(), revision: options.bundle?.revision ?? 0 },
             }),
             persist: (session, changes)=>Promise.resolve(persist(session, changes)).catch(
                 (/** @type {Error} */ error)=>{
@@ -2950,7 +2954,7 @@ async function openSession({ options, events, filesystem, registry, inherited })
  * registry the installation wrote into `registry`, when there is one to fill.
  *
  * @param {{ options: AppOptions, events: any, filesystem: any, blocks: any,
- *     seeded: { files: any[] }, registry: any }} deps
+ *     seeded: { files: any[], registry?: any }, registry: any }} deps
  */
 async function furnishVolume({ options, events, filesystem, blocks, seeded, registry }){
     if (blocks)
@@ -2960,11 +2964,15 @@ async function furnishVolume({ options, events, filesystem, blocks, seeded, regi
     // What the installation wrote to the registry is the machine's before the
     // program's first instruction, as it was on the machine it was installed
     // on: a launcher finds its game installed by the key its setup made. What
-    // the session saved since is kept over it.
+    // the session saved since is kept over it -- unless the session was saved
+    // under an earlier revision of the bottle, whose registry is then laid over
+    // it, as a reinstall would: a corrected install path reaches a person who
+    // ran the bottle before.
     const installedRegistry = await blocks?.registry;
     if (installedRegistry && registry)
     {
-        registry.fillFromJSON(installedRegistry);
+        registry.fillFromJSON(installedRegistry,
+            (seeded.registry?.revision ?? 0) < (options.bundle?.revision ?? 0));
     }
     // A disc is a drive of its own, and takes D: or the first letter nothing
     // holds once the machine's own disk is mounted.

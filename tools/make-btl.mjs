@@ -122,6 +122,10 @@ async function pack(root, id, flags){
             entry: null,
         };
 
+    // Each packing is a new revision of the bottle: a session saved under an
+    // earlier one takes this one's registry over its own.
+    manifest.revision = (Number.isInteger(manifest.revision) ? manifest.revision : 0) + 1;
+
     const bundle = await openBundle(output);
     manifest.entry ??= guessEntry(bundle.list());
     await bundle.close();

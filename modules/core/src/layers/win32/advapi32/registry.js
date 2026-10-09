@@ -561,10 +561,10 @@ function walk(node, parts){
  *
  * @param {RegistryNode} into @param {RegistryNode} from
  */
-function mergeMissing(into, from){
+function mergeMissing(into, from, over = false){
     for (const [name, value] of from.values)
     {
-        if (!into.values.has(name))
+        if (over || !into.values.has(name))
         {
             into.values.set(name, value);
         }
@@ -574,7 +574,7 @@ function mergeMissing(into, from){
         const present = into.keys.get(name);
         if (present)
         {
-            mergeMissing(present, child);
+            mergeMissing(present, child, over);
         }
         else
         {
@@ -854,7 +854,7 @@ export function createHive(
         return [...seen.values()];
     };
 
-    return {
+    const hive = {
         /**
          * @param {number} id
          * @returns {RegistryKey | null}
@@ -1135,10 +1135,11 @@ export function createHive(
          * Adds what a saved tree holds and this hive does not, leaving every
          * key and value already here as it is: the registry an installation
          * left, beneath what the programs run since have written over it.
+         * `over` lays the tree's values over the ones here instead.
          *
-         * @param {any} stored
+         * @param {any} stored @param {boolean} [over]
          */
-        fillFromJSON(stored){
+        fillFromJSON(stored, over = false){
             for (const entry of stored?.roots ?? [])
             {
                 const id = entry?.id >>> 0;
@@ -1146,14 +1147,15 @@ export function createHive(
                 if (id === HKEY_CLASSES_ROOT)
                 {
                     mergeMissing(/** @type {RegistryNode} */ (
-                        walk(roots.get(HKEY_LOCAL_MACHINE), segments(MACHINE_CLASSES))), tree);
+                        walk(roots.get(HKEY_LOCAL_MACHINE), segments(MACHINE_CLASSES))),
+                    tree, over);
                 }
                 else if (ROOT_NAMES.has(id))
                 {
                     const root = roots.get(id);
                     if (root)
                     {
-                        mergeMissing(root, tree);
+                        mergeMissing(root, tree, over);
                     }
                     else
                     {
@@ -1163,4 +1165,5 @@ export function createHive(
             }
         },
     };
+    return hive;
 }
