@@ -27,6 +27,8 @@ const D3DCAPS_READ_SCANLINE = 0x00020000;
 const D3DCAPS2_FULLSCREENGAMMA = 0x00020000;
 const D3DCAPS2_DYNAMICTEXTURES = 0x20000000;
 const D3DCAPS2_CANAUTOGENMIPMAP = 0x40000000;
+const D3DCAPS3_ALPHA_FULLSCREEN_FLIP_OR_DISCARD = 0x00000020;
+const D3DDEVCAPS2_STREAMOFFSET = 0x00000001;
 
 const D3DPRESENT_INTERVAL_ONE = 0x00000001;
 const D3DPRESENT_INTERVAL_IMMEDIATE = 0x80000000;
@@ -84,6 +86,7 @@ const D3DPTEXTURECAPS_CUBEMAP = 0x00000800;
 const D3DPTEXTURECAPS_MIPCUBEMAP = 0x00010000;
 const D3DPTEXTURECAPS_VOLUMEMAP = 0x00002000;
 const D3DPTEXTURECAPS_MIPVOLUMEMAP = 0x00008000;
+const D3DPTEXTURECAPS_NONPOW2CONDITIONAL = 0x00000100;
 
 const D3DPTFILTERCAPS_MINFPOINT = 0x00000100;
 const D3DPTFILTERCAPS_MINFLINEAR = 0x00000200;
@@ -148,8 +151,9 @@ export function capabilityWords(caps, identity = {}){
         // full-screen device's ramp is claimed where the display shows it.
         Caps2: D3DCAPS2_DYNAMICTEXTURES | D3DCAPS2_CANAUTOGENMIPMAP
             | (caps.fullscreenGamma === true ? D3DCAPS2_FULLSCREENGAMMA : 0),
-        // No copy between video and system memory through StretchRect.
-        Caps3: 0,
+        // Blending is the pipeline's, whatever the swap chain presents with; no copy
+        // between video and system memory through StretchRect.
+        Caps3: D3DCAPS3_ALPHA_FULLSCREEN_FLIP_OR_DISCARD,
         PresentationIntervals: D3DPRESENT_INTERVAL_IMMEDIATE | D3DPRESENT_INTERVAL_ONE,
         CursorCaps: D3DCURSORCAPS_COLOR | D3DCURSORCAPS_LOWRES,
         DevCaps: D3DDEVCAPS_EXECUTESYSTEMMEMORY | D3DDEVCAPS_EXECUTEVIDEOMEMORY
@@ -175,7 +179,10 @@ export function capabilityWords(caps, identity = {}){
             | D3DPSHADECAPS_ALPHAGOURAUDBLEND | D3DPSHADECAPS_FOGGOURAUD,
         TextureCaps: D3DPTEXTURECAPS_PERSPECTIVE | D3DPTEXTURECAPS_ALPHA | D3DPTEXTURECAPS_MIPMAP
             | D3DPTEXTURECAPS_CUBEMAP | D3DPTEXTURECAPS_MIPCUBEMAP
-            | D3DPTEXTURECAPS_VOLUMEMAP | D3DPTEXTURECAPS_MIPVOLUMEMAP,
+            | D3DPTEXTURECAPS_VOLUMEMAP | D3DPTEXTURECAPS_MIPVOLUMEMAP
+            // Without POW2 a texture of any size is whole; programs test this bit for a
+            // two-dimensional texture of any size at all.
+            | D3DPTEXTURECAPS_NONPOW2CONDITIONAL,
         TextureFilterCaps: FILTER_CAPS,
         CubeTextureFilterCaps: FILTER_CAPS,
         VolumeTextureFilterCaps: FILTER_CAPS,
@@ -219,7 +226,8 @@ export function capabilityWords(caps, identity = {}){
         MaxVertexShaderConst: runsVertexShaders ? 256 : 0,
         PixelShaderVersion: shaderVersion(D3DPS_VERSION_MARK, ps),
         PixelShader1xMaxValue: runsPixelShaders ? 1.0 : 0,
-        DevCaps2: 0,
+        // A stream reads from the offset SetStreamSource gives it.
+        DevCaps2: D3DDEVCAPS2_STREAMOFFSET,
         MaxNpatchTessellationLevel: 0,
         Reserved5: 0,
         MasterAdapterOrdinal: 0,
