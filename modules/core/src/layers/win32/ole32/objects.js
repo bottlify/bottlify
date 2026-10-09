@@ -60,6 +60,12 @@ export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
  * @property {ComInterfaceDescriptor[]} interfaces
  * @property {any} [state]        Whatever the implementation hangs off the object.
  * @property {() => void} [destroy]  Called once, when the last reference goes.
+ * @property {() => Promise<void> | void} [lastRelease]
+ *     Called when the program's Release is about to drop the last reference,
+ *     on the program's thread, and waited for before it does: what an object
+ *     owes the program's own objects as it goes -- a filter graph telling the
+ *     filters in it that it is gone -- happens inside that Release, as on
+ *     Windows, rather than after the program has moved on and freed them.
  * @property {boolean} [owned]
  *     The object belongs to something that is no caller -- an apartment's
  *     context -- and lives as long as that does: its count is only its
@@ -86,6 +92,7 @@ export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
  * @property {(id: string) => boolean} [reachable]
  *     For an object something else owns: its pointers stay good at a count
  *     of zero, as the bridge asks of an object that can be called again.
+ * @property {() => Promise<void> | void} [lastRelease]  As the definition's.
  */
 
 /** The head of every COM vtable, in the only order it is ever in. */
@@ -237,6 +244,10 @@ export function createComObject(clsid, definition){
     if (definition.owned)
     {
         object.reachable = ()=>true;
+    }
+    if (definition.lastRelease)
+    {
+        object.lastRelease = definition.lastRelease;
     }
     return object;
 }

@@ -84,18 +84,7 @@ const FRAMES_PER_TICK = 4;
 const STEPS_PER_TICK = 16;
 
 /**
- * What of a clip a source reads: the graph's clip, seen from here.
- *
- * @typedef {Object} VideoClip
- * @property {number} width
- * @property {number} height
- * @property {number} fps
- * @property {boolean} hasVideo
- * @property {() => 'frame' | 'audio' | 'end'} decode
- * @property {() => Uint8Array | null} frame
- * @property {(() => Int16Array | null) | undefined} [readAudio]
- * @property {() => void} close
- *
+ * @typedef {import('./clip.js').VideoClip} VideoClip
  * @typedef {import('../ole32/objects.js').ComObject} ComObject
  */
 
@@ -110,8 +99,10 @@ const STEPS_PER_TICK = 16;
  * @property {() => any} currentThread
  * @property {(object: ComObject, iid: string) => number} publish
  * @property {(pointer: number) => any} objectAt
- * @property {{ deliver: (entry: number, args: number[], done?: () => void) => void }} notices
- *           The thread calls owed to the program's objects are made on.
+ * @property {{ deliver: (entry: number, args: number[], done?: () => void, tag?: any) => void,
+ *              drop: (tag: any) => { done?: () => void }[] }} notices
+ *           The thread calls owed to the program's objects are made on; `drop`
+ *           takes back the queued ones of a source that is going.
  */
 
 /**
@@ -134,6 +125,8 @@ const STEPS_PER_TICK = 16;
  * @property {number} peer         The renderer's input pin, one reference held; 0 unconnected.
  * @property {number} memInput     Its IMemInputPin, one reference held.
  * @property {boolean} busy        A Receive is queued or running.
+ * @property {Promise<void> | null} receiving
+ *           Settles when that Receive has returned, for a teardown to wait on.
  * @property {boolean} ended       EndOfStream has been sent.
  * @property {number} shown
  * @property {number | null} startedAt
@@ -205,9 +198,10 @@ export function createStreaming(host){
      * behind whatever is already owed.
      *
      * @param {number} self @param {number} slot @param {number[]} [args] @param {() => void} [done]
+     * @param {any} [tag]
      */
-    const later = (self, slot, args = [], done)=>
-        host.notices.deliver(entryOf(self, slot), [self >>> 0, ...args], done);
+    const later = (self, slot, args = [], done, tag)=>
+        host.notices.deliver(entryOf(self, slot), [self >>> 0, ...args], done, tag);
 
     /** @param {number} result */
     const failed = result=>(result | 0) < 0;
@@ -372,16 +366,23 @@ export function createStreaming(host){
             host.writeMemory(source.buffer, source.pixels);
             source.actual = source.size;
             source.busy = true;
+            /** @type {() => void} */
+            let returned = ()=>{};
+            source.receiving = new Promise(resolve=>{
+                returned = resolve;
+            });
             const sample = host.publish(source.sample, IID_IMEDIA_SAMPLE);
             later(source.memInput, VTABLE.MemReceive, [sample],
                 ()=>{
                     source.busy = false;
+                    source.receiving = null;
                     source.discontinuity = false;
-                });
+                    returned();
+                }, source);
         }
         if (source.ended)
         {
-            later(source.peer, VTABLE.PinEndOfStream);
+            later(source.peer, VTABLE.PinEndOfStream, [], undefined, source);
         }
     };
 
@@ -401,8 +402,8 @@ export function createStreaming(host){
         source.discontinuity = true;
         if (source.peer !== 0)
         {
-            later(source.peer, VTABLE.PinBeginFlush);
-            later(source.peer, VTABLE.PinEndFlush);
+            later(source.peer, VTABLE.PinBeginFlush, [], undefined, source);
+            later(source.peer, VTABLE.PinEndFlush, [], undefined, source);
         }
     };
 
@@ -431,7 +432,7 @@ export function createStreaming(host){
         const source = /** @type {any} */ ({
             path, clip, filterState: STATE_STOPPED, width, height, stride, size,
             buffer: host.allocate(size), pixels: new Uint8Array(size), actual: 0,
-            discontinuity: true, peer: 0, memInput: 0, busy: false, ended: false,
+            discontinuity: true, peer: 0, memInput: 0, busy: false, receiving: null, ended: false,
             shown: 0, startedAt: null,
         });
 
@@ -640,5 +641,59 @@ export function createStreaming(host){
         return S_OK;
     };
 
-    return { createSource, connect, feed, restart, close, each, join, leave, remove };
+    /**
+     * What a graph owes the program's objects as its last reference goes,
+     * made inside that Release on the program's thread, as quartz makes it:
+     * the filters stopped if they were running, the source's connection
+     * broken, each filter told it is in no graph and let go. Nothing of it is
+     * left for later -- by then the program has freed what it was for.
+     *
+     * @param {Source | null} source @param {number[]} filters @param {boolean} running
+     */
+    const teardown = async(source, filters, running)=>{
+        const thread = host.currentThread();
+        if (source)
+        {
+            // A sample taken back before it started is one nobody waits for.
+            const dropped = host.notices.drop(source);
+            if (dropped.some(notice=>notice.done !== undefined))
+            {
+                source.busy = false;
+                source.receiving = null;
+            }
+            source.clip?.close();
+            source.clip = null;
+            source.ended = true;
+            // A sample on its way into the renderer finishes first, as a
+            // streaming thread is waited for when its filter stops.
+            await source.receiving;
+        }
+        if (running)
+        {
+            for (const filter of filters)
+            {
+                await call(thread, filter, VTABLE.FilterStop);
+            }
+        }
+        if (source && source.peer !== 0)
+        {
+            const { peer, memInput } = source;
+            source.peer = 0;
+            source.memInput = 0;
+            await call(thread, peer, VTABLE.PinDisconnect);
+            await call(thread, peer, VTABLE.Release);
+            await call(thread, memInput, VTABLE.Release);
+        }
+        if (source)
+        {
+            host.free(source.buffer);
+        }
+        for (const filter of filters)
+        {
+            await call(thread, filter, VTABLE.FilterJoinGraph, [0, 0]);
+            await call(thread, filter, VTABLE.Release);
+        }
+    };
+
+    return { createSource, connect, feed, restart, close, each, join, leave, remove, teardown };
 }

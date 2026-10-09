@@ -150,26 +150,7 @@ const WINDOW_PROPERTIES = [
 /** IBasicAudio's, the same shape. */
 const AUDIO_PROPERTIES = ['Volume', 'Balance'];
 
-/**
- * @typedef {Object} VideoClip
- * @property {number} width
- * @property {number} height
- * @property {number} fps
- * @property {number} frameCount
- * @property {boolean} hasVideo
- * @property {boolean} hasAudio
- * @property {number} sampleRate  The film's own rate, not the device's.
- * @property {number} channels
- * @property {() => 'frame' | 'audio' | 'end'} decode
- * @property {() => Uint8Array | null} frame
- *           The current frame as BGRA. A view into the decoder's own memory,
- *           valid until the next call into it.
- * @property {(() => Int16Array | null) | undefined} [readAudio]
- *           Whatever PCM the decoder is holding, and null when it holds none.
- *           `decode` stops early to have this taken, and it is also read on its
- *           own to take what the decoder has not stopped for yet.
- * @property {() => void} close
- */
+/** @typedef {import('./clip.js').VideoClip} VideoClip */
 
 /**
  * @typedef {Object} GraphEvent
@@ -536,8 +517,13 @@ export function createQuartz(host){
      */
     let films = 0;
 
-    /** @param {FilterGraphState} graph @param {number} path */
-    const render = (graph, path)=>{
+    /**
+     * A new film for the graph's own window: everything counted for the last
+     * one starts again, and the clip, when there is one, sizes the window.
+     *
+     * @param {FilterGraphState} graph @returns {(clip: VideoClip | null) => number}
+     */
+    const present = graph=>{
         graph.clip?.close();
         graph.loaded = true;
         graph.clip = null;
@@ -548,9 +534,7 @@ export function createQuartz(host){
         graph.soundMovedAt = null;
         graph.startedAt = null;
         graph.finished = false;
-
-        /** @param {VideoClip | null} clip */
-        const took = clip=>{
+        return clip=>{
             graph.clip = clip;
             if (clip)
             {
@@ -561,6 +545,11 @@ export function createQuartz(host){
             }
             return S_OK;
         };
+    };
+
+    /** @param {FilterGraphState} graph @param {number} path */
+    const render = (graph, path)=>{
+        const took = present(graph);
 
         // Opening reads a file, and reading one may mean waiting for it: a
         // bundle answers in blocks over the network. The bridge parks the
@@ -982,7 +971,20 @@ export function createQuartz(host){
         Connect: (graph, [out, into])=>connectPins(graph, out, into),
 
         /** HRESULT Render(IPin *ppinOut) */
-        Render: graph=>recordFailure(graph, VFW_E_CANNOT_RENDER),
+        Render: (graph, [out])=>{
+            // The source's pin rendered the way RenderFile renders a file: to
+            // the graph's own window, which plays the clip the source holds.
+            const source = graph.source;
+            if (!source || source.peer !== 0 || host.stream?.objectAt(out) !== source.pin)
+            {
+                return recordFailure(graph, VFW_E_CANNOT_RENDER);
+            }
+            const clip = source.clip;
+            source.clip = null;
+            graph.source = null;
+            streaming?.close(source);
+            return present(graph)(clip);
+        },
 
         /** HRESULT RenderFile(LPCWSTR lpcwstrFile, LPCWSTR lpcwstrPlayList) */
         RenderFile: (graph, [path])=>render(graph, path),
@@ -1411,6 +1413,9 @@ export function createQuartz(host){
                 playing.delete(state);
                 state.clip?.close();
                 state.clip = null;
+                // Reached without the program's Release -- nothing here is
+                // waited for -- so what is still owed goes on the streaming
+                // thread, which is the best that can be done from outside.
                 if (streaming)
                 {
                     if (state.source)
@@ -1424,6 +1429,20 @@ export function createQuartz(host){
                     }
                     state.filters = [];
                 }
+            },
+            // The program's own filters are told the graph is gone inside the
+            // Release that ends it, as quartz tells them: the program frees them
+            // right after, and anything left for later would reach freed memory.
+            lastRelease: ()=>{
+                if (!streaming || (state.filters.length === 0 && !state.source))
+                {
+                    return;
+                }
+                playing.delete(state);
+                const { source, filters } = state;
+                state.source = null;
+                state.filters = [];
+                return streaming.teardown(source, filters, state.state !== STATE_STOPPED);
             },
             interfaces: [
                 describe(IID_IFILTER_GRAPH, IFILTER_GRAPH_SLOTS, graphBuilder),

@@ -621,7 +621,9 @@ export function createWin32Module(){
                     publish: (object, iid)=>bridge.publishInterface(object, iid),
                     objectAt: pointer=>bridge.interfaceObject(pointer),
                     notices: {
-                        deliver: (entry, args, done)=>streamNotices.deliver(entry, args, done),
+                        deliver: (entry, args, done, tag)=>
+                            streamNotices.deliver(entry, args, done, tag),
+                        drop: tag=>streamNotices.drop(tag),
                     },
                 },
             });
