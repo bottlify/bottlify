@@ -37,6 +37,7 @@
 
 import { createFonts } from './font.js';
 import { createSprites } from './sprite.js';
+import { createLines } from './line.js';
 import { createEffects } from './effect.js';
 import { D3DX_DEFAULT, createTextureLoader } from './texture.js';
 import { guestEntry } from '../msvcrt/guest-code.js';
@@ -141,7 +142,9 @@ const IN_GUEST = [[inGuest, COMPILED], [matrix, MATRIX], [vector, VECTOR],
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {{ publish: (object: any, interfaceId: string) => number }} [vtables]
  *           Where a COM object gets the interface pointer a program holds.
- * @property {{ allocate: (bytes: number) => number, free: (address: number) => any }} [heap]
+ * @property {{ allocate: (bytes: number) => number, free: (address: number) => any,
+ *     allocateCode?: (bytes: number) => number }} [heap]
+ *           Where code goes too: the slots of a COM method that answers a FLOAT.
  * @property {(call: { entry: number, args: number[], thread?: any })
  *     => Promise<number>} [callGuest]
  *           A call into the guest -- a device's own method, from a constant table's setter.
@@ -172,6 +175,7 @@ export function createD3dxFunctions(host, options = {}){
     const textures = createTextureLoader(host);
     const sprites = createSprites(host);
     const fonts = createFonts(host, sprites);
+    const polylines = createLines(host);
     /** @type {import('../ole32/objects.js').ComInterfaceDescriptor} */
     const buffer = {
         id: IID_ID3DXBUFFER,
@@ -446,6 +450,9 @@ export function createD3dxFunctions(host, options = {}){
                 return 0;
             },
         },
+
+        /** See line.js. */
+        D3DXCreateLine: { argBytes: 8, handler: polylines.create },
 
         /**
          * HRESULT D3DXCreateFontA(LPDIRECT3DDEVICE9 pDevice, INT Height, UINT Width,
