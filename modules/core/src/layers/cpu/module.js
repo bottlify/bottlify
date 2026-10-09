@@ -38,6 +38,16 @@ export const ENGINES = Object.freeze(['emulator', 'cork']);
 export const DEFAULT_ENGINE = 'cork';
 
 /**
+ * Where the first thread's stack pointer starts and where the stub table sits
+ * below it, unless the configuration says otherwise. The span between the end
+ * of the table and the stack pointer is all the stack the first thread can
+ * have there.
+ */
+export const DEFAULT_INITIAL_STACK = 0x300000;
+export const DEFAULT_THUNK_BASE = 0x100000;
+export const DEFAULT_THUNK_CAPACITY = 16384 * 16;
+
+/**
  * cpu — the guest CPU and the channel the guest calls us through.
  *
  * The only layer that knows which engine is underneath. Everything above it
@@ -304,17 +314,17 @@ export function createCpuModule(){
                 noExecuteBelow: config?.noExecuteBelow ?? 0,
                 trapPort: config?.trapPort ?? 0xb077,
                 entryVector: config?.entryVector ?? 0x7000,
-                initialStack: config?.initialStack ?? 0x300000,
+                initialStack: config?.initialStack ?? DEFAULT_INITIAL_STACK,
                 // Low, so that everything between here and the initial stack
                 // pointer belongs to the stack. A program linked for a megabyte
                 // needs a megabyte below that pointer, and the stubs sitting in
                 // the middle of that span would cap it at less.
-                thunkBase: config?.thunkBase ?? 0x100000,
+                thunkBase: config?.thunkBase ?? DEFAULT_THUNK_BASE,
                 // Sixteen thousand stubs. Every import of every library takes one,
                 // and so does every method of every COM interface a program asks
                 // for -- which is unbounded in principle and in the low thousands
                 // in practice.
-                thunkCapacity: config?.thunkCapacity ?? 16384 * 16,
+                thunkCapacity: config?.thunkCapacity ?? DEFAULT_THUNK_CAPACITY,
                 // The emulator's compiler budgets, by index, for a caller that
                 // wants to A/B them: 1 is how many pages one compiled module may
                 // span, 3 how many extra basic blocks discovery may follow. The

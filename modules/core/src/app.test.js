@@ -20,6 +20,7 @@ import {
     moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, feedFilmSound, emulatorOf,
     heapSizeFor,
     spaceAbove,
+    placeMainStack,
     resourceLookup,
     createMissingImports,
     shippedLibraryReader,
@@ -1247,6 +1248,23 @@ test('the space above the program moves up past an image too large for the fixed
     assert.deepEqual(spaceAbove(0x400000 + 0x159e6000),
         { moduleBase: 0x15e00000, stackPoolBase: 0x1be00000, heapBase: 0x1fe00000 },
         'a large image pushes the whole layout above its end, on a megabyte');
+});
+
+test('the first thread gets its whole reserve, in the pool when it does not fit low', ()=>{
+    // Clamped to the span under the default stack pointer, a program linked
+    // for eight megabytes got less than two and walked off the bottom of its
+    // stack, through the stub table, on its first deep call.
+    assert.deepEqual(placeMainStack(0x100000, 0x08000000, 0x04000000),
+        { initialStack: undefined, poolBase: 0x08000000, poolSize: 0x04000000 },
+        'a megabyte fits under the default stack pointer');
+    assert.deepEqual(placeMainStack(0x800000, 0x08000000, 0x04000000),
+        { initialStack: 0x08800000, poolBase: 0x08800000, poolSize: 0x03800000 },
+        'eight megabytes go at the bottom of the pool, whole, and the pool starts above them');
+    assert.deepEqual(placeMainStack(0x800001, 0x08000000, 0x04000000).initialStack, 0x08810000,
+        'on a 64 KiB granule');
+    assert.deepEqual(placeMainStack(0x40000000, 0x08000000, 0x04000000),
+        { initialStack: 0x09000000, poolBase: 0x09000000, poolSize: 0x03000000 },
+        'an enormous reserve is capped at a quarter of the pool');
 });
 
 test('the heap reaches the end of RAM unless a size was asked for', ()=>{

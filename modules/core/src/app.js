@@ -9,7 +9,10 @@ import { assembleModules } from './core.js';
 import { createEvents } from './events.js';
 import { captureTrace, describeAddress, formatTrace } from './trace.js';
 import { coalescedSaver, inflateRaw, normaliseSession, resolveStorage } from './storage.js';
-import { DEFAULT_ENGINE, DEFAULT_MEMORY_SIZE } from './layers/cpu/module.js';
+import {
+    DEFAULT_ENGINE, DEFAULT_INITIAL_STACK, DEFAULT_MEMORY_SIZE,
+    DEFAULT_THUNK_BASE, DEFAULT_THUNK_CAPACITY,
+} from './layers/cpu/module.js';
 import { CORK_TSC_MHZ } from './layers/cpu/internal/cork-host.js';
 import { SETTINGS, processorName } from './settings.js';
 import { createPresenter } from './layers/graphics/webgpu/internal/presenter.js';
@@ -1215,6 +1218,32 @@ export function spaceAbove(imageEnd){
         stackPoolBase: 0x08000000 + shift,
         heapBase: 0x0c000000 + shift,
     };
+}
+
+/**
+ * Where the first thread's stack goes. Under the default initial stack pointer
+ * when what the image was linked to reserve fits between the stub table and
+ * it; otherwise at the bottom of the stack pool, the size the image asked for
+ * (on a 64 KiB granule, capped at a quarter of the pool), with the pool for
+ * the other threads starting above it. Clamping to the low span instead hands
+ * a program linked for eight megabytes less than two, and the first deep call
+ * walks off the stack's bottom -- through the stub table and below it -- with
+ * nothing to say the stack was what ran out.
+ *
+ * @param {number} reserve      The image's SizeOfStackReserve.
+ * @param {number} poolBase     Where the stack pool starts.
+ * @param {number} poolSize     How large it is.
+ * @returns {{ initialStack: number | undefined, poolBase: number, poolSize: number }}
+ *   `initialStack` undefined keeps the processor's default.
+ */
+export function placeMainStack(reserve, poolBase, poolSize){
+    const asked = Math.max(reserve >>> 0, 0x10000);
+    if (asked <= DEFAULT_INITIAL_STACK - (DEFAULT_THUNK_BASE + DEFAULT_THUNK_CAPACITY))
+    {
+        return { initialStack: undefined, poolBase, poolSize };
+    }
+    const size = Math.min(Math.ceil(asked / 0x10000) * 0x10000, Math.floor(poolSize / 4));
+    return { initialStack: poolBase + size, poolBase: poolBase + size, poolSize: poolSize - size };
 }
 
 /**
@@ -3044,20 +3073,23 @@ async function buildApp(options){
     // placed inside the heap would be overwritten by the first large
     // allocation.
     const mainImage = parsePe(options.executable);
-    const { moduleBase: MODULE_BASE, stackPoolBase: STACK_POOL_BASE, heapBase: HEAP_BASE }
+    const { moduleBase: MODULE_BASE, stackPoolBase: STACK_POOL_START, heapBase: HEAP_BASE }
         = spaceAbove(mainImage.imageBase + mainImage.sizeOfImage);
     // Where a thread that is not the first gets its stack. Above the space
     // libraries are mapped into and below the heap, because a stack of the size
     // a program was linked for is a megabyte or more and the megabyte under the
     // image will not hold several of them.
-    const STACK_POOL_SIZE = 0x04000000;
+    const STACK_POOL_WHOLE = 0x04000000;
+    const mainStack = placeMainStack(mainImage.stackReserve, STACK_POOL_START, STACK_POOL_WHOLE);
+    const STACK_POOL_BASE = mainStack.poolBase;
+    const STACK_POOL_SIZE = mainStack.poolSize;
     // What each of them gets: what the image was linked to expect, floored so a
     // program that asks for almost nothing still has room to make a call, and
     // capped so that a program asking for an enormous stack cannot leave the
     // pool with room for only one thread.
     const threadStackSize = Math.min(
         Math.max(mainImage.stackReserve, 0x10000),
-        Math.floor(STACK_POOL_SIZE / 16));
+        Math.floor(STACK_POOL_WHOLE / 16));
     const memorySize = options.memorySize ?? DEFAULT_MEMORY_SIZE;
     const HEAP_SIZE = heapSizeFor(memorySize, options.heapSize, HEAP_BASE);
 
@@ -3364,6 +3396,7 @@ async function buildApp(options){
         },
         cpu: {
             jit: options.jit, sampling: options.sampling, memorySize,
+            initialStack: mainStack.initialStack,
             // ponytail: open, where Windows never maps the first 64 KiB, until
             // a store alone can fault there. Closed, FMOD's mixer thread reads
             // NULL+0x54 before its creator has set the pointer and faults; open,
@@ -4275,7 +4308,8 @@ async function buildApp(options){
     // Clamped to what actually fits under the initial stack pointer, because
     // the region below it is finite and a request larger than the room is a
     // layout question rather than something to honour silently.
-    const stackRoom = initialStack - (thunkBase + cpu.layout.thunkCapacity);
+    const stackRoom = initialStack - (mainStack.initialStack === undefined
+        ? thunkBase + cpu.layout.thunkCapacity : STACK_POOL_START);
     const stackSize = options.stackSize
         ?? Math.min(Math.max(parsePe(options.executable).stackReserve, 0x10000), stackRoom);
 
@@ -5152,7 +5186,7 @@ async function buildApp(options){
     // the map yet, and below the stack pool; and nowhere anything is mapped.
     const librarySpace = {
         floor: mainImage.imageBase + mainImage.sizeOfImage,
-        limit: STACK_POOL_BASE,
+        limit: STACK_POOL_START,
         /** @param {number} base @param {number} size */
         holder: (base, size)=>memory.list().find((/** @type {any} */ region)=>
             base < region.base + region.size && region.base < base + size) ?? null,
