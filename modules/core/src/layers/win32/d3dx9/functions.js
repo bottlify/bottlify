@@ -42,6 +42,7 @@ import { D3DX_DEFAULT, createTextureLoader } from './texture.js';
 import { guestEntry } from '../msvcrt/guest-code.js';
 import { createComObject } from '../ole32/objects.js';
 import { createConstantTableObjects } from './constants.js';
+import { createShaderSemantics } from './semantics.js';
 import { preprocess, preprocessTracked } from './preprocess.js';
 import { compileShader } from './hlsl-compile.js';
 import { assembleShader, disassembleShader } from './shader-asm.js';
@@ -384,6 +385,9 @@ export function createD3dxFunctions(host, options = {}){
             .map(name=>[name, guestEntry(source[name], compiled[name], host)]))),
 
         ...constantTables.exports,
+
+        /** See semantics.js. */
+        ...createShaderSemantics(host),
 
         /** See effect.js. */
         ...effects.exports,

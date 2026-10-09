@@ -93,6 +93,11 @@ rectangles are malformed, which pool and usage combinations are accepted, which 
 surface may be created with. The selection of cases to cover is Wine's editorial work over
 twenty-five years, and this entry records that debt.
 
+Wine's `dlls/d3dx9_36/tests/shader.c` (`test_shader_semantics`) is used the same way: the six
+shader token streams there and the semantics Windows answers for them are the cases of
+`modules/core/src/layers/win32/d3dx9/semantics.test.js` -- test data only; the walk itself is
+written from the documented token format.
+
 What is not taken: no code, no test structure, no helper, no assertion text, no ordering. Every
 test in this repository is written independently, against this project's own conventions.
 
