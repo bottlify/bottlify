@@ -1182,17 +1182,44 @@ const DONE_8 = ['CopyRects'];
 const DONE_9 = ['StretchRect', 'Issue', 'GetData'];
 
 /**
- * The gate for one version. Each version's gate is a file of its own
- * (`frames-contract-8.itest.js`, `-9`): together they run about a minute,
- * which is the whole of the time a file is given.
+ * The arms each gate plays a program down, and the pairs it compares. The
+ * guest code and the device recording for a graphics worker are two
+ * mechanisms with a slow path each, so two gates: one compares the guest code
+ * with every call a trap, the other the device recording with the device
+ * drawing itself -- with every call a trap and with the guest code, so that
+ * the recording is seen under both.
  *
- * @param {Version} version
+ * @type {Record<'guest' | 'worker', { arms: [string, boolean, boolean][],
+ *     pairs: [string, string][], subject: string }>}
  */
-export function frameGate(version){
+const GATES = {
+    guest: {
+        arms: [['every call a trap', false, false], ['the guest code', true, false]],
+        pairs: [['every call a trap', 'the guest code']],
+        subject: 'with every call a trap',
+    },
+    worker: {
+        arms: [['the device drawing itself', false, false],
+            ['the device recording', false, true],
+            ['the guest code recorded', true, true]],
+        pairs: [['the device drawing itself', 'the device recording'],
+            ['the device recording', 'the guest code recorded']],
+        subject: 'with the device drawing on the program\'s thread',
+    },
+};
+
+/**
+ * One gate for one version, each a file of its own
+ * (`frames-contract-<version>-<gate>.itest.js`): all four in one file ran
+ * past the minute a file is given.
+ *
+ * @param {Version} version @param {'guest' | 'worker'} which
+ */
+export function frameGate(version, which){
     const nine = version === D3D9;
-    test(`${nine ? 'Direct3D 9' : 'Direct3D 8'}: the GPU is given what it would be with every`
-        + ' call a trap and with the device drawing on the program\'s thread, whatever a frame'
-        + ' locked, uploaded, bound, referenced, drew and copied', async()=>{
+    const gate = GATES[which];
+    test(`${nine ? 'Direct3D 9' : 'Direct3D 8'}: the GPU is given what it would be ${gate.subject},`
+        + ' whatever a frame locked, uploaded, bound, referenced, drew and copied', async()=>{
         /** @type {string[]} */
         const wrong = [];
         /** @type {Map<string, number>} */
@@ -1202,29 +1229,31 @@ export function frameGate(version){
         for (let seed = 1; seed <= 40 && wrong.length === 0; seed++)
         {
             const steps = generate(seed, 200, callsOf(version).upUnbinds, nine);
-            const trap = await play(version, false, steps);
-            const guest = await play(version, true, steps);
-            // The device in a graphics worker: the one the program holds
-            // records and answers what it can without the one that draws.
-            const recordedTrap = await play(version, false, steps, true);
-            const recorded = await play(version, true, steps, true);
-            for (const [method, times] of [...guest.inGuest, ...recorded.inGuest])
+            /** @type {Map<string, Played>} */
+            const played = new Map();
+            for (const [name, guestCode, worker] of gate.arms)
             {
-                taken.set(method, (taken.get(method) ?? 0) + times);
+                const run = await play(version, guestCode, steps, worker);
+                played.set(name, run);
+                for (const [method, times] of run.inGuest)
+                {
+                    taken.set(method, (taken.get(method) ?? 0) + times);
+                }
+                if (!guestCode && !worker)
+                {
+                    for (const [method, times] of run.done)
+                    {
+                        answered.set(method, (answered.get(method) ?? 0) + times);
+                    }
+                }
             }
-            for (const [method, times] of trap.done)
+            for (const [one, other] of gate.pairs)
             {
-                answered.set(method, (answered.get(method) ?? 0) + times);
-            }
-            for (const [one, other] of /** @type {[[string, Played], [string, Played]][]} */ ([
-                [['every call a trap', trap], ['the guest code', guest]],
-                [['every call a trap recorded', recordedTrap], ['the guest code recorded',
-                    recorded]],
-                [['the device drawing itself', trap], ['the device recording', recordedTrap]]]))
-            {
+                const a = /** @type {Played} */ (played.get(one));
+                const b = /** @type {Played} */ (played.get(other));
                 for (const found of [
-                    parting([one[0], one[1].answers], [other[0], other[1].answers], 'answer'),
-                    parting([one[0], one[1].gpu], [other[0], other[1].gpu], 'GPU draw')])
+                    parting([one, a.answers], [other, b.answers], 'answer'),
+                    parting([one, a.gpu], [other, b.gpu], 'GPU draw')])
                 {
                     if (found)
                     {

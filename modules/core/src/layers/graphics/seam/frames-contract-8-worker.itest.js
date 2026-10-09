@@ -4,9 +4,9 @@
  * See LICENSE for details
  */
 
-/** The frames gate (`frames-contract.itest.js`) for Direct3D 8. */
+/** The frames gate (`frames-contract.itest.js`) for Direct3D 8: the device recording for a graphics worker against the device drawing itself. */
 
 import { D3D8 } from './guest-machine.itest.js';
 import { frameGate } from './frames-contract.itest.js';
 
-frameGate(D3D8);
+frameGate(D3D8, 'worker');
