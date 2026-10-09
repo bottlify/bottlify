@@ -161,13 +161,16 @@ for (const path of sources(ROOT))
         }
         const inside = code.slice(body[0], body[1]);
         const firstAwait = inside.search(/\bawait\b/);
-        if (firstAwait < 0)
+        // The awaited call's own arguments are read before it suspends: what
+        // comes after the end of that statement is what runs after the await.
+        const resumed = firstAwait < 0 ? -1 : inside.indexOf(';', firstAwait);
+        if (resumed < 0)
         {
             continue;
         }
-        for (const ask of inside.slice(firstAwait).matchAll(ASKS))
+        for (const ask of inside.slice(resumed).matchAll(ASKS))
         {
-            const offset = body[0] + firstAwait + (ask.index ?? 0);
+            const offset = body[0] + resumed + (ask.index ?? 0);
             const line = lineOf(offset);
             const source = lines[line - 1];
             const previous = lines[line - 2] ?? '';
