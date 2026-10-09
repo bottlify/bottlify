@@ -260,6 +260,9 @@ function parse(argv){
         // V8 flags for the browser ("--no-liftoff", "--liftoff-only"): how a run
         // depends on the wasm tiers.
         jsFlags: argv.includes('--js-flags') ? argv[argv.indexOf('--js-flags') + 1] : undefined,
+        // `--chrome-flag --use-webgpu-adapter=swiftshader`, repeatable: the same
+        // run on another adapter, to tell a GPU's answer from the engine's.
+        chromeFlags: argv.flatMap((arg, at)=>(arg === '--chrome-flag' ? [argv[at + 1]] : [])),
         // The translator's own settings as JSON ('{"countTransfers":true}').
         corkConfig: argv.includes('--cork-config')
             ? { ...mode.cork, ...JSON.parse(argv[argv.indexOf('--cork-config') + 1]) }
@@ -1387,7 +1390,8 @@ export async function game(options){
     });
     const browser = await launchWithGpu({ profileDir: options.userDataDir ?? undefined,
         headed: options.headed,
-        extraFlags: options.jsFlags ? [`--js-flags=${options.jsFlags}`] : [] });
+        extraFlags: [...options.jsFlags ? [`--js-flags=${options.jsFlags}`] : [],
+            ...options.chromeFlags] });
     mkdirSync(REPORTS_DIR, { recursive: true });
 
     const pageUrl = `http://127.0.0.1:${server.port}/sandbox/test/page/game/index.html`

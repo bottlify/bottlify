@@ -192,6 +192,7 @@ function setup(){
     const gdi = createGdiFunctions({
         readMemory: (address, length)=>memory.readMemory(address, length),
         writeMemory: (address, data)=>memory.writeMemory(address, data),
+        fillMemory: (address, value, length)=>memory.bytes.fill(value, address, address + length),
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         handles,
         surfaces,
@@ -875,6 +876,17 @@ test('CreateDIBSection asks for DWORD-aligned rows and hands back the pointer', 
     // some widths and shears the image on others.
     assert.deepEqual(surfaces.allocated, [{ address: HEAP, bytes: 32 * 4 }]);
     assert.equal(memory.u32(BITS_POINTER), HEAP, 'the guest draws through this pointer');
+});
+
+test('a DIB section starts as zeroes, whatever its memory held before', ()=>{
+    // Windows hands a section fresh pages; the allocator here hands back the
+    // block a deleted one had, and text drawn into it landed on the last text.
+    const { fns, memory, hdc } = withDC();
+    putBitmapInfo(memory, { width: 4, height: 2, bitCount: 32 });
+    memory.bytes.fill(0x7f, HEAP, HEAP + 32);
+    assert.ok(fns.CreateDIBSection.handler([hdc, STRUCT, 0, BITS_POINTER, 0, 0]) > 0);
+    const bits = memory.u32(BITS_POINTER);
+    assert.deepEqual([...memory.bytes.subarray(bits, bits + 32)], new Array(32).fill(0));
 });
 
 test('a top-down DIB is the same allocation as a bottom-up one', ()=>{

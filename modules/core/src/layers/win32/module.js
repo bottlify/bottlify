@@ -691,6 +691,7 @@ export function createWin32Module(){
             const gdi = createGdiFunctions({
                 readMemory,
                 writeMemory,
+                fillMemory,
                 readCString,
                 windowContextCurrent: hdc=>windowService.refreshContext?.(hdc),
                 canWrite,

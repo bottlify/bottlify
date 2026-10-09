@@ -503,6 +503,8 @@ const ENUMERATED_FONTTYPE = 0x0004;
  * @typedef {Object} GdiHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, value: number, length: number) => void} [fillMemory]
+ *     Bytes of one value, written without a buffer of that size.
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {{ open: (type: string, object: any) => number,
  *              close: (handle: number) => any }} handles
@@ -3226,6 +3228,11 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
+                // Fresh pages on Windows, so zeroes: the block a section just
+                // deleted comes back from the allocator with its pixels, and a
+                // program that draws text into a new section to read its glyphs
+                // read the last one's text under its own.
+                host.fillMemory?.(address, 0, bytes);
                 if ((bitsOut >>> 0) !== 0)
                 {
                     writeU32s(host, bitsOut, [address]);
