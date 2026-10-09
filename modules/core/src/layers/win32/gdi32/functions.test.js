@@ -296,14 +296,13 @@ test('a fresh DC starts with the stock objects Windows puts in it', ()=>{
     assert.equal(fns.GetMapMode.handler([hdc]), MM_TEXT);
 });
 
-test('a DC is released once, and only by the window that owns it', ()=>{
+test('a DC is released once, whichever window the call names', ()=>{
     const { fns, hdc } = withDC();
 
-    assert.equal(fns.ReleaseDC.handler([HWND + 4, hdc]), 0,
-        'a DC belongs to the window it was fetched for');
-    assert.equal(fns.ReleaseDC.handler([HWND, hdc]), 1);
-    assert.equal(fns.ReleaseDC.handler([HWND, hdc]), 0,
-        'releasing twice is the leak that never was');
+    assert.equal(fns.ReleaseDC.handler([HWND, 0]), 0, 'no DC, nothing released');
+    assert.equal(fns.ReleaseDC.handler([HWND + 4, hdc]), 1,
+        'the DC knows its window (dce.c test_parameters)');
+    assert.equal(fns.ReleaseDC.handler([HWND, hdc]), 0, 'released already');
     assert.equal(fns.GetTextColor.handler([hdc]), CLR_INVALID,
         'and the handle names nothing afterwards');
 });

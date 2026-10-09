@@ -2511,6 +2511,8 @@ export function createWin32Module(){
                     regionBox: region=>gdi.regionBox(region),
                     /** @param {number} region @param {any} rect */
                     setRegion: (region, rect)=>gdi.setRegion(region, rect),
+                    /** @param {number} region */
+                    deleteRegion: region=>void gdi.table.DeleteObject.handler([region]),
                     // A bitmap's size, for a caret drawn in it and an icon made from it.
                     /** @param {number} bitmap */
                     bitmapSize: bitmap=>gdi.bitmapSize(bitmap),

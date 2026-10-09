@@ -2242,15 +2242,19 @@ export function createGdiFunctions(host){
             handler: ([hwnd])=>createContext(hwnd >>> 0, 'window').hdc,
         },
 
-        /** int ReleaseDC(HWND hWnd, HDC hDC) */
+        /**
+         * int ReleaseDC(HWND hWnd, HDC hDC)
+         *
+         * A window's context goes back whichever window the call names: the
+         * context knows its own (dce.c test_parameters). Anything else, and
+         * one gone back already, is refused.
+         */
         ReleaseDC: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([hwnd, handle])=>{
+            handler: ([, handle])=>{
                 const dc = dcOf(handle);
-                // A DC belongs to the window it was fetched for, and releasing it
-                // against another window is the bug that leaks the cache entry.
-                if (!dc || dc.kind !== 'window' || dc.window !== (hwnd >>> 0))
+                if (!dc || dc.kind !== 'window')
                 {
                     return 0;
                 }

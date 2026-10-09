@@ -216,6 +216,10 @@ export function setupBars(gdiEngine){
         draw: gdi.draw,
         /** @param {number} region @param {any} rect */
         setRegion: (region, rect)=>gdi.setRegion(region, rect),
+        /** @param {number} region */
+        regionBox: region=>gdi.regionBox(region),
+        /** @param {number} region */
+        deleteRegion: region=>void gdi.table.DeleteObject.handler([region]),
         present: ()=>{},
         allocate,
         release: ()=>{},

@@ -143,6 +143,24 @@ const MAX_TAB_STOPS = 1024;
 /** What a character cell measures when nothing better is known. */
 const ESTIMATED_CHAR_WIDTH = 8;
 const ESTIMATED_LINE_HEIGHT = 16;
+/** Class styles: each window a context of its own, or the class one for all its windows. */
+const CS_OWNDC = 0x0020;
+const CS_CLASSDC = 0x0040;
+/** GetDCEx: a context from the cache whatever the class says; and its region's two uses. */
+const DCX_CACHE = 0x0002;
+const DCX_EXCLUDERGN = 0x0040;
+const DCX_INTERSECTRGN = 0x0080;
+
+/**
+ * @typedef {Object} HeldContext
+ * @property {any} record  The window it is on.
+ * @property {boolean} whole  The whole window's, frame included.
+ * @property {Rect[] | null} limit  The part a paint limits it to.
+ * @property {number} revision  The layout revision its clip was worked out under.
+ * @property {'cache' | 'own' | 'class'} kind  Made for one GetDC, or kept.
+ * @property {{ handle: number, exclude: boolean } | null} region
+ *           GetDCEx's region, taken out of what it draws in or kept to.
+ */
 
 /**
  * @typedef {Object} PaintHost
@@ -153,6 +171,9 @@ const ESTIMATED_LINE_HEIGHT = 16;
  *           The rectangle a region object holds, and its rectangles when it is
  *           more than one; null for a handle that is not one: gdi32's, reached
  *           the same way `setRegion` is.
+ * @property {(region: number) => void} [deleteRegion]
+ *           Deletes a region the system took from GetDCEx, once the context
+ *           it was given to is done with it.
  * @property {(region: number, rect: any) => void} [setRegion]
  *           Fills in a region object the caller owns. It belongs to gdi32's
  *           table, which this layer cannot reach, so it arrives as a service or
@@ -446,6 +467,9 @@ export function tabbedWidth(text, widthOf, stops, interval){
  *        to date before it draws.
  * @param {(record: any) => boolean} [options.frozen]
  *        Whether a window is held as it is, being dragged: it draws nowhere.
+ * @param {(record: any) => ({ style: number, keptContext?: number } | null)} [options.classOf]
+ *        A window's class, whose style says whose its context is, and which
+ *        keeps the one context of a CS_CLASSDC class.
  * @param {{ paintStarts: (record: any) => void, paintEnds: (record: any) => void }}
  *        [options.caret]  The caret, taken off a window while it paints and
  *        put back after, as BeginPaint and EndPaint hide and show it.
@@ -735,7 +759,7 @@ export function createPaintFunctions(options){
             // with no background leaves the screen as it was, and that is
             // not a picture to present.
             return after(send(record.hwnd, WM_ERASEBKGND, hdc, 0, thread), erased=>{
-                releaseContext(record.hwnd, hdc);
+                finishContext(record, hdc);
                 if ((erased | 0) !== 0)
                 {
                     painted();
@@ -768,35 +792,117 @@ export function createPaintFunctions(options){
     };
 
     /**
-     * A device context on a window's client area, or on the whole window:
-     * its origin at the area's corner, and clipped to the part of it that
-     * is on the screen and inside every ancestor.
+     * The window contexts out now, each with what its origin and clip are
+     * worked out from: its window, whether it is the whole window's, the
+     * part a paint limits it to, in its own coordinates, and the layout
+     * revision they were worked out under; whose it is -- the cache's, made
+     * for one GetDC, or a window's own or its class's, kept -- and the
+     * region GetDCEx gave it, in screen coordinates, which the system owns
+     * from then on.
      *
-     * @param {any} record @param {boolean} [whole]
-     * @returns {number} the handle, or zero
+     * @type {Map<number, HeldContext>}
      */
-    const contextOn = (record, whole = false)=>{
-        const area = whole ? geometry.windowRect(record) : geometry.clientRect(record);
-        const hdc = contexts()?.get(record.hwnd, area) ?? 0;
-        if (hdc !== 0)
+    const held = new Map();
+
+    /**
+     * What a context draws in: its window's visible region, with the region
+     * GetDCEx gave it taken in or out, and during a paint the part the
+     * paint is of.
+     *
+     * @param {number} hdc @param {HeldContext} entry
+     */
+    const clipHeld = (hdc, entry)=>{
+        const area = entry.whole
+            ? geometry.windowRect(entry.record) : geometry.clientRect(entry.record);
+        let visible = visibleArea(entry.record, entry.whole, area);
+        if (entry.region)
         {
-            held.set(hdc, { record, whole, limit: null,
-                revision: options.layoutRevision?.() ?? 0 });
-            host.draw?.clip?.(hdc, visibleArea(record, whole, area));
+            const box = host.regionBox?.(entry.region.handle) ?? null;
+            const pieces = offsetArea(box?.rects ?? (box && !isEmpty(box) ? [box] : []),
+                -area.left, -area.top);
+            visible = entry.region.exclude ? subtractAreas(visible, pieces)
+                : intersectAreas(visible, pieces);
         }
-        return hdc;
+        host.draw?.clip?.(hdc, entry.limit ? intersectAreas(visible, entry.limit) : visible);
     };
 
     /**
-     * The window contexts out now, each with what its origin and clip were
-     * worked out from: its window, whether it is the whole window's, the
-     * part a paint limits it to, in its own coordinates, and the layout
-     * revision they were worked out under.
+     * Whose a window's client context is: its own with CS_OWNDC, its
+     * class's with CS_CLASSDC, made once and handed out again with what was
+     * selected into it; the cache's otherwise, and always for the whole
+     * window or when DCX_CACHE asks (dce.c test_dc_attributes).
      *
-     * @type {Map<number, { record: any, whole: boolean, limit: Rect[] | null,
-     *     revision: number }>}
+     * @param {any} record @param {boolean} whole @param {number} flags
+     * @returns {'cache' | 'own' | 'class'}
      */
-    const held = new Map();
+    const kindOf = (record, whole, flags)=>{
+        if (whole || (flags & DCX_CACHE) !== 0)
+        {
+            return 'cache';
+        }
+        const style = options.classOf?.(record)?.style ?? 0;
+        return (style & CS_OWNDC) !== 0 ? 'own' : (style & CS_CLASSDC) !== 0 ? 'class' : 'cache';
+    };
+
+    /**
+     * A device context on a window's client area, or on the whole window:
+     * its origin at the area's corner, and clipped to the part of it that
+     * is on the screen and inside every ancestor. A window's own context and
+     * its class's are the same handle each time, moved to the window that
+     * asks; DCX_INTERSECTRGN or DCX_EXCLUDERGN hands it a region, the
+     * system's from then on: a cache context's goes when it is released, a
+     * kept one's when another takes its place (dce.c test_dc_visrgn).
+     *
+     * @param {any} record @param {boolean} [whole] @param {number} [flags]  GetDCEx's.
+     * @param {number} [region]  GetDCEx's hrgnClip.
+     * @returns {number} the handle, or zero
+     */
+    const contextOn = (record, whole = false, flags = 0, region = 0)=>{
+        const kind = kindOf(record, whole, flags);
+        const owner = kind === 'own' ? record : kind === 'class' ? options.classOf?.(record) : null;
+        const area = whole ? geometry.windowRect(record) : geometry.clientRect(record);
+        let hdc = owner?.keptContext ?? 0;
+        let entry = held.get(hdc);
+        if (entry)
+        {
+            if (entry.record !== record)
+            {
+                // A class's context moves to the window that asks for it,
+                // leaving the region it had where it was.
+                entry.record = record;
+                entry.region = null;
+                entry.limit = null;
+            }
+            contexts()?.rebind?.(hdc, area);
+        }
+        else
+        {
+            hdc = contexts()?.get(record.hwnd, area) ?? 0;
+            if (hdc === 0)
+            {
+                return 0;
+            }
+            entry = { record, whole, limit: null, revision: 0, kind, region: null };
+            held.set(hdc, entry);
+            if (owner)
+            {
+                owner.keptContext = hdc;
+            }
+        }
+        entry.revision = options.layoutRevision?.() ?? 0;
+        if ((flags & (DCX_INTERSECTRGN | DCX_EXCLUDERGN)) !== 0)
+        {
+            const given = region >>> 0;
+            if (entry.region && entry.region.handle !== given)
+            {
+                host.deleteRegion?.(entry.region.handle);
+            }
+            entry.region = given === 0 ? null
+                : { handle: given, exclude: (flags & DCX_EXCLUDERGN) !== 0 };
+        }
+        clipHeld(hdc, entry);
+        return hdc;
+    };
 
     /**
      * Clips a context to its window's visible region and, during a paint,
@@ -812,19 +918,64 @@ export function createPaintFunctions(options){
             return;
         }
         entry.limit = limit;
-        const area = entry.whole
-            ? geometry.windowRect(entry.record) : geometry.clientRect(entry.record);
-        host.draw?.clip?.(hdc, intersectAreas(visibleArea(entry.record, entry.whole, area), limit));
+        clipHeld(hdc, entry);
     };
 
     /**
-     * A context goes back: it is no longer brought up to date.
+     * ReleaseDC: a cache context goes back, with the region it was given,
+     * and is no longer brought up to date; a window's own context or its
+     * class's stays as it is, and the call succeeds whichever window it
+     * names (dce.c test_parameters).
      *
      * @param {number} hwnd @param {number} hdc
      */
     const releaseContext = (hwnd, hdc)=>{
+        const entry = held.get(hdc >>> 0);
+        if (entry && entry.kind !== 'cache')
+        {
+            return 1;
+        }
         held.delete(hdc >>> 0);
-        return contexts()?.release(hwnd >>> 0, hdc >>> 0) ?? 0;
+        if (entry?.region)
+        {
+            host.deleteRegion?.(entry.region.handle);
+        }
+        return contexts()?.release(entry ? entry.record.hwnd : hwnd >>> 0, hdc >>> 0) ?? 0;
+    };
+
+    /**
+     * The end of a paint or an erase on a context: released when it is the
+     * cache's; a kept one stays out, no longer limited to the paint.
+     *
+     * @param {any} record @param {number} hdc
+     */
+    const finishContext = (record, hdc)=>{
+        const entry = held.get(hdc >>> 0);
+        if (entry && entry.kind !== 'cache')
+        {
+            entry.limit = null;
+            clipHeld(hdc >>> 0, entry);
+            return;
+        }
+        releaseContext(record.hwnd, hdc);
+    };
+
+    /**
+     * A window is gone: its own context with it. Its class's stays, for the
+     * next window of the class to ask.
+     *
+     * @param {any} record
+     */
+    const forgetContexts = record=>{
+        const hdc = record.keptContext ?? 0;
+        const entry = held.get(hdc);
+        if (entry && entry.kind === 'own')
+        {
+            entry.kind = 'cache';
+            owners.delete(hdc);
+            releaseContext(record.hwnd, hdc);
+        }
+        record.keptContext = 0;
     };
 
     /**
@@ -849,8 +1000,7 @@ export function createPaintFunctions(options){
         const area = entry.whole
             ? geometry.windowRect(entry.record) : geometry.clientRect(entry.record);
         contexts()?.rebind?.(hdc >>> 0, area);
-        const visible = visibleArea(entry.record, entry.whole, area);
-        host.draw?.clip?.(hdc >>> 0, entry.limit ? intersectAreas(visible, entry.limit) : visible);
+        clipHeld(hdc >>> 0, entry);
     };
 
     /**
@@ -935,7 +1085,7 @@ export function createPaintFunctions(options){
     const endPaint = (record, hdc)=>{
         if (hdc !== 0)
         {
-            releaseContext(record.hwnd, hdc);
+            finishContext(record, hdc);
             painted();
         }
         if (record.painting === hdc)
@@ -1250,10 +1400,15 @@ export function createPaintFunctions(options){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([hwnd, hdc])=>{
+                // A kept context is still its window's after it goes back.
+                const kept = (held.get(hdc >>> 0)?.kind ?? 'cache') !== 'cache';
                 const released = releaseContext(hwnd, hdc);
-                if (released)
+                if (released && !kept)
                 {
                     owners.delete(hdc >>> 0);
+                }
+                if (released)
+                {
                     painted();
                 }
                 return released;
@@ -1569,19 +1724,20 @@ export function createPaintFunctions(options){
         /**
          * HDC GetDCEx(HWND hWnd, HRGN hrgnClip, DWORD flags)
          *
-         * The flags select a clip region and whether the non-client area is
-         * included; DCX_WINDOW is honoured, so a program that paints its own
-         * frame draws on it. The region handle is the caller's to destroy
-         * either way, which is why nothing is done with it.
+         * The flags select whether the non-client area is included --
+         * DCX_WINDOW, so a program that paints its own frame draws on it --
+         * whether the class's context is passed over for the cache's, and
+         * the region the context is kept to or kept out of, which is the
+         * system's from then on.
          */
         GetDCEx: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([hwnd, , flags])=>{
+            handler: ([hwnd, region, flags])=>{
                 const DCX_WINDOW = 0x1;
                 const record = live(hwnd);
                 return handedOut(hwnd, record
-                    ? contextOn(record, (flags & DCX_WINDOW) !== 0)
+                    ? contextOn(record, (flags & DCX_WINDOW) !== 0, flags >>> 0, region >>> 0)
                     : contexts()?.get(hwnd >>> 0, null) ?? 0);
             },
         },
@@ -1971,7 +2127,7 @@ export function createPaintFunctions(options){
     };
 
     return { table, beginPaint, endPaint, invalidate, validate, updateNow, eraseNow, clientArea,
-        cellOf, contextOn, owesPaint, updateOf, refreshContext };
+        cellOf, contextOn, owesPaint, updateOf, refreshContext, forgetContexts };
 }
 
 /** A brush argument up to this is a system colour index plus one. */

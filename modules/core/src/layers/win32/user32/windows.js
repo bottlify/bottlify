@@ -522,6 +522,8 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           by a region.
  * @property {(region: number, rect: any) => boolean} [setRegion]
  *           Makes a GDI region hold a rectangle, for GetUpdateRgn.
+ * @property {(region: number) => void} [deleteRegion]
+ *           Deletes a GDI region the system took from GetDCEx.
  * @property {() => void} [present]
  *           Shows the desktop. Called once a paint pass has finished.
  * @property {(delay: number, fire: () => void) => boolean} [later]
@@ -2394,6 +2396,7 @@ export function createWindowFunctions(host){
         }
         directory.close(record.hwnd);
         toldRun.delete(record.hwnd);
+        paint.forgetContexts(record);
         if (active === record.hwnd)
         {
             active = 0;
@@ -4969,6 +4972,7 @@ export function createWindowFunctions(host){
         desktop: ()=>desktopWindow().hwnd,
         covering: coveringOf,
         layoutRevision: ()=>layoutRevision,
+        classOf: (/** @type {any} */ record)=>classes.get(record.className) ?? null,
         caret,
     });
 
@@ -7311,7 +7315,10 @@ export function createWindowFunctions(host){
                 const visible = !shown(record) || frozen(record) || isEmpty(shownPart) ? []
                     : offsetArea(subtractAreas([shownPart], coveringOf(record, !children)),
                         -origin.left, -origin.top);
-                const hdc = paint.contextOn(record);
+                // The cache's context, whatever the class keeps: what the
+                // scroll does to its clip is not the program's.
+                const DCX_CACHE = 0x2;
+                const hdc = paint.contextOn(record, false, DCX_CACHE);
                 if (hdc !== 0 && children)
                 {
                     draw?.clip?.(hdc, visible);
