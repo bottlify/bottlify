@@ -353,7 +353,9 @@ export function createSeh(host){
      * above the one before it, ends the walk -- a chain that points backwards
      * is a cycle, and following it does not terminate.
      *
-     * @param {any} [thread]  Whose chain; the running thread's by default.
+     * @param {any} thread  Whose chain. Named by every caller rather than taken
+     *        to be the running thread: a dispatch that has awaited anything is
+     *        no longer answering for the thread on the processor.
      * @returns {{ frames: { frame: number, handler: number }[], damaged: boolean }}
      */
     const chain = thread=>{
@@ -524,7 +526,10 @@ export function createSeh(host){
             return { handled: true, registers: continuation(at.context, flags) };
         }
 
-        const { frames, damaged } = chain();
+        // The asking thread's chain: after the vectored handlers the thread on
+        // the processor, or the one an executor's call is answered for, may
+        // be another, and its frames are not this exception's.
+        const { frames, damaged } = chain(asked);
         // A jump into the first page is a call through a null pointer, whose
         // return address -- the call's own place -- is the only lead.
         const caller = (what.address >>> 0) < 0x10000 && host.isMapped(registers.esp >>> 0)
@@ -606,7 +611,8 @@ export function createSeh(host){
      * @param {any} [options.thread]  Whose frames these are, for the same reason.
      */
     const unwind = async(targetFrame, address, options = {})=>{
-        const { frames, damaged } = chain(options.thread);
+        const asked = options.thread ?? host.currentThread?.();
+        const { frames, damaged } = chain(asked);
         const registers = options.registers ?? host.registers();
         const record = options.record ?? 0;
         const at = carve(registers);
@@ -637,9 +643,6 @@ export function createSeh(host){
             return { unwound: false };
         }
 
-        // As above: the unwind runs a handler per frame, and only the first
-        // of them runs on the thread that is standing here now.
-        const asked = options.thread ?? host.currentThread?.();
         const teb = tebOf(asked);
         let reached = everything;
         for (let index = 0; index < frames.length; index++)

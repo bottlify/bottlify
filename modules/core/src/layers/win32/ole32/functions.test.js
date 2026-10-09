@@ -123,6 +123,7 @@ function fakeHost(){
             current = thread;
         },
         currentThread: ()=>current,
+        callerThread: ()=>current,
         heap: fakeHeap(),
         registry: createComRegistry(),
         vtables: {
