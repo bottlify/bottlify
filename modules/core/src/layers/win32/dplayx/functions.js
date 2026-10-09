@@ -222,7 +222,7 @@ export function createDplayFunctions(host){
                     return DPERR_UNAVAILABLE;
                 }
                 const object = createComObject('{D1EB6D20-8923-11D0-9D97-00A0C90A43CB}',
-                    { interfaces: PLAY_INTERFACES });
+                    { interfaces: [...PLAY_INTERFACES] });
                 const pointer = host.vtables.publish(object, PLAY_INTERFACES[0].id) >>> 0;
                 writeU32(out, pointer);
                 return pointer === 0 ? 0x8007000e : DP_OK;
