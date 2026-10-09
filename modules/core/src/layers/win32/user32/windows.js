@@ -395,6 +395,8 @@ const ERROR_INVALID_THREAD_ID = 1444;
 const ERROR_INVALID_PARAMETER = 87;
 /** A pointer the call was to write through, and could not. */
 const ERROR_NOACCESS = 998;
+/** Another thread's window, which only its own may destroy. */
+const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_WINDOW_HANDLE = 1400;
 const ERROR_TLW_WITH_WSCHILD = 1406;
 
@@ -2364,8 +2366,10 @@ export function createWindowFunctions(host){
     };
 
     /**
-     * DestroyWindow as a program calls it: a CBT hook hears first, and one
-     * that answers non-zero keeps the window.
+     * DestroyWindow as a program calls it: only the thread that made the
+     * window may, another is refused with ERROR_ACCESS_DENIED (msg.c
+     * test_interthread_messages); a CBT hook hears first, and one that
+     * answers non-zero keeps the window.
      *
      * @param {number} hwnd @param {unknown} [thread]
      * @returns {number | Promise<number>}
@@ -2378,6 +2382,13 @@ export function createWindowFunctions(host){
             return 0;
         }
         const on = thread ?? host.callerThread?.();
+        const maker = creatorOf(record);
+        const asking = threadIdOf(on);
+        if (maker !== null && asking !== null && maker !== asking)
+        {
+            host.setLastError?.(ERROR_ACCESS_DENIED);
+            return 0;
+        }
         return andThen(askCbt(HCBT_DESTROYWND, record.hwnd, 0, on),
             refused=>((refused | 0) !== 0 ? 0 : destroyWindow(record.hwnd, on)));
     };

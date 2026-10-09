@@ -5835,3 +5835,21 @@ test('PeekMessage with no MSG to fill fails with ERROR_NOACCESS, and takes the m
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
     assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_USER + 1, 'the first was taken');
 });
+
+test('only the thread that made a window may destroy it', ()=>{
+    // msg.c test_interthread_messages: DestroyWindow from another thread fails
+    // with ERROR_ACCESS_DENIED and leaves the window, which its own thread can
+    // still be told to quit through.
+    const ERROR_ACCESS_DENIED = 5;
+    const caller = { current: { name: 'maker', id: 7 } };
+    const { fns, memory, errors } = setup({ caller });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+    caller.current = { name: 'other', id: 8 };
+    assert.equal(fns.DestroyWindow.handler([hwnd]), 0);
+    assert.equal(errors.at(-1), ERROR_ACCESS_DENIED);
+    assert.equal(fns.IsWindow.handler([hwnd]), 1, 'still there');
+    caller.current = { name: 'maker', id: 7 };
+    assert.equal(fns.DestroyWindow.handler([hwnd]), 1, 'its own thread may');
+});
