@@ -2191,3 +2191,129 @@ test('outside the contract: a level written after its surface\'s unlock and afte
         await run.call('Release level', ()=>level.surface.release());
     }));
 });
+
+test('Direct3D 8: a Reset across a large change of size, with default-pool resources bound,'
+    + ' released and held, answers the same on both sides', async()=>{
+    await same(8, async run=>{
+        const { device, vertices, indices } = await device8(run);
+        /** @type {{ buffer?: any }} */
+        const dynamic = {};
+        await run.call('CreateVertexBuffer default', ()=>device.CreateVertexBuffer(4 * STRIDE,
+            D3DUSAGE.DYNAMIC | D3DUSAGE.WRITEONLY, FVF_LIT, D3DPOOL.DEFAULT, dynamic), [dynamic]);
+        /** @type {{ texture?: any }} */
+        const target = {};
+        await run.call('CreateTexture target', ()=>device.CreateTexture(16, 16, 1,
+            D3DUSAGE.RENDERTARGET, D3DFMT.X8R8G8B8, D3DPOOL.DEFAULT, target), [target]);
+        /** @type {{ surface?: any }} */
+        const level = {};
+        await run.call('GetSurfaceLevel', ()=>target.texture.GetSurfaceLevel(0, level), [level]);
+        await run.call('SetStreamSource default', ()=>device.SetStreamSource(0, dynamic.buffer,
+            STRIDE));
+        await run.call('SetTexture target', ()=>device.SetTexture(0, target.texture));
+        /** @type {Record<string, any>} */
+        const implicit = {};
+        await run.call('GetBackBuffer', ()=>device.GetBackBuffer(0, 0, implicit.back = {}),
+            [implicit.back]);
+        await run.call('GetDepthStencilSurface', ()=>device.GetDepthStencilSurface(
+            implicit.depth = {}), [implicit.depth]);
+        // Held: refused alike.
+        await run.call('Reset held', ()=>device.Reset({ ...PARAMETERS, backBufferWidth: 640,
+            backBufferHeight: 480 }));
+        await run.call('TestCooperativeLevel held', ()=>device.TestCooperativeLevel());
+        await run.call('Release back', ()=>implicit.back.surface.release());
+        await run.call('Release depth', ()=>implicit.depth.surface.release());
+        await run.call('Release level', ()=>level.surface.release());
+        await run.call('Release target', ()=>target.texture.release());
+        await run.call('Release default', ()=>dynamic.buffer.release());
+        // Released but still bound.
+        await run.call('Reset bound', ()=>device.Reset({ ...PARAMETERS, backBufferWidth: 1600,
+            backBufferHeight: 1200 }));
+        await run.call('TestCooperativeLevel bound', ()=>device.TestCooperativeLevel());
+        await run.call('SetStreamSource managed', ()=>device.SetStreamSource(0, vertices, STRIDE));
+        await run.call('SetTexture none', ()=>device.SetTexture(0, null));
+        await run.call('Reset unbound', ()=>device.Reset({ ...PARAMETERS, backBufferWidth: 1600,
+            backBufferHeight: 1200 }));
+        await run.call('TestCooperativeLevel', ()=>device.TestCooperativeLevel());
+        await run.call('SetIndices', ()=>device.SetIndices(indices, 0));
+        await run.call('BeginScene', ()=>device.BeginScene());
+        await run.call('Clear', ()=>device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER,
+            0xff0a0b0c, 1, 0));
+        await run.call('EndScene', ()=>device.EndScene());
+        await run.call('Present', ()=>device.Present(null, null, 0, null));
+        await run.call('idle', ()=>device.idle());
+        await run.look('after the reset');
+        for (const [name, object] of /** @type {[string, any][]} */ ([['vertices', vertices],
+            ['indices', indices], ['device', device]]))
+        {
+            await run.call(`Release ${name}`, ()=>object.release());
+        }
+        await run.look('end');
+    });
+});
+
+test('Direct3D 8: a Reset after render targets, a state block and surfaces of its own were made,'
+    + ' bound and released answers the same on both sides', async()=>{
+    await same(8, async run=>{
+        const { device, vertices, indices } = await device8(run);
+        /** @type {{ texture?: any }} */
+        const target = {};
+        await run.call('CreateTexture target', ()=>device.CreateTexture(16, 16, 1,
+            D3DUSAGE.RENDERTARGET, D3DFMT.X8R8G8B8, D3DPOOL.DEFAULT, target), [target]);
+        /** @type {{ surface?: any }} */
+        const level = {};
+        await run.call('GetSurfaceLevel', ()=>target.texture.GetSurfaceLevel(0, level), [level]);
+        /** @type {{ surface?: any }} */
+        const depth = {};
+        await run.call('CreateDepthStencilSurface', ()=>device.CreateDepthStencilSurface(16, 16,
+            D3DFMT.D24S8, depth), [depth]);
+        /** @type {{ surface?: any }} */
+        const lone = {};
+        await run.call('CreateRenderTarget', ()=>device.CreateRenderTarget(16, 16, D3DFMT.X8R8G8B8,
+            0, lone), [lone]);
+        /** @type {Record<string, any>} */
+        const old = {};
+        await run.call('GetRenderTarget', ()=>device.GetRenderTarget(old.target = {}),
+            [old.target]);
+        await run.call('GetDepthStencilSurface', ()=>device.GetDepthStencilSurface(
+            old.depth = {}), [old.depth]);
+        await run.call('SetRenderTarget level', ()=>device.SetRenderTarget(level.surface,
+            depth.surface));
+        await run.call('SetTexture target', ()=>device.SetTexture(1, target.texture));
+        /** @type {{ handle?: number }} */
+        const all = {};
+        await run.call('CreateStateBlock', ()=>device.CreateStateBlock(SBT_ALL, all), [all]);
+        await run.call('Clear target', ()=>device.Clear(0, null, D3DCLEAR.TARGET, 0xff203040,
+            1, 0));
+        await run.call('SetRenderTarget back', ()=>device.SetRenderTarget(old.target.surface,
+            old.depth.surface));
+        await run.call('SetTexture none', ()=>device.SetTexture(1, null));
+        await run.call('Release old target', ()=>old.target.surface.release());
+        await run.call('Release old depth', ()=>old.depth.surface.release());
+        await run.call('Reset with a state block', ()=>device.Reset({ ...PARAMETERS,
+            backBufferWidth: 1280, backBufferHeight: 1024 }));
+        await run.call('DeleteStateBlock', ()=>device.DeleteStateBlock(all.handle));
+        await run.call('Reset without', ()=>device.Reset({ ...PARAMETERS, backBufferWidth: 1280,
+            backBufferHeight: 1024 }));
+        for (const [name, object] of /** @type {[string, any][]} */ ([['level', level.surface],
+            ['target', target.texture], ['depth', depth.surface], ['lone', lone.surface]]))
+        {
+            await run.call(`Release ${name}`, ()=>object.release());
+        }
+        await run.call('Reset released', ()=>device.Reset({ ...PARAMETERS, backBufferWidth: 1280,
+            backBufferHeight: 1024 }));
+        await run.call('TestCooperativeLevel', ()=>device.TestCooperativeLevel());
+        await run.call('BeginScene', ()=>device.BeginScene());
+        await run.call('Clear', ()=>device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER,
+            0xff0a0b0c, 1, 0));
+        await run.call('EndScene', ()=>device.EndScene());
+        await run.call('Present', ()=>device.Present(null, null, 0, null));
+        await run.call('idle', ()=>device.idle());
+        await run.look('after the reset');
+        for (const [name, object] of /** @type {[string, any][]} */ ([['vertices', vertices],
+            ['indices', indices], ['device', device]]))
+        {
+            await run.call(`Release ${name}`, ()=>object.release());
+        }
+        await run.look('end');
+    });
+});

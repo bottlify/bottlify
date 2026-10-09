@@ -229,3 +229,21 @@ None yet.
 - **Correctness.** The kernel32 and win32 unit tests passed; the game did not reach its world.
 - **Decision.** Reverted. The poll stays a cost to remove another way: a thread's progress made
   visible to the poller, or the polled thread on an executor of its own (stage 3).
+
+### 2026-10-09 -- client arrays read once a glLockArraysEXT rather than once a draw
+
+- **Idea.** A Quake 3 renderer locks a surface's client arrays and draws them once a stage; the
+  recording read -- and sent its twin -- every range again at each glDrawElements. Reading each
+  range once a lock (the extension's promise that the arrays do not change) would cut what a
+  draw costs the program's thread. Prompted by a Call of Duty Dawnville demo report where
+  glDrawElements was 248 082 calls and 12 163 ms of host time (49 us a call).
+- **Workload.** `tools/graphics-node-bench.mjs --scenes gl-tess --modes remote --draws 600
+  --frames 30 --warm 10 --reps 3` (the scene added in `e9469170`), fastest of 3, `cork2` at
+  `8b9091b4` against the change on it.
+- **Values.** Base: program thread 6.64 ms a frame, worker 15.74 ms, 3842 KiB a frame. Change:
+  6.78 ms, 15.16 ms, 2505 KiB. Noise floor: not measured.
+- **Machine.** Node 22.22.0, a 4-core x86-64 Linux VM (Firecracker). Power plan: not recorded.
+- **Why it did not pay.** The bytes fell by a third and neither thread's time moved: the copy
+  is not where a draw's time goes on either side.
+- **Correctness.** Not run beyond the bench.
+- **Decision.** Reverted.

@@ -558,6 +558,127 @@ function openglScene({ draws, gpu, client }){
 }
 
 /**
+ * OpenGL as a Quake 3 renderer draws: each surface written into the same
+ * client arrays (positions, two texture-coordinate sets, colours), locked
+ * with glLockArraysEXT, and drawn once a stage -- glColor4ubv and
+ * glDrawElements of its indices -- before the unlock. `draws` is the count of
+ * glDrawElements a frame, three stages a surface.
+ *
+ * @param {{ draws: number, gpu: SceneGpu }} scene
+ */
+function openglTessScene({ draws, gpu }){
+    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+        now: ()=>0 });
+    const bytes = new Uint8Array(24 << 20);
+    const view = new DataView(bytes.buffer);
+    let next = 16 << 20;
+    const opengl = createOpengl({
+        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+            bytes.slice(at, at + length),
+        windowMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+            bytes.subarray(at, at + length),
+        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>
+            bytes.set(value, at),
+        scratch: { allocate: (/** @type {number} */ size)=>{
+            const at = next;
+            next += size + 15 & ~15;
+            return at;
+        } },
+        screen: ()=>({ width: 640, height: 480 }),
+        present: ()=>{},
+        presenter: ()=>({ claim: ()=>{} }),
+        backend: ()=>backend,
+        createSampler: (/** @type {any} */ descriptor)=>gpu.device.createSampler?.(descriptor)
+            ?? ({ kind: 'sampler', descriptor }),
+        frameQueued: (/** @type {any} */ settled)=>settled,
+        exportAddress: ()=>0x10000000,
+        remote: gpu.opengl,
+    });
+    const table = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
+        opengl.table);
+    /** @param {string} name @param {number[]} args */
+    const gl = (name, ...args)=>table[name].handler(args);
+    const hdc = 0x900d;
+    gl('wglSetPixelFormat', hdc, 1, 0);
+    gl('wglMakeCurrent', hdc, gl('wglCreateContext', hdc));
+    // The tesselator's arrays, as Quake 3 keeps them: 1000 vertices at most.
+    const XYZ = 0x100000;
+    const ST0 = 0x110000;
+    const ST1 = 0x118000;
+    const RGBA = 0x120000;
+    const INDEXES = 0x128000;
+    const COLOUR = 0x130000;
+    const VERTICES = 170;
+    const INDICES = 510;
+    for (let i = 0; i < INDICES; i++)
+    {
+        view.setUint32(INDEXES + i * 4, (i * 7) % VERTICES, true);
+    }
+    view.setUint32(COLOUR, 0xffc0a080, true);
+    gl('glGenTextures', 4, 0x1000);
+    const textures = [0, 1, 2, 3].map(i=>view.getUint32(0x1000 + i * 4, true));
+    for (const name of textures)
+    {
+        gl('glBindTexture', GL.TEXTURE_2D, name);
+        gl('glTexParameteri', GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+        gl('glTexImage2D', GL.TEXTURE_2D, 0, GL.RGBA, 64, 64, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+            0x80000);
+    }
+    gl('glEnable', GL.TEXTURE_2D);
+    gl('glEnable', GL.DEPTH_TEST);
+    const surfaces = Math.max(1, Math.round(draws / 3));
+    let frames = 0;
+    return {
+        gpu,
+        async frame(){
+            gl('glClear', GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
+            gl('glEnableClientState', GL.VERTEX_ARRAY);
+            gl('glEnableClientState', GL.TEXTURE_COORD_ARRAY);
+            gl('glVertexPointer', 3, GL.FLOAT, 16, XYZ);
+            gl('glTexCoordPointer', 2, GL.FLOAT, 0, ST0);
+            for (let s = 0; s < surfaces; s++)
+            {
+                // The surface, written over the last one where the arrays point.
+                for (let v = 0; v < VERTICES; v++)
+                {
+                    view.setFloat32(XYZ + v * 16, ((v + s) % 32) / 16 - 1, true);
+                    view.setFloat32(XYZ + v * 16 + 4, ((v * 3 + frames) % 32) / 16 - 1, true);
+                    view.setFloat32(XYZ + v * 16 + 8, 0.5, true);
+                    view.setFloat32(ST0 + v * 8, (v % 8) / 8, true);
+                    view.setFloat32(ST0 + v * 8 + 4, (s % 8) / 8, true);
+                    view.setFloat32(ST1 + v * 8, (v % 4) / 4, true);
+                    view.setFloat32(ST1 + v * 8 + 4, (s % 4) / 4, true);
+                    view.setUint32(RGBA + v * 4, 0xff808080 + v, true);
+                }
+                gl('glLockArraysEXT', 0, VERTICES);
+                for (let stage = 0; stage < 3; stage++)
+                {
+                    gl('glBindTexture', GL.TEXTURE_2D, textures[(s + stage) & 3]);
+                    gl('glTexCoordPointer', 2, GL.FLOAT, 0, stage === 1 ? ST1 : ST0);
+                    if (stage === 2)
+                    {
+                        gl('glEnableClientState', GL.COLOR_ARRAY);
+                        gl('glColorPointer', 4, GL.UNSIGNED_BYTE, 0, RGBA);
+                    }
+                    else
+                    {
+                        gl('glDisableClientState', GL.COLOR_ARRAY);
+                        gl('glColor4ubv', COLOUR);
+                    }
+                    gl('glDrawElements', GL.TRIANGLES, INDICES, GL.UNSIGNED_INT, INDEXES);
+                }
+                gl('glUnlockArraysEXT');
+            }
+            frames++;
+            gpu.mark?.('recorded');
+            await gl('wglSwapBuffers', hdc);
+            gpu.mark?.('replayed');
+            gpu.reset();
+        },
+    };
+}
+
+/**
  * Direct3D 7 as a game of its era draws: a 640x480 target with a depth
  * buffer attached, two textures, and a frame of `draws` lit draws of a
  * vertex buffer through indices by pointer, a world matrix and a texture
@@ -650,6 +771,7 @@ export const SCENES = {
     'ddraw-32': (draws, gpu)=>ddrawScene({ draws, depth: 32, gpu }),
     'gl-buffers': (draws, gpu)=>openglScene({ draws, gpu, client: false }),
     'gl-client': (draws, gpu)=>openglScene({ draws, gpu, client: true }),
+    'gl-tess': (draws, gpu)=>openglTessScene({ draws, gpu }),
     'd3d7-lit': (draws, gpu)=>d3d7Scene({ draws, gpu }),
     'ddraw-8': (draws, gpu)=>ddrawScene({ draws, depth: 8, gpu }),
     'd3d8-lit': (draws, gpu)=>directScene({ version: 8, draws, gpu }),

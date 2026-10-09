@@ -1044,6 +1044,8 @@ const CASES = {
         { label: 'words wider than a byte', args: [0x1ff, 0xffffff00, 0x1234] },
     ],
     glColor4ub: [{ label: 'a colour', args: [0x40, 0x80, 0xff, 0x10], error: GL.NO_ERROR }],
+    glColor4ubv: [{ label: 'a colour', args: ['data'], data: [0xc0a08040 | 0],
+        error: GL.NO_ERROR }],
     glColor3fv: [{ label: 'a colour', args: ['data'], data: floats([0.25, 0.5, 0.75]),
         error: GL.NO_ERROR }],
     glColor4fv: [{ label: 'a colour', args: ['data'], data: VECTOR, error: GL.NO_ERROR }],

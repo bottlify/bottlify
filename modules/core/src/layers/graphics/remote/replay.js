@@ -1557,7 +1557,10 @@ export function createPlayer({ root, ship, read, borrow }){
             {
                 return refsTo(target, args[0]);
             }
-            const answer = target[playing](...args);
+            // A Reset the recording answered is played as answered: what the
+            // program holds is the recording's count, not this side's.
+            const answer = playing === 'Reset' ? target.Reset(...args, allocs.length > 0)
+                : target[playing](...args);
             bindAll(answer, handsOut(playing) ? args : NOTHING, bind);
             if (allocs.length > 0)
             {

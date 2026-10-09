@@ -647,6 +647,28 @@ test('an outstanding default-pool resource makes Reset answer DEVICELOST', ()=>{
     assertFullyReleased(device);
 });
 
+test('a Reset played as the recording answered it goes ahead over a count of this side\'s,'
+    + ' and says so', ()=>{
+    /** @type {string[]} */
+    const reported = [];
+    const device = createDevice({
+        caps: { divergence: (/** @type {string} */ api, /** @type {string} */ detail)=>
+            reported.push(`${api}: ${detail}`) },
+    });
+    /** @type {{ texture?: any }} */
+    const texture = {};
+    assert.equal(device.CreateTexture(16, 16, 1, 0, D3DFMT.R5G6B5, D3DPOOL.DEFAULT, texture),
+        D3D_OK);
+    assert.equal(device.Reset(undefined, true), D3D_OK);
+    assert.equal(device.TestCooperativeLevel(), D3D_OK);
+    assert.equal(reported.length, 1);
+    assert.match(reported[0], /1 default-pool resource/);
+
+    device.injectDeviceLoss(false);
+    assert.equal(device.Reset(undefined, true), D3DERR_DEVICELOST, 'a lost device is lost alike');
+    assert.equal(texture.texture.release(), 0);
+});
+
 test('a resource outside the default pool never blocks a Reset', ()=>{
     const device = createDevice();
     /** @type {{ texture?: any }} */
