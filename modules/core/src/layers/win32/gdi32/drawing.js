@@ -338,6 +338,9 @@ function readGammaRamp(bytes){
  *           [textWidth]
  *           How wide the engine draws a string in a font; null, or absent,
  *           without an engine.
+ * @property {(family: string, bytes: Uint8Array) => Promise<boolean>} [addFont]
+ *           A program's own font, drawn under its family name from then on;
+ *           false, or absent, where none can be taken.
  * @property {any} [pixelFormat]
  *           The pixel-format service: `choose(descriptor)`, `describe(index)`,
  *           `count()`, and `set(hdc, index)` / `get(hdc)` for the format a

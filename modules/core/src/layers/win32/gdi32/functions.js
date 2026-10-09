@@ -24,7 +24,9 @@ import { createGdiObjects } from './objects.js';
 import { DEFAULT_PALETTE_COLORS, createDrawingFunctions } from './drawing.js';
 import { copyPath, pathMoved } from './paths.js';
 import { createMetafileFunctions } from './metafiles.js';
-import { FACES, FF_MODERN, FF_ROMAN, FIXED_PITCH, faceNamed, windowsMetrics } from './faces.js';
+import {
+    FACES, FF_MODERN, FF_ROMAN, FIXED_PITCH, faceNamed, fontFamilies, windowsMetrics,
+} from './faces.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import {
     BITMAP,
@@ -147,6 +149,9 @@ const LAYOUT_RTL = 0x01;
 const GDI_ERROR = 0xffffffff;
 /** GetGlyphOutline's formats this layer answers, and the flags it reads past. */
 const GGO_METRICS = 0;
+const GGO_BITMAP = 1;
+/** The gray formats, by the levels their bytes run to: 4, 16 and 64. */
+const GGO_GRAY_LEVELS = new Map([[4, 4], [5, 16], [6, 64]]);
 const GGO_GLYPH_INDEX = 0x80;
 const GGO_UNHINTED = 0x100;
 const GLYPHMETRICS_SIZE = 20;
@@ -1646,6 +1651,10 @@ export function createGdiFunctions(host){
     /** @param {any} dc @returns {import('./structs.js').TextMetricFields} */
     const currentMetrics = dc=>metricsOf(currentFont(dc));
 
+    /** The handles AddFontMemResourceEx gave out and RemoveFontMemResourceEx has not taken back. */
+    const memoryFonts = new Set();
+    let lastMemoryFont = 0;
+
     /** GetGlyphIndices in either width. @param {number[]} args @param {boolean} wide */
     const glyphIndices = ([handle, text, count, out, flags], wide)=>{
         const dc = dcOf(handle);
@@ -1671,15 +1680,21 @@ export function createGdiFunctions(host){
     };
 
     /** GetGlyphOutline in either width. @param {number[]} args @param {string} api */
-    const glyphOutline = ([handle, char, format, metrics, , , matrix], api)=>{
+    const glyphOutline = ([handle, char, format, metrics, size, buffer, matrix], api)=>{
         const dc = dcOf(handle);
         if (!dc || (matrix >>> 0) === 0 || (metrics >>> 0) === 0)
         {
             return GDI_ERROR;
         }
-        if (((format >>> 0) & ~(GGO_GLYPH_INDEX | GGO_UNHINTED)) !== GGO_METRICS)
+        const kind = (format >>> 0) & ~(GGO_GLYPH_INDEX | GGO_UNHINTED);
+        if (kind === GGO_BITMAP || GGO_GRAY_LEVELS.has(kind))
         {
-            host.divergence?.(api, 'the outline and bitmap of a glyph are not made; only metrics');
+            return glyphBitmap(dc, char & 0xffff, kind, metrics >>> 0, size >>> 0, buffer >>> 0,
+                api);
+        }
+        if (kind !== GGO_METRICS)
+        {
+            host.divergence?.(api, 'the outline of a glyph is not made; only metrics and bitmaps');
             return GDI_ERROR;
         }
         const width = widthOf(dc, String.fromCharCode(char & 0xffff));
@@ -1694,6 +1709,68 @@ export function createGdiFunctions(host){
         view.setInt16(18, 0, true);
         host.writeMemory(metrics >>> 0, bytes);
         return 1;
+    };
+
+    /**
+     * A glyph's bitmap, as GetGlyphOutline makes it: the black box, rows
+     * padded to a DWORD, one bit a pixel high bit first for GGO_BITMAP and a
+     * byte a pixel from 0 to the format's levels for the gray ones; the origin
+     * is the box's top left against the pen on the baseline. Asked with no
+     * buffer, it is the size a buffer needs. A glyph with no ink -- a space --
+     * needs none, and its box is one pixel, as Windows says it.
+     *
+     * @param {any} dc @param {number} code @param {number} kind
+     * @param {number} metrics @param {number} size @param {number} buffer @param {string} api
+     */
+    const glyphBitmap = (dc, code, kind, metrics, size, buffer, api)=>{
+        const font = currentFont(dc);
+        const glyph = host.graphics?.glyph?.(code, font);
+        if (!glyph)
+        {
+            host.divergence?.(api, 'no font engine to draw a glyph with');
+            return GDI_ERROR;
+        }
+        // The engine places a glyph against the top of its own cell.
+        const ascent = host.graphics?.fontMetrics?.(font)?.ascent ?? currentMetrics(dc).ascent;
+        const empty = glyph.width === 0 || glyph.height === 0;
+        const pitch = kind === GGO_BITMAP ? ((glyph.width + 31) >> 5) * 4 : (glyph.width + 3) & ~3;
+        const needed = empty ? 0 : pitch * glyph.height;
+        const fields = new Uint8Array(GLYPHMETRICS_SIZE);
+        const view = new DataView(fields.buffer);
+        view.setUint32(0, empty ? 1 : glyph.width, true);
+        view.setUint32(4, empty ? 1 : glyph.height, true);
+        view.setInt32(8, glyph.left, true);
+        view.setInt32(12, ascent - glyph.top, true);
+        view.setInt16(16, glyph.advance, true);
+        view.setInt16(18, 0, true);
+        host.writeMemory(metrics, fields);
+        if (buffer === 0 || size === 0)
+        {
+            return needed;
+        }
+        if (size < needed)
+        {
+            return GDI_ERROR;
+        }
+        const bits = new Uint8Array(needed);
+        const levels = GGO_GRAY_LEVELS.get(kind) ?? 1;
+        for (let y = 0; y < (empty ? 0 : glyph.height); y++)
+        {
+            for (let x = 0; x < glyph.width; x++)
+            {
+                const covered = glyph.coverage[y * glyph.width + x];
+                if (kind === GGO_BITMAP)
+                {
+                    bits[y * pitch + (x >> 3)] |= covered >= 128 ? 0x80 >> (x & 7) : 0;
+                }
+                else
+                {
+                    bits[y * pitch + x] = Math.round(covered * levels / 255);
+                }
+            }
+        }
+        host.writeMemory(buffer, bits);
+        return needed;
     };
 
     /**
@@ -3969,20 +4046,17 @@ export function createGdiFunctions(host){
          * and a scalable font resource cannot be written for one. Zero is the
          * documented failure of each, which an installer notes and moves on
          * from -- the file itself was already copied. Every spelling answers
-         * the same way, the private and in-memory ones included, and nothing
-         * can be removed that was never added.
+         * the same way, the private ones included, and nothing can be removed
+         * that was never added. A font in memory is the exception, below.
          *
          * int AddFontResourceA(LPCSTR lpszFilename)
          * int AddFontResourceW(LPCWSTR lpszFilename)
          * int AddFontResourceExA(LPCSTR name, DWORD fl, PVOID res)
          * int AddFontResourceExW(LPCWSTR name, DWORD fl, PVOID res)
-         * HANDLE AddFontMemResourceEx(PVOID pFileView, DWORD cjSize, PVOID pvResrved,
-         *                             DWORD *pNumFonts)
          * BOOL RemoveFontResourceA(LPCSTR lpFileName)
          * BOOL RemoveFontResourceW(LPCWSTR lpFileName)
          * BOOL RemoveFontResourceExA(LPCSTR name, DWORD fl, PVOID pdv)
          * BOOL RemoveFontResourceExW(LPCWSTR name, DWORD fl, PVOID pdv)
-         * BOOL RemoveFontMemResourceEx(HANDLE h)
          * BOOL CreateScalableFontResourceA(DWORD fdwHidden, LPCSTR lpszFontRes,
          *                                  LPCSTR lpszFontFile, LPCSTR lpszCurrentPath)
          */
@@ -3990,12 +4064,56 @@ export function createGdiFunctions(host){
         AddFontResourceW: { argBytes: 4, handler: ()=>0 },
         AddFontResourceExA: { argBytes: 12, handler: ()=>0 },
         AddFontResourceExW: { argBytes: 12, handler: ()=>0 },
-        AddFontMemResourceEx: { argBytes: 16, handler: ()=>0 },
+        /**
+         * HANDLE AddFontMemResourceEx(PVOID pFileView, DWORD cjSize, PVOID pvResrved,
+         *                             DWORD *pNumFonts)
+         *
+         * A font the program carries in its own data, private to it: each
+         * face it holds is drawn under its family name from here on. Zero,
+         * with nothing counted, for bytes that are no font or a platform that
+         * takes none.
+         */
+        AddFontMemResourceEx: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([view, size, , count])=>{
+                const add = host.graphics?.addFont;
+                if (!add || (view >>> 0) === 0 || (size >>> 0) === 0 || (count >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const bytes = host.readMemory(view >>> 0, size >>> 0).slice();
+                const families = fontFamilies(bytes);
+                if (families.length === 0)
+                {
+                    return 0;
+                }
+                // Loading a face is the browser's, and asynchronous; the call
+                // returns once it can be drawn with.
+                return Promise.all([...new Set(families)].map(family=>add(family, bytes)))
+                    .then(taken=>{
+                        if (!taken.some(Boolean))
+                        {
+                            return 0;
+                        }
+                        const counted = new Uint8Array(4);
+                        new DataView(counted.buffer).setUint32(0, families.length, true);
+                        host.writeMemory(count >>> 0, counted);
+                        memoryFonts.add(++lastMemoryFont);
+                        return lastMemoryFont;
+                    });
+            },
+        },
         RemoveFontResourceA: { argBytes: 4, handler: ()=>0 },
         RemoveFontResourceW: { argBytes: 4, handler: ()=>0 },
         RemoveFontResourceExA: { argBytes: 12, handler: ()=>0 },
         RemoveFontResourceExW: { argBytes: 12, handler: ()=>0 },
-        RemoveFontMemResourceEx: { argBytes: 4, handler: ()=>0 },
+        // The face stays drawable: a run keeps the fonts it was given.
+        RemoveFontMemResourceEx: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>(memoryFonts.delete(handle >>> 0) ? 1 : 0),
+        },
 
         CreateScalableFontResourceA: {
             argBytes: 16,

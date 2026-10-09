@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createGdiFunctions } from './functions.js';
+import { fontWithNames } from './faces.test.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import {
     BITMAPINFOHEADER,
@@ -1417,7 +1418,7 @@ test('the metrics of a DC nobody selected a font into are the system font\'s', (
  * as a 13-pixel cell, and a character is as wide as its code is odd -- so a
  * string's width depends on which characters it has, not how many.
  */
-function withEngine(){
+function withEngine(/** @type {Record<string, any>} */ more = {}){
     const context = setup();
     /** @type {import('./structs.js').LogFontFields[]} */
     const asked = [];
@@ -1434,6 +1435,13 @@ function withEngine(){
                     externalLeading: 0, aveCharWidth: 6, maxCharWidth: 9 };
             },
             textWidth: (font, text)=>[...text].reduce((sum, ch)=>sum + 4 + ch.charCodeAt(0) % 2, 0),
+            // 'A' a three-by-two box of mixed coverage, a space nothing at all.
+            glyph: code=>(code === 0x41
+                ? { advance: 5, left: 1, top: 3, width: 3, height: 2,
+                    coverage: Uint8Array.of(255, 0, 128, 0, 255, 64) }
+                : { advance: 4, left: 0, top: 0, width: 0, height: 0,
+                    coverage: new Uint8Array(0) }),
+            ...more,
         },
     });
     return { ...context, asked, fns: gdi.table, gdi, hdc: gdi.table.GetDC.handler([HWND]) };
@@ -1777,9 +1785,9 @@ test('a font file cannot be added to the fixed font table, with the stack intact
 
 test('every spelling of adding and removing a font fails the same way, popping its arguments',
     ()=>{
-        // gdi32.spec: each is stdcall with these arities. Nothing can be
-        // added, so every add answers zero fonts and every remove FALSE --
-        // including the in-memory pair, whose handle is NULL.
+        // gdi32.spec: each is stdcall with these arities. Without a font
+        // engine nothing can be added, so every add answers zero fonts and
+        // every remove FALSE -- the in-memory pair too, whose handle is NULL.
         const { fns, memory } = setup();
         const table = /** @type {Record<string, { argBytes: number,
             handler: (args: number[]) => number }>} */ (/** @type {unknown} */ (fns));
@@ -2442,9 +2450,65 @@ test('GetGlyphOutline answers a glyph\'s metrics and refuses its shape', ()=>{
     assert.equal(memory.i32(GM + 12) > 0, true, 'the origin at the ascent');
     assert.ok((memory.u32(GM + 16) & 0xffff) > 0, 'the advance');
     assert.equal(fns.GetGlyphOutlineW.handler([hdc, 65, 1, GM, 0, 0, MAT]), 0xffffffff,
-        'GGO_BITMAP is not made');
+        'GGO_BITMAP is not made without a font engine');
     assert.equal(fns.GetGlyphOutlineA.handler([hdc, 65, 0, GM, 0, 0, 0]), 0xffffffff,
         'the matrix is required');
+});
+
+test('GetGlyphOutline draws the bitmap of a glyph, one bit or one gray level a pixel', ()=>{
+    // A game that builds its font textures from GGO_GRAY8_BITMAP got
+    // GDI_ERROR for every character and drew no text at all.
+    const { fns, hdc, memory } = withEngine();
+    const GM = STRUCT + 0xa00;
+    const MAT = STRUCT + 0xa40;
+    const BITS = STRUCT + 0xa80;
+    memory.putU32s(MAT, [0x10000, 0, 0, 0x10000]);
+    const GGO_BITMAP = 1;
+    const GGO_GRAY8_BITMAP = 6;
+    assert.equal(fns.GetGlyphOutlineW.handler([hdc, 0x41, GGO_GRAY8_BITMAP, GM, 0, 0, MAT]), 8,
+        'asked with no buffer: two rows of a DWORD each');
+    assert.deepEqual([memory.u32(GM), memory.u32(GM + 4), memory.i32(GM + 8), memory.i32(GM + 12),
+        memory.u32(GM + 16) & 0xffff], [3, 2, 1, 11 - 3, 5],
+    'the black box, its origin against the pen on the baseline, the advance');
+    memory.fill(BITS, 4);
+    assert.equal(fns.GetGlyphOutlineW.handler([hdc, 0x41, GGO_GRAY8_BITMAP, GM, 8, BITS, MAT]), 8);
+    assert.deepEqual([...memory.readMemory(BITS, 8)], [64, 0, 32, 0, 0, 64, 16, 0],
+        'levels from 0 to 64, each row padded');
+    assert.equal(fns.GetGlyphOutlineW.handler([hdc, 0x41, GGO_BITMAP, GM, 8, BITS, MAT]), 8);
+    assert.deepEqual([...memory.readMemory(BITS, 8)], [0xa0, 0, 0, 0, 0x40, 0, 0, 0],
+        'a bit a pixel, high bit first, half covered or more inked');
+    assert.equal(fns.GetGlyphOutlineW.handler([hdc, 0x41, GGO_GRAY8_BITMAP, GM, 4, BITS, MAT]),
+        0xffffffff, 'a buffer too small');
+    assert.equal(fns.GetGlyphOutlineW.handler([hdc, 0x20, GGO_GRAY8_BITMAP, GM, 0, 0, MAT]), 0,
+        'a space needs no bitmap');
+    assert.deepEqual([memory.u32(GM), memory.u32(GM + 4), memory.u32(GM + 16) & 0xffff], [1, 1, 4]);
+});
+
+test('a font held in memory is drawn under its family name, and a handle says so', async()=>{
+    // A game unpacks its fonts from an archive of its own and hands them over
+    // with AddFontMemResourceEx; refused, its text fell back to another face.
+    const { fns, memory } = withEngine();
+    /** @type {string[]} */
+    const added = [];
+    const FONT = STRUCT + 0xc00;
+    const COUNT = STRUCT + 0xbf0;
+    const bytes = fontWithNames([[3, 0x409, 'Trajan Pro']]);
+    memory.writeMemory(FONT, bytes);
+    assert.equal(await fns.AddFontMemResourceEx.handler([FONT, bytes.length, 0, COUNT]), 0,
+        'an engine that takes no font: nothing added');
+    const taking = withEngine({ addFont: async(/** @type {string} */ family)=>{
+        added.push(family);
+        return true;
+    } });
+    taking.memory.writeMemory(FONT, bytes);
+    const handle = await taking.fns.AddFontMemResourceEx.handler([FONT, bytes.length, 0, COUNT]);
+    assert.notEqual(handle, 0);
+    assert.deepEqual(added, ['Trajan Pro']);
+    assert.equal(taking.memory.u32(COUNT), 1, 'one face in it');
+    assert.equal(await taking.fns.AddFontMemResourceEx.handler([FONT, 6, 0, COUNT]), 0,
+        'bytes that are no font');
+    assert.equal(taking.fns.RemoveFontMemResourceEx.handler([handle]), 1);
+    assert.equal(taking.fns.RemoveFontMemResourceEx.handler([handle]), 0, 'only once');
 });
 
 test('GetGlyphIndices maps each character, marking the ones outside the font', ()=>{

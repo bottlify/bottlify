@@ -130,3 +130,67 @@ export function windowsMetrics(font){
     }
     return null;
 }
+
+/**
+ * The family names a font file declares, one for each face in it: the `name`
+ * table's family (name 1), Windows' Unicode record first, US English among
+ * those, and the Macintosh one where there is no other. A collection
+ * ('ttcf') names one per face. Not a font file, it names none.
+ *
+ * @param {Uint8Array} bytes
+ * @returns {string[]}
+ */
+export function fontFamilies(bytes){
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const u16 = (/** @type {number} */ at)=>view.getUint16(at);
+    const u32 = (/** @type {number} */ at)=>view.getUint32(at);
+    const tag = (/** @type {number} */ at)=>String.fromCharCode(...bytes.subarray(at, at + 4));
+    /** @param {number} at  where a face's table directory starts */
+    const familyAt = at=>{
+        const tables = u16(at + 4);
+        for (let index = 0; index < tables; index++)
+        {
+            const record = at + 12 + index * 16;
+            if (tag(record) !== 'name')
+            {
+                continue;
+            }
+            const table = u32(record + 8);
+            const count = u16(table + 2);
+            const strings = table + u16(table + 4);
+            let best = null;
+            let rank = 0;
+            for (let entry = 0; entry < count; entry++)
+            {
+                const name = table + 6 + entry * 12;
+                const [platform, , language, id, length, offset] =
+                    [0, 2, 4, 6, 8, 10].map(field=>u16(name + field));
+                const here = id !== 1 ? 0 : platform === 3 ? (language === 0x409 ? 3 : 2)
+                    : platform === 1 ? 1 : 0;
+                if (here > rank)
+                {
+                    const raw = bytes.subarray(strings + offset, strings + offset + length);
+                    best = platform === 3
+                        ? String.fromCharCode(...Array.from({ length: length >> 1 },
+                            (_, unit)=>raw[unit * 2] << 8 | raw[unit * 2 + 1]))
+                        : String.fromCharCode(...raw);
+                    rank = here;
+                }
+            }
+            return best;
+        }
+        return null;
+    };
+    try
+    {
+        const kind = tag(0);
+        const starts = kind === 'ttcf'
+            ? Array.from({ length: u32(8) }, (_, index)=>u32(12 + index * 4))
+            : kind === 'OTTO' || kind === 'true' || u32(0) === 0x00010000 ? [0] : [];
+        return /** @type {string[]} */ (starts.map(familyAt).filter(name=>name));
+    }
+    catch {
+        // A directory that points past the end is not a font.
+        return [];
+    }
+}

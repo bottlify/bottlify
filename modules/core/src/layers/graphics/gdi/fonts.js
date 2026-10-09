@@ -76,6 +76,9 @@ export const NONANTIALIASED_QUALITY = 3;
  * @property {(font: FontRequest | null) => FontMetrics | null} metrics
  * @property {(code: number, font: FontRequest | null) => Glyph | null} glyph
  *           `code` is a byte of the program's text; null when unavailable.
+ * @property {(family: string, bytes: Uint8Array) => Promise<boolean>} addFace
+ *           A program's own font, drawn under its family name from then on;
+ *           false where the platform cannot take a font.
  */
 
 /**
@@ -198,7 +201,7 @@ export function createFontEngine(options = {}){
         : null;
     if (!context)
     {
-        return { available: false, metrics: ()=>null, glyph: ()=>null };
+        return { available: false, metrics: ()=>null, glyph: ()=>null, addFace: async()=>false };
     }
     const ctx = context;
     ctx.textBaseline = 'alphabetic';
@@ -326,8 +329,22 @@ export function createFontEngine(options = {}){
         return { advance, left: left | 0, top: face.metrics.ascent - up, width, height, coverage };
     };
 
+    const scope = /** @type {any} */ (globalThis);
     return {
         available: true,
+        async addFace(family, bytes){
+            if (typeof scope.FontFace !== 'function' || !scope.fonts)
+            {
+                return false;
+            }
+            const face = new scope.FontFace(family, bytes);
+            await face.load();
+            scope.fonts.add(face);
+            // What was measured and drawn of that name was a stand-in's.
+            faces.clear();
+            glyphs.clear();
+            return true;
+        },
         metrics: font=>faceOf(font ?? DEFAULT_FONT).metrics,
         glyph(code, font){
             const request = font ?? DEFAULT_FONT;

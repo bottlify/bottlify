@@ -3964,6 +3964,8 @@ async function buildApp(options){
                  * @param {string} text
                  */
                 textWidth: (font, text)=>core.api('graphics').gdiDrawing().textWidth(font, text),
+                /** A program's own font, AddFontMemResourceEx's. @param {string} family @param {Uint8Array} bytes */
+                addFont: (family, bytes)=>core.api('graphics').gdiDrawing().addFont(family, bytes),
                 // The desktop every window context draws into, shown after
                 // a paint pass. The window manager decides when a pass is
                 // over; the graphics layer owns the surface and the screen.

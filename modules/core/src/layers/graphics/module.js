@@ -1102,6 +1102,13 @@ export function createGraphicsModule(){
                  */
                 glyph: (code, font)=>fonts.glyph(code, font),
                 /**
+                 * A program's own font, under its family name, for as long as
+                 * the run lasts: AddFontMemResourceEx's.
+                 *
+                 * @param {string} family @param {Uint8Array} bytes
+                 */
+                addFont: (family, bytes)=>fonts.addFace(family, bytes),
+                /**
                  * How wide a string is in a font, or null without an engine.
                  *
                  * @param {import('../win32/gdi32/structs.js').LogFontFields} font
