@@ -111,6 +111,12 @@ const PAGE_EXECUTE_READWRITE = 0x40;
 /** VirtualQuery's State and Type, beside the MEM_COMMIT already declared above. */
 const MEM_FREE = 0x10000;
 const MEM_PRIVATE = 0x20000;
+/**
+ * VirtualQuery's Type for a mapped executable image. The CRT's SEH handler
+ * (_ValidateEH3RN) asks VirtualQuery about a frame's scope table and trusts it
+ * only inside an image, whose headers it then reads from AllocationBase.
+ */
+const MEM_IMAGE = 0x1000000;
 
 /**
  * `lpMaximumApplicationAddress`: where 32-bit user address space ends. A free
@@ -668,8 +674,9 @@ export function createHeapAllocator({ base, size }){
  *           a buffer holding the pattern would be allocated, zeroed and copied
  *           inside the program's own call, for bytes that can be filled once.
  * @property {(code: number) => void} setLastError
- * @property {(address: number) => { base: number, size: number } | null} [regionAt]
+ * @property {(address: number) => { base: number, size: number, kind?: string } | null} [regionAt]
  *           The memory layer's region map, when the assembling caller wired one.
+ *           A region of kind `image` is answered as MEM_IMAGE.
  *           Without it VirtualQuery knows only the arena.
  * @property {(address: number) => { base: number, size: number } | null} [nextRegionAfter]
  *           The mapped region with the lowest base above an address, when the
@@ -2026,6 +2033,12 @@ export function createHeapFunctions(host){
                 if (inArena)
                 {
                     answer = arenaAnswer(page, arenaEnd);
+                }
+                else if (region && region.kind === 'image')
+                {
+                    answer = [page, region.base, PAGE_EXECUTE_READWRITE,
+                        region.base + region.size - page, MEM_COMMIT, PAGE_EXECUTE_READWRITE,
+                        MEM_IMAGE];
                 }
                 else if (region)
                 {

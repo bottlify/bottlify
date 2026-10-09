@@ -102,7 +102,7 @@ function setup(arena = ARENA){
  * mapped spans -- the shape VirtualQuery needs from the memory layer,
  * without pulling that layer in.
  *
- * @param {{ base: number, size: number }[]} regions
+ * @param {{ base: number, size: number, kind?: string }[]} regions
  */
 function regionHost(regions){
     return {
@@ -1016,6 +1016,26 @@ test('VirtualQuery on a gap outside the arena answers the whole run up to the ne
     assert.equal(view.getUint32(buffer + MBI.State, true), MEM_RESERVE);
     assert.equal(view.getUint32(buffer + MBI.Protect, true), 0);
     assert.equal(view.getUint32(buffer + MBI.Type, true), MEM_PRIVATE);
+});
+
+test('VirtualQuery on a mapped image answers MEM_IMAGE from the image base', ()=>{
+    // The CRT's __except_handler3 validates a frame's scope table this way: a
+    // table not in MEM_IMAGE is not trusted, the frame's filter is never run,
+    // and an exception the program itself catches (SetThreadName's
+    // 0x406D1388) goes unhandled.
+    const host = regionHost([{ base: 0x400000, size: 0x300000, kind: 'image' }]);
+    const fns = createHeapFunctions(host);
+    const buffer = host.arena.base;
+
+    assert.equal(fns.VirtualQuery.handler([0x6d4878, buffer, MBI.SIZE]), MBI.SIZE);
+
+    const view = new DataView(host.bytes.buffer);
+    assert.equal(view.getUint32(buffer + MBI.BaseAddress, true), 0x6d4000);
+    assert.equal(view.getUint32(buffer + MBI.AllocationBase, true), 0x400000,
+        'the image base, where its headers are');
+    assert.equal(view.getUint32(buffer + MBI.RegionSize, true), 0x700000 - 0x6d4000);
+    assert.equal(view.getUint32(buffer + MBI.State, true), MEM_COMMIT);
+    assert.equal(view.getUint32(buffer + MBI.Type, true), 0x1000000);
 });
 
 test('VirtualQuery above the last region answers up to the top of user address space', ()=>{
