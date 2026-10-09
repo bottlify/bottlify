@@ -21,8 +21,8 @@
  *   node tools/night-run/night-run.mjs [--budget USD] [--model ID] [--minutes N]
  *       [--only id,id] [--skip id,id] [--dry]
  *
- * A bottle is broken unless its manifest labels it playable; the Wine test
- * bottles (labelled test) are not titles and are left out.
+ * Games only, and broken ones: a bottle labelled playable, a benchmark, the Wine test
+ * bottles (labelled test) and applications are left out.
  * They go in alphabetical order of title. The budget is shared out evenly
  * over the bottles not yet run, so an early long hunt leaves less for the rest
  * rather than running the key dry. Every session's messages
@@ -76,8 +76,9 @@ async function brokenBottles(){
         const manifest = JSON.parse(text);
         const labels = Array.isArray(manifest.labels) ? manifest.labels : [];
         const chosen = only.length ? only.includes(id)
-            : !id.startsWith('wine-') && !labels.some((/** @type {string} */ label)=>
-                ['playable', 'test'].includes(label));
+            : manifest.kind !== 'application' && !id.startsWith('wine-')
+                && !labels.some((/** @type {string} */ label)=>
+                    ['playable', 'test', 'benchmark'].includes(label));
         if (chosen && !skip.includes(id))
         {
             bottles.push({ id, title: String(manifest.title ?? id).trim(), labels });
