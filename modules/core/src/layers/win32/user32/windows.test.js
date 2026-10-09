@@ -11,6 +11,7 @@ import { MSG, RECT, WNDCLASSA, WNDCLASSEXA } from './structs.js';
 import { createWindowFunctions, watchDispatch } from './windows.js';
 import { createWindowDirectory } from './directory.js';
 import { decodeAnsi } from '../kernel32/locale.js';
+import { intersectAreas } from './paint.js';
 
 /**
  * Guest addresses the fixtures use: far enough apart that nothing overlaps, and
@@ -247,6 +248,8 @@ function paintedHost(fills, presents, clips, scrolls = []){
  * @param {() => number} [options.queueNow] The message queue's clock, for a test
  *        that waits for something the queue does later.
  * @param {(region: number) => any} [options.regionBox] gdi32's rectangle of a region.
+ * @param {(region: number, rect: any) => boolean} [options.setRegion] gdi32's filling
+ *        in of a region the caller owns.
  * @param {(delay: number, fire: () => void) => boolean} [options.later] The system's clock.
  * @param {any[]} [options.scrolls] Where the screen's moved pixels are told, with `paint`.
  * @param {any} [options.directory] The run's window directory, for a test that reads what
@@ -256,7 +259,7 @@ function paintedHost(fills, presents, clips, scrolls = []){
  */
 function setup({
     heap = false, reply, waitForObjects, now, hookReply, threadExists, trace, paint = false,
-    caller = { current: THREAD }, queueNow, regionBox, later, scrolls = [], directory,
+    caller = { current: THREAD }, queueNow, regionBox, setRegion, later, scrolls = [], directory,
     processId,
 } = {})
 {
@@ -351,6 +354,7 @@ function setup({
         } : undefined,
         release: heap ? (/** @type {number} */ at)=>released.push(at) : undefined,
         regionBox,
+        setRegion,
         later,
         directory,
         processId,
@@ -1810,10 +1814,11 @@ function paintsInOrder(fns, memory){
     throw new Error('the paints never ran out');
 }
 
-test('an area a child is to erase is repainted from its parent up, as a browser repaints', ()=>{
-    // A skinned dialog's owner-drawn label erases with a hollow brush and
-    // draws its text over whatever is there: repainted alone, its text went
-    // bold on every hover. The parent paints the area under it first.
+test('an area a child is to erase is the child\'s alone: its parent is not invalidated', ()=>{
+    // user32's msg.c test_paint_messages: RedrawWindow(hchild, ...,
+    // RDW_INVALIDATE | RDW_FRAME | RDW_ERASE) then UPDATENOW on the parent
+    // sends WM_NCPAINT, WM_ERASEBKGND and WM_PAINT to the child only
+    // (WmChildPaintNc); the parent's update region stays empty.
     const { fns, memory } = setup();
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
@@ -1823,15 +1828,11 @@ test('an area a child is to erase is repainted from its parent up, as a browser 
     paintsInOrder(fns, memory);
 
     fns.InvalidateRect.handler([child, 0, 1]);
-    assert.equal(fns.GetUpdateRect.handler([parent, RECT_BUFFER, 0]), 1,
-        'the parent has the area under the child to paint');
-    const [left, top, right, bottom] = [0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at));
-    assert.deepEqual([left, top, right, bottom], [40, 30, 60, 40], 'and only that area');
-    assert.deepEqual(paintsInOrder(fns, memory), [parent, child], 'the parent first');
+    assert.equal(fns.GetUpdateRect.handler([parent, 0, 0]), 0, 'nothing for the parent');
+    assert.deepEqual(paintsInOrder(fns, memory), [child], 'the child alone');
 
     fns.InvalidateRect.handler([child, 0, 0]);
-    assert.equal(fns.GetUpdateRect.handler([parent, 0, 0]), 0,
-        'an area the child paints over without erasing stays its own');
+    assert.equal(fns.GetUpdateRect.handler([parent, 0, 0]), 0);
     paintsInOrder(fns, memory);
 });
 
@@ -1872,21 +1873,38 @@ test('a parent that clips its children, or one in the middle of painting, is not
         'its painting cannot reach under the child');
 });
 
-test('UpdateWindow on a child starts from the parent that has the area under it to paint',
+test('UpdateWindow on a child paints the child alone, and validates the parent under it',
     ()=>{
+        // msg.c test_paint_messages: "RDW_UPDATENOW on child without
+        // WS_CLIPCHILDREN will validate corresponding parent area" -- the
+        // child is sent WM_PAINT (WmInvalidateErasePaint2), the parent is not,
+        // and what the parent had to paint under the child is taken out.
+        const RECT_IN = 0x11400;
         const { fns, memory, dispatched } = setup();
         putClass(memory);
         fns.RegisterClassA.handler([CLASS_STRUCT]);
         const parent = createWindow(fns, memory, { style: WS_VISIBLE });
         const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent,
-            x: 0, y: 0, width: 20, height: 10 });
+            x: 10, y: 10, width: 100, height: 100 });
         paintsInOrder(fns, memory);
-        fns.InvalidateRect.handler([child, 0, 1]);
+        memory.putU32s(RECT_IN, [0, 0, 50, 50]);
+        // RDW_INVALIDATE | RDW_ERASE | RDW_FRAME on the parent reaches the
+        // child, the parent not clipping it.
+        fns.RedrawWindow.handler([parent, RECT_IN, 0, 0x1 | 0x4 | 0x400]);
         dispatched.length = 0;
         assert.equal(fns.UpdateWindow.handler([child]), 1);
         assert.deepEqual(dispatched.filter(message=>message.message === WM_PAINT)
-            .map(message=>message.hwnd), [parent, child], 'painted first, the child would be'
-            + ' painted over');
+            .map(message=>message.hwnd), [child]);
+        assert.equal(fns.GetUpdateRect.handler([parent, RECT_BUFFER, 0]), 1,
+            'the part beside the child is still to paint');
+        assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at)), [0, 0, 50, 50],
+            'an L, whose rectangle is the one invalidated');
+        memory.putU32s(RECT_IN, [20, 20, 30, 30]);
+        fns.ValidateRect.handler([parent, 0]);
+        fns.RedrawWindow.handler([parent, RECT_IN, 0, 0x1 | 0x4 | 0x400]);
+        fns.UpdateWindow.handler([child]);
+        assert.equal(fns.GetUpdateRect.handler([parent, 0, 0]), 0,
+            'all under the child: nothing left');
     });
 
 test('UpdateWindow paints the window and then its children, as RDW_UPDATENOW | RDW_ALLCHILDREN',
@@ -2069,11 +2087,11 @@ test('a window hidden or destroyed has the caller\'s windows under it erased bef
         assert.equal(erased(under), 1, 'and the same for a window destroyed');
     });
 
-test('a sibling painted over by a change repaints only where it was painted over', ()=>{
-    // A wizard page's white panel is its first control, under the labels and
-    // check boxes laid on it. A check box that repaints itself takes the
-    // panel along under it -- and the panel repainted whole painted over
-    // every label, none of which had changed or was repainted after it.
+test('a child invalidating itself marks no sibling, beneath it or over it', ()=>{
+    // An update region is one window's (msg.c test_paint_messages,
+    // WmChildPaintNc: only the invalidated child is sent anything). The
+    // panel under a check box keeps its pixels: the check box's context is
+    // its own, and repaints nothing of the panel's.
     const WS_POPUP = 0x80000000;
     const { fns, memory } = setup({ paint: true });
     putClass(memory);
@@ -2090,14 +2108,379 @@ test('a sibling painted over by a change repaints only where it was painted over
     {
         fns.ValidateRect.handler([memory.u32(MSG_BUFFER + MSG.hwnd), 0]);
     }
-    void panel;
 
     fns.InvalidateRect.handler([box, 0, 1]);
-    const RECT_AT = 0x7f00;
-    assert.equal(fns.GetUpdateRect.handler([panel, RECT_AT, 0]), 1);
-    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RECT_AT + at)), [10, 120, 210, 140],
-        'the panel repaints under the check box and nowhere else');
-    assert.equal(fns.GetUpdateRect.handler([label, 0, 0]), 0, 'the label is left as it is');
+    assert.equal(fns.GetUpdateRect.handler([panel, 0, 0]), 0, 'the panel beneath it');
+    assert.equal(fns.GetUpdateRect.handler([label, 0, 0]), 0, 'a label beside it');
+    assert.equal(fns.GetUpdateRect.handler([page, 0, 0]), 0, 'the parent');
+    assert.equal(fns.GetUpdateRect.handler([box, 0, 0]), 1, 'the check box itself');
+});
+
+/** @param {any[]} area */
+const areaOf = area=>area.reduce((sum, piece)=>sum
+    + Math.max(0, piece.right - piece.left) * Math.max(0, piece.bottom - piece.top), 0);
+
+/**
+ * Whether two lists of rectangles cover the same pixels, however they are
+ * cut into pieces.
+ *
+ * @param {any[]} a @param {any[]} b
+ */
+const sameArea = (a, b)=>areaOf(a) === areaOf(b) && areaOf(intersectAreas(a, b)) === areaOf(a);
+
+/**
+ * A window's update region, read as the clip BeginPaint gives its context --
+ * the region, in client coordinates, where the window is seen -- and then
+ * painted, which validates it.
+ *
+ * @param {{ fns: any, clips: any[] }} context @param {number} hwnd
+ */
+function updateRegion({ fns, clips }, hwnd){
+    const PAINT = 0x11800;
+    fns.BeginPaint.handler([hwnd, PAINT]);
+    const region = clips.at(-1);
+    fns.EndPaint.handler([hwnd, PAINT]);
+    return region;
+}
+
+/** @param {any} context @param {number} hwnd @returns {number[] | null} */
+function updateRect({ fns, memory }, hwnd){
+    return fns.GetUpdateRect.handler([hwnd, RECT_BUFFER, 0]) === 0 ? null
+        : [0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at) | 0);
+}
+
+/** @param {any} context Every paint the queue holds taken, each validated. */
+function drainPaints({ fns, memory }){
+    while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) !== 0)
+    {
+        fns.RedrawWindow.handler([memory.u32(MSG_BUFFER + MSG.hwnd), 0, 0, 0x8 | 0x40]);
+    }
+}
+
+/**
+ * The paint tests' windows, of a class with no CS_HREDRAW or CS_VREDRAW
+ * unless `classStyle` says otherwise.
+ *
+ * @param {{ classStyle?: number }} [options]
+ */
+function paintWorld({ classStyle = 0 } = {}){
+    /** @type {Map<number, any>} */
+    const regions = new Map();
+    const context = setup({ paint: true, reply: message=>(message.message === 0x0014 ? 1 : 0),
+        setRegion: (region, rect)=>{
+            regions.set(region, rect);
+            return true;
+        } });
+    putClass(context.memory);
+    context.memory.putU32s(CLASS_STRUCT, [classStyle]);
+    context.fns.RegisterClassA.handler([CLASS_STRUCT]);
+    return { ...context, regions };
+}
+
+const WS_POPUP_STYLE = 0x80000000;
+
+test('a window invalidated marks no window over it, and is erased only when asked', ()=>{
+    // An update region is the window's own (msg.c test_paint_messages); a
+    // popup over it is clipped out of its context, not repainted after it.
+    const context = paintWorld();
+    const { fns, dispatched } = context;
+    const below = createWindow(fns, context.memory, { style: WS_POPUP_STYLE | WS_VISIBLE,
+        x: 0, y: 0, width: 300, height: 200 });
+    const above = createWindow(fns, context.memory, { style: WS_POPUP_STYLE | WS_VISIBLE,
+        x: 100, y: 50, width: 100, height: 100 });
+    drainPaints(context);
+
+    fns.InvalidateRect.handler([below, 0, 0]);
+    assert.equal(updateRect(context, above), null, 'nothing for the window over it');
+    dispatched.length = 0;
+    assert.ok(sameArea(updateRegion(context, below), [
+        { left: 0, top: 0, right: 300, bottom: 50 },
+        { left: 0, top: 50, right: 100, bottom: 200 },
+        { left: 200, top: 50, right: 300, bottom: 200 },
+        { left: 100, top: 150, right: 200, bottom: 200 },
+    ]), 'it paints where it is seen');
+    assert.equal(dispatched.filter(message=>message.message === 0x0014).length, 0,
+        'bErase FALSE: no WM_ERASEBKGND');
+
+    fns.InvalidateRect.handler([below, 0, 1]);
+    dispatched.length = 0;
+    updateRegion(context, below);
+    assert.equal(dispatched.filter(message=>message.message === 0x0014).length, 1);
+    assert.equal(updateRect(context, above), null);
+});
+
+test('RedrawWindow reaches children by WS_CLIPCHILDREN, RDW_ALLCHILDREN and RDW_NOCHILDREN',
+    ()=>{
+        // msg.c test_paint_messages, with a WS_BORDER child at (10, 10): the
+        // parent's {0,0,50,50} is the child's {0,0,39,39}, its client starting
+        // a pixel in; WS_CLIPCHILDREN keeps it from the child unless
+        // RDW_ALLCHILDREN, and RDW_NOCHILDREN keeps it from the child always.
+        const WS_BORDER = 0x00800000;
+        const WS_CLIPCHILDREN = 0x02000000;
+        const RDW_INVALIDATE = 0x1;
+        const RDW_ERASE = 0x4;
+        const RDW_VALIDATE = 0x8;
+        const RDW_NOCHILDREN = 0x40;
+        const RDW_ALLCHILDREN = 0x80;
+        const RDW_FRAME = 0x400;
+        const RECT_IN = 0x11400;
+        const context = paintWorld();
+        const { fns, memory } = context;
+        const parent = createWindow(fns, memory, { style: WS_POPUP_STYLE | WS_VISIBLE,
+            x: 100, y: 100, width: 200, height: 200 });
+        const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE | WS_BORDER,
+            parent, x: 10, y: 10, width: 100, height: 100 });
+        drainPaints(context);
+        memory.putU32s(RECT_IN, [0, 0, 50, 50]);
+        /** @param {number} flags */
+        const redraw = flags=>fns.RedrawWindow.handler([parent, RECT_IN, 0, flags]);
+
+        redraw(RDW_INVALIDATE | RDW_ERASE | RDW_FRAME);
+        assert.deepEqual(updateRect(context, parent), [0, 0, 50, 50]);
+        assert.deepEqual(updateRect(context, child), [0, 0, 39, 39]);
+        redraw(RDW_VALIDATE);
+        assert.equal(updateRect(context, child), null, 'validated with it');
+        assert.equal(updateRect(context, parent), null);
+
+        redraw(RDW_INVALIDATE | RDW_ERASE | RDW_NOCHILDREN);
+        assert.equal(updateRect(context, child), null, 'RDW_NOCHILDREN');
+        drainPaints(context);
+
+        fns.SetWindowLongA.handler([parent, -16, WS_POPUP_STYLE | WS_VISIBLE | WS_CLIPCHILDREN]);
+        drainPaints(context);
+        redraw(RDW_INVALIDATE | RDW_ERASE);
+        assert.deepEqual(updateRect(context, parent), [0, 0, 50, 50]);
+        assert.equal(updateRect(context, child), null, 'a parent that clips its children');
+        redraw(RDW_INVALIDATE | RDW_ALLCHILDREN);
+        assert.deepEqual(updateRect(context, child), [0, 0, 39, 39], 'RDW_ALLCHILDREN');
+    });
+
+test('the update region is the union of what was invalidated, less what was validated', ()=>{
+    // msg.c test_paint_messages: {0,0,100,100} less {0,0,50,100} is
+    // {50,0,100,100}; a region is cropped to the client area; a rectangle
+    // with its corners swapped is put the right way round; an empty one is
+    // nothing.
+    const RECT_IN = 0x11400;
+    const context = paintWorld();
+    const { fns, memory } = context;
+    const hwnd = createWindow(fns, memory, { style: WS_POPUP_STYLE | WS_VISIBLE,
+        x: 0, y: 0, width: 300, height: 200 });
+    drainPaints(context);
+    /** @param {number[]} rect */
+    const put = rect=>{
+        memory.putU32s(RECT_IN, rect.map(value=>value >>> 0));
+        return RECT_IN;
+    };
+
+    fns.InvalidateRect.handler([hwnd, put([0, 0, 100, 100]), 0]);
+    fns.ValidateRect.handler([hwnd, put([0, 0, 50, 100])]);
+    assert.deepEqual(updateRect(context, hwnd), [50, 0, 100, 100]);
+    fns.ValidateRect.handler([hwnd, put([50, 0, 100, 100])]);
+    assert.equal(updateRect(context, hwnd), null, 'everything valid');
+
+    fns.InvalidateRect.handler([hwnd, put([0, 0, 10, 10]), 0]);
+    fns.InvalidateRect.handler([hwnd, put([200, 150, 210, 160]), 0]);
+    assert.deepEqual(updateRect(context, hwnd), [0, 0, 210, 160], 'the rectangle around both');
+    fns.ValidateRect.handler([hwnd, put([0, 0, 10, 10])]);
+    assert.deepEqual(updateRect(context, hwnd), [200, 150, 210, 160],
+        'the other corner, not the span between');
+    fns.InvalidateRect.handler([hwnd, put([0, 0, 10, 10]), 0]);
+    assert.ok(sameArea(updateRegion(context, hwnd), [
+        { left: 0, top: 0, right: 10, bottom: 10 },
+        { left: 200, top: 150, right: 210, bottom: 160 },
+    ]), 'BeginPaint clips to the two corners');
+
+    fns.InvalidateRect.handler([hwnd, put([-50, -50, 1000, 1000]), 0]);
+    assert.deepEqual(updateRect(context, hwnd), [0, 0, 300, 200], 'cropped to the client area');
+    fns.ValidateRect.handler([hwnd, 0]);
+    fns.InvalidateRect.handler([hwnd, put([21, 12, 7, 30]), 0]);
+    assert.deepEqual(updateRect(context, hwnd), [7, 12, 21, 30]);
+    fns.ValidateRect.handler([hwnd, 0]);
+    fns.InvalidateRect.handler([hwnd, put([10, 10, 10, 15]), 0]);
+    assert.equal(updateRect(context, hwnd), null, 'an empty rectangle');
+});
+
+test('GetUpdateRgn fills in the rectangle around the update region', ()=>{
+    const REGION = 0x7000;
+    const SIMPLEREGION = 2;
+    const NULLREGION = 1;
+    const RECT_IN = 0x11400;
+    const context = paintWorld();
+    const { fns, memory, regions } = context;
+    const hwnd = createWindow(fns, memory, { style: WS_POPUP_STYLE | WS_VISIBLE,
+        x: 0, y: 0, width: 300, height: 200 });
+    drainPaints(context);
+    assert.equal(fns.GetUpdateRgn.handler([hwnd, REGION, 0]), NULLREGION);
+    memory.putU32s(RECT_IN, [10, 10, 20, 20]);
+    fns.InvalidateRect.handler([hwnd, RECT_IN, 0]);
+    memory.putU32s(RECT_IN, [30, 30, 40, 40]);
+    fns.InvalidateRect.handler([hwnd, RECT_IN, 0]);
+    assert.equal(fns.GetUpdateRgn.handler([hwnd, REGION, 0]), SIMPLEREGION);
+    assert.deepEqual(regions.get(REGION), { left: 10, top: 10, right: 40, bottom: 40 });
+});
+
+test('a window moved over another exposes only the strip it left, and nothing over it', ()=>{
+    // msg.c test_swp_paint_regions: what is beneath is invalidated where the
+    // window was and no longer is; the moved window, its pixels copied,
+    // owes nothing; a window over it is not touched. Hidden, it exposes all
+    // of what it showed, which is not what the window over it covers.
+    const SWP_NOSIZE = 0x1;
+    const SWP_NOZORDER = 0x4;
+    const SWP_NOACTIVATE = 0x10;
+    const context = paintWorld();
+    const { fns, memory } = context;
+    const below = createWindow(fns, memory, { style: WS_POPUP_STYLE | WS_VISIBLE,
+        x: 0, y: 0, width: 400, height: 300 });
+    const moving = createWindow(fns, memory, { style: WS_POPUP_STYLE | WS_VISIBLE,
+        x: 50, y: 50, width: 100, height: 100 });
+    drainPaints(context);
+    fns.SetWindowPos.handler([moving, 0, 60, 50, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]);
+    assert.deepEqual(updateRect(context, below), [50, 50, 60, 150], 'the 10-pixel strip');
+    assert.equal(updateRect(context, moving), null, 'its pixels came with it');
+    drainPaints(context);
+
+    const over = createWindow(fns, memory, { style: WS_POPUP_STYLE | WS_VISIBLE,
+        x: 140, y: 140, width: 30, height: 30 });
+    drainPaints(context);
+    fns.ShowWindow.handler([moving, SW_HIDE]);
+    assert.equal(updateRect(context, over), null, 'the window over it');
+    assert.ok(sameArea(updateRegion(context, below), [
+        { left: 60, top: 50, right: 160, bottom: 140 },
+        { left: 60, top: 140, right: 140, bottom: 150 },
+    ]), 'what it showed, less what the window over it covers');
+});
+
+test('SWP_NOREDRAW marks nothing: the program redraws what it asks for', ()=>{
+    // "Does not redraw changes ... applies to the client area, the nonclient
+    // area, and any part of the parent window uncovered" (SetWindowPos).
+    const SWP_NOSIZE = 0x1;
+    const SWP_NOZORDER = 0x4;
+    const SWP_NOREDRAW = 0x8;
+    const SWP_NOACTIVATE = 0x10;
+    const context = paintWorld();
+    const { fns, memory } = context;
+    const below = createWindow(fns, memory, { style: WS_POPUP_STYLE | WS_VISIBLE,
+        x: 0, y: 0, width: 400, height: 300 });
+    const moving = createWindow(fns, memory, { style: WS_POPUP_STYLE | WS_VISIBLE,
+        x: 50, y: 50, width: 100, height: 100 });
+    drainPaints(context);
+    fns.SetWindowPos.handler([moving, 0, 60, 60, 0, 0,
+        SWP_NOSIZE | SWP_NOZORDER | SWP_NOREDRAW | SWP_NOACTIVATE]);
+    assert.equal(updateRect(context, below), null);
+    assert.equal(updateRect(context, moving), null);
+});
+
+test('a size change repaints the whole client only in a direction CS_HREDRAW or CS_VREDRAW names',
+    ()=>{
+        // msg.c test_hvredraw: the update region is the new client area less
+        // the old, both from the client's corner -- moved and sized at once
+        // too, the bits going along -- or all of it when the class asks for
+        // a redraw in the direction that changed.
+        const CS_VREDRAW = 0x1;
+        const CS_HREDRAW = 0x2;
+        const SWP_NOZORDER = 0x4;
+        const SWP_NOACTIVATE = 0x10;
+        /** @param {number} classStyle @param {number[]} change */
+        const after = (classStyle, [dx, dy, dw, dh])=>{
+            const context = paintWorld({ classStyle });
+            const { fns, memory } = context;
+            const hwnd = createWindow(fns, memory, { style: WS_POPUP_STYLE | WS_VISIBLE,
+                x: 100, y: 100, width: 150, height: 150 });
+            drainPaints(context);
+            fns.SetWindowPos.handler([hwnd, 0, 100 + dx, 100 + dy, 150 + dw, 150 + dh,
+                SWP_NOZORDER | SWP_NOACTIVATE]);
+            return updateRegion(context, hwnd);
+        };
+        const whole = (/** @type {number} */ w, /** @type {number} */ h)=>[
+            { left: 0, top: 0, right: w, bottom: h }];
+        assert.ok(sameArea(after(0, [0, 0, 5, 0]),
+            [{ left: 150, top: 0, right: 155, bottom: 150 }]));
+        assert.ok(sameArea(after(0, [0, 0, 0, 5]),
+            [{ left: 0, top: 150, right: 150, bottom: 155 }]));
+        assert.ok(sameArea(after(0, [0, 0, -5, -5]), []), 'shrunk: nothing new');
+        assert.ok(sameArea(after(0, [-5, -5, 5, 5]), [
+            { left: 150, top: 0, right: 155, bottom: 155 },
+            { left: 0, top: 150, right: 150, bottom: 155 },
+        ]), 'moved and sized: the bits went along');
+        assert.ok(sameArea(after(CS_HREDRAW, [0, 0, 0, 5]),
+            [{ left: 0, top: 150, right: 150, bottom: 155 }]), 'CS_HREDRAW, only taller');
+        assert.ok(sameArea(after(CS_HREDRAW, [0, 0, 5, 0]), whole(155, 150)));
+        assert.ok(sameArea(after(CS_VREDRAW, [0, 0, 0, 5]), whole(150, 155)));
+        assert.ok(sameArea(after(CS_VREDRAW | CS_HREDRAW, [-5, -5, 5, 5]), whole(155, 155)));
+    });
+
+test('a child shown, or moved, marks its parent as msg.c test_swp_paint_regions has it', ()=>{
+    // test_swp_paint_region_on_show: a child shown has its client area to
+    // paint, and its parent the child's rectangle. test_swp_paint_regions:
+    // a child moved by -20 leaves its parent the old rectangle less the new,
+    // and owes nothing itself.
+    const WS_BORDER = 0x00800000;
+    const SWP_NOSIZE = 0x1;
+    const SWP_NOMOVE = 0x2;
+    const SWP_NOZORDER = 0x4;
+    const SWP_NOACTIVATE = 0x10;
+    const SWP_SHOWWINDOW = 0x40;
+    const context = paintWorld();
+    const { fns, memory } = context;
+    const parent = createWindow(fns, memory, { style: WS_POPUP_STYLE | WS_VISIBLE,
+        x: 80, y: 80, width: 200, height: 200 });
+    const child = createWindow(fns, memory, { style: WS_CHILD | WS_BORDER, parent,
+        x: 10, y: 10, width: 90, height: 90 });
+    drainPaints(context);
+    fns.SetWindowPos.handler([child, 0, 0, 0, 0, 0,
+        SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSIZE | SWP_NOMOVE]);
+    assert.deepEqual(updateRect(context, parent), [10, 10, 100, 100]);
+    assert.deepEqual(updateRect(context, child), [0, 0, 88, 88]);
+    drainPaints(context);
+
+    fns.SetWindowPos.handler([child, 0, -10, -10, 90, 90, SWP_NOACTIVATE | SWP_NOZORDER]);
+    assert.ok(sameArea(updateRegion(context, parent), [
+        { left: 80, top: 10, right: 100, bottom: 100 },
+        { left: 10, top: 80, right: 80, bottom: 100 },
+    ]), 'the old rectangle less the new');
+    assert.equal(updateRect(context, child), null);
+});
+
+test('a window brought to the top paints only what the windows over it hid', ()=>{
+    const SWP_NOSIZE = 0x1;
+    const SWP_NOMOVE = 0x2;
+    const SWP_NOACTIVATE = 0x10;
+    const context = paintWorld();
+    const { fns, memory } = context;
+    const first = createWindow(fns, memory, { style: WS_POPUP_STYLE | WS_VISIBLE,
+        x: 0, y: 0, width: 200, height: 200 });
+    const second = createWindow(fns, memory, { style: WS_POPUP_STYLE | WS_VISIBLE,
+        x: 100, y: 100, width: 200, height: 200 });
+    drainPaints(context);
+    fns.SetWindowPos.handler([first, 0, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE]);
+    assert.deepEqual(updateRect(context, first), [100, 100, 200, 200]);
+    assert.equal(updateRect(context, second), null, 'the one now beneath keeps its pixels');
+});
+
+test('a transparent sibling over a window that repaints paints again over it', ()=>{
+    // WS_EX_TRANSPARENT clips nothing beneath it and shows because it is
+    // painted after the siblings beneath it; repainting one of them paints
+    // over it there, so it paints again there -- and nowhere else.
+    const WS_EX_TRANSPARENT = 0x20;
+    const context = paintWorld();
+    const { fns, memory } = context;
+    const page = createWindow(fns, memory, { style: WS_POPUP_STYLE | WS_VISIBLE,
+        x: 0, y: 0, width: 300, height: 200 });
+    memory.putString(TITLE, 'child');
+    const label = fns.CreateWindowExA.handler([WS_EX_TRANSPARENT, CLASS_NAME, TITLE,
+        WS_CHILD | WS_VISIBLE, 10, 10, 100, 20, page, 0, HINSTANCE, 0]);
+    const picture = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: page,
+        x: 0, y: 0, width: 200, height: 100 });
+    const beside = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: page,
+        x: 200, y: 100, width: 50, height: 50 });
+    drainPaints(context);
+    const RECT_IN = 0x11400;
+    memory.putU32s(RECT_IN, [50, 0, 200, 100]);
+    fns.InvalidateRect.handler([picture, RECT_IN, 1]);
+    assert.deepEqual(updateRect(context, label), [40, 0, 100, 20], 'where the picture repaints');
+    drainPaints(context);
+    fns.InvalidateRect.handler([beside, 0, 1]);
+    assert.equal(updateRect(context, label), null, 'not for a sibling it is not over');
 });
 
 test('a window that moves takes its pixels with it, and only what it left is painted', ()=>{
@@ -2300,6 +2683,8 @@ test('a transparent child paints after the siblings beneath it, an opaque one fr
     // and then covered. Without the style the stacking alone decides, and
     // the topmost child paints first.
     const WS_EX_TRANSPARENT = 0x20;
+    const RDW_VALIDATE = 0x8;
+    const RDW_NOCHILDREN = 0x40;
     /** @param {number} exStyle */
     const page = exStyle=>{
         const { fns, memory, hwnd } = withWindow();
@@ -2319,7 +2704,9 @@ test('a transparent child paints after the siblings beneath it, an opaque one fr
             {
                 const target = memory.u32(MSG_BUFFER + MSG.hwnd);
                 painted.push(target);
-                fns.ValidateRect.handler([target, 0]);
+                // The window alone: ValidateRect on a parent that does not
+                // clip its children validates them too (RDW_VALIDATE, msg.c).
+                fns.RedrawWindow.handler([target, 0, 0, RDW_VALIDATE | RDW_NOCHILDREN]);
             }
         }
         return { painted, hwnd, label, picture };

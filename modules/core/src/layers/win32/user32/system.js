@@ -461,6 +461,10 @@ const GCL_STYLE = -26;
 const GCW_ATOM = -32;
 const GCL_HICONSM = -34;
 
+/** The class styles that have a window repainted whole when its size changes. */
+const CS_VREDRAW = 0x0001;
+const CS_HREDRAW = 0x0002;
+
 /** The style bit EnableWindow sets, and the only one it touches. */
 const WS_DISABLED = 0x08000000;
 const WS_MINIMIZE = 0x20000000;
@@ -966,8 +970,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             return 0;
         }
         const wasShown = host.shown(record);
-        const covered = wasShown ? host.geometry.shapedRect(record) : null;
-        // Read before it moves: whether its pixels on the screen are all its own.
+        const before = wasShown ? host.geometry.shapedRect(record) : null;
+        const oldWidth = record.width;
+        const oldHeight = record.height;
+        // Read before it moves: whether its pixels on the screen are all its
+        // own, and what it and its descendants show.
         const whole = wasShown && host.wholeOnScreen?.(record) === true;
         const moved = (flags & SWP_NOMOVE) === 0 && (record.x !== (x | 0) || record.y !== (y | 0));
         const sized = (flags & SWP_NOSIZE) === 0
@@ -975,6 +982,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         // Moved while it holds the mouse, it is being dragged: held as it is,
         // its picture taken before it moves.
         const dragged = wasShown && moved && !sized && host.dragging?.(record) === true;
+        const watched = host.beforeChange?.(record, dragged) ?? null;
         if ((flags & SWP_NOMOVE) === 0)
         {
             record.x = x | 0;
@@ -995,35 +1003,49 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         }
         if ((flags & SWP_NOZORDER) === 0 && (record.style & WS_CHILD) !== 0)
         {
-            host.restack(record, after >>> 0);
+            host.restack(record, after >>> 0, false);
         }
         else if ((flags & SWP_NOZORDER) === 0 && (after | 0) !== HWND_BOTTOM)
         {
-            host.raise(record);
+            host.raise(record, false);
         }
         host.tell?.(record);
         const isShown = host.shown(record);
+        // A class with CS_HREDRAW or CS_VREDRAW has the whole of its windows
+        // repainted when they change size in that direction; any other keeps
+        // what it showed and is repainted where it grew (msg.c test_hvredraw).
+        const classStyle = classOfWindow(record.hwnd)?.style ?? 0;
+        const redraw = ((classStyle & CS_HREDRAW) !== 0 && record.width !== oldWidth)
+            || ((classStyle & CS_VREDRAW) !== 0 && record.height !== oldHeight);
+        // SWP_NOREDRAW asks for no painting at all: what the window left and
+        // what it now shows wait for the program to invalidate them.
+        const redrawn = (flags & SWP_NOREDRAW) === 0;
         if (dragged && isShown)
         {
-            host.dragMove(record, covered);
+            host.dragMove(record);
         }
-        // A window that only moved takes its pixels with it, as SetWindowPos
-        // copies a window's bits unless told not to.
-        const copied = (dragged && isShown) || whole && isShown && moved && !sized
-            && (flags & (SWP_NOCOPYBITS | SWP_NOREDRAW)) === 0
-            && host.moveBits?.(record, covered) === true;
-        if (!copied && covered && (!isShown || moved || sized))
+        // A window that moved takes its pixels with it, as SetWindowPos
+        // copies a window's bits unless told not to; its client area keeps
+        // its corner, so a size changed with the move keeps them too.
+        const copied = !dragged && whole && isShown && moved && redrawn && !redraw
+            && (flags & SWP_NOCOPYBITS) === 0
+            && host.moveBits?.(record, before) === true;
+        if (watched)
         {
-            host.uncover(covered);
-        }
-        if (!copied && isShown && (!wasShown || moved || sized))
-        {
-            host.appear(record);
+            const now = host.geometry.shapedRect(record);
+            host.afterChange?.(watched, {
+                quiet: !redrawn,
+                shift: copied && before
+                    ? { dx: now.left - before.left, dy: now.top - before.top } : undefined,
+                moved: isShown && wasShown,
+                sized: sized && isShown,
+                held: dragged && isShown,
+                redraw,
+            });
         }
         // What it showed is framed and erased before it returns, as Windows
         // XP's SetWindowPos does it; SWP_NOREDRAW asks for no painting at all.
-        const erased = (flags & SWP_NOREDRAW) === 0
-            ? host.eraseShown?.(thread) ?? 1 : 1;
+        const erased = redrawn ? host.eraseShown?.(thread) ?? 1 : 1;
         // A child placed without SWP_NOACTIVATE is told it is the active
         // child, shown or not (user32's message tests, WmShowChildSeq_2 and
         // _4): an MDI child becomes the client's active one this way when its
@@ -3662,14 +3684,15 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 {
                     return 0;
                 }
-                const took = redraw && host.shown(record) ? host.geometry.shapedRect(record) : null;
+                const watched = redraw && host.shown(record)
+                    ? host.beforeChange?.(record) ?? null : null;
                 // The rectangle around it and, for a region of more than one,
                 // its rectangles: the window's shape (frame.js `shapeRects`).
                 // GetWindowRgn and GetWindowRgnBox answer the rectangle.
                 record.regionBox = (hRgn >>> 0) === 0 ? null : host.regionBox?.(hRgn >>> 0) ?? null;
-                if (took)
+                if (watched)
                 {
-                    host.uncover(took);
+                    host.afterChange?.(watched, { moved: true, redraw: true });
                 }
                 return 1;
             },

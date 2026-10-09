@@ -663,7 +663,7 @@ test('InvalidateRgn and ValidateRgn take the region\'s own rectangle', ()=>{
     assert.equal(fns.ValidateRgn.argBytes, 8);
 });
 
-test('ValidateRect takes a band off the update area, and keeps it whole over a hole', ()=>{
+test('ValidateRect takes a band off the update area, and a hole out of it', ()=>{
     const { memory, fns } = setup();
     const hwnd = makeWindow(memory, fns);
     fns.ValidateRect.handler([hwnd, 0]);
@@ -677,7 +677,18 @@ test('ValidateRect takes a band off the update area, and keeps it whole over a h
     memory.putU32s(RECT_BUFFER, [40, 40, 60, 60]);
     fns.ValidateRect.handler([hwnd, RECT_BUFFER]);
     assert.deepEqual(updateRectOf(memory, fns, hwnd), [0, 30, 100, 100],
-        'a hole in the middle is not something a rectangle can hold');
+        'a hole in the middle leaves the rectangle around the region as it was');
+    memory.putU32s(RECT_BUFFER, [0, 30, 100, 40]);
+    fns.ValidateRect.handler([hwnd, RECT_BUFFER]);
+    memory.putU32s(RECT_BUFFER, [0, 60, 100, 100]);
+    fns.ValidateRect.handler([hwnd, RECT_BUFFER]);
+    assert.deepEqual(updateRectOf(memory, fns, hwnd), [0, 40, 100, 60],
+        'and the region is kept, not the rectangle: the hole stays valid');
+    memory.putU32s(RECT_BUFFER, [0, 40, 40, 60]);
+    fns.ValidateRect.handler([hwnd, RECT_BUFFER]);
+    memory.putU32s(RECT_BUFFER, [60, 40, 100, 60]);
+    fns.ValidateRect.handler([hwnd, RECT_BUFFER]);
+    assert.equal(updateRectOf(memory, fns, hwnd), null, 'the hole was never to paint again');
 
     memory.putU32s(RECT_BUFFER, [0, 0, 200, 200]);
     fns.ValidateRect.handler([hwnd, RECT_BUFFER]);

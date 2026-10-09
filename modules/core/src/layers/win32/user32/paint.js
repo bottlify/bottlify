@@ -14,10 +14,14 @@
  * region, gets WM_PAINT for as long as it runs -- the loop looks like a hang
  * and has nothing to do with drawing.
  *
- * A region is kept here as one rectangle rather than as a real region. That is
- * a deliberate simplification with a known ceiling: a program that invalidates
- * two far-apart strips repaints the span between them, which is slower and
- * never wrong. Real regions belong with the drawing, not with the bookkeeping.
+ * An update region is the window's own: invalidating one window never marks
+ * another, apart from its children by the RedrawWindow rules (RDW_ALLCHILDREN,
+ * or a parent without WS_CLIPCHILDREN). Every window paints through a context
+ * clipped to what of it is seen, so a window below repainting cannot reach the
+ * one above it, and nothing above has to paint again after it. The region is
+ * kept as rectangles that do not overlap, in client coordinates (`updateArea`),
+ * with their bounding rectangle beside it (`updateRect`) for GetUpdateRect,
+ * rcPaint and the many places that only ask whether there is anything to paint.
  *
  * Where the pixels go is not decided here. A DC comes from whoever owns them,
  * handed in as a service, because this layer may not reach the graphics layer:
@@ -30,7 +34,7 @@
 import { PAINTSTRUCT, RECT, readRect, writeRect, writeU32s } from './structs.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { readText } from './unicode.js';
-import { intersectArea, subtractFromArea } from '../gdi32/rects.js';
+import { boundsOf, intersectArea, subtractFromArea } from '../gdi32/rects.js';
 
 /** DrawText's flags. */
 const DT_CENTER = 0x0001;
@@ -42,13 +46,18 @@ const DT_SINGLELINE = 0x0020;
 const DT_CALCRECT = 0x0400;
 const DT_NOPREFIX = 0x0800;
 
-/** RedrawWindow's flags, the ones with an effect on an update rectangle. */
+/** RedrawWindow's flags, the ones with an effect on an update region. */
+const RDW_NOCHILDREN = 0x0040;
 const RDW_ALLCHILDREN = 0x0080;
 const RDW_INVALIDATE = 0x0001;
 const RDW_ERASE = 0x0004;
 const RDW_VALIDATE = 0x0008;
 const RDW_UPDATENOW = 0x0100;
 const RDW_FRAME = 0x0400;
+
+/** The styles that decide what a window's painting covers. */
+const WS_CLIPCHILDREN = 0x02000000;
+const WS_EX_TRANSPARENT = 0x00000020;
 
 /** What BeginPaint sends before the program draws. */
 const WM_NCPAINT = 0x0085;
@@ -139,9 +148,10 @@ const ESTIMATED_LINE_HEIGHT = 16;
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
- * @property {(region: number) => Rect | null} [regionBox]
- *           The rectangle a region object holds, null for a handle that is not
- *           one: gdi32's, reached the same way `setRegion` is.
+ * @property {(region: number) => (Rect & { rects?: Rect[] }) | null} [regionBox]
+ *           The rectangle a region object holds, and its rectangles when it is
+ *           more than one; null for a handle that is not one: gdi32's, reached
+ *           the same way `setRegion` is.
  * @property {(region: number, rect: any) => void} [setRegion]
  *           Fills in a region object the caller owns. It belongs to gdi32's
  *           table, which this layer cannot reach, so it arrives as a service or
@@ -188,16 +198,50 @@ const ESTIMATED_LINE_HEIGHT = 16;
  * @property {number | null} underline   The character to underline, for a mnemonic.
  */
 
-/** @param {any} a @param {any} b */
-const union = (a, b)=>({
-    left: Math.min(a.left, b.left),
-    top: Math.min(a.top, b.top),
-    right: Math.max(a.right, b.right),
-    bottom: Math.max(a.bottom, b.bottom),
-});
-
 /** @param {any} rect */
 const isEmpty = rect=>rect.right <= rect.left || rect.bottom <= rect.top;
+
+/**
+ * Past this many rectangles an update region is kept as the one around them:
+ * repainting a little more of the window's own area is a cost, while a region
+ * that grew without bound would be paid for at every invalidation.
+ */
+const MOST_UPDATE_PIECES = 64;
+
+/**
+ * An area with a rectangle added, still in pieces that do not overlap: only
+ * the part of the rectangle not already in it is added, so invalidating an
+ * area already invalid -- a control made inside a dialog still to paint --
+ * leaves the pieces as they were.
+ *
+ * @param {Rect[]} area @param {Rect} rect @returns {Rect[]}
+ */
+export const addToArea = (area, rect)=>(isEmpty(rect)
+    ? area : [...area, ...area.reduce(subtractFromArea, [rect])]);
+
+/** @param {Rect[]} area @param {Rect[]} more @returns {Rect[]} */
+export const unionAreas = (area, more)=>more.reduce(addToArea, area);
+
+/** @param {Rect[]} area @param {Rect[]} taken @returns {Rect[]} */
+export const subtractAreas = (area, taken)=>taken.reduce(subtractFromArea, area);
+
+/** @param {Rect[]} a @param {Rect[]} b @returns {Rect[]} the pixels in both */
+export const intersectAreas = (a, b)=>a.flatMap(piece=>intersectArea(b, piece));
+
+/** @param {Rect[]} area @param {number} dx @param {number} dy @returns {Rect[]} */
+export const offsetArea = (area, dx, dy)=>area.map(piece=>({ left: piece.left + dx,
+    top: piece.top + dy, right: piece.right + dx, bottom: piece.bottom + dy }));
+
+/**
+ * A rectangle a program passed with its corners swapped, put the right way
+ * round, as RedrawWindow and InvalidateRect take it (user32's msg.c,
+ * test_paint_messages: {21,12,7,30} invalidates {7,12,21,30}).
+ *
+ * @param {Rect} rect @returns {Rect}
+ */
+export const ordered = rect=>({ left: Math.min(rect.left, rect.right),
+    top: Math.min(rect.top, rect.bottom), right: Math.max(rect.left, rect.right),
+    bottom: Math.max(rect.top, rect.bottom) });
 
 /**
  * Where DrawText puts each line of a string.
@@ -376,12 +420,13 @@ export function tabbedWidth(text, widthOf, stops, interval){
  *     visibleWindowRect: (record: any) => Rect }} options.geometry
  * @param {(hwnd: number, message: number, wParam: number, lParam: number,
  *     thread?: unknown) => number | Promise<number>} options.send
- * @param {(record: any, erase: boolean) => void} options.invalidated
- *        A window's update area grew, to be erased or not. Whoever keeps the
- *        others in order marks the ones that now have to repaint with it.
- * @param {(record: any) => any} [options.paintsFirst]
- *        The window an update of this one starts from: an ancestor that still
- *        has to paint the area under it, or the window itself.
+ * @param {(record: any) => void} options.invalidated
+ *        A window's update area grew: its thread has a paint to look for.
+ * @param {(record: any) => any[]} [options.children]
+ *        A window's own children, which an invalidation of it reaches by the
+ *        RedrawWindow rules.
+ * @param {(record: any) => any | null} [options.parentOf]
+ *        A child window's parent; null for a top-level window.
  * @param {() => void} options.painted   Something reached the screen.
  * @param {(record: any) => any[]} [options.descendants]
  *        A window's descendants, parents before their children: the order
@@ -424,73 +469,156 @@ export function createPaintFunctions(options){
     /** The window LockWindowUpdate holds, or 0. */
     let lockedWindow = 0;
 
-    /** @param {any} record @param {any} rect @param {boolean} [erase] */
-    const invalidate = (record, rect, erase = false)=>{
-        if (isEmpty(rect))
+    /**
+     * The update area a window now has, and the rectangle around it; nothing
+     * left is no update area at all, which is also no erase still owed and
+     * no frame -- what RDW_VALIDATE leaves (msg.c test_paint_messages: a
+     * window validated whole is sent nothing by RDW_ERASENOW).
+     *
+     * @param {any} record @param {Rect[] | null} area
+     */
+    const setUpdate = (record, area)=>{
+        const pieces = area && area.length > MOST_UPDATE_PIECES ? [boundsOf(area)] : area;
+        if (!pieces || pieces.length === 0)
+        {
+            record.updateArea = null;
+            record.updateRect = null;
+            record.erase = false;
+            record.ncDirty = false;
+            return;
+        }
+        record.updateArea = pieces;
+        record.updateRect = boundsOf(pieces);
+    };
+
+    /** @param {any} record @returns {Rect[]} its update area, client coordinates */
+    const updateOf = record=>record.updateArea
+        ?? (record.updateRect ? [record.updateRect] : []);
+
+    /**
+     * Whether RedrawWindow's rules carry a change of a window's update area
+     * on to its children: never with RDW_NOCHILDREN, always with
+     * RDW_ALLCHILDREN, and otherwise when the window does not clip them --
+     * then what it paints covers them, and they paint again after it
+     * (msg.c test_paint_messages, WmInvalidateParentChild).
+     *
+     * @param {any} record @param {'auto' | 'all' | 'none'} children
+     */
+    const reachesChildren = (record, children)=>children === 'all'
+        || (children === 'auto' && (record.style & WS_CLIPCHILDREN) === 0);
+
+    /**
+     * The part of an area, in a window's client coordinates, over each of its
+     * shown children, in each child's client coordinates; and whether it
+     * reaches the child's frame.
+     *
+     * @param {any} record @param {Rect[]} area
+     * @returns {{ child: any, area: Rect[], frame: boolean }[]}
+     */
+    const overChildren = (record, area)=>{
+        const origin = geometry.clientRect(record);
+        const onScreen = offsetArea(area, origin.left, origin.top);
+        return (options.children?.(record) ?? []).flatMap(child=>{
+            if (!shown(child))
+            {
+                return [];
+            }
+            const over = intersectArea(onScreen, geometry.windowRect(child));
+            if (over.length === 0)
+            {
+                return [];
+            }
+            const client = geometry.clientRect(child);
+            const inside = intersectArea(over, client);
+            return [{ child, area: offsetArea(inside, -client.left, -client.top),
+                frame: subtractFromArea(over, client).length > 0 }];
+        });
+    };
+
+    /**
+     * Adds an area to a window's update region, cropped to its client area
+     * as Windows crops it (msg.c: "GetUpdateRgn clips to client area"), and
+     * marks it to be erased when asked. Its children that the RedrawWindow
+     * rules reach are invalidated under it too, always to be erased and with
+     * their frames where it covers them: the parent's paint goes over all of
+     * them (msg.c, "no RDW_ERASE in parent still causes RDW_ERASE and
+     * RDW_FRAME in child"). No other window is touched -- not the windows
+     * over it, which its context leaves out, and not its parent.
+     *
+     * @param {any} record
+     * @param {Rect | Rect[]} given  In client coordinates.
+     * @param {boolean} [erase]
+     * @param {'auto' | 'all' | 'none'} [children]
+     */
+    const invalidate = (record, given, erase = false, children = 'auto')=>{
+        const area = intersectArea(Array.isArray(given) ? given : [given], clientArea(record));
+        if (area.length === 0)
         {
             return;
         }
-        record.updateRect = record.updateRect ? union(record.updateRect, rect) : rect;
+        setUpdate(record, unionAreas(updateOf(record), area));
         record.erase = record.erase || erase;
-        invalidated(record, erase);
+        invalidated(record);
+        if (!reachesChildren(record, children))
+        {
+            return;
+        }
+        for (const { child, area: under, frame } of overChildren(record, area))
+        {
+            child.ncDirty = child.ncDirty || frame;
+            invalidate(child, under, true, children);
+            if (frame && under.length === 0)
+            {
+                invalidated(child);
+            }
+        }
     };
 
     /**
-     * What is left of an update rectangle once `taken` is validated out of
-     * it. Exact when the result is still a rectangle -- nothing left, or a
-     * band cut off one side; when the cut would leave an L or a hole, the
-     * rectangle is kept whole, because repainting more than asked is a cost
-     * and repainting less is a hole.
+     * Takes an area out of a window's update region; the whole of it when no
+     * area is named. The children the RedrawWindow rules reach are validated
+     * under it the same way.
      *
-     * @param {Rect} dirty @param {Rect} taken
-     * @returns {Rect | null}
+     * @param {any} record @param {Rect[] | null} area  In client coordinates.
+     * @param {'auto' | 'all' | 'none'} [children]
      */
-    const subtract = (dirty, taken)=>{
-        const coversX = taken.left <= dirty.left && taken.right >= dirty.right;
-        const coversY = taken.top <= dirty.top && taken.bottom >= dirty.bottom;
-        if (coversX && coversY)
+    const validate = (record, area, children = 'auto')=>{
+        setUpdate(record, area ? subtractAreas(updateOf(record), area) : null);
+        if (!reachesChildren(record, children))
         {
-            return null;
+            return;
         }
-        if (coversX && taken.top <= dirty.top && taken.bottom > dirty.top)
+        for (const { child, area: under } of overChildren(record, area ?? [clientArea(record)]))
         {
-            return { ...dirty, top: taken.bottom };
+            validate(child, under, children);
         }
-        if (coversX && taken.bottom >= dirty.bottom && taken.top < dirty.bottom)
-        {
-            return { ...dirty, bottom: taken.top };
-        }
-        if (coversY && taken.left <= dirty.left && taken.right > dirty.left)
-        {
-            return { ...dirty, left: taken.right };
-        }
-        if (coversY && taken.right >= dirty.right && taken.left < dirty.right)
-        {
-            return { ...dirty, right: taken.left };
-        }
-        return dirty;
-    };
-
-    /**
-     * Takes an area out of a window's update rectangle; the whole of it when
-     * no area is named.
-     *
-     * @param {any} record @param {Rect | null} area
-     */
-    const validate = (record, area)=>{
-        record.updateRect = record.updateRect && area ? subtract(record.updateRect, area) : null;
     };
 
     /**
      * The area a region names, in the window's client coordinates: its
-     * rectangle, or the whole client area for no region -- or for one that
+     * rectangles, or the whole client area for no region -- or for one that
      * cannot be read, since repainting more than asked is the safe side.
      *
      * @param {any} record @param {number} region
+     * @returns {Rect[]}
      */
-    const regionArea = (record, region)=>((region >>> 0) === 0
-        ? clientArea(record)
-        : host.regionBox?.(region >>> 0) ?? clientArea(record));
+    const regionArea = (record, region)=>{
+        const held = (region >>> 0) === 0 ? null : host.regionBox?.(region >>> 0) ?? null;
+        if (!held)
+        {
+            return [clientArea(record)];
+        }
+        return Array.isArray(held.rects) ? held.rects : [held];
+    };
+
+    /**
+     * Whether a window has anything to paint: an update area, or only its
+     * frame, which is a WM_PAINT too (msg.c: "GetUpdateRgn must return empty
+     * region since only nonclient area is invalidated").
+     *
+     * @param {any} record
+     */
+    const owesPaint = record=>Boolean(record.updateRect) || record.ncDirty === true;
 
     /**
      * WM_PAINT sent now, the window procedure run before the caller goes on,
@@ -504,20 +632,46 @@ export function createPaintFunctions(options){
      * @returns {number | Promise<number>}
      */
     const paintNow = (record, thread)=>{
-        if (!record.updateRect)
+        if (!owesPaint(record))
         {
             return 1;
         }
-        // In the middle of painting from the moment it is sent WM_PAINT, not
-        // only from its BeginPaint: a handler that changes a child before it
-        // begins -- relabels a button -- would otherwise have the child's
-        // paint start from this window again, and be sent WM_PAINT inside its
-        // own WM_PAINT for as long as the stack lasted.
-        record.paintSent = (record.paintSent ?? 0) + 1;
+        const over = paintsOver(record);
         return after(send(record.hwnd, WM_PAINT, 0, 0, thread ?? host.callerThread?.()), ()=>{
-            record.paintSent--;
+            if (over)
+            {
+                validate(over.parent, over.area, 'none');
+            }
             return 1;
         });
+    };
+
+    /**
+     * What a child sent WM_PAINT now, by RDW_UPDATENOW, paints of a parent
+     * that does not clip its children: its update region, and its frame
+     * when that is to be drawn, in the parent's client coordinates. That
+     * part of the parent's update region is validated, the child having
+     * painted it (msg.c test_paint_messages: "RDW_UPDATENOW on child without
+     * WS_CLIPCHILDREN will validate corresponding parent area"). A
+     * transparent child shows the parent through it, and leaves the parent
+     * its paint.
+     *
+     * @param {any} record
+     * @returns {{ parent: any, area: Rect[] } | null}
+     */
+    const paintsOver = record=>{
+        const parent = options.parentOf?.(record) ?? null;
+        if (!parent || !parent.updateRect || (parent.style & WS_CLIPCHILDREN) !== 0
+            || (record.exStyle & WS_EX_TRANSPARENT) !== 0)
+        {
+            return null;
+        }
+        const origin = geometry.clientRect(parent);
+        const client = geometry.clientRect(record);
+        const frame = record.ncDirty === true
+            ? subtractFromArea([geometry.windowRect(record)], client) : [];
+        const area = [...offsetArea(updateOf(record), client.left, client.top), ...frame];
+        return { parent, area: offsetArea(area, -origin.left, -origin.top) };
     };
 
     /**
@@ -526,20 +680,18 @@ export function createPaintFunctions(options){
      * children, as the screen shows them. RDW_UPDATENOW, with or without
      * RDW_ALLCHILDREN.
      *
+     * Only the window and its descendants: an ancestor with an area still
+     * to paint is not painted first (msg.c, WmInvalidateErasePaint2 -- the
+     * child alone).
+     *
      * @param {any} record @param {boolean} children @param {unknown} [thread]
-     * @param {boolean} [alone]  Itself and its children only, never from an
-     *        ancestor: a control that repaints itself as it handles a message.
      * @returns {number | Promise<number>}
      */
-    const updateNow = (record, children, thread, alone = false)=>{
+    const updateNow = (record, children, thread)=>{
         // Named once, here: past the first window's paint the thread on the
         // processor may be any other.
         const on = thread ?? host.callerThread?.();
-        // Under an area an ancestor still has to paint, a window paints after
-        // it: painted first, it would be painted over.
-        const from = alone ? record : options.paintsFirst?.(record) ?? record;
-        const order = children || from !== record
-            ? [from, ...(descendants?.(from) ?? [])] : [record];
+        const order = children ? [record, ...(descendants?.(record) ?? [])] : [record];
         /** @param {number} index @returns {number | Promise<number>} */
         const next = index=>(index >= order.length
             ? 1
@@ -562,26 +714,19 @@ export function createPaintFunctions(options){
     const eraseNow = (record, thread)=>{
         const frame = record.ncDirty === true;
         const erase = record.erase === true && Boolean(record.updateRect);
-        // A window another one left is erased only where it was left: the
-        // rest of it still shows what it painted, and its WM_PAINT is to come.
-        const area = record.eraseRect && record.updateRect
-            ? { left: Math.max(record.eraseRect.left, record.updateRect.left),
-                top: Math.max(record.eraseRect.top, record.updateRect.top),
-                right: Math.min(record.eraseRect.right, record.updateRect.right),
-                bottom: Math.min(record.eraseRect.bottom, record.updateRect.bottom) }
-            : record.updateRect;
+        // Erased only in its update region: the rest of it still shows what
+        // it painted, and its WM_PAINT is to come.
+        const area = updateOf(record);
         record.ncDirty = false;
         record.erase = false;
-        record.eraseRect = null;
         return after(frame ? send(record.hwnd, WM_NCPAINT, 1, 0, thread) : 0, ()=>{
             const hdc = erase ? contextOn(record) : 0;
             if (hdc === 0)
             {
                 return 1;
             }
-            host.draw?.clip?.(hdc, intersectArea(
-                visibleArea(record, false, geometry.clientRect(record)),
-                area ?? clientArea(record)));
+            host.draw?.clip?.(hdc, intersectAreas(
+                visibleArea(record, false, geometry.clientRect(record)), area));
             // Shown only when it erased, which the answer says: a window
             // with no background leaves the screen as it was, and that is
             // not a picture to present.
@@ -687,24 +832,21 @@ export function createPaintFunctions(options){
         // the procedure it subclassed has that procedure's BeginPaint find
         // the window clean; drawing everywhere, it painted over the skin.
         const dirty = record.updateRect ?? { left: 0, top: 0, right: 0, bottom: 0 };
+        const area = updateOf(record);
+        const erase = record.erase === true;
+        const frame = record.ncDirty === true;
         // Cleared before the guest paints, not after: a program that
         // invalidates from inside its own WM_PAINT expects that request to
         // survive, and clearing afterwards would swallow it.
-        record.updateRect = null;
+        setUpdate(record, null);
         record.painting = hdc;
-        // Between BeginPaint and EndPaint, whatever context it has: an area
-        // a child is to erase does not bubble up into it then.
-        record.inPaint = true;
-        const erase = record.erase === true;
-        record.erase = false;
-        record.eraseRect = null;
-        const frame = record.ncDirty === true;
-        record.ncDirty = false;
         if (hdc !== 0)
         {
             options.caret?.paintStarts(record);
+            // rcPaint is the rectangle around the region; the clip is the
+            // region itself, so two far corners do not paint the span between.
             host.draw?.clip?.(hdc,
-                intersectArea(visibleArea(record, false, geometry.clientRect(record)), dirty));
+                intersectAreas(visibleArea(record, false, geometry.clientRect(record)), area));
         }
         const result = { hdc, rect: dirty };
         if (hdc === 0)
@@ -720,7 +862,6 @@ export function createPaintFunctions(options){
 
     /** @param {any} record @param {number} hdc */
     const endPaint = (record, hdc)=>{
-        record.inPaint = false;
         if (hdc !== 0)
         {
             contexts()?.release(record.hwnd, hdc);
@@ -1111,7 +1252,7 @@ export function createPaintFunctions(options){
                     return 0;
                 }
                 invalidate(record,
-                    (rect >>> 0) === 0 ? clientArea(record) : readRect(host, rect),
+                    (rect >>> 0) === 0 ? clientArea(record) : ordered(readRect(host, rect)),
                     (erase >>> 0) !== 0);
                 return 1;
             },
@@ -1120,9 +1261,8 @@ export function createPaintFunctions(options){
         /**
          * BOOL InvalidateRgn(HWND hWnd, HRGN hRgn, BOOL bErase)
          *
-         * This build's update area is a rectangle, so a region invalidates
-         * its bounding rectangle -- all of what it covers, and at most a
-         * little more. A null region is the whole client area.
+         * The region's rectangles join the update region; a null region is
+         * the whole client area.
          */
         InvalidateRgn: {
             argBytes: 12,
@@ -1146,7 +1286,9 @@ export function createPaintFunctions(options){
          * or InvalidateRgn, RDW_VALIDATE is ValidateRect or ValidateRgn, and
          * RDW_UPDATENOW is UpdateWindow -- the window's own, and with
          * RDW_ALLCHILDREN its descendants' after it. RDW_ERASE marks the
-         * background for erasing, as bErase does, and RDW_FRAME the frame.
+         * background for erasing, as bErase does, and RDW_FRAME the frame
+         * where the area reaches past the client area. RDW_ALLCHILDREN and
+         * RDW_NOCHILDREN decide which children the change reaches.
          */
         RedrawWindow: {
             argBytes: 16,
@@ -1157,16 +1299,26 @@ export function createPaintFunctions(options){
                 {
                     return 0;
                 }
-                const named = (region >>> 0) !== 0 || (rect >>> 0) === 0;
-                const area = named ? regionArea(record, region) : readRect(host, rect);
+                const whole = (region >>> 0) === 0 && (rect >>> 0) === 0;
+                const area = (region >>> 0) !== 0 || whole
+                    ? regionArea(record, region) : [ordered(readRect(host, rect))];
+                const children = (flags & RDW_NOCHILDREN) !== 0 ? 'none'
+                    : (flags & RDW_ALLCHILDREN) !== 0 ? 'all' : 'auto';
                 if ((flags & RDW_INVALIDATE) !== 0)
                 {
-                    invalidate(record, area, (flags & RDW_ERASE) !== 0);
-                    record.ncDirty = record.ncDirty || (flags & RDW_FRAME) !== 0;
+                    const client = clientArea(record);
+                    if ((flags & RDW_FRAME) !== 0 && (whole
+                        || area.some(piece=>!isEmpty(piece)
+                            && subtractFromArea([piece], client).length > 0)))
+                    {
+                        record.ncDirty = true;
+                        invalidated(record);
+                    }
+                    invalidate(record, area, (flags & RDW_ERASE) !== 0, children);
                 }
                 else if ((flags & RDW_VALIDATE) !== 0)
                 {
-                    validate(record, (rect >>> 0) === 0 && (region >>> 0) === 0 ? null : area);
+                    validate(record, whole ? null : area, children);
                 }
                 return (flags & RDW_UPDATENOW) === 0
                     ? 1 : updateNow(record, (flags & RDW_ALLCHILDREN) !== 0);
@@ -1199,7 +1351,8 @@ export function createPaintFunctions(options){
          * BOOL GetUpdateRect(HWND hWnd, LPRECT lpRect, BOOL bErase)
          *
          * Answers whether there is anything to paint, which is what a program
-         * checks before deciding to.
+         * checks before deciding to; the rectangle is the one around the
+         * update region.
          */
         GetUpdateRect: {
             argBytes: 12,
@@ -1385,7 +1538,10 @@ export function createPaintFunctions(options){
          * object table those regions live in -- gdi32's, which user32 cannot
          * reach. Without the service that bridges them the honest answer is
          * ERROR: reporting a complexity for a region left holding whatever it
-         * held before would have the caller clip to the wrong shape.
+         * held before would have the caller clip to the wrong shape. The
+         * service fills a region with one rectangle, so an update region of
+         * several is handed over as the rectangle around it, and the answer
+         * says SIMPLEREGION, which is what the region then holds.
          */
         GetUpdateRgn: {
             argBytes: 12,
@@ -1402,6 +1558,11 @@ export function createPaintFunctions(options){
                 const dirty = record.updateRect;
                 host.setRegion(region >>> 0,
                     dirty ?? { left: 0, top: 0, right: 0, bottom: 0 });
+                if (dirty && (record.updateArea?.length ?? 1) > 1)
+                {
+                    tellOnce('GetUpdateRgn', 'an update region of several rectangles is'
+                        + ' handed over as the rectangle around it');
+                }
                 return dirty ? SIMPLEREGION : NULLREGION;
             },
         },
@@ -1649,8 +1810,7 @@ export function createPaintFunctions(options){
          * BOOL ValidateRect(HWND hWnd, const RECT *lpRect)
          *
          * A null rectangle validates everything. Otherwise the rectangle is
-         * taken out of the update area as far as what is left is still a
-         * rectangle -- see `subtract` -- so a program that paints a strip
+         * taken out of the update region, so a program that paints a strip
          * itself and validates it is not sent a WM_PAINT for that strip.
          */
         ValidateRect: {
@@ -1662,7 +1822,7 @@ export function createPaintFunctions(options){
                 {
                     return 0;
                 }
-                validate(record, (rect >>> 0) === 0 ? null : readRect(host, rect));
+                validate(record, (rect >>> 0) === 0 ? null : [ordered(readRect(host, rect))]);
                 return 1;
             },
         },
@@ -1705,9 +1865,10 @@ export function createPaintFunctions(options){
                 {
                     return 0;
                 }
-                validate(record, (region >>> 0) === 0
-                    ? null
-                    : host.regionBox?.(region >>> 0) ?? null);
+                // A region that cannot be read validates everything, as no
+                // region does: what it names cannot be told apart.
+                const readable = (region >>> 0) !== 0 && host.regionBox?.(region >>> 0);
+                validate(record, readable ? regionArea(record, region) : null);
                 return 1;
             },
         },
@@ -1735,8 +1896,7 @@ export function createPaintFunctions(options){
                     return ERROR;
                 }
                 const visible = visibleArea(record, false, geometry.clientRect(record));
-                const area = record.updateRect
-                    ? subtractFromArea(visible, record.updateRect) : visible;
+                const area = subtractAreas(visible, updateOf(record));
                 host.draw?.clip?.(hdc >>> 0, area);
                 return area.length === 0 ? NULLREGION
                     : area.length === 1 ? SIMPLEREGION : COMPLEXREGION;
@@ -1744,8 +1904,8 @@ export function createPaintFunctions(options){
         },
     };
 
-    return { table, beginPaint, endPaint, invalidate, updateNow, eraseNow, clientArea, cellOf,
-        contextOn };
+    return { table, beginPaint, endPaint, invalidate, validate, updateNow, eraseNow, clientArea,
+        cellOf, contextOn, owesPaint, updateOf };
 }
 
 /** A brush argument up to this is a system colour index plus one. */
