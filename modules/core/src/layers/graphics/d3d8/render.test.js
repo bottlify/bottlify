@@ -3964,3 +3964,35 @@ test('a floating-point surface is an r16float, R32F narrowed to half precision o
     const halves = Uint8Array.from([0x00, 0x3c, 0x00, 0x38]);
     assert.deepEqual([...expandTexels(D3DFMT.R16F, halves, 2)], [...halves]);
 });
+
+test('recorded: a draw under the stencil test carries it, its reference set on the pass;'
+    + ' a clear ignores it', async()=>{
+    // A program marks pixels in the stencil and then lets only some draws write
+    // through them -- a depth put back everywhere but where the scene stood is one --
+    // and a renderer that drops the test lets those draws write everywhere.
+    const h = harness();
+    const { device, gpu } = h;
+    const set = (/** @type {number} */ state, /** @type {number} */ value)=>
+        assert.equal(device.SetRenderState(state, value), D3D_OK);
+    set(52, 1);
+    set(56, 6);
+    set(57, 0xff);
+    set(55, 3);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20), D3D_OK);
+    assert.equal(device.Clear(1, [{ x1: 1, y1: 1, x2: 3, y2: 3 }], D3DCLEAR.TARGET,
+        argb(4, 5, 6), 1, 0), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    const [drawn, cleared] = gpu.of('createRenderPipeline')
+        .map((/** @type {any} */ call)=>call.descriptor.depthStencil);
+    assert.deepEqual(drawn.stencilBack,
+        { compare: 'not-equal', failOp: 'keep', depthFailOp: 'keep', passOp: 'replace' });
+    assert.deepEqual(drawn.stencilFront, drawn.stencilBack, 'one-sided: both faces alike');
+    assert.equal(drawn.stencilReadMask, 0xff);
+    assert.deepEqual(gpu.of('setStencilReference').map((/** @type {any} */ call)=>call.reference),
+        [0xff]);
+    assert.equal(cleared.stencilFront, undefined, 'the clear quad runs no stencil test');
+});
