@@ -61,6 +61,17 @@ evidence again.
 - **Decision.** Stage 3 is not started for these titles. The counters stay, so that a title with
   more parallel threads shows it.
 
+### 2026-10-09 -- the startup stub on a read-only page, for an IsBadWritePtr probe
+
+- Idea: a SecuROM 7 check calls `IsBadWritePtr(<process-startup base> + 2, 1)`; the guess was
+  that this is the entry point's return address, read-only code on Windows, and that moving the
+  startup stub to a page of its own with read-execute access would pass it.
+- Measured (one harness run, `--worker --coi`, headed Chrome, bundle index sha256 f9862be8...):
+  with the stub moved, the probe still names the arena's base + 2, which is now the process
+  environment block's `BeingDebugged` byte -- writable on Windows, so the answer 0 was already
+  right. The program's error (8007) did not change. The change was not kept.
+- Not recorded: GPU, driver, power plan.
+
 ## Invalidated
 
 None yet.
