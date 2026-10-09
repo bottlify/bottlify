@@ -113,10 +113,11 @@ export function normaliseFormat(format){
  * @param {number} [options.capabilities]  The DSBCAPS flags it was created with.
  * @param {() => boolean} [options.kept]  Whether something besides the program's
  *                                     own references keeps it.
+ * @param {() => void} [options.touched]  Told when its count of references moves.
  */
 export function createSoundBuffer({
     bytes, address, format: initialFormat, now, primary = false, capabilities = 0,
-    kept = ()=>false,
+    kept = ()=>false, touched = ()=>{},
 })
 {
     // Not a constant: a program sets the format of the primary buffer to say
@@ -489,8 +490,14 @@ export function createSoundBuffer({
             return capabilities;
         },
 
-        addRef: ()=>++references,
-        release: ()=>(references = Math.max(0, references - 1)),
+        addRef: ()=>{
+            touched();
+            return ++references;
+        },
+        release: ()=>{
+            touched();
+            return (references = Math.max(0, references - 1));
+        },
         get references(){
             return references;
         },

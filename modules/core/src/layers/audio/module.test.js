@@ -598,6 +598,28 @@ test('with shared memory, a released DirectSound buffer frees its slot: 40 over 
         'no fallback after releasing every buffer before the next one opened');
 });
 
+test('buffers kept loaded and stopped leave the walk; the one played stays', async()=>{
+    // A program that loads every sound it has once and plays a few at a time
+    // was walked a thousand buffers, twice, on every turn.
+    const f = await playing();
+    /** @type {number[]} */
+    const made = [];
+    for (let i = 0; i < 40; i++)
+    {
+        assert.equal(f.call(f.root, 'CreateSoundBuffer', [DESC_AT, OUT_AT + 4, 0]), DS_OK);
+        made.push(f.view.getUint32(OUT_AT + 4, true));
+    }
+    f.api.pump();
+    f.api.pump();
+    assert.ok(f.api.feeding().awake <= 1, `${f.api.feeding().awake} still walked`);
+    f.call(made[20], 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.advance(50);
+    f.api.pump();
+    f.api.pump();
+    assert.equal(f.api.feeding().awake, 1, 'the one playing');
+    assert.equal(f.api.buffers().length, 41, 'and every one is still there to be played');
+});
+
 test('with nothing listening, a released buffer still leaves the walk', async()=>{
     // A build with no sound device reads nothing out, but it still walks every
     // buffer before each mix for its notifications; one that never let go of a
