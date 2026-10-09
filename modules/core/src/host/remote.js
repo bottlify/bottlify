@@ -438,6 +438,14 @@ export async function createRemoteApp(wiring){
             read: (address, length)=>request('debug.read', [address, length]),
             /** @returns {Promise<{ name: string, base: number, size: number }[]>} */
             modules: ()=>request('debug.modules'),
+            /**
+             * Writes down the next `frames` frames with draws of the running
+             * program, every draw with its shaders, stages and state, into the
+             * next report (the local controller's `debug.dumpFrames`).
+             *
+             * @param {number} [count] @returns {Promise<number>}
+             */
+            dumpFrames: (count = 1)=>request('debug.dumpFrames', [count]),
         },
         /** @returns {Promise<{ count: number, history: import('./messages.js').Presented[] }>} */
         presented: ()=>request('presented'),
