@@ -15,6 +15,7 @@ import { TEB } from './kernel32/teb.js';
 import { createModuleFunctions } from './kernel32/modules.js';
 import { createFileFunctions } from './kernel32/files.js';
 import { createRichEditControls } from './riched/richedit.js';
+import { createRichedLibraries } from './riched/libraries.js';
 import { createSyncFunctions } from './kernel32/sync.js';
 import { createCodeArena } from './kernel32/code-arena.js';
 import { createGuestHeap } from './kernel32/guest-heap.js';
@@ -2071,6 +2072,10 @@ export function createWin32Module(){
                 // DirectPlay with no service provider, and a lobby that did
                 // not launch the program.
                 'DPLAYX.dll': createDplayFunctions({ writeMemory, vtables: comVtables }),
+
+                // The rich edit classes are always registered; these are the
+                // libraries a program loads before it makes one.
+                ...createRichedLibraries({ writeMemory }),
 
                 // The old iostream library: its objects live in the program's
                 // memory and its methods run over the C runtime's heap, locks
