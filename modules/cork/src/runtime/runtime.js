@@ -626,6 +626,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @property {number} entry
      * @property {Set<number>} pages
      * @property {Set<number>} [reads]   every page forming read: what a worker forms it from
+     * @property {Set<number>} [formable]   every page forming was told it may form code on
      * @property {number[]} slots   entry indices
      * @property {number} table     the function's index in the table, or -1
      * @property {[number, number][]} spans   the blocks' [start, end)
@@ -730,7 +731,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const dropped = new Map();
     const counts = {
         modules: 0, invalidations: 0, volatilePages: 0, dropped: 0, moduleBytes: 0,
-        queueDrops: 0, queueEvictions: 0,
+        queueDrops: 0, queueEvictions: 0, emitFailures: 0,
         cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0, precisionSwitches: 0,
         stackCode: 0,
         // Batches the store answered in the call that formed them, and a turn later.
@@ -1094,6 +1095,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         if (typeof read === 'function' && 'refused' in decode(byte=>read(byte), address))
         {
             return 'refused';
+        }
+        // Closed in a region's loop: it is that region's to give an entry by
+        // forming again with copies, and no candidate of its own until then.
+        const holders = closedIn.get(address);
+        if (holders !== undefined)
+        {
+            return [...holders].every(record=>record.copies === true) ? 'closed, copied' : 'closed';
         }
         return 'unknown';
     };
@@ -1542,7 +1550,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
         /** @type {RegionRecord} */
         const record = {
-            entry: region.entry, pages: region.pages, reads: region.reads, slots: [], table: -1,
+            entry: region.entry, pages: region.pages, reads: region.reads,
+            formable: region.formable, slots: [], table: -1,
             spans: region.blocks.map(block=>[block.start, block.end]), extents,
             entryTop: one.entryTop, hash: region.hash, labels: JSON.stringify(built.labels),
             linked: built.linked === true, wide: one.wide === true, loose: one.loose === true,
@@ -1725,6 +1734,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             if (!result.ok)
             {
                 refused[`emit at ${metas[i].region.entry.toString(16)}: ${result.message}`] = 1;
+                // Done with, as a region the emitter took is: left in flight,
+                // a candidate the emitter failed on was sent again once overdue
+                // and failed again, and translated code left for it all the while.
+                // Barren until its page is written, which forms it again.
+                inFlight.delete(keyOf(metas[i].region.entry, metas[i].entryTop));
+                barrenAdd(metas[i].region.entry, metas[i].entryTop);
+                counts.emitFailures++;
             }
         }
         if (built.length === 0)
@@ -2278,7 +2294,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 hash: record.hash, checked: record.checked === true, copies: record.copies === true,
                 ...(record.targets === undefined ? {} : { targets: record.targets }) })),
             pages: [...copies],
-            formable: chunk.flatMap(record=>[...record.pages]),
+            formable: chunk.flatMap(record=>[...record.formable ?? record.pages]),
             form: formOptions,
         };
         const translator = freeTranslator();
@@ -2643,7 +2659,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                         hash: one.region.hash, checked: one.checked, copies: one.copies === true,
                         ...(one.targets === undefined ? {} : { targets: one.targets }) })),
                     pages: [...copies],
-                    formable: unbuilt.flatMap(one=>[...one.region.pages]),
+                    formable: unbuilt.flatMap(one=>[...one.region.formable ?? one.region.pages]),
                     form: formOptions,
                 },
                 layout, features: found, options: emitOptions(),
@@ -3407,6 +3423,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 queued: queue.size,
                 barren: barren.size,
                 queueDrops: counts.queueDrops,
+                emitFailures: counts.emitFailures,
                 queueEvictions: counts.queueEvictions,
                 volatilePages: counts.volatilePages,
                 exits: { ...exits },

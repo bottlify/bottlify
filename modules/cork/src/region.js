@@ -72,6 +72,8 @@ import { decode } from './decode/decoder.js';
  * @property {Set<number>} pages         4 KiB pages the code and its switch tables span
  * @property {Set<number>} [reads]       every page forming read, `pages` among them: what a
  *                                       worker forms the region again from
+ * @property {Set<number>} [formable]    every page forming was told it may form code on: the
+ *                                       ones a worker forming it again may, and no others
  * @property {SwitchTable[]} [tables]    the switch tables its jumps go through, read as data
  * @property {string} hash               of the decoded bytes, for the cache
  * @property {Map<string, number>} refused   opcode → times a refusal cut a block
@@ -460,6 +462,21 @@ export function formRegion(read, entry,
     /** @type {Set<number>} */
     const touched = new Set();
     let lastTouched = -1;
+    // The pages `translatable` answered yes for: a worker forming the region
+    // again answers the same for them and no for the rest, or its region
+    // differs -- a callee looked into here and not there, a prediction made
+    // here and not there -- and the batch's copy of it is refused as changed.
+    /** @type {Set<number>} */
+    const granted = new Set();
+    const asked = translatable;
+    translatable = address=>{
+        const yes = asked(address);
+        if (yes)
+        {
+            granted.add(address >>> 12);
+        }
+        return yes;
+    };
     const source = read;
     read = address=>{
         const page = address >>> 12;
@@ -825,6 +842,7 @@ export function formRegion(read, entry,
         bytes,
         pages,
         reads: touched,
+        formable: granted,
         tables,
         hash: hashRegion(read, { blocks: ordered, tables }),
         refused,
