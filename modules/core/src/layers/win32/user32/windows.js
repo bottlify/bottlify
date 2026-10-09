@@ -200,6 +200,10 @@ const DT_NOPREFIX = 0x0800;
 
 /** The one hook type this build calls, and the one event it calls it for. */
 const WH_CBT = 5;
+const WH_KEYBOARD = 2;
+/** A keyboard hook's codes: the message is being taken, or only looked at. */
+const HC_ACTION = 0;
+const HC_NOREMOVE = 3;
 /** The CBT hook's codes: what is about to happen, which it may forbid. */
 const HCBT_MINMAX = 1;
 const HCBT_CREATEWND = 3;
@@ -4535,9 +4539,27 @@ export function createWindowFunctions(host){
             return null;
         }
         return andThen(mouseActivate(entry, thread), (/** @type {boolean} */ keep)=>(keep
-            ? andThen(askCursor(entry, thread), ()=>entry)
+            ? andThen(askCursor(entry, thread), ()=>andThen(
+                askKeyboardHooks(entry, HC_ACTION, thread),
+                (/** @type {number} */ refused)=>((refused | 0) !== 0
+                    ? takeThrough(filter, thread) : entry)))
             : takeThrough(filter, thread)));
     });
+
+    /**
+     * A key message being retrieved, shown to the thread's WH_KEYBOARD hooks
+     * first, as Windows shows it: the virtual key and the message's lParam,
+     * HC_ACTION when it is taken and HC_NOREMOVE when it is only looked at.
+     * A hook that answers nonzero on HC_ACTION discards the message. A
+     * program that keeps its key state in such a hook hears no key at all
+     * without it.
+     *
+     * @param {any} entry @param {number} code @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const askKeyboardHooks = (entry, code, thread)=>(!KEY_MESSAGES.has(entry.message >>> 0)
+        || chainOf(WH_KEYBOARD, thread).length === 0 ? 0
+        : callHook(WH_KEYBOARD, null, [code, entry.wParam >>> 0, entry.lParam >>> 0], thread));
 
     /**
      * The default window procedure, as every window procedure falls back on
@@ -5628,7 +5650,10 @@ export function createWindowFunctions(host){
         // and the activation, for the call that takes it.
         // What other threads sent is handled before anything posted is looked for.
         const entry = andThen(receiveSent(thread), ()=>(remove ? takeThrough(filter, thread)
-            : andThen(placeWaiting(filter, thread), ()=>host.queue.peek(filter))));
+            : andThen(placeWaiting(filter, thread), ()=>{
+                const seen = host.queue.peek(filter);
+                return seen ? andThen(askKeyboardHooks(seen, HC_NOREMOVE, thread), ()=>seen) : seen;
+            })));
         return andThen(entry, (/** @type {any} */ taken)=>{
             if (!taken)
             {
@@ -6506,8 +6531,8 @@ export function createWindowFunctions(host){
          *                         DWORD dwThreadId)
          *
          * Every type is accepted, because a program installs its hooks at
-         * start-up and treats a refusal as fatal; only a CBT hook is ever
-         * called, and the others say so once rather than failing silently.
+         * start-up and treats a refusal as fatal; a CBT and a keyboard hook
+         * are called, and the others say so once rather than failing silently.
          */
         SetWindowsHookExA: {
             argBytes: 16,
@@ -6520,7 +6545,7 @@ export function createWindowFunctions(host){
                 const hook = { handle: 0, type: type | 0, proc: proc >>> 0, thread: thread >>> 0 };
                 hook.handle = host.handles.open('hook', hook);
                 hooks.push(hook);
-                if (hook.type !== WH_CBT)
+                if (hook.type !== WH_CBT && hook.type !== WH_KEYBOARD)
                 {
                     host.divergence?.('SetWindowsHookExA',
                         `hook type ${hook.type} is installed but never called`);

@@ -3136,6 +3136,23 @@ test('a CBT hook is told of a window before its procedure is, and can refuse it'
     assert.equal(dispatched[1].thread, THREAD);
 });
 
+test('a keyboard hook is shown every key message taken, and can discard it', ()=>{
+    // A game that keeps its key state in a WH_KEYBOARD hook heard no key at
+    // all while only CBT hooks were called: Enter on its title did nothing.
+    let refuse = false;
+    const { fns, queue, called } = setup({ hookReply: ()=>(refuse ? 1 : 0) });
+    fns.SetWindowsHookExA.handler([WH_KEYBOARD, HOOK_PROC, 0, 1]);
+    queue.post({ hwnd: 0, message: WM_KEYDOWN, wParam: 0x0d, lParam: 0x001c0001 });
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_NOREMOVE]), 1);
+    assert.deepEqual(called.at(-1)?.args, [3, 0x0d, 0x001c0001], 'HC_NOREMOVE on a look');
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.deepEqual(called.at(-1)?.args, [0, 0x0d, 0x001c0001], 'HC_ACTION on the take');
+    queue.post({ hwnd: 0, message: WM_KEYDOWN, wParam: 0x41, lParam: 0x001e0001 });
+    refuse = true;
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0,
+        'a hook that answers nonzero takes the message away');
+});
+
 test('a CBT hook answering non-zero refuses the window before WM_CREATE', ()=>{
     const { memory, fns, dispatched } = setup({ heap: true, hookReply: ()=>1 });
     putClass(memory);
@@ -3285,9 +3302,10 @@ test('a hook of a type that is never called says so once, and is still installed
     const { memory, fns, called, divergences } = setup({ heap: true });
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
-    assert.notEqual(fns.SetWindowsHookExA.handler([WH_KEYBOARD, HOOK_PROC, HINSTANCE, 1]), 0);
+    // WH_MOUSE: a keyboard hook is called now.
+    assert.notEqual(fns.SetWindowsHookExA.handler([7, HOOK_PROC, HINSTANCE, 1]), 0);
     assert.equal(divergences.length, 1);
-    assert.match(divergences[0], /SetWindowsHookExA: hook type 2/);
+    assert.match(divergences[0], /SetWindowsHookExA: hook type 7/);
     createWindow(fns, memory);
     assert.deepEqual(called, []);
     assert.equal(fns.SetWindowsHookExA.handler([WH_CBT, 0, HINSTANCE, 1]), 0,
