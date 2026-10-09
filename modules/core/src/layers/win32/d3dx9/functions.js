@@ -41,6 +41,7 @@ import { createLines } from './line.js';
 import { createRenderToSurface } from './render-to-surface.js';
 import { createEffects } from './effect.js';
 import { D3DX_DEFAULT, createTextureLoader } from './texture.js';
+import { createTextureTools } from './texture-tools.js';
 import { guestEntry } from '../msvcrt/guest-code.js';
 import { createComObject } from '../ole32/objects.js';
 import { createConstantTableObjects } from './constants.js';
@@ -398,6 +399,9 @@ export function createD3dxFunctions(host, options = {}){
 
         /** See mesh.js. */
         ...createMeshFunctions(host),
+
+        /** See texture-tools.js. */
+        ...createTextureTools(host),
 
         /** See effect.js. */
         ...effects.exports,
