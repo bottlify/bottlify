@@ -173,3 +173,13 @@ test('semantics: assembled vs_1_1 with definitions and a texture coordinate writ
     assert.equal(api.D3DXGetShaderOutputSemantics.handler([CODE, OUT, COUNT]), 0);
     assert.deepEqual(read(view, view.getUint32(COUNT, true)), [[5, 1], [5, 3], [0, 0]]);
 });
+
+test('D3DXGetShaderVersion is the first token, and 0 for no shader', ()=>{
+    // A vertex shader that opens with its constant table comment, as a
+    // compiled one does: the version is still the word before it.
+    const { api } = machine([0xfffe0101, 0x0002fffe, 0x42415443, 0x1c, 0x0000ffff]);
+    assert.equal(api.D3DXGetShaderVersion.argBytes, 4);
+    assert.equal(api.D3DXGetShaderVersion.handler([CODE]), 0xfffe0101);
+    assert.equal(api.D3DXGetShaderVersion.handler([0]), 0);
+    assert.equal(machine([0xffff0300]).api.D3DXGetShaderVersion.handler([CODE]), 0xffff0300);
+});

@@ -184,7 +184,7 @@ export function shaderSemantics(token, output){
 }
 
 /**
- * The two exports over guest memory.
+ * The exports that read a shader's bytecode in guest memory.
  *
  * @param {{ readMemory: (address: number, length: number) => Uint8Array,
  *     writeMemory: (address: number, bytes: Uint8Array) => void }} host
@@ -242,5 +242,16 @@ export function createShaderSemantics(host){
          *     D3DXSEMANTIC *pSemantics, UINT *pCount)
          */
         D3DXGetShaderOutputSemantics: entry(true),
+        /**
+         * DWORD D3DXGetShaderVersion(const DWORD *pFunction)
+         *
+         * The version token, the bytecode's first word, as it stands: it is not
+         * checked to be a shader, and a null pointer answers 0 rather than faulting.
+         */
+        D3DXGetShaderVersion: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([code])=>((code >>> 0) === 0 ? 0 : readU32(code >>> 0)),
+        },
     };
 }
