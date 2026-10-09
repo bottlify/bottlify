@@ -4393,6 +4393,18 @@ export function createRenderer(options){
                 ...(dimension === '3d' ? { depth: 1, dimension: '3d' } : {}),
             });
             placeholders.set(dimension, placeholder);
+            // An unbound sampler reads opaque black on Windows (Wine's d3d9
+            // unbound_sampler_test answers 0xff000000), not a cleared texel.
+            const layers = dimension === 'cube' ? 6 : 1;
+            backend.uploadTexture({
+                texture: placeholder.texture,
+                format: COLOR_FORMAT,
+                mipLevel: 0,
+                width: 1,
+                height: 1,
+                data: new Uint8Array(4 * layers).map((_, index)=>(index % 4 === 3 ? 255 : 0)),
+                ...(layers > 1 ? { depthOrArrayLayers: layers } : {}),
+            });
             if (dumpDraws && dimension === '2d')
             {
                 uploaded.set('placeholder', {
@@ -4400,7 +4412,7 @@ export function createRenderer(options){
                     format: 0,
                     width: 1,
                     height: 1,
-                    texels: new Uint8Array(4),
+                    texels: new Uint8Array([0, 0, 0, 255]),
                     gpu: placeholder,
                 });
             }

@@ -401,6 +401,12 @@ test('a sampler declared a cube binds the cube map\'s cube view, and nothing of 
         h.device.SetTexture(0, h.texture);
         await h.draw();
         assert.equal(bound().texture.descriptor.label, 'placeholder:cube');
+        // Every face of the placeholder reads opaque black, as an unbound
+        // sampler does on Windows.
+        const blank = h.gpu.of('writeTexture').find(
+            (/** @type {any} */ call)=>call.destination.texture === bound().texture);
+        assert.equal(blank.size.depthOrArrayLayers, 6);
+        assert.deepEqual([...blank.bytes], Array.from({ length: 6 }, ()=>[0, 0, 0, 255]).flat());
         assert.equal(h.reports.length, 1);
         assert.match(h.reports[0], /declared cube and a 2d texture is bound/);
 
