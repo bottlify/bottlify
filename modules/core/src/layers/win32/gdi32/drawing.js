@@ -4094,13 +4094,39 @@ export function createDrawingFunctions(
          * UINT GetSystemPaletteEntries(HDC hdc, UINT iStart, UINT cEntries,
          *                             LPPALETTEENTRY pPalEntries)
          *
-         * None. A system palette exists on a device of eight bits or fewer, and
-         * this one is 32; reporting entries a program could then match against
-         * would have it choose colours from a palette nothing draws through.
+         * The display is not a palette device, so the count is zero -- but
+         * the entries asked for are still written as the system palette
+         * stands: the twenty static colours, ten at each end, black between
+         * (Wine's palette.c check_system_palette_entries). A program that
+         * builds its identity palette from these finds the static colours
+         * where every Windows keeps them.
          */
         GetSystemPaletteEntries: {
             argBytes: 16,
-            handler: ()=>0,
+            /** @param {number[]} args */
+            handler: ([handle, start, count, out])=>{
+                if (!dcOf(handle) || (out >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const first = start >>> 0;
+                const total = Math.min(count >>> 0, Math.max(0, 256 - first));
+                const bytes = new Uint8Array(total * 4);
+                for (let at = 0; at < total; at++)
+                {
+                    const index = first + at;
+                    const fixed = index < 10 ? index : index >= 246 ? index - 236 : -1;
+                    const pixel = fixed < 0 ? 0 : DEFAULT_PALETTE_COLORS[fixed];
+                    bytes[at * 4] = (pixel >>> 16) & 0xff;
+                    bytes[at * 4 + 1] = (pixel >>> 8) & 0xff;
+                    bytes[at * 4 + 2] = pixel & 0xff;
+                }
+                if (total > 0)
+                {
+                    host.writeMemory(out >>> 0, bytes);
+                }
+                return 0;
+            },
         },
 
         /**

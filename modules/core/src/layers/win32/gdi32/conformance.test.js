@@ -287,3 +287,16 @@ test('RGN_AND of a clip with a region is what ExtSelectClipRgn leaves, and GetCl
         fns.ExtSelectClipRgn.handler([dc, fns.CreateRectRgn.handler([25, 25, 100, 100]), RGN_AND]);
         assert.deepEqual(clipBox(machine).box, [25, 25, 50, 50]);
     });
+
+test('GetSystemPaletteEntries counts none on this display but writes the static colours'
+    + ' (palette.c check_system_palette_entries)', ()=>{
+    const machine = painted(4, 4);
+    const out = 0x3000;
+    machine.bytes.fill(0x55, out, out + 1024);
+    assert.equal(machine.fns.GetSystemPaletteEntries.handler([machine.dc, 0, 256, out]), 0);
+    const entry = (/** @type {number} */ index)=>[...machine.bytes.subarray(out + index * 4,
+        out + index * 4 + 4)];
+    assert.deepEqual(entry(1), [0x80, 0, 0, 0], 'the second static colour, dark red');
+    assert.deepEqual(entry(100), [0, 0, 0, 0], 'black between the two ends');
+    assert.deepEqual(entry(255), [0xff, 0xff, 0xff, 0], 'white last');
+});

@@ -191,7 +191,27 @@ export function createGdiDrawing(options = {}){
     const penOf = context=>{
         const record = objects.get(context.state.pen);
         const pen = record && record.type === 'pen' ? record.attributes : DEFAULT_PEN;
-        return { ...pen, color: resolveColor(context, pen.color) };
+        const color = resolveColor(context, pen.color);
+        return { ...pen,
+            color: context.surface.mono === true ? monoPenColor(context, color) : color };
+    };
+
+    /**
+     * A pen's colour on a monochrome device bitmap is not its nearest one.
+     * With the DC's text colour black or its background white, the pen is
+     * black unless it is exactly white or exactly the background; with
+     * both the other way, it is black only when it is black or the
+     * background (Wine's bitmap.c test_mono_bitmap, is_black_pen).
+     *
+     * @param {any} context @param {number} color  A plain COLORREF.
+     */
+    const monoPenColor = (context, color)=>{
+        const text = resolveColor(context, context.state.textColor);
+        const background = resolveColor(context, context.state.bkColor);
+        const black = text === 0 || background === WHITE
+            ? color !== WHITE && color !== background
+            : color === 0 || color === background;
+        return black ? 0 : WHITE;
     };
 
     /**
