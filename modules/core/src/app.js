@@ -3382,6 +3382,11 @@ async function buildApp(options){
     // the run's, shared with the machines of the processes still running.
     const ownsTranslationStore = storeSpec === 'local';
 
+    // What the volume's reader calls for blocks a read found absent, kept so a
+    // reader outside win32 -- DirectMusic's loader -- can wait for them too.
+    /** @type {((needed: any[]) => Promise<unknown>) | null} */
+    let fetchBundleBlocks = null;
+
     const core = await assembleModules({
         kernel: {
             // How many guest instructions a thread runs before the next one
@@ -3559,9 +3564,25 @@ async function buildApp(options){
                 {
                     return null;
                 }
+                const filesystem = core.api('filesystem');
                 try
                 {
-                    return core.api('filesystem').read(handle, core.api('filesystem').size(handle));
+                    try
+                    {
+                        return filesystem.read(handle, filesystem.size(handle));
+                    }
+                    catch (e){
+                        // A block of the bundle not fetched yet: fetched, then
+                        // read once more, as the volume's own reader does.
+                        const miss = /** @type {any} */ (e);
+                        if (miss?.code !== 'BLOCK_MISS' || !fetchBundleBlocks)
+                        {
+                            throw miss;
+                        }
+                        await fetchBundleBlocks(miss.blocks);
+                        filesystem.seek(handle, 0);
+                        return filesystem.read(handle, filesystem.size(handle));
+                    }
                 }
                 finally
                 {
@@ -4142,7 +4163,7 @@ async function buildApp(options){
             idle: ()=>new Promise(resolve=>idlers.push(()=>resolve(undefined))),
             /** @param {any[]} needed */
             /** @param {any[]} needed */
-            fetchBlocks: needed=>{
+            fetchBlocks: fetchBundleBlocks = needed=>{
                 if (!blocks)
                 {
                     return Promise.resolve();
