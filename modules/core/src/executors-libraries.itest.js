@@ -270,14 +270,14 @@ test('a library\'s exports called from threads on several executors at once',
                     ...bumps,
                     ...join_(iat, at('h1')), ...join_(iat, at('h2')),
                     0x31, 0xdb, //                                  xor ebx, ebx
-                    0xa1, ...u32(iat('count')), 0x8b, 0x00, //       mov eax, [&count]; mov eax, [eax]
+                    0xa1, ...u32(iat('count')), 0x8b, 0x00, // mov eax, [&count]; mov eax, [eax]
                     0x3d, ...u32(3 * N), ...bitIfEqual(1), //        cmp eax, 3N
                     ...same('who1', 'id1'), ...bitIfEqual(2),
                     ...same('who2', 'id2'), ...bitIfEqual(4),
                     ...exitWithBits(iat),
                 ],
                 worker: [
-                    0x8b, 0x7c, 0x24, 0x04, //                      mov edi, [esp+4]  where to say who
+                    0x8b, 0x7c, 0x24, 0x04, // mov edi, [esp+4]  where to say who
                     ...bumps,
                     ...call(iat, 'whoami'), 0x89, 0x07, //           mov [edi], eax
                     0x31, 0xc0, 0xc2, 0x04, 0x00, //                 xor eax, eax; ret 4
@@ -316,7 +316,7 @@ test('a library loaded by a thread on another executor is attached on that threa
                 0x85, 0xc0, { jump: 'jz', to: 'done' },
                 0x89, 0xc7, //                                      mov edi, eax
                 0x68, ...u32(at('tid')), 0x57, ...call(iat, 'GetProcAddress'),
-                0x8b, 0x30, //                                      mov esi, [eax]  the attaching thread
+                0x8b, 0x30, // mov esi, [eax]  the attaching thread
                 0x68, ...u32(at('bump')), 0x57, ...call(iat, 'GetProcAddress'),
                 0xa3, ...u32(at('bumpAt')),
                 ...call(iat, 'GetCurrentThreadId'),
@@ -401,10 +401,10 @@ test('the process heap and msvcrt\'s malloc under threads at once',
                 0x6a, 0x20, 0x6a, 0x00, 0x57, ...call(iat, 'HeapAlloc'), // HeapAlloc(heap, 0, 32)
                 0x85, 0xc0, { jump: 'jz', to: 'lost' },
                 0x89, 0xc3, //                                      mov ebx, eax
-                0x89, 0x30, 0x89, 0x70, 0x1c, //                    mov [eax], esi; mov [eax+28], esi
+                0x89, 0x30, 0x89, 0x70, 0x1c, // mov [eax], esi; mov [eax+28], esi
                 0x6a, 0x18, ...call(iat, 'malloc'), 0x83, 0xc4, 0x04, // malloc(24)
                 0x85, 0xc0, { jump: 'jz', to: 'lost' },
-                0x89, 0x30, 0x89, 0x70, 0x14, //                    mov [eax], esi; mov [eax+20], esi
+                0x89, 0x30, 0x89, 0x70, 0x14, // mov [eax], esi; mov [eax+20], esi
                 0x50, //                                            push eax  (free's argument)
                 0x39, 0x33, ...markIfNotEqual(at('bad')), //         cmp [ebx], esi
                 0x39, 0x73, 0x1c, ...markIfNotEqual(at('bad')), //   cmp [ebx+28], esi
