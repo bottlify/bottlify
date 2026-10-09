@@ -136,6 +136,16 @@ test('error information is held once, handed over once, and absent by default', 
     assert.equal(call('SetErrorInfo', [0xdeadbeef, 0]) >>> 0, 0x80070057);
 });
 
+test('GetActiveObject finds no running object and clears the out pointer', ()=>{
+    setUp();
+    host.putU32(SLOT, 0xdeadbeef);
+    assert.equal(call('GetActiveObject', [0x1000, 0, SLOT]), 0x800401e3, 'MK_E_UNAVAILABLE');
+    assert.equal(host.u32(SLOT), 0);
+    assert.equal(call('GetActiveObject', [0x1000, 0, 0]), 0x80070057);
+    assert.equal(fx.GetActiveObject.argBytes, 12);
+    assert.equal(OLEAUT32_ORDINALS[35], 'GetActiveObject');
+});
+
 test('a BSTR carries its byte count in front of the pointer it hands out', ()=>{
     setUp();
     host.putWide(TEXT, 'hi');

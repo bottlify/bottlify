@@ -2579,6 +2579,29 @@ export function createAutomationFunctions(host){
         },
 
         /**
+         * HRESULT GetActiveObject(REFCLSID rclsid, void *pvReserved, IUnknown **ppunk)
+         *
+         * Looks a class up in the running object table, where another process
+         * registers the object it serves. No other process registers one here,
+         * so the answer is the one Windows gives for a class nobody is running:
+         * MK_E_UNAVAILABLE with the out pointer cleared, which a caller reads as
+         * "start your own instance" rather than a failure.
+         */
+        GetActiveObject: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, , out])=>{
+                const MK_E_UNAVAILABLE = 0x800401e3;
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(out >>> 0, 0);
+                return MK_E_UNAVAILABLE;
+            },
+        },
+
+        /**
          * HRESULT LoadTypeLib(LPCOLESTR szFile, ITypeLib **pptlib)
          * HRESULT LoadTypeLibEx(LPCOLESTR szFile, REGKIND regkind, ITypeLib **pptlib)
          *
@@ -3436,6 +3459,7 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     12: 'VariantChangeType',
     13: 'VariantTimeToDosDateTime',
     14: 'DosDateTimeToVariantTime',
+    35: 'GetActiveObject',
     147: 'VariantChangeTypeEx',
     149: 'SysStringByteLen',
     150: 'SysAllocStringByteLen',
