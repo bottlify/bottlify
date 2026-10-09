@@ -404,8 +404,12 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          *
          * @param {any} thread
          * @param {number} returnValue
+         * @param {Record<string, number>} [registers]  What else the answer
+         *     sets, for a call that answers in registers as well as in EAX.
+         *     Applied when the thread is resumed, which is the only moment the
+         *     registers on the processor are certainly its own.
          */
-        finish(thread, returnValue){
+        finish(thread, returnValue, registers){
             const call = hostCalls(thread).pop();
             if (!call)
             {
@@ -419,10 +423,15 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
                 answered = null;
                 open();
             }
+            // The call returns where it was always going to, with the value it
+            // gives: neither is the answer's to move.
+            const rest = Object.fromEntries(Object.entries(registers ?? {})
+                .filter(([name])=>name !== 'eip' && name !== 'esp' && name !== 'eax'));
             kernel.scheduleResume(thread, {
                 eip: call.hostReturn,
                 esp: call.restingStack,
                 returnValue,
+                ...Object.keys(rest).length > 0 ? { registers: rest } : {},
             });
         },
 

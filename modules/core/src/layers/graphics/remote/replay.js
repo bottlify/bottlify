@@ -1561,7 +1561,13 @@ export function createPlayer({ root, ship, read, borrow }){
             bindAll(answer, handsOut(playing) ? args : NOTHING, bind);
             if (allocs.length > 0)
             {
-                throw new Error(`remote: ${playing} allocated less on the played device`);
+                // What the played device answered says which way it went: a
+                // refusal (a Reset the device took as lost, with resources it
+                // still counts live) or a call that made fewer objects.
+                const said = typeof answer === 'number' ? `0x${(answer >>> 0).toString(16)}`
+                    : answer instanceof Promise ? 'a promise' : typeof answer;
+                throw new Error(`remote: ${playing} allocated less on the played device: it`
+                    + ` answered ${said}, ${allocs.length} of the recording's objects not made`);
             }
             const later = answer instanceof Promise;
             if (!later)

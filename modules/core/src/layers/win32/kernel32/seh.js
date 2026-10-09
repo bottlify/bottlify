@@ -200,7 +200,9 @@ const hex = value=>`0x${(value >>> 0).toString(16)}`;
  * @property {() => Record<string, number>} registers  EFLAGS among them
  *           (`eflags`) when the host can read them; without them a handler
  *           starts with the flags as they stand and continues with them.
- * @property {(values: Record<string, number>) => void} setRegisters
+ * @property {(value: number, registers: Record<string, number>) => any} answerWith
+ *           An answer that returns `value` and sets `registers` on the
+ *           calling thread as it resumes (the bridge's `answerWith`).
  * @property {(options: { entry: number, args: number[], thread?: any,
  *                        stackAtRest?: number,
  *                        registers?: Record<string, number> }) => Promise<number>} callGuest
@@ -834,18 +836,15 @@ export function createSeh(host){
                     {
                         parameters.push(readU32(from + at * 4));
                     }
+                    // The context a handler continued from is the caller's to
+                    // take back when it resumes: by the time the dispatch is
+                    // done the processor may be running somebody else.
                     return raise({
                         code: code >>> 0,
                         flags: flags >>> 0 & EXCEPTION_NONCONTINUABLE,
                         address: host.registers().eip,
                         parameters,
-                    }).then(result=>{
-                        if (result.registers)
-                        {
-                            host.setRegisters(result.registers);
-                        }
-                        return 0;
-                    });
+                    }).then(result=>(result.registers ? host.answerWith(0, result.registers) : 0));
                 },
             },
 

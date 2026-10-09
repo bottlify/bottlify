@@ -205,3 +205,40 @@ test('every region is formed the same on the worker from its own pages alone', (
         }
     }
 });
+
+test('a region formed again on a worker is the region the runtime formed, wherever forming'
+    + ' looked', ()=>{
+    // 0x401000: call [0x403000]; ret -- the slot names a small function on a
+    // page of its own, 0x402000: ret. Forming predicts the call through the
+    // slot where that callee is code it may form, and a region already at its
+    // most blocks takes none of the callee's: its page is in no block, and
+    // none of the region's pages. A worker told only those predicts nothing,
+    // forms another region and answers the job changed.
+    const form = { ...FORM, maxBlocks: 1 };
+    /** @type {Map<number, Uint8Array>} */
+    const pages = new Map([
+        [0x401, [0xff, 0x15, 0x00, 0x30, 0x40, 0x00, 0xc3]],
+        [0x402, [0xc3]],
+        [0x403, [0x00, 0x20, 0x40, 0x00]],
+    ].map(([page, bytes])=>{
+        const copy = new Uint8Array(4096);
+        copy.set(/** @type {number[]} */ (bytes));
+        const at = /** @type {number} */ (page);
+        return [at, copy];
+    }));
+    const read = (/** @type {number} */ address)=>pages.get(address >>> 12)?.[address & 0xfff] ?? 0;
+    const region = formRegion(read, 0x401000, { ...form,
+        translatable: address=>pages.has(address >>> 12) });
+    assert.ok(region.blocks.some(block=>block.exit.predicted), 'the call is predicted');
+    assert.ok(!region.pages.has(0x402), 'and its callee\'s page is none of the region\'s');
+    const relink = (/** @type {number[]} */ formable)=>relinkBatch({
+        jobs: [{ entry: 0x401000, entryTop: 0, hash: region.hash }],
+        pages: [...(region.reads ?? region.pages)].map(page=>[page,
+            /** @type {Uint8Array} */ (pages.get(page))]),
+        formable, form,
+    }, layout, FEATURES, OPTIONS);
+    assert.deepEqual(relink([...(region.formable ?? [])]).results.map(one=>one.ok), [true],
+        'told every page forming was told it may form on');
+    assert.deepEqual(relink([...region.pages]).results.map(one=>one.ok), [false],
+        'told only the pages of its code, it forms another region');
+});

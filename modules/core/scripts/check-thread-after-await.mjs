@@ -6,7 +6,9 @@
 
 /**
  * Fails when a host routine asks which thread is running -- currentThread(),
- * teb(), registers() -- after it has awaited anything.
+ * teb(), registers() -- or writes the running thread's registers
+ * (setRegisters) after it has awaited anything, or in a `.then` callback,
+ * which runs as late.
  *
  * A call into the host is answered with its caller as the current thread only
  * until the answer first awaits. On one executor the thread is usually still
@@ -27,7 +29,8 @@ import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('../src/layers/', import.meta.url));
-const ASKS = /\b(?:currentThread|teb|registers)\s*(?:\?\.)?\(\s*\)/g;
+const ASKS = /\b(?:(?:currentThread|teb|registers)\s*(?:\?\.)?\(\s*\)|setRegisters\s*(?:\?\.)?\()/g;
+const THEN = /\.then\s*\(/g;
 const ASYNC = /\basync\b\s*(?:function\b[^(]*\(|\(|[\w$]+\s*=>)/g;
 
 /** @param {string} dir @returns {string[]} */
@@ -145,6 +148,28 @@ function closing(code, open){
     return null;
 }
 
+/**
+ * The span from the parenthesis at `open` to the one that closes it.
+ *
+ * @param {string} code @param {number} open
+ * @returns {[number, number] | null}
+ */
+function parenthesised(code, open){
+    let depth = 0;
+    for (let close = open; close < code.length; close++)
+    {
+        if (code[close] === '(')
+        {
+            depth++;
+        }
+        else if (code[close] === ')' && --depth === 0)
+        {
+            return [open, close];
+        }
+    }
+    return null;
+}
+
 const found = [];
 for (const path of sources(ROOT))
 {
@@ -152,6 +177,31 @@ for (const path of sources(ROOT))
     const code = blank(text);
     const lines = text.split('\n');
     const lineOf = (/** @type {number} */ offset)=>code.slice(0, offset).split('\n').length;
+    /** @param {number} offset */
+    const report = offset=>{
+        const line = lineOf(offset);
+        const source = lines[line - 1];
+        const previous = lines[line - 2] ?? '';
+        if (!/\/\/ any thread:/.test(source) && !/\/\/ any thread:/.test(previous))
+        {
+            found.push(`${relative(ROOT, path)}:${line}: ${source.trim()}`);
+        }
+    };
+    // What a `.then` is handed runs after the promise settles: as late as
+    // anything after an await.
+    for (const match of code.matchAll(THEN))
+    {
+        const open = (match.index ?? 0) + match[0].length - 1;
+        const span = parenthesised(code, open);
+        if (!span)
+        {
+            continue;
+        }
+        for (const ask of code.slice(span[0], span[1]).matchAll(ASKS))
+        {
+            report(span[0] + (ask.index ?? 0));
+        }
+    }
     for (const match of code.matchAll(ASYNC))
     {
         const body = bodyOf(code, match.index ?? 0);
@@ -170,15 +220,7 @@ for (const path of sources(ROOT))
         }
         for (const ask of inside.slice(resumed).matchAll(ASKS))
         {
-            const offset = body[0] + resumed + (ask.index ?? 0);
-            const line = lineOf(offset);
-            const source = lines[line - 1];
-            const previous = lines[line - 2] ?? '';
-            if (/\/\/ any thread:/.test(source) || /\/\/ any thread:/.test(previous))
-            {
-                continue;
-            }
-            found.push(`${relative(ROOT, path)}:${line}: ${source.trim()}`);
+            report(body[0] + resumed + (ask.index ?? 0));
         }
     }
 }

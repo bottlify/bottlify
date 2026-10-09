@@ -977,7 +977,7 @@ export function createWin32Module(){
                 // fault's does, and a handler that continues from it gets them back.
                 registers: ()=>Object.fromEntries(
                     [...registerNames, 'eflags'].map(name=>[name, cpuRegisters.read(name)])),
-                setRegisters,
+                answerWith: (value, registers)=>bridge.answerWith(value, registers),
                 /** @param {any} call */
                 callGuest: call=>bridge.callGuest(call),
                 currentThread: ()=>kernel.currentThread(),

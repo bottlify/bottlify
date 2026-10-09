@@ -46,9 +46,11 @@ function machine(options = {}){
         isMapped: at=>at > 0 && at < bytes.length,
         teb: ()=>TEB,
         registers: ()=>({ ...registers }),
-        /** @param {Record<string, number>} values */
-        setRegisters: values=>{
+        // What the bridge does with such an answer once the caller resumes.
+        /** @param {number} value @param {Record<string, number>} values */
+        answerWith: (value, values)=>{
             registers = { ...registers, ...values };
+            return value;
         },
         /**
          * @param {{ entry: number, args: number[], stackAtRest?: number,
