@@ -198,6 +198,8 @@ function lookUp(table, value, what){
  * @property {boolean} depthTest
  * @property {boolean} depthWrite
  * @property {number} depthFunc
+ * @property {number} [depthBias]            in the depth format's smallest steps
+ * @property {number} [depthBiasSlopeScale]
  * @property {number} cullMode
  * @property {boolean} blend
  * @property {number} srcBlend
@@ -301,6 +303,8 @@ export function pipelineKey(state){
         state.depthTest ? 1 : 0,
         state.depthWrite ? 1 : 0,
         state.depthFunc,
+        ...(state.depthBias || state.depthBiasSlopeScale
+            ? [`bias${state.depthBias ?? 0}/${state.depthBiasSlopeScale ?? 0}`] : []),
         state.cullMode,
         state.blend ? 1 : 0,
         state.srcBlend,
@@ -445,6 +449,9 @@ export function pipelineDescriptor(state, layout){
                 ? lookUp(COMPARE, state.depthFunc, 'depth function')
                 : 'always',
             depthWriteEnabled: state.depthWrite,
+            ...(state.depthBias ? { depthBias: state.depthBias } : {}),
+            ...(state.depthBiasSlopeScale
+                ? { depthBiasSlopeScale: state.depthBiasSlopeScale } : {}),
             ...(state.stencil ? stencilDescriptor(state.stencil) : {}),
         };
 

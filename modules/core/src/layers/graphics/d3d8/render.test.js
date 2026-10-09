@@ -46,6 +46,7 @@ import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { FVF, decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { viewportState } from '../webgpu/internal/viewport.js';
+import { pipelineDescriptor, pipelineKey } from '../webgpu/internal/pipeline.js';
 import {
     clear as referenceClear, createReferenceSurface, fillRect, fogFactor,
     fogged as referenceFogged, toBase64,
@@ -2578,6 +2579,39 @@ test('a state renormalises its normals only when NORMALIZENORMALS asks', ()=>{
     model.renderStates.set(D3DRS.NORMALIZENORMALS, 1);
     assert.equal(pipelineStateOf(model, shape).normalizeNormals, true);
 });
+
+test('a depth bias reaches the pipeline: Direct3D 9 in depth units, Direct3D 8 in ZBIAS steps',
+    ()=>{
+        const bits = (/** @type {number} */ f)=>new Uint32Array(new Float32Array([f]).buffer)[0];
+        const model = /** @type {any} */ ({
+            renderStates: new Map([[195, bits(-0.0001)], [175, bits(-2)]]),
+            stageStates: ()=>new Map(),
+            textures: new Map(),
+            transforms: new Map(),
+            lights: new Map(),
+            material: material8(),
+        });
+        const shape = {
+            fvf: FVF.XYZ, topology: 'triangle-list', targetFormat: 'bgra8unorm',
+            depthFormat: 'depth24plus-stencil8', stages: [],
+        };
+        model.renderStates.set(D3DRS.CULLMODE, 1);
+        const state = pipelineStateOf(model, shape);
+        assert.equal(state.depthBias, Math.round(-0.0001 * 16777216));
+        assert.equal(state.depthBiasSlopeScale, -2);
+        const descriptor = pipelineDescriptor(state, null);
+        assert.equal(descriptor.depthStencil.depthBias, state.depthBias);
+        assert.equal(descriptor.depthStencil.depthBiasSlopeScale, -2);
+        assert.notEqual(pipelineKey(state), pipelineKey(pipelineStateOf({ ...model,
+            renderStates: new Map([[D3DRS.CULLMODE, 1]]) }, shape)),
+        'a biased draw is a pipeline of its own');
+        assert.equal(pipelineStateOf(model, { ...shape, topology: 'line-list' }).depthBias,
+            undefined, 'not on lines, which WebGPU does not bias');
+        const eight = { ...model, renderStates: new Map([[D3DRS.ZBIAS, 2], [D3DRS.CULLMODE, 1]]) };
+        assert.equal(pipelineStateOf(eight, shape).depthBias, Math.round(2 * -0.000005 * 16777216));
+        assert.equal(pipelineStateOf(eight, { ...shape, depthFormat: undefined }).depthBias,
+            undefined, 'no depth, no bias');
+    });
 
 test('the run counts what lighting it was actually asked for', async()=>{
     // A picture that is uniformly too dark or too flat cannot be diagnosed from

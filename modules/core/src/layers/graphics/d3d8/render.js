@@ -1951,6 +1951,41 @@ export const isFlatShaded = model=>
 export const isAffine = projection=>projection[3] === 0 && projection[7] === 0
     && projection[11] === 0 && projection[15] === 1;
 
+/** What a Direct3D 8 ZBIAS step is in depth units, as Direct3D 9's DEPTHBIAS says one. */
+const ZBIAS_STEP = -0.000005;
+
+/**
+ * The depth bias a draw is made with, in WebGPU's terms: a count of the depth
+ * format's smallest steps and a factor of the polygon's slope. Direct3D 9's
+ * DEPTHBIAS is in depth units and SLOPESCALEDEPTHBIAS the same factor;
+ * Direct3D 8's ZBIAS is a step count from 0 to 16, each step pulling the
+ * polygon nearer. A decal laid on a wall leans on it to stay in front:
+ * without it the two take turns as the camera moves.
+ *
+ * @param {any} model @param {string | undefined} depthFormat
+ * @param {string | undefined} topology
+ * @returns {{ depthBias?: number, depthBiasSlopeScale?: number }}
+ */
+function depthBiasOf(model, depthFormat, topology){
+    // WebGPU allows a bias only on triangles.
+    if (depthFormat === undefined || (topology !== undefined && topology !== 'triangle-list'
+        && topology !== 'triangle-strip' && topology !== POINT_QUADS))
+    {
+        return {};
+    }
+    const zbias = model.renderStates.get(D3DRS.ZBIAS) ?? 0;
+    const units = dwordToFloat(model.renderStates.get(D3DRS9.DEPTHBIAS) ?? 0)
+        + (zbias & 0xff) * ZBIAS_STEP;
+    const slope = dwordToFloat(model.renderStates.get(D3DRS9.SLOPESCALEDEPTHBIAS) ?? 0);
+    const steps = depthFormat === 'depth16unorm' ? 65536 : 16777216;
+    const depthBias = Number.isFinite(units) ? Math.round(units * steps) : 0;
+    const depthBiasSlopeScale = Number.isFinite(slope) ? slope : 0;
+    return {
+        ...depthBias !== 0 ? { depthBias } : {},
+        ...depthBiasSlopeScale !== 0 ? { depthBiasSlopeScale } : {},
+    };
+}
+
 /**
  * The render state of a draw, as the pipeline cache keys it.
  *
@@ -2003,6 +2038,7 @@ export function pipelineStateOf(model, shape){
         depthTest,
         depthWrite: depthTest && rs('ZWRITEENABLE') !== 0,
         depthFunc: rs('ZFUNC'),
+        ...depthBiasOf(model, shape.depthFormat, shape.topology),
         cullMode: rs('CULLMODE'),
         blend: rs('ALPHABLENDENABLE') !== 0,
         srcBlend,
