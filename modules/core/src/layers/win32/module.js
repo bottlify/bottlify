@@ -665,22 +665,35 @@ export function createWin32Module(){
             // Built here rather than with the other tables because two things need
             // it: the library a program links against, and the drawing layer, which
             // asks it for a device context over pixels GDI did not allocate.
+            /**
+             * Whether the guest may write there: what a call that fills in a
+             * caller's structure checks first, to answer ERROR_NOACCESS for a
+             * bad pointer rather than stop the machine.
+             *
+             * @param {number} address @param {number} length
+             */
+            const canWrite = (address, length)=>{
+                // A memory layer that cannot say takes every write it is given.
+                if (typeof memory.assert !== 'function')
+                {
+                    return true;
+                }
+                try
+                {
+                    memory.assert(address >>> 0, Math.max(1, length), 'write');
+                    return true;
+                }
+                catch (e){
+                    void e;
+                    return false;
+                }
+            };
             const gdi = createGdiFunctions({
                 readMemory,
                 writeMemory,
                 readCString,
                 windowContextCurrent: hdc=>windowService.refreshContext?.(hdc),
-                canWrite: (address, length)=>{
-                    try
-                    {
-                        memory.assert(address >>> 0, Math.max(1, length), 'write');
-                        return true;
-                    }
-                    catch (e){
-                        void e;
-                        return false;
-                    }
-                },
+                canWrite,
                 divergence: config?.divergence,
                 handles: {
                     /** @param {string} type @param {any} object */
@@ -2358,6 +2371,7 @@ export function createWin32Module(){
 
                 'USER32.dll': createWindowFunctions({
                     readMemory,
+                    canWrite,
                     processId,
                     directory: windowDirectory,
                     writeMemory,

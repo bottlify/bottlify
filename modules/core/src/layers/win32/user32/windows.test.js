@@ -342,6 +342,8 @@ function setup({
         threadExists,
         /** @param {number} code */
         setLastError: code=>errors.push(code),
+        // The first page is not the guest's to write, as on Windows.
+        canWrite: address=>address >= 0x10000,
         park: ()=>{
             parked.push(true);
             return PARKED;
@@ -5820,3 +5822,16 @@ test('SW_SCROLLCHILDREN moves each child in turn, and the scroll answers after t
         assert.ok(memory.u32(RECT_BUFFER) > memory.u32(RECT_BUFFER + 16) + 10,
             'it moved with the scroll');
     });
+
+test('PeekMessage with no MSG to fill fails with ERROR_NOACCESS, and takes the message all'
+    + ' the same', ()=>{
+    // msg.c test_messages: "PeekMessage(NULL) fails, but still removes the message".
+    const ERROR_NOACCESS = 998;
+    const { fns, memory, hwnd, queue, errors } = withWindow();
+    queue.post({ hwnd, message: WM_USER, wParam: 0, lParam: 0 });
+    queue.post({ hwnd, message: WM_USER + 1, wParam: 0, lParam: 0 });
+    assert.equal(fns.PeekMessageA.handler([0, 0, 0, 0, PM_REMOVE]), 0);
+    assert.equal(errors.at(-1), ERROR_NOACCESS);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_USER + 1, 'the first was taken');
+});

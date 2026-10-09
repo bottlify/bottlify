@@ -45,6 +45,7 @@ import {
     createControlProcedures, pointOf,
 } from './controls.js';
 import {
+    MSG,
     WNDCLASSA,
     WNDCLASSEXA,
     readMessage,
@@ -392,6 +393,8 @@ const HWND_THREAD_MESSAGES = 0xffffffff;
 /** What PostThreadMessage reports for an identifier that names no thread. */
 const ERROR_INVALID_THREAD_ID = 1444;
 const ERROR_INVALID_PARAMETER = 87;
+/** A pointer the call was to write through, and could not. */
+const ERROR_NOACCESS = 998;
 const ERROR_INVALID_WINDOW_HANDLE = 1400;
 const ERROR_TLW_WITH_WSCHILD = 1406;
 
@@ -545,6 +548,9 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           program that makes one gets no window for it.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, length: number) => boolean} [canWrite]
+ *           Whether the guest may write there; without it every address is
+ *           taken to be writable.
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number) => { base: number, size: number } | null} [regionAt]
  *           The region an address sits in, from the memory layer's map: the
@@ -5922,6 +5928,13 @@ export function createWindowFunctions(host){
         return andThen(entry, (/** @type {any} */ taken)=>{
             if (!taken)
             {
+                return 0;
+            }
+            // Taken all the same, with nowhere to put it (msg.c: "PeekMessage
+            // (NULL) fails, but still removes the message").
+            if (host.canWrite?.(out >>> 0, MSG.SIZE) === false)
+            {
+                host.setLastError?.(ERROR_NOACCESS);
                 return 0;
             }
             writeMessage(host, out, retrieved(taken, unicode));
