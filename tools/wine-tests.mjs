@@ -420,6 +420,9 @@ async function runChild(exePath, test, settings){
             // The program on its own volume, where GetModuleFileName says it is:
             // a test that reads its own resources or copies itself opens it.
             files: [{ path: imagePath, bytes: executable }],
+            // The run's first process is numbered at random otherwise, and
+            // the test's own closing count is told from a child's by it.
+            processId: MAIN_PROCESS,
             cork: { config: { feed: 'slice', timings: true,
                 worker: true, workerUrl: new URL(
                     'modules/cork/src/runtime/translator.worker.js', ROOT).href,
