@@ -5,7 +5,8 @@
  */
 
 /**
- * The launcher in a headless browser that stays up and takes orders, for
+ * The launcher in a browser that stays up and takes orders -- headless, or a
+ * window a person plays in (DRIVE_HEADED=1) -- for
  * walking a title's screens a step at a time: a screenshot of the picture, a
  * person says what to press, the press goes in, the next screenshot comes.
  * The run is never restarted to get past a screen, and the engine is there to
@@ -26,6 +27,8 @@
  *   /key?code=Enter      a key press, by KeyboardEvent.code
  *   /type?text=123       characters typed one after another
  *   /eval?js=EXPR        the value of an expression in the launcher tab, as JSON
+ *   /report?file=PATH    the running title's report, as Download report saves it;
+ *                        answers the path (dbg/live-downloads by default)
  *   /stack               where the tab's own code is running when it answers nothing else
  *   /upload?file=PATH    a file handed to the page's file input (`selector`, the
  *                        first one by default) -- the library's Add, for an installer
@@ -52,8 +55,11 @@ const [pattern = '', query = ''] = process.argv.slice(2);
 /** @param {number} ms */
 const sleep = ms=>new Promise(done=>setTimeout(done, ms));
 
+// DRIVE_HEADED=1 shows the window: a person plays in it while the endpoints
+// below look inside the same tab.
 const browser = await launchWithGpu({
-    headed: false, profileDir: process.env.DRIVE_PROFILE ?? 'dbg/chrome-profile' });
+    headed: process.env.DRIVE_HEADED === '1',
+    profileDir: process.env.DRIVE_PROFILE ?? 'dbg/chrome-profile' });
 const cdp = new CdpEndpoint(browser.browserWs);
 await cdp.open();
 const downloads = resolve('dbg/live-downloads');
@@ -191,6 +197,24 @@ createServer(async(request, answer)=>{
         else if (url.pathname === '/eval')
         {
             out = JSON.stringify(await evaluate(arg('js')));
+        }
+        else if (url.pathname === '/report')
+        {
+            // What the launcher's Download report saves, taken from the running
+            // engine at once: every layer's diagnostics, the phase profile, the
+            // threads, the hottest guest code, and the journal ring.
+            const report = await evaluate(`(async()=>{
+                const app = globalThis.app;
+                if (!app) { return { error: 'no title is running' }; }
+                const [records, presented, engine] = await Promise.all([
+                    app.log.recent(${Number(arg('records') || 20000)}), app.presented(),
+                    typeof app.report === 'function' ? app.report()
+                        : app.diagnostics().then(diagnostics=>({ diagnostics }))]);
+                return { at: new Date().toISOString(), presented, engine, journal: records };
+            })()`);
+            const file = resolve(arg('file') || `${downloads}/live-report-${Date.now()}.json`);
+            await writeFile(file, JSON.stringify(report));
+            out = file;
         }
         else if (url.pathname === '/stack')
         {
