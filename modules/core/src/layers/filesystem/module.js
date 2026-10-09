@@ -502,6 +502,34 @@ export function createFilesystemModule(){
                     return out;
                 },
 
+                /**
+                 * The empty directories the writable layer holds, as full paths:
+                 * the part of a session `export` cannot carry.
+                 *
+                 * @param {string} [letter]
+                 * @returns {string[]}
+                 */
+                exportDirectories(letter){
+                    if (!live())
+                    {
+                        return [];
+                    }
+                    /** @type {string[]} */
+                    const out = [];
+                    for (const [key, tree] of state.drives)
+                    {
+                        if (letter && key !== String(letter).toUpperCase())
+                        {
+                            continue;
+                        }
+                        for (const path of tree.writableDirectories())
+                        {
+                            out.push(formatPath(key, splitComponents(path)));
+                        }
+                    }
+                    return out;
+                },
+
                 /** @returns {string[]} */
                 drives: ()=>live() ? [...state.drives.keys()] : [],
 

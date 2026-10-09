@@ -725,6 +725,40 @@ export function createOverlay({
             return found;
         },
 
+        /**
+         * The directories the writable layer made that hold nothing. A list of
+         * files cannot say they exist, and a program that creates a file in one
+         * relies on it being there: CreateDirectory does not make parents.
+         *
+         * @returns {string[]}
+         */
+        writableDirectories(){
+            /** @type {string[]} */
+            const found = [];
+            /** @param {Node} node */
+            const walk = node=>{
+                let live = 0;
+                for (const child of node.children.values())
+                {
+                    if (child.tombstone)
+                    {
+                        continue;
+                    }
+                    live++;
+                    if (child.directory)
+                    {
+                        walk(child);
+                    }
+                }
+                if (live === 0 && node !== root && node.inWritable)
+                {
+                    found.push(node.path);
+                }
+            };
+            walk(root);
+            return found;
+        },
+
         diagnostics(){
             let files = 0;
             let directories = 0;

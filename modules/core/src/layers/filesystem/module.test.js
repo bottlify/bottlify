@@ -50,6 +50,26 @@ test('a module with no configuration still comes up as a volume', async()=>{
     await filesystemModule.dispose();
 });
 
+test('an empty directory a program made is exported, one holding something is not', async()=>{
+    // A list of files cannot say Settings\Profiles exists, and a program that
+    // later creates Settings\Profiles\Default relies on it: CreateDirectory
+    // does not make parents.
+    const fs = await filesystemModule.create(undefined);
+    fs.createDirectory('C:\\Game');
+    fs.createDirectory('C:\\Game\\Settings');
+    fs.createDirectory('C:\\Game\\Settings\\Profiles');
+    fs.createDirectory('C:\\Game\\Logs');
+    const handle = fs.open('C:\\Game\\Logs\\log.txt',
+        { write: true, disposition: fs.Disposition.CREATE_NEW });
+    fs.write(handle, bytes('log'));
+    fs.close(handle);
+
+    assert.deepEqual(fs.exportDirectories(), ['C:\\Game\\Settings\\Profiles']);
+    assert.deepEqual(fs.exportDirectories('D'), []);
+    await filesystemModule.dispose();
+    assert.deepEqual(fs.exportDirectories(), []);
+});
+
 test('a file written in one case is found in another and listed in its own', async()=>{
     const fs = await volume();
 

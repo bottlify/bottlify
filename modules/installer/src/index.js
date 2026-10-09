@@ -64,7 +64,9 @@ export {
  * is over by the time any of it is called.
  *
  * @typedef {Object} InstalledApp
- * @property {{ export: () => { path: string, bytes: Uint8Array }[] }} session
+ * @property {{ export: () => { path: string, bytes: Uint8Array }[],
+ *             directories?: () => string[] }} session  `directories`: the empty ones
+ *           it made, which a list of files cannot carry.
  * @property {() => { toJSON: () => unknown }} registry
  * @property {() => string[]} [systemLibraries]  The libraries the engine synthesises
  *           as Windows' own, which a bottle does not carry out of system32.
@@ -111,6 +113,7 @@ export async function storageHeadroom(){
 export function collectFrom(app, media, root){
     return collect({
         files: app.session.export(),
+        directories: app.session.directories?.() ?? [],
         registry: app.registry().toJSON(),
         // A disc is a drive of its own and was never in the prefix.
         seeded: isDiscMedia(media) ? [] : prefixOptions(media).seeded,
@@ -153,6 +156,7 @@ export async function publish({ prefix, endpoint, id, manifest = {}, report }){
     report?.({ stage: 'packing', detail: `${prefix.files.length} files under ${prefix.root}` });
     const packed = await packBundle({
         files: prefix.files,
+        directories: prefix.directories ?? [],
         write: sink.write,
         onProgress: progress=>report?.({
             stage: 'packing',

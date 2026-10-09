@@ -117,6 +117,8 @@ const SYSTEM_ROOTS = ['windows', 'temp', 'tmp', 'program files\\common files',
  * @property {PrefixFile[]} files   Everything under it, the registry and what the
  *                                  install added to system32 (`SYSTEM_PATH`) included.
  * @property {string[]} outside     Absolute paths neither the root nor system32 covers.
+ * @property {string[]} [directories]  The empty directories the install made under the
+ *                                  root, relative to it, which a list of files cannot carry.
  * @property {string[]} [answered]  What the install put in system32 that names a
  *                                  library the engine synthesises itself: not carried.
  * @property {string | null} entry  Best guess at the program to start.
@@ -328,11 +330,13 @@ export function guessEntry(files){
  * @param {any} [options.registry]      The hive, as `toJSON` gives it.
  * @param {string[]} [options.seeded]   Paths put there before the run.
  * @param {string} [options.root]       Overrides the chosen root.
+ * @param {string[]} [options.directories]  The empty directories the run left,
+ *        absolute guest paths.
  * @param {string[]} [options.synthesised]  The libraries the engine synthesises as
  *        Windows' own, by file name (the app's `systemLibraries()`).
  * @returns {Prefix}
  */
-export function collect({ files, registry, seeded = [], root, synthesised = [] }){
+export function collect({ files, directories = [], registry, seeded = [], root, synthesised = [] }){
     const planted = new Set(seeded.map(fold));
     const produced = files.filter(file=>!planted.has(fold(file.path)));
 
@@ -382,5 +386,9 @@ export function collect({ files, registry, seeded = [], root, synthesised = [] }
             bytes: new TextEncoder().encode(JSON.stringify(registry)),
         });
     }
-    return { root: chosen, files: inside, outside, answered, entry };
+    // Only the installation's own: an empty directory elsewhere is the system's.
+    const empty = directories
+        .filter(path=>fold(path).startsWith(under))
+        .map(path=>path.slice(under.length));
+    return { root: chosen, files: inside, directories: empty, outside, answered, entry };
 }

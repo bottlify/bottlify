@@ -6764,6 +6764,8 @@ async function buildApp(options){
         session: {
             /** @returns {{ path: string, bytes: Uint8Array }[]} */
             export: ()=>filesystem.export(),
+            /** @returns {string[]} The empty directories it made, which `export` cannot carry. */
+            directories: ()=>filesystem.exportDirectories(),
             /**
              * @param {{ path: string, bytes?: Uint8Array, delete?: boolean }[]} changes
              * @param {{ quiet?: boolean }} [how]
@@ -7352,6 +7354,7 @@ async function buildSystemHost(deps){
         systemLibraries: ()=>(across().length > 0 ? ask('systemLibraries') : libraries()),
         session: {
             export: ()=>filesystem.export(),
+            directories: ()=>filesystem.exportDirectories(),
             /** @param {any[]} changes @param {{ quiet?: boolean }} [how] */
             apply: (changes, how)=>filesystem.apply(changes, how),
             generation: ()=>filesystem.generation(),

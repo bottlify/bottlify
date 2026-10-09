@@ -61,6 +61,16 @@ test('the rest of the media is seeded beside the entry, none of it counted as pr
     assert.deepEqual(prefix.files.map(file=>file.path), ['title.exe']);
 });
 
+test('the empty directories under the root are carried, relative to it', ()=>{
+    const prefix = collect({
+        files: tree(['C:\\Games\\Title\\title.exe']),
+        directories: ['C:\\Games\\Title\\Settings\\Profiles', 'C:\\Temp\\scratch'],
+    });
+
+    assert.equal(prefix.root, 'C:\\Games\\Title');
+    assert.deepEqual(prefix.directories, ['Settings\\Profiles']);
+});
+
 test('what was seeded is not part of what the installer produced', ()=>{
     const media = prefixOptions({ name: 'Setup.exe', bytes: bytes('MZ') });
     const prefix = collect({
