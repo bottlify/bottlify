@@ -5259,6 +5259,13 @@ export function createWindowFunctions(host){
         }
         presentIfPainted();
         return 0;
+    }, hwnd=>{
+        // An internal paint is handed out once (MSDN WM_PAINT).
+        const record = live(hwnd);
+        if (record)
+        {
+            record.internalPaint = false;
+        }
     });
 
     const rawInput = createRawInput({

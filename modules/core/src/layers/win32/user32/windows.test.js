@@ -5709,3 +5709,40 @@ test('GetUpdateRect and GetUpdateRgn with bErase erase what is owed, once, and l
         assert.equal(fns.GetUpdateRect.handler([hwnd, 0, 1]), 1);
         assert.equal(erases(), before + 1, 'once');
     });
+
+test('RDW_INTERNALPAINT hands out one WM_PAINT with nothing to paint', ()=>{
+    // MSDN WM_PAINT: an internal paint is handed out once, whether or not
+    // the window calls BeginPaint; RDW_NOINTERNALPAINT takes it back.
+    const RDW_INTERNALPAINT = 0x2;
+    const RDW_NOINTERNALPAINT = 0x10;
+    const { fns, memory, hwnd } = withWindow();
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    fns.ValidateRect.handler([hwnd, 0]);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0);
+    fns.RedrawWindow.handler([hwnd, 0, 0, RDW_INTERNALPAINT]);
+    assert.equal(fns.GetUpdateRect.handler([hwnd, RECT_BUFFER, 0]), 1, 'something to paint');
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at)), [0, 0, 0, 0],
+        'and no area of it');
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_PAINT);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0,
+        'once, though nobody called BeginPaint');
+    fns.RedrawWindow.handler([hwnd, 0, 0, RDW_INTERNALPAINT]);
+    fns.RedrawWindow.handler([hwnd, 0, 0, RDW_NOINTERNALPAINT]);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0, 'taken back');
+});
+
+test('RDW_ERASENOW erases before RedrawWindow returns and leaves the paint queued', ()=>{
+    const RDW_INVALIDATE = 0x1;
+    const RDW_ERASE = 0x4;
+    const RDW_ERASENOW = 0x200;
+    const WM_ERASEBKGND = 0x0014;
+    const { fns, memory, hwnd, dispatched } = withWindow({ paint: true });
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    fns.ValidateRect.handler([hwnd, 0]);
+    const before = dispatched.length;
+    fns.RedrawWindow.handler([hwnd, 0, 0, RDW_INVALIDATE | RDW_ERASE | RDW_ERASENOW]);
+    assert.deepEqual(dispatched.slice(before).map(entry=>entry.message), [WM_ERASEBKGND]);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_PAINT, 'the paint still to come');
+});

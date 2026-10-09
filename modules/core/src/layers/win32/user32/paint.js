@@ -55,6 +55,11 @@ const RDW_ERASE = 0x0004;
 const RDW_VALIDATE = 0x0008;
 const RDW_UPDATENOW = 0x0100;
 const RDW_FRAME = 0x0400;
+const RDW_INTERNALPAINT = 0x0002;
+const RDW_NOINTERNALPAINT = 0x0010;
+const RDW_NOERASE = 0x0020;
+const RDW_ERASENOW = 0x0200;
+const RDW_NOFRAME = 0x0800;
 
 /** The styles that decide what a window's painting covers. */
 const WS_CLIPCHILDREN = 0x02000000;
@@ -647,11 +652,13 @@ export function createPaintFunctions(options){
     /**
      * Whether a window has anything to paint: an update area, or only its
      * frame, which is a WM_PAINT too (msg.c: "GetUpdateRgn must return empty
-     * region since only nonclient area is invalidated").
+     * region since only nonclient area is invalidated"), or a paint asked
+     * for with RDW_INTERNALPAINT and nothing to paint.
      *
      * @param {any} record
      */
-    const owesPaint = record=>Boolean(record.updateRect) || record.ncDirty === true;
+    const owesPaint = record=>Boolean(record.updateRect) || record.ncDirty === true
+        || record.internalPaint === true;
 
     /**
      * WM_PAINT sent now, the window procedure run before the caller goes on,
@@ -670,6 +677,8 @@ export function createPaintFunctions(options){
             return 1;
         }
         const over = paintsOver(record);
+        // Sent once for an internal paint, as UpdateWindow sends it.
+        record.internalPaint = false;
         return after(send(record.hwnd, WM_PAINT, 0, 0, thread ?? host.callerThread?.()), ()=>{
             if (over)
             {
@@ -1085,6 +1094,7 @@ export function createPaintFunctions(options){
         // invalidates from inside its own WM_PAINT expects that request to
         // survive, and clearing afterwards would swallow it.
         setUpdate(record, null);
+        record.internalPaint = false;
         record.painting = hdc;
         if (hdc !== 0)
         {
@@ -1583,8 +1593,39 @@ export function createPaintFunctions(options){
                 {
                     validate(record, whole ? null : area, children);
                 }
-                return (flags & RDW_UPDATENOW) === 0
-                    ? 1 : updateNow(record, (flags & RDW_ALLCHILDREN) !== 0);
+                // What is owed besides the area: a paint with nothing to
+                // paint, given or taken back, and the background and the
+                // frame no longer to be drawn -- for the window and the
+                // children the flags reach (msg.c test_paint_messages).
+                const reached = [record,
+                    ...reachesChildren(record, children) ? descendants?.(record) ?? [] : []];
+                for (const each of reached)
+                {
+                    if ((flags & RDW_INTERNALPAINT) !== 0)
+                    {
+                        each.internalPaint = true;
+                        invalidated(each);
+                    }
+                    else if ((flags & RDW_NOINTERNALPAINT) !== 0)
+                    {
+                        each.internalPaint = false;
+                    }
+                    if ((flags & RDW_NOERASE) !== 0)
+                    {
+                        each.erase = false;
+                    }
+                    if ((flags & RDW_NOFRAME) !== 0)
+                    {
+                        each.ncDirty = false;
+                    }
+                }
+                const thread = host.callerThread?.();
+                const erased = (flags & RDW_ERASENOW) === 0 || (flags & RDW_UPDATENOW) !== 0 ? 1
+                    : reached.filter(each=>shown(each)).reduce(
+                        (/** @type {number | Promise<number>} */ chain, each)=>
+                            after(chain, ()=>eraseNow(each, thread)), 1);
+                return after(erased, ()=>((flags & RDW_UPDATENOW) === 0
+                    ? 1 : updateNow(record, (flags & RDW_ALLCHILDREN) !== 0, thread)));
             },
         },
 

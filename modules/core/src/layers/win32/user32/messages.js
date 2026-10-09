@@ -427,6 +427,13 @@ export function createMessageQueue(options = {}){
      * @type {((filter: MessageFilter) => number) | null}
      */
     let dirtyWindow = null;
+    /**
+     * Told when a made-up WM_PAINT is taken off the queue: an internal paint
+     * is handed out once.
+     *
+     * @type {((hwnd: number) => void) | null}
+     */
+    let paintTaken = null;
 
     /**
      * The entries the input layer posted -- the ones that name the pointer's
@@ -1176,6 +1183,7 @@ export function createMessageQueue(options = {}){
                 {
                     retrieved++;
                     pumped.set(WM_PAINT, (pumped.get(WM_PAINT) ?? 0) + 1);
+                    paintTaken?.(paint.hwnd);
                 }
                 return paint;
             }
@@ -1218,13 +1226,16 @@ export function createMessageQueue(options = {}){
         },
 
         /**
-         * Tells the queue how to find a window with an area to paint. The
-         * windows are the window half's; the queue only asks.
+         * Tells the queue how to find a window with an area to paint, and
+         * whom to tell when one's WM_PAINT is taken. The windows are the
+         * window half's; the queue only asks.
          *
          * @param {(filter: MessageFilter) => number} source
+         * @param {(hwnd: number) => void} [taken]
          */
-        paintsFrom(source){
+        paintsFrom(source, taken){
             dirtyWindow = source;
+            paintTaken = taken ?? null;
         },
 
         /**
