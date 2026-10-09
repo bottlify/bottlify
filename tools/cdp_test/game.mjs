@@ -46,7 +46,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchWithGpu, shutdown } from './browser.mjs';
 import { CdpEndpoint } from './cdp.mjs';
-import { reportTimeout } from './timeout-report.mjs';
+import { pausedStack, reportTimeout } from './timeout-report.mjs';
 import { serveStatic } from './server.mjs';
 import { describeProfile, profileWorkers, summarise, summariseAllocations } from './profile.mjs';
 import { describeDevice, watchDevice } from './device-lag.mjs';
@@ -508,37 +508,6 @@ const toBgra = rgba=>{
     }
     return bgra;
 };
-
-/**
- * Where a page that answers nothing is running: the debugger's pause
- * interrupts the thread even inside a loop that never yields, and the frames
- * it stops in are named, then the page is let go again.
- *
- * @param {CdpEndpoint} cdp
- * @param {string} sessionId
- * @returns {Promise<string>}
- */
-async function pausedStack(cdp, sessionId){
-    /** @type {(frames: any[]) => void} */
-    let paused = ()=>{};
-    /** @type {Promise<any[]>} */
-    const frames = new Promise(settle=>{
-        paused = settle;
-    });
-    // Enabling the debugger announces every script, which a paused frame
-    // names only by id.
-    /** @type {Map<string, string>} */
-    const scripts = new Map();
-    cdp.on('Debugger.scriptParsed', params=>scripts.set(params.scriptId, params.url));
-    cdp.on('Debugger.paused', params=>paused(params.callFrames));
-    await cdp.send('Debugger.enable', {}, sessionId);
-    await cdp.send('Debugger.pause', {}, sessionId);
-    const stack = await Promise.race([frames, new Promise((_, reject)=>
-        setTimeout(()=>reject(new Error('the page did not pause')), 10000))]);
-    await cdp.send('Debugger.resume', {}, sessionId).catch(()=>{});
-    return stack.slice(0, 25).map(frame=>`  ${frame.functionName || '(anonymous)'} `
-        + `${(scripts.get(frame.location.scriptId) ?? '').split('/').slice(-3).join('/')}:${frame.location.lineNumber + 1}`).join('\n');
-}
 
 /**
  * Waits for an expression to answer something other than null.
