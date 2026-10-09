@@ -4026,5 +4026,30 @@ test('a dump asked for on a running device writes down that many frames, then st
     liveDump.dumpFrames = 1;
     assert.equal(await frame(), 1, 'the frame after the asking, one line a draw');
     assert.equal(liveDump.dumpFrames, 0, 'counted down');
-    assert.equal(await frame(), 0, 'and no more');
+    assert.equal(await frame(), 1, 'and kept, for a report asked for a frame later');
+    const dumped = device.diagnostics().lastDump;
+    assert.match(dumped[0], /^#0 /);
+});
+
+test('a frame submitted early for a read-back keeps the lines of its draws', async()=>{
+    const h = harness({ width: 64, height: 64, dumpDraws: true });
+    const { device } = h;
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
+        quad([0, 0, 8, 8], argb(255, 0, 0)), 20), D3D_OK);
+    // A chain presenting into a window the display does not show sends what
+    // the frame has so far to the GPU, without ending the frame.
+    /** @type {{ swapChain?: any }} */
+    const chain = {};
+    assert.equal(device.CreateAdditionalSwapChain({ windowed: true, backBufferWidth: 8,
+        backBufferHeight: 8, swapEffect: 1 }, chain), D3D_OK);
+    await chain.swapChain.Present(false);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
+        quad([8, 8, 16, 16], argb(0, 255, 0)), 20), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+    const dumped = device.diagnostics().lastDump.filter((/** @type {string} */ line)=>/^#/.test(line));
+    assert.equal(dumped.length, 2, `both draws: ${device.diagnostics().lastDump.join(' | ')}`);
+    chain.swapChain.release();
 });

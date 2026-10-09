@@ -2542,10 +2542,31 @@ export function createRenderer(options){
     const dumpedShaders = new Set();
     /** Each dumped draw's shaders once, as `vs12 <hex tokens>`. @type {string[]} */
     const shaderBytecode = [];
-    /** @type {string[]} the same, for the frame most recently presented */
+    /**
+     * What of the frame being recorded went to the GPU early: a read-back of a
+     * target mid-frame submits what came before it, and its lines with it.
+     *
+     * @type {string[][]}
+     */
+    let submittedDump = [];
+    /**
+     * The same, for the frame most recently presented: its parts, joined when
+     * asked for, because each part's GPU-side check is appended when it is
+     * replayed, after the present.
+     *
+     * @type {string[][]}
+     */
     let lastDump = [];
-    /** @type {{ frame: number, lines: string[] }[]} the frames `dumpEvery` kept */
+    /** @type {{ frame: number, parts: string[][] }[]} the frames `dumpEvery` kept */
     const dumps = [];
+    /**
+     * A frame's lines whole: its parts in order, each sent to the GPU early
+     * marked where it ends, since its draws are numbered from zero again.
+     *
+     * @param {string[][]} parts
+     */
+    const joinDump = parts=>parts.flatMap((part, at)=>(at < parts.length - 1
+        ? [...part, `-- submitted (${part.length} draws)`] : part));
     /** Whether the draws of the frame being recorded are written down. */
     const dumping = ()=>dumpDraws || (dumpEvery > 0 && counters.frames % dumpEvery === 0)
         || (liveDump !== null && liveDump.dumpFrames > 0);
@@ -7614,6 +7635,10 @@ export function createRenderer(options){
             recording = null;
             recorded.cut = backend.markPresent();
             recorded.dump = dump;
+            if (dump.length > 0)
+            {
+                submittedDump.push(dump);
+            }
             dump = [];
             kept = 0;
             chain = chain.then(()=>replay(recorded, null)).catch(failure);
@@ -8066,14 +8091,22 @@ export function createRenderer(options){
             // The dump travels with its frame: the GPU-side check is appended
             // at replay, which happens after another frame may have begun.
             recorded.dump = dump;
-            lastDump = dump;
-            if (liveDump !== null && liveDump.dumpFrames > 0 && dump.length > 0)
+            const parts = dump.length > 0 ? [...submittedDump, dump] : submittedDump;
+            submittedDump = [];
+            const written = parts.some(part=>part.length > 0);
+            // A frame nobody asked to write down leaves the last one that was:
+            // a dump asked for on a running program is read a report later.
+            if (written || dumpDraws)
+            {
+                lastDump = parts;
+            }
+            if (liveDump !== null && liveDump.dumpFrames > 0 && written)
             {
                 liveDump.dumpFrames--;
             }
-            if (dumpEvery > 0 && dump.length > 0 && counters.frames % dumpEvery === 0)
+            if (dumpEvery > 0 && written && counters.frames % dumpEvery === 0)
             {
-                dumps.push({ frame: counters.frames, lines: dump });
+                dumps.push({ frame: counters.frames, parts });
                 if (dumps.length > DUMPS_KEPT)
                 {
                     dumps.shift();
@@ -8249,11 +8282,13 @@ export function createRenderer(options){
                 // the frame drew with.
                 recentFrames: frameHistory.slice(),
                 // Empty unless the build asked for it; see `dumpDraws`.
-                lastDump,
+                lastDump: joinDump(lastDump),
                 // The bytecode of the shaders the dumped draws ran, each once.
                 shaderBytecode: [...shaderBytecode],
                 // The same, every `dumpEvery`-th frame.
-                ...(dumpEvery > 0 ? { dumps: dumps.slice() } : {}),
+                ...(dumpEvery > 0
+                    ? { dumps: dumps.map(({ frame, parts })=>({ frame, lines: joinDump(parts) })) }
+                    : {}),
                 // What the program made, and where its pixels live. Addresses
                 // rather than pixels: a reader that can read guest memory can
                 // fetch the ones it wants, and every texture at once would be
