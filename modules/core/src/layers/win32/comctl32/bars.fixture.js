@@ -214,6 +214,8 @@ export function setupBars(gdiEngine){
             refreshContext = service.refreshContext;
         },
         draw: gdi.draw,
+        /** @param {number} region @param {any} rect */
+        setRegion: (region, rect)=>gdi.setRegion(region, rect),
         present: ()=>{},
         allocate,
         release: ()=>{},

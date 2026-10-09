@@ -4857,14 +4857,19 @@ export function createGdiFunctions(host){
         },
 
         /**
-         * Makes a region object the caller owns hold a rectangle, as
-         * GetUpdateRgn fills in the region it is handed.
+         * Makes a region object the caller owns hold a rectangle, or the
+         * pieces of an area, as GetUpdateRgn fills in the region it is handed.
          *
          * @param {number} handle
-         * @param {{ left: number, top: number, right: number, bottom: number }} rect
+         * @param {{ left: number, top: number, right: number, bottom: number }
+         *     | { left: number, top: number, right: number, bottom: number }[]} rect
          * @returns {boolean} false for a handle that is not a region
          */
         setRegion(handle, rect){
+            if (Array.isArray(rect))
+            {
+                return drawing.setRegionArea(handle, rect);
+            }
             const record = objects.get(handle >>> 0);
             if (!record || record.type !== 'region')
             {
@@ -5014,6 +5019,14 @@ export function createGdiFunctions(host){
                 metafiles.drawn.invert(hdc, rect);
                 return drawing.bound(hdc)?.invertRect(hdc >>> 0, rect, halftone) === true;
             },
+
+            /**
+             * What the context draws in, device coordinates, as pieces: its
+             * window's visible part, meta region and clip together.
+             *
+             * @param {number} hdc
+             */
+            area: hdc=>drawing.drawnArea(hdc),
 
             /**
              * The pixels of a rectangle moved by dx, dy within the context,

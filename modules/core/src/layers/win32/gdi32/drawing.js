@@ -4841,7 +4841,36 @@ export function createDrawingFunctions(
         }
     };
 
-    return { functions, bound, setDIBits, restoreClip, restoreBrushOrigin, setVisible };
+    /**
+     * What a DC draws in, in its device coordinates: its visible part, meta
+     * region and clip together, as pieces that do not overlap.
+     *
+     * @param {number} handle
+     * @returns {import('./rects.js').Rect[]}
+     */
+    const drawnArea = handle=>{
+        const dc = dcOf(handle);
+        return dc ? areaOf(drawnAreaOf(dc)) : [];
+    };
+
+    /**
+     * A region made to hold an area, as the window manager hands one back.
+     *
+     * @param {number} handle @param {import('./rects.js').Rect[]} pieces
+     * @returns {boolean} false for a handle that is not a region
+     */
+    const setRegionArea = (handle, pieces)=>{
+        const record = objects.get(handle >>> 0);
+        if (!record || record.type !== 'region')
+        {
+            return false;
+        }
+        holdArea(record, pieces);
+        return true;
+    };
+
+    return { functions, bound, setDIBits, restoreClip, restoreBrushOrigin, setVisible,
+        drawnArea, setRegionArea };
 }
 
 /**

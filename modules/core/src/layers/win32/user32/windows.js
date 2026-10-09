@@ -59,6 +59,9 @@ import {
 import { convertCharacter, readText, translated, writeText } from './unicode.js';
 import { DESKTOP_WINDOW, HWND_BROADCAST, createWindowDirectory } from './directory.js';
 import { boundsOf, subtractFromArea } from '../gdi32/rects.js';
+import { areaOf } from '../gdi32/regions.js';
+
+/** @typedef {import('../gdi32/rects.js').Rect} Rect */
 
 /** The messages whose wParam is a character code, in the encoding of the procedure. */
 const CHARACTER_MESSAGES = new Set([0x0102, 0x0103, 0x0106, 0x0107]);
@@ -320,6 +323,7 @@ const ERROR_INVALID_MENU_HANDLE = 1401;
 const REGION_ERROR = 0;
 const NULLREGION = 1;
 const SIMPLEREGION = 2;
+const COMPLEXREGION = 3;
 /** MDICREATESTRUCT: the class, title, owner, place, size, style and lParam, a dword each. */
 const MDICREATESTRUCT_SIZE = 36;
 /** Painted only once the siblings beneath it have been: a label over a picture. */
@@ -2773,64 +2777,67 @@ export function createWindowFunctions(host){
     };
 
     /**
-     * Scrolls `scrollRect` (or `area`) of a context by dx, dy, clipped to
-     * `clipRect` (or `area`), and answers the update area: the strip the
-     * pixels moved away from, or its bounding rectangle when it turns a
-     * corner.
+     * What a scroll leaves to be painted, worked out on regions rather than
+     * the strip along one edge. Of the part of `scroll` that changes -- in
+     * `clip` and in what the context shows -- what the moved pixels cover
+     * is good; the rest is not: the strip moved away from, and where the
+     * pixels came from a part that does not show, as under a sibling over
+     * the window (win.c test_scrollvalidate).
      *
-     * @param {number} hdc
-     * @param {{ left: number, top: number, right: number, bottom: number }} area
-     * @param {number} scrollRect @param {number} clipRect
+     * @param {Rect[]} visible  What the context draws in.
+     * @param {Rect} scroll @param {Rect} clip
      * @param {number} dx @param {number} dy
-     * @returns {{ left: number, top: number, right: number, bottom: number }}
+     * @returns {{ changed: Rect[], uncovered: Rect[] }}
      */
-    const scrollArea = (hdc, area, scrollRect, clipRect, dx, dy)=>{
-        const scroll = (scrollRect >>> 0) === 0 ? area : readRect(host, scrollRect);
-        const clip = (clipRect >>> 0) === 0 ? area
-            : intersect(readRect(host, clipRect), area);
-        const source = intersect(scroll, clip);
-        if (isEmpty(source) || (dx === 0 && dy === 0))
+    const scrollAreas = (visible, scroll, clip, dx, dy)=>{
+        const source = intersectAreas(visible, [scroll]);
+        const changed = intersectAreas(source, [clip]);
+        const moved = intersectAreas(intersectAreas(offsetArea(source, dx, dy), [clip]), visible);
+        return { changed, uncovered: subtractAreas(changed, moved) };
+    };
+
+    /**
+     * Moves the pixels of a scroll within the context, and answers what it
+     * leaves to be painted.
+     *
+     * @param {number} hdc @param {Rect[]} visible
+     * @param {Rect} scroll @param {Rect} clip
+     * @param {number} dx @param {number} dy
+     */
+    const scrollPixels = (hdc, visible, scroll, clip, dx, dy)=>{
+        if (dx === 0 && dy === 0)
         {
-            return { left: 0, top: 0, right: 0, bottom: 0 };
+            return { changed: [], uncovered: [] };
         }
-        if (hdc !== 0)
+        const areas = scrollAreas(visible, scroll, clip, dx, dy);
+        if (hdc !== 0 && areas.changed.length > 0)
         {
+            // The context is clipped to what it shows already; a pixel moved
+            // from a part that does not show lands in the update area.
             draw?.scroll?.(hdc, scroll, dx, dy, clip);
         }
-        const update = { ...source };
-        if (dx === 0)
-        {
-            update.top = dy < 0 ? Math.max(source.top, source.bottom + dy) : source.top;
-            update.bottom = dy < 0 ? source.bottom : Math.min(source.bottom, source.top + dy);
-        }
-        else if (dy === 0)
-        {
-            update.left = dx < 0 ? Math.max(source.left, source.right + dx) : source.left;
-            update.right = dx < 0 ? source.right : Math.min(source.right, source.left + dx);
-        }
-        return update;
+        return areas;
     };
 
     /**
      * Hands a scroll's update area back -- into the region and the rectangle
-     * a caller gave -- runs what follows it, and answers its kind of region.
+     * a caller gave -- and answers its kind of region.
      *
-     * @param {{ left: number, top: number, right: number, bottom: number }} update
-     * @param {number} region @param {number} updateRect
-     * @param {() => void} then
+     * @param {Rect[]} update @param {number} region @param {number} updateRect
      */
-    const finishScroll = (update, region, updateRect, then)=>{
+    const handScrollBack = (update, region, updateRect)=>{
+        const area = areaOf(update);
+        const bounds = boundsOf(area);
         if ((updateRect >>> 0) !== 0)
         {
-            writeU32s(host, updateRect >>> 0, [update.left, update.top, update.right,
-                update.bottom]);
+            writeU32s(host, updateRect >>> 0, [bounds.left, bounds.top, bounds.right,
+                bounds.bottom]);
         }
         if ((region >>> 0) !== 0)
         {
-            host.setRegion?.(region >>> 0, update);
+            host.setRegion?.(region >>> 0, area);
         }
-        then();
-        return isEmpty(update) ? NULLREGION : SIMPLEREGION;
+        return area.length === 0 ? NULLREGION : area.length === 1 ? SIMPLEREGION : COMPLEXREGION;
     };
 
     /**
@@ -7201,11 +7208,15 @@ export function createWindowFunctions(host){
          *     const RECT *prcClip, HRGN hrgnUpdate, LPRECT prcUpdate, UINT flags)
          *
          * The client area's pixels within prcScroll -- the whole client by
-         * default -- moved by dx, dy, only what lands inside prcClip changing.
-         * What they move away from is the update area, handed back in the
-         * region and the rectangle and, with SW_INVALIDATE, left to be
-         * painted (erased first with SW_ERASE); SW_SCROLLCHILDREN takes the
-         * children along. Answers what kind of region the update area is.
+         * default -- moved by dx, dy, only what lands inside prcClip, the
+         * whole client by default, changing. What they leave is the update
+         * area; a part of it waiting to be painted moves with them and is
+         * still owed where it was. Both are handed back in the region and
+         * the rectangle and, with SW_INVALIDATE, left to be painted (erased
+         * first with SW_ERASE). SW_SCROLLCHILDREN takes the children along,
+         * their pixels with them: the move goes over them as if the window
+         * did not clip them (win.c test_scrollvalidate). Answers what kind
+         * of region the update area is.
          */
         ScrollWindowEx: {
             argBytes: 32,
@@ -7219,31 +7230,51 @@ export function createWindowFunctions(host){
                 {
                     return REGION_ERROR;
                 }
+                const children = (flags & SW_SCROLLCHILDREN) !== 0;
                 const size = geometry.clientSize(record);
                 const client = { left: 0, top: 0, right: size.width, bottom: size.height };
+                const scroll = (scrollRect >>> 0) === 0 ? client : readRect(host, scrollRect);
+                const clip = (clipRect >>> 0) === 0 ? client : readRect(host, clipRect);
+                const origin = geometry.clientRect(record);
+                const shownPart = geometry.visibleClientRect(record);
+                const visible = !shown(record) || frozen(record) || isEmpty(shownPart) ? []
+                    : offsetArea(subtractAreas([shownPart], coveringOf(record, !children)),
+                        -origin.left, -origin.top);
                 const hdc = paint.contextOn(record);
-                const update = scrollArea(hdc, client, scrollRect, clipRect, dx | 0, dy | 0);
-                paint.endPaint(record, hdc);
-                if ((flags & SW_SCROLLCHILDREN) !== 0)
+                if (hdc !== 0 && children)
                 {
-                    const scrolled = (scrollRect >>> 0) === 0 ? client : readRect(host, scrollRect);
+                    draw?.clip?.(hdc, visible);
+                }
+                const { changed, uncovered } = scrollPixels(hdc, visible, scroll, clip,
+                    dx | 0, dy | 0);
+                paint.endPaint(record, hdc);
+                const owed = intersectAreas(paint.updateOf(record), changed);
+                const carried = intersectAreas(offsetArea(owed, dx | 0, dy | 0), [clip]);
+                if (carried.length > 0)
+                {
+                    paint.invalidate(record, carried, record.erase === true, 'none');
+                }
+                if (children)
+                {
                     for (const child of childrenOf(record))
                     {
-                        if (child.x < scrolled.right && child.x + child.width > scrolled.left
-                            && child.y < scrolled.bottom && child.y + child.height > scrolled.top)
+                        if (child.x < scroll.right && child.x + child.width > scroll.left
+                            && child.y < scroll.bottom && child.y + child.height > scroll.top)
                         {
+                            // Its pixels moved with the window's; nothing of it
+                            // is to be redrawn but what the scroll left.
                             (/** @type {any} */ (table)).SetWindowPos.handler([child.hwnd, 0,
                                 child.x + (dx | 0), child.y + (dy | 0), 0, 0,
-                                0x0001 | 0x0004 | 0x0010]);
+                                0x0001 | 0x0004 | 0x0008 | 0x0010 | 0x0100]);
                         }
                     }
                 }
-                return finishScroll(update, region, updateRect, ()=>{
-                    if ((flags & SW_INVALIDATE) !== 0 && !isEmpty(update))
-                    {
-                        paint.invalidate(record, update, (flags & SW_ERASE) !== 0);
-                    }
-                });
+                if ((flags & SW_INVALIDATE) !== 0 && uncovered.length > 0)
+                {
+                    paint.invalidate(record, uncovered, (flags & SW_ERASE) !== 0,
+                        children ? 'all' : 'auto');
+                }
+                return handScrollBack([...uncovered, ...owed, ...carried], region, updateRect);
             },
         },
 
@@ -7267,19 +7298,26 @@ export function createWindowFunctions(host){
          * BOOL ScrollDC(HDC hDC, int dx, int dy, const RECT *lprcScroll,
          *     const RECT *lprcClip, HRGN hrgnUpdate, LPRECT lprcUpdate)
          *
-         * The same move on a context the caller holds; the update area is
-         * handed back and nothing is invalidated.
+         * The same move on a context the caller holds, within what it draws
+         * in -- its window's visible part and the clip selected into it --
+         * the scroll and the clip each all of that when not given. The
+         * update area is handed back and nothing is invalidated.
          */
         ScrollDC: {
             argBytes: 28,
             /** @param {number[]} args */
             handler: ([hdc, dx, dy, scrollRect, clipRect, region, updateRect])=>{
-                // ponytail: with neither rectangle the context's whole surface
-                // would scroll; a generous bound stands in for its size.
-                const surface = { left: 0, top: 0, right: 4096, bottom: 4096 };
-                const update = scrollArea(hdc >>> 0, surface, scrollRect, clipRect,
+                if ((hdc >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const visible = draw?.area?.(hdc >>> 0) ?? [];
+                const all = boundsOf(visible);
+                const scroll = (scrollRect >>> 0) === 0 ? all : readRect(host, scrollRect);
+                const clip = (clipRect >>> 0) === 0 ? all : readRect(host, clipRect);
+                const { uncovered } = scrollPixels(hdc >>> 0, visible, scroll, clip,
                     dx | 0, dy | 0);
-                finishScroll(update, region, updateRect, ()=>{});
+                handScrollBack(uncovered, region, updateRect);
                 return 1;
             },
         },

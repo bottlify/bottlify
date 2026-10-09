@@ -2300,9 +2300,9 @@ test('the update region is the union of what was invalidated, less what was vali
     assert.equal(updateRect(context, hwnd), null, 'an empty rectangle');
 });
 
-test('GetUpdateRgn fills in the rectangle around the update region', ()=>{
+test('GetUpdateRgn fills in the update region, piece by piece', ()=>{
     const REGION = 0x7000;
-    const SIMPLEREGION = 2;
+    const COMPLEXREGION = 3;
     const NULLREGION = 1;
     const RECT_IN = 0x11400;
     const context = paintWorld();
@@ -2315,8 +2315,9 @@ test('GetUpdateRgn fills in the rectangle around the update region', ()=>{
     fns.InvalidateRect.handler([hwnd, RECT_IN, 0]);
     memory.putU32s(RECT_IN, [30, 30, 40, 40]);
     fns.InvalidateRect.handler([hwnd, RECT_IN, 0]);
-    assert.equal(fns.GetUpdateRgn.handler([hwnd, REGION, 0]), SIMPLEREGION);
-    assert.deepEqual(regions.get(REGION), { left: 10, top: 10, right: 40, bottom: 40 });
+    assert.equal(fns.GetUpdateRgn.handler([hwnd, REGION, 0]), COMPLEXREGION);
+    assert.deepEqual(regions.get(REGION), [{ left: 10, top: 10, right: 20, bottom: 20 },
+        { left: 30, top: 30, right: 40, bottom: 40 }]);
 });
 
 test('a window moved over another exposes only the strip it left, and nothing over it', ()=>{

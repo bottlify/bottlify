@@ -35,6 +35,7 @@ import { PAINTSTRUCT, RECT, readRect, writeRect, writeU32s } from './structs.js'
 import { decodeAnsi } from '../kernel32/locale.js';
 import { readText } from './unicode.js';
 import { boundsOf, intersectArea, subtractFromArea } from '../gdi32/rects.js';
+import { areaOf } from '../gdi32/regions.js';
 
 /** DrawText's flags. */
 const DT_CENTER = 0x0001;
@@ -1609,9 +1610,8 @@ export function createPaintFunctions(options){
          * reach. Without the service that bridges them the honest answer is
          * ERROR: reporting a complexity for a region left holding whatever it
          * held before would have the caller clip to the wrong shape. The
-         * service fills a region with one rectangle, so an update region of
-         * several is handed over as the rectangle around it, and the answer
-         * says SIMPLEREGION, which is what the region then holds.
+         * region is filled with the update area's own pieces, and the answer
+         * says what it then holds.
          */
         GetUpdateRgn: {
             argBytes: 12,
@@ -1620,20 +1620,16 @@ export function createPaintFunctions(options){
                 const ERROR = 0;
                 const NULLREGION = 1;
                 const SIMPLEREGION = 2;
+                const COMPLEXREGION = 3;
                 const record = live(hwnd);
                 if (!record || !host.setRegion)
                 {
                     return ERROR;
                 }
-                const dirty = record.updateRect;
-                host.setRegion(region >>> 0,
-                    dirty ?? { left: 0, top: 0, right: 0, bottom: 0 });
-                if (dirty && (record.updateArea?.length ?? 1) > 1)
-                {
-                    tellOnce('GetUpdateRgn', 'an update region of several rectangles is'
-                        + ' handed over as the rectangle around it');
-                }
-                return dirty ? SIMPLEREGION : NULLREGION;
+                const area = areaOf(updateOf(record));
+                host.setRegion(region >>> 0, area);
+                return area.length === 0 ? NULLREGION
+                    : area.length === 1 ? SIMPLEREGION : COMPLEXREGION;
             },
         },
 
