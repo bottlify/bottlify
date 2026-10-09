@@ -1820,6 +1820,14 @@ export function createHarness(canvas, how = {}){
         result.staleTrail = layers.find((/** @type {any} */ one)=>one.name === 'audio')
             ?.metrics?.staleTrail ?? [];
         result.instructions = metrics('cpu').instructions ?? null;
+        // Whether the run had the executors it was given: how many slices ran
+        // on the others, the most threads at once, and why none ran if they did not.
+        result.executors = {
+            refused: metrics('cpu').executorsRefused ?? null,
+            others: (metrics('cpu').executors ?? []).length,
+            slices: metrics('kernel').executorSlices ?? null,
+            mostAtOnce: metrics('kernel').mostAtOnce ?? null,
+        };
         result.threads = {
             byState: metrics('kernel').byState ?? {},
             waiting: metrics('kernel').waiting ?? [],
