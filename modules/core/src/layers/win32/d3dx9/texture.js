@@ -50,6 +50,8 @@ const D3DRTYPE_TEXTURE = 3;
  * @property {() => any} [currentThread]
  */
 
+/** @typedef {(object: number, slot: number, rest: number[]) => Promise<number>} GuestMethod */
+
 /** @param {number} value */
 const nextPowerOfTwo = value=>2 ** Math.ceil(Math.log2(Math.max(1, value)));
 
@@ -328,6 +330,120 @@ export function createTextureLoader(host){
     };
 
     /**
+     * The half both surface loaders share: the source's texels, read as packed
+     * rows of its format, brought to the destination's format and the size of
+     * its rectangle and written through the destination's lock.
+     *
+     * @param {string} api
+     * @param {number} dest @param {number} destRect @param {number} colorKey
+     * @param {(method: GuestMethod, scratch: number)
+     *     => Promise<number | { format: number, width: number, height: number }>} sourceArea
+     * @param {(area: { format: number, width: number, height: number }, method: GuestMethod,
+     *     scratch: number) => Promise<number | Uint8Array>} readSource
+     * @returns {Promise<number>}
+     */
+    const intoSurface = async(api, dest, destRect, colorKey, sourceArea, readSource)=>{
+        const thread = host.currentThread?.();
+        // As for `upload`: the call into the guest goes below this one once it is in flight.
+        await null;
+        const heap = /** @type {NonNullable<TextureHost['heap']>} */ (host.heap);
+        const scratch = heap.allocate(SURFACE_DESC_BYTES + 8);
+        if (scratch === 0)
+        {
+            return E_OUTOFMEMORY;
+        }
+        /** @type {GuestMethod} */
+        const method = (object, slot, rest)=>call(thread, object, slot, rest);
+        try
+        {
+            const from = await sourceArea(method, scratch);
+            const to = await surfaceArea(method, scratch, dest, destRect);
+            if (typeof from === 'number' || typeof to === 'number')
+            {
+                return typeof from === 'number' ? from : /** @type {number} */ (to);
+            }
+            if (!isSupported(from.format) || !isSupported(to.format)
+                || from.width <= 0 || from.height <= 0 || to.width <= 0 || to.height <= 0)
+            {
+                host.divergence?.(api, `answered D3DERR_INVALIDCALL:`
+                    + ` format ${from.format} ${from.width}x${from.height} into format`
+                    + ` ${to.format} ${to.width}x${to.height} is not a copy this loader makes`);
+                return D3DERR_INVALIDCALL;
+            }
+            const packed = await readSource(from, method, scratch);
+            if (typeof packed === 'number')
+            {
+                return packed;
+            }
+            let bgra = decodeTexels(from.format, packed, from.width, from.height);
+            if (from.width !== to.width || from.height !== to.height)
+            {
+                bgra = resample(bgra, from.width, from.height, to.width, to.height);
+            }
+            if (colorKey !== 0)
+            {
+                applyColorKey(bgra, colorKey);
+            }
+            const bytes = encodeTexels(to.format, bgra, to.width, to.height);
+            const locked = scratch + SURFACE_DESC_BYTES;
+            const answer = await method(dest, SURFACE.LockRect, [locked, destRect, 0]);
+            if (answer !== D3D_OK)
+            {
+                host.divergence?.(api, `the destination would not lock (0x${answer.toString(16)})`);
+                return answer;
+            }
+            const write = layoutOf(to.format, to.width, to.height);
+            for (let row = 0, pitch = u32(locked), bits = u32(locked + 4); row < write.rows; row++)
+            {
+                host.writeMemory(bits + row * pitch,
+                    bytes.subarray(row * write.rowBytes, (row + 1) * write.rowBytes));
+            }
+            await method(dest, SURFACE.UnlockRect, []);
+            return D3D_OK;
+        }
+        finally
+        {
+            heap.free(scratch);
+        }
+    };
+
+    /**
+     * A surface's format and the size of a rectangle of it, the whole surface
+     * for a null one.
+     *
+     * @param {GuestMethod} method @param {number} scratch
+     * @param {number} surface @param {number} rect
+     */
+    const surfaceArea = async(method, scratch, surface, rect)=>{
+        const answer = await method(surface, SURFACE.GetDesc, [scratch]);
+        if (answer !== D3D_OK)
+        {
+            return answer;
+        }
+        const format = u32(scratch);
+        const [left, top, right, bottom] = rect === 0
+            ? [0, 0, u32(scratch + 24), u32(scratch + 28)]
+            : [0, 4, 8, 12].map(at=>u32(rect + at));
+        return { format, width: right - left, height: bottom - top };
+    };
+
+    /**
+     * An area's texels as packed rows, read from rows `pitch` bytes apart.
+     *
+     * @param {{ format: number, width: number, height: number }} area
+     * @param {number} bits @param {number} pitch
+     */
+    const readRows = (area, bits, pitch)=>{
+        const { rowBytes, rows } = layoutOf(area.format, area.width, area.height);
+        const packed = new Uint8Array(rowBytes * rows);
+        for (let row = 0; row < rows; row++)
+        {
+            packed.set(host.readMemory(bits + row * pitch, rowBytes), row * rowBytes);
+        }
+        return packed;
+    };
+
+    /**
      * HRESULT D3DXLoadSurfaceFromSurface(LPDIRECT3DSURFACE9 pDestSurface,
      *     const PALETTEENTRY *pDestPalette, const RECT *pDestRect,
      *     LPDIRECT3DSURFACE9 pSrcSurface, const PALETTEENTRY *pSrcPalette,
@@ -347,100 +463,58 @@ export function createTextureLoader(host){
         {
             return D3DERR_INVALIDCALL;
         }
-        const thread = host.currentThread?.();
-        return (async()=>{
-            // As for `upload`: the call into the guest goes below this one once it is in flight.
-            await null;
-            const heap = /** @type {NonNullable<TextureHost['heap']>} */ (host.heap);
-            const scratch = heap.allocate(SURFACE_DESC_BYTES + 8);
-            if (scratch === 0)
-            {
-                return E_OUTOFMEMORY;
-            }
-            /** @param {number} object @param {number} slot @param {number[]} rest */
-            const method = (object, slot, rest)=>call(thread, object, slot, rest);
-            /** @param {number} surface @param {number} rect */
-            const area = async(surface, rect)=>{
-                const answer = await method(surface, SURFACE.GetDesc, [scratch]);
-                if (answer !== D3D_OK)
-                {
-                    return answer;
-                }
-                const format = u32(scratch);
-                const [left, top, right, bottom] = rect === 0
-                    ? [0, 0, u32(scratch + 24), u32(scratch + 28)]
-                    : [0, 4, 8, 12].map(at=>u32(rect + at));
-                return { format, width: right - left, height: bottom - top };
-            };
-            try
-            {
-                const from = await area(source, sourceRect);
-                const to = await area(dest, destRect);
-                if (typeof from === 'number' || typeof to === 'number')
-                {
-                    return typeof from === 'number' ? from : /** @type {number} */ (to);
-                }
-                if (!isSupported(from.format) || !isSupported(to.format)
-                    || from.width <= 0 || from.height <= 0 || to.width <= 0 || to.height <= 0)
-                {
-                    host.divergence?.('D3DXLoadSurfaceFromSurface', `answered D3DERR_INVALIDCALL:`
-                        + ` format ${from.format} ${from.width}x${from.height} into format`
-                        + ` ${to.format} ${to.width}x${to.height} is not a copy this loader makes`);
-                    return D3DERR_INVALIDCALL;
-                }
+        const api = 'D3DXLoadSurfaceFromSurface';
+        return intoSurface(api, dest, destRect, colorKey,
+            (method, scratch)=>surfaceArea(method, scratch, source, sourceRect),
+            async(from, method, scratch)=>{
                 const locked = scratch + SURFACE_DESC_BYTES;
-                let answer = await method(source, SURFACE.LockRect,
+                const answer = await method(source, SURFACE.LockRect,
                     [locked, sourceRect, D3DLOCK_READONLY]);
                 if (answer !== D3D_OK)
                 {
-                    host.divergence?.('D3DXLoadSurfaceFromSurface',
-                        `the source would not lock (0x${answer.toString(16)})`);
+                    host.divergence?.(api, `the source would not lock (0x${answer.toString(16)})`);
                     return answer;
                 }
-                const reading = layoutOf(from.format, from.width, from.height);
-                const packed = new Uint8Array(reading.rowBytes * reading.rows);
-                for (let row = 0, pitch = u32(locked), bits = u32(locked + 4); row < reading.rows;
-                    row++)
-                {
-                    packed.set(host.readMemory(bits + row * pitch, reading.rowBytes),
-                        row * reading.rowBytes);
-                }
+                const packed = readRows(from, u32(locked + 4), u32(locked));
                 await method(source, SURFACE.UnlockRect, []);
-                let bgra = decodeTexels(from.format, packed, from.width, from.height);
-                if (from.width !== to.width || from.height !== to.height)
-                {
-                    bgra = resample(bgra, from.width, from.height, to.width, to.height);
-                }
-                if (colorKey !== 0)
-                {
-                    applyColorKey(bgra, colorKey);
-                }
-                const bytes = encodeTexels(to.format, bgra, to.width, to.height);
-                answer = await method(dest, SURFACE.LockRect, [locked, destRect, 0]);
-                if (answer !== D3D_OK)
-                {
-                    host.divergence?.('D3DXLoadSurfaceFromSurface',
-                        `the destination would not lock (0x${answer.toString(16)})`);
-                    return answer;
-                }
-                const write = layoutOf(to.format, to.width, to.height);
-                for (let row = 0, pitch = u32(locked), bits = u32(locked + 4); row < write.rows;
-                    row++)
-                {
-                    host.writeMemory(bits + row * pitch,
-                        bytes.subarray(row * write.rowBytes, (row + 1) * write.rowBytes));
-                }
-                await method(dest, SURFACE.UnlockRect, []);
-                return D3D_OK;
-            }
-            finally
-            {
-                heap.free(scratch);
-            }
-        })();
+                return packed;
+            });
     };
 
-    return { fromMemory, imageInfo, loadSurface };
+    /**
+     * HRESULT D3DXLoadSurfaceFromMemory(LPDIRECT3DSURFACE9 pDestSurface,
+     *     const PALETTEENTRY *pDestPalette, const RECT *pDestRect,
+     *     LPCVOID pSrcMemory, D3DFORMAT SrcFormat, UINT SrcPitch,
+     *     const PALETTEENTRY *pSrcPalette, const RECT *pSrcRect, DWORD Filter,
+     *     D3DCOLOR ColorKey)
+     *
+     * pSrcMemory is the top-left corner of the whole source image, its rows
+     * SrcPitch bytes apart -- rows of 4x4 blocks for a compressed format -- and
+     * pSrcRect, which may not be null, the part of it read. The rest is
+     * D3DXLoadSurfaceFromSurface's.
+     *
+     * @param {number[]} args
+     * @returns {number | Promise<number>}
+     */
+    const loadSurfaceFromMemory = args=>{
+        const [dest, , destRect, bits, format, pitch, , sourceRect, , colorKey]
+            = args.map(a=>a >>> 0);
+        if (dest === 0 || bits === 0 || sourceRect === 0 || !host.callGuest || !host.heap)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        const [left, top, right, bottom] = [0, 4, 8, 12].map(at=>u32(sourceRect + at));
+        return intoSurface('D3DXLoadSurfaceFromMemory', dest, destRect, colorKey,
+            async()=>({ format, width: right - left, height: bottom - top }),
+            async from=>{
+                const block = isCompressed(format) ? 4 : 1;
+                const unit = layoutOf(format, block, block).rowBytes;
+                return readRows(from, bits + Math.floor(top / block) * pitch
+                    + Math.floor(left / block) * unit, pitch);
+            });
+    };
+
+    return { fromMemory, imageInfo, loadSurface, loadSurfaceFromMemory };
 }
 
 /**

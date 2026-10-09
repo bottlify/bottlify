@@ -147,6 +147,18 @@ function rig(){
         },
         imageInfo: created.imageInfo,
         /** @param {number[]} args */
+        loadSurfaceFromMemory: args=>{
+            inHandler = true;
+            try
+            {
+                return created.loadSurfaceFromMemory(args);
+            }
+            finally
+            {
+                inHandler = false;
+            }
+        },
+        /** @param {number[]} args */
         loadSurface: args=>{
             inHandler = true;
             try
@@ -304,4 +316,26 @@ test('D3DXLoadSurfaceFromSurface copies a whole surface into a rectangle of anot
     const target = surface(2, 2, FMT.A8R8G8B8, 0);
     assert.equal(await loader.loadSurface([dest, 0, 0, target, 0, 0, 1, 0]), 0x8876086c);
     assert.match(diverged.join(' | '), /D3DXLoadSurfaceFromSurface: the source would not lock/);
+});
+
+test('D3DXLoadSurfaceFromMemory reads the source rectangle of an image at its pitch into a'
+    + ' surface, in its format; a null source rectangle is refused', async()=>{
+    const { textures, calls, loader, place, surface, memory } = rig();
+    const dest = surface(2, 1, FMT.A8R8G8B8);
+    // A 3x2 X8R8G8B8 image, rows 16 bytes apart (4 bytes of padding each).
+    const image = place([
+        1, 1, 1, 0, 2, 2, 2, 0, 3, 3, 3, 0, 9, 9, 9, 9,
+        4, 4, 4, 0, 5, 5, 5, 0, 6, 6, 6, 0, 9, 9, 9, 9,
+    ]);
+    const rect = place([1, 0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 2, 0, 0, 0]);
+    // dest, its palette and rectangle, memory, format, pitch, palette, rectangle, FILTER_NONE, key
+    assert.equal(await loader.loadSurfaceFromMemory([dest, 0, 0, image, FMT.X8R8G8B8, 16, 0, rect,
+        1, 0]), 0);
+    const at = textures.get(dest).data;
+    assert.deepEqual([...memory.subarray(at, at + 8)], [5, 5, 5, 255, 6, 6, 6, 255],
+        'the second row from its second texel, made opaque');
+    assert.deepEqual(calls, [['LockRect', 'whole', 0], ['UnlockRect']]);
+
+    assert.equal(loader.loadSurfaceFromMemory([dest, 0, 0, image, FMT.X8R8G8B8, 16, 0, 0, 1, 0]),
+        0x8876086c);
 });
