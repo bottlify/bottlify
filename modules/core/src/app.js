@@ -2310,7 +2310,10 @@ async function mountBundle({ options, cpu, events, translationStore }){
         // so `??` will not do here: `store: null` has to mean no cache.
         store: await resolveBlockStore(
             options.bundle.store === undefined ? 'local' : options.bundle.store),
-        name: options.bundle.id ?? options.id ?? 'bundle',
+        // ponytail: the cache of a bundle packed again is left behind on the
+        // store; drop names of this bundle with another fingerprint when the
+        // space matters.
+        name: `${options.bundle.id ?? options.id ?? 'bundle'}-${bundle.fingerprint}`,
         blockSize: bundle.blockSize,
         blockCount: bundle.blockCount,
     });

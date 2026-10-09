@@ -41,8 +41,11 @@ const CONTENT = {
     'Game\\Random.bin': noise(2048),
 };
 
-/** @returns {Promise<Uint8Array>} the bundle, as bytes */
-async function buildBundle(){
+/**
+ * @param {number} [blockSize]
+ * @returns {Promise<Uint8Array>} the bundle, as bytes
+ */
+async function buildBundle(blockSize = BLOCK_SIZE){
     const directory = await mkdtemp(join(tmpdir(), 'bottlify-btl-'));
     const root = join(directory, 'tree');
     try
@@ -55,7 +58,7 @@ async function buildBundle(){
             await writeFile(join(root, path.replace(/\\/g, '/')), bytes);
         }
         const output = join(directory, 'bundle.btl');
-        await writeBundle({ root, output, blockSize: BLOCK_SIZE });
+        await writeBundle({ root, output, blockSize });
         return new Uint8Array(await readFile(output));
     }
     finally
@@ -377,4 +380,17 @@ test('a relocated directory appears where it is mapped, outside the prefix', asy
     assert.ok(paths.includes('WINDOWS') && paths.includes('WINDOWS\\system32'),
         'the directories it is mapped into are listed');
     assert.ok(!paths.some(path=>/data/i.test(path)), 'nothing is left at the old place');
+});
+
+test('a bundle packed again under the same name has another fingerprint', async()=>{
+    // A block cache named by the bundle alone answered a repacked bundle's
+    // reads with the old one's blocks, and the guest read garbage.
+    const again = await openBundle(async(at, count)=>bundleBytes.subarray(at, at + count),
+        decodeBlock);
+    assert.equal((await open()).fingerprint, again.fingerprint, 'the same bytes, the same name');
+    const other = await buildBundle(BLOCK_SIZE * 2);
+    const repacked = await openBundle(async(at, count)=>other.subarray(at, at + count),
+        decodeBlock);
+    assert.match(repacked.fingerprint, /^[0-9a-f]{8}$/);
+    assert.notEqual(repacked.fingerprint, again.fingerprint);
 });

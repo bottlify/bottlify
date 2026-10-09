@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { crc32 } from './crc32.js';
+
 /**
  * The .btl container, read.
  *
@@ -120,6 +122,9 @@ export const Codec = {
  * @typedef {Object} Bundle
  * @property {number} blockSize
  * @property {number} blockCount  How many blocks the container holds.
+ * @property {string} fingerprint  The CRC-32 of the index as stored, in hex: another
+ *     packing of the same name has another, so a block cache keyed by it is never
+ *     read for the wrong one.
  * @property {readonly BundleFile[]} files
  * @property {readonly string[]} directories    Recorded empty ones only.
  * @property {BundleMember | null} translations  The translation seed, when there is one.
@@ -218,6 +223,10 @@ export async function openBundle(fetchRange, decode, options = {}){
     return {
         blockSize,
         blockCount: blocks.length,
+        // The index as stored names the blocks it lays out: a bundle packed
+        // again under the same name has another, and a cache of the old one's
+        // blocks must not answer for it.
+        fingerprint: crc32(stored).toString(16).padStart(8, '0'),
         files,
         directories: index.directories,
         translations,
