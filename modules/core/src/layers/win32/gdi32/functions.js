@@ -62,6 +62,9 @@ const GRAY_BRUSH = 2;
 const DKGRAY_BRUSH = 3;
 const BLACK_BRUSH = 4;
 const NULL_BRUSH = 5;
+/** The last hatch style, and the end of the indices CreateHatchBrush takes. */
+const HS_DIAGCROSS = 5;
+const HS_API_MAX = 12;
 const WHITE_PEN = 6;
 const BLACK_PEN = 7;
 const NULL_PEN = 8;
@@ -2686,6 +2689,10 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
+                if (fields.style === BS_NULL)
+                {
+                    return stockObject(NULL_BRUSH);
+                }
                 if (fields.style === BS_PATTERN || fields.style === BS_PATTERN8X8)
                 {
                     return patternBrush(fields.hatch);
@@ -2727,13 +2734,26 @@ export function createGdiFunctions(host){
             handler: ([packed, usage])=>dibPatternBrush(packed >>> 0, usage >>> 0),
         },
 
-        /** HBRUSH CreateHatchBrush(int iHatch, COLORREF color) */
+        /**
+         * HBRUSH CreateHatchBrush(int iHatch, COLORREF color)
+         *
+         * The six hatches up to HS_DIAGCROSS; the indices after them up to
+         * HS_API_MAX are solid brushes of the colour, and past it there is no
+         * brush, the last error untouched (Wine's brush.c test_hatch_brush).
+         */
         CreateHatchBrush: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([hatch, color])=>objects.create('brush', {
-                style: BS_HATCHED, color: color >>> 0, hatch: hatch | 0,
-            }),
+            handler: ([hatch, color])=>{
+                const index = hatch >>> 0;
+                if (index >= HS_API_MAX)
+                {
+                    return 0;
+                }
+                return objects.create('brush', index <= HS_DIAGCROSS
+                    ? { style: BS_HATCHED, color: color >>> 0, hatch: index }
+                    : { style: BS_SOLID, color: color >>> 0, hatch: 0 });
+            },
         },
 
         /**
