@@ -1372,7 +1372,8 @@ export function createHarness(canvas, how = {}){
     /**
      * Runs one title and reports what came out of it.
      *
-     * @param {{ exe?: string, exeUrl?: string, bundleUrl: string, discUrl?: string, bundlePrefix?: string,
+     * @param {{ exe?: string, exeUrl?: string, bundleUrl: string, discUrl?: string,
+     *           bundlePrefix?: string,
      *           imagePath: string,
      *           commandLine?: string,
      *           concurrency?: import('../../../src/mode.js').Concurrency,
