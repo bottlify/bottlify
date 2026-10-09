@@ -462,32 +462,6 @@ test('Sleep stops the thread, and a zero sleep yields instead', ()=>{
     assert.deepEqual(host.sleeps, [250], 'and only the real wait reached the scheduler');
 });
 
-test('a zero sleep goes behind a ready thread of its priority or higher, and only that', ()=>{
-    // A thread polling a flag with Sleep(0) between looks: the thread that sets
-    // the flag runs at once when it may, rather than when the poller's quantum ends.
-    const { host, fns } = setup();
-    const self = host.currentThread();
-    self.priority = 1;
-    /** @type {any[]} */
-    const blocked = [];
-    /** @type {any[]} */
-    let threads = [self, { state: 'ready', priority: 0 }, { state: 'ready', priority: 3,
-        awaitingHost: true }];
-    /** @type {any} */ (host).kernel = {
-        threads: ()=>threads,
-        clock: { virtualTime: ()=>700 },
-        /** @param {any} thread @param {string} reason @param {any} timed */
-        block: (thread, reason, timed)=>blocked.push({ thread, reason, timed }),
-    };
-    assert.equal(fns.Sleep.handler([0]), 0, 'only a lower priority, or one waiting on us');
-    assert.deepEqual(blocked, []);
-    threads = [self, { state: 'ready', priority: 1 }];
-    assert.equal(fns.Sleep.handler([0]), PARKED);
-    assert.deepEqual(blocked,
-        [{ thread: self, reason: 'Sleep', timed: { deadline: 700, result: 0 } }],
-        'behind one of its own priority, for no time');
-});
-
 test('the identity queries answer for the thread that is running', ()=>{
     const { host, fns } = setup();
 

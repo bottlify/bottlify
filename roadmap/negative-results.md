@@ -181,3 +181,27 @@ None yet.
   the change was not looked into further.
 - **Correctness.** Not run beyond the timing harness.
 - **Decision.** Reverted; the dispatch stays.
+
+### 2026-10-09 -- Sleep(0) yielding to a ready thread of the caller's priority or higher
+
+- **Idea.** `Sleep(0)` returned at once and yielded nothing, so a thread polling another's
+  progress -- `do Sleep(0); while (!scene->checkResults(..., false))`, the main thread of the
+  Gothic 3 demo waiting on its physics thread -- kept the one executor for its quantum, two host
+  calls a look. Windows' single-processor rule (go behind a ready thread of the caller's priority
+  or higher) would let the other thread run at once.
+- **Workload.** The Gothic 3 demo, bundle `g3`, loading `G3_World_01_0001` and running on in the
+  world: `tools/cdp_test/game.mjs g3 --worker --coi --screen 1024x768 --memory 2048
+  --run-seconds 2850 --profile-calls`, `cork2` at `1f8012c5` (base) and `f9f13803` (change), one
+  run each.
+- **Values.** Base: the world from about frame 6200, 1174 world frames, median 1162 ms, p90 1340
+  ms; Sleep 71.6 M calls, WaitForSingleObject 71.8 M, 248 s of sampled host time between them.
+  Change: Sleep 34.0 M, WaitForSingleObject 34.2 M, 251 s; the load bar full by the end but the
+  world never shown in 2850 s, 6026 frames, the last ones about 7.5 s each.
+- **Machine.** Headless Chromium 141 (`/opt/pw-browsers/chromium-1194`), SwiftShader, a 4-core
+  x86-64 Linux VM (Firecracker). Power plan: not recorded.
+- **Why it did not pay.** Not measured; the likeliest reading is that a ready thread of higher
+  priority (the run has one at 15) now takes a whole quantum every time the poller yields, where
+  on a machine of several processors it runs beside it.
+- **Correctness.** The kernel32 and win32 unit tests passed; the game did not reach its world.
+- **Decision.** Reverted. The poll stays a cost to remove another way: a thread's progress made
+  visible to the poller, or the polled thread on an executor of its own (stage 3).
