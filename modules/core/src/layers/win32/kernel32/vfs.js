@@ -350,6 +350,34 @@ export function createVolume(fs, fetchBlocks = null){
             return written;
         },
 
+        /**
+         * write for a caller that can park: a write into a file the bundle
+         * holds copies the file up first, and the copy needs the blocks under
+         * it, so absent ones are fetched and the answer is a promise -- as read
+         * answers.
+         *
+         * @param {any} node @param {number} offset @param {Uint8Array} bytes
+         * @returns {number | Promise<number>}
+         */
+        writeOrFetch(node, offset, bytes){
+            try
+            {
+                return this.write(node, offset, bytes);
+            }
+            catch (e){
+                const miss = /** @type {any} */ (e);
+                if (miss?.code !== 'BLOCK_MISS' || !fetchBlocks)
+                {
+                    throw miss;
+                }
+                // The guest's buffer may change while it is parked; what it
+                // asked to write is what it passed at the call.
+                const held = bytes.slice();
+                // One retry, as read: the miss named every absent block.
+                return fetchBlocks(miss.blocks).then(()=>this.write(node, offset, held));
+            }
+        },
+
         /** @param {any} node @param {number} size */
         truncate(node, size){
             fs.seek(node, size, SeekFrom.BEGIN);

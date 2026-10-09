@@ -542,6 +542,26 @@ test('a write hands the volume the guest\'s own bytes when the memory layer lend
     assert.equal(files.text('C:\\GAME\\SAVE.DAT'), 'AAcd');
 });
 
+test('a write whose file is still being fetched parks, then reports its count', async()=>{
+    // A bundled file is copied up on its first write; when its blocks are not
+    // here the volume answers with a promise, and the guest is parked on it
+    // exactly as on a read -- the count and the position land when it settles.
+    const { memory, files, fns, open } = setup();
+    files.put('C:\\GAME\\SAVE.DAT', 'abcd');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    memory.putDword(OUT_COUNT, 0xdeadbeef);
+    const anyFiles = /** @type {any} */ (files);
+    anyFiles.writeOrFetch = (/** @type {any} */ node, /** @type {number} */ at,
+        /** @type {Uint8Array} */ bytes)=>Promise.resolve().then(()=>files.write(node, at, bytes));
+
+    const answer = /** @type {any} */ (fns.WriteFile.handler([handle, BUFFER, 2, OUT_COUNT, 0]));
+    assert.equal(typeof answer?.then, 'function', 'the call is parked, not answered');
+    assert.equal(memory.dword(OUT_COUNT), 0xdeadbeef,
+        'nothing is reported before the write is done');
+    assert.equal(await answer, 1);
+    assert.equal(memory.dword(OUT_COUNT), 2);
+});
+
 test('a zero-length write still reports a count', ()=>{
     const { memory, files, fns, open } = setup();
     files.put('C:\\GAME\\SAVE.DAT', 'abcd');

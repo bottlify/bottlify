@@ -296,6 +296,10 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
  *           Short at the end of the file; empty past it, which is not an error.
  *           A promise when the bytes are not resident yet -- see ReadFile.
  * @property {(node: any, offset: number, bytes: Uint8Array) => number} write
+ * @property {(node: any, offset: number, bytes: Uint8Array)
+ *     => number | Promise<number>} [writeOrFetch]
+ *           write, or a promise when the file must be copied up from blocks
+ *           not resident yet -- see WriteFile.
  * @property {(node: any, size: number) => void} truncate
  * @property {(node: any) => void} close
  * @property {(path: string) => boolean} remove
@@ -2230,18 +2234,32 @@ export function createFileFunctions(host){
                 const at = pointer !== 0 && host.ports
                     ? host.ports.offsetOf(pointer)
                     : file.position;
-                const stored = files.write(file.node, at, bytes);
-                file.position = at + stored;
-                // Written even for a zero-length write, which is how a program
-                // asks whether the handle still works.
-                writeDwordIf(written >>> 0, stored);
-                // The same debt an overlapped read owes: a save written through
-                // a pool hangs if the packet its worker waits on never arrives.
-                if (pointer !== 0)
+                /** @param {number} stored */
+                const deliver = stored=>{
+                    file.position = at + stored;
+                    // Written even for a zero-length write, which is how a program
+                    // asks whether the handle still works.
+                    writeDwordIf(written >>> 0, stored);
+                    // The same debt an overlapped read owes: a save written through
+                    // a pool hangs if the packet its worker waits on never arrives.
+                    if (pointer !== 0)
+                    {
+                        host.ports?.completed(handle >>> 0, stored, pointer);
+                    }
+                    return 1;
+                };
+                const stored = (files.writeOrFetch ?? files.write)
+                    .call(files, file.node, at, bytes);
+                if (typeof stored === 'number')
                 {
-                    host.ports?.completed(handle >>> 0, stored, pointer);
+                    return deliver(stored);
                 }
-                return 1;
+                // Parked like ReadFile while the bundle's blocks arrive.
+                const owner = host.currentThread?.() ?? null;
+                return /** @type {any} */ (stored.then(deliver, ()=>{
+                    host.setLastErrorFor?.(owner, ERROR_IO_DEVICE);
+                    return 0;
+                }));
             },
         },
 
@@ -2957,10 +2975,17 @@ export function createFileFunctions(host){
                 const bytes = count === 0
                     ? new Uint8Array(0)
                     : host.readMemory(buffer >>> 0, count >>> 0).slice();
-                const stored = files.write(file.node, file.position, bytes);
-                file.position += stored;
-                host.setLastError(ERROR_SUCCESS);
-                return stored;
+                /** @param {number} stored */
+                const deliver = stored=>{
+                    file.position += stored;
+                    host.setLastError(ERROR_SUCCESS);
+                    return stored;
+                };
+                const stored = (files.writeOrFetch ?? files.write).call(files, file.node,
+                    file.position, bytes);
+                return typeof stored === 'number'
+                    ? deliver(stored)
+                    : /** @type {any} */ (stored.then(deliver, ()=>HFILE_ERROR));
             },
         },
 

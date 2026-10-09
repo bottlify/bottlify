@@ -66,6 +66,43 @@ test('a file written through the adapter reads back through it', async()=>{
     vol.close(reopened);
 });
 
+test('a write into a file whose blocks are not resident waits for them, as a read does', async()=>{
+    // A bundled file is copied up on its first write, and the copy reads the
+    // blocks under it: when they are absent the layer throws a miss naming
+    // them. A launcher that writes into its game's executable must be parked
+    // until they arrive, not stopped.
+    const fs = await filesystemModule.create({});
+    const absent = [{ index: 7 }];
+    let resident = false;
+    /** @type {any[]} */
+    const fetched = [];
+    const bundled = Object.create(fs);
+    bundled.write = (/** @type {any} */ node, /** @type {Uint8Array} */ bytes)=>{
+        if (!resident)
+        {
+            throw Object.assign(new Error('not resident'), { code: 'BLOCK_MISS', blocks: absent });
+        }
+        return fs.write(node, bytes);
+    };
+    const vol = /** @type {any} */ (createVolume(bundled, async blocks=>{
+        fetched.push(...blocks);
+        resident = true;
+    }));
+    const node = vol.open('C:\\game.exe', { read: true, write: true, create: true });
+    const bytes = new Uint8Array([1, 2, 3]);
+
+    assert.throws(()=>vol.write(node, 0, bytes), /not resident/,
+        'the synchronous write still reports the miss to a caller that cannot wait');
+    const pending = vol.writeOrFetch(node, 0, bytes);
+    assert.equal(typeof pending?.then, 'function');
+    bytes[0] = 9;
+    assert.equal(await pending, 3);
+    assert.deepEqual(fetched, absent, 'the blocks the miss named are the ones fetched');
+    assert.deepEqual([...vol.read(node, 0, 3)], [1, 2, 3],
+        'the bytes written are the ones passed at the call');
+    vol.close(node);
+});
+
 test('an offset is honoured even when it goes backwards', async()=>{
     const { volume: vol } = await volume();
     const node = vol.open('C:\\a.bin', { read: true, write: true, create: true });
