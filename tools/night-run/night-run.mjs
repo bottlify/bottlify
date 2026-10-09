@@ -116,6 +116,8 @@ contract that was wrong and what the title did because of it.
 bundles/${bottle.id}/manifest.json (that file is not in git; keep the rest of it as it is). \
 Not before.
 7. Leave the test's route beside the game: bundles/${bottle.id}/route.json.
+8. Copy the screenshot that shows how far the title got (in its game, or where it stops) to \
+dbg/night/${bottle.id}.png; the person reads it in the morning.
 
 How:
 - Run it: node tools/cdp_test/game.mjs ${bottle.id} --headed --worker --coi --wait 240 (more if \
