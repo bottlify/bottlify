@@ -78,7 +78,7 @@ async function brokenBottles(){
         const chosen = only.length ? only.includes(id)
             : manifest.kind !== 'application' && !id.startsWith('wine-')
                 && manifest.status !== 'playable' && !labels.some((/** @type {string} */ label)=>
-                    ['playable', 'test', 'benchmark'].includes(label));
+                ['playable', 'test', 'benchmark'].includes(label));
         if (chosen && !skip.includes(id))
         {
             bottles.push({ id, title: String(manifest.title ?? id).trim(), labels });
