@@ -2922,6 +2922,23 @@ export function createWin32Module(){
                 setRegisters,
                 windows,
                 handleType: (/** @type {number} */ handle)=>kernel.handles.typeOf(handle),
+                // The processes a Toolhelp snapshot lists: this one and the
+                // children it started that are still running.
+                processes: ()=>[
+                    {
+                        id: processId, parent: 0, path: modules.imagePath(),
+                        threads: (kernel.threads?.() ?? [])
+                            .filter((/** @type {any} */ thread)=>thread.state !== 'terminated')
+                            .map((/** @type {any} */ thread)=>thread.id >>> 0),
+                    },
+                    ...(kernel.processes?.all() ?? [])
+                        .filter((/** @type {any} */ child)=>!child.completed
+                            && child.exitCode === kernel.processes.STILL_ACTIVE)
+                        .map((/** @type {any} */ child)=>({
+                            id: child.id >>> 0, parent: processId,
+                            path: String(child.imagePath ?? ''), threads: [child.threadId >>> 0],
+                        })),
+                ],
                 divergence: config?.divergence,
                 advapi32: libraries['ADVAPI32.dll'],
             });

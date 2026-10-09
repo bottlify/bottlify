@@ -74,6 +74,33 @@ const PROCESS_BASIC = Object.freeze({
 
 /** The information classes answered here. */
 const SYSTEM_BASIC_INFORMATION = 0;
+const SYSTEM_PROCESS_INFORMATION = 5;
+
+/**
+ * SYSTEM_PROCESS_INFORMATION as 32-bit Windows lays it out, one per process,
+ * each followed by a SYSTEM_THREAD_INFORMATION per thread and then its image
+ * name; NextEntryOffset chains them and is 0 on the last.
+ */
+const SYSTEM_PROCESS = {
+    NEXT_ENTRY_OFFSET: 0x00,
+    NUMBER_OF_THREADS: 0x04,
+    IMAGE_NAME: 0x38,
+    BASE_PRIORITY: 0x40,
+    UNIQUE_PROCESS_ID: 0x44,
+    INHERITED_FROM_PROCESS_ID: 0x48,
+    SIZE: 0xb8,
+};
+const SYSTEM_THREAD = {
+    CLIENT_PROCESS: 0x20,
+    CLIENT_THREAD: 0x24,
+    PRIORITY: 0x28,
+    BASE_PRIORITY: 0x2c,
+    THREAD_STATE: 0x34,
+    SIZE: 0x40,
+};
+/** KTHREAD_STATE: the idle thread runs; every other one waits. */
+const THREAD_STATE_RUNNING = 2;
+const THREAD_STATE_WAITING = 5;
 const PROCESS_BASIC_INFORMATION = 0;
 const PROCESS_DEBUG_PORT = 7;
 const PROCESS_EXECUTE_FLAGS = 0x22;
@@ -140,7 +167,67 @@ const NORMAL_BASE_PRIORITY = 8;
  *           names, or null when it names nothing. Without it NtQueryObject
  *           answers every handle as invalid.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {() => SystemProcess[]} [processes]  The processes a Toolhelp
+ *           snapshot lists, this one first. Without it SystemProcessInformation
+ *           is an unknown class.
  */
+
+/**
+ * @typedef {{ id: number, parent: number, path: string, threads: number[] }} SystemProcess
+ */
+
+/**
+ * The SYSTEM_PROCESS_INFORMATION chain for these processes, behind the idle
+ * process every Windows lists first, written for a buffer at `base`: an image
+ * name's buffer is an address into it.
+ *
+ * @param {SystemProcess[]} processes
+ * @param {number} base
+ * @returns {Uint8Array}
+ */
+export function systemProcessInformation(processes, base){
+    const entries = [{ id: 0, parent: 0, path: '', threads: [0] }, ...processes].map(process=>{
+        const name = process.path.slice(process.path.lastIndexOf('\\') + 1);
+        const nameAt = SYSTEM_PROCESS.SIZE + process.threads.length * SYSTEM_THREAD.SIZE;
+        const size = nameAt + (name.length + 1) * 2 + 7 & ~7;
+        return { ...process, name, nameAt, size };
+    });
+    const bytes = new Uint8Array(entries.reduce((sum, entry)=>sum + entry.size, 0));
+    const view = new DataView(bytes.buffer);
+    let at = 0;
+    entries.forEach((entry, index)=>{
+        const priority = entry.id === 0 ? 0 : NORMAL_BASE_PRIORITY;
+        const last = index === entries.length - 1;
+        view.setUint32(at + SYSTEM_PROCESS.NEXT_ENTRY_OFFSET, last ? 0 : entry.size, true);
+        view.setUint32(at + SYSTEM_PROCESS.NUMBER_OF_THREADS, entry.threads.length, true);
+        view.setUint32(at + SYSTEM_PROCESS.BASE_PRIORITY, priority, true);
+        view.setUint32(at + SYSTEM_PROCESS.UNIQUE_PROCESS_ID, entry.id >>> 0, true);
+        view.setUint32(at + SYSTEM_PROCESS.INHERITED_FROM_PROCESS_ID, entry.parent >>> 0, true);
+        entry.threads.forEach((thread, slot)=>{
+            const record = at + SYSTEM_PROCESS.SIZE + slot * SYSTEM_THREAD.SIZE;
+            view.setUint32(record + SYSTEM_THREAD.CLIENT_PROCESS, entry.id >>> 0, true);
+            view.setUint32(record + SYSTEM_THREAD.CLIENT_THREAD, thread >>> 0, true);
+            view.setUint32(record + SYSTEM_THREAD.PRIORITY, priority, true);
+            view.setUint32(record + SYSTEM_THREAD.BASE_PRIORITY, priority, true);
+            view.setUint32(record + SYSTEM_THREAD.THREAD_STATE,
+                entry.id === 0 ? THREAD_STATE_RUNNING : THREAD_STATE_WAITING, true);
+        });
+        for (let i = 0; i < entry.name.length; i++)
+        {
+            view.setUint16(at + entry.nameAt + i * 2, entry.name.charCodeAt(i), true);
+        }
+        // The idle process has no name: an empty string with no buffer.
+        if (entry.name.length > 0)
+        {
+            view.setUint16(at + SYSTEM_PROCESS.IMAGE_NAME, entry.name.length * 2, true);
+            view.setUint16(at + SYSTEM_PROCESS.IMAGE_NAME + 2, (entry.name.length + 1) * 2, true);
+            view.setUint32(at + SYSTEM_PROCESS.IMAGE_NAME + 4, base + at + entry.nameAt >>> 0,
+                true);
+        }
+        at += entry.size;
+    });
+    return bytes;
+}
 
 /**
  * Builds the query half of the table: name -> { argBytes, handler }.
@@ -309,6 +396,20 @@ export function createQueryFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([infoClass, buffer, length, returnLength])=>{
+                if ((infoClass >>> 0) === SYSTEM_PROCESS_INFORMATION && host.processes)
+                {
+                    // What the Toolhelp snapshot is built on. A process walker
+                    // told the class is unknown concludes it is being kept from
+                    // looking.
+                    const chain = systemProcessInformation(host.processes(), buffer >>> 0);
+                    writeU32If(returnLength >>> 0, chain.length);
+                    if ((length >>> 0) < chain.length || buffer === 0)
+                    {
+                        return STATUS.INFO_LENGTH_MISMATCH;
+                    }
+                    host.writeMemory(buffer >>> 0, chain);
+                    return STATUS.SUCCESS;
+                }
                 if ((infoClass >>> 0) !== SYSTEM_BASIC_INFORMATION)
                 {
                     return STATUS.INVALID_INFO_CLASS;

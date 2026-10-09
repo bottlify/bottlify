@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createQueryFunctions } from './query.js';
+import { createQueryFunctions, systemProcessInformation } from './query.js';
 import { STATUS } from './status.js';
 import { PEB, TEB, createProcessBlocks } from '../kernel32/teb.js';
 import { VER, WINDOWS_VERSIONS, setCondition } from '../kernel32/versions.js';
@@ -328,4 +328,34 @@ test('the debug-help queries are refused as unsupported and say so', ()=>{
     assert.equal(fns.RtlDestroyQueryDebugBuffer.handler([0x1000]), STATUS.SUCCESS);
     assert.equal(fns.RtlQueryProcessDebugInformation.handler([0, 0, 0]), STATUS.NOT_IMPLEMENTED);
     assert.equal(said.length, 4);
+});
+
+test('SystemProcessInformation chains the idle process and each process with its threads', ()=>{
+    // The class the Toolhelp snapshot is built on: a walker follows
+    // NextEntryOffset, reads the id, the parent, the threads and the name.
+    const base = 0x10000;
+    const chain = systemProcessInformation([
+        { id: 0x1000, parent: 0, path: 'C:\\Games\\game.exe', threads: [0x1004, 0x1008] },
+    ], base);
+    const view = new DataView(chain.buffer);
+    const next = view.getUint32(0, true);
+    assert.equal(view.getUint32(0x44, true), 0, 'the idle process first');
+    assert.equal(view.getUint16(0x38, true), 0, 'with no name');
+    assert.equal(view.getUint32(next, true), 0, 'the last entry ends the chain');
+    assert.equal(view.getUint32(next + 0x04, true), 2, 'two threads');
+    assert.equal(view.getUint32(next + 0x44, true), 0x1000, 'UniqueProcessId');
+    assert.equal(view.getUint32(next + 0xb8 + 0x40 + 0x24, true), 0x1008, 'second thread id');
+    assert.equal(view.getUint32(next + 0xb8 + 0x20, true), 0x1000, 'thread owner');
+    const length = view.getUint16(next + 0x38, true);
+    const name = view.getUint32(next + 0x3c, true) - base;
+    assert.equal(String.fromCharCode(...new Uint16Array(chain.buffer.slice(name, name + length))),
+        'game.exe');
+
+    const host = fakeHost();
+    const asked = createQueryFunctions({ ...host, processes: ()=>[
+        { id: 0x1000, parent: 0, path: 'C:\\game.exe', threads: [0x1004] }] });
+    assert.equal(asked.NtQuerySystemInformation.handler([5, BUFFER, 8, BUFFER + 0x400]),
+        STATUS.INFO_LENGTH_MISMATCH, 'too small a buffer is told the size');
+    const needed = host.view.getUint32(BUFFER + 0x400, true);
+    assert.ok(needed > 0xb8 * 2);
 });
