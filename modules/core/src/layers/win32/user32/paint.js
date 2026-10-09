@@ -467,6 +467,8 @@ export function tabbedWidth(text, widthOf, stops, interval){
  *        to date before it draws.
  * @param {(record: any) => boolean} [options.frozen]
  *        Whether a window is held as it is, being dragged: it draws nowhere.
+ * @param {(hwnd: number) => boolean} [options.isWindow]
+ *        Whether a handle names a window, of this process or another.
  * @param {(record: any) => ({ style: number, keptContext?: number } | null)} [options.classOf]
  *        A window's class, whose style says whose its context is, and which
  *        keeps the one context of a CS_CLASSDC class.
@@ -961,22 +963,39 @@ export function createPaintFunctions(options){
     };
 
     /**
-     * A window is gone: its own context with it. Its class's stays, for the
-     * next window of the class to ask.
+     * A window is gone: its own context with it, and every cache context
+     * out on it. Its class's stays, for the next window of the class to ask.
      *
      * @param {any} record
      */
     const forgetContexts = record=>{
-        const hdc = record.keptContext ?? 0;
-        const entry = held.get(hdc);
-        if (entry && entry.kind === 'own')
+        for (const [hdc, entry] of [...held])
         {
-            entry.kind = 'cache';
+            if (entry.record !== record)
+            {
+                continue;
+            }
             owners.delete(hdc);
-            releaseContext(record.hwnd, hdc);
+            // A cache context out on it is released, and names nothing
+            // after (dce.c test_destroyed_window); the class's is still the
+            // class's, for the next window that asks.
+            if (entry.kind !== 'class')
+            {
+                entry.kind = 'cache';
+                releaseContext(record.hwnd, hdc);
+            }
         }
         record.keptContext = 0;
     };
+
+    /**
+     * Whether a handle a context is asked for names no window: one destroyed,
+     * or never one. The screen's context, asked for with none, is not.
+     *
+     * @param {number} hwnd
+     */
+    const noWindow = hwnd=>(hwnd >>> 0) !== 0 && !live(hwnd)
+        && options.isWindow?.(hwnd >>> 0) === false;
 
     /**
      * Brings a context out since before the windows last changed up to
@@ -1390,6 +1409,10 @@ export function createPaintFunctions(options){
             /** @param {number[]} args */
             handler: ([hwnd])=>{
                 const record = live(hwnd);
+                if (noWindow(hwnd))
+                {
+                    return 0;
+                }
                 return handedOut(hwnd,
                     record ? contextOn(record) : contexts()?.get(hwnd >>> 0, null) ?? 0);
             },
@@ -1400,6 +1423,10 @@ export function createPaintFunctions(options){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([hwnd, hdc])=>{
+                if (noWindow(hwnd))
+                {
+                    return 0;
+                }
                 // A kept context is still its window's after it goes back.
                 const kept = (held.get(hdc >>> 0)?.kind ?? 'cache') !== 'cache';
                 const released = releaseContext(hwnd, hdc);
@@ -1736,6 +1763,10 @@ export function createPaintFunctions(options){
             handler: ([hwnd, region, flags])=>{
                 const DCX_WINDOW = 0x1;
                 const record = live(hwnd);
+                if (noWindow(hwnd))
+                {
+                    return 0;
+                }
                 return handedOut(hwnd, record
                     ? contextOn(record, (flags & DCX_WINDOW) !== 0, flags >>> 0, region >>> 0)
                     : contexts()?.get(hwnd >>> 0, null) ?? 0);
@@ -1753,6 +1784,10 @@ export function createPaintFunctions(options){
             /** @param {number[]} args */
             handler: ([hwnd])=>{
                 const record = live(hwnd);
+                if (noWindow(hwnd))
+                {
+                    return 0;
+                }
                 return handedOut(hwnd,
                     record ? contextOn(record, true) : contexts()?.get(hwnd >>> 0, null) ?? 0);
             },

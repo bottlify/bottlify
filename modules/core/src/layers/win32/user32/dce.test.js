@@ -158,7 +158,8 @@ test('a cache context is a new one each time, and released it names nothing', as
     const hdc = fns.GetDC.handler([hwnd]);
     const R2_COPYPEN = 13;
     gdi32.SetROP2.handler([hdc, R2_WHITE]);
-    assert.equal(fns.ReleaseDC.handler([0x1234, hdc]), 1,
+    const other = await make(120, 10);
+    assert.equal(fns.ReleaseDC.handler([other, hdc]), 1,
         'released whichever window the call names');
     assert.equal(fns.ReleaseDC.handler([hwnd, hdc]), 0, 'and only once');
     assert.equal(gdi32.GetROP2.handler([hdc]), 0, 'a released context answers nothing');
@@ -216,3 +217,58 @@ test('a CS_OWNDC context keeps a paint\'s limit until EndPaint, not ReleaseDC', 
     fns.EndPaint.handler([hwnd, PS]);
     assert.deepEqual(clipBox(hdc), [0, 0, 100, 100], 'EndPaint gives it the window back');
 });
+
+test('a destroyed window takes its contexts with it, and is handed none', async()=>{
+    // dce.c test_destroyed_window.
+    const cached = await classed(0);
+    let { fns, gdi32 } = cached.context;
+    const plain = await cached.make(10, 10);
+    let hdc = fns.GetDC.handler([plain]);
+    gdi32.SetROP2.handler([hdc, R2_WHITE]);
+    await fns.DestroyWindow.handler([plain]);
+    assert.equal(gdi32.GetROP2.handler([hdc]), 0, 'a cache context out on it is gone');
+    assert.notEqual(fns.WindowFromDC.handler([hdc]), plain);
+    assert.equal(fns.ReleaseDC.handler([plain, hdc]), 0);
+    assert.equal(fns.GetDC.handler([plain]), 0, 'a destroyed window is handed no context');
+
+    const shared = await classed(CS_CLASSDC);
+    ({ fns, gdi32 } = shared.context);
+    const first = await shared.make(10, 10);
+    const second = await shared.make(120, 10);
+    hdc = fns.GetDC.handler([second]);
+    gdi32.SetROP2.handler([hdc, R2_WHITE]);
+    await fns.DestroyWindow.handler([second]);
+    assert.equal(gdi32.GetROP2.handler([hdc]), R2_WHITE, 'the class\'s context stays');
+    assert.notEqual(fns.WindowFromDC.handler([hdc]), second, 'but is not the window\'s');
+    assert.equal(fns.ReleaseDC.handler([second, hdc]), 0);
+    assert.equal(fns.GetDC.handler([first]), hdc, 'and goes to the next window that asks');
+
+    const owned = await classed(CS_OWNDC);
+    ({ fns, gdi32 } = owned.context);
+    const own = await owned.make(10, 10);
+    hdc = fns.GetDC.handler([own]);
+    gdi32.SetROP2.handler([hdc, R2_WHITE]);
+    await fns.DestroyWindow.handler([own]);
+    assert.equal(gdi32.GetROP2.handler([hdc]), 0, 'its own context goes with it');
+    assert.equal(fns.ReleaseDC.handler([own, hdc]), 0);
+});
+
+test('a scroll clipped smaller than it scrolls leaves owed what would come in from outside',
+    async()=>{
+        // dce.c test_scroll_window: only the pixels inside the clip move, so
+        // what the scroll would bring in across its edge is painted, not
+        // copied (MSDN ScrollWindowEx).
+        const { context, make, clipBox } = await classed(CS_OWNDC);
+        const { fns, memory } = context;
+        const hwnd = await make(10, 10);
+        await fns.UpdateWindow.handler([hwnd]);
+        const CLIP = TEXT + 0x2c0;
+        const PS = TEXT + 0x280;
+        memory.put32s(CLIP, [25, 25, 50, 50]);
+        await fns.ScrollWindow.handler([hwnd, -5, -10, 0, CLIP]);
+        const hdc = await fns.BeginPaint.handler([hwnd, PS]);
+        const [left, top, right, bottom] = clipBox(hdc);
+        assert.ok(left >= 25 && top >= 25 && right <= 50 && bottom <= 50
+            && right > left && bottom > top, `owed inside the clip: ${[left, top, right, bottom]}`);
+        fns.EndPaint.handler([hwnd, PS]);
+    });

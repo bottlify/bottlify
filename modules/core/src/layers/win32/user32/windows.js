@@ -2789,11 +2789,13 @@ export function createWindowFunctions(host){
 
     /**
      * What a scroll leaves to be painted, worked out on regions rather than
-     * the strip along one edge. Of the part of `scroll` that changes -- in
+     * the strip along one edge. Only the pixels inside `clip` move, and
+     * only there do they land: of the part of `scroll` that changes -- in
      * `clip` and in what the context shows -- what the moved pixels cover
-     * is good; the rest is not: the strip moved away from, and where the
-     * pixels came from a part that does not show, as under a sibling over
-     * the window (win.c test_scrollvalidate).
+     * is good; the rest is not: the strip moved away from, what would have
+     * come in from outside `clip`, and where the pixels came from a part
+     * that does not show, as under a sibling over the window (win.c
+     * test_scrollvalidate, dce.c test_scroll_window; MSDN ScrollWindowEx).
      *
      * @param {Rect[]} visible  What the context draws in.
      * @param {Rect} scroll @param {Rect} clip
@@ -2801,9 +2803,8 @@ export function createWindowFunctions(host){
      * @returns {{ changed: Rect[], uncovered: Rect[] }}
      */
     const scrollAreas = (visible, scroll, clip, dx, dy)=>{
-        const source = intersectAreas(visible, [scroll]);
-        const changed = intersectAreas(source, [clip]);
-        const moved = intersectAreas(intersectAreas(offsetArea(source, dx, dy), [clip]), visible);
+        const changed = intersectAreas(intersectAreas(visible, [scroll]), [clip]);
+        const moved = intersectAreas(intersectAreas(offsetArea(changed, dx, dy), [clip]), visible);
         return { changed, uncovered: subtractAreas(changed, moved) };
     };
 
@@ -2825,7 +2826,7 @@ export function createWindowFunctions(host){
         {
             // The context is clipped to what it shows already; a pixel moved
             // from a part that does not show lands in the update area.
-            draw?.scroll?.(hdc, scroll, dx, dy, clip);
+            draw?.scroll?.(hdc, intersect(scroll, clip), dx, dy, clip);
         }
         return areas;
     };
@@ -4973,6 +4974,8 @@ export function createWindowFunctions(host){
         covering: coveringOf,
         layoutRevision: ()=>layoutRevision,
         classOf: (/** @type {any} */ record)=>classes.get(record.className) ?? null,
+        isWindow: (/** @type {number} */ hwnd)=>Boolean(live(hwnd)
+            || directory.describe(hwnd, processId)),
         caret,
     });
 

@@ -422,11 +422,11 @@ function createWindow(fns, memory, options = {}){
  *
  * @param {Parameters<typeof putClass>[1] & Parameters<typeof createWindow>[2]
  *     & { reply?: (message: any) => any, trace?: (message: any) => void,
- *         paint?: boolean }} [options]
+ *         paint?: boolean, queueNow?: () => number }} [options]
  */
 function withWindow(options = {}){
-    const { reply, trace, paint, ...rest } = options;
-    const context = setup({ reply, trace, paint });
+    const { reply, trace, paint, queueNow, ...rest } = options;
+    const context = setup({ reply, trace, paint, queueNow });
     putClass(context.memory, rest);
     context.fns.RegisterClassA.handler([CLASS_STRUCT]);
     const hwnd = createWindow(context.fns, context.memory, rest);
