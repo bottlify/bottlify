@@ -2320,6 +2320,9 @@ const CLEAR_STRIDE = 20;
  *     under. Off by default: it transforms every vertex of every draw a second
  *     time on the processor, which is a cost an ordinary run must not pay.
  * @property {number} [dumpEvery]
+ * @property {{ dumpFrames: number }} [liveDump]
+ *     Set on a running program to have its next frames with draws written
+ *     down as `dumpDraws` writes them; counts down as they are.
  *     The same account for every this-many-th presented frame, the last
  *     `DUMPS_KEPT` of them kept: a picture wrong in one frame of a few is
  *     caught with its draws, where the last frame alone misses it. Its first
@@ -2370,6 +2373,10 @@ export function createRenderer(options){
     const dumpDraws = options.dumpDraws === true;
     const nanProbe = options.nanProbe === true;
     const dumpEvery = Math.max(0, Math.floor(options.dumpEvery ?? 0));
+    // Asked for on a running program: the next frames with draws are written
+    // down as `dumpDraws` writes them, without the texture copies only a run
+    // started with `dumpDraws` makes.
+    const liveDump = options.liveDump ?? null;
     const maxDraws = options.maxDraws === undefined ? -1 : options.maxDraws;
     const divergence = options.divergence ?? null;
     // One id or several, comma-separated: a picture painted by a family of
@@ -2396,7 +2403,8 @@ export function createRenderer(options){
     const { LockFlags, BufferUsage, TextureUsage } = backend;
     // A dumping run reads vertex buffers back off the GPU to compare them
     // with what the program wrote, which needs them made as copy sources.
-    const dumpCopySource = dumpDraws || dumpEvery > 0 ? BufferUsage.COPY_SRC : 0;
+    const dumpCopySource = dumpDraws || dumpEvery > 0 || liveDump !== null
+        ? BufferUsage.COPY_SRC : 0;
 
     /** @type {WeakMap<object, any>} d3d8 surface -> backend surface */
     const surfaces = new WeakMap();
@@ -2539,7 +2547,8 @@ export function createRenderer(options){
     /** @type {{ frame: number, lines: string[] }[]} the frames `dumpEvery` kept */
     const dumps = [];
     /** Whether the draws of the frame being recorded are written down. */
-    const dumping = ()=>dumpDraws || (dumpEvery > 0 && counters.frames % dumpEvery === 0);
+    const dumping = ()=>dumpDraws || (dumpEvery > 0 && counters.frames % dumpEvery === 0)
+        || (liveDump !== null && liveDump.dumpFrames > 0);
     /** Draws kept in the frame being recorded, against `maxDraws`. */
     let kept = 0;
     /** Frames whose commands have reached the queue: those numbered below this. */
@@ -8058,6 +8067,10 @@ export function createRenderer(options){
             // at replay, which happens after another frame may have begun.
             recorded.dump = dump;
             lastDump = dump;
+            if (liveDump !== null && liveDump.dumpFrames > 0 && dump.length > 0)
+            {
+                liveDump.dumpFrames--;
+            }
             if (dumpEvery > 0 && dump.length > 0 && counters.frames % dumpEvery === 0)
             {
                 dumps.push({ frame: counters.frames, lines: dump });

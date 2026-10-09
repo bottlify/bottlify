@@ -91,6 +91,12 @@ export function serveGraphics(scope, deps){
     const clients = new Set();
     /** What told them, for a client that comes after. @type {{ type: 'lost', reason: string } | null} */
     let lostWith = null;
+    /**
+     * Asked of the page on a running program (`app.debug.dumpFrames`): every
+     * Direct3D 8 and 9 device here writes its next frames down while this is
+     * above zero.
+     */
+    const liveDump = { dumpFrames: 0 };
 
     /**
      * The newest frame each process presented and not yet sent, kept in a
@@ -381,6 +387,7 @@ export function serveGraphics(scope, deps){
         {
             played = playedDirect3D(FACTORIES[api], {
                 ...options,
+                liveDump,
                 backend,
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
                 // The program has memory; what of it this side reads is what it is sent.
@@ -452,6 +459,9 @@ export function serveGraphics(scope, deps){
                 break;
             case 'root':
                 takeRoot(data);
+                break;
+            case 'debug':
+                liveDump.dumpFrames = Math.max(0, Math.floor(Number(data.dumpFrames) || 0));
                 break;
             case 'client':
             {

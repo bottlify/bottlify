@@ -883,6 +883,16 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
         'debug.read': async(/** @type {number} */ address, /** @type {number} */ length)=>
             (await app.debug.read(address, length)).slice(),
         'debug.modules': ()=>app.debug.modules(),
+        // The graphics worker is this thread's, so the asking goes to it from
+        // here; what its devices write down comes back in the next report.
+        'debug.dumpFrames': (/** @type {number} */ count = 1)=>{
+            if (!graphics)
+            {
+                throw new Error('dumpFrames: this run draws without a graphics worker');
+            }
+            graphics.worker.postMessage({ type: 'debug', dumpFrames: count });
+            return count;
+        },
         presented: ()=>({ count: frames, history: presented.slice() }),
         /*
          * The emulator's account of where the guest ran, by address. Only the
