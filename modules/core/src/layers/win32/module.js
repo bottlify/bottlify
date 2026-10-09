@@ -2674,6 +2674,9 @@ export function createWin32Module(){
                     divergence: config?.divergence,
                     vtables: comVtables,
                     hive,
+                    // A server's path written REG_EXPAND_SZ names %SystemRoot% and
+                    // the like, expanded against the process's variables.
+                    environment: ()=>config?.environment ?? defaultEnvironment(windows, folders),
                     // A docfile is a file on the volume, and an object a program
                     // saves into one answers GetClassID and Save on its own side.
                     files: volume,

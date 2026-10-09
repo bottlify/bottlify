@@ -1295,6 +1295,61 @@ test('a class the registry names an InprocServer32 for is made by the server\'s 
         void fns;
     });
 
+test('a server path written REG_EXPAND_SZ is loaded with its variables expanded', async()=>{
+    // msxml4 registers %SystemRoot%\system32\msxml4.dll; loaded as written, no
+    // such file exists and the class is never made.
+    const { host, view } = withGuestCalls();
+    const MODULE = 0x7000000;
+    const DLL_GET_CLASS_OBJECT = METHOD_BASE + 0x100;
+    const path = '%systemroot%\\system32\\msxml4.dll %UNSET%';
+    /** @type {string[]} */
+    const loaded = [];
+    /** @type {any} */ (host).environment = ()=>({ SystemRoot: 'C:\\WINDOWS' });
+    /** @type {any} */ (host).hive = {
+        root: ()=>'HKCR',
+        /** @param {any} _root @param {string} key */
+        open: (_root, key)=>(key.toUpperCase() === `CLSID\\${CLSID_GUEST}\\INPROCSERVER32`
+            ? key : null),
+        getValue: ()=>({ type: 2,
+            data: Uint8Array.from([...path].map(c=>c.charCodeAt(0)).concat([0])) }),
+    };
+    /** @param {number} address */
+    const text = address=>{
+        let read = '';
+        for (let at = address; host.bytes[at] !== 0; at++)
+        {
+            read += String.fromCharCode(host.bytes[at]);
+        }
+        return read;
+    };
+    /** @type {any} */ (host).libraries = {
+        load: ()=>0,
+        free: ()=>0,
+        /** @param {number} name */
+        loadAnsi: name=>{
+            loaded.push(text(name));
+            return MODULE;
+        },
+        /** @param {number} module @param {number} name */
+        procAddress: (module, name)=>(module === MODULE && text(name) === 'DllGetClassObject'
+            ? DLL_GET_CLASS_OBJECT : 0),
+    };
+    const methods = /** @type {any} */ (host).call;
+    /** @type {any} */ (host).call = async(/** @type {number} */ entry, /** @type {number[]} */ args)=>{
+        if (entry === DLL_GET_CLASS_OBJECT)
+        {
+            view.setUint32(args[2], GUEST_OBJECT, true);
+            return 0;
+        }
+        return methods(entry, args);
+    };
+    const served = createOleFunctions(/** @type {any} */ (host));
+    initialize(served, COINIT_APARTMENTTHREADED);
+    await served.CoCreateInstance.handler([GUEST_CLSID_ARG, 0, 1, IID_ARG, PPV]);
+    assert.deepEqual(loaded, ['C:\\WINDOWS\\system32\\msxml4.dll %UNSET%'],
+        'any case of the name; one with no variable is left as written');
+});
+
 test('a DLL a surrogate would serve as a local server is made in process, and said to be',
     async()=>{
         const { host, calls, view } = withGuestCalls();

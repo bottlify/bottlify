@@ -31,7 +31,7 @@ import {
     GUID_NULL, GUID_SIZE, GUID_STRING_LENGTH, canonicalGuid, formatGuid, parseGuid, readGuid,
     writeGuid,
 } from './guid.js';
-import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
+import { HKEY_CLASSES_ROOT, REG_EXPAND_SZ } from '../advapi32/registry.js';
 import { createStorageFunctions } from './storage.js';
 import { createUserMarshalFunctions } from './usrmarshal.js';
 import { createPropVariantFunctions } from './propvariant.js';
@@ -267,8 +267,10 @@ const MAX_PROGID = 255;
  * @property {{ pointer: () => number }} [taskAllocator]
  *           The process's IMalloc, for CoGetMalloc. Absent, that call fails
  *           as an allocation failure would.
+ * @property {() => Record<string, string>} [environment]
+ *           The process's variables, which a REG_EXPAND_SZ server path names.
  * @property {{ root: (id: number) => any, open: (key: any, path: string) => any,
- *              getValue: (key: any, name: string) => { data: Uint8Array } | null,
+ *              getValue: (key: any, name: string) => { data: Uint8Array, type?: number } | null,
  *              subkeys?: (key: any) => string[],
  *              create?: (key: any, path: string) => { key: any },
  *              setValue?: (key: any, name: string, type: number, data: Uint8Array) => void,
@@ -1036,6 +1038,14 @@ export function createOleFunctions(host){
                 break;
             }
             text += String.fromCharCode(byte);
+        }
+        if (value.type === REG_EXPAND_SZ)
+        {
+            // %NAME% replaced as ExpandEnvironmentStrings replaces it: by the
+            // variable of that name in any case, or left as written.
+            const variables = Object.entries(host.environment?.() ?? {});
+            text = text.replace(/%([^%]*)%/g, (whole, name)=>variables.find(
+                ([candidate])=>candidate.toLowerCase() === name.toLowerCase())?.[1] ?? whole);
         }
         return text.length > 0 ? text : null;
     };
