@@ -165,7 +165,8 @@ export function createCpuModule(){
              *          yieldCheck: (() => boolean) | null, stacks: [number, number][],
              *          lent: import('./engine.js').TranslatorPort[], remotes: any[],
              *          bell: ReturnType<typeof createBell> | null,
-             *          beforeTrap: (() => void) | null }}
+             *          beforeTrap: (() => void) | null,
+             *          remoteFigures: Map<number, any> }}
              */
             const state = {
                 host: null, thunks: null, running: false, tableWritten: false,
@@ -175,6 +176,8 @@ export function createCpuModule(){
                 remotes: [],
                 bell: null,
                 beforeTrap: null,
+                // The other executors' translator figures, as each last answered.
+                remoteFigures: new Map(),
                 faultHandler: null,
                 // The guest's clock once the kernel gives it (`useGuestClock`).
                 guestClock: null,
@@ -458,9 +461,18 @@ export function createCpuModule(){
                         {
                             // What crosses to a worker is data: the translation store
                             // and anything callable stay with the process's own.
+                            // The doorbell is the process's link's, rung for the process's
+                            // own batches. A run's pool lends translators to the process's
+                            // own executor alone (`translators: 0`): another one waiting for
+                            // a lend would interpret all but what it emits inline while it
+                            // loads, so it opens a translator of its own.
                             const cork = Object.fromEntries(Object.entries(hostConfig.cork)
-                                .filter(([key, value])=>key !== 'store'
+                                .filter(([key, value])=>key !== 'store' && key !== 'doorbell'
                                     && typeof value !== 'function'));
+                            if (cork.translators === 0)
+                            {
+                                cork.translators = 1;
+                            }
                             const bell = createBell();
                             state.bell = bell;
                             state.remotes = await Promise.all(Array.from(
@@ -1191,6 +1203,23 @@ export function createCpuModule(){
                     cork: instance.cork
                         ? instance.host?.corkDiagnostics?.() ?? instance.cork.diagnostics()
                         : null,
+                    // The other executors' translators, as each answered last: they
+                    // answer between their slices, so a report carries the answer to
+                    // the report before it, and says so of one not yet given.
+                    executors: instance.remotes.map((/** @type {any} */ remote)=>{
+                        remote.diagnostics().then((/** @type {any} */ value)=>{
+                            instance.remoteFigures.set(remote.index, value);
+                        }).catch(()=>{});
+                        const figures = instance.remoteFigures.get(remote.index);
+                        return figures ? {
+                            index: remote.index,
+                            retired: figures.retired,
+                            translatedShare: figures.translatedShare,
+                            regions: figures.regions,
+                            translateMs: figures.translateMs,
+                            workerBusyMs: figures.workerBusyMs,
+                        } : { index: remote.index, answer: 'not answered yet' };
+                    }),
                 },
             };
         },

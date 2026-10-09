@@ -65,7 +65,7 @@ function buildRaceExe(crossing = false){
             const cross = crossing ? [0x51, 0xff, 0x15, ...u32(iat('GetACP')), 0x59] : [];
             // mov ecx, N; L: the crossing; dec ecx; jnz L
             const busy = crossing
-                ? [0xb9, ...u32(N), ...cross, 0x49, 0x75, -(cross.length + 2) & 0xff]
+                ? [0xb9, ...u32(N), ...cross, 0x49, 0x75, -(cross.length + 3) & 0xff]
                 : [];
             const main = [
                 ...start('first'), ...start('second'), ...busy, ...wait('first'), ...wait('second'),

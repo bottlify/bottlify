@@ -290,9 +290,12 @@ function byLibrary(unresolved){
  *
  * @param {any} app
  */
-function report(app, { grep = null, calls = 24 } = {}){
+async function report(app, { grep = null, calls = 24 } = {}){
     // Taken once: a snapshot walks every ring it publishes, and asking three
     // times over asks three times as much of the guest's address space.
+    // The other executors answer between their slices: asked once, then read.
+    app.diagnostics();
+    await new Promise(resolve=>setTimeout(resolve, 500));
     const layers = app.diagnostics();
     for (const layer of layers)
     {
@@ -302,6 +305,10 @@ function report(app, { grep = null, calls = 24 } = {}){
             .map(([name, value])=>`${name}=${value}`)
             .join(' ');
         console.log(`  ${layer.name} [${layer.status}] ${interesting}`);
+        for (const row of layer.name === 'cpu' ? metrics.executors ?? [] : [])
+        {
+            console.log(`    executor ${row.index}  ${JSON.stringify(row)}`);
+        }
         // A process in a worker of its own: what it waited on the system for.
         for (const row of layer.name === 'link' ? metrics.asked ?? [] : [])
         {
@@ -681,7 +688,7 @@ async function main(){
     {
         printProfile(app, samples);
     }
-    report(app, { grep, calls });
+    await report(app, { grep, calls });
     for (const failure of failures.slice(0, 3))
     {
         // The trace, not the payload. A dump of the whole event is unreadable
