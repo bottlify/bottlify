@@ -420,7 +420,10 @@ flowchart LR
   thread has an executor of its own, where its translations are: the process's first thread runs on
   the process's own, each later one on the other executor fewest live threads call theirs. A turn
   gives every free executor the next ready thread whose executor it is; a thread whose executor is
-  busy waits for it, as it would for the one processor. The process's own thread runs its threads
+  busy then goes to one left free -- the process's own first -- and has its code translated there
+  too, rather than leave a processor idle. A thread is never started while another executor still
+  runs it: one that waited there is made ready by its wake before that slice is taken, and the
+  scheduler refuses the second start. The process's own thread runs its threads
   too, and answers the calls the others' threads make -- at each of its own crossings into the host
   and between its turns, each caller the current thread while it is answered. An executor past the
   first is a cork host in a worker of its own over the

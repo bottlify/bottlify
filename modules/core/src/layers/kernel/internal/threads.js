@@ -824,12 +824,41 @@ export function createScheduler(options){
     };
 
     /**
+     * The ready threads no executor is running. A thread that waits on another
+     * executor is made ready by its wake before that executor's slice has
+     * ended -- it spins in the park loop until the slice is taken -- and must
+     * not start a second time elsewhere meanwhile.
+     */
+    const runnable = ()=>{
+        const elsewhere = new Set([...placed.values()].map(on=>on.thread));
+        return elsewhere.size === 0 ? ready() : ready().filter(thread=>!elsewhere.has(thread));
+    };
+
+    /**
+     * A thread started on a second executor while one runs it diverges in ways
+     * found much later -- a lock taken twice, a count lost -- so the start
+     * itself fails.
+     *
+     * @param {any} next
+     */
+    const runsOnce = next=>{
+        for (const [remote, on] of placed)
+        {
+            if (on.thread === next)
+            {
+                throw new Error(`${next.name} started while executor ${remote.index} runs it`);
+            }
+        }
+    };
+
+    /**
      * Puts `next` on executor `remote` and starts its slice. A thread whose
      * state is on the process's own executor is taken off it first.
      *
      * @param {any} remote @param {any} next
      */
     const place = (remote, next)=>{
+        runsOnce(next);
         if (next === current)
         {
             current.context = cpu.captureContext();
@@ -922,6 +951,7 @@ export function createScheduler(options){
      * @returns {{ ran: any | null, instructions: number, switched: boolean }}
      */
     const runHere = next=>{
+        runsOnce(next);
         const resume = resumeOf(next);
         noteGap(next);
         if (next !== current)
@@ -971,29 +1001,22 @@ export function createScheduler(options){
     };
 
     /**
-     * Whether `thread`'s executor could take it now.
-     *
-     * @param {any} thread @param {any[]} remotes
-     */
-    const homeFree = (thread, remotes)=>{
-        const home = homeOf(thread, remotes);
-        return home === 0 || remotes.some(remote=>remote.index === home && !remote.busy());
-    };
-
-    /**
      * The ready threads in the usual order, each to its own executor while
-     * that one is free; one whose executor is taken waits for it, as it would
-     * for the one processor there is otherwise. Starts the others' slices and
-     * answers the thread for this one, if any.
+     * that one is free. A thread whose own is taken then goes to an executor
+     * left free -- this one first, its translations made there too -- rather
+     * than leave a processor idle while it waits; it keeps its own for the
+     * next turn. Starts the others' slices and answers the thread for this
+     * one, if any.
      *
      * @param {any[]} remotes @param {any} bell
      * @returns {any | null}
      */
     const choose = (remotes, bell)=>{
-        let candidates = ready();
+        let candidates = runnable();
         const free = remotes.filter(remote=>!remote.busy());
         let here = null;
-        let waiting = false;
+        /** @type {any[]} */
+        const waiting = [];
         while (candidates.length > 0 && (here === null || free.length > 0))
         {
             const next = pick(candidates);
@@ -1011,11 +1034,27 @@ export function createScheduler(options){
             }
             else
             {
-                waiting = true;
+                waiting.push(next);
             }
         }
-        // A thread left without its executor waits for that one to give its thread up.
-        bell.goOn?.(!waiting && candidates.length === 0);
+        for (const next of waiting)
+        {
+            if (here === null)
+            {
+                here = next;
+            }
+            else if (free.length > 0)
+            {
+                place(/** @type {any} */ (free.shift()), next);
+            }
+            else
+            {
+                break;
+            }
+        }
+        // A thread left without an executor waits for one to give its thread up.
+        bell.goOn?.(candidates.length === 0
+            && waiting.every(thread=>thread.state !== ThreadState.READY));
         return here;
     };
 
@@ -1063,7 +1102,8 @@ export function createScheduler(options){
             {
                 return { ran, instructions, switched: true };
             }
-            if (!ready().some(thread=>homeFree(thread, remotes)))
+            // A thread made ready runs here next round: this executor is free.
+            if (runnable().length === 0)
             {
                 bell.wait(seen);
             }
