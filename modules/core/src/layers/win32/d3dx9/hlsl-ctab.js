@@ -17,6 +17,7 @@
  */
 
 import { RS, registersOf } from './hlsl-ir.js';
+import { float32Bits } from './hlsl-math.js';
 
 /** @typedef {import('./hlsl-ir.js').Const} Const */
 /** @typedef {import('./hlsl-ir.js').CtabType} CtabType */
@@ -176,7 +177,8 @@ export function buildConstantTable(options){
     }
     for (const block of defaultBlocks)
     {
-        block.values.forEach((value, i)=>view.setFloat32(block.offset + i * 4, value, true));
+        block.values.forEach((value, i)=>
+            view.setUint32(block.offset + i * 4, float32Bits(value), true));
     }
     return bytes;
 }

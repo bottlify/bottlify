@@ -24,6 +24,7 @@
  * - `pow` is the mathematical power, so a negative base with an integral exponent is defined.
  */
 
+import * as hm from './hlsl-math.js';
 import {
     BOOL, FLOAT, VOID, RANK, baseOf, buildValue, conversionRank, flattenValue, isNumeric,
     matrixOf, toBase, vectorOf, withBase, scalarCount,
@@ -439,8 +440,8 @@ export function fmodFloat(/** @type {number} */ a, /** @type {number} */ b){
  * @param {number} x
  */
 function frexpParts(x){
-    const exp = Math.ceil(Math.log2(Math.abs(x) + (x === 0 ? 1 : 0)));
-    return { mant: f32(x / Math.pow(2, exp)), exp };
+    const exp = Math.ceil(hm.log2(Math.abs(x) + (x === 0 ? 1 : 0)));
+    return { mant: f32(x / hm.exp2(exp)), exp };
 }
 
 /**
@@ -454,20 +455,20 @@ function frexpParts(x){
  */
 const LANE = new Map(/** @type {[string, Lane][]} */ ([
     ['abs', { f: Math.abs, i: x=>Math.abs(x) | 0 }],
-    ['acos', { f: Math.acos }], ['asin', { f: Math.asin }], ['atan', { f: Math.atan }],
-    ['atan2', { f: Math.atan2 }],
-    ['ceil', { f: Math.ceil }], ['cos', { f: Math.cos }], ['cosh', { f: Math.cosh }],
-    ['degrees', { f: x=>x * (180 / Math.PI) }], ['exp', { f: Math.exp }],
-    ['exp2', { f: x=>Math.pow(2, x) }], ['floor', { f: Math.floor }],
+    ['acos', { f: hm.acos }], ['asin', { f: hm.asin }], ['atan', { f: hm.atan }],
+    ['atan2', { f: hm.atan2 }],
+    ['ceil', { f: Math.ceil }], ['cos', { f: hm.cos }], ['cosh', { f: hm.cosh }],
+    ['degrees', { f: x=>x * (180 / Math.PI) }], ['exp', { f: hm.exp }],
+    ['exp2', { f: hm.exp2 }], ['floor', { f: Math.floor }],
     ['frac', { f: x=>x - Math.floor(x) }],
-    ['ldexp', { f: (x, e)=>x * Math.pow(2, e) }],
-    ['log', { f: Math.log }], ['log10', { f: Math.log10 }], ['log2', { f: Math.log2 }],
-    ['pow', { f: Math.pow }], ['radians', { f: x=>x * (Math.PI / 180) }],
+    ['ldexp', { f: (x, e)=>x * hm.exp2(e) }],
+    ['log', { f: hm.log }], ['log10', { f: hm.log10 }], ['log2', { f: hm.log2 }],
+    ['pow', { f: hm.pow }], ['radians', { f: x=>x * (Math.PI / 180) }],
     ['round', { f: roundEven }], ['rsqrt', { f: x=>1 / f32(Math.sqrt(x)) }],
     ['saturate', { f: sat }], ['sign', { f: sgn, i: sgn }],
-    ['sin', { f: Math.sin }], ['sinh', { f: Math.sinh }], ['sqrt', { f: Math.sqrt }],
+    ['sin', { f: hm.sin }], ['sinh', { f: hm.sinh }], ['sqrt', { f: Math.sqrt }],
     ['step', { f: (a, x)=>x >= a ? 1 : 0 }],
-    ['tan', { f: Math.tan }], ['tanh', { f: Math.tanh }], ['trunc', { f: Math.trunc }],
+    ['tan', { f: hm.tan }], ['tanh', { f: hm.tanh }], ['trunc', { f: Math.trunc }],
     ['fmod', { f: fmodFloat }],
     ['max', { f: fmax, i: Math.max }], ['min', { f: fmin, i: Math.min }],
     ['lerp', { f: (a, b, t)=>f32(a + f32(t * f32(b - a))) }],
@@ -647,7 +648,7 @@ export function evaluateIntrinsic(name, args, argTypes, resultType, hooks = {}, 
         }
         case 'lit': {
             const [ndl, ndh, m] = [lanes[0][0], lanes[1][0], lanes[2][0]];
-            return [1, fmax(0, ndl), ndl < 0 || ndh < 0 ? 0 : f32(Math.pow(ndh, m)), 1];
+            return [1, fmax(0, ndl), ndl < 0 || ndh < 0 ? 0 : f32(hm.pow(ndh, m)), 1];
         }
         case 'D3DCOLORtoUBYTE4': {
             const c = lanes[0];
@@ -678,8 +679,8 @@ export function evaluateIntrinsic(name, args, argTypes, resultType, hooks = {}, 
             return buildValue(resultType, parts.map(p=>p.mant));
         }
         case 'sincos':
-            outs.set(1, buildValue(argTypes[1], lanes[0].map(Math.sin)));
-            outs.set(2, buildValue(argTypes[2], lanes[0].map(Math.cos)));
+            outs.set(1, buildValue(argTypes[1], lanes[0].map(hm.sin)));
+            outs.set(2, buildValue(argTypes[2], lanes[0].map(hm.cos)));
             return 0;
         case 'mul': return mulValues(args[0], args[1], argTypes[0], argTypes[1], resultType);
         case 'ddx':
