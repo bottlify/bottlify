@@ -623,6 +623,22 @@ export function createDirectSound({
 
     /** @type {any[]} */
     const buffers = [];
+    /**
+     * The buffers a look may have something to do with: made since the last
+     * one, called by the program, or not idle when last looked at. A stopped
+     * buffer the program leaves alone stays idle -- its cursor does not move
+     * with time -- so a program that keeps a thousand sounds loaded and plays
+     * a few is walked for the few, not the thousand, on every turn.
+     *
+     * @type {Set<any>}
+     */
+    const awake = new Set();
+    /** @param {Record<string, Function>} methods  methods whose target is a buffer */
+    const waking = methods=>Object.fromEntries(Object.entries(methods).map(([name, method])=>
+        [name, (/** @type {any} */ buffer, /** @type {number[]} */ args)=>{
+            awake.add(buffer);
+            return method(buffer, args);
+        }]));
     let placedOnce = false;
     /** Deferred buffers whose place has been settled. @type {WeakSet<object>} */
     const placedInSoftware = new WeakSet();
@@ -750,14 +766,16 @@ export function createDirectSound({
      *     placed: any } | null} */
     let describedBuffer = null;
     const bufferDescriptors = ()=>describedBuffer ??= {
-        buffer: describe(IID_IDirectSoundBuffer, IDIRECTSOUNDBUFFER_SLOTS, bufferMethods),
-        buffer8: describe(IID_IDirectSoundBuffer8, IDIRECTSOUNDBUFFER8_SLOTS, bufferMethods),
-        notify: describe(IID_IDirectSoundNotify, IDIRECTSOUNDNOTIFY_SLOTS, notifyMethods),
-        properties: describe(IID_IKsPropertySet, IKSPROPERTYSET_SLOTS, propertySetMethods),
+        buffer: describe(IID_IDirectSoundBuffer, IDIRECTSOUNDBUFFER_SLOTS, waking(bufferMethods)),
+        buffer8: describe(IID_IDirectSoundBuffer8, IDIRECTSOUNDBUFFER8_SLOTS,
+            waking(bufferMethods)),
+        notify: describe(IID_IDirectSoundNotify, IDIRECTSOUNDNOTIFY_SLOTS, waking(notifyMethods)),
+        properties: describe(IID_IKsPropertySet, IKSPROPERTYSET_SLOTS,
+            waking(propertySetMethods)),
         listener: describe(IID_IDirectSound3DListener, IDIRECTSOUND3DLISTENER_SLOTS,
-            spatial.listenerMethods),
+            waking(spatial.listenerMethods)),
         placed: describe(IID_IDirectSound3DBuffer, IDIRECTSOUND3DBUFFER_SLOTS,
-            spatial.bufferMethods),
+            waking(spatial.bufferMethods)),
     };
     const spatial = createSpatial({ memory });
     /**
@@ -1236,8 +1254,10 @@ export function createDirectSound({
                 // The device's own, which the program can ask for again after
                 // releasing every reference it had.
                 kept: primary ? ()=>root.references > 0 : undefined,
+                touched: ()=>awake.add(buffer),
             });
             buffers.push(buffer);
+            awake.add(buffer);
             if (!primary && (flags & DSBCAPS_CTRL3D) !== 0 && !placedOnce)
             {
                 placedOnce = true;
@@ -1278,8 +1298,10 @@ export function createDirectSound({
                 format: source.format,
                 now,
                 capabilities: source.capabilities,
+                touched: ()=>awake.add(copy),
             });
             buffers.push(copy);
+            awake.add(copy);
             writeU32(out, publishBuffer(copy));
             return DS_OK;
         },
@@ -1725,6 +1747,17 @@ export function createDirectSound({
         buffers: ()=>buffers,
 
         /**
+         * The buffers a look has something to do with (`awake` above). Each is
+         * let back to sleep by `rest` once a look found it idle and still held.
+         */
+        awakeBuffers: ()=>[...awake],
+
+        /** @param {any} buffer  idle and reachable: nothing to do until it is called */
+        rest: buffer=>{
+            awake.delete(buffer);
+        },
+
+        /**
          * Drops every buffer the program has fully released (`references`
          * reached zero, and for a primary buffer its device gone as well)
          * from the walk. Without this, a buffer a program
@@ -1733,11 +1766,13 @@ export function createDirectSound({
          * `buffers()` once a turn was walking a list that only ever grew.
          */
         pruneReleased(){
-            for (let at = buffers.length - 1; at >= 0; at--)
+            // A buffer's references move only by a call that wakes it.
+            for (const buffer of [...awake])
             {
-                if (!buffers[at].reachable())
+                if (!buffer.reachable())
                 {
-                    buffers.splice(at, 1);
+                    awake.delete(buffer);
+                    buffers.splice(buffers.indexOf(buffer), 1);
                 }
             }
         },

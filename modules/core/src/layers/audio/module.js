@@ -363,12 +363,19 @@ export function createAudioModule(){
                 // Deliberately before the check below, because this is owed whether
                 // or not anything is listening to the result. A build with no sound
                 // device must still not hang the program that asked for one.
-                for (const buffer of dsound.buffers())
+                for (const buffer of dsound.awakeBuffers())
                 {
                     // A stopped buffer nothing has touched since the last look
-                    // has nothing to say, and a program makes dozens of them.
+                    // has nothing to say, and a program makes dozens of them --
+                    // a thousand, kept loaded: it is let out of the walk until
+                    // the program calls it again. One let go is not, so that
+                    // the walk below closes what it played.
                     if (buffer.idle())
                     {
+                        if (buffer.references > 0)
+                        {
+                            dsound.rest(buffer);
+                        }
                         continue;
                     }
                     for (const event of buffer.drainNotifications())
@@ -391,7 +398,7 @@ export function createAudioModule(){
                     dsound.pruneReleased();
                     return;
                 }
-                for (const buffer of dsound.buffers())
+                for (const buffer of dsound.awakeBuffers())
                 {
                     // The primary buffer is the mix target and holds no samples of
                     // the program's own -- except under DSSCL_WRITEPRIMARY, where
@@ -585,6 +592,7 @@ export function createAudioModule(){
                     fedRanges,
                     fedBytes,
                     tracksOpen: openTracks,
+                    awake: dsound.awakeBuffers().length,
                 }),
 
                 /**
