@@ -819,6 +819,11 @@ export function createGraphicsModule(){
                 return desktopSurface;
             };
 
+            // The exclusive-mode picture and its window, while one holds the
+            // screen; null when the screen is the desktop's.
+            /** @type {{ surface: any, window: number } | null} */
+            let fullScreen = null;
+
             /**
              * Shows a DirectDraw primary surface.
              *
@@ -838,6 +843,7 @@ export function createGraphicsModule(){
              * @param {boolean} [exclusive]
              */
             const presentPrimary = (surface, window = 0, exclusive = false)=>{
+                fullScreen = exclusive ? { surface, window } : null;
                 const screen = services.screen;
                 // A picture the GPU owns has nothing worth reading in guest
                 // memory, and a primary of another size than the screen has no
@@ -1140,6 +1146,20 @@ export function createGraphicsModule(){
                  * within one flush anyway.
                  */
                 presentDesktop: ()=>{
+                    // A picture that has the screen to itself is what is on it:
+                    // the windows under it are not seen, and the ones over it
+                    // are composed onto it, so a paint pass shows the picture
+                    // again rather than the desktop over it.
+                    const held = fullScreen;
+                    const owner = held && `0x${(held.window >>> 0).toString(16)}`;
+                    if (held && !win32.applicationDeactivated?.()
+                        && (win32.windows?.() ?? []).some(
+                            (/** @type {ListedWindow} */ listed)=>listed.visible
+                                && listed.hwnd === owner))
+                    {
+                        presentPrimary(held.surface, held.window, true);
+                        return;
+                    }
                     const screen = desktop();
                     if (screen)
                     {
