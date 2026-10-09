@@ -138,6 +138,8 @@ function lookUp(table, value, what){
  * @property {number} alphaOp
  * @property {number} alphaArg1
  * @property {number} alphaArg2
+ * @property {number} [colorArg0]  MULTIPLYADD's and LERP's third operand; CURRENT if absent
+ * @property {number} [alphaArg0]
  * @property {number} texCoordIndex
  * @property {number} [projected]
  *     For a stage generating its coordinate: which component the transformed
@@ -245,6 +247,8 @@ export function pipelineKey(state){
             stage.colorOp, stage.colorArg1, stage.colorArg2,
             stage.alphaOp, stage.alphaArg1, stage.alphaArg2,
             stage.texCoordIndex, stage.projected ?? 0,
+            ...(stage.colorArg0 === undefined && stage.alphaArg0 === undefined ? []
+                : [`a${stage.colorArg0 ?? 1}/${stage.alphaArg0 ?? 1}`]),
             ...(stage.colorKey === undefined ? [] : [`k${stage.colorKey}`]),
             ...(stage.dimension === undefined ? [] : [stage.dimension]),
         ].join(','))

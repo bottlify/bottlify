@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
     D3DFOG, D3DLIGHT, D3DMCS, D3DTA, D3DTOP, TCI, fixedFragmentStage, fogFunctionDeclaration,
-    generateFixedFunction,
+    argumentsRead, generateFixedFunction,
 } from './fixedfunction.js';
 import { FOG_SOURCE } from './pipeline.js';
 import { FVF, decodeFvf } from './vertexformat.js';
@@ -175,6 +175,35 @@ test('the blending operations weigh the two arguments by an alpha', ()=>{
         'sampleStage0(input.texCoord0) + current - sampleStage0(input.texCoord0) * current'));
     assert.ok(codeOf(D3DTOP.ADDSIGNED2X).includes(
         '(sampleStage0(input.texCoord0) + current - vec4f(0.5)) * 2.0'));
+});
+
+test('the colour-plus-alpha forms, the signed dot product and ARG0 as a third operand', ()=>{
+    const fvf = FVF.XYZ | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT);
+    const T = 'sampleStage0(input.texCoord0)';
+    const codeOf = (/** @type {number} */ colorOp, /** @type {number} */ colorArg0 = D3DTA.CURRENT)=>
+        generate(baseState({ fvf, stages: [{
+            colorOp, colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.DIFFUSE, colorArg0,
+            alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.CURRENT, alphaArg2: D3DTA.CURRENT,
+            texCoordIndex: 0,
+        }] })).code;
+    assert.ok(codeOf(D3DTOP.MODULATEALPHA_ADDCOLOR).includes(
+        `(${T}) + vec4f((${T}).a) * (input.diffuse)`));
+    assert.ok(codeOf(D3DTOP.MODULATECOLOR_ADDALPHA).includes(
+        `(${T}) * (input.diffuse) + vec4f((${T}).a)`));
+    assert.ok(codeOf(D3DTOP.MODULATEINVALPHA_ADDCOLOR).includes(
+        `vec4f(1.0 - (${T}).a) * (input.diffuse) + (${T})`));
+    assert.ok(codeOf(D3DTOP.MODULATEINVCOLOR_ADDALPHA).includes(
+        `(vec4f(1.0) - (${T})) * (input.diffuse) + vec4f((${T}).a)`));
+    assert.ok(codeOf(D3DTOP.DOTPRODUCT3).includes(
+        `4.0 * dot((${T}).rgb - vec3f(0.5), (input.diffuse).rgb - vec3f(0.5))`));
+    // ARG0 is the addend's multiplier and the interpolant, and defaults to CURRENT.
+    assert.ok(codeOf(D3DTOP.MULTIPLYADD).includes(`(${T}) + (input.diffuse) * (current)`));
+    assert.ok(codeOf(D3DTOP.LERP, D3DTA.TFACTOR).includes(
+        `mix(input.diffuse, ${T}, uniforms.textureFactor)`));
+    assert.deepEqual(argumentsRead(D3DTOP.LERP, D3DTA.TEXTURE, D3DTA.DIFFUSE, D3DTA.TFACTOR),
+        [D3DTA.TEXTURE, D3DTA.DIFFUSE, D3DTA.TFACTOR]);
+    assert.deepEqual(argumentsRead(D3DTOP.MODULATE, D3DTA.TEXTURE, D3DTA.DIFFUSE, D3DTA.TFACTOR),
+        [D3DTA.TEXTURE, D3DTA.DIFFUSE]);
 });
 
 test('a vertex colour is swizzled back from B,G,R,A', ()=>{

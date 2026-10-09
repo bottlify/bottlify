@@ -330,7 +330,8 @@ export function validateStages(stageStates, stageCount, options = {}){
             return D3DERR_UNSUPPORTEDCOLOROPERATION;
         }
         if (!argumentsRead(colorOp, states.get(D3DTSS.COLORARG1) ?? 0,
-            states.get(D3DTSS.COLORARG2) ?? 0).every(readable))
+            states.get(D3DTSS.COLORARG2) ?? 0, states.get(D3DTSS.COLORARG0) ?? D3DTA.CURRENT)
+            .every(readable))
         {
             return D3DERR_UNSUPPORTEDCOLORARG;
         }
@@ -340,7 +341,8 @@ export function validateStages(stageStates, stageCount, options = {}){
             return D3DERR_UNSUPPORTEDALPHAOPERATION;
         }
         if (!argumentsRead(alphaOp, states.get(D3DTSS.ALPHAARG1) ?? 0,
-            states.get(D3DTSS.ALPHAARG2) ?? 0).every(readable))
+            states.get(D3DTSS.ALPHAARG2) ?? 0, states.get(D3DTSS.ALPHAARG0) ?? D3DTA.CURRENT)
+            .every(readable))
         {
             return D3DERR_UNSUPPORTEDALPHAARG;
         }

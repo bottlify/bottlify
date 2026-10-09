@@ -1757,6 +1757,7 @@ export function stageCascade(model, layout){
             alphaOp: get(D3DTSS.ALPHAOP),
             alphaArg1: get(D3DTSS.ALPHAARG1),
             alphaArg2: get(D3DTSS.ALPHAARG2),
+            ...arguments0(get),
             texCoordIndex,
             // A projected generated coordinate is divided by its third or
             // fourth component at the sample, which is the count's last.
@@ -1768,8 +1769,8 @@ export function stageCascade(model, layout){
         const texture = model.textures.get(stage) ?? null;
         if (!texture)
         {
-            const colour = readsTexture(key.colorOp, key.colorArg1, key.colorArg2);
-            const alpha = readsTexture(key.alphaOp, key.alphaArg1, key.alphaArg2);
+            const colour = readsTexture(key.colorOp, key.colorArg1, key.colorArg2, key.colorArg0);
+            const alpha = readsTexture(key.alphaOp, key.alphaArg1, key.alphaArg2, key.alphaArg0);
             if ((colour || alpha) && !unbound)
             {
                 unbound = {
@@ -1791,8 +1792,8 @@ export function stageCascade(model, layout){
                 key.alphaArg1 = D3DTA.CURRENT;
             }
         }
-        const samples = readsTexture(key.colorOp, key.colorArg1, key.colorArg2)
-            || readsTexture(key.alphaOp, key.alphaArg1, key.alphaArg2);
+        const samples = readsTexture(key.colorOp, key.colorArg1, key.colorArg2, key.colorArg0)
+            || readsTexture(key.alphaOp, key.alphaArg1, key.alphaArg2, key.alphaArg0);
         const dimension = samples ? textureDimensionOf(texture) : '2d';
         stages.push(dimension === '2d' ? key : { ...key, dimension });
         textures.push(samples ? texture : null);
@@ -1813,14 +1814,30 @@ export function stageCascade(model, layout){
 }
 
 /**
+ * A stage's ARG0 operands, only for an operation that reads one: a key that
+ * carried them always would split pipelines that draw identically.
+ *
+ * @param {(state: number)=>number} get
+ * @returns {{ colorArg0?: number, alphaArg0?: number }}
+ */
+function arguments0(get){
+    const three = (/** @type {number} */ op)=>op === D3DTOP.MULTIPLYADD || op === D3DTOP.LERP;
+    return {
+        ...(three(get(D3DTSS.COLOROP)) ? { colorArg0: get(D3DTSS.COLORARG0) } : {}),
+        ...(three(get(D3DTSS.ALPHAOP)) ? { alphaArg0: get(D3DTSS.ALPHAARG0) } : {}),
+    };
+}
+
+/**
  * Whether an operation reads its stage's texture: through an argument it
  * reads, or by blending by the texture's alpha.
  *
- * @param {number} op @param {number} arg1 @param {number} arg2
+ * @param {number} op @param {number} arg1 @param {number} arg2 @param {number} [arg0]
  */
-function readsTexture(op, arg1, arg2){
+function readsTexture(op, arg1, arg2, arg0){
     return op === D3DTOP.BLENDTEXTUREALPHA || op === D3DTOP.BLENDTEXTUREALPHAPM
-        || argumentsRead(op, arg1, arg2).some(arg=>(arg & D3DTA_SELECTMASK) === D3DTA.TEXTURE);
+        || argumentsRead(op, arg1, arg2, arg0)
+            .some(arg=>(arg & D3DTA_SELECTMASK) === D3DTA.TEXTURE);
 }
 
 /**

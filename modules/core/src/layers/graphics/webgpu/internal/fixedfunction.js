@@ -71,6 +71,13 @@ export const D3DTOP = Object.freeze({
     BLENDFACTORALPHA: 14,
     BLENDTEXTUREALPHAPM: 15,
     BLENDCURRENTALPHA: 16,
+    MODULATEALPHA_ADDCOLOR: 18,
+    MODULATECOLOR_ADDALPHA: 19,
+    MODULATEINVALPHA_ADDCOLOR: 20,
+    MODULATEINVCOLOR_ADDALPHA: 21,
+    DOTPRODUCT3: 24,
+    MULTIPLYADD: 25,
+    LERP: 26,
 });
 
 /** D3DTA, where a stage argument comes from. The low three bits select. */
@@ -280,9 +287,10 @@ const SPOT_FUNCTION = `fn spotFactor(light: Light, toLight: vec3f) -> f32 {
  *
  * @param {number} op  D3DTOP
  * @param {number} arg1 @param {number} arg2
+ * @param {number} [arg0]  ARG0, read by MULTIPLYADD and LERP
  * @returns {number[]} the argument values the operation actually reads
  */
-export function argumentsRead(op, arg1, arg2){
+export function argumentsRead(op, arg1, arg2, arg0 = /** @type {number} */ (D3DTA.CURRENT)){
     if (op === D3DTOP.DISABLE)
     {
         return [];
@@ -294,6 +302,11 @@ export function argumentsRead(op, arg1, arg2){
     if (op === D3DTOP.SELECTARG2)
     {
         return [arg2];
+    }
+    // The two three-operand operations read the stage's ARG0 as their third.
+    if (op === D3DTOP.MULTIPLYADD || op === D3DTOP.LERP)
+    {
+        return [arg1, arg2, arg0];
     }
     return [arg1, arg2];
 }
@@ -341,12 +354,14 @@ function argument(arg, stageIndex, coordinate, specular = 'input.specular'){
  * @param {string} coordinate
  * @param {number} arg1 @param {number} arg2
  * @param {string} [specular]  as `argument` reads it
+ * @param {number} [arg0]  the third operand of MULTIPLYADD and LERP
  * @returns {string | null}
  */
-function combine(op, stageIndex, coordinate, arg1, arg2, specular = 'input.specular'){
-    const read = argumentsRead(op, arg1, arg2);
+function combine(op, stageIndex, coordinate, arg1, arg2, specular = 'input.specular', arg0 = 1){
+    const read = argumentsRead(op, arg1, arg2, arg0);
     const a = read.length > 0 ? argument(read[0], stageIndex, coordinate, specular) : '';
     const b = read.length > 1 ? argument(read[1], stageIndex, coordinate, specular) : '';
+    const c = read.length > 2 ? argument(read[2], stageIndex, coordinate, specular) : '';
     switch (op)
     {
         case D3DTOP.DISABLE:
@@ -383,6 +398,24 @@ function combine(op, stageIndex, coordinate, arg1, arg2, specular = 'input.specu
             return `${a} + ${b} * (1.0 - (sampleStage${stageIndex}(${coordinate})).a)`;
         case D3DTOP.BLENDCURRENTALPHA:
             return `mix(${b}, ${a}, (current).a)`;
+        // The four colour-only forms: one argument's alpha or colour scales the
+        // other's colour, and the first argument's alpha or colour is added.
+        case D3DTOP.MODULATEALPHA_ADDCOLOR:
+            return `(${a}) + vec4f((${a}).a) * (${b})`;
+        case D3DTOP.MODULATECOLOR_ADDALPHA:
+            return `(${a}) * (${b}) + vec4f((${a}).a)`;
+        case D3DTOP.MODULATEINVALPHA_ADDCOLOR:
+            return `vec4f(1.0 - (${a}).a) * (${b}) + (${a})`;
+        case D3DTOP.MODULATEINVCOLOR_ADDALPHA:
+            return `(vec4f(1.0) - (${a})) * (${b}) + vec4f((${a}).a)`;
+        // Both arguments as signed vectors, the dot product replicated into
+        // every channel, alpha too.
+        case D3DTOP.DOTPRODUCT3:
+            return `vec4f(saturate(4.0 * dot((${a}).rgb - vec3f(0.5), (${b}).rgb - vec3f(0.5))))`;
+        case D3DTOP.MULTIPLYADD:
+            return `(${a}) + (${b}) * (${c})`;
+        case D3DTOP.LERP:
+            return `mix(${b}, ${a}, ${c})`;
         default:
             throw new Error(`Unsupported texture operation ${op}`);
     }
@@ -909,13 +942,15 @@ specular = 'input.specular', sprite = false)
                 : sprite ? flat ? 'input.sprite' : 'vec3f(input.sprite, 0.0)'
                     : `input.texCoord${set}${wide.has(set) ? flat ? '.xy' : '.xyz' : ''}`;
             const color = combine(
-                stage.colorOp, index, coordinate, stage.colorArg1, stage.colorArg2, specular);
+                stage.colorOp, index, coordinate, stage.colorArg1, stage.colorArg2, specular,
+                stage.colorArg0);
             if (color === null)
             {
                 return `    // stage ${index} disabled`;
             }
             const alpha = combine(
-                stage.alphaOp, index, coordinate, stage.alphaArg1, stage.alphaArg2, specular);
+                stage.alphaOp, index, coordinate, stage.alphaArg1, stage.alphaArg2, specular,
+                stage.alphaArg0);
             // Each stage's result is held to [0, 1] before the next reads it,
             // as the fixed function's registers hold it: a sum past one or a
             // difference below zero is not carried into the stage after.

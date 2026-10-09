@@ -1846,7 +1846,7 @@ test('ValidateDevice refuses a stage the combiner does not draw, and writes no p
 
     /** @type {{ passes?: number }} */
     const refused = {};
-    assert.equal(device.SetTextureStageState(0, D3DTSS.COLOROP, 24), D3D_OK, 'DOTPRODUCT3');
+    assert.equal(device.SetTextureStageState(0, D3DTSS.COLOROP, 22), D3D_OK, 'BUMPENVMAP');
     assert.equal(device.ValidateDevice(refused), 0x88760819, 'D3DERR_UNSUPPORTEDCOLOROPERATION');
     assert.equal(refused.passes, undefined);
 

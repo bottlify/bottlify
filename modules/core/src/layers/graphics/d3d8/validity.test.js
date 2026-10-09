@@ -189,23 +189,23 @@ test('the texture stages validate when the combiner draws them, and name what it
 
     reset();
     assert.equal(validate(), D3D_OK, 'the default cascade');
-    set(0, D3DTSS.COLOROP, 24);
-    assert.equal(validate(), UNSUPPORTEDCOLOROPERATION, 'D3DTOP_DOTPRODUCT3');
+    set(0, D3DTSS.COLOROP, 22);
+    assert.equal(validate(), UNSUPPORTEDCOLOROPERATION, 'D3DTOP_BUMPENVMAP');
     reset();
     set(0, D3DTSS.COLORARG1, 5);
     assert.equal(validate(), UNSUPPORTEDCOLORARG, 'D3DTA_TEMP');
     set(0, D3DTSS.COLOROP, 3);
     assert.equal(validate(), D3D_OK, 'an argument the operation does not read is not looked at');
     reset();
-    set(0, D3DTSS.ALPHAOP, 25);
-    assert.equal(validate(), UNSUPPORTEDALPHAOPERATION, 'D3DTOP_MULTIPLYADD');
+    set(0, D3DTSS.ALPHAOP, 23);
+    assert.equal(validate(), UNSUPPORTEDALPHAOPERATION, 'D3DTOP_BUMPENVMAPLUMINANCE');
     reset();
     set(0, D3DTSS.ALPHAOP, 4);
     set(0, D3DTSS.ALPHAARG2, 6);
     assert.equal(validate(), UNSUPPORTEDALPHAARG, 'D3DTA_CONSTANT, read by MODULATE');
     reset();
     set(1, D3DTSS.COLOROP, 1);
-    set(2, D3DTSS.COLOROP, 24);
+    set(2, D3DTSS.COLOROP, 22);
     assert.equal(validate(), D3D_OK, 'nothing past the first disabled stage is drawn');
 
     // Wine's d3d9 test_filter: a filter of none is refused, texture or not.
