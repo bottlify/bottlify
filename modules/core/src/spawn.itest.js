@@ -35,10 +35,11 @@ async function spawnOn(t){
         readFile(new URL('../test/fixtures/spawn.exe', import.meta.url)),
         readFile(new URL('../test/fixtures/spawn_child.exe', import.meta.url)),
     ]);
+    let loads = 0;
     const app = await createApp({
         executable: new Uint8Array(parent),
         imagePath: 'C:\\App\\spawn.exe',
-        storage: { load: async()=>({
+        storage: { load: async()=>(loads++, {
             files: [{ path: 'C:\\App\\spawn_child.exe', bytes: new Uint8Array(child) }],
         }) },
     });
@@ -66,6 +67,9 @@ async function spawnOn(t){
         ['child: first', 'child: second', 'parent: done'],
         'the children ran in turn, and the parent after them');
     assert.equal(code, 0, 'the run ends with the parent\'s own exit code');
+    // A child stands on the drives the parent laid, the saved files on them
+    // already: reading the session again raced the parent saving into it.
+    assert.equal(loads, 1, 'the session is read once, by the process that laid the drives');
     assert.deepEqual(lifecycle, [
         'child C:\\App\\spawn_child.exe', 'resumed 42',
         'child C:\\App\\spawn_child.exe', 'resumed 0',

@@ -2890,16 +2890,21 @@ export function createKernelGl(opengl, journalCall, traced, counters){
  * before the program's first instruction, and what saves it from then on.
  *
  * @param {{ options: AppOptions, events: any, filesystem: any, registry: any,
- *     inherited: boolean }} deps
+ *     inherited: boolean, standing?: boolean }} deps
+ *     `standing`: the volume is the run's already, its files laid on it.
  *     `inherited`: the registry is the run's already, made by a process before
  *     this one
  */
-async function openSession({ options, events, filesystem, registry, inherited }){
+async function openSession({ options, events, filesystem, registry, inherited, standing = false }){
     const storage = resolveStorage(options.storage, options.id ?? 'session');
 
     // Seeded before the program's first instruction, and awaited: a save that
     // arrives after the program has looked for it is a save that was not there.
-    const seeded = normaliseSession(await storage.load());
+    // A process standing on the run's drives and hive reads nothing: what was
+    // saved is on them already, laid there by the process that made them, and
+    // reading the folder while that process saves into it -- a launcher
+    // starting a compiler for every shader -- catches an entry mid-write.
+    const seeded = normaliseSession(standing && inherited ? null : await storage.load());
     // The registry first, and before the program's first instruction: its
     // settings and its name are here as often as in a file, and a program
     // that finds the key empty writes its defaults over them. The files wait
@@ -4249,7 +4254,8 @@ async function buildApp(options){
     const filesystem = core.api('filesystem');
     const registryInherited = core.api('win32').registryInherited?.() ?? false;
     const { seeded, saver, stopSavingRegistry } = await openSession({ options, events, filesystem,
-        registry: core.api('win32').registry(), inherited: registryInherited });
+        registry: core.api('win32').registry(), inherited: registryInherited,
+        standing: filesystem.inherited?.() ?? false });
 
     const journal = core.api('log');
     // The run's processes share one event bus and one journal, so only the
