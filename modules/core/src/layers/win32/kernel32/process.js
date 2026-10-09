@@ -1185,6 +1185,16 @@ export function createProcessFunctions(host){
         },
 
         /**
+         * BOOL K32EmptyWorkingSet(HANDLE hProcess), psapi's EmptyWorkingSet:
+         * accepted as SetProcessWorkingSetSize is, there being no pages to
+         * trim.
+         */
+        K32EmptyWorkingSet: {
+            argBytes: 4,
+            handler: ()=>1,
+        },
+
+        /**
          * BOOL SetProcessShutdownParameters(DWORD dwLevel, DWORD dwFlags)
          * BOOL GetProcessShutdownParameters(LPDWORD lpdwLevel, LPDWORD lpdwFlags)
          *

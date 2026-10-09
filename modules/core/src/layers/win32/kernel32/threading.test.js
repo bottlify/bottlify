@@ -793,6 +793,19 @@ test('a Toolhelp snapshot holds this process and nothing after it', ()=>{
     assert.equal(fns.Process32Next.argBytes, 8);
 });
 
+test('K32EnumProcesses lists this process, as many ids as fit, and the bytes written', ()=>{
+    const { fns, host, written, errors } = setup();
+    host.processId = 0x2a4;
+    assert.equal(fns.K32EnumProcesses.argBytes, 12);
+    assert.equal(fns.K32EnumProcesses.handler([0x100, 16, 0x200]), 1);
+    assert.deepEqual([...written.get(0x100) ?? []], [0xa4, 0x02, 0, 0]);
+    assert.deepEqual([...written.get(0x200) ?? []], [4, 0, 0, 0], 'lpcbNeeded');
+    assert.equal(fns.K32EnumProcesses.handler([0x100, 2, 0x200]), 1, 'no room for one id');
+    assert.deepEqual([...written.get(0x200) ?? []], [0, 0, 0, 0]);
+    assert.equal(fns.K32EnumProcesses.handler([0x100, 16, 0]), 0);
+    assert.equal(errors.at(-1), 87, 'ERROR_INVALID_PARAMETER');
+});
+
 test('a snapshot names the image in the ANSI page', ()=>{
     // The euro sign is 0x80 there, the trade mark 0x99 and an em dash 0x97,
     // as the ANSI calls read those bytes; an image named with them is named

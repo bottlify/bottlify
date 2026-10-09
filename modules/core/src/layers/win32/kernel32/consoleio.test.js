@@ -141,6 +141,8 @@ test('the screen buffer\'s calls and writing input are refused as for a handle t
             ['ReadConsoleOutputCharacterA', 20], ['ReadConsoleOutputCharacterW', 20],
             ['SetConsoleScreenBufferSize', 8], ['SetConsoleTextAttribute', 8],
             ['SetConsoleWindowInfo', 12], ['GetLargestConsoleWindowSize', 4],
+            ['SetConsoleTitleA', 4], ['SetConsoleTitleW', 4],
+            ['WriteConsoleOutputCharacterA', 20], ['WriteConsoleOutputCharacterW', 20],
         ];
         for (const [name, argBytes] of cases)
         {

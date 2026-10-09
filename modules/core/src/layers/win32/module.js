@@ -81,6 +81,7 @@ import { createCommonDialogFunctions } from './comdlg32/functions.js';
 import { createImmFunctions } from './imm32/functions.js';
 import { createShlwapiFunctions } from './shlwapi/functions.js';
 import { createIphlpapiFunctions } from './iphlpapi/functions.js';
+import { createCrypt32Functions } from './crypt32/functions.js';
 import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
 import { createCfgmgrFunctions } from './cfgmgr32/functions.js';
@@ -2060,6 +2061,22 @@ export function createWin32Module(){
                     readCString,
                     readWideString,
                     divergence: config?.divergence,
+                }),
+
+                // The process status library: kernel32's K32 entries under
+                // their original names.
+                'PSAPI.DLL': {
+                    EnumProcesses: { argBytes: 12, handler: (/** @type {number[]} */ args)=>
+                        libraries['KERNEL32.dll'].K32EnumProcesses.handler(args) },
+                    EmptyWorkingSet: { argBytes: 4, handler: (/** @type {number[]} */ args)=>
+                        libraries['KERNEL32.dll'].K32EmptyWorkingSet.handler(args) },
+                },
+
+                'CRYPT32.dll': createCrypt32Functions({
+                    readMemory, writeMemory, readWideString, setLastError: setError,
+                    // LPTR: fixed and zeroed, as the caller's LocalFree expects.
+                    localAlloc: bytes=>libraries['KERNEL32.dll'].LocalAlloc
+                        .handler([0x40, bytes]) >>> 0,
                 }),
 
                 'SFC.dll': createSfcFunctions({ writeMemory, readCString, files: volume }),

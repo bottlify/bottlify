@@ -312,6 +312,16 @@ export function createConsoleIoFunctions(host){
         SetConsoleWindowInfo: noConsole('SetConsoleWindowInfo', 12),
         GetLargestConsoleWindowSize: noConsole('GetLargestConsoleWindowSize', 4),
 
+        /**
+         * BOOL SetConsoleTitleA/W(LPCSTR lpConsoleTitle) and BOOL
+         * WriteConsoleOutputCharacterA/W(HANDLE, LPCSTR, DWORD, COORD, LPDWORD):
+         * refused as a process with no console of its own is refused.
+         */
+        SetConsoleTitleA: noConsole('SetConsoleTitleA', 4),
+        SetConsoleTitleW: noConsole('SetConsoleTitleW', 4),
+        WriteConsoleOutputCharacterA: noConsole('WriteConsoleOutputCharacterA', 20),
+        WriteConsoleOutputCharacterW: noConsole('WriteConsoleOutputCharacterW', 20),
+
         /** BOOL GetNumberOfConsoleInputEvents(HANDLE, LPDWORD lpcNumberOfEvents) */
         GetNumberOfConsoleInputEvents: {
             argBytes: 8,

@@ -1291,6 +1291,42 @@ export function createThreadingFunctions(host){
         },
 
         /**
+         * BOOL K32EnumProcesses(DWORD *lpidProcess, DWORD cb, LPDWORD lpcbNeeded),
+         * psapi's EnumProcesses: the ids a process snapshot lists, as many as
+         * fit in cb bytes, and the bytes written. A list that filled the
+         * buffer may have been cut short; the caller grows it and asks again.
+         */
+        K32EnumProcesses: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([ids, size, needed])=>{
+                if ((needed >>> 0) === 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const all = [(host.processId ?? 0x1000) >>> 0,
+                    ...(kernel.processes?.all() ?? [])
+                        .filter((/** @type {any} */ child)=>!child.completed
+                            && child.exitCode === kernel.processes.STILL_ACTIVE)
+                        .map((/** @type {any} */ child)=>child.id >>> 0)];
+                const count = (ids >>> 0) === 0
+                    ? 0 : Math.min(all.length, Math.floor((size >>> 0) / 4));
+                const bytes = new Uint8Array(count * 4);
+                const view = new DataView(bytes.buffer);
+                all.slice(0, count).forEach((id, i)=>view.setUint32(i * 4, id, true));
+                if (count > 0)
+                {
+                    host.writeMemory(ids >>> 0, bytes);
+                }
+                const written = new Uint8Array(4);
+                new DataView(written.buffer).setUint32(0, count * 4, true);
+                host.writeMemory(needed >>> 0, written);
+                return 1;
+            },
+        },
+
+        /**
          * HANDLE OpenThread(DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD dwThreadId)
          *
          * A new handle to a thread of this process that has not ended, or to
