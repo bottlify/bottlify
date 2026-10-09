@@ -1743,12 +1743,20 @@ const EMPTY_BLOCK = new Float32Array(0);
  * the cascade at a stage that never wanted one, and the draw loses its
  * texturing with the rest of the picture intact.
  *
+ * A vertex shader leaves D3DTSS_TEXCOORDINDEX nothing to do: the index and
+ * its generation modes belong to fixed-function vertex processing, which a
+ * shader replaces, and stage n samples the oTn the shader wrote -- wined3d's
+ * fixed-function fragment stage reads its own stage's varying and applies the
+ * index only in its fixed-function vertex stage. `shaderCoordinates` says the
+ * vertices are a shader's.
+ *
  * @param {RenderModel} model
  * @param {import('../webgpu/internal/vertexformat.js').VertexLayout} layout
+ * @param {{ shaderCoordinates?: boolean }} [how]
  * @returns {{ stages: import('../webgpu/internal/pipeline.js').StageKey[],
  *             textures: (any | null)[], truncated: CascadeTruncation | null }}
  */
-export function stageCascade(model, layout){
+export function stageCascade(model, layout, how = {}){
     /** @type {import('../webgpu/internal/pipeline.js').StageKey[]} */
     const stages = [];
     /** @type {(any | null)[]} */
@@ -1764,7 +1772,7 @@ export function stageCascade(model, layout){
         {
             break;
         }
-        const texCoordIndex = get(D3DTSS.TEXCOORDINDEX);
+        const texCoordIndex = how.shaderCoordinates ? stage : get(D3DTSS.TEXCOORDINDEX);
         const transformFlags = get(D3DTSS.TEXTURETRANSFORMFLAGS);
         const key = {
             colorOp,
@@ -5659,7 +5667,7 @@ export function createRenderer(options){
         const spriteSets = points?.sprite
             ? [...new Set(stageCascade(model, {
                 texCoordSets: 0, attributes: [], stride, preTransformed: false, blendWeights: 0,
-            }).stages.map(stage=>varyingLocation(D3DDECLUSAGE.TEXCOORD,
+            }, { shaderCoordinates: true }).stages.map(stage=>varyingLocation(D3DDECLUSAGE.TEXCOORD,
                 stage.texCoordIndex & COORD_SET_MASK)))]
             : [];
         /** @type {import('../d3d9/wgsl.js').TranslatedShader} */
@@ -5689,7 +5697,7 @@ export function createRenderer(options){
         }
         const cascade = stageCascade(model, {
             texCoordSets: sets, attributes: [], stride, preTransformed: false, blendWeights: 0,
-        });
+        }, { shaderCoordinates: true });
         const state = {
             ...pipelineStateOf(model, {
                 fvf: 0, topology, ...formatsOf(model), stages: cascade.stages, lighting: null,

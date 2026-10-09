@@ -312,3 +312,44 @@ test('a vs_1_1 and a ps_1_1 draw as a pair, the pixel shader sampling its stage'
     texture.texture.release();
     h.release();
 });
+
+test('under a vertex shader a stage samples the set of its own number, whatever its index says',
+    async()=>{
+        // A program that leaves D3DTSS_TEXCOORDINDEX at a generation mode and
+        // set 0 while its shader writes what the stage needs into oT1: the
+        // index is fixed-function vertex processing, which the shader
+        // replaces, so stage 1 reads oT1.
+        const h = harness();
+        /** @type {{ handle?: number }} */
+        const made = {};
+        const shader = [
+            0xfffe0101,
+            0x00000014, 0xc00f0000, 0x90e40000, 0xa0e40000,
+            0x00000001, 0xd00f0000, 0x90e40005,
+            0x00000001, 0xe00f0000, 0x90e40005,
+            0x00000001, 0xe00f0001, 0x90e40005,
+            0x0000ffff,
+        ];
+        assert.equal(h.device.CreateVertexShader(DECLARATION, shader, made), D3D_OK);
+        assert.equal(h.device.SetVertexShader(made.handle), D3D_OK);
+        /** @type {{ texture?: any }} */
+        const texture = {};
+        assert.equal(h.device.CreateTexture(4, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED,
+            texture), D3D_OK);
+        assert.equal(h.device.SetTexture(1, texture.texture), D3D_OK);
+        assert.equal(h.device.SetTextureStageState(1, D3DTSS.COLOROP, D3DTOP.MODULATE), D3D_OK);
+        assert.equal(h.device.SetTextureStageState(1, D3DTSS.TEXCOORDINDEX, 0x10000), D3D_OK);
+
+        await h.draw();
+        const fragment = h.gpu.of('createShaderModule').map(call=>call.descriptor.code)
+            .find(code=>code.includes('fn ps_main'));
+        assert.ok(fragment);
+        assert.match(fragment, /sampleStage1\(input\.texCoord1\b/, 'stage 1 reads oT1');
+        assert.doesNotMatch(fragment, /sampleStage1\(input\.texCoord0\b/);
+
+        assert.equal(h.device.SetTexture(1, null), D3D_OK);
+        texture.texture.release();
+        assert.equal(h.device.SetVertexShader(0), D3D_OK);
+        assert.equal(h.device.DeleteVertexShader(made.handle), D3D_OK);
+        h.release();
+    });
