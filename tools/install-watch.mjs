@@ -405,11 +405,16 @@ if (pressing.length > 0)
             {
                 const win32 = diagnostics.find((/** @type {any} */ entry)=>entry.name === 'win32')
                     ?.metrics ?? {};
-                const button = (win32.windows ?? []).find((/** @type {any} */ w)=>w.visible
+                // Of several standing at once, the one named first: a licence
+                // page's "I accept" before the "Next >" beside it, which on its
+                // own goes nowhere.
+                const button = (win32.windows ?? []).filter((/** @type {any} */ w)=>w.visible
                     && w.className === 'Button'
                     && (anyOrder ? pressing.includes(w.title) : w.title === pressing[step])
                     && (w.hwnd !== lastButton || looksSince > 3)
-                    && (parseInt(w.style, 16) & WS_DISABLED) === 0);
+                    && (parseInt(w.style, 16) & WS_DISABLED) === 0)
+                    .sort((/** @type {any} */ a, /** @type {any} */ b)=>
+                        pressing.indexOf(a.title) - pressing.indexOf(b.title))[0];
                 if (!button)
                 {
                     continue;
