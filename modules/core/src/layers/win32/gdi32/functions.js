@@ -76,6 +76,7 @@ const DEFAULT_GUI_FONT = 17;
  * Only the selectable ones are answered by the first.
  */
 const OBJ_PEN = 1;
+const OBJ_EXTPEN = 11;
 const OBJ_BRUSH = 2;
 const OBJ_DC = 3;
 const OBJ_PAL = 5;
@@ -111,6 +112,7 @@ const BRUSH_STYLES = new Set([BS_SOLID, BS_NULL, BS_HATCHED, BS_PATTERN, BS_DIBP
     BS_DIBPATTERNPT, BS_PATTERN8X8]);
 
 /** Pen styles, PS_SOLID through PS_INSIDEFRAME. */
+const PS_SOLID = 0;
 const PS_NULL = 5;
 const PS_INSIDEFRAME = 6;
 
@@ -1182,6 +1184,24 @@ export function createGdiFunctions(host){
             text += String.fromCharCode(unit);
         }
         return text;
+    };
+
+    /**
+     * CreatePen and CreatePenIndirect: see CreatePen.
+     *
+     * @param {number} style @param {number} width @param {number} color
+     */
+    const cosmeticPen = (style, width, color)=>{
+        const kind = style & PS_STYLE_MASK;
+        if (kind === PS_NULL)
+        {
+            return stockObject(NULL_PEN);
+        }
+        return objects.create('pen', {
+            style: kind > PS_INSIDEFRAME ? PS_SOLID : kind,
+            width: Math.abs(width),
+            color,
+        });
     };
 
     /**
@@ -2532,7 +2552,9 @@ export function createGdiFunctions(host){
                     return 0;
                 }
                 switch (type >>> 0){
+                    // The selected pen whichever way it was made.
                     case OBJ_PEN:
+                    case OBJ_EXTPEN:
                         return dc.pen;
                     case OBJ_BRUSH:
                         return dc.brush;
@@ -2567,29 +2589,30 @@ export function createGdiFunctions(host){
                     }
                     return dc.kind === 'memory' ? OBJ_MEMDC : OBJ_DC;
                 }
-                const type = OBJECT_TYPES[objects.get(handle)?.type ?? ''];
+                const record = objects.get(handle);
+                const type = OBJECT_TYPES[record?.type ?? ''];
                 if (type === undefined)
                 {
                     host.setLastError?.(ERROR_INVALID_HANDLE);
                     return 0;
                 }
-                return type;
+                return record?.type === 'pen' && record.attributes.extended !== undefined
+                    ? OBJ_EXTPEN : type;
             },
         },
 
-        /** HPEN CreatePen(int iStyle, int cWidth, COLORREF color) */
+        /**
+         * HPEN CreatePen(int iStyle, int cWidth, COLORREF color)
+         *
+         * A cosmetic pen, its fields as GetObject will give them back: the
+         * width's magnitude, a style it does not know -- PS_USERSTYLE,
+         * PS_ALTERNATE and the numbers past them -- as PS_SOLID, and PS_NULL
+         * the stock NULL_PEN whatever came with it (Wine's pen.c test_logpen).
+         */
         CreatePen: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([style, width, color])=>{
-                if ((style | 0) < 0 || (style | 0) > PS_INSIDEFRAME)
-                {
-                    return 0;
-                }
-                return objects.create('pen', {
-                    style: style | 0, width: width | 0, color: color >>> 0,
-                });
-            },
+            handler: ([style, width, color])=>cosmeticPen(style >>> 0, width | 0, color >>> 0),
         },
 
         /** HPEN CreatePenIndirect(const LOGPEN *plpen) */
@@ -2597,12 +2620,12 @@ export function createGdiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([logpen])=>{
-                const fields = readLogPen(host, logpen);
-                if (fields.style > PS_INSIDEFRAME)
+                if ((logpen >>> 0) === 0)
                 {
                     return 0;
                 }
-                return objects.create('pen', fields);
+                const fields = readLogPen(host, logpen);
+                return cosmeticPen(fields.style >>> 0, fields.width | 0, fields.color >>> 0);
             },
         },
 
@@ -2610,8 +2633,10 @@ export function createGdiFunctions(host){
          * HPEN ExtCreatePen(DWORD dwPenStyle, DWORD dwWidth, const LOGBRUSH *plbrush,
          *                   DWORD dwStyleCount, const DWORD *lpStyle)
          *
-         * A pen of a style and a brush's colour. A cosmetic pen is one pixel
-         * wide; only PS_USERSTYLE takes a dash table, and it must have one.
+         * A pen of a style and a brush, which GetObject answers as an
+         * EXTLOGPEN. A cosmetic pen is one pixel wide and cannot be
+         * PS_INSIDEFRAME; only PS_USERSTYLE takes a dash table, and it must
+         * have one of at most sixteen entries. PS_NULL is the stock pen.
          */
         ExtCreatePen: {
             argBytes: 20,
@@ -2621,15 +2646,23 @@ export function createGdiFunctions(host){
                 const geometric = ((style >>> 0) & PS_TYPE_MASK) === PS_GEOMETRIC;
                 const user = kind === PS_USERSTYLE;
                 if ((brush >>> 0) === 0 || kind > PS_ALTERNATE
-                    || (!geometric && (width >>> 0) !== 1)
-                    || (user ? (count >>> 0) === 0 || (dashes >>> 0) === 0 : (count >>> 0) !== 0))
+                    || (!geometric && ((width >>> 0) !== 1 || kind === PS_INSIDEFRAME))
+                    || (geometric && kind === PS_ALTERNATE)
+                    || (user ? (count >>> 0) === 0 || (count >>> 0) > 16 || (dashes >>> 0) === 0
+                        : (count >>> 0) !== 0))
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const [, color] = readU32s(host, brush >>> 0, 2);
+                if (kind === PS_NULL)
+                {
+                    return stockObject(NULL_PEN);
+                }
+                const [brushStyle, color, hatch] = readU32s(host, brush >>> 0, 3);
                 return objects.create('pen', {
                     style: kind, width: width | 0, color: color >>> 0, extended: style >>> 0,
+                    brushStyle: brushStyle >>> 0, hatch: hatch >>> 0,
+                    entries: user ? readU32s(host, dashes >>> 0, count >>> 0) : [],
                 });
             },
         },

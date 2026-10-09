@@ -4880,8 +4880,15 @@ function describeObject(record, room, wide){
     const attributes = record.attributes ?? {};
     switch (record.type){
         // LOGPEN: style, POINT width, colour.
+        // EXTLOGPEN for an ExtCreatePen pen: the style as it was asked for,
+        // width, brush style, colour, hatch and the dash table. A buffer
+        // short of the dashes is refused, as one short of the rest is.
         case 'pen':
-            return dwords([attributes.style | 0, attributes.width | 0, 0, attributes.color >>> 0]);
+            return attributes.extended !== undefined
+                ? dwords([attributes.extended >>> 0, attributes.width | 0,
+                    attributes.brushStyle >>> 0, attributes.color >>> 0, attributes.hatch >>> 0,
+                    (attributes.entries ?? []).length, ...(attributes.entries ?? [])])
+                : dwords([attributes.style | 0, attributes.width | 0, 0, attributes.color >>> 0]);
         // LOGBRUSH: style, colour, hatch.
         case 'brush':
             return dwords([attributes.style | 0, attributes.color >>> 0, attributes.hatch | 0]);
