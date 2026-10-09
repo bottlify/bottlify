@@ -78,6 +78,7 @@ import { isParkedCall } from './parking.js';
  * @property {boolean} forwards
  * @property {boolean} hook
  * @property {number} target
+ * @property {Map<number, number>} [callers]  Sampled crossings by return address.
  * @property {boolean} site
  * @property {number} trampoline
  * @property {number} resume
@@ -208,6 +209,8 @@ const HOOK_AREA = 'call.hook';
 
 /** How many calls one timed crossing stands for, on average (`sampleInterval`). */
 const TRAP_SAMPLE = 32;
+/** How many return addresses each function's sampled crossings are counted at. */
+const CALLERS_KEPT = 64;
 const TRAP_WEIGHT = Object.freeze({ weight: TRAP_SAMPLE });
 
 /** How many functions the report names by the host time they took. */
@@ -418,6 +421,8 @@ class Dispatcher {
         // An int32 from the start, so the field keeps one representation.
         this.sampler = 0x9e3779b9 | 0;
         this.untilSample = this.sampleInterval();
+        /** Whether the crossing being made is a sampled one, whose caller is counted. */
+        this.sampleCaller = false;
 
         // Indexed by trap id: the cpu hands them out in sequence from zero.
         /** @type {(Entry | undefined)[]} */
@@ -1002,6 +1007,18 @@ class Dispatcher {
         // calls the guest back has overwritten the stack by the time
         // anybody reads this.
         this.froms[at] = hostReturn;
+        // The sampled crossings also say where they came from: a function
+        // called millions of times is a loop somewhere, and the loop's
+        // address is what names it.
+        if (this.sampleCaller)
+        {
+            this.sampleCaller = false;
+            const callers = entry.callers ??= new Map();
+            if (callers.has(hostReturn) || callers.size < CALLERS_KEPT)
+            {
+                callers.set(hostReturn, (callers.get(hostReturn) ?? 0) + 1);
+            }
+        }
         // Copied, because a handler that writes through a pointer can
         // change what the arguments describe before anyone reads them.
         const kept = entry.kept;
@@ -1309,6 +1326,7 @@ class Dispatcher {
             return;
         }
         this.untilSample = this.sampleInterval();
+        this.sampleCaller = true;
         const profiler = import.meta.BOTTLIFY_DIAGNOSTICS !== false ? this.profiler : null;
         profiler?.begin('trap', 'host');
         const began = performance.now();
@@ -1357,7 +1375,10 @@ class Dispatcher {
                 .sort((left, right)=>right.sampledMs - left.sampledMs || right.calls - left.calls)
                 .slice(0, BY_FUNCTION_KEPT)
                 .map(entry=>`${entry.name} ${entry.calls} ${
-                    Math.round(entry.sampledMs * TRAP_SAMPLE)}ms`),
+                    Math.round(entry.sampledMs * TRAP_SAMPLE)}ms${entry.callers
+                    ? ` from ${[...entry.callers].sort((a, b)=>b[1] - a[1]).slice(0, 3)
+                        .map(([from, count])=>`0x${(from >>> 0).toString(16)}x${count}`)
+                        .join(',')}` : ''}`),
         };
     }
 
