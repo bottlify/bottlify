@@ -1207,6 +1207,21 @@ export function createGdiFunctions(host){
         });
     };
 
+    /** SetICMProfileA/W: see the entry point. @param {number[]} args */
+    const setIcmProfile = ([handle, file])=>{
+        if ((file >>> 0) === 0)
+        {
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        if (!dcOf(handle))
+        {
+            host.setLastError?.(ERROR_INVALID_HANDLE);
+            return 0;
+        }
+        return 1;
+    };
+
     /**
      * GetICMProfile in either width: the display's profile, the sRGB one
      * every Windows installs. The size is in characters with the terminator;
@@ -4142,6 +4157,62 @@ export function createGdiFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: args=>icmProfile(args, true),
+        },
+
+        /**
+         * int SetICMMode(HDC hdc, int mode)
+         *
+         * Whether colour management is on for the DC, kept and answered;
+         * ICM_QUERY asks without changing it, and it starts off (Wine's icm.c
+         * test_SetICMMode). Nothing here manages colour either way.
+         */
+        SetICMMode: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, mode])=>{
+                const ICM_OFF = 1;
+                const ICM_DONE_OUTSIDEDC = 4;
+                const ICM_QUERY = 3;
+                const dc = dcOf(handle);
+                if (!dc || (mode | 0) < ICM_OFF || (mode | 0) > ICM_DONE_OUTSIDEDC)
+                {
+                    return 0;
+                }
+                if ((mode | 0) === ICM_QUERY)
+                {
+                    return dc.icmMode ?? ICM_OFF;
+                }
+                dc.icmMode = mode | 0;
+                return 1;
+            },
+        },
+
+        /**
+         * int EnumICMProfilesA(HDC, ICMENUMPROCA, LPARAM)
+         * int EnumICMProfilesW(HDC, ICMENUMPROCW, LPARAM)
+         *
+         * -1, nothing to enumerate: the one profile GetICMProfile names is
+         * not a file a procedure could open.
+         */
+        EnumICMProfilesA: { argBytes: 12, handler: ()=>0xffffffff },
+        EnumICMProfilesW: { argBytes: 12, handler: ()=>0xffffffff },
+
+        /**
+         * BOOL SetICMProfileA(HDC hdc, LPSTR lpFileName)
+         * BOOL SetICMProfileW(HDC hdc, LPWSTR lpFileName)
+         *
+         * No file is ERROR_INVALID_PARAMETER and no DC ERROR_INVALID_HANDLE,
+         * in that order; a profile named is taken, and changes nothing drawn.
+         */
+        SetICMProfileA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>setIcmProfile(args),
+        },
+        SetICMProfileW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>setIcmProfile(args),
         },
 
         Escape: { argBytes: 20, handler: ()=>0 },
