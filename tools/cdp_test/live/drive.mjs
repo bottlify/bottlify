@@ -16,7 +16,7 @@
  * opens https://127.0.0.1:5180/library (the launcher running over TLS, as the
  * person's own browser has it), starts the bottle whose card matches the
  * regular expression `card` if one is given, and listens on
- * http://127.0.0.1:9401:
+ * http://127.0.0.1:9401 (DRIVE_PORT; DRIVE_PROFILE names another profile):
  *
  *   /shot?file=PATH      the picture, cut to the canvas, as a PNG; answers the path
  *   /click?x=&y=         a left click at the program's own pixels
@@ -26,6 +26,7 @@
  *   /key?code=Enter      a key press, by KeyboardEvent.code
  *   /type?text=123       characters typed one after another
  *   /eval?js=EXPR        the value of an expression in the launcher tab, as JSON
+ *   /stack               where the tab's own code is running when it answers nothing else
  *   /upload?file=PATH    a file handed to the page's file input (`selector`, the
  *                        first one by default) -- the library's Add, for an installer
  *   /quit                closes the browser and ends
@@ -41,14 +42,18 @@ import { writeFile, mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { launchWithGpu, shutdown } from '../browser.mjs';
 import { CdpEndpoint } from '../cdp.mjs';
+import { pausedStack } from '../timeout-report.mjs';
 
-const PORT = 9401;
+// Another session's walk may hold the defaults: DRIVE_PORT and DRIVE_PROFILE
+// give this one its own, since two browsers cannot share a profile.
+const PORT = Number(process.env.DRIVE_PORT ?? 9401);
 const [pattern = '', query = ''] = process.argv.slice(2);
 
 /** @param {number} ms */
 const sleep = ms=>new Promise(done=>setTimeout(done, ms));
 
-const browser = await launchWithGpu({ headed: false, profileDir: 'dbg/chrome-profile' });
+const browser = await launchWithGpu({
+    headed: false, profileDir: process.env.DRIVE_PROFILE ?? 'dbg/chrome-profile' });
 const cdp = new CdpEndpoint(browser.browserWs);
 await cdp.open();
 const downloads = resolve('dbg/live-downloads');
@@ -186,6 +191,10 @@ createServer(async(request, answer)=>{
         else if (url.pathname === '/eval')
         {
             out = JSON.stringify(await evaluate(arg('js')));
+        }
+        else if (url.pathname === '/stack')
+        {
+            out = await pausedStack(cdp, sessionId);
         }
         else if (url.pathname === '/upload')
         {
