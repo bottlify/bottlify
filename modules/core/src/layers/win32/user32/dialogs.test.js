@@ -329,8 +329,9 @@ test('a CBT hook hears of the dialog window and may subclass it before its first
     const dialog = fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
     assert.notEqual(dialog, 0);
     assert.deepEqual(hooked[0].slice(0, 3), [HOOK, 3, dialog], 'HCBT_CREATEWND, for the dialog');
-    assert.deepEqual(reached.filter(m=>m.hwnd === dialog).slice(0, 2).map(m=>m.message),
-        [0x81, 0x1], 'WM_NCCREATE and WM_CREATE reached the procedure the hook put in');
+    assert.deepEqual(reached.filter(m=>m.hwnd === dialog).slice(0, 3).map(m=>m.message),
+        [0x81, 0x83, 0x1],
+        'WM_NCCREATE, WM_NCCALCSIZE and WM_CREATE reached the procedure the hook put in');
 });
 
 test('a dialog named in the resources is the template read where it was mapped', ()=>{
@@ -939,11 +940,18 @@ test('a control of a class the program registered is the window of that class', 
     const CLASS_NAME = 0x10900;
     /** @type {{ wndProc: number, message: number, lParam: number }[]} */
     const seen = [];
+    /** CREATESTRUCT's hwndParent and hMenu, read while the procedure has it. */
+    /** @type {number[]} */
+    const created = [];
     const WM_NCCREATE = 0x0081;
     const { memory, fns } = setup({
         allocate: ()=>0x13000,
         dispatch: (wndProc, message)=>{
             seen.push({ wndProc, message: message.message, lParam: message.lParam });
+            if (message.message === WM_NCCREATE && created.length === 0)
+            {
+                created.push(memory.u32(message.lParam + 12), memory.u32(message.lParam + 8));
+            }
             // TRUE to WM_NCCREATE, as the default procedure answers it.
             return message.message === WM_NCCREATE ? 1 : 0;
         },
@@ -965,13 +973,14 @@ test('a control of a class the program registered is the window of that class', 
     const WM_CREATE = 0x0001;
     const WM_SIZE = 0x0005;
     const WM_MOVE = 0x0003;
+    const WM_NCCALCSIZE = 0x0083;
     assert.deepEqual(seen.map(call=>[call.wndProc, call.message]),
-        [[METER_PROC, WM_NCCREATE], [METER_PROC, WM_CREATE], [METER_PROC, WM_SIZE],
-            [METER_PROC, WM_MOVE], [DIALOGPROC, WM_INITDIALOG]],
+        [[METER_PROC, WM_NCCREATE], [METER_PROC, WM_NCCALCSIZE], [METER_PROC, WM_CREATE],
+            [METER_PROC, WM_SIZE], [METER_PROC, WM_MOVE], [DIALOGPROC, WM_INITDIALOG]],
         'the control was told it exists and its size, then the dialog initialised, all'
         + ' during the call');
-    assert.equal(memory.u32(seen[0].lParam + 12), dialog, 'CREATESTRUCT.hwndParent');
-    assert.equal(memory.u32(seen[0].lParam + 8), 201, 'CREATESTRUCT.hMenu is the id');
+    assert.equal(created[0], dialog, 'CREATESTRUCT.hwndParent');
+    assert.equal(created[1], 201, 'CREATESTRUCT.hMenu is the id');
     assert.equal(fns.SetWindowWord.handler([meter, 0, 7]), 0, 'and it has the extra bytes');
     assert.equal(fns.GetWindowWord.handler([meter, 0]), 7);
     assert.notEqual(fns.GetWindowLongA.handler([fns.GetDlgItem.handler([dialog, 1]), -4]),
@@ -1580,7 +1589,7 @@ test('a template\'s controls are made one after another, each handed its creatio
     const creating = fns.CreateDialogIndirectParamA.handler(
         [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
     await new Promise(resolve=>setImmediate(resolve));
-    assert.equal(order.length, 2, 'the second control is not made while the first is answering');
+    assert.equal(order.length, 3, 'the second control is not made while the first is answering');
     /** @type {() => void} */ (/** @type {unknown} */ (finishFirst))();
     const dialog = await creating;
     assert.notEqual(dialog, 0);
@@ -1588,9 +1597,10 @@ test('a template\'s controls are made one after another, each handed its creatio
     // Each, as CreateWindowEx tells a child, then hears its size and place.
     const WM_SIZE = 0x0005;
     const WM_MOVE = 0x0003;
-    assert.deepEqual(order, [`${first}:${WM_NCCREATE}`, `${first}:${WM_CREATE}`,
-        `${first}:${WM_SIZE}`, `${first}:${WM_MOVE}`,
-        `${second}:${WM_NCCREATE}`, `${second}:${WM_CREATE}`,
+    const WM_NCCALCSIZE = 0x0083;
+    assert.deepEqual(order, [`${first}:${WM_NCCREATE}`, `${first}:${WM_NCCALCSIZE}`,
+        `${first}:${WM_CREATE}`, `${first}:${WM_SIZE}`, `${first}:${WM_MOVE}`,
+        `${second}:${WM_NCCREATE}`, `${second}:${WM_NCCALCSIZE}`, `${second}:${WM_CREATE}`,
         `${second}:${WM_SIZE}`, `${second}:${WM_MOVE}`]);
     assert.deepEqual(data, [[6, 7, 8], []], 'the size word, then the data; NULL for none');
 });

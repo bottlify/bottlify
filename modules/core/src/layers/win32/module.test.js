@@ -150,21 +150,22 @@ test('a child runs beside a parent that has not exited, however the parent waits
     });
 
 test('a DC taken through user32 is one GDI answers for', async()=>{
-    // A program asks the display about itself through its own window: GetDC
-    // on the window, GetDeviceCaps on what came back. Both libraries live in
-    // this module, so user32 hands out GDI's context under the window's name
-    // rather than a null one whose caps read as zero.
+    // A program asks the display about itself through a context user32
+    // hands out: GetDeviceCaps on what came back. Both libraries live in
+    // this module, so user32 hands out GDI's context rather than a null one
+    // whose caps read as zero.
     const api = await win32Module.create({ screen: SCREEN }, stubHost());
     const user32 = api.libraries()['USER32.dll'];
     const gdi32 = api.libraries()['GDI32.dll'];
-    const hwnd = 0x40b4;
 
-    const dc = user32.GetDC.handler([hwnd]);
-    assert.notEqual(dc, 0, 'a window has a device context');
+    const dc = user32.GetDC.handler([0]);
+    assert.notEqual(dc, 0, 'the screen has a device context');
     assert.equal(gdi32.GetDeviceCaps.handler([dc, BITSPIXEL]), SCREEN.bitsPerPixel);
     assert.equal(gdi32.GetDeviceCaps.handler([dc, HORZRES]), SCREEN.width);
-    assert.equal(user32.ReleaseDC.handler([hwnd, dc]), 1);
-    assert.equal(user32.ReleaseDC.handler([hwnd, dc]), 0, 'released once, gone');
+    assert.equal(user32.ReleaseDC.handler([0, dc]), 1);
+    assert.equal(user32.ReleaseDC.handler([0, dc]), 0, 'released once, gone');
+    assert.equal(user32.GetDC.handler([0x40b4]), 0,
+        'a handle that names no window has none (dce.c test_destroyed_window)');
 
     await win32Module.dispose();
 });

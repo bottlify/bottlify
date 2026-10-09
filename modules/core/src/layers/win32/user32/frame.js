@@ -249,6 +249,10 @@ const NO_FRAME = Object.freeze({
  * @property {(Rect & { rects?: Rect[] }) | null} [regionBox]
  *           The region SetWindowRgn shaped it with, in window coordinates: the
  *           rectangle around it, and its rectangles when it is more than one.
+ * @property {{ left: number, top: number, right: number, bottom: number } | null}
+ *           [ncFrame]  How far in from each edge its procedure put the client
+ *           area when WM_NCCALCSIZE asked, where that is not what its style
+ *           says: a skinned window's whole rectangle, say.
  */
 
 /**
@@ -258,9 +262,23 @@ const NO_FRAME = Object.freeze({
  *        A window by handle, live or not; null for a handle that is no window.
  */
 export function createGeometry(windowOf){
-    /** @param {PlacedWindow} record @returns {Frame} */
-    const frame = record=>(record.frameless ? NO_FRAME
+    /**
+     * The frame its style describes, which DefWindowProc's WM_NCCALCSIZE
+     * answers and the frame is painted by.
+     *
+     * @param {PlacedWindow} record @returns {Frame}
+     */
+    const styleFrame = record=>(record.frameless ? NO_FRAME
         : frameOf(record.style, record.exStyle, (record.menu ?? 0) !== 0));
+
+    /**
+     * The frame the client area is placed inside: the style's, or what the
+     * window's procedure answered WM_NCCALCSIZE with instead.
+     *
+     * @param {PlacedWindow} record @returns {Frame}
+     */
+    const frame = record=>(record.ncFrame && !record.frameless
+        ? { ...styleFrame(record), ...record.ncFrame } : styleFrame(record));
 
     /**
      * The window a child is placed inside. An owned top-level window names
@@ -428,8 +446,8 @@ export function createGeometry(windowOf){
     };
 
     return {
-        frame, container, clientSize, windowOrigin, clientOrigin, windowRect, shapedRect,
-        shapeRects, holesOf, clientRect, visibleClientRect, visibleWindowRect,
+        frame, styleFrame, container, clientSize, windowOrigin, clientOrigin, windowRect,
+        shapedRect, shapeRects, holesOf, clientRect, visibleClientRect, visibleWindowRect,
     };
 }
 

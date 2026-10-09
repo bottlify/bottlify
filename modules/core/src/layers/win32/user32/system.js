@@ -914,7 +914,17 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 .map(index=>read.getInt32(index * 4, true));
             const before = { window: host.geometry.windowRect(record),
                 client: host.geometry.clientRect(record), visible: host.shown(record) };
-            return andThen(place([record.hwnd, after, x, y, cx, cy, flags], thread, ()=>{
+            // A new size or a changed frame asks the procedure where its
+            // client area goes (WM_NCCALCSIZE), before anything moves.
+            const sizing = (flags & SWP_NOSIZE) === 0 || (flags & SWP_FRAMECHANGED) !== 0;
+            const calculated = sizing ? host.calcClient?.(record, {
+                x: (flags & SWP_NOMOVE) !== 0 ? record.x : x,
+                y: (flags & SWP_NOMOVE) !== 0 ? record.y : y,
+                width: (flags & SWP_NOSIZE) !== 0 ? record.width : cx,
+                height: (flags & SWP_NOSIZE) !== 0 ? record.height : cy,
+            }, thread, pos) ?? 0 : 0;
+            /** WM_WINDOWPOSCHANGED, with what became of what was asked. */
+            const changed = ()=>{
                 const window = host.geometry.windowRect(record);
                 const client = host.geometry.clientRect(record);
                 const same = (/** @type {any} */ a, /** @type {any} */ b)=>a.left === b.left
@@ -939,10 +949,12 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                     .forEach((value, index)=>told.setUint32(index * 4, value >>> 0, true));
                 host.writeMemory(pos, new Uint8Array(told.buffer));
                 return host.send(record.hwnd, WM_WINDOWPOSCHANGED, 0, pos, thread);
-            }), answer=>{
+            };
+            return andThen(calculated, ()=>andThen(place([record.hwnd, after, x, y, cx, cy, flags],
+                thread, changed), answer=>{
                 host.release?.(pos);
                 return answer;
-            });
+            }));
         });
     };
 

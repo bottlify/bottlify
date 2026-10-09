@@ -2788,6 +2788,54 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * WM_NCCALCSIZE: the procedure is handed where the window goes, in its
+     * parent's client coordinates, and answers where its client area is in
+     * it -- in an NCCALCSIZE_PARAMS, with the old rectangles and the
+     * WINDOWPOS, when SetWindowPos asks. DefWindowProc answers the style's
+     * frame; a procedure that answers otherwise has its client area where it
+     * said (msg.c WmCreateOverlappedSeq; MSDN WM_NCCALCSIZE).
+     *
+     * @param {any} record
+     * @param {{ x: number, y: number, width: number, height: number }} placed
+     * @param {unknown} thread
+     * @param {number} [pos]  the WINDOWPOS SetWindowPos places it with
+     * @returns {number | Promise<number>}
+     */
+    const calcClient = (record, placed, thread, pos = 0)=>{
+        const NCCALCSIZE_PARAMS_SIZE = 52;
+        const at = host.allocate?.(pos !== 0 ? NCCALCSIZE_PARAMS_SIZE : 16) ?? 0;
+        if (at === 0)
+        {
+            return 0;
+        }
+        const window = { left: placed.x, top: placed.y, right: placed.x + placed.width,
+            bottom: placed.y + placed.height };
+        const words = [window.left, window.top, window.right, window.bottom];
+        if (pos !== 0)
+        {
+            const edges = geometry.frame(record);
+            const old = [record.x, record.y, record.x + record.width, record.y + record.height];
+            words.push(...old, old[0] + edges.left, old[1] + edges.top, old[2] - edges.right,
+                old[3] - edges.bottom, pos);
+        }
+        writeU32s(host, at, words);
+        return andThen(send(record.hwnd, WM_NCCALCSIZE, pos !== 0 ? 1 : 0, at, thread), ()=>{
+            const view = new DataView(host.readMemory(at, 16).slice().buffer);
+            const [left, top, right, bottom] = [0, 4, 8, 12]
+                .map(offset=>view.getInt32(offset, true));
+            host.release?.(at);
+            const style = geometry.styleFrame(record);
+            const inset = { left: left - window.left, top: top - window.top,
+                right: window.right - right, bottom: window.bottom - bottom };
+            record.ncFrame = inset.left === style.left && inset.top === style.top
+                && inset.right === style.right && inset.bottom === style.bottom ? null
+                : { left: Math.max(0, inset.left), top: Math.max(0, inset.top),
+                    right: Math.max(0, inset.right), bottom: Math.max(0, inset.bottom) };
+            return 0;
+        });
+    };
+
+    /**
      * What a scroll leaves to be painted, worked out on regions rather than
      * the strip along one edge. Only the pixels inside `clip` move, and
      * only there do they land: of the part of `scroll` that changes -- in
@@ -3071,6 +3119,10 @@ export function createWindowFunctions(host){
         const tell = message=>callProcedure(record.wndProc, {
             hwnd: record.hwnd, message, wParam: 0, lParam: create, unicode,
         }, thread);
+        // Between the two, WM_NCCALCSIZE: where the client area is in it
+        // (msg.c WmCreateOverlappedSeq).
+        const placedThenCreated = ()=>andThen(calcClient(record, record, thread),
+            ()=>tell(WM_CREATE));
         /** @param {number} handle */
         const done = handle=>{
             host.release?.(create);
@@ -3105,7 +3157,7 @@ export function createWindowFunctions(host){
             // WM_NCCREATE before WM_CREATE, with the same structure: a
             // procedure that keeps lpCreateParams takes it from the first.
             return andThen(tell(WM_NCCREATE), accepted=>((accepted | 0) === 0 ? refuse()
-                : andThen(tell(WM_CREATE), created=>{
+                : andThen(placedThenCreated(), created=>{
                     if ((created | 0) === -1)
                     {
                         return refuse();
@@ -4705,8 +4757,19 @@ export function createWindowFunctions(host){
             // every window such a program tries to make.
             case WM_NCCREATE:
                 return 1;
-            case WM_NCCALCSIZE:
+            case WM_NCCALCSIZE: {
+                // The client area inside the frame the style describes.
+                const at = message.lParam >>> 0;
+                if (at !== 0)
+                {
+                    const view = new DataView(host.readMemory(at, 16).slice().buffer);
+                    const edges = geometry.styleFrame(record);
+                    writeU32s(host, at, [view.getInt32(0, true) + edges.left,
+                        view.getInt32(4, true) + edges.top, view.getInt32(8, true) - edges.right,
+                        view.getInt32(12, true) - edges.bottom]);
+                }
                 return 0;
+            }
             case WM_WINDOWPOSCHANGED: {
                 // What SetWindowPos did, told as the two messages a program
                 // lays itself out by: the client area's corner -- on the
@@ -5939,6 +6002,7 @@ export function createWindowFunctions(host){
                     placeWindow = place;
                 },
                 activateOther,
+                calcClient,
                 shown, raise, restack, tell, desktop: desktopWindow, showWindow,
                 // What the run answers for every process's windows.
                 runForeground: ()=>directory.foreground?.() ?? 0,
