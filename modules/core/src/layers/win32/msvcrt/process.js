@@ -37,6 +37,13 @@ const SIG_ERR = 0xffffffff;
 /** The two actions <signal.h> reserves for the runtime's own use, refused from a program. */
 const SIG_SGE = 3;
 const SIG_ACK = 4;
+/** SIG_IGN: the signal is dropped. */
+const SIG_IGN = 1;
+/** What a signal's default action exits with, as _exit(3) in the runtime. */
+const DEFAULT_ACTION_EXIT = 3;
+/** The code a raised SIGFPE's handler is given as its second argument: _FPE_EXPLICITGEN. */
+const FPE_EXPLICITGEN = 0x8c;
+const SIGFPE = 8;
 
 /** _spawn's modes: _P_WAIT, _P_NOWAIT, _P_OVERLAY, _P_NOWAITO, _P_DETACH. */
 const SPAWN_MODES = 5;
@@ -45,6 +52,11 @@ const SPAWN_MODES = 5;
  * @typedef {Object} ProcessHost
  * @property {(code: number) => void} errno
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(entry: number, args: number[], thread?: any) => Promise<number>} [callGuest]
+ *           Runs the handler a program set, for raise.
+ * @property {() => any} [currentThread]
+ * @property {(code: number) => any} [exitProcess]
+ *           Ends the process, for the default action raise takes.
  */
 
 /**
@@ -97,6 +109,44 @@ export function createProcessFunctions(host){
                 const previous = handlers.get(number) ?? 0;
                 handlers.set(number, given);
                 return previous >>> 0;
+            },
+        },
+
+        /**
+         * int raise(int sig)
+         *
+         * A signal the runtime does not know is -1 and EINVAL. SIG_IGN drops
+         * it; SIG_DFL ends the process with exit code 3, the runtime's default
+         * action; a handler the program set is put back to SIG_DFL first and
+         * then called with the signal (SIGFPE also with _FPE_EXPLICITGEN), as
+         * the runtime does, and raise answers zero once it returns.
+         */
+        raise: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: async([signal])=>{
+                const number = signal | 0;
+                if (!SIGNALS.has(number))
+                {
+                    host.errno(EINVAL);
+                    return 0xffffffff;
+                }
+                const action = handlers.get(number) ?? 0;
+                if (action === SIG_IGN)
+                    return 0;
+                if (action === 0)
+                {
+                    if (!host.exitProcess)
+                        throw new Error('raise: cannot end the process for a default action');
+                    return host.exitProcess(DEFAULT_ACTION_EXIT);
+                }
+                if (!host.callGuest)
+                    throw new Error('raise: no way into guest code to run a signal handler');
+                handlers.set(number, 0);
+                const args = number === SIGFPE ? [number, FPE_EXPLICITGEN] : [number];
+                await host.callGuest(action, args, host.currentThread?.());
+                return 0;
             },
         },
 

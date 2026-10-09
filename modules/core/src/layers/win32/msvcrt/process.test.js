@@ -80,3 +80,46 @@ test('_spawnv answers as _spawnl does, its arguments in an array', ()=>{
     assert.deepEqual(errno, [EINVAL, EINVAL, ENOENT]);
     assert.equal(fns._spawnv.argBytes, 12);
 });
+
+test('raise ignores, ends the process by default, or runs the handler set', async()=>{
+    /** @type {number[]} */
+    const errno = [];
+    /** @type {Array<[number, number[]]>} */
+    const called = [];
+    /** @type {number[]} */
+    const exited = [];
+    const fns = /** @type {Record<string, any>} */ (createProcessFunctions({
+        errno: code=>void errno.push(code),
+        callGuest: async(entry, args)=>{
+            called.push([entry, args]);
+            return 0;
+        },
+        exitProcess: code=>void exited.push(code),
+    }));
+    const SIGINT = 2;
+    const SIGFPE = 8;
+    const SIGTERM = 15;
+    assert.equal(fns.raise.convention, 'cdecl');
+    assert.equal(fns.raise.argBytes, 4);
+
+    assert.equal(await fns.raise.handler([5]), 0xffffffff, 'a signal the runtime does not know');
+    assert.deepEqual(errno, [EINVAL]);
+
+    fns.signal.handler([SIGINT, 1]);
+    assert.equal(await fns.raise.handler([SIGINT]), 0, 'SIG_IGN');
+    assert.deepEqual(called, []);
+    assert.deepEqual(exited, []);
+
+    fns.signal.handler([SIGFPE, 0x401000]);
+    assert.equal(await fns.raise.handler([SIGFPE]), 0);
+    assert.deepEqual(called, [[0x401000, [SIGFPE, 0x8c]]], 'SIGFPE is given _FPE_EXPLICITGEN');
+    assert.equal(fns.signal.handler([SIGFPE, 0]), 0,
+        'the handler was put back to SIG_DFL before it ran');
+
+    fns.signal.handler([SIGINT, 0x402000]);
+    await fns.raise.handler([SIGINT]);
+    assert.deepEqual(called[1], [0x402000, [SIGINT]]);
+
+    await fns.raise.handler([SIGTERM]);
+    assert.deepEqual(exited, [3], 'SIG_DFL is _exit(3)');
+});

@@ -874,6 +874,9 @@ export function createMsvcrtFunctions(host){
         ...createCxxFunctions(host),
         ...createProcessFunctions({
             errno,
+            callGuest: host.callGuest,
+            ...host.currentThread ? { currentThread: host.currentThread } : {},
+            ...host.exitProcess ? { exitProcess: host.exitProcess } : {},
             ...host.divergence ? { divergence: host.divergence } : {},
         }),
         ...createLocaleFunctions({
