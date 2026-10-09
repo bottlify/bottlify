@@ -499,6 +499,7 @@ export function createGraphicsModule(){
                     probeTexture: device?.probeTexture,
                     fog: device?.fog,
                     mips: device?.mips,
+                    nanProbe: device?.nanProbe,
                     onDeviceLost,
                     // Where a full-screen device's gamma ramp is shown.
                     gamma: displayGamma,
@@ -538,6 +539,7 @@ export function createGraphicsModule(){
                     probeTexture: device?.probeTexture,
                     fog: device?.fog,
                     mips: device?.mips,
+                    nanProbe: device?.nanProbe,
                     onDeviceLost,
                     gamma: displayGamma,
                     frameQueued,

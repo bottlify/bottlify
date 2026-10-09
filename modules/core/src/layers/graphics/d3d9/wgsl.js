@@ -418,7 +418,7 @@ function moduleHeader(options){
  * @param {{ inputs?: Map<number, InputShape>, alsoWrite?: readonly number[],
  *     fog?: number, fogSource?: number, flatColours?: boolean,
  *     stageDimensions?: readonly string[], projectedBy?: readonly string[],
- *     points?: { sprite: boolean }, alphaTest?: number }} [options]
+ *     points?: { sprite: boolean }, alphaTest?: number, nanProbe?: boolean }} [options]
  *        For a vertex shader, the shape of each v# the declaration supplies,
  *        by register. Absent means every declared input arrives as four
  *        floats; present, a declared register it does not name reads as the
@@ -1611,6 +1611,16 @@ export function translateShader(parsed, options = {}){
             }
             const at = body.indexOf('    out.oC0 = oC0;');
             body.splice(at < 0 ? body.length : at, 0, ...fogLines);
+        }
+        // A colour that came out NaN or infinite, magenta: read by its bits,
+        // which a compiler with fast maths cannot fold away as it may x != x.
+        if (options.nanProbe === true && pixelOutputs.has(0))
+        {
+            const at = body.indexOf('    out.oC0 = oC0;');
+            body.splice(at < 0 ? body.length : at, 0,
+                '    if (any((bitcast<vec4u>(oC0) & vec4u(0x7f800000u)) == vec4u(0x7f800000u))) {',
+                '        oC0 = vec4f(1.0, 0.0, 1.0, 1.0);',
+                '    }');
         }
         // D3DRS_ALPHATESTENABLE runs after the pixel shader as after the
         // fixed stages: the colour's alpha, as written, against the

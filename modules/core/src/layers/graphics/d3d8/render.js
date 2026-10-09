@@ -2337,6 +2337,8 @@ const CLEAR_STRIDE = 20;
  *     shader it would run with D3DRS_FOGENABLE clear, which is how a picture
  *     washed towards the fog colour is told apart from one washed by something
  *     else -- two runs then differ by fog and nothing else.
+ * @property {boolean} [nanProbe]  Every pixel a shader made NaN or infinite is
+ *     drawn magenta: where a picture goes black on one GPU and not another.
  * @property {boolean} [mips]
  *     Whether a sample may come from a level below the top; on by default.
  *     Off, every texture is sampled at its top level whatever the program
@@ -2366,6 +2368,7 @@ export function createRenderer(options){
     const windowMemory = options.windowMemory ?? readMemory;
     const createSampler = options.createSampler ?? null;
     const dumpDraws = options.dumpDraws === true;
+    const nanProbe = options.nanProbe === true;
     const dumpEvery = Math.max(0, Math.floor(options.dumpEvery ?? 0));
     const maxDraws = options.maxDraws === undefined ? -1 : options.maxDraws;
     const divergence = options.divergence ?? null;
@@ -5257,7 +5260,7 @@ export function createRenderer(options){
             ? model.renderStates.get(D3DRS.ALPHAFUNC) ?? 0 : undefined;
         const pixel = translationOf(pixelShader,
             `ps|fog${fog.source}/${fog.mode}${flat ? '|flat' : ''}|${legacy.key}`
-                + (alphaFunc === undefined ? '' : `|a${alphaFunc}`),
+                + (alphaFunc === undefined ? '' : `|a${alphaFunc}`) + (nanProbe ? '|nan' : ''),
             ()=>translateShader(
                 /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.pixel), {
                     ...(fog.source === FOG_SOURCE.NONE
@@ -5266,6 +5269,7 @@ export function createRenderer(options){
                     stageDimensions: legacy.stageDimensions,
                     projectedBy: legacy.projectedBy,
                     ...(alphaFunc === undefined ? {} : { alphaTest: alphaFunc }),
+                    ...(nanProbe ? { nanProbe } : {}),
                 }));
         if (pixel.error)
         {

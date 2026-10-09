@@ -969,6 +969,20 @@ test('the fog stage after a pixel shader mixes the shaded colour by the varying'
         + 'select(d3dRcp(in.vPos.w), in.vPos.z, fogRange.w != 0.0)), 0.0, 1.0)), oC0.a);');
 });
 
+test('the NaN probe paints a colour that came out NaN or infinite magenta, by its bits', ()=>{
+    // A picture black on a GPU and right on SwiftShader: the probe shows where a
+    // shader's colour stopped being a number. Read by the exponent's bits, which
+    // fast maths cannot fold away as it may x != x.
+    const shader = parseShader([PS_1_1,
+        op(OPCODE.MOV, 0), dst(REGISTER.TEMP, 0), src(REGISTER.INPUT, 0), END_TOKEN]);
+    const probed = translateShader(shader, { nanProbe: true });
+    assert.equal(probed.error, null);
+    assertLine(probed.wgsl,
+        'if (any((bitcast<vec4u>(oC0) & vec4u(0x7f800000u)) == vec4u(0x7f800000u))) {');
+    assertLine(probed.wgsl, 'oC0 = vec4f(1.0, 0.0, 1.0, 1.0);');
+    assert.ok(!translateShader(shader).wgsl.includes('bitcast<vec4u>(oC0)'), 'off unless asked');
+});
+
 test('a pixel shader under the alpha test discards what fails it, by a register of its own', ()=>{
     // Wine's d3d8 test_alphatest runs the test after a ps_1_1 as after the
     // fixed stages.
