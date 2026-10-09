@@ -83,6 +83,7 @@ import { createIphlpapiFunctions } from './iphlpapi/functions.js';
 import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
 import { createCfgmgrFunctions } from './cfgmgr32/functions.js';
+import { createMsvfwFunctions } from './msvfw32/functions.js';
 import { createIostreamFunctions } from './msvcirt/functions.js';
 import { formatToString } from './msvcrt/format.js';
 import { createDsetupFunctions } from './dsetup/functions.js';
@@ -2062,6 +2063,9 @@ export function createWin32Module(){
 
                 // The device tree: its root alone, with no bus resources.
                 'CFGMGR32.dll': createCfgmgrFunctions({ writeMemory, readCString }),
+
+                // Video for Windows with no compressors and no MCI video device.
+                'MSVFW32.dll': createMsvfwFunctions({ writeMemory }),
 
                 // The old iostream library: its objects live in the program's
                 // memory and its methods run over the C runtime's heap, locks
