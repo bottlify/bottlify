@@ -493,6 +493,13 @@ const ranSince = (image, cpu)=>{
 setInterval(async()=>{
     try
     {
+        // This process as a whole, every worker in it: what grows between two
+        // lines is what a page's tab would grow by.
+        const usage = process.memoryUsage();
+        const mb = (/** @type {number} */ bytes)=>Math.round(bytes / 1048576);
+        console.log(seconds(), 'MEM', JSON.stringify({ rss: mb(usage.rss),
+            heapUsed: mb(usage.heapUsed), external: mb(usage.external),
+            arrayBuffers: mb(usage.arrayBuffers) }));
         for (const { image, diagnostics } of await app.standing())
         {
             /** @param {string} layer */
