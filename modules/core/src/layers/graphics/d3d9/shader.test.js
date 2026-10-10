@@ -115,19 +115,22 @@ test('a register type split across the token is put back together', ()=>{
     assert.equal(parsed.instructions[0].sources[0].index, 3);
 });
 
-test('a predicated instruction reads its predicate before its destination', ()=>{
+test('a predicated instruction reads its predicate after its destination', ()=>{
+    // (p0) mov r1, c0: the order D3DXAssembleShader writes and Wine's
+    // visual tests carry (0x14000001, r, p0, c).
     const parsed = parseShader([
         VS_2_0,
-        (op(OPCODE.MOV, 3) | PREDICATED) >>> 0, src(REGISTER.PREDICATE, 0), dst(REGISTER.TEMP, 1),
+        (op(OPCODE.MOV, 3) | PREDICATED) >>> 0, dst(REGISTER.TEMP, 1), src(REGISTER.PREDICATE, 0),
         src(REGISTER.CONST, 0),
         END_TOKEN,
     ]);
     assert.equal(parsed.error, null);
     const [mov] = parsed.instructions;
     assert.equal(mov.predicated, true);
-    assert.equal(mov.sources[0].type, REGISTER.PREDICATE);
     assert.equal(mov.dest?.type, REGISTER.TEMP);
-    assert.equal(mov.sources[1].type, REGISTER.CONST);
+    assert.equal(mov.predicate?.type, REGISTER.PREDICATE);
+    assert.equal(mov.sources.length, 1, 'the predicate is not one of the sources');
+    assert.equal(mov.sources[0].type, REGISTER.CONST);
 });
 
 test('a sampler declaration says what kind of texture it samples', ()=>{
