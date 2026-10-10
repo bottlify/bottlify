@@ -59,8 +59,9 @@ import {
     reportedBackBufferCount, targetPairResult, validatePresentParameters, validateStages,
 } from './validity.js';
 import {
-    createPriority, createReferenceCount, createSurface, createTexture, createVolumeTexture,
-    rectMoveOf, regionAtLevel, volumeUpdate, writeFrontBuffer, writePixels,
+    chainBytes, createPriority, createReferenceCount, createSurface, createTexture,
+    createVideoMemory, createVolumeTexture, rectMoveOf, regionAtLevel, volumeUpdate,
+    writeFrontBuffer, writePixels,
 } from '../d3d9/resources.js';
 import { volumeCreateResult, volumeLevelCount } from '../d3d9/validity.js';
 import {
@@ -856,6 +857,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         services.free?.(address);
     };
 
+    const videoMemory = createVideoMemory(AVAILABLE_TEXTURE_MEMORY);
+
     /**
      * A resource the program owns: it took a reference on the device, and
      * while it lives in the default pool it also blocks a Reset.
@@ -864,8 +867,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      * @param {() => void} [onGone]  What the resource gives back when its last
      *     reference goes, before the device's is released.
      */
-    const explicitCount = (pool, onGone = ()=>{})=>{
+    const explicitCount = (pool, onGone = ()=>{}, bytes = 0)=>{
         count.addRef();
+        const giveBack = videoMemory.take(pool, bytes);
         const blocking = pool === D3DPOOL.DEFAULT;
         if (blocking)
         {
@@ -884,7 +888,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 count.release();
                 liveDefaultPoolResources -= blocking ? 1 : 0;
             },
-            onLastRef: onGone,
+            onLastRef: ()=>{
+                giveBack();
+                onGone();
+            },
         });
     };
 
@@ -1191,7 +1198,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         const base = allocate(spec.length);
         // Its storage goes back with its last reference, as a Direct3D 9
         // buffer's does.
-        const bufferCount = explicitCount(spec.pool, ()=>free(base));
+        const bufferCount = explicitCount(spec.pool, ()=>free(base), spec.length);
         let locked = false;
         const buffer = {
             ...spec,
@@ -1595,7 +1602,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
 
         /** @returns {number} bytes, rounded the way this call always reports them */
         GetAvailableTextureMem(){
-            return AVAILABLE_TEXTURE_MEMORY;
+            return videoMemory.available();
         },
 
         /**
@@ -2783,7 +2790,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 format,
                 pool,
                 usage,
-                count: explicitCount(pool),
+                count: explicitCount(pool, undefined, chainBytes(format, width, height, 1, chain)),
                 allocate,
                 free,
             });
@@ -2817,7 +2824,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             const chain = levels || volumeLevelCount(width, height, depth);
             const texture = createVolumeTexture({
                 width, height, depth, levels: chain, format, pool, usage,
-                count: explicitCount(pool), allocate, free,
+                count: explicitCount(pool, undefined,
+                    chainBytes(format, width, height, depth, chain)), allocate, free,
             });
             renderer?.trackTexture(texture, { width, height, depth, format, levels: chain, usage });
             out.texture = texture;
@@ -2850,7 +2858,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 format,
                 pool,
                 usage,
-                count: explicitCount(pool),
+                count: explicitCount(pool, undefined,
+                    chainBytes(format, edgeLength, edgeLength, 1, chain) * 6),
                 allocate,
                 free,
                 cube: true,
@@ -2886,7 +2895,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 lockable,
                 pixels: targetPixels(),
                 base: allocate(surfaceBytes(format, width, height)),
-                count: explicitCount(D3DPOOL.DEFAULT, ()=>retireSurface(surface)),
+                count: explicitCount(D3DPOOL.DEFAULT, ()=>retireSurface(surface),
+                    surfaceBytes(format, width, height)),
             });
             out.surface = surface;
             return D3D_OK;
@@ -2914,7 +2924,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 usage: D3DUSAGE.DEPTHSTENCIL,
                 divergence: services.divergence ?? null,
                 base: allocate(surfaceBytes(format, width, height)),
-                count: explicitCount(D3DPOOL.DEFAULT, ()=>retireSurface(surface)),
+                count: explicitCount(D3DPOOL.DEFAULT, ()=>retireSurface(surface),
+                    surfaceBytes(format, width, height)),
             });
             out.surface = surface;
             return D3D_OK;

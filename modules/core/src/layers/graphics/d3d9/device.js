@@ -63,8 +63,9 @@ import {
 import { createDefaultStageStates } from '../d3d8/stagestates.js';
 import { createDefaultRenderStates } from './renderstates.js';
 import {
-    createPriority, createReferenceCount, createSurface, createTexture, createVolumeTexture,
-    packColour, rectMoveOf, regionAtLevel, volumeUpdate, writeFrontBuffer, writePixels,
+    chainBytes, createPriority, createReferenceCount, createSurface, createTexture,
+    createVideoMemory, createVolumeTexture, packColour, rectMoveOf, regionAtLevel, volumeUpdate,
+    writeFrontBuffer, writePixels,
 } from './resources.js';
 import {
     SURFACE_TYPE, reportedBackBufferCount, validatePresentParameters, volumeCreateResult,
@@ -992,6 +993,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      */
     const pooled = new Set();
 
+    const videoMemory = createVideoMemory(AVAILABLE_TEXTURE_MEMORY);
+
     /**
      * A resource that the program owns: it took a reference on the device.
      *
@@ -999,12 +1002,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * @param {() => void} [onGone]  What the resource gives back when its last
      *     reference goes, before the device's is released.
      */
-    const explicitCount = (pool = D3DPOOL.MANAGED, onGone = ()=>{})=>{
+    const explicitCount = (pool = D3DPOOL.MANAGED, onGone = ()=>{}, bytes = 0)=>{
         // The reference a resource holds on the device follows the program's
         // count: one the device keeps bound past the program's last Release
         // holds none, and taking it back takes one again (Wine's d3d9ex
         // test_reset_ex ends with the device's count at zero).
         count.addRef();
+        const giveBack = videoMemory.take(pool, bytes);
         const made = createReferenceCount({
             onFirstRef: ()=>count.addRef(),
             onZero: ()=>count.release(),
@@ -1013,6 +1017,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             // resets, would otherwise keep one entry for every buffer it made.
             onLastRef: ()=>{
                 pooled.delete(entry);
+                giveBack();
                 onGone();
             },
         });
@@ -1263,7 +1268,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     const createBuffer = options=>{
         // Its storage goes back when the last reference does, the program's or
         // the device's binding, whichever is later.
-        const bufferCount = explicitCount(options.pool, ()=>free(base));
+        const bufferCount = explicitCount(options.pool, ()=>free(base), options.length);
         const base = allocate(options.length);
         let locked = false;
         const buffer = {
@@ -1827,7 +1832,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     const makeTexture = spec=>{
         const texture = createTexture({
             ...spec,
-            count: explicitCount(spec.pool),
+            count: explicitCount(spec.pool, undefined,
+                chainBytes(spec.format, spec.width, spec.height, 1, spec.levels)
+                * (spec.cube ? 6 : 1)),
             allocate: spec.allocate ?? allocate,
             free: spec.free ?? free,
             // This version refuses a lock rectangle that is not one.
@@ -2041,7 +2048,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
 
         /** @returns {number} bytes, rounded the way this call always reports them */
         GetAvailableTextureMem(){
-            return AVAILABLE_TEXTURE_MEMORY;
+            return videoMemory.available();
         },
 
         /**
@@ -3721,7 +3728,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             const chain = levels || volumeLevelCount(width, height, depth);
             const texture = createVolumeTexture({
                 width, height, depth, levels: chain, format, pool, usage,
-                count: explicitCount(pool), allocate, free,
+                count: explicitCount(pool, undefined,
+                    chainBytes(format, width, height, depth, chain)), allocate, free,
             });
             renderer?.trackTexture?.(texture,
                 { width, height, depth, format, levels: chain, usage });
@@ -3758,7 +3766,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 usage: D3DUSAGE.RENDERTARGET | usage,
                 lockable,
                 base: allocate(surfaceBytes(format, width, height)),
-                count: explicitCount(D3DPOOL.DEFAULT, ()=>retireSurface(surface)),
+                count: explicitCount(D3DPOOL.DEFAULT, ()=>retireSurface(surface),
+                    surfaceBytes(format, width, height)),
                 rejectsMalformedRects: true,
                 divergence: services.divergence ?? null,
                 pixels: targetPixels(),
@@ -3788,7 +3797,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 pool: D3DPOOL.DEFAULT,
                 usage: D3DUSAGE.DEPTHSTENCIL | usage,
                 base: allocate(surfaceBytes(format, width, height)),
-                count: explicitCount(D3DPOOL.DEFAULT, ()=>retireSurface(surface)),
+                count: explicitCount(D3DPOOL.DEFAULT, ()=>retireSurface(surface),
+                    surfaceBytes(format, width, height)),
                 rejectsMalformedRects: true,
             });
             out.surface = surface;
@@ -3824,7 +3834,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 base: userMemory || allocate(surfaceBytes(format, width, height)),
                 // The program's own memory stays the program's.
                 count: explicitCount(pool, ()=>(userMemory === 0 ? retireSurface(surface)
-                    : renderer?.retire(surface))),
+                    : renderer?.retire(surface)), surfaceBytes(format, width, height)),
                 rejectsMalformedRects: true,
             });
             out.surface = surface;

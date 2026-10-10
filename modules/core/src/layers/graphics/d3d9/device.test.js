@@ -965,3 +965,42 @@ test('a buffer released and unbound is not kept by the device until a reset', as
     assert.equal(counters.filter(counter=>counter.deref() !== undefined).length, 0);
     assert.equal(device.release(), 0);
 });
+
+test('GetAvailableTextureMem falls as default-pool resources are made and comes back as they go',
+    ()=>{
+        // Wine's d3d9 test_vidmem_accounting: twenty 1024x1024 A8R8G8B8 render
+        // targets take at least 2 MB each off what the device reports.
+        const device = createDevice();
+        const start = device.GetAvailableTextureMem();
+        /** @type {any[]} */
+        const made = [];
+        for (let index = 0; index < 20; index++)
+        {
+            /** @type {{ texture?: any }} */
+            const out = {};
+            assert.equal(device.CreateTexture(1024, 1024, 1, D3DUSAGE.RENDERTARGET,
+                D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, out), D3D_OK);
+            made.push(out.texture);
+        }
+        const end = device.GetAvailableTextureMem();
+        assert.ok(start - end > 2 * 1024 * 1024 * made.length,
+            `fell by ${(start - end) / 1048576} MB`);
+        assert.equal(end % (1 << 20), 0, 'in whole megabytes');
+        /** @type {{ buffer?: any }} */
+        const buffer = {};
+        assert.equal(device.CreateVertexBuffer(8 << 20, 0, 0, D3DPOOL.DEFAULT, buffer), D3D_OK);
+        assert.equal(device.GetAvailableTextureMem(), end - (8 << 20), 'a buffer counts too');
+        /** @type {{ buffer?: any }} */
+        const managed = {};
+        assert.equal(device.CreateVertexBuffer(8 << 20, 0, 0, D3DPOOL.MANAGED, managed), D3D_OK);
+        assert.equal(device.GetAvailableTextureMem(), end - (8 << 20),
+            'a managed one does not');
+        for (const texture of made)
+        {
+            assert.equal(texture.release(), 0);
+        }
+        assert.equal(buffer.buffer.release(), 0);
+        assert.equal(managed.buffer.release(), 0);
+        assert.equal(device.GetAvailableTextureMem(), start);
+        assert.equal(device.release(), 0);
+    });
