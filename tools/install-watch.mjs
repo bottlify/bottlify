@@ -523,6 +523,21 @@ setInterval(async()=>{
                 traps: `${cpu.traps}/${cpu.trapCapacity}`,
                 refused: bridge.comInterfacesRefused, because: bridge.comRefusedBecause,
             }));
+            // What the devices drew against what reached the screen: a
+            // picture that stops changing while the program still presents
+            // is a device that stopped replaying, and only these say so.
+            const graphics = metrics('graphics');
+            const device = graphics.seam?.device;
+            if (device || graphics.worker)
+            {
+                const last = device?.recentFrames?.at(-1);
+                console.log(seconds(), 'GFX', image.split('\\').pop(), JSON.stringify({
+                    shown: graphics.worker?.frames, dropped: graphics.worker?.dropped,
+                    drawn: device?.frames, replays: device?.timing?.replays,
+                    failures: device?.failures, last: last && `#${last.index} ${last.draws}`
+                        + ` draws ${last.clears} clears ${last.target}`,
+                }));
+            }
             for (const line of describeWindows(win32.windows ?? []))
             {
                 console.log(seconds(), 'WINDOW', line);
