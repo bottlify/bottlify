@@ -267,8 +267,11 @@ function block(p, next){
         return lines;
     };
     const temp = pick(next, p.temps);
-    switch (Math.floor(next() * 5))
+    switch (Math.floor(next() * 7))
     {
+        case 5: return [`call l${Math.floor(next() * SUBROUTINES)}`];
+        case 6: return [`callnz l${Math.floor(next() * SUBROUTINES)}, ${next() < 0.5 ? '!' : ''}`
+            + `b${Math.floor(next() * 4)}`];
         case 0: return [`if b${Math.floor(next() * 4)}`, ...inner(), 'endif'];
         case 1: return [`if b${Math.floor(next() * 4)}`, ...inner(), 'else', ...inner(), 'endif'];
         case 2:
@@ -280,10 +283,48 @@ function block(p, next){
     }
 }
 
+/** The subroutines a profile with flow control has, l0 and l1. */
+const SUBROUTINES = 2;
+
 /**
- * @param {Profile} p @param {string[]} body
+ * The bodies of the subroutines: a few instructions, a ret from inside a
+ * branch or a loop now and then, and l1 calling l0.
+ *
+ * @param {Profile} p @param {() => number} next
+ * @returns {string[][]}
  */
-const programText = (p, body)=>[p.name, ...p.head, ...p.init, ...body, ...p.tail].join('\n');
+function subroutines(p, next){
+    const plainOne = ()=>instruction({ ...p, flow: false, special: [] }, next)
+        .filter(line=>!line.startsWith('+'));
+    return Array.from({ length: SUBROUTINES }, (_, k)=>{
+        const lines = [...plainOne(), ...plainOne()];
+        const temp = pick(next, p.temps);
+        const roll = next();
+        if (roll < 0.3)
+        {
+            lines.splice(1, 0, `if b${Math.floor(next() * 4)}`, ...plainOne(), 'ret', 'endif');
+        }
+        else if (roll < 0.6)
+        {
+            lines.push('rep i0', ...plainOne(), `if_gt ${temp}.x, c1.y`, 'ret', 'endif',
+                ...plainOne(), 'endrep');
+        }
+        if (k > 0 && next() < 0.5)
+        {
+            lines.push('call l0');
+        }
+        return lines;
+    });
+}
+
+/**
+ * @param {Profile} p @param {string[]} body @param {string[][]} [subs]
+ */
+const programText = (p, body, subs = [])=>[p.name, ...p.head, ...p.init, ...body, ...p.tail,
+    ...(subs.length > 0
+        ? ['ret', ...subs.flatMap((lines, k)=>[`label l${k}`, ...lines, 'ret'])]
+        : []),
+].join('\n');
 
 /**
  * @typedef {Object} GateCase
@@ -314,6 +355,15 @@ const programText = (p, body)=>[p.name, ...p.head, ...p.init, ...body, ...p.tail
 export function buildCase(profile, seed, length = 10){
     const p = PROFILES[profile];
     const next = generator(seed);
+    // Subroutines only where the version has them and the bodies assemble.
+    let subs = p.flow ? subroutines(p, next) : [];
+    try
+    {
+        assemble(programText(p, [], subs));
+    }
+    catch {
+        subs = [];
+    }
     /** @type {string[]} */
     const body = [];
     for (let tries = 0; body.length < length && tries < length * 20; tries++)
@@ -321,14 +371,14 @@ export function buildCase(profile, seed, length = 10){
         const candidate = instruction(p, next);
         try
         {
-            assemble(programText(p, [...body, ...candidate]));
+            assemble(programText(p, [...body, ...candidate], subs));
             body.push(...candidate);
         }
         catch {
             // Not a shader this version allows: not taken.
         }
     }
-    const text = programText(p, body);
+    const text = programText(p, body, subs);
     const tokens = assemble(text);
 
     const ps1 = profile.startsWith('ps_1_');

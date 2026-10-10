@@ -51,10 +51,17 @@
  *   reads (`bumpRegister`): two registers a stage, D3DTSS_BUMPENVMAT00, 01,
  *   10 and 11, then D3DTSS_BUMPENVLSCALE and LOFFSET.
  *
- * Three things are not translated and say so: predicated execution;
- * subroutines, whose body would need the entry point's registers; and texture
- * reads from a vertex shader. A shader using any of them is reported as
- * untranslatable rather than translated wrong.
+ * - **Subroutines are inlined** at each call: a body reads and writes the
+ *   caller's registers and Direct3D allows no recursion. A body that returns
+ *   before its end runs inside a loop its ret breaks out of, through any loop
+ *   of its own by a flag; main is wrapped the same way when it returns early.
+ * - **The predicate is a vec4<bool>**: setp writes it through its mask, a
+ *   predicated write keeps each component its predicate is false for, and
+ *   if, breakp and callnz read one component of it.
+ *
+ * One thing is not translated and says so: texture reads from a vertex
+ * shader. A shader using it is reported as untranslatable rather than
+ * translated wrong.
  */
 
 import { OPCODE, REGISTER, SHADER_KIND } from './shader.js';
@@ -307,13 +314,17 @@ function swizzleOf(operand){
  * @param {string} target   The WGSL variable.
  * @param {import('./shader.js').Operand} dest
  * @param {string} value    A vec4f expression.
+ * @param {string | null} [predicate]  A vec4<bool> the write runs under, per component.
  */
-function writeMasked(target, dest, value){
+function writeMasked(target, dest, value, predicate = null){
     const scale = SHIFT[dest.shift];
     const shifted = scale ? `(${value} * ${scale})` : value;
-    const saturated = (dest.resultModifier & SATURATE) !== 0
+    const clamped = (dest.resultModifier & SATURATE) !== 0
         ? `clamp(${shifted}, vec4f(0.0), vec4f(1.0))`
         : shifted;
+    // A predicated write keeps the old value of each component its
+    // predicate is false for.
+    const saturated = predicate ? `select(${target}, ${clamped}, ${predicate})` : clamped;
     if (dest.writeMask === 0xf)
     {
         return `${target} = ${saturated};`;
@@ -417,6 +428,31 @@ function moduleHeader(options){
 }
 
 /**
+ * Whether a body returns before its end: a ret inside a block, or one with
+ * instructions after it.
+ *
+ * @param {import('./shader.js').Instruction[]} list
+ */
+function returnsEarly(list){
+    let depth = 0;
+    return list.some((instruction, at)=>{
+        switch (instruction.opcode)
+        {
+            case OPCODE.IF: case OPCODE.IFC: case OPCODE.REP: case OPCODE.LOOP:
+                depth++;
+                return false;
+            case OPCODE.ENDIF: case OPCODE.ENDREP: case OPCODE.ENDLOOP:
+                depth--;
+                return false;
+            case OPCODE.RET:
+                return depth > 0 || at < list.length - 1;
+            default:
+                return false;
+        }
+    });
+}
+
+/**
  * Translates one shader.
  *
  * @param {import('./shader.js').ParsedShader} parsed
@@ -495,9 +531,22 @@ export function translateShader(parsed, options = {}){
      * The open blocks, innermost last, so that the one closing instruction
      * shared by three openers knows what it closes.
      *
-     * @type {{ kind: 'if' | 'rep' | 'loop', step?: string }[]}
+     * @type {{ kind: 'if' | 'rep' | 'loop', step?: string, returns?: string, saved?: number }[]}
      */
     const blocks = [];
+    /**
+     * The bodies being translated that a ret leaves: main when it returns
+     * from inside a block, and each subroutine inlined at its call. A ret
+     * breaks out of the frame's wrapping loop, through any loop of its own
+     * by the frame's flag.
+     *
+     * @type {{ flag: string, base: number }[]}
+     */
+    const frames = [];
+    /** The labels being inlined, outermost first, so a recursive call is refused. @type {number[]} */
+    const calling = [];
+    let frameCount = 0;
+    let loopCount = 0;
 
     /** @param {string} line */
     const emit = line=>{
@@ -638,10 +687,10 @@ export function translateShader(parsed, options = {}){
                     ? 'vec4f(in.vPos.xy - 0.5, 0.0, 1.0)'
                     : 'vec4f(select(-1.0, 1.0, in.vFace))';
             case REGISTER.PREDICATE:
-                fail('predicated execution is not translated');
-                return 'r0';
+                used.add('p0');
+                return 'p0';
             case REGISTER.LABEL:
-                fail('subroutines are not translated');
+                fail('a label read as a value');
                 return 'r0';
             case REGISTER.SAMPLER:
                 if (vertex)
@@ -704,9 +753,15 @@ export function translateShader(parsed, options = {}){
      * @param {import('./shader.js').Operand} operand
      */
     const condition = operand=>{
-        const raw = registerName(operand, false);
+        // A predicate is read through its replicated swizzle: one component.
+        const raw = operand.type === REGISTER.PREDICATE
+            ? `${registerName(operand, false)}.${COMPONENT[operand.swizzle & 3]}`
+            : registerName(operand, false);
         return operand.modifier === MODIFIER.NOT ? `(!${raw})` : raw;
     };
+
+    /** Whether the instruction being translated has had its predicate applied. */
+    let predicateApplied = false;
 
     /**
      * An integer source's component, for the loops.
@@ -721,7 +776,9 @@ export function translateShader(parsed, options = {}){
      */
     const write = (instruction, value)=>{
         const dest = /** @type {import('./shader.js').Operand} */ (instruction.dest);
-        emit(writeMasked(registerName(dest, true), dest, value));
+        const predicate = instruction.predicate ? source(instruction.predicate) : null;
+        predicateApplied = true;
+        emit(writeMasked(registerName(dest, true), dest, value, predicate));
     };
 
     /** @param {import('./shader.js').Instruction} instruction @param {number} at */
@@ -897,12 +954,9 @@ export function translateShader(parsed, options = {}){
     /** @param {import('./shader.js').Instruction} instruction */
     const comparison = instruction=>COMPARISON[instruction.control & 0x7] ?? '==';
 
-    for (const instruction of parsed.instructions)
-    {
-        if (instruction.predicated)
-        {
-            fail('predicated execution is not translated');
-        }
+    /** @param {import('./shader.js').Instruction} instruction */
+    const translateOne = instruction=>{
+        predicateApplied = false;
         switch (instruction.opcode)
         {
             case OPCODE.NOP:
@@ -1211,6 +1265,14 @@ export function translateShader(parsed, options = {}){
                 }
                 indent--;
                 emit('}');
+                if (block.kind === 'loop')
+                {
+                    emit(`aL = _aL${block.saved};`);
+                }
+                if (block.returns)
+                {
+                    emit(`if (${block.returns}) { break; }`);
+                }
                 break;
             }
             case OPCODE.REP:
@@ -1224,11 +1286,15 @@ export function translateShader(parsed, options = {}){
                 // loop aL, i#: i.x passes, aL from i.y, stepping by i.z each pass.
                 const counter = instruction.sources[1];
                 used.add('aL');
+                // aL is the innermost loop's: an enclosing loop's counter
+                // comes back when this one ends.
+                const saved = loopCount++;
+                emit(`let _aL${saved} = aL;`);
                 emit(`aL = ${integer(counter, 'y')};`);
                 emit(`for (var _loop${blocks.length} = 0;`
                     + ` _loop${blocks.length} < ${integer(counter, 'x')};`
                     + ` _loop${blocks.length}++) {`);
-                blocks.push({ kind: 'loop', step: `aL += ${integer(counter, 'z')};` });
+                blocks.push({ kind: 'loop', step: `aL += ${integer(counter, 'z')};`, saved });
                 indent++;
                 break;
             }
@@ -1239,24 +1305,70 @@ export function translateShader(parsed, options = {}){
                 emit(`if (${src(instruction, 0)}.x ${comparison(instruction)}`
                     + ` ${src(instruction, 1)}.x) { break; }`);
                 break;
-            case OPCODE.RET:
-                if (blocks.length === 0)
+            case OPCODE.RET: {
+                const frame = frames[frames.length - 1];
+                if (!frame)
                 {
-                    emit('return out;');
+                    // Main's own last instruction: the body ends here anyway.
+                    break;
                 }
-                else
+                const loops = blocks.slice(frame.base).filter(block=>block.kind !== 'if');
+                if (loops.length > 0)
                 {
-                    fail('a return inside a block is not translated');
+                    emit(`${frame.flag} = true;`);
+                    for (const block of loops)
+                    {
+                        block.returns = frame.flag;
+                    }
                 }
+                emit('break;');
                 break;
+            }
             case OPCODE.LABEL:
-            case OPCODE.CALL:
-            case OPCODE.CALLNZ:
-                fail('subroutines are not translated');
                 break;
-            case OPCODE.SETP:
+            case OPCODE.CALL:
+            case OPCODE.CALLNZ: {
+                // Inlined: a subroutine reads and writes the caller's
+                // registers, and Direct3D allows no recursion.
+                const label = instruction.sources[0].index;
+                const called = subroutines.get(label);
+                if (!called)
+                {
+                    fail(`a call to l${label}, which the shader does not define`);
+                    break;
+                }
+                if (calling.includes(label))
+                {
+                    fail(`a recursive call to l${label}`);
+                    break;
+                }
+                if (instruction.opcode === OPCODE.CALLNZ)
+                {
+                    emit(`if (${condition(instruction.sources[1])}) {`);
+                    indent++;
+                }
+                calling.push(label);
+                translateBody(called, true);
+                calling.pop();
+                if (instruction.opcode === OPCODE.CALLNZ)
+                {
+                    indent--;
+                    emit('}');
+                }
+                break;
+            }
+            case OPCODE.SETP: {
+                // setp_cmp p0.mask, a, b: each written component the comparison's.
+                const dest = /** @type {import('./shader.js').Operand} */ (instruction.dest);
+                used.add('p0');
+                const parts = [...COMPONENT].map((letter, component)=>
+                    ((dest.writeMask & (1 << component)) !== 0 ? `_t.${letter}` : `p0.${letter}`));
+                emit(`{ let _t = ${src(instruction, 0)} ${comparison(instruction)}`
+                    + ` ${src(instruction, 1)}; p0 = vec4<bool>(${parts.join(', ')}); }`);
+                break;
+            }
             case OPCODE.BREAKP:
-                fail('predicated execution is not translated');
+                emit(`if (${condition(instruction.sources[0])}) { break; }`);
                 break;
             case OPCODE.PHASE:
                 break;
@@ -1373,7 +1485,53 @@ export function translateShader(parsed, options = {}){
             default:
                 fail(`${instruction.name} is not translated`);
         }
+        if (instruction.predicate && !predicateApplied)
+        {
+            fail(`a predicated ${instruction.name} is not translated`);
+        }
+    };
+
+    /**
+     * A body of instructions, wrapped in a loop a ret can leave when one
+     * returns before its end.
+     *
+     * @param {import('./shader.js').Instruction[]} list @param {boolean} wrap
+     */
+    const translateBody = (list, wrap)=>{
+        if (!wrap)
+        {
+            list.forEach(translateOne);
+            return;
+        }
+        const flag = `_ret${frameCount++}`;
+        emit(`var ${flag} = false;`);
+        emit('loop {');
+        indent++;
+        frames.push({ flag, base: blocks.length });
+        list.forEach(translateOne);
+        frames.pop();
+        emit('break;');
+        indent--;
+        emit('}');
+    };
+
+    // Main runs to the first label; each label's body runs to the next.
+    /** @type {import('./shader.js').Instruction[]} */
+    const main = [];
+    /** @type {Map<number, import('./shader.js').Instruction[]>} */
+    const subroutines = new Map();
+    let filling = main;
+    for (const instruction of parsed.instructions)
+    {
+        if (instruction.opcode === OPCODE.LABEL)
+        {
+            filling = [];
+            subroutines.set(instruction.sources[0]?.index ?? -1, filling);
+            continue;
+        }
+        filling.push(instruction);
     }
+    translateBody(main, returnsEarly(main));
 
     if (blocks.length > 0)
     {
@@ -1408,9 +1566,9 @@ export function translateShader(parsed, options = {}){
     const declarations = [];
     for (const name of [...used].sort())
     {
-        declarations.push(name === 'aL'
-            ? '    var aL: i32 = 0;'
-            : `    var ${name}: vec4f = vec4f(0.0);`);
+        declarations.push(name === 'aL' ? '    var aL: i32 = 0;'
+            : name === 'p0' ? '    var p0: vec4<bool> = vec4<bool>(false);'
+                : `    var ${name}: vec4f = vec4f(0.0);`);
     }
 
     /** @type {string[]} */
