@@ -295,10 +295,6 @@ function isTransformType(type){
  *     Where a full-screen device's gamma ramp reaches the picture. Absent, a
  *     ramp is kept and read back only.
  * @property {import('../webgpu/internal/latency.js').FrameQueued} [frameQueued]
- * @property {(address: number, version: number) => void} [readBackAhead]
- *     Where the device plays a recording, told each time a render target a
- *     copy has read back is read back again ahead of the next copy: its memory
- *     at `address` holds the GPU's picture as of `version` of its `drawnInto`.
  *     Told of every frame a present queues; what it answers is what the
  *     present waits on before it answers the program. Absent, a present never
  *     waits.
@@ -399,7 +395,7 @@ export function createDirect3D8(options = {}){
     const {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
-        probeTexture, fog, mips, nanProbe, onDeviceLost, gamma, frameQueued, readBackAhead, ...caps
+        probeTexture, fog, mips, nanProbe, onDeviceLost, gamma, frameQueued, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
@@ -407,7 +403,7 @@ export function createDirect3D8(options = {}){
     const services = {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
-        probeTexture, fog, mips, nanProbe, onDeviceLost, gamma, frameQueued, readBackAhead,
+        probeTexture, fog, mips, nanProbe, onDeviceLost, gamma, frameQueued,
     };
     if (backend && !readMemory)
     {
@@ -787,8 +783,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             return undefined;
         }
         return {
-            /** @param {any} surface @param {boolean} [ahead] read before anything waits for it */
-            readBack: (surface, ahead = false)=>renderer.readSurface(surface, ahead).then(
+            readBack: surface=>renderer.readSurface(surface).then(
                 (/** @type {{ data: Uint8Array }} */ pixels)=>{
                     writePixels(surface, pixels.data, write);
                 }),
@@ -900,7 +895,6 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      * @param {any} surface
      */
     const retireSurface = surface=>{
-        readsAhead.delete(surface);
         free(surface.base);
         renderer?.retire(surface);
     };
@@ -1477,52 +1471,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      * @returns {number | Promise<number>}
      */
     const presented = submitted=>{
-        readAhead();
         const held = submitted ? services.frameQueued?.(submitted) ?? null : null;
         return held ? held.then(()=>D3D_OK) : D3D_OK;
     };
 
-    /**
-     * Render targets a copy has read back, with the last read issued for each:
-     * which `drawnInto` it took and when its bytes are in memory. A program
-     * that reads a target back every frame -- a fence against the GPU running
-     * ahead -- reads one drawn in the frame before, so each is read again as a
-     * frame is presented, and the copy waits on that read rather than issuing
-     * its own. Every choice turns on the counts alone, never on whether a read
-     * has come back yet, so a device that plays a recording asks its GPU for
-     * exactly what a device drawing for itself asks. Where the drawing is
-     * played for a device elsewhere, that device is told
-     * (`services.readBackAhead`) and answers its own copy.
-     *
-     * @type {Map<object, { version: number, read: Promise<void> }>}
-     */
-    const readsAhead = new Map();
-    /**
-     * @param {any} surface @param {number} version @param {any} pixels
-     * @param {boolean} [ahead]
-     */
-    const readInto = (surface, version, pixels, ahead = false)=>{
-        const read = pixels.readBack(surface, ahead);
-        readsAhead.set(surface, { version, read });
-        return read;
-    };
-    const readAhead = ()=>{
-        const pixels = readsAhead.size > 0 ? targetPixels() : undefined;
-        if (!pixels)
-        {
-            return;
-        }
-        const tell = services.readBackAhead ?? (()=>{});
-        for (const [surface, last] of readsAhead)
-        {
-            const now = drawnInto.get(surface) ?? 0;
-            if (now !== last.version)
-            {
-                const at = /** @type {any} */ (surface).base;
-                readInto(surface, now, pixels, true).then(()=>tell(at, now), ()=>{});
-            }
-        }
-    };
 
     /**
      * An additional swap chain's back buffer presented: onto the display
@@ -3146,16 +3098,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             // black. They are read back first, as a lock of the target reads.
             const pixels = surfaceTypeOf(from) === SURFACE_TYPE.RENDER_TARGET
                 ? targetPixels() : undefined;
-            if (pixels)
-            {
-                // A read of this drawing already issued -- ahead, or by the
-                // copy before -- is waited on rather than asked again.
-                const now = drawnInto.get(source) ?? 0;
-                const last = readsAhead.get(source);
-                return (last && last.version === now ? last.read
-                    : readInto(source, now, pixels)).then(describeMoves);
-            }
-            return describeMoves();
+            return pixels ? pixels.readBack(source).then(describeMoves) : describeMoves();
         },
 
         /**

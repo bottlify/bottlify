@@ -85,6 +85,27 @@ evidence again.
   which the change does not touch. Not kept.
 - Not recorded: GPU, driver, power plan.
 
+### 2026-10-10 -- reading a fence target back ahead, as each frame is presented
+
+- Idea: the RC demo reads back two 16x16 render targets every frame (1024 bytes each, locked
+  read-only: a fence against the GPU running ahead), drawing into each after copying it; the
+  played device could read each changed target back again at every present and tell the
+  recording which drawing its memory held, so the next frame's copy is answered without a
+  round trip. Kept beside it, and not part of this entry: a copy out of a target nothing has
+  drawn into since its last read-back is answered from its memory (`createTargetReads`).
+- Measured (live launcher, headed Chrome in the Parallels VM, RC demo bundle cb83b58a...,
+  first level "Find slaver camp" standing still, three 30 s samples each; frame interval from
+  `app.presented()`, the last 599 frames): without the read-ahead, median 25.9 / 26.7 /
+  26.8 ms (one sample earlier in the session), CopyRects waits 2 238 / 2 098 / 2 100 per 30 s,
+  10.7-12.5 s waited. With it, read-ahead holding the frame chain until its bytes: median
+  30.0 / 29.5 / 29.7 ms, waits 938 / 958 / 960, 7.4-7.6 s. With it releasing the chain at
+  submit: median 29.3 / 30.0 / 30.2 ms, waits 937 / 945 / 958; read-backs 4.3 ms each before,
+  5.7 ms with it (`timing.readBackMs`); a frame becomes GPU work in 0.46 ms
+  (`timing.replayMs`). Half the waits went, the frame got about 3 ms slower: the recording runs
+  a frame or two ahead of the played device, so most read-aheads land after the copy that
+  wanted them, and every one adds a read-back to the GPU's queue. Not kept.
+- Not recorded: GPU (Parallels display adapter, model not recorded), driver, power plan.
+
 ## Invalidated
 
 None yet.

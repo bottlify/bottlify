@@ -177,8 +177,6 @@ function rig(version, way, caps = {}){
                 }
                 toSender({ type: 'wrote', writes: [{ address, bytes: bytes.slice() }] });
             },
-            readBackAhead: (/** @type {number} */ address, /** @type {number} */ drawn)=>
-                toSender({ type: 'prefetched', address, version: drawn }),
         });
         if (way === 'at once')
         {
@@ -2386,9 +2384,7 @@ test('Direct3D 8: a small target read back every frame, drawn into only now and 
 test('Direct3D 8: a target drawn into every frame and read back the frame after leaves the'
     + ' program the same bytes on both sides', async()=>{
     // The order a fence keeps: the copy of what the frame before drew, then
-    // the frame's own drawing into it. The played device reads the target
-    // back ahead as each frame is presented, and the recording answers the
-    // next copy from that.
+    // the frame's own drawing into it -- every copy the renderer's to answer.
     await same(8, async run=>{
         const { device, vertices, indices } = await device8(run);
         /** @type {{ surface?: any }} */
