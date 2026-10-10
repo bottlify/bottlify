@@ -709,6 +709,45 @@ test('byte-exact: strips and fans expand to the lists they draw, winding kept', 
     assert.equal(vertexCountOf(D3DPT.POINTLIST, 0), 0);
 });
 
+test('a strip or fan of any length and index width expands as triangle by triangle', ()=>{
+    // The rewrite writes straight into a typed array; this is the same lists
+    // spelt out one primitive at a time, over lengths and widths at random.
+    let seed = 0x2545f491;
+    const random = ()=>{
+        seed ^= seed << 13;
+        seed ^= seed >>> 17;
+        seed ^= seed << 5;
+        return (seed >>> 0) / 0x100000000;
+    };
+    /** @param {number} type @param {number[]} order */
+    const spelt = (type, order)=>{
+        /** @type {number[]} */
+        const out = [];
+        const step = type === D3DPT.LINESTRIP ? 2 : 3;
+        for (let first = 0; first + step - 1 < order.length; first++)
+        {
+            out.push(...(type === D3DPT.LINESTRIP ? [order[first], order[first + 1]]
+                : type === D3DPT.TRIANGLEFAN ? (first + 2 < order.length
+                    ? [order[first + 1], order[first + 2], order[0]] : [])
+                    : first % 2 === 0 ? [order[first], order[first + 1], order[first + 2]]
+                        : [order[first], order[first + 2], order[first + 1]]));
+        }
+        return out;
+    };
+    for (let round = 0; round < 300; round++)
+    {
+        const type = [D3DPT.LINESTRIP, D3DPT.TRIANGLESTRIP, D3DPT.TRIANGLEFAN][round % 3];
+        const length = Math.floor(random() * 40);
+        const limit = random() < 0.2 ? 0x20000 : 0x10000;
+        const order = Array.from({ length }, ()=>Math.floor(random() * limit));
+        const narrow = round % 2 === 0 && limit === 0x10000;
+        const list = listIndices(type, narrow ? Uint16Array.from(order) : order);
+        assert.deepEqual([...list], spelt(type, order), `round ${round}`);
+        assert.equal(list instanceof Uint32Array, order.some(index=>index > 0xffff),
+            `round ${round}: wide only past sixteen bits`);
+    }
+});
+
 test('byte-exact: triangles under a fill mode become their edges or their vertices', ()=>{
     // D3DFILL_WIREFRAME draws each triangle's three edges and D3DFILL_POINT
     // its three vertices (Microsoft's D3DFILLMODE), whatever type of

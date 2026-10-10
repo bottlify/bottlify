@@ -507,40 +507,55 @@ const LIST_OF = Object.freeze({
  */
 export function listIndices(type, indices){
     const count = indices.length;
-    /** @type {number[]} */
-    const out = [];
+    const length = type === D3DPT.LINESTRIP ? 2 * Math.max(0, count - 1)
+        : type === D3DPT.TRIANGLESTRIP || type === D3DPT.TRIANGLEFAN ? 3 * Math.max(0, count - 2)
+            : -1;
+    if (length < 0)
+    {
+        throw new Error(`Primitive type ${type} is already a list`);
+    }
+    // Written straight into an array of the list's own length and width: a
+    // draw rewritten this way is rewritten every frame, and a number array
+    // pushed to and then copied was most of what it cost. Sixteen-bit indices
+    // stay sixteen-bit; any others are as wide as their largest.
+    let wide = false;
+    if (!(indices instanceof Uint16Array))
+    {
+        for (let index = 0; index < count && !wide; index++)
+        {
+            wide = indices[index] > 0xffff;
+        }
+    }
+    const out = wide ? new Uint32Array(length) : new Uint16Array(length);
+    let at = 0;
     switch (type)
     {
         case D3DPT.LINESTRIP:
             for (let index = 0; index + 1 < count; index++)
             {
-                out.push(indices[index], indices[index + 1]);
+                out[at++] = indices[index];
+                out[at++] = indices[index + 1];
             }
             break;
         case D3DPT.TRIANGLESTRIP:
             for (let index = 0; index + 2 < count; index++)
             {
-                if (index % 2 === 0)
-                {
-                    out.push(indices[index], indices[index + 1], indices[index + 2]);
-                }
-                else
-                {
-                    out.push(indices[index], indices[index + 2], indices[index + 1]);
-                }
-            }
-            break;
-        case D3DPT.TRIANGLEFAN:
-            for (let index = 1; index + 1 < count; index++)
-            {
-                out.push(indices[index], indices[index + 1], indices[0]);
+                const odd = index & 1;
+                out[at++] = indices[index];
+                out[at++] = indices[index + 1 + odd];
+                out[at++] = indices[index + 2 - odd];
             }
             break;
         default:
-            throw new Error(`Primitive type ${type} is already a list`);
+            for (let index = 1; index + 1 < count; index++)
+            {
+                out[at++] = indices[index];
+                out[at++] = indices[index + 1];
+                out[at++] = indices[0];
+            }
+            break;
     }
-    const wide = out.some(value=>value > 0xffff);
-    return wide ? Uint32Array.from(out) : Uint16Array.from(out);
+    return out;
 }
 
 /**
@@ -7748,10 +7763,51 @@ export function createRenderer(options){
      * @param {number} baseVertex
      * @param {number} [fill]  D3DFILL; SOLID rewrites a strip or fan as a list.
      */
-    const expandedGeometry = (type, indices, baseVertex, fill = D3DFILL.SOLID)=>{
-        const expanded = fill === D3DFILL.SOLID
+    const expandedGeometry = (type, indices, baseVertex, fill = D3DFILL.SOLID)=>
+        geometryOf(fill === D3DFILL.SOLID
             ? listIndices(type, indices)
-            : filledIndices(type, indices, fill);
+            : filledIndices(type, indices, fill), baseVertex);
+
+    /**
+     * A draw of vertices in order rewritten as a list: the list depends on
+     * nothing but the type, the count and the fill, so each is made once --
+     * a program's fans of four, drawn by the hundred every frame, were each
+     * rewritten from an array of the numbers counted out again. Never more
+     * than a few hundred kept: a count that changes every draw starts over.
+     *
+     * @type {Map<string, Uint16Array | Uint32Array>}
+     */
+    const ascendingLists = new Map();
+
+    /**
+     * @param {number} type
+     * @param {number} count
+     * @param {number} baseVertex
+     * @param {number} fill
+     */
+    const ascendingGeometry = (type, count, baseVertex, fill)=>{
+        const key = `${type}:${fill}:${count}`;
+        let expanded = ascendingLists.get(key);
+        if (!expanded)
+        {
+            const order = ascending(count);
+            expanded = fill === D3DFILL.SOLID ? listIndices(type, order)
+                : filledIndices(type, order, fill);
+            if (ascendingLists.size >= 256)
+            {
+                ascendingLists.clear();
+            }
+            ascendingLists.set(key, expanded);
+        }
+        return geometryOf(expanded, baseVertex);
+    };
+
+    /**
+     * A list written to the scratch ring, which copies it.
+     *
+     * @param {Uint16Array | Uint32Array} expanded @param {number} baseVertex
+     */
+    const geometryOf = (expanded, baseVertex)=>{
         return {
             indices: {
                 ...scratchIndices.write(expanded),
@@ -8458,7 +8514,7 @@ export function createRenderer(options){
             record(model, prepared, {
                 vertices: { gpu: streamBuffer?.gpu ?? zeroBuffer().gpu, offset: start },
                 ...(rewrite
-                    ? expandedGeometry(type, ascending(count), startVertex, fill)
+                    ? ascendingGeometry(type, count, startVertex, fill)
                     : { indices: null, count, first: startVertex }),
             }, true, streamZeroBias(model));
             if (dumping() && prepared.program)
@@ -8614,7 +8670,7 @@ export function createRenderer(options){
             }
             const vertices = scratchVertices.write(vertexData.subarray(0, count * stride));
             const geometry = rewrite
-                ? expandedGeometry(type, ascending(count), 0, fill)
+                ? ascendingGeometry(type, count, 0, fill)
                 : { indices: null, count, first: 0 };
             record(model, prepared, { vertices, ...geometry });
             if (dumping() && prepared.program)
