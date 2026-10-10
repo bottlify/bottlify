@@ -226,6 +226,27 @@ test('what is built on a device answers E_NOTIMPL, its objects null, and says so
     }
 });
 
+/**
+ * The device and mesh facilities built here, each with its argument count
+ * as its documented signature gives it.
+ */
+const BUILT = {
+    D3DXCheckTextureRequirements: 7, D3DXComputeBoundingBox: 5, D3DXComputeBoundingSphere: 5,
+    D3DXComputeNormals: 2, D3DXConvertMeshSubsetToSingleStrip: 5, D3DXCreateLine: 2,
+    D3DXCreateRenderToSurface: 7, D3DXCreateTexture: 8, D3DXFillTexture: 3,
+    D3DXGetShaderVersion: 1, D3DXSaveTextureToFileA: 4, D3DXSaveTextureToFileW: 4,
+    D3DXSaveTextureToFileInMemory: 4,
+};
+
+test('the device and mesh facilities are exported with the width they pop', ()=>{
+    const { fns } = machine();
+    for (const [name, count] of Object.entries(BUILT))
+    {
+        assert.equal(fns[name]?.argBytes, count * 4, name);
+        assert.ok(!(name in NOT_BUILT), `${name} is not also listed as not built`);
+    }
+});
+
 test('the arithmetic is code in the guest, stdcall, its handler the same JavaScript', ()=>{
     const { fns } = machine();
     for (const compiled of [COMPILED, MATRIX, VECTOR, QUATERNION])
