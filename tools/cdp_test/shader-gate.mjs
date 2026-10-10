@@ -33,7 +33,7 @@ import { fileURLToPath } from 'node:url';
 import { launchWithGpu, shutdown } from './browser.mjs';
 import { CdpEndpoint } from './cdp.mjs';
 import { serveStatic } from './server.mjs';
-import { buildCase, PROFILES, SAMPLER_BYTES } from './shader-cases.mjs';
+import { buildCase, PROFILES } from './shader-cases.mjs';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const REPORTS_DIR = join(TOOL_ROOT, 'reports');
@@ -271,24 +271,25 @@ function pageRunner(){
     const DIMENSIONS = { 'texture_2d<f32>': '2d', 'texture_cube<f32>': 'cube',
         'texture_3d<f32>': '3d' };
     /**
-     * Each sampler's 1x1 texture of known bytes and a sampler for it, view and
-     * sampler in turn: filtering and levels give back exactly those bytes.
+     * Each sampler's 1x1 texture of known bytes, in the format the case gave
+     * it, and a sampler for it, view and sampler in turn: filtering and levels
+     * give back exactly those bytes.
      *
      * @param {any} device @param {any} plan
      */
     const samplerResourcesOf = (device, plan)=>plan.samplers.flatMap((/** @type {any} */ s)=>{
         const dimension = DIMENSIONS[s.type] ?? '2d';
         const layers = dimension === 'cube' ? 6 : 1;
+        const texel = plan.texels[s.index % plan.texels.length];
         const texture = device.createTexture({
-            size: [1, 1, layers], format: 'rgba8unorm',
+            size: [1, 1, layers], format: texel.format,
             dimension: dimension === '3d' ? '3d' : '2d',
             usage: TEXTURE_BINDING | TEXTURE_COPY_DST,
         });
-        const bytes = plan.samplerBytes[s.index % plan.samplerBytes.length];
         for (let layer = 0; layer < layers; layer++)
         {
             device.queue.writeTexture({ texture, origin: [0, 0, layer] },
-                new Uint8Array(bytes), { bytesPerRow: 4 }, [1, 1, 1]);
+                new Uint8Array(texel.bytes), { bytesPerRow: texel.bytes.length }, [1, 1, 1]);
         }
         return [texture.createView({ dimension }), device.createSampler({
             magFilter: 'linear', minFilter: 'linear' })];
@@ -526,7 +527,8 @@ async function main(){
     let cdp = null;
     /** @type {any[]} */
     const failures = [];
-    /** @type {Record<string, { cases: number, passed: number, undefinedComponents: number }>} */
+    /** @type {Record<string, { cases: number, passed: number, undefinedComponents: number,
+        filled: number }>} */
     const byProfile = {};
     let adapter = null;
     try
@@ -564,8 +566,7 @@ async function main(){
                 (_, k)=>buildCase(profile, seed * 1000003 + k, length));
             const plans = cases.map(c=>({ ...pagePlan(c), entry: c.entry, samplers: c.samplers,
                 constants: c.constants, ints: c.ints, bools: c.bools,
-                viewportRegister: c.viewportRegister,
-                samplerBytes: SAMPLER_BYTES }));
+                viewportRegister: c.viewportRegister, texels: c.texels }));
             const answer = await cdp.send('Runtime.evaluate', {
                 expression: `gateRun(${JSON.stringify(plans)}).then(r => JSON.stringify(r))`,
                 awaitPromise: true, returnByValue: true,
@@ -580,8 +581,11 @@ async function main(){
                 throw new Error(`no device: ${ran.error}`);
             }
             adapter = ran.adapter;
-            const stats = { cases: cases.length, passed: 0, undefinedComponents: 0 };
+            const stats = { cases: cases.length, passed: 0, undefinedComponents: 0, filled: 0 };
             cases.forEach((c, at)=>{
+                // A case that samples a texture of fewer than four channels.
+                stats.filled += c.samplers.some(s=>c.texels[s.index % c.texels.length].ones !== 0)
+                    ? 1 : 0;
                 const verdict = compare(c, ran.results[at]);
                 stats.undefinedComponents += verdict.undefinedCount;
                 if (verdict.ok)
@@ -597,6 +601,8 @@ async function main(){
             });
             byProfile[profile] = stats;
             console.log(`${profile}: ${stats.passed}/${stats.cases} pass`
+                + `${stats.filled ? `, ${stats.filled} sampling a texture of one or two channels`
+                    : ''}`
                 + `${stats.undefinedComponents ? `, ${stats.undefinedComponents} components`
                     + ' undefined by Direct3D not compared' : ''}`);
         }
