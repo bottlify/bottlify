@@ -508,11 +508,14 @@ export function pipelineDescriptor(state, layout){
         ? undefined
         : vertexBuffersOf(layout.stride, layout.attributes, layout.streams,
             Boolean(state.points));
+    // A strip drawn from an index buffer names its index format after a
+    // slash (`triangle-strip/uint16`): the pipeline has to be built for it.
+    const [topology, stripIndexFormat] = (state.topology ?? 'triangle-list').split('/');
     return {
         primitive: {
             // A point's quad is two triangles, and a point is never culled.
-            topology: state.points ? 'triangle-list'
-                : state.topology === undefined ? 'triangle-list' : state.topology,
+            topology: state.points ? 'triangle-list' : topology,
+            ...(stripIndexFormat && !state.points ? { stripIndexFormat } : {}),
             cullMode: state.points ? 'none' : lookUp(CULL, state.cullMode, 'cull mode'),
             frontFace: 'ccw',
         },

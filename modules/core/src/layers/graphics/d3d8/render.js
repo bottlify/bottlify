@@ -2224,7 +2224,7 @@ const ZBIAS_STEP = -0.000005;
 function depthBiasOf(model, depthFormat, topology){
     // WebGPU allows a bias only on triangles.
     if (depthFormat === undefined || (topology !== undefined && topology !== 'triangle-list'
-        && topology !== 'triangle-strip' && topology !== POINT_QUADS))
+        && !topology.startsWith('triangle-strip') && topology !== POINT_QUADS))
     {
         return {};
     }
@@ -7776,6 +7776,36 @@ export function createRenderer(options){
         || (type === D3DPT.TRIANGLESTRIP && isFlatShaded(model));
 
     /**
+     * Whether an indexed strip is drawn as one, from the program's own index
+     * buffer, rather than rewritten as a list on every draw: a line strip, or
+     * a triangle strip not flat-shaded (`listed`), whose indices hold no
+     * WebGPU restart value. A strip pipeline with an index format reads
+     * 0xFFFF (0xFFFFFFFF) as the end of one strip and the start of another,
+     * where Direct3D draws that vertex; a scan of the indices is far cheaper
+     * than the rewrite it spares.
+     *
+     * @param {RenderModel} model @param {number} type
+     * @param {{ bytes: number, gpu: string }} format
+     * @param {() => Uint8Array} bytes  the draw's indices
+     */
+    const nativeStrip = (model, type, format, bytes)=>{
+        if (type !== D3DPT.LINESTRIP
+            && (type !== D3DPT.TRIANGLESTRIP || isFlatShaded(model)))
+        {
+            return false;
+        }
+        const raw = bytes();
+        const words = format.bytes === 2
+            ? (raw.byteOffset % 2 === 0
+                ? new Uint16Array(raw.buffer, raw.byteOffset, raw.byteLength >> 1)
+                : new Uint16Array(raw.slice().buffer, 0, raw.byteLength >> 1))
+            : (raw.byteOffset % 4 === 0
+                ? new Uint32Array(raw.buffer, raw.byteOffset, raw.byteLength >> 2)
+                : new Uint32Array(raw.slice().buffer, 0, raw.byteLength >> 2));
+        return !words.includes(format.bytes === 2 ? 0xffff : 0xffffffff);
+    };
+
+    /**
      * The fill mode a draw's triangles are drawn under; anything that is not
      * a triangle is SOLID, as D3DRS_FILLMODE leaves it. WebGPU cannot cull a
      * line or a point, so a culled wireframe also draws its back faces'
@@ -8493,16 +8523,20 @@ export function createRenderer(options){
             }
             const count = vertexCountOf(type, primitiveCount);
             const fill = fillOf(model, type);
-            // A list drawn solid binds the program's own indices; anything
-            // else is rewritten from them.
-            const list = fill === D3DFILL.SOLID ? LIST_OF[type] : FILLED[fill];
+            const byteOffset = startIndex * format.bytes;
+            // A list drawn solid binds the program's own indices, and so does
+            // a strip WebGPU draws as Direct3D does; anything else is rewritten
+            // from them.
+            const strip = fill === D3DFILL.SOLID && nativeStrip(model, type, format,
+                ()=>bufferFor(model.indices).gpu.bytes(byteOffset, count * format.bytes));
+            const list = strip || fill !== D3DFILL.SOLID ? FILLED[fill] : LIST_OF[type];
             const prepared = prepare(model, stream.buffer ? stream.stride : 0,
-                list === undefined ? TOPOLOGY[type] : list);
+                strip ? `${TOPOLOGY[type]}/${format.gpu}`
+                    : list === undefined ? TOPOLOGY[type] : list);
             if (!prepared)
             {
                 return;
             }
-            const byteOffset = startIndex * format.bytes;
             if (!stream.buffer)
             {
                 // Nothing read from stream zero (the device allows only that): its zeros,

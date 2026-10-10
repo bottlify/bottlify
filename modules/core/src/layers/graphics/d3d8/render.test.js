@@ -1932,7 +1932,14 @@ test('recorded: a clear of only the viewport leaves the rest of the target alone
     assert.equal(gpu.count('draw'), 1);
 });
 
-test('recorded: an indexed strip is expanded to a list from the bytes the program wrote', async()=>{
+/**
+ * An indexed strip of four vertices beside a list from the same buffer, and
+ * what the GPU was given for both.
+ *
+ * @param {number[]} order  the strip's four indices
+ * @param {{ flat?: boolean }} [how]
+ */
+async function indexedStrip(order, how = {}){
     const h = harness();
     const { device, gpu } = h;
     /** @type {{ buffer?: any }} */
@@ -1945,36 +1952,64 @@ test('recorded: an indexed strip is expanded to a list from the bytes the progra
     /** @type {{ pBits?: number }} */
     const locked = {};
     assert.equal(indices.buffer.Lock(0, 0, locked, 0), D3D_OK);
-    h.write(/** @type {number} */ (locked.pBits), new Uint8Array(Uint16Array.from([3, 2, 1, 0]).buffer));
+    h.write(/** @type {number} */ (locked.pBits), new Uint8Array(Uint16Array.from(order).buffer));
     assert.equal(indices.buffer.Unlock(), D3D_OK);
 
     assert.equal(device.BeginScene(), D3D_OK);
     assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    if (how.flat)
+    {
+        assert.equal(device.SetRenderState(D3DRS.SHADEMODE, 1), D3D_OK);
+    }
     assert.equal(device.SetStreamSource(0, vertices.buffer, 20), D3D_OK);
     assert.equal(device.SetIndices(indices.buffer, 7), D3D_OK);
     assert.equal(device.DrawIndexedPrimitive(D3DPT.TRIANGLESTRIP, 0, 4, 0, 2), D3D_OK);
     assert.equal(device.DrawIndexedPrimitive(D3DPT.TRIANGLELIST, 0, 3, 1, 1), D3D_OK);
     assert.equal(device.EndScene(), D3D_OK);
     await h.present();
-
-    const draws = gpu.of('drawIndexed').map((/** @type {any} */ call)=>call.args);
-    assert.deepEqual(draws[0], [6, 1, 0, 7], 'two triangles, from the scratch list, base kept');
-    assert.deepEqual(draws[1], [3, 1, 0, 7], 'a list draws from the bound buffer');
-    const bound = gpu.of('setIndexBuffer');
-    assert.equal(bound[0].buffer.descriptor.label, 'scratch-indices#0');
-    assert.equal(bound[0].format, 'uint16');
-    assert.match(bound[1].buffer.descriptor.label, /^indices#/,
-        'the generation the plain lock renamed to, which the draw was recorded against');
-    assert.equal(bound[1].offset, 2, 'the start index, in bytes');
-    const scratch = gpu.of('writeBuffer').find((/** @type {any} */ call)=>
-        call.buffer === bound[0].buffer);
-    assert.deepEqual([...new Uint16Array(scratch.bytes.buffer, scratch.bytes.byteOffset, 6)],
-        [3, 2, 1, 2, 0, 1], 'the strip the program wrote, as a list');
-    const pipelines = gpu.of('createRenderPipeline').map((/** @type {any} */ call)=>
-        call.descriptor.primitive.topology);
-    assert.deepEqual(pipelines, ['triangle-list'], 'one pipeline serves both');
+    const seen = {
+        draws: gpu.of('drawIndexed').map((/** @type {any} */ call)=>call.args),
+        bound: gpu.of('setIndexBuffer'),
+        written: gpu.of('writeBuffer'),
+        primitives: gpu.of('createRenderPipeline').map((/** @type {any} */ call)=>
+            call.descriptor.primitive),
+    };
     vertices.buffer.release();
     indices.buffer.release();
+    return seen;
+}
+
+test('recorded: an indexed strip is drawn as a strip from the program\'s own indices', async()=>{
+    // Rewritten as a list, every draw of it copied its indices out, built the
+    // list on the processor and wrote it to the ring.
+    const { draws, bound, primitives } = await indexedStrip([3, 2, 1, 0]);
+    assert.deepEqual(draws[0], [4, 1, 0, 7], 'four indices of the strip, base kept');
+    assert.deepEqual(draws[1], [3, 1, 0, 7], 'a list draws from the bound buffer');
+    assert.match(bound[0].buffer.descriptor.label, /^indices#/, 'the program\'s own buffer');
+    assert.equal(bound[0].format, 'uint16');
+    assert.deepEqual(primitives.map((/** @type {any} */ p)=>[p.topology, p.stripIndexFormat]),
+        [['triangle-strip', 'uint16'], ['triangle-list', undefined]],
+        'a strip pipeline built for the index format');
+});
+
+test('recorded: an indexed strip WebGPU would cut, or one flat-shaded, is still a list', async()=>{
+    // 0xFFFF is a vertex to Direct3D and a restart to a strip pipeline; a
+    // flat triangle takes its colour from a vertex WebGPU's strip does not.
+    for (const [order, how] of /** @type {[number[], any][]} */ ([
+        [[3, 2, 0xffff, 0], {}],
+        [[3, 2, 1, 0], { flat: true }],
+    ]))
+    {
+        const { draws, bound, written, primitives } = await indexedStrip(order, how);
+        assert.deepEqual(draws[0], [6, 1, 0, 7], 'two triangles, from the scratch list');
+        assert.equal(bound[0].buffer.descriptor.label, 'scratch-indices#0');
+        const scratch = written.find((/** @type {any} */ call)=>call.buffer === bound[0].buffer);
+        assert.deepEqual([...new Uint16Array(scratch.bytes.buffer, scratch.bytes.byteOffset, 6)],
+            [order[0], order[1], order[2], order[1], order[3], order[2]],
+            'the strip the program wrote, as a list');
+        assert.deepEqual(primitives.map((/** @type {any} */ p)=>p.topology), ['triangle-list'],
+            'one pipeline serves both');
+    }
 });
 
 test('recorded: a fan drawn from user memory is expanded, and unbinds stream zero', async()=>{
