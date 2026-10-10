@@ -19,6 +19,8 @@ import { createReferenceCount } from '../d3d9/resources.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
+import v8 from 'node:v8';
+import vm from 'node:vm';
 
 const RAM_BASE = 0x40000000;
 
@@ -31,7 +33,8 @@ const RAM_BASE = 0x40000000;
  */
 function toy(sides){
     return (/** @type {any} */ services)=>{
-        const side = { services, played: services.backend !== undefined, seen: /** @type {any[]} */ ([]) };
+        const side = { services, played: services.backend !== undefined,
+            seen: /** @type {any[]} */ ([]), counted: /** @type {WeakRef<any>[]} */ ([]) };
         sides.push(side);
         return {
             /** @param {{ thing?: any }} out */
@@ -85,6 +88,8 @@ function toy(sides){
             /** @param {{ thing?: any }} out */
             CreateCounted(out){
                 const count = createReferenceCount({ onLastRef: ()=>side.seen.push('gone') });
+                // Watched, never held: what keeps one alive is the test's question.
+                side.counted.push(new WeakRef(count));
                 out.thing = {
                     counter: count,
                     get refCount(){
@@ -232,6 +237,58 @@ test('the bytes sent to the played side are counted by what sent them: a buffer\
         assert.deepEqual(sender.shippedBytes(), { buffers: 16, surfaces: lend ? 0 : 16, reads: 0,
             writes: 4 }, `lent: ${lend}`);
     }
+});
+
+test('a played object the program no longer counts is not held by the player', async()=>{
+    // A program that makes and drops buffers by the ten thousand while it
+    // loads had every one held by the played side for the rest of the run.
+    const { root, played, play } = toyAcross(false);
+    for (let made = 0; made < 32; made++)
+    {
+        /** @type {{ thing?: any }} */
+        const out = {};
+        root.CreateCounted(out);
+        assert.equal(out.thing.release(), 0);
+    }
+    /** @type {{ thing?: any }} */
+    const kept = {};
+    root.CreateCounted(kept);
+    play();
+    await new Promise(resolve=>setImmediate(resolve));
+    v8.setFlagsFromString('--expose-gc');
+    /** @type {() => void} */ (vm.runInNewContext('gc'))();
+    const alive = played.counted.filter((/** @type {WeakRef<object>} */ one)=>one.deref());
+    assert.equal(alive.length, 1, 'only the one still counted');
+    kept.thing.addRef();
+    play();
+    assert.equal(alive[0].deref().value, 2, 'and calls still reach it');
+});
+
+test('one method called on many objects of a kind defines its structures\' shapes once', ()=>{
+    // Kept per object, every buffer a level made sent its Lock's shape again,
+    // and both sides' tables of shapes grew with every buffer.
+    const { root, sender, play } = toyAcross(false);
+    const make = ()=>{
+        /** @type {{ thing?: any }} */
+        const out = {};
+        root.CreateThing(out);
+        play();
+        return out.thing;
+    };
+    /** @param {any} thing */
+    const lockCost = thing=>{
+        // A structure with members, as the seam's are when they cross.
+        /** @type {{ pBits?: number }} */
+        const locked = { pBits: 0 };
+        const before = sender.sent().bytes;
+        thing.Lock(locked);
+        play();
+        return sender.sent().bytes - before;
+    };
+    const first = make();
+    lockCost(first);
+    const again = lockCost(first);
+    assert.equal(lockCost(make()), again, 'a new object\'s lock costs what a known one\'s does');
 });
 
 test('the bytes of the batches are counted by the method whose record they are', ()=>{

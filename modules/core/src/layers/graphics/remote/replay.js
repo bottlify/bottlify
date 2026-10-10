@@ -922,6 +922,15 @@ export function createRecording(options){
     /** The number `refsTo` has in the writer's table, once it has one. */
     let refsToId = -1;
     const countSite = createSite();
+    /**
+     * Each method's argument places, shared by every object of one kind: the
+     * structures one method is given have one shape whichever buffer it is
+     * called on. Kept per object, every buffer a level made defined its
+     * shapes anew, and the table of shapes on both sides grew with them.
+     *
+     * @type {Map<string, import('./wire.js').Site[]>}
+     */
+    const sitesByMethod = new Map();
 
     /**
      * A reference taken or given back here, sent as the count it left. The
@@ -986,8 +995,9 @@ export function createRecording(options){
         /** @type {number | undefined} */
         let number;
         /** Each argument's place, for the shapes of the structures passed there. */
-        /** @type {import('./wire.js').Site[]} */
-        const sites = [];
+        const kind = `${name}:${/** @type {any} */ (target).type ?? ''}`;
+        const sites = sitesByMethod.get(kind) ?? sitesByMethod.set(kind, []).get(kind)
+            ?? [];
         /** @type {(...args: any[]) => any} */
         const call = (...args)=>{
             const count = args.length;
@@ -1510,8 +1520,53 @@ export function createRecording(options){
  *     was given; `read` reads a batch of calls
  */
 export function createPlayer({ root, ship, read, borrow }){
-    /** @type {object[]} */
+    /**
+     * The played objects by the number the recording gave each. One the
+     * program still counts is held here; one whose count fell to zero is held
+     * weakly, by whatever of the device still binds it -- a buffer a stream
+     * still names, which a getter may hand back -- and goes with the last of
+     * those. Held strongly, every buffer a level's loading made and dropped
+     * stayed for the rest of the run.
+     *
+     * @type {(object | WeakRef<object>)[]}
+     */
     const objects = [root];
+    /** A slot held weakly is emptied once its object is collected. */
+    const collected = new FinalizationRegistry((/** @type {number} */ number)=>{
+        const held = objects[number];
+        if (held instanceof WeakRef && held.deref() === undefined)
+        {
+            delete objects[number];
+        }
+    });
+    /** @param {number} number @returns {any} */
+    const objectAt = number=>{
+        const held = objects[number];
+        return held instanceof WeakRef ? held.deref() : held;
+    };
+    /**
+     * After a call on one: held weakly at a count of zero, strongly again
+     * once counted.
+     *
+     * @param {number} number @param {any} object
+     */
+    const holdAsCounted = (number, object)=>{
+        const count = object?.refCount;
+        if (typeof count !== 'number')
+        {
+            return;
+        }
+        const weak = objects[number] instanceof WeakRef;
+        if (count === 0 && !weak)
+        {
+            objects[number] = new WeakRef(object);
+            collected.register(object, number);
+        }
+        else if (count > 0 && weak)
+        {
+            objects[number] = object;
+        }
+    };
     /** @type {WeakSet<object>} */
     const known = new WeakSet([root]);
     /** @type {number[]} */
@@ -1527,7 +1582,7 @@ export function createPlayer({ root, ship, read, borrow }){
     const standIn = new Proxy({}, {
         get: (_, key)=>(typeof key === 'string' ? ()=>replies.shift() : undefined),
     });
-    const reader = createReader({ ref: number=>objects[number], service: ()=>standIn });
+    const reader = createReader({ ref: objectAt, service: ()=>standIn });
 
     /** @param {object} object */
     const bind = object=>{
@@ -1560,7 +1615,7 @@ export function createPlayer({ root, ship, read, borrow }){
 
     return {
         play(call){
-            const target = /** @type {any} */ (objects[call.t]);
+            const target = /** @type {any} */ (objectAt(call.t));
             if (call.op === OP.GET)
             {
                 bindAll(target[/** @type {string} */ (call.m)], [], bind);
@@ -1601,12 +1656,15 @@ export function createPlayer({ root, ship, read, borrow }){
             const args = /** @type {any[]} */ (call.a);
             if (playing === REFS_TO)
             {
-                return refsTo(target, args[0]);
+                const counted = refsTo(target, args[0]);
+                holdAsCounted(call.t, target);
+                return counted;
             }
             // A Reset the recording answered is played as answered: what the
             // program holds is the recording's count, not this side's.
             const answer = playing === 'Reset' ? target.Reset(...args, allocs.length > 0)
                 : target[playing](...args);
+            holdAsCounted(call.t, target);
             bindAll(answer, handsOut(playing) ? args : NOTHING, bind);
             if (allocs.length > 0)
             {
@@ -1643,7 +1701,7 @@ export function createPlayer({ root, ship, read, borrow }){
             // it after the call -- what a device says of itself -- passes on.
             return call.wait === WAIT.ANSWER ? { answer, outs: args } : answer;
         },
-        object: number=>objects[number],
+        object: objectAt,
         allocate(){
             const address = allocs.shift();
             if (address === undefined)
