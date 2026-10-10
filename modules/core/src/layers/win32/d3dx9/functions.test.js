@@ -157,9 +157,9 @@ test('a normal ignores translation where a coordinate does not', ()=>{
  * would have made.
  */
 const NOT_BUILT = {
-    D3DXCleanMesh: [6, 3, 5], D3DXComputeNormalMap: [6],
+    D3DXComputeNormalMap: [6],
     D3DXCreateTeapot: [3, 1, 2], D3DXCreateTextA: [8, 5, 6],
-    D3DXSimplifyMesh: [7, 6], D3DXUVAtlasPartition: [17, 11, 12, 13, 14], D3DXValidMesh: [3, 2],
+    D3DXSimplifyMesh: [7, 6], D3DXUVAtlasPartition: [17, 11, 12, 13, 14],
 };
 
 test('D3DXCreateBuffer hands over a zeroed block behind an ID3DXBuffer, freed with it', ()=>{
@@ -229,7 +229,7 @@ const BUILT = {
     D3DXFilterTexture: 4, D3DXSaveSurfaceToFileA: 5, D3DXSaveSurfaceToFileW: 5,
     D3DXSaveSurfaceToFileInMemory: 5,
     D3DXCreateBox: 6, D3DXCreateCylinder: 8, D3DXCreatePolygon: 5, D3DXCreateSphere: 6,
-    D3DXCreateTorus: 7,
+    D3DXCreateTorus: 7, D3DXValidMesh: 3, D3DXCleanMesh: 6,
     D3DXCreateMesh: 6, D3DXCreateMeshFVF: 6, D3DXDeclaratorFromFVF: 2, D3DXFVFFromDeclarator: 2,
     D3DXGetDeclVertexSize: 2, D3DXGetDeclLength: 1,
     D3DXAssembleShader: 7, D3DXAssembleShaderFromFileA: 6, D3DXAssembleShaderFromFileW: 6,

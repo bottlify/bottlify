@@ -79,13 +79,11 @@ const IID_ID3DXBUFFER = '{8BA5FB08-5195-40E2-AC58-0D989C3A0102}';
  * @type {Record<string, number[]>}
  */
 const NOT_BUILT = {
-    D3DXCleanMesh: [24, 3, 5],
     D3DXComputeNormalMap: [24],
     D3DXCreateTeapot: [12, 1, 2],
     D3DXCreateTextA: [32, 5, 6],
     D3DXSimplifyMesh: [28, 6],
     D3DXUVAtlasPartition: [68, 11, 12, 13, 14],
-    D3DXValidMesh: [12, 2],
 };
 
 
@@ -713,7 +711,7 @@ export function createD3dxFunctions(host, options = {}){
         ...createShaderSemantics(host),
 
         /** See mesh.js. */
-        ...createMeshFunctions(host),
+        ...createMeshFunctions(host, { giveBuffer }),
 
         /** See mesh-object.js. */
         ...meshes.exports,
