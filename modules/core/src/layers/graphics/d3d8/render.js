@@ -7818,8 +7818,9 @@ export function createRenderer(options){
                 const value = colorToFloats(color);
                 // A target without alpha has none to clear: the format says the
                 // channel is undefined, and a zero there would make the
-                // presented frame transparent.
-                const alpha = target.Format === D3DFMT.A8R8G8B8 ? value.a : 1;
+                // presented frame transparent. One with alpha, whichever format
+                // it is, keeps what the clear gives it.
+                const alpha = FORMAT_INFO[target.Format]?.alpha === true ? value.a : 1;
                 beginPass(model, {
                     clearColor: (flags & D3DCLEAR.TARGET) !== 0
                         ? { ...value, a: alpha }

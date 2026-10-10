@@ -1798,6 +1798,26 @@ test('recorded: with ZENABLE off no depth is written, whatever ZWRITEENABLE says
     assert.equal(on.depthWriteEnabled, true, 'and with the test on, the write is ZWRITEENABLE');
 });
 
+test('recorded: a whole clear keeps its alpha in any target format that has one', async()=>{
+    // The X8 case above is opaque because the format has no alpha; a format with
+    // one -- four bits of it here -- is cleared to what the program asked for.
+    for (const format of [D3DFMT.A8R8G8B8, D3DFMT.A4R4G4B4, D3DFMT.A1R5G5B5])
+    {
+        const h = harness({ depth: false });
+        const { device, gpu } = h;
+        /** @type {{ surface?: any }} */
+        const target = {};
+        assert.equal(device.CreateRenderTarget(4, 4, format, false, target), D3D_OK);
+        assert.equal(device.SetRenderTarget(target.surface, null), D3D_OK);
+        assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, argb(1, 2, 3, 0x40), 1, 0), D3D_OK);
+        await h.present();
+        const pass = gpu.of('beginRenderPass').find((/** @type {any} */ call)=>
+            call.descriptor.colorAttachments[0].clearValue !== undefined);
+        assert.equal(pass.descriptor.colorAttachments[0].clearValue.a, 0x40 / 255,
+            `format ${format}`);
+    }
+});
+
 test('recorded: a whole clear is a clearing pass, a partial clear a scissored quad', async()=>{
     const h = harness();
     const { device, gpu } = h;
