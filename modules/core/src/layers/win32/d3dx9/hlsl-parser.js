@@ -706,9 +706,8 @@ export function parse(source, file = 'memory'){
     };
 
     /**
-     * `asm { ... }`, a shader in assembly, its text given back for the assembler: the tokens
-     * between the braces, a line of them to a line of the source, joined as they were written
-     * (no space where none stood). A comment is lost, which the assembler would have skipped.
+     * `asm { ... }`, a shader in assembly, its body given to the assembler as written: the
+     * lexer reads it as one token, since assembly is not lexed as HLSL.
      *
      * @param {Position} pos
      * @returns {Expr}
@@ -716,37 +715,32 @@ export function parse(source, file = 'memory'){
     const asmBlock = pos=>{
         next();
         expectPunct('{');
-        let depth = 1;
-        let text = '';
-        /** @type {Token | null} */
-        let last = null;
-        for (;;)
+        const body = next();
+        if (body.type !== 'asm')
         {
-            const token = next();
-            if (token.type === 'eof')
-            {
-                throw unexpected(token);
-            }
-            if (token.type === 'punct' && (token.text === '{' || token.text === '}'))
-            {
-                depth += token.text === '{' ? 1 : -1;
-                if (depth === 0)
-                {
-                    break;
-                }
-            }
-            if (last && token.pos.line !== last.pos.line)
-            {
-                text += '\n';
-            }
-            else if (last && token.pos.col !== last.pos.col + last.text.length)
-            {
-                text += ' ';
-            }
-            text += token.text;
-            last = token;
+            throw unexpected(body);
         }
-        return { kind: 'compile', target: 'asm', callee: '', args: [], asm: text, pos };
+        expectPunct('}');
+        return { kind: 'compile', target: 'asm', callee: '', args: [], asm: body.text, pos };
+    };
+
+    /**
+     * `decl { stream 0; float v0[3]; ... } asm { ... }`, a vertex shader written for Direct3D
+     * 8, whose declaration of its input streams went with the shader. Direct3D 9 takes the
+     * declaration from the device instead, so the block is read past and the shader is its
+     * assembly.
+     *
+     * @param {Position} pos
+     * @returns {Expr}
+     */
+    const declAsmBlock = pos=>{
+        next();
+        skipBalanced();
+        if (!(isWord('asm') && isPunct('{', 1)))
+        {
+            throw unexpected(peek());
+        }
+        return asmBlock(pos);
     };
 
     /**
@@ -1087,6 +1081,11 @@ export function parse(source, file = 'memory'){
             const callee = expectIdent().text;
             return { kind: 'compile', target, callee, args: parseArguments(), pos: token.pos };
         }
+        if (token.text === 'decl' && isPunct('{'))
+        {
+            at--;
+            return declAsmBlock(token.pos);
+        }
         if (token.text === 'asm' && isPunct('{'))
         {
             // `PixelShader p = asm { ... };`: the block read from its brace, as a pass's is.
@@ -1359,6 +1358,10 @@ export function parse(source, file = 'memory'){
                 else if (isWord('asm') && isPunct('{', 1))
                 {
                     value = asmBlock(state.pos);
+                }
+                else if (isWord('decl') && isPunct('{', 1))
+                {
+                    value = declAsmBlock(state.pos);
                 }
                 else
                 {

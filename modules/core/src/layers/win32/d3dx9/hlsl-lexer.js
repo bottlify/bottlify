@@ -28,8 +28,9 @@
 
 /**
  * @typedef {Object} Token
- * @property {'ident' | 'int' | 'float' | 'string' | 'punct' | 'eof'} type
- * @property {string} text    The source text of the token (a string's, without quotes).
+ * @property {'ident' | 'int' | 'float' | 'string' | 'punct' | 'asm' | 'eof'} type
+ * @property {string} text    The source text of the token (a string's, without quotes; an
+ *     `asm` block's body as written, comments and all).
  * @property {number} value   A number's value; zero for the rest.
  * @property {string} suffix  A number's type suffix, lower case: 'f', 'h', 'l', 'u' or ''.
  * @property {Position} pos
@@ -155,6 +156,83 @@ export function tokenize(source, file = 'memory'){
         tokens.push({ type, text, value, suffix, pos: here(start) });
     };
 
+    /**
+     * After `asm`, its `{ ... }` as one token of the body between the braces: the body is
+     * assembly, where `;` starts a comment and `1st` in one is no malformed number, and it
+     * is handed to the assembler as written. A brace inside a comment does not count.
+     *
+     * @param {number} from  Just past `asm`.
+     * @returns {number}  Where lexing goes on: past the closing brace, or `from` when no
+     *     brace follows.
+     */
+    const assemblyBody = from=>{
+        let j = from;
+        while (j < source.length && /\s/.test(source[j]))
+        {
+            j++;
+        }
+        if (source[j] !== '{')
+        {
+            return from;
+        }
+        for (let k = from; k < j; k++)
+        {
+            if (source[k] === '\n')
+            {
+                line++;
+                lineStart = k + 1;
+            }
+        }
+        push('punct', '{', j);
+        const bodyStart = j + 1;
+        const bodyPos = here(bodyStart);
+        let depth = 1;
+        let k = bodyStart;
+        while (k < source.length)
+        {
+            const c = source[k];
+            if (c === ';' || (c === '/' && source[k + 1] === '/'))
+            {
+                while (k < source.length && source[k] !== '\n')
+                {
+                    k++;
+                }
+                continue;
+            }
+            if (c === '/' && source[k + 1] === '*')
+            {
+                const end = source.indexOf('*/', k + 2);
+                k = end < 0 ? source.length : end + 2;
+                continue;
+            }
+            if (c === '{' || c === '}')
+            {
+                depth += c === '{' ? 1 : -1;
+                if (depth === 0)
+                {
+                    break;
+                }
+            }
+            k++;
+        }
+        if (k >= source.length)
+        {
+            throw new HlslError('X3000', 'syntax error: unterminated asm block', bodyPos);
+        }
+        const body = source.slice(bodyStart, k);
+        tokens.push({ type: 'asm', text: body, value: 0, suffix: '', pos: bodyPos });
+        for (let m = bodyStart; m < k; m++)
+        {
+            if (source[m] === '\n')
+            {
+                line++;
+                lineStart = m + 1;
+            }
+        }
+        push('punct', '}', k);
+        return k + 1;
+    };
+
     while (i < source.length)
     {
         const c = source[i];
@@ -243,6 +321,10 @@ export function tokenize(source, file = 'memory'){
             }
             push('ident', source.slice(i, j), i);
             i = j;
+            if (tokens[tokens.length - 1].text === 'asm')
+            {
+                i = assemblyBody(i);
+            }
             continue;
         }
         if (DIGIT.test(c) || (c === '.' && DIGIT.test(source[i + 1] ?? '')))
