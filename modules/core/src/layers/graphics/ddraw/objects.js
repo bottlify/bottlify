@@ -78,6 +78,7 @@ import {
     DDPCAPS_2BIT,
     DDPCAPS_4BIT,
     DDPCAPS_PRIMARYSURFACE,
+    DDPF_FOURCC,
     DDPF_PALETTEINDEXED8,
     DDPF_RGB,
     DDPF_ZBUFFER,
@@ -112,6 +113,27 @@ import {
     validateSurfaceSize,
 } from './caps.js';
 import { bytesPerPixel } from './structs.js';
+
+/**
+ * A DXTn surface's row: one row of 4x4 blocks, eight bytes a block for DXT1
+ * and sixteen for the others, as a lock hands it out and a loader writes the
+ * blocks row after row. Null for a format that is not block-compressed.
+ *
+ * @param {import('./structs.js').PixelFormatFields} format @param {number} width
+ * @returns {number | null}
+ */
+function blockRowBytes(format, width){
+    if ((format.flags & DDPF_FOURCC) === 0)
+    {
+        return null;
+    }
+    const code = format.fourCC >>> 0;
+    if (code < 0x31545844 || code > 0x35545844)
+    {
+        return null;
+    }
+    return Math.max(1, Math.ceil(width / 4)) * (code === 0x31545844 ? 8 : 16);
+}
 
 /** The four IDirectDraw generations, in the order they were introduced. */
 const DDRAW_INTERFACES = Object.freeze(
@@ -903,7 +925,7 @@ export function createDirectDraw(options = {}){
         let height = spec.height;
         let pixelFormat = spec.pixelFormat;
         let bpp = bytesPerPixel(pixelFormat);
-        let pitch = width * (bpp > 0 ? bpp : 1);
+        let pitch = blockRowBytes(pixelFormat, width) ?? width * (bpp > 0 ? bpp : 1);
         let buffer = allocate(pitch * height);
 
         /** @type {Surface | null} */

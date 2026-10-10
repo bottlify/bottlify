@@ -17,9 +17,11 @@
  *
  * Stretching samples by flooring, `src + floor(index * srcExtent / destExtent)`,
  * the rule `graphics/gdi` uses; the two blitters must not disagree about which
- * texel a magnified pixel shows. Nothing converts between pixel widths: a
- * source and destination of different depth are refused rather than guessed
- * at.
+ * texel a magnified pixel shows. A copy between two RGB formats re-encodes
+ * every channel, and a DXTn source is decompressed into the destination's RGB
+ * format, as the runtime does for a compressed picture copied into a texture
+ * the device can sample; any other pair of formats is refused rather than
+ * guessed at.
  */
 
 import {
@@ -27,6 +29,7 @@ import {
     DDBLT_KEYDESTOVERRIDE, DDBLT_KEYSRC, DDBLT_KEYSRCOVERRIDE, DDERR_INVALIDPARAMS,
     DDERR_INVALIDRECT, DDERR_UNSUPPORTED, DD_OK,
 } from './constants.js';
+import { decodeS3tc } from '../webgpu/internal/s3tc.js';
 
 /**
  * @typedef {Object} BlitSurface
@@ -34,10 +37,16 @@ import {
  * @property {number} pitch           Bytes per row.
  * @property {number} width
  * @property {number} height
- * @property {number} bytesPerPixel   1, 2 or 4.
+ * @property {number} bytesPerPixel   1, 2, 3 or 4; three only as the source of a
+ *     copy that converts the format.
  * @property {number} [keyMask]       The bits a colour key compares; the whole pixel if absent.
  * @property {boolean} [depth]        A depth buffer, which holds no colour to fill.
  * @property {number} [depthMask]     A depth buffer's depth bits; the whole pixel if absent.
+ * @property {import('../webgpu/internal/s3tc.js').S3tcKind} [compressed]
+ *     A DXTn surface's block kind: its bytes are blocks from `buffer` on, not rows.
+ * @property {{ red: number, green: number, blue: number, alpha: number }} [channels]
+ *     An RGB surface's channel masks (`alpha` 0 where it has none): what a
+ *     copy between two formats converts by. Absent for any other format.
  */
 
 /**
@@ -394,6 +403,117 @@ function snapshot(memory, src, rect){
 }
 
 /**
+ * Whether a copy from `src` to `dest` moves pixels between two RGB formats:
+ * the bytes are not each other's, and every channel has to be re-encoded.
+ *
+ * @param {BlitSurface} src @param {BlitSurface} dest
+ */
+const converts = (src, dest)=>{
+    const from = src.channels;
+    const to = dest.channels;
+    return from !== undefined && to !== undefined && (src.bytesPerPixel !== dest.bytesPerPixel
+        || from.red !== to.red || from.green !== to.green || from.blue !== to.blue
+        || from.alpha !== to.alpha);
+};
+
+/** @param {number} mask @returns {{ shift: number, bits: number, max: number }} */
+const fieldOf = mask=>{
+    if (mask === 0)
+    {
+        return { shift: 0, bits: 0, max: 0 };
+    }
+    // A channel's mask is one run of bits: from its lowest to its highest.
+    const shift = 31 - Math.clz32(mask & -mask);
+    const bits = 32 - Math.clz32(mask) - shift;
+    return { shift, bits, max: 2 ** bits - 1 };
+};
+
+/**
+ * The snapshot, re-encoded from the source's RGB format into the
+ * destination's, channel by channel and scaled to the destination's width
+ * of each: the bytes the copy then writes as they are. A channel the source
+ * lacks is full where the destination has it -- an opaque picture copied
+ * into a format with alpha stays opaque -- and one the destination lacks is
+ * dropped. Direct3D drivers convert so on a copy into a texture, and the
+ * texture loaders of the era copy a picture of one format into a surface of
+ * the format the device enumerated.
+ *
+ * @param {BlitSurface} src @param {BlitSurface} dest @param {number} pixels
+ */
+function convertSnapshot(src, dest, pixels){
+    const from = /** @type {NonNullable<BlitSurface['channels']>} */ (src.channels);
+    const to = /** @type {NonNullable<BlitSurface['channels']>} */ (dest.channels);
+    const inBpp = src.bytesPerPixel;
+    const outBpp = dest.bytesPerPixel;
+    const pairs = /** @type {const} */ (['red', 'green', 'blue', 'alpha']).map(name=>({
+        in: fieldOf(from[name]), out: fieldOf(to[name]),
+    })).filter(pair=>pair.out.bits > 0);
+    const out = new Uint8Array(Math.max(pixels * outBpp, snapshotBytes.length));
+    const held = snapshotBytes;
+    for (let pixel = 0; pixel < pixels; pixel++)
+    {
+        const at = pixel * inBpp;
+        let value = 0;
+        for (let byte = 0; byte < inBpp; byte++)
+        {
+            value += held[at + byte] * 2 ** (byte * 8);
+        }
+        let encoded = 0;
+        for (const pair of pairs)
+        {
+            const level = pair.in.bits === 0
+                ? pair.out.max
+                : Math.round((Math.floor(value / 2 ** pair.in.shift) % 2 ** pair.in.bits)
+                    * pair.out.max / pair.in.max);
+            encoded += level * 2 ** pair.out.shift;
+        }
+        for (let byte = 0; byte < outBpp; byte++)
+        {
+            out[pixel * outBpp + byte] = Math.floor(encoded / 2 ** (byte * 8)) & 0xff;
+        }
+    }
+    snapshotBytes = out;
+}
+
+/** The byte order `decodeS3tc` writes, red first, as one 32-bit pixel. */
+const DECODED = Object.freeze({
+    buffer: 0, pitch: 0, width: 0, height: 0, bytesPerPixel: 4,
+    channels: { red: 0xff, green: 0xff00, blue: 0xff0000, alpha: 0xff000000 },
+});
+
+/**
+ * A DXTn source's rectangle into the snapshot, in the destination's format:
+ * the blocks decoded whole, the rectangle cut from them and re-encoded.
+ *
+ * @param {BlitMemory} memory @param {BlitSurface} src @param {Rect} rect
+ * @param {BlitSurface} dest
+ * @returns {boolean} false when the surface's bytes are too few for its blocks
+ */
+function snapshotCompressed(memory, src, rect, dest){
+    const kind = /** @type {import('../webgpu/internal/s3tc.js').S3tcKind} */ (src.compressed);
+    const blocks = Math.ceil(src.width / 4) * Math.ceil(src.height / 4)
+        * (kind === 'dxt1' ? 8 : 16);
+    const texels = decodeS3tc(memory.readMemory(src.buffer, blocks), kind, src.width, src.height);
+    if (!texels)
+    {
+        return false;
+    }
+    const width = rect.right - rect.left;
+    const rows = rect.bottom - rect.top;
+    if (width * rows * 4 > snapshotBytes.length)
+    {
+        snapshotBytes = new Uint8Array(Math.max(width * rows * 4, snapshotBytes.length * 2));
+    }
+    for (let row = 0; row < rows; row++)
+    {
+        const from = ((rect.top + row) * src.width + rect.left) * 4;
+        snapshotBytes.set(texels.subarray(from, from + width * 4), row * width * 4);
+    }
+    convertSnapshot(DECODED, dest, width * rows);
+    return true;
+}
+
+/**
  * A depth buffer's depth bits, set to one value over a rectangle; the stencil
  * bits beside them keep what they held.
  *
@@ -445,6 +565,10 @@ function depthFill(memory, dest, rect, value, clipList){
  */
 export function blt(request){
     const { memory, dest } = request;
+    if (dest.bytesPerPixel === 3)
+    {
+        return DDERR_UNSUPPORTED;
+    }
     const flags = request.flags >>> 0;
     const fx = request.fx ?? {};
     const destRect = wholeOf(request.destRect, dest);
@@ -481,7 +605,30 @@ export function blt(request){
     {
         return DDERR_INVALIDPARAMS;
     }
-    if (src.bytesPerPixel !== dest.bytesPerPixel)
+    if (src.compressed !== undefined)
+    {
+        const whole = wholeOf(request.srcRect, src);
+        if (dest.channels === undefined || srcColorKey !== undefined)
+        {
+            return DDERR_UNSUPPORTED;
+        }
+        if (!rectFits(whole, src))
+        {
+            return DDERR_INVALIDRECT;
+        }
+        if (!snapshotCompressed(memory, src, whole, dest))
+        {
+            return DDERR_INVALIDPARAMS;
+        }
+        transfer({ ...common, fill: 0, src, srcRect: whole });
+        return DD_OK;
+    }
+    const conversion = converts(src, dest);
+    // A source key is a value of the source's format, which a converted
+    // snapshot no longer holds.
+    if ((src.bytesPerPixel !== dest.bytesPerPixel && !conversion)
+        || (src.bytesPerPixel === 3 && !conversion)
+        || (conversion && srcColorKey !== undefined))
     {
         return DDERR_UNSUPPORTED;
     }
@@ -491,6 +638,11 @@ export function blt(request){
         return DDERR_INVALIDRECT;
     }
     snapshot(memory, src, srcRect);
+    if (conversion)
+    {
+        convertSnapshot(src, dest,
+            (srcRect.right - srcRect.left) * (srcRect.bottom - srcRect.top));
+    }
     transfer({ ...common, fill: 0, src, srcRect, srcColorKey });
     return DD_OK;
 }
@@ -517,7 +669,11 @@ export function bltFast(request){
     {
         return DDERR_INVALIDPARAMS;
     }
-    if (src.bytesPerPixel !== dest.bytesPerPixel)
+    const flags = request.flags >>> 0;
+    const conversion = converts(src, dest);
+    if ((src.bytesPerPixel !== dest.bytesPerPixel && !conversion)
+        || (src.bytesPerPixel === 3 && !conversion) || dest.bytesPerPixel === 3
+        || (conversion && (flags & DDBLTFAST_SRCCOLORKEY) !== 0))
     {
         return DDERR_UNSUPPORTED;
     }
@@ -532,8 +688,12 @@ export function bltFast(request){
     {
         return DDERR_INVALIDRECT;
     }
-    const flags = request.flags >>> 0;
     snapshot(memory, src, srcRect);
+    if (conversion)
+    {
+        convertSnapshot(src, dest,
+            (srcRect.right - srcRect.left) * (srcRect.bottom - srcRect.top));
+    }
     transfer({
         memory,
         dest,

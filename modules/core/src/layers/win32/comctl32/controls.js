@@ -24,6 +24,7 @@ import { TREEVIEW_CLASS, TREEVIEW_ATOM, createTreeViewProcedure } from './treevi
 import { TAB_CLASS, TAB_ATOM, createTabProcedure } from './tab.js';
 import { TOOLBAR_CLASS, TOOLBAR_ATOM, createToolbarProcedure } from './toolbar.js';
 import { STATUSBAR_CLASS, STATUSBAR_ATOM, createStatusBarProcedure } from './statusbar.js';
+import { TRACKBAR_CLASS, TRACKBAR_ATOM, createTrackbarProcedure } from './trackbar.js';
 
 /** The face colour's brush, as a class's background names it: the index plus one. */
 const FACE_BACKGROUND = 15 + 1;
@@ -68,6 +69,11 @@ export function createCommonControls(host, toolkit, images, resources){
             atom: STATUSBAR_ATOM,
             procedure: createStatusBarProcedure(host, toolkit),
             background: FACE_BACKGROUND,
+        },
+        {
+            name: TRACKBAR_CLASS,
+            atom: TRACKBAR_ATOM,
+            procedure: createTrackbarProcedure(host, toolkit),
         },
     ];
 }

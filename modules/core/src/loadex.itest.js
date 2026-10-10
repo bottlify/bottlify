@@ -211,3 +211,63 @@ test('LoadLibraryEx loads as data, or leaves a module unresolved, as asked', { t
         const code = await app.run({ timeoutMs: 40000 });
         assert.equal(code, ALL, `missing bits 0x${(ALL & ~code).toString(16)}`);
     });
+
+/**
+ * A library importing from `NOSUCH.dll`, which nothing provides, whose entry
+ * point stores 1 at `into`.
+ *
+ * @param {number} into
+ */
+function needy(into){
+    return library(movable(buildExe({
+        imports: { 'NOSUCH.dll': ['Thing'] },
+        code: ()=>[
+            0xc7, 0x05, ...u32(into), ...u32(1), //        mov dword [into], 1
+            0xb8, ...u32(1), //                            mov eax, 1
+            0xc2, 0x0c, 0x00, //                           ret 12
+        ],
+    })));
+}
+
+test('LoadLibrary refuses a library one of whose own libraries is nowhere, as Windows does',
+    { timeout: 60000 }, async t=>{
+        // Exit code bits: LoadLibrary answered NULL (1), GetLastError says
+        // ERROR_MOD_NOT_FOUND (2), GetModuleHandle finds nothing (4), DllMain
+        // did not run (8).
+        const EVERY = 0xf;
+        let attached = 0;
+        const executable = buildExe({
+            imports: { 'KERNEL32.dll': ['LoadLibraryA', 'GetLastError', 'GetModuleHandleA',
+                'ExitProcess'] },
+            data: { name: cString('needy.dll'), attached: [0, 0, 0, 0] },
+            codeSize: 0x80,
+            code: ({ iat, at })=>{
+                attached = at('attached');
+                /** @param {string} fn */
+                const call = fn=>[0xff, 0x15, ...u32(iat(fn))];
+                const flag = (/** @type {number} */ bit)=>[0x81, 0xcb, ...u32(bit)];
+                const push = (/** @type {number} */ value)=>[0x68, ...u32(value)];
+                const JNE = 0x75;
+                return [
+                    0x31, 0xdb, //                                   xor ebx, ebx
+                    ...push(at('name')), ...call('LoadLibraryA'),
+                    0x85, 0xc0, JNE, 6, ...flag(0x1), //             test eax, eax
+                    ...call('GetLastError'),
+                    0x3d, ...u32(126), JNE, 6, ...flag(0x2), //      cmp eax, 126
+                    ...push(at('name')), ...call('GetModuleHandleA'),
+                    0x85, 0xc0, JNE, 6, ...flag(0x4),
+                    0x83, 0x3d, ...u32(at('attached')), 0x00, JNE, 6, ...flag(0x8),
+                    0x53, ...call('ExitProcess'), //                 push ebx
+                ];
+            },
+        });
+        const app = await createApp({
+            executable,
+            imagePath: 'C:\\App\\Needy.exe',
+            files: [{ path: 'C:\\App\\needy.dll', bytes: needy(attached) }],
+        });
+        t.after(()=>app.dispose());
+
+        const code = await app.run({ timeoutMs: 40000 });
+        assert.equal(code, EVERY, `missing bits 0x${(EVERY & ~code).toString(16)}`);
+    });

@@ -20,11 +20,13 @@
  * file rather than three entries somewhere else:
  *
  * - **argv[0] is quoted** whenever we are the one composing the child's command
- *   line. A child is handed a single string and its argv[0] ends at the first
- *   space, so an unquoted path with a space in it hands the tail of its own
- *   path to the program as an argument -- and a launcher that strips argv[0] to
- *   build its next command line then keeps that tail and re-appends it every
- *   time round, growing the line on each pass.
+ *   line, and when the caller named the image with a space in it and no
+ *   quotes, as CreateProcess quotes it. A child is handed a single string
+ *   and its argv[0] ends at the first space, so an unquoted path with a
+ *   space in it hands the tail of its own path to the program as an argument
+ *   -- and a launcher that strips argv[0] to build its next command line then
+ *   keeps that tail and re-appends it every time round, growing the line on
+ *   each pass.
  * - **The image is found the way Windows finds it.** An unquoted command line
  *   is genuinely ambiguous, so each space-separated prefix is tried in turn;
  *   case is folded by the volume, which is what lets a launcher naming
@@ -339,23 +341,38 @@ export function createSpawner(host){
      * tried in turn and the first that exists wins, which is the only reason an
      * unquoted path containing a space works at all.
      *
+     * When the name that won has a space in it, the child's line is the
+     * caller's with that name put in quotes, as CreateProcess itself does: the
+     * child's C runtime ends argv[0] -- and starts WinMain's lpCmdLine -- at the
+     * first unquoted space, so the caller's own spelling would hand the child
+     * the tail of its own path as an argument.
+     *
      * @param {string} line
-     * @returns {string | null}
+     * @returns {{ path: string, line: string } | null}
      */
     const imageFromCommandLine = line=>{
         const trimmed = line.trim();
         if (trimmed.startsWith('"'))
         {
             const end = trimmed.indexOf('"', 1);
-            return end < 0 ? null : resolveImage(trimmed.slice(1, end));
+            const path = end < 0 ? null : resolveImage(trimmed.slice(1, end));
+            return path === null ? null : { path, line };
         }
-        const words = trimmed.split(' ').filter(word=>word.length > 0);
+        const words = trimmed.split(' ');
         for (let count = 1; count <= words.length; count++)
         {
-            const found = resolveImage(words.slice(0, count).join(' '));
-            if (found)
+            if (words[count - 1].length === 0)
             {
-                return found;
+                continue;
+            }
+            const name = words.slice(0, count).join(' ');
+            const path = resolveImage(name);
+            if (path)
+            {
+                return {
+                    path,
+                    line: name.includes(' ') ? `"${name}"${trimmed.slice(name.length)}` : line,
+                };
             }
         }
         return null;
@@ -363,17 +380,21 @@ export function createSpawner(host){
 
     return {
         launch(named, line, flags, directory = ''){
-            const path = named === '' ? imageFromCommandLine(line) : resolveImage(named);
-            if (path === null)
+            const found = named === ''
+                ? imageFromCommandLine(line)
+                : { path: resolveImage(named), line };
+            if (found === null || found.path === null)
             {
                 return null;
             }
+            const path = found.path;
+            const childLine = found.line;
             const made = kernel.processes.create({
                 imagePath: path,
                 // The caller's own line when it gave one, because that is what the
                 // child is entitled to see; ours only when it did not -- and then
                 // quoted, for the reason in this file's header.
-                commandLine: line.trim() === '' ? `"${path}"` : line,
+                commandLine: childLine.trim() === '' ? `"${path}"` : childLine,
                 suspended: (flags & CREATE_SUSPENDED) !== 0,
                 // A redistributable installer is a process the engine itself
                 // stands in for: it is answered as already run and exited 0, so
@@ -404,7 +425,7 @@ export function createSpawner(host){
             return made;
         },
 
-        imageOf: name=>resolveImage(name) ?? imageFromCommandLine(name),
+        imageOf: name=>resolveImage(name) ?? imageFromCommandLine(name)?.path ?? null,
     };
 }
 

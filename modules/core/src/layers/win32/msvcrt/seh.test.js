@@ -356,3 +356,10 @@ test('a finally run by this runtime is an abnormal termination; one inline is no
     assert.equal(m.crt.table._abnormal_termination.handler(), 0,
         'and outside it, a finally reached by falling out of its block');
 });
+
+test('_seh_longjmp_unwind answers to its undecorated name and the decorated one', ()=>{
+    const table = /** @type {Record<string, any>} */ (machine().crt.table);
+    assert.ok(table._seh_longjmp_unwind);
+    assert.equal(table._seh_longjmp_unwind, table['_seh_longjmp_unwind@4']);
+    assert.equal(table._seh_longjmp_unwind.argBytes, 4);
+});

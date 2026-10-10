@@ -15,6 +15,7 @@ import * as ids from './ids.js';
 const S_OK = 0;
 const S_FALSE = 1;
 const E_POINTER = 0x80004003 | 0;
+const E_INVALIDARG = 0x80070057 | 0;
 
 /** A guest address space with a bump allocator, for the descriptors a call writes. */
 function arena(){
@@ -229,6 +230,39 @@ test('LoadObjectFromFile reads a named file and hands back a segment', async()=>
     assert.equal(await call(loader, ids.IID_DIRECTMUSIC_LOADER8, 'LoadObjectFromFile',
         [0, 0, path, out]), S_OK);
     assert.notEqual(space.readU32(out), 0);
+});
+
+test('GetObject reads only the fields dwValidData names', async()=>{
+    const { space, files, dm } = rig();
+    const { segment } = segmentWithWave();
+    files.set('C:\\music\\track.sgt', segment);
+    const loader = createComObject(ids.CLSID_DIRECTMUSIC_LOADER, dm.loader());
+    const directory = space.alloc(600);
+    space.writeWide(directory, 'C:\\music');
+    assert.equal(await call(loader, ids.IID_DIRECTMUSIC_LOADER8, 'SetSearchDirectory',
+        [0, directory]), S_OK);
+
+    // A class and a file name, and the rest of the structure as a caller's
+    // stack left it: a length, a data pointer and a stream that were never
+    // set, which must not be taken for a request to load from memory.
+    const desc = space.alloc(ids.DMUS_OBJECTDESC.SIZE);
+    space.writeBytes(desc, new Uint8Array(ids.DMUS_OBJECTDESC.SIZE).fill(0xcc));
+    space.writeU32(desc + ids.DMUS_OBJECTDESC.dwSize, ids.DMUS_OBJECTDESC.SIZE);
+    space.writeU32(desc + ids.DMUS_OBJECTDESC.dwValidData,
+        ids.DMUS_OBJ.CLASS | ids.DMUS_OBJ.FILENAME);
+    space.writeGuid(desc + ids.DMUS_OBJECTDESC.guidClass, ids.CLSID_DIRECTMUSIC_SEGMENT);
+    space.writeWide(desc + ids.DMUS_OBJECTDESC.wszFileName, 'track.sgt');
+
+    const out = space.alloc(4);
+    assert.equal(await call(loader, ids.IID_DIRECTMUSIC_LOADER8, 'GetObject',
+        [desc, 0, out]), S_OK);
+    assert.notEqual(space.readU32(out), 0, 'the file beside the search directory was loaded');
+
+    // Nothing valid to load by: no flag for a name, a file, memory or a stream.
+    space.writeU32(desc + ids.DMUS_OBJECTDESC.dwValidData, ids.DMUS_OBJ.CLASS);
+    assert.equal(await call(loader, ids.IID_DIRECTMUSIC_LOADER8, 'GetObject',
+        [desc, 0, out]), E_INVALIDARG);
+    assert.equal(space.readU32(out), 0);
 });
 
 test('SetSearchDirectory tells a not-yet-named path from one already set', async()=>{

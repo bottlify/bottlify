@@ -36,6 +36,7 @@ const ERROR_INVALID_PARAMETER = 87;
 const ERROR_BAD_EXE_FORMAT = 193;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INSUFFICIENT_BUFFER = 122;
+const ERROR_NOACCESS = 998;
 /** sizeof(MODULEINFO): the base, the image's size and its entry point. */
 const MODULEINFO_SIZE = 12;
 
@@ -101,6 +102,9 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
  *           no module, so not among the ones `byBase` knows.
  * @property {(code: number) => any} [exitThread]
  *           Ends the calling thread as ExitThread does.
+ * @property {() => { base: number, path: string }[]} [list]
+ *           Every module of the process, the image first: what psapi's
+ *           EnumProcessModules hands out.
  * @property {(asked: { module: string, name: string, found: number }) => void} [resolved]
  *           Told what a program looked up at runtime and what it was given. A
  *           name we answer zero to is one the program then decides about, and
@@ -234,6 +238,42 @@ export function createModuleFunctions(host){
         const written = Math.min(text.length, size - 1);
         host.writeMemory(buffer, encodeAnsi(`${text.slice(0, written)}\0`));
         return written;
+    };
+
+    /**
+     * A module's path or its file name, ANSI or wide, cut to `size`
+     * characters with the terminator inside them; the characters written.
+     *
+     * @param {number} handle @param {number} buffer @param {number} size
+     * @param {boolean} wide @param {boolean} baseName
+     */
+    const moduleText = (handle, buffer, size, wide, baseName)=>{
+        const module = handle === 0 ? host.find(null) : host.byBase(handle >>> 0);
+        if (!module)
+        {
+            host.setLastError(ERROR_INVALID_HANDLE);
+            return 0;
+        }
+        const path = handle === 0 ? host.imagePath() : fileNameOf(module);
+        const text = baseName ? path.slice(path.lastIndexOf(SEPARATOR) + 1) : path;
+        if ((size >>> 0) === 0)
+        {
+            host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+        if (!wide)
+        {
+            return writeString(buffer >>> 0, size >>> 0, text);
+        }
+        const kept = text.slice(0, (size >>> 0) - 1);
+        const bytes = new Uint8Array((kept.length + 1) * 2);
+        for (let at = 0; at < kept.length; at++)
+        {
+            bytes[at * 2] = kept.charCodeAt(at) & 0xff;
+            bytes[at * 2 + 1] = kept.charCodeAt(at) >> 8;
+        }
+        host.writeMemory(buffer >>> 0, bytes);
+        return kept.length;
     };
 
     /**
@@ -526,6 +566,70 @@ export function createModuleFunctions(host){
                 host.writeMemory(info >>> 0, new Uint8Array(out.buffer));
                 return 1;
             },
+        },
+
+        /**
+         * BOOL K32EnumProcessModules(HANDLE hProcess, HMODULE *lphModule, DWORD cb,
+         *     LPDWORD lpcbNeeded)
+         *
+         * psapi's EnumProcessModules: as many module handles as fit in `cb`
+         * bytes, the image first, and in `lpcbNeeded` the bytes all of them
+         * take -- a caller sizes its array from a first call that fits none.
+         */
+        K32EnumProcessModules: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([, handles, size, needed])=>{
+                if ((needed >>> 0) === 0)
+                {
+                    host.setLastError(ERROR_NOACCESS);
+                    return 0;
+                }
+                const bases = (host.list?.() ?? []).map(module=>module.base >>> 0);
+                const fits = Math.min(bases.length, Math.floor((size >>> 0) / 4));
+                if (fits > 0)
+                {
+                    const out = new DataView(new ArrayBuffer(fits * 4));
+                    bases.slice(0, fits).forEach((base, at)=>out.setUint32(at * 4, base, true));
+                    host.writeMemory(handles >>> 0, new Uint8Array(out.buffer));
+                }
+                const total = new DataView(new ArrayBuffer(4));
+                total.setUint32(0, bases.length * 4, true);
+                host.writeMemory(needed >>> 0, new Uint8Array(total.buffer));
+                return 1;
+            },
+        },
+
+        /**
+         * DWORD K32GetModuleFileNameExA(HANDLE hProcess, HMODULE hModule,
+         *     LPSTR lpFilename, DWORD nSize) and the wide form: GetModuleFileName
+         *     asked about a process, which here is always this one.
+         */
+        K32GetModuleFileNameExA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([, handle, buffer, size])=>moduleText(handle, buffer, size, false, false),
+        },
+        K32GetModuleFileNameExW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([, handle, buffer, size])=>moduleText(handle, buffer, size, true, false),
+        },
+
+        /**
+         * DWORD K32GetModuleBaseNameA(HANDLE hProcess, HMODULE hModule,
+         *     LPSTR lpBaseName, DWORD nSize) and the wide form: the file name
+         *     of a module's path, without its directory.
+         */
+        K32GetModuleBaseNameA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([, handle, buffer, size])=>moduleText(handle, buffer, size, false, true),
+        },
+        K32GetModuleBaseNameW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([, handle, buffer, size])=>moduleText(handle, buffer, size, true, true),
         },
 
         /** DWORD GetModuleFileNameA(HMODULE hModule, LPSTR lpFilename, DWORD nSize) */

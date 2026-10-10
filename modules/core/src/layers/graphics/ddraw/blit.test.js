@@ -264,6 +264,54 @@ test('byte-exact: each refusal has its own code and writes nothing', ()=>{
     assert.deepEqual(bytesOf(memory, dest), before);
 });
 
+/** A4R4G4B4, the 16-bit texture format with four bits of alpha. */
+const ARGB4444 = { red: 0xf00, green: 0xf0, blue: 0xf, alpha: 0xf000 };
+
+test('byte-exact: a copy between RGB formats re-encodes every channel, opaque where the source '
+    + 'has no alpha', ()=>{
+    const memory = ram();
+    const src = { ...surface(BASE, 2, 1, 3),
+        channels: { red: 0xff0000, green: 0xff00, blue: 0xff, alpha: 0 } };
+    const dest = { ...surface(BASE + 0x100, 2, 1, 2), channels: ARGB4444 };
+    memory.bytes.set([0x00, 0x80, 0xff, 0x11, 0x22, 0x33], BASE);
+
+    assert.equal(blt({ memory, dest, src, flags: DDBLT_WAIT }), 0);
+    assert.equal(readPixel(memory, dest, 0, 0), 0xff80, 'red 255, green 128, blue 0');
+    assert.equal(readPixel(memory, dest, 1, 0), 0xf321, 'red 0x33, green 0x22, blue 0x11');
+
+    const keyed = { memory, dest, src, flags: DDBLT_KEYSRC,
+        fx: { srcColorKey: { low: 0, high: 0 } } };
+    assert.equal(blt(keyed), DDERR_UNSUPPORTED, 'a source key is a value of the source format');
+    assert.equal(bltFast({ memory, dest, src, x: 0, y: 0, flags: 0 }), 0, 'BltFast converts too');
+});
+
+test('byte-exact: a DXT5 source is decompressed into the destination format', ()=>{
+    const memory = ram();
+    // Two 4x4 blocks: opaque alpha (both endpoints 255), and colour 0 pure
+    // red, colour 1 pure blue; the first block selects colour 0 everywhere,
+    // the second colour 1.
+    const block = (/** @type {number} */ selectors)=>[255, 255, 0, 0, 0, 0, 0, 0,
+        0x00, 0xf8, 0x1f, 0x00, selectors, selectors, selectors, selectors];
+    memory.bytes.set([...block(0x00), ...block(0x55)], BASE);
+    const src = { ...surface(BASE, 8, 4, 0, 32), compressed: /** @type {const} */ ('dxt5') };
+    const dest = { ...surface(BASE + 0x100, 8, 4, 2), channels: ARGB4444 };
+
+    assert.equal(blt({ memory, dest, src, flags: DDBLT_WAIT }), 0);
+    assert.equal(readPixel(memory, dest, 0, 0), 0xff00);
+    assert.equal(readPixel(memory, dest, 3, 3), 0xff00);
+    assert.equal(readPixel(memory, dest, 4, 0), 0xf00f);
+    assert.equal(readPixel(memory, dest, 7, 3), 0xf00f);
+
+    const corner = { ...surface(BASE + 0x200, 2, 2, 2), channels: ARGB4444 };
+    assert.equal(blt({ memory, dest: corner, src, flags: 0,
+        srcRect: { left: 3, top: 2, right: 5, bottom: 4 } }), 0);
+    assert.deepEqual([0, 1].map(x=>readPixel(memory, corner, x, 1)), [0xff00, 0xf00f],
+        'a rectangle across two blocks');
+
+    assert.equal(blt({ memory, dest: surface(BASE + 0x300, 8, 4, 2), src, flags: 0 }),
+        DDERR_UNSUPPORTED, 'only into an RGB format');
+});
+
 test('byte-exact: BltFast copies at an offset and refuses to fall off the surface', ()=>{
     const memory = ram();
     const src = surface(BASE, 2, 2, 1);

@@ -1572,3 +1572,36 @@ test('an asm block is assembled where it stands, in a pass or in a parameter', a
     assert.deepEqual(wrong.model?.techniques.map(t=>techniqueCompiles(
         /** @type {any} */ (wrong.model), t)), [false, true]);
 });
+
+test('a Direct3D 8 vertex shader declares its streams in a decl block, which is read past',
+    async()=>{
+        const vs = 'vs.1.1\ndcl_position v0\ndcl_color v2\nm4x4 oPos, v0, c0\nmov oD0, v2\n';
+        const ps = 'ps.1.1\ntex t0\nmul_x2_sat r0.rgb, t0, v0\n+mul r0.a, t0, v0\n';
+        const decl = 'decl\n{\nstream 0;\nfloat v0[3]; // Position\nD3DCOLOR v2;\n}\n';
+        const named = await buildEffect(`Texture Tex0;\nvertexshader vSdr =\n${decl}asm\n{\n`
+            + `${vs}};\npixelshader pSdr =\nasm\n{\n${ps}};\nTechnique T0 { Pass P0 {\n`
+            + 'Texture[0] = <Tex0>; VertexShader = <vSdr>; PixelShader = <pSdr>; } }');
+        assert.equal(named.messages, '');
+        assert.deepEqual(named.model?.techniques.map(t=>techniqueCompiles(
+            /** @type {any} */ (named.model), t)), [true]);
+        assert.deepEqual(named.model?.shaders.map(s=>s.tokens),
+            [assembleShader(vs).tokens, assembleShader(ps).tokens]);
+        const inPass = await buildEffect(
+            `technique t { pass p { VertexShader = ${decl}asm {\n${vs}}; } }`);
+        assert.equal(inPass.messages, '');
+        assert.deepEqual(inPass.model?.shaders[0].tokens, assembleShader(vs).tokens);
+        // A declaration with no shader after it is not one.
+        const bare = await buildEffect(`vertexshader v = ${decl};`);
+        assert.match(bare.messages, /X3000/);
+    });
+
+test('an asm block is assembly, not HLSL: its comments are the assembler\'s', async()=>{
+    // `; 1st` is no malformed number and a brace in a comment closes nothing.
+    const text = 'vs.1.1 ; Constants: 0..3 {\ndcl_position v0\n// it\'s a } here\n'
+        + 'm4x4 oPos, v0, c0 ; 1st bone\n/* a { */ mov oD0, v0\n';
+    const effect = await buildEffect(`technique t { pass p { VertexShader = asm {\n${text}}; } }`);
+    assert.equal(effect.messages, '');
+    assert.deepEqual(effect.model?.shaders[0].tokens, assembleShader(text).tokens);
+    const open = await buildEffect('technique t { pass p { VertexShader = asm { vs.1.1 ; } }');
+    assert.match(open.messages, /X3000: syntax error: unterminated asm block/);
+});

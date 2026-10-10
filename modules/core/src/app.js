@@ -5154,12 +5154,50 @@ async function buildApp(options){
                     // at an address belonging to nothing.
                     if (!inert)
                     {
+                        // A library one of whose own libraries is nowhere --
+                        // not on the volume, not one the engine provides --
+                        // is refused whole, with ERROR_MOD_NOT_FOUND, as
+                        // Windows refuses it: a program asking at run time is
+                        // asking whether it may have the library, and a "yes"
+                        // whose imports fault when called takes away the
+                        // fallback it has for "no" (its own resources, another
+                        // renderer).
+                        /** @type {string[]} */
+                        const absent = [];
+                        /** @type {any[]} */
+                        const brought = [];
                         for (const dependency of readImports(file, image))
                         {
                             if (findModule(dependency.dll) === null)
                             {
-                                await loadLibraryAtRuntime(dependency.dll, 0, asked);
+                                const got = await loadLibraryAtRuntime(dependency.dll, 0, asked);
+                                if (got === 0)
+                                {
+                                    absent.push(dependency.dll);
+                                }
+                                else
+                                {
+                                    brought.push(byBase.get(got));
+                                }
                             }
+                        }
+                        if (absent.length > 0)
+                        {
+                            threadBlocks?.removeModule(base);
+                            byName.delete(moduleKeyOf(name));
+                            byBase.delete(base);
+                            memory.unregister(name);
+                            for (const other of brought)
+                            {
+                                if (other)
+                                {
+                                    await releaseLibrary(other);
+                                }
+                            }
+                            events.emit('libraries-missing', {
+                                names: [name], reason: `it imports ${absent.join(', ')}`,
+                            });
+                            return 0;
                         }
 
                         loader.bind(mapped, resolveImport, missingImport);
