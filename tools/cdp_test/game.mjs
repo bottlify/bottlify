@@ -1786,8 +1786,8 @@ export async function game(options){
                         return;
                     }
                     const bytes = Buffer.from(shot.pixels, 'base64');
-                    const image = toPng(shot.width, shot.height,
-                        shot.format === 'bgra8unorm' ? bytes : toBgra(bytes));
+                    // Read back as RGBA whatever the surface's format.
+                    const image = toPng(shot.width, shot.height, toBgra(bytes));
                     const path = join(REPORTS_DIR,
                         `game-${shotsStamp}-at-${String(at).padStart(5, '0')}s.png`);
                     writeFileSync(path, image);
@@ -1851,9 +1851,8 @@ export async function game(options){
                         if (frame)
                         {
                             writeFileSync(join(REPORTS_DIR, `game-${stampOut}-frame.png`),
-                                toPng(frame.width, frame.height, frame.format.startsWith('bgra')
-                                    ? Buffer.from(frame.pixels, 'base64')
-                                    : toBgra(Buffer.from(frame.pixels, 'base64'))));
+                                toPng(frame.width, frame.height,
+                                    toBgra(Buffer.from(frame.pixels, 'base64'))));
                         }
                         return `${stack}
 the run as it stands: ${path}`;
