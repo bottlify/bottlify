@@ -19,7 +19,12 @@
  *
  * Usage (from the repository root):
  *   node tools/night-run/night-run.mjs [--budget USD] [--model ID] [--minutes N]
- *       [--only id,id] [--skip id,id] [--dry]
+ *       [--only id,id] [--skip id,id] [--branch NAME] [--dry]
+ *
+ * `--branch` is the branch the sessions commit to and push (review by default):
+ * run from a worktree of its own on another branch, the night does not share a
+ * checkout with whoever works in the main one, and its commits are merged from
+ * there.
  *
  * Games only, and broken ones: a bottle whose status is playable, a benchmark, the Wine test
  * bottles (labelled test) and applications are left out.
@@ -60,6 +65,7 @@ const minutes = Number(flags.minutes ?? 75);
 const list = (/** @type {string | true | undefined} */ value)=>
     (typeof value === 'string' ? value.split(',').filter(Boolean) : []);
 const only = list(flags.only);
+const branch = typeof flags.branch === 'string' ? flags.branch : 'review';
 const skip = list(flags.skip);
 
 /** @returns {Promise<{ id: string, title: string, labels: string[] }[]>} */
@@ -111,7 +117,7 @@ The steps, in order:
 3. Add it: implement every missing entry point the title's own executables reach, by contract, \
 with tests.
 4. Run the title and fix everything up to its first start in the game (below).
-5. Commit each fix to review and push it; the message says what was fixed and why -- the \
+5. Commit each fix to ${branch} and push it; the message says what was fixed and why -- the \
 contract that was wrong and what the title did because of it.
 6. When the title reaches its game, set its status in bundles/${bottle.id}/manifest.json (that \
 file is not in git; keep the rest of it as it is): "status": "playable" when it plays right, \
@@ -134,7 +140,8 @@ never hardcode an offset for one title. Every fix carries a test in the same cha
 npm run lint. No full test suite.
 
 Rules:
-- Work in this checkout on branch review. Commit each fix and push it (git push origin review). \
+- Work in this checkout on branch ${branch}. Commit each fix and push it \
+(git push origin ${branch}). \
 No Co-Authored-By or session lines in commit messages. Never stage bottlify-ui/public/config.json \
 or anything holding a token. Temporary files go to dbg/.
 - Do not start, stop or restart the launcher on port 5180 or the bottle server on 8788. Only the \
