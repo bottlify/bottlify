@@ -98,7 +98,7 @@ Sound needs the click: a browser starts audio only from a person's gesture.
 `node tools/play.mjs <id> [--port 8080] [--compatible]` is a local server for exactly this layout,
 with Range and the isolation headers (`--compatible` leaves them off). The player page takes two more
 things from its address for a measurement: `&executors=3` runs the program's threads on three
-executors at once (`createApp`'s `executors`), and `&cork={"checkReads":false}` sets the
+executors at once (`createApp`'s `executors`), and `&cork={"checkReads":true}` sets the
 translator's settings (`EngineConfig`).
 
 ## Install as a package
