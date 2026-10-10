@@ -301,6 +301,12 @@ test('CreateDevice refuses what cannot be a target, and publishes what can', ()=
     assert.equal(h.device(made.device, 'GetDirect3D', [0x4500]), D3D_OK);
     assert.equal(h.box.memory.readU32(0x4500), d3d);
     assert.equal(h.device(made.device, 'GetDirect3D', [0]), DDERR_INVALIDPARAMS >>> 0);
+    // A proxy may answer its methods with its own: remote graphics records
+    // every call through one, and a read-only method is an invariant it breaks.
+    const published = h.publisher.objectAt(d3d);
+    const wrapped = new Proxy(published, { get: (target, key)=>(
+        typeof Reflect.get(target, key) === 'function' ? ()=>0 : Reflect.get(target, key)) });
+    assert.doesNotThrow(()=>wrapped.addRef, 'its methods are not read-only');
 
     // Two releases on the Direct3D pointer: the query took one reference and
     // GetDirect3D another, and both are IDirectDraw7's count.

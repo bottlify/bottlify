@@ -396,10 +396,13 @@ export function createDirectDrawSeam(
             }
             return GENERATION_BY_NAME[id] ? id : undefined;
         };
-        const facade = Object.create(root, {
-            addRef: { value: (/** @type {string} */ id)=>root.addRef(generationOf(id)) },
-            release: { value: (/** @type {string} */ id)=>root.release(generationOf(id)) },
-        });
+        // Plain properties, as an assignment makes them: a read-only,
+        // non-configurable one may not be answered by anything but itself,
+        // and the recording proxy remote graphics puts over every object it
+        // hands out answers each method with its own recorded call.
+        const facade = Object.create(root);
+        facade.addRef = (/** @type {string} */ id)=>root.addRef(generationOf(id));
+        facade.release = (/** @type {string} */ id)=>root.release(generationOf(id));
         facades.set(root, facade);
         roots.add(new WeakRef(root));
         return facade;
