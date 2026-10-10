@@ -98,6 +98,8 @@ import { isParkedCall } from './parking.js';
  * @property {number} calls        Calls made to it.
  * @property {number} sampledMs    Host ms the timed ones of them took, each standing for
  *     `TRAP_SAMPLE` calls on average (`dispatch`).
+ * @property {number} [windowCalls]  `calls` when the rate window began (`measureRates`).
+ * @property {number} [windowMs]     `sampledMs` when it began.
  */
 
 /**
@@ -217,6 +219,25 @@ const TRAP_WEIGHT = Object.freeze({ weight: TRAP_SAMPLE });
 const BY_FUNCTION_KEPT = 80;
 
 /**
+ * The window the call rates are measured over, and how often a run of calls
+ * looks at the clock to see whether one has passed: a clock read per call
+ * would cost more than the counting.
+ */
+const RATE_WINDOW_MS = 1000;
+const RATE_CHECK_CALLS = 1024;
+/**
+ * A function the program calls more often than this a second, or that holds
+ * the host for more than this share of each second, is named in the report
+ * and once in the journal: a program that has started going to the host for
+ * ever -- polling a query, spinning on a message -- shows as it starts,
+ * rather than as a frame rate nobody can explain.
+ */
+const CHATTY_CALLS_PER_SECOND = 20000;
+const CHATTY_MS_PER_SECOND = 100;
+/** How many chatty functions the report names. */
+const CHATTY_KEPT = 10;
+
+/**
  * A ring record. The text of the answer is the one thing about a call that
  * costs an allocation to write down, and almost nobody reads it: so it is
  * made from the number when it is read, not when the call is made.
@@ -255,6 +276,8 @@ const NO_ERROR = ()=>0;
  * @param {any} deps.memory    For the stack itself, so a wild ESP is caught here.
  * @param {any} deps.parking   Brackets each handler and issues the parked token.
  * @param {(answer: Promise<number>, frame: any) => void} [deps.suspend]
+ * @param {() => number} [deps.now]  The clock call rates are measured by;
+ *        performance.now unless a test keeps its own.
  *        What to do with a handler that has not finished; wired by the module.
  * @param {() => number} [deps.lastError]
  *        The running thread's last error, for the trace. Injected because it
@@ -286,7 +309,8 @@ const NO_ERROR = ()=>0;
  * @param {{ enabled: (category: string, level: number) => boolean,
  *            write: (level: number, category: string, message: string,
  *                a?: any, b?: any, c?: any, d?: any) => void,
- *            Level: { TRACE: number }, revisionCell?: () => Int32Array }} [deps.journal]
+ *            Level: { TRACE: number, WARN?: number }, revisionCell?: () => Int32Array }}
+ *        [deps.journal]
  *        Where a slot hook's crossings are written when `call.hook` is on:
  *        the frame as the guest's own call site left it, and where the
  *        call was sent afterwards. A hook stands in front of a call the
@@ -348,6 +372,20 @@ class Dispatcher {
 
         /** @type {Parameters<typeof createDispatcher>[0]['journal'] | null} */
         this.journal = deps.journal ?? null;
+
+        /** The clock the call rates are measured by (`chatty`). */
+        this.now = deps.now ?? (()=>performance.now());
+        /** When the current rate window began. */
+        this.windowStart = this.now();
+        /**
+         * The functions over the chatty thresholds in the last whole window,
+         * as report lines, the heaviest host time first.
+         *
+         * @type {string[]}
+         */
+        this.chatty = [];
+        /** The names already written to the journal as chatty, once each. @type {Set<string>} */
+        this.chattyNoted = new Set();
         /**
          * Whose writes into guest memory these are.
          *
@@ -982,6 +1020,10 @@ class Dispatcher {
         const at = this.callCount++ & CALL_RING - 1;
         this.ids[at] = id;
         entry.calls++;
+        if ((this.callCount & RATE_CHECK_CALLS - 1) === 0)
+        {
+            this.measureRates();
+        }
 
         // Everything the handler might need about where it was called from,
         // read before it runs: a handler that calls the guest back writes
@@ -1354,7 +1396,58 @@ class Dispatcher {
         this.cross(id);
     }
 
+    /**
+     * Closes the rate window if a whole one has passed: each function's calls
+     * and host time in it, per second, and the ones over the chatty
+     * thresholds kept for the report.
+     */
+    measureRates(){
+        const now = this.now();
+        const elapsed = now - this.windowStart;
+        if (elapsed < RATE_WINDOW_MS)
+        {
+            return;
+        }
+        this.windowStart = now;
+        /** @type {{ name: string, perSecond: number, msPerSecond: number }[]} */
+        const over = [];
+        for (const entry of this.functions)
+        {
+            if (!entry)
+            {
+                continue;
+            }
+            const calls = entry.calls - (entry.windowCalls ?? 0);
+            const ms = (entry.sampledMs - (entry.windowMs ?? 0)) * TRAP_SAMPLE;
+            entry.windowCalls = entry.calls;
+            entry.windowMs = entry.sampledMs;
+            const perSecond = calls * 1000 / elapsed;
+            const msPerSecond = ms * 1000 / elapsed;
+            if (perSecond >= CHATTY_CALLS_PER_SECOND || msPerSecond >= CHATTY_MS_PER_SECOND)
+            {
+                over.push({ name: entry.name, perSecond, msPerSecond });
+            }
+        }
+        over.sort((left, right)=>right.msPerSecond - left.msPerSecond
+            || right.perSecond - left.perSecond);
+        this.chatty = over.slice(0, CHATTY_KEPT).map(({ name, perSecond, msPerSecond })=>
+            `${name} ${Math.round(perSecond)}/s ${Math.round(msPerSecond)}ms/s`);
+        const journal = this.journal;
+        for (const { name, perSecond, msPerSecond } of over)
+        {
+            if (this.chattyNoted.has(name))
+            {
+                continue;
+            }
+            this.chattyNoted.add(name);
+            journal?.write(journal.Level.WARN ?? journal.Level.TRACE, 'call.chatty',
+                '{0} goes to the host {1} times a second, {2} ms of each second',
+                name, Math.round(perSecond), Math.round(msPerSecond));
+        }
+    }
+
     diagnostics(){
+        this.measureRates();
         const entries = /** @type {Entry[]} */ (this.functions.filter(Boolean));
         return {
             implemented: this.implemented,
@@ -1368,6 +1461,9 @@ class Dispatcher {
             // Where the host's time went, by function, since the start: the
             // calls made and the ms the timed ones stand for, the heaviest
             // first.
+            // The functions going to the host too often or for too long a
+            // second, over the last whole second measured (`measureRates`).
+            chatty: this.chatty,
             hostMs: Math.round(entries.reduce((sum, entry)=>sum + entry.sampledMs, 0)
                 * TRAP_SAMPLE),
             byFunction: entries
