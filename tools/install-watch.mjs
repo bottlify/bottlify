@@ -373,13 +373,6 @@ for (const { what, at } of all('--key').map(timed))
         setTimeout(()=>app.input.send({ kind: 'key', code: what, down: false }), 150);
     }, at * 1000);
 }
-// Clicks go through the input layer's route (`app.input.route`), a step every
-// 150 ms: a pointer a program keeps by relative motion is pushed into the
-// corner first and moved from there, and a dialog's button sees a press and a
-// release apart. Nothing here presents frames to count, so a timer stands in.
-const route = app.input.route();
-setInterval(()=>route.tick(), 150).unref?.();
-
 // `--press 'Next >|I &accept|Finish'`: the buttons pressed in turn, each by
 // its title once it has stood visible and enabled for a whole look, and is not
 // the button pressed last unless three looks have passed -- a wizard's pages
@@ -437,7 +430,10 @@ if (pressing.length > 0)
                 lastButton = button.hwnd;
                 looksSince = 0;
                 step += anyOrder ? 0 : 1;
-                route.click(x, y);
+                app.input.send({ kind: 'pointerMove', x, y, dx: 0, dy: 0 });
+                app.input.send({ kind: 'pointerButton', button: 'left', down: true });
+                setTimeout(()=>app.input.send({ kind: 'pointerButton', button: 'left',
+                    down: false }), 150);
                 break;
             }
         }
@@ -453,7 +449,12 @@ for (const { what, at } of all('--click').map(timed))
     const [x, y] = what.split(',').map(Number);
     setTimeout(()=>{
         console.log(seconds(), 'CLICK', x, y);
-        route.click(x, y);
+        // No movement of its own: a program reading the mouse through DirectInput
+        // would otherwise see a jump from wherever the pointer last was.
+        app.input.send({ kind: 'pointerMove', x, y, dx: 0, dy: 0 });
+        app.input.send({ kind: 'pointerButton', button: 'left', down: true });
+        setTimeout(()=>app.input.send({ kind: 'pointerButton', button: 'left', down: false }),
+            150);
     }, at * 1000);
 }
 

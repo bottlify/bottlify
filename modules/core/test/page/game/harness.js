@@ -26,13 +26,18 @@
 import { createApp } from '../../../src/app.js';
 import { placeHooks, watchFrom } from '../../../src/host/serve.js';
 import { openGraphicsWorker } from '../../../src/host/graphics-worker.js';
-import { createInputRoute } from '../../../src/layers/input/route.js';
 import {
     SLOTS, GLOBAL_HEADER_INT32, SLOT_HEADER_INT32, SLOT_BYTES, ARENA_OFFSET, ARENA_BYTES,
     slotHeaderOffset, slotPcmOffset, createSeam, mixBlock,
 } from '../../../src/layers/audio/output/mix.js';
 
 /** How much of each unbounded collection survives the trip back out. */
+/**
+ * Further than any screen is wide or tall: the motion that takes a cursor a
+ * program moves by relative motion into the top left corner.
+ */
+const CORNER = 1 << 16;
+
 const LIMITS = {
     // Output whole: a conformance test prints three pieces per failed check,
     // and 400 ended Wine's d3d8 visual at its 130th.
@@ -868,7 +873,6 @@ export function schedulePresses(app, request, say = ()=>{}){
  * @property {boolean} pointerDown    Whether the held pointer's button is down.
  * @property {{ x: number, y: number }} pointerAt  Where the last click left it.
  * @property {any[]} [inputs]          The pointer and key messages sent, each with its present.
- * @property {ReturnType<typeof createInputRoute>} [route]  The clicks and keys still to send.
  * @property {number[]} gaps          Milliseconds between one present and the next.
  * @property {number[]} times         Each present's wall-clock time (ms since the epoch), so a
  *                                    driver can count the frames inside a window of its own.
@@ -1076,27 +1080,51 @@ export function presentFrame(app, request, state, frame){
     // A click, a frame long, once the program has drawn a number of frames:
     // pressed on one presented frame and released on the next, which is how a
     // person's click reaches a program that reads the button once a frame.
-    // Clicks and key taps, each queued on the present it comes due and sent a
-    // step a present (`createInputRoute`): a click pushes a cursor a program
-    // keeps by relative motion into the corner before it moves to its point,
-    // and a key is held for its frames. What comes due together goes in turn.
-    state.route ??= createInputRoute(send);
     for (const click of request.clicks ?? [])
     {
+        if (click.after < 0)
+        {
+            // Timed, and not yet due.
+            continue;
+        }
+        // A program that keeps a cursor of its own and moves it by relative
+        // motion -- DirectInput's mouse -- puts it wherever it likes, the
+        // middle of a menu it has just opened as often as not. Pushed far up
+        // and left first it stops in the corner, and the motion from there to
+        // the click takes it to the same point as this harness's pointer,
+        // whatever the program. A frame apart: a program that adds a frame's
+        // motion up before it stops the cursor at an edge would take the two
+        // together for a push into the corner.
         if (state.presents === click.after)
         {
-            state.route.click(click.x, click.y);
+            send({ kind: 'pointerMove', x: 0, y: 0, dx: -CORNER, dy: -CORNER });
+        }
+        if (state.presents === click.after + 1)
+        {
+            send({ kind: 'pointerMove', x: click.x, y: click.y, dx: click.x, dy: click.y });
             state.pointerAt = { x: click.x, y: click.y };
+            send({ kind: 'pointerButton', button: 'left', down: true });
+        }
+        if (state.presents === click.after + 2)
+        {
+            send({ kind: 'pointerButton', button: 'left', down: false });
         }
     }
+    // A key press, held for one presented frame and released on the next, the
+    // same shape a person's tap has and the only shape a program that reads
+    // the transition can see. A scenario with no way to type can drive a
+    // program's menus and nothing that answers the keyboard.
     for (const key of request.keys ?? [])
     {
         if (state.presents === key.after)
         {
-            state.route.key(key.code, key.frames ?? 1);
+            send({ kind: 'key', code: key.code, down: true });
+        }
+        if (state.presents === key.after + (key.frames ?? 1))
+        {
+            send({ kind: 'key', code: key.code, down: false });
         }
     }
-    state.route.tick();
     // Mouse motion without a button, the same every frame for a stretch: how
     // a program that turns its view by relative motion is turned.
     for (const turn of request.looks ?? [])
@@ -1449,7 +1477,6 @@ export function createHarness(canvas, how = {}){
         presentState.pointerDown = false;
         presentState.pointerAt = { x: 0, y: 0 };
         presentState.inputs = [];
-        presentState.route = undefined;
         /** @type {any} */
         const collected = { failures: [], missing: [], output: [], events: [], shaders: [],
             divergences: [] };
