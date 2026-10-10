@@ -1105,10 +1105,11 @@ function tableFog(position){
  * @param {string} [position]  The fragment's position builtin, for table fog.
  * @param {string} [specular]  What a stage reads the specular colour as.
  * @param {boolean} [sprite]  Every carried set is the point sprite's `input.sprite`.
+ * @param {string} [table]  Table fog's factor, the depth's by default.
  */
 function fragmentBody(state, specularEnable, generated = state.stages.map(
     stage=>generates(stage.texCoordIndex)), position = 'input.position',
-specular = 'input.specular', sprite = false)
+specular = 'input.specular', sprite = false, table = tableFog(position))
 {
     const wide = wideSets(state);
     /**
@@ -1201,7 +1202,7 @@ specular = 'input.specular', sprite = false)
         ? ''
         : '\n    current = vec4f(mix(uniforms.fogColor.rgb, current.rgb,'
             + ` clamp(${fogSourceOf(state) === FOG_SOURCE.TABLE
-                ? tableFog(position) : 'input.fogAmount'}, 0.0, 1.0)), current.a);`;
+                ? table : 'input.fogAmount'}, 0.0, 1.0)), current.a);`;
 
     // The test discards rather than returning a transparent pixel: a discarded
     // fragment writes no depth, and one blended to zero alpha still does, which
@@ -1278,12 +1279,16 @@ export function fixedFragmentStage(state, written){
     // fogged whole (Wine's d3d8 fog_special_test).
     const fogSource = fogSourceOf(state);
     const carriedFog = fogSource === FOG_SOURCE.SPECULAR || fogSource === FOG_SOURCE.VERTEX;
+    // Table fog runs its curve over the shader's oFog when it wrote one, and
+    // over the depth otherwise: the fixed projection says nothing of the
+    // shader's w (decisions.md, table fog through a vertex shader).
+    const tableOverFog = fogSource === FOG_SOURCE.TABLE && has(10);
+    if ((carriedFog || tableOverFog) && has(10))
+    {
+        fields.push('    @location(10) fog: vec4f,');
+    }
     if (carriedFog)
     {
-        if (has(10))
-        {
-            fields.push('    @location(10) fog: vec4f,');
-        }
         carried.push(`    input.fogAmount = ${has(10) ? 'in.fog.x' : has(1) ? 'in.v1.a' : '0.0'};`);
     }
     // A vertex shader's clip distances, where the device does not clip by
@@ -1312,7 +1317,8 @@ ${members.join('\n')}
 fn ps_main(in: PsIn) -> @location(0) vec4f {
     var input: Carried;
 ${carried.join('\n')}
-${fragmentBody(state, state.specularEnable === true, [], 'in.position')}${
+${fragmentBody(state, state.specularEnable === true, [], 'in.position', undefined, false,
+        tableOverFog ? 'fogFactorOf(in.fog.x)' : 'fogFactorOf(in.position.z)')}${
     discarded.lines.length ? `\n${discarded.lines.join('\n')}` : ''}
     return current;
 }

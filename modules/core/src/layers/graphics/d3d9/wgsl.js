@@ -1879,14 +1879,18 @@ export function translateShader(parsed, options = {}){
             {
                 emits(varyingLocation(D3DDECLUSAGE.FOG, 0), 'oFog');
             }
-            const amount = carried === FOG_SOURCE.VERTEX && wrote ? 'out.oFog.x' : '0.0';
+            const amount = wrote ? 'out.oFog.x' : '0.0';
             body.push(`    out.oFog = vec4f(${amount}, c[${fogRegister}].rgb);`);
             if (carried === FOG_SOURCE.TABLE)
             {
                 outputFields.push(`    @location(${FOG_RANGE_LOCATION}) @interpolate(flat)`
                     + ` o${FOG_RANGE_LOCATION}: vec4f,`);
                 outputs.push(FOG_RANGE_LOCATION);
-                body.push(`    out.o${FOG_RANGE_LOCATION} = c[${fogRegister + 1}];`);
+                // A w of 2 tells the pixel stage the curve runs over the
+                // shader's oFog rather than the depth (decisions.md, table fog
+                // through a vertex shader).
+                body.push(`    out.o${FOG_RANGE_LOCATION} = ${wrote
+                    ? `vec4f(c[${fogRegister + 1}].xyz, 2.0)` : `c[${fogRegister + 1}]`};`);
             }
         }
         if (options.points)
@@ -1949,10 +1953,12 @@ export function translateShader(parsed, options = {}){
             inputFields.push(`    @location(${varyingLocation(D3DDECLUSAGE.FOG, 0)}) fog: vec4f,`);
             reads.push(varyingLocation(D3DDECLUSAGE.FOG, 0));
             // Table fog over the pixel's z under an affine projection, its w
-            // otherwise; the curve reads its range from a module variable,
-            // since a function cannot see the entry point's input.
+            // otherwise, and over the vertex shader's oFog when it wrote one;
+            // the curve reads its range from a module variable, since a
+            // function cannot see the entry point's input.
             const amount = table
-                ? 'fogFactorOf(select(d3dRcp(in.vPos.w), in.vPos.z, fogRange.w != 0.0))'
+                ? 'fogFactorOf(select(select(d3dRcp(in.vPos.w), in.vPos.z, fogRange.w != 0.0),'
+                    + ' in.fog.x, fogRange.w > 1.5))'
                 : 'in.fog.x';
             const fogLines = [
                 ...(table ? ['    fogRange = in.fogRange;'] : []),

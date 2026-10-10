@@ -366,6 +366,18 @@ linker's default and what Wine gives every thread as a floor. Not derived from a
 Windows' own rounding of a small reserve was not measured. Revisit if a program is found that
 depends on a small stack ending where it was linked to end. *2026-10-10.*
 
+**A43 -- Table fog through a vertex shader that writes oFog runs its curve over that oFog.**
+With FOGTABLEMODE set, a draw through a vertex shader below model 3 is fogged per pixel by the
+table curve over the shader's oFog when the shader wrote one, and over the depth (z) when it did
+not. Wine's `fog_with_shader_test` rows for a shader with fog output under table fog expect the
+depth instead, as measured on a GeForce 7600GS; programs of the shader-model-1 generation were
+written against earlier drivers that took the curve over oFog, and set their range for it. Far
+Cry writes oFog as one minus its own visibility and sets a LINEAR table range of 0 to 1: over
+the depth every terrain pixel of a level came out the fog colour (measured 2026-10-10, browser,
+graphics worker, SwiftShader); over oFog the range gives back the program's own factor. A shader
+without oFog keeps Wine's answer. Revisit if a program is found that writes oFog and sets its
+table range for depth. *2026-10-10.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

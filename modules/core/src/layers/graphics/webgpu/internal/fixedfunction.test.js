@@ -931,9 +931,15 @@ test('a vertex shader over the fixed pixel stage is fogged by what it wrote, or 
         .includes('input.fogAmount = in.fog.x;'));
     assert.ok(fixedFragmentStage(state({}), [0, 1]).wgsl
         .includes('input.fogAmount = in.v1.a;'));
+    // Table fog runs its curve over the shader's oFog when it wrote one, over
+    // the depth when it did not (decisions.md).
     const table = fixedFragmentStage(state({ fogSource: FOG_SOURCE.TABLE }), [0, 1, 10]).wgsl;
-    assert.ok(table.includes('fogFactorOf(select(1.0 / in.position.w, in.position.z,'));
+    assert.ok(table.includes('@location(10) fog: vec4f,'));
+    assert.ok(table.includes('clamp(fogFactorOf(in.fog.x), 0.0, 1.0)'));
     assert.doesNotMatch(table, /fogAmount/);
+    const depth = fixedFragmentStage(state({ fogSource: FOG_SOURCE.TABLE }), [0, 1]).wgsl;
+    assert.ok(depth.includes('clamp(fogFactorOf(in.position.z), 0.0, 1.0)'));
+    assert.doesNotMatch(depth, /in\.fog\b/);
 });
 
 test('a pre-transformed vertex takes its fog factor from the specular alpha', ()=>{
