@@ -24,7 +24,9 @@ export const DEVICE = Object.freeze({
     SetDepthStencilSurface: 39, GetDepthStencilSurface: 40, BeginScene: 41, EndScene: 42,
     SetTransform: 44, SetViewport: 47, GetViewport: 48, SetRenderState: 57,
     CreateStateBlock: 59, SetTexture: 65, SetTextureStageState: 67, SetSamplerState: 69,
-    DrawPrimitiveUP: 83, SetFVF: 89, SetVertexShader: 92, SetPixelShader: 107,
+    DrawIndexedPrimitive: 82, DrawPrimitiveUP: 83, CreateVertexDeclaration: 86,
+    SetVertexDeclaration: 87, SetFVF: 89, SetVertexShader: 92, SetStreamSource: 100,
+    SetIndices: 104, SetPixelShader: 107,
 });
 
 /** IUnknown's AddRef and Release, and IDirect3DStateBlock9's Apply. */
@@ -36,8 +38,9 @@ export const STATEBLOCK_APPLY = 5;
 export const TEXTURE = Object.freeze({ GetType: 10, GetLevelCount: 13, GetLevelDesc: 17,
     GetSurfaceLevel: 18, LockRect: 19, UnlockRect: 20 });
 
-/** IDirect3DIndexBuffer9's slots. */
+/** IDirect3DIndexBuffer9's slots, which IDirect3DVertexBuffer9's are too. */
 export const INDEX_BUFFER = Object.freeze({ Lock: 11, Unlock: 12 });
+export const VERTEX_BUFFER = INDEX_BUFFER;
 
 /** IDirect3DSurface9's slots. */
 export const SURFACE = Object.freeze({ GetDesc: 12, LockRect: 13, UnlockRect: 14 });

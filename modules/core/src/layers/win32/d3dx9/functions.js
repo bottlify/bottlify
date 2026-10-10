@@ -48,6 +48,8 @@ import { createComObject } from '../ole32/objects.js';
 import { createConstantTableObjects } from './constants.js';
 import { createShaderSemantics } from './semantics.js';
 import { createMeshFunctions } from './mesh.js';
+import { createMeshObjects } from './mesh-object.js';
+import { createDeclarationFunctions } from './fvf.js';
 import { preprocess, preprocessTracked } from './preprocess.js';
 import { compileShader } from './hlsl-compile.js';
 import { assembleShader, disassembleShader } from './shader-asm.js';
@@ -80,8 +82,6 @@ const NOT_BUILT = {
     D3DXComputeNormalMap: [24],
     D3DXCreateBox: [24, 4, 5],
     D3DXCreateCylinder: [32, 6, 7],
-    D3DXCreateMesh: [24, 5],
-    D3DXCreateMeshFVF: [24, 5],
     D3DXCreatePolygon: [20, 3, 4],
     D3DXCreateSphere: [24, 4, 5],
     D3DXCreateTeapot: [12, 1, 2],
@@ -337,6 +337,7 @@ export function createD3dxFunctions(host, options = {}){
         }
     };
 
+    const meshes = createMeshObjects(host, { giveBuffer });
     const constantTables = createConstantTableObjects(host);
     const effects = createEffects(host, { giveBuffer, macrosAt,
         includer: include=>includer(include),
@@ -717,6 +718,12 @@ export function createD3dxFunctions(host, options = {}){
 
         /** See mesh.js. */
         ...createMeshFunctions(host),
+
+        /** See mesh-object.js. */
+        ...meshes.exports,
+
+        /** See fvf.js. */
+        ...createDeclarationFunctions(host),
 
         /** See texture-tools.js. */
         ...createTextureTools(host),
