@@ -56,6 +56,14 @@ test('a UUID is spelled into a string the caller frees with RpcStringFree', ()=>
             }
             return text;
         },
+        readWideString: address=>{
+            let text = '';
+            for (let at = address; view.getUint16(at, true) !== 0; at += 2)
+            {
+                text += String.fromCharCode(view.getUint16(at, true));
+            }
+            return text;
+        },
         allocate: ()=>0x200,
         free: address=>{
             freed.push(address);
@@ -80,4 +88,21 @@ test('a UUID is spelled into a string the caller frees with RpcStringFree', ()=>
     assert.equal(fns.RpcStringFreeA.handler([0x40]), 0);
     assert.deepEqual(freed, [0x200]);
     assert.equal(view.getUint32(0x40, true), 0, 'and the pointer is cleared');
+
+    assert.equal(fns.UuidToStringW.argBytes, 8);
+    assert.equal(fns.RpcStringFreeW.argBytes, 4);
+    assert.equal(fns.UuidToStringW.handler([0x10, 0x40]), 0, 'RPC_S_OK');
+    const wide = view.getUint32(0x40, true);
+    let spelled = '';
+    for (let at = wide; view.getUint16(at, true) !== 0; at += 2)
+    {
+        spelled += String.fromCharCode(view.getUint16(at, true));
+    }
+    assert.equal(spelled, '6b29fc40-ca47-1067-b31d-00dd010662da', 'the same spelling in UTF-16');
+    assert.equal(fns.UuidFromStringW.argBytes, 8);
+    assert.equal(fns.UuidFromStringW.handler([wide, 0xa0]), 0, 'the UTF-16 string reads back');
+    assert.deepEqual([...memory.subarray(0xa0, 0xb0)], [...memory.subarray(0x10, 0x20)]);
+    assert.equal(fns.RpcStringFreeW.handler([0x40]), 0);
+    assert.equal(freed.at(-1), wide);
+    assert.equal(view.getUint32(0x40, true), 0);
 });

@@ -453,6 +453,19 @@ export function createProfileFunctions(host){
     };
 
     /**
+     * Every section's name, NUL-separated: the list a NULL section name gives
+     * GetPrivateProfileString, for whichever file and width.
+     * @param {string | null} path @param {number} buffer @param {number} size
+     * @param {boolean} [wide]
+     */
+    const sectionNames = (path, buffer, size, wide = false)=>{
+        /** @param {ProfileLine[]} lines */
+        const answer = lines=>deliver(buffer, size, lookUp(lines, null, null, ''), wide);
+        const loaded = path === null ? [] : load(path);
+        return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+    };
+
+    /**
      * A section's lines into the caller's buffer, NUL-separated: GetPrivate-
      * ProfileSection's body, for whichever file and width.
      *
@@ -601,6 +614,14 @@ export function createProfileFunctions(host){
                 readSection(pathOf(file), text(section, MAX_NAME), buffer, size),
         },
 
+        /** DWORD GetPrivateProfileSectionW(...): GetPrivateProfileSectionA in UTF-16 */
+        GetPrivateProfileSectionW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([section, buffer, size, file])=>
+                readSection(widePathOf(file), wideText(section, MAX_NAME), buffer, size, true),
+        },
+
         /**
          * DWORD GetPrivateProfileSectionNamesA(LPSTR lpszReturnBuffer,
          *   DWORD nSize, LPCSTR lpFileName)
@@ -611,13 +632,14 @@ export function createProfileFunctions(host){
         GetPrivateProfileSectionNamesA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([buffer, size, file])=>{
-                const path = pathOf(file);
-                /** @param {ProfileLine[]} lines */
-                const answer = lines=>deliver(buffer, size, lookUp(lines, null, null, ''));
-                const loaded = path === null ? [] : load(path);
-                return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
-            },
+            handler: ([buffer, size, file])=>sectionNames(pathOf(file), buffer, size),
+        },
+
+        /** DWORD GetPrivateProfileSectionNamesW(...): GetPrivateProfileSectionNamesA in UTF-16 */
+        GetPrivateProfileSectionNamesW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([buffer, size, file])=>sectionNames(widePathOf(file), buffer, size, true),
         },
 
         /**
@@ -651,6 +673,14 @@ export function createProfileFunctions(host){
             /** @param {number[]} args */
             handler: ([section, list, file])=>
                 writeSection(pathOf(file), text(section, MAX_NAME), entriesOf(list, false)),
+        },
+
+        /** BOOL WritePrivateProfileSectionW(...): WritePrivateProfileSectionA in UTF-16 */
+        WritePrivateProfileSectionW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([section, list, file])=>
+                writeSection(widePathOf(file), wideText(section, MAX_NAME), entriesOf(list, true)),
         },
 
         /**

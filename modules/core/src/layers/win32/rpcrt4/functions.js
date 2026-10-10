@@ -58,6 +58,63 @@ export function createRpcFunctions(host){
         host.writeMemory(address, bytes);
     };
 
+    /**
+     * UuidFromString once the string is read; NULL is the nil UUID.
+     * @param {string | null} spelled @param {number} out
+     */
+    const uuidFromString = (spelled, out)=>{
+        if (spelled === null)
+        {
+            host.writeMemory(out >>> 0, new Uint8Array(GUID_SIZE));
+            return RPC_S_OK;
+        }
+        const bytes = spelled.length === UUID_STRING_LENGTH ? parseGuid(`{${spelled}}`) : null;
+        if (bytes === null)
+        {
+            return RPC_S_INVALID_STRING_UUID;
+        }
+        host.writeMemory(out >>> 0, bytes);
+        return RPC_S_OK;
+    };
+
+    /**
+     * UuidToString's work in either width.
+     * @param {number} uuid @param {number} out @param {boolean} wide
+     */
+    const uuidToString = (uuid, out, wide)=>{
+        const bytes = (uuid >>> 0) === 0 || !host.readMemory
+            ? new Uint8Array(GUID_SIZE)
+            : host.readMemory(uuid >>> 0, GUID_SIZE);
+        const codes = [...formatGuid(bytes).slice(1, -1).toLowerCase(), '\0']
+            .map(c=>c.charCodeAt(0));
+        const encoded = wide ? new Uint8Array(Uint16Array.from(codes).buffer)
+            : Uint8Array.from(codes);
+        const at = host.allocate?.(encoded.length) ?? 0;
+        if (at === 0)
+        {
+            return RPC_S_OUT_OF_MEMORY;
+        }
+        host.writeMemory(at, encoded);
+        writeU32(out >>> 0, at);
+        return RPC_S_OK;
+    };
+
+    /** @param {number} pointer */
+    const stringFree = pointer=>{
+        if ((pointer >>> 0) === 0 || !host.readMemory)
+        {
+            return RPC_S_OK;
+        }
+        const held = new DataView(host.readMemory(pointer >>> 0, 4).slice().buffer)
+            .getUint32(0, true);
+        if (held !== 0)
+        {
+            host.free?.(held);
+        }
+        writeU32(pointer >>> 0, 0);
+        return RPC_S_OK;
+    };
+
     /** @type {Partial<ReturnType<typeof createRuntime>>} */
     const runtime = host.runtime && host.readMemory && host.allocate && host.free
         ? createRuntime({
@@ -118,23 +175,16 @@ export function createRpcFunctions(host){
         UuidFromStringA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([text, out])=>{
-                if ((text >>> 0) === 0)
-                {
-                    host.writeMemory(out >>> 0, new Uint8Array(GUID_SIZE));
-                    return RPC_S_OK;
-                }
-                const spelled = host.readCString?.(text >>> 0, UUID_STRING_LENGTH + 1) ?? '';
-                const bytes = spelled.length === UUID_STRING_LENGTH
-                    ? parseGuid(`{${spelled}}`)
-                    : null;
-                if (bytes === null)
-                {
-                    return RPC_S_INVALID_STRING_UUID;
-                }
-                host.writeMemory(out >>> 0, bytes);
-                return RPC_S_OK;
-            },
+            handler: ([text, out])=>uuidFromString((text >>> 0) === 0 ? null
+                : host.readCString?.(text >>> 0, UUID_STRING_LENGTH + 1) ?? '', out),
+        },
+
+        /** RPC_STATUS UuidFromStringW(RPC_WSTR StringUuid, UUID *Uuid) -- in UTF-16. */
+        UuidFromStringW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([text, out])=>uuidFromString((text >>> 0) === 0 ? null
+                : host.readWideString?.(text >>> 0) ?? '', out),
         },
 
         /**
@@ -146,40 +196,28 @@ export function createRpcFunctions(host){
         UuidToStringA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([uuid, out])=>{
-                const bytes = (uuid >>> 0) === 0 || !host.readMemory
-                    ? new Uint8Array(GUID_SIZE)
-                    : host.readMemory(uuid >>> 0, GUID_SIZE);
-                const spelled = formatGuid(bytes).slice(1, -1).toLowerCase();
-                const at = host.allocate?.(spelled.length + 1) ?? 0;
-                if (at === 0)
-                {
-                    return RPC_S_OUT_OF_MEMORY;
-                }
-                host.writeMemory(at, Uint8Array.from([...spelled, '\0'].map(c=>c.charCodeAt(0))));
-                writeU32(out >>> 0, at);
-                return RPC_S_OK;
-            },
+            handler: ([uuid, out])=>uuidToString(uuid, out, false),
+        },
+
+        /** RPC_STATUS UuidToStringW(const UUID *Uuid, RPC_WSTR *StringUuid) -- in UTF-16. */
+        UuidToStringW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([uuid, out])=>uuidToString(uuid, out, true),
         },
 
         /** RPC_STATUS RpcStringFreeA(RPC_CSTR *String) -- freed, and the pointer cleared. */
         RpcStringFreeA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([pointer])=>{
-                if ((pointer >>> 0) === 0 || !host.readMemory)
-                {
-                    return RPC_S_OK;
-                }
-                const held = new DataView(host.readMemory(pointer >>> 0, 4).slice().buffer)
-                    .getUint32(0, true);
-                if (held !== 0)
-                {
-                    host.free?.(held);
-                }
-                writeU32(pointer >>> 0, 0);
-                return RPC_S_OK;
-            },
+            handler: ([pointer])=>stringFree(pointer),
+        },
+
+        /** RPC_STATUS RpcStringFreeW(RPC_WSTR *String) */
+        RpcStringFreeW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>stringFree(pointer),
         },
     };
 }

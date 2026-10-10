@@ -130,3 +130,13 @@ Microsoft publishes that file system's source as a Windows Driver Kit sample (Mi
 License); it is used as knowledge of the observable behaviour only, and no code from it is carried
 into this repository. The disc format itself is read from its public standards, ECMA-119 and the
 Joliet specification.
+
+## The RAR 5.0 archive format -- used as a specification
+
+The RAR reader (`modules/installer/src/rar.js`) reads the container as RARLAB's published
+technote "RAR 5.0 archive format" describes it. The compression algorithm has no document of its
+own; its observable rules -- the block header and its check byte, the table encoding, the length
+and distance slots, the filters -- are taken from the behaviour of RARLAB's freely available UnRAR
+source, whose licence permits using it to handle RAR archives but not to recreate the compression
+algorithm. It is used as knowledge only, no code from it is carried into this repository, and the
+reader only unpacks.

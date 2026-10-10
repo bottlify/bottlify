@@ -11,7 +11,7 @@
  * An install several processes deep that has stopped shows here which process
  * waits on which; the facade alone speaks for one of them.
  *
- *   node tools/install-watch.mjs <setup.exe | disc.iso | archive.zip [--entry PATH]>
+ *   node tools/install-watch.mjs <setup.exe | disc.iso | archive.zip|.rar [--entry PATH]>
  *       | --bundle ID [--which PATH]
  *       [--every 30] [--minutes 20]
  *       [--journal SECONDS] [--memory MB] [--key Code@S]... [--click X,Y@S]...
@@ -73,7 +73,7 @@ import { deflateSync } from 'node:zlib';
 import { openBundle } from './btl.mjs';
 import { createApp } from '../modules/core/src/app.js';
 import { createFakeDevice } from '../modules/core/src/layers/graphics/webgpu/internal/fake-device.js';
-import { archiveDisc, collectFrom, discOptions, placementOf, prefixOptions, readZip }
+import { archiveDisc, collectFrom, discOptions, placementOf, prefixOptions, readRar, readZip }
     from '../modules/installer/src/index.js';
 
 const argv = process.argv.slice(2);
@@ -165,19 +165,23 @@ const besideSetup = ()=>readdirSync(dirname(file), { withFileTypes: true })
     .map(one=>({ name: one.name,
         bytes: new Uint8Array(readFileSync(join(dirname(file), one.name))) }));
 /**
- * A disc image, or a zip built into one as the page builds it, mounted as D:
+ * A disc image, or a zip or rar built into one as the page builds it, mounted as D:
  * with the program it names started from there -- the autorun's, or the one
  * `--entry PATH` names on it.
  */
+/** What an install came from, for `--collect`: the setup, or the disc built for it. */
+/** @type {any} */
+let collectable = null;
 const discMedia = async()=>{
     const name = basename(file);
     const bytes = new Uint8Array(readFileSync(file));
-    const disc = /\.zip$/i.test(name)
-        ? archiveDisc(name, await readZip(new Blob([bytes]))) : { name, disc: bytes };
+    const read = /\.zip$/i.test(name) ? readZip : /\.rar$/i.test(name) ? readRar : null;
+    const disc = read ? archiveDisc(name, await read(new Blob([bytes]))) : { name, disc: bytes };
+    collectable = disc;
     return discOptions(disc, argv.includes('--entry')
         ? { entry: argv[argv.indexOf('--entry') + 1] } : {});
 };
-const isDisc = !bundleId && /\.(iso|zip)$/i.test(file);
+const isDisc = !bundleId && /\.(iso|zip|rar)$/i.test(file);
 const media = bundleId || isDisc ? null : {
     name: basename(file),
     bytes: new Uint8Array(readFileSync(file)),
@@ -393,8 +397,10 @@ setInterval(()=>route.tick(), 150).unref?.();
 // for as long as the run lasts -- every installer on the disk driven by one
 // list of the buttons that go forward.
 const anyOrder = argv.includes('--press-any');
+// A label is matched as a person reads it: without the mnemonic's `&`, in any case.
+const label = (/** @type {string} */ title)=>title.replace(/&/g, '').toLowerCase();
 const pressing = argv.includes('--press') || anyOrder
-    ? argv[argv.indexOf(anyOrder ? '--press-any' : '--press') + 1].split('|') : [];
+    ? argv[argv.indexOf(anyOrder ? '--press-any' : '--press') + 1].split('|').map(label) : [];
 if (pressing.length > 0)
 {
     let step = 0;
@@ -421,11 +427,12 @@ if (pressing.length > 0)
                 // own goes nowhere.
                 const button = (win32.windows ?? []).filter((/** @type {any} */ w)=>w.visible
                     && w.className === 'Button'
-                    && (anyOrder ? pressing.includes(w.title) : w.title === pressing[step])
+                    && (anyOrder ? pressing.includes(label(w.title))
+                        : label(w.title) === pressing[step])
                     && (w.hwnd !== lastButton || looksSince > 3)
                     && (parseInt(w.style, 16) & WS_DISABLED) === 0)
                     .sort((/** @type {any} */ a, /** @type {any} */ b)=>
-                        pressing.indexOf(a.title) - pressing.indexOf(b.title))[0];
+                        pressing.indexOf(label(a.title)) - pressing.indexOf(label(b.title)))[0];
                 if (!button)
                 {
                     continue;
@@ -688,11 +695,12 @@ for (let at = argv.indexOf('--copy'); at >= 0; at = argv.indexOf('--copy', at + 
     }
 }
 const collectTo = argv.includes('--collect-to') ? argv[argv.indexOf('--collect-to') + 1] : null;
-if (media && (argv.includes('--collect') || collectTo))
+collectable ??= media;
+if (collectable && (argv.includes('--collect') || collectTo))
 {
     try
     {
-        const collected = collectFrom(app, media);
+        const collected = collectFrom(app, collectable);
         const bytes = collected.files.reduce((total, one)=>total + one.bytes.length, 0);
         console.log('COLLECT root', collected.root, 'entry', collected.entry,
             'files', collected.files.length, 'bytes', bytes, 'outside', collected.outside.length);

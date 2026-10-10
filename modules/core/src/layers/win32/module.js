@@ -107,6 +107,8 @@ import { createWintrustFunctions } from './wintrust/functions.js';
 import { createD3dxFunctions } from './d3dx9/functions.js';
 import { createSpoolerFunctions } from './winspool/functions.js';
 import { createNetworkFunctions } from './mpr/functions.js';
+import { createNetbiosFunctions, createSensFunctions, createTelephonyFunctions }
+    from './offline/functions.js';
 import { createAcmFunctions } from './msacm32/functions.js';
 import { createThemeFunctions } from './uxtheme/functions.js';
 import { createWininetFunctions } from './wininet/functions.js';
@@ -2033,7 +2035,8 @@ export function createWin32Module(){
                     directx: directx?.version,
                 }),
 
-                'LZ32.dll': createLzFunctions({ readCString, writeMemory, files: volume }),
+                'LZ32.dll': createLzFunctions({
+                    readCString, readWideString, writeMemory, files: volume }),
 
                 // The Patch API's applying half: the delta patches a Windows
                 // Installer patch's PatchFiles action and setups apply.
@@ -2452,6 +2455,13 @@ export function createWin32Module(){
                     writeMemory }),
 
                 'MPR.dll': createNetworkFunctions({ setLastError: setError, writeMemory }),
+
+                // Network adapters, modems and connectivity a game asks about
+                // for its online modes: none of them on this machine.
+                'NETAPI32.dll': createNetbiosFunctions({ readMemory, writeMemory }),
+                'TAPI32.dll': createTelephonyFunctions({ readMemory, writeMemory }),
+                'SensApi.dll': createSensFunctions({ readMemory, writeMemory,
+                    setLastError: setError }),
 
                 'UXTHEME.dll': createThemeFunctions({
                     setLastError: setError, readMemory, writeMemory,

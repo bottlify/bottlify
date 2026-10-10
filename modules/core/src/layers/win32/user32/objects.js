@@ -1472,6 +1472,31 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         return host.handles.open(icon ? 'icon' : 'cursor', { hotSpot, width, height, picture });
     };
 
+    /**
+     * An accelerator table from the caller's six-byte entries, for either width.
+     * @param {number[]} args
+     */
+    const createAccelerators = ([table, count])=>{
+        const entries = count | 0;
+        if ((table >>> 0) === 0 || entries <= 0)
+        {
+            return 0;
+        }
+        const bytes = host.readMemory(table >>> 0, entries * ACCEL_SIZE);
+        /** @type {AcceleratorEntry[]} */
+        const read = [];
+        for (let index = 0; index < entries; index++)
+        {
+            const at = index * ACCEL_SIZE;
+            read.push({
+                flags: bytes[at] & ACCEL_FLAGS,
+                key: bytes[at + 2] | bytes[at + 3] << 8,
+                command: bytes[at + 4] | bytes[at + 5] << 8,
+            });
+        }
+        return openAccelerators(read).handle;
+    };
+
     return {
         /** BOOL SetPropA/W(HWND hWnd, LPCSTR lpString, HANDLE hData) */
         SetPropA: { argBytes: 12, handler: ansiProperties.set },
@@ -2176,26 +2201,19 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         CreateAcceleratorTableA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([table, count])=>{
-                const entries = count | 0;
-                if ((table >>> 0) === 0 || entries <= 0)
-                {
-                    return 0;
-                }
-                const bytes = host.readMemory(table >>> 0, entries * ACCEL_SIZE);
-                /** @type {AcceleratorEntry[]} */
-                const read = [];
-                for (let index = 0; index < entries; index++)
-                {
-                    const at = index * ACCEL_SIZE;
-                    read.push({
-                        flags: bytes[at] & ACCEL_FLAGS,
-                        key: bytes[at + 2] | bytes[at + 3] << 8,
-                        command: bytes[at + 4] | bytes[at + 5] << 8,
-                    });
-                }
-                return openAccelerators(read).handle;
-            },
+            handler: args=>createAccelerators(args),
+        },
+
+        /**
+         * HACCEL CreateAcceleratorTableW(LPACCEL paccel, int cAccel)
+         *
+         * The same six-byte entries; a character key is a UTF-16 unit rather
+         * than an ANSI byte, which the WORD holds either way.
+         */
+        CreateAcceleratorTableW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>createAccelerators(args),
         },
 
         /**

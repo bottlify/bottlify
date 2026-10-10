@@ -1718,6 +1718,41 @@ export function createAutomationFunctions(host){
         },
 
         /**
+         * HRESULT VarBstrCat(BSTR bstrLeft, BSTR bstrRight, BSTR *pbstrResult)
+         *
+         * A NULL operand is the empty string. The lengths are added in bytes,
+         * so an odd-length byte string stays as long as it was.
+         */
+        VarBstrCat: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([left, right, result])=>{
+                if ((result >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const leftBytes = byteLengthOf(left >>> 0);
+                const rightBytes = byteLengthOf(right >>> 0);
+                const data = new Uint8Array(leftBytes + rightBytes);
+                if (leftBytes)
+                {
+                    data.set(host.readMemory(left >>> 0, leftBytes));
+                }
+                if (rightBytes)
+                {
+                    data.set(host.readMemory(right >>> 0, rightBytes), leftBytes);
+                }
+                const bstr = allocateBstr(data);
+                if (bstr === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                writeU32(result >>> 0, bstr);
+                return S_OK;
+            },
+        },
+
+        /**
          * ULONG BSTR_UserSize(ULONG *pFlags, ULONG StartingSize, BSTR *pBstr)
          *
          * A BSTR on the wire is MS-OAUT's FLAGGED_WORD_BLOB as NDR lays a
@@ -3211,6 +3246,78 @@ export function createAutomationFunctions(host){
         },
 
         /**
+         * HRESULT DispCallFunc(void *pvInstance, ULONG_PTR oVft, CALLCONV cc,
+         *   VARTYPE vtReturn, UINT cActuals, VARTYPE *prgvt, VARIANTARG **prgpvarg,
+         *   VARIANT *pvargResult)
+         *
+         * A call through a vtable slot (an instance given, oVft its byte
+         * offset, the instance pushed first) or to oVft itself. Each argument
+         * is pushed as its type occupies the stack: two dwords for the 64-bit
+         * types, the whole sixteen-byte variant for VT_VARIANT, one otherwise.
+         * The answer is EAX; a floating-point or 64-bit return comes back in
+         * registers the guest call does not hand over, and is refused.
+         */
+        DispCallFunc: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: ([instance, offset, , returnType, count, types, values, result])=>{
+                const wide64 = new Set([VT_R8, VT_CY, VT_DATE, VT_I8, VT_UI8]);
+                const returned = returnType & 0xffff;
+                if (!host.call || wide64.has(returned) || returned === VT_R4)
+                {
+                    report('OLE Automation', `DispCallFunc cannot return type ${returned}`
+                        + (host.call ? '' : ' or call into the program at all'));
+                    return DISP_E_BADVARTYPE;
+                }
+                /** @type {number[]} */
+                const pushed = (instance >>> 0) === 0 ? [] : [instance >>> 0];
+                for (let index = 0; index < (count >>> 0); index++)
+                {
+                    const type = readU16((types >>> 0) + index * 2);
+                    const variant = readU32((values >>> 0) + index * 4);
+                    const dwords = type === VT_VARIANT ? 4 : wide64.has(type) ? 2 : 1;
+                    const from = type === VT_VARIANT ? variant : variant + VARIANT_VALUE;
+                    for (let word = 0; word < dwords; word++)
+                    {
+                        pushed.push(readU32(from + word * 4));
+                    }
+                }
+                const entry = (instance >>> 0) === 0
+                    ? offset >>> 0
+                    : readU32(readU32(instance >>> 0) + (offset >>> 0));
+                return host.call(entry, pushed, host.callerThread?.()).then(answer=>{
+                    if ((result >>> 0) !== 0)
+                    {
+                        host.fillMemory(result >>> 0, 0, 16);
+                        writeU16(result >>> 0, returned);
+                        writeU32((result >>> 0) + VARIANT_VALUE, answer >>> 0);
+                    }
+                    return S_OK;
+                });
+            },
+        },
+
+        /**
+         * HRESULT OleCreateFontIndirect(LPFONTDESC lpFontDesc, REFIID riid,
+         *   LPVOID *lplpvObj)
+         *
+         * An IFont nothing here implements; declared so its twelve bytes are
+         * popped and the caller is told, rather than left with a short stack.
+         */
+        OleCreateFontIndirect: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, , out])=>{
+                report('OLE Automation', 'OleCreateFontIndirect: no IFont object is implemented');
+                if ((out >>> 0) !== 0)
+                {
+                    writeU32(out >>> 0, 0);
+                }
+                return E_NOTIMPL;
+            },
+        },
+
+        /**
          * HRESULT CreateErrorInfo(ICreateErrorInfo **pperrinfo)
          *
          * A fresh, empty error object with one reference, the caller's.
@@ -3460,6 +3567,7 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     13: 'VariantTimeToDosDateTime',
     14: 'DosDateTimeToVariantTime',
     35: 'GetActiveObject',
+    146: 'DispCallFunc',
     147: 'VariantChangeTypeEx',
     149: 'SysStringByteLen',
     150: 'SysAllocStringByteLen',
@@ -3536,8 +3644,10 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     292: 'LPSAFEARRAY_UserMarshal',
     293: 'LPSAFEARRAY_UserUnmarshal',
     294: 'LPSAFEARRAY_UserFree',
+    313: 'VarBstrCat',
     318: 'VarCat',
     330: 'VarDateFromUdate',
     331: 'VarUdateFromDate',
     417: 'OleCreatePropertyFrame',
+    420: 'OleCreateFontIndirect',
 });
