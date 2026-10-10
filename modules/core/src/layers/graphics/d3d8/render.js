@@ -2672,6 +2672,16 @@ export function createRenderer(options){
     /** Frames whose commands have reached the queue: those numbered below this. */
     let submittedFrames = 0;
 
+    /**
+     * Where the replaying side's time goes: how long a recorded frame took to
+     * be made into GPU work and put on the queue, and how long a read-back took
+     * from being asked to having its bytes -- the wait a program reading its
+     * targets back sees, of which the GPU's own part is only some.
+     */
+    const timing = { replays: 0, replayMs: 0, worstReplayMs: 0, readBacks: 0, readBackMs: 0,
+        worstReadBackMs: 0 };
+    const clock = ()=>(typeof performance === 'undefined' ? Date.now() : performance.now());
+
     const counters = {
         frames: 0,
         draws: 0,
@@ -7790,7 +7800,14 @@ export function createRenderer(options){
             const queued = new Promise(resolve=>{
                 onQueue = ()=>resolve(undefined);
             });
+            const asked = clock();
             const read = chain.then(()=>replay(recorded, null, gpu, ahead ? onQueue : null));
+            read.then(()=>{
+                const took = clock() - asked;
+                timing.readBacks++;
+                timing.readBackMs += took;
+                timing.worstReadBackMs = Math.max(timing.worstReadBackMs, took);
+            }, ()=>{});
             // A read nothing waits for yet holds the next frame only until
             // its copy is on the queue, not until its bytes come back.
             chain = (ahead ? Promise.race([queued, read]) : read).then(()=>undefined, failure);
@@ -8409,6 +8426,7 @@ export function createRenderer(options){
                 // cascade cut short, a texture uploaded, how many textures
                 // the frame drew with.
                 recentFrames: frameHistory.slice(),
+                timing: { ...timing },
                 // Empty unless the build asked for it; see `dumpDraws`.
                 lastDump: joinDump(lastDump),
                 // The bytecode of the shaders the dumped draws ran, each once.
@@ -8457,6 +8475,7 @@ export function createRenderer(options){
      */
     async function replay(recorded, surface, snapshot = null, submitted = null){
         const pipelines = await Promise.allSettled(recorded.pipelines);
+        const began = clock();
         const frame = backend.beginFrame({ cut: recorded.cut });
         // A frame counts when a query is open as it starts or opens in it,
         // and then every pass of it can: a BEGIN may land in any of them.
@@ -8535,6 +8554,10 @@ export function createRenderer(options){
             // becomes every frame after it, and the only symptom is a picture
             // that stopped changing while the counters keep climbing.
             frame.end();
+            const took = clock() - began;
+            timing.replays++;
+            timing.replayMs += took;
+            timing.worstReplayMs = Math.max(timing.worstReplayMs, took);
             submitted?.();
         }
         lastFrame = recorded.commands;
