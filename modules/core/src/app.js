@@ -8519,6 +8519,12 @@ export async function createApp(options){
             }
             return machineInput.send(event);
         },
+        // A route a tool queues clicks and keys on goes the same way: built
+        // on the machine's own send, it took every press to the process the
+        // facade speaks for, whichever program's window was under it.
+        route(){
+            return createInputRoute(event=>this.send(event));
+        },
     });
 
     /**

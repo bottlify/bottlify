@@ -82,6 +82,9 @@ for (const concurrency of /** @type {const} */ ([1, 2, 4]))
             app.input.send({ kind: 'pointerButton', button: 'left', down: true, x, y });
             app.input.send({ kind: 'pointerButton', button: 'left', down: false, x, y });
         };
+        // The child's window is clicked through a route, as a tool queues
+        // its clicks: it goes where the windows say, as a page's events do.
+        const route = app.input.route();
         // Once both pictures are up: a click on each window, a while apart
         // for the activation each brings to reach both programs, then keys.
         let tick = 0;
@@ -94,13 +97,14 @@ for (const concurrency of /** @type {const} */ ([1, 2, 4]))
                 return;
             }
             tick++;
+            route.tick();
             if (tick === 1)
             {
                 click(50, 50);
             }
             else if (tick === 20)
             {
-                click(250, 250);
+                route.click(250, 250);
             }
             else if (tick > 40)
             {
