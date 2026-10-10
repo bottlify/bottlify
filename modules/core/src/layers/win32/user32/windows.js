@@ -1123,6 +1123,36 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * What activation and the focus moving tell a window: WM_NCACTIVATE,
+     * WM_ACTIVATE, WM_ACTIVATEAPP, WM_KILLFOCUS, WM_SETFOCUS. A window of the
+     * thread that moved them hears it now; a window of another thread hears it
+     * on that thread, when it next looks at its queue, and the thread that
+     * moved them does not wait for it -- activation and the focus are each
+     * thread's own, and a thread that loses them learns it in its own message
+     * loop. Run on the mover instead, a program's procedure would answer on a
+     * thread it never runs on: a splash screen's thread taking the foreground
+     * would run the game window's WM_KILLFOCUS -- a whole device reset --
+     * beside the game's own thread drawing with that device.
+     *
+     * @param {number} hwnd @param {number} message @param {number} wParam
+     * @param {number} lParam @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const tellOwner = (hwnd, message, wParam, lParam, thread)=>{
+        const record = live(hwnd);
+        const owner = record ? creatorOf(record) : null;
+        const self = threadIdOf(thread ?? host.callerThread?.());
+        if (!record || owner === null || self === null || owner === self
+            || !queueing.has(owner))
+        {
+            return send(hwnd, message, wParam, lParam, thread);
+        }
+        sendAcross(hwnd, message, wParam, lParam, thread ?? host.callerThread?.(), false,
+            { kind: ISMEX_NOTIFY });
+        return 0;
+    };
+
+    /**
      * Every top-level window a broadcast reaches: this process's, in the
      * order they were made, then every other process's. A message-only window
      * is not top-level, and a child is not reached.
@@ -2119,7 +2149,7 @@ export function createWindowFunctions(host){
                 return 0;
             }
             const [target, message, wParam, lParam] = told[index];
-            return andThen(live(target) ? send(target, message, wParam, lParam, thread) : 0,
+            return andThen(live(target) ? tellOwner(target, message, wParam, lParam, thread) : 0,
                 ()=>tell(index + 1));
         };
         if (!moved)
@@ -2136,8 +2166,8 @@ export function createWindowFunctions(host){
                 return 0;
             }
             return andThen(current !== 0 && live(current)
-                ? send(current, WM_KILLFOCUS, gained, 0, thread) : 0,
-            ()=>(live(gained) ? send(gained, WM_SETFOCUS, current, 0, thread) : 0));
+                ? tellOwner(current, WM_KILLFOCUS, gained, 0, thread) : 0,
+            ()=>(live(gained) ? tellOwner(gained, WM_SETFOCUS, current, 0, thread) : 0));
         }));
     };
 
@@ -2202,8 +2232,8 @@ export function createWindowFunctions(host){
             // hears WM_ACTIVATE before WM_SETFOCUS.
             const activated = target !== 0 ? activate(target, { thread: on }) : 0;
             return andThen(activated, ()=>
-                andThen(previous !== 0 ? send(previous, WM_KILLFOCUS, target, 0, on) : 0,
-                    ()=>andThen(target !== 0 ? send(target, WM_SETFOCUS, previous, 0, on) : 0,
+                andThen(previous !== 0 ? tellOwner(previous, WM_KILLFOCUS, target, 0, on) : 0,
+                    ()=>andThen(target !== 0 ? tellOwner(target, WM_SETFOCUS, previous, 0, on) : 0,
                         ()=>previous)));
         });
     };
