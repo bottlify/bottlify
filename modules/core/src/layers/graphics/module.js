@@ -1033,6 +1033,12 @@ export function createGraphicsModule(){
                     createSampler: device
                         ? (/** @type {any} */ descriptor)=>device.device.createSampler(descriptor)
                         : undefined,
+                    // The same per-draw account Direct3D 8 and 9 take.
+                    dumpDraws: device?.dumpDraws === true,
+                    dumpEvery: device?.dumpEvery,
+                    maxDraws: device?.maxDraws,
+                    skipTexture: device?.skipTexture,
+                    probeTexture: device?.probeTexture,
                     presenter: state.shown,
                 }),
 

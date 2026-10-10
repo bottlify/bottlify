@@ -787,7 +787,7 @@ export function createGraphicsLibraries(
             // nothing at all about what it drew through them. The OpenGL
             // runtime joins the answer when it is the one that drew: its
             // renderer is made lazily, so it is asked only if it exists.
-            device: d3d8?.diagnostics() ?? d3d9?.diagnostics()
+            device: d3d8?.diagnostics() ?? d3d9?.diagnostics() ?? d3d7?.diagnostics()
                 ?? (opengl ? opengl.diagnostics().gpu : null),
             // Every compressed block the program handed OpenGL, as a digest.
             compressedTextures: opengl ? opengl.diagnostics().compressed : null,

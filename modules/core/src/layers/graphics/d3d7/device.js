@@ -99,6 +99,12 @@ const FILTER_NUMBERING = Object.freeze({
  *     Where a flipped surface gets shown from. The device claims the address
  *     of every surface it renders into, so a present of that address shows
  *     the texture rather than the guest bytes nobody drew.
+ * @property {boolean} [dumpDraws]  Every draw of the last frame, with its state,
+ *     as Direct3D 8's renderer writes it.
+ * @property {number} [dumpEvery]
+ * @property {number} [maxDraws]
+ * @property {string | null} [skipTexture]  A dump id (`tN`), as `--skip-texture` names it.
+ * @property {string | null} [probeTexture]
  * @property {(ddraw: any, services: RenderServices) => any} [remote]
  *     Makes the Direct3D 7 object in this one's place, whose devices draw
  *     elsewhere (`remote/d3d7.js`).
@@ -237,6 +243,11 @@ export function createDirect3D7(ddraw, services = {}){
             readMemory: /** @type {(address: number, length: number) => Uint8Array} */ (
                 services.readMemory),
             createSampler: services.createSampler ?? null,
+            dumpDraws: services.dumpDraws === true,
+            dumpEvery: services.dumpEvery,
+            maxDraws: services.maxDraws,
+            skipTexture: services.skipTexture ?? null,
+            probeTexture: services.probeTexture ?? null,
         })
         : null;
 
@@ -404,15 +415,13 @@ export function createDirect3D7(ddraw, services = {}){
             maxPointSize: 1,
             softwareVertexProcessing: false,
         });
-        // D3D8's table, cut at D3D7's last state and with D3D7's own added:
-        // a state this version never had is not a state a program can read.
-        for (const state of [...renderStates.keys()])
-        {
-            if (state > D3DRENDERSTATE_MAX)
-            {
-                renderStates.delete(state);
-            }
-        }
+        // D3D8's table with D3D7's own added. The states past D3D7's last
+        // stay for the renderer, which is Direct3D 8's: a D3D7 device always
+        // adds what it blends and writes every channel, which is what BLENDOP
+        // and COLORWRITEENABLE say at their defaults -- dropped, they read as
+        // no blend operation and a write mask of nothing, and no pixel of any
+        // draw reaches the target. A program cannot reach them: a state this
+        // version never had is not one it can set or read.
         for (const state of Object.values(D3DRENDERSTATE_D3D7_ONLY))
         {
             if (!renderStates.has(state))
@@ -420,6 +429,8 @@ export function createDirect3D7(ddraw, services = {}){
                 renderStates.set(state, 0);
             }
         }
+        /** @param {number} state */
+        const isProgramState = state=>state <= D3DRENDERSTATE_MAX && renderStates.has(state);
         /** @type {Map<number, Map<number, number>>} */
         const stageStates = new Map();
         /** @type {Map<number, any>} stage -> DirectDraw surface */
@@ -1074,7 +1085,7 @@ export function createDirect3D7(ddraw, services = {}){
 
             /** @param {number} state @param {number} value */
             SetRenderState(state, value){
-                if (!renderStates.has(state))
+                if (!isProgramState(state))
                 {
                     return DDERR_INVALIDPARAMS;
                 }
@@ -1085,7 +1096,7 @@ export function createDirect3D7(ddraw, services = {}){
 
             /** @param {number} state @param {{ value?: number }} out */
             GetRenderState(state, out){
-                if (!renderStates.has(state))
+                if (!isProgramState(state))
                 {
                     return DDERR_INVALIDPARAMS;
                 }
