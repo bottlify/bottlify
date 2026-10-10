@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createMeshFunctions, vertexNormals } from './mesh.js';
+import { createMeshFunctions, indexBufferOf, singleStrip, vertexNormals } from './mesh.js';
 import { deviceRig } from './device.fixture.js';
 
 const D3DERR_INVALIDCALL = 0x8876086c;
@@ -149,4 +149,88 @@ test('D3DXComputeNormals refuses no mesh, and a mesh without a position or norma
     assert.equal(await r.call(api.D3DXComputeNormals, [packed, 0]), 0x80004001,
         'a packed normal is told, not guessed at');
     assert.equal(r.diverged.at(-1)?.[0], 'D3DXComputeNormals');
+});
+
+/**
+ * The triangles a strip draws, each as it winds, its lowest index first;
+ * those with no area left out.
+ *
+ * @param {number[]} strip
+ */
+function stripTriangles(strip){
+    /** @type {string[]} */
+    const drawn = [];
+    for (let t = 0; t + 2 < strip.length; t++)
+    {
+        const [a, b, c] = t % 2 === 0 ? [strip[t], strip[t + 1], strip[t + 2]]
+            : [strip[t + 1], strip[t], strip[t + 2]];
+        if (a !== b && b !== c && a !== c)
+        {
+            drawn.push(canonical([a, b, c]));
+        }
+    }
+    return drawn.sort();
+}
+
+/** A triangle turned so its lowest index is first, its winding kept. @param {number[]} t */
+function canonical(t){
+    const k = t.indexOf(Math.min(...t));
+    return [t[k], t[(k + 1) % 3], t[(k + 2) % 3]].join(',');
+}
+
+test('singleStrip draws exactly the faces it is given, each with its own winding', ()=>{
+    let seed = 7;
+    const next = ()=>{
+        seed = (seed * 1103515245 + 12345) >>> 0;
+        return seed >>> 16;
+    };
+    for (let round = 0; round < 200; round++)
+    {
+        const faces = Array.from({ length: 1 + next() % 12 }, ()=>{
+            const a = next() % 50;
+            const b = (a + 1 + next() % 48) % 50;
+            let c = next() % 50;
+            while (c === a || c === b)
+            {
+                c = (c + 1) % 50;
+            }
+            return [a, b, c];
+        });
+        assert.deepEqual(stripTriangles(singleStrip(faces)), faces.map(canonical).sort(),
+            JSON.stringify(faces));
+    }
+});
+
+test('the index buffer is made as the IB_ options and 32BIT ask', ()=>{
+    assert.deepEqual(indexBufferOf(0), { usage: 0, pool: 0, format: 101 });
+    assert.deepEqual(indexBufferOf(0x1 | 0x200 | 0x400), { usage: 0x8, pool: 1, format: 102 });
+    assert.deepEqual(indexBufferOf(0x110 | 0x880 | 0x40), { usage: 0x200, pool: 2, format: 101 },
+        'SYSTEMMEM and DYNAMIC count for both; VB_WRITEONLY is the vertex buffer\'s alone');
+});
+
+test('D3DXConvertMeshSubsetToSingleStrip strips the faces of one attribute', async()=>{
+    const r = deviceRig();
+    const api = /** @type {any} */ (createMeshFunctions(r.host));
+    const mesh = r.mesh({ ...QUAD, vertices: 6, indices: [0, 1, 2, 0, 2, 3, 3, 4, 5],
+        ranges: [[0, 0, 1, 0, 3], [1, 1, 2, 0, 6]] });
+    const out = r.heap.allocate(8);
+    assert.equal(api.D3DXConvertMeshSubsetToSingleStrip.argBytes, 20);
+    assert.equal(await r.call(api.D3DXConvertMeshSubsetToSingleStrip, [mesh, 1, 0x200, out,
+        out + 4]), 0);
+    const buffer = r.objects.get(r.view.getUint32(out, true));
+    const count = r.view.getUint32(out + 4, true);
+    const strip = [...new Uint16Array(r.memory.buffer, buffer.data, count)];
+    assert.deepEqual(stripTriangles(strip), ['0,2,3', '3,4,5']);
+    assert.deepEqual([buffer.format, buffer.pool, buffer.length], [101, 1, count * 2]);
+    assert.equal(r.objects.get(r.device).refs, 1, 'the device GetDevice gave is let go');
+    assert.equal(r.objects.get(mesh).locks, 0);
+    assert.equal(await r.call(api.D3DXConvertMeshSubsetToSingleStrip, [mesh, 7, 0, out, 0]),
+        D3DERR_INVALIDCALL, 'an attribute with no faces');
+    assert.equal(r.view.getUint32(out, true), 0);
+    const untabled = r.mesh(QUAD);
+    assert.equal(await r.call(api.D3DXConvertMeshSubsetToSingleStrip, [untabled, 0, 0, out,
+        0]), 0x80004001);
+    assert.equal(r.diverged.at(-1)?.[0], 'D3DXConvertMeshSubsetToSingleStrip');
+    assert.equal(r.call(api.D3DXConvertMeshSubsetToSingleStrip, [0, 0, 0, out, 0]),
+        D3DERR_INVALIDCALL);
 });

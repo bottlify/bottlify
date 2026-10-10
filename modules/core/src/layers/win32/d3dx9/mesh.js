@@ -4,11 +4,12 @@
  * See LICENSE for details
  */
 
-import { createDeviceCalls } from './device.js';
+import { DEVICE, INDEX_BUFFER, UNKNOWN_RELEASE, createDeviceCalls } from './device.js';
 
 /**
  * D3DX's geometry over vertex data: the bounds of a run of positions, and
- * what D3DX does to a mesh -- its normals computed.
+ * what D3DX does to a mesh -- its normals computed, a subset of it made one
+ * triangle strip.
  *
  * Positions are D3DXVECTOR3, three floats at the start of each vertex, the
  * vertices `stride` bytes apart. The bounds' arithmetic is single precision,
@@ -41,6 +42,56 @@ const D3DDECLUSAGE_POSITION = 0;
 const D3DDECLUSAGE_NORMAL = 3;
 const D3DLOCK_READONLY = 0x10;
 const D3DXMESH_32BIT = 0x1;
+const D3DFMT_INDEX16 = 101;
+const D3DFMT_INDEX32 = 102;
+
+/**
+ * The index buffer's usage and pool from D3DXMESH options: each IB_ option
+ * as the D3DUSAGE it stands for, and where it is kept.
+ *
+ * @param {number} options
+ */
+export function indexBufferOf(options){
+    /** @type {[number, number][]} */
+    const usages = [[0x2, 0x20], [0x4, 0x40], [0x8, 0x80], [0x4000, 0x100], [0x400, 0x8],
+        [0x800, 0x200], [0x10000, 0x10]];
+    const usage = usages.reduce((sum, [option, use])=>(options & option ? sum | use : sum), 0);
+    const pool = options & 0x100 ? 2 : options & 0x200 ? 1 : 0;
+    return { usage, pool, format: options & D3DXMESH_32BIT ? D3DFMT_INDEX32 : D3DFMT_INDEX16 };
+}
+
+/**
+ * One triangle strip that draws these triangles, each with its own winding:
+ * every triangle after the first joined by repeating the last index and its
+ * own first, so the joins are triangles with no area, and its first index
+ * put at an even place in the strip, where a strip keeps a triangle's
+ * winding as listed. It is not the shortest strip; D3DX's own looks for
+ * shared edges and is shorter.
+ *
+ * @param {number[][]} faces
+ * @returns {number[]}
+ */
+export function singleStrip(faces){
+    /** @type {number[]} */
+    const strip = [];
+    for (const [a, b, c] of faces)
+    {
+        if (strip.length > 0)
+        {
+            strip.push(/** @type {number} */ (strip.at(-1)), a, a);
+            if ((strip.length - 1) % 2 !== 0)
+            {
+                strip.push(a);
+            }
+            strip.push(b, c);
+        }
+        else
+        {
+            strip.push(a, b, c);
+        }
+    }
+    return strip;
+}
 
 /**
  * Each vertex's normal: the normals of the faces around it, each weighted by
@@ -244,7 +295,128 @@ export function createMeshFunctions(host){
         return answer;
     };
 
+    /**
+     * D3DXConvertMeshSubsetToSingleStrip's work, once its handler has returned.
+     *
+     * @param {number} mesh @param {number} attribute @param {number} options
+     * @param {number} out @param {number} countOut @param {any} thread
+     * @returns {Promise<number>}
+     */
+    const convertSubset = async(mesh, attribute, options, out, countOut, thread)=>{
+        await null;
+        const api = 'D3DXConvertMeshSubsetToSingleStrip';
+        return withScratch(8, async at=>{
+            putU32s(at, [0]);
+            const sized = await method(thread, mesh, MESH.GetAttributeTable, [0, at]);
+            if (sized !== D3D_OK)
+            {
+                return sized;
+            }
+            const ranges = u32(at);
+            if (ranges === 0)
+            {
+                // The faces' attributes are then only in an ID3DXMesh's attribute
+                // buffer, which a base mesh does not have.
+                host.divergence?.(api, 'a mesh with no attribute table: answered E_NOTIMPL');
+                return E_NOTIMPL;
+            }
+            const table = await withScratch(ranges * 20, async rows=>{
+                const read = await method(thread, mesh, MESH.GetAttributeTable, [rows, at]);
+                return read !== D3D_OK ? read
+                    : [...new Uint32Array(host.readMemory(rows, ranges * 20).slice().buffer)];
+            });
+            if (typeof table === 'number')
+            {
+                return table;
+            }
+            const indices = await indicesOf(mesh, thread, at);
+            if (typeof indices === 'number')
+            {
+                return indices;
+            }
+            /** @type {number[][]} */
+            const faces = [];
+            for (let r = 0; r < ranges; r++)
+            {
+                const [id, start, count] = table.slice(r * 5, r * 5 + 3);
+                if (id !== attribute)
+                {
+                    continue;
+                }
+                for (let face = start; face < start + count; face++)
+                {
+                    faces.push(indices.slice(face * 3, face * 3 + 3));
+                }
+            }
+            const strip = singleStrip(faces);
+            const { usage, pool, format } = indexBufferOf(options);
+            if (strip.length === 0 || (format === D3DFMT_INDEX16
+                && strip.some(index=>index > 0xffff)))
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            putU32s(at, [0, 0]);
+            const got = await method(thread, mesh, MESH.GetDevice, [at]);
+            if (got !== D3D_OK)
+            {
+                return got;
+            }
+            const device = u32(at);
+            const width = format === D3DFMT_INDEX32 ? 4 : 2;
+            const made = await method(thread, device, DEVICE.CreateIndexBuffer, [strip.length
+                * width, usage, format, pool, at + 4, 0]);
+            await method(thread, device, UNKNOWN_RELEASE, []);
+            if (made !== D3D_OK)
+            {
+                return made;
+            }
+            const buffer = u32(at + 4);
+            const locked = await method(thread, buffer, INDEX_BUFFER.Lock, [0, 0, at, 0]);
+            if (locked !== D3D_OK)
+            {
+                await method(thread, buffer, UNKNOWN_RELEASE, []);
+                return locked;
+            }
+            host.writeMemory(u32(at), new Uint8Array((width === 4 ? Uint32Array.from(strip)
+                : Uint16Array.from(strip)).buffer));
+            await method(thread, buffer, INDEX_BUFFER.Unlock, []);
+            putU32s(out, [buffer]);
+            if (countOut !== 0)
+            {
+                putU32s(countOut, [strip.length]);
+            }
+            return D3D_OK;
+        });
+    };
+
     return {
+        /**
+         * HRESULT D3DXConvertMeshSubsetToSingleStrip(LPD3DXBASEMESH MeshIn,
+         *     DWORD AttribId, DWORD IBOptions, LPDIRECT3DINDEXBUFFER9 *ppIndexBuffer,
+         *     DWORD *pNumIndices)
+         *
+         * The faces the mesh's attribute table gives the attribute, as one strip
+         * (singleStrip) in a new index buffer on the mesh's device, made as the
+         * IB_ options and 32BIT ask. A subset with no faces, or indices too big
+         * for 16 bits, answers D3DERR_INVALIDCALL.
+         */
+        D3DXConvertMeshSubsetToSingleStrip: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([mesh, attribute, options, out, countOut])=>{
+                if ((out >>> 0) !== 0)
+                {
+                    putU32s(out, [0]);
+                }
+                if ((mesh >>> 0) === 0 || (out >>> 0) === 0 || !host.callGuest || !host.heap)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                return convertSubset(mesh >>> 0, attribute >>> 0, options >>> 0, out >>> 0,
+                    countOut >>> 0, host.currentThread?.());
+            },
+        },
+
         /**
          * HRESULT D3DXComputeNormals(LPD3DXBASEMESH pMesh, const DWORD *pAdjacency)
          *
