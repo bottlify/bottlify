@@ -141,6 +141,14 @@ export function createDirect3D7Seam(
     const objects = new WeakMap();
     /** The device made last, whose counters a run reports. @type {any} */
     let lastDevice = null;
+    /**
+     * The DirectDraw object each device was made through, as it was
+     * published: this layer's bookkeeping, kept here rather than on the
+     * device, which remote graphics records and plays elsewhere.
+     *
+     * @type {WeakMap<object, any>}
+     */
+    const madeThrough = new WeakMap();
     /** @param {any} root */
     const d3dFor = root=>{
         const existing = objects.get(root);
@@ -600,7 +608,7 @@ export function createDirect3D7Seam(
             }
             // IDirect3D7 shares IDirectDraw7's count, and the object it is
             // published on is the one CreateDevice was called through.
-            const root = device.ddraw;
+            const root = madeThrough.get(device);
             root.addRef(IID_IDirect3D7);
             fields.writeU32(out >>> 0, publisher.publish(root, [], IID_IDirect3D7));
             return D3D_OK;
@@ -1053,7 +1061,7 @@ export function createDirect3D7Seam(
                 fields.writeU32(out >>> 0, 0);
                 return made.hr;
             }
-            made.device.ddraw = root;
+            madeThrough.set(made.device, root);
             lastDevice = made.device;
             fields.writeU32(out >>> 0,
                 publisher.publish(made.device, deviceInterfaces, IID_IDirect3DDevice7));

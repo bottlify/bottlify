@@ -307,6 +307,11 @@ test('CreateDevice refuses what cannot be a target, and publishes what can', ()=
     const wrapped = new Proxy(published, { get: (object, key)=>(
         typeof Reflect.get(object, key) === 'function' ? ()=>0 : Reflect.get(object, key)) });
     assert.doesNotThrow(()=>wrapped.addRef, 'its methods are not read-only');
+    // What it was made through is this layer's to remember: a property on the
+    // device is recorded and played by remote graphics, which has no number
+    // for the facade and played the device's count on nothing.
+    assert.equal(Object.hasOwn(h.publisher.objectAt(made.device), 'ddraw'), false,
+        'nothing of this layer is written onto the device');
 
     // Two releases on the Direct3D pointer: the query took one reference and
     // GetDirect3D another, and both are IDirectDraw7's count.
