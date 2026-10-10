@@ -109,9 +109,9 @@ export const PROFILES = {
     },
     vs_3_0: {
         name: 'vs_3_0', vertex: true, flow: true, predicated: true,
-        special: ['pow', 'lit', 'm4x4', 'm3x3', 'sincos3'],
+        special: ['pow', 'lit', 'm4x4', 'm3x3', 'sincos3', 'texldl'],
         head: ['dcl_position v0', 'dcl_texcoord0 v1', 'dcl_color v2', 'dcl_position o0',
-            'dcl_texcoord0 o1', 'dcl_color o2'],
+            'dcl_texcoord0 o1', 'dcl_color o2', 'dcl_2d s0', 'dcl_2d s1'],
         init: ['mov r0, v0', 'mov r1, v1', 'mov r2, c0', 'mov r3, v2'],
         temps: ['r0', 'r1', 'r2', 'r3'], reads: ['v0', 'v1', 'v2', 'c1', 'c2', 'c3', 'c9'],
         masks: MASKS, swizzles: SWIZZLES, scalars: SCALARS,
@@ -253,6 +253,7 @@ function special(p, next, name, source, dest){
         case 'sincos3':
             return [`sincos ${temp()}${pick(next, ['.x', '.y', '.xy'])}, ${source(true)}`];
         case 'texkill': return [`texkill ${pick(next, p.temps)}`];
+        case 'texldl': return [`texldl ${dest()}, ${source(false)}, s${Math.floor(next() * 2)}`];
         case 'dsx': return [`dsx ${dest()}, ${source(false)}`];
         case 'dsy': return [`dsy ${dest()}, ${source(false)}`];
         case 'vpos': return [`add ${dest()}, vPos.xyxy, ${source(false)}`];
