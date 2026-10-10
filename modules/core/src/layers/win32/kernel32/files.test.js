@@ -501,7 +501,7 @@ test('a write to a standard handle goes to the console, not to the filesystem', 
     assert.deepEqual(console, [{ handle: HANDLE_STDOUT, text: 'hello' }]);
     assert.equal(memory.dword(OUT_COUNT), 5);
     // The volume holds what it held plus the machine's own five directories.
-    assert.equal(files.nodes.size, 7, 'nothing was created for it');
+    assert.equal(files.nodes.size, 9, 'nothing was created for it');
 });
 
 test('a write to a file lands at the position and moves it on', ()=>{
@@ -1633,6 +1633,7 @@ test('the directories the machine promises exist before a program asks', ()=>{
     const { files, fns, at } = setup();
     const promised = [
         'C:\\WINDOWS\\system32', 'C:\\Program Files', 'C:\\Program Files\\Common Files',
+        'C:\\WINDOWS\\system32\\drivers', 'C:\\WINDOWS\\system32\\drivers\\etc',
     ];
     for (const path of promised)
     {

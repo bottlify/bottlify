@@ -53,15 +53,17 @@ const PRIMARY_MASK = 0x3ff;
 
 /**
  * The languages a lookup naming none tries, in order, before settling for the
- * first there is: the user interface's language, its primary language with
- * SUBLANG_NEUTRAL, LANG_NEUTRAL with SUBLANG_NEUTRAL and then with
- * SUBLANG_DEFAULT, and English. A program that carries its dialogs in many
- * languages gets its user's rather than whichever sorts first.
+ * first there is: LANG_NEUTRAL with SUBLANG_NEUTRAL itself, then the user
+ * interface's language, its primary language with
+ * SUBLANG_NEUTRAL, LANG_NEUTRAL with SUBLANG_DEFAULT, and English. A program
+ * that carries its dialogs in many languages gets its user's rather than
+ * whichever sorts first; one that carries a neutral entry beside a localised
+ * one gets the neutral, which is the one it was built to read.
  *
  * @param {number} ui
  * @returns {number[]}
  */
-const neutralPreference = ui=>[...new Set([ui, ui & PRIMARY_MASK, 0x0000, 0x0400, ENGLISH])];
+const neutralPreference = ui=>[...new Set([0x0000, ui, ui & PRIMARY_MASK, 0x0400, ENGLISH])];
 
 /** Only the types worth naming in a listing; anything else is reported by number. */
 const TYPE_NAMES = new Map([

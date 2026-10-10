@@ -350,19 +350,29 @@ test('a lookup naming no language takes the user interface\'s, not the first the
     assert.equal(findResource(only.bytes, only.image, 10, 1)?.language, 0x407);
 });
 
+test('a lookup naming no language takes a neutral entry over the user interface\'s', ()=>{
+    // A program built with one configuration resource in LANG_NEUTRAL and a
+    // stale one under US English reads the neutral: Wine's ntdll tries the
+    // language asked for, LANG_NEUTRAL with SUBLANG_NEUTRAL, before any default.
+    const { bytes, image } = inLanguages([0x000, 0x409]);
+    assert.equal(findResource(bytes, image, 10, 1)?.language, 0x000);
+    assert.equal(findResource(bytes, image, 10, 1, 0x409)?.language, 0x409);
+});
+
 test('with the user interface\'s language absent the neutral search goes on in order', ()=>{
-    // Its primary language with no sublanguage, then LANG_NEUTRAL with
-    // SUBLANG_NEUTRAL and with SUBLANG_DEFAULT, then English, and only
-    // then the first entry.
+    // LANG_NEUTRAL with SUBLANG_NEUTRAL first, as the lookup asked for it;
+    // then the language itself, its primary language with no sublanguage,
+    // LANG_NEUTRAL with SUBLANG_DEFAULT, English, and only then the first
+    // entry.
     const GERMAN = 0x407;
     /** @param {number[]} languages */
     const chosen = languages=>{
         const { bytes, image } = inLanguages(languages);
         return findResource(bytes, image, 10, 1, null, GERMAN)?.language;
     };
-    assert.equal(chosen([0x000, 0x007, 0x404, 0x407, 0x409]), 0x407, 'the language itself');
-    assert.equal(chosen([0x000, 0x007, 0x404, 0x409, 0x807]), 0x007, 'its primary, neutral');
-    assert.equal(chosen([0x000, 0x400, 0x404, 0x409, 0x807]), 0x000, 'LANG_NEUTRAL');
+    assert.equal(chosen([0x000, 0x007, 0x404, 0x407, 0x409]), 0x000, 'LANG_NEUTRAL');
+    assert.equal(chosen([0x007, 0x404, 0x407, 0x409]), 0x407, 'the language itself');
+    assert.equal(chosen([0x007, 0x400, 0x404, 0x409, 0x807]), 0x007, 'its primary, neutral');
     assert.equal(chosen([0x400, 0x404, 0x409, 0x807]), 0x400, 'the user default');
     assert.equal(chosen([0x404, 0x409, 0x807]), 0x409, 'English');
     assert.equal(chosen([0x404, 0x807]), 0x404, 'and at last the first');

@@ -284,6 +284,67 @@ export function createServiceFunctions(host){
     };
 
     /**
+     * The service's key as QUERY_SERVICE_CONFIG: nine fields, then the strings
+     * its pointers name, in the caller's buffer. Every string is there, empty
+     * where the key holds none -- a caller reads them without testing for
+     * NULL -- and the display name is the service's own name when no other
+     * was given, as CreateService records it.
+     *
+     * @param {boolean} wide
+     */
+    const queryConfig = wide=>({
+        argBytes: 16,
+        handler: (/** @type {number[]} */ [service, buffer, size, needed])=>{
+            const ERROR_INSUFFICIENT_BUFFER = 122;
+            const ERROR_INVALID_ADDRESS = 487;
+            const HEADER = 36;
+            const object = held(service, 'service');
+            const name = object ? /** @type {string} */ (object.name) : '';
+            const key = object ? serviceKey(name) : null;
+            if (!key)
+            {
+                return fail(ERROR_INVALID_HANDLE);
+            }
+            if ((needed >>> 0) === 0)
+            {
+                return fail(ERROR_INVALID_ADDRESS);
+            }
+            const encode = (/** @type {string} */ words)=>(wide
+                ? new Uint8Array(Uint16Array.from(`${words} `, c=>c.charCodeAt(0)).buffer)
+                : sz(words));
+            // Path, group, dependencies (an empty list: two terminators), account, display name.
+            const strings = [
+                encode(textOf(key, 'ImagePath') ?? ''),
+                encode(textOf(key, 'Group') ?? ''),
+                new Uint8Array(wide ? 4 : 2),
+                encode(textOf(key, 'ObjectName') ?? ''),
+                encode(textOf(key, 'DisplayName') ?? name),
+            ];
+            const total = strings.reduce((sum, bytes)=>sum + bytes.length, HEADER);
+            writeDword(needed, total);
+            if ((size >>> 0) < total || (buffer >>> 0) === 0)
+            {
+                return fail(ERROR_INSUFFICIENT_BUFFER);
+            }
+            const out = new Uint8Array(total);
+            const view = new DataView(out.buffer);
+            view.setUint32(0, numberOf(key, 'Type', SERVICE_WIN32_OWN_PROCESS), true);
+            view.setUint32(4, numberOf(key, 'Start', 3), true);
+            view.setUint32(8, numberOf(key, 'ErrorControl', 1), true);
+            view.setUint32(20, numberOf(key, 'Tag', 0), true);
+            let at = HEADER;
+            for (const [index, offset] of [12, 16, 24, 28, 32].entries())
+            {
+                view.setUint32(offset, (buffer >>> 0) + at, true);
+                out.set(strings[index], at);
+                at += strings[index].length;
+            }
+            host.writeMemory?.(buffer >>> 0, out);
+            return 1;
+        },
+    });
+
+    /**
      * EnumServicesStatusExA and W: the services the database holds, in name
      * order, each with its type and -- no service ever runs here -- stopped.
      * As many as fit are written, their names after the records; with room
@@ -566,6 +627,14 @@ export function createServiceFunctions(host){
                 return 1;
             },
         },
+
+        /**
+         * BOOL QueryServiceConfigA(SC_HANDLE hService, LPQUERY_SERVICE_CONFIGA
+         *   lpServiceConfig, DWORD cbBufSize, LPDWORD pcbBytesNeeded)
+         * BOOL QueryServiceConfigW(..., LPQUERY_SERVICE_CONFIGW, ...)
+         */
+        QueryServiceConfigA: queryConfig(false),
+        QueryServiceConfigW: queryConfig(true),
 
         /** SC_LOCK LockServiceDatabase(SC_HANDLE hSCManager) */
         LockServiceDatabase: {

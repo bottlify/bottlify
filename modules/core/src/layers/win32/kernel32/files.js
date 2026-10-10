@@ -454,9 +454,11 @@ export function createFileFunctions(host){
     // to create its scratch file in one and its last to move a shared library
     // into another. A promise of a directory that is not there fails that
     // create or move with "access denied", which is the wrong answer to a
-    // question the program never asked.
+    // question the program never asked. A driver's setup copies its .sys into
+    // system32's drivers folder, which every installation has, the same way.
     for (const path of [WINDOWS_DIRECTORY, TEMP_PATH.slice(0, -1), SYSTEM_DIRECTORY,
-        PROGRAM_FILES, `${PROGRAM_FILES}\\Common Files`, ...host.directories ?? []])
+        `${SYSTEM_DIRECTORY}\\drivers`, `${SYSTEM_DIRECTORY}\\drivers\\etc`, PROGRAM_FILES,
+        `${PROGRAM_FILES}\\Common Files`, ...host.directories ?? []])
     {
         try
         {
