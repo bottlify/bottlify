@@ -185,8 +185,8 @@ test('a held pointer and a scheduled click and key are forwarded per frame', ()=
     }
     const steps = (state.inputs ?? []).filter(sent=>sent.kind !== 'pointerMove'
         || sent.dx !== 0).map(sent=>`${sent.present}:${sent.kind}:${sent.down ?? ''}`);
-    assert.deepEqual(steps, ['1:pointerMove:', '2:pointerMove:', '2:pointerButton:true',
-        '3:pointerButton:false', '4:key:true', '5:key:false']);
+    assert.deepEqual(steps, ['1:pointerMove:', '2:pointerMove:', '3:pointerButton:true',
+        '4:pointerButton:false', '5:key:true', '6:key:false']);
 });
 
 test('a process-replace is recorded', ()=>{
@@ -304,9 +304,9 @@ test('a route\'s clicks move a cursor kept by relative motion to where they are 
             }
         }
     };
-    for (let frame = 0; frame < 8; frame++)
+    for (let frame = 0; frame < 10; frame++)
     {
-        if (frame === 4)
+        if (frame === 5)
         {
             cursor.x = 512;
             cursor.y = 384;
@@ -334,5 +334,5 @@ test('timed clicks that come due on the same present go one after the other', ()
     }
     const buttons = (state.inputs ?? []).filter(sent=>sent.kind === 'pointerButton')
         .map(sent=>`${sent.present}:${sent.down ? 'down' : 'up'}`);
-    assert.deepEqual(buttons, ['2:down', '3:up', '5:down', '6:up']);
+    assert.deepEqual(buttons, ['3:down', '4:up', '7:down', '8:up']);
 });
