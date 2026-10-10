@@ -3592,7 +3592,7 @@ export function createRenderer(options){
         {
             most = Math.max(most, order[at]);
         }
-        const skipped = model.baseVertexIndex * stream.stride;
+        const skipped = streamZeroStart(model) + model.baseVertexIndex * stream.stride;
         const wanted = Math.min((most + 1) * stream.stride, stream.buffer.length - skipped);
         const vertices = wanted > 0
             ? readMemory(stream.buffer.base + skipped, wanted)
@@ -4011,6 +4011,17 @@ export function createRenderer(options){
      */
     const streamZeroBias = model=>(model.stream.stride > 0
         ? Math.floor((model.stream.offset ?? 0) / model.stream.stride) : 0);
+
+    /**
+     * Where stream zero's buffer is bound: what is left of its offset past
+     * the whole vertices `streamZeroBias` folds into the first vertex, which
+     * the device has checked is a multiple of four (Direct3D 8 has no offset
+     * and leaves it zero).
+     *
+     * @param {RenderModel} model
+     */
+    const streamZeroStart = model=>(model.stream.stride > 0
+        ? (model.stream.offset ?? 0) - streamZeroBias(model) * model.stream.stride : 0);
 
     /**
      * The further streams a layout reads and their strides, for a key: a
@@ -7341,6 +7352,15 @@ export function createRenderer(options){
         return bound;
     };
 
+    /**
+     * Stream zero's buffer bound at `start` bytes: the shared whole binding
+     * at zero, which is every draw of a stream whose offset is whole
+     * vertices, and a binding of its own otherwise.
+     *
+     * @param {any} gpu @param {number} start
+     */
+    const streamBinding = (gpu, start)=>(start === 0 ? wholeBinding(gpu) : { gpu, offset: start });
+
     /** @type {WeakMap<object, Map<number, { gpu: any, offset: number, format: string }>>} */
     const indexBindings = new WeakMap();
     /**
@@ -8113,12 +8133,13 @@ export function createRenderer(options){
             const streamBuffer = stream.buffer ? bufferFor(stream.buffer).gpu : null;
             // The bytes this draw reads must survive a later lock of the same
             // buffer in this frame, which is what makes such a lock rename.
-            // Stream zero's offset is in the first vertex here, as the
-            // binding below starts the buffer at zero.
-            const from = startVertex * stream.stride;
+            // Stream zero's whole vertices of offset are in the first vertex
+            // here, and the binding below starts the buffer at the rest.
+            const start = streamBuffer ? streamZeroStart(model) : 0;
+            const from = start + startVertex * stream.stride;
             streamBuffer?.markRead(from, from + count * stream.stride);
             record(model, prepared, {
-                vertices: { gpu: streamBuffer?.gpu ?? zeroBuffer().gpu, offset: 0 },
+                vertices: { gpu: streamBuffer?.gpu ?? zeroBuffer().gpu, offset: start },
                 ...(rewrite
                     ? expandedGeometry(type, ascending(count), startVertex, fill)
                     : { indices: null, count, first: startVertex }),
@@ -8129,8 +8150,8 @@ export function createRenderer(options){
             }
             else if (dumping())
             {
-                const vertices = readMemory(stream.buffer.base + startVertex * stream.stride,
-                    count * stream.stride);
+                const vertices = readMemory(stream.buffer.base + start
+                    + startVertex * stream.stride, count * stream.stride);
                 dumpDraw(model, prepared, vertices, stream.stride, null);
                 noteDumpVertices(prepared, vertices, startVertex * stream.stride, stream.stride);
             }
@@ -8192,7 +8213,8 @@ export function createRenderer(options){
                 const order = indicesFrom(bufferFor(model.indices).gpu.bytes(byteOffset,
                     count * format.bytes), format.bytes);
                 const vertexBytes = bufferFor(stream.buffer).gpu;
-                const base = (stream.offset ?? 0) + model.baseVertexIndex * stream.stride;
+                // The base vertex carries the offset's whole vertices already.
+                const base = streamZeroStart(model) + model.baseVertexIndex * stream.stride;
                 record(model, prepared, {
                     vertices: scratchVertices.write(gatheredPoints((first, many)=>
                         vertexBytes.bytes(base + first * stream.stride, many * stream.stride),
@@ -8205,9 +8227,10 @@ export function createRenderer(options){
             }
             const streamBuffer = bufferFor(stream.buffer).gpu;
             const indexBuffer = bufferFor(model.indices).gpu;
+            const start = streamZeroStart(model);
             if (minIndex !== undefined && numVertices !== undefined)
             {
-                const from = (model.baseVertexIndex + minIndex) * stream.stride;
+                const from = start + (model.baseVertexIndex + minIndex) * stream.stride;
                 streamBuffer.markRead(from, from + numVertices * stream.stride);
             }
             else
@@ -8215,7 +8238,7 @@ export function createRenderer(options){
                 streamBuffer.markRead();
             }
             indexBuffer.markRead(byteOffset, byteOffset + count * format.bytes);
-            const vertices = wholeBinding(streamBuffer.gpu);
+            const vertices = streamBinding(streamBuffer.gpu, start);
             if (list === undefined)
             {
                 const geometry = scratchGeometry;

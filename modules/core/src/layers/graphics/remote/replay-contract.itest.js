@@ -789,6 +789,14 @@ test('Direct3D 9: buffers locked plain, with DISCARD and with NOOVERWRITE, drawn
             await run.call('SetStreamSource static', ()=>device.SetStreamSource(0, vertices, 0,
                 STRIDE));
             await drawQuad9(run, device, `static ${frame}`, tex, frame / 8);
+            // Part of a vertex in: the whole vertices go into the first, and
+            // the buffer is bound at the rest.
+            await run.call('SetStreamSource part of a vertex in', ()=>device.SetStreamSource(0,
+                vertices, STRIDE + 8, STRIDE));
+            assert.equal(await run.call(`DrawIndexedPrimitive part of a vertex in ${frame}`,
+                ()=>device.DrawIndexedPrimitive(D3DPT.TRIANGLELIST, 0, 0, 2, 0, 1)), D3D_OK);
+            await run.call('SetStreamSource static again', ()=>device.SetStreamSource(0, vertices,
+                0, STRIDE));
             // A frame's worth of quads into one dynamic buffer: the first with
             // DISCARD, the rest after it with NOOVERWRITE, and one with neither.
             await run.call('SetStreamSource dynamic', ()=>device.SetStreamSource(0,

@@ -82,8 +82,8 @@ differently raises a `divergence` event naming the API.
 - Direct3D 9 claims vertex and pixel shader model 3.0. Not offered: user clip planes
   (`MaxUserClipPlanes` is 0), the border and mirror-once address modes, a mip level-of-detail
   bias (`D3DTSS_MIPMAPLODBIAS` is read but not applied), the per-stage constant and temporary
-  register of the texture stages; a draw from a stream whose offset is not a whole vertex of its
-  stride is refused.
+  register of the texture stages; a draw from a stream whose offset, past its whole vertices,
+  is not a multiple of four bytes is refused (WebGPU binds a vertex buffer only there).
 - Direct3D 9's 32-bit float formats are kept as half floats, and A16B16G16R16/G16R16 as half
   floats of their value.
 - The engine's own `d3dx9` reads BMP, DDS, TGA, PNG and JPEG images; `D3DXCreateTeapot`,

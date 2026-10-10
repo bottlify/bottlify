@@ -28,7 +28,9 @@ import assert from 'node:assert/strict';
 import {
     D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DRS, D3DSWAPEFFECT, D3DUSAGE, D3D_OK,
 } from './constants.js';
-import { D3DCLEAR, D3DPT, D3DTA, D3DTEXF, D3DTOP, D3DTSS } from '../d3d8/constants.js';
+import {
+    D3DCLEAR, D3DFMT_INDEX, D3DPT, D3DTA, D3DTEXF, D3DTOP, D3DTSS,
+} from '../d3d8/constants.js';
 import { D3DISSUE, D3DQUERYTYPE, createDirect3D9 } from './device.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
@@ -580,18 +582,114 @@ test('a draw under the scissor test is cut to the scissor rectangle, and only th
     assert.deepEqual(scissors.slice(-2), [[2, 1, 6, 4], [0, 0, 8, 8]]);
 });
 
-test('a stream whose offset straddles the stride is refused rather than drawn wrong', ()=>{
+test('a stream whose offset is part of a vertex in is bound there, by both kinds of draw',
+    async()=>{
+        const h = harness({ width: 8, height: 8 });
+        const { device } = h;
+        /** @type {{ buffer?: any }} */
+        const created = {};
+        assert.equal(device.CreateVertexBuffer(
+            8 * TRIANGLE_STRIDE, 0, FVF_TRIANGLE, D3DPOOL.DEFAULT, created), D3D_OK);
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        assert.equal(created.buffer.Lock(0, 0, locked, 0), D3D_OK);
+        // Three whole vertices and eight bytes in, which no first vertex can say alone.
+        const offset = 3 * TRIANGLE_STRIDE + 8;
+        const wanted = [[1, 1], [7, 1], [1, 4], [2, 2]];
+        wanted.forEach(([x, y], index)=>h.write(/** @type {number} */ (locked.pBits) + offset
+            + index * TRIANGLE_STRIDE, vertex(x, y, argb(0, 0, 255))));
+        assert.equal(created.buffer.Unlock(), D3D_OK);
+        /** @type {{ buffer?: any }} */
+        const indexBuffer = {};
+        assert.equal(device.CreateIndexBuffer(6, 0, D3DFMT_INDEX.INDEX16, D3DPOOL.DEFAULT,
+            indexBuffer), D3D_OK);
+        /** @type {{ pBits?: number }} */
+        const indexLock = {};
+        assert.equal(indexBuffer.buffer.Lock(0, 0, indexLock, 0), D3D_OK);
+        h.write(/** @type {number} */ (indexLock.pBits), new Uint8Array([0, 0, 1, 0, 2, 0]));
+        assert.equal(indexBuffer.buffer.Unlock(), D3D_OK);
+
+        assert.equal(device.SetStreamSource(0, created.buffer, offset, TRIANGLE_STRIDE), D3D_OK);
+        assert.equal(device.SetIndices(indexBuffer.buffer), D3D_OK);
+        assert.equal(device.SetFVF(FVF_TRIANGLE), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 1, 1), D3D_OK);
+        assert.equal(device.DrawIndexedPrimitive(D3DPT.TRIANGLELIST, 1, 0, 3, 0, 1), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+
+        const draws = h.device.diagnostics().lastFrame.filter(
+            (/** @type {any} */ command)=>command.kind === 'draw');
+        assert.equal(draws[0].vertices.offset, 8, 'bound at what is left past whole vertices');
+        assert.equal(draws[0].first, 3 + 1, 'the whole vertices are in the first vertex');
+        assert.deepEqual(queuedTriangle(h, draws[0]).map(point=>[point.x, point.y]),
+            wanted.slice(1));
+        assert.equal(draws[1].vertices.offset, 8);
+        assert.equal(draws[1].baseVertex, 3 + 1, 'and in the base vertex of an indexed draw');
+        const bound = h.gpu.of('setVertexBuffer').map((/** @type {any} */ call)=>call.offset);
+        assert.ok(bound.length > 0 && bound.every(at=>at === 8), 'the GPU is given that offset');
+    });
+
+test('an indexed point list from a stream at an offset reads its vertices from there', async()=>{
+    const h = harness({ width: 8, height: 8 });
+    const { device } = h;
+    /** @type {{ buffer?: any }} */
+    const created = {};
+    assert.equal(device.CreateVertexBuffer(
+        8 * TRIANGLE_STRIDE, 0, FVF_TRIANGLE, D3DPOOL.DEFAULT, created), D3D_OK);
+    /** @type {{ pBits?: number }} */
+    const locked = {};
+    assert.equal(created.buffer.Lock(0, 0, locked, 0), D3D_OK);
+    const offset = 2 * TRIANGLE_STRIDE + 4;
+    const points = [[1, 1], [3, 3], [5, 5], [6, 2]];
+    points.forEach(([x, y], index)=>h.write(/** @type {number} */ (locked.pBits) + offset
+        + index * TRIANGLE_STRIDE, vertex(x, y, argb(0, 255, 0))));
+    assert.equal(created.buffer.Unlock(), D3D_OK);
+    /** @type {{ buffer?: any }} */
+    const indexBuffer = {};
+    assert.equal(device.CreateIndexBuffer(4, 0, D3DFMT_INDEX.INDEX16, D3DPOOL.DEFAULT,
+        indexBuffer), D3D_OK);
+    /** @type {{ pBits?: number }} */
+    const indexLock = {};
+    assert.equal(indexBuffer.buffer.Lock(0, 0, indexLock, 0), D3D_OK);
+    h.write(/** @type {number} */ (indexLock.pBits), new Uint8Array([2, 0, 0, 0]));
+    assert.equal(indexBuffer.buffer.Unlock(), D3D_OK);
+
+    assert.equal(device.SetStreamSource(0, created.buffer, offset, TRIANGLE_STRIDE), D3D_OK);
+    assert.equal(device.SetIndices(indexBuffer.buffer), D3D_OK);
+    assert.equal(device.SetFVF(FVF_TRIANGLE), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    // Base vertex one: indices 2 and 0 are the fourth and second vertex past the offset.
+    assert.equal(device.DrawIndexedPrimitive(D3DPT.POINTLIST, 1, 0, 3, 0, 2), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    const draw = h.device.diagnostics().lastFrame.find(
+        (/** @type {any} */ command)=>command.kind === 'draw');
+    const bytes = queuedBytes(h.gpu, draw.vertices, 2 * TRIANGLE_STRIDE);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    assert.deepEqual([0, 1].map(at=>[view.getFloat32(at * TRIANGLE_STRIDE, true),
+        view.getFloat32(at * TRIANGLE_STRIDE + 4, true)]), [points[3], points[1]],
+    'the offset counted once: its whole vertices are the base vertex\'s already');
+});
+
+test('a stream whose offset leaves part of a word past whole vertices is refused', ()=>{
     const h = harness();
     const { device } = h;
     /** @type {{ buffer?: any }} */
     const created = {};
     assert.equal(device.CreateVertexBuffer(
         6 * TRIANGLE_STRIDE, 0, FVF_TRIANGLE, D3DPOOL.DEFAULT, created), D3D_OK);
-    assert.equal(device.SetStreamSource(0, created.buffer, 4, TRIANGLE_STRIDE), D3D_OK);
+    assert.equal(device.SetStreamSource(0, created.buffer, TRIANGLE_STRIDE + 2, TRIANGLE_STRIDE),
+        D3D_OK);
     assert.equal(device.SetFVF(FVF_TRIANGLE), D3D_OK);
     assert.equal(device.BeginScene(), D3D_OK);
 
-    assert.notEqual(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    assert.notEqual(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK,
+        'WebGPU binds a vertex buffer only at a multiple of four bytes');
+    assert.equal(device.SetStreamSource(0, created.buffer, TRIANGLE_STRIDE + 4, TRIANGLE_STRIDE),
+        D3D_OK);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
 });
 
 test('a device with no backend answers every drawing call and records nothing', async()=>{

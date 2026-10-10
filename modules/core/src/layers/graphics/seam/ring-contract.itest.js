@@ -484,6 +484,10 @@ test('Direct3D 9: every call the command ring answers for in the guest is one th
             ],
             SetStreamSource: [
                 { label: 'stream 0', args: [0, 'vertices', 0, 16], setup: vertices9 },
+                { label: 'stream 0, part of a vertex in', args: [0, 'vertices', 24, 16],
+                    setup: vertices9 },
+                { label: 'stream 0, at an offset of no whole word past a vertex',
+                    args: [0, 'vertices', 22, 16], setup: vertices9 },
                 { label: 'none', args: [0, 0, 0, 0] },
                 { label: 'a stream past the last', args: [16, 'vertices', 0, 16],
                     setup: vertices9 },
@@ -542,10 +546,15 @@ test('Direct3D 9: every call the command ring answers for in the guest is one th
                     drawable9(device, made);
                     assert.equal(device.SetIndices(null), D3D_OK);
                 } },
-                { label: 'a stream offset that is no whole vertex', args: [4, 0, 0, 3, 0, 1],
+                { label: 'a stream offset part of a vertex in', args: [4, 0, 0, 3, 0, 1],
                     setup: (device, made)=>{
                         drawable9(device, made);
                         assert.equal(device.SetStreamSource(0, made.vertices, 8, 16), D3D_OK);
+                    } },
+                { label: 'a stream offset of no whole word past a vertex',
+                    args: [4, 0, 0, 3, 0, 1], setup: (device, made)=>{
+                        drawable9(device, made);
+                        assert.equal(device.SetStreamSource(0, made.vertices, 6, 16), D3D_OK);
                     } },
                 { label: 'after a draw from the program\'s memory', args: [4, 0, 0, 3, 0, 1],
                     setup: (device, made)=>{
@@ -680,6 +689,8 @@ test('Direct3D 9: the routines keep what a draw needs as the device does, call a
         ['BeginScene', [], 'ok'],
         ['SetFVF', [FVF_XYZ_DIFFUSE], 'ok'],
         ['SetStreamSource', [0, 'vertices', 8, 16], 'ok'],
+        ['DrawPrimitive', [4, 0, 1], 'ok'],
+        ['SetStreamSource', [0, 'vertices', 6, 16], 'ok'],
         ['DrawPrimitive', [4, 0, 1], 'trap'],
     ]);
     sequence(api, buffers, [
