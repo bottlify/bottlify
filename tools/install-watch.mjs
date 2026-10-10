@@ -71,6 +71,7 @@ import { basename, dirname, join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { deflateSync } from 'node:zlib';
 import { openBundle } from './btl.mjs';
+import { isButtonClass, label } from './wizard-buttons.mjs';
 import { createApp } from '../modules/core/src/app.js';
 import { createFakeDevice } from '../modules/core/src/layers/graphics/webgpu/internal/fake-device.js';
 import { archiveDisc, collectFrom, discOptions, placementOf, prefixOptions, readRar, readZip }
@@ -405,8 +406,6 @@ setInterval(()=>route.tick(), 150).unref?.();
 // for as long as the run lasts -- every installer on the disk driven by one
 // list of the buttons that go forward.
 const anyOrder = argv.includes('--press-any');
-// A label is matched as a person reads it: without the mnemonic's `&`, in any case.
-const label = (/** @type {string} */ title)=>title.replace(/&/g, '').toLowerCase();
 const pressing = argv.includes('--press') || anyOrder
     ? argv[argv.indexOf(anyOrder ? '--press-any' : '--press') + 1].split('|').map(label) : [];
 if (pressing.length > 0)
@@ -434,7 +433,7 @@ if (pressing.length > 0)
                 // page's "I accept" before the "Next >" beside it, which on its
                 // own goes nowhere.
                 const button = (win32.windows ?? []).filter((/** @type {any} */ w)=>w.visible
-                    && w.className === 'Button'
+                    && isButtonClass(w.className)
                     && (anyOrder ? pressing.includes(label(w.title))
                         : label(w.title) === pressing[step])
                     && (w.hwnd !== lastButton || looksSince > 3)
