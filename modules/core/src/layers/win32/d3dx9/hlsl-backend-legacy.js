@@ -49,8 +49,8 @@ const MODIFIER = { comp: MOD.COMP, bias: MOD.BIAS, bx2: MOD.SIGN, x2: MOD.X2, dw
 /** The scale a destination can take, by the factor, as the token holds it. */
 const SHIFT = new Map([[2, 1], [4, 2], [8, 3], [0.125, 13], [0.25, 14], [0.5, 15]]);
 
-/** A product by these is a scale of the destination: x2 and x4, d2 and d4 before 1.4. */
-const EASY_SCALES = new Set([2, 4, 0.5, 0.25]);
+/** A product by these is a scale of the destination in every model 1 version: x2, x4, d2; d4 is 1.4's. */
+const EASY_SCALES = new Set([2, 4, 0.5]);
 
 /** @param {Src} src @returns {boolean} */
 const isTexcoord = src=>src.kind === 'input' && src.input.usage === USAGE.TEXCOORD;

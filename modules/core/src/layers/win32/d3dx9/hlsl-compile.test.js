@@ -697,3 +697,17 @@ test('ps_1_4 reads tex2Dproj at a coordinate set as texld with _dw', async()=>{
         float4 main(float4 at : TEXCOORD0) : COLOR { return tex2Dproj(sam, at); }`, 'ps_1_3');
     assert.equal(older.ok, false);
 });
+
+test('a quarter is a _d4 only from ps_1_4; before it the product stays a multiply', async()=>{
+    // ps_1_1 to 1_3 scale a result by _x2, _x4 and _d2; _d4 and _d8 came with 1.4.
+    for (const [profile, d4] of /** @type {[string, boolean][]} */ ([['ps_1_1', false],
+        ['ps_1_3', false], ['ps_1_4', true]]))
+    {
+        const result = await compile(`float4 main(float4 c : COLOR0) : COLOR {
+            return float4(c.rgb, c.a * 0.25); }`, profile);
+        assert.equal(result.ok, true, result.messages);
+        const tokens = /** @type {Uint32Array} */ (result.tokens);
+        assert.equal(/_d4/.test(disassemble(tokens)), d4, profile);
+        assert.deepEqual(shade(result, [0.5, 0.25, 0.75, 1]), [0.5, 0.25, 0.75, 0.25], profile);
+    }
+});
