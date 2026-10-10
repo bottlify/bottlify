@@ -1827,7 +1827,7 @@ END
     assert.equal(r.gpu.count('draw'), 2, 'the draw and the shown copy were issued');
 });
 
-test('a range drawn through its mode\'s order starts at its first vertex by the base vertex', async()=>{
+test('a ranged draw starts at its first vertex by the base vertex, not in the order', async()=>{
     // The order a mode and count expand to is built once and shared; a range
     // that starts past zero was written into it, and the next draw of the
     // same mode and count read the first one's start.
