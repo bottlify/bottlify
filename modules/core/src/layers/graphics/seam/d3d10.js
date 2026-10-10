@@ -29,6 +29,7 @@
 import { describe as describeSlots } from './vtables.js';
 import { createEffectSeam } from './d3d10-effect.js';
 import { readGuid } from './ddraw.js';
+import { describeAdapter } from './adapter.js';
 import { createFields } from './structs.js';
 import {
     D3D10_LIMITS, D3D10_MAP, D3D10_MAP_FLAG_DO_NOT_WAIT, D3D10_RESOURCE_DIMENSION,
@@ -544,15 +545,26 @@ export const ID3D10DEVICE1_SLOTS = /** @type {[string, number][]} */ ([
  *     What a device draws with: the backend and the GPU's sampler and texture
  *     makers, reached when a program creates one rather than before.
  * @property {import('../d3d10/dxgi.js').FactoryOptions} [factoryOptions]
+ * @property {() => { width: number, height: number, displayWidth?: number,
+ *                     displayHeight?: number }} [screen]
+ *     The desktop user32 reports, which DXGI's one output shows.
+ * @property {() => import('./adapter.js').AdapterIdentity | null} [identity]
+ *     The hardware behind the GPU, which DXGI's adapter reports as Direct3D 9's does.
  */
 
 /**
  * @param {Deps} deps
  */
 export function createDirect3D10Seam({ publisher, memory, allocate, free, deviceOptions,
-    factoryOptions })
+    factoryOptions: given, screen, identity })
 {
     const fields = createFields(memory);
+    /** @type {import('../d3d10/dxgi.js').FactoryOptions} */
+    const factoryOptions = {
+        ...(screen ? { display: ()=>screen() } : {}),
+        ...(identity ? { vendorId: ()=>describeAdapter(identity()).vendorId } : {}),
+        ...given,
+    };
 
     /** @param {number} address @param {number} count @returns {number[]} */
     const readPointers = (address, count)=>{
@@ -754,7 +766,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             fields.writeU32(out + DXGI_OUTPUT_DESC.AttachedToDesktop,
                 held.desc.AttachedToDesktop ? 1 : 0);
             fields.writeU32(out + DXGI_OUTPUT_DESC.Rotation, held.desc.Rotation);
-            fields.writeU32(out + DXGI_OUTPUT_DESC.Monitor, 1);
+            fields.writeU32(out + DXGI_OUTPUT_DESC.Monitor, held.desc.Monitor);
             return S_OK;
         },
         /**

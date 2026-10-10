@@ -322,7 +322,8 @@ export function createGraphicsLibraries(
         identity: ()=>graphics.adapter?.() ?? null,
     }));
     const d3d10 = built('D3D10.dll', ()=>createDirect3D10Seam({
-        publisher, memory, allocate, free,
+        publisher, memory, allocate, free, screen,
+        identity: ()=>graphics.adapter?.() ?? null,
         deviceOptions: ()=>graphics.create('d3d10'),
         // A back buffer asked for at zero takes the window's client area; the
         // display stands in only for a window this layer cannot measure.

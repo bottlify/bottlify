@@ -65,11 +65,12 @@ const DXGI_ERROR_NOT_CURRENTLY_AVAILABLE = 0x887a0022;
  */
 
 /**
- * The modes an output of this size lists in one format: the sizes every
- * other path of this build lists, at the one rate a browser presents at,
- * progressive, ordered by width, then height.
+ * The modes an output of this size lists in one format: the sizes user32's
+ * EnumDisplaySettings lists for the same display, at the one rate a browser
+ * presents at, progressive, ordered by width, then height.
  *
- * @param {{ width: number, height: number }} size
+ * @param {{ width: number, height: number, displayWidth?: number,
+ *           displayHeight?: number }} size  The mode in effect, and the display's own size.
  * @param {number} format
  * @returns {ModeFields[]}
  */
@@ -78,7 +79,9 @@ export function outputModes(size, format){
     {
         return [];
     }
-    return displayModes({ width: size.width, height: size.height, bitsPerPixel: 32 })
+    return displayModes({ width: size.width, height: size.height, bitsPerPixel: 32,
+        ...(size.displayWidth ? { displayWidth: size.displayWidth } : {}),
+        ...(size.displayHeight ? { displayHeight: size.displayHeight } : {}) })
         .filter(mode=>mode.refresh === REFRESH_HZ)
         .map(mode=>({
             width: mode.width,
@@ -101,36 +104,61 @@ const DXGI_PRESENT_TEST = 0x1;
  * @typedef {Object} OutputConfig
  * @property {string} deviceName
  * @property {{ left: number, top: number, right: number, bottom: number }} [desktopCoordinates]
+ * @property {() => { width: number, height: number, displayWidth?: number,
+ *                     displayHeight?: number }} [desktop]
+ *     The desktop's size, read when asked, in place of fixed coordinates, and
+ *     the display's own when that is larger.
+ * @property {number} [monitor]  The HMONITOR the output's description names.
  */
 
 /**
  * @typedef {Object} AdapterConfig
  * @property {string} description
- * @property {number} [vendorId]
+ * @property {number | (() => number)} [vendorId]
  * @property {number} [deviceId]
  * @property {OutputConfig[]} [outputs]
  */
 
 /**
  * @typedef {Object} FactoryOptions
- * @property {AdapterConfig[]} [adapters]
+ * @property {AdapterConfig[]} [adapters]  Every adapter, outright; the machine's one otherwise.
  * @property {(window: number) => { width: number, height: number }} [windowClientSize]
+ * @property {() => { width: number, height: number, displayWidth?: number,
+ *                     displayHeight?: number }} [display]
+ *     The desktop the machine's one output shows, as user32 reports it.
+ * @property {() => number} [vendorId]
+ *     The PCI vendor of the machine's one adapter, as Direct3D 9 reports it.
  */
 
 /**
- * What a machine with one adapter and one output looks like.
- *
- * @type {readonly AdapterConfig[]}
+ * The display's name and handle as user32 gives them -- EnumDisplayDevices'
+ * DeviceName and what MonitorFromWindow answers -- and Direct3D 9's adapter
+ * identifier repeats: a program matches an output to a monitor by them, and
+ * GetMonitorInfo refuses any other handle.
  */
-const DEFAULT_ADAPTERS = Object.freeze([{
-    description: VIDEO_ADAPTER_NAME,
-    vendorId: 0,
-    deviceId: 0,
-    outputs: [{
-        deviceName: 'Bottlify Output 0',
-        desktopCoordinates: { left: 0, top: 0, right: 1920, bottom: 1080 },
-    }],
-}]);
+const DISPLAY_DEVICE_NAME = '\\\\.\\DISPLAY1';
+const PRIMARY_MONITOR = 0x00010001;
+
+/**
+ * What a machine with one adapter and one output looks like: the adapter by
+ * the name and vendor every other API reports, the output showing the
+ * desktop user32 reports, read when asked so a mode change is seen.
+ *
+ * @param {FactoryOptions} options
+ * @returns {AdapterConfig[]}
+ */
+function machineAdapters(options){
+    return [{
+        description: VIDEO_ADAPTER_NAME,
+        vendorId: options.vendorId,
+        deviceId: 0,
+        outputs: [{
+            deviceName: DISPLAY_DEVICE_NAME,
+            monitor: PRIMARY_MONITOR,
+            desktop: options.display ?? (()=>({ width: 640, height: 480 })),
+        }],
+    }];
+}
 
 /**
  * @param {string} iid
@@ -176,7 +204,7 @@ export function CreateDXGIFactory1(iid, out, options = {}){
  * @param {boolean} [secondVersion]  Whether it answers as IDXGIFactory1.
  */
 export function createFactory(options = {}, secondVersion = false){
-    const configs = options.adapters ?? DEFAULT_ADAPTERS;
+    const configs = options.adapters ?? machineAdapters(options);
     const windowClientSize = options.windowClientSize ?? (()=>({ width: 640, height: 480 }));
 
     /** @type {any[]} */
@@ -294,7 +322,9 @@ function createAdapter(config, factory){
             }
             out.desc = {
                 Description: config.description,
-                VendorId: config.vendorId ?? 0,
+                VendorId: (typeof config.vendorId === 'function'
+                    ? config.vendorId()
+                    : config.vendorId) ?? 0,
                 DeviceId: config.deviceId ?? 0,
                 SubSysId: 0,
                 Revision: 0,
@@ -356,10 +386,28 @@ function createAdapter(config, factory){
  * @param {any} adapter
  */
 function createOutput(config, adapter){
-    const desktop = config.desktopCoordinates ?? { left: 0, top: 0, right: 0, bottom: 0 };
-    const size = {
-        width: desktop.right - desktop.left || 640,
-        height: desktop.bottom - desktop.top || 480,
+    /** @returns {{ left: number, top: number, right: number, bottom: number }} */
+    const coordinates = ()=>{
+        if (config.desktop)
+        {
+            const { width, height } = config.desktop();
+            return { left: 0, top: 0, right: width, bottom: height };
+        }
+        return config.desktopCoordinates ?? { left: 0, top: 0, right: 0, bottom: 0 };
+    };
+    /**
+     * @returns {{ width: number, height: number, displayWidth?: number,
+     *             displayHeight?: number }}
+     */
+    const sizeOf = ()=>{
+        const desktop = coordinates();
+        const display = config.desktop?.();
+        return {
+            width: desktop.right - desktop.left || 640,
+            height: desktop.bottom - desktop.top || 480,
+            ...(display?.displayWidth ? { displayWidth: display.displayWidth } : {}),
+            ...(display?.displayHeight ? { displayHeight: display.displayHeight } : {}),
+        };
     };
     return attachCom({
         /**
@@ -367,7 +415,7 @@ function createOutput(config, adapter){
          * @returns {ModeFields[]} every mode listed in that format
          */
         GetDisplayModeList(format){
-            return outputModes(size, format);
+            return outputModes(sizeOf(), format);
         },
 
         /**
@@ -393,6 +441,7 @@ function createOutput(config, adapter){
             const format = wanted.format === DXGI_FORMAT.UNKNOWN
                 ? DXGI_FORMAT.R8G8B8A8_UNORM
                 : wanted.format;
+            const size = sizeOf();
             const modes = outputModes(size, format);
             if (modes.length === 0)
             {
@@ -422,7 +471,7 @@ function createOutput(config, adapter){
 
         /** @returns {{ width: number, height: number }} the desktop this output shows */
         size(){
-            return { ...size };
+            return sizeOf();
         },
 
         /** @param {{ desc?: any }} out */
@@ -433,10 +482,11 @@ function createOutput(config, adapter){
             }
             out.desc = {
                 DeviceName: config.deviceName,
-                DesktopCoordinates: config.desktopCoordinates
-                    ?? { left: 0, top: 0, right: 0, bottom: 0 },
+                DesktopCoordinates: coordinates(),
                 AttachedToDesktop: true,
-                Rotation: 0,
+                // DXGI_MODE_ROTATION_IDENTITY: a desktop that is not turned.
+                Rotation: 1,
+                Monitor: config.monitor ?? 0,
             };
             return S_OK;
         },

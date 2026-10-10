@@ -55,6 +55,9 @@ import {
 } from './d3d10-effect.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { createGraphicsLibraries } from './exports.js';
+import { PCI_VENDOR_IDS } from './adapter.js';
+import { VIDEO_ADAPTER_NAME } from '../../win32/devices.js';
+import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
 
 const E_NOTIMPL = 0x80004001;
 
@@ -2215,4 +2218,65 @@ test('multisample quality levels through the seam: a count out of range writes i
     assert.deepEqual(check(65536, 2), [E_INVALIDARG, 0xdeadbeef]);
     assert.equal(h.device(device, 'CheckMultisampleQualityLevels',
         [DXGI_FORMAT.R8G8B8A8_UNORM, 2, 0]), E_INVALIDARG);
+});
+
+test('DXGI names the adapter, the output and the monitor as user32 and Direct3D 9 do'
+    + ' (test_get_containing_output, dxgi.c:2494-2513)', ()=>{
+    const box = machine();
+    let display = { width: 1280, height: 720, bitsPerPixel: 32 };
+    const { libraries } = createGraphicsLibraries({
+        graphics: { create: ()=>null, available: ()=>false, adapter: ()=>({ vendor: 'nvidia' }) },
+        only: ['D3D10.dll', 'DXGI.dll'],
+        memory: box.services,
+        publishInterface: box.publishInterface,
+        unpublishInterface: box.unpublishInterface,
+        allocate: box.allocate,
+        screen: ()=>display,
+    });
+    const factoryAt = box.place([0]);
+    assert.equal(libraries['DXGI.dll'].CreateDXGIFactory.handler([
+        box.placeGuid(IID.IDXGIFactory), factoryAt]) >>> 0, S_OK);
+    const factory = box.memory.readU32(factoryAt);
+    const adapterAt = box.place([0]);
+    assert.equal(box.call(factory, slot(IDXGIFACTORY_SLOTS, 'EnumAdapters'), [0, adapterAt]),
+        S_OK);
+    const adapter = box.memory.readU32(adapterAt);
+    const adapterDesc = box.allocate(0x124);
+    assert.equal(box.call(adapter, slot(IDXGIADAPTER_SLOTS, 'GetDesc'), [adapterDesc]), S_OK);
+    /** @param {number} at @param {number} length */
+    const wide = (at, length)=>String.fromCharCode(...new Uint16Array(
+        box.services.readMemory(at, length * 2).slice().buffer)).replace(/\0.*$/s, '');
+    assert.equal(wide(adapterDesc, 128), VIDEO_ADAPTER_NAME);
+    assert.equal(box.memory.readU32(adapterDesc + 0x100), PCI_VENDOR_IDS.nvidia,
+        'the vendor Direct3D 9\'s adapter identifier reports');
+    assert.deepEqual([box.memory.readU32(adapterDesc + 0x11c),
+        box.memory.readU32(adapterDesc + 0x120)], [1, 0], 'the LUID Direct3D 9 reports');
+
+    const outputAt = box.place([0]);
+    assert.equal(box.call(adapter, slot(IDXGIADAPTER_SLOTS, 'EnumOutputs'), [0, outputAt]), S_OK);
+    const output = box.memory.readU32(outputAt);
+    const outputDesc = box.allocate(0x5c);
+    /** @returns {any[]} */
+    const described = ()=>{
+        assert.equal(box.call(output, slot(IDXGIOUTPUT_SLOTS, 'GetDesc'), [outputDesc]), S_OK);
+        return [wide(outputDesc, 32), [0, 4, 8, 12].map(at=>box.memory.readU32(outputDesc
+            + 0x40 + at)), box.memory.readU32(outputDesc + 0x58)];
+    };
+    assert.deepEqual(described(), ['\\\\.\\DISPLAY1', [0, 0, 1280, 720], 0x00010001],
+        'user32\'s display name, desktop and monitor handle');
+    display = { width: 1920, height: 1080, bitsPerPixel: 32 };
+    assert.deepEqual(described()[1], [0, 0, 1920, 1080], 'a mode change is seen');
+    const countAt = box.place([0]);
+    assert.equal(box.call(output, slot(IDXGIOUTPUT_SLOTS, 'GetDisplayModeList'),
+        [DXGI_FORMAT.R8G8B8A8_UNORM, 0, countAt, 0]), S_OK);
+    const count = box.memory.readU32(countAt);
+    const modes = box.allocate(count * 0x1c);
+    assert.equal(box.call(output, slot(IDXGIOUTPUT_SLOTS, 'GetDisplayModeList'),
+        [DXGI_FORMAT.R8G8B8A8_UNORM, 0, countAt, modes]), S_OK);
+    const sizes = Array.from({ length: count }, (_, index)=>[box.memory.readU32(modes
+        + index * 0x1c), box.memory.readU32(modes + index * 0x1c + 4)]);
+    assert.deepEqual(sizes, displayModes(display).filter(mode=>mode.refresh === REFRESH_HZ)
+        .map(mode=>[mode.width, mode.height]), 'the sizes EnumDisplaySettings lists');
+    assert.ok(sizes.some(([width, height])=>width === 1920 && height === 1080),
+        'the display\'s own size among them');
 });
