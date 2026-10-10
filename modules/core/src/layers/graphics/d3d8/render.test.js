@@ -4390,3 +4390,41 @@ test('a frame submitted early for a read-back keeps the lines of its draws', asy
     assert.equal(dumped.length, 2, `both draws: ${device.diagnostics().lastDump.join(' | ')}`);
     chain.swapChain.release();
 });
+
+test('every word of every sixteen-bit format unpacks through its table as the formula says', ()=>{
+    // The table is built once from the unpacking itself; this holds it to the
+    // formats' definitions, word by word, so a table read wrongly shows.
+    const five = (/** @type {number} */ v)=>(v << 3) | (v >>> 2);
+    const six = (/** @type {number} */ v)=>(v << 2) | (v >>> 4);
+    const four = (/** @type {number} */ v)=>(v << 4) | v;
+    /** @type {[number, (w: number) => number[]][]} */
+    const formats = [
+        [D3DFMT.R5G6B5, w=>[five(w & 31), six((w >>> 5) & 63), five(w >>> 11), 255]],
+        [D3DFMT.X1R5G5B5, w=>[five(w & 31), five((w >>> 5) & 31), five((w >>> 10) & 31), 255]],
+        [D3DFMT.A1R5G5B5, w=>[five(w & 31), five((w >>> 5) & 31), five((w >>> 10) & 31),
+            w & 0x8000 ? 255 : 0]],
+        [D3DFMT.A4R4G4B4, w=>[four(w & 15), four((w >>> 4) & 15), four((w >>> 8) & 15),
+            four(w >>> 12)]],
+        [D3DFMT.X4R4G4B4, w=>[four(w & 15), four((w >>> 4) & 15), four((w >>> 8) & 15), 255]],
+    ];
+    const words = new Uint8Array(0x20000);
+    for (let w = 0; w < 0x10000; w++)
+    {
+        words[w * 2] = w & 0xff;
+        words[w * 2 + 1] = w >>> 8;
+    }
+    for (const [format, formula] of formats)
+    {
+        const out = expandTexels(format, words, 0x10000);
+        for (let w = 0; w < 0x10000; w++)
+        {
+            const want = formula(w);
+            if (out[w * 4] !== want[0] || out[w * 4 + 1] !== want[1]
+                || out[w * 4 + 2] !== want[2] || out[w * 4 + 3] !== want[3])
+            {
+                assert.fail(`format ${format}, word 0x${w.toString(16)}: `
+                    + `${[...out.subarray(w * 4, w * 4 + 4)]} for ${want}`);
+            }
+        }
+    }
+});

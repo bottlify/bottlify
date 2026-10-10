@@ -629,7 +629,10 @@ const TEXEL_EXPANSION = Object.freeze({
         for (let index = 0; index < count; index++)
         {
             const value = pixels[index];
-            out.set([value, value, value, 0xff], index * 4);
+            out[index * 4] = value;
+            out[index * 4 + 1] = value;
+            out[index * 4 + 2] = value;
+            out[index * 4 + 3] = 0xff;
         }
         return out;
     },
@@ -638,7 +641,10 @@ const TEXEL_EXPANSION = Object.freeze({
         for (let index = 0; index < count; index++)
         {
             const value = pixels[index * 2];
-            out.set([value, value, value, pixels[index * 2 + 1]], index * 4);
+            out[index * 4] = value;
+            out[index * 4 + 1] = value;
+            out[index * 4 + 2] = value;
+            out[index * 4 + 3] = pixels[index * 2 + 1];
         }
         return out;
     },
@@ -648,7 +654,10 @@ const TEXEL_EXPANSION = Object.freeze({
         {
             const packed = pixels[index];
             const value = four(packed & 0xf);
-            out.set([value, value, value, four(packed >>> 4)], index * 4);
+            out[index * 4] = value;
+            out[index * 4 + 1] = value;
+            out[index * 4 + 2] = value;
+            out[index * 4 + 3] = four(packed >>> 4);
         }
         return out;
     },
@@ -658,7 +667,10 @@ const TEXEL_EXPANSION = Object.freeze({
         const out = new Uint8Array(count * 4);
         for (let index = 0; index < count; index++)
         {
-            out.set([pixels[index * 2], pixels[index * 2 + 1], 0x7f, 0x7f], index * 4);
+            out[index * 4] = pixels[index * 2];
+            out[index * 4 + 1] = pixels[index * 2 + 1];
+            out[index * 4 + 2] = 0x7f;
+            out[index * 4 + 3] = 0x7f;
         }
         return out;
     },
@@ -689,19 +701,38 @@ const four = value=>(value << 4) | value;
 const six = value=>(value << 2) | (value >>> 4);
 
 /**
+ * Each sixteen-bit format's every word, unpacked once into the four bytes it
+ * becomes: an upload is then one lookup a texel, where it was an array made
+ * and copied for each.
+ *
+ * @type {WeakMap<(word: number) => number[], Uint32Array>}
+ */
+const SIXTEEN_TABLES = new WeakMap();
+
+/**
  * @param {Uint8Array} pixels
  * @param {number} count
  * @param {(word: number)=>number[]} unpack  b, g, r, a of one little-endian word
  * @returns {Uint8Array}
  */
 function expandSixteen(pixels, count, unpack){
-    const out = new Uint8Array(count * 4);
+    let table = SIXTEEN_TABLES.get(unpack);
+    if (!table)
+    {
+        table = new Uint32Array(0x10000);
+        const bytes = new Uint8Array(table.buffer);
+        for (let word = 0; word < 0x10000; word++)
+        {
+            bytes.set(unpack(word), word * 4);
+        }
+        SIXTEEN_TABLES.set(unpack, table);
+    }
+    const out = new Uint32Array(count);
     for (let index = 0; index < count; index++)
     {
-        const word = pixels[index * 2] | (pixels[index * 2 + 1] << 8);
-        out.set(unpack(word), index * 4);
+        out[index] = table[pixels[index * 2] | (pixels[index * 2 + 1] << 8)];
     }
-    return out;
+    return new Uint8Array(out.buffer);
 }
 
 /**
