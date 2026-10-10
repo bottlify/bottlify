@@ -586,7 +586,8 @@ function returnsEarly(list){
  *     fog?: number, fogSource?: number, flatColours?: boolean,
  *     stageDimensions?: readonly string[], projectedBy?: readonly string[],
  *     points?: { sprite: boolean }, alphaTest?: number, nanProbe?: boolean,
- *     ones?: readonly number[], sampling?: readonly (SamplerVariant | undefined)[],
+ *     tableFogOverDepth?: boolean, ones?: readonly number[],
+ *     sampling?: readonly (SamplerVariant | undefined)[],
  *     clip?: import('../webgpu/internal/fixedfunction.js').ClipState }} [options]
  *        For a vertex shader, the shape of each v# the declaration supplies,
  *        by register. Absent means every declared input arrives as four
@@ -602,7 +603,10 @@ function returnsEarly(list){
  *        which is where Direct3D applies it. Only a draw whose vertex stage
  *        is the fixed one can promise the varying, so only it is fogged.
  *        `fogSource` FOG_SOURCE.TABLE evaluates the curve per pixel instead,
- *        over the range the vertex stage carries at `FOG_RANGE_LOCATION`.
+ *        over the range the vertex stage carries at `FOG_RANGE_LOCATION`:
+ *        over the shader's oFog where it wrote one, as drivers of the
+ *        shader-model-1 generation did (decisions.md A43), and over the
+ *        depth with `tableFogOverDepth`, as later ones do.
  *        `points` draws a vertex shader's point list as quads, sized by the
  *        shader's oPts or the state's size, and with a sprite every
  *        coordinate set it writes is the quad's own.
@@ -1879,14 +1883,18 @@ export function translateShader(parsed, options = {}){
             {
                 emits(varyingLocation(D3DDECLUSAGE.FOG, 0), 'oFog');
             }
-            const amount = carried === FOG_SOURCE.VERTEX && wrote ? 'out.oFog.x' : '0.0';
+            const amount = wrote ? 'out.oFog.x' : '0.0';
             body.push(`    out.oFog = vec4f(${amount}, c[${fogRegister}].rgb);`);
             if (carried === FOG_SOURCE.TABLE)
             {
                 outputFields.push(`    @location(${FOG_RANGE_LOCATION}) @interpolate(flat)`
                     + ` o${FOG_RANGE_LOCATION}: vec4f,`);
                 outputs.push(FOG_RANGE_LOCATION);
-                body.push(`    out.o${FOG_RANGE_LOCATION} = c[${fogRegister + 1}];`);
+                // A w of 2 tells the pixel stage the curve runs over the
+                // shader's oFog rather than the depth (decisions.md A43).
+                const overFog = wrote && options.tableFogOverDepth !== true;
+                body.push(`    out.o${FOG_RANGE_LOCATION} = ${overFog
+                    ? `vec4f(c[${fogRegister + 1}].xyz, 2.0)` : `c[${fogRegister + 1}]`};`);
             }
         }
         if (options.points)
@@ -1949,10 +1957,12 @@ export function translateShader(parsed, options = {}){
             inputFields.push(`    @location(${varyingLocation(D3DDECLUSAGE.FOG, 0)}) fog: vec4f,`);
             reads.push(varyingLocation(D3DDECLUSAGE.FOG, 0));
             // Table fog over the pixel's z under an affine projection, its w
-            // otherwise; the curve reads its range from a module variable,
-            // since a function cannot see the entry point's input.
+            // otherwise, and over the vertex shader's oFog when it wrote one;
+            // the curve reads its range from a module variable, since a
+            // function cannot see the entry point's input.
             const amount = table
-                ? 'fogFactorOf(select(d3dRcp(in.vPos.w), in.vPos.z, fogRange.w != 0.0))'
+                ? 'fogFactorOf(select(select(d3dRcp(in.vPos.w), in.vPos.z, fogRange.w != 0.0),'
+                    + ' in.fog.x, fogRange.w > 1.5))'
                 : 'in.fog.x';
             const fogLines = [
                 ...(table ? ['    fogRange = in.fogRange;'] : []),

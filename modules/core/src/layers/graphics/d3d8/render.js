@@ -2756,6 +2756,10 @@ const CLEAR_STRIDE = 20;
  *     shader it would run with D3DRS_FOGENABLE clear, which is how a picture
  *     washed towards the fog colour is told apart from one washed by something
  *     else -- two runs then differ by fog and nothing else.
+ * @property {'legacy' | 'current'} [driverRules]  Which generation of
+ *     drivers a behaviour Direct3D left to them follows where they changed
+ *     it (decisions.md A43): 'legacy', the default, the shader-model-1 era's;
+ *     'current', what later drivers and Wine's conformance tests do.
  * @property {boolean} [nanProbe]  Every pixel a shader made NaN or infinite is
  *     drawn magenta: where a picture goes black on one GPU and not another.
  * @property {boolean} [mips]
@@ -2788,6 +2792,7 @@ export function createRenderer(options){
     const createSampler = options.createSampler ?? null;
     const dumpDraws = options.dumpDraws === true;
     const nanProbe = options.nanProbe === true;
+    const tableFogOverDepth = options.driverRules === 'current';
     const dumpEvery = Math.max(0, Math.floor(options.dumpEvery ?? 0));
     // Asked for on a running program: the next frames with draws are written
     // down as `dumpDraws` writes them, without the texture copies only a run
@@ -3281,6 +3286,24 @@ export function createRenderer(options){
     };
 
     /**
+     * Where a shader draw's fog comes from, for the frame's account: table fog
+     * (`/vst`, over the depth), or vertex fog and whether the vertex shader
+     * writes oFog (`/vsv+`, `/vsv-`; one that writes none is fogged whole).
+     *
+     * @param {RenderModel} model
+     */
+    const shaderFogOf = model=>{
+        if (fogOf(model).source === FOG_SOURCE.TABLE)
+        {
+            return '/vst';
+        }
+        const vertex = model.stageProcessing.program?.vertex;
+        const writes = vertex?.instructions.some((/** @type {any} */ instruction)=>
+            instruction.dest?.type === REGISTER.RASTOUT && instruction.dest.index === 1);
+        return vertex ? `/vsv${writes ? '+' : '-'}` : '/ps';
+    };
+
+    /**
      * @param {RenderModel} model
      * @param {PreparedDraw} prepared
      */
@@ -3303,8 +3326,7 @@ export function createRenderer(options){
             // Built once a preparation, which starts with none.
             if (!prepared.fogSetting)
             {
-                prepared.fogSetting = fogSettingOf(model) + (layout ? ''
-                    : `/vs${isAffine(transformOf(model, D3DTS.PROJECTION)) ? 'z' : 'w'}`);
+                prepared.fogSetting = fogSettingOf(model) + (layout ? '' : shaderFogOf(model));
             }
             frameStats.fog = prepared.fogSetting;
             // And how many draws ran under each setting: a program fogs its
@@ -5974,11 +5996,12 @@ export function createRenderer(options){
                     + pointKey
                     + (sampling.vertexOnes ? `|o${onesKey(sampling.vertexOnes)}` : '')
                     + (sampling.vertexVariants ? `|s${variantsKey(sampling.vertexVariants)}` : '')
-                    + clipKey,
+                    + clipKey + (tableFogOverDepth ? '|zfog' : ''),
                 ()=>translateShader(
                     /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
                     { inputs: layout.shapes, alsoWrite: missing, flatColours: flat,
                         fogSource: fog.source, ...(points ? { points } : {}),
+                        ...(tableFogOverDepth ? { tableFogOverDepth } : {}),
                         ...(sampling.vertexOnes ? { ones: sampling.vertexOnes } : {}),
                         ...(sampling.vertexVariants
                             ? { sampling: sampling.vertexVariants } : {}),
@@ -6251,7 +6274,7 @@ export function createRenderer(options){
             vertexShader: program.vertexId,
             pixelShader: -1,
         };
-        const pixel = fixedFragmentStage(state, vertex.outputs);
+        const pixel = fixedFragmentStage(state, vertex.outputs, { tableFogOverDepth });
         counters.prepared.built++;
         return {
             // What the fragment stage's block carries past the cascade's rows.
@@ -6387,7 +6410,11 @@ export function createRenderer(options){
         if (vertex.fogRegister !== undefined)
         {
             // What the fixed vertex stage reads for the same: the colour,
-            // then the curve's range, as `hybridVertexBlocks` writes them.
+            // then the curve's range, as `hybridVertexBlocks` writes them --
+            // over the depth, always: the fixed projection is not the
+            // shader's, so it says nothing of what the shader's w is, and
+            // table fog through a vertex shader is taken over z (Wine's fog
+            // rules; fog_with_shader_test draws the curve over the depth).
             const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
             const fogColour = colorToFloats(rs('FOGCOLOR'));
             blocks[0].set([fogColour.r, fogColour.g, fogColour.b, fogColour.a],
@@ -6396,7 +6423,7 @@ export function createRenderer(options){
                 dwordToFloat(rs('FOGSTART')),
                 dwordToFloat(rs('FOGEND')),
                 dwordToFloat(rs('FOGDENSITY')),
-                isAffine(transformOf(model, D3DTS.PROJECTION)) ? 1 : 0,
+                1,
             ], (vertex.fogRegister + 1) * 4);
         }
         // The user planes, as set: a vertex shader's are in clip space.

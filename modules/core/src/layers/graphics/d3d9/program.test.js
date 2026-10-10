@@ -22,7 +22,7 @@ import { D3DFMT_INDEX, D3DPT, D3DRS, D3DTS, D3DTSS } from '../d3d8/constants.js'
 import { createDirect3D9 } from './device.js';
 import { D3DDECLTYPE, D3DDECLUSAGE } from './declaration.js';
 import { END_TOKEN, OPCODE, REGISTER, SHADER_KIND, versionToken } from './shader.js';
-import { HYBRID_CONSTANTS, varyingLocation } from './wgsl.js';
+import { FOG_RANGE_LOCATION, HYBRID_CONSTANTS, varyingLocation } from './wgsl.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { UNIFORM_FLOATS, multiplyMatrices, normalMatrixOf } from '../d3d8/render.js';
@@ -93,7 +93,7 @@ const STRIDE = 24;
 
 /**
  * @param {{ dumpDraws?: boolean, refusePipeline?: (descriptor: any) => string | null,
- *     model?: number, features?: string[] }} [options]
+ *     model?: number, features?: string[], driverRules?: 'legacy' | 'current' }} [options]
  */
 function harness(options = {}){
     const gpu = createFakeDevice({ refusePipeline: options.refusePipeline,
@@ -121,6 +121,7 @@ function harness(options = {}){
         },
         divergence: (_api, detail)=>reports.push(detail),
         dumpDraws: options.dumpDraws ?? false,
+        ...(options.driverRules ? { driverRules: options.driverRules } : {}),
     });
     /** @type {{ device?: any }} */
     const out = {};
@@ -1856,3 +1857,65 @@ test('a shader draw into a texture bound to its own sampler samples the placehol
         (/** @type {any} */ command)=>command.kind === 'draw');
     assert.equal(draw.program.samplerBindings[0].placeholder, true);
 });
+
+test('table fog through a vertex shader is taken over the depth, whatever the projection set',
+    async()=>{
+        // The fixed projection is not the shader's, so it says nothing of what
+        // the shader's w is: with FOGTABLEMODE set, a draw through a vertex
+        // shader is fogged by its z (Wine's fog rules: table fog uses the Z
+        // value no matter what vertex type; its fog_with_shader_test draws
+        // the curve over the depth). A program that sets its range for depth,
+        // 0 to 1, under a perspective projection was fogged whole over w.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+        assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetPixelShader(ps.shader);
+        h.device.SetTransform(D3DTS.PROJECTION,
+            [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 0, -1, 0]);
+        h.device.SetRenderState(D3DRS.FOGENABLE, 1);
+        h.device.SetRenderState(D3DRS.FOGTABLEMODE, 3);
+        h.device.SetRenderState(D3DRS.FOGSTART, floatToDword(0));
+        h.device.SetRenderState(D3DRS.FOGEND, floatToDword(1));
+        await h.draw();
+        const floats = new Float32Array(h.boundBytes(h.groupsOfDraw().get(0), 0).buffer);
+        // The range is the block's last register: start, end, density, and
+        // whether the depth is z.
+        assert.deepEqual([...floats.subarray(floats.length - 4)], [0, 1, 1, 1],
+            'density 1 by default');
+    });
+
+test('table fog through a shader that writes oFog runs over it, or over the depth by later rules',
+    async()=>{
+        // The shader-model-1 generation's drivers took the table curve over the
+        // shader's oFog, later ones over the depth (decisions.md A43); which one
+        // a run follows is its `driverRules`, the earlier by default.
+        const writesFog = [...VERTEX_SHADER.slice(0, -1),
+            op(OPCODE.MOV, 2), dst(REGISTER.RASTOUT, 1, 0x1), src(REGISTER.CONST, 4), END_TOKEN];
+        /** @param {'legacy' | 'current' | undefined} driverRules */
+        const rangeLine = async driverRules=>{
+            const h = harness({ driverRules });
+            /** @type {{ shader?: any }} */
+            const vs = {};
+            /** @type {{ shader?: any }} */
+            const ps = {};
+            assert.equal(h.device.CreateVertexShader(writesFog, vs), D3D_OK);
+            assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+            h.device.SetVertexShader(vs.shader);
+            h.device.SetPixelShader(ps.shader);
+            h.device.SetRenderState(D3DRS.FOGENABLE, 1);
+            h.device.SetRenderState(D3DRS.FOGTABLEMODE, 3);
+            await h.draw();
+            const vertex = h.gpu.of('createShaderModule').map(call=>call.descriptor)
+                .find(module=>module.label.startsWith('vs:'));
+            return vertex.code.split('\n').find((/** @type {string} */ line)=>
+                line.includes(`out.o${FOG_RANGE_LOCATION} =`)).trim();
+        };
+        assert.match(await rangeLine(undefined), /= vec4f\(c\[\d+\]\.xyz, 2\.0\);$/);
+        assert.match(await rangeLine('legacy'), /= vec4f\(c\[\d+\]\.xyz, 2\.0\);$/);
+        assert.match(await rangeLine('current'), /= c\[\d+\];$/);
+    });

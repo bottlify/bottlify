@@ -1003,6 +1003,23 @@ test('Direct3D 9: the copies between surfaces -- UpdateSurface, UpdateTexture, S
         await run.call('CreateOffscreenPlainSurface read-back', ()=>device
             .CreateOffscreenPlainSurface(32, 32, D3DFMT.X8R8G8B8, D3DPOOL.SYSTEMMEM, readBack),
         [readBack]);
+        // And a system-memory texture read back into, carried on by its texture.
+        /** @type {{ texture?: any }} */
+        const readTexture = {};
+        await run.call('CreateTexture read-back', ()=>device.CreateTexture(32, 32, 1, 0,
+            D3DFMT.X8R8G8B8, D3DPOOL.SYSTEMMEM, readTexture), [readTexture]);
+        /** @type {{ surface?: any }} */
+        const readLevel = {};
+        await run.call('GetSurfaceLevel read-back', ()=>readTexture.texture.GetSurfaceLevel(0,
+            readLevel), [readLevel]);
+        /** @type {{ texture?: any }} */
+        const carried = {};
+        await run.call('CreateTexture carried', ()=>device.CreateTexture(32, 32, 1,
+            D3DUSAGE.RENDERTARGET, D3DFMT.X8R8G8B8, D3DPOOL.DEFAULT, carried), [carried]);
+        /** @type {{ surface?: any }} */
+        const carriedLevel = {};
+        await run.call('GetSurfaceLevel carried', ()=>carried.texture.GetSurfaceLevel(0,
+            carriedLevel), [carriedLevel]);
         /** @type {{ surface?: any }} */
         const front = {};
         await run.call('CreateOffscreenPlainSurface front', ()=>device.CreateOffscreenPlainSurface(
@@ -1048,6 +1065,19 @@ test('Direct3D 9: the copies between surfaces -- UpdateSurface, UpdateTexture, S
                 { left: 0, top: 0, right: 4, bottom: 4 }, 0xff00ff00 + frame));
             await run.call('GetRenderTargetData', ()=>device.GetRenderTargetData(back.surface,
                 readBack.surface));
+            // The read-back surface copied on before anything locks it: the
+            // copy is the device's, and carries the pixels the copy back put
+            // there, not what the program's memory held while they travelled.
+            await run.call('UpdateSurface read-back into plain', ()=>device.UpdateSurface(
+                readBack.surface, { left: 0, top: 0, right: 8, bottom: 8 }, plainVideo.surface,
+                { x: 8, y: 8 }));
+            await run.call('GetRenderTargetData into a texture', ()=>device.GetRenderTargetData(
+                back.surface, readLevel.surface));
+            await run.call('UpdateTexture read-back', ()=>device.UpdateTexture(
+                readTexture.texture, carried.texture));
+            await run.call('StretchRect carried into plain', ()=>device.StretchRect(
+                carriedLevel.surface, { left: 0, top: 0, right: 8, bottom: 8 },
+                plainVideo.surface, { left: 16, top: 16, right: 24, bottom: 24 }, TEXF_POINT));
             /** @type {{ pBits?: number, Pitch?: number }} */
             const pixels = {};
             await run.call('LockRect read-back', ()=>readBack.surface.LockRect(pixels, null,
@@ -1093,6 +1123,8 @@ test('Direct3D 9: the copies between surfaces -- UpdateSurface, UpdateTexture, S
             ['drawn level', drawnLevel.surface], ['drawn', drawn.texture],
             ['back', back.surface], ['plain video', plainVideo.surface],
             ['read-back', readBack.surface], ['front', front.surface],
+            ['read-back level', readLevel.surface], ['read-back texture', readTexture.texture],
+            ['carried level', carriedLevel.surface], ['carried', carried.texture],
             ['chain back', chainBack.surface], ['chain', chain.swapChain],
             ['vertices', vertices], ['indices', indices], ['device', device]]))
         {
