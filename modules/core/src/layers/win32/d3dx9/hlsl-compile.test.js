@@ -661,3 +661,18 @@ test('a typedef\'s name constructs the type it names, as a cast to it does', asy
         float4 main() : COLOR0 { S s = S(1, 2, 3, 4); return s.a; }`, 'ps_2_0');
     assert.equal(strukt.ok, false, 'a structure is not constructed by its name');
 });
+
+test('a plain sampler is passed for a typed sampler parameter, two typed ones are not mixed',
+    async()=>{
+        const result = await compile(`sampler s = sampler_state { MinFilter = LINEAR; };
+            float4 read(sampler2D from, float2 uv) { return tex2D(from, uv); }
+            float4 main(float2 uv : TEXCOORD0) : COLOR0 { return read(s, uv); }`, 'ps_2_0');
+        assert.equal(result.ok, true, result.messages);
+        assert.ok(decode(/** @type {Uint32Array} */ (result.tokens)).instructions
+            .some((/** @type {any} */ i)=>i.name === 'texld'));
+        const mixed = await compile(`sampler3D s;
+            float4 read(sampler2D from, float2 uv) { return tex2D(from, uv); }
+            float4 main(float2 uv : TEXCOORD0) : COLOR0 { return read(s, uv); }`, 'ps_2_0');
+        assert.equal(mixed.ok, false);
+        assert.match(mixed.messages, /X3013/);
+    });
