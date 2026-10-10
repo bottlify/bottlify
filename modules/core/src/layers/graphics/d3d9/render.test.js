@@ -29,7 +29,7 @@ import {
     D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DRS, D3DSWAPEFFECT, D3DUSAGE, D3D_OK,
 } from './constants.js';
 import {
-    D3DCLEAR, D3DFMT_INDEX, D3DPT, D3DTA, D3DTEXF, D3DTOP, D3DTSS,
+    D3DCLEAR, D3DFMT_INDEX, D3DLOCK, D3DPT, D3DTA, D3DTEXF, D3DTOP, D3DTSS,
 } from '../d3d8/constants.js';
 import { D3DISSUE, D3DQUERYTYPE, createDirect3D9 } from './device.js';
 import { createBackend } from '../webgpu/backend.js';
@@ -937,6 +937,49 @@ test('a fixed-function draw reads a member in another stream from that stream', 
     assert.equal(bound.length, 2);
     assert.match(bound[0], /zero/, 'nothing bound reads as zero');
     assert.doesNotMatch(bound[1], /zero/, 'and the bound buffer after');
+    colours.buffer.release();
+    vertices.buffer.release();
+});
+
+test('a NOOVERWRITE lock over what a queued draw reads from another stream renames it', async()=>{
+    // A program that keeps vertices from frame to frame -- a skinning cache --
+    // writes its next stretch under NOOVERWRITE, and a frame's draws read at
+    // its submit, after every write it made: a lock over bytes a draw of the
+    // frame reads from stream 1 must leave that draw its bytes, as one over
+    // stream zero's does.
+    const h = harness({ width: 8, height: 8 });
+    const { device } = h;
+    colourFirstDeclaration(device, 1);
+    /** @type {{ buffer?: any }} */
+    const vertices = {};
+    assert.equal(device.CreateVertexBuffer(60, 0, 0, D3DPOOL.MANAGED, vertices), D3D_OK);
+    assert.equal(device.SetStreamSource(0, vertices.buffer, 0, 20), D3D_OK);
+    /** @type {{ buffer?: any }} */
+    const colours = {};
+    assert.equal(device.CreateVertexBuffer(12, D3DUSAGE.DYNAMIC | D3DUSAGE.WRITEONLY, 0,
+        D3DPOOL.DEFAULT, colours), D3D_OK);
+    assert.equal(device.SetStreamSource(1, colours.buffer, 0, 4), D3D_OK);
+    /** @param {number} value */
+    const fill = value=>{
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        assert.equal(colours.buffer.Lock(0, 12, locked, D3DLOCK.NOOVERWRITE), D3D_OK);
+        h.write(/** @type {number} */ (locked.pBits), new Uint8Array(12).fill(value));
+        assert.equal(colours.buffer.Unlock(), D3D_OK);
+    };
+    assert.equal(device.BeginScene(), D3D_OK);
+    fill(0x11);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    fill(0x22);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    const bound = h.gpu.of('setVertexBuffer')
+        .filter((/** @type {any} */ call)=>call.slot === 1)
+        .map((/** @type {any} */ call)=>call.buffer.descriptor.label);
+    assert.equal(bound.length, 2);
+    assert.notEqual(bound[0], bound[1], 'the first draw keeps the generation it read');
     colours.buffer.release();
     vertices.buffer.release();
 });

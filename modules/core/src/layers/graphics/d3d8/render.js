@@ -4366,9 +4366,12 @@ export function createRenderer(options){
      * @param {readonly { stream: number, stride: number, instanced?: boolean }[] | undefined}
      *        streams
      * @param {number} bias
+     * @param {{ first: number, count: number }} [span]
+     *     The vertices the draw reaches, numbered as stream zero's are; absent,
+     *     every vertex from the stream's offset on.
      * @returns {readonly { slot: number, gpu: any, offset: number }[] | null}
      */
-    const streamBindings = (model, streams, bias)=>{
+    const streamBindings = (model, streams, bias, span)=>{
         if (!streams || streams.length === 0)
         {
             return NO_STREAM_BINDINGS;
@@ -4392,7 +4395,16 @@ export function createRenderer(options){
                 return null;
             }
             const buffer = bufferFor(source.buffer).gpu;
-            buffer.markRead();
+            // The bytes it reads, as stream zero's are marked: a NOOVERWRITE
+            // lock over them before this frame is submitted renames, which an
+            // unranged mark never makes it do. A program that keeps vertices
+            // from frame to frame in a ring -- a skinning cache -- and writes
+            // the next stretch under NOOVERWRITE otherwise overwrote the
+            // vertices queued frames still drew from.
+            const ranged = span && !instanced;
+            const from = (source.offset ?? 0) + (ranged ? span.first * source.stride : 0);
+            const to = ranged ? from + span.count * source.stride : buffer.size;
+            buffer.markRead(from, Math.min(to, buffer.size));
             bound.push({ slot: index + 1, gpu: buffer.gpu, offset });
         }
         return bound;
@@ -6714,15 +6726,17 @@ export function createRenderer(options){
      *     its area already.
      * @param {number} [bias]
      *     The vertices stream zero's offset was folded into the first vertex as.
+     * @param {{ first: number, count: number }} [span]
+     *     The vertices the draw reaches, for its further streams (`streamBindings`).
      */
-    const record = (model, prepared, geometry, scissored = true, bias = 0)=>{
+    const record = (model, prepared, geometry, scissored = true, bias = 0, span = undefined)=>{
         if (maxDraws >= 0 && kept >= maxDraws)
         {
             return;
         }
         const streams = streamBindings(model,
             prepared.layout?.streams ?? prepared.program?.source?.layout?.streams,
-            bias);
+            bias, span);
         if (!streams)
         {
             skip('stream');
@@ -8670,7 +8684,7 @@ export function createRenderer(options){
                 ...(rewrite
                     ? ascendingGeometry(type, count, startVertex, fill)
                     : { indices: null, count, first: startVertex }),
-            }, true, streamZeroBias(model));
+            }, true, streamZeroBias(model), { first: startVertex, count });
             if (dumping() && prepared.program)
             {
                 dumpProgram(model, prepared, count);
@@ -8759,14 +8773,17 @@ export function createRenderer(options){
             const streamBuffer = bufferFor(stream.buffer).gpu;
             const indexBuffer = bufferFor(model.indices).gpu;
             const start = streamZeroStart(model);
-            if (minIndex !== undefined && numVertices !== undefined)
+            const span = minIndex !== undefined && numVertices !== undefined
+                ? { first: model.baseVertexIndex + minIndex, count: numVertices } : undefined;
+            if (span)
             {
-                const from = start + (model.baseVertexIndex + minIndex) * stream.stride;
-                streamBuffer.markRead(from, from + numVertices * stream.stride);
+                const from = start + span.first * stream.stride;
+                streamBuffer.markRead(from, from + span.count * stream.stride);
             }
             else
             {
-                streamBuffer.markRead();
+                // No range given: every vertex from the stream's start may be read.
+                streamBuffer.markRead(start, streamBuffer.size);
             }
             indexBuffer.markRead(byteOffset, byteOffset + count * format.bytes);
             const vertices = streamBinding(streamBuffer.gpu, start);
@@ -8778,7 +8795,7 @@ export function createRenderer(options){
                 geometry.count = count;
                 geometry.first = 0;
                 geometry.baseVertex = model.baseVertexIndex;
-                record(model, prepared, geometry, true, streamZeroBias(model));
+                record(model, prepared, geometry, true, streamZeroBias(model), span);
                 if (dumping() && prepared.program)
                 {
                     dumpProgram(model, prepared, count);
@@ -8798,7 +8815,7 @@ export function createRenderer(options){
             record(model, prepared, {
                 vertices,
                 ...expandedGeometry(type, order, model.baseVertexIndex, fill),
-            }, true, streamZeroBias(model));
+            }, true, streamZeroBias(model), span);
             if (dumping() && prepared.program)
             {
                 dumpProgram(model, prepared, count);
