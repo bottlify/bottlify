@@ -46,8 +46,8 @@ import {
 import { SHADER_KIND, SYSTEM_VALUE, parseDxbc, parseShaderOfKind } from './dxbc.js';
 import { createFactory } from './dxgi.js';
 import {
-    INDEX_FORMAT, VERTEX_FORMAT, multisampleQualityLevels as webgpuMultisampleQualityLevels,
-    textureStorage,
+    INDEX_FORMAT, MIPS_GENERATED, MULTISAMPLE_COUNT, VERTEX_FORMAT,
+    multisampleQualityLevels as webgpuMultisampleQualityLevels, textureStorage,
 } from './gpuformats.js';
 import { createDrawStatistics, createQueryObject } from './queries.js';
 import { createRenderer } from './render.js';
@@ -85,8 +85,23 @@ const FORMAT_SUPPORT = Object.freeze({
     BLENDABLE: 0x8000,
     DEPTH_STENCIL: 0x10000,
     CPU_LOCKABLE: 0x20000,
+    MULTISAMPLE_RESOLVE: 0x40000,
     DISPLAY: 0x80000,
+    MULTISAMPLE_RENDERTARGET: 0x200000,
+    MULTISAMPLE_LOAD: 0x400000,
 });
+
+/**
+ * The views of a depth family that read its depth, and so can be sampled
+ * against a reference: R32_FLOAT, R24_UNORM_X8_TYPELESS, R16_UNORM and
+ * R32_FLOAT_X8X24_TYPELESS (D3D10's format support table).
+ *
+ * @type {ReadonlySet<number>}
+ */
+const DEPTH_READING_VIEWS = new Set([
+    DXGI_FORMAT.R32_FLOAT, DXGI_FORMAT.R24_UNORM_X8_TYPELESS, DXGI_FORMAT.R16_UNORM,
+    DXGI_FORMAT.R32_FLOAT_X8X24_TYPELESS,
+]);
 
 /** The frames a DXGI device queues ahead unless told otherwise, and the most it will. */
 const DEFAULT_FRAME_LATENCY = 3;
@@ -1100,7 +1115,10 @@ export function createDevice(options = {}){
                 return E_FAIL;
             }
             const block = info.blockEdge > 1;
-            let support = FORMAT_SUPPORT.CPU_LOCKABLE | (block ? 0 : FORMAT_SUPPORT.BUFFER);
+            const depth = info.kind === FORMAT_KIND.DEPTH;
+            // A buffer holds elements a view can name: no blocks, and no depth.
+            let support = FORMAT_SUPPORT.CPU_LOCKABLE
+                | (block || depth ? 0 : FORMAT_SUPPORT.BUFFER);
             if (VERTEX_FORMAT[format])
             {
                 support |= FORMAT_SUPPORT.IA_VERTEX_BUFFER;
@@ -1109,8 +1127,12 @@ export function createDevice(options = {}){
             {
                 support |= FORMAT_SUPPORT.IA_INDEX_BUFFER;
             }
-            const kept = textureStorage(format,
-                info.kind === FORMAT_KIND.DEPTH ? D3D10_BIND.DEPTH_STENCIL : 0, textureOptions);
+            // The view of a depth family that reads its depth is kept as that
+            // family's depth texture, whatever it would be as a colour.
+            const readsDepth = DEPTH_READING_VIEWS.has(format);
+            const kept = textureStorage(format, depth ? D3D10_BIND.DEPTH_STENCIL : 0,
+                textureOptions) ?? (readsDepth ? { format: 'depth', conversion: null,
+                depth: true } : null);
             if (kept)
             {
                 // WebGPU makes no compressed or depth texture of three dimensions.
@@ -1119,7 +1141,7 @@ export function createDevice(options = {}){
                     | (block ? 0 : FORMAT_SUPPORT.TEXTURE1D)
                     | (block || kept.depth ? 0 : FORMAT_SUPPORT.TEXTURE3D);
             }
-            if (kept && info.kind === FORMAT_KIND.COLOUR)
+            if (kept && !kept.depth && info.kind === FORMAT_KIND.COLOUR)
             {
                 support |= FORMAT_SUPPORT.SHADER_LOAD;
                 // What a sampler may filter: normalised and float formats, but
@@ -1130,12 +1152,14 @@ export function createDevice(options = {}){
                 {
                     support |= FORMAT_SUPPORT.SHADER_SAMPLE;
                 }
-                if (info.renderable && !kept.conversion)
+                // A8_UNORM is drawn into as the alpha of an eight-bit texture;
+                // its conversion is for the bytes a program uploads.
+                if (info.renderable && (!kept.conversion || kept.conversion === 'a8'))
                 {
                     support |= FORMAT_SUPPORT.RENDER_TARGET
                         | (filterable ? FORMAT_SUPPORT.BLENDABLE : 0);
                 }
-                if (/^(rgba8unorm|bgra8unorm)/.test(kept.format) && !kept.conversion)
+                if (MIPS_GENERATED.test(kept.format) && !kept.conversion)
                 {
                     support |= FORMAT_SUPPORT.MIP_AUTOGEN;
                 }
@@ -1144,9 +1168,21 @@ export function createDevice(options = {}){
             {
                 support |= FORMAT_SUPPORT.DISPLAY;
             }
-            if (info.kind === FORMAT_KIND.DEPTH && kept)
+            if (depth && kept)
             {
-                support |= FORMAT_SUPPORT.DEPTH_STENCIL | FORMAT_SUPPORT.SHADER_SAMPLE_COMPARISON;
+                support |= FORMAT_SUPPORT.DEPTH_STENCIL;
+            }
+            // Comparison is a read of depth, through the view that reads it:
+            // the typed depth format itself is never bound to a shader.
+            if (readsDepth)
+            {
+                support |= FORMAT_SUPPORT.SHADER_SAMPLE_COMPARISON;
+            }
+            if (multisampleQualityLevels(format, MULTISAMPLE_COUNT) > 0)
+            {
+                support |= FORMAT_SUPPORT.MULTISAMPLE_RENDERTARGET
+                    | (depth || kept?.depth ? 0 : FORMAT_SUPPORT.MULTISAMPLE_RESOLVE
+                        | FORMAT_SUPPORT.MULTISAMPLE_LOAD);
             }
             out.support = support;
             return S_OK;

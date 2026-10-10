@@ -2225,3 +2225,72 @@ test('the combined entry points answer with the swap chain\'s own failure and ha
         assert.deepEqual([chain.swapChain, device.device], [null, null]);
     }
 });
+
+test('a shadow map\'s formats say what each is for: the depth format draws depth, the view that'
+    + ' reads it compares (D3D10 format support; test_format_support, d3d10core.c:13827)', ()=>{
+    const device = createDevice();
+    /** @param {number} format */
+    const support = format=>{
+        /** @type {{ support?: number }} */
+        const out = {};
+        assert.equal(device.CheckFormatSupport(format, out), S_OK, `format ${format}`);
+        return /** @type {number} */ (out.support);
+    };
+    const [TEXTURE2D, COMPARISON, DEPTH_STENCIL, BUFFER] = [0x20, 0x400, 0x10000, 0x1];
+    for (const format of [DXGI_FORMAT.D24_UNORM_S8_UINT, DXGI_FORMAT.D32_FLOAT,
+        DXGI_FORMAT.D16_UNORM])
+    {
+        const bits = support(format);
+        assert.ok(bits & DEPTH_STENCIL && bits & TEXTURE2D, `${format} is a depth texture`);
+        assert.ok(!(bits & COMPARISON), `${format} is never bound to a shader`);
+        assert.ok(!(bits & BUFFER), `${format} is never a buffer's element`);
+    }
+    for (const format of [DXGI_FORMAT.R24_UNORM_X8_TYPELESS, DXGI_FORMAT.R32_FLOAT,
+        DXGI_FORMAT.R16_UNORM, DXGI_FORMAT.R32_FLOAT_X8X24_TYPELESS])
+    {
+        const bits = support(format);
+        assert.ok(bits & TEXTURE2D && bits & COMPARISON, `${format} reads depth to compare`);
+    }
+    assert.ok(!(support(DXGI_FORMAT.R8G8B8A8_UNORM) & COMPARISON));
+    assertFullyReleased(device);
+});
+
+test('an A8 texture is drawn into, as test_render_a8 draws (d3d10core.c:18552), and mips are'
+    + ' generated in every format the GPU makes them in', ()=>{
+    const device = createDevice();
+    /** @param {number} format */
+    const support = format=>{
+        /** @type {{ support?: number }} */
+        const out = {};
+        device.CheckFormatSupport(format, out);
+        return /** @type {number} */ (out.support);
+    };
+    assert.ok(support(DXGI_FORMAT.A8_UNORM) & 0x4000, 'RENDER_TARGET');
+    createTexture2D(device, { Format: DXGI_FORMAT.A8_UNORM }).release();
+    for (const format of [DXGI_FORMAT.R8G8B8A8_UNORM, DXGI_FORMAT.R16G16B16A16_FLOAT,
+        DXGI_FORMAT.R10G10B10A2_UNORM, DXGI_FORMAT.R8_UNORM])
+    {
+        assert.ok(support(format) & 0x2000, `MIP_AUTOGEN for ${format}`);
+    }
+    assert.ok(!(support(DXGI_FORMAT.R32G32B32A32_FLOAT) & 0x2000), 'not a 32-bit float');
+    assertFullyReleased(device);
+});
+
+test('the multisample bits follow the quality levels: a four-sample target, resolved and read'
+    + ' where it is colour', ()=>{
+    const device = createDevice();
+    /** @param {number} format */
+    const support = format=>{
+        /** @type {{ support?: number }} */
+        const out = {};
+        device.CheckFormatSupport(format, out);
+        return /** @type {number} */ (out.support);
+    };
+    const [RESOLVE, RENDERTARGET, LOAD] = [0x40000, 0x200000, 0x400000];
+    assert.equal(support(DXGI_FORMAT.R8G8B8A8_UNORM) & (RESOLVE | RENDERTARGET | LOAD),
+        RESOLVE | RENDERTARGET | LOAD);
+    assert.equal(support(DXGI_FORMAT.D24_UNORM_S8_UINT) & (RESOLVE | RENDERTARGET | LOAD),
+        RENDERTARGET, 'depth is drawn at four samples and never resolved');
+    assert.equal(support(DXGI_FORMAT.R32G32B32A32_FLOAT) & (RESOLVE | RENDERTARGET | LOAD), 0);
+    assertFullyReleased(device);
+});

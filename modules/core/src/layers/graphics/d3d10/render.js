@@ -38,7 +38,7 @@ import {
 import { convertTexels, convertedTexelBytes } from './blocks.js';
 import {
     INDEX_FORMAT, TEXEL_BYTES, VERTEX_FORMAT, VERTEX_FORMAT_BYTES, copyCompatible,
-    isDepthFormat, resolvable, textureStorage, viewFormatOf,
+    MIPS_GENERATED, isDepthFormat, resolvable, textureStorage, viewFormatOf,
 } from './gpuformats.js';
 import { levelExtent } from './validity.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
@@ -279,9 +279,6 @@ const DEFAULT_BLEND = Object.freeze({
  * @property {'clear'} kind
  * @property {number[]} color
  */
-
-/** The formats a level is drawn into and filtered from when the GPU makes mips. */
-const FILTERED_TARGET = /^(rgba8unorm|bgra8unorm|rgba16float|rg16float|r16float|rgb10a2unorm|rg8unorm|r8unorm)/;
 
 /**
  * A triangle over the whole target, sampling the level above at the middle of
@@ -2170,7 +2167,7 @@ export function createRenderer(services){
             if (backend && backing.texture && gpuWritten(resource)
                 && resource.dimension !== D3D10_RESOURCE_DIMENSION.TEXTURE1D
                 && resource.dimension !== D3D10_RESOURCE_DIMENSION.TEXTURE3D
-                && FILTERED_TARGET.test(format) && backing.sampleCount === 1)
+                && MIPS_GENERATED.test(format) && backing.sampleCount === 1)
             {
                 recordMips(resource, backing);
                 return true;

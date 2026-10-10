@@ -478,3 +478,10 @@ export function multisampleQualityLevels(dxgiFormat, sampleCount){
 export function resolvable(format){
     return MULTISAMPLED.has(format) && !isDepthFormat(format);
 }
+
+/**
+ * The formats the GPU makes a texture's mips in, drawing each level from the
+ * one above with a filtering sampler: those it renders, blends and filters
+ * without a feature.
+ */
+export const MIPS_GENERATED = /^(rgba8unorm|bgra8unorm|rgba16float|rg16float|r16float|rgb10a2unorm|rg8unorm|r8unorm)/;
