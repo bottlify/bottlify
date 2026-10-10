@@ -359,3 +359,17 @@ test('SystemProcessInformation chains the idle process and each process with its
     const needed = host.view.getUint32(BUFFER + 0x400, true);
     assert.ok(needed > 0xb8 * 2);
 });
+
+test('the system file cache is sized by a well-formed request, and nothing else is set', ()=>{
+    // SystemFileCacheInformation (21) with its 36-byte structure is what a program
+    // lifting the cache's bounds sends; there is no cache here to bound.
+    const host = fakeHost();
+    const fns = createQueryFunctions(host);
+    assert.equal(fns.NtSetSystemInformation.argBytes, 12);
+    assert.equal(fns.NtSetSystemInformation.handler([21, BUFFER, 36]), STATUS.SUCCESS);
+    assert.equal(fns.NtSetSystemInformation.handler([21, BUFFER, 32]),
+        STATUS.INFO_LENGTH_MISMATCH);
+    assert.equal(fns.NtSetSystemInformation.handler([21, 0, 36]), STATUS.ACCESS_VIOLATION);
+    assert.equal(fns.NtSetSystemInformation.handler([0, BUFFER, 0x2c]),
+        STATUS.INVALID_INFO_CLASS);
+});
