@@ -599,6 +599,41 @@ test('a stage whose texture lacks channels samples them as one, a four-channel o
         assert.throws(()=>sampledWithOnes('t', 0b1111), /mask 15/);
     });
 
+test('a level-of-detail bias is added to its own stage\'s level before the clamp, and only there',
+    ()=>{
+        const textured = {
+            colorOp: D3DTOP.SELECTARG1, colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.CURRENT,
+            alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.TEXTURE, alphaArg2: D3DTA.CURRENT,
+            texCoordIndex: 0,
+        };
+        const fvf = FVF.XYZ | FVF.DIFFUSE | (2 << FVF.TEXCOUNT_SHIFT) | (1 << 16);
+        const plain = generate(baseState({ fvf, stages: [textured, textured] })).code;
+        const biased = generate(baseState({ fvf,
+            stages: [textured, { ...textured, lodBias: -1.5 }] })).code;
+        const derived = '0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1.0e-12))';
+        const sampleOf = (/** @type {string} */ code, /** @type {number} */ index)=>{
+            const from = code.slice(code.indexOf(`fn sampleStage${index}`));
+            return from.slice(0, from.indexOf('\n}\n'));
+        };
+        assert.ok(sampleOf(biased, 1).includes(`let lod = clamp(${derived} + -1.5,`),
+            'the bias joins the derived level, inside the clamp to the levels allowed');
+        assert.equal(sampleOf(biased, 0), sampleOf(plain, 0), 'the stage without one is as it was');
+        assert.ok(!plain.includes(' + -1.5'));
+        assert.equal(generate(baseState({ fvf, stages: [textured, textured] })).code, plain);
+
+        // A cube and a volume stage take it the same way.
+        for (const dimension of ['cube', '3d'])
+        {
+            const code = generate(baseState({ fvf,
+                stages: [{ ...textured, dimension, lodBias: 2 }] })).code;
+            assert.ok(sampleOf(code, 0).includes(`let lod = clamp(${derived} + 2.0,`), dimension);
+        }
+        // And the fragment stage over a vertex shader.
+        const fragment = fixedFragmentStage(baseState({ fvf: 0, vertexShader: 1,
+            stages: [{ ...textured, lodBias: 0.25 }] }), [0, 2]);
+        assert.ok(fragment.wgsl.includes(`let lod = clamp(${derived} + 0.25,`));
+    });
+
 test('a stage puts its coordinate through its own texture transform before sampling', ()=>{
     // Direct3D applies D3DTS_TEXTURE0..7 to (u, v, 1) for a two-coordinate
     // set: two dot products against the rows the block carries, computed

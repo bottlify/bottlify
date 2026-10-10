@@ -24,6 +24,10 @@ import {
     D3DFMT, FORMAT_INFO, sampledOnes,
 } from '../../modules/core/src/layers/graphics/d3d9/constants.js';
 import { fromHalf, toHalf } from '../../modules/core/src/layers/graphics/d3d9/half.js';
+import { D3DTEXF, D3DTSS } from '../../modules/core/src/layers/graphics/d3d8/constants.js';
+import {
+    lodBiasOf, samplerDescriptorOf,
+} from '../../modules/core/src/layers/graphics/d3d8/render.js';
 
 /** @param {number} seed */
 export function generator(seed){
@@ -63,6 +67,12 @@ const KEPT_AS = { 1: 'r16float', 2: 'rg16float' };
  * @property {number[]} bytes    Its one texel as uploaded.
  * @property {number[]} values   What Direct3D samples from it, the filled channels one.
  * @property {number} ones       The channels the read fills (`sampledOnes`).
+ * @property {number} [size]     A sampling profile's: the texture's width and height.
+ * @property {number[][]} [levels]  A sampling profile's: each level's one colour, as bytes.
+ * @property {any} [sampler]     A sampling profile's: the GPU sampler the engine makes for
+ *     the sampler's state (`samplerDescriptorOf`); absent, linear and repeating.
+ * @property {import('../../modules/core/src/layers/graphics/d3d9/wgsl.js').SamplerVariant}
+ *     [variant]  What the state asks of the reads beyond that sampler.
  */
 
 /**
@@ -93,6 +103,66 @@ export function samplerTexels(seed){
     });
 }
 
+/** The colour of each level of a sampling profile's textures, distinct from level to level. */
+const LEVEL_BYTES = [[250, 20, 40, 255], [30, 240, 60, 200], [10, 50, 230, 120],
+    [200, 200, 20, 60]];
+/** The level-of-detail biases a sampling profile's samplers are given. */
+const LOD_BIASES = [-1.5, -0.75, 0.25, 1.25, 2.5];
+/** How near a level of detail may come to the half between two levels and be compared. */
+const LEVEL_MARGIN = 0.02;
+
+/**
+ * Each sampler's texture and state for a profile that samples under a state
+ * the GPU sampler alone cannot express: 'lod', a level-of-detail bias, over a
+ * texture of three levels of one colour each, read through a point mip filter
+ * -- the GPU's nearest level -- so a level is told by its colour exactly.
+ *
+ * @param {number} seed @param {'lod'} kind
+ * @returns {SamplerTexel[]}
+ */
+export function samplingTexels(seed, kind){
+    const next = generator(seed ^ 0x51ed270b);
+    return Array.from({ length: SAMPLER_BYTES.length }, (_, sampler)=>{
+        const levels = [0, 1, 2].map(level=>LEVEL_BYTES[(level + sampler) % LEVEL_BYTES.length]);
+        const lodBias = kind === 'lod' ? pick(next, LOD_BIASES) : 0;
+        const states = new Map([[D3DTSS.MAGFILTER, D3DTEXF.LINEAR],
+            [D3DTSS.MINFILTER, D3DTEXF.LINEAR], [D3DTSS.MIPFILTER, D3DTEXF.POINT],
+            [D3DTSS.MIPMAPLODBIAS, new Uint32Array(Float32Array.of(lodBias).buffer)[0]]]);
+        return {
+            format: 'rgba8unorm', bytes: levels[0], values: levels[0].map(byte=>byte / 255),
+            ones: 0, size: 4, levels, sampler: samplerDescriptorOf(states),
+            variant: { lodBias: lodBiasOf(states.get(D3DTSS.MIPMAPLODBIAS) ?? 0) },
+        };
+    });
+}
+
+/**
+ * What a sampling profile's texture answers a read, as Direct3D reads it: the
+ * level the read's level of detail names with the sampler's bias added, the
+ * nearest of the three, the top one at or below zero. A derived level is none
+ * here -- every varying is the same at the three corners, so every derivative
+ * is zero -- and its read is the top level whatever the bias. Null where the
+ * level lies too near the half between two for the GPU's rounding to be known.
+ *
+ * @param {SamplerTexel} texel @param {{ kind: string, value?: number }} mode
+ * @returns {number[] | null}
+ */
+function sampledLevel(texel, mode){
+    const levels = /** @type {number[][]} */ (texel.levels);
+    if (mode.kind !== 'lod')
+    {
+        return levels[0].map(byte=>byte / 255);
+    }
+    const lod = Math.fround(/** @type {number} */ (mode.value) + (texel.variant?.lodBias ?? 0));
+    if (lod > 0 && lod < levels.length - 0.5
+        && Math.abs(lod - Math.floor(lod) - 0.5) < LEVEL_MARGIN)
+    {
+        return null;
+    }
+    const level = lod <= 0 ? 0 : Math.min(levels.length - 1, Math.floor(lod + 0.5));
+    return levels[level].map(byte=>byte / 255);
+}
+
 /**
  * @typedef {Object} Profile
  * @property {string} name
@@ -115,6 +185,8 @@ export function samplerTexels(seed){
  * @property {string[]} [special]    Instructions with forms of their own, by name.
  * @property {boolean} [flow]        Whether to try if, rep and loop blocks.
  * @property {boolean} [predicated]  Whether p0 exists: setp, predicated writes, if p0, breakp.
+ * @property {'lod'} [sampling]  The samplers' state the GPU sampler cannot hold
+ *     (`samplingTexels`).
  */
 
 /** @param {() => number} next @param {string} r @param {string} s */
@@ -230,6 +302,13 @@ PROFILES.ps_1_4 = {
     binary: ['add', 'sub', 'mul', 'dp3', 'dp4'], ternary: ['mad', 'lrp', 'cnd', 'cmp'],
     dmods: ['', '_sat', '_x2', '_x4', '_d2'], sourceForms: PS1_FORMS, tail: [],
 };
+
+// The level-of-detail bias, through texldl, whose level the bias moves where
+// every derivative is zero, in each stage that has it.
+PROFILES.ps_3_0_lod = { ...PROFILES.ps_3_0, name: 'ps_3_0', sampling: 'lod',
+    special: ['texldl', 'texldl', 'pow'], flow: false, predicated: false };
+PROFILES.vs_3_0_lod = { ...PROFILES.vs_3_0, name: 'vs_3_0', sampling: 'lod',
+    special: ['texldl', 'texldl', 'm4x4'], flow: false, predicated: false };
 
 /**
  * One instruction, at random from what the profile names.
@@ -418,6 +497,8 @@ const programText = (p, body, subs = [])=>[p.name, ...p.head, ...p.init, ...body
  * @property {Record<string, number>} written
  * @property {number | undefined} viewportRegister
  * @property {boolean} killed
+ * @property {boolean} [unsettled]  A read lay where the GPU's rounding decides it
+ *     (`sampledLevel`): not compared.
  * @property {string | null} error
  */
 
@@ -477,17 +558,29 @@ export function buildCase(profile, seed, length = 10){
         const unit = ps1 || name.startsWith('t') || (!p.vertex && name === 'v0');
         inputs[name] = Array.from({ length: 4 }, ()=>between(next, unit ? 0 : -3, unit ? 1 : 3));
     }
-    const texels = samplerTexels(seed);
+    const texels = p.sampling ? samplingTexels(seed, p.sampling) : samplerTexels(seed);
+    let unsettled = false;
     const result = execute(tokens, {
         constants: { f: constants, i: ints, b: bools },
         inputs: { v: [inputs.v0, inputs.v1, inputs.v2], t: [inputs.t0, inputs.t1] },
         position: [0, 0],
         frontFacing: true,
-        sample: sampler=>texels[sampler % texels.length].values,
+        sample: (sampler, dimension, coord, mode)=>{
+            const texel = texels[sampler % texels.length];
+            if (!texel.levels)
+            {
+                return texel.values;
+            }
+            const read = sampledLevel(texel, mode);
+            unsettled ||= read === null;
+            return read ?? [0, 0, 0, 0];
+        },
         derivative: ()=>[0, 0, 0, 0],
     });
-    const translated = translateShader(parseShader(tokens),
-        { ones: texels.map(texel=>texel.ones) });
+    const translated = translateShader(parseShader(tokens), {
+        ones: texels.map(texel=>texel.ones),
+        ...(p.sampling ? { sampling: texels.map(texel=>texel.variant) } : {}),
+    });
     return {
         profile, seed, text, vertex: p.vertex,
         wgsl: translated.wgsl, entry: translated.entry, samplers: translated.samplers, texels,
@@ -495,7 +588,7 @@ export function buildCase(profile, seed, length = 10){
         expected: Object.fromEntries(Object.entries(result.outputs)
             .map(([name, values])=>[name, Array.from(values, Number)])),
         written: result.written, viewportRegister: translated.viewportRegister,
-        killed: result.killed,
+        killed: result.killed, unsettled,
         error: translated.error,
     };
 }

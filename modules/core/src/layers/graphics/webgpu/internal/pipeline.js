@@ -164,6 +164,10 @@ function lookUp(table, value, what){
  * @property {number} [ones]
  *     The channels the stage's texture samples as one that the GPU's texture
  *     lacks (`sampledOnes` in `d3d9/constants.js`), when there are any.
+ * @property {number} [lodBias]
+ *     D3DTSS_MIPMAPLODBIAS of a stage that samples, when it is not zero: added
+ *     to the level of detail its sample computes. Written into the shader, so
+ *     only a stage with one carries it.
  */
 
 /**
@@ -294,6 +298,7 @@ export function pipelineKey(state){
             ...(stage.bump === undefined ? [] : [`b${stage.bump.join('/')}`]),
             ...(stage.dimension === undefined ? [] : [stage.dimension]),
             ...(stage.ones === undefined ? [] : [`o${stage.ones}`]),
+            ...(stage.lodBias === undefined ? [] : [`l${stage.lodBias}`]),
         ].join(','))
         .join(';');
 

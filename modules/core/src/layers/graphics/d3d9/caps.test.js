@@ -133,7 +133,8 @@ test('what the renderer does not do is not claimed', ()=>{
         'D3DPRASTERCAPS_SCISSORTEST: draws and clears are cut to the scissor');
     assert.equal(words.RasterCaps & 0x06020000, 0x06020000,
         'DEPTHBIAS, SLOPESCALEDEPTHBIAS and ANISOTROPY, which the pipeline and sampler read');
-    assert.equal(words.RasterCaps & 0x00002000, 0, 'no MIPMAPLODBIAS, which nothing reads');
+    assert.equal(words.RasterCaps & 0x00002000, 0x00002000,
+        'MIPMAPLODBIAS, which the shader adds to the level a read takes');
     assert.equal(words.TextureCaps & 0x10800, 0x10800,
         'cube maps and their chains, which the renderer samples');
     assert.equal(words.CubeTextureFilterCaps, words.TextureFilterCaps);

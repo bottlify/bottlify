@@ -271,9 +271,11 @@ function pageRunner(){
     const DIMENSIONS = { 'texture_2d<f32>': '2d', 'texture_cube<f32>': 'cube',
         'texture_3d<f32>': '3d' };
     /**
-     * Each sampler's 1x1 texture of known bytes, in the format the case gave
-     * it, and a sampler for it, view and sampler in turn: filtering and levels
-     * give back exactly those bytes.
+     * Each sampler's texture of known bytes, in the format the case gave it,
+     * and a sampler for it, view and sampler in turn: a 1x1 whose filtering
+     * and levels give back exactly those bytes, or for a sampling profile a
+     * chain of levels of one colour each, through the sampler the engine
+     * makes for the state the case gave.
      *
      * @param {any} device @param {any} plan
      */
@@ -281,18 +283,28 @@ function pageRunner(){
         const dimension = DIMENSIONS[s.type] ?? '2d';
         const layers = dimension === 'cube' ? 6 : 1;
         const texel = plan.texels[s.index % plan.texels.length];
+        const size = texel.size ?? 1;
+        /** @type {number[][]} */
+        const levels = texel.levels ?? [texel.bytes];
         const texture = device.createTexture({
-            size: [1, 1, layers], format: texel.format,
-            dimension: dimension === '3d' ? '3d' : '2d',
+            size: [size, size, dimension === '3d' ? size : layers], format: texel.format,
+            dimension: dimension === '3d' ? '3d' : '2d', mipLevelCount: levels.length,
             usage: TEXTURE_BINDING | TEXTURE_COPY_DST,
         });
-        for (let layer = 0; layer < layers; layer++)
-        {
-            device.queue.writeTexture({ texture, origin: [0, 0, layer] },
-                new Uint8Array(texel.bytes), { bytesPerRow: texel.bytes.length }, [1, 1, 1]);
-        }
-        return [texture.createView({ dimension }), device.createSampler({
-            magFilter: 'linear', minFilter: 'linear' })];
+        levels.forEach((bytes, level)=>{
+            const across = Math.max(1, size >> level);
+            const deep = dimension === '3d' ? across : 1;
+            const row = Array.from({ length: across }, ()=>bytes).flat();
+            const all = Array.from({ length: across * deep }, ()=>row).flat();
+            for (let layer = 0; layer < layers; layer++)
+            {
+                device.queue.writeTexture({ texture, mipLevel: level, origin: [0, 0, layer] },
+                    new Uint8Array(all), { bytesPerRow: row.length, rowsPerImage: across },
+                    [across, across, deep]);
+            }
+        });
+        return [texture.createView({ dimension }), device.createSampler(texel.sampler
+            ?? { magFilter: 'linear', minFilter: 'linear' })];
     });
 
     /** @param {any} device @param {any} plan */
@@ -469,6 +481,11 @@ function compare(c, result){
     {
         return { ok: false, error: result.error, mismatches: [], undefinedCount: 0 };
     }
+    // A read the GPU's rounding decides is not the machine's to say.
+    if (c.unsettled)
+    {
+        return { ok: true, error: null, mismatches: [], undefinedCount: 1, unsettled: true };
+    }
     // A killed pixel leaves the target as it was cleared; a pixel the machine
     // kept and the GPU dropped is as wrong as the reverse.
     const dropped = (result.values.oC0 ?? []).every((/** @type {number} */ x)=>x === CLEARED);
@@ -528,7 +545,7 @@ async function main(){
     /** @type {any[]} */
     const failures = [];
     /** @type {Record<string, { cases: number, passed: number, undefinedComponents: number,
-        filled: number }>} */
+        filled: number, unsettled: number }>} */
     const byProfile = {};
     let adapter = null;
     try
@@ -581,13 +598,21 @@ async function main(){
                 throw new Error(`no device: ${ran.error}`);
             }
             adapter = ran.adapter;
-            const stats = { cases: cases.length, passed: 0, undefinedComponents: 0, filled: 0 };
+            const stats = { cases: cases.length, passed: 0, undefinedComponents: 0, filled: 0,
+                unsettled: 0 };
             cases.forEach((c, at)=>{
                 // A case that samples a texture of fewer than four channels.
                 stats.filled += c.samplers.some(s=>c.texels[s.index % c.texels.length].ones !== 0)
                     ? 1 : 0;
                 const verdict = compare(c, ran.results[at]);
-                stats.undefinedComponents += verdict.undefinedCount;
+                if ('unsettled' in verdict)
+                {
+                    stats.unsettled++;
+                }
+                else
+                {
+                    stats.undefinedComponents += verdict.undefinedCount;
+                }
                 if (verdict.ok)
                 {
                     stats.passed++;
@@ -604,7 +629,9 @@ async function main(){
                 + `${stats.filled ? `, ${stats.filled} sampling a texture of one or two channels`
                     : ''}`
                 + `${stats.undefinedComponents ? `, ${stats.undefinedComponents} components`
-                    + ' undefined by Direct3D not compared' : ''}`);
+                    + ' undefined by Direct3D not compared' : ''}`
+                + `${stats.unsettled ? `, ${stats.unsettled} reading where the GPU's rounding`
+                    + ' decides, not compared' : ''}`);
         }
     }
     finally

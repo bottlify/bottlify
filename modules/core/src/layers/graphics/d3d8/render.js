@@ -170,6 +170,14 @@ function declaredSamplers(parsed){
 const onesKey = ones=>(ones === null ? '' : Array.from(ones, value=>value ?? 0).join(','));
 
 /**
+ * A list of `variantsAt`'s, for a key: each sampler's variant, empty for none.
+ *
+ * @param {(import('../d3d9/wgsl.js').SamplerVariant | undefined)[]} variants
+ */
+const variantsKey = variants=>Array.from(variants, variant=>(variant
+    ? `${variant.lodBias ?? 0}` : '')).join(',');
+
+/**
  * The component D3DTTFF_PROJECTED divides a coordinate set by, for each
  * D3DTTFF_COUNTn: the last of the count, or w with no count; one coordinate
  * has nothing to divide by.
@@ -1870,10 +1878,12 @@ export function stageCascade(model, layout, how = {}){
             || readsTexture(key.alphaOp, key.alphaArg1, key.alphaArg2, key.alphaArg0);
         const dimension = samples ? textureDimensionOf(texture) : '2d';
         const ones = samples ? onesOf(texture) : 0;
-        stages.push(dimension === '2d' && ones === 0 ? key : {
+        const lodBias = samples ? lodBiasOf(get(D3DTSS.MIPMAPLODBIAS)) : 0;
+        stages.push(dimension === '2d' && ones === 0 && lodBias === 0 ? key : {
             ...key,
             ...(dimension === '2d' ? {} : { dimension }),
             ...(ones === 0 ? {} : { ones }),
+            ...(lodBias === 0 ? {} : { lodBias }),
         });
         textures.push(samples ? texture : null);
     }
@@ -1890,6 +1900,23 @@ export function stageCascade(model, layout, how = {}){
         textures.pop();
     }
     return { stages, textures, truncated: unbound };
+}
+
+/** The furthest a level-of-detail bias moves a sample, either way, as hardware holds it. */
+const LOD_BIAS_LIMIT = 16;
+
+/**
+ * D3DSAMP_MIPMAPLODBIAS (D3DTSS_ in Direct3D 8), a DWORD holding a float, as
+ * the bias a sample adds to its level of detail: zero for one that is no
+ * number, held to what hardware reaches.
+ *
+ * @param {number} dword
+ * @returns {number}
+ */
+export function lodBiasOf(dword){
+    const bias = dwordToFloat(dword);
+    return Number.isFinite(bias)
+        ? Math.min(LOD_BIAS_LIMIT, Math.max(-LOD_BIAS_LIMIT, bias)) + 0 : 0;
 }
 
 /**
@@ -5442,26 +5469,65 @@ export function createRenderer(options){
     };
 
     /**
+     * What each of a shader's samplers asks of its reads that its GPU sampler
+     * cannot do (`SamplerVariant` in the translator), by sampler number; null
+     * when none asks, which is every draw whose samplers hold no level bias.
+     *
+     * @param {RenderModel} model
+     * @param {import('../d3d9/shader.js').ParsedShader | null} parsed
+     * @param {number} first  The stage the shader's s0 is: 0, or D3DVERTEXTEXTURESAMPLER0.
+     * @returns {import('../d3d9/wgsl.js').SamplerVariant[] | null}
+     */
+    const variantsAt = (model, parsed, first)=>{
+        if (!parsed)
+        {
+            return null;
+        }
+        /** @type {import('../d3d9/wgsl.js').SamplerVariant[] | null} */
+        let variants = null;
+        for (const { index } of declaredSamplers(parsed))
+        {
+            const lodBias = lodBiasOf(model.stageStates(first + index).get(D3DTSS.MIPMAPLODBIAS)
+                ?? 0);
+            if (lodBias !== 0)
+            {
+                variants ??= [];
+                variants[index] = { lodBias };
+            }
+        }
+        return variants;
+    };
+
+    /**
      * What a shader's reads depend on beyond the shader: the channels each
-     * texture it samples lacks and reads as one (`onesAt`), for its pixel and
+     * texture it samples lacks and reads as one (`onesAt`) and what its
+     * samplers' state asks of the reads (`variantsAt`), for its pixel and
      * its vertex samplers; and for a 1.x pixel shader, the dimension of the
      * texture bound at each stage and, below 1.4, the component
      * D3DTTFF_PROJECTED divides each stage's coordinates by.
      *
      * @param {RenderModel} model @param {ProgramState} program
      * @returns {{ key: string, pixelKey: string, stageDimensions?: string[],
-     *     projectedBy?: string[], pixelOnes?: number[], vertexOnes?: number[] }}
+     *     projectedBy?: string[], pixelOnes?: number[], vertexOnes?: number[],
+     *     pixelVariants?: import('../d3d9/wgsl.js').SamplerVariant[],
+     *     vertexVariants?: import('../d3d9/wgsl.js').SamplerVariant[] }}
      *     `key` is empty for a draw that reads nothing beyond its shaders, and
      *     `pixelKey` the part of it the pixel shader's translation reads.
      */
     const samplingOf = (model, program)=>{
         const pixelOnes = onesAt(model, program.pixel, 0);
         const vertexOnes = onesAt(model, program.vertex, D3DVERTEXTEXTURESAMPLER0);
-        const pixelPart = pixelOnes === null ? '' : `|o${onesKey(pixelOnes)}`;
-        const ones = pixelPart + (vertexOnes === null ? '' : `|v${onesKey(vertexOnes)}`);
+        const pixelVariants = variantsAt(model, program.pixel, 0);
+        const vertexVariants = variantsAt(model, program.vertex, D3DVERTEXTEXTURESAMPLER0);
+        const pixelPart = (pixelOnes === null ? '' : `|o${onesKey(pixelOnes)}`)
+            + (pixelVariants === null ? '' : `|s${variantsKey(pixelVariants)}`);
+        const ones = pixelPart + (vertexOnes === null ? '' : `|v${onesKey(vertexOnes)}`)
+            + (vertexVariants === null ? '' : `|t${variantsKey(vertexVariants)}`);
         const filled = {
             ...(pixelOnes === null ? {} : { pixelOnes }),
             ...(vertexOnes === null ? {} : { vertexOnes }),
+            ...(pixelVariants === null ? {} : { pixelVariants }),
+            ...(vertexVariants === null ? {} : { vertexVariants }),
         };
         const version = program.pixel?.version;
         if (!version || version.major >= 2)
@@ -5554,6 +5620,7 @@ export function createRenderer(options){
                     stageDimensions: sampling.stageDimensions,
                     projectedBy: sampling.projectedBy,
                     ...(sampling.pixelOnes ? { ones: sampling.pixelOnes } : {}),
+                    ...(sampling.pixelVariants ? { sampling: sampling.pixelVariants } : {}),
                     ...(alphaFunc === undefined ? {} : { alphaTest: alphaFunc }),
                     ...(nanProbe ? { nanProbe } : {}),
                 }));
@@ -5632,12 +5699,15 @@ export function createRenderer(options){
             ? translationOf(/** @type {object} */ (program.vertexShader),
                 `vs:${shapes}|w${missing.join(',')}${flat ? '|flat' : ''}|f${fog.source}`
                     + pointKey
-                    + (sampling.vertexOnes ? `|o${onesKey(sampling.vertexOnes)}` : ''),
+                    + (sampling.vertexOnes ? `|o${onesKey(sampling.vertexOnes)}` : '')
+                    + (sampling.vertexVariants ? `|s${variantsKey(sampling.vertexVariants)}` : ''),
                 ()=>translateShader(
                     /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
                     { inputs: layout.shapes, alsoWrite: missing, flatColours: flat,
                         fogSource: fog.source, ...(points ? { points } : {}),
-                        ...(sampling.vertexOnes ? { ones: sampling.vertexOnes } : {}) }))
+                        ...(sampling.vertexOnes ? { ones: sampling.vertexOnes } : {}),
+                        ...(sampling.vertexVariants
+                            ? { sampling: sampling.vertexVariants } : {}) }))
             : hybridStageFor(
                 `${program.declarationId}|${shapes}|w${missing.join(',')}|g${generated.join(',')}`
                     + `|f${fog.source}/${fog.mode}${flat ? '|flat' : ''}`

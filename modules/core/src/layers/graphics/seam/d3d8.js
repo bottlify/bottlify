@@ -181,6 +181,7 @@ const FILTER_CAPS = 0x03030300 | 0x00000400 | 0x04000000;
 /** KEEP through DECR, every operation the pipeline maps; Direct3D 8 has no two-sided set. */
 const STENCIL_CAPS = 0xff;
 const D3DPRASTERCAPS_ZBIAS = 0x00004000;
+const D3DPRASTERCAPS_MIPMAPLODBIAS = 0x00002000;
 const D3DPRASTERCAPS_ANISOTROPY = 0x00020000;
 
 const D3DPTADDRESSCAPS_WRAP = 0x00000001;
@@ -2458,12 +2459,12 @@ export function createDirect3D8Seam(
             PrimitiveMiscCaps: D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW
                 | D3DPMISCCAPS_CULLCCW | D3DPMISCCAPS_MASKZ
                 | D3DPMISCCAPS_COLORWRITEENABLE | D3DPMISCCAPS_BLENDOP,
-            // D3DRS_ZBIAS and MAXANISOTROPY are read; no level bias, which the
-            // sampler does not read.
+            // D3DRS_ZBIAS and MAXANISOTROPY are read, and the level bias, which
+            // the shader adds where no WebGPU sampler takes one.
             RasterCaps: D3DPRASTERCAPS_DITHER | D3DPRASTERCAPS_ZTEST
                 | D3DPRASTERCAPS_FOGVERTEX | D3DPRASTERCAPS_FOGTABLE | D3DPRASTERCAPS_FOGRANGE
                 | D3DPRASTERCAPS_WFOG | D3DPRASTERCAPS_ZFOG | D3DPRASTERCAPS_ZBIAS
-                | D3DPRASTERCAPS_ANISOTROPY,
+                | D3DPRASTERCAPS_ANISOTROPY | D3DPRASTERCAPS_MIPMAPLODBIAS,
             // Every comparison a depth test can ask for; the backend maps them
             // one to one onto its own.
             ZCmpCaps: ALL_COMPARE_CAPS,

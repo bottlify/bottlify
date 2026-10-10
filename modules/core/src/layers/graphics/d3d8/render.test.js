@@ -39,7 +39,7 @@ import {
     HARDWARE_SAMPLER, filledIndices, listIndices, multiplyMatrices, packLight, pipelineStateOf,
     samplerFlagsOf,
     screenExtent, transformPosition, uniformBlock, uniformsOf, pixelUniformsOf, fogModeOf, fogOf,
-    isAffine, stageCascade,
+    isAffine, lodBiasOf, stageCascade,
     vertexCountOf,
 } from './render.js';
 import { createBackend } from '../webgpu/backend.js';
@@ -4077,6 +4077,39 @@ test('a cascade stage says what its texture fills, and a stage that samples noth
         const unfilled = stageCascade(model, layout).stages;
         assert.ok(unfilled.every(stage=>!('ones' in stage)), 'none is asked for by default');
         assert.deepEqual(unfilled.slice(1), filled.slice(1));
+    });
+
+test('a cascade stage that samples carries its level-of-detail bias, and only one that is set',
+    ()=>{
+        const texture = { name: 'texture' };
+        const bits = (/** @type {number} */ value)=>new Uint32Array(Float32Array.of(value).buffer)[0];
+        const states = [
+            new Map([[D3DTSS.COLOROP, D3DTOP.SELECTARG1], [D3DTSS.COLORARG1, D3DTA.TEXTURE],
+                [D3DTSS.ALPHAOP, D3DTOP.SELECTARG1], [D3DTSS.ALPHAARG1, D3DTA.TEXTURE],
+                [D3DTSS.MIPMAPLODBIAS, bits(-0.75)]]),
+            new Map([[D3DTSS.COLOROP, D3DTOP.MODULATE], [D3DTSS.COLORARG1, D3DTA.TEXTURE],
+                [D3DTSS.COLORARG2, D3DTA.CURRENT], [D3DTSS.ALPHAOP, D3DTOP.SELECTARG1],
+                [D3DTSS.ALPHAARG1, D3DTA.CURRENT], [D3DTSS.MIPMAPLODBIAS, bits(1e30)]]),
+            // A bias on a stage that samples nothing shapes nothing.
+            new Map([[D3DTSS.COLOROP, D3DTOP.MODULATE], [D3DTSS.COLORARG1, D3DTA.DIFFUSE],
+                [D3DTSS.COLORARG2, D3DTA.CURRENT], [D3DTSS.ALPHAOP, D3DTOP.SELECTARG1],
+                [D3DTSS.ALPHAARG1, D3DTA.CURRENT], [D3DTSS.MIPMAPLODBIAS, bits(2)]]),
+            new Map([[D3DTSS.COLOROP, D3DTOP.MODULATE], [D3DTSS.COLORARG1, D3DTA.TEXTURE],
+                [D3DTSS.COLORARG2, D3DTA.CURRENT], [D3DTSS.ALPHAOP, D3DTOP.SELECTARG1],
+                [D3DTSS.ALPHAARG1, D3DTA.CURRENT], [D3DTSS.MIPMAPLODBIAS, bits(NaN)]]),
+        ];
+        const model = /** @type {any} */ ({
+            renderStates: new Map(),
+            stageStates: (/** @type {number} */ stage)=>states[stage] ?? new Map(),
+            textures: new Map([[0, texture], [1, texture], [2, texture], [3, texture]]),
+        });
+        const layout = decodeFvf(FVF.XYZ | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT));
+        const stages = stageCascade(model, layout).stages;
+        assert.equal(stages[0].lodBias, -0.75);
+        assert.equal(stages[1].lodBias, 16, 'held to what hardware reaches');
+        assert.equal('lodBias' in stages[2], false);
+        assert.equal('lodBias' in stages[3], false, 'a bias that is no number is none');
+        assert.equal(lodBiasOf(bits(-0)), 0);
     });
 
 test('a floating-point surface is an r16float, R32F narrowed to half precision on upload', ()=>{

@@ -1791,7 +1791,8 @@ test('every capability claimed is one the renderer honours', ()=>{
     assert.equal(caps.RasterCaps & 0x00020000, 0x00020000, 'anisotropy, the sampler\'s');
     assert.equal(caps.TextureFilterCaps & (0x00000400 | 0x04000000), 0x04000400,
         'anisotropic minification and magnification');
-    assert.equal(caps.RasterCaps & 0x00002000, 0, 'no D3DTSS_MIPMAPLODBIAS, which nothing reads');
+    assert.equal(caps.RasterCaps & 0x00002000, 0x00002000,
+        'D3DTSS_MIPMAPLODBIAS, which the shader adds to the level a read takes');
     assert.equal(caps.StencilCaps, 0xff, 'KEEP through DECR, the operations the pipeline maps');
     assert.equal(caps.MaxVertexBlendMatrices, 0, 'no vertex blending');
     assert.equal(caps.TextureAddressCaps & (0x00000008 | 0x00000020), 0,

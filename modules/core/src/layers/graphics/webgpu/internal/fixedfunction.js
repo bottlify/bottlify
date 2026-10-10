@@ -817,7 +817,8 @@ ${functionDeclarations(lighting, vertexFog || fogSource === FOG_SOURCE.TABLE
         ? state.fogMode : D3DFOG.NONE, vertexFog)}${samplerDeclarations(dimensionsOf(state), 0, 1)}
 ${keys.some(key=>key !== null) ? 'var<private> colourKeyed: bool = false;\n' : ''}${
     sampleFunctions(state.stages.length, state.stages.map((stage, index)=>(generated[index]
-        ? { projected: stage.projected ?? 0 } : null)), keys, dimensionsOf(state), onesOf(state))}
+        ? { projected: stage.projected ?? 0 } : null)), keys, dimensionsOf(state), onesOf(state),
+    state.stages)}
 struct VertexIn {
 ${inputs}
 };
@@ -1113,7 +1114,8 @@ export function fixedFragmentStage(state, written){
 @group(1) @binding(0) var<uniform> uniforms: Uniforms;
 ${functionDeclarations(null, fogSource === FOG_SOURCE.TABLE ? state.fogMode : D3DFOG.NONE)}${
     samplerDeclarations(dimensionsOf(state), 2, 0)}
-${sampleFunctions(state.stages.length, [], [], dimensionsOf(state), onesOf(state))}
+${sampleFunctions(state.stages.length, [], [], dimensionsOf(state), onesOf(state),
+        state.stages)}
 struct PsIn {
 ${fields.join('\n')}
 };
@@ -1184,6 +1186,21 @@ const ADDRESS_FUNCTION = `fn addressCoordinate(t: f32, mode: u32, texels: f32) -
 `;
 
 /**
+ * A stage's level of detail before it is held to the levels allowed: from the
+ * derivatives `dx` and `dy` its sample function takes, plus D3DSAMP_MIPMAPLODBIAS
+ * where the stage has one -- added before the clamp, as the sampler adds it, so
+ * it moves the choice between magnification and minification too. A stage
+ * without a bias is written as it always was.
+ *
+ * @param {number} [bias]
+ * @returns {string}
+ */
+function levelOfDetail(bias){
+    const derived = '0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1.0e-12))';
+    return bias ? `${derived} + ${literalOf(bias)}` : derived;
+}
+
+/**
  * The sampling of one stage, with the stage's sampler state read from the
  * block: address modes, point filtering by snapping to texel centres, and the
  * mip mode as an explicit level. The derivatives are taken from the raw
@@ -1204,9 +1221,14 @@ const ADDRESS_FUNCTION = `fn addressCoordinate(t: f32, mode: u32, texels: f32) -
  *     components, and is sampled by `cubeSample` or `volumeSample`.
  * @param {readonly number[]} [ones]
  *     Per stage, the channels its texture samples as one (`sampledWithOnes`).
+ * @param {readonly import('./pipeline.js').StageKey[]} [stages]
+ *     The stages themselves, for what only some of them ask: a level-of-detail
+ *     bias (`lodBias`), written into that stage's sample alone.
  * @returns {string}
  */
-function sampleFunctions(count, generated = [], keys = [], dimensions = [], ones = []){
+function sampleFunctions(count, generated = [], keys = [], dimensions = [], ones = [],
+    stages = [])
+{
     if (count === 0)
     {
         return '';
@@ -1217,11 +1239,12 @@ function sampleFunctions(count, generated = [], keys = [], dimensions = [], ones
     {
         const flags = index < 3 ? `uniforms.stage${index}` : '0u';
         const dimension = dimensions[index] ?? '2d';
+        const lod = levelOfDetail(stages[index]?.lodBias);
         if (dimension !== '2d')
         {
             lines.push(dimension === 'cube'
-                ? cubeSample(index, flags, ones[index])
-                : volumeSample(index, flags, ones[index]));
+                ? cubeSample(index, flags, ones[index], lod)
+                : volumeSample(index, flags, ones[index], lod));
             continue;
         }
         // The stage's texture transform, as Direct3D applies it to a
@@ -1249,7 +1272,7 @@ ${transformed}    let flags = ${flags};
     let dx = dpdx(raw * size);
     let dy = dpdy(raw * size);
     let levels = f32(textureNumLevels(texture${index}));
-    let lod = clamp(0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1.0e-12)),
+    let lod = clamp(${lod},
         f32((flags >> 8u) & 0xffu), max(levels - 1.0, 0.0));
     let mipMode = (flags >> 6u) & 3u;
     var level = 0.0;
@@ -1285,8 +1308,9 @@ ${keyTest(index, keys[index] ?? null)
  * two minor components over the major one are that face's coordinates.
  *
  * @param {number} index @param {string} flags @param {number} [ones]
+ * @param {string} [lod]  The unclamped level of detail (`levelOfDetail`).
  */
-function cubeSample(index, flags, ones){
+function cubeSample(index, flags, ones, lod = levelOfDetail()){
     const read = sampledWithOnes(
         `textureSampleLevel(texture${index}, sampler${index}, towards, level)`, ones);
     return `fn sampleStage${index}(direction: vec3f) -> vec4f {
@@ -1297,7 +1321,7 @@ function cubeSample(index, flags, ones){
     let dx = dpdx(direction) / major * size * 0.5;
     let dy = dpdy(direction) / major * size * 0.5;
     let levels = f32(textureNumLevels(texture${index}));
-    let lod = clamp(0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1.0e-12)),
+    let lod = clamp(${lod},
         f32((flags >> 8u) & 0xffu), max(levels - 1.0, 0.0));
     let mipMode = (flags >> 6u) & 3u;
     var level = f32((flags >> 8u) & 0xffu);
@@ -1333,8 +1357,9 @@ function cubeSample(index, flags, ones){
  * with the third's address mode in bits 16-17 of the stage's flags.
  *
  * @param {number} index @param {string} flags @param {number} [ones]
+ * @param {string} [lod]  The unclamped level of detail (`levelOfDetail`).
  */
-function volumeSample(index, flags, ones){
+function volumeSample(index, flags, ones, lod = levelOfDetail()){
     const read = sampledWithOnes(
         `textureSampleLevel(texture${index}, sampler${index}, uvw, level)`, ones);
     return `fn sampleStage${index}(raw: vec3f) -> vec4f {
@@ -1343,7 +1368,7 @@ function volumeSample(index, flags, ones){
     let dx = dpdx(raw * size);
     let dy = dpdy(raw * size);
     let levels = f32(textureNumLevels(texture${index}));
-    let lod = clamp(0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1.0e-12)),
+    let lod = clamp(${lod},
         f32((flags >> 8u) & 0xffu), max(levels - 1.0, 0.0));
     let mipMode = (flags >> 6u) & 3u;
     var level = f32((flags >> 8u) & 0xffu);

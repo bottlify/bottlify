@@ -301,6 +301,26 @@ export function varyingLocation(usage, index){
  */
 
 /**
+ * What a sampler's state asks of the reads through it beyond the GPU sampler
+ * it is bound with, which WebGPU's samplers cannot be told. Only a sampler
+ * that asks has one, and only its reads are written differently.
+ *
+ * @typedef {Object} SamplerVariant
+ * @property {number} [lodBias]  D3DSAMP_MIPMAPLODBIAS, not zero: added to the
+ *     level of detail of every read, implicit or explicit.
+ */
+
+/**
+ * A float as a WGSL literal of the abstract kind, which takes any finite value.
+ *
+ * @param {number} value
+ */
+const floatLiteral = value=>{
+    const text = String(value);
+    return text.includes('.') || text.includes('e') ? text : `${text}.0`;
+};
+
+/**
  * @param {import('./shader.js').Operand} operand
  * @returns {string} the four-component swizzle, e.g. ".xyzw"
  */
@@ -469,7 +489,7 @@ function returnsEarly(list){
  *     fog?: number, fogSource?: number, flatColours?: boolean,
  *     stageDimensions?: readonly string[], projectedBy?: readonly string[],
  *     points?: { sprite: boolean }, alphaTest?: number, nanProbe?: boolean,
- *     ones?: readonly number[] }} [options]
+ *     ones?: readonly number[], sampling?: readonly (SamplerVariant | undefined)[] }} [options]
  *        For a vertex shader, the shape of each v# the declaration supplies,
  *        by register. Absent means every declared input arrives as four
  *        floats; present, a declared register it does not name reads as the
@@ -499,6 +519,9 @@ function returnsEarly(list){
  *        the channels the texture bound there samples as one that the GPU's
  *        texture lacks (`sampledOnes` in `constants.js`); absent or zero, a
  *        read is the sample as it comes.
+ *        `sampling` is, by the same numbers, what a sampler's state asks of
+ *        its reads that its GPU sampler cannot do (`SamplerVariant`); absent,
+ *        a read is the GPU sampler's alone.
  * @returns {TranslatedShader}
  */
 export function translateShader(parsed, options = {}){
@@ -835,8 +858,11 @@ export function translateShader(parsed, options = {}){
                     ?? TEXTURE_TYPE['2d'],
             });
         }
-        return sampledWithOnes(`textureSample(tex${stage}, samp${stage},`
-            + ` ${swizzled(at, dimension === '2d' ? 'xy' : 'xyz')})`, options.ones?.[stage]);
+        const coordinates = swizzled(at, dimension === '2d' ? 'xy' : 'xyz');
+        const bias = options.sampling?.[stage]?.lodBias;
+        return sampledWithOnes(bias
+            ? `textureSampleBias(tex${stage}, samp${stage}, ${coordinates}, ${floatLiteral(bias)})`
+            : `textureSample(tex${stage}, samp${stage}, ${coordinates})`, options.ones?.[stage]);
     };
 
     /**
@@ -959,21 +985,31 @@ export function translateShader(parsed, options = {}){
             ? `(${src(instruction, 0)}.${coordinates} / ${src(instruction, 0)}.w)`
             : `${src(instruction, 0)}.${coordinates}`;
         const pair = `tex${entry.index}, samp${entry.index}`;
+        // The sampler's own bias joins whatever level the read names: added to
+        // an explicit level or bias, and as a scale of two to its power on
+        // the derivatives a gradient read gives, which is what moves their
+        // level by it.
+        const lodBias = options.sampling?.[entry.index]?.lodBias;
+        const plus = lodBias ? ` + ${floatLiteral(lodBias)}` : '';
         if (how === 'level')
         {
-            return `textureSampleLevel(${pair}, ${at}, ${src(instruction, 0)}.w)`;
+            return `textureSampleLevel(${pair}, ${at}, ${src(instruction, 0)}.w${plus})`;
         }
         if (how === 'grad')
         {
             const derivatives = entry.type === 'texture_2d<f32>' ? 'xy' : 'xyz';
-            return `textureSampleGrad(${pair}, ${at}, ${src(instruction, 2)}.${derivatives},`
-                + ` ${src(instruction, 3)}.${derivatives})`;
+            const scale = lodBias ? ` * ${floatLiteral(2 ** lodBias)}` : '';
+            return `textureSampleGrad(${pair}, ${at},`
+                + ` ${src(instruction, 2)}.${derivatives}${scale},`
+                + ` ${src(instruction, 3)}.${derivatives}${scale})`;
         }
         if (bias)
         {
-            return `textureSampleBias(${pair}, ${at}, ${src(instruction, 0)}.w)`;
+            return `textureSampleBias(${pair}, ${at}, ${src(instruction, 0)}.w${plus})`;
         }
-        return `textureSample(${pair}, ${at})`;
+        return lodBias
+            ? `textureSampleBias(${pair}, ${at}, ${floatLiteral(lodBias)})`
+            : `textureSample(${pair}, ${at})`;
     };
 
     /**

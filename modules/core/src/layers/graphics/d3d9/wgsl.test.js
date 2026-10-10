@@ -187,6 +187,57 @@ test('the pixel-stage instructions become the statements they mean', ()=>{
     }
 });
 
+test('a sampler\'s level-of-detail bias joins every kind of read through it, and only its own',
+    ()=>{
+        // D3DSAMP_MIPMAPLODBIAS is added to the level a read takes: one
+        // derived from the derivatives, a texldb's bias, a texldl's level
+        // (whose reference says the sampler's bias and MAXMIPLEVEL are
+        // honoured), and a texldd's derivatives by two to its power.
+        const r = REGISTER.TEMP;
+        const s = REGISTER.SAMPLER;
+        const reads = parseShader([PS_3_0, ...dclSampler(0), ...dclSampler(1),
+            op(OPCODE.DCL, 2), (0x80000000 | D3DDECLUSAGE.TEXCOORD) >>> 0, dst(REGISTER.INPUT, 0),
+            op(OPCODE.TEX, 3), dst(r, 0), src(REGISTER.INPUT, 0), src(s, 0),
+            op(OPCODE.TEX, 3, 1), dst(r, 1), src(REGISTER.INPUT, 0), src(s, 0),
+            op(OPCODE.TEX, 3, 2), dst(r, 2), src(REGISTER.INPUT, 0), src(s, 0),
+            op(OPCODE.TEXLDL, 3), dst(r, 3), src(REGISTER.INPUT, 0), src(s, 0),
+            op(OPCODE.TEXLDD, 5), dst(r, 4), src(REGISTER.INPUT, 0), src(s, 0), src(r, 1),
+            src(r, 2),
+            op(OPCODE.TEX, 3), dst(r, 5), src(REGISTER.INPUT, 0), src(s, 1),
+            op(OPCODE.ADD, 3), dst(r, 0), src(r, 0), src(r, 5),
+            op(OPCODE.MOV, 2), dst(REGISTER.COLOROUT, 0), src(r, 0), END_TOKEN]);
+        assert.equal(reads.error, null);
+        const plain = translateShader(reads);
+        const biased = translateShader(reads, { sampling: [{ lodBias: -1 }] });
+        assert.equal(biased.error, null);
+        for (const line of [
+            'r0 = textureSampleBias(tex0, samp0, in.v0.xy, -1.0);',
+            'r1 = textureSampleBias(tex0, samp0, (in.v0.xy / in.v0.w), -1.0);',
+            'r2 = textureSampleBias(tex0, samp0, in.v0.xy, in.v0.w + -1.0);',
+            'r3 = textureSampleLevel(tex0, samp0, in.v0.xy, in.v0.w + -1.0);',
+            'r4 = textureSampleGrad(tex0, samp0, in.v0.xy, r1.xy * 0.5, r2.xy * 0.5);',
+            'r5 = textureSample(tex1, samp1, in.v0.xy);',
+        ])
+        {
+            assertLine(biased.wgsl, line);
+        }
+        assert.equal(translateShader(reads, { sampling: [] }).wgsl, plain.wgsl,
+            'no variant is the translation as it always was, to the byte');
+
+        // A vertex shader's texldl and a 1.x stage's read take it the same way.
+        const vertex = translateShader(parseShader([VS_3_0, ...dclInput(0, 0), ...dclSampler(0),
+            op(OPCODE.DCL, 2), 0x80000000, dst(REGISTER.OUTPUT, 0),
+            op(OPCODE.TEXLDL, 3), dst(r, 0), src(REGISTER.INPUT, 0), src(s, 0),
+            op(OPCODE.MOV, 2), dst(REGISTER.OUTPUT, 0), src(r, 0), END_TOKEN]),
+        { sampling: [{ lodBias: 2 }] });
+        assertLine(vertex.wgsl, 'r0 = textureSampleLevel(tex0, samp0, v0.xy, v0.w + 2.0);');
+        const legacy = translateShader(parseShader([PS_1_1,
+            0x00000042, 0xb00f0000,                 // tex t0
+            0x00000001, 0x800f0000, 0xb0e40000,     // mov r0, t0
+            END_TOKEN]), { sampling: [{ lodBias: 0.5 }] });
+        assertLine(legacy.wgsl, 't0 = textureSampleBias(tex0, samp0, in.t0.xy, 0.5);');
+    });
+
 test('a cube sampler takes three coordinates, and a sampler read without a dcl is refused', ()=>{
     const parsed = parseShader([PS_2_0, ...dclSampler(1, 3),
         op(OPCODE.TEX, 3), dst(REGISTER.TEMP, 0), src(REGISTER.TEXTURE, 0),

@@ -1656,3 +1656,44 @@ test('the fixed pixel stage over a vertex shader fills a narrow texture, and is 
         vs.shader.release();
         narrow.release();
     });
+
+test('a sampler\'s level-of-detail bias reaches the reads of a shader pair and of the fixed stages',
+    async()=>{
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+        assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+        h.device.SetTexture(0, h.texture);
+        assert.equal(h.device.BeginScene(), D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetPixelShader(ps.shader);
+        for (const bias of [0, -0.5, 0])
+        {
+            // D3DSAMP_MIPMAPLODBIAS.
+            assert.equal(h.device.SetSamplerState(0, 8, floatToDword(bias)), D3D_OK);
+            assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        }
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetPixelShader(null);
+        assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        assert.equal(h.device.SetSamplerState(0, 8, floatToDword(-0.5)), D3D_OK);
+        assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        assert.equal(h.device.EndScene(), D3D_OK);
+        assert.equal(h.device.Present(), D3D_OK);
+        await h.device.idle();
+        assert.deepEqual(h.reports, []);
+        const pixels = modulesOf(h, 'ps:');
+        assert.equal(pixels.length, 4, 'a translation and a fixed stage each with the bias and'
+            + ' without; the draw back at zero shares the first');
+        assert.ok(pixels[0].includes('textureSample(tex0, samp0, in.t0.xy)'));
+        assert.ok(pixels[1].includes('textureSampleBias(tex0, samp0, in.t0.xy, -0.5)'));
+        assert.ok(!pixels[2].includes(' + -0.5'));
+        assert.ok(pixels[3].includes('1.0e-12)) + -0.5,'), pixels[3]);
+        h.device.SetTexture(0, null);
+        h.device.SetVertexShader(null);
+        vs.shader.release();
+        ps.shader.release();
+    });
