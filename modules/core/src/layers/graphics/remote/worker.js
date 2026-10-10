@@ -99,6 +99,8 @@ export function serveGraphics(scope, deps){
      */
     const liveDump = {
         dumpFrames: 0,
+        /** How buffer locks are taken (`app.debug.bufferLocks`): '' as asked, 'rename' always renaming. */
+        bufferLocks: '',
         /** @param {string[]} lines @param {number} frame */
         written: (lines, frame)=>{
             const dumped = { type: 'dumped', lines, frame };
@@ -495,7 +497,14 @@ export function serveGraphics(scope, deps){
                 takeRoot(data);
                 break;
             case 'debug':
-                liveDump.dumpFrames = Math.max(0, Math.floor(Number(data.dumpFrames) || 0));
+                if ('dumpFrames' in data)
+                {
+                    liveDump.dumpFrames = Math.max(0, Math.floor(Number(data.dumpFrames) || 0));
+                }
+                if ('bufferLocks' in data)
+                {
+                    liveDump.bufferLocks = String(data.bufferLocks ?? '');
+                }
                 break;
             case 'client':
             {

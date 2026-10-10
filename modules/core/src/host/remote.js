@@ -446,6 +446,13 @@ export async function createRemoteApp(wiring){
              * @param {number} [count] @returns {Promise<number>}
              */
             dumpFrames: (count = 1)=>request('debug.dumpFrames', [count]),
+            /**
+             * How the graphics worker's devices take buffer locks from now on:
+             * '' as the program asked, 'rename' renaming at every one.
+             *
+             * @param {string} [mode] @returns {Promise<string>}
+             */
+            bufferLocks: (mode = '')=>request('debug.bufferLocks', [mode]),
         },
         /** @returns {Promise<{ count: number, history: import('./messages.js').Presented[] }>} */
         presented: ()=>request('presented'),

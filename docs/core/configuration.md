@@ -97,6 +97,8 @@ publishing). The tables list only the settings that are data. `memory` and `load
 | `lendMemory` | `true` | With a graphics worker and shared guest memory: what a Direct3D 8 or 9 program unlocks is read by the worker in place instead of copied to it. `false` copies it, for measurement. |
 | `guestCode` | `true` | Direct3D 8 and 9 keep the state a program sets, the calls it makes in order and the counts of its references in guest memory, and answer its getters there, so most calls never cross to the host. `false` traps every call, as before they did: a fault that goes away with it is in that guest code. |
 | `driverRules` | `'legacy'` | Where Direct3D left a behaviour to the driver and drivers changed it, which generation Direct3D 8 and 9 follow: `'legacy'`, the drivers of the shader-model-1 and 2 era that programs of that time were written against; `'current'`, later drivers, which Wine's conformance tests record. One behaviour so far: table fog through a vertex shader that writes oFog runs over that oFog (`'legacy'`) or over the depth (`'current'`) -- [decisions.md](../../roadmap/decisions.md) A43. |
+| `keepMemory` | `false` | For debugging: memory a released Direct3D 9 resource held is never given back to the guest's heap. |
+| `rereadBuffers` | `false` | For debugging, without a graphics worker: every Direct3D draw compares the vertices it reaches with guest memory and sends what changed, for every buffer -- a dynamic one always does. |
 | `guestTraps` | `[]` | With `guestCode` on, the parts of that guest code kept as traps all the same: methods by name, or the groups `getters`, `ring`, `locks`, `levels` and `counts`. For narrowing down which part a fault is in. |
 
 ## audio

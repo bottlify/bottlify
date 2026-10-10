@@ -514,6 +514,8 @@ export function createGraphicsModule(){
                     mips: device?.mips,
                     nanProbe: device?.nanProbe,
                     driverRules: config?.driverRules,
+                    keepMemory: config?.keepMemory,
+                    rereadBuffers: config?.rereadBuffers,
                     onDeviceLost,
                     // Where a full-screen device's gamma ramp is shown.
                     gamma: displayGamma,
@@ -556,6 +558,8 @@ export function createGraphicsModule(){
                     mips: device?.mips,
                     nanProbe: device?.nanProbe,
                     driverRules: config?.driverRules,
+                    keepMemory: config?.keepMemory,
+                    rereadBuffers: config?.rereadBuffers,
                     onDeviceLost,
                     gamma: displayGamma,
                     frameQueued,

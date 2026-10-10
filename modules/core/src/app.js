@@ -7816,6 +7816,20 @@ function liveDumpOf(worker){
             worker.postMessage({ type: 'debug', dumpFrames: frames });
             return frames;
         },
+        /**
+         * How the worker's devices take buffer locks from now on: '' as the
+         * program asked, 'rename' renaming at every one.
+         *
+         * @param {string} [mode]
+         */
+        bufferLocks: (mode = '')=>{
+            if (!worker)
+            {
+                throw new Error('bufferLocks: this run draws without a graphics worker');
+            }
+            worker.postMessage({ type: 'debug', bufferLocks: mode });
+            return mode;
+        },
         dumped: ()=>last,
     };
 }

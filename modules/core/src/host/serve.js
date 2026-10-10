@@ -892,6 +892,14 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             graphics.worker.postMessage({ type: 'debug', dumpFrames: count });
             return count;
         },
+        'debug.bufferLocks': (/** @type {string} */ mode = '')=>{
+            if (!graphics)
+            {
+                throw new Error('bufferLocks: this run draws without a graphics worker');
+            }
+            graphics.worker.postMessage({ type: 'debug', bufferLocks: mode });
+            return mode;
+        },
         presented: ()=>({ count: frames, history: presented.slice() }),
         /*
          * The emulator's account of where the guest ran, by address. Only the

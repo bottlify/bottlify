@@ -461,6 +461,8 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {string} [probeTexture]
  * @property {boolean} [fog]
  * @property {'legacy' | 'current'} [driverRules]  The renderer's (`createRenderer`).
+ * @property {boolean} [keepMemory]  Released resources' memory is never given back (debugging).
+ * @property {boolean} [rereadBuffers]  The renderer's (`createRenderer`).
  * @property {boolean} [mips]
  * @property {(watcher: () => void) => () => void} [onDeviceLost]
  *     Calls the watcher once the GPU underneath is gone for good, at once if it
@@ -496,15 +498,20 @@ export function createDirect3D9(options = {}){
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, divergence, dumpDraws, dumpEvery, liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
-        ...caps
+        keepMemory, rereadBuffers, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
     /** @type {DeviceServices} */
     const services = {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
-        free: giveBack, divergence, dumpDraws, dumpEvery, liveDump, maxDraws, skipTexture,
+        // `keepMemory`: what a released resource held is never given back to
+        // the guest's heap -- a debugging aid, for telling memory handed out
+        // twice apart from a defect elsewhere.
+        free: keepMemory === true ? undefined : giveBack, divergence, dumpDraws, dumpEvery,
+        liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
+        rereadBuffers,
     };
     if (backend && !readMemory)
     {
@@ -905,6 +912,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             fog: services.fog,
             mips: services.mips,
             driverRules: services.driverRules,
+            rereadBuffers: services.rereadBuffers,
             compressedTextures: caps.compressedTextures,
         })
         : null;
