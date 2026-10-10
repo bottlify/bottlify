@@ -35,7 +35,7 @@ import {
 import {
     D3D10_BIND, D3D10_CPU_ACCESS, D3D10_DRIVER_TYPE, D3D10_MAP, D3D10_PRIMITIVE_TOPOLOGY,
     D3D10_MAP_FLAG_DO_NOT_WAIT, D3D10_QUERY, D3D10_RESOURCE_MISC, D3D10_SDK_VERSION, D3D10_USAGE,
-    DXGI_ERROR_INVALID_CALL, DXGI_FORMAT,
+    DXGI_ERROR_INVALID_CALL, DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT,
     DXGI_SWAP_EFFECT, DXGI_USAGE, E_INVALIDARG, IID, S_OK,
 } from '../d3d10/constants.js';
 import { DXGI_SWAP_CHAIN_DESC, writeSwapChainDesc } from '../d3d10/structs.js';
@@ -1227,11 +1227,26 @@ test('d3d10_1.dll makes an ID3D10Device1 at 10.0, and forwards the rest to d3d10
     assert.equal(h.box.call(h.box.memory.readU32(dxgiAt), slot(IDXGIDEVICE_SLOTS, 'GetAdapter'),
         [adapterAt]), S_OK);
     const adapter = h.box.memory.readU32(adapterAt);
-    const supports = (/** @type {string} */ iid)=>h.box.call(adapter,
-        slot(IDXGIADAPTER_SLOTS, 'CheckInterfaceSupport'), [h.box.placeGuid(iid), 0]);
-    assert.equal(supports(IID.ID3D10Device), S_OK);
-    assert.equal(supports(IID.ID3D10Device1), S_OK);
-    assert.equal(supports(IID.IDXGIFactory), DXGI_ERROR_INVALID_CALL);
+    // test_check_interface_support (dxgi.c:1270-1304): the DXGI device and
+    // both Direct3D 10 devices, with a driver version; anything else is
+    // unsupported and the version is left alone.
+    /** @param {string} iid */
+    const supports = iid=>{
+        const version = h.box.place([0xdeadbeef, 0xdeadbeef]);
+        const hr = h.box.call(adapter, slot(IDXGIADAPTER_SLOTS, 'CheckInterfaceSupport'),
+            [h.box.placeGuid(iid), version]);
+        return [hr, h.box.memory.readU32(version), h.box.memory.readU32(version + 4)];
+    };
+    for (const iid of [IID.IDXGIDevice, IID.ID3D10Device, IID.ID3D10Device1])
+    {
+        assert.deepEqual(supports(iid), [S_OK, 0, 0x00010000], `${iid}: driver 1.0.0.0`);
+        assert.equal(h.box.call(adapter, slot(IDXGIADAPTER_SLOTS, 'CheckInterfaceSupport'),
+            [h.box.placeGuid(iid), 0]), S_OK, 'with no version asked');
+    }
+    const ID3D11Device = '{DB6F6DDB-AC77-4E88-8253-819DF9BBF140}';
+    assert.deepEqual(supports(ID3D11Device), [DXGI_ERROR_UNSUPPORTED, 0xdeadbeef, 0xdeadbeef]);
+    assert.deepEqual(supports(IID.IDXGIFactory), [DXGI_ERROR_UNSUPPORTED, 0xdeadbeef,
+        0xdeadbeef]);
 
     // D3D10_BLEND_DESC1: two words, then eight targets of eight words.
     const desc = h.box.allocate(0x108);

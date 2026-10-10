@@ -40,8 +40,9 @@
 
 import { attachCom } from './com.js';
 import {
-    DXGI_ERROR_INVALID_CALL, DXGI_ERROR_NOT_FOUND, DXGI_FORMAT, DXGI_MODE_SCALING,
-    DXGI_MODE_SCANLINE_ORDER, DXGI_SWAP_EFFECT, DXGI_USAGE, E_INVALIDARG, E_NOINTERFACE, IID, S_OK,
+    DXGI_ERROR_INVALID_CALL, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT,
+    DXGI_MODE_SCALING, DXGI_MODE_SCANLINE_ORDER, DXGI_SWAP_EFFECT, DXGI_USAGE, E_INVALIDARG,
+    E_NOINTERFACE, IID, S_OK,
 } from './constants.js';
 import {
     DISPLAY_FORMATS, backBufferUsage, highestAccessibleBuffer, swapChainDescResult,
@@ -89,6 +90,9 @@ export function outputModes(size, format){
             scaling: DXGI_MODE_SCALING.UNSPECIFIED,
         }));
 }
+
+/** The user-mode driver's version, 1.0.0.0: its high dword, then its low one. */
+const DRIVER_VERSION = Object.freeze({ high: 0x00010000, low: 0 });
 
 /** DXGI_PRESENT_TEST: a present that only asks whether it would be shown. */
 const DXGI_PRESENT_TEST = 0x1;
@@ -295,6 +299,28 @@ function createAdapter(config, factory){
                 SubSysId: 0,
                 Revision: 0,
             };
+            return S_OK;
+        },
+
+        /**
+         * Which device interfaces a device made on this adapter answers to,
+         * and the user-mode driver's version for them: Direct3D 10 and 10.1
+         * and the DXGI device every one of them is, at the version Direct3D
+         * 9's adapter identifier gives the same driver. Anything else is
+         * unsupported, and its version left as the caller had it
+         * (test_check_interface_support, dxgi.c:1270-1304).
+         *
+         * @param {string} iid
+         * @param {{ version?: { low: number, high: number } }} out
+         * @returns {number}
+         */
+        CheckInterfaceSupport(iid, out){
+            if (iid !== IID.IDXGIDevice && iid !== IID.ID3D10Device
+                && iid !== IID.ID3D10Device1)
+            {
+                return DXGI_ERROR_UNSUPPORTED;
+            }
+            out.version = { ...DRIVER_VERSION };
             return S_OK;
         },
 

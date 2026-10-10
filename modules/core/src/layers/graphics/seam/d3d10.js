@@ -879,20 +879,17 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             }
             return hr;
         },
-        // Direct3D 10 and 10.1 are what this adapter speaks, as every device
-        // made on it answers both; anything else asked by GUID is refused,
-        // which is how a program picks between its own paths.
         /** @param {any} adapter @param {number[]} args */
         CheckInterfaceSupport: (adapter, [guid, version])=>{
-            if ((version >>> 0) !== 0)
+            /** @type {{ version?: { low: number, high: number } }} */
+            const held = {};
+            const hr = adapter.CheckInterfaceSupport(readGuid(memory, guid), held);
+            if (hr === S_OK && held.version && (version >>> 0) !== 0)
             {
-                fields.writeU32(version, 0);
-                fields.writeU32(version + 4, 0);
+                fields.writeU32(version, held.version.low);
+                fields.writeU32(version + 4, held.version.high);
             }
-            const id = readGuid(memory, guid);
-            return id === IID.ID3D10Device || id === IID.ID3D10Device1
-                ? S_OK
-                : DXGI_ERROR_INVALID_CALL;
+            return hr;
         },
     });
 
