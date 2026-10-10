@@ -129,9 +129,9 @@ test('the arithmetic instructions become the statements they mean', ()=>{
             'r0 = d3dNrm4(c[1]);'],
         ['sincos', [op(OPCODE.SINCOS, 4), dst(r, 0), src(c, 1), src(c, 2), src(c, 3)],
             'r0 = vec4f(cos(c[1].x), sin(c[1].x), 0.0, 0.0);'],
-        // To nearest, halves away from zero, as Wine's shader_glsl_mov rounds.
+        // floor(x + 0.5), as the documented pseudo-code and the reference machine round.
         ['mova', [op(OPCODE.MOVA, 2), dst(REGISTER.ADDR, 0), src(c, 1)],
-            'a0 = (floor(abs(c[1]) + vec4f(0.5)) * sign(c[1]));'],
+            'a0 = floor(c[1] + vec4f(0.5));'],
         ['expp', [op(OPCODE.EXPP, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(exp2(c[1].w));'],
         ['logp', [op(OPCODE.LOGP, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(d3dLog(c[1].w));'],
     ]);

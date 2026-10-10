@@ -1029,10 +1029,9 @@ export function translateShader(parsed, options = {}){
                     : src(instruction, 0));
                 break;
             case OPCODE.MOVA:
-                // To nearest, halves away from zero (Wine's shader_glsl_mov);
-                // WGSL's round() takes halves to even.
-                write(instruction, `(floor(abs(${src(instruction, 0)}) + vec4f(0.5))`
-                    + ` * sign(${src(instruction, 0)}))`);
+                // floor(x + 0.5), as the instruction's documented pseudo-code
+                // rounds; WGSL's round() takes halves to even.
+                write(instruction, `floor(${src(instruction, 0)} + vec4f(0.5))`);
                 break;
             case OPCODE.ADD:
                 write(instruction, `(${src(instruction, 0)} + ${src(instruction, 1)})`);
