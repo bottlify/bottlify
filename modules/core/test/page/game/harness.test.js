@@ -177,19 +177,16 @@ test('a held pointer and a scheduled click and key are forwarded per frame', ()=
     assert.deepEqual(app.sent[0], { kind: 'pointerMove', x: 12, y: 34, dx: 0, dy: 0 },
         'the held pointer is placed every frame');
 
-    presentFrame(app, request, state, {}); // presents === 2: click and key press
-    assert.ok(app.sent.some(message=>message.kind === 'pointerButton' && message.down === true),
-        'the click pressed on the frame it was scheduled for');
-    assert.ok(app.sent.some(message=>
-        message.kind === 'key' && message.code === 'Enter' && message.down === true),
-    'the key pressed on the frame it was scheduled for');
-
-    presentFrame(app, request, state, {}); // presents === 3: both release
-    assert.ok(app.sent.some(message=>message.kind === 'pointerButton' && message.down === false),
-        'the click released one frame after it pressed');
-    assert.ok(app.sent.some(message=>
-        message.kind === 'key' && message.code === 'Enter' && message.down === false),
-    'the key released one frame after it pressed');
+    // Then in turn: the click's corner, its move and press, its release; the
+    // key's press and release.
+    for (let frame = 2; frame <= 6; frame++)
+    {
+        presentFrame(app, request, state, {});
+    }
+    const steps = (state.inputs ?? []).filter(sent=>sent.kind !== 'pointerMove'
+        || sent.dx !== 0).map(sent=>`${sent.present}:${sent.kind}:${sent.down ?? ''}`);
+    assert.deepEqual(steps, ['1:pointerMove:', '2:pointerMove:', '2:pointerButton:true',
+        '3:pointerButton:false', '4:key:true', '5:key:false']);
 });
 
 test('a process-replace is recorded', ()=>{
