@@ -87,8 +87,9 @@ differently raises a `divergence` event naming the API.
 - Direct3D 9's 32-bit float formats are kept as half floats, and A16B16G16R16/G16R16 as half
   floats of their value; a format with fewer than four channels samples its missing colour channels
   as 0, not 1.
-- The engine's own `d3dx9` reads BMP, DDS and TGA images, not JPEG or PNG; `D3DXCreateTeapot`, `D3DXCreateTextA`, `D3DXSimplifyMesh`, `D3DXUVAtlasPartition` and
-  `D3DXComputeNormalMap` answer `E_NOTIMPL`.
+- The engine's own `d3dx9` reads BMP, DDS and TGA images, not JPEG or PNG; `D3DXCreateTeapot`,
+  `D3DXCreateTextA`, `D3DXSimplifyMesh`, `D3DXUVAtlasPartition` and `D3DXComputeNormalMap` answer
+  `E_NOTIMPL`.
 - No DirectX redistributables ship with the engine: a program brings `d3dx9_*`, XAudio2 and the rest
   itself (its installer's DirectX setup, or the DLLs beside its exe); without them the engine's own
   `d3dx9` table answers.
