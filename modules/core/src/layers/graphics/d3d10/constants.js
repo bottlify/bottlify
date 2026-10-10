@@ -663,6 +663,12 @@ export const D3D10_SRV_DIMENSION = Object.freeze({
     TEXTURECUBE: 9,
 });
 
+/** Direct3D 10.1's shader-resource dimensions: those of 10.0 and the cube array. */
+export const D3D10_1_SRV_DIMENSION = Object.freeze({
+    ...D3D10_SRV_DIMENSION,
+    TEXTURECUBEARRAY: 10,
+});
+
 export const D3D10_PRIMITIVE_TOPOLOGY = Object.freeze({
     UNDEFINED: 0,
     POINTLIST: 1,

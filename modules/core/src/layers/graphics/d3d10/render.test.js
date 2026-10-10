@@ -1744,3 +1744,59 @@ test('a swap chain\'s present past the bound waits for the oldest frame to finis
     await second;
     assert.equal(answered, S_OK);
 });
+
+test('a shader-resource view binds the levels and slices its dimension names, and no others',
+    async()=>{
+        const h = harness();
+        const { device } = h;
+        bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(device.CreatePixelShader(assemble({
+            kind: SHADER_KIND.PIXEL,
+            outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+            instructions: [
+                dclResource(0, RESOURCE_DIMENSION.TEXTURE2DARRAY, RETURN_TYPE.FLOAT),
+                dclResource(1, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
+                dclOutput(o(0)), ld(o(0), r(0), t(0)), ret(),
+            ],
+        }), ps), S_OK);
+        device.PSSetShader(ps.shader);
+        /** @type {{ resource?: any }} */
+        const texture = {};
+        assert.equal(device.CreateTexture2D({ ...TEXTURE_2X2, Width: 8, Height: 8, MipLevels: 4,
+            ArraySize: 4 }, null, texture), S_OK);
+        /** @type {{ view?: any }} */
+        const array = {};
+        assert.equal(device.CreateShaderResourceView(texture.resource, {
+            Format: 0, ViewDimension: 5, MostDetailedMip: 1, MipLevels: 2, FirstArraySlice: 1,
+            ArraySize: 2,
+        }, array), S_OK);
+        // A two-dimensional view of an array has no slice range in its union:
+        // it views the first slice, whatever else the description held.
+        /** @type {{ view?: any }} */
+        const single = {};
+        assert.equal(device.CreateShaderResourceView(texture.resource, {
+            Format: 0, ViewDimension: 4, MostDetailedMip: 2, MipLevels: 1, FirstArraySlice: 3,
+            ArraySize: 0,
+        }, single), S_OK);
+        /** @type {{ desc?: any }} */
+        const reported = {};
+        single.view.GetDesc(reported);
+        assert.deepEqual(reported.desc, { Format: DXGI_FORMAT.R8G8B8A8_UNORM, ViewDimension: 4,
+            MostDetailedMip: 2, MipLevels: 1 }, 'its own members and no others');
+        device.PSSetShaderResources(0, [array.view, single.view]);
+        device.Draw(3, 0);
+        await h.present();
+        assert.equal(h.gpu.count('draw'), 1);
+        const group = h.gpu.of('createBindGroup').find((/** @type {any} */ call)=>
+            call.descriptor.label === 'd3d10:ps');
+        /** @param {number} binding */
+        const bound = binding=>group.descriptor.entries
+            .find((/** @type {any} */ entry)=>entry.binding === binding).resource.viewDescriptor;
+        assert.deepEqual([bound(16).dimension, bound(16).baseMipLevel, bound(16).mipLevelCount,
+            bound(16).baseArrayLayer, bound(16).arrayLayerCount], ['2d-array', 1, 2, 1, 2]);
+        assert.deepEqual([bound(17).dimension, bound(17).baseMipLevel, bound(17).mipLevelCount,
+            bound(17).baseArrayLayer, bound(17).arrayLayerCount], ['2d', 2, 1, 0, 1]);
+        assert.deepEqual(h.divergences, []);
+    });

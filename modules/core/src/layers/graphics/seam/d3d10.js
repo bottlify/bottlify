@@ -41,7 +41,8 @@ import {
 } from '../d3d10/device.js';
 import { CreateDXGIFactory, CreateDXGIFactory1 } from '../d3d10/dxgi.js';
 import {
-    DXGI_MODE_DESC, readModeDesc, readSwapChainDesc, writeModeDesc, writeSwapChainDesc,
+    DXGI_MODE_DESC, VIEW_UNION, readModeDesc, readSwapChainDesc, readViewDesc, writeModeDesc,
+    writeSwapChainDesc, writeViewDesc,
 } from '../d3d10/structs.js';
 import { bindFlagsForUsage, levelExtent } from '../d3d10/validity.js';
 import {
@@ -96,15 +97,6 @@ const D3D10_TEXTURE3D_DESC = Object.freeze({
 
 const D3D10_SUBRESOURCE_DATA = Object.freeze({
     pSysMem: 0x00, SysMemPitch: 0x04, SysMemSlicePitch: 0x08, SIZE: 0x0c,
-});
-
-/**
- * The three view descriptions share a head and differ in the union after it.
- * The union is read as three dwords whatever the dimension names, and the
- * object model sorts out which fields mean anything.
- */
-const VIEW_DESC = Object.freeze({
-    Format: 0x00, ViewDimension: 0x04, u0: 0x08, u1: 0x0c, u2: 0x10, u3: 0x14,
 });
 
 const D3D10_BLEND_DESC = Object.freeze({
@@ -1428,11 +1420,11 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
 
     /**
      * @param {string} id
-     * @param {(desc: any) => Record<string, number>} unionOf
-     *     The union fields after the head, in order, as the view reports them.
+     * @param {import('../d3d10/structs.js').ViewUnion} union  How its description is laid out.
      * @param {[string, [string, number][]][]} [later]  Later versions it also answers as.
+     * @param {import('../d3d10/structs.js').ViewUnion} [union1]  The 10.1 description's.
      */
-    const viewInterfaces = (id, unionOf, later = [])=>describeAll([
+    const viewInterfaces = (id, union, later = [], union1 = union)=>describeAll([
         [id, ID3D10VIEW_SLOTS], [IID.ID3D10View, ID3D10BASEVIEW_SLOTS],
         [IID.ID3D10DeviceChild, ID3D10DEVICECHILD_SLOTS], ...later,
     ], {
@@ -1451,43 +1443,24 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             /** @type {{ desc?: any }} */
             const held = {};
             view.GetDesc(held);
-            fields.writeStruct(out, VIEW_DESC, {
-                Format: held.desc.Format,
-                ViewDimension: held.desc.ViewDimension,
-                ...unionOf(held.desc),
-            });
+            writeViewDesc(memory, out, union, held.desc);
         },
-        // Direct3D 10.1's description differs only by a cube-array member no
-        // view here has, so the older one is written in its place.
         /** @param {any} view @param {number[]} args */
         GetDesc1: (view, [out])=>{
             /** @type {{ desc?: any }} */
             const held = {};
             view.GetDesc(held);
-            fields.writeStruct(out, VIEW_DESC, {
-                Format: held.desc.Format,
-                ViewDimension: held.desc.ViewDimension,
-                ...unionOf(held.desc),
-            });
+            writeViewDesc(memory, out, union1, held.desc);
         },
     });
 
-    const renderTargetViewInterfaces = viewInterfaces(IID.ID3D10RenderTargetView, desc=>({
-        u0: desc.MipSlice ?? desc.ElementOffset ?? 0,
-        u1: desc.FirstArraySlice ?? desc.ElementWidth ?? 0,
-        u2: desc.ArraySize ?? 0,
-    }));
-    const depthStencilViewInterfaces = viewInterfaces(IID.ID3D10DepthStencilView, desc=>({
-        u0: desc.MipSlice ?? 0,
-        u1: desc.FirstArraySlice ?? 0,
-        u2: desc.ArraySize ?? 0,
-    }));
-    const shaderResourceViewInterfaces = viewInterfaces(IID.ID3D10ShaderResourceView, desc=>({
-        u0: desc.MostDetailedMip ?? desc.ElementOffset ?? 0,
-        u1: desc.MipLevels ?? desc.ElementWidth ?? 0,
-        u2: desc.FirstArraySlice ?? 0,
-        u3: desc.ArraySize ?? 0,
-    }), [[IID.ID3D10ShaderResourceView1, ID3D10SHADERRESOURCEVIEW1_SLOTS]]);
+    const renderTargetViewInterfaces = viewInterfaces(IID.ID3D10RenderTargetView,
+        VIEW_UNION.RENDER_TARGET);
+    const depthStencilViewInterfaces = viewInterfaces(IID.ID3D10DepthStencilView,
+        VIEW_UNION.DEPTH_STENCIL);
+    const shaderResourceViewInterfaces = viewInterfaces(IID.ID3D10ShaderResourceView,
+        VIEW_UNION.SHADER_RESOURCE, [[IID.ID3D10ShaderResourceView1,
+            ID3D10SHADERRESOURCEVIEW1_SLOTS]], VIEW_UNION.SHADER_RESOURCE1);
 
     /**
      * @param {string} id
@@ -1736,21 +1709,11 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
      * A view description, or null for the default view.
      *
      * @param {number} address
-     * @param {string[]} names  What the union's dwords are called for this view kind.
+     * @param {import('../d3d10/structs.js').ViewUnion} union
      */
-    const readViewDesc = (address, names)=>{
-        if ((address >>> 0) === 0)
-        {
-            return null;
-        }
-        const raw = fields.readStruct(address, VIEW_DESC);
-        /** @type {Record<string, number>} */
-        const desc = { Format: raw.Format, ViewDimension: raw.ViewDimension };
-        names.forEach((name, index)=>{
-            desc[name] = raw[`u${index}`];
-        });
-        return desc;
-    };
+    const readViewDescAt = (address, union)=>((address >>> 0) === 0
+        ? null
+        : readViewDesc(memory, address, union));
 
     /**
      * @param {number} address
@@ -2012,15 +1975,15 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
      * @param {string} method
      * @param {import('./com.js').InterfaceDescriptor[]} interfaces
      * @param {string} id
-     * @param {string[]} unionNames
+     * @param {import('../d3d10/structs.js').ViewUnion} union  How its description is laid out.
      */
-    const viewCreate = (method, interfaces, id, unionNames)=>
+    const viewCreate = (method, interfaces, id, union)=>
         /** @param {any} device @param {number[]} args */
         (device, [resourcePointer, descAt, out])=>{
             /** @type {{ view?: any }} */
             const held = {};
             const hr = device[method](publisher.objectAt(resourcePointer),
-                readViewDesc(descAt, unionNames), held);
+                readViewDescAt(descAt, union), held);
             if (hr !== S_OK)
             {
                 if ((out >>> 0) !== 0)
@@ -2437,13 +2400,13 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                 address=>fields.readStruct(address, D3D10_TEXTURE3D_DESC)),
             CreateShaderResourceView: viewCreate('CreateShaderResourceView',
                 shaderResourceViewInterfaces, IID.ID3D10ShaderResourceView,
-                ['MostDetailedMip', 'MipLevels', 'FirstArraySlice', 'ArraySize']),
+                VIEW_UNION.SHADER_RESOURCE),
             CreateRenderTargetView: viewCreate('CreateRenderTargetView',
                 renderTargetViewInterfaces, IID.ID3D10RenderTargetView,
-                ['MipSlice', 'FirstArraySlice', 'ArraySize']),
+                VIEW_UNION.RENDER_TARGET),
             CreateDepthStencilView: viewCreate('CreateDepthStencilView',
                 depthStencilViewInterfaces, IID.ID3D10DepthStencilView,
-                ['MipSlice', 'FirstArraySlice', 'ArraySize']),
+                VIEW_UNION.DEPTH_STENCIL),
             /** @param {any} device @param {number[]} args */
             CreateInputLayout: (device, [elements, count, bytecode, length, out])=>{
                 /** @type {{ layout?: any }} */
@@ -2481,7 +2444,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                 blendStateInterfaces, IID.ID3D10BlendState1, 'state'),
             CreateShaderResourceView1: viewCreate('CreateShaderResourceView1',
                 shaderResourceViewInterfaces, IID.ID3D10ShaderResourceView1,
-                ['MostDetailedMip', 'MipLevels', 'FirstArraySlice', 'ArraySize']),
+                VIEW_UNION.SHADER_RESOURCE1),
             /** @param {any} device */
             GetFeatureLevel: device=>device.GetFeatureLevel(),
             CreateDepthStencilState: stateCreate('CreateDepthStencilState', readDepthStencilDesc,

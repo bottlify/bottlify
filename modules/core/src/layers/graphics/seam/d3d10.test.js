@@ -1726,3 +1726,317 @@ test('an effect variable\'s typed views are called through its vtable', ()=>{
     assert.equal(h.box.call(e.effect, 2), 0);
     assert.equal(e.references(), e.baseline, 'every reference handed out came back');
 });
+
+// --- view descriptions, through guest memory ---
+
+/** What a stack the program never cleared holds in the union's other dwords. */
+const STALE = 0xcdcdcdcd;
+
+/**
+ * A view description in guest memory the way Wine's get_rtv_desc,
+ * get_dsv_desc and get_srv_desc fill one (d3d10core.c:235-560): the head, then
+ * only the members of the dimension asked for, laid out as the SDK header lays
+ * that dimension's union out -- written here from the header, not from the
+ * table the seam reads with -- and stale dwords in every other place.
+ *
+ * @param {ReturnType<typeof seamed>} h
+ * @param {'rtv' | 'dsv' | 'srv'} kind
+ * @param {number[]} entry  Wine's {format, dimension, mip, (mip count,) layer, layer count}.
+ * @returns {number} where it was placed
+ */
+function placeViewDesc(h, kind, entry){
+    const [format, dimension, ...rest] = entry;
+    /** @type {Record<string, Record<number, (values: number[]) => number[]>>} */
+    const layouts = {
+        // D3D10_RTV_DIMENSION: TEX1D 2, TEX1DARRAY 3, TEX2D 4, TEX2DARRAY 5,
+        // TEX2DMS 6, TEX2DMSARRAY 7, TEX3D 8.
+        rtv: {
+            2: ([mip])=>[mip], 3: ([mip, layer, count])=>[mip, layer, count],
+            4: ([mip])=>[mip], 5: ([mip, layer, count])=>[mip, layer, count],
+            6: ()=>[], 7: ([, layer, count])=>[layer, count],
+            8: ([mip, layer, count])=>[mip, layer, count],
+        },
+        // D3D10_DSV_DIMENSION: TEX1D 1, TEX1DARRAY 2, TEX2D 3, TEX2DARRAY 4,
+        // TEX2DMS 5, TEX2DMSARRAY 6.
+        dsv: {
+            1: ([mip])=>[mip], 2: ([mip, layer, count])=>[mip, layer, count],
+            3: ([mip])=>[mip], 4: ([mip, layer, count])=>[mip, layer, count],
+            5: ()=>[], 6: ([, layer, count])=>[layer, count],
+        },
+        // D3D10_SRV_DIMENSION: as the render target's, and TEXTURECUBE 9.
+        srv: {
+            2: ([mip, levels])=>[mip, levels],
+            3: ([mip, levels, layer, count])=>[mip, levels, layer, count],
+            4: ([mip, levels])=>[mip, levels],
+            5: ([mip, levels, layer, count])=>[mip, levels, layer, count],
+            6: ()=>[], 7: ([, , layer, count])=>[layer, count],
+            8: ([mip, levels])=>[mip, levels], 9: ([mip, levels])=>[mip, levels],
+        },
+    };
+    const members = (layouts[kind][dimension] ?? (()=>[]))(rest.map(value=>value >>> 0));
+    const union = [STALE, STALE, STALE, STALE];
+    members.forEach((value, index)=>{
+        union[index] = value;
+    });
+    return h.box.place([format, dimension, ...union]);
+}
+
+/**
+ * The description a view reports, read at the SDK header's offsets for its
+ * dimension, as Wine's check_*_desc reads it, with what lies past the
+ * structure: a description written one dword too long shows there.
+ *
+ * @param {ReturnType<typeof seamed>} h
+ * @param {'rtv' | 'dsv' | 'srv'} kind
+ * @param {number} view
+ */
+function reportedViewDesc(h, kind, view){
+    const size = kind === 'srv' ? 6 : 5;
+    const out = h.box.place(Array(size + 1).fill(STALE));
+    h.box.call(view, slot(ID3D10VIEW_SLOTS, 'GetDesc'), [out]);
+    const words = Array.from({ length: size + 1 },
+        (_, index)=>h.box.memory.readU32(out + index * 4));
+    return { words: words.slice(0, size), past: words[size] };
+}
+
+/**
+ * @param {ReturnType<typeof seamed>} h
+ * @param {number} device
+ * @param {{ mips: number, slices: number, format: number, bind: number, misc?: number,
+ *           volume?: boolean }} texture
+ */
+function viewTexture(h, device, texture){
+    const out = h.box.place([0]);
+    const hr = texture.volume
+        ? h.device(device, 'CreateTexture3D', [h.box.place([64, 64, texture.slices,
+            texture.mips, texture.format, D3D10_USAGE.DEFAULT, texture.bind, 0, 0]), 0, out])
+        : h.device(device, 'CreateTexture2D', [h.box.place([512, 512, texture.mips,
+            texture.slices, texture.format, 1, 0, D3D10_USAGE.DEFAULT, texture.bind, 0,
+            texture.misc ?? 0]), 0, out]);
+    assert.equal(hr, S_OK);
+    return h.box.memory.readU32(out);
+}
+
+const RGBA8 = DXGI_FORMAT.R8G8B8A8_UNORM;
+const RGBA8_TL = DXGI_FORMAT.R8G8B8A8_TYPELESS;
+const D24S8 = DXGI_FORMAT.D24_UNORM_S8_UINT;
+const ALL = 0xffffffff;
+
+/**
+ * Runs one of Wine's view tables through the seam: each valid row creates the
+ * view from a description with stale dwords beside its members and reads back
+ * the expected description at the header's offsets; each invalid row is
+ * E_INVALIDARG with the out pointer cleared.
+ *
+ * @param {'rtv' | 'dsv' | 'srv'} kind
+ * @param {string} method
+ * @param {number} bind
+ * @param {[any, number[] | null, number[]][]} valid  texture, description (null: default), expected
+ * @param {[any, number[]][]} invalid
+ */
+function runViewTable(kind, method, bind, valid, invalid){
+    const h = seamed();
+    const { device } = h.createDeviceAndSwapChain();
+    const size = kind === 'srv' ? 6 : 5;
+    for (const [index, [texture, desc, expected]] of valid.entries())
+    {
+        const resource = viewTexture(h, device, { ...texture, bind });
+        const out = h.box.place([0xdeadbeef]);
+        assert.equal(h.device(device, method, [resource, desc ? placeViewDesc(h, kind, desc) : 0,
+            out]), S_OK, `row ${index}`);
+        const view = h.box.memory.readU32(out);
+        const { words, past } = reportedViewDesc(h, kind, view);
+        const wanted = [...expected.map(value=>value >>> 0)];
+        // Wine's check_*_desc compares the head and the dimension's members;
+        // the rest of the union is zero here, as it is in a description
+        // Windows built and the program cleared before asking.
+        while (wanted.length < size)
+        {
+            wanted.push(0);
+        }
+        assert.deepEqual(words, wanted, `row ${index}: the description at the header's offsets`);
+        assert.equal(past, STALE, `row ${index}: nothing written past the structure`);
+        h.box.call(view, 2);
+        h.box.call(resource, 2);
+    }
+    for (const [index, [texture, desc]] of invalid.entries())
+    {
+        const resource = viewTexture(h, device, { ...texture, bind });
+        const out = h.box.place([0xdeadbeef]);
+        assert.equal(h.device(device, method, [resource, placeViewDesc(h, kind, desc), out]),
+            E_INVALIDARG, `invalid row ${index}`);
+        assert.equal(h.box.memory.readU32(out), 0, `invalid row ${index}: no view`);
+        h.box.call(resource, 2);
+    }
+}
+
+test('render-target views: Wine\'s table of descriptions, each read by its own dimension'
+    + ' (test_create_rendertarget_view, d3d10core.c:2894-2987)', ()=>{
+    const t = (/** @type {number} */ mips, /** @type {number} */ slices,
+        /** @type {number} */ format)=>({ mips, slices, format });
+    const v = (/** @type {number} */ mips, /** @type {number} */ slices,
+        /** @type {number} */ format)=>({ mips, slices, format, volume: true });
+    const [TEX_1D, TEX_1D_ARRAY, TEX_2D, TEX_2D_ARRAY, TEX_2DMS, TEX_2DMS_ARR, TEX_3D] =
+        [2, 3, 4, 5, 6, 7, 8];
+    runViewTable('rtv', 'CreateRenderTargetView', D3D10_BIND.RENDER_TARGET, [
+        [t(1, 1, RGBA8), null, [RGBA8, TEX_2D, 0]],
+        [t(10, 1, RGBA8), null, [RGBA8, TEX_2D, 0]],
+        [t(10, 1, RGBA8), [0, TEX_2D, 0], [RGBA8, TEX_2D, 0]],
+        [t(10, 1, RGBA8), [0, TEX_2D, 1], [RGBA8, TEX_2D, 1]],
+        [t(10, 1, RGBA8), [0, TEX_2D, 9], [RGBA8, TEX_2D, 9]],
+        [t(1, 1, RGBA8_TL), [RGBA8, TEX_2D, 0], [RGBA8, TEX_2D, 0]],
+        [t(10, 1, RGBA8_TL), [RGBA8, TEX_2D, 0], [RGBA8, TEX_2D, 0]],
+        [t(1, 4, RGBA8), null, [RGBA8, TEX_2D_ARRAY, 0, 0, 4]],
+        [t(10, 4, RGBA8), null, [RGBA8, TEX_2D_ARRAY, 0, 0, 4]],
+        [t(10, 4, RGBA8), [0, TEX_2D_ARRAY, 0, 0, ALL], [RGBA8, TEX_2D_ARRAY, 0, 0, 4]],
+        [t(10, 4, RGBA8), [0, TEX_2D_ARRAY, 1, 0, ALL], [RGBA8, TEX_2D_ARRAY, 1, 0, 4]],
+        [t(10, 4, RGBA8), [0, TEX_2D_ARRAY, 9, 0, ALL], [RGBA8, TEX_2D_ARRAY, 9, 0, 4]],
+        [t(10, 4, RGBA8), [0, TEX_2D_ARRAY, 0, 1, ALL], [RGBA8, TEX_2D_ARRAY, 0, 1, 3]],
+        [t(10, 4, RGBA8), [0, TEX_2D_ARRAY, 0, 3, ALL], [RGBA8, TEX_2D_ARRAY, 0, 3, 1]],
+        [t(1, 1, RGBA8), [0, TEX_2DMS], [RGBA8, TEX_2DMS]],
+        [t(1, 4, RGBA8), [0, TEX_2DMS], [RGBA8, TEX_2DMS]],
+        [t(10, 4, RGBA8), [0, TEX_2DMS], [RGBA8, TEX_2DMS]],
+        [t(1, 1, RGBA8), [0, TEX_2DMS_ARR, 0, 0, 1], [RGBA8, TEX_2DMS_ARR, 0, 1]],
+        [t(1, 1, RGBA8), [0, TEX_2DMS_ARR, 0, 0, ALL], [RGBA8, TEX_2DMS_ARR, 0, 1]],
+        [t(10, 4, RGBA8), [0, TEX_2DMS_ARR, 0, 0, 1], [RGBA8, TEX_2DMS_ARR, 0, 1]],
+        [t(10, 4, RGBA8), [0, TEX_2DMS_ARR, 0, 0, 4], [RGBA8, TEX_2DMS_ARR, 0, 4]],
+        [t(10, 4, RGBA8), [0, TEX_2DMS_ARR, 0, 0, ALL], [RGBA8, TEX_2DMS_ARR, 0, 4]],
+        [v(1, 6, RGBA8), null, [RGBA8, TEX_3D, 0, 0, 6]],
+        [v(2, 6, RGBA8), null, [RGBA8, TEX_3D, 0, 0, 6]],
+        [v(2, 6, RGBA8), [0, TEX_3D, 0, 0, ALL], [RGBA8, TEX_3D, 0, 0, 6]],
+        [v(2, 4, RGBA8), [0, TEX_3D, 1, 0, ALL], [RGBA8, TEX_3D, 1, 0, 2]],
+        [v(2, 4, RGBA8), [0, TEX_3D, 0, 1, ALL], [RGBA8, TEX_3D, 0, 1, 3]],
+        [v(2, 4, RGBA8), [0, TEX_3D, 0, 3, ALL], [RGBA8, TEX_3D, 0, 3, 1]],
+        [v(2, 4, RGBA8), [0, TEX_3D, 1, 1, 1], [RGBA8, TEX_3D, 1, 1, 1]],
+        [v(2, 4, RGBA8), [0, TEX_3D, 1, 1, ALL], [RGBA8, TEX_3D, 1, 1, 1]],
+        [v(6, 8, RGBA8), [0, TEX_3D, 1, 0, ALL], [RGBA8, TEX_3D, 1, 0, 4]],
+        [v(6, 8, RGBA8), [0, TEX_3D, 5, 0, ALL], [RGBA8, TEX_3D, 5, 0, 1]],
+    ], [
+        [t(1, 1, RGBA8), [RGBA8, 0]],
+        [t(6, 4, RGBA8), [RGBA8, 0]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_1D, 0]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_1D_ARRAY, 0, 0, 1]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_3D, 0, 0, 1]],
+        [t(1, 1, RGBA8), [RGBA8_TL, TEX_2D, 0]],
+        [t(1, 1, RGBA8_TL), [0, TEX_2D, 0]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D, 1]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D_ARRAY, 0, 0, 0]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D_ARRAY, 1, 0, 1]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D_ARRAY, 0, 0, 2]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D_ARRAY, 0, 1, 1]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2DMS_ARR, 0, 0, 2]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2DMS_ARR, 0, 1, 1]],
+        [v(1, 9, RGBA8), [RGBA8, TEX_2D, 0]],
+        [v(1, 9, RGBA8), [RGBA8, TEX_2D_ARRAY, 0, 0, 1]],
+        [v(1, 1, RGBA8), [RGBA8, TEX_3D, 0, 0, 0]],
+        [v(1, 1, RGBA8), [RGBA8, TEX_3D, 1, 0, 1]],
+        [v(1, 9, RGBA8), [RGBA8_TL, TEX_3D, 0, 0, 1]],
+        [v(4, 8, RGBA8), [RGBA8, TEX_3D, 0, 0, 9]],
+        [v(4, 8, RGBA8), [RGBA8, TEX_3D, 3, 0, 2]],
+        [v(4, 8, RGBA8), [RGBA8, TEX_3D, 1, 0, 8]],
+        [v(4, 8, RGBA8), [RGBA8, TEX_3D, 0, 8, ALL]],
+        [v(4, 8, RGBA8), [RGBA8, TEX_3D, 3, 1, ALL]],
+    ]);
+});
+
+test('depth-stencil views: Wine\'s table of descriptions, each read by its own dimension'
+    + ' (test_create_depthstencil_view, d3d10core.c:2616-2672)', ()=>{
+    const t = (/** @type {number} */ mips, /** @type {number} */ slices,
+        /** @type {number} */ format)=>({ mips, slices, format });
+    const R24G8_TL = DXGI_FORMAT.R24G8_TYPELESS;
+    const [TEX_1D, TEX_1D_ARRAY, TEX_2D, TEX_2D_ARRAY, TEX_2DMS, TEX_2DMS_ARR] =
+        [1, 2, 3, 4, 5, 6];
+    runViewTable('dsv', 'CreateDepthStencilView', D3D10_BIND.DEPTH_STENCIL, [
+        [t(1, 1, D24S8), null, [D24S8, TEX_2D, 0]],
+        [t(10, 1, D24S8), null, [D24S8, TEX_2D, 0]],
+        [t(10, 1, D24S8), [0, TEX_2D, 0], [D24S8, TEX_2D, 0]],
+        [t(10, 1, D24S8), [0, TEX_2D, 1], [D24S8, TEX_2D, 1]],
+        [t(10, 1, D24S8), [0, TEX_2D, 9], [D24S8, TEX_2D, 9]],
+        [t(1, 1, R24G8_TL), [D24S8, TEX_2D, 0], [D24S8, TEX_2D, 0]],
+        [t(10, 1, R24G8_TL), [D24S8, TEX_2D, 0], [D24S8, TEX_2D, 0]],
+        [t(1, 4, D24S8), null, [D24S8, TEX_2D_ARRAY, 0, 0, 4]],
+        [t(10, 4, D24S8), null, [D24S8, TEX_2D_ARRAY, 0, 0, 4]],
+        [t(10, 4, D24S8), [0, TEX_2D_ARRAY, 0, 0, ALL], [D24S8, TEX_2D_ARRAY, 0, 0, 4]],
+        [t(10, 4, D24S8), [0, TEX_2D_ARRAY, 5, 0, ALL], [D24S8, TEX_2D_ARRAY, 5, 0, 4]],
+        [t(10, 4, D24S8), [0, TEX_2D_ARRAY, 0, 2, ALL], [D24S8, TEX_2D_ARRAY, 0, 2, 2]],
+        [t(1, 1, D24S8), [0, TEX_2DMS], [D24S8, TEX_2DMS]],
+        [t(10, 4, D24S8), [0, TEX_2DMS], [D24S8, TEX_2DMS]],
+        [t(1, 1, D24S8), [0, TEX_2DMS_ARR, 0, 0, ALL], [D24S8, TEX_2DMS_ARR, 0, 1]],
+        [t(10, 4, D24S8), [0, TEX_2DMS_ARR, 0, 0, 1], [D24S8, TEX_2DMS_ARR, 0, 1]],
+        [t(10, 4, D24S8), [0, TEX_2DMS_ARR, 0, 0, ALL], [D24S8, TEX_2DMS_ARR, 0, 4]],
+    ], [
+        [t(1, 1, D24S8), [D24S8, 0]],
+        [t(6, 4, D24S8), [D24S8, 0]],
+        [t(1, 1, D24S8), [D24S8, TEX_1D, 0]],
+        [t(1, 1, D24S8), [D24S8, TEX_1D_ARRAY, 0, 0, 1]],
+        [t(1, 1, D24S8), [R24G8_TL, TEX_2D, 0]],
+        [t(1, 1, R24G8_TL), [0, TEX_2D, 0]],
+        [t(1, 1, D24S8), [D24S8, TEX_2D, 1]],
+        [t(1, 1, D24S8), [D24S8, TEX_2D_ARRAY, 0, 0, 0]],
+        [t(1, 1, D24S8), [D24S8, TEX_2D_ARRAY, 1, 0, 1]],
+        [t(1, 1, D24S8), [D24S8, TEX_2D_ARRAY, 0, 0, 2]],
+        [t(1, 1, D24S8), [D24S8, TEX_2D_ARRAY, 0, 1, 1]],
+        [t(1, 1, D24S8), [D24S8, TEX_2DMS_ARR, 0, 0, 2]],
+        [t(1, 1, D24S8), [D24S8, TEX_2DMS_ARR, 0, 1, 1]],
+    ]);
+});
+
+test('shader-resource views: Wine\'s table of descriptions, each read by its own dimension'
+    + ' (test_create_shader_resource_view, d3d10core.c:3542-3632)', ()=>{
+    const t = (/** @type {number} */ mips, /** @type {number} */ slices,
+        /** @type {number} */ format)=>({ mips, slices, format });
+    const v = (/** @type {number} */ mips, /** @type {number} */ slices,
+        /** @type {number} */ format)=>({ mips, slices, format, volume: true });
+    const [TEX_1D, TEX_1D_ARRAY, TEX_2D, TEX_2D_ARRAY, TEX_2DMS, TEX_2DMS_ARR, TEX_3D] =
+        [2, 3, 4, 5, 6, 7, 8];
+    runViewTable('srv', 'CreateShaderResourceView', D3D10_BIND.SHADER_RESOURCE, [
+        [t(10, 1, RGBA8), null, [RGBA8, TEX_2D, 0, 10]],
+        [t(10, 1, RGBA8), [0, TEX_2D, 0, ALL], [RGBA8, TEX_2D, 0, 10]],
+        [t(10, 1, RGBA8), [RGBA8, TEX_2D, 0, ALL], [RGBA8, TEX_2D, 0, 10]],
+        [t(10, 1, RGBA8), [0, TEX_2D, 0, 10], [RGBA8, TEX_2D, 0, 10]],
+        [t(1, 1, RGBA8_TL), [RGBA8, TEX_2D, 0, ALL], [RGBA8, TEX_2D, 0, 1]],
+        [t(10, 1, RGBA8_TL), [RGBA8, TEX_2D, 0, ALL], [RGBA8, TEX_2D, 0, 10]],
+        [t(10, 4, RGBA8), null, [RGBA8, TEX_2D_ARRAY, 0, 10, 0, 4]],
+        [t(10, 4, RGBA8), [0, TEX_2D_ARRAY, 0, ALL, 0, ALL], [RGBA8, TEX_2D_ARRAY, 0, 10, 0, 4]],
+        [t(10, 4, RGBA8), [0, TEX_2D_ARRAY, 1, ALL, 0, ALL], [RGBA8, TEX_2D_ARRAY, 1, 9, 0, 4]],
+        [t(10, 4, RGBA8), [0, TEX_2D_ARRAY, 9, ALL, 0, ALL], [RGBA8, TEX_2D_ARRAY, 9, 1, 0, 4]],
+        [t(10, 4, RGBA8), [0, TEX_2D_ARRAY, 0, ALL, 1, ALL], [RGBA8, TEX_2D_ARRAY, 0, 10, 1, 3]],
+        [t(10, 4, RGBA8), [0, TEX_2D_ARRAY, 0, ALL, 3, ALL], [RGBA8, TEX_2D_ARRAY, 0, 10, 3, 1]],
+        [t(1, 1, RGBA8), [0, TEX_2DMS], [RGBA8, TEX_2DMS]],
+        [t(10, 4, RGBA8), [0, TEX_2DMS], [RGBA8, TEX_2DMS]],
+        [t(1, 1, RGBA8), [0, TEX_2DMS_ARR, 0, 1, 0, 1], [RGBA8, TEX_2DMS_ARR, 0, 1]],
+        [t(1, 1, RGBA8), [0, TEX_2DMS_ARR, 0, 1, 0, ALL], [RGBA8, TEX_2DMS_ARR, 0, 1]],
+        [t(10, 4, RGBA8), [0, TEX_2DMS_ARR, 0, 1, 0, 4], [RGBA8, TEX_2DMS_ARR, 0, 4]],
+        [t(10, 4, RGBA8), [0, TEX_2DMS_ARR, 0, 1, 0, ALL], [RGBA8, TEX_2DMS_ARR, 0, 4]],
+        [v(1, 12, RGBA8), null, [RGBA8, TEX_3D, 0, 1]],
+        [v(1, 12, RGBA8), [0, TEX_3D, 0, 1], [RGBA8, TEX_3D, 0, 1]],
+        [v(1, 12, RGBA8), [0, TEX_3D, 0, ALL], [RGBA8, TEX_3D, 0, 1]],
+        [v(4, 12, RGBA8), [0, TEX_3D, 0, ALL], [RGBA8, TEX_3D, 0, 4]],
+    ], [
+        [t(1, 1, RGBA8), [RGBA8, 0]],
+        [t(6, 4, RGBA8), [RGBA8, 0]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_1D, 0, 1]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_1D_ARRAY, 0, 1, 0, 1]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_3D, 0, 1]],
+        [t(1, 1, RGBA8), [RGBA8_TL, TEX_2D, 0, ALL]],
+        [t(1, 1, RGBA8_TL), [0, TEX_2D, 0, ALL]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D, 0, 0]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D, 0, 2]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D, 1, 1]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D_ARRAY, 0, 0, 0, 0]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D_ARRAY, 0, 0, 0, 1]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D_ARRAY, 0, 1, 0, 0]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D_ARRAY, 0, 2, 0, 1]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D_ARRAY, 1, 1, 0, 1]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D_ARRAY, 0, 1, 0, 2]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D_ARRAY, 0, 1, 1, 1]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2DMS_ARR, 0, 1, 0, 2]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2DMS_ARR, 0, 1, 1, 1]],
+        [v(1, 9, RGBA8), [RGBA8, TEX_2D, 0, 1]],
+        [v(1, 9, RGBA8), [RGBA8, TEX_2D_ARRAY, 0, 1, 0, 1]],
+        [v(1, 1, RGBA8), [RGBA8, TEX_3D, 0, 0]],
+        [v(1, 1, RGBA8), [RGBA8_TL, TEX_3D, 0, 1]],
+        [v(1, 1, RGBA8), [0, TEX_3D, 0, 2]],
+        [v(1, 1, RGBA8), [0, TEX_3D, 1, 1]],
+    ]);
+});

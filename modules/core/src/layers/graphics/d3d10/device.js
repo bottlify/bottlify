@@ -560,19 +560,19 @@ export function createDevice(options = {}){
         const resolved = resolveViewDesc({
             resource,
             desc: desc ?? null,
-            dimensions: kind.dimensions,
+            dimensions: kind.union.dimensions,
+            members: kind.union.members,
             bindFlag: kind.bindFlag,
-            mipRange: kind.mipRange,
         });
         if (!resolved)
         {
             return E_INVALIDARG;
         }
-        const { dimensionName, ...reported } = resolved;
         out.view = createView({
             resource,
-            desc: Object.freeze(reported),
-            dimensionName,
+            desc: Object.freeze(resolved.desc),
+            dimensionName: resolved.dimensionName,
+            range: resolved.range,
             iid: kind.iid,
             also: kind.also,
             retainDevice,

@@ -30,11 +30,12 @@
 
 import { attachCom } from './com.js';
 import {
-    ALL_REMAINING, D3D10_BIND, D3D10_CPU_ACCESS, D3D10_DSV_DIMENSION, D3D10_MAP,
-    D3D10_MAP_FLAG_DO_NOT_WAIT, D3D10_RESOURCE_DIMENSION, D3D10_RTV_DIMENSION, D3D10_SRV_DIMENSION,
+    ALL_REMAINING, D3D10_BIND, D3D10_CPU_ACCESS, D3D10_MAP,
+    D3D10_MAP_FLAG_DO_NOT_WAIT, D3D10_RESOURCE_DIMENSION,
     D3D10_USAGE, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_USAGE, E_INVALIDARG, FORMAT_INFO, FORMAT_KIND,
     IID, S_OK,
 } from './constants.js';
+import { VIEW_UNION } from './structs.js';
 import { fullMipChainLength, levelExtent, resolveViewFormat } from './validity.js';
 
 /**
@@ -335,16 +336,49 @@ function dimensionSuitsResource(resource, name){
  * @property {any} resource
  * @property {any} desc                 Null asks for the default view.
  * @property {Record<string, number>} dimensions
+ * @property {Readonly<Record<string, readonly string[]>>} members
+ *     The union members each dimension has; a field of the description that is
+ *     not one of its dimension's members is not looked at.
  * @property {number} bindFlag          The bind flag the resource must carry.
- * @property {boolean} [mipRange]       A shader resource view names a range of levels.
  */
 
 /**
+ * @typedef {Object} ViewRange  What a view reaches, whatever its dimension calls it.
+ * @property {number} mip      The first mip level.
+ * @property {number} levels   How many levels.
+ * @property {number} first    The first array slice, or depth slice of a volume.
+ * @property {number} count    How many.
+ */
+
+/**
+ * A range of `available` things, asked as a first one and a count where all
+ * ones means "to the end".
+ *
+ * @param {number} first
+ * @param {number} requested
+ * @param {number} available
+ * @returns {number | null} the count, or null if the range does not fit
+ */
+function sliceCountOf(first, requested, available){
+    const count = requested === ALL_REMAINING ? available - first : requested;
+    if (first >= available || count < 1 || first + count > available)
+    {
+        return null;
+    }
+    return count;
+}
+
+/**
  * The whole of view validation, in one place because all three view kinds run
- * exactly these checks and differ only in their dimension enumeration.
+ * exactly these checks and differ only in their dimension enumeration and in
+ * which members each dimension's union has: a dimension without an array range
+ * views one slice, one without a mip count views one level, and a multisampled
+ * one views level zero.
  *
  * @param {ViewRequest} request
- * @returns {any | null} the resolved description, or null if the view is refused
+ * @returns {{ desc: any, dimensionName: string, range: ViewRange | null } | null}
+ *     the description as the view reports it and what it reaches, or null if
+ *     the view is refused
  */
 export function resolveViewDesc(request){
     const { resource, desc, dimensions } = request;
@@ -356,13 +390,15 @@ export function resolveViewDesc(request){
     {
         // A buffer has no shape to infer a view from, so a null description is
         // not "the obvious one" but a request that cannot be answered.
-        return desc ? resolveBufferViewDesc(resource, desc, dimensions) : null;
+        const reported = desc ? resolveBufferViewDesc(resource, desc, dimensions) : null;
+        return reported ? { desc: reported, dimensionName: 'BUFFER', range: null } : null;
     }
 
     const name = desc
         ? nameOfDimension(desc.ViewDimension, dimensions)
         : defaultDimensionName(resource, dimensions);
-    if (!name || name === 'UNKNOWN' || !dimensionSuitsResource(resource, name))
+    const members = name ? request.members[name] : undefined;
+    if (!name || !members || name === 'UNKNOWN' || !dimensionSuitsResource(resource, name))
     {
         return null;
     }
@@ -373,41 +409,64 @@ export function resolveViewDesc(request){
         return null;
     }
 
-    const mipSlice = desc ? (desc.MipSlice ?? desc.MostDetailedMip ?? 0) : 0;
-    if (mipSlice >= resource.desc.MipLevels)
+    /** @param {string} member @param {number} fallback */
+    const asked = (member, fallback)=>(desc ? desc[member] ?? fallback : fallback);
+    /** @type {Record<string, number>} */
+    const values = {};
+
+    const mipMember = members.includes('MostDetailedMip') ? 'MostDetailedMip' : 'MipSlice';
+    const mip = members.includes(mipMember) ? asked(mipMember, 0) : 0;
+    if (mip >= resource.desc.MipLevels)
     {
         return null;
+    }
+    values[mipMember] = mip;
+    let levels = 1;
+    if (members.includes('MipLevels'))
+    {
+        const count = sliceCountOf(mip, asked('MipLevels', ALL_REMAINING),
+            resource.desc.MipLevels);
+        if (count === null)
+        {
+            return null;
+        }
+        levels = count;
+        values.MipLevels = levels;
     }
 
-    const available = availableSlices(resource, mipSlice);
-    const firstSlice = desc ? (desc.FirstArraySlice ?? desc.FirstWSlice ?? 0) : 0;
-    const requested = desc ? (desc.ArraySize ?? desc.WSize ?? ALL_REMAINING) : ALL_REMAINING;
-    const sliceCount = requested === ALL_REMAINING ? available - firstSlice : requested;
-    if (firstSlice >= available || sliceCount < 1 || firstSlice + sliceCount > available)
+    let first = 0;
+    let count = 1;
+    for (const [firstMember, countMember] of [['FirstArraySlice', 'ArraySize'],
+        ['FirstWSlice', 'WSize']])
     {
-        return null;
+        if (!members.includes(firstMember))
+        {
+            continue;
+        }
+        first = asked(firstMember, 0);
+        const fits = sliceCountOf(first, asked(countMember, ALL_REMAINING),
+            availableSlices(resource, mip));
+        if (fits === null)
+        {
+            return null;
+        }
+        count = fits;
+        values[firstMember] = first;
+        values[countMember] = count;
+    }
+    if (resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
+        && !members.includes('FirstWSlice'))
+    {
+        count = availableSlices(resource, mip);
     }
 
-    const resolved = {
-        Format: format,
-        ViewDimension: dimensions[name],
-        dimensionName: name,
-        MipSlice: mipSlice,
-        FirstArraySlice: firstSlice,
-        ArraySize: sliceCount,
-    };
-    if (!request.mipRange)
+    /** @type {Record<string, number>} */
+    const reported = { Format: format, ViewDimension: dimensions[name] };
+    for (const member of members)
     {
-        return resolved;
+        reported[member] = values[member];
     }
-    const levels = desc && desc.MipLevels !== undefined && desc.MipLevels !== ALL_REMAINING
-        ? desc.MipLevels
-        : resource.desc.MipLevels - mipSlice;
-    if (levels < 1 || mipSlice + levels > resource.desc.MipLevels)
-    {
-        return null;
-    }
-    return { ...resolved, MostDetailedMip: mipSlice, MipLevels: levels };
+    return { desc: reported, dimensionName: name, range: { mip, levels, first, count } };
 }
 
 /**
@@ -448,6 +507,7 @@ function resolveBufferViewDesc(resource, desc, dimensions){
  * @property {any} resource
  * @property {any} desc              The already-resolved description.
  * @property {string} dimensionName  The shape the view looks at, by its enumeration name.
+ * @property {ViewRange | null} range  What it reaches; null for a buffer's view.
  * @property {string} iid
  * @property {readonly string[]} [also]  Later versions of the interface it answers to.
  * @property {() => void} retainDevice
@@ -461,6 +521,7 @@ function resolveBufferViewDesc(resource, desc, dimensions){
 export function createView(options){
     return attachCom({
         dimensionName: options.dimensionName,
+        range: options.range,
 
         /** @param {{ desc?: any }} out */
         GetDesc(out){
@@ -499,24 +560,21 @@ export function createView(options){
     });
 }
 
-/** The three view kinds, each with its own dimension enumeration and bind flag. */
+/** The three view kinds, each with its own dimension enumeration, union and bind flag. */
 export const VIEW_KINDS = Object.freeze({
     RENDER_TARGET: Object.freeze({
-        dimensions: D3D10_RTV_DIMENSION,
+        union: VIEW_UNION.RENDER_TARGET,
         bindFlag: D3D10_BIND.RENDER_TARGET,
-        mipRange: false,
         iid: IID.ID3D10RenderTargetView,
     }),
     DEPTH_STENCIL: Object.freeze({
-        dimensions: D3D10_DSV_DIMENSION,
+        union: VIEW_UNION.DEPTH_STENCIL,
         bindFlag: D3D10_BIND.DEPTH_STENCIL,
-        mipRange: false,
         iid: IID.ID3D10DepthStencilView,
     }),
     SHADER_RESOURCE: Object.freeze({
-        dimensions: D3D10_SRV_DIMENSION,
+        union: VIEW_UNION.SHADER_RESOURCE,
         bindFlag: D3D10_BIND.SHADER_RESOURCE,
-        mipRange: true,
         iid: IID.ID3D10ShaderResourceView,
         also: Object.freeze([IID.ID3D10ShaderResourceView1]),
     }),

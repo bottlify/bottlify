@@ -20,7 +20,14 @@
  *
  * Every member of all three is a 32-bit quantity on the 32-bit ABI these run
  * under, so no field needs padding and the sizes are exactly the sums.
+ *
+ * The view descriptions at the end are Direct3D's, not DXGI's, and they are
+ * the exception: a union, read by the dimension that names its members.
  */
+
+import {
+    D3D10_1_SRV_DIMENSION, D3D10_DSV_DIMENSION, D3D10_RTV_DIMENSION, D3D10_SRV_DIMENSION,
+} from './constants.js';
 
 /** DXGI_RATIONAL: the refresh rate, as a fraction rather than a number. */
 export const DXGI_RATIONAL = Object.freeze({
@@ -207,4 +214,147 @@ export function writeSwapChainDesc(memory, address, desc){
     writeU32(memory, address + DXGI_SWAP_CHAIN_DESC.Windowed, desc.windowed ? 1 : 0);
     writeU32(memory, address + DXGI_SWAP_CHAIN_DESC.SwapEffect, desc.swapEffect);
     writeU32(memory, address + DXGI_SWAP_CHAIN_DESC.Flags, desc.flags);
+}
+
+/**
+ * The three view descriptions: a head of `Format` and `ViewDimension`, then a
+ * union whose members are those of the dimension the head names -- and only
+ * those. A two-dimensional render-target view's union is one `MipSlice`; the
+ * dwords after it are whatever the program's stack held, and a reader that
+ * takes them as an array range refuses a view Windows makes. The members are
+ * listed in the order they sit in the union, every one a 32-bit quantity, so a
+ * member's offset is 8 plus four times its place.
+ *
+ * Direct3D 10.1's shader-resource description is the same structure with one
+ * dimension more, the cube array.
+ */
+const RANGE_1D = Object.freeze(['MipSlice']);
+const RANGE_ARRAY = Object.freeze(['MipSlice', 'FirstArraySlice', 'ArraySize']);
+/** @type {readonly string[]} */
+const RANGE_MS = Object.freeze([]);
+const RANGE_MS_ARRAY = Object.freeze(['FirstArraySlice', 'ArraySize']);
+const RANGE_BUFFER = Object.freeze(['ElementOffset', 'ElementWidth']);
+const SRV_LEVELS = Object.freeze(['MostDetailedMip', 'MipLevels']);
+const SRV_ARRAY = Object.freeze(['MostDetailedMip', 'MipLevels', 'FirstArraySlice', 'ArraySize']);
+
+/**
+ * @typedef {Object} ViewUnion
+ * @property {Readonly<Record<string, number>>} dimensions  The kind's dimension enumeration.
+ * @property {Readonly<Record<string, readonly string[]>>} members  Per dimension name.
+ * @property {number} size  The whole description's size in bytes.
+ */
+
+/** @type {Readonly<Record<string, ViewUnion>>} */
+export const VIEW_UNION = Object.freeze({
+    RENDER_TARGET: Object.freeze({
+        dimensions: D3D10_RTV_DIMENSION,
+        members: Object.freeze({
+            BUFFER: RANGE_BUFFER,
+            TEXTURE1D: RANGE_1D,
+            TEXTURE1DARRAY: RANGE_ARRAY,
+            TEXTURE2D: RANGE_1D,
+            TEXTURE2DARRAY: RANGE_ARRAY,
+            TEXTURE2DMS: RANGE_MS,
+            TEXTURE2DMSARRAY: RANGE_MS_ARRAY,
+            TEXTURE3D: Object.freeze(['MipSlice', 'FirstWSlice', 'WSize']),
+        }),
+        size: 0x14,
+    }),
+    DEPTH_STENCIL: Object.freeze({
+        dimensions: D3D10_DSV_DIMENSION,
+        members: Object.freeze({
+            TEXTURE1D: RANGE_1D,
+            TEXTURE1DARRAY: RANGE_ARRAY,
+            TEXTURE2D: RANGE_1D,
+            TEXTURE2DARRAY: RANGE_ARRAY,
+            TEXTURE2DMS: RANGE_MS,
+            TEXTURE2DMSARRAY: RANGE_MS_ARRAY,
+        }),
+        size: 0x14,
+    }),
+    SHADER_RESOURCE: Object.freeze({
+        dimensions: D3D10_SRV_DIMENSION,
+        members: Object.freeze({
+            BUFFER: RANGE_BUFFER,
+            TEXTURE1D: SRV_LEVELS,
+            TEXTURE1DARRAY: SRV_ARRAY,
+            TEXTURE2D: SRV_LEVELS,
+            TEXTURE2DARRAY: SRV_ARRAY,
+            TEXTURE2DMS: RANGE_MS,
+            TEXTURE2DMSARRAY: RANGE_MS_ARRAY,
+            TEXTURE3D: SRV_LEVELS,
+            TEXTURECUBE: SRV_LEVELS,
+        }),
+        size: 0x18,
+    }),
+    SHADER_RESOURCE1: Object.freeze({
+        dimensions: D3D10_1_SRV_DIMENSION,
+        members: Object.freeze({
+            BUFFER: RANGE_BUFFER,
+            TEXTURE1D: SRV_LEVELS,
+            TEXTURE1DARRAY: SRV_ARRAY,
+            TEXTURE2D: SRV_LEVELS,
+            TEXTURE2DARRAY: SRV_ARRAY,
+            TEXTURE2DMS: RANGE_MS,
+            TEXTURE2DMSARRAY: RANGE_MS_ARRAY,
+            TEXTURE3D: SRV_LEVELS,
+            TEXTURECUBE: SRV_LEVELS,
+            TEXTURECUBEARRAY: Object.freeze(['MostDetailedMip', 'MipLevels',
+                'First2DArrayFace', 'NumCubes']),
+        }),
+        size: 0x18,
+    }),
+});
+
+/**
+ * @param {ViewUnion} union
+ * @param {number} viewDimension
+ * @returns {readonly string[] | null} the union's members for that dimension, or null
+ *     for a dimension the kind does not have
+ */
+export function viewUnionMembers(union, viewDimension){
+    const entry = Object.entries(union.dimensions).find(([, value])=>value === viewDimension);
+    return entry ? union.members[entry[0]] ?? null : null;
+}
+
+/**
+ * A view description out of guest memory, with the members of its dimension
+ * and no others; a dimension the kind does not have reads as the head alone.
+ *
+ * @param {GuestMemory} memory
+ * @param {number} address
+ * @param {ViewUnion} union
+ * @returns {Record<string, number>}
+ */
+export function readViewDesc(memory, address, union){
+    const ViewDimension = readU32(memory, address + 4);
+    /** @type {Record<string, number>} */
+    const desc = { Format: readU32(memory, address), ViewDimension };
+    (viewUnionMembers(union, ViewDimension) ?? []).forEach((name, index)=>{
+        desc[name] = readU32(memory, address + 8 + index * 4);
+    });
+    return desc;
+}
+
+/**
+ * A view description into guest memory: the head, its dimension's members in
+ * their places, and zeros in the rest of the union, the whole structure and
+ * not a byte past it.
+ *
+ * @param {GuestMemory} memory
+ * @param {number} address
+ * @param {ViewUnion} union
+ * @param {Record<string, number>} desc
+ */
+export function writeViewDesc(memory, address, union, desc){
+    const words = new Uint32Array(union.size / 4);
+    words[0] = desc.Format;
+    words[1] = desc.ViewDimension;
+    (viewUnionMembers(union, desc.ViewDimension) ?? []).forEach((name, index)=>{
+        words[2 + index] = desc[name] ?? 0;
+    });
+    const bytes = new Uint8Array(union.size);
+    const view = new DataView(bytes.buffer);
+    words.forEach((word, index)=>view.setUint32(index * 4, word, true));
+    memory.writeMemory(address, bytes);
 }

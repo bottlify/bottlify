@@ -825,14 +825,14 @@ export function createRenderer(services){
             dimension: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
                 ? '3d'
                 : isCube ? 'cube' : array ? '2d-array' : '2d',
-            baseMipLevel: desc.MostDetailedMip ?? desc.MipSlice ?? 0,
-            mipLevelCount: desc.MipLevels ?? 1,
+            baseMipLevel: view.range.mip,
+            mipLevelCount: view.range.levels,
             baseArrayLayer: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
                 ? 0
-                : desc.FirstArraySlice ?? 0,
+                : view.range.first,
             arrayLayerCount: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
                 ? 1
-                : desc.ArraySize ?? 1,
+                : view.range.count,
         });
         gpu = { view: created, sampleType: sampleTypeOf(chosen.format, chosen.aspect) };
         views.set(view, gpu);
@@ -1417,8 +1417,8 @@ export function createRenderer(services){
         const described = {};
         view.GetDesc(described);
         const desc = described.desc;
-        const mip = desc.MipSlice ?? 0;
-        const layer = desc.FirstArraySlice ?? 0;
+        const mip = view.range.mip;
+        const layer = view.range.first;
         if (held.resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D)
         {
             diverge('a view into a slice of a 3D texture draws into its first slice');
