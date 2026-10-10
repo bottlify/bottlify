@@ -1718,6 +1718,41 @@ export function createAutomationFunctions(host){
         },
 
         /**
+         * HRESULT VarBstrCat(BSTR bstrLeft, BSTR bstrRight, BSTR *pbstrResult)
+         *
+         * A NULL operand is the empty string. The lengths are added in bytes,
+         * so an odd-length byte string stays as long as it was.
+         */
+        VarBstrCat: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([left, right, result])=>{
+                if ((result >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const leftBytes = byteLengthOf(left >>> 0);
+                const rightBytes = byteLengthOf(right >>> 0);
+                const data = new Uint8Array(leftBytes + rightBytes);
+                if (leftBytes)
+                {
+                    data.set(host.readMemory(left >>> 0, leftBytes));
+                }
+                if (rightBytes)
+                {
+                    data.set(host.readMemory(right >>> 0, rightBytes), leftBytes);
+                }
+                const bstr = allocateBstr(data);
+                if (bstr === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                writeU32(result >>> 0, bstr);
+                return S_OK;
+            },
+        },
+
+        /**
          * ULONG BSTR_UserSize(ULONG *pFlags, ULONG StartingSize, BSTR *pBstr)
          *
          * A BSTR on the wire is MS-OAUT's FLAGGED_WORD_BLOB as NDR lays a
@@ -3609,6 +3644,7 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     292: 'LPSAFEARRAY_UserMarshal',
     293: 'LPSAFEARRAY_UserUnmarshal',
     294: 'LPSAFEARRAY_UserFree',
+    313: 'VarBstrCat',
     318: 'VarCat',
     330: 'VarDateFromUdate',
     331: 'VarUdateFromDate',

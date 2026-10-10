@@ -171,6 +171,24 @@ test('length is asked in characters and in bytes, and the two differ', ()=>{
     assert.equal(call('SysStringByteLen', [bstr]), 8);
 });
 
+test('VarBstrCat joins by byte length, a NULL side counting as empty', ()=>{
+    setUp();
+    host.putWide(TEXT, 'ab');
+    const left = call('SysAllocString', [TEXT]);
+    host.putWide(TEXT, 'cde');
+    const right = call('SysAllocString', [TEXT]);
+    const OUT = TEXT + 0x100;
+
+    assert.equal(call('VarBstrCat', [left, right, OUT]), 0);
+    const joined = host.u32(OUT);
+    assert.equal(call('SysStringByteLen', [joined]), 10);
+    assert.deepEqual([0, 1, 2, 3, 4, 5].map(i=>host.u16(joined + i * 2)),
+        [...'abcde'].map(c=>c.charCodeAt(0)).concat(0));
+    assert.equal(call('VarBstrCat', [0, right, OUT]), 0);
+    assert.equal(call('SysStringByteLen', [host.u32(OUT)]), 6);
+    assert.equal(call('VarBstrCat', [left, right, 0]), 0x80070057);
+});
+
 test('an embedded NUL is kept, because the length is the prefix and not a scan', ()=>{
     setUp();
     const bstr = call('SysAllocStringLen', [TEXT, 3]);
