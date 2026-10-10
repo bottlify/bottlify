@@ -60,6 +60,7 @@ import { createMixer } from './layers/audio/output/mixer.js';
 import { objectHandlers } from './system-objects.js';
 import { openProcessWorker } from './host/process-worker.js';
 import { createTranslatorPool, portTranslator } from './host/pool/pool.js';
+import { createInputRoute } from './layers/input/route.js';
 
 /**
  * createApp — the consumer-facing entry point: run a Win32 application.
@@ -6818,6 +6819,7 @@ async function buildApp(options){
             /** @param {any} event */
             send: event=>input.send(event),
             poll: ()=>input.poll(),
+            route: ()=>createInputRoute(event=>input.send(event)),
         },
 
         /**
@@ -7611,6 +7613,10 @@ async function buildSystemHost(deps){
                 return Boolean(process);
             },
             poll: ()=>{},
+            /** @returns {ReturnType<typeof createInputRoute>} */
+            route(){
+                return createInputRoute(event=>this.send(event));
+            },
         },
         pause: ()=>tellAll('pause'),
         resume: ()=>tellAll('resume'),
