@@ -1159,3 +1159,28 @@ test('_fsopen and _wfsopen are fopen and _wfopen with a share flag that changes 
     assert.equal(fns._fsopen.handler([memory.put('C:\\none.txt'), memory.put('r'), 0x40]), 0);
     assert.deepEqual([fns._fsopen.argBytes, fns._wfsopen.argBytes], [12, 12]);
 });
+
+test('tmpfile opens a new file for update in binary, each its own, removed when it closes', ()=>{
+    const { memory, files, fns } = build();
+    const first = fns.tmpfile.handler([]);
+    const second = fns.tmpfile.handler([]);
+    assert.notEqual(first, 0);
+    assert.notEqual(second, 0);
+    assert.notEqual(first, second);
+
+    const buffer = memory.allocate(8);
+    memory.bytes.set([7, 0x0a, 9], buffer);
+    assert.equal(fns.fwrite.handler([buffer, 1, 3, first]), 3);
+    assert.equal(fns.fseek.handler([first, 0, 0]), 0);
+    const back = memory.allocate(8);
+    assert.equal(fns.fread.handler([back, 1, 8, first]), 3, 'read back: opened for update');
+    assert.deepEqual([...memory.bytes.subarray(back, back + 3)], [7, 0x0a, 9],
+        'binary: the line feed is not widened');
+
+    assert.equal(fns.fclose.handler([first]), 0);
+    assert.equal(fns.fclose.handler([second]), 0);
+    for (const name of files.closed)
+    {
+        assert.equal(files.stat(name)?.exists === true, false, `${name} is gone once closed`);
+    }
+});

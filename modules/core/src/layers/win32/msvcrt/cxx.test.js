@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createCxxFunctions, EH_PROLOG_CODE } from './cxx.js';
+import { CHKESP_CODE, createCxxFunctions, EH_PROLOG_CODE } from './cxx.js';
 import { fakeMemory } from './harness.test.js';
 
 /**
@@ -186,4 +186,12 @@ test('_EH_prolog is code of its own, not a variable: it lies in .text, apart fro
     const { table } = build();
     assert.equal(table._EH_prolog.data, undefined);
     assert.deepEqual(table._EH_prolog.code(), EH_PROLOG_CODE);
+});
+
+test('_chkesp is a bare ret in the guest: the checked result in EAX and the flags stay', ()=>{
+    const { table } = build();
+    assert.equal(table._chkesp.data, undefined);
+    assert.equal(table._chkesp.handler, undefined, 'no host crossing to answer in EAX');
+    assert.deepEqual([...table._chkesp.code()], [0xc3]);
+    assert.equal(CHKESP_CODE, table._chkesp.code());
 });

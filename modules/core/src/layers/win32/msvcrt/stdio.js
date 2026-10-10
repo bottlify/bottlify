@@ -112,6 +112,9 @@ export const standardRecords = iob=>(iob === 0 ? []
  * @property {number[]} pushback  What ungetc gave back, the next to read last.
  */
 
+/** The fixed part of a tmpfile name, as the runtime spells it from its process. */
+const TEMPORARY_STEM = '1c';
+
 /** fopen's `ccs=` names, case aside, and the Unicode translation each opens in. */
 const CCS = new Map([['unicode', O_WTEXT], ['utf-8', O_U8TEXT], ['utf-16le', O_U16TEXT]]);
 
@@ -162,6 +165,9 @@ function parseMode(mode){
 export function createStdioFunctions(host){
     /** @type {Map<number, Stream>} */
     const streams = new Map();
+
+    /** How many names tmpfile has tried. */
+    let temporaryCount = 0;
 
     const descriptors = host.descriptors ?? createDescriptors({
         files: host.files, write: host.write, errno: host.errno, fmode: host.fmode,
@@ -773,6 +779,24 @@ export function createStdioFunctions(host){
         _fsopen: cdecl(12, ([path, mode])=>openStream(
             (path >>> 0) === 0 ? '' : readString(path),
             (mode >>> 0) === 0 ? null : readString(mode))),
+
+        /**
+         * FILE *tmpfile(void)
+         *
+         * A file no other has the name of, in the root of the current drive
+         * as msvcrt.dll puts it, opened for update in binary ("w+b") and
+         * removed when the stream closes or the process ends. NULL when it
+         * cannot be made.
+         */
+        tmpfile: cdecl(0, ()=>{
+            const next = ()=>`\t${TEMPORARY_STEM}.${(temporaryCount++).toString(32)}`;
+            let name = next();
+            while (host.files.stat(name)?.exists === true)
+            {
+                name = next();
+            }
+            return openStream(name, 'w+bD');
+        }),
 
         /** FILE *_wfsopen(const wchar_t *filename, const wchar_t *mode, int shflag) */
         _wfsopen: cdecl(12, ([path, mode])=>openStream(
