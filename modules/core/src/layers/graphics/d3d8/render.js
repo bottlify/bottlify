@@ -6762,8 +6762,11 @@ export function createRenderer(options){
         command.pipeline = prepared.pipelineIndex;
         command.state = prepared.state;
         command.uniforms = prepared.uniforms;
-        command.stageBindings = unsampledTargets(model, prepared.stageBindings);
-        command.program = prepared.program;
+        const bindings = unsampledTargets(model, prepared.stageBindings);
+        command.stageBindings = bindings;
+        // A shader draw binds its samplers from its program, the same list.
+        command.program = bindings === prepared.stageBindings || !prepared.program
+            ? prepared.program : { ...prepared.program, samplerBindings: bindings };
         command.vertices = geometry.vertices;
         command.indices = geometry.indices;
         command.count = geometry.count;
