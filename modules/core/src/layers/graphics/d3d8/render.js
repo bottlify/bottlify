@@ -59,6 +59,7 @@ import { OPCODE, REGISTER, SHADER_KIND } from '../d3d9/shader.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
 import { storedToHalves } from '../d3d9/half.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
+import { changedSpans } from '../webgpu/internal/changed.js';
 import {
     CLIP_LOCATION, clipStateOf, fixedFragmentStage, generates, generationOf, readsNormal, tailOf,
     vertexTailOf,
@@ -3053,12 +3054,6 @@ export function createRenderer(options){
         draws: 0,
         clears: 0,
         /**
-         * Indexed draws whose indices reach vertices outside the MinIndex and
-         * NumVertices they were given: a hint drivers do not hold a program
-         * to, and which marking what a draw reads cannot trust either.
-         */
-        outsideVertexRange: 0,
-        /**
          * The shapes of the draws a run made: which entry point, and how the
          * buffer ones reached their vertices -- a stream offset that is not
          * whole vertices, a base vertex, a minimum index. What a program draws
@@ -4433,18 +4428,18 @@ export function createRenderer(options){
             // game that skins its models into one after unlocking it drew
             // every model in the pose of the frame before. What the guest's
             // memory holds now against what was sent: a difference is sent.
+            // Four bytes at a time, and only the spans that differ are sent: it
+            // runs for every draw from such a buffer.
             const now = windowMemory(source.base + from, to - from);
-            const sent = gpu.bytes(from, to - from);
-            let at = 0;
-            while (at < now.length && now[at] === sent[at])
-            {
-                at++;
-            }
-            if (at < now.length)
+            const spans = changedSpans(now, gpu.bytes(from, to - from));
+            if (spans.length > 0)
             {
                 const stale = counters.shapes.staleDraws;
                 stale[source.length] = (stale[source.length] ?? 0) + 1;
-                gpu.rewrite(from + at, now.subarray(at));
+                for (let index = 0; index < spans.length; index += 2)
+                {
+                    gpu.rewrite(from + spans[index], now.subarray(spans[index], spans[index + 1]));
+                }
                 gpu.flush();
             }
             return;
@@ -7974,44 +7969,6 @@ export function createRenderer(options){
     /** Buffers the program has locked for writing, for `countShape`. @type {WeakSet<object>} */
     const lockedBuffers = new WeakSet();
 
-    /**
-     * The vertices an indexed draw reaches, numbered from the stream's start:
-     * those its indices name, together with the MinIndex and NumVertices it
-     * was given -- a hint a driver does not hold the program to, so the
-     * bytes a lock must not overwrite are the ones the indices read.
-     *
-     * @param {Uint8Array} bytes  its indices
-     * @param {number} elementBytes @param {number} base  BaseVertexIndex
-     * @param {number | undefined} minIndex @param {number | undefined} numVertices
-     * @returns {{ first: number, count: number } | undefined}
-     */
-    const drawnSpan = (bytes, elementBytes, base, minIndex, numVertices)=>{
-        let low = Infinity;
-        let high = -1;
-        for (let at = 0; at + elementBytes <= bytes.length; at += elementBytes)
-        {
-            const index = elementBytes === 2 ? bytes[at] | (bytes[at + 1] << 8)
-                : (bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16)
-                    | (bytes[at + 3] << 24)) >>> 0;
-            low = index < low ? index : low;
-            high = index > high ? index : high;
-        }
-        if (high < 0)
-        {
-            return minIndex !== undefined && numVertices !== undefined
-                ? { first: base + minIndex, count: numVertices } : undefined;
-        }
-        if (minIndex !== undefined && numVertices !== undefined)
-        {
-            if (low < minIndex || high >= minIndex + numVertices)
-            {
-                counters.outsideVertexRange++;
-            }
-            low = Math.min(low, minIndex);
-            high = Math.max(high, minIndex + numVertices - 1);
-        }
-        return { first: base + low, count: high - low + 1 };
-    };
 
     /**
      * The geometry a draw hands `record`, which copies it at once: one object
@@ -9007,8 +8964,11 @@ export function createRenderer(options){
             const streamBuffer = bufferFor(stream.buffer).gpu;
             const indexBuffer = bufferFor(model.indices).gpu;
             const start = streamZeroStart(model);
-            const span = drawnSpan(indexBuffer.bytes(byteOffset, count * format.bytes),
-                format.bytes, model.baseVertexIndex, minIndex, numVertices);
+            // MinIndex and NumVertices say which vertices the indices reach; a
+            // scan of every index to check them cost each indexed draw its
+            // index count, and the programs measured gave them right.
+            const span = minIndex !== undefined && numVertices !== undefined
+                ? { first: model.baseVertexIndex + minIndex, count: numVertices } : undefined;
             if (span)
             {
                 const from = start + span.first * stream.stride;
@@ -9371,7 +9331,6 @@ export function createRenderer(options){
                 frames: counters.frames,
                 draws: counters.draws,
                 clears: counters.clears,
-                outsideVertexRange: counters.outsideVertexRange,
                 shapes: { ...counters.shapes, strides: { ...counters.shapes.strides },
                     locks: { ...counters.shapes.locks },
                     lockedDraws: { ...counters.shapes.lockedDraws },
