@@ -2121,13 +2121,9 @@ export function createGpuRenderer(services){
         }
         else if (expanded)
         {
-            if (!scanned)
-            {
-                for (let i = 0; i < expanded.length; i++)
-                {
-                    expanded[i] += request.first;
-                }
-            }
+            // A range drawn through its mode's order starts at `first`: the
+            // base vertex says so, and the order -- shared, cached by mode and
+            // count (`expandMode`) -- is not written.
             indices = {
                 ...scratchIndices.write(expanded), format: 'uint32', count: expanded.length,
             };
@@ -2135,7 +2131,8 @@ export function createGpuRenderer(services){
         packedSample = null;
         record(context, scene(), layout, slots,
             indices, indices ? indices.count : request.count,
-            indices ? 0 : request.first - from, 0 - from, topologyOf(request.mode));
+            indices ? 0 : request.first - from,
+            (expanded && !scanned ? request.first : 0) - from, topologyOf(request.mode));
         return true;
     };
 

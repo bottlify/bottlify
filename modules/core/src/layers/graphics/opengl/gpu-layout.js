@@ -375,6 +375,34 @@ export function expandMode(mode, count){
     {
         return null;
     }
+    // The same mode and count give the same order, and a frame draws the
+    // same few hundred times over: each is built once. The answer is shared,
+    // so no caller writes into it.
+    const key = mode * 0x100000 + count;
+    const known = EXPANDED.get(key);
+    if (known !== undefined)
+    {
+        return known;
+    }
+    if (EXPANDED.size >= EXPANDED_KEPT)
+    {
+        EXPANDED.clear();
+    }
+    const order = buildOrder(mode, count);
+    EXPANDED.set(key, order);
+    return order;
+}
+
+/** The orders `expandMode` has built, by mode and count. @type {Map<number, Uint32Array>} */
+const EXPANDED = new Map();
+/** How many it keeps before starting over: a bound, not a working set. */
+const EXPANDED_KEPT = 1024;
+
+/**
+ * @param {number} mode @param {number} count
+ * @returns {Uint32Array}
+ */
+function buildOrder(mode, count){
     /** @type {number[]} */
     const out = [];
     switch (mode)

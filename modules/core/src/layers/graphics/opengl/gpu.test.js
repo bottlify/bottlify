@@ -1826,3 +1826,31 @@ END
     assert.ok(fragmentLayout, 'the program block keeps a group of its own, past the units');
     assert.equal(r.gpu.count('draw'), 2, 'the draw and the shown copy were issued');
 });
+
+test('a range drawn through its mode\'s order starts at its first vertex by the base vertex', async()=>{
+    // The order a mode and count expand to is built once and shared; a range
+    // that starts past zero was written into it, and the next draw of the
+    // same mode and count read the first one's start.
+    const r = rig();
+    const { context } = r;
+    for (let i = 0; i < 6; i++)
+    {
+        r.floats(0x1000 + i * STRIDE, [i, i, 0]);
+    }
+    context.glEnableClientState(GL.VERTEX_ARRAY);
+    context.glVertexPointer(3, GL.FLOAT, STRIDE, 0x1000);
+    context.glDrawArrays(GL.TRIANGLE_FAN, 2, 4);
+    context.glDrawArrays(GL.TRIANGLE_FAN, 0, 4);
+    await r.swap();
+    const draws = r.gpu.of('drawIndexed').map((/** @type {any} */ call)=>call.args);
+    assert.deepEqual(draws[0], [6, 1, 0, 0], 'from vertex two, which the copy starts at');
+    assert.deepEqual(draws[1], [6, 1, 0, 0]);
+    const orders = r.gpu.of('writeBuffer')
+        .filter(w=>/gl-scratch-indices/.test(w.buffer.descriptor.label))
+        .map(w=>[...new Uint32Array(w.bytes.buffer, w.bytes.byteOffset, 6)]);
+    assert.ok(orders.length > 0);
+    for (const order of orders)
+    {
+        assert.deepEqual(order, [0, 1, 2, 0, 2, 3], 'the shared order, unwritten by either draw');
+    }
+});
