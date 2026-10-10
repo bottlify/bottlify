@@ -389,8 +389,10 @@ setInterval(()=>route.tick(), 150).unref?.();
 // for as long as the run lasts -- every installer on the disk driven by one
 // list of the buttons that go forward.
 const anyOrder = argv.includes('--press-any');
+// A label is matched as a person reads it: without the mnemonic's `&`, in any case.
+const label = (/** @type {string} */ title)=>title.replace(/&/g, '').toLowerCase();
 const pressing = argv.includes('--press') || anyOrder
-    ? argv[argv.indexOf(anyOrder ? '--press-any' : '--press') + 1].split('|') : [];
+    ? argv[argv.indexOf(anyOrder ? '--press-any' : '--press') + 1].split('|').map(label) : [];
 if (pressing.length > 0)
 {
     let step = 0;
@@ -417,11 +419,12 @@ if (pressing.length > 0)
                 // own goes nowhere.
                 const button = (win32.windows ?? []).filter((/** @type {any} */ w)=>w.visible
                     && w.className === 'Button'
-                    && (anyOrder ? pressing.includes(w.title) : w.title === pressing[step])
+                    && (anyOrder ? pressing.includes(label(w.title))
+                        : label(w.title) === pressing[step])
                     && (w.hwnd !== lastButton || looksSince > 3)
                     && (parseInt(w.style, 16) & WS_DISABLED) === 0)
                     .sort((/** @type {any} */ a, /** @type {any} */ b)=>
-                        pressing.indexOf(a.title) - pressing.indexOf(b.title))[0];
+                        pressing.indexOf(label(a.title)) - pressing.indexOf(label(b.title)))[0];
                 if (!button)
                 {
                     continue;
