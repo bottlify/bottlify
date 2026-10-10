@@ -1791,7 +1791,8 @@ export async function game(options){
                     const path = join(REPORTS_DIR,
                         `game-${shotsStamp}-at-${String(at).padStart(5, '0')}s.png`);
                     writeFileSync(path, image);
-                    console.log(`  shot at ${at} s: ${path}`);
+                    console.log(`  shot at ${at} s: ${path} (frame ${shot.frameIndex}`
+                        + ` of ${shot.presents} presented)`);
                 }, ()=>{}).finally(()=>{
                     shooting = false;
                 });

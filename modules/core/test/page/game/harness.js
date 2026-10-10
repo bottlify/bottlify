@@ -1312,7 +1312,7 @@ function filesUnder(app, directory){
  *     window's own calls rather than whatever filled the cap getting there.
  * @property {() => string} frameReport
  * @property {() => Promise<{ width: number, height: number, format: string,
- *     pixels: string } | null>} frameShot
+ *     pixels: string, frameIndex: number, presents: number } | null>} frameShot
  *     Where a frame's time goes, asked while the run is still going. A report
  *     at the end of a run answers what a whole run cost; this answers what one
  *     frame costs, which is the question a frame rate is.
@@ -2055,8 +2055,13 @@ export function createHarness(canvas, how = {}){
             }
             const surface = presentState.presented.surface;
             const image = await readBack((await opened).device, surface);
+            // Which frame it is, and how many the page has been handed: a
+            // picture that stays the same while the count goes on is a
+            // program drawing the same thing, one whose index stays too is
+            // frames that stopped reaching the page.
             return { width: image.width, height: image.height, format: surface.format,
-                pixels: toBase64(image.pixels) };
+                pixels: toBase64(image.pixels), frameIndex: presentState.presented.frameIndex,
+                presents: presentState.presents };
         },
         // The tail of the engine's journal, formatted: what a category a run
         // switched on has recorded, read while the run is still going.
