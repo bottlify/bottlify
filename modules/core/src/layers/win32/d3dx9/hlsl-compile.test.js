@@ -676,3 +676,24 @@ test('a plain sampler is passed for a typed sampler parameter, two typed ones ar
         assert.equal(mixed.ok, false);
         assert.match(mixed.messages, /X3013/);
     });
+
+test('ps_1_4 reads tex2Dproj at a coordinate set as texld with _dw', async()=>{
+    // fxc: texld r0, t0_dw.xyw -- the read divides x and y by w.
+    const result = await compile(`sampler sam;
+        float4 main(float4 at : TEXCOORD0) : COLOR { return tex2Dproj(sam, at); }`, 'ps_1_4');
+    assert.equal(result.ok, true, result.messages);
+    const program = decode(/** @type {Uint32Array} */ (result.tokens));
+    assert.match(disassemble(/** @type {Uint32Array} */ (result.tokens)), /texld r0, t0_dw/);
+    const out = [...execute(program, { inputs: { v: [], t: [[0.5, 0.25, 0.75, 2]] },
+        constants: { f: new Float32Array(32 * 4) }, sample: (_, __, c)=>[c[0], c[1], 0, 1] })
+        .outputs.oC0];
+    assert.deepEqual(out, [0.25, 0.125, 0, 1]);
+    // A computed coordinate has no modifier to divide it, nor a set before 1.4.
+    const computed = await compile(`sampler sam;
+        float4 main(float4 at : TEXCOORD0) : COLOR { return tex2Dproj(sam, at * 2); }`,
+    'ps_1_4');
+    assert.equal(computed.ok, false);
+    const older = await compile(`sampler sam;
+        float4 main(float4 at : TEXCOORD0) : COLOR { return tex2Dproj(sam, at); }`, 'ps_1_3');
+    assert.equal(older.ok, false);
+});

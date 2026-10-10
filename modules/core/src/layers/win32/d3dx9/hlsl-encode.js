@@ -31,7 +31,7 @@ export const REG = Object.freeze({
 /** D3DSPSM, the source modifiers this compiler writes. */
 export const MOD = Object.freeze({
     NONE: 0, NEG: 1, BIAS: 2, BIASNEG: 3, SIGN: 4, SIGNNEG: 5, COMP: 6, X2: 7, X2NEG: 8,
-    ABS: 11, ABSNEG: 12,
+    DW: 10, ABS: 11, ABSNEG: 12,
 });
 
 /** D3DSIO: opcode, how the operands are laid out, and how many sources. */

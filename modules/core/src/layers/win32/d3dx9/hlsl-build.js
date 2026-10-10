@@ -982,13 +982,17 @@ export function createBuilder(profile){
      * @param {Const} sampler @param {Vec} coord @param {string} mode
      */
     const legacySample = (sampler, coord, mode)=>{
-        if (mode !== 'plain')
-        {
-            throw new TargetError('X4532', `this texture read is not available in ${profile.name}`);
-        }
         const src = coord.src;
         const direct = src.kind === 'input' && src.input.usage === USAGE.TEXCOORD
             && src.swz.every((c, i)=>c === i);
+        // tex2Dproj in 1.4 is texld of the coordinate set with _dw, which divides x and y
+        // by w as the read takes them; the modifier is only on a set as it came in, and a
+        // model 1 shader has no division of its own to do it any other way.
+        const projected = mode === 'project' && profile.minor >= 4 && direct;
+        if (mode !== 'plain' && !projected)
+        {
+            throw new TargetError('X4532', `this texture read is not available in ${profile.name}`);
+        }
         const reg = newReg(4);
         if (profile.minor < 4)
         {
@@ -1017,7 +1021,8 @@ export function createBuilder(profile){
             const from = src.kind === 'imm' || src.kind === 'const'
                 ? emit('mov', coord.w, [src]).src : src;
             instrs.push({ op: 'texld', dest: { kind: 'reg', reg, mask: 15 },
-                srcs: [from, { kind: 'sampler', cst: sampler }] });
+                srcs: [projected ? { ...from, mod: 'dw' } : from,
+                    { kind: 'sampler', cst: sampler }] });
         }
         return vec({ kind: 'reg', reg, swz: [0, 1, 2, 3] });
     };

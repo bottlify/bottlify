@@ -44,7 +44,7 @@ import {
 /** @typedef {import('./hlsl-encode.js').PhysInstr} PhysInstr */
 
 /** A source's modifier by name, to the token. */
-const MODIFIER = { comp: MOD.COMP, bias: MOD.BIAS, bx2: MOD.SIGN, x2: MOD.X2 };
+const MODIFIER = { comp: MOD.COMP, bias: MOD.BIAS, bx2: MOD.SIGN, x2: MOD.X2, dw: MOD.DW };
 
 /** The scale a destination can take, by the factor, as the token holds it. */
 const SHIFT = new Map([[2, 1], [4, 2], [8, 3], [0.125, 13], [0.25, 14], [0.5, 15]]);
