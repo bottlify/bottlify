@@ -57,7 +57,8 @@ import {
     VERTEX_PROGRAM_BINDING,
 } from './arb-wgsl.js';
 import {
-    CLEAR_UNIFORM_FLOATS, COPY_UNIFORM_FLOATS, UNIFORM, UNITS, clearDescriptor, clearKey,
+    CLEAR_UNIFORM_FLOATS, CLIP_PLANES, COPY_UNIFORM_FLOATS, UNIFORM, UNITS, clearDescriptor,
+    clearKey,
     copyKey, drawDescriptor, drawKey, generateClear, generateCopy, generateDraw, generateShow,
     lightingStateOf, sameKeyInputs,
     showDescriptor, showKey, writeLighting,
@@ -1190,7 +1191,37 @@ export function createGpuRenderer(services){
             fragmentProgram: scene.programs.fragment,
             // A vertex program takes the place of the fixed stage, lighting and all.
             lighting: scene.programs.vertex ? null : lightingStateOf(scene.lighting),
+            clip: clipStateOf(scene),
         };
+    };
+
+    /** Whether the device clips by the distances a vertex stage writes. */
+    const clipDistances = backend.hasFeature?.('clip-distances') === true;
+
+    /**
+     * The user clip planes a draw is clipped by: the fixed vertex stage
+     * writes a distance to each enabled one, which the device clips by where
+     * it can, and which the fragment stage discards by otherwise. A vertex
+     * program clips by nothing here (the specification has it write its own
+     * clip coordinates only under ARB_position_invariant), and a fragment
+     * program leaves no place to discard in: there the planes need the device.
+     *
+     * @param {import('./pipeline.js').Scene} scene
+     * @returns {{ count: number, distances: boolean } | null}
+     */
+    const clipStateOf = scene=>{
+        const count = Math.min(scene.clipPlanes.length, CLIP_PLANES);
+        if (count === 0 || scene.programs.vertex)
+        {
+            return null;
+        }
+        if (!clipDistances && scene.programs.fragment)
+        {
+            diverge('user clip planes were enabled under a fragment program on a device'
+                + ' without clip-distances, and nothing was clipped');
+            return null;
+        }
+        return { count, distances: clipDistances };
     };
 
     /**
@@ -1297,6 +1328,13 @@ export function createGpuRenderer(services){
     };
 
     /**
+     * @param {readonly (readonly number[])[]} a @param {readonly (readonly number[])[]} b
+     */
+    const sameClipPlanes = (a, b)=>a.length === b.length
+        && a.every((plane, i)=>plane[0] === b[i][0] && plane[1] === b[i][1]
+            && plane[2] === b[i][2] && plane[3] === b[i][3]);
+
+    /**
      * @param {import('./pipeline.js').Scene['fog']} a
      * @param {import('./pipeline.js').Scene['fog']} b
      */
@@ -1350,7 +1388,8 @@ export function createGpuRenderer(services){
      *           alphaTest: import('./pipeline.js').Scene['alphaTest'],
      *           depthDirection: number,
      *           modelview: ArrayLike<number>,
-     *           block: Float32Array, lit: boolean }>}
+     *           block: Float32Array, lit: boolean,
+     *           clipPlanes: readonly (readonly number[])[] }>}
      */
     const fixedUniformsCache = new WeakMap();
 
@@ -1406,7 +1445,8 @@ export function createGpuRenderer(services){
         // ponytail: a lit draw's block is built anew -- the scene's lighting is
         // a fresh record each draw; compare its values if lit draws ever
         // need to join one another.
-        if (cached && !scene.lighting && !cached.lit && sameMatrix(cached.mvp, mvp)
+        if (cached && !scene.lighting && !cached.lit
+            && sameClipPlanes(cached.clipPlanes, scene.clipPlanes) && sameMatrix(cached.mvp, mvp)
             && sameMatrix(cached.modelview, scene.modelview)
             && sameUnits(cached.units, scene.units)
             && sameCurrent(cached.current, scene.current) && sameFog(cached.fog, scene.fog)
@@ -1487,10 +1527,15 @@ export function createGpuRenderer(services){
         {
             writeLighting(block, scene.lighting);
         }
+        const clipCount = Math.min(scene.clipPlanes.length, CLIP_PLANES);
+        for (let plane = 0; plane < clipCount; plane++)
+        {
+            block.set(scene.clipPlanes[plane], UNIFORM.clipPlanes + plane * 4);
+        }
         fixedUniformsCache.set(context, {
             mvp, modelview: scene.modelview, units: scene.units, current: scene.current,
             fog: scene.fog, alphaTest: scene.alphaTest, depthDirection, block,
-            lit: scene.lighting !== null,
+            lit: scene.lighting !== null, clipPlanes: scene.clipPlanes,
         });
         return block;
     };

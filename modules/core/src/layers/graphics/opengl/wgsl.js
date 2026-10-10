@@ -85,6 +85,10 @@ import {
  * @property {LightingState | null} [lighting]
  *           the fixed pipeline's lighting, when it is on and no vertex
  *           program takes its place; absent or null draws unlit
+ * @property {{ count: number, distances: boolean } | null} [clip]
+ *           the enabled user clip planes, in the uniform block's order, and
+ *           whether the device clips by the distances a vertex stage writes
+ *           (`clip-distances`) or the fragment stage discards what they cut
  */
 
 /**
@@ -103,6 +107,9 @@ export const UNITS = 4;
 
 /** How many lights the uniform block carries: GL_MAX_LIGHTS. */
 export const LIGHTS = 8;
+
+/** How many user clip planes it carries: GL_MAX_CLIP_PLANES. */
+export const CLIP_PLANES = 6;
 
 /** Floats per light in the uniform block, and where each part lies. */
 const LIGHT_FLOATS = 24;
@@ -134,7 +141,9 @@ export const UNIFORM = Object.freeze({
     // emission, ambient, diffuse, specular, then shininess
     material: 48 + UNITS * 36 + 28 + VARYING_TEXCOORDS * 4,
     lights: 48 + UNITS * 36 + 48 + VARYING_TEXCOORDS * 4,     // LIGHTS * LIGHT_FLOATS
-    floats: 48 + UNITS * 36 + 48 + VARYING_TEXCOORDS * 4 + LIGHTS * LIGHT_FLOATS,
+    // CLIP_PLANES vec4f, eye space, the enabled ones first
+    clipPlanes: 48 + UNITS * 36 + 48 + VARYING_TEXCOORDS * 4 + LIGHTS * LIGHT_FLOATS,
+    floats: 48 + UNITS * 36 + 48 + VARYING_TEXCOORDS * 4 + LIGHTS * LIGHT_FLOATS + CLIP_PLANES * 4,
 });
 
 export const UNIFORM_STRUCT = `struct GlLight {
@@ -162,6 +171,7 @@ struct Uniforms {
     lightModelAmbient: vec4f,
     material: array<vec4f, 5>,
     lights: array<GlLight, ${LIGHTS}>,
+    clipPlanes: array<vec4f, ${CLIP_PLANES}>,
 };
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 `;
@@ -441,6 +451,7 @@ export function drawKey(state){
             ? `vp${state.vertexProgram.name}.${state.vertexProgram.version}`
             : '-',
         lightingKey(state.lighting),
+        state.clip ? `C${state.clip.count}${state.clip.distances ? 'd' : ''}` : '-',
         state.fragmentProgram
             ? `fp${state.fragmentProgram.name}.${state.fragmentProgram.version}.`
                 + `${state.viewportHeight ?? 0}`
@@ -555,6 +566,12 @@ export function sameKeyInputs(a, b){
     const pa = a.polygonOffset;
     const pb = b.polygonOffset;
     if (pa !== pb && (!pa || !pb || pa.factor !== pb.factor || pa.units !== pb.units))
+    {
+        return false;
+    }
+    const ca = a.clip ?? null;
+    const cb = b.clip ?? null;
+    if (ca !== cb && (!ca || !cb || ca.count !== cb.count || ca.distances !== cb.distances))
     {
         return false;
     }
@@ -859,9 +876,17 @@ function environment(unit){
  *
  * @param {import('./arb-wgsl.js').StageVaryings} varyings
  * @param {boolean} flat
+ * @param {{ count: number, distances: boolean } | null} [clip]  the user clip planes'
+ *     distances: a builtin the device clips by, or two vectors the fragment discards by
  */
-function vertexOutStruct(varyings, flat){
+function vertexOutStruct(varyings, flat, clip = null){
     const interpolation = flat ? '@interpolate(flat) ' : '';
+    const next = 3 + varyings.texcoords.length + (varyings.fogCoord ? 1 : 0);
+    // The device's clip distances are a vertex output only, never a fragment
+    // input: a stage that writes them returns a struct of its own with them,
+    // and the fragment stage reads the rest by location as ever.
+    const clipFields = !clip || clip.distances ? []
+        : [`    @location(${next}) clipLow: vec4f,`, `    @location(${next + 1}) clipHigh: vec4f,`];
     // Invariant, so that two modules computing one position from the same
     // data agree to the bit: a depth-equal pass drawn through a different
     // module than the pass before it would otherwise be free to fight it.
@@ -874,10 +899,18 @@ function vertexOutStruct(varyings, flat){
         ...(varyings.fogCoord
             ? [`    @location(${3 + varyings.texcoords.length}) fogCoord: f32,`]
             : []),
+        ...clipFields,
     ];
+    const clipped = clip?.distances
+        ? `
+struct VertexOutClipped {
+${fields.join('\n')}
+    @builtin(clip_distances) clipDistances: array<f32, ${clip.count}>,
+};`
+        : '';
     return `struct VertexOut {
 ${fields.join('\n')}
-};`;
+};${clipped}`;
 }
 
 /** @param {DrawState} state */
@@ -921,6 +954,24 @@ function fixedVertexMain(state, varyings){
         `    out.color = ${colour ? widen(colour, [0, 0, 0, 1]) : 'uniforms.color'};`,
         `    out.secondary = ${secondary ? widen(secondary, [0, 0, 0, 1]) : 'uniforms.secondary'};`,
     ];
+    const clip = state.clip;
+    if (clip)
+    {
+        const distance = (/** @type {number} */ plane)=>(plane < clip.count
+            ? `dot(eyePosition, uniforms.clipPlanes[${plane}])` : '1.0');
+        if (clip.distances)
+        {
+            for (let plane = 0; plane < clip.count; plane++)
+            {
+                vertexBody.push(`    out.clipDistances[${plane}] = ${distance(plane)};`);
+            }
+        }
+        else
+        {
+            vertexBody.push(`    out.clipLow = vec4f(${[0, 1, 2, 3].map(distance).join(', ')});`,
+                `    out.clipHigh = vec4f(${[4, 5, 6, 7].map(distance).join(', ')});`);
+        }
+    }
     if (state.lighting)
     {
         vertexBody.push(`    out.color = glLit(eyePosition, ${normal
@@ -975,9 +1026,10 @@ function fixedVertexMain(state, varyings){
             vertexBody.push(`    out.tc${set} = ${given};`);
         }
     }
+    const output = state.clip?.distances ? 'VertexOutClipped' : 'VertexOut';
     return `@vertex
-fn vertexMain(vertex: VertexIn) -> VertexOut {
-    var out: VertexOut;
+fn vertexMain(vertex: VertexIn) -> ${output} {
+    var out: ${output};
 ${vertexBody.join('\n')}
     return out;
 }`;
@@ -1000,6 +1052,10 @@ function fixedFragment(state){
         + `@group(0) @binding(${2 + i * 2}) var t${unit.index}Sampler: sampler;`).join('\n');
 
     const fragmentBody = [
+        ...(state.clip && !state.clip.distances
+            ? ['    if (any(input.clipLow < vec4f(0.0)) || any(input.clipHigh < vec4f(0.0)))',
+                '    {', '        discard;', '    }']
+            : []),
         '    let primary = clamp(input.color, vec4f(0.0), vec4f(1.0));',
         '    var current = primary;',
     ];
@@ -1054,11 +1110,12 @@ export function generateDraw(state){
     }
     const varyings = { texcoords: state.units.map(unit=>unit.index), fogCoord: false };
     const fragment = fixedFragment(state);
-    const code = `${UNIFORM_STRUCT}${fragment.bindings}
+    const code = `${state.clip?.distances ? 'enable clip_distances;\n' : ''}${UNIFORM_STRUCT}${
+        fragment.bindings}
 
 ${fixedVertexIn(state)}
 
-${vertexOutStruct(varyings, state.flat)}
+${vertexOutStruct(varyings, state.flat, state.clip ?? null)}
 
 ${SPHERE_MAP_FN}
 ${state.lighting ? lightingFunction(state.lighting) : ''}
@@ -1132,7 +1189,7 @@ function generateProgramDraw(state){
         ? vertexStage.code
         : `${fixedVertexIn(state)}
 
-${vertexOutStruct(varyings, state.flat)}
+${vertexOutStruct(varyings, state.flat, state.clip ?? null)}
 
 ${SPHERE_MAP_FN}
 ${state.lighting ? lightingFunction(state.lighting) : ''}
@@ -1145,7 +1202,7 @@ ${fixedVertexMain(state, varyings)}
 
 ${fixedFragment(state).main}
 `;
-    const code = `${UNIFORM_STRUCT}
+    const code = `${state.clip?.distances ? 'enable clip_distances;\n' : ''}${UNIFORM_STRUCT}
 ${vertexCode}
 ${fragmentCode}`;
     return {

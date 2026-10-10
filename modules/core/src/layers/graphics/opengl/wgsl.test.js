@@ -12,7 +12,8 @@ import { parseProgram } from './arb-program.js';
 import { VARYING_TEXCOORDS, emitVertex } from './arb-wgsl.js';
 import { CANONICAL_LAYOUT } from './gpu-layout.js';
 import {
-    LIGHTS, UNIFORM, clearDescriptor, clearKey, copyKey, drawDescriptor, drawKey, generateClear,
+    CLIP_PLANES, LIGHTS, UNIFORM, clearDescriptor, clearKey, copyKey, drawDescriptor, drawKey,
+    generateClear,
     sameKeyInputs,
     generateCopy, generateDraw, generateShow, lightingStateOf, showDescriptor, writeLighting,
 } from './wgsl.js';
@@ -282,8 +283,9 @@ test('the uniform block layout the shader declares is the one the renderer fills
     assert.equal(UNIFORM.lightModelAmbient, UNIFORM.misc + 4);
     assert.equal(UNIFORM.material, UNIFORM.lightModelAmbient + 4);
     assert.equal(UNIFORM.lights, UNIFORM.material + 5 * 4);
-    assert.equal(UNIFORM.floats, UNIFORM.lights + LIGHTS * 24,
+    assert.equal(UNIFORM.clipPlanes, UNIFORM.lights + LIGHTS * 24,
         'a light is six vectors: three colours, position, spot, attenuation');
+    assert.equal(UNIFORM.floats, UNIFORM.clipPlanes + CLIP_PLANES * 4);
     assert.equal(UNIFORM.floats % 4, 0);
 });
 
@@ -626,4 +628,20 @@ test('the lighting goes into the block where the shader reads it', ()=>{
     assert.ok(Math.abs(block[at + 20] - 0.5) < 1e-6, 'the cosine of a 60 degree cone');
     assert.deepEqual(Array.from(block.slice(at + 24 + 19, at + 24 + 21)), [0, -2],
         'no cone: no exponent, and a cosine no angle reaches');
+});
+
+test('user clip planes: distances the device clips by, or ones the fragment discards by', ()=>{
+    const byDevice = generateDraw(state({ clip: { count: 2, distances: true } })).code;
+    assert.match(byDevice, /^enable clip_distances;/);
+    assert.match(byDevice, /@builtin\(clip_distances\) clipDistances: array<f32, 2>/);
+    assert.match(byDevice, /out\.clipDistances\[1\] = dot\(eyePosition, uniforms\.clipPlanes\[1\]\);/);
+    assert.doesNotMatch(byDevice, /discard/);
+
+    const byFragment = generateDraw(state({ clip: { count: 5, distances: false } })).code;
+    assert.doesNotMatch(byFragment, /enable clip_distances/);
+    assert.match(byFragment, /out\.clipHigh = vec4f\(dot\(eyePosition, uniforms\.clipPlanes\[4\]\), 1\.0,/,
+        'a plane past the enabled ones never cuts');
+    assert.match(byFragment, /any\(input\.clipLow < vec4f\(0\.0\)\)/);
+    assert.notEqual(drawKey(state({ clip: { count: 5, distances: false } })), drawKey(state()));
+    assert.equal(sameKeyInputs(state({ clip: { count: 2, distances: true } }), state()), false);
 });

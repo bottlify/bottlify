@@ -1878,3 +1878,27 @@ test('the passes drawn inside one array lock read the locked range once', async(
     const indices = r.gpu.of('drawIndexed').reduce((sum, call)=>sum + call.args[0], 0);
     assert.equal(indices, 9, 'every pass drawn, joined or not');
 });
+
+test('a user clip plane reaches the uniform block, and the shader cuts by it', async()=>{
+    // The GPU path drew everything a plane should have cut away.
+    const r = rig();
+    const { context } = r;
+    context.glClipPlane(GL.CLIP_PLANE0, [1, 0, 0, -4]);
+    context.glEnable(GL.CLIP_PLANE0);
+    context.glBegin(GL.TRIANGLES);
+    context.glVertex2f(0, 0);
+    context.glVertex2f(8, 0);
+    context.glVertex2f(8, 8);
+    context.glEnd();
+    await r.swap();
+
+    const uniforms = uniformBlocks(r).filter(w=>/uniforms/.test(w.buffer.descriptor.label));
+    const block = new Float32Array(uniforms[uniforms.length - 2].bytes.buffer,
+        uniforms[uniforms.length - 2].bytes.byteOffset, UNIFORM.floats);
+    assert.deepEqual([...block.subarray(UNIFORM.clipPlanes, UNIFORM.clipPlanes + 4)],
+        [1, 0, 0, -4], 'the plane in eye space, the modelview being the identity');
+    const modules = r.gpu.of('createShaderModule').map((/** @type {any} */ call)=>
+        call.descriptor.code);
+    assert.ok(modules.some((/** @type {string} */ code)=>/clipLow/.test(code)
+        && /discard/.test(code)), 'a device without clip-distances discards what it cuts');
+});
