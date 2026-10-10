@@ -159,13 +159,11 @@ test('a normal ignores translation where a coordinate does not', ()=>{
 const NOT_BUILT = {
     D3DXAssembleShaderFromFileA: [6, 4, 5],
     D3DXCleanMesh: [6, 3, 5], D3DXComputeNormalMap: [6],
-    D3DXCreateBox: [6, 4, 5], D3DXCreateCubeTextureFromFileExA: [13, 12],
-    D3DXCreateCubeTextureFromFileInMemoryEx: [14, 13], D3DXCreateCylinder: [8, 6, 7],
+    D3DXCreateBox: [6, 4, 5], D3DXCreateCylinder: [8, 6, 7],
     D3DXCreateMesh: [6, 5],
     D3DXCreateMeshFVF: [6, 5], D3DXCreatePolygon: [5, 3, 4], D3DXCreateSphere: [6, 4, 5],
     D3DXCreateTeapot: [3, 1, 2], D3DXCreateTextA: [8, 5, 6],
-    D3DXCreateTextureFromFileExA: [14, 13],
-    D3DXCreateTorus: [7, 5, 6], D3DXFilterTexture: [4], D3DXGetImageInfoFromFileA: [2],
+    D3DXCreateTorus: [7, 5, 6], D3DXFilterTexture: [4],
     D3DXSaveSurfaceToFileInMemory: [5, 0],
     D3DXSimplifyMesh: [7, 6], D3DXUVAtlasPartition: [17, 11, 12, 13, 14], D3DXValidMesh: [3, 2],
 };
@@ -236,6 +234,21 @@ const BUILT = {
     D3DXCreateRenderToSurface: 7, D3DXCreateTexture: 8, D3DXFillTexture: 3,
     D3DXGetShaderVersion: 1, D3DXSaveTextureToFileA: 4, D3DXSaveTextureToFileW: 4,
     D3DXSaveTextureToFileInMemory: 4,
+    D3DXCreateTextureFromFileA: 3, D3DXCreateTextureFromFileW: 3,
+    D3DXCreateTextureFromFileExA: 14, D3DXCreateTextureFromFileExW: 14,
+    D3DXCreateTextureFromFileInMemory: 4, D3DXCreateTextureFromFileInMemoryEx: 15,
+    D3DXCreateTextureFromResourceA: 4, D3DXCreateTextureFromResourceW: 4,
+    D3DXCreateTextureFromResourceExA: 15, D3DXCreateTextureFromResourceExW: 15,
+    D3DXCreateCubeTextureFromFileA: 3, D3DXCreateCubeTextureFromFileW: 3,
+    D3DXCreateCubeTextureFromFileExA: 13, D3DXCreateCubeTextureFromFileExW: 13,
+    D3DXCreateCubeTextureFromFileInMemory: 4, D3DXCreateCubeTextureFromFileInMemoryEx: 14,
+    D3DXCreateCubeTextureFromResourceA: 4, D3DXCreateCubeTextureFromResourceW: 4,
+    D3DXCreateCubeTextureFromResourceExA: 14, D3DXCreateCubeTextureFromResourceExW: 14,
+    D3DXGetImageInfoFromFileA: 2, D3DXGetImageInfoFromFileW: 2,
+    D3DXGetImageInfoFromFileInMemory: 3, D3DXGetImageInfoFromResourceA: 3,
+    D3DXGetImageInfoFromResourceW: 3, D3DXLoadSurfaceFromFileA: 8, D3DXLoadSurfaceFromFileW: 8,
+    D3DXLoadSurfaceFromFileInMemory: 9, D3DXLoadSurfaceFromResourceA: 9,
+    D3DXLoadSurfaceFromResourceW: 9, D3DXLoadSurfaceFromSurface: 8, D3DXLoadSurfaceFromMemory: 10,
 };
 
 test('the device and mesh facilities are exported with the width they pop', ()=>{

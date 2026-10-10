@@ -24,7 +24,8 @@ const D3DPOOL_DEFAULT = 0;
 /** What each slot is called, by kind, for the record. */
 const NAMES = {
     device: { 1: 'AddRef', 2: 'Release', 7: 'GetDeviceCaps', 23: 'CreateTexture',
-        27: 'CreateIndexBuffer', 28: 'CreateRenderTarget', 29: 'CreateDepthStencilSurface',
+        25: 'CreateCubeTexture', 26: 'CreateVertexBuffer', 27: 'CreateIndexBuffer',
+        28: 'CreateRenderTarget', 29: 'CreateDepthStencilSurface',
         37: 'SetRenderTarget', 38: 'GetRenderTarget', 39: 'SetDepthStencilSurface',
         40: 'GetDepthStencilSurface', 41: 'BeginScene', 42: 'EndScene', 47: 'SetViewport',
         48: 'GetViewport', 57: 'SetRenderState', 59: 'CreateStateBlock', 65: 'SetTexture',
@@ -32,9 +33,12 @@ const NAMES = {
         89: 'SetFVF', 92: 'SetVertexShader', 107: 'SetPixelShader' },
     texture: { 1: 'AddRef', 2: 'Release', 3: 'GetDevice', 10: 'GetType', 13: 'GetLevelCount',
         17: 'GetLevelDesc', 18: 'GetSurfaceLevel', 19: 'LockRect', 20: 'UnlockRect' },
+    cube: { 1: 'AddRef', 2: 'Release', 3: 'GetDevice', 10: 'GetType', 13: 'GetLevelCount',
+        17: 'GetLevelDesc', 18: 'GetCubeMapSurface', 19: 'LockRect', 20: 'UnlockRect' },
     surface: { 1: 'AddRef', 2: 'Release', 3: 'GetDevice', 10: 'GetType', 12: 'GetDesc',
         13: 'LockRect', 14: 'UnlockRect' },
     indices: { 1: 'AddRef', 2: 'Release', 11: 'Lock', 12: 'Unlock', 13: 'GetDesc' },
+    vertices: { 1: 'AddRef', 2: 'Release', 11: 'Lock', 12: 'Unlock', 13: 'GetDesc' },
     block: { 1: 'AddRef', 2: 'Release', 5: 'Apply' },
     mesh: { 1: 'AddRef', 2: 'Release', 4: 'GetNumFaces', 5: 'GetNumVertices', 6: 'GetFVF',
         7: 'GetDeclaration', 8: 'GetNumBytesPerVertex', 9: 'GetOptions', 10: 'GetDevice',
@@ -111,6 +115,20 @@ export function deviceRig(options = {}){
             width: Math.max(1, width >> level), height: Math.max(1, height >> level), format,
             usage, pool }));
         return object({ kind: 'texture', width, height, usage, format, pool, surfaces });
+    };
+
+    /**
+     * A cube texture: six faces, +X to -Z, each a chain of surfaces.
+     *
+     * @param {number} edge @param {number} levels @param {number} usage
+     * @param {number} format @param {number} pool
+     */
+    const cubeTexture = (edge, levels, usage, format, pool)=>{
+        const count = levels === 0 ? Math.floor(Math.log2(Math.max(edge, 1))) + 1 : levels;
+        const faces = Array.from({ length: 6 }, ()=>Array.from({ length: count }, (_, level)=>
+            surface({ width: Math.max(1, edge >> level), height: Math.max(1, edge >> level),
+                format, usage, pool })));
+        return object({ kind: 'cube', width: edge, height: edge, usage, format, pool, faces });
     };
 
     const caps = { textureCaps: 0, maxWidth: 4096, maxHeight: 4096, ...options.caps };
@@ -200,6 +218,17 @@ export function deviceRig(options = {}){
                     put(out, texture(width, height, levels, usage, format, pool));
                     return 0;
                 }
+                case 25: {
+                    const [, edge, levels, usage, format, pool, out] = args;
+                    put(out, cubeTexture(edge, levels, usage, format, pool));
+                    return 0;
+                }
+                case 26: {
+                    const [, length, usage, fvf, pool, out] = args;
+                    put(out, object({ kind: 'vertices', length, usage, fvf, pool,
+                        data: heap.allocate(length), pitch: 0 }));
+                    return 0;
+                }
                 case 27: {
                     const [, length, usage, format, pool, out] = args;
                     put(out, object({ kind: 'indices', length, usage, format, pool,
@@ -278,6 +307,40 @@ export function deviceRig(options = {}){
                     return 0;
             }
         }
+        if (self.kind === 'cube')
+        {
+            const [, face, level] = args;
+            const at = (/** @type {number} */ f, /** @type {number} */ l)=>
+                self.faces[f]?.[l] ?? 0;
+            switch (slot)
+            {
+                case 3:
+                    put(args[1], addRef(device));
+                    return 0;
+                case 10:
+                    return 5;
+                case 13:
+                    return self.faces[0].length;
+                case 17:
+                    return args[1] >= self.faces[0].length ? 0x8876086c
+                        : surfaceDesc(args[2], objects.get(self.faces[0][args[1]]));
+                case 18:
+                    if (at(face, level) === 0)
+                    {
+                        return 0x8876086c;
+                    }
+                    put(args[3], addRef(at(face, level)));
+                    return 0;
+                case 19:
+                    return at(face, level) === 0 ? 0x8876086c
+                        : lock(args[3], objects.get(at(face, level)));
+                case 20:
+                    objects.get(at(face, level)).locked = false;
+                    return 0;
+                default:
+                    return 0;
+            }
+        }
         if (self.kind === 'surface')
         {
             switch (slot)
@@ -296,11 +359,19 @@ export function deviceRig(options = {}){
                     return 0;
             }
         }
-        if (self.kind === 'indices')
+        if (self.kind === 'indices' || self.kind === 'vertices')
         {
             if (slot === 11)
             {
-                put(args[3], self.data);
+                put(args[3], self.data + args[1]);
+            }
+            if (slot === 13)
+            {
+                // D3DINDEXBUFFER_DESC: Format, Type, Usage, Pool, Size; a vertex
+                // buffer's: Format, Type, Usage, Pool, Size, FVF.
+                putAll(args[1], self.kind === 'indices'
+                    ? [self.format, 7, self.usage, self.pool, self.length]
+                    : [100, 6, self.usage, self.pool, self.length, self.fvf]);
             }
             return 0;
         }
@@ -446,7 +517,7 @@ export function deviceRig(options = {}){
         view.getFloat32(at + i * 4, true));
 
     return { memory, view, heap, host, device, objects, calls, diverged, invoke, call,
-        texture, surface, mesh, object, putFloats, floats, live, guestFunction,
+        texture, cubeTexture, surface, mesh, object, putFloats, floats, live, guestFunction,
         get viewport(){
             return viewport;
         } };

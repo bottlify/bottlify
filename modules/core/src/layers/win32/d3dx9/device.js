@@ -18,7 +18,8 @@
 
 /** IDirect3DDevice9's slots, after IUnknown's three, in d3d9.h's order. */
 export const DEVICE = Object.freeze({
-    GetDeviceCaps: 7, CreateTexture: 23, CreateIndexBuffer: 27, CreateRenderTarget: 28,
+    GetDeviceCaps: 7, CreateTexture: 23, CreateCubeTexture: 25, CreateVertexBuffer: 26,
+    CreateIndexBuffer: 27, CreateRenderTarget: 28,
     CreateDepthStencilSurface: 29, UpdateTexture: 31, SetRenderTarget: 37, GetRenderTarget: 38,
     SetDepthStencilSurface: 39, GetDepthStencilSurface: 40, BeginScene: 41, EndScene: 42,
     SetTransform: 44, SetViewport: 47, GetViewport: 48, SetRenderState: 57,

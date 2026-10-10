@@ -8,6 +8,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { D3DX_DEFAULT, D3DX_FROM_FILE, createTextureLoader } from './texture.js';
 import { FMT } from './pixels.js';
+import { deviceRig } from './device.fixture.js';
+import { writeDds } from './save-texture.js';
 
 const D3DXERR_INVALIDDATA = 0x88760b59;
 
@@ -338,4 +340,185 @@ test('D3DXLoadSurfaceFromMemory reads the source rectangle of an image at its pi
 
     assert.equal(loader.loadSurfaceFromMemory([dest, 0, 0, image, FMT.X8R8G8B8, 16, 0, 0, 1, 0]),
         0x8876086c);
+});
+
+/**
+ * The loaders as functions.js exports them, on the device rig, with files and
+ * resources the test names.
+ *
+ * @param {{ files?: Record<string, number[] | Uint8Array>,
+ *     resources?: Record<string, number[] | Uint8Array> }} given
+ *     Resources by `type:name`.
+ */
+function exported(given){
+    const r = deviceRig();
+    /** @type {any[][]} */
+    const asked = [];
+    const loader = createTextureLoader({ ...r.host,
+        readFile: async path=>{
+            asked.push(['file', path]);
+            const bytes = given.files?.[path];
+            return bytes ? Uint8Array.from(bytes) : null;
+        },
+        resource: (module, name, type)=>{
+            asked.push(['resource', module, name, type]);
+            const bytes = given.resources?.[`${type}:${name}`];
+            return bytes ? Uint8Array.from(bytes) : null;
+        } });
+    /** @param {string} text @param {boolean} [wide] */
+    const string = (text, wide = false)=>{
+        const at = r.heap.allocate((text.length + 1) * 2);
+        [...text, '\0'].forEach((c, i)=>(wide ? r.view.setUint16(at + i * 2, c.charCodeAt(0), true)
+            : r.memory[at + i] = c.charCodeAt(0)));
+        return at;
+    };
+    /** @param {string} name @param {number[]} args */
+    const call = (name, args)=>r.call(/** @type {any} */ (loader.exports[name]), args);
+    /** A surface's texels, packed. @param {number} at */
+    const texels = at=>{
+        const surface = r.objects.get(at);
+        return [...r.memory.subarray(surface.data, surface.data + surface.pitch * surface.height)];
+    };
+    return { r, loader, asked, string, call, texels };
+}
+
+/** An A8R8G8B8 DDS file of one level, or a cube map of six such faces. @param {number[][]} faces */
+function dds(faces, edge = 2){
+    const file = writeDds(FMT.A8R8G8B8, [{ width: edge, height: edge,
+        bytes: Uint8Array.from(faces[0]) }]);
+    if (faces.length === 1)
+    {
+        return file;
+    }
+    const cube = new Uint8Array(file.length + faces.slice(1).flat().length);
+    cube.set(file);
+    cube.set(faces.slice(1).flat(), file.length);
+    new DataView(cube.buffer).setUint32(112, 0x200 | 0xfc00, true);
+    return cube;
+}
+
+/** A face of 2x2 texels, each B, G, R, A the face's number. @param {number} n */
+const face = n=>new Array(16).fill(n);
+
+test('D3DXCreateTextureFromFile reads the file the program names and makes a managed texture of'
+    + ' it; a file not there answers D3DXERR_INVALIDDATA, the texture null', async()=>{
+    const pixels = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+    const { r, asked, string, call, texels } = exported({ files: { 'art\\a.dds': dds([pixels]) } });
+    const out = r.heap.allocate(4);
+    assert.equal(await call('D3DXCreateTextureFromFileA', [r.device, string('art\\a.dds'), out]),
+        0);
+    const texture = r.objects.get(r.view.getUint32(out, true));
+    assert.deepEqual([texture.width, texture.height, texture.format, texture.pool,
+        texture.surfaces.length], [2, 2, FMT.A8R8G8B8, 1, 2], 'a full chain, managed');
+    assert.deepEqual(texels(texture.surfaces[0]), pixels);
+    assert.deepEqual(asked, [['file', 'art\\a.dds']]);
+
+    r.view.setUint32(out, 0xaaaaaaaa, true);
+    assert.equal(await call('D3DXCreateTextureFromFileW', [r.device, string('gone.dds', true),
+        out]), D3DXERR_INVALIDDATA);
+    assert.equal(r.view.getUint32(out, true), 0);
+    assert.deepEqual(asked.at(-1), ['file', 'gone.dds'], 'the wide name read as wide');
+    assert.equal(call('D3DXCreateTextureFromFileA', [r.device, 0, out]), 0x8876086c);
+});
+
+test('the Ex form makes what it is asked: size, levels, format, pool, and the image info',
+    async()=>{
+        const { r, string, call } = exported({ files: { 'a.dds': dds([face(9)]) } });
+        const out = r.heap.allocate(4);
+        const info = r.heap.allocate(28);
+        // Width, Height, MipLevels, Usage, Format, Pool, Filter, MipFilter, ColorKey, info,
+        // palette, out.
+        assert.equal(await call('D3DXCreateTextureFromFileExA', [r.device, string('a.dds'), 4, 4,
+            1, 0, FMT.X8R8G8B8, 2, D3DX_DEFAULT, D3DX_DEFAULT, 0, info, 0, out]), 0);
+        const texture = r.objects.get(r.view.getUint32(out, true));
+        assert.deepEqual([texture.width, texture.height, texture.format, texture.pool,
+            texture.surfaces.length], [4, 4, FMT.X8R8G8B8, 2, 1]);
+        assert.deepEqual(Array.from({ length: 7 }, (_, i)=>r.view.getUint32(info + i * 4, true)),
+            [2, 2, 1, 1, FMT.A8R8G8B8, 3, 4], 'the file: 2x2, one level, a texture, a DDS');
+    });
+
+test('D3DXCreateTextureFromResource looks in RT_RCDATA, then RT_BITMAP, whose DIB is read as the'
+    + ' bitmap file it would be', async()=>{
+    // A 1x1 24-bit DIB: BITMAPINFOHEADER, one row of B, G, R and a byte of padding.
+    const dib = new Array(40).fill(0);
+    [40, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 24, 0].forEach((v, i)=>(dib[i] = v));
+    const { r, asked, string, call, texels } = exported({ resources: {
+        '10:7': dds([face(5)]), '2:LOGO': [...dib, 30, 20, 10, 0] } });
+    const out = r.heap.allocate(4);
+    assert.equal(await call('D3DXCreateTextureFromResourceA', [r.device, 0x400000, 7, out]), 0);
+    assert.deepEqual(asked, [['resource', 0x400000, 7, 10]], 'an ordinal, RT_RCDATA');
+    assert.equal(await call('D3DXCreateTextureFromResourceW', [r.device, 0x400000,
+        string('LOGO', true), out]), 0);
+    assert.deepEqual(asked.slice(1), [['resource', 0x400000, 'LOGO', 10],
+        ['resource', 0x400000, 'LOGO', 2]]);
+    const texture = r.objects.get(r.view.getUint32(out, true));
+    assert.equal(texture.format, FMT.X8R8G8B8);
+    assert.deepEqual(texels(texture.surfaces[0]), [30, 20, 10, 255]);
+    assert.equal(await call('D3DXCreateTextureFromResourceA', [r.device, 0, 99, out]),
+        D3DXERR_INVALIDDATA);
+});
+
+test('a cube texture is made of a DDS cube map, face by face; a texture of it, or a cube of a'
+    + ' flat image, is refused', async()=>{
+    const faces = [0, 1, 2, 3, 4, 5].map(face);
+    const cube = dds(faces);
+    const flat = dds([face(7)]);
+    const { r, string, call, texels, loader } = exported({ files: { 'sky.dds': cube,
+        'flat.dds': flat } });
+    const out = r.heap.allocate(4);
+    assert.equal(await call('D3DXCreateCubeTextureFromFileA', [r.device, string('sky.dds'), out]),
+        0);
+    const made = r.objects.get(r.view.getUint32(out, true));
+    assert.equal(made.kind, 'cube');
+    assert.deepEqual([made.width, made.format, made.pool, made.faces[0].length],
+        [2, FMT.A8R8G8B8, 1, 2]);
+    made.faces.forEach((/** @type {number[]} */ levels, /** @type {number} */ n)=>{
+        assert.deepEqual(texels(levels[0]), faces[n], `face ${n}`);
+        assert.deepEqual(texels(levels[1]), [n, n, n, n], `face ${n}'s second level`);
+    });
+    assert.ok(r.calls.some(c=>c[0] === 'CreateCubeTexture' && c[1] === 2));
+
+    const data = r.heap.allocate(cube.length);
+    r.memory.set(cube, data);
+    const info = r.heap.allocate(28);
+    // Size, MipLevels, Usage, Format, Pool, Filter, MipFilter, ColorKey, info, palette, out.
+    assert.equal(await call('D3DXCreateCubeTextureFromFileInMemoryEx', [r.device, data,
+        cube.length, 4, 1, 0, 0, 1, D3DX_DEFAULT, D3DX_DEFAULT, 0, info, 0, out]), 0);
+    assert.equal(r.objects.get(r.view.getUint32(out, true)).width, 4);
+    assert.equal(r.view.getUint32(info + 20, true), 5, 'D3DRTYPE_CUBETEXTURE');
+    assert.equal(loader.imageInfo([data, cube.length, info]), 0);
+    assert.equal(r.view.getUint32(info + 20, true), 5);
+
+    assert.equal(await call('D3DXCreateCubeTextureFromFileA', [r.device, string('flat.dds'),
+        out]), D3DXERR_INVALIDDATA);
+    assert.equal(r.view.getUint32(out, true), 0);
+    assert.equal(await call('D3DXCreateTextureFromFileA', [r.device, string('sky.dds'), out]),
+        D3DXERR_INVALIDDATA);
+    assert.match(r.diverged.map(d=>d.join(': ')).join('\n'),
+        /D3DXCreateCubeTextureFromFileA: answered D3DXERR_INVALIDDATA: the file is not a cube/);
+});
+
+test('D3DXGetImageInfoFromFile describes the file it names; D3DXLoadSurfaceFromFileInMemory puts'
+    + ' a rectangle of an image into a surface', async()=>{
+    const pixels = [1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4];
+    const file = dds([pixels]);
+    const { r, string, call, texels } = exported({ files: { 'b.dds': file } });
+    const info = r.heap.allocate(28);
+    assert.equal(await call('D3DXGetImageInfoFromFileA', [string('b.dds'), info]), 0);
+    assert.deepEqual([r.view.getUint32(info, true), r.view.getUint32(info + 4, true)], [2, 2]);
+    assert.equal(await call('D3DXGetImageInfoFromFileW', [string('none', true), info]),
+        D3DXERR_INVALIDDATA);
+
+    const data = r.heap.allocate(file.length);
+    r.memory.set(file, data);
+    const dest = r.surface({ width: 1, height: 2, format: FMT.A8R8G8B8, usage: 0, pool: 1 });
+    const rect = r.heap.allocate(16);
+    [1, 0, 2, 2].forEach((v, i)=>r.view.setUint32(rect + i * 4, v, true));
+    assert.equal(await call('D3DXLoadSurfaceFromFileInMemory', [dest, 0, 0, data, file.length,
+        rect, 1, 0, info]), 0);
+    assert.deepEqual(texels(dest), [2, 2, 2, 2, 4, 4, 4, 4], 'the right-hand column');
+    const wide = r.surface({ width: 2, height: 1, format: FMT.A8R8G8B8, usage: 0, pool: 1 });
+    assert.equal(await call('D3DXLoadSurfaceFromFileA', [wide, 0, 0, string('b.dds'), 0, 1, 0,
+        0]), 0);
+    assert.deepEqual(texels(wide), [3, 3, 3, 3, 4, 4, 4, 4], 'the whole image, point sampled');
 });

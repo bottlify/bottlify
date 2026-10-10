@@ -40,7 +40,7 @@ import { createSprites } from './sprite.js';
 import { createLines } from './line.js';
 import { createRenderToSurface } from './render-to-surface.js';
 import { createEffects } from './effect.js';
-import { D3DX_DEFAULT, createTextureLoader } from './texture.js';
+import { createTextureLoader } from './texture.js';
 import { createTextureTools } from './texture-tools.js';
 import { createTextureSaver } from './save-texture.js';
 import { guestEntry } from '../msvcrt/guest-code.js';
@@ -107,8 +107,6 @@ const NOT_BUILT = {
     D3DXCleanMesh: [24, 3, 5],
     D3DXComputeNormalMap: [24],
     D3DXCreateBox: [24, 4, 5],
-    D3DXCreateCubeTextureFromFileExA: [52, 12],
-    D3DXCreateCubeTextureFromFileInMemoryEx: [56, 13],
     D3DXCreateCylinder: [32, 6, 7],
     D3DXCreateMesh: [24, 5],
     D3DXCreateMeshFVF: [24, 5],
@@ -116,10 +114,8 @@ const NOT_BUILT = {
     D3DXCreateSphere: [24, 4, 5],
     D3DXCreateTeapot: [12, 1, 2],
     D3DXCreateTextA: [32, 5, 6],
-    D3DXCreateTextureFromFileExA: [56, 13],
     D3DXCreateTorus: [28, 5, 6],
     D3DXFilterTexture: [16],
-    D3DXGetImageInfoFromFileA: [8],
     D3DXSaveSurfaceToFileA: [20],
     D3DXSaveSurfaceToFileInMemory: [20, 0],
     D3DXSimplifyMesh: [28, 6],
@@ -435,9 +431,7 @@ export function createD3dxFunctions(host, options = {}){
         }])),
 
         /** See texture.js. */
-        D3DXCreateTextureFromFileInMemoryEx: { argBytes: 60, handler: textures.fromMemory },
-        D3DXLoadSurfaceFromSurface: { argBytes: 32, handler: textures.loadSurface },
-        D3DXLoadSurfaceFromMemory: { argBytes: 40, handler: textures.loadSurfaceFromMemory },
+        ...textures.exports,
 
         /** HRESULT D3DXCreateSprite(LPDIRECT3DDEVICE9 pDevice, LPD3DXSPRITE *ppSprite) */
         D3DXCreateSprite: {
@@ -486,24 +480,6 @@ export function createD3dxFunctions(host, options = {}){
         /** The same, D3DXFONT_DESCW. */
         D3DXCreateFontIndirectW: { argBytes: 12, handler: (/** @type {number[]} */ args)=>
             createFontIndirect(args, true) },
-
-        /**
-         * HRESULT D3DXCreateTextureFromFileInMemory(LPDIRECT3DDEVICE9 pDevice, LPCVOID pSrcData,
-         *     UINT SrcDataSize, LPDIRECT3DTEXTURE9 *ppTexture)
-         *
-         * The Ex form with what the documentation says this one means: sizes and a full
-         * chain of levels from the file, its format, the managed pool, no colour key.
-         */
-        D3DXCreateTextureFromFileInMemory: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([device, data, size, out])=>textures.fromMemory([device, data, size,
-                D3DX_DEFAULT, D3DX_DEFAULT, D3DX_DEFAULT, 0, 0, 1, D3DX_DEFAULT, D3DX_DEFAULT, 0,
-                0, 0, out]),
-        },
-
-        /** See texture.js. */
-        D3DXGetImageInfoFromFileInMemory: { argBytes: 12, handler: textures.imageInfo },
 
         /**
          * HRESULT D3DXCreateBuffer(DWORD NumBytes, LPD3DXBUFFER *ppBuffer)
