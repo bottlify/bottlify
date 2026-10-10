@@ -607,6 +607,24 @@ test('a string array sized by its list has that many elements, each its string',
     assert.equal(await g.call(fx, 'GetParameterElement', names, 2), 0);
 });
 
+test('an annotation array sized by its list has that many elements', async()=>{
+    // Battlefield 2 sizes an allocation by a technique's `Declaration`
+    // annotation; an open length came out as -1 elements, a -4-byte block.
+    const g = guest();
+    const fx = await g.effect('float4 ps() : COLOR { return 1; }\n'
+        + 'technique t < int Declaration[] = { 0, 3, 1, 2 }; string list[] = {"a", "b"}; >\n'
+        + '{ pass p { PixelShader = compile ps_2_0 ps(); } }\n');
+    const technique = await g.call(fx, 'GetTechnique', 0);
+    const declaration = await g.call(fx, 'GetAnnotationByName', technique, g.put('Declaration'));
+    assert.ok(declaration);
+    assert.equal((await g.desc(fx, declaration)).elements, 4);
+    const ints = g.out(16);
+    assert.equal(await g.call(fx, 'GetIntArray', declaration, ints, 4), D3D_OK);
+    assert.deepEqual(g.ints(ints, 4), [0, 3, 1, 2]);
+    const list = await g.call(fx, 'GetAnnotationByName', technique, g.put('list'));
+    assert.equal((await g.desc(fx, list)).elements, 2);
+});
+
 test('the setters and getters convert as D3DX does, and refuse the wrong shape', async()=>{
     const g = guest();
     const fx = await g.effect(VALUES);
