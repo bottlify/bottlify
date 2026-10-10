@@ -275,7 +275,7 @@ test('a played object the program no longer counts is not held by the player', a
     kept.thing.addRef();
     owned.thing.addRef();
     play();
-    assert.deepEqual(alive.map(one=>one.deref().value), [2, 1], 'and calls still reach them');
+    assert.deepEqual(alive.map((/** @type {WeakRef<any>} */ one)=>one.deref().value), [2, 1], 'and calls still reach them');
 });
 
 test('one method called on many objects of a kind defines its structures\' shapes once', ()=>{
