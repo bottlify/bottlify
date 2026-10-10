@@ -5376,7 +5376,7 @@ export function createRenderer(options){
      * What `samplingOf` answers for a shader of model 2 or later whose
      * textures all sample as they are kept.
      */
-    const PLAIN_SAMPLING = Object.freeze({ key: '', pixelKey: '', ones: '' });
+    const PLAIN_SAMPLING = Object.freeze({ key: '', pixelKey: '' });
 
     /**
      * The channels the texture bound at each of a shader's samplers samples as
@@ -5420,10 +5420,10 @@ export function createRenderer(options){
      * D3DTTFF_PROJECTED divides each stage's coordinates by.
      *
      * @param {RenderModel} model @param {ProgramState} program
-     * @returns {{ key: string, pixelKey: string, ones: string, stageDimensions?: string[],
+     * @returns {{ key: string, pixelKey: string, stageDimensions?: string[],
      *     projectedBy?: string[], pixelOnes?: number[], vertexOnes?: number[] }}
-     *     `pixelKey` is the part of the key the pixel shader's translation
-     *     reads, `ones` the part the channels filled make, empty for none.
+     *     `key` is empty for a draw that reads nothing beyond its shaders, and
+     *     `pixelKey` the part of it the pixel shader's translation reads.
      */
     const samplingOf = (model, program)=>{
         const pixelOnes = onesAt(model, program.pixel, 0);
@@ -5438,7 +5438,7 @@ export function createRenderer(options){
         if (!version || version.major >= 2)
         {
             return ones === '' ? PLAIN_SAMPLING
-                : { key: ones, pixelKey: pixelPart, ones, ...filled };
+                : { key: ones, pixelKey: pixelPart, ...filled };
         }
         /** @type {string[]} */
         const stageDimensions = [];
@@ -5457,7 +5457,7 @@ export function createRenderer(options){
         const stages = `${stageDimensions.join(',')}|${projectedBy.join(',')}`;
         return {
             key: `${stages}${ones}`, pixelKey: `${stages}${pixelPart}`,
-            ones, stageDimensions, projectedBy, ...filled,
+            stageDimensions, projectedBy, ...filled,
         };
     };
 
@@ -5667,9 +5667,13 @@ export function createRenderer(options){
             pipelineIndex: 0,
             source: {
                 // The pipeline is cached by this and the state, neither of which
-                // names what is bound: the channels a translation fills are said.
+                // names what is bound: what the translations read of it -- a 1.x
+                // stage's dimension and projection, the channels a read fills --
+                // is said, as the translations are tagged by it, so one
+                // translation pair is one pipeline.
                 key: `${state.vertexShader}/${state.pixelShader}/${program.declarationId}`
-                    + `/${shapes}/${stride}${streamsKey(layout)}${sampling.ones}`,
+                    + `/${shapes}/${stride}${streamsKey(layout)}`
+                    + (sampling.key === '' ? '' : `|${sampling.key}`),
                 vertex, pixel, layout,
             },
         };

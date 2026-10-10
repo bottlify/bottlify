@@ -369,6 +369,64 @@ test('a ps_1_1 reads each stage as bound, projects as the stage asks, and bumps 
         assert.equal(h.device.release(), 0);
     });
 
+test('a ps_1_1 over a 2D texture and over a cube map draws through a pipeline for each',
+    async()=>{
+        // A 1.x read samples whatever dimension is bound at its stage, so the
+        // shader is translated once for each; the pipeline is the pair's, and
+        // one made for the 2D read cannot bind the cube map.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+        // tex t0; mov r0, t0
+        assert.equal(h.device.CreatePixelShader([versionToken(SHADER_KIND.PIXEL, 1, 1),
+            0x00000042, 0xb00f0000, 0x00000001, 0x800f0000, 0xb0e40000, END_TOKEN], ps),
+        D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetPixelShader(ps.shader);
+        /** @type {{ texture?: any }} */
+        const cube = {};
+        assert.equal(h.device.CreateCubeTexture(2, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, cube),
+            D3D_OK);
+        // Two frames of the same two draws: a frame asks for a draw's
+        // pipeline once, so the second frame is where one is served again.
+        for (let frame = 0; frame < 2; frame++)
+        {
+            assert.equal(h.device.BeginScene(), D3D_OK);
+            for (const texture of [h.texture, cube.texture])
+            {
+                h.device.SetTexture(0, texture);
+                assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+            }
+            assert.equal(h.device.EndScene(), D3D_OK);
+            assert.equal(h.device.Present(), D3D_OK);
+        }
+        await h.device.idle();
+        assert.deepEqual(h.reports, []);
+
+        assert.deepEqual(h.device.diagnostics().programs, { built: 2, reused: 2 },
+            'one pipeline for each dimension, each served again in the next frame');
+        const pixels = h.gpu.of('createShaderModule').map((/** @type {any} */ call)=>
+            call.descriptor).filter((/** @type {any} */ module)=>module.label.startsWith('ps:'));
+        assert.equal(pixels.length, 2);
+        assert.ok(pixels[0].code.includes('var tex0: texture_2d<f32>;'));
+        assert.ok(pixels[1].code.includes('var tex0: texture_cube<f32>;'));
+        const views = h.gpu.of('createBindGroupLayout').map((/** @type {any} */ call)=>
+            call.descriptor).filter((/** @type {any} */ one)=>
+            String(one.label).startsWith('samplers:'))
+            .map((/** @type {any} */ one)=>one.entries[0].texture.viewDimension ?? '2d');
+        assert.deepEqual(views, ['2d', 'cube'], 'each pipeline binds the view it samples');
+
+        h.device.SetTexture(0, null);
+        h.device.SetVertexShader(null);
+        h.device.SetPixelShader(null);
+        vs.shader.release();
+        ps.shader.release();
+        cube.texture.release();
+    });
+
 test('a vertex shader reads the texture at D3DVERTEXTEXTURESAMPLER0 through texldl', async()=>{
     const h = harness({ model: 3 });
     const output = (/** @type {number} */ usage, /** @type {number} */ register)=>[
