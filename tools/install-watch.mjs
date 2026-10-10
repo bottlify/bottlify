@@ -169,11 +169,15 @@ const besideSetup = ()=>readdirSync(dirname(file), { withFileTypes: true })
  * with the program it names started from there -- the autorun's, or the one
  * `--entry PATH` names on it.
  */
+/** What an install came from, for `--collect`: the setup, or the disc built for it. */
+/** @type {any} */
+let collectable = null;
 const discMedia = async()=>{
     const name = basename(file);
     const bytes = new Uint8Array(readFileSync(file));
     const read = /\.zip$/i.test(name) ? readZip : /\.rar$/i.test(name) ? readRar : null;
     const disc = read ? archiveDisc(name, await read(new Blob([bytes]))) : { name, disc: bytes };
+    collectable = disc;
     return discOptions(disc, argv.includes('--entry')
         ? { entry: argv[argv.indexOf('--entry') + 1] } : {});
 };
@@ -671,11 +675,12 @@ for (let at = argv.indexOf('--copy'); at >= 0; at = argv.indexOf('--copy', at + 
     }
 }
 const collectTo = argv.includes('--collect-to') ? argv[argv.indexOf('--collect-to') + 1] : null;
-if (media && (argv.includes('--collect') || collectTo))
+collectable ??= media;
+if (collectable && (argv.includes('--collect') || collectTo))
 {
     try
     {
-        const collected = collectFrom(app, media);
+        const collected = collectFrom(app, collectable);
         const bytes = collected.files.reduce((total, one)=>total + one.bytes.length, 0);
         console.log('COLLECT root', collected.root, 'entry', collected.entry,
             'files', collected.files.length, 'bytes', bytes, 'outside', collected.outside.length);
