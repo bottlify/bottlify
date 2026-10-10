@@ -157,7 +157,6 @@ test('a normal ignores translation where a coordinate does not', ()=>{
  * would have made.
  */
 const NOT_BUILT = {
-    D3DXAssembleShaderFromFileA: [6, 4, 5],
     D3DXCleanMesh: [6, 3, 5], D3DXComputeNormalMap: [6],
     D3DXCreateBox: [6, 4, 5], D3DXCreateCylinder: [8, 6, 7],
     D3DXCreateMesh: [6, 5],
@@ -233,6 +232,12 @@ const BUILT = {
     D3DXCreateRenderToSurface: 7, D3DXCreateTexture: 8, D3DXFillTexture: 3,
     D3DXFilterTexture: 4, D3DXSaveSurfaceToFileA: 5, D3DXSaveSurfaceToFileW: 5,
     D3DXSaveSurfaceToFileInMemory: 5,
+    D3DXAssembleShader: 7, D3DXAssembleShaderFromFileA: 6, D3DXAssembleShaderFromFileW: 6,
+    D3DXAssembleShaderFromResourceA: 7, D3DXAssembleShaderFromResourceW: 7,
+    D3DXCompileShader: 10, D3DXCompileShaderFromFileA: 9, D3DXCompileShaderFromFileW: 9,
+    D3DXCompileShaderFromResourceA: 10, D3DXCompileShaderFromResourceW: 10,
+    D3DXPreprocessShader: 6, D3DXPreprocessShaderFromFileA: 5, D3DXPreprocessShaderFromFileW: 5,
+    D3DXPreprocessShaderFromResourceA: 6, D3DXPreprocessShaderFromResourceW: 6,
     D3DXGetShaderVersion: 1, D3DXSaveTextureToFileA: 4, D3DXSaveTextureToFileW: 4,
     D3DXSaveTextureToFileInMemory: 4,
     D3DXCreateTextureFromFileA: 3, D3DXCreateTextureFromFileW: 3,

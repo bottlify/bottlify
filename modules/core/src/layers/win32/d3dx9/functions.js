@@ -64,6 +64,7 @@ const E_NOTIMPL = 0x80004001;
 const E_OUTOFMEMORY = 0x8007000e;
 const E_FAIL = 0x80004005;
 const D3DERR_INVALIDCALL = 0x8876086c;
+const D3DXERR_INVALIDDATA = 0x88760b59;
 const IID_ID3DXBUFFER = '{8BA5FB08-5195-40E2-AC58-0D989C3A0102}';
 
 /**
@@ -75,7 +76,6 @@ const IID_ID3DXBUFFER = '{8BA5FB08-5195-40E2-AC58-0D989C3A0102}';
  * @type {Record<string, number[]>}
  */
 const NOT_BUILT = {
-    D3DXAssembleShaderFromFileA: [24, 4, 5],
     D3DXCleanMesh: [24, 3, 5],
     D3DXComputeNormalMap: [24],
     D3DXCreateBox: [24, 4, 5],
@@ -348,12 +348,363 @@ export function createD3dxFunctions(host, options = {}){
      * it included: a program that asks for the same compile again -- every frame, as some do
      * after a refusal -- is given the same answer once its includes are found the same.
      *
-     * @type {Map<string, { included: { name: string, system: boolean, text: string }[],
+     * @type {Map<string, { included: { name: string, system: boolean, parent: string,
+     *     text: string }[],
      *     result: Awaited<ReturnType<typeof compileShader>> }>}
      */
     const compiles = new Map();
     /** The most compiles kept; the oldest goes first. */
     const COMPILES_KEPT = 512;
+
+    /** A wide string, at most 1023 characters. @param {number} address */
+    const wideAt = address=>{
+        const units = new Uint16Array(host.readMemory(address >>> 0, 2048).slice().buffer);
+        const end = units.indexOf(0);
+        return String.fromCharCode(...units.subarray(0, end < 0 ? units.length : end));
+    };
+
+    /** @typedef {NonNullable<import('./preprocess.js').PreprocessOptions['include']>} Include */
+
+    /**
+     * A file's text, through the host, or null.
+     *
+     * @param {string} api @param {string} path
+     * @returns {Promise<string | null>}
+     */
+    const fileText = async(api, path)=>{
+        if (!host.readFile)
+        {
+            host.divergence?.(api, `no file reader is given to this layer: ${path}`);
+            return null;
+        }
+        const bytes = await host.readFile(path);
+        return bytes ? latin1(bytes) : null;
+    };
+
+    /**
+     * D3DX's own includer for a source read from a file with no ID3DXInclude:
+     * each file named relative to the directory of the one that includes it,
+     * the first one's for the source itself.
+     *
+     * @param {string} api @param {string} path
+     * @returns {Include}
+     */
+    const besides = (api, path)=>{
+        /** @param {string} file */
+        const folder = file=>file.slice(0, Math.max(file.lastIndexOf('\\'),
+            file.lastIndexOf('/')) + 1);
+        /** Where each file opened was found, by the name it was included by. */
+        const found = new Map();
+        return async(name, system, parent)=>{
+            const target = /^([A-Za-z]:)?[\\/]/.test(name) ? name
+                : folder(found.get(parent) ?? path) + name;
+            const text = await fileText(api, target);
+            if (text !== null)
+            {
+                found.set(name, target);
+            }
+            return text;
+        };
+    };
+
+    /**
+     * A shader's source as a function names it: its text, once read, and what
+     * opens its #includes -- the program's ID3DXInclude when it gives one,
+     * and for a file with none, the files beside it, as the documentation
+     * says D3DX honours them there and nowhere else.
+     *
+     * @typedef {{ text: string | null | Promise<string | null>, include: Include | undefined }}
+     *     ShaderSource
+     */
+    const shaderSources = {
+        /** @param {number} data @param {number} size @param {number} include */
+        memory: (data, size, include)=>/** @type {ShaderSource} */ ({
+            text: latin1(host.readMemory(data >>> 0, size >>> 0)),
+            include: (include >>> 0) === 0 ? undefined : includer(include >>> 0) }),
+        /**
+         * @param {string} api @param {number} file @param {boolean} wide @param {number} include
+         * @returns {ShaderSource}
+         */
+        file: (api, file, wide, include)=>{
+            const path = wide ? wideAt(file) : latin1(cString(file));
+            return { text: fileText(api, path),
+                include: (include >>> 0) === 0 ? besides(api, path) : includer(include >>> 0) };
+        },
+        /**
+         * RT_RCDATA, where D3DX looks a shader up.
+         *
+         * @param {string} api @param {number} module @param {number} name @param {boolean} wide
+         * @param {number} include
+         * @returns {ShaderSource}
+         */
+        resource: (api, module, name, wide, include)=>{
+            const key = (name >>> 0) < 0x10000 ? name >>> 0
+                : wide ? wideAt(name) : latin1(cString(name));
+            const read = async()=>{
+                if (!host.resource)
+                {
+                    host.divergence?.(api, `no resource reader is given to this layer: ${key}`);
+                    return null;
+                }
+                const bytes = await host.resource(module >>> 0, key, 10);
+                return bytes ? latin1(bytes) : null;
+            };
+            return { text: read(),
+                include: (include >>> 0) === 0 ? undefined : includer(include >>> 0) };
+        },
+    };
+
+    /**
+     * A shader function in the three forms D3DX has it: the source in memory
+     * (pSrcData and SrcDataSize first), FromFile (a path) and FromResource (a
+     * module and a name), A and W. After the source each takes the arguments
+     * the in-memory form takes after its size.
+     *
+     * @param {string} name  The in-memory form's.
+     * @param {number} argBytes  The in-memory form's; FromFile's is four fewer.
+     * @param {(api: string, rest: number[], source: (include: number) => ShaderSource,
+     *     given: boolean) => number | Promise<number>} run
+     *     `given` false where the call names no source at all.
+     * @returns {Record<string, { argBytes: number, handler: (args: number[]) => any }>}
+     */
+    const shaderForms = (name, argBytes, run)=>Object.fromEntries([
+        [name, { argBytes, handler: (/** @type {number[]} */ [data, size, ...rest])=>
+            run(name, rest, include=>shaderSources.memory(data, size, include),
+                (data >>> 0) !== 0) }],
+        ...['A', 'W'].flatMap(suffix=>{
+            const wide = suffix === 'W';
+            const fromFile = `${name}FromFile${suffix}`;
+            const fromResource = `${name}FromResource${suffix}`;
+            return [
+                [fromFile, { argBytes: argBytes - 4, handler: (/** @type {number[]} */ [file,
+                    ...rest])=>run(fromFile, rest, include=>shaderSources.file(fromFile, file,
+                    wide, include), (file >>> 0) !== 0) }],
+                [fromResource, { argBytes, handler: (/** @type {number[]} */ [module, resource,
+                    ...rest])=>run(fromResource, rest, include=>shaderSources.resource(
+                    fromResource, module, resource, wide, include), true) }],
+            ];
+        }),
+    ]);
+
+    /** Clears each out-pointer that is not null. @param {number[]} outs */
+    const clearOuts = outs=>{
+        for (const out of outs)
+        {
+            if ((out >>> 0) !== 0)
+            {
+                host.writeMemory(out >>> 0, new Uint8Array(4));
+            }
+        }
+    };
+
+    /**
+     * D3DXPreprocessShader's work: the source run through the preprocessor
+     * (`preprocess.js`), with the program's macros and includes, handed back
+     * as a buffer of text ended by a NUL; a directive that fails answers E_FAIL
+     * with its message in the error buffer.
+     *
+     * @param {ShaderSource} source @param {[string, string][]} macros
+     * @param {number} textOut @param {number} errorsOut
+     * @returns {Promise<number>}
+     */
+    const preprocessWork = async(source, macros, textOut, errorsOut)=>{
+        const text = await source.text;
+        if (text === null)
+        {
+            return D3DXERR_INVALIDDATA;
+        }
+        const result = await preprocess(text, { defines: macros, include: source.include });
+        if ('error' in result)
+        {
+            if ((errorsOut >>> 0) !== 0)
+            {
+                giveBuffer(errorsOut, encode(`${result.error}\n`));
+            }
+            return E_FAIL;
+        }
+        return (textOut >>> 0) === 0 ? 0 : giveBuffer(textOut, encode(result.text));
+    };
+
+    /**
+     * D3DXCompileShader's work: the HLSL compiler (`hlsl-compile.js`) from the
+     * source through the preprocessor to the bytecode of the entry point for
+     * the profile, and its constant table. What was found wrong -- and any
+     * warning, for a compile that went through -- is text in the error
+     * buffer, `file(line,col): error Xnnnn: ...` as fxc prints it; a compile
+     * with errors answers E_FAIL and leaves the shader and the table null.
+     *
+     * @param {string} api @param {ShaderSource} source @param {[string, string][]} macros
+     * @param {{ entry: string, profile: string, flags: number }} target
+     * @param {number} shaderOut @param {number} errorsOut @param {number} tableOut
+     * @returns {Promise<number>}
+     */
+    const compileWork = async(api, source, macros, target, shaderOut, errorsOut, tableOut)=>{
+        const text = await source.text;
+        if (text === null)
+        {
+            return D3DXERR_INVALIDDATA;
+        }
+        const { entry: entryName, profile, flags } = target;
+        /** What the includes handed over, by name, for the record. */
+        /** @type {Record<string, string>} */
+        const included = {};
+        /** @type {{ name: string, system: boolean, parent: string, text: string }[]} */
+        const opened = [];
+        const opener = source.include;
+        /** @param {string} name @param {boolean} system @param {string} parent */
+        const recorded = async(name, system, parent)=>{
+            const file = await /** @type {Include} */ (opener)(name, system, parent);
+            if (file !== null)
+            {
+                included[name] = file;
+                opened.push({ name, system, parent, text: file });
+            }
+            return file;
+        };
+        const key = JSON.stringify([text, entryName, profile, flags, macros, opener !== undefined]);
+        /** The answer of an earlier compile, if its includes are still the same. */
+        const earlier = async()=>{
+            const known = compiles.get(key);
+            if (!known)
+            {
+                return null;
+            }
+            for (const file of known.included)
+            {
+                if (await recorded(file.name, file.system, file.parent) !== file.text)
+                {
+                    return null;
+                }
+            }
+            return known.result;
+        };
+        let result = await earlier();
+        if (!result)
+        {
+            Object.keys(included).forEach(name=>delete included[name]);
+            opened.length = 0;
+            result = await compileShader(text, { entry: entryName, profile, flags,
+                defines: macros, include: opener && recorded });
+            compiles.delete(key);
+            compiles.set(key, { included: opened.slice(), result });
+            if (compiles.size > COMPILES_KEPT)
+            {
+                compiles.delete(/** @type {string} */ (compiles.keys().next().value));
+            }
+        }
+        host.shaderCompiled?.({ api, profile, entry: entryName, defines: macros, flags,
+            source: text, included, messages: result.messages, tokens: result.tokens });
+        if ((errorsOut >>> 0) !== 0 && result.messages !== '')
+        {
+            giveBuffer(errorsOut, encode(result.messages));
+        }
+        if (!result.ok || !result.tokens)
+        {
+            // The line it points at, so a report says what the program
+            // wrote and not only where.
+            const lines = result.messages.split('\n');
+            const first = lines.find(line=>/ error /.test(line)) ?? lines[0];
+            const at = /^memory\((\d+),/.exec(first);
+            const line = at ? text.split('\n')[Number(at[1]) - 1]?.trim() : undefined;
+            host.divergence?.(api, `refused: ${first}${line ? ` -- ${line}` : ''}`);
+            return E_FAIL;
+        }
+        const bytes = new Uint8Array(result.tokens.buffer, result.tokens.byteOffset,
+            result.tokens.byteLength);
+        const answer = giveBuffer(shaderOut, bytes);
+        if (answer !== 0 || (tableOut >>> 0) === 0 || !result.constantTable)
+        {
+            return answer;
+        }
+        return constantTables.publish(result.constantTable, result.tokens[0], tableOut);
+    };
+
+    /**
+     * D3DXAssembleShader's work: shader assembly (`shader-asm.js`) to
+     * bytecode, after the preprocessor has had the program's macros and
+     * includes. A line that does not assemble is `file(line): error: text` in
+     * the error buffer, the line being the one of the file it came from; any
+     * such line answers E_FAIL with no shader.
+     *
+     * @param {string} api @param {ShaderSource} source @param {[string, string][]} macros
+     * @param {number} shaderOut @param {number} errorsOut
+     * @returns {Promise<number>}
+     */
+    const assembleWork = async(api, source, macros, shaderOut, errorsOut)=>{
+        const text = await source.text;
+        if (text === null)
+        {
+            return D3DXERR_INVALIDDATA;
+        }
+        const expanded = await preprocessTracked(text, { defines: macros,
+            include: source.include });
+        /** @type {string[]} */
+        const messages = [];
+        let tokens = null;
+        if ('error' in expanded)
+        {
+            messages.push(`${expanded.error}\n`);
+        }
+        else
+        {
+            const result = assembleShader(expanded.text);
+            tokens = result.tokens;
+            for (const { line, message } of result.errors)
+            {
+                const origin = expanded.origins[line - 1];
+                messages.push(`${origin?.file ?? 'memory'}(${origin?.line ?? line}`
+                    + `): error: ${message}\n`);
+            }
+        }
+        if (messages.length > 0 && (errorsOut >>> 0) !== 0)
+        {
+            giveBuffer(errorsOut, encode(messages.join('')));
+        }
+        if (messages.length > 0 || !tokens)
+        {
+            host.divergence?.(api, `refused: ${messages[0]?.trim()}`);
+            return E_FAIL;
+        }
+        return giveBuffer(shaderOut, new Uint8Array(tokens.buffer, tokens.byteOffset,
+            tokens.byteLength));
+    };
+
+    /** @typedef {Parameters<typeof shaderForms>[2]} ShaderRun */
+
+    /** @type {ShaderRun} */
+    const preprocessRun = (api, [defines, include, textOut, errorsOut], source, given)=>{
+        clearOuts([textOut, errorsOut]);
+        if (!given || !host.heap || !host.vtables)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        return preprocessWork(source(include), macrosAt(defines), textOut, errorsOut);
+    };
+
+    /** @type {ShaderRun} */
+    const compileRun = (api, rest, source, given)=>{
+        const [defines, include, entry, profile, flags, shaderOut, errorsOut, tableOut] = rest;
+        clearOuts([shaderOut, errorsOut, tableOut]);
+        if (!given || (profile >>> 0) === 0 || (shaderOut >>> 0) === 0 || !host.heap
+            || !host.vtables)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        return compileWork(api, source(include), macrosAt(defines), {
+            entry: (entry >>> 0) === 0 ? 'main' : latin1(cString(entry)),
+            profile: latin1(cString(profile)), flags: flags >>> 0 },
+        shaderOut, errorsOut, tableOut);
+    };
+
+    /** @type {ShaderRun} */
+    const assembleRun = (api, [defines, include, , shaderOut, errorsOut], source, given)=>{
+        clearOuts([shaderOut, errorsOut]);
+        if (!given || (shaderOut >>> 0) === 0 || !host.heap || !host.vtables)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        return assembleWork(api, source(include), macrosAt(defines), shaderOut, errorsOut);
+    };
 
     return {
         ...Object.fromEntries(IN_GUEST.flatMap(([source, compiled])=>Object.keys(compiled)
@@ -473,42 +824,9 @@ export function createD3dxFunctions(host, options = {}){
          *     const D3DXMACRO *pDefines, LPD3DXINCLUDE pInclude,
          *     LPD3DXBUFFER *ppShaderText, LPD3DXBUFFER *ppErrorMsgs)
          *
-         * The source run through the preprocessor (`preprocess.js`), with the
-         * program's macros and its ID3DXInclude for every #include, handed
-         * back as a buffer of text ended by a NUL; a directive that fails
-         * answers E_FAIL with its message in the error buffer.
+         * And its FromFile and FromResource forms. See preprocessWork.
          */
-        D3DXPreprocessShader: {
-            argBytes: 24,
-            /** @param {number[]} args */
-            handler: ([source, size, defines, include, textOut, errorsOut])=>{
-                for (const out of [textOut, errorsOut])
-                {
-                    if ((out >>> 0) !== 0)
-                    {
-                        host.writeMemory(out >>> 0, new Uint8Array(4));
-                    }
-                }
-                if ((source >>> 0) === 0 || !host.heap || !host.vtables)
-                {
-                    return D3DERR_INVALIDCALL;
-                }
-                const text = latin1(host.readMemory(source >>> 0, size >>> 0));
-                return preprocess(text, { defines: macrosAt(defines),
-                    include: (include >>> 0) === 0 ? undefined : includer(include >>> 0) })
-                    .then(result=>{
-                        if ('error' in result)
-                        {
-                            if ((errorsOut >>> 0) !== 0)
-                            {
-                                giveBuffer(errorsOut, encode(`${result.error}\n`));
-                            }
-                            return E_FAIL;
-                        }
-                        return (textOut >>> 0) === 0 ? 0 : giveBuffer(textOut, encode(result.text));
-                    });
-            },
-        },
+        ...shaderForms('D3DXPreprocessShader', 24, preprocessRun),
 
         /**
          * HRESULT D3DXCompileShader(LPCSTR pSrcData, UINT SrcDataLen, const D3DXMACRO*,
@@ -516,187 +834,18 @@ export function createD3dxFunctions(host, options = {}){
          *     LPD3DXBUFFER *ppShader, LPD3DXBUFFER *ppErrorMsgs,
          *     LPD3DXCONSTANTTABLE *ppConstantTable)
          *
-         * The HLSL compiler (`hlsl-compile.js`): the source through the
-         * preprocessor with the program's macros and its ID3DXInclude, to the
-         * bytecode of the entry point for the profile, and its constant table.
-         * What was found wrong -- and any warning, for a compile that went
-         * through -- is text in the error buffer, `file(line,col): error
-         * Xnnnn: ...` as fxc prints it; a compile with errors answers E_FAIL
-         * and leaves the shader and the table null.
+         * And its FromFile and FromResource forms. See compileWork.
          */
-        D3DXCompileShader: {
-            argBytes: 40,
-            /** @param {number[]} args */
-            handler: ([source, size, defines, include, entry, profile, flags, shaderOut,
-                errorsOut, tableOut])=>{
-                for (const out of [shaderOut, errorsOut, tableOut])
-                {
-                    if ((out >>> 0) !== 0)
-                    {
-                        host.writeMemory(out >>> 0, new Uint8Array(4));
-                    }
-                }
-                if ((source >>> 0) === 0 || (profile >>> 0) === 0 || (shaderOut >>> 0) === 0
-                    || !host.heap || !host.vtables)
-                {
-                    return D3DERR_INVALIDCALL;
-                }
-                const text = latin1(host.readMemory(source >>> 0, size >>> 0));
-                const macros = macrosAt(defines);
-                /** What the program's ID3DXInclude handed over, by name, for the record. */
-                /** @type {Record<string, string>} */
-                const included = {};
-                /** @type {{ name: string, system: boolean, text: string }[]} */
-                const opened = [];
-                const opener = (include >>> 0) === 0 ? undefined : includer(include >>> 0);
-                /** @param {string} name @param {boolean} system */
-                const recorded = async(name, system)=>{
-                    const file = await /** @type {NonNullable<typeof opener>} */ (opener)(name,
-                        system);
-                    if (file !== null)
-                    {
-                        included[name] = file;
-                        opened.push({ name, system, text: file });
-                    }
-                    return file;
-                };
-                const entryName = (entry >>> 0) === 0 ? 'main' : latin1(cString(entry));
-                const key = JSON.stringify([text, entryName, latin1(cString(profile)),
-                    flags >>> 0, macros, (include >>> 0) !== 0]);
-                /** The answer of an earlier compile, if its includes are still the same. */
-                const earlier = async()=>{
-                    const known = compiles.get(key);
-                    if (!known)
-                    {
-                        return null;
-                    }
-                    for (const file of known.included)
-                    {
-                        if (await recorded(file.name, file.system) !== file.text)
-                        {
-                            return null;
-                        }
-                    }
-                    return known.result;
-                };
-                return earlier().then(async known=>{
-                    if (known)
-                    {
-                        return known;
-                    }
-                    Object.keys(included).forEach(name=>delete included[name]);
-                    opened.length = 0;
-                    const result = await compileShader(text, {
-                        entry: entryName,
-                        profile: latin1(cString(profile)),
-                        flags: flags >>> 0,
-                        defines: macros,
-                        include: opener && recorded,
-                    });
-                    compiles.delete(key);
-                    compiles.set(key, { included: opened.slice(), result });
-                    if (compiles.size > COMPILES_KEPT)
-                    {
-                        compiles.delete(/** @type {string} */ (compiles.keys().next().value));
-                    }
-                    return result;
-                }).then(result=>{
-                    host.shaderCompiled?.({ api: 'D3DXCompileShader',
-                        profile: latin1(cString(profile)),
-                        entry: entryName,
-                        defines: macros, flags: flags >>> 0, source: text, included,
-                        messages: result.messages, tokens: result.tokens });
-                    if ((errorsOut >>> 0) !== 0 && result.messages !== '')
-                    {
-                        giveBuffer(errorsOut, encode(result.messages));
-                    }
-                    if (!result.ok || !result.tokens)
-                    {
-                        // The line it points at, so a report says what the program
-                        // wrote and not only where.
-                        const lines = result.messages.split('\n');
-                        const first = lines.find(line=>/ error /.test(line)) ?? lines[0];
-                        const at = /^memory\((\d+),/.exec(first);
-                        const line = at ? text.split('\n')[Number(at[1]) - 1]?.trim() : undefined;
-                        host.divergence?.('D3DXCompileShader', `refused: ${first}${
-                            line ? ` -- ${line}` : ''}`);
-                        return E_FAIL;
-                    }
-                    const bytes = new Uint8Array(result.tokens.buffer, result.tokens.byteOffset,
-                        result.tokens.byteLength);
-                    const answer = giveBuffer(shaderOut, bytes);
-                    if (answer !== 0 || (tableOut >>> 0) === 0 || !result.constantTable)
-                    {
-                        return answer;
-                    }
-                    return constantTables.publish(result.constantTable, result.tokens[0], tableOut);
-                });
-            },
-        },
+        ...shaderForms('D3DXCompileShader', 40, compileRun),
 
         /**
          * HRESULT D3DXAssembleShader(LPCSTR pSrcData, UINT SrcDataLen,
          *     const D3DXMACRO *pDefines, LPD3DXINCLUDE pInclude, DWORD Flags,
          *     LPD3DXBUFFER *ppShader, LPD3DXBUFFER *ppErrorMsgs)
          *
-         * Shader assembly (`shader-asm.js`) to bytecode, after the preprocessor
-         * has had the program's macros and includes. A line that does not assemble
-         * is `file(line): error: text` in the error buffer, the line being the one
-         * of the file it came from; any such line answers E_FAIL with no shader.
+         * And its FromFile and FromResource forms. See assembleWork.
          */
-        D3DXAssembleShader: {
-            argBytes: 28,
-            /** @param {number[]} args */
-            handler: ([source, size, defines, include, , shaderOut, errorsOut])=>{
-                for (const out of [shaderOut, errorsOut])
-                {
-                    if ((out >>> 0) !== 0)
-                    {
-                        host.writeMemory(out >>> 0, new Uint8Array(4));
-                    }
-                }
-                if ((source >>> 0) === 0 || (shaderOut >>> 0) === 0 || !host.heap
-                    || !host.vtables)
-                {
-                    return D3DERR_INVALIDCALL;
-                }
-                const text = latin1(host.readMemory(source >>> 0, size >>> 0));
-                return preprocessTracked(text, { defines: macrosAt(defines),
-                    include: (include >>> 0) === 0 ? undefined : includer(include >>> 0) })
-                    .then(expanded=>{
-                        /** @type {string[]} */
-                        const messages = [];
-                        let tokens = null;
-                        if ('error' in expanded)
-                        {
-                            messages.push(`${expanded.error}\n`);
-                        }
-                        else
-                        {
-                            const result = assembleShader(expanded.text);
-                            tokens = result.tokens;
-                            for (const { line, message } of result.errors)
-                            {
-                                const origin = expanded.origins[line - 1];
-                                messages.push(`${origin?.file ?? 'memory'}(${origin?.line ?? line}`
-                                    + `): error: ${message}\n`);
-                            }
-                        }
-                        if (messages.length > 0 && (errorsOut >>> 0) !== 0)
-                        {
-                            giveBuffer(errorsOut, encode(messages.join('')));
-                        }
-                        if (messages.length > 0 || !tokens)
-                        {
-                            host.divergence?.('D3DXAssembleShader', `refused: ${
-                                messages[0]?.trim()}`);
-                            return E_FAIL;
-                        }
-                        return giveBuffer(shaderOut, new Uint8Array(tokens.buffer,
-                            tokens.byteOffset, tokens.byteLength));
-                    });
-            },
-        },
+        ...shaderForms('D3DXAssembleShader', 28, assembleRun),
 
         /**
          * HRESULT D3DXDisassembleShader(const DWORD *pShader, BOOL EnableColorCode,
