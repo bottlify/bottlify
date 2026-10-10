@@ -643,6 +643,28 @@ test('FormatMessageA expands inserts from the arguments it is handed', ()=>{
     assert.equal(String.fromCharCode(...host.bytes.slice(0x300, 0x30b)), 'Forward = W');
 });
 
+test('FormatMessageA reads two-digit inserts and printf widths and precisions', ()=>{
+    // A crash report's format: "%10" is the tenth argument, not the first
+    // followed by a zero, and ".8X" is eight hexadecimal digits. Read as "%1"
+    // and a string, the exception code is taken for a pointer, the call faults
+    // and answers 0, and the report's box comes up empty.
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+    const format = 'C=%1!.8X! J=%10!.8X! S=[%2!-4s!] D=%3!05d! P=%4!.2s!';
+    host.writeMemory(0x200, Uint8Array.from([...format, ' '].map(c=>c.charCodeAt(0))));
+    host.writeMemory(0x240, Uint8Array.from([...'ab', ' '].map(c=>c.charCodeAt(0))));
+    host.writeMemory(0x250, Uint8Array.from([...'xyz', ' '].map(c=>c.charCodeAt(0))));
+    // FORMAT_MESSAGE_ARGUMENT_ARRAY: the pointer is the array itself.
+    host.writeMemory(0x280, new Uint8Array(Uint32Array.from(
+        [0xc0000005, 0x240, -42, 0x250, 0, 0, 0, 0, 0, 0xff]).buffer));
+
+    const expected = 'C=C0000005 J=000000FF S=[ab  ] D=-0042 P=xy';
+    assert.equal(fns.FormatMessageA.handler([0x2400, 0x200, 0, 0, 0x300, 0x80, 0x280]),
+        expected.length);
+    assert.equal(String.fromCharCode(...host.bytes.slice(0x300, 0x300 + expected.length)),
+        expected);
+});
+
 test('FormatMessageA formats the numeric inserts a resolution is named with', ()=>{
     // "%1!d!x%2!d!x%3!d!" is the format cshell paints a display mode with; a
     // handler that reads every insert as a string pointer finds a stack

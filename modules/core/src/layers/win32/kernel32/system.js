@@ -428,10 +428,66 @@ export function createSystemFunctions(host){
      * width is the caller's: FormatMessageW reads a bare `s` as wide and `S`
      * as narrow.
      *
+     * Ahead of the conversion stand printf's flags, width and precision --
+     * `%1!.8X!` is eight hexadecimal digits, `%2!-10s!` a string padded on the
+     * right -- and they shape the text as printf would.
+     *
      * @param {number} value @param {string} conversion @param {boolean} wideCaller
      * @returns {string}
      */
     const insertValue = (value, conversion, wideCaller)=>{
+        const spec = /^([-+ #0]*)(\d*)(?:\.(\d*))?(.*)$/.exec(conversion)
+            ?? ['', '', '', undefined, conversion];
+        const [, flagText, widthText, precisionText] = spec;
+        const body = bareInsert(value, spec[4], wideCaller, precisionText);
+        const width = Number(widthText || 0);
+        if (body.length >= width)
+        {
+            return body;
+        }
+        if (flagText.includes('-'))
+        {
+            return body.padEnd(width);
+        }
+        const numeric = /[diuxo]$/i.test(spec[4]);
+        if (flagText.includes('0') && numeric && precisionText === undefined)
+        {
+            const sign = /^[-+ ]/.test(body) ? body[0] : '';
+            return sign + body.slice(sign.length).padStart(width - sign.length, '0');
+        }
+        return body.padStart(width);
+    };
+
+    /**
+     * One insert's conversion with no flags or width: a precision is the
+     * fewest digits of a number and the most characters of a string.
+     *
+     * @param {number} value @param {string} conversion @param {boolean} wideCaller
+     * @param {string | undefined} precisionText
+     * @returns {string}
+     */
+    const bareInsert = (value, conversion, wideCaller, precisionText)=>{
+        const precision = precisionText === undefined ? -1 : Number(precisionText || 0);
+        /** @param {string} digits */
+        const least = digits=>{
+            const negative = digits.startsWith('-');
+            const magnitude = negative ? digits.slice(1) : digits;
+            return (negative ? '-' : '') + magnitude.padStart(precision, '0');
+        };
+        const text = plainInsert(value, conversion, wideCaller);
+        const last = conversion === '' ? 's' : conversion[conversion.length - 1].toLowerCase();
+        if (precision < 0)
+        {
+            return text;
+        }
+        return last === 's' ? text.slice(0, precision) : last === 'c' ? text : least(text);
+    };
+
+    /**
+     * @param {number} value @param {string} conversion @param {boolean} wideCaller
+     * @returns {string}
+     */
+    const plainInsert = (value, conversion, wideCaller)=>{
         const shape = conversion.toLowerCase();
         const last = conversion === '' ? 's' : conversion[conversion.length - 1];
         const other = last === 'S' || last === 'C';
@@ -463,7 +519,7 @@ export function createSystemFunctions(host){
 
     /**
      * FormatMessage's insert pass over a caller's own format string: `%1`
-     * through `%9` take the n-th argument, `%%` is a literal percent, and
+     * through `%99` take the n-th argument, `%%` is a literal percent, and
      * everything else is copied through.
      *
      * The arguments are a va_list, not an array: `argumentsPtr` points at the
@@ -503,8 +559,11 @@ export function createSystemFunctions(host){
                 out += ch;
                 continue;
             }
-            const index = next.charCodeAt(0) - 0x31;
-            at++;
+            // Up to two digits: %1 to %99.
+            const second = text[at + 2];
+            const twoDigits = second !== undefined && second >= '0' && second <= '9';
+            const index = Number(twoDigits ? next + second : next) - 1;
+            at += twoDigits ? 2 : 1;
             let conversion = 's';
             if (text[at + 1] === '!')
             {
