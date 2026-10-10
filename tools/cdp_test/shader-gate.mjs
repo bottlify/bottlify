@@ -518,6 +518,25 @@ async function main(){
             { url: `http://127.0.0.1:${server.port}/sandbox/shader-gate.html` });
         const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
         await cdp.send('Runtime.enable', {}, sessionId);
+        // A new target answers on about:blank first, where there is no
+        // navigator.gpu; the runner goes in once the gate's own page is up.
+        for (let tries = 0; ; tries++)
+        {
+            const loaded = await cdp.send('Runtime.evaluate', {
+                expression: 'location.pathname.endsWith(\'shader-gate.html\')'
+                    + ' && document.readyState === \'complete\'',
+                returnByValue: true,
+            }, sessionId);
+            if (loaded.result?.value === true)
+            {
+                break;
+            }
+            if (tries > 100)
+            {
+                throw new Error('the gate page did not load');
+            }
+            await new Promise(done=>setTimeout(done, 100));
+        }
         await cdp.send('Runtime.evaluate', { expression: `(${pageRunner.toString()})(); null` },
             sessionId);
         for (const profile of profiles)
