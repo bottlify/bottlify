@@ -34,11 +34,11 @@ import { D3D10_ASYNC_GETDATA_DONOTFLUSH } from './queries.js';
 import { D3D10CreateDeviceAndSwapChain } from './device.js';
 import { defaultSwapChainDesc } from './dxgi.js';
 import { RESOURCE_DIMENSION, RETURN_TYPE } from './sm4.js';
-import { SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
+import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
 import {
     assemble, cb, colouredPixelShader, colouredVertexShader, dclConstantBuffer, dclInputPs,
-    dclOutput, dclResource, dclSampler, l, ld, lu, mov, o, passThroughVertexShader, r, ret, s,
-    sample, solidPixelShader, t, v,
+    dclInputSiv, dclOutput, dclOutputSiv, dclResource, dclSampler, l, ld, lu, mov, o,
+    passThroughVertexShader, r, ret, s, sample, solidPixelShader, t, utof, v,
 } from './shader-fixtures.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
@@ -1883,5 +1883,31 @@ test('a draw with no pixel shader writes depth and no render target (test_depth_
     assert.equal(fragment,
         'diagnostic(off, derivative_uniformity);\n@fragment fn fragmentMain() {\n}',
         'a fragment stage that reads and writes nothing');
+    assert.deepEqual(h.divergences, []);
+});
+
+test('a draw with no input layout runs on what the vertex shader makes of SV_VertexID'
+    + ' (test_shader_stage_input_output_matching, d3d10core.c:11895-11902)', async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [0, 1, 0, 1]);
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    assert.equal(device.CreateVertexShader(assemble({
+        kind: SHADER_KIND.VERTEX,
+        inputs: [{ name: 'SV_VERTEXID', systemValue: SYSTEM_VALUE.VERTEX_ID, register: 0,
+            componentType: COMPONENT_TYPE.UINT }],
+        outputs: [{ name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        instructions: [dclInputSiv(v(0), SYSTEM_VALUE.VERTEX_ID),
+            dclOutputSiv(o(0), SYSTEM_VALUE.POSITION), utof(o(0), v(0)), ret()],
+    }), vs), S_OK);
+    device.VSSetShader(vs.shader);
+    device.IASetInputLayout(null);
+    device.Draw(3, 0);
+    await h.present();
+    assert.equal(h.gpu.count('draw'), 1, 'the draw runs');
+    assert.deepEqual(h.gpu.of('draw').map((/** @type {any} */ call)=>call.args), [[3, 1, 0, 0]]);
+    const pipeline = h.gpu.of('createRenderPipeline').at(-1).descriptor;
+    assert.deepEqual(pipeline.vertex.buffers, [], 'no stream feeds it');
     assert.deepEqual(h.divergences, []);
 });

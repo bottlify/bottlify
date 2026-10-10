@@ -18,7 +18,11 @@ import {
 } from './constants.js';
 import { D3D10CreateDevice, D3D10CreateDeviceAndSwapChain } from './device.js';
 import { defaultSwapChainDesc } from './dxgi.js';
-import { passThroughVertexShader, solidPixelShader } from './shader-fixtures.js';
+import {
+    assemble, dclInputSiv, dclOutputSiv, o, passThroughVertexShader, ret, solidPixelShader, utof,
+    v,
+} from './shader-fixtures.js';
+import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
 
 /** @param {object} [options] */
 function createDevice(options = {}){
@@ -1076,7 +1080,8 @@ test('an input layout needs elements and a signature to match them against', ()=
     /** @type {{ layout?: any }} */
     const out = {};
     const signature = passThroughVertexShader();
-    assert.equal(device.CreateInputLayout([], signature, out), E_INVALIDARG);
+    assert.equal(device.CreateInputLayout([], signature, out), E_INVALIDARG,
+        'no elements feed nothing, and this shader reads POSITION0');
     assert.equal(device.CreateInputLayout([element], null, out), E_INVALIDARG);
     assert.equal(device.CreateInputLayout([{ ...element, SemanticName: '' }], signature,
         out), E_INVALIDARG);
@@ -2070,4 +2075,26 @@ test('a buffer view without an element count is refused, not made over nothing',
         Format: DXGI_FORMAT.R32_FLOAT, ViewDimension: D3D10_SRV_DIMENSION.BUFFER,
         ElementOffset: 0 }, out), E_INVALIDARG);
     assert.equal(out.view, null);
+});
+
+test('a layout of no elements feeds a vertex shader that reads only system values', ()=>{
+    const device = createDevice();
+    const vertexId = assemble({
+        kind: SHADER_KIND.VERTEX,
+        inputs: [{ name: 'SV_VERTEXID', systemValue: SYSTEM_VALUE.VERTEX_ID, register: 0,
+            componentType: COMPONENT_TYPE.UINT }],
+        outputs: [{ name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        instructions: [dclInputSiv(v(0), SYSTEM_VALUE.VERTEX_ID),
+            dclOutputSiv(o(0), SYSTEM_VALUE.POSITION), utof(o(0), v(0)), ret()],
+    });
+    /** @type {{ layout?: any }} */
+    const empty = {};
+    assert.equal(device.CreateInputLayout([], vertexId, empty), S_OK);
+    /** @type {{ layout?: any }} */
+    const none = {};
+    assert.equal(device.CreateInputLayout(null, vertexId, none), S_OK);
+    assert.deepEqual([empty.layout.elements, none.layout.elements], [[], []]);
+    empty.layout.release();
+    none.layout.release();
+    assertFullyReleased(device);
 });

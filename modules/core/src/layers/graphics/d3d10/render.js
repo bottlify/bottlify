@@ -152,6 +152,9 @@ const ADDRESS = Object.freeze({
 const blendable = format=>!/int$/.test(format) && !/32float$/.test(format);
 
 /** The state a null rasterizer, depth-stencil or blend state stands for. */
+/** What a draw with no input layout bound is fed by: nothing. */
+const NO_INPUT_LAYOUT = Object.freeze({ elements: Object.freeze([]) });
+
 const DEFAULT_RASTERIZER = Object.freeze({
     FillMode: D3D10_FILL_MODE.SOLID,
     CullMode: D3D10_CULL_MODE.BACK,
@@ -2073,7 +2076,9 @@ export function createRenderer(services){
             const state = {
                 vertexShader: pipeline.stages.vs.shader,
                 pixelShader: pipeline.stages.ps.shader,
-                inputLayout: pipeline.inputLayout,
+                // No layout feeds no attribute: the draw runs on what the
+                // vertex shader makes of its system values alone.
+                inputLayout: pipeline.inputLayout ?? NO_INPUT_LAYOUT,
                 blendState: pipeline.blendState,
                 depthStencilState: pipeline.depthStencilState,
                 rasterizerState: pipeline.rasterizerState,
@@ -2086,11 +2091,6 @@ export function createRenderer(services){
                 strides: pipeline.vertexStrides.slice(),
                 indexFormat: draw.indexCount === undefined ? null : indexFormat,
             };
-            if (!state.inputLayout)
-            {
-                diverge('a draw with no input layout is skipped');
-                return;
-            }
             const rasterizer = pipeline.rasterizerState
                 ? stateDesc(pipeline.rasterizerState)
                 : DEFAULT_RASTERIZER;

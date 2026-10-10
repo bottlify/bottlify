@@ -971,19 +971,22 @@ export function createDevice(options = {}){
          * index: every input the shader declares has to be fed by some element,
          * or the draw could never assemble a vertex.
          *
-         * @param {readonly any[]} elements
+         * @param {readonly any[] | null} elements
          * @param {Uint8Array} shaderBytecode  A container with the input signature.
          * @param {{ layout?: any }} out
          * @returns {number}
          */
         CreateInputLayout(elements, shaderBytecode, out){
             out.layout = null;
-            if (!elements || elements.length === 0
-                || elements.length > D3D10_LIMITS.INPUT_ELEMENTS || !shaderBytecode)
+            // No elements at all is a layout: a vertex shader that reads only
+            // system values -- a full-screen pass built from SV_VertexID --
+            // is fed by it.
+            const given = elements ?? [];
+            if (given.length > D3D10_LIMITS.INPUT_ELEMENTS || !shaderBytecode)
             {
                 return E_INVALIDARG;
             }
-            for (const element of elements)
+            for (const element of given)
             {
                 if (!element.SemanticName || element.InputSlot >= D3D10_LIMITS.VERTEX_INPUT_SLOTS)
                 {
@@ -1001,7 +1004,7 @@ export function createDevice(options = {}){
                 {
                     continue;
                 }
-                const fed = elements.some(element=>
+                const fed = given.some(element=>
                     element.SemanticName.toUpperCase() === input.name.toUpperCase()
                     && (element.SemanticIndex ?? 0) === input.index);
                 if (!fed)
@@ -1010,7 +1013,7 @@ export function createDevice(options = {}){
                 }
             }
             out.layout = attachCom({
-                elements: Object.freeze(elements.map(element=>Object.freeze({ ...element }))),
+                elements: Object.freeze(given.map(element=>Object.freeze({ ...element }))),
                 /** @param {{ device?: any }} target */
                 GetDevice(target){
                     retainDevice();

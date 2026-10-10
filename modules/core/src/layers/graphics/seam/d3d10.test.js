@@ -40,8 +40,10 @@ import {
 } from '../d3d10/constants.js';
 import { DXGI_SWAP_CHAIN_DESC, writeSwapChainDesc } from '../d3d10/structs.js';
 import {
-    constantBufferShader, passThroughVertexShader, solidPixelShader,
+    assemble, constantBufferShader, dclInputSiv, dclOutputSiv, o, passThroughVertexShader, ret,
+    solidPixelShader, utof, v as input,
 } from '../d3d10/shader-fixtures.js';
+import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE } from '../d3d10/dxbc.js';
 import { createBackend } from '../webgpu/backend.js';
 import { FX_KIND, effectBinary } from '../d3d10/effect-fixtures.js';
 import { CONSTANT_TYPE } from '../d3d10/effect.js';
@@ -2109,4 +2111,23 @@ test('a buffer view\'s first element and element count come through the seam, ar
         const refused = view(kilobyte, RGBA32F, first, count);
         assert.deepEqual([refused.hr, refused.view], [E_INVALIDARG, 0], `${first}+${count}`);
     }
+});
+
+test('an input layout of no elements is made through the seam from a NULL array', ()=>{
+    const h = seamed();
+    const { device } = h.createDeviceAndSwapChain();
+    const bytecode = assemble({
+        kind: SHADER_KIND.VERTEX,
+        inputs: [{ name: 'SV_VERTEXID', systemValue: SYSTEM_VALUE.VERTEX_ID, register: 0,
+            componentType: COMPONENT_TYPE.UINT }],
+        outputs: [{ name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        instructions: [dclInputSiv(input(0), SYSTEM_VALUE.VERTEX_ID),
+            dclOutputSiv(o(0), SYSTEM_VALUE.POSITION), utof(o(0), input(0)), ret()],
+    });
+    const out = h.box.place([0xdeadbeef]);
+    assert.equal(h.device(device, 'CreateInputLayout', [0, 0, h.box.placeBytes(bytecode),
+        bytecode.length, out]), S_OK);
+    const layout = h.box.memory.readU32(out);
+    assert.notEqual(layout, 0);
+    assert.equal(h.box.call(layout, 2), 0);
 });
