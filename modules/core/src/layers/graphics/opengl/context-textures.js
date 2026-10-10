@@ -1048,18 +1048,27 @@ export function installTextureCalls(context, kernel){
         {
             digestBlocks(bytes);
         }
-        const texels = bytes && width > 0 && height > 0
-            ? decodeS3tc(bytes, internal, width, height)
-            : null;
-        const args = [target, level, internal, width, height, border, size, texels];
+        // A list keeps the blocks, which its replay hands back to this call.
+        const args = [target, level, internal, width, height, border, size, bytes];
         if (!enter(name, args))
         {
             return;
         }
+        // Decoded when something reads them -- the processor's rasteriser, a
+        // read-back, a device that takes no blocks -- and not otherwise: a
+        // device that samples the blocks never asks, and the decode was the
+        // whole upload's cost on both the program's thread and the worker's.
+        /** @type {Uint8Array | null | undefined} */
+        let decoded;
         image.texture.levels.set(levelKey(level, image.face), {
             width, height, internalFormat: internal, border,
             baseFormat: /** @type {number} */ (baseFormatOf(internal)),
-            texels,
+            get texels(){
+                decoded ??= bytes && width > 0 && height > 0
+                    ? decodeS3tc(bytes, internal, width, height)
+                    : null;
+                return decoded;
+            },
             compressedFormat: internal,
             compressedBytes: size,
             compressed: bytes ? { format: internal, bytes } : null,

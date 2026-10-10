@@ -212,7 +212,12 @@ export function createSceneBuilder(kernel){
                 images.push({
                     width: level.width,
                     height: level.height,
-                    texels: level.texels ?? blankTexels(level),
+                    // Read where something reads them: a compressed level is
+                    // decoded only then, and a device sampling its blocks never
+                    // does.
+                    get texels(){
+                        return level.texels ?? blankTexels(level);
+                    },
                 });
             }
             const generated = unit.genEnabled.some((/** @type {number} */ g)=>g !== 0);

@@ -574,3 +574,26 @@ test('the assembly tables name the provoking vertex the specification names', ()
     ]);
     assert.deepEqual(linesOf(GL.LINES, 5).length, 2);
 });
+
+test('a compressed image compiled into a list draws the same blocks when the list plays', ()=>{
+    // The list kept the decoded texels as the call's data, which its replay
+    // then read as blocks.
+    const context = drawing();
+    const name = context.glGenTextures(1)[0];
+    context.glBindTexture(GL.TEXTURE_2D, name);
+    const block = new Uint8Array(8);
+    new DataView(block.buffer).setUint16(0, 0xf800, true);
+    new DataView(block.buffer).setUint16(2, 0x001f, true);
+    new DataView(block.buffer).setUint32(4, 0x55555555, true);
+    const list = context.glGenLists(1);
+    context.glNewList(list, GL.COMPILE);
+    context.glCompressedTexImage2DARB(GL.TEXTURE_2D, 0, GL.COMPRESSED_RGB_S3TC_DXT1_EXT, 4, 4, 0,
+        8, block);
+    context.glEndList();
+    context.glCallList(list);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST);
+    context.glEnable(GL.TEXTURE_2D);
+    assert.equal(context.glGetError(), GL.NO_ERROR);
+    texturedQuad(context);
+    assert.deepEqual(pixelAt(context.framebuffer, 3, 3), [0, 0, 255, 255]);
+});
