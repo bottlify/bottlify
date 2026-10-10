@@ -86,8 +86,11 @@ function toy(sides){
                 return D3D_OK;
             },
             /** @param {{ thing?: any }} out */
-            CreateCounted(out){
-                const count = createReferenceCount({ onLastRef: ()=>side.seen.push('gone') });
+            CreateCounted(out, owned = false){
+                // One its device owns starts at zero and lives on there, as an
+                // implicit swap chain does.
+                const count = createReferenceCount({ implicit: owned,
+                    onLastRef: ()=>side.seen.push('gone') });
                 // Watched, never held: what keeps one alive is the test's question.
                 side.counted.push(new WeakRef(count));
                 out.thing = {
@@ -95,6 +98,10 @@ function toy(sides){
                     get refCount(){
                         return count.value;
                     },
+                    get destroyed(){
+                        return count.destroyed;
+                    },
+                    Touch: ()=>D3D_OK,
                     addRef: ()=>count.addRef(),
                     release: ()=>count.release(),
                 };
@@ -253,15 +260,22 @@ test('a played object the program no longer counts is not held by the player', a
     /** @type {{ thing?: any }} */
     const kept = {};
     root.CreateCounted(kept);
+    // At a count of zero and not destroyed -- a level its texture owns -- the
+    // program may still call it through the pointer it kept.
+    /** @type {{ thing?: any }} */
+    const owned = {};
+    root.CreateCounted(owned, true);
+    owned.thing.Touch();
     play();
     await new Promise(resolve=>setImmediate(resolve));
     v8.setFlagsFromString('--expose-gc');
     /** @type {() => void} */ (vm.runInNewContext('gc'))();
     const alive = played.counted.filter((/** @type {WeakRef<object>} */ one)=>one.deref());
-    assert.equal(alive.length, 1, 'only the one still counted');
+    assert.equal(alive.length, 2, 'only the one still counted and the one still owned');
     kept.thing.addRef();
+    owned.thing.addRef();
     play();
-    assert.equal(alive[0].deref().value, 2, 'and calls still reach it');
+    assert.deepEqual(alive.map(one=>one.deref().value), [2, 1], 'and calls still reach them');
 });
 
 test('one method called on many objects of a kind defines its structures\' shapes once', ()=>{

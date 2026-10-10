@@ -1521,12 +1521,13 @@ export function createRecording(options){
  */
 export function createPlayer({ root, ship, read, borrow }){
     /**
-     * The played objects by the number the recording gave each. One the
-     * program still counts is held here; one whose count fell to zero is held
-     * weakly, by whatever of the device still binds it -- a buffer a stream
-     * still names, which a getter may hand back -- and goes with the last of
-     * those. Held strongly, every buffer a level's loading made and dropped
-     * stayed for the rest of the run.
+     * The played objects by the number the recording gave each. One is held
+     * here until it says it is destroyed, and weakly after: an object at a
+     * count of zero may still be called through the pointer the program kept
+     * while its device owns it (a level of a texture, a back buffer), so the
+     * count alone does not say it is done. Held strongly for good, every
+     * buffer a level's loading made and dropped stayed for the rest of the
+     * run.
      *
      * @type {(object | WeakRef<object>)[]}
      */
@@ -1545,26 +1546,36 @@ export function createPlayer({ root, ship, read, borrow }){
         return held instanceof WeakRef ? held.deref() : held;
     };
     /**
-     * After a call on one: held weakly at a count of zero, strongly again
-     * once counted.
+     * The objects at a count of zero not destroyed yet -- one released while
+     * a stream still binds it goes when the stream lets go, with no call on
+     * it -- looked at again after each batch.
+     *
+     * @type {Set<number>}
+     */
+    const uncounted = new Set();
+    /**
+     * After a call on one, or a batch: held weakly once destroyed.
      *
      * @param {number} number @param {any} object
      */
     const holdAsCounted = (number, object)=>{
-        const count = object?.refCount;
-        if (typeof count !== 'number')
+        if (!object || objects[number] instanceof WeakRef)
         {
             return;
         }
-        const weak = objects[number] instanceof WeakRef;
-        if (count === 0 && !weak)
+        if (object.destroyed === true)
         {
+            uncounted.delete(number);
             objects[number] = new WeakRef(object);
             collected.register(object, number);
         }
-        else if (count > 0 && weak)
+        else if (object.refCount === 0)
         {
-            objects[number] = object;
+            uncounted.add(number);
+        }
+        else
+        {
+            uncounted.delete(number);
         }
     };
     /** @type {WeakSet<object>} */
@@ -1711,7 +1722,13 @@ export function createPlayer({ root, ship, read, borrow }){
             }
             return address;
         },
-        read: (buffer, each)=>reader.read(buffer, each),
+        read: (buffer, each)=>{
+            reader.read(buffer, each);
+            for (const number of uncounted)
+            {
+                holdAsCounted(number, objects[number]);
+            }
+        },
     };
 }
 
